@@ -1,13 +1,17 @@
 import { useNavigation } from "@react-navigation/native";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
-import type { PreviewHostingLeaseSummary, ScopedThreadRef } from "@t3tools/contracts";
+import {
+  AuthPreviewOperateScope,
+  type PreviewHostingLeaseSummary,
+  type ScopedThreadRef,
+} from "@t3tools/contracts";
 
 import { previewEnvironment } from "../../state/preview";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { assetEnvironment } from "../../state/assets";
 import { useAtomQueryRunner } from "../../state/use-atom-query-runner";
 import { useEnvironmentServerConfig } from "../../state/entities";
-import { environmentBootstrap } from "../../state/session";
+import { environmentBootstrap, useEnvironmentScope } from "../../state/session";
 
 function useSupportsPreviewAssetRecovery(threadRef: ScopedThreadRef | null) {
   const config = useEnvironmentServerConfig(threadRef?.environmentId ?? null);
@@ -70,6 +74,8 @@ export function useCreateManagedPreviewResourceUrl(threadRef: ScopedThreadRef | 
 export function useOpenManagedBrowserPreview(threadRef: ScopedThreadRef | null) {
   const navigation = useNavigation();
   const open = useAtomCommand(previewEnvironment.open, { reportFailure: false });
+  const canOperate = useEnvironmentScope(threadRef?.environmentId ?? null, AuthPreviewOperateScope);
+  if (!canOperate) return undefined;
   return async (url: string): Promise<void> => {
     if (threadRef === null) throw new Error("The preview has no owning thread.");
     const result = await open({

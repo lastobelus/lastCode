@@ -26,13 +26,13 @@ export { selectHostedPreview } from "@t3tools/client-runtime/preview-hosting";
 /** Intercept potential owned links before the shell opens them without recovery. */
 export function mayBeHostedPreviewUrl(threadRef: ScopedThreadRef, url: string): boolean {
   const connection = readPreparedConnection(threadRef.environmentId);
-  if (!connection) return false;
   try {
     const parsed = new URL(url);
     return (
       (parsed.protocol === "http:" || parsed.protocol === "https:") &&
-      (isPrivateNetworkHost(parsed.hostname) ||
-        parsed.hostname === new URL(connection.httpBaseUrl).hostname)
+      (parsed.pathname.startsWith("/api/assets/") ||
+        isPrivateNetworkHost(parsed.hostname) ||
+        (connection !== null && parsed.hostname === new URL(connection.httpBaseUrl).hostname))
     );
   } catch {
     return false;

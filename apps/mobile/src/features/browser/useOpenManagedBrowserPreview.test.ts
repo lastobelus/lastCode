@@ -1,4 +1,10 @@
-import { EnvironmentId, ThreadId, type ServerConfig } from "@t3tools/contracts";
+import {
+  AuthPreviewOperateScope,
+  EnvironmentId,
+  PreviewHostingLeaseId,
+  ThreadId,
+  type ServerConfig,
+} from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
@@ -9,14 +15,20 @@ const mocks = vi.hoisted(() => ({
   createUrl: vi.fn(),
   bootstrapFamily: {},
   assetFamily: {},
+  scope: vi.fn(),
+  open: vi.fn(),
+  navigate: vi.fn(),
 }));
-vi.mock("@react-navigation/native", () => ({ useNavigation: () => ({}) }));
+vi.mock("@react-navigation/native", () => ({
+  useNavigation: () => ({ navigate: mocks.navigate }),
+}));
 vi.mock("../../state/entities", () => ({ useEnvironmentServerConfig: mocks.config }));
 vi.mock("../../state/preview", () => ({ previewEnvironment: {} }));
-vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: () => vi.fn() }));
+vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: () => mocks.open }));
 vi.mock("../../state/assets", () => ({ assetEnvironment: { createUrl: mocks.assetFamily } }));
 vi.mock("../../state/session", () => ({
   environmentBootstrap: mocks.bootstrapFamily,
+  useEnvironmentScope: mocks.scope,
 }));
 vi.mock("../../state/use-atom-query-runner", () => ({
   useAtomQueryRunner: (family: unknown) =>
@@ -27,6 +39,7 @@ import { prepareThenOpenThreadFeedUrl } from "../../lib/prepareThreadFeedPreview
 import {
   useCreateManagedPreviewResourceUrl,
   useRenewPreviewDocumentUrl,
+  useOpenManagedBrowserPreview,
 } from "./useOpenManagedBrowserPreview";
 
 const threadRef = {
@@ -182,6 +195,93 @@ describe("mobile preview asset recovery", () => {
             },
           },
         });
+    },
+  );
+});
+
+describe("mobile managed navigation permissions", () => {
+  it("propagates a permitted browser failure without opening externally", async () => {
+    mocks.scope.mockReturnValue(true);
+    mocks.open.mockResolvedValue(AsyncResult.failure(Cause.fail(new Error("Browser unavailable"))));
+    const lease = {
+      leaseId: PreviewHostingLeaseId.make("failed-browser-lease"),
+      threadId: threadRef.threadId,
+      url: "http://localhost:5173/report.html",
+      handedOffAt: "2026-10-01T00:00:00.000Z",
+      expiresAt: "2026-10-02T00:00:00.000Z",
+      status: "active" as const,
+    };
+    const recover = vi.fn(async () => lease);
+    const external = vi.fn();
+    await expect(
+      prepareThenOpenThreadFeedUrl(
+        { ...input, url: lease.url, list: async () => [lease], recover },
+        external,
+        useOpenManagedBrowserPreview(threadRef),
+      ),
+    ).rejects.toThrow("Browser unavailable");
+    expect(recover).toHaveBeenCalledExactlyOnceWith(lease, { bootstrap: false });
+    expect(external).not.toHaveBeenCalled();
+    expect(mocks.navigate).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    "uses the owning environment's browser permission before preparing navigation: %s",
+    async (canOperate) => {
+      mocks.scope.mockImplementation((environmentId, scope) =>
+        environmentId === threadRef.environmentId && scope === AuthPreviewOperateScope
+          ? canOperate
+          : true,
+      );
+      mocks.open.mockResolvedValue(AsyncResult.success({ tabId: "managed-tab" }));
+      const lease = {
+        leaseId: PreviewHostingLeaseId.make("owned-lease"),
+        threadId: threadRef.threadId,
+        url: "http://localhost:5173/report.html",
+        handedOffAt: "2026-10-01T00:00:00.000Z",
+        expiresAt: "2026-10-02T00:00:00.000Z",
+        status: "active" as const,
+      };
+      const recover = vi.fn(async () => ({ ...lease, bootstrapToken: "one-use-secret" }));
+      const list = vi.fn(async () => [lease]);
+      const external = vi.fn();
+      await prepareThenOpenThreadFeedUrl(
+        {
+          ...input,
+          environmentUrl: "https://192.168.100.100:8443/",
+          url: lease.url,
+          list,
+          recover,
+        },
+        external,
+        useOpenManagedBrowserPreview(threadRef),
+      );
+      expect(list).toHaveBeenCalledOnce();
+      expect(recover).toHaveBeenCalledExactlyOnceWith(lease, { bootstrap: !canOperate });
+      expect(mocks.scope).toHaveBeenCalledWith(threadRef.environmentId, AuthPreviewOperateScope);
+      if (canOperate) {
+        expect(external).not.toHaveBeenCalled();
+        expect(mocks.open).toHaveBeenCalledExactlyOnceWith({
+          environmentId: threadRef.environmentId,
+          input: {
+            threadId: threadRef.threadId,
+            url: lease.url,
+            runtime: "server",
+            browserHost: "environment",
+            profileId: "default",
+          },
+        });
+        expect(mocks.navigate).toHaveBeenCalledWith("ThreadBrowserPreview", {
+          ...threadRef,
+          tabId: "managed-tab",
+        });
+      } else {
+        expect(mocks.open).not.toHaveBeenCalled();
+        expect(mocks.navigate).not.toHaveBeenCalled();
+        expect(external).toHaveBeenCalledExactlyOnceWith(
+          "http://192.168.100.100:5173/report.html#token=one-use-secret&t3-preview-return-hash=",
+        );
+      }
     },
   );
 });

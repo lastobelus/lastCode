@@ -60,6 +60,7 @@ vi.mock("~/state/preview", () => ({
 }));
 
 import {
+  mayBeHostedPreviewUrl,
   prepareHostedPreview,
   recoverHostedPreview,
   selectHostedPreview,
@@ -92,6 +93,20 @@ beforeEach(() => {
 });
 
 describe("native preview reopening", () => {
+  it.each([
+    ["http://localhost:5173/qa", true],
+    ["http://192.168.1.30:5173/qa", true],
+    ["https://managed-server.example/api/assets/saved/report.html", true],
+    ["https://github.com/example/project/pull/73", false],
+    ["mailto:developer@example.com", false],
+    ["not-a-url", false],
+  ] as const)("recognizes potential owned links before connection: %s", (url, expected) => {
+    mocks.connection.mockReturnValue(null);
+    expect(mayBeHostedPreviewUrl(owner, url)).toBe(expected);
+    expect(mocks.query).not.toHaveBeenCalled();
+    expect(mocks.run).not.toHaveBeenCalled();
+  });
+
   it.each([
     "https://github.com/example/project/pull/73",
     "mailto:developer@example.com",

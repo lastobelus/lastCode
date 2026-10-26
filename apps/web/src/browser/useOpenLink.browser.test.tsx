@@ -608,27 +608,37 @@ describe.each(["web", "desktop"] as const)("%s managed link focus", (surface) =>
     expect(mocks.prepareHostedPreview).toHaveBeenCalledTimes(2);
   });
 
-  it("preserves a manual panel choice made while a managed link is recovering", async () => {
-    using _setup = setup(surface);
-    using _popup = surface === "web" ? reservePopup() : undefined;
-    const preparation = deferredPreparation();
-    mocks.prepareHostedPreview.mockReturnValueOnce(preparation.promise);
-    await using link = await renderLink();
-    const revision = useRightPanelStore.getState().getUserActionRevision(threadRef);
-    const opening = link.click();
-    expect(useRightPanelStore.getState().getUserActionRevision(threadRef)).toBe(revision + 1);
-    useRightPanelStore.getState().open(threadRef, "files");
-    await act(async () => {
-      preparation.finish(prepared);
-      await opening;
-    });
-    expect(
-      selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, threadRef)?.id,
-    ).toBe("files");
-    expect(readThreadPreviewState(threadRef).sessions[snapshot.tabId]).toEqual(snapshot);
-    expect(mocks.openPreview.mock.calls[0]?.[0].input.focus.userActionRevision).toBe(revision + 1);
-    expect(mocks.prepareHostedPreview).toHaveBeenCalledExactlyOnceWith(threadRef, sourceUrl);
-  });
+  it.each(["ready", "connection", "capability", "permission"])(
+    "preserves a manual panel choice while a managed link waits for %s",
+    async (pending) => {
+      using _setup = setup(surface);
+      if (pending === "connection") mocks.connected = false;
+      if (pending === "capability") mocks.serverBrowser = false;
+      if (pending === "permission") mocks.readScope.mockReturnValue(false);
+      using _popup = surface === "web" ? reservePopup() : undefined;
+      const preparation = deferredPreparation();
+      mocks.prepareHostedPreview.mockReturnValueOnce(preparation.promise);
+      await using link = await renderLink();
+      const revision = useRightPanelStore.getState().getUserActionRevision(threadRef);
+      const opening = link.click();
+      useRightPanelStore.getState().open(threadRef, "files");
+      await act(async () => {
+        mocks.connected = true;
+        mocks.serverBrowser = true;
+        mocks.readScope.mockReturnValue(true);
+        preparation.finish(prepared);
+        await opening;
+      });
+      expect(
+        selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, threadRef)?.id,
+      ).toBe("files");
+      expect(readThreadPreviewState(threadRef).sessions[snapshot.tabId]).toEqual(snapshot);
+      expect(mocks.openPreview.mock.calls[0]?.[0].input.focus.userActionRevision).toBe(
+        revision + 1,
+      );
+      expect(mocks.prepareHostedPreview).toHaveBeenCalledExactlyOnceWith(threadRef, sourceUrl);
+    },
+  );
 
   it("captures background modifier opens without superseding a pending foreground click", async () => {
     using _setup = setup(surface);

@@ -49,10 +49,7 @@ export function useOpenLink(threadRef: ScopedThreadRef | null | undefined): (
     const potentialHostedLink =
       targetThreadRef != null && mayBeHostedPreviewUrl(targetThreadRef, url);
     const focus =
-      targetThreadRef &&
-      potentialHostedLink &&
-      readEnvironmentScope(targetThreadRef.environmentId, AuthPreviewOperateScope) &&
-      readEnvironmentSupportsServerBrowser(targetThreadRef.environmentId)
+      targetThreadRef && potentialHostedLink
         ? capturePreviewOpenFocus(targetThreadRef, background)
         : undefined;
     if (!window.desktopBridge) {
