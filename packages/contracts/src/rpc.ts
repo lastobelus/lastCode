@@ -339,6 +339,7 @@ import {
   PreviewHostingLeaseMetadata,
   PreviewHostingLeaseSummary,
   PreviewHostingListInput,
+  PreviewHostingActivityInput,
   PreviewHostingRecoverInput,
   PreviewHostingRecoverResult,
   PreviewHostingStopThreadInput,
@@ -526,6 +527,7 @@ export const WS_METHODS = {
   previewReportProfiles: "preview.reportProfiles",
   previewHostingList: "previewHosting.list",
   previewHostingRecover: "previewHosting.recover",
+  previewHostingActivity: "previewHosting.activity",
   previewHostingStopThread: "previewHosting.stopThread",
   previewReportStatus: "preview.reportStatus",
   previewClaimRecovery: "preview.claimRecovery",
@@ -1752,6 +1754,10 @@ const WsPreviewHostingRecoverRpc = Rpc.make(WS_METHODS.previewHostingRecover, {
   success: PreviewHostingRecoverResult,
   error: Schema.Union([PreviewHostingError, EnvironmentAuthorizationError]),
 });
+const WsPreviewHostingActivityRpc = Rpc.make(WS_METHODS.previewHostingActivity, {
+  payload: PreviewHostingActivityInput,
+  error: Schema.Union([PreviewHostingError, EnvironmentAuthorizationError]),
+});
 
 const WsPreviewHostingStopThreadRpc = Rpc.make(WS_METHODS.previewHostingStopThread, {
   payload: PreviewHostingStopThreadInput,
@@ -2329,6 +2335,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsPreviewReportProfilesRpc,
   WsPreviewHostingListRpc,
   WsPreviewHostingRecoverRpc,
+  WsPreviewHostingActivityRpc,
   WsPreviewHostingStopThreadRpc,
   WsSubscribePreviewHostingRpc,
   WsPreviewReportStatusRpc,

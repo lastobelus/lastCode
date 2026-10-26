@@ -1,4 +1,7 @@
-import { hostedPreviewNavigationUrl } from "@t3tools/client-runtime/preview-hosting";
+import {
+  hostedPreviewNavigationUrl,
+  type PreparedHostedPreview,
+} from "@t3tools/client-runtime/preview-hosting";
 import { AuthFilesystemReadScope } from "@t3tools/contracts";
 import type {
   AssetResource,
@@ -15,7 +18,9 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 
 import { previewRuntimeTabId } from "~/browser/previewRuntimeTabId";
+import { ensureDesktopBrowserTab } from "~/browser/desktopBrowserDemand";
 import { rendersServerTabNatively } from "~/browser/previewRuntime";
+import { preparedPreviewOpenTarget } from "~/browser/preparedPreviewOpenTarget";
 import { requestHostedPreviewRefresh } from "~/browser/hostedPreviewRefresh";
 import { prepareHostedPreview } from "~/components/preview/previewHostingRecovery";
 import { previewBridge } from "~/components/preview/previewBridge";
@@ -50,16 +55,27 @@ import {
 function findHandoffBrowser(
   ref: ScopedThreadRef,
   entry: HandoffEntry,
-  destinationUrl?: string,
+  prepared?: PreparedHostedPreview,
 ): string | undefined {
   const state = readThreadPreviewState(ref);
   for (const snapshot of Object.values(state.sessions)) {
     if (snapshot.navStatus._tag === "Idle") continue;
+    if (
+      prepared !== undefined &&
+      entry.target.kind === "url" &&
+      preparedPreviewOpenTarget(ref.environmentId, prepared, entry.target.url, snapshot.profileId)
+        .browserHost === "environment" &&
+      snapshot.backingPage !== "server"
+    ) {
+      continue;
+    }
     const url = snapshot.navStatus.url;
     if (
       entry.target.kind === "url" &&
       (handoffUrlsEqual(url, entry.target.url) ||
-        (destinationUrl !== undefined && handoffUrlsEqual(url, destinationUrl)))
+        (prepared !== undefined &&
+          (handoffUrlsEqual(url, prepared.url) ||
+            (prepared.localUrl !== undefined && handoffUrlsEqual(url, prepared.localUrl)))))
     )
       return snapshot.tabId;
     const binding = handoffBrowserTarget(ref, snapshot.tabId);
@@ -111,11 +127,10 @@ async function navigateHandoffBrowser(
     // intent until that viewer can send it, and mint navigation access there.
     requestHostedPreviewRefresh(ref, tabId, serverUrl);
   } else if (native && previewBridge) {
+    const runtimeTabId = previewRuntimeTabId(ref, readThreadPreviewState(ref).serverEpoch, tabId);
+    await ensureDesktopBrowserTab(runtimeTabId);
     // Native navigation mirrors its resulting URL back to the server.
-    await previewBridge.navigate(
-      previewRuntimeTabId(ref, readThreadPreviewState(ref).serverEpoch, tabId),
-      url,
-    );
+    await previewBridge.navigate(runtimeTabId, url);
   } else {
     const result = await navigatePreview({
       environmentId: ref.environmentId,
@@ -138,7 +153,7 @@ export async function openHandoff(
       panels.openPullRequest(ref, target);
     } else if (target.kind === "url") {
       const prepared = await prepareHostedPreview(ref, target.url, "resource");
-      const existing = findHandoffBrowser(ref, entry, prepared.url);
+      const existing = findHandoffBrowser(ref, entry, prepared);
       if (existing) {
         const snapshot = readThreadPreviewState(ref).sessions[existing];
         const streamed =
@@ -146,16 +161,23 @@ export async function openHandoff(
         if (prepared.restarted || snapshot?.navStatus._tag === "LoadFailed") {
           const navigation = streamed ? prepared : await prepareHostedPreview(ref, target.url);
           // Navigation access can take time; a newer user navigation wins.
-          if (findHandoffBrowser(ref, entry, prepared.url) !== existing) return;
+          if (findHandoffBrowser(ref, entry, prepared) !== existing) return;
           await navigateHandoffBrowser(
             ref,
             existing,
             hostedPreviewNavigationUrl(navigation),
             navigatePreview,
-            target.url,
+            prepared.localUrl ?? target.url,
           );
         }
-        rememberHandoffBrowser(ref, existing, target, streamed ? target.url : prepared.url);
+        rememberHandoffBrowser(
+          ref,
+          existing,
+          target,
+          snapshot?.navStatus._tag === "Idle" || snapshot === undefined
+            ? prepared.url
+            : snapshot.navStatus.url,
+        );
         panels.openBrowser(ref, existing);
       } else {
         const result = await openPreparedUrlInPreview(
@@ -163,10 +185,19 @@ export async function openHandoff(
             threadRef: ref,
             url: target.url,
             openPreview,
-            onOpened: (tabId) => rememberHandoffBrowser(ref, tabId, target, prepared.url),
+            onOpened: (tabId) => {
+              const snapshot = readThreadPreviewState(ref).sessions[tabId];
+              rememberHandoffBrowser(
+                ref,
+                tabId,
+                target,
+                snapshot === undefined || snapshot.navStatus._tag === "Idle"
+                  ? prepared.url
+                  : snapshot.navStatus.url,
+              );
+            },
           },
-          prepared.url,
-          (await prepareHostedPreview(ref, target.url)).navigationUrl,
+          await prepareHostedPreview(ref, target.url),
         );
         if (result._tag === "Failure") throw squashAtomCommandFailure(result);
       }

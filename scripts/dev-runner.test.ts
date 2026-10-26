@@ -3,6 +3,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeChildProcess from "node:child_process";
 import * as NetService from "@t3tools/shared/Net";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { assert, describe, it } from "@effect/vitest";
@@ -67,6 +68,104 @@ const devServerInput = {
   built: false,
   runArgs: ["--inspect", "secret-token-value"],
 } as const;
+
+it.live.each(["SIGTERM", "SIGHUP"] as const)(
+  "stops the owned child and grandchild when the runner receives %s",
+  (signal) =>
+    Effect.promise(async () => {
+      const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "dev-runner-shutdown-"));
+      const bin = NodePath.join(root, "bin");
+      NodeFS.mkdirSync(bin);
+      // A stubborn descendant keeps inherited output open until group cleanup finishes.
+      const descendant = `process.on("SIGTERM", () => {}); process.send("ready"); setInterval(() => {}, 1000);`;
+      NodeFS.writeFileSync(
+        NodePath.join(bin, "vp"),
+        `#!${process.execPath}\nconst { spawn } = require("node:child_process");\nconst child = spawn(process.execPath, ["-e", ${JSON.stringify(descendant)}], { stdio: ["ignore", "inherit", "inherit", "ipc"] });\nconsole.log("preview-process-tree:" + process.pid + ":" + child.pid);\nchild.once("message", () => console.log("preview-process-tree-ready"));\nsetInterval(() => {}, 1000);\n`,
+        { mode: 0o755 },
+      );
+      const runner = NodeChildProcess.spawn(
+        process.execPath,
+        [
+          NodePath.join(import.meta.dirname, "dev-runner.ts"),
+          "dev:server",
+          "--port",
+          "13773",
+          "--home-dir",
+          NodePath.join(root, "state"),
+        ],
+        {
+          cwd: root,
+          env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+          detached: true,
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      let tree: { child: number; descendant: number } | undefined;
+      let shutdownComplete = false;
+      let output = "";
+      let errors = "";
+      runner.stderr.on("data", (chunk: Buffer) => {
+        errors += chunk.toString();
+      });
+      const stopped = new Promise<void>((resolve) => runner.once("close", () => resolve()));
+      try {
+        await new Promise<void>((resolve, reject) => {
+          // oxlint-disable t3code/no-real-time-wait-in-tests -- A failure deadline bounds the real subprocess; readiness itself comes from its stdout event.
+          // @effect-diagnostics-next-line globalTimers:off -- Real child process deadlines must use native time.
+          const timeout = setTimeout(
+            () => reject(new Error("Process fixture did not start")),
+            8000,
+          );
+          // oxlint-enable t3code/no-real-time-wait-in-tests
+          runner.once("error", reject);
+          runner.once("exit", () => {
+            clearTimeout(timeout);
+            if (!tree) reject(new Error(`Runner exited before the fixture started: ${errors}`));
+          });
+          runner.stdout.on("data", (chunk: Buffer) => {
+            output += chunk.toString();
+            const match = /preview-process-tree:(\d+):(\d+)/.exec(output);
+            if (!match) return;
+            tree = { child: Number(match[1]), descendant: Number(match[2]) };
+            if (!output.includes("preview-process-tree-ready")) return;
+            clearTimeout(timeout);
+            resolve();
+          });
+        });
+        runner.kill(signal);
+        await new Promise<void>((resolve, reject) => {
+          // oxlint-disable t3code/no-real-time-wait-in-tests -- A failure deadline bounds a stuck child; successful shutdown is acknowledged by its close event.
+          // @effect-diagnostics-next-line globalTimers:off -- Real child process deadlines must use native time.
+          const deadline = setTimeout(
+            () => reject(new Error("Runner exited without stopping its descendant")),
+            5000,
+          );
+          // oxlint-enable t3code/no-real-time-wait-in-tests
+          void stopped.then(() => {
+            clearTimeout(deadline);
+            resolve();
+          });
+        });
+        shutdownComplete = true;
+      } finally {
+        if (!shutdownComplete) {
+          // Only processes captured from this fixture may be signalled, including on failure.
+          for (const pid of [tree?.descendant, tree?.child, runner.pid]) {
+            if (pid === undefined) continue;
+            try {
+              process.kill(pid, "SIGKILL");
+            } catch {}
+          }
+          if (runner.pid !== undefined) {
+            try {
+              process.kill(-runner.pid, "SIGKILL");
+            } catch {}
+          }
+        }
+        NodeFS.rmSync(root, { recursive: true, force: true });
+      }
+    }),
+);
 
 it.layer(NodeServices.layer)("dev-runner", (it) => {
   describe("createDevRunnerEnv", () => {

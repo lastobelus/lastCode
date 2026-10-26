@@ -36,6 +36,11 @@ import {
 } from "../../native/SelectableMarkdownText";
 import { resolveWorkspaceFilePath } from "./filePath";
 import { previewEnvironment } from "../../state/preview";
+import {
+  useCreateManagedPreviewResourceUrl,
+  useOpenManagedBrowserPreview,
+  useRenewPreviewDocumentUrl,
+} from "../browser/useOpenManagedBrowserPreview";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { usePreparedConnection, useConfiguredPreviewEnvironmentUrl } from "../../state/session";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
@@ -100,6 +105,13 @@ export function FileMarkdownPreview(props: {
     reportFailure: false,
   });
   const preparedConnection = usePreparedConnection(props.environmentId);
+  const threadRef =
+    props.threadId === null
+      ? null
+      : { environmentId: props.environmentId, threadId: props.threadId };
+  const openManagedBrowser = useOpenManagedBrowserPreview(threadRef);
+  const createResourceUrl = useCreateManagedPreviewResourceUrl(threadRef);
+  const renewDocumentUrl = useRenewPreviewDocumentUrl(threadRef);
   const handlePullToRefresh = async () => {
     if (!props.onRefresh) {
       return;
@@ -114,57 +126,57 @@ export function FileMarkdownPreview(props: {
   );
   const connection = Option.getOrNull(preparedConnection);
   const knownEnvironmentUrl = useConfiguredPreviewEnvironmentUrl(props.environmentId, connection);
-  const prepareMediaUrl = (href: string, purpose: "navigation" | "resource" = "resource") => {
-    const threadRef =
-      props.threadId === null
-        ? null
-        : { environmentId: props.environmentId, threadId: props.threadId };
-    return openThreadFeedMarkdownUrl(
-      threadRef === null || connection === null
-        ? null
-        : {
-            threadRef,
-            purpose,
-            environmentUrl: connection.httpBaseUrl,
-            knownEnvironmentUrls: knownEnvironmentUrl === null ? [] : [knownEnvironmentUrl],
-            list: async () => {
-              const result = await listHostedPreviews({
-                environmentId: props.environmentId,
-                input: { threadId: threadRef.threadId },
-              });
-              if (result._tag === "Failure") throw squashAtomCommandFailure(result);
-              return result.value;
-            },
-            recover: async (
-              lease: PreviewHostingLeaseSummary,
-              options: { readonly bootstrap: boolean },
-            ) => {
-              const result = await recoverHostedPreviewLease({
-                environmentId: props.environmentId,
-                input: {
-                  threadId: threadRef.threadId,
-                  leaseId: lease.leaseId,
-                  url: lease.url,
-                  bootstrap: options.bootstrap,
-                },
-              });
-              if (result._tag === "Failure") throw squashAtomCommandFailure(result);
-              return result.value;
-            },
+  const previewPreparationInput = (purpose: "navigation" | "resource") =>
+    threadRef === null || connection === null
+      ? null
+      : {
+          threadRef,
+          purpose,
+          createResourceUrl,
+          renewDocumentUrl,
+          environmentUrl: connection.httpBaseUrl,
+          knownEnvironmentUrls: knownEnvironmentUrl === null ? [] : [knownEnvironmentUrl],
+          list: async () => {
+            const result = await listHostedPreviews({
+              environmentId: props.environmentId,
+              input: { threadId: threadRef.threadId },
+            });
+            if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+            return result.value;
           },
-      href,
-      (url) => url,
-    );
-  };
+          recover: async (
+            lease: PreviewHostingLeaseSummary,
+            options: { readonly bootstrap: boolean },
+          ) => {
+            const result = await recoverHostedPreviewLease({
+              environmentId: props.environmentId,
+              input: {
+                threadId: threadRef.threadId,
+                leaseId: lease.leaseId,
+                url: lease.url,
+                bootstrap: options.bootstrap,
+              },
+            });
+            if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+            return result.value;
+          },
+        };
+  const prepareMediaUrl = (href: string) =>
+    openThreadFeedMarkdownUrl(previewPreparationInput("resource"), href, (url) => url);
   const openExternalLink = (href: string) => {
-    void prepareMediaUrl(href, "navigation")
-      .then((url) => tryOpenExternalUrl(url, "markdown-link"))
-      .catch(() =>
-        Alert.alert(
-          "Preview unavailable",
-          "The preview could not be restored. Tap the link to retry.",
-        ),
-      );
+    void openThreadFeedMarkdownUrl(
+      previewPreparationInput("navigation"),
+      href,
+      async (url) => {
+        await tryOpenExternalUrl(url, "markdown-link");
+      },
+      openManagedBrowser,
+    ).catch(() =>
+      Alert.alert(
+        "Preview unavailable",
+        "The preview could not be restored. Tap the link to retry.",
+      ),
+    );
   };
   const renderImage: MarkdownImageRenderer = (image) => {
     const media = resolveMobileMarkdownMediaSource(image.href, {

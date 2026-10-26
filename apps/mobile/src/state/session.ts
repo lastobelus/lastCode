@@ -2,6 +2,7 @@ import { configuredPreviewEnvironmentUrl } from "@t3tools/client-runtime/preview
 import type { PreparedConnection } from "@t3tools/client-runtime/connection";
 import { environmentCatalog } from "../connection/catalog";
 import { useAtomValue } from "@effect/atom-react";
+import { createEnvironmentBootstrapQuery } from "@t3tools/client-runtime/state/bootstrap";
 import { createEnvironmentSessionAtoms } from "@t3tools/client-runtime/state/session";
 import {
   type AuthEnvironmentScope,
@@ -17,6 +18,7 @@ import { connectionAtomRuntime } from "../connection/runtime";
 import { appAtomRegistry } from "./atom-registry";
 
 export const environmentSession = createEnvironmentSessionAtoms(connectionAtomRuntime);
+export const environmentBootstrap = createEnvironmentBootstrapQuery(connectionAtomRuntime);
 
 const EMPTY_SESSION_STATE_ATOM = Atom.make(AsyncResult.initial<AuthSessionState>());
 

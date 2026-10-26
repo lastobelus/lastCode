@@ -491,7 +491,8 @@ function ChatMarkdownDirectMedia(
     let cancelled = false;
     void prepareHostedPreview(props.threadRef, props.src, "resource").then(
       (result) => {
-        if (!cancelled) setPrepared({ key: requestKey, url: result.url, failed: false });
+        if (!cancelled)
+          setPrepared({ key: requestKey, url: result.resourceUrl ?? result.url, failed: false });
       },
       () => {
         if (!cancelled) setPrepared({ key: requestKey, url: null, failed: true });
@@ -665,16 +666,15 @@ function useChatMarkdownState({
   ) => {
     const requestId = ++mediaRequestId.current;
     void (async () => {
-      const preparedSource =
-        threadRef && resolveExternalWebLinkHost(source) !== null
-          ? (
-              await prepareHostedPreview(
-                threadRef,
-                resolveProtocolRelativeMediaUrl(source),
-                "resource",
-              )
-            ).url
-          : source;
+      let preparedSource = source;
+      if (threadRef && resolveExternalWebLinkHost(source) !== null) {
+        const prepared = await prepareHostedPreview(
+          threadRef,
+          resolveProtocolRelativeMediaUrl(source),
+          "resource",
+        );
+        preparedSource = prepared.resourceUrl ?? prepared.url;
+      }
       return resolveMarkdownMediaPreview({
         source: preparedSource,
         resolvedFilePath,

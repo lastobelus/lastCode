@@ -200,6 +200,7 @@ import * as DeviceService from "./device/DeviceService.ts";
 import { remoteSshDeviceHosts } from "./device/localSshDeviceHost.ts";
 import * as PreviewManager from "./preview/Manager.ts";
 import * as PreviewHosting from "./preview/Hosting.ts";
+import { makeHostingClientActivity } from "./preview/HostingClientActivity.ts";
 import { issueAssetUrl } from "./assets/AssetAccess.ts";
 import {
   attachmentRelativePath,
@@ -1361,6 +1362,10 @@ const layerCoreWsRpc = (
       const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
       const terminalManager = yield* TerminalManager.TerminalManager;
       const previewHosting = yield* PreviewHosting.PreviewHosting;
+      const setHostingActivity = yield* makeHostingClientActivity(
+        previewHosting,
+        desktopBrowserOwner,
+      );
       const previewManager = yield* PreviewManager.PreviewManager;
       const portDiscovery = yield* PortScanner.PortDiscovery;
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
@@ -2258,6 +2263,8 @@ const layerCoreWsRpc = (
             input.resource._tag === "attachment" ||
             input.resource._tag === "native-app-icon" ||
             input.resource._tag === "tool-output-image" ||
+            input.resource._tag === "managed-preview-resource" ||
+            input.resource._tag === "preview-document" ||
             input.resource._tag === SOURCE_CONTROL_MEDIA_ASSET ||
             (input.resource._tag === "media-file" && input.resource.linkedThreadFile === true) ||
             // A network path is served only from the thread's project, looked up below.
@@ -3206,15 +3213,28 @@ const layerCoreWsRpc = (
               (error) =>
                 new ContractPreviewHostingError({
                   reason:
-                    error._tag === "PreviewHostingError" &&
-                    error.operation === "validate" &&
-                    error.detail?.includes("already served")
-                      ? "url_in_use"
-                      : "unavailable",
+                    error._tag === "PreviewHostingError" && error.operation === "capacity"
+                      ? "capacity"
+                      : error._tag === "PreviewHostingError" &&
+                          error.operation === "validate" &&
+                          error.detail?.includes("already served")
+                        ? "url_in_use"
+                        : "unavailable",
                   message:
-                    error._tag === "PreviewHostingError" && error.operation === "validate"
+                    error._tag === "PreviewHostingError" &&
+                    (error.operation === "validate" || error.operation === "capacity")
                       ? error.message
                       : "Preview hosting is unavailable on this server.",
+                }),
+            ),
+          ),
+        [WS_METHODS.previewHostingActivity]: (input) =>
+          setHostingActivity(input).pipe(
+            Effect.mapError(
+              () =>
+                new ContractPreviewHostingError({
+                  reason: "unavailable",
+                  message: "Preview hosting activity is unavailable on this server.",
                 }),
             ),
           ),
@@ -3585,6 +3605,7 @@ type WsRequestServices =
   | WorktreeSetupTracker.WorktreeSetupTracker
   | import("./auth/ServerSecretStore.ts").ServerSecretStore
   | import("./project/ProjectFaviconResolver.ts").ProjectFaviconResolver
+  | import("./assets/NativeAppIconResolver.ts").NativeAppIconResolver
   | import("./provider/AntigravityInstallation.ts").AntigravityInstallation
   | import("./provider/CodexInstallation.ts").CodexInstallation
   | import("./vcs/VcsProcess.ts").VcsProcess

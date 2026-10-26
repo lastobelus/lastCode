@@ -1,9 +1,17 @@
-import type { PreviewSessionSnapshot, ScopedThreadRef } from "@t3tools/contracts";
+import type { PreviewOpenInput, PreviewSessionSnapshot, ScopedThreadRef } from "@t3tools/contracts";
+import type { PreparedHostedPreview } from "@t3tools/client-runtime/preview-hosting";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import * as previewRuntime from "~/browser/previewRuntime";
+import type { OpenPreviewMutation } from "~/browser/openFileInPreview";
+import {
+  applyPreviewServerEvent,
+  readThreadPreviewState,
+  resetPreviewStateForTests,
+} from "~/previewStateStore";
+import { selectActiveRightPanelSurface, useRightPanelStore } from "~/rightPanelStore";
 
 import {
   openTerminalLinkInPreview,
@@ -11,23 +19,26 @@ import {
 } from "./openTerminalLinkInPreview";
 
 const hostingMocks = vi.hoisted(() => ({
-  prepare: vi.fn(async (_ref: ScopedThreadRef, url: string) => ({
+  prepare: vi.fn(async (_ref: ScopedThreadRef, url: string): Promise<PreparedHostedPreview> => ({
     url,
     managed: false,
     restored: false,
   })),
 }));
-vi.mock("./previewHostingRecovery", () => ({ prepareHostedPreview: hostingMocks.prepare }));
-
-vi.mock("~/previewStateStore", () => ({
-  applyPreviewServerSnapshot: vi.fn(),
-  isPreviewSupportedInRuntime: () => true,
+vi.mock("./previewHostingRecovery", () => ({
+  prepareHostedPreview: hostingMocks.prepare,
+  mayBeHostedPreviewUrl: (_ref: ScopedThreadRef, url: string) =>
+    /^http:\/\/(localhost|127\.0\.0\.1)/.test(url),
+}));
+vi.mock("~/state/entities", () => ({
+  readEnvironmentSupportsServerBrowser: () => true,
+  readEnvironmentHasLocalDesktopBrowser: () => true,
+  useEnvironmentSupportsServerBrowser: () => true,
 }));
 
-vi.mock("~/rightPanelStore", () => ({
-  useRightPanelStore: {
-    getState: () => ({ openBrowser: vi.fn() }),
-  },
+vi.mock("~/previewStateStore", async (original) => ({
+  ...(await original<typeof import("~/previewStateStore")>()),
+  isPreviewSupportedInRuntime: () => true,
 }));
 
 const browserDefaultsMocks = vi.hoisted(() => ({
@@ -70,8 +81,35 @@ const snapshot: PreviewSessionSnapshot = {
   updatedAt: "2026-06-20T00:00:00.000Z",
 };
 
+function installWebPopup() {
+  const tab = {
+    opener: {},
+    closed: false,
+    document: { createElement: () => ({}), head: { append: vi.fn() } },
+    location: { replace: vi.fn() },
+    close: vi.fn(),
+  };
+  const externalOpen = vi.fn(() => tab);
+  vi.stubGlobal("window", { open: externalOpen });
+  return { tab, externalOpen };
+}
+
+function deferredRecovery() {
+  let resolve!: (value: PreparedHostedPreview) => void;
+  const promise = new Promise<PreparedHostedPreview>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve };
+}
+
 beforeEach(() => {
   vi.stubGlobal("window", { desktopBridge: {} });
+  resetPreviewStateForTests();
+  useRightPanelStore.setState({
+    byThreadKey: {},
+    threadPanelVisibilityByThreadKey: {},
+    userActionRevisionByThreadKey: {},
+  });
   hostingMocks.prepare
     .mockReset()
     .mockImplementation(async (_ref, url) => ({ url, managed: false, restored: false }));
@@ -86,6 +124,142 @@ afterEach(() => {
 });
 
 describe("openTerminalLinkInPreview", () => {
+  it.each(
+    ["desktop", "web"].flatMap((client) =>
+      ["before", "after"].map((delivery) => ({ client, delivery })),
+    ),
+  )(
+    "preserves a newer panel choice on $client when the opened event arrives $delivery the reply",
+    async ({ client, delivery }) => {
+      const popup = client === "web" ? installWebPopup() : undefined;
+      vi.spyOn(previewRuntime, "isPreviewAvailableFor").mockReturnValue(true);
+      const recovery = deferredRecovery();
+      hostingMocks.prepare.mockReturnValueOnce(recovery.promise);
+      const emitOpened = (focus: PreviewOpenInput["focus"]) =>
+        applyPreviewServerEvent(threadRef, {
+          type: "opened",
+          threadId: threadRef.threadId,
+          tabId: snapshot.tabId,
+          snapshot,
+          createdAt: snapshot.updatedAt,
+          serverEpoch: "terminal-focus-epoch",
+          revision: 1,
+          ...(focus === undefined ? {} : { focus }),
+        });
+      const openPreview = vi.fn<OpenPreviewMutation<never>>(async ({ input }) => {
+        if (delivery === "before") emitOpened(input.focus);
+        return AsyncResult.success(snapshot);
+      });
+      const revision = useRightPanelStore.getState().getUserActionRevision(threadRef);
+      const opening = openTerminalLinkInPreview({
+        url: "http://localhost:5173/app",
+        threadRef,
+        openPreview,
+        fallbackToBrowser: vi.fn(),
+        forceBrowser: false,
+      });
+      useRightPanelStore.getState().open(threadRef, "files");
+      recovery.resolve({ url: "http://localhost:5173/app", managed: true, restored: true });
+      await opening;
+      if (delivery === "after") emitOpened(openPreview.mock.calls[0]?.[0].input.focus);
+      expect(
+        selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, threadRef)?.id,
+      ).toBe("files");
+      expect(readThreadPreviewState(threadRef).sessions[snapshot.tabId]).toEqual(snapshot);
+      expect(openPreview.mock.calls[0]?.[0].input.focus?.userActionRevision).toBe(revision + 1);
+      expect(hostingMocks.prepare).toHaveBeenCalledOnce();
+      if (popup) {
+        expect(popup.tab.close).toHaveBeenCalledOnce();
+        expect(popup.tab.location.replace).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it("opens an ordinary managed app in its environment rather than this desktop", async () => {
+    vi.spyOn(previewRuntime, "previewRuntimeFor").mockReturnValue(undefined);
+    const url = "http://workstation.example:5173/app?case=terminal#section";
+    const localUrl = "http://127.0.0.1:5173/app?case=terminal#section";
+    hostingMocks.prepare.mockResolvedValue({ url, localUrl, managed: true, restored: true });
+    const openPreview = vi.fn(async (_input: { input: PreviewOpenInput }) =>
+      AsyncResult.success(snapshot),
+    );
+    const fallbackToBrowser = vi.fn();
+    await openTerminalLinkInPreview({
+      url,
+      threadRef,
+      openPreview,
+      fallbackToBrowser,
+      forceBrowser: false,
+    });
+    expect(openPreview.mock.calls[0]?.[0].input).toMatchObject({
+      url: localUrl,
+      runtime: "server",
+      browserHost: "environment",
+      profileId: "default",
+    });
+    expect(openPreview.mock.calls[0]?.[0].input).not.toHaveProperty("desktopHostId");
+    expect(fallbackToBrowser).not.toHaveBeenCalled();
+  });
+
+  it.each(["desktop", "web"])(
+    "opens a managed terminal link from %s in its environment despite a named default profile",
+    async (client) => {
+      if (client === "web") vi.stubGlobal("window", { open: vi.fn() });
+      vi.spyOn(previewRuntime, "isPreviewAvailableFor").mockReturnValue(true);
+      browserDefaultsMocks.resolve.mockResolvedValue({ ...hydratedDefaults, profileId: "work" });
+      const url = "http://localhost:5173/app?case=terminal#section";
+      const localUrl = "http://127.0.0.1:5173/app?case=terminal#section";
+      hostingMocks.prepare.mockResolvedValue({ url, localUrl, managed: true, restored: true });
+      const openPreview = vi.fn(async (_input: { input: PreviewOpenInput }) =>
+        AsyncResult.success(snapshot),
+      );
+      const fallbackToBrowser = vi.fn();
+      await openTerminalLinkInPreview({
+        url,
+        threadRef,
+        openPreview,
+        fallbackToBrowser,
+        forceBrowser: false,
+      });
+      expect(openPreview.mock.calls[0]?.[0].input).toMatchObject({
+        url: localUrl,
+        profileId: "default",
+        runtime: "server",
+        browserHost: "environment",
+      });
+      expect(fallbackToBrowser).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps a managed Action's named profile on its selected desktop", async () => {
+    vi.spyOn(previewRuntime, "previewRuntimeFor").mockReturnValue("server");
+    vi.spyOn(previewRuntime, "desktopBrowserHostFor").mockReturnValue("selected-desktop");
+    const url = "http://workstation.example:5173/sign-in";
+    hostingMocks.prepare.mockResolvedValue({
+      url,
+      localUrl: "http://127.0.0.1:5173/sign-in",
+      managed: true,
+      restored: true,
+    });
+    const openPreview = vi.fn(async (_input: { input: PreviewOpenInput }) =>
+      AsyncResult.success(snapshot),
+    );
+    await openTerminalLinkInPreview({
+      url,
+      threadRef,
+      terminalLinkProfileName: "Work account",
+      openPreview,
+      fallbackToBrowser: vi.fn(),
+      forceBrowser: false,
+    });
+    expect(openPreview.mock.calls[0]?.[0].input).toMatchObject({
+      url,
+      profileId: "work",
+      desktopHostId: "selected-desktop",
+    });
+    expect(openPreview.mock.calls[0]?.[0].input).not.toHaveProperty("browserHost");
+  });
+
   it.each([
     { forceBrowser: false, catalogue: "present" },
     { forceBrowser: true, catalogue: "present" },
@@ -131,7 +305,7 @@ describe("openTerminalLinkInPreview", () => {
   );
 
   it.each([false, true])(
-    "keeps ordinary hosted-web links external after managed recovery (modifier=%s)",
+    "keeps public hosted-web links external (modifier=%s)",
     async (forceBrowser) => {
       const replace = vi.fn();
       const externalOpen = vi.fn(() => ({
@@ -143,9 +317,8 @@ describe("openTerminalLinkInPreview", () => {
       }));
       vi.stubGlobal("window", { open: externalOpen });
       vi.spyOn(previewRuntime, "isPreviewAvailableFor").mockReturnValue(true);
-      const url = "http://localhost:5173/qa";
-      const resolved = "http://workstation.example:5173/qa";
-      hostingMocks.prepare.mockResolvedValue({ url: resolved, managed: true, restored: true });
+      const url = "https://example.com/docs";
+      hostingMocks.prepare.mockResolvedValue({ url, managed: false, restored: false });
       const openPreview = vi.fn(async () => AsyncResult.success(snapshot));
       const fallbackToBrowser = vi.fn();
       await openTerminalLinkInPreview({
@@ -157,9 +330,79 @@ describe("openTerminalLinkInPreview", () => {
       });
       expect(externalOpen).toHaveBeenCalledExactlyOnceWith("about:blank", "_blank");
       expect(hostingMocks.prepare).toHaveBeenCalledExactlyOnceWith(threadRef, url);
-      expect(replace).toHaveBeenCalledExactlyOnceWith(resolved);
+      expect(replace).toHaveBeenCalledExactlyOnceWith(url);
       expect(browserDefaultsMocks.resolve).not.toHaveBeenCalled();
       expect(openPreview).not.toHaveBeenCalled();
+      expect(fallbackToBrowser).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["system preference", "unavailable preview"])(
+    "reserves a hosted terminal link's external tab before recovery with %s",
+    async (reason) => {
+      const { tab, externalOpen } = installWebPopup();
+      vi.spyOn(previewRuntime, "isPreviewAvailableFor").mockReturnValue(
+        reason !== "unavailable preview",
+      );
+      linkTargetMocks.preference.mockReturnValue(reason === "system preference" ? "system" : "app");
+      const recovery = deferredRecovery();
+      hostingMocks.prepare.mockReturnValueOnce(recovery.promise);
+      const fallbackToBrowser = vi.fn();
+      const openPreview = vi.fn(async () => AsyncResult.success(snapshot));
+      const url = "http://localhost:5173/app";
+      const resolved = "http://workstation.example:5173/app";
+
+      const opening = openTerminalLinkInPreview({
+        url,
+        threadRef,
+        openPreview,
+        fallbackToBrowser,
+        forceBrowser: false,
+      });
+      const reservationsAtClick = [...externalOpen.mock.calls];
+      recovery.resolve({ url: resolved, managed: true, restored: true });
+      await opening;
+
+      expect(reservationsAtClick).toEqual([["about:blank", "_blank"]]);
+      expect(hostingMocks.prepare).toHaveBeenCalledExactlyOnceWith(threadRef, url);
+      expect(tab.location.replace).toHaveBeenCalledExactlyOnceWith(resolved);
+      expect(tab.close).not.toHaveBeenCalled();
+      expect(openPreview).not.toHaveBeenCalled();
+      expect(fallbackToBrowser).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["success", "interrupted"])(
+    "closes the terminal link reservation after integrated opening ends with %s",
+    async (outcome) => {
+      const { tab, externalOpen } = installWebPopup();
+      vi.spyOn(previewRuntime, "isPreviewAvailableFor").mockReturnValue(true);
+      const recovery = deferredRecovery();
+      hostingMocks.prepare.mockReturnValueOnce(recovery.promise);
+      const openPreview = vi.fn<OpenPreviewMutation<never>>(async () =>
+        outcome === "success"
+          ? AsyncResult.success(snapshot)
+          : AsyncResult.failure(Cause.interrupt()),
+      );
+      const fallbackToBrowser = vi.fn();
+      const url = "http://localhost:5173/app";
+
+      const opening = openTerminalLinkInPreview({
+        url,
+        threadRef,
+        openPreview,
+        fallbackToBrowser,
+        forceBrowser: false,
+      });
+      const reservationsAtClick = [...externalOpen.mock.calls];
+      recovery.resolve({ url, managed: true, restored: true });
+      await opening;
+
+      expect(reservationsAtClick).toEqual([["about:blank", "_blank"]]);
+      expect(hostingMocks.prepare).toHaveBeenCalledExactlyOnceWith(threadRef, url);
+      expect(openPreview).toHaveBeenCalledOnce();
+      expect(tab.close).toHaveBeenCalledOnce();
+      expect(tab.location.replace).not.toHaveBeenCalled();
       expect(fallbackToBrowser).not.toHaveBeenCalled();
     },
   );
@@ -223,6 +466,7 @@ describe("openTerminalLinkInPreview", () => {
         url: "https://example.com/docs",
         viewport: hydratedDefaults.viewport,
         profileId: "work",
+        focus: expect.objectContaining({ userActionRevision: expect.any(Number) }),
       },
     });
     expect(hydratedDefaults.profileId).toBe("default");

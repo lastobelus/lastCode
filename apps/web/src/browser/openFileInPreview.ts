@@ -1,4 +1,4 @@
-import { hostedPreviewNavigationUrl } from "@t3tools/client-runtime/preview-hosting";
+import type { PreparedHostedPreview } from "@t3tools/client-runtime/preview-hosting";
 import type {
   AssetCreateUrlResult,
   AssetResource,
@@ -19,11 +19,11 @@ import { AsyncResult } from "effect/reactivity";
 
 import { prepareHostedPreview } from "~/components/preview/previewHostingRecovery";
 import { resolveAssetUrl } from "~/assets/assetUrls";
+import { isPreviewAvailableFor } from "~/browser/previewRuntime";
 import {
-  desktopBrowserHostFor,
-  isPreviewAvailableFor,
-  previewRuntimeFor,
-} from "~/browser/previewRuntime";
+  preparedPreviewOpenProfileId,
+  preparedPreviewOpenTarget,
+} from "./preparedPreviewOpenTarget";
 import {
   applyPreviewServerSnapshot,
   capturePreviewOpenFocus,
@@ -78,14 +78,13 @@ export async function openUrlInPreview<E>(
   focus = capturePreviewOpenFocus(input.threadRef, input.background),
 ): Promise<AtomCommandResult<void, E | BrowserSettingsReadError>> {
   const prepared = await prepareHostedPreview(input.threadRef, input.url);
-  return openPreparedUrlInPreview(input, prepared.url, prepared.navigationUrl, focus);
+  return openPreparedUrlInPreview(input, prepared, focus);
 }
 
 /** Open an already recovered destination while retaining the authored URL. */
 export async function openPreparedUrlInPreview<E>(
   input: OpenUrlInPreviewInput<E>,
-  destinationUrl: string,
-  navigationUrl?: string,
+  prepared: PreparedHostedPreview,
   focus = capturePreviewOpenFocus(input.threadRef, input.background),
 ): Promise<AtomCommandResult<void, E | BrowserSettingsReadError>> {
   const panelRevision = focus.userActionRevision;
@@ -96,21 +95,18 @@ export async function openPreparedUrlInPreview<E>(
   if (defaults instanceof BrowserSettingsReadError) {
     return AsyncResult.failure(Cause.fail(defaults));
   }
-  const runtime = previewRuntimeFor(input.threadRef.environmentId);
-  const desktopHostId =
-    runtime === "server" ? desktopBrowserHostFor(input.threadRef.environmentId) : undefined;
+  const profileId = preparedPreviewOpenProfileId(
+    prepared,
+    browserDefaultOpenProfileId(defaults),
+    input.profileId,
+  );
   const result = await input.openPreview({
     environmentId: input.threadRef.environmentId,
     input: {
       threadId: input.threadRef.threadId,
-      url: hostedPreviewNavigationUrl(
-        { url: destinationUrl, ...(navigationUrl === undefined ? {} : { navigationUrl }) },
-        runtime === "server" && desktopHostId === undefined ? input.url : destinationUrl,
-      ),
+      ...preparedPreviewOpenTarget(input.threadRef.environmentId, prepared, input.url, profileId),
       viewport: browserDefaultOpenViewport(defaults),
-      profileId: input.profileId ?? browserDefaultOpenProfileId(defaults),
-      ...(runtime === undefined ? {} : { runtime }),
-      ...(desktopHostId === undefined ? {} : { desktopHostId }),
+      profileId,
       // Carry background intent through independently delivered/replayed events.
       ...(input.background ? { background: true } : {}),
       focus,

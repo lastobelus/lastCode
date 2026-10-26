@@ -1,4 +1,5 @@
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as NetService from "@t3tools/shared/Net";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Deferred from "effect/Deferred";
@@ -32,6 +33,9 @@ import type * as PtyAdapter from "@t3tools/shared/PtyAdapter";
 import * as ProcessRunner from "../processRunner.ts";
 
 const PREVIEW_URL = "http://localhost:5173/field-examples";
+const listeningNetworkLayer = Layer.mock(NetService.NetService)({
+  hasListenerOnHost: () => Effect.succeed(true),
+});
 const encodePersistedHostingState = Schema.encodeSync(
   Schema.fromJsonString(
     Schema.Struct({
@@ -228,6 +232,14 @@ function discoveryLayer(
           if (!ready) return Effect.void;
           const url = input.configuredUrls[0] ?? PREVIEW_URL;
           const parsed = new URL(url);
+          const written = harness.writes.at(-1);
+          const opened =
+            written === undefined
+              ? harness.opens.at(-1)
+              : harness.opens.find(
+                  (input) =>
+                    input.threadId === written.threadId && input.terminalId === written.terminalId,
+                );
           const server: DiscoveredLocalServer = {
             host: parsed.hostname,
             port: Number(parsed.port),
@@ -235,14 +247,17 @@ function discoveryLayer(
             processName: "node",
             pid: 100,
             terminal:
-              attributeTerminal && harness.opens.at(-1) !== undefined
+              attributeTerminal && opened !== undefined
                 ? {
-                    threadId: ThreadId.make(harness.opens.at(-1)!.threadId),
-                    terminalId: harness.opens.at(-1)!.terminalId,
+                    threadId: ThreadId.make(opened.threadId),
+                    terminalId: opened.terminalId,
                   }
                 : null,
           };
-          return listener([server]);
+          return listener([
+            (attributeTerminal ? scannedServers.find((entry) => entry.url === url) : undefined) ??
+              server,
+          ]);
         }),
         () => Effect.void,
       ),
@@ -311,6 +326,7 @@ function hostingLayer(
 ) {
   const dependencies = Layer.mergeAll(
     httpLayer,
+    listeningNetworkLayer,
     NodeServices.layer,
     ServerConfig.layer(config),
     terminalLayer(harness),
@@ -383,7 +399,447 @@ function failFirstExpiredStateWriteLayer(
   ).pipe(Layer.provide(NodeServices.layer));
 }
 
+const warmProcessFixture = Effect.fn("warmProcessFixture")(function* (
+  count: number,
+  overrides: Partial<TerminalHarness> = {},
+) {
+  yield* TestClock.setTime(1_000);
+  const fs = yield* FileSystem.FileSystem;
+  const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-warm-budget-" });
+  const config = yield* Effect.provide(
+    ServerConfig.ServerConfig,
+    ServerConfig.layerTest(process.cwd(), root),
+  );
+  const leases = Array.from({ length: count }, (_, index) =>
+    leaseFixture({
+      id: `warm-${index}`,
+      threadId: `thread-${index}`,
+      terminalId: `preview-warm-${index}`,
+      url: `http://localhost:${6_000 + index}/app`,
+      command: `node app.mjs --port ${6_000 + index}`,
+      env: { FIXTURE_MODE: "retained" },
+      cwd: `${root}/workspace`,
+      worktreePath: `${root}/workspace`,
+      expiresAt: DateTime.formatIso(
+        DateTime.makeUnsafe(1_000 - count + index + PreviewHosting.PREVIEW_HOSTING_LEASE_MS),
+      ),
+    }),
+  );
+  yield* fs.makeDirectory(`${root}/workspace`, { recursive: true });
+  yield* fs.writeFileString(`${root}/workspace/dependencies.marker`, "retained dependencies");
+  yield* fs.makeDirectory(config.stateDir, { recursive: true });
+  yield* fs.writeFileString(
+    `${config.stateDir}/preview-hosting.json`,
+    encodePersistedHostingState({ version: 1, leases }),
+  );
+  const harness = testTerminalHarness({
+    summaries: leases.map((lease) => terminalFixture(lease.threadId, lease.terminalId)),
+    ...overrides,
+  });
+  const request = {
+    threadId: "new-thread",
+    command: "node app.mjs --port 7000",
+    cwd: `${root}/workspace`,
+    worktreePath: `${root}/workspace`,
+    env: { FIXTURE_MODE: "new" },
+    url: "http://localhost:7000/app",
+  };
+  return { fs, root, config, leases, harness, request, layer: hostingLayer(config, harness) };
+});
+
 describe("PreviewHosting", () => {
+  it.effect(
+    "unloads the least recently used inactive app without deleting its recovery recipe",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* warmProcessFixture(8);
+        const { leases, harness, request, root, fs } = fixture;
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            yield* TestClock.adjust(Duration.seconds(1));
+            yield* hosting.setActivity({
+              activityId: "recent-view",
+              threadId: leases[0]!.threadId,
+              url: leases[0]!.url,
+              active: true,
+            });
+            yield* hosting.setActivity({
+              activityId: "recent-view",
+              threadId: leases[0]!.threadId,
+              url: leases[0]!.url,
+              active: false,
+            });
+            yield* hosting.setActivity({
+              activityId: "recording",
+              threadId: leases[1]!.threadId,
+              url: leases[1]!.url.replace("localhost", "127.0.0.1"),
+              active: true,
+            });
+            const started = yield* hosting.launch(request);
+            assert.equal(started.status, "active");
+            assert.deepEqual(harness.closes, [
+              { threadId: leases[2]!.threadId, terminalId: leases[2]!.terminalId },
+            ]);
+            const sleeping = (yield* hosting.list()).find((lease) => lease.id === leases[2]!.id)!;
+            assert.deepEqual(sleeping, {
+              ...leases[2]!,
+              status: "sleeping",
+              cleanupPending: false,
+            });
+            assert.include(
+              yield* hosting.protectedWorkspacePaths(),
+              yield* fs.realPath(`${root}/workspace`),
+            );
+            assert.equal(
+              yield* fs.readFileString(`${root}/workspace/dependencies.marker`),
+              "retained dependencies",
+            );
+            assert.equal(harness.summaries.length, 8);
+          }).pipe(Effect.provide(fixture.layer)),
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect(
+    "saves a blocked handoff and retries after the last activity releases a process slot",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* warmProcessFixture(8);
+        const { leases, harness, request, config, fs } = fixture;
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            for (const lease of leases) {
+              yield* hosting.setActivity({
+                activityId: lease.id,
+                threadId: lease.threadId,
+                url: lease.url,
+                active: true,
+              });
+            }
+            const extraActivity = {
+              activityId: "automation",
+              threadId: leases[0]!.threadId,
+              url: leases[0]!.url,
+            };
+            yield* hosting.setActivity({ ...extraActivity, active: true });
+            yield* hosting.setActivity({
+              activityId: leases[0]!.id,
+              threadId: leases[0]!.threadId,
+              url: leases[0]!.url,
+              active: false,
+            });
+            const blocked = yield* hosting.launch(request).pipe(Effect.result);
+            assert.equal(blocked._tag, "Failure");
+            if (blocked._tag === "Failure") {
+              assert.equal(blocked.failure._tag, "PreviewHostingError");
+              assert.match(blocked.failure.message, /preview is saved.*retry/);
+            }
+            assert.deepEqual(harness.opens, []);
+            assert.deepEqual(harness.closes, []);
+            const saved = (yield* hosting.list(request.threadId))[0]!;
+            assert.equal(saved.status, "sleeping");
+            assert.equal(saved.command, request.command);
+            assert.deepEqual(saved.env, request.env);
+            assert.include(
+              yield* fs.readFileString(`${config.stateDir}/preview-hosting.json`),
+              `"id":"${saved.id}"`,
+            );
+            yield* hosting.setActivity({ ...extraActivity, active: false });
+            const recovered = yield* hosting.recover({
+              threadId: saved.threadId,
+              leaseId: PreviewHostingLeaseId.make(saved.id),
+              url: saved.url,
+            });
+            assert.equal(recovered?.status, "active");
+            assert.equal(recovered?.id, saved.id);
+            assert.equal(harness.opens.length, 1);
+            assert.deepEqual(harness.closes, [
+              { threadId: leases[0]!.threadId, terminalId: leases[0]!.terminalId },
+            ]);
+          }).pipe(Effect.provide(fixture.layer)),
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("reduces an existing excess of warm processes before admitting another app", () =>
+    Effect.gen(function* () {
+      const fixture = yield* warmProcessFixture(10);
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          yield* hosting.launch(fixture.request);
+          assert.deepEqual(
+            fixture.harness.closes.map((entry) => entry.terminalId),
+            fixture.leases.slice(0, 3).map((lease) => lease.terminalId),
+          );
+          assert.equal(fixture.harness.summaries.length, 8);
+          assert.equal(
+            (yield* hosting.list()).filter((lease) => lease.status === "sleeping").length,
+            3,
+          );
+        }).pipe(Effect.provide(fixture.layer)),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect(
+    "reserves a process slot across shutdown acknowledgment and simultaneous launches",
+    () =>
+      Effect.gen(function* () {
+        const shutdownStarted = yield* Deferred.make<void>();
+        const allowShutdown = yield* Deferred.make<void>();
+        let acknowledged = false;
+        let waits = 0;
+        const fixture = yield* warmProcessFixture(8, {
+          onWaitForThreadShutdown: () =>
+            ++waits === 1
+              ? Deferred.succeed(shutdownStarted, undefined).pipe(
+                  Effect.andThen(Deferred.await(allowShutdown)),
+                  Effect.tap(() =>
+                    Effect.sync(() => {
+                      acknowledged = true;
+                    }),
+                  ),
+                )
+              : Effect.void,
+          onOpen: () =>
+            Effect.sync(() => {
+              assert.isTrue(acknowledged);
+              assert.isBelow(fixture.harness.summaries.length, 8);
+            }),
+        });
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const first = yield* hosting.launch(fixture.request).pipe(Effect.forkScoped);
+            yield* Deferred.await(shutdownStarted);
+            const second = yield* hosting
+              .launch({
+                ...fixture.request,
+                threadId: "another-thread",
+                url: "http://localhost:7001/app",
+              })
+              .pipe(Effect.forkScoped({ startImmediately: true }));
+            assert.deepEqual(fixture.harness.opens, []);
+            assert.deepEqual(fixture.harness.writes, []);
+            assert.isTrue(
+              (yield* hosting.list()).find((lease) => lease.id === "warm-0")?.cleanupPending,
+            );
+            yield* Deferred.succeed(allowShutdown, undefined);
+            assert.equal((yield* Fiber.join(first)).status, "active");
+            assert.equal((yield* Fiber.join(second)).status, "active");
+            assert.equal(fixture.harness.summaries.length, 8);
+            assert.equal(fixture.harness.opens.length, 2);
+            assert.deepEqual(
+              fixture.harness.closes.map((entry) => entry.terminalId),
+              ["preview-warm-0", "preview-warm-1"],
+            );
+          }).pipe(Effect.provide(fixture.layer)),
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("keeps a failed shutdown reserved instead of launching a ninth process", () =>
+    Effect.gen(function* () {
+      const fixture = yield* warmProcessFixture(8, {
+        onWaitForThreadShutdown: (threadId) =>
+          Effect.fail(
+            new TerminalManager.TerminalShutdownError({
+              threadId,
+              terminalIds: ["preview-warm-0"],
+            }),
+          ),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const blocked = yield* hosting.launch(fixture.request).pipe(Effect.result);
+          assert.equal(blocked._tag, "Failure");
+          assert.deepEqual(fixture.harness.opens, []);
+          assert.deepEqual(fixture.harness.writes, []);
+          assert.equal((yield* hosting.list(fixture.request.threadId))[0]?.status, "sleeping");
+          assert.isTrue(
+            (yield* hosting.list()).find((lease) => lease.id === "warm-0")?.cleanupPending,
+          );
+        }).pipe(Effect.provide(fixture.layer)),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect(
+    "keeps healthy returns and activity updates independent of another app's readiness",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* warmProcessFixture(7);
+        const waitingForHttp = yield* Deferred.make<void>();
+        const slowFinished = yield* Deferred.make<void>();
+        let notifySlow: Effect.Effect<void> = Effect.void;
+        const serverFor = (url: string): DiscoveredLocalServer => {
+          const existing = fixture.leases.find((lease) => lease.url === url);
+          const owner = existing ?? fixture.harness.opens[0]!;
+          return {
+            host: "localhost",
+            port: Number(new URL(url).port),
+            url,
+            pid: 100,
+            processName: "node",
+            terminal: { threadId: ThreadId.make(owner.threadId), terminalId: owner.terminalId },
+          };
+        };
+        const discovery = Layer.mock(PortScanner.PortDiscovery)({
+          scan: (urls) =>
+            Effect.succeed(
+              (urls ?? []).filter((url) => url !== fixture.request.url).map(serverFor),
+            ),
+          subscribe: (input, listener) =>
+            Effect.suspend(() => {
+              const url = input.configuredUrls[0]!;
+              if (url !== fixture.request.url) return listener([serverFor(url)]);
+              notifySlow = Effect.suspend(() => listener([serverFor(url)]));
+              return Deferred.succeed(waitingForHttp, undefined).pipe(Effect.asVoid);
+            }),
+          retain: Effect.void,
+        });
+        const layer = PreviewHosting.layer.pipe(
+          Layer.provideMerge(
+            Layer.mergeAll(
+              NodeServices.layer,
+              FetchHttpClient.layer,
+              ServerConfig.layer(fixture.config),
+              terminalLayer(fixture.harness),
+              listeningNetworkLayer,
+              discovery,
+            ),
+          ),
+        );
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const slow = yield* hosting.launch(fixture.request).pipe(
+              Effect.tap(() => Deferred.succeed(slowFinished, undefined)),
+              Effect.forkScoped,
+            );
+            yield* Deferred.await(waitingForHttp);
+            const healthy = fixture.leases[0]!;
+            yield* hosting.setActivity({
+              activityId: "visible",
+              threadId: healthy.threadId,
+              url: healthy.url,
+              active: true,
+            });
+            const recovered = yield* hosting.recover({
+              threadId: healthy.threadId,
+              leaseId: PreviewHostingLeaseId.make(healthy.id),
+              url: healthy.url,
+            });
+            assert.equal(recovered?.status, "active");
+            assert.isFalse(yield* Deferred.isDone(slowFinished));
+            assert.equal(fixture.harness.opens.length, 1);
+            assert.deepEqual(fixture.harness.closes, []);
+            yield* notifySlow;
+            assert.equal((yield* Fiber.join(slow)).status, "active");
+          }).pipe(Effect.provide(layer)),
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("reserves an unpublished launch before another app competes for the eighth slot", () =>
+    Effect.gen(function* () {
+      const opening = yield* Deferred.make<void>();
+      const finishOpen = yield* Deferred.make<void>();
+      let opened = 0;
+      const fixture = yield* warmProcessFixture(7, {
+        onOpen: () =>
+          ++opened === 1
+            ? Deferred.succeed(opening, undefined).pipe(Effect.andThen(Deferred.await(finishOpen)))
+            : Effect.void,
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const first = yield* hosting.launch(fixture.request).pipe(Effect.forkScoped);
+          yield* Deferred.await(opening);
+          const second = yield* hosting.launch({
+            ...fixture.request,
+            threadId: "another-thread",
+            url: "http://localhost:7001/app",
+          });
+          assert.equal(second.status, "active");
+          assert.deepEqual(fixture.harness.closes, [
+            { threadId: fixture.leases[0]!.threadId, terminalId: fixture.leases[0]!.terminalId },
+          ]);
+          assert.equal(fixture.harness.writes.length, 1);
+          yield* Deferred.succeed(finishOpen, undefined);
+          assert.equal((yield* Fiber.join(first)).status, "active");
+          assert.equal(fixture.harness.summaries.length, 8);
+        }).pipe(Effect.provide(fixture.layer)),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("skips a locked eviction candidate whose recovery also needs admission", () =>
+    Effect.gen(function* () {
+      const refreshing = yield* Deferred.make<void>();
+      const finishRefresh = yield* Deferred.make<void>();
+      let refreshes = 0;
+      const fixture = yield* warmProcessFixture(8, {
+        onRefreshMetadata: () =>
+          Effect.suspend(() =>
+            ++refreshes === 1
+              ? Deferred.succeed(refreshing, undefined).pipe(
+                  Effect.andThen(Deferred.await(finishRefresh)),
+                )
+              : Effect.void,
+          ),
+      });
+      const original = fixture.leases[0]!;
+      const layer = PreviewHosting.layer.pipe(
+        Layer.provideMerge(
+          Layer.mergeAll(
+            NodeServices.layer,
+            FetchHttpClient.layer,
+            ServerConfig.layer(fixture.config),
+            terminalLayer(fixture.harness),
+            Layer.mock(NetService.NetService)({
+              hasListenerOnHost: () => Effect.succeed(false),
+            }),
+            discoveryLayer(true, [], fixture.harness),
+          ),
+        ),
+      );
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const recovery = yield* hosting
+            .recover({
+              threadId: original.threadId,
+              leaseId: PreviewHostingLeaseId.make(original.id),
+              url: original.url,
+            })
+            .pipe(Effect.forkScoped);
+          yield* Deferred.await(refreshing);
+          const started = yield* hosting.launch(fixture.request);
+          assert.equal(started.status, "active");
+          assert.deepEqual(fixture.harness.closes, [
+            { threadId: fixture.leases[1]!.threadId, terminalId: fixture.leases[1]!.terminalId },
+          ]);
+          yield* Deferred.succeed(finishRefresh, undefined);
+          const recovered = yield* Fiber.join(recovery);
+          assert.equal(recovered?.status, "active");
+          assert.equal(recovered?.restarted, true);
+          assert.equal(fixture.harness.summaries.length, 8);
+          assert.equal(fixture.harness.opens.length, 2);
+          assert.deepEqual(
+            fixture.harness.closes.map((entry) => entry.terminalId),
+            [fixture.leases[1]!.terminalId, original.terminalId],
+          );
+        }).pipe(Effect.provide(layer)),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect.each([false, true])(
     "lets other threads launch while shutdown blocks new launches in the stopping thread (%s)",
     (failClose) =>
@@ -596,6 +1052,7 @@ describe("PreviewHosting", () => {
         }),
       ).pipe(Layer.provide(ProcessRunner.layer));
       const dependencies = Layer.mergeAll(
+        listeningNetworkLayer,
         FetchHttpClient.layer,
         ServerConfig.layer(config),
         terminalsLayer,
@@ -1156,7 +1613,7 @@ describe("PreviewHosting", () => {
       }).pipe(Effect.provide(NodeServices.layer)),
   );
 
-  it.effect("launches a named terminal and fixes its 24-hour expiry at handoff", () =>
+  it.effect("launches a named terminal with a 24-hour process window", () =>
     Effect.gen(function* () {
       yield* TestClock.setTime(1_000);
       const fs = yield* FileSystem.FileSystem;
@@ -1221,6 +1678,52 @@ describe("PreviewHosting", () => {
           assert.equal(harness.opens.length, 1);
           assert.equal(harness.writes.length, 1);
         }).pipe(Effect.provide(layer)),
+      );
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
+  );
+
+  it.effect("renews a healthy preview on return without interrupting its process", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(1_000);
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-return-deadline-" });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const closed = yield* Deferred.make<void>();
+      const harness = testTerminalHarness({
+        onClose: () => Deferred.succeed(closed, undefined).pipe(Effect.asVoid),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const lease = yield* hosting.launch({
+            threadId: "thread-1",
+            command: "pnpm dev --port 5173",
+            cwd: "/workspace",
+            url: PREVIEW_URL,
+          });
+          const untilReturn = PreviewHosting.PREVIEW_HOSTING_LEASE_MS - 5 * 60_000;
+          yield* TestClock.adjust(Duration.millis(untilReturn));
+          assert.deepEqual(
+            yield* hosting.prepareNavigation({ threadId: lease.threadId, url: PREVIEW_URL }),
+            { managed: true, runId: lease.runId },
+          );
+          const renewed = (yield* hosting.list(lease.threadId))[0]!;
+          assert.equal(renewed.handedOffAt, lease.handedOffAt);
+          assert.equal(renewed.runId, lease.runId);
+          assert.equal(Date.parse(renewed.expiresAt) - Date.parse(lease.expiresAt), untilReturn);
+          yield* TestClock.adjust(Duration.minutes(5));
+          assert.deepEqual(harness.closes, []);
+          assert.equal(harness.writes.length, 1);
+          assert.equal((yield* hosting.list(lease.threadId))[0]?.status, "active");
+          yield* TestClock.adjust(Duration.millis(untilReturn));
+          yield* Deferred.await(closed);
+          assert.deepEqual(harness.closes, [
+            { threadId: lease.threadId, terminalId: lease.terminalId },
+          ]);
+        }).pipe(Effect.provide(hostingLayer(config, harness))),
       );
     }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
   );
@@ -1874,6 +2377,7 @@ describe("PreviewHosting", () => {
           Layer.provideMerge(
             Layer.mergeAll(
               NodeServices.layer,
+              listeningNetworkLayer,
               FetchHttpClient.layer,
               ServerConfig.layer(config),
               terminalLayer(harness),
@@ -2347,6 +2851,7 @@ describe("PreviewHosting", () => {
               if (result._tag === "Success")
                 assert.deepEqual(result.success, {
                   managed: true,
+                  runId: saved.runId,
                   bootstrapToken: "fixture-one-use",
                 });
               assert.equal(requests.at(-1)?.url, "http://localhost:5173/api/auth/pairing-token");
@@ -2438,6 +2943,7 @@ describe("PreviewHosting", () => {
               if (result._tag === "Success")
                 assert.deepEqual(result.success, {
                   managed: true,
+                  runId: saved.runId,
                   localUrl: "http://localhost:5173/qa?theme=dark#anchor",
                   bootstrapToken: "fixture-one-use",
                 });
@@ -2475,6 +2981,377 @@ describe("PreviewHosting", () => {
           ),
         );
       }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("releases the expiry gate during shutdown while counting the stopping process", () =>
+    Effect.gen(function* () {
+      const shutdownStarted = yield* Deferred.make<void>();
+      const allowShutdown = yield* Deferred.make<void>();
+      const slowCleaned = yield* Deferred.make<void>();
+      const independentCleaned = yield* Deferred.make<void>();
+      const acknowledged = new Set<string>();
+      let liveProcesses = 8;
+      const fixture = yield* warmProcessFixture(8, {
+        onWaitForThreadShutdown: (threadId) =>
+          Effect.gen(function* () {
+            if (acknowledged.has(threadId)) return;
+            if (threadId === "thread-0") {
+              yield* Deferred.succeed(shutdownStarted, undefined);
+              yield* Deferred.await(allowShutdown);
+            }
+            acknowledged.add(threadId);
+            liveProcesses--;
+          }),
+        onOpen: () =>
+          Effect.sync(() => {
+            assert.isBelow(liveProcesses, 8);
+            liveProcesses++;
+          }),
+      });
+      const slow = fixture.leases[0]!;
+      const independent = fixture.leases[1]!;
+      const healthy = fixture.leases[2]!;
+      yield* fixture.fs.writeFileString(
+        `${fixture.config.stateDir}/preview-hosting.json`,
+        encodePersistedHostingState({
+          version: 1,
+          leases: fixture.leases.map((lease) => ({ ...lease, expiresAt: slow.expiresAt })),
+        }),
+      );
+      const server: DiscoveredLocalServer = {
+        host: "localhost",
+        port: 6_002,
+        url: healthy.url,
+        pid: 100,
+        processName: "node",
+        terminal: { threadId: ThreadId.make(healthy.threadId), terminalId: healthy.terminalId },
+      };
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          yield* hosting.subscribe(() =>
+            Effect.gen(function* () {
+              const leases = yield* hosting.list().pipe(Effect.orDie);
+              for (const [leaseId, cleaned] of [
+                [slow.id, slowCleaned],
+                [independent.id, independentCleaned],
+              ] as const) {
+                if (
+                  leases.some(
+                    (lease) =>
+                      lease.id === leaseId &&
+                      lease.status === "sleeping" &&
+                      lease.cleanupPending === false,
+                  )
+                )
+                  yield* Deferred.succeed(cleaned, undefined);
+              }
+            }),
+          );
+          for (const lease of fixture.leases.slice(2)) {
+            yield* hosting.setActivity({
+              activityId: lease.id,
+              threadId: lease.threadId,
+              url: lease.url,
+              active: true,
+            });
+          }
+          yield* TestClock.adjust(Duration.millis(PreviewHosting.PREVIEW_HOSTING_LEASE_MS));
+          yield* Deferred.await(shutdownStarted);
+          const activity = {
+            activityId: "during-expiry",
+            threadId: healthy.threadId,
+            url: healthy.url,
+          };
+          yield* hosting.setActivity({ ...activity, active: true });
+          assert.equal(
+            (yield* hosting.recover({
+              threadId: healthy.threadId,
+              leaseId: PreviewHostingLeaseId.make(healthy.id),
+              url: healthy.url,
+            }))?.status,
+            "active",
+          );
+          yield* hosting.setActivity({ ...activity, active: false });
+          yield* Deferred.await(independentCleaned);
+          assert.isFalse(acknowledged.has(slow.threadId));
+          assert.equal(liveProcesses, 7);
+          assert.isTrue(
+            (yield* hosting.list()).find((lease) => lease.id === slow.id)?.cleanupPending,
+          );
+
+          const admitted = yield* hosting.launch(fixture.request);
+          yield* hosting.setActivity({
+            activityId: admitted.id,
+            threadId: admitted.threadId,
+            url: admitted.url,
+            active: true,
+          });
+          const nextRequest = {
+            ...fixture.request,
+            threadId: "another-thread",
+            url: "http://localhost:7001/app",
+          };
+          const blocked = yield* hosting.launch(nextRequest).pipe(Effect.result);
+          assert.equal(blocked._tag, "Failure");
+          if (blocked._tag === "Failure") {
+            assert.equal(blocked.failure._tag, "PreviewHostingError");
+            if (blocked.failure._tag === "PreviewHostingError")
+              assert.equal(blocked.failure.operation, "capacity");
+          }
+          assert.equal(fixture.harness.opens.length, 1);
+          assert.equal(liveProcesses, 8);
+          yield* Deferred.succeed(allowShutdown, undefined);
+          yield* Deferred.await(slowCleaned);
+          assert.equal(liveProcesses, 7);
+          assert.equal((yield* hosting.launch(nextRequest)).status, "active");
+          assert.equal(fixture.harness.opens.length, 2);
+          assert.equal(liveProcesses, 8);
+        }).pipe(Effect.provide(hostingLayer(fixture.config, fixture.harness, true, [server]))),
+      ).pipe(Effect.ensuring(Deferred.succeed(allowShutdown, undefined)));
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("expires only after 24 idle hours following the last matching activity", () =>
+    Effect.gen(function* () {
+      const closed = yield* Deferred.make<void>();
+      const fixture = yield* warmProcessFixture(1, {
+        onClose: () => Deferred.succeed(closed, undefined).pipe(Effect.asVoid),
+      });
+      const original = fixture.leases[0]!;
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const view = {
+            activityId: "visible",
+            threadId: original.threadId,
+            url: original.url,
+          };
+          const recording = {
+            ...view,
+            activityId: "recording",
+            url: original.url.replace("localhost", "127.0.0.1"),
+          };
+          yield* hosting.setActivity({ ...view, active: true });
+          yield* hosting.setActivity({ ...recording, active: true });
+          yield* TestClock.adjust(Duration.days(2));
+          assert.deepEqual(fixture.harness.closes, []);
+          assert.isTrue(yield* hosting.ownsTerminal(original.threadId, original.terminalId));
+          yield* hosting.setActivity({ ...view, active: false });
+          yield* TestClock.adjust(Duration.days(1));
+          assert.deepEqual(fixture.harness.closes, []);
+          yield* hosting.setActivity({ ...recording, active: false });
+          yield* TestClock.adjust(Duration.millis(PreviewHosting.PREVIEW_HOSTING_LEASE_MS - 1));
+          assert.deepEqual(fixture.harness.closes, []);
+          assert.isTrue(yield* hosting.ownsTerminal(original.threadId, original.terminalId));
+          yield* TestClock.adjust(Duration.millis(1));
+          yield* Deferred.await(closed);
+          assert.deepEqual(fixture.harness.closes, [
+            { threadId: original.threadId, terminalId: original.terminalId },
+          ]);
+          assert.equal((yield* hosting.list())[0]?.status, "sleeping");
+          const recovered = yield* hosting.recover({
+            threadId: original.threadId,
+            leaseId: PreviewHostingLeaseId.make(original.id),
+            url: original.url,
+            resource: true,
+          });
+          assert.equal(recovered?.status, "active");
+          assert.equal(recovered?.restarted, true);
+          assert.equal(fixture.harness.writes.length, 1);
+        }).pipe(Effect.provide(fixture.layer)),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("keeps an in-flight recovery protected when its old idle deadline passes", () =>
+    Effect.gen(function* () {
+      const inspecting = yield* Deferred.make<void>();
+      const finishInspection = yield* Deferred.make<void>();
+      let refreshes = 0;
+      const fixture = yield* warmProcessFixture(1, {
+        onRefreshMetadata: () =>
+          Effect.suspend(() =>
+            ++refreshes === 1
+              ? Deferred.succeed(inspecting, undefined).pipe(
+                  Effect.andThen(Deferred.await(finishInspection)),
+                )
+              : Effect.void,
+          ),
+      });
+      const original = fixture.leases[0]!;
+      const server: DiscoveredLocalServer = {
+        host: "localhost",
+        port: 6_000,
+        url: original.url,
+        pid: 100,
+        processName: "node",
+        terminal: { threadId: ThreadId.make(original.threadId), terminalId: original.terminalId },
+      };
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const recovering = yield* hosting
+            .recover({
+              threadId: original.threadId,
+              leaseId: PreviewHostingLeaseId.make(original.id),
+              url: original.url,
+            })
+            .pipe(Effect.forkScoped);
+          yield* Deferred.await(inspecting);
+          yield* TestClock.adjust(Duration.days(1));
+          assert.deepEqual(fixture.harness.closes, []);
+          yield* Deferred.succeed(finishInspection, undefined);
+          assert.equal((yield* Fiber.join(recovering))?.status, "active");
+          assert.deepEqual(fixture.harness.closes, []);
+        }).pipe(Effect.provide(hostingLayer(fixture.config, fixture.harness, true, [server]))),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("verifies healthy media ownership without repeating readiness or state writes", () =>
+    Effect.gen(function* () {
+      const fixture = yield* warmProcessFixture(1);
+      const original = fixture.leases[0]!;
+      const server: DiscoveredLocalServer = {
+        host: "localhost",
+        port: 6_000,
+        url: original.url,
+        pid: 100,
+        processName: "node",
+        terminal: { threadId: ThreadId.make(original.threadId), terminalId: original.terminalId },
+      };
+      let owner: DiscoveredLocalServer["terminal"] = server.terminal;
+      let scans = 0;
+      let subscriptions = 0;
+      let writes = 0;
+      let updates = 0;
+      const fileSystemLayer = Layer.succeed(FileSystem.FileSystem, {
+        ...fixture.fs,
+        writeFileString: (filePath, data, options) => {
+          writes++;
+          return fixture.fs.writeFileString(filePath, data, options);
+        },
+      });
+      const discovery = Layer.mock(PortScanner.PortDiscovery)({
+        scan: () =>
+          Effect.sync(() => {
+            scans++;
+            return [{ ...server, terminal: owner }];
+          }),
+        subscribe: () =>
+          Effect.sync(() => {
+            subscriptions++;
+          }),
+        retain: Effect.void,
+      });
+      const layer = PreviewHosting.layer.pipe(
+        Layer.provide(fileSystemLayer),
+        Layer.provideMerge(
+          Layer.mergeAll(
+            NodeServices.layer,
+            FetchHttpClient.layer,
+            ServerConfig.layer(fixture.config),
+            terminalLayer(fixture.harness),
+            listeningNetworkLayer,
+            discovery,
+          ),
+        ),
+      );
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          yield* hosting.subscribe(() =>
+            Effect.sync(() => {
+              updates++;
+            }),
+          );
+          const input = {
+            threadId: original.threadId,
+            leaseId: PreviewHostingLeaseId.make(original.id),
+            url: original.url,
+            resource: true,
+          };
+          const activity = { activityId: "media", threadId: original.threadId, url: original.url };
+          for (let index = 0; index < 3; index++) {
+            yield* hosting.setActivity({ ...activity, active: true });
+            assert.equal((yield* hosting.recover(input))?.status, "active");
+            yield* hosting.setActivity({ ...activity, active: false });
+          }
+          assert.equal(scans, 3);
+          assert.equal(subscriptions, 0);
+          assert.equal(writes, 0);
+          assert.equal(updates, 1);
+          assert.deepEqual(fixture.harness.opens, []);
+          assert.deepEqual(fixture.harness.closes, []);
+          owner = { threadId: ThreadId.make("foreign-thread"), terminalId: "foreign-terminal" };
+          const rejected = yield* hosting.recover(input).pipe(Effect.result);
+          assert.equal(rejected._tag, "Failure");
+          if (rejected._tag === "Failure") {
+            assert.equal(rejected.failure._tag, "PreviewHostingError");
+            assert.include(rejected.failure.message, "does not own");
+          }
+          assert.equal(scans, 4);
+          assert.equal(subscriptions, 0);
+          assert.deepEqual(fixture.harness.writes, []);
+        }).pipe(Effect.provide(layer)),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("cancels healthy resource recovery when its thread stops during ownership checks", () =>
+    Effect.gen(function* () {
+      const inspecting = yield* Deferred.make<void>();
+      const finishInspection = yield* Deferred.make<void>();
+      const cancelled = yield* Deferred.make<void>();
+      let refreshes = 0;
+      const fixture = yield* warmProcessFixture(1, {
+        onRefreshMetadata: () =>
+          Effect.suspend(() =>
+            ++refreshes === 1
+              ? Deferred.succeed(inspecting, undefined).pipe(
+                  Effect.andThen(Deferred.await(finishInspection)),
+                )
+              : Effect.void,
+          ),
+      });
+      const original = fixture.leases[0]!;
+      const server: DiscoveredLocalServer = {
+        host: "localhost",
+        port: 6_000,
+        url: original.url,
+        pid: 100,
+        processName: "node",
+        terminal: { threadId: ThreadId.make(original.threadId), terminalId: original.terminalId },
+      };
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          yield* hosting.subscribe((leases) =>
+            leases.length === 0
+              ? Deferred.succeed(cancelled, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+          );
+          const recovering = yield* hosting
+            .recover({
+              threadId: original.threadId,
+              leaseId: PreviewHostingLeaseId.make(original.id),
+              url: original.url,
+              resource: true,
+            })
+            .pipe(Effect.forkScoped);
+          yield* Deferred.await(inspecting);
+          const stopping = yield* hosting.stopThread(original.threadId).pipe(Effect.forkScoped);
+          yield* Deferred.await(cancelled);
+          yield* Deferred.succeed(finishInspection, undefined);
+          assert.isNull(yield* Fiber.join(recovering));
+          yield* Fiber.join(stopping);
+          assert.deepEqual(fixture.harness.opens, []);
+          assert.deepEqual(fixture.harness.writes, []);
+          assert.deepEqual(yield* hosting.list(), []);
+        }).pipe(Effect.provide(hostingLayer(fixture.config, fixture.harness, true, [server]))),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.effect("sleeps only its terminal and retains the handoff until explicit stop", () =>
@@ -2540,13 +3417,22 @@ describe("PreviewHosting", () => {
             }),
           );
           assert.equal(conflicting._tag, "Failure");
+          const prepared = yield* hosting.prepareNavigation({
+            threadId: lease.threadId,
+            url: PREVIEW_URL,
+          });
+          assert.equal(prepared.restarted, true);
+          assert.notProperty(
+            yield* hosting.prepareNavigation({ threadId: lease.threadId, url: PREVIEW_URL }),
+            "restarted",
+          );
           const recovered = yield* hosting.recoverForBrowser({
             threadId: ThreadId.make("thread-1"),
             leaseId: PreviewHostingLeaseId.make(lease.id),
             url: PREVIEW_URL,
           });
           assert.equal(recovered?.leaseId, lease.id);
-          assert.equal(recovered?.restarted, true);
+          assert.notProperty(recovered, "restarted");
           assert.equal(recovered?.handedOffAt, lease.handedOffAt);
           assert.equal(recovered?.status, "active");
           assert.isAbove(Date.parse(recovered!.expiresAt), Date.parse(lease.expiresAt));
@@ -2564,6 +3450,67 @@ describe("PreviewHosting", () => {
         }).pipe(Effect.provide(layer)),
       );
     }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
+  );
+
+  it.effect(
+    "waits for expired preview shutdown before acknowledging cleanup or replaying its recipe",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(10_000);
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-expiry-shutdown-" });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        const stopped = yield* Deferred.make<void>();
+        const shutdownStarted = yield* Deferred.make<void>();
+        const recoveryStarted = yield* Deferred.make<void>();
+        let shutdownWaits = 0;
+        const harness = testTerminalHarness({
+          onWaitForThreadShutdown: () =>
+            Effect.gen(function* () {
+              shutdownWaits += 1;
+              yield* Deferred.succeed(shutdownStarted, undefined);
+              yield* Deferred.await(stopped);
+            }),
+        });
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const lease = yield* hosting.launch({
+              threadId: "thread-1",
+              command: "pnpm dev --port 5173",
+              cwd: "/workspace",
+              url: PREVIEW_URL,
+            });
+            yield* TestClock.adjust(Duration.millis(PreviewHosting.PREVIEW_HOSTING_LEASE_MS));
+            yield* Deferred.await(shutdownStarted);
+            assert.equal(shutdownWaits, 1);
+            assert.include(
+              yield* fs.readFileString(`${config.stateDir}/preview-hosting.json`),
+              '"cleanupPending":true',
+            );
+            const recovery = yield* Effect.gen(function* () {
+              yield* Deferred.succeed(recoveryStarted, undefined);
+              return yield* hosting.recover({
+                threadId: "thread-1",
+                leaseId: lease.id,
+                url: lease.url,
+              });
+            }).pipe(Effect.forkChild);
+            yield* Deferred.await(recoveryStarted);
+            assert.equal(harness.writes.length, 1);
+            yield* Deferred.succeed(stopped, undefined);
+            assert.equal((yield* Fiber.join(recovery))?.status, "active");
+            assert.equal(harness.writes.length, 2);
+            assert.include(
+              yield* fs.readFileString(`${config.stateDir}/preview-hosting.json`),
+              '"cleanupPending":false',
+            );
+          }).pipe(Effect.provide(hostingLayer(config, harness))),
+        ).pipe(Effect.ensuring(Deferred.succeed(stopped, undefined)));
+      }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
   );
 
   it.effect("does not let a failed close retry delay another lease's expiry", () =>
@@ -2962,6 +3909,248 @@ describe("PreviewHosting", () => {
     }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
   );
 
+  it.effect.each([
+    { operation: "recoverForBrowser", listening: false },
+    { operation: "prepareNavigation", listening: false },
+    { operation: "recoverForBrowser", listening: true },
+    { operation: "prepareNavigation", listening: true },
+  ] as const)(
+    "reports actual replay via $operation despite conservative subprocess metadata (listener: $listening)",
+    ({ operation, listening }) =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(1_000);
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-stale-shell-" });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        const saved = leaseFixture({ runId: "11111111-1111-4111-8111-111111111111" });
+        yield* fs.makeDirectory(config.stateDir, { recursive: true });
+        yield* fs.writeFileString(
+          `${config.stateDir}/preview-hosting.json`,
+          encodePersistedHostingState({ version: 1, leases: [saved] }),
+        );
+        const subscribed = yield* Deferred.make<void>();
+        let responding = false;
+        let shutdownAcknowledged = false;
+        let notify:
+          | ((servers: ReadonlyArray<DiscoveredLocalServer>) => Effect.Effect<void>)
+          | undefined;
+        const probes: Array<{ port: number; host: string }> = [];
+        const server: DiscoveredLocalServer = {
+          host: "localhost",
+          port: 5173,
+          url: PREVIEW_URL,
+          processName: "node",
+          pid: 100,
+          terminal: { threadId: ThreadId.make(saved.threadId), terminalId: saved.terminalId },
+        };
+        const harness = testTerminalHarness({
+          // An unknown root identity or prompt helper can keep this true after Ctrl+C.
+          summaries: [terminalFixture(saved.threadId, saved.terminalId)],
+          onWaitForThreadShutdown: () =>
+            Effect.sync(() => {
+              shutdownAcknowledged = true;
+            }),
+          onOpen: () =>
+            Effect.sync(() => {
+              assert.isTrue(shutdownAcknowledged);
+            }),
+          onWrite: () =>
+            Effect.sync(() => {
+              responding = true;
+            }),
+        });
+        const discovery = Layer.mock(PortScanner.PortDiscovery)({
+          scan: () => Effect.sync(() => (responding ? [server] : [])),
+          subscribe: (_input, listener) =>
+            Effect.gen(function* () {
+              notify = listener;
+              yield* Deferred.succeed(subscribed, undefined);
+              if (responding) yield* listener([server]);
+            }),
+          retain: Effect.void,
+        });
+        const network = Layer.mock(NetService.NetService)({
+          hasListenerOnHost: (port, host) =>
+            Effect.sync(() => {
+              probes.push({ port, host });
+              return listening;
+            }),
+        });
+        const layer = PreviewHosting.layer.pipe(
+          Layer.provideMerge(
+            Layer.mergeAll(
+              NodeServices.layer,
+              FetchHttpClient.layer,
+              ServerConfig.layer(config),
+              terminalLayer(harness),
+              discovery,
+              network,
+            ),
+          ),
+        );
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const recover = () =>
+              operation === "recoverForBrowser"
+                ? hosting.recoverForBrowser({
+                    threadId: ThreadId.make(saved.threadId),
+                    leaseId: PreviewHostingLeaseId.make(saved.id),
+                    url: saved.url,
+                  })
+                : hosting.prepareNavigation({ threadId: saved.threadId, url: saved.url });
+            const recovery = yield* recover().pipe(Effect.forkScoped);
+            yield* Deferred.await(subscribed);
+            assert.deepEqual(probes, [{ port: 5173, host: "localhost" }]);
+            assert.deepEqual(
+              harness.closes,
+              listening ? [] : [{ threadId: saved.threadId, terminalId: saved.terminalId }],
+            );
+            assert.equal(harness.writes.length, listening ? 0 : 1);
+            if (listening) {
+              responding = true;
+              yield* notify!([server]);
+            }
+            const first = yield* Fiber.join(recovery);
+            assert.equal(first?.restarted, listening ? undefined : true);
+            if (listening) assert.equal(first?.runId, saved.runId);
+            else assert.notEqual(first?.runId, saved.runId);
+            const repeated = yield* recover();
+            assert.notProperty(repeated, "restarted");
+            assert.equal(repeated?.runId, first?.runId);
+            const retained = (yield* hosting.list(saved.threadId))[0];
+            assert.equal(retained?.status, "active");
+            assert.equal(retained?.handedOffAt, saved.handedOffAt);
+            assert.equal(retained?.runId, first?.runId);
+            assert.notProperty(retained, "restarted");
+            assert.notInclude(
+              yield* fs.readFileString(`${config.stateDir}/preview-hosting.json`),
+              '"restarted"',
+            );
+            assert.equal(harness.writes.length, listening ? 0 : 1);
+          }).pipe(Effect.provide(layer)),
+        );
+      }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
+  );
+
+  it.effect("retains a replay run ID for parallel warm observers after resource recovery", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(1_000);
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-run-identity-" });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const saved = leaseFixture({ runId: "11111111-1111-4111-8111-111111111111" });
+      yield* fs.makeDirectory(config.stateDir, { recursive: true });
+      yield* fs.writeFileString(
+        `${config.stateDir}/preview-hosting.json`,
+        encodePersistedHostingState({ version: 1, leases: [saved] }),
+      );
+      const written = yield* Deferred.make<void>();
+      const releaseLaunch = yield* Deferred.make<void>();
+      const browserStarted = yield* Deferred.make<void>();
+      const navigationStarted = yield* Deferred.make<void>();
+      let responding = false;
+      const harness = testTerminalHarness({
+        summaries: [terminalFixture(saved.threadId, saved.terminalId)],
+        onWrite: () =>
+          Effect.gen(function* () {
+            responding = true;
+            yield* Deferred.succeed(written, undefined);
+            yield* Deferred.await(releaseLaunch);
+          }),
+      });
+      const server: DiscoveredLocalServer = {
+        host: "localhost",
+        port: 5173,
+        url: PREVIEW_URL,
+        processName: "node",
+        pid: 100,
+        terminal: { threadId: ThreadId.make(saved.threadId), terminalId: saved.terminalId },
+      };
+      const layer = PreviewHosting.layer.pipe(
+        Layer.provideMerge(
+          Layer.mergeAll(
+            NodeServices.layer,
+            FetchHttpClient.layer,
+            ServerConfig.layer(config),
+            terminalLayer(harness),
+            Layer.mock(NetService.NetService)({ hasListenerOnHost: () => Effect.succeed(false) }),
+            Layer.mock(PortScanner.PortDiscovery)({
+              scan: () => Effect.sync(() => (responding ? [server] : [])),
+              subscribe: (_input, listener) =>
+                Effect.suspend(() => (responding ? listener([server]) : Effect.void)),
+              retain: Effect.void,
+            }),
+          ),
+        ),
+      );
+      const input = {
+        threadId: ThreadId.make(saved.threadId),
+        leaseId: PreviewHostingLeaseId.make(saved.id),
+        url: saved.url,
+      };
+      const runId = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const resource = yield* hosting.recover(input).pipe(Effect.forkScoped);
+          yield* Deferred.await(written);
+          const browser = yield* Effect.gen(function* () {
+            yield* Deferred.succeed(browserStarted, undefined);
+            return yield* hosting.recoverForBrowser(input);
+          }).pipe(Effect.forkScoped);
+          const navigation = yield* Effect.gen(function* () {
+            yield* Deferred.succeed(navigationStarted, undefined);
+            return yield* hosting.prepareNavigation({ threadId: saved.threadId, url: saved.url });
+          }).pipe(Effect.forkScoped);
+          yield* Deferred.await(browserStarted);
+          yield* Deferred.await(navigationStarted);
+          yield* Deferred.succeed(releaseLaunch, undefined);
+          const replay = yield* Fiber.join(resource);
+          const browserResult = yield* Fiber.join(browser);
+          const navigationResult = yield* Fiber.join(navigation);
+          assert.equal(replay?.restarted, true);
+          assert.isTrue(Schema.is(Schema.String.check(Schema.isUUID(4)))(replay?.runId));
+          assert.notEqual(replay?.runId, saved.runId);
+          assert.equal(browserResult?.runId, replay?.runId);
+          assert.equal(navigationResult.runId, replay?.runId);
+          assert.notProperty(browserResult, "restarted");
+          assert.notProperty(navigationResult, "restarted");
+          const retained = (yield* hosting.list(saved.threadId))[0]!;
+          assert.equal(retained.runId, replay?.runId);
+          assert.equal(retained.handedOffAt, saved.handedOffAt);
+          yield* TestClock.adjust(Duration.minutes(5));
+          const renewed = yield* hosting.recoverForBrowser(input);
+          assert.equal(renewed?.runId, retained.runId);
+          assert.notProperty(renewed, "restarted");
+          assert.isAbove(Date.parse(renewed!.expiresAt), Date.parse(retained.expiresAt));
+          assert.equal(harness.writes.length, 1);
+          assert.include(
+            yield* fs.readFileString(`${config.stateDir}/preview-hosting.json`),
+            `"runId":"${retained.runId}"`,
+          );
+          return retained.runId;
+        }).pipe(Effect.provide(layer)),
+      );
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          assert.equal(
+            (yield* hosting.prepareNavigation({ threadId: saved.threadId, url: saved.url })).runId,
+            runId,
+          );
+          assert.equal((yield* hosting.recoverForBrowser(input))?.runId, runId);
+          assert.equal(harness.writes.length, 1);
+        }).pipe(Effect.provide(layer)),
+      );
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
+  );
+
   it.effect.each([true, false])(
     "rechecks a retained nonresponding command without duplicating an active launch (idle: %s)",
     (idle) =>
@@ -3036,6 +4225,7 @@ describe("PreviewHosting", () => {
           Layer.provideMerge(
             Layer.mergeAll(
               NodeServices.layer,
+              listeningNetworkLayer,
               FetchHttpClient.layer,
               ServerConfig.layer(config),
               terminalLayer(harness),
@@ -3091,7 +4281,10 @@ describe("PreviewHosting", () => {
                 4_000 + PreviewHosting.PREVIEW_HOSTING_LEASE_MS,
               );
             } else {
-              assert.equal(recovered?.expiresAt, saved.expiresAt);
+              assert.equal(
+                Date.parse(recovered!.expiresAt),
+                4_000 + PreviewHosting.PREVIEW_HOSTING_LEASE_MS,
+              );
               assert.deepEqual(harness.opens, []);
               assert.deepEqual(harness.writes, []);
             }
@@ -3169,6 +4362,7 @@ describe("PreviewHosting", () => {
           Layer.provideMerge(
             Layer.mergeAll(
               NodeServices.layer,
+              listeningNetworkLayer,
               FetchHttpClient.layer,
               ServerConfig.layer(config),
               terminalLayer(harness),

@@ -162,6 +162,15 @@ export function ServerBrowserSurface(props: {
     ref,
   } = props;
   const access = usePreviewStreamAccess(environmentId);
+  const [documentVisible, setDocumentVisible] = useState(
+    () => document.visibilityState === "visible",
+  );
+  useEffect(() => {
+    const changed = () => setDocumentVisible(document.visibilityState === "visible");
+    changed();
+    document.addEventListener("visibilitychange", changed);
+    return () => document.removeEventListener("visibilitychange", changed);
+  }, []);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const keySentRef = useRef(false);
@@ -356,7 +365,8 @@ export function ServerBrowserSurface(props: {
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!visible || accessDenied || hostSetup || !access || !cap || !canvas) return;
+    if (!visible || !documentVisible || accessDenied || hostSetup || !access || !cap || !canvas)
+      return;
     let refreshTimer: ReturnType<typeof setTimeout> | null = null;
     const painter = createPreviewFramePainter(canvas, () => {
       if (hasFrameRef.current) return;
@@ -451,6 +461,7 @@ export function ServerBrowserSurface(props: {
     cap,
     clearInput,
     environmentId,
+    documentVisible,
     followSize,
     hostSetup,
     tabId,

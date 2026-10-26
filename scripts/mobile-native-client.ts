@@ -365,7 +365,7 @@ const main = Command.make(
               "Native directory contains tracked files; clean prebuild would overwrite them.",
           });
         const prebuild = command(
-          "vp",
+          path.join((yield* roots).repo, "node_modules", ".bin", "vp"),
           ["exec", "expo", "prebuild", "--clean", "--platform", platform, "--no-install"],
           true,
         ).pipe(Effect.asVoid);

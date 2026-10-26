@@ -24,6 +24,90 @@ const lease = {
 };
 
 describe("prepareThenOpenThreadFeedUrl", () => {
+  it("opens an older environment's signed document without unsupported preparation", async () => {
+    const url = "https://workspace.example/api/assets/current/report.html?mode=review#chart";
+    const open = vi.fn((destination: string) => destination);
+    const list = vi.fn(async () => [lease]);
+    await expect(
+      prepareThenOpenThreadFeedUrl(
+        {
+          threadRef,
+          url,
+          environmentUrl: "https://workspace.example/",
+          list,
+          recover: async () => lease,
+        },
+        open,
+      ),
+    ).resolves.toBe(url);
+    expect(open).toHaveBeenCalledExactlyOnceWith(url);
+    expect(list).not.toHaveBeenCalled();
+  });
+
+  it("opens managed media through the connected environment instead of its loopback listener", async () => {
+    const source = { ...lease, url: "http://localhost:5173/report.pdf?run=7" };
+    const open = vi.fn((url: string) => url);
+    const createResourceUrl = vi.fn(async () => "/api/assets/signed/report.pdf");
+    await expect(
+      prepareThenOpenThreadFeedUrl(
+        {
+          threadRef,
+          url: source.url,
+          purpose: "resource",
+          environmentUrl: "https://workspace.example/",
+          list: async () => [source],
+          recover: async () => source,
+          createResourceUrl,
+        },
+        open,
+      ),
+    ).resolves.toBe("https://workspace.example/api/assets/signed/report.pdf");
+    expect(createResourceUrl).toHaveBeenCalledWith(source, source.url);
+    expect(open).not.toHaveBeenCalledWith(source.url);
+  });
+
+  it("opens managed navigation in the environment browser without leaking its bootstrap token", async () => {
+    const external = vi.fn(async () => {});
+    const browser = vi.fn(async () => {});
+    const recover = vi.fn(async () => ({ ...lease, bootstrapToken: "one-use-secret" }));
+    await openThreadFeedMarkdownUrl(
+      {
+        threadRef,
+        environmentUrl: "https://workspace.example/",
+        list: async () => [lease],
+        recover,
+      },
+      lease.url,
+      external,
+      browser,
+    );
+    expect(external).not.toHaveBeenCalled();
+    expect(browser).toHaveBeenCalledWith(lease.url);
+    expect(recover).toHaveBeenCalledWith(lease, { bootstrap: false });
+  });
+
+  it("keeps public navigation external and propagates environment-browser failures", async () => {
+    const external = vi.fn(async () => {});
+    const failure = new Error("Environment browser unavailable");
+    const browser = vi.fn(async () => {
+      throw failure;
+    });
+    const input = {
+      threadRef,
+      environmentUrl: "https://workspace.example/",
+      list: async () => [lease],
+      recover: async () => lease,
+    };
+    await openThreadFeedMarkdownUrl(input, "https://public.example/article", external, browser);
+    expect(external).toHaveBeenCalledWith("https://public.example/article");
+    expect(browser).not.toHaveBeenCalled();
+    external.mockClear();
+    await expect(openThreadFeedMarkdownUrl(input, lease.url, external, browser)).rejects.toBe(
+      failure,
+    );
+    expect(external).not.toHaveBeenCalled();
+  });
+
   it("restores an owned thread lease before opening the environment-resolved URL", async () => {
     const order: string[] = [];
     const opened = vi.fn(async () => {
@@ -71,6 +155,38 @@ describe("prepareThenOpenThreadFeedUrl", () => {
     expect(list).not.toHaveBeenCalled();
     expect(opened).toHaveBeenCalledWith("https://public.example/article?a=1#section");
   });
+
+  it.each(["navigation", "resource"] as const)(
+    "opens an unmanaged local asset for %s without environment renewal",
+    async (purpose) => {
+      const url = "http://localhost:3000/api/assets/logo.png?size=2#preview";
+      const external = vi.fn(async (destination: string) => destination);
+      const browser = vi.fn(async (destination: string) => destination);
+      const recover = vi.fn(async () => lease);
+      const renewDocumentUrl = vi.fn(async () => {
+        throw new Error("The environment does not own this asset");
+      });
+      await expect(
+        prepareThenOpenThreadFeedUrl(
+          {
+            threadRef,
+            url,
+            purpose,
+            environmentUrl: "https://workspace.example/",
+            list: async () => [],
+            recover,
+            renewDocumentUrl,
+          },
+          external,
+          browser,
+        ),
+      ).resolves.toBe(url);
+      expect(external).toHaveBeenCalledExactlyOnceWith(url);
+      expect(browser).not.toHaveBeenCalled();
+      expect(recover).not.toHaveBeenCalled();
+      expect(renewDocumentUrl).not.toHaveBeenCalled();
+    },
+  );
 
   it("waits for managed recovery before a thread markdown link opens externally", async () => {
     let finishRecovery!: (recovered: typeof lease) => void;

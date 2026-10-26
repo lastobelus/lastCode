@@ -11,9 +11,26 @@ import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
+vi.mock("~/browser/previewRuntime", () => ({
+  previewRuntimeFor: vi.fn(() => undefined),
+  desktopBrowserHostFor: vi.fn(() => undefined),
+  isPreviewAvailableFor: vi.fn(() => false),
+}));
+vi.mock("~/state/entities", () => ({
+  readEnvironmentSupportsServerBrowser: vi.fn(() => false),
+}));
+vi.mock("./previewHostingRecovery", () => ({
+  prepareHostedPreview: vi.fn(async (_ref: ScopedThreadRef, url: string) => ({
+    url,
+    managed: false,
+    restored: false,
+  })),
+}));
+
 import * as browserDefaults from "~/browser/browserDefaults";
 import * as previewRuntime from "~/browser/previewRuntime";
 import * as hostingRecovery from "./previewHostingRecovery";
+import * as entities from "~/state/entities";
 import {
   BrowserSettingsReadError,
   openFileInPreview,
@@ -72,6 +89,15 @@ const applyOpenedEvent = (opened: PreviewSessionSnapshot, background = false) =>
   });
 
 beforeEach(() => {
+  vi.mocked(previewRuntime.previewRuntimeFor).mockReturnValue(undefined);
+  vi.mocked(previewRuntime.desktopBrowserHostFor).mockReturnValue(undefined);
+  vi.mocked(previewRuntime.isPreviewAvailableFor).mockReturnValue(false);
+  vi.mocked(entities.readEnvironmentSupportsServerBrowser).mockReturnValue(false);
+  vi.mocked(hostingRecovery.prepareHostedPreview).mockImplementation(async (_ref, url) => ({
+    url,
+    managed: false,
+    restored: false,
+  }));
   resetPreviewStateForTests();
   useRightPanelStore.setState({
     byThreadKey: {},
@@ -86,6 +112,42 @@ afterEach(() => {
 });
 
 describe("openPreviewSession", () => {
+  it.each([undefined, "server", "desktop"] as const)(
+    "routes a managed app through shared placement while preserving an explicit %s move",
+    async (runtime) => {
+      vi.spyOn(previewRuntime, "previewRuntimeFor").mockReturnValue(undefined);
+      vi.spyOn(entities, "readEnvironmentSupportsServerBrowser").mockReturnValue(true);
+      const url = "http://workstation.example:5173/app/a%2Fb?q=1#section";
+      const localUrl = "http://127.0.0.1:5173/app/a%2Fb?q=1#section";
+      vi.spyOn(hostingRecovery, "prepareHostedPreview").mockResolvedValue({
+        url,
+        localUrl,
+        managed: true,
+        restored: true,
+      });
+      const openPreview = vi.fn(async (_input: { input: PreviewOpenInput }) =>
+        AsyncResult.success(snapshot),
+      );
+      await openPreviewSession({
+        threadRef,
+        openPreview,
+        url,
+        ...(runtime === undefined ? {} : { runtime }),
+      });
+      if (runtime === "desktop") {
+        expect(openPreview.mock.calls[0]?.[0].input).toMatchObject({ url });
+        expect(openPreview.mock.calls[0]?.[0].input).not.toHaveProperty("browserHost");
+        expect(openPreview.mock.calls[0]?.[0].input).not.toHaveProperty("runtime");
+      } else {
+        expect(openPreview.mock.calls[0]?.[0].input).toMatchObject({
+          url: localUrl,
+          runtime: "server",
+          browserHost: "environment",
+        });
+        expect(openPreview.mock.calls[0]?.[0].input).not.toHaveProperty("desktopHostId");
+      }
+    },
+  );
   it("moves to the environment's browser without selecting this desktop's native host", async () => {
     vi.spyOn(previewRuntime, "previewRuntimeFor").mockReturnValue(undefined);
     const desktopHost = vi
@@ -112,6 +174,7 @@ describe("openPreviewSession", () => {
         threadId: threadRef.threadId,
         url: "http://localhost:5173/check",
         runtime: "server",
+        browserHost: "environment",
         profileId: DEFAULT_BROWSER_PROFILE_ID,
         viewport: FILL_PREVIEW_VIEWPORT,
       },
@@ -181,6 +244,36 @@ describe("openPreviewSession", () => {
             : {}),
         },
       });
+    },
+  );
+
+  it.each(["session", "link"] as const)(
+    "uses the environment for an ordinary managed %s when the default profile is named",
+    async (entryPoint) => {
+      vi.spyOn(entities, "readEnvironmentSupportsServerBrowser").mockReturnValue(true);
+      vi.spyOn(hostingRecovery, "prepareHostedPreview").mockResolvedValue({
+        url: "http://workstation.example:5173/check?x=1#section",
+        localUrl: "http://127.0.0.1:5173/check?x=1#section",
+        managed: true,
+        restored: true,
+      });
+      __setClientSettingsForTests({
+        ...DEFAULT_CLIENT_SETTINGS,
+        browserDefaultProfileId: "work",
+        browserProfiles: [{ id: "work", name: "Work", kind: "persistent" }],
+      });
+      const openPreview = vi.fn(async (_input: { input: PreviewOpenInput }) =>
+        AsyncResult.success(snapshot),
+      );
+      const open = entryPoint === "session" ? openPreviewSession : openUrlInPreview;
+      await open({ openPreview, threadRef, url: "http://localhost:5173/check?x=1#section" });
+      expect(openPreview.mock.calls[0]?.[0].input).toMatchObject({
+        url: "http://127.0.0.1:5173/check?x=1#section",
+        profileId: DEFAULT_BROWSER_PROFILE_ID,
+        runtime: "server",
+        browserHost: "environment",
+      });
+      expect(openPreview.mock.calls[0]?.[0].input).not.toHaveProperty("desktopHostId");
     },
   );
 

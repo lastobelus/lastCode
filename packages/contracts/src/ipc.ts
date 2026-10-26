@@ -4,6 +4,7 @@ import type {
   DesktopBrowserSurfaceRequest,
   DesktopBrowserSurfaceResponse,
   DesktopBrowserPresentationInput,
+  DesktopBrowserRendererRequest,
 } from "./desktopBrowser.ts";
 import * as Schema from "effect/Schema";
 import type { PreviewCaptureFailureEncoded } from "./previewCapture.ts";
@@ -1287,6 +1288,9 @@ export interface DesktopPreviewBridge {
     readonly environmentId: string;
   }) => Promise<void>;
   onBrowserSurfaceRequest: (listener: (input: DesktopBrowserSurfaceRequest) => void) => () => void;
+  onBrowserRendererRequest: (
+    listener: (input: DesktopBrowserRendererRequest) => void,
+  ) => () => void;
   browserSurfaceResponse: (input: DesktopBrowserSurfaceResponse) => Promise<void>;
   browserPresentation: (input: DesktopBrowserPresentationInput) => Promise<void>;
   browserCommand: (input: {

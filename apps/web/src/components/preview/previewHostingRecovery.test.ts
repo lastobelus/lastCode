@@ -1,9 +1,27 @@
-import { EnvironmentId, ThreadId, type PreviewHostingLeaseSummary } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ThreadId,
+  PreviewHostingError,
+  type PreviewHostingLeaseSummary,
+} from "@t3tools/contracts";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import * as Cause from "effect/Cause";
+import * as Base64Url from "effect/encoding/Base64Url";
+import { AsyncResult } from "effect/reactivity";
 
 const mocks = vi.hoisted(() => ({
   run: vi.fn(),
-  connection: vi.fn(() => ({
+  query: vi.fn(),
+  config:
+    vi.fn<
+      () => { environment: { capabilities: { previewAssetRecovery?: boolean | undefined } } } | null
+    >(),
+  connection: vi.fn<
+    () => {
+      httpBaseUrl: string;
+      target: { _tag: string; httpBaseUrl: string };
+    } | null
+  >(() => ({
     httpBaseUrl: "http://managed-server.example:3773",
     target: {
       _tag: "PrimaryConnectionTarget",
@@ -13,22 +31,37 @@ const mocks = vi.hoisted(() => ({
   configuredEndpoint: vi.fn<() => string | null>(() => null),
   list: {},
   recover: {},
+  bootstrap: {},
 }));
-vi.mock("@t3tools/client-runtime/state/runtime", () => ({ runAtomCommand: mocks.run }));
-vi.mock("~/rpc/atomRegistry", () => ({ appAtomRegistry: {} }));
+vi.mock("@t3tools/client-runtime/state/runtime", async (original) => ({
+  ...(await original<typeof import("@t3tools/client-runtime/state/runtime")>()),
+  runAtomCommand: mocks.run,
+  executeAtomQuery: mocks.query,
+}));
+vi.mock("~/state/assets", () => ({
+  assetEnvironment: { createUrl: (input: unknown) => input },
+}));
+vi.mock("~/rpc/atomRegistry", () => ({ appAtomRegistry: { get: mocks.config } }));
+vi.mock("~/state/server", () => ({
+  serverEnvironment: { configValueAtom: (environmentId: string) => environmentId },
+}));
 vi.mock("~/state/session", () => ({
+  environmentBootstrap: () => mocks.bootstrap,
   readPreparedConnection: mocks.connection,
-  readConfiguredPreviewEnvironmentUrl: () =>
-    mocks.configuredEndpoint() ??
-    (mocks.connection().target._tag === "PrimaryConnectionTarget"
-      ? mocks.connection().target.httpBaseUrl
-      : null),
+  readConfiguredPreviewEnvironmentUrl: () => {
+    const connection = mocks.connection();
+    return (
+      mocks.configuredEndpoint() ??
+      (connection?.target._tag === "PrimaryConnectionTarget" ? connection.target.httpBaseUrl : null)
+    );
+  },
 }));
 vi.mock("~/state/preview", () => ({
   previewEnvironment: { hostingList: mocks.list, hostingRecover: mocks.recover },
 }));
 
 import {
+  mayBeHostedPreviewUrl,
   prepareHostedPreview,
   recoverHostedPreview,
   selectHostedPreview,
@@ -46,14 +79,261 @@ const lease: PreviewHostingLeaseSummary = {
   expiresAt: "2026-10-03T00:00:00.000Z",
   status: "active",
 };
+const savedDocumentUrl = `https://managed-server.example/api/assets/${Base64Url.encode(
+  JSON.stringify({ version: 1, kind: "attachment", expiresAt: 1 }),
+)}.signature/report.html`;
 beforeEach(() => {
+  mocks.config.mockReset();
+  mocks.config.mockReturnValue({ environment: { capabilities: { previewAssetRecovery: true } } });
   mocks.run.mockReset();
-  mocks.connection.mockClear();
+  mocks.query.mockReset();
+  mocks.query.mockResolvedValue({
+    _tag: "Success",
+    value: { relativeUrl: "/api/assets/resource/report.png", expiresAt: 1790000000000 },
+  });
+  mocks.connection.mockReset();
   mocks.configuredEndpoint.mockReset();
   mocks.configuredEndpoint.mockReturnValue(null);
 });
 
 describe("native preview reopening", () => {
+  it.each([
+    ["http://localhost:5173/qa", true],
+    ["http://192.168.1.30:5173/qa", true],
+    [savedDocumentUrl, true],
+    ["https://cdn.example/api/assets/logo.png", false],
+    ["https://github.com/example/project/pull/73", false],
+    ["mailto:developer@example.com", false],
+    ["not-a-url", false],
+  ] as const)("recognizes potential owned links before connection: %s", (url, expected) => {
+    mocks.connection.mockReturnValue(null);
+    expect(mayBeHostedPreviewUrl(owner, url)).toBe(expected);
+    expect(mocks.query).not.toHaveBeenCalled();
+    expect(mocks.run).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "https://github.com/example/project/pull/73",
+    "mailto:developer@example.com",
+    "custom-app://open/project",
+    "not-a-url",
+  ])("opens unrelated links without waiting for a disconnected environment: %s", async (url) => {
+    mocks.connection.mockReturnValue(null);
+    mocks.config.mockReturnValue(null);
+    await expect(prepareHostedPreview(owner, url)).resolves.toEqual({
+      url,
+      managed: false,
+      restored: false,
+    });
+    expect(mocks.query).not.toHaveBeenCalled();
+    expect(mocks.run).not.toHaveBeenCalled();
+  });
+
+  it("opens public links while the connected environment is still loading its config", async () => {
+    mocks.config.mockReturnValue(null);
+    const url = "https://github.com/example/project/pull/73";
+    await expect(prepareHostedPreview(owner, url)).resolves.toEqual({
+      url,
+      managed: false,
+      restored: false,
+    });
+    expect(mocks.query).not.toHaveBeenCalled();
+    expect(mocks.run).not.toHaveBeenCalled();
+  });
+
+  it.each(
+    ["disconnected", "loading"].flatMap((state) =>
+      (["navigation", "resource"] as const).map((purpose) => ({ state, purpose })),
+    ),
+  )(
+    "opens foreign assets during $state for $purpose without bootstrap",
+    async ({ state, purpose }) => {
+      if (state === "disconnected") mocks.connection.mockReturnValue(null);
+      mocks.config.mockReturnValue(null);
+      mocks.query.mockResolvedValue(
+        AsyncResult.failure(Cause.fail(new Error("Environment offline"))),
+      );
+      const url = "https://cdn.example/api/assets/logo.png";
+      await expect(prepareHostedPreview(owner, url, purpose)).resolves.toEqual({
+        url,
+        managed: false,
+        restored: false,
+      });
+      expect(mocks.query).not.toHaveBeenCalled();
+      expect(mocks.run).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["http://localhost:5173/qa", "http://managed-server.example:5173/qa"])(
+    "still bootstraps a saved app while its connection or config is loading: %s",
+    async (url) => {
+      const prepared = mocks.connection();
+      if (url.startsWith("http://localhost")) mocks.connection.mockReturnValue(null);
+      mocks.config.mockReturnValue(null);
+      mocks.query.mockResolvedValueOnce(
+        AsyncResult.success({
+          prepared,
+          config: { environment: { capabilities: { previewAssetRecovery: true } } },
+        }),
+      );
+      mocks.run
+        .mockResolvedValueOnce(AsyncResult.success([lease]))
+        .mockResolvedValueOnce(AsyncResult.success(lease));
+      await expect(prepareHostedPreview(owner, url)).resolves.toMatchObject({
+        managed: true,
+        restored: true,
+      });
+      expect(mocks.query).toHaveBeenCalledExactlyOnceWith(expect.anything(), mocks.bootstrap, {
+        reportFailure: false,
+        refresh: true,
+      });
+    },
+  );
+
+  it.each([true, undefined])(
+    "waits for bootstrap before choosing signed-document renewal: %s",
+    async (previewAssetRecovery) => {
+      mocks.config.mockReturnValue(null);
+      let ready!: (value: unknown) => void;
+      mocks.query.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            ready = resolve;
+          }),
+      );
+      const url = "http://managed-server.example:3773/api/assets/expired/report.html";
+      const opened = vi.fn();
+      const pending = prepareHostedPreview(owner, url).then(opened);
+      expect(mocks.query).toHaveBeenCalledExactlyOnceWith(expect.anything(), mocks.bootstrap, {
+        reportFailure: false,
+        refresh: true,
+      });
+      expect(opened).not.toHaveBeenCalled();
+      ready(
+        AsyncResult.success({
+          config: { environment: { capabilities: { previewAssetRecovery } } },
+          prepared: mocks.connection(),
+        }),
+      );
+      await pending;
+      expect(opened).toHaveBeenCalledExactlyOnceWith(
+        previewAssetRecovery
+          ? expect.objectContaining({
+              url: "http://managed-server.example:3773/api/assets/resource/report.png",
+              restored: true,
+            })
+          : { url, managed: false, restored: false },
+      );
+      expect(mocks.query).toHaveBeenCalledTimes(previewAssetRecovery ? 2 : 1);
+      expect(mocks.run).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects failed bootstrap without returning an expired signed document", async () => {
+    mocks.config.mockReturnValue(null);
+    mocks.query.mockResolvedValue(AsyncResult.failure(Cause.fail(new Error("Readiness failed"))));
+    const opened = vi.fn();
+    await expect(
+      prepareHostedPreview(
+        owner,
+        "http://managed-server.example:3773/api/assets/expired/report.html",
+      ).then(opened),
+    ).rejects.toThrow("The saved preview could not be started.");
+    expect(opened).not.toHaveBeenCalled();
+    expect(mocks.query).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([undefined, false])(
+    "opens an older environment's signed link without renewal support: %s",
+    async (previewAssetRecovery) => {
+      mocks.config.mockReturnValue({ environment: { capabilities: { previewAssetRecovery } } });
+      const url =
+        "http://managed-server.example:3773/api/assets/current/report.html?mode=review#chart";
+      await expect(prepareHostedPreview(owner, url)).resolves.toEqual({
+        url,
+        managed: false,
+        restored: false,
+      });
+      expect(mocks.query).not.toHaveBeenCalled();
+      expect(mocks.run).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not disguise an advertised document-renewal failure as a usable old link", async () => {
+    mocks.query.mockResolvedValue(AsyncResult.failure(Cause.fail(new Error("File unavailable"))));
+    await expect(
+      prepareHostedPreview(
+        owner,
+        "http://managed-server.example:3773/api/assets/current/report.html",
+      ),
+    ).rejects.toThrow("The saved preview could not be started.");
+    expect(mocks.run).not.toHaveBeenCalled();
+  });
+
+  it("keeps an older environment's managed resource route without sending a new resource tag", async () => {
+    mocks.config.mockReturnValue({ environment: { capabilities: {} } });
+    mocks.run
+      .mockResolvedValueOnce(AsyncResult.success([lease]))
+      .mockResolvedValueOnce(AsyncResult.success(lease));
+    await expect(prepareHostedPreview(owner, lease.url, "resource")).resolves.toMatchObject({
+      managed: true,
+      restored: true,
+    });
+    expect(mocks.query).not.toHaveBeenCalled();
+  });
+
+  it("preserves the actionable capacity error when a saved app cannot yet restart", async () => {
+    const message =
+      "Managed previews are at capacity. Your preview is saved. Close an active Browser view or finish its automation or recording, then retry.";
+    mocks.run.mockResolvedValueOnce(AsyncResult.success([lease])).mockResolvedValueOnce(
+      AsyncResult.failure(
+        Cause.fail(
+          new PreviewHostingError({
+            reason: "capacity",
+            message: "sensitive internal diagnostics",
+          }),
+        ),
+      ),
+    );
+    await expect(prepareHostedPreview(owner, lease.url)).rejects.toThrow(message);
+  });
+  it("renews retained signed documents without changing the selected desktop profile", async () => {
+    const url = "http://managed-server.example:3773/api/assets/old/report.html?mode=review#chart";
+    mocks.query.mockResolvedValue({
+      _tag: "Success",
+      value: {
+        relativeUrl: "/api/assets/fresh/report.html?mode=review#chart",
+        expiresAt: 1790000000000,
+      },
+    });
+    expect(await prepareHostedPreview(owner, url, "resource")).toEqual({
+      url: "http://managed-server.example:3773/api/assets/fresh/report.html?mode=review#chart",
+      managed: false,
+      restored: true,
+      restarted: true,
+    });
+    expect(mocks.query.mock.calls[0]?.[1]).toMatchObject({
+      input: {
+        resource: { _tag: "preview-document", threadId: owner.threadId, url, refresh: false },
+      },
+    });
+    expect(mocks.run).not.toHaveBeenCalled();
+  });
+
+  it("keeps a healthy document unchanged on return and refreshes access for explicit navigation", async () => {
+    const relativeUrl = "/api/assets/current/report.html";
+    const url = `http://managed-server.example:3773${relativeUrl}`;
+    mocks.query.mockResolvedValue({
+      _tag: "Success",
+      value: { relativeUrl, expiresAt: 1790000000000 },
+    });
+    expect(await prepareHostedPreview(owner, url, "resource")).not.toHaveProperty("restarted");
+    await prepareHostedPreview(owner, url);
+    expect(mocks.query.mock.calls[1]?.[1]).toMatchObject({
+      input: { resource: { refresh: true } },
+    });
+  });
+
   it("restores the owning lease across remote origin resolution without an agent message", async () => {
     mocks.run
       .mockResolvedValueOnce({ _tag: "Success", value: [lease] })
@@ -83,6 +363,7 @@ describe("native preview reopening", () => {
       prepareHostedPreview(owner, "http://192.168.1.24:5173/qa?version=1#first"),
     ).resolves.toEqual({
       url: "http://100.100.12.4:5173/qa?version=1#first",
+      localUrl: "http://localhost:5173/qa?version=1#first",
       managed: true,
       restored: true,
     });
@@ -101,6 +382,7 @@ describe("native preview reopening", () => {
       prepareHostedPreview(owner, "http://192.168.1.24:5173/qa?version=1#first"),
     ).resolves.toEqual({
       url: "http://100.100.12.4:5173/qa?version=1#first",
+      localUrl: "http://localhost:5173/qa?version=1#first",
       managed: true,
       restored: true,
     });

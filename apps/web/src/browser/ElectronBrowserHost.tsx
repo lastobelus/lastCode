@@ -1,24 +1,32 @@
 import { DesktopCdpRelay } from "./DesktopCdpRelay";
 
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
+import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import {
   AuthPreviewOperateScope,
   type DesktopPreviewOpenLinkEvent,
+  type DesktopBrowserRendererRequest,
   FILL_PREVIEW_VIEWPORT,
 } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import * as Cause from "effect/Cause";
-import { type ComponentProps, useEffect, useEffectEvent, useState } from "react";
+import * as Option from "effect/Option";
+import { AsyncResult } from "effect/reactivity";
+import { type ComponentProps, useEffect, useEffectEvent, useRef, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 
 import { primaryEnvironmentIdAtom } from "~/state/primaryEnvironment";
 import { toastManager } from "~/components/ui/toast";
 
 import { isElectron } from "~/env";
+import { randomUUID } from "~/lib/utils";
 import { useClientSettingsHydrated } from "~/hooks/useSettings";
 import { useDesktopHostedPreviewSessions } from "~/components/preview/usePreviewSession";
 import { useActivePreviewSessions } from "~/previewStateStore";
 import { previewEnvironment } from "~/state/preview";
-import { useEnvironmentScope } from "~/state/session";
+import { environmentSession, useEnvironmentScope } from "~/state/session";
+import { environmentCatalog } from "~/connection/catalog";
+import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { useEnvironmentHasLocalDesktopBrowser } from "~/state/entities";
 
@@ -30,6 +38,18 @@ import { openUrlInPreview } from "./openFileInPreview";
 import { rendersServerTabNatively } from "./previewRuntime";
 import { previewRuntimeTabId } from "./previewRuntimeTabId";
 import { useDesktopBrowserSessions } from "./useDesktopBrowserSessions";
+import { acquireBrowserSurfaceActivity, useBrowserSurfaceStore } from "./browserSurfaceStore";
+import { useActiveBrowserRecordingTabIds } from "./browserRecording";
+import { prepareHostedPreview } from "~/components/preview/previewHostingRecovery";
+import { hostedPreviewNavigationUrl } from "@t3tools/client-runtime/preview-hosting";
+import { stripPreviewBootstrapTokenFromUrl } from "@t3tools/shared/remote";
+import { withDesktopTab } from "./desktopTabLifetime";
+import { getDesktopBrowserHostId } from "./desktopBrowserTransport";
+import {
+  ensureDesktopBrowserTab,
+  registerDesktopBrowserDemand,
+  markDesktopBrowserTabUnavailable,
+} from "./desktopBrowserDemand";
 
 function reportLinkOpenFailure(cause: unknown) {
   toastManager.add({
@@ -37,6 +57,15 @@ function reportLinkOpenFailure(cause: unknown) {
     title: "Could not open the link in the browser",
     description: cause instanceof Error ? cause.message : undefined,
   });
+}
+
+function canonicalBrowserDestination(url: string | null): string | null {
+  if (url === null) return null;
+  try {
+    return stripPreviewBootstrapTokenFromUrl(new URL(url)).href;
+  } catch {
+    return url;
+  }
 }
 
 export function ElectronBrowserHost() {
@@ -75,6 +104,11 @@ export function ElectronBrowserHost() {
             pictureInPicture:
               previewState.desktopByTabId[snapshot.tabId]?.pictureInPicture ?? false,
             zoomFactor: previewState.desktopByTabId[snapshot.tabId]?.zoomFactor ?? 1,
+            desktopHostId:
+              snapshot.desktopHostId ??
+              (threadRef.environmentId === primaryEnvironmentId
+                ? "local"
+                : getDesktopBrowserHostId(threadRef.environmentId)),
           }))
       : [];
   });
@@ -83,6 +117,168 @@ export function ElectronBrowserHost() {
   const sessions = activeSessions.toSorted((left, right) =>
     left.runtimeTabId < right.runtimeTabId ? -1 : left.runtimeTabId > right.runtimeTabId ? 1 : 0,
   );
+  const visibleTabIds = useBrowserSurfaceStore(
+    useShallow((state) =>
+      Object.entries(state.byTabId)
+        .filter(([, surface]) => surface.visible && surface.rect !== null)
+        .map(([id]) => id),
+    ),
+  );
+  const activeTabIds = useBrowserSurfaceStore(
+    useShallow((state) => Object.keys(state.activityByTabId)),
+  );
+  const recordingTabIds = useActiveBrowserRecordingTabIds();
+  const [windowVisible, setWindowVisible] = useState(() => document.visibilityState === "visible");
+  useEffect(() => {
+    const changed = () => setWindowVisible(document.visibilityState === "visible");
+    document.addEventListener("visibilitychange", changed);
+    return () => document.removeEventListener("visibilitychange", changed);
+  }, []);
+  const [mountedTabIds, setMountedTabIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [generations, setGenerations] = useState<ReadonlyMap<string, number>>(() => new Map());
+  const [requestedSources, setRequestedSources] = useState<
+    ReadonlyMap<string, { readonly url: string; readonly previousUrl: string | null }>
+  >(() => new Map());
+  const demandRegistrations = useRef(new Map<string, () => void>());
+  const requestGuest = useEffectEvent((id: string, url?: string) => {
+    const release = acquireBrowserSurfaceActivity(id);
+    if (url !== undefined) {
+      const session = sessions.find((candidate) => candidate.runtimeTabId === id);
+      const previousUrl =
+        session?.snapshot.navStatus._tag === "Idle"
+          ? null
+          : (session?.snapshot.navStatus.url ?? null);
+      setRequestedSources((previous) => new Map(previous).set(id, { url, previousUrl }));
+    }
+    setGenerations((previous) => new Map(previous).set(id, (previous.get(id) ?? 0) + 1));
+    setMountedTabIds((previous) => new Set(previous).add(id));
+    return release;
+  });
+  useEffect(() => {
+    const current = demandRegistrations.current;
+    const ids = new Set(sessions.map((session) => session.runtimeTabId));
+    for (const [id, dispose] of current)
+      if (!ids.has(id)) {
+        dispose();
+        current.delete(id);
+      }
+    for (const id of ids)
+      if (!current.has(id))
+        current.set(
+          id,
+          registerDesktopBrowserDemand(id, (url) => requestGuest(id, url)),
+        );
+  }, [sessions]);
+
+  useEffect(() => {
+    const obsolete = [...requestedSources].filter(([id, requested]) => {
+      const session = sessions.find((candidate) => candidate.runtimeTabId === id);
+      const url =
+        session?.snapshot.navStatus._tag === "Idle"
+          ? null
+          : (session?.snapshot.navStatus.url ?? null);
+      return !session || url !== requested.previousUrl;
+    });
+    if (obsolete.length === 0) return;
+    // oxlint-disable-next-line react/set-state-in-effect -- Canonical navigation commits retire the temporary cold-navigation destination.
+    setRequestedSources((current) => {
+      const next = new Map(current);
+      for (const [id] of obsolete) next.delete(id);
+      return next;
+    });
+  }, [sessions, requestedSources]);
+  useEffect(() => {
+    const current = demandRegistrations.current;
+    return () => {
+      for (const dispose of current.values()) dispose();
+      current.clear();
+    };
+  }, []);
+  const [wakeRequests, setWakeRequests] = useState<
+    ReadonlyMap<string, DesktopBrowserRendererRequest>
+  >(() => new Map());
+  const wakeTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const receiveRendererRequest = useEffectEvent((request: DesktopBrowserRendererRequest) => {
+    const key = JSON.stringify([request.environmentId, request.threadId, request.tabId]);
+    const matches = sessions.filter(
+      (session) =>
+        session.threadRef.environmentId === request.environmentId &&
+        session.threadRef.threadId === request.threadId &&
+        session.snapshot.tabId === request.tabId &&
+        session.desktopHostId === request.desktopHostId,
+    );
+    if (request.action === "unload") {
+      for (const session of matches) markDesktopBrowserTabUnavailable(session.runtimeTabId);
+      setMountedTabIds(
+        (current) =>
+          new Set(
+            [...current].filter((id) => !matches.some((session) => session.runtimeTabId === id)),
+          ),
+      );
+      return;
+    }
+    clearTimeout(wakeTimers.current.get(key));
+    setWakeRequests((current) => new Map(current).set(key, request));
+    wakeTimers.current.set(
+      key,
+      setTimeout(() => {
+        wakeTimers.current.delete(key);
+        setWakeRequests((current) => {
+          const next = new Map(current);
+          next.delete(key);
+          return next;
+        });
+      }, 45_000),
+    );
+  });
+  useEffect(() => {
+    const unsubscribe =
+      window.desktopBridge?.preview?.onBrowserRendererRequest?.(receiveRendererRequest);
+    const timers = wakeTimers.current;
+    return () => {
+      unsubscribe?.();
+      for (const timer of timers.values()) clearTimeout(timer);
+      timers.clear();
+    };
+  }, []);
+  useEffect(() => {
+    const matches = sessions.filter((session) => {
+      const request = wakeRequests.get(
+        JSON.stringify([
+          session.threadRef.environmentId,
+          session.threadRef.threadId,
+          session.snapshot.tabId,
+        ]),
+      );
+      return request && session.desktopHostId === request.desktopHostId;
+    });
+    for (const session of matches)
+      void ensureDesktopBrowserTab(session.runtimeTabId).catch(reportLinkOpenFailure);
+  }, [sessions, wakeRequests]);
+  const demandedTabIds = new Set([
+    ...(windowVisible ? visibleTabIds : []),
+    ...activeTabIds,
+    ...recordingTabIds,
+    ...sessions
+      .filter((session) => session.pictureInPicture)
+      .map((session) => session.runtimeTabId),
+  ]);
+  useEffect(() => {
+    // oxlint-disable-next-line react/set-state-in-effect -- Surface leases admit guests to the external Electron cache; inactive guests retain their DOM.
+    setMountedTabIds((current) => {
+      const next = new Set(
+        sessions
+          .filter(
+            (session) =>
+              current.has(session.runtimeTabId) || demandedTabIds.has(session.runtimeTabId),
+          )
+          .map((session) => session.runtimeTabId),
+      );
+      return next.size === current.size && [...next].every((id) => current.has(id))
+        ? current
+        : next;
+    });
+  }, [sessions, demandedTabIds]);
 
   useEffect(() => {
     const preview = window.desktopBridge?.preview;
@@ -153,43 +349,182 @@ export function ElectronBrowserHost() {
   return (
     <div className="contents" data-electron-browser-host>
       <DesktopCdpRelay />
-      {sessions.map(({ threadRef, snapshot, runtimeTabId, pictureInPicture, zoomFactor }) => {
-        const url = snapshot.navStatus._tag === "Idle" ? null : snapshot.navStatus.url;
-        return (
-          <AuthorizedBrowserWebview
-            key={runtimeTabId}
-            threadRef={threadRef}
-            tabId={snapshot.tabId}
-            runtimeTabId={runtimeTabId}
-            initialUrl={url}
-            viewport={snapshot.viewport ?? FILL_PREVIEW_VIEWPORT}
-            pictureInPicture={pictureInPicture}
-            profileId={snapshot.profileId}
-            zoomFactor={zoomFactor}
-            serverDriven={snapshot.runtime === "server"}
-            desktopHostId={snapshot.desktopHostId}
-            {...(snapshot.runtime === "server"
-              ? {
-                  serverRendering: {
-                    colorScheme: snapshot.colorScheme ?? "system",
-                    zoomFactor: snapshot.zoomFactor ?? 1,
-                  },
-                }
-              : {})}
-          />
-        );
-      })}
+      {sessions.map(
+        ({ threadRef, snapshot, runtimeTabId, pictureInPicture, zoomFactor, desktopHostId }) => {
+          if (!mountedTabIds.has(runtimeTabId)) return null;
+          const canonicalUrl = snapshot.navStatus._tag === "Idle" ? null : snapshot.navStatus.url;
+          const requested = requestedSources.get(runtimeTabId);
+          const url = requested?.previousUrl === canonicalUrl ? requested.url : canonicalUrl;
+          return (
+            <AuthorizedBrowserWebview
+              key={`${runtimeTabId}:${generations.get(runtimeTabId) ?? 0}`}
+              threadRef={threadRef}
+              tabId={snapshot.tabId}
+              runtimeTabId={runtimeTabId}
+              initialUrl={url}
+              viewport={snapshot.viewport ?? FILL_PREVIEW_VIEWPORT}
+              pictureInPicture={pictureInPicture}
+              profileId={snapshot.profileId}
+              zoomFactor={zoomFactor}
+              serverDriven={snapshot.runtime === "server"}
+              desktopHostId={desktopHostId}
+              demanded={demandedTabIds.has(runtimeTabId)}
+              {...(snapshot.runtime === "server"
+                ? {
+                    serverRendering: {
+                      colorScheme: snapshot.colorScheme ?? "system",
+                      zoomFactor: snapshot.zoomFactor ?? 1,
+                    },
+                  }
+                : {})}
+            />
+          );
+        },
+      )}
     </div>
   );
 }
 
-function AuthorizedBrowserWebview(props: ComponentProps<typeof HostedBrowserWebview>) {
+function AuthorizedBrowserWebview(
+  props: ComponentProps<typeof HostedBrowserWebview> & { readonly demanded: boolean },
+) {
   const canOperatePreview = useEnvironmentScope(
     props.threadRef.environmentId,
     AuthPreviewOperateScope,
   );
   const profileId = useTabProfileId(props.profileId);
-  return canOperatePreview ? <HostedBrowserWebview {...props} profileId={profileId} /> : null;
+  return canOperatePreview ? <PreparedBrowserWebview {...props} profileId={profileId} /> : null;
+}
+
+function PreparedBrowserWebview({
+  demanded,
+  ...props
+}: ComponentProps<typeof HostedBrowserWebview> & { readonly demanded: boolean }) {
+  const connection = Option.getOrNull(
+    AsyncResult.value(useAtomValue(environmentCatalog.stateAtom(props.threadRef.environmentId))),
+  );
+  const connectionGeneration = connection?.phase === "connected" ? connection.generation : null;
+  const config = useAtomValue(
+    environmentSession.initialConfigValueAtom(props.threadRef.environmentId),
+  );
+  const configReady = config !== null;
+  const supportsActivity = config?.environment.capabilities.previewHostingActivity === true;
+  const setHostingActivity = useAtomCommand(previewEnvironment.hostingActivity, {
+    reportFailure: false,
+  });
+  const updateActivity = useEffectEvent(
+    async (command: Parameters<typeof setHostingActivity>[0]) => {
+      const result = await setHostingActivity(command);
+      if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+    },
+  );
+  const [source, setSource] = useState<{
+    readonly url: string | null;
+    readonly destination: string | null;
+    readonly runId: string | undefined;
+  } | null>(null);
+  const prepare = useEffectEvent(async (url: string | null) => {
+    const destination = canonicalBrowserDestination(url);
+    if (url === null)
+      return {
+        url: null,
+        destination,
+        restarted: false,
+        runId: undefined,
+        cold: source === null,
+        sameUrl: true,
+      };
+    const prepared = await prepareHostedPreview(
+      props.threadRef,
+      url,
+      source === null ? "navigation" : "resource",
+    );
+    // A canonical navigation has already loaded its new destination. Only a return to the
+    // document whose run we observed needs a reload when another observer restarted it.
+    const restarted =
+      prepared.runId !== undefined && source?.destination === destination
+        ? prepared.runId !== source.runId
+        : prepared.restarted === true;
+    const navigation =
+      source !== null && restarted
+        ? await prepareHostedPreview(props.threadRef, url, "navigation")
+        : prepared;
+    const navigationUrl = hostedPreviewNavigationUrl(navigation);
+    return {
+      url: navigationUrl,
+      destination,
+      restarted,
+      runId: navigation.runId,
+      cold: source === null,
+      sameUrl: navigationUrl === url,
+    };
+  });
+  useEffect(() => {
+    if (!demanded || connectionGeneration === null || !configReady) return;
+    let disposed = false;
+    const command = {
+      environmentId: props.threadRef.environmentId,
+      input: {
+        activityId: randomUUID(),
+        threadId: props.threadRef.threadId,
+        url: props.initialUrl ?? "about:blank",
+        active: true,
+      },
+    };
+    const acknowledged = supportsActivity ? updateActivity(command) : Promise.resolve();
+    void acknowledged
+      .then(() => (disposed ? undefined : prepare(props.initialUrl)))
+      .then((prepared) => {
+        if (disposed || prepared === undefined) return;
+        const nextSource = {
+          url: prepared.url,
+          destination: prepared.destination,
+          runId: prepared.runId,
+        };
+        if (!prepared.cold && prepared.restarted && prepared.url !== null) {
+          const bridge = window.desktopBridge?.preview;
+          if (bridge)
+            withDesktopTab(props.runtimeTabId, async () => {
+              if (disposed) return;
+              if (prepared.sameUrl) await bridge.refresh(props.runtimeTabId);
+              else await bridge.navigate(props.runtimeTabId, prepared.url!);
+              if (!disposed) setSource(nextSource);
+            });
+        } else setSource(nextSource);
+      })
+      .catch((cause) => {
+        if (disposed) return;
+        markDesktopBrowserTabUnavailable(props.runtimeTabId, cause);
+        reportLinkOpenFailure(cause);
+      });
+    return () => {
+      disposed = true;
+      if (!supportsActivity) return;
+      void acknowledged
+        .then(() => {
+          const current = Option.getOrNull(
+            AsyncResult.value(
+              appAtomRegistry.get(environmentCatalog.stateAtom(command.environmentId)),
+            ),
+          );
+          // Disconnect releases this connection's declarations on the server. A late ACK must
+          // never send its release through a replacement connection.
+          if (current?.phase === "connected" && current.generation === connectionGeneration)
+            return updateActivity({ ...command, input: { ...command.input, active: false } });
+        })
+        .catch(() => undefined);
+    };
+  }, [
+    demanded,
+    connectionGeneration,
+    configReady,
+    supportsActivity,
+    props.runtimeTabId,
+    props.initialUrl,
+    props.threadRef.environmentId,
+    props.threadRef.threadId,
+  ]);
+  return source === null ? null : <HostedBrowserWebview {...props} initialUrl={source.url} />;
 }
 
 // Latch after hydration: Electron fixes the partition when the guest attaches.

@@ -141,6 +141,8 @@ it.live("MCP opens only its own current publication through signed HTTP in real 
       McpToolAccessTestkit.liveThreadsLayer,
       Layer.mock(ProjectStore.ProjectStoreV2)({ get: () => Effect.succeed(Option.some(project)) }),
       Layer.mock(Hosting.PreviewHosting)({
+        setActivity: () => Effect.void,
+        list: () => Effect.succeed([]),
         prepareNavigation: () => Effect.succeed({ managed: false }),
       }),
       Layer.mock(Orchestrator.OrchestratorV2)({}),

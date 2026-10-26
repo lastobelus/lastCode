@@ -57,6 +57,11 @@ export function createPreviewEnvironmentAtoms<R, E>(
       tag: WS_METHODS.previewHostingRecover,
       scheduler: hostingScheduler,
     }),
+    hostingActivity: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:preview:hosting-activity",
+      tag: WS_METHODS.previewHostingActivity,
+      concurrency: { mode: "parallel" },
+    }),
     list: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:preview:list",
       tag: WS_METHODS.previewList,

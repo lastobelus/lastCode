@@ -49,6 +49,7 @@ import { capturePreviewAnnotationScreenshot } from "~/lib/previewAnnotation";
 import { getClientSettings } from "~/hooks/useSettings";
 import {
   rememberPreviewUrl,
+  readThreadPreviewState,
   updatePreviewServerSnapshot,
   useThreadPreviewState,
 } from "~/previewStateStore";
@@ -89,7 +90,12 @@ import { BrowserDeviceToolbar } from "~/browser/BrowserDeviceToolbar";
 import { BROWSER_DEVICE_TOOLBAR_HEIGHT } from "~/browser/browserViewportLayout";
 import { useBrowserLayoutZoomFactor } from "~/browser/useBrowserLayoutZoomFactor";
 import { previewRuntimeTabId } from "~/browser/previewRuntimeTabId";
+import {
+  ensureDesktopBrowserTab,
+  useDesktopBrowserDemandFailure,
+} from "~/browser/desktopBrowserDemand";
 import { BrowserSettingsReadError } from "~/browser/openFileInPreview";
+import { preparedPreviewOpenTarget } from "~/browser/preparedPreviewOpenTarget";
 import { PreviewFileNotShown, PreviewUnreachable } from "./PreviewUnreachable";
 import {
   clearPreviewRecoveryRequest,
@@ -255,7 +261,18 @@ export function PreviewView({
   const [serverFrameTabId, setServerFrameTabId] = useState<string | null>(null);
   const desktopOverlay = tabId ? (previewState.desktopByTabId[tabId] ?? null) : null;
   const layoutZoomFactor = useBrowserLayoutZoomFactor(desktopOverlay?.zoomFactor ?? 1);
-  const navStatus = snapshot?.navStatus ?? { _tag: "Idle" as const };
+  const nativeDemandFailure = useDesktopBrowserDemandFailure(isServerTab ? null : runtimeTabId);
+  const canonicalNavStatus = snapshot?.navStatus ?? { _tag: "Idle" as const };
+  const navStatus =
+    nativeDemandFailure !== null && canonicalNavStatus._tag !== "Idle"
+      ? {
+          _tag: "LoadFailed" as const,
+          url: canonicalNavStatus.url,
+          title: canonicalNavStatus.title,
+          code: -1,
+          description: nativeDemandFailure,
+        }
+      : canonicalNavStatus;
   const url = navStatus._tag === "Idle" ? "" : navStatus.url;
   const recoveryRequest = usePreviewRecoveryRequest(threadRef, url, tabId ?? undefined);
   const loading = desktopOverlay?.loading ?? navStatus._tag === "Loading";
@@ -306,7 +323,7 @@ export function PreviewView({
   }, [environmentHostname, latestHistoryUrl, navTitle, navUrl, threadEnvironmentId, threadId]);
 
   // Recovery must not override a newer address, tab, or environment.
-  const navigationIdentity = JSON.stringify([runtimeTabId, url, environmentHttpBaseUrl]);
+  const navigationIdentity = JSON.stringify([runtimeTabId, url, environmentHttpBaseUrl, visible]);
   const navigationSequence = useRef({ identity: navigationIdentity, value: 0 });
   useEffect(() => {
     if (navigationSequence.current.identity !== navigationIdentity) {
@@ -331,6 +348,7 @@ export function PreviewView({
       return true;
     }
     if (runtimeTabId && previewBridge) {
+      await ensureDesktopBrowserTab(runtimeTabId, resolvedUrl);
       const prepared = await prepareHostedPreview(threadRef, resolvedUrl);
       if (sequence !== navigationSequence.current.value) return false;
       // The bridge mirrors the resolved URL back to the server.
@@ -407,6 +425,7 @@ export function PreviewView({
   };
   const hostedPreviews = useThreadPreviewLeases(threadRef);
   const managedHandoff = (() => {
+    if (nativeDemandFailure !== null) return true;
     try {
       return selectHostedPreview(new URL(url), hostedPreviews) !== null;
     } catch {
@@ -416,8 +435,56 @@ export function PreviewView({
   const hostingEnvironmentId = threadRef.environmentId;
   const hostingThreadId = threadRef.threadId;
   const refreshPreparedPreview = async (
-    prepared: Pick<PreparedHostedPreview, "url" | "navigationUrl">,
+    prepared: PreparedHostedPreview,
+    panelRevision: number,
   ): Promise<boolean> => {
+    const target = preparedPreviewOpenTarget(
+      threadRef.environmentId,
+      prepared,
+      url,
+      activeProfileId,
+    );
+    if (
+      isUnreachable &&
+      nativeDemandFailure === null &&
+      visible &&
+      tabId &&
+      snapshot &&
+      snapshot.backingPage !== "server" &&
+      target.browserHost === "environment"
+    ) {
+      const sequence = navigationSequence.current.value;
+      const panels = useRightPanelStore.getState();
+      if (panels.getUserActionRevision(threadRef) !== panelRevision) return false;
+      const result = await open({
+        environmentId: threadRef.environmentId,
+        input: {
+          threadId: threadRef.threadId,
+          ...target,
+          viewport,
+          profileId: activeProfileId,
+          background: true,
+        },
+      });
+      if (result._tag === "Failure") {
+        if (isAtomCommandInterrupted(result)) return false;
+        throw squashAtomCommandFailure(result);
+      }
+      updatePreviewServerSnapshot(threadRef, result.value, { consumeOpenFocus: true });
+      const current = readThreadPreviewState(threadRef).sessions[tabId];
+      if (
+        !isMountedRef.current ||
+        sequence !== navigationSequence.current.value ||
+        useRightPanelStore.getState().getUserActionRevision(threadRef) !== panelRevision ||
+        current?.navStatus._tag !== "LoadFailed" ||
+        current.navStatus.url !== url
+      ) {
+        return true;
+      }
+      panels.openBrowser(threadRef, result.value.tabId);
+      await closePreviewSession({ closePreview, snapshot, tabId, threadRef });
+      return true;
+    }
     const destination = hostedPreviewNavigationUrl(prepared);
     if (isServerTab) {
       if (serverControlledTabId !== runtimeTabId) return false;
@@ -429,6 +496,18 @@ export function PreviewView({
         : false;
     }
     if (!previewBridge || !runtimeTabId) return false;
+    const sequence = navigationSequence.current.value;
+    await ensureDesktopBrowserTab(runtimeTabId);
+    const current = tabId ? readThreadPreviewState(threadRef).sessions[tabId] : null;
+    if (
+      !isMountedRef.current ||
+      sequence !== navigationSequence.current.value ||
+      useRightPanelStore.getState().getUserActionRevision(threadRef) !== panelRevision ||
+      !current ||
+      current.navStatus._tag === "Idle" ||
+      current.navStatus.url !== url
+    )
+      return false;
     if (destination !== url) await previewBridge.navigate(runtimeTabId, destination);
     else await previewBridge.refresh(runtimeTabId);
     return true;
@@ -436,21 +515,28 @@ export function PreviewView({
   const refreshRecoveredPreview = useEffectEvent(refreshPreparedPreview);
   const handleRefresh = () => {
     const sequence = ++navigationSequence.current.value;
+    const panelRevision = useRightPanelStore.getState().getUserActionRevision({
+      environmentId: hostingEnvironmentId,
+      threadId: hostingThreadId,
+    });
     void prepareHostedPreview(
       { environmentId: hostingEnvironmentId, threadId: hostingThreadId },
       url,
     )
       .then(async (prepared) => {
         if (sequence === navigationSequence.current.value)
-          await refreshPreparedPreview(isServerTab ? { ...prepared, url } : prepared);
+          await refreshPreparedPreview(
+            isServerTab ? { ...prepared, url } : prepared,
+            panelRevision,
+          );
       })
       .catch((cause: unknown) => {
         if (sequence === navigationSequence.current.value) reportHostedPreviewFailure(cause);
       });
   };
 
-  // Returning to a retained panel must wake its server even when the guest
-  // still displays a cached successful page. Healthy pages keep unsaved state.
+  // The renderer owns ordinary return recovery. Repeating it here can reload
+  // the restored page after the user has already started typing.
   const preparedVisibleTab = useRef<{
     key: string;
     recovery: Promise<PreparedHostedPreview>;
@@ -459,17 +545,12 @@ export function PreviewView({
     completed: boolean;
   } | null>(null);
   useEffect(() => {
+    if (!requestedHostedRefresh) return;
     if (!visible) {
       if (preparedVisibleTab.current?.completed) preparedVisibleTab.current = null;
       return;
     }
-    if (
-      !runtimeTabId ||
-      !url ||
-      !environmentHttpBaseUrl ||
-      (navStatus._tag === "LoadFailed" && !requestedHostedRefresh)
-    )
-      return;
+    if (!runtimeTabId || !url || !environmentHttpBaseUrl) return;
     if (
       requestedHostedRefresh?.expectedUrl &&
       tabId &&
@@ -510,13 +591,13 @@ export function PreviewView({
     if (attempt.completed) return;
     let cancelled = false;
     const sequence = navigationSequence.current.value;
+    const panelRevision = useRightPanelStore.getState().getUserActionRevision({
+      environmentId: hostingEnvironmentId,
+      threadId: hostingThreadId,
+    });
     void attempt.recovery
-      .then(async (prepared) => {
+      .then(async () => {
         if (cancelled || sequence !== navigationSequence.current.value) return;
-        if (!prepared.restarted && !requestedHostedRefresh) {
-          attempt.completed = true;
-          return;
-        }
         // Preparation can finish before the streamed viewer attaches. Do not mint
         // or consume a one-use credential until that viewer confirms control.
         if (isServerTab && serverControlledTabId !== runtimeTabId) return;
@@ -531,6 +612,7 @@ export function PreviewView({
         if (attempt.dispatch === null) {
           attempt.dispatch = refreshRecoveredPreview(
             isServerTab ? { ...authenticated, url: destination } : authenticated,
+            panelRevision,
           ).then((accepted) => {
             attempt.completed = accepted;
             if (accepted && requestedHostedRefresh && tabId) {
@@ -569,7 +651,6 @@ export function PreviewView({
     hostingEnvironmentId,
     hostingThreadId,
     environmentHttpBaseUrl,
-    navStatus._tag,
     isServerTab,
     serverControlledTabId,
     requestedHostedRefresh,
@@ -654,6 +735,10 @@ export function PreviewView({
     attempt.watching = true;
     let cancelled = false;
     const sequence = navigationSequence.current.value;
+    const panelRevision = useRightPanelStore.getState().getUserActionRevision({
+      environmentId: hostingEnvironmentId,
+      threadId: hostingThreadId,
+    });
     void attempt.recovery
       .then(async (prepared) => {
         if (cancelled || sequence !== navigationSequence.current.value) return;
@@ -661,6 +746,7 @@ export function PreviewView({
           if (attempt.dispatch === null) {
             attempt.dispatch = refreshRecoveredPreview(
               isServerTab ? { ...prepared, url } : prepared,
+              panelRevision,
             ).then((accepted) => {
               attempt.completed = accepted;
               if (!accepted) hostingAttemptedByTab.current.delete(runtimeTabId);
@@ -835,7 +921,10 @@ export function PreviewView({
   };
 
   const desktopCall = (op: ((tabId: string) => Promise<void>) | undefined) => () => {
-    if (op && runtimeTabId) void op(runtimeTabId).catch(() => undefined);
+    if (op && runtimeTabId)
+      void ensureDesktopBrowserTab(runtimeTabId)
+        .then(() => op(runtimeTabId))
+        .catch(() => undefined);
   };
   const moreMenuActions: PreviewMoreMenuActions | null = serverOwnsRendering
     ? {

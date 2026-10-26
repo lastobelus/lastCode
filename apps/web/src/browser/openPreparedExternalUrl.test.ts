@@ -58,6 +58,15 @@ describe("prepared external navigation", () => {
     expect(tab.location.replace).not.toHaveBeenCalled();
   });
 
+  it("does not navigate a tab the user closed during preparation", async () => {
+    const { tab } = installBrowser();
+    await openPreparedExternalUrl("https://example.com/qa", async () => {
+      tab.closed = true;
+      return "https://example.com/prepared";
+    });
+    expect(tab.location.replace).not.toHaveBeenCalled();
+  });
+
   it("reports a blocked popup before starting recovery", async () => {
     vi.stubGlobal("window", { open: vi.fn(() => null) });
     const prepare = vi.fn(async () => "https://example.com/qa");
@@ -65,6 +74,33 @@ describe("prepared external navigation", () => {
       "Allow popups",
     );
     expect(prepare).not.toHaveBeenCalled();
+  });
+
+  it("closes the reservation when preparation handles the open internally", async () => {
+    const { tab } = installBrowser();
+    await openPreparedExternalUrl("http://localhost:5173/qa", async () => null);
+    expect(tab.close).toHaveBeenCalledOnce();
+    expect(tab.location.replace).not.toHaveBeenCalled();
+  });
+
+  it("allows internal opening without a popup when requested", async () => {
+    vi.stubGlobal("window", { open: vi.fn(() => null) });
+    const prepare = vi.fn(async () => null);
+    await openPreparedExternalUrl("http://localhost:5173/qa", prepare, {
+      allowWithoutPopup: true,
+    });
+    expect(prepare).toHaveBeenCalledOnce();
+    expect(mocks.openExternal).not.toHaveBeenCalled();
+  });
+
+  it("still reports a blocked popup when internal preparation needs external navigation", async () => {
+    vi.stubGlobal("window", { open: vi.fn(() => null) });
+    await expect(
+      openPreparedExternalUrl("http://localhost:5173/qa", async () => "https://example.com/qa", {
+        allowWithoutPopup: true,
+      }),
+    ).rejects.toThrow("Allow popups");
+    expect(mocks.openExternal).not.toHaveBeenCalled();
   });
 
   it("keeps desktop opening behind recovery without reserving a web tab", async () => {

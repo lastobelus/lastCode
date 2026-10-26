@@ -3,6 +3,7 @@ import {
   HostedPreviewUrlTooLongError,
   HostedPreviewRecoveryError,
   hostedPreviewNavigationUrl,
+  type PreparedHostedPreview,
   type PrepareHostedPreviewInput,
 } from "@t3tools/client-runtime/preview-hosting";
 import type { MediaActionsSource } from "./mediaActionsSource";
@@ -11,10 +12,21 @@ import type { MediaActionsSource } from "./mediaActionsSource";
 export async function prepareThenOpenThreadFeedUrl<A>(
   input: PrepareHostedPreviewInput,
   open: (url: string) => A | Promise<A>,
+  openManagedBrowser?: (url: string) => A | Promise<A>,
 ): Promise<A> {
   let destination = input.url;
+  let prepared: PreparedHostedPreview | undefined;
   try {
-    destination = hostedPreviewNavigationUrl(await prepareHostedPreview(input));
+    const { createResourceUrl: _resource, ...navigationInput } = input;
+    prepared = await prepareHostedPreview(
+      openManagedBrowser !== undefined && input.purpose !== "resource"
+        ? { ...navigationInput, purpose: "resource" }
+        : input,
+    );
+    destination =
+      input.purpose === "resource"
+        ? (prepared.resourceUrl ?? prepared.url)
+        : hostedPreviewNavigationUrl(prepared);
   } catch (cause) {
     if (
       cause instanceof HostedPreviewUrlTooLongError ||
@@ -23,6 +35,13 @@ export async function prepareThenOpenThreadFeedUrl<A>(
       throw cause;
     // Keep the user's original link usable if preparation unexpectedly fails.
   }
+  if (
+    input.purpose !== "resource" &&
+    prepared?.managed &&
+    prepared.localUrl !== undefined &&
+    openManagedBrowser !== undefined
+  )
+    return openManagedBrowser(prepared.localUrl);
   return open(destination);
 }
 
@@ -83,8 +102,9 @@ export function openThreadFeedMarkdownUrl<A>(
   input: Omit<PrepareHostedPreviewInput, "url"> | null,
   url: string,
   open: (url: string) => A | Promise<A>,
+  openManagedBrowser?: (url: string) => A | Promise<A>,
 ): Promise<A> {
   return input === null
     ? Promise.resolve(open(url))
-    : prepareThenOpenThreadFeedUrl({ ...input, url }, open);
+    : prepareThenOpenThreadFeedUrl({ ...input, url }, open, openManagedBrowser);
 }

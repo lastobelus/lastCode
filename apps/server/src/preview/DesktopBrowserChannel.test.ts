@@ -63,6 +63,13 @@ it.effect(
         yield* channel.receiveEvent("owner-a", "host-a", { type: "attached", ...key });
         expect(channel.isPresented(tab)).toBe(false);
         yield* channel.receiveEvent("owner-a", "host-a", {
+          type: "rendering",
+          ...key,
+          active: true,
+        });
+        expect(channel.isRendering(tab)).toBe(true);
+        expect(channel.isPresented(tab)).toBe(false);
+        yield* channel.receiveEvent("owner-a", "host-a", {
           type: "presentation",
           ...key,
           presented: true,
@@ -76,14 +83,17 @@ it.effect(
         // A replacement announcement must not inherit its predecessor's visibility.
         yield* channel.receiveEvent("owner-a", "host-a", { type: "attached", ...key });
         expect(channel.isPresented(tab)).toBe(false);
+        expect(channel.isRendering(tab)).toBe(false);
         yield* channel.receiveEvent("owner-a", "host-a", {
           type: "attached",
           ...key,
           presented: true,
+          rendering: true,
         });
         expect(channel.isPresented(tab)).toBe(true);
         yield* Fiber.interrupt(host.fiber);
         expect(channel.isPresented(tab)).toBe(false);
+        expect(channel.isRendering(tab)).toBe(false);
         expect(yield* channel.isAttached(tab)).toBe(false);
         // A reconnect starts without any prior guest or presentation.
         yield* connectHost(channel, "owner-b", "host-a");

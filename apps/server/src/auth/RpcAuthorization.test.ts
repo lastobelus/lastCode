@@ -77,6 +77,9 @@ describe("RPC authorization scopes", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.previewHostingRecover)).toBe(
       AuthTerminalOperateScope,
     );
+    expect(requiredScopeForRpcMethod(WS_METHODS.previewHostingActivity)).toBe(
+      AuthPreviewOperateScope,
+    );
     expect(requiredScopeForRpcMethod(WS_METHODS.subscribePreviewHosting)).toBe(
       AuthOrchestrationReadScope,
     );
@@ -442,6 +445,19 @@ it.effect("separates host file URLs from readable attachment URLs", () =>
         requiredPermission: AuthFilesystemReadScope,
       });
     }
+    expect(
+      yield* client[WS_METHODS.assetsCreateUrl]({
+        resource: {
+          _tag: "managed-preview-resource",
+          threadId: ThreadId.make("thread"),
+          leaseId: "lease-resource",
+          url: "http://127.0.0.1:5173/image.png",
+        },
+      }).pipe(Effect.flip),
+    ).toMatchObject({
+      requiredScope: AuthTerminalOperateScope,
+      requiredPermission: AuthTerminalOperateScope,
+    });
     expect(handled).toBe(2);
   }).pipe(Effect.scoped),
 );

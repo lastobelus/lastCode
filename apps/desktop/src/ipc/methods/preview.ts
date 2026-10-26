@@ -1,4 +1,5 @@
 import {
+  DesktopBrowserTransportError,
   DesktopPreviewAnnotationSendEnabledInputSchema,
   DesktopPreviewAnnotationThemeInputSchema,
   DesktopPreviewArtifactInputSchema,
@@ -32,6 +33,7 @@ import * as ElectronWindow from "../../electron/ElectronWindow.ts";
 import * as BrowserImport from "../../preview/BrowserImport/BrowserImport.ts";
 import * as BrowserProfileScope from "../../preview/BrowserProfileScope.ts";
 import * as PreviewManager from "../../preview/Manager.ts";
+import * as DesktopBrowserHost from "../../preview/DesktopBrowserHost.ts";
 import { normalizeCaptureFailure } from "../../preview/captureErrors.ts";
 import * as DesktopClientSettings from "../../settings/DesktopClientSettings.ts";
 import { PREVIEW_WEBVIEW_PREFERENCES } from "../../preview/WebviewPreferences.ts";
@@ -81,6 +83,10 @@ const createTab = DesktopIpc.makeIpcMethod({
     serverTab,
   }) {
     const manager = yield* PreviewManager.PreviewManager;
+    const host = yield* DesktopBrowserHost.DesktopBrowserHost;
+    if (serverTab && !host.reserveTab(tabId, serverTab)) {
+      return yield* new DesktopBrowserTransportError({ reason: "at-capacity" });
+    }
     yield* manager.createTab(tabId, { zoomFactor, colorScheme, serverTab });
   }),
 });
@@ -91,6 +97,8 @@ const closeTab = DesktopIpc.makeIpcMethod({
   result: Schema.Void,
   handler: Effect.fn("desktop.ipc.preview.closeTab")(function* ({ tabId }) {
     const manager = yield* PreviewManager.PreviewManager;
+    const host = yield* DesktopBrowserHost.DesktopBrowserHost;
+    host.releaseReservation(tabId);
     yield* manager.closeTab(tabId);
   }),
 });

@@ -201,6 +201,8 @@ export const PreviewOpenInput = Schema.Struct({
   viewport: Schema.optional(PreviewViewportSetting),
   profileId: Schema.optional(BrowserProfileId),
   runtime: Schema.optional(PreviewRuntime),
+  /** Explicit placement; environment browsers do not use a desktop's named profiles. */
+  browserHost: Schema.optional(Schema.Literal("environment")),
   /** Desktop cookie jar selected for this tab; never fall back to another browser. */
   desktopHostId: Schema.optional(Schema.String),
   /** Create a visible tab without selecting it when its opened event arrives. */
@@ -248,6 +250,15 @@ export class PreviewRecoveryStorageError extends Schema.TaggedError<PreviewRecov
 ) {
   override get message() {
     return "Could not persist the preview recovery request identity.";
+  }
+}
+
+export class PreviewSessionStorageError extends Schema.TaggedError<PreviewSessionStorageError>()(
+  "PreviewSessionStorageError",
+  { cause: Schema.Defect() },
+) {
+  override get message() {
+    return "Could not read or save retained browser tabs. Their saved record was left intact.";
   }
 }
 
@@ -460,12 +471,23 @@ export class PreviewNativeCreateError extends Schema.TaggedError<PreviewNativeCr
   }
 }
 
+export class PreviewProfileHostError extends Schema.TaggedError<PreviewProfileHostError>()(
+  "PreviewProfileHostError",
+  { profileId: BrowserProfileId },
+) {
+  override get message() {
+    return "The selected browser profile belongs to a desktop. Open this preview on that desktop.";
+  }
+}
+
 export const PreviewError = Schema.Union([
   PreviewSessionLookupError,
   PreviewInvalidUrlError,
   PreviewControlRequiredError,
   PreviewRecoveryStorageError,
+  PreviewSessionStorageError,
   PreviewNativeCloseError,
   PreviewNativeCreateError,
+  PreviewProfileHostError,
 ]);
 export type PreviewError = typeof PreviewError.Type;
