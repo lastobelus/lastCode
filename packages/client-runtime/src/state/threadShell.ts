@@ -11,7 +11,12 @@ import * as Schema from "effect/Schema";
 import { Atom } from "effect/reactivity";
 
 import type { EnvironmentThreadShell, PendingSubagentRequest } from "./models.ts";
-import { presentThreadShell, threadRuntimeIsActive } from "./models.ts";
+import {
+  presentThreadShell,
+  threadRuntimeIsActive,
+  threadShellIsCleanupRecovery,
+  threadShellIsVisible,
+} from "./models.ts";
 import { type EnvironmentCatalogState, enabledEnvironmentIds } from "./connections.ts";
 import {
   arrayElementsEqual,
@@ -408,7 +413,11 @@ export function createEnvironmentThreadShellAtoms(input: {
     for (const environmentId of enabledEnvironmentIds(get(input.catalogValueAtom))) {
       const subagentRequests = get(pendingSubagentRequestsAtom(environmentId));
       for (const thread of get(environmentThreadsAtom(environmentId))) {
-        if (thread.archivedAt !== null || thread.lineage.relationshipToParent === "subagent")
+        if (
+          !threadShellIsVisible(thread) ||
+          (!threadShellIsCleanupRecovery(thread) &&
+            thread.lineage.relationshipToParent === "subagent")
+        )
           continue;
         next.push(scopedThread(environmentId, thread, subagentRequests));
       }

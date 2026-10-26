@@ -162,6 +162,13 @@ through the pages you have visited, like a browser's back and forward buttons.
 [new-thread defaults](./thread-sidebar.md#start-a-thread). `chat.newWithoutProject`
 (`mod+alt+n`) starts a thread [without a project](./thread-sidebar.md#start-without-a-project).
 
+`sidebar.mode.toggle` has no default shortcut; add one in **Settings → Keybindings**
+under **Sidebar: Toggle Presentation**. With **Settings → LastCode → Appearance →
+LastCode sidebar** enabled, it switches between LastCode and the v2 sidebar without
+changing either saved sidebar preference. With LastCode off, it switches between
+the upstream inbox and legacy sidebars using the preference in **Settings → General →
+Legacy features → Sidebar (legacy)**. The tree button uses the same behavior.
+
 ## Reserved shortcuts
 
 In the desktop app, `mod+w` closes the focused terminal or the active right-panel
