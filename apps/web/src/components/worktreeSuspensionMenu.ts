@@ -88,7 +88,7 @@ export function buildWorktreeSuspensionMenuItems(input: {
     items.push({
       id: summary?.keepWorkspace ? "workspace-release" : "workspace-keep",
       label: summary?.keepWorkspace ? "Release Keep workspace…" : "Keep workspace",
-      disabled: busy || !input.canKeep,
+      disabled: busy || summary?.state === "suspended" || !input.canKeep,
     });
   }
   return items;

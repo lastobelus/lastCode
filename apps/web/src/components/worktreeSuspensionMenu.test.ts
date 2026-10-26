@@ -35,6 +35,12 @@ it("offers restore for current suspended authority and fresh creation for delibe
   const suspended = menu({ summary: { ...summary, state: "suspended", snapshotId: "copy" } });
   expect(suspended.map((item) => item.id)).toContain("workspace-restore");
   expect(suspended.map((item) => item.id)).not.toContain("workspace-suspend");
+  expect(suspended.find((item) => item.id === "workspace-restore")?.disabled).toBe(false);
+  expect(suspended.find((item) => item.id === "workspace-keep")?.disabled).toBe(true);
+  const heldSuspended = menu({
+    summary: { ...summary, state: "suspended", snapshotId: "copy", keepWorkspace: true },
+  });
+  expect(heldSuspended.find((item) => item.id === "workspace-release")?.disabled).toBe(true);
   const discarded = menu({ summary: { ...summary, state: "discarded" }, canCreateFresh: false });
   expect(discarded.find((item) => item.id === "workspace-create-fresh")?.disabled).toBe(true);
   expect(discarded.map((item) => item.id)).not.toContain("workspace-restore");
