@@ -21,7 +21,7 @@ import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import { prepareHostedPreview, type PreparedHostedPreview } from "../previewHosting.ts";
 import type { RpcSession } from "../rpc/session.ts";
 import { executeAtomQuery, squashAtomCommandFailure } from "./runtime.ts";
-import { createEnvironmentSessionAtoms } from "./session.ts";
+import { createEnvironmentBootstrapQuery } from "./bootstrap.ts";
 
 const target = new PrimaryConnectionTarget({
   environmentId: EnvironmentId.make("bootstrap-environment"),
@@ -38,7 +38,7 @@ const prepared: PreparedConnection = {
   target,
 };
 
-const makeHarness = Effect.fn("SessionTest.makeHarness")(function* () {
+const makeHarness = Effect.fn("BootstrapTest.makeHarness")(function* () {
   const config = yield* Deferred.make<ServerConfig, ConnectionTransientError>();
   const configRead = yield* Deferred.make<void>();
   const session: RpcSession = {
@@ -83,7 +83,7 @@ const makeHarness = Effect.fn("SessionTest.makeHarness")(function* () {
   const registry = yield* Effect.acquireRelease(Effect.sync(AtomRegistry.make), (value) =>
     Effect.sync(() => value.dispose()),
   );
-  const atoms = createEnvironmentSessionAtoms(runtime);
+  const bootstrap = createEnvironmentBootstrapQuery(runtime);
   const renew = vi.fn(async (_url: string, _refresh: boolean) => "/api/assets/renewed/report.html");
   const opened = vi.fn<(value: PreparedHostedPreview) => void>();
   const list = vi.fn(async () => []);
@@ -98,7 +98,7 @@ const makeHarness = Effect.fn("SessionTest.makeHarness")(function* () {
       renewDocumentUrl: async (url, refresh) => {
         const result = await executeAtomQuery(
           registry,
-          atoms.bootstrap({
+          bootstrap({
             environmentId: target.environmentId,
             input: undefined,
           }),
@@ -115,7 +115,7 @@ const makeHarness = Effect.fn("SessionTest.makeHarness")(function* () {
     configRead,
     session,
     supervisor,
-    atoms,
+    bootstrap,
     registry,
     renew,
     opened,
@@ -125,7 +125,7 @@ const makeHarness = Effect.fn("SessionTest.makeHarness")(function* () {
   };
 });
 
-const completeStartup = Effect.fn("SessionTest.completeStartup")(function* (supported: boolean) {
+const completeStartup = Effect.fn("BootstrapTest.completeStartup")(function* (supported: boolean) {
   const harness = yield* makeHarness();
   const pending = yield* Effect.promise(harness.start).pipe(Effect.forkChild);
   yield* Deferred.await(harness.configRead);

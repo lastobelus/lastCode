@@ -45,7 +45,7 @@ vi.mock("~/state/server", () => ({
   serverEnvironment: { configValueAtom: (environmentId: string) => environmentId },
 }));
 vi.mock("~/state/session", () => ({
-  environmentSession: { bootstrap: () => mocks.bootstrap },
+  environmentBootstrap: () => mocks.bootstrap,
   readPreparedConnection: mocks.connection,
   readConfiguredPreviewEnvironmentUrl: () => {
     const connection = mocks.connection();

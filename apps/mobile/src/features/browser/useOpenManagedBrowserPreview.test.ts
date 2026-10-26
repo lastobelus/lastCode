@@ -16,7 +16,7 @@ vi.mock("../../state/preview", () => ({ previewEnvironment: {} }));
 vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: () => vi.fn() }));
 vi.mock("../../state/assets", () => ({ assetEnvironment: { createUrl: mocks.assetFamily } }));
 vi.mock("../../state/session", () => ({
-  environmentSession: { bootstrap: mocks.bootstrapFamily },
+  environmentBootstrap: mocks.bootstrapFamily,
 }));
 vi.mock("../../state/use-atom-query-runner", () => ({
   useAtomQueryRunner: (family: unknown) =>

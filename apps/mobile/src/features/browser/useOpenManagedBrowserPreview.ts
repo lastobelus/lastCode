@@ -7,11 +7,11 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { assetEnvironment } from "../../state/assets";
 import { useAtomQueryRunner } from "../../state/use-atom-query-runner";
 import { useEnvironmentServerConfig } from "../../state/entities";
-import { environmentSession } from "../../state/session";
+import { environmentBootstrap } from "../../state/session";
 
 function useSupportsPreviewAssetRecovery(threadRef: ScopedThreadRef | null) {
   const config = useEnvironmentServerConfig(threadRef?.environmentId ?? null);
-  const bootstrap = useAtomQueryRunner(environmentSession.bootstrap, {
+  const bootstrap = useAtomQueryRunner(environmentBootstrap, {
     reportFailure: false,
     refresh: true,
   });

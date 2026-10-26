@@ -13,7 +13,7 @@ import { isPrivateNetworkHost } from "@t3tools/shared/hostClassification";
 
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import {
-  environmentSession,
+  environmentBootstrap,
   readPreparedConnection,
   readConfiguredPreviewEnvironmentUrl,
 } from "~/state/session";
@@ -72,7 +72,7 @@ export async function prepareHostedPreview(
     }
     const result = await executeAtomQuery(
       appAtomRegistry,
-      environmentSession.bootstrap({ environmentId: threadRef.environmentId, input: undefined }),
+      environmentBootstrap({ environmentId: threadRef.environmentId, input: undefined }),
       { reportFailure: false, refresh: true },
     );
     if (result._tag === "Failure")
