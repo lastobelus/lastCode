@@ -218,6 +218,10 @@ can release their hold and discard them there.
 Saved workspaces have no automatic expiry. They are local recovery, not a backup: restoration
 depends on both this environment's saved data and the repository's Git data.
 
+On Linux, suspension needs `getfattr`, `getfacl`, and `lsattr` to check file metadata before
+removing a checkout. Install your distribution's `attr`, `acl`, and `e2fsprogs` packages if
+these commands are missing. The checkout is kept when its metadata cannot be verified.
+
 ### Permanent deletion and generated files
 
 Select a project to set **Automatic worktree cleanup** to **Inherit**, **Off**, or **Custom**.

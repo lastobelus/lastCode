@@ -27,6 +27,7 @@ const state = vi.hoisted(() => ({
     projectId: ProjectId;
     title: string;
     worktreePath: string | null;
+    source: ReturnType<typeof makeThreadFixture>["source"];
     runtime: { status: "idle" } | null;
     latestRun: null;
   }[],
@@ -38,10 +39,20 @@ const state = vi.hoisted(() => ({
   sessionLookupFails: false,
 }));
 
-vi.mock("react", () => ({
+vi.mock("react", async (original) => ({
+  ...(await original<typeof import("react")>()),
   useCallback: (callback: unknown) => callback,
   useMemo: (factory: () => unknown) => factory(),
   useRef: (current: unknown) => ({ current }),
+}));
+vi.mock("./useWorkspaceLifecycleConfirmation", async (original) => ({
+  ...(await original<typeof import("./useWorkspaceLifecycleConfirmation")>()),
+  useWorkspaceLifecycleConfirmation: () => ({
+    supported: () => false,
+    confirm: () => {
+      throw new Error("These permission fixtures do not support saved workspaces.");
+    },
+  }),
 }));
 vi.mock("../components/ThreadArchiveDialog", () => ({
   requestThreadArchiveDialog: () => {
@@ -263,6 +274,7 @@ beforeEach(() => {
       projectId: ProjectId.make("project"),
       title: "Thread",
       worktreePath: null,
+      source: makeThreadFixture().source,
       runtime: null,
       latestRun: null,
     },

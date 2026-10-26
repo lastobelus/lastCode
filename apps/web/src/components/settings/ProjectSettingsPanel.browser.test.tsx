@@ -102,6 +102,11 @@ vi.mock(import("~/localApi"), async (original) => ({
   ...(await original()),
   readLocalApi: (() => ({ dialogs: { confirm: state.confirm } })) as never,
 }));
+vi.mock(import("../WorkspaceLifecycleDialog"), async (original) => ({
+  ...(await original()),
+  requestWorkspaceLifecycleDialog: async () =>
+    (await state.confirm()) ? { discard: false } : null,
+}));
 vi.mock(import("~/lib/composerDraftUploads"), async (original) => ({
   ...(await original()),
   releaseProjectDraftUploads: state.releaseUploads,
@@ -388,7 +393,11 @@ describe("project settings permissions", () => {
     await vi.waitFor(() => expect(state.delete).toHaveBeenCalledOnce());
     expect(state.delete).toHaveBeenCalledWith({
       environmentId: primaryId,
-      input: { projectId: state.projects[0]!.id, force: true },
+      input: {
+        projectId: state.projects[0]!.id,
+        force: true,
+        savedWorkspace: { mode: "retain" },
+      },
     });
     await vi.waitFor(() => expect(state.releaseUploads).toHaveBeenCalledOnce());
     expect(state.clearDraft).toHaveBeenCalledOnce();
