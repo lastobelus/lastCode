@@ -295,6 +295,7 @@ export const make = Effect.gen(function* () {
   const identify = Effect.fn("WorktreeSuspension.identify")(function* (
     threadId: ThreadId,
     catalog?: readonly CheckoutAuthority[],
+    purpose: "capture" | "activity" = "capture",
   ) {
     const thread = yield* projections.getThreadShell(threadId);
     if (thread === null || thread.deletedAt !== null || thread.worktreePath === null)
@@ -336,7 +337,9 @@ export const make = Effect.gen(function* () {
         return yield* failure("protected", "A registered project uses this workspace.");
     }
     const checkoutId = yield* crypto.randomUUIDv4();
-    const inspected = yield* native(() => store.inspectSource(actual));
+    const inspected = yield* native(() =>
+      purpose === "activity" ? store.inspectActiveSource(actual) : store.inspectSource(actual),
+    );
     const record: CheckoutAuthority = {
       checkoutId,
       repositoryRoot,
@@ -760,7 +763,7 @@ export const make = Effect.gen(function* () {
           )
             return yield* failure("changed", "The rebound project belongs to another repository.");
         if (Option.isSome(info)) {
-          const inspected = yield* native(() => store.inspectSource(destination));
+          const inspected = yield* native(() => store.inspectActiveSource(destination));
           if (
             record.nativeIdentity !== undefined &&
             (inspected.commonDirectory !== record.nativeIdentity.commonDirectory ||
@@ -2628,7 +2631,7 @@ export const make = Effect.gen(function* () {
                 (yield* fs.exists(binding.worktreePath)) &&
                 (yield* isManaged(binding.worktreePath))
               ) {
-                record = yield* identify(thread.id);
+                record = yield* identify(thread.id, undefined, "activity");
                 break;
               }
             }

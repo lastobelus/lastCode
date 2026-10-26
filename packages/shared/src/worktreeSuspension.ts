@@ -878,7 +878,7 @@ const inspectPrivateGitDirectory = async (gitDirectory: string) => {
   }
 };
 
-const gitIdentity = async (source: string) => {
+const gitIdentity = async (source: string, purpose: "capture" | "activity" = "capture") => {
   await noLinkedAncestors(source);
   const dotGit = await NodeFSP.lstat(NodePath.join(source, ".git"));
   if (!dotGit.isFile() || dotGit.nlink !== 1) refuse("only linked Git worktrees are supported");
@@ -894,41 +894,49 @@ const gitIdentity = async (source: string) => {
   await noLinkedAncestors(gitDirectory);
   await noLinkedAncestors(commonDirectory);
   await noLinkedAncestors(NodePath.join(commonDirectory, "objects"));
-  if (await exists(NodePath.join(commonDirectory, "objects", "info", "alternates")))
-    refuse("alternate Git object stores are unsupported");
-  if ((await gitText(source, ["rev-parse", "--show-ref-format"])) !== "files")
-    refuse("this Git ref storage format is unsupported");
-  if ((await gitText(source, ["rev-parse", "--is-shallow-repository"])) !== "false")
-    refuse("shallow Git repositories are unsupported");
-  const configuration = (await git(source, ["config", "--null", "--list"]))
-    .toString("utf8")
-    .split("\0");
-  if (
-    configuration.some(
-      (entry) =>
-        /^(extensions\.partialclone|remote\..*\.promisor)\n/u.test(entry) &&
-        !entry.endsWith("\nfalse"),
-    )
-  )
-    refuse("partial Git repositories are unsupported");
-  await inspectPrivateGitDirectory(gitDirectory);
+  for (const name of ["HEAD", "gitdir", "commondir"]) {
+    const stat = await NodeFSP.lstat(NodePath.join(gitDirectory, name));
+    if (!stat.isFile() || stat.nlink !== 1)
+      refuse("the worktree private Git metadata is redirected");
+  }
   const registration = await NodeFSP.readFile(NodePath.join(gitDirectory, "gitdir"), "utf8");
   if (registration.trim() !== NodePath.join(source, ".git"))
     refuse("the Git worktree registration does not match");
-  for (const marker of [
-    "locked",
-    "MERGE_HEAD",
-    "CHERRY_PICK_HEAD",
-    "REVERT_HEAD",
-    "rebase-merge",
-    "rebase-apply",
-    "sequencer",
-    "BISECT_LOG",
-    "index.lock",
-    "config.worktree",
-  ]) {
-    if (await exists(NodePath.join(gitDirectory, marker)))
-      refuse("the worktree has locked, in-progress, or unsupported Git state");
+  // Ordinary workspace use needs identity and a usage clock, even during an uncapturable Git operation.
+  if (purpose === "capture") {
+    if (await exists(NodePath.join(commonDirectory, "objects", "info", "alternates")))
+      refuse("alternate Git object stores are unsupported");
+    if ((await gitText(source, ["rev-parse", "--show-ref-format"])) !== "files")
+      refuse("this Git ref storage format is unsupported");
+    if ((await gitText(source, ["rev-parse", "--is-shallow-repository"])) !== "false")
+      refuse("shallow Git repositories are unsupported");
+    const configuration = (await git(source, ["config", "--null", "--list"]))
+      .toString("utf8")
+      .split("\0");
+    if (
+      configuration.some(
+        (entry) =>
+          /^(extensions\.partialclone|remote\..*\.promisor)\n/u.test(entry) &&
+          !entry.endsWith("\nfalse"),
+      )
+    )
+      refuse("partial Git repositories are unsupported");
+    await inspectPrivateGitDirectory(gitDirectory);
+    for (const marker of [
+      "locked",
+      "MERGE_HEAD",
+      "CHERRY_PICK_HEAD",
+      "REVERT_HEAD",
+      "rebase-merge",
+      "rebase-apply",
+      "sequencer",
+      "BISECT_LOG",
+      "index.lock",
+      "config.worktree",
+    ]) {
+      if (await exists(NodePath.join(gitDirectory, marker)))
+        refuse("the worktree has locked, in-progress, or unsupported Git state");
+    }
   }
   const head = await gitText(source, ["rev-parse", "--verify", "HEAD^{commit}"]);
   const symbolic = await NodeFSP.readFile(NodePath.join(gitDirectory, "HEAD"), "utf8");
@@ -2892,16 +2900,17 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     await atomicJson(filename, journal);
     return { path: destination, branch, head: input.head };
   };
-  const inspectSource = async (sourcePath: string) => {
+  const inspectSource = async (sourcePath: string, purpose: "capture" | "activity" = "capture") => {
     const source = NodePath.resolve(sourcePath);
     return {
-      ...(await gitIdentity(source)),
+      ...(await gitIdentity(source, purpose)),
       sourceIdentity: identity(await NodeFSP.lstat(source)),
     };
   };
   return {
     capture,
     inspectSource,
+    inspectActiveSource: (sourcePath: string) => inspectSource(sourcePath, "activity"),
     createFresh,
     read,
     readJournal,

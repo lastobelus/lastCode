@@ -1799,6 +1799,39 @@ it.live("installs fail-closed acquisition when the private catalog is unreadable
   ),
 );
 
+it.live.each(["active", "suspended"] as const)(
+  "blocks ordinary acquisition when a published %s checkout loses its recovery catalog",
+  (state) =>
+    realGit((f) =>
+      Effect.gen(function* () {
+        const h = yield* harness(f, { settings: automaticSettings });
+        const saved = yield* h.suspend;
+        if (state === "active")
+          yield* h.acquisition.acquire({ path: f.workspace, purpose: "file-write" });
+        expect((yield* h.registry.list)[0]!.summary.state).toBe(state);
+        yield* Effect.promise(() =>
+          NodeFSP.unlink(NodePath.join(h.registry.root, "authority.json")),
+        );
+        for (const purpose of ["terminal", "editor", "file-write"] as const) {
+          const refused = yield* h.acquisition
+            .acquire({ path: f.workspace, purpose, threadId: firstId })
+            .pipe(Effect.flip);
+          expect(refused.reason).toBe("snapshot-unavailable");
+        }
+        yield* Effect.promise(async () => {
+          expect((await h.store.readJournal(saved.summary.snapshotId!)).phase).toBe(
+            state === "active" ? "active" : "suspended",
+          );
+          if (state === "active")
+            expect(await NodeFSP.readFile(NodePath.join(f.workspace, "tracked"), "utf8")).toBe(
+              "working\n",
+            );
+          else await expect(NodeFSP.lstat(f.workspace)).rejects.toMatchObject({ code: "ENOENT" });
+        });
+      }),
+    ),
+);
+
 it.live(
   "retains uncertain deletion consent and cancels it only after an exact rejected receipt",
   () =>
@@ -1973,6 +2006,95 @@ it.live("editor acquisition records positive use before automatic suspension", (
       expect((yield* h.registry.list)[0]!.summary.state).toBe("active");
     }),
   ),
+);
+
+it.live.each(
+  (["shallow", "merge", "rebase"] as const).flatMap((state) =>
+    [false, true].map((registered) => ({ state, registered })),
+  ),
+)(
+  "records ordinary workspace use during $state without allowing capture (registered: $registered)",
+  ({ state, registered }) =>
+    realGit((f) =>
+      Effect.gen(function* () {
+        const h = yield* harness(f, { cleanupThreads: true, settings: automaticSettings });
+        untouchedOwners(h.threads);
+        if (registered) yield* h.service.previewSuspend({ threadId: firstId });
+        const original = yield* Effect.promise(async () => {
+          const gitDirectory = await git(f.workspace, "rev-parse", "--absolute-git-dir");
+          const head = await git(f.workspace, "rev-parse", "HEAD");
+          const marker =
+            state === "shallow"
+              ? NodePath.join(f.repository, ".git", "shallow")
+              : NodePath.join(gitDirectory, state === "merge" ? "MERGE_HEAD" : "rebase-merge");
+          if (state === "rebase") {
+            await NodeFSP.mkdir(marker);
+            for (const [name, value] of Object.entries({
+              "head-name": "refs/heads/topic",
+              "orig-head": head,
+              onto: head,
+              msgnum: "1",
+              end: "1",
+            }))
+              await NodeFSP.writeFile(NodePath.join(marker, name), `${value}\n`);
+          } else await NodeFSP.writeFile(marker, `${head}\n`);
+          if (state === "shallow")
+            expect(await git(f.workspace, "rev-parse", "--is-shallow-repository")).toBe("true");
+          else
+            expect(await git(f.workspace, "status")).toContain(
+              state === "merge" ? "still merging" : "currently rebasing",
+            );
+          return {
+            marker,
+            indexPath: NodePath.join(gitDirectory, "index"),
+            index: await NodeFSP.readFile(NodePath.join(gitDirectory, "index")),
+            tracked: await NodeFSP.readFile(NodePath.join(f.workspace, "tracked")),
+            ignored: await NodeFSP.readFile(NodePath.join(f.workspace, "notes", "private")),
+          };
+        });
+        for (const purpose of ["terminal", "editor", "file-write"] as const) {
+          const before = yield* DateTime.now.pipe(Effect.map(DateTime.formatIso));
+          expect(
+            yield* h.acquisition.acquire({ path: f.workspace, purpose, threadId: firstId }),
+          ).toEqual({ path: f.workspace, branch: "topic", restored: false });
+          const records = yield* h.registry.list;
+          expect(records).toHaveLength(1);
+          const record = records[0]!;
+          expect(record.lastWorkspaceUseAt).toBeDefined();
+          expect(record.lastWorkspaceUseAt! >= before).toBe(true);
+          expect(record.summary.state).toBe("active");
+          expect(record.summary.snapshotId).toBeNull();
+          expect(record.history).toEqual([]);
+          expect(record.operation).toBeUndefined();
+          expect(record.pendingProjection).toBeUndefined();
+          expect(record.blockedReason).toBeNull();
+        }
+        const refused = yield* h.service.previewSuspend({ threadId: firstId }).pipe(Effect.flip);
+        expect(refused.reason).toBe("protected");
+        expect(refused.message).toContain("unsupported");
+        yield* Effect.promise(async () => {
+          expect(await NodeFSP.readFile(original.indexPath)).toEqual(original.index);
+          expect(await NodeFSP.readFile(NodePath.join(f.workspace, "tracked"))).toEqual(
+            original.tracked,
+          );
+          expect(await NodeFSP.readFile(NodePath.join(f.workspace, "notes", "private"))).toEqual(
+            original.ignored,
+          );
+          expect(await NodeFSP.stat(original.marker)).toBeDefined();
+          await NodeFSP.rm(original.marker, { recursive: state === "rebase" });
+        });
+        expect((yield* h.service.previewSuspend({ threadId: firstId })).token).toBeTruthy();
+        const used = (yield* h.registry.list)[0]!;
+        const requests = h.gitRequests.length;
+        yield* h.service.sweep;
+        const retained = (yield* h.registry.list)[0]!;
+        expect(retained.lastWorkspaceUseAt).toBe(used.lastWorkspaceUseAt);
+        expect(retained.summary.state).toBe("active");
+        expect(retained.operation).toBeUndefined();
+        expect(retained.history).toEqual([]);
+        expect(h.gitRequests).toHaveLength(requests);
+      }),
+    ),
 );
 
 it.live("finishes separate recovery when its published thread is deleted before finalization", () =>
