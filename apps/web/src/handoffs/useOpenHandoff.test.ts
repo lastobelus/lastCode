@@ -59,7 +59,9 @@ vi.mock("~/browser/browserDefaults", () => ({
 
 const native = vi.hoisted(() => ({
   bridge: null as null | { navigate: ReturnType<typeof vi.fn> },
+  ensure: vi.fn<(tabId: string) => Promise<void>>(),
 }));
+vi.mock("~/browser/desktopBrowserDemand", () => ({ ensureDesktopBrowserTab: native.ensure }));
 vi.mock("~/components/preview/previewBridge", () => ({
   get previewBridge() {
     return native.bridge;
@@ -114,6 +116,7 @@ beforeEach(() => {
   filesystem.readScope.mockReset().mockReturnValue(true);
   vi.mocked(toastManager.add).mockClear();
   native.bridge = null;
+  native.ensure.mockReset().mockResolvedValue(undefined);
   refresh.request.mockClear();
   hosting.prepare.mockReset();
   hosting.prepare.mockImplementation(async (_ref, url) => ({
@@ -425,6 +428,70 @@ describe("opening a saved handoff", () => {
     expect(ops.navigatePreview).not.toHaveBeenCalled();
     expect(native.bridge.navigate).not.toHaveBeenCalled();
     expect(panel().activeSurfaceId).toBe("browser:tab");
+  });
+  it.each(["url", "file"] as const)(
+    "restores an unloaded native %s handoff before navigating the retained tab",
+    async (kind) => {
+      const ops = operations();
+      const url = "http://workstation.example:8123/account";
+      let finishRestore!: () => void;
+      const restored = new Promise<void>((resolve) => (finishRestore = resolve));
+      let restorationAttempted!: () => void;
+      const attempted = new Promise<void>((resolve) => (restorationAttempted = resolve));
+      native.ensure.mockImplementationOnce(() => {
+        restorationAttempted();
+        return restored;
+      });
+      native.bridge = { navigate: vi.fn(async () => restorationAttempted()) };
+      hosting.prepare.mockResolvedValue({ url, managed: true, restored: true, restarted: true });
+      const entry = recordHandoff(
+        ref,
+        kind === "url" ? { kind: "url", url } : { kind: "file", path: "/workspace/report.html" },
+      );
+      const retained: PreviewSessionSnapshot = {
+        ...snapshot(url),
+        profileId: "work-account",
+        runtime: "server",
+        backingPage: "desktop",
+        desktopHostId: "local",
+      };
+      applyPreviewServerSnapshot(ref, retained);
+      rememberHandoffBrowser(ref, "tab", entry.target, url);
+      const opening = openHandoff(ref, entry, ops);
+      await attempted;
+      expect(native.bridge.navigate).not.toHaveBeenCalled();
+      expect(panel().surfaces).toEqual([]);
+      finishRestore();
+      await opening;
+      const destination = kind === "url" ? url : "https://environment.example/api/assets/fresh";
+      expect(native.bridge.navigate).toHaveBeenCalledExactlyOnceWith(
+        JSON.stringify([ref.environmentId, ref.threadId, null, "tab"]),
+        destination,
+      );
+      expect(readThreadPreviewState(ref).sessions.tab?.profileId).toBe("work-account");
+      expect(ops.openPreview).not.toHaveBeenCalled();
+      expect(ops.navigatePreview).not.toHaveBeenCalled();
+      expect(panel().activeSurfaceId).toBe("browser:tab");
+      expect(toastManager.add).not.toHaveBeenCalled();
+    },
+  );
+  it("keeps a failed native restoration available for retry without navigating or selecting it", async () => {
+    const ops = operations();
+    const url = "http://localhost:8123/account";
+    native.bridge = { navigate: vi.fn(async () => undefined) };
+    native.ensure.mockRejectedValueOnce(new Error("Restoration failed"));
+    hosting.prepare.mockResolvedValue({ url, managed: true, restored: true, restarted: true });
+    const entry = recordHandoff(ref, { kind: "url", url });
+    const retained: PreviewSessionSnapshot = { ...snapshot(url), profileId: "work-account" };
+    applyPreviewServerSnapshot(ref, retained);
+    await openHandoff(ref, entry, ops);
+    expect(native.bridge.navigate).not.toHaveBeenCalled();
+    expect(panel().surfaces).toEqual([]);
+    expect(readThreadPreviewState(ref).sessions.tab).toEqual(retained);
+    expect(readThreadHandoffs(ref)[0]?.sequence).toBe(entry.sequence);
+    expect(toastManager.add).toHaveBeenCalledWith(
+      expect.objectContaining({ description: "Restoration failed" }),
+    );
   });
   it("reopens a healthy managed server form without navigating or creating another tab", async () => {
     const ops = operations();

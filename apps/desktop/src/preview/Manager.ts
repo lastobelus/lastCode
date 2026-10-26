@@ -1914,6 +1914,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         audioMuted: current?.audioMuted ?? false,
         audible: current?.audible ?? false,
         controller: current?.controller ?? "none",
+        ...(current?.serverTab === undefined ? {} : { serverTab: current.serverTab }),
         ...(current?.favicon ? { favicon: current.favicon } : {}),
         updatedAt,
       };

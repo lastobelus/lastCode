@@ -18,6 +18,7 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 
 import { previewRuntimeTabId } from "~/browser/previewRuntimeTabId";
+import { ensureDesktopBrowserTab } from "~/browser/desktopBrowserDemand";
 import { rendersServerTabNatively } from "~/browser/previewRuntime";
 import { preparedPreviewOpenTarget } from "~/browser/preparedPreviewOpenTarget";
 import { requestHostedPreviewRefresh } from "~/browser/hostedPreviewRefresh";
@@ -126,11 +127,10 @@ async function navigateHandoffBrowser(
     // intent until that viewer can send it, and mint navigation access there.
     requestHostedPreviewRefresh(ref, tabId, serverUrl);
   } else if (native && previewBridge) {
+    const runtimeTabId = previewRuntimeTabId(ref, readThreadPreviewState(ref).serverEpoch, tabId);
+    await ensureDesktopBrowserTab(runtimeTabId);
     // Native navigation mirrors its resulting URL back to the server.
-    await previewBridge.navigate(
-      previewRuntimeTabId(ref, readThreadPreviewState(ref).serverEpoch, tabId),
-      url,
-    );
+    await previewBridge.navigate(runtimeTabId, url);
   } else {
     const result = await navigatePreview({
       environmentId: ref.environmentId,
