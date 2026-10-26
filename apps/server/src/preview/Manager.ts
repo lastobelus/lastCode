@@ -5,6 +5,7 @@ import {
   type PreviewError,
   PreviewInvalidUrlError,
   PreviewNativeCloseError,
+  PreviewNativeCreateError,
   PreviewProfileHostError,
   isBuiltInBrowserProfileId,
   type PreviewListInput,
@@ -61,16 +62,19 @@ export class PreviewManager extends Context.Service<
           readonly close?: () => Effect.Effect<void, PreviewError>;
         };
         /** Creates an independent native page before any subscriber sees the tab. */
-        readonly createDesktopRoot?: (snapshot: PreviewSessionSnapshot) => Effect.Effect<
-          {
-            readonly rootId: string;
-            readonly close: () => Effect.Effect<void, PreviewError>;
-            readonly publish: () => Effect.Effect<void, PreviewError>;
-          },
-          PreviewError
-        >;
+        readonly createDesktopRoot?: (
+          snapshot: PreviewSessionSnapshot,
+        ) => Effect.Effect<NativeRoot, PreviewError>;
         /** Runs before the `opened` event publishes, so subscribers find state keyed by the tab. */
         readonly beforePublish?: (snapshot: PreviewSessionSnapshot) => void;
+      },
+    ) => Effect.Effect<PreviewSessionSnapshot, PreviewError>;
+    readonly restoreDesktopRoot: (
+      input: PreviewCloseInput & {
+        readonly tabId: string;
+        readonly create: (
+          snapshot: PreviewSessionSnapshot,
+        ) => Effect.Effect<NativeRoot, PreviewError>;
       },
     ) => Effect.Effect<PreviewSessionSnapshot, PreviewError>;
     readonly navigate: (
@@ -105,6 +109,12 @@ export class PreviewManager extends Context.Service<
     readonly subscribeEvents: Effect.Effect<PubSub.Subscription<PreviewEvent>, never, Scope.Scope>;
   }
 >()("t3/preview/Manager/PreviewManager") {}
+
+interface NativeRoot {
+  readonly rootId: string;
+  readonly close: () => Effect.Effect<void, PreviewError>;
+  readonly publish: () => Effect.Effect<void, PreviewError>;
+}
 
 interface PreviewSessionState {
   readonly threadId: string;
@@ -145,9 +155,7 @@ function dormantSnapshot(snapshot: PreviewSessionSnapshot): PreviewSessionSnapsh
           },
     canGoBack: false,
     canGoForward: false,
-    ...(snapshot.backingPage === "desktop-root" || snapshot.backingPage === "desktop-popup"
-      ? { backingPage: "desktop" as const }
-      : {}),
+    ...(snapshot.backingPage === "desktop-popup" ? { backingPage: "desktop" as const } : {}),
   };
 }
 
@@ -479,6 +487,65 @@ export const make = Effect.gen(function* PreviewManagerMake() {
     },
   );
 
+  const restoreDesktopRoot: PreviewManager["Service"]["restoreDesktopRoot"] = Effect.fn(
+    "PreviewManager.restoreDesktopRoot",
+  )(function* (input) {
+    const key = compositeKey(input.threadId, input.tabId);
+    const state = yield* SynchronizedRef.get(stateRef);
+    const original = state.sessions.get(key);
+    if (!original)
+      return yield* new PreviewSessionLookupError({ threadId: input.threadId, tabId: input.tabId });
+    if (
+      original.snapshot.backingPage !== "desktop-root" ||
+      original.snapshot.desktopRootId !== undefined
+    )
+      return yield* new PreviewNativeCreateError({
+        tabId: input.tabId,
+        cause: "The native browser root is already bound.",
+      });
+    const root = yield* input.create(original.snapshot);
+    let committed = false;
+    return yield* SynchronizedRef.modifyEffect(stateRef, (current) =>
+      Effect.gen(function* () {
+        const session = current.sessions.get(key);
+        if (!session)
+          return yield* new PreviewSessionLookupError({
+            threadId: input.threadId,
+            tabId: input.tabId,
+          });
+        if (
+          session.snapshot.backingPage !== "desktop-root" ||
+          session.snapshot.desktopRootId !== undefined
+        )
+          return yield* new PreviewNativeCreateError({
+            tabId: input.tabId,
+            cause: "The native browser root is already bound.",
+          });
+        // Native IDs are ephemeral; the persisted dormant destination is unchanged.
+        const snapshot = { ...session.snapshot, desktopRootId: root.rootId };
+        const sessions = new Map(current.sessions);
+        sessions.set(key, { ...session, snapshot });
+        yield* root.publish();
+        nativeCloseGuards.set(key, root.close);
+        committed = true;
+        const revision = current.revision + 1;
+        yield* PubSub.publish(eventsPubSub, {
+          type: "navigated",
+          threadId: input.threadId,
+          tabId: input.tabId,
+          createdAt: snapshot.updatedAt,
+          serverEpoch,
+          revision,
+          snapshot,
+        });
+        return [snapshot, { sessions, revision }] as const;
+      }),
+    ).pipe(
+      Effect.uninterruptible,
+      Effect.onError(() => (committed ? Effect.void : root.close().pipe(Effect.ignore))),
+    );
+  });
+
   const navigate: PreviewManager["Service"]["navigate"] = Effect.fn("PreviewManager.navigate")(
     function* (input) {
       const url = yield* normalizeUrl(input.url);
@@ -716,13 +783,19 @@ export const make = Effect.gen(function* PreviewManagerMake() {
 
   const commitClosed = Effect.fn("PreviewManager.commitClosed")(function* (
     targetKeys: ReadonlySet<string>,
+    withoutNative = false,
   ) {
     const createdAt = yield* currentIsoTimestamp;
     yield* SynchronizedRef.modifyEffect(stateRef, (state) => {
       const eventsToEmit: PreviewEvent[] = [];
       const sessions = new Map(state.sessions);
-      const targets = [...state.sessions.values()].filter((session) =>
-        targetKeys.has(compositeKey(session.threadId, session.tabId)),
+      const targets = [...state.sessions.values()].filter(
+        (session) =>
+          targetKeys.has(compositeKey(session.threadId, session.tabId)) &&
+          (!withoutNative ||
+            (session.snapshot.backingPage !== "desktop-popup" &&
+              (session.snapshot.backingPage !== "desktop-root" ||
+                session.snapshot.desktopRootId === undefined))),
       );
       let revision = state.revision;
       for (const target of targets) {
@@ -749,7 +822,10 @@ export const make = Effect.gen(function* PreviewManagerMake() {
         Effect.as([undefined, { sessions, revision }] as const),
       );
     });
-    for (const key of targetKeys) nativeCloseGuards.delete(key);
+    const current = yield* SynchronizedRef.get(stateRef);
+    for (const key of targetKeys) {
+      if (!current.sessions.has(key)) nativeCloseGuards.delete(key);
+    }
   });
 
   const close: PreviewManager["Service"]["close"] = Effect.fn("PreviewManager.close")(
@@ -759,28 +835,17 @@ export const make = Effect.gen(function* PreviewManagerMake() {
         (session) => input.tabId === undefined || session.tabId === input.tabId,
       );
       yield* commitClosed(
-        new Set(
-          targets
-            .filter(
-              (target) =>
-                target.snapshot.backingPage !== "desktop-popup" &&
-                target.snapshot.backingPage !== "desktop-root",
-            )
-            .map((target) => compositeKey(target.threadId, target.tabId)),
-        ),
+        new Set(targets.map((target) => compositeKey(target.threadId, target.tabId))),
+        true,
       );
       let firstFailure: PreviewError | undefined;
       // Native acknowledgment can re-enter the manager. Never await it under the state lock.
       for (const target of targets) {
-        if (
-          target.snapshot.backingPage !== "desktop-popup" &&
-          target.snapshot.backingPage !== "desktop-root"
-        )
-          continue;
-        const guard = nativeCloseGuards.get(compositeKey(target.threadId, target.tabId));
+        const key = compositeKey(target.threadId, target.tabId);
+        const current = yield* SynchronizedRef.get(stateRef);
+        if (!current.sessions.has(key)) continue;
+        const guard = nativeCloseGuards.get(key);
         if (!guard) {
-          const current = yield* SynchronizedRef.get(stateRef);
-          if (!current.sessions.has(compositeKey(target.threadId, target.tabId))) continue;
           firstFailure ??= new PreviewNativeCloseError({
             tabId: target.tabId,
             reason: "unavailable",
@@ -877,6 +942,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
 
   return PreviewManager.of({
     open,
+    restoreDesktopRoot,
     requestReveal,
     navigate,
     reportStatus,

@@ -1074,7 +1074,10 @@ const make = Effect.gen(function* () {
     }
   };
 
-  const createTab = async (snapshot: PreviewSessionSnapshot): Promise<ServerTab> => {
+  const createTab = async (
+    snapshot: PreviewSessionSnapshot,
+    restoreNavigation = false,
+  ): Promise<ServerTab> => {
     const adopted = adoptedPages.get(tabKey(snapshot.threadId, snapshot.tabId));
     adoptedPages.delete(tabKey(snapshot.threadId, snapshot.tabId));
     const nativePopup = nativePopupForTab(snapshot.threadId, snapshot.tabId);
@@ -1083,9 +1086,12 @@ const make = Effect.gen(function* () {
       adopted?.hostedOrigins ??
       nativePopup?.hostedOrigins ??
       new Map<string, string>();
+    const nativeRoot =
+      snapshot.backingPage === "desktop-root"
+        ? nativeRoots.get(tabKey(snapshot.threadId, snapshot.tabId))
+        : undefined;
     if (snapshot.backingPage === "desktop-root") {
-      const root = nativeRoots.get(tabKey(snapshot.threadId, snapshot.tabId));
-      if (!root || root.closed || root.rootId !== snapshot.desktopRootId)
+      if (!nativeRoot || nativeRoot.closed || nativeRoot.rootId !== snapshot.desktopRootId)
         throw new Error("The native browser root is unavailable.");
     }
     if (snapshot.backingPage === "desktop-popup") {
@@ -1306,7 +1312,12 @@ const make = Effect.gen(function* () {
     if (!desktop) page.on("popup", (popup) => void adoptPopup(tab, popup));
     // Discard failed rendering while keeping the destination available for a cold return.
     const key = tabKey(tab.threadId, tab.tabId);
-    if (closedPendingTabs.delete(key) || nativePopup?.closed) {
+    if (
+      closedPendingTabs.delete(key) ||
+      nativePopup?.closed ||
+      (nativeRoot !== undefined &&
+        (nativeRoots.get(key) !== nativeRoot || nativeRoot.closed || nativeRoot.closeRequested))
+    ) {
       await control.close().catch(constVoid);
       if (desktop) await desktop.close().catch(constVoid);
       else await page.close().catch(constVoid);
@@ -1329,7 +1340,7 @@ const make = Effect.gen(function* () {
     reportLiveTabs();
     // Native/adopted pages may have finished before their listeners were installed.
     if (adopted || desktop) void reportLoaded(tab, true);
-    if (!adopted && !desktop && snapshot.navStatus._tag !== "Idle") {
+    if (!adopted && (!desktop || restoreNavigation) && snapshot.navStatus._tag !== "Idle") {
       const url = snapshot.navStatus.url;
       const ready = Promise.withResolvers<void>();
       tab.navigationReady = ready.promise;
@@ -1880,7 +1891,11 @@ const make = Effect.gen(function* () {
     }
   };
 
-  const ensureTab = (snapshot: PreviewSessionSnapshot, newSession = false): Promise<ServerTab> => {
+  const ensureTab = (
+    snapshot: PreviewSessionSnapshot,
+    newSession = false,
+    signal = new AbortController().signal,
+  ): Promise<ServerTab> => {
     const key = tabKey(snapshot.threadId, snapshot.tabId);
     const pending = pendingTabs.get(key);
     if (pending) return pending;
@@ -1894,7 +1909,25 @@ const make = Effect.gen(function* () {
     const opening = (async () => {
       closeIdleHeadlessTabs();
       if (!native) ensureTabCapacity(newSession ? snapshot.automationOwner : undefined, key);
-      return createTab(snapshot);
+      if (snapshot.backingPage === "desktop-root" && snapshot.desktopRootId === undefined) {
+        await Effect.runPromise(
+          manager.restoreDesktopRoot({
+            threadId: ThreadId.make(snapshot.threadId),
+            tabId: snapshot.tabId,
+            create: (retained) =>
+              createDesktopRoot(retained, signal, (created) => createTab(created, true)),
+          }),
+          { signal },
+        );
+        const restored = tabs.get(key);
+        if (!restored)
+          throw new ServerBrowserTabNotFoundError({
+            threadId: snapshot.threadId,
+            tabId: snapshot.tabId,
+          });
+        return restored;
+      }
+      return createTab(snapshot, !newSession && snapshot.backingPage === "desktop-root");
     })()
       .catch((cause: unknown) => {
         const adopted = adoptedPages.get(key);
@@ -1921,7 +1954,12 @@ const make = Effect.gen(function* () {
     return opening;
   };
 
-  const createDesktopRoot = (snapshot: PreviewSessionSnapshot, signal: AbortSignal) =>
+  const createDesktopRoot = (
+    snapshot: PreviewSessionSnapshot,
+    signal: AbortSignal,
+    attach: (snapshot: PreviewSessionSnapshot) => Promise<ServerTab> = (created) =>
+      ensureTab(created, true),
+  ) =>
     Effect.tryPromise({
       try: async () => {
         if (snapshot.profileId === undefined)
@@ -1974,7 +2012,7 @@ const make = Effect.gen(function* () {
           signal.addEventListener("abort", cancel, { once: true });
           try {
             signal.throwIfAborted();
-            await ensureTab({ ...snapshot, desktopRootId: root.rootId }, true);
+            await attach({ ...snapshot, desktopRootId: root.rootId });
             await Effect.runPromise(desktopChannel.acceptRoot(key, root.rootId), { signal });
           } finally {
             signal.removeEventListener("abort", cancel);
@@ -2061,7 +2099,7 @@ const make = Effect.gen(function* () {
     );
     if (!snapshot) return yield* new ServerBrowserTabNotFoundError({ threadId, tabId });
     return yield* Effect.tryPromise({
-      try: () => ensureTab(snapshot),
+      try: (signal) => ensureTab(snapshot, false, signal),
       catch: (cause) => (isTabNotFound(cause) ? cause : new ServerBrowserLaunchError({ cause })),
     });
   });
@@ -2256,6 +2294,7 @@ const make = Effect.gen(function* () {
           !tabs.has(tabKey(snapshot.threadId, snapshot.tabId)) &&
           (snapshot.backingPage === "server" ||
             snapshot.backingPage === "desktop" ||
+            (snapshot.backingPage === "desktop-root" && snapshot.desktopRootId === undefined) ||
             detachedRoots.some(
               (root) => snapshot.tabId === root.key.tabId && snapshot.desktopRootId === root.rootId,
             )),
@@ -2776,7 +2815,7 @@ const make = Effect.gen(function* () {
     );
   };
 
-  const requireTab = async (request: PreviewAutomationRequest) => {
+  const requireTab = async (request: PreviewAutomationRequest, signal: AbortSignal) => {
     if (!request.agentSessionId)
       throw new BrowserControlInterrupted("The agent session is missing. Reconnect the provider.");
     const owned = [...tabs.values()].filter(
@@ -2792,6 +2831,7 @@ const make = Effect.gen(function* () {
         ? latestThreadTab(request.threadId, request.agentSessionId)
         : await Effect.runPromise(
             findTab(request.threadId, request.tabId).pipe(Effect.orElseSucceed(constVoid)),
+            { signal },
           );
     if (!tab) {
       throw new ServerBrowserPage.ServerBrowserOperationError(
@@ -3196,6 +3236,7 @@ const make = Effect.gen(function* () {
                     ServerBrowserTabNotFoundError: () => Effect.succeed(undefined),
                   }),
                 ),
+                { signal },
               )
             : undefined;
         if (reuse && request.tabIdExplicit && !found) {
@@ -3446,7 +3487,8 @@ const make = Effect.gen(function* () {
           (snapshot) =>
             snapshot.tabId === request.tabId &&
             snapshot.runtime === "server" &&
-            snapshot.backingPage === "server",
+            (snapshot.backingPage === "server" ||
+              (snapshot.backingPage === "desktop-root" && snapshot.desktopRootId === undefined)),
         );
         if (retained && !tabs.has(key)) {
           if (
@@ -3464,7 +3506,7 @@ const make = Effect.gen(function* () {
         }
       }
     }
-    const tab = await requireTab(request);
+    const tab = await requireTab(request, signal);
     signal.throwIfAborted();
     // Closing must unblock an action waiting on a dialog, without queueing behind it.
     if (request.operation === "close") {

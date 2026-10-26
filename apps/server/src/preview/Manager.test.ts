@@ -97,6 +97,139 @@ it.layer(PreviewManagerTestLayer)("PreviewManager", (it) => {
     }),
   );
 
+  it.effect(
+    "retains dedicated root intent across dormancy and restart without native identities",
+    () =>
+      Effect.gen(function* () {
+        const config = yield* isolatedPersistenceConfig();
+        const create = PreviewManager.make.pipe(
+          Effect.provideService(ServerConfig.ServerConfig, config),
+        );
+        const first = yield* Effect.scoped(create);
+        const threadId = freshThreadId();
+        const opened = yield* first.open({
+          threadId,
+          runtime: "server",
+          desktopHostId: "host-a",
+          profileId: "work",
+          automationOwner: "agent-a",
+          url: "https://example.test/saved",
+          createDesktopRoot: () =>
+            Effect.succeed({
+              rootId: "obsolete-root",
+              publish: () => Effect.void,
+              close: () => Effect.void,
+            }),
+        });
+        const restarted = yield* Effect.scoped(create);
+        yield* first.nativeDormantConfirmed({ threadId, tabId: opened.tabId });
+        for (const manager of [first, restarted]) {
+          const { sessions } = yield* manager.list({ threadId });
+          expect(sessions).toEqual([
+            expect.objectContaining({
+              tabId: opened.tabId,
+              backingPage: "desktop-root",
+              desktopHostId: "host-a",
+              profileId: "work",
+              automationOwner: "agent-a",
+              navStatus: { _tag: "Loading", url: "https://example.test/saved", title: "" },
+            }),
+          ]);
+          expect(sessions[0]).not.toHaveProperty("desktopRootId");
+          yield* manager.close({ threadId, tabId: opened.tabId });
+          expect((yield* manager.list({ threadId })).sessions).toEqual([]);
+        }
+      }),
+  );
+
+  it.effect.each(["creation", "publication"] as const)(
+    "closing a dormant root during %s cannot orphan the replacement native root",
+    (stage) =>
+      Effect.gen(function* () {
+        const manager = yield* PreviewManager.PreviewManager;
+        const threadId = freshThreadId();
+        const opened = yield* manager.open({
+          threadId,
+          runtime: "server",
+          desktopHostId: "host-a",
+          profileId: "work",
+          automationOwner: "agent-a",
+          createDesktopRoot: () =>
+            Effect.succeed({
+              rootId: "old-root",
+              publish: () => Effect.void,
+              close: () => Effect.void,
+            }),
+        });
+        yield* manager.nativeDormantConfirmed({ threadId, tabId: opened.tabId });
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        let nativeCloses = 0;
+        let published = false;
+        let cancelClose = true;
+        const restoring = yield* manager
+          .restoreDesktopRoot({
+            threadId,
+            tabId: opened.tabId,
+            create: () =>
+              Effect.gen(function* () {
+                if (stage === "creation") {
+                  yield* Deferred.succeed(entered, undefined);
+                  yield* Deferred.await(release);
+                }
+                return {
+                  rootId: "fresh-root",
+                  publish: () =>
+                    Effect.gen(function* () {
+                      published = true;
+                      if (stage === "publication") {
+                        yield* Deferred.succeed(entered, undefined);
+                        yield* Deferred.await(release);
+                      }
+                    }),
+                  close: () =>
+                    Effect.suspend(() => {
+                      nativeCloses += 1;
+                      return published && cancelClose
+                        ? Effect.fail(
+                            new PreviewNativeCloseError({
+                              tabId: opened.tabId,
+                              reason: "canceled",
+                            }),
+                          )
+                        : Effect.void;
+                    }),
+                };
+              }),
+          })
+          .pipe(Effect.result, Effect.forkChild);
+        yield* Deferred.await(entered);
+        const closing = yield* manager
+          .close({ threadId, tabId: opened.tabId })
+          .pipe(Effect.result, Effect.forkChild);
+        if (stage === "creation") yield* Fiber.join(closing);
+        yield* Deferred.succeed(release, undefined);
+        const restored = yield* Fiber.join(restoring);
+        const closed = yield* Fiber.join(closing);
+        expect(nativeCloses).toBe(1);
+        if (stage === "creation") {
+          expect(restored).toMatchObject({
+            _tag: "Failure",
+            failure: { _tag: "PreviewSessionLookupError" },
+          });
+          expect(published).toBe(false);
+          expect((yield* manager.list({ threadId })).sessions).toEqual([]);
+        } else {
+          expect(closed).toMatchObject({ _tag: "Failure", failure: { reason: "canceled" } });
+          expect((yield* manager.list({ threadId })).sessions[0]?.desktopRootId).toBe("fresh-root");
+          cancelClose = false;
+          yield* manager.close({ threadId, tabId: opened.tabId });
+          expect(nativeCloses).toBe(2);
+          expect((yield* manager.list({ threadId })).sessions).toEqual([]);
+        }
+      }),
+  );
+
   it.effect("restores canonical tab identities and settings without replaying opened events", () =>
     Effect.gen(function* () {
       const config = yield* isolatedPersistenceConfig();
@@ -250,7 +383,7 @@ it.layer(PreviewManagerTestLayer)("PreviewManager", (it) => {
         for (const tab of restored.sessions) {
           expect(tab).toMatchObject({
             runtime: "server",
-            backingPage: "desktop",
+            backingPage: tab.tabId === root.tabId ? "desktop-root" : "desktop",
             desktopHostId: "selected-desktop",
             profileId: "work-account",
           });
