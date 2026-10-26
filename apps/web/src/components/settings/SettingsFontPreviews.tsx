@@ -25,9 +25,9 @@ export function PromptFontPreview() {
   const editorRef = useRef<ComposerPromptEditorHandle>(null);
   const [prompt, setPrompt] = useState(PROMPT_PREVIEW_TEXT);
   const [cursor, setCursor] = useState(PROMPT_PREVIEW_TEXT.length);
-  const onChange = (nextValue: string, nextCursor: number) => {
+  const onChange = (nextValue: string, _nextCursor: number, expandedCursor: number) => {
     setPrompt(nextValue);
-    setCursor(nextCursor);
+    setCursor(expandedCursor);
   };
   return (
     <div className="mt-1 mb-2 rounded-lg border border-border bg-background px-3 py-2">

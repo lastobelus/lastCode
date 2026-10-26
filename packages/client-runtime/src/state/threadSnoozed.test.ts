@@ -1,6 +1,4 @@
 // @effect-diagnostics globalDate:off -- Tests exercise local calendar snooze boundaries.
-import { ThreadId } from "@t3tools/contracts";
-import { TurnId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -26,39 +24,31 @@ function localDate(year: number, month: number, day: number, hour: number, minut
 function makeShell(input: {
   readonly snoozedUntil?: string | null;
   readonly snoozedAt?: string | null;
-  readonly sessionStatus?: "starting" | "running" | "ready" | "error";
+  readonly runtimeStatus?: "starting" | "running" | "completed" | "failed";
   readonly pending?: "approval" | "user-input";
-  readonly turnRequestedAt?: string | null;
-  readonly turnCompletedAt?: string | null;
+  readonly runRequestedAt?: string | null;
+  readonly runCompletedAt?: string | null;
 }): ThreadSnoozeShell {
-  const threadId = ThreadId.make("thread-1");
   return {
     snoozedUntil: input.snoozedUntil ?? null,
     snoozedAt: input.snoozedAt ?? (input.snoozedUntil != null ? SNOOZED_AT : null),
     hasPendingApprovals: input.pending === "approval",
     hasPendingUserInput: input.pending === "user-input",
-    session:
-      input.sessionStatus === undefined
+    runtime:
+      input.runtimeStatus === undefined
         ? null
         : {
-            threadId,
-            status: input.sessionStatus,
-            providerName: "Codex",
-            runtimeMode: "full-access",
-            activeTurnId: null,
-            lastError: input.sessionStatus === "error" ? "boom" : null,
+            status: input.runtimeStatus,
             updatedAt: "2026-04-10T11:00:00.000Z",
           },
-    latestTurn:
-      input.turnCompletedAt === undefined
+    latestRun:
+      input.runCompletedAt === undefined
         ? null
         : {
-            turnId: TurnId.make("turn-1"),
-            state: "completed",
-            requestedAt: input.turnRequestedAt === undefined ? SNOOZED_AT : input.turnRequestedAt,
+            status: "completed",
+            requestedAt: input.runRequestedAt === undefined ? SNOOZED_AT : input.runRequestedAt,
             startedAt: null,
-            completedAt: input.turnCompletedAt,
-            assistantMessageId: null,
+            completedAt: input.runCompletedAt,
           },
   };
 }
@@ -66,7 +56,7 @@ function makeShell(input: {
 type QueuedTurnShell = Parameters<typeof hasQueuedTurnStart>[0];
 
 function makeQueuedTurnShell(overrides: Partial<QueuedTurnShell> = {}): QueuedTurnShell {
-  return { latestUserMessageAt: null, latestTurn: null, session: null, ...overrides };
+  return { latestUserMessageAt: null, latestRun: null, runtime: null, ...overrides };
 }
 
 describe("effectiveSnoozed", () => {
@@ -129,7 +119,7 @@ describe("effectiveSnoozed", () => {
 
   it("stays snoozed while the session keeps working — snooze never pauses the agent", () => {
     expect(
-      effectiveSnoozed(makeShell({ snoozedUntil: FUTURE_WAKE, sessionStatus: "running" }), {
+      effectiveSnoozed(makeShell({ snoozedUntil: FUTURE_WAKE, runtimeStatus: "running" }), {
         now: NOW,
       }),
     ).toBe(true);
@@ -161,7 +151,7 @@ describe("threadRaisedHandWhileSnoozed", () => {
     ).toBe(true);
     expect(
       threadRaisedHandWhileSnoozed(
-        makeShell({ snoozedUntil: FUTURE_WAKE, sessionStatus: "error" }),
+        makeShell({ snoozedUntil: FUTURE_WAKE, runtimeStatus: "failed" }),
       ),
     ).toBe(true);
   });
@@ -207,24 +197,17 @@ describe("hasQueuedTurnStart", () => {
     const messageAt = "2026-04-10T11:59:00.000Z";
     const adopted = makeQueuedTurnShell({
       latestUserMessageAt: messageAt,
-      latestTurn: {
-        turnId: TurnId.make("turn-adopted"),
-        state: "running",
+      latestRun: {
+        status: "running",
         requestedAt: messageAt,
         startedAt: null,
         completedAt: null,
-        assistantMessageId: null,
       },
     });
     const failed = makeQueuedTurnShell({
       latestUserMessageAt: messageAt,
-      session: {
-        threadId: ThreadId.make("thread-failed"),
-        status: "error",
-        providerName: "Codex",
-        runtimeMode: "full-access",
-        activeTurnId: null,
-        lastError: "failed",
+      runtime: {
+        status: "failed",
         updatedAt: NOW,
       },
     });
@@ -238,24 +221,32 @@ describe("threadWokeAt", () => {
     expect(threadWokeAt(makeShell({ snoozedUntil: PAST_WAKE }), { now: NOW })).toBe(PAST_WAKE);
     const shell = makeShell({
       snoozedUntil: PAST_WAKE,
-      turnCompletedAt: "2026-04-10T09:30:00.000Z",
+      runCompletedAt: "2026-04-10T09:30:00.000Z",
     });
     expect(effectiveSnoozed(shell, { now: NOW })).toBe(false);
     expect(threadWokeAt(shell, { now: NOW })).toBe(PAST_WAKE);
   });
 
   it.each([
-    { reason: "failure", sessionStatus: "error" },
-    { reason: "approval", sessionStatus: "ready", pending: "approval" },
-    { reason: "user input", sessionStatus: "ready", pending: "user-input" },
+    { reason: "failure", runtimeStatus: "failed" },
+    { reason: "approval", runtimeStatus: "completed", pending: "approval" },
+    { reason: "user input", runtimeStatus: "completed", pending: "user-input" },
   ] as const)("reports $reason activity instead of an already-requested completion", (activity) => {
     const shell = makeShell({
       ...activity,
       snoozedUntil: FUTURE_WAKE,
-      turnCompletedAt: "2026-04-10T10:30:00.000Z",
+      runCompletedAt: "2026-04-10T10:30:00.000Z",
     });
     expect(effectiveSnoozed(shell, { now: NOW })).toBe(false);
     expect(threadWokeAt(shell, { now: NOW })).toBe("2026-04-10T11:00:00.000Z");
+  });
+
+  it("falls back to runtime activity for blocked/failed early wakes", () => {
+    expect(
+      threadWokeAt(makeShell({ snoozedUntil: FUTURE_WAKE, runtimeStatus: "failed" }), {
+        now: NOW,
+      }),
+    ).toBe("2026-04-10T11:00:00.000Z");
   });
 
   it("keeps the early wake authoritative after the scheduled time passes", () => {

@@ -510,6 +510,9 @@ function ThreadTerminal(props: {
             cols: initialAttachGridSize.cols,
             rows: initialAttachGridSize.rows,
             ...(pendingLaunch?.env ? { env: pendingLaunch.env } : {}),
+            ...(pendingLaunch
+              ? { terminalLinkProfileName: pendingLaunch.terminalLinkProfileName ?? null }
+              : {}),
             ...(pendingLaunch ? { restartIfNotRunning: true } : {}),
           }
         : null,

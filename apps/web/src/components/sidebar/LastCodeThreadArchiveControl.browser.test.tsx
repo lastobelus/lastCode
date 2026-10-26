@@ -1,15 +1,5 @@
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import {
-  beforeAll,
-  afterAll,
-  beforeEach,
-  afterEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vite-plus/test";
+import { act, render, stubGlobal } from "../../../test/render";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { AsyncResult } from "effect/reactivity";
 import * as Cause from "effect/Cause";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
@@ -92,60 +82,45 @@ function Harness({ allowed = true }: { allowed?: boolean }) {
     </li>
   );
 }
-let root: Root | null = null,
-  container: HTMLDivElement | null = null;
-let frames: FrameRequestCallback[] = [];
-const original = Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-beforeAll(() =>
-  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
-    configurable: true,
-    value: true,
-  }),
-);
-afterAll(() => {
-  if (original) Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", original);
-  else Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-});
-beforeEach(() => {
+function setup() {
+  using stack = new DisposableStack();
   vi.clearAllMocks();
   mocks.confirm = true;
   mocks.canOperate = true;
   mocks.persistent = false;
   mocks.archive.mockResolvedValue(AsyncResult.success<undefined, never>(undefined));
-  frames = [];
-  vi.stubGlobal("requestAnimationFrame", (fn: FrameRequestCallback) => {
-    frames.push(fn);
-    return frames.length;
+  let frames: FrameRequestCallback[] = [];
+  stack.use(
+    stubGlobal("requestAnimationFrame", (fn: FrameRequestCallback) => {
+      frames.push(fn);
+      return frames.length;
+    }),
+  );
+  stack.use(stubGlobal("cancelAnimationFrame", vi.fn()));
+  const resources = stack.move();
+  return {
+    async flushFocus() {
+      const pending = frames;
+      frames = [];
+      await act(() => pending.forEach((fn) => fn(0)));
+    },
+    [Symbol.dispose]: () => resources.dispose(),
+  };
+}
+async function renderArchive() {
+  const screen = await render(<Harness />, { router: false });
+  const button = (label: string) =>
+    screen.container.querySelector<HTMLButtonElement>(`button[aria-label="${label} Ordinary"]`)!;
+  return Object.assign(screen, {
+    button,
+    click: (label: string) => act(() => button(label).click()),
   });
-  vi.stubGlobal("cancelAnimationFrame", vi.fn());
-});
-afterEach(async () => {
-  await act(() => root?.unmount());
-  container?.remove();
-  root = null;
-  container = null;
-  vi.unstubAllGlobals();
-  document.body.replaceChildren();
-});
-async function render() {
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-  await act(() => root?.render(<Harness />));
-}
-const button = (label: string) =>
-  container!.querySelector<HTMLButtonElement>(`button[aria-label="${label} Ordinary"]`)!;
-async function click(label: string) {
-  await act(() => button(label).click());
-}
-async function flushFocus() {
-  const pending = frames;
-  frames = [];
-  await act(() => pending.forEach((fn) => fn(0)));
 }
 describe("row-local archive control", () => {
   it("cancels confirmation on row mouse leave and keeps the process control mounted", async () => {
-    await render();
+    using fixture = setup();
+    await using screen = await renderArchive();
+    const { button, click, container } = screen;
     const process = [...container!.querySelectorAll("button")].find(
       (button) => button.textContent === "Process control",
     );
@@ -164,47 +139,55 @@ describe("row-local archive control", () => {
     ).toBe(process);
     expect(mocks.archive).not.toHaveBeenCalled();
     await click("Archive");
-    await flushFocus();
+    await fixture.flushFocus();
     expect(document.activeElement).toBe(button("Confirm archive"));
   });
   it("updates denied archive presentation without resetting the independent editing target", async () => {
-    await render();
+    using fixture = setup();
+    await using screen = await renderArchive();
+    const { button, click } = screen;
     await click("Archive");
-    await act(() => root?.render(<Harness allowed={false} />));
+    await screen.rerender(<Harness allowed={false} />);
     expect(button("Archive")).toBeNull();
     expect(button("Confirm archive")).toBeNull();
     expect(mocks.archive).not.toHaveBeenCalled();
-    await act(() => root?.render(<Harness />));
-    await flushFocus();
+    await screen.rerender(<Harness />);
+    await fixture.flushFocus();
     expect(document.activeElement).toBe(button("Confirm archive"));
     await click("Confirm archive");
     expect(mocks.archive).toHaveBeenCalledExactlyOnceWith(ref, { confirmed: true });
   });
   it("focuses inline confirmation and submits only the exact confirmed destination", async () => {
-    await render();
+    using fixture = setup();
+    await using screen = await renderArchive();
+    const { button, click } = screen;
     await click("Archive");
     expect(mocks.archive).not.toHaveBeenCalled();
-    await flushFocus();
+    await fixture.flushFocus();
     expect(document.activeElement).toBe(button("Confirm archive"));
     await click("Confirm archive");
     expect(mocks.archive).toHaveBeenCalledWith(ref, { confirmed: true });
     expect(button("Archive")).not.toBeNull();
   });
   it("cancels its target and allows a fresh confirmation", async () => {
-    await render();
+    using fixture = setup();
+    await using screen = await renderArchive();
+    const { button, click, container } = screen;
     await click("Archive");
-    await flushFocus();
+    await fixture.flushFocus();
     await act(() =>
       [...container!.querySelectorAll("button")].find((x) => x.textContent === "Cancel")!.click(),
     );
     expect(container!.querySelector('[aria-label="Confirm archive Ordinary"]')).toBeNull();
     expect(mocks.archive).not.toHaveBeenCalled();
     await click("Archive");
-    await flushFocus();
+    await fixture.flushFocus();
     expect(document.activeElement).toBe(button("Confirm archive"));
   });
   it("keeps nested Enter from navigating while click activates archive", async () => {
-    await render();
+    using _fixture = setup();
+    await using screen = await renderArchive();
+    const { button, click } = screen;
     const control = button("Archive");
     await act(() =>
       control.dispatchEvent(
@@ -217,14 +200,18 @@ describe("row-local archive control", () => {
     expect(mocks.archive).toHaveBeenCalledOnce();
   });
   it("uses the shared ordinary/family confirmation path when inline confirmation is disabled", async () => {
+    using _fixture = setup();
     mocks.confirm = false;
-    await render();
+    await using screen = await renderArchive();
+    const { click, container } = screen;
     await click("Archive");
     expect(mocks.archive).toHaveBeenCalledWith(ref);
     expect(container!.querySelector('[aria-label="Confirm archive Ordinary"]')).toBeNull();
   });
   it("rejects revoked permissions before opening and again before confirmed mutation", async () => {
-    await render();
+    using _fixture = setup();
+    await using screen = await renderArchive();
+    const { click, container } = screen;
     mocks.canOperate = false;
     await click("Archive");
     expect(container!.querySelector('[aria-label="Confirm archive Ordinary"]')).toBeNull();
@@ -236,7 +223,9 @@ describe("row-local archive control", () => {
     expect(container!.querySelector('[aria-label="Confirm archive Ordinary"]')).toBeNull();
   });
   it("rereads persistence at execution and reports the remedy without mutation", async () => {
-    await render();
+    using _fixture = setup();
+    await using screen = await renderArchive();
+    const { click } = screen;
     await click("Archive");
     mocks.persistent = true;
     await click("Confirm archive");
@@ -246,6 +235,7 @@ describe("row-local archive control", () => {
     );
   });
   it("reports ordinary failures but does not report interruption", async () => {
+    using _fixture = setup();
     mocks.archive.mockResolvedValueOnce(AsyncResult.failure(Cause.fail(new Error("Denied"))));
     await archiveLastCodeThread(ref, false, mocks.archive);
     expect(mocks.toast).toHaveBeenCalledWith(

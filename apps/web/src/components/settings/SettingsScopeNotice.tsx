@@ -180,9 +180,7 @@ export function SettingsScopeNoticeContent({
               {renderChoices(group)}
             </SettingsSection>
           ) : (
-            <SettingsGroup key={group?.projectKey ?? target}>
-              {renderChoices(group)}
-            </SettingsGroup>
+            <SettingsGroup key={group?.projectKey ?? target}>{renderChoices(group)}</SettingsGroup>
           ),
         )}
       </div>

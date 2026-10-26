@@ -129,6 +129,7 @@ import {
   type NativeScrollEvent,
   type NativeSyntheticEvent,
   Pressable,
+  ScrollView,
   StyleSheet,
   type ColorValue,
   useWindowDimensions,
@@ -142,6 +143,7 @@ import { composerImageGallery } from "../../lib/composerImageGallery";
 import { messageImageGallery } from "./messageImageGallery";
 import { FilePreviewModal, type FilePreviewSource } from "../../components/FilePreviewModal";
 import { inlineFilePreviewKind, isPdfFile } from "../../lib/filePreview";
+import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
 import { ThreadInlineFilePreview } from "./ThreadInlineFilePreview";
 import { flattenThemeColor } from "../../lib/mobileTheme";
 import { PresentationSource } from "../../components/ui/NativePresentation";
@@ -244,6 +246,11 @@ import { htmlRenderRowHeight, ThreadHtmlRender } from "./HtmlRenderWebView";
 import { ThreadMcpApp } from "./McpAppWebView";
 import { assetEnvironment, useAssetUrl, useRefreshAssetUrl } from "../../state/assets";
 import { previewEnvironment } from "../../state/preview";
+import {
+  useCreateManagedPreviewResourceUrl,
+  useOpenManagedBrowserPreview,
+  useRenewPreviewDocumentUrl,
+} from "../browser/useOpenManagedBrowserPreview";
 import { useAtomQueryRunner } from "../../state/use-atom-query-runner";
 import { readEnvironmentScope } from "../../state/session";
 import { projectEnvironment } from "../../state/projects";
@@ -251,7 +258,7 @@ import {
   needsWorkspaceBasenameLookup,
   pickWorkspaceBasenameMatch,
   WORKSPACE_BASENAME_LOOKUP_LIMIT,
-} from "@t3tools/client-runtime/workspace-basename-lookup";
+} from "@t3tools/shared/workspaceBasenameLookup";
 import {
   useLiveThreadLinkLabels,
   useQuietThreadShell,
@@ -2383,6 +2390,18 @@ export const ThreadFeed = memo(function ThreadFeed({
   const recoverHostedPreviewLease = useAtomCommand(previewEnvironment.hostingRecover, {
     reportFailure: false,
   });
+  const openManagedBrowser = useOpenManagedBrowserPreview({
+    environmentId: props.environmentId,
+    threadId: props.threadId,
+  });
+  const createResourceUrl = useCreateManagedPreviewResourceUrl({
+    environmentId: props.environmentId,
+    threadId: props.threadId,
+  });
+  const renewDocumentUrl = useRenewPreviewDocumentUrl({
+    environmentId: props.environmentId,
+    threadId: props.threadId,
+  });
   const preparedConnection = usePreparedConnection(props.environmentId);
   const hasPreparedConnection = Option.isSome(preparedConnection);
   const environmentUrl = Option.isSome(preparedConnection)
@@ -2392,7 +2411,10 @@ export const ThreadFeed = memo(function ThreadFeed({
     props.environmentId,
     Option.getOrNull(preparedConnection),
   );
-  const previewPreparationInput = (url: string) => {
+  const previewPreparationInput = (
+    url: string,
+    purpose: "navigation" | "resource" = "navigation",
+  ) => {
     if (!hasPreparedConnection) return null;
     return {
       threadRef: {
@@ -2400,6 +2422,9 @@ export const ThreadFeed = memo(function ThreadFeed({
         threadId: props.threadId,
       },
       url,
+      purpose,
+      createResourceUrl,
+      renewDocumentUrl,
       environmentUrl,
       knownEnvironmentUrls: knownEnvironmentUrl === null ? [] : [knownEnvironmentUrl],
       list: async () => {
@@ -2642,15 +2667,18 @@ export const ThreadFeed = memo(function ThreadFeed({
           };
           const mediaUrl = "uri" in media.source ? media.source.uri : null;
           if (mediaUrl !== null && /^https?:\/\//i.test(mediaUrl)) {
-            void openThreadFeedMarkdownUrl(previewPreparationInput(mediaUrl), mediaUrl, (url) =>
-              openVideo({
-                ...media.source,
-                uri: url,
-                actionsSource: preparedThreadFeedMediaActionsSource(
-                  media.source.actionsSource,
-                  url,
-                ),
-              }),
+            void openThreadFeedMarkdownUrl(
+              previewPreparationInput(mediaUrl, "resource"),
+              mediaUrl,
+              (url) =>
+                openVideo({
+                  ...media.source,
+                  uri: url,
+                  actionsSource: preparedThreadFeedMediaActionsSource(
+                    media.source.actionsSource,
+                    url,
+                  ),
+                }),
             );
           } else {
             openVideo(media.source);
@@ -2661,15 +2689,18 @@ export const ThreadFeed = memo(function ThreadFeed({
           };
           const mediaUrl = "uri" in media.source ? media.source.uri : null;
           if (mediaUrl !== null && /^https?:\/\//i.test(mediaUrl)) {
-            void openThreadFeedMarkdownUrl(previewPreparationInput(mediaUrl), mediaUrl, (url) =>
-              openImage({
-                ...media.source,
-                uri: url,
-                actionsSource: preparedThreadFeedMediaActionsSource(
-                  media.source.actionsSource,
-                  url,
-                ),
-              }),
+            void openThreadFeedMarkdownUrl(
+              previewPreparationInput(mediaUrl, "resource"),
+              mediaUrl,
+              (url) =>
+                openImage({
+                  ...media.source,
+                  uri: url,
+                  actionsSource: preparedThreadFeedMediaActionsSource(
+                    media.source.actionsSource,
+                    url,
+                  ),
+                }),
             );
           } else {
             openImage(media.source);
@@ -2785,7 +2816,7 @@ export const ThreadFeed = memo(function ThreadFeed({
     if (presentation.href) {
       if (/^https?:\/\//i.test(presentation.href) && isPdfFile({ name: presentation.href })) {
         void openThreadFeedMarkdownUrl(
-          previewPreparationInput(presentation.href),
+          previewPreparationInput(presentation.href, "resource"),
           presentation.href,
           (url) => {
             if (request.signal.aborted) return;
@@ -2802,8 +2833,13 @@ export const ThreadFeed = memo(function ThreadFeed({
         return;
       }
       const linkUrl = presentation.href;
-      void openThreadFeedMarkdownUrl(previewPreparationInput(linkUrl), linkUrl, (url) =>
-        openPullRequest(url),
+      void openThreadFeedMarkdownUrl(
+        previewPreparationInput(linkUrl),
+        linkUrl,
+        async (url) => {
+          await openPullRequest(url);
+        },
+        openManagedBrowser,
       ).catch(() =>
         Dialog.alert(
           "Preview unavailable",

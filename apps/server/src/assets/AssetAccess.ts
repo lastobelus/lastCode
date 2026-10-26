@@ -2,6 +2,8 @@ import type { AssetResource } from "@t3tools/contracts";
 import {
   AssetAttachmentNotFoundError,
   AssetSourceControlMediaUrlValidationError,
+  AssetManagedPreviewResourceError,
+  AssetPreviewDocumentError,
   AssetPreviewTypeValidationError,
   AssetProjectFaviconInspectionError,
   AssetProjectFaviconNotFoundError,
@@ -62,11 +64,14 @@ import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import * as ProjectFaviconResolver from "../project/ProjectFaviconResolver.ts";
 import { isWithinRoot } from "../workspace/KnownWorkspaces.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+import * as ThreadLinkedFiles from "../workspace/ThreadLinkedFiles.ts";
 import * as NativeAppIconResolver from "./NativeAppIconResolver.ts";
 import { sourceControlDefinitions } from "../sourceControl/sourceControlDefinitions.ts";
 import { extractIcnsPng } from "./icns.ts";
 import { openMediaFile, readMediaFileHeader, type OpenMediaFile } from "./MediaFile.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as PreviewHosting from "../preview/Hosting.ts";
+import { canonicalManagedPreviewResource } from "./ManagedPreviewResource.ts";
 
 export const ASSET_ROUTE_PREFIX = "/api/assets";
 
@@ -109,6 +114,14 @@ const PREVIEW_ASSET_EXTENSIONS = new Set([
 ]);
 
 const AssetClaimsSchema = Schema.Union([
+  Schema.Struct({
+    version: Schema.Literal(1),
+    kind: Schema.Literal("managed-preview-resource"),
+    threadId: ThreadId,
+    leaseId: Schema.String,
+    url: Schema.String,
+    expiresAt: Schema.Number,
+  }),
   Schema.Struct({
     version: Schema.Literal(1),
     kind: Schema.Literal("workspace-file"),
@@ -185,6 +198,12 @@ const decodeAssetClaims = Schema.decodeUnknownOption(AssetClaimsJson);
 const encodeAssetClaims = Schema.encodeSync(AssetClaimsJson);
 
 export type ResolvedAsset =
+  | {
+      readonly kind: "managed-preview-resource";
+      readonly threadId: string;
+      readonly leaseId: string;
+      readonly url: string;
+    }
   | {
       readonly kind: "file";
       readonly path: string;
@@ -554,9 +573,104 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
   let fileRevision: string | undefined;
 
   switch (input.resource._tag) {
+    case "preview-document": {
+      const target = URL.parse(input.resource.url);
+      if (target === null) return yield* new AssetPreviewDocumentError({});
+      if (
+        (target.protocol !== "http:" && target.protocol !== "https:") ||
+        target.username !== "" ||
+        target.password !== ""
+      )
+        return yield* new AssetPreviewDocumentError({});
+      const match = /^\/api\/assets\/([^/]+)\/(.+)$/.exec(target.pathname);
+      const parts = match?.[1]?.split(".");
+      const [encodedPayload, signature] = parts ?? [];
+      const savedClaims = encodedPayload ? decodeClaims(encodedPayload) : null;
+      if (
+        parts?.length !== 2 ||
+        !encodedPayload ||
+        !signature ||
+        !savedClaims ||
+        (savedClaims.kind !== "attachment" &&
+          savedClaims.kind !== "workspace-file" &&
+          savedClaims.kind !== "workspace-file-exact" &&
+          savedClaims.kind !== "media-file-exact" &&
+          savedClaims.kind !== "managed-preview-resource")
+      )
+        return yield* new AssetPreviewDocumentError({});
+      const secrets = yield* ServerSecretStore.ServerSecretStore;
+      const signingSecret = yield* secrets
+        .getOrCreateRandom(SIGNING_SECRET_NAME, 32)
+        .pipe(
+          Effect.mapError(
+            (cause) => new AssetSigningKeyLoadError({ resource: input.resource, cause }),
+          ),
+        );
+      if (!timingSafeEqualBase64Url(signature, signPayload(encodedPayload, signingSecret)))
+        return yield* new AssetPreviewDocumentError({});
+      const renewed = new URL(
+        yield* renewPreviewAssetUrl(
+          target.href,
+          input.resource.refresh ? PREVIEW_DOCUMENT_TOKEN_TTL_MS : 0,
+        ).pipe(
+          Effect.mapError(
+            (cause) => new AssetSigningKeyLoadError({ resource: input.resource, cause }),
+          ),
+        ),
+      );
+      const suffix = renewed.pathname.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+      const separator = suffix.indexOf("/");
+      const token = suffix.slice(0, separator);
+      const resolved = yield* resolveAsset(token, suffix.slice(separator + 1)).pipe(Effect.scoped);
+      if (resolved === null) return yield* new AssetPreviewDocumentError({});
+      const renewedClaims = decodeClaims(token.split(".")[0]!);
+      if (renewedClaims === null) return yield* new AssetPreviewDocumentError({});
+      return {
+        relativeUrl: `${renewed.pathname}${renewed.search}${renewed.hash}`,
+        expiresAt: renewedClaims.expiresAt,
+      };
+    }
+    case "managed-preview-resource": {
+      const hosting = yield* PreviewHosting.PreviewHosting;
+      const resource = input.resource;
+      const lease = yield* hosting.list(resource.threadId).pipe(
+        Effect.map((leases) =>
+          leases.find(
+            (entry) => entry.id === resource.leaseId && entry.threadId === resource.threadId,
+          ),
+        ),
+        Effect.mapError((cause) => new AssetManagedPreviewResourceError({ cause })),
+      );
+      const canonical = lease ? canonicalManagedPreviewResource(resource.url, lease.url) : null;
+      if (canonical === null) return yield* new AssetManagedPreviewResourceError({});
+      expiresAt = (yield* Clock.currentTimeMillis) + PREVIEW_DOCUMENT_TOKEN_TTL_MS;
+      claims = {
+        version: 1,
+        kind: "managed-preview-resource",
+        threadId: resource.threadId,
+        leaseId: resource.leaseId,
+        url: canonical,
+        expiresAt,
+      };
+      fileName = new URL(canonical).pathname.split("/").at(-1) || "resource";
+      break;
+    }
     case "media-file": {
       let requestedPath = expandHomePath(input.resource.path, yield* HostProcess.HomeDirectory);
-      if (!path.isAbsolute(requestedPath)) {
+      if (input.resource.linkedThreadFile === true) {
+        const linkedFiles = yield* ThreadLinkedFiles.ThreadLinkedFiles;
+        const target = yield* linkedFiles
+          .resolveFile({
+            threadId: input.resource.threadId,
+            path: input.resource.path,
+          })
+          .pipe(
+            Effect.mapError(
+              (cause) => new AssetWorkspaceResolutionError({ resource: input.resource, cause }),
+            ),
+          );
+        requestedPath = target.absolutePath;
+      } else if (!path.isAbsolute(requestedPath)) {
         if (!input.workspaceRoot) {
           return yield* new AssetWorkspaceContextNotFoundError({ resource: input.resource });
         }
@@ -882,6 +996,55 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
   };
 });
 
+const PREVIEW_DOCUMENT_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** A trusted Browser session retains the signed file identity after its HTTP capability expires. */
+export const renewPreviewAssetUrl = Effect.fn("AssetAccess.renewPreviewAssetUrl")(function* (
+  url: string,
+  minimumValidityMs = PREVIEW_DOCUMENT_TOKEN_TTL_MS,
+  canonicalOrigin?: string,
+) {
+  const target = URL.parse(url);
+  if (target === null) return url;
+  if (target.protocol !== "http:" && target.protocol !== "https:") return url;
+  const match = /^\/api\/assets\/([^/]+)\/(.+)$/.exec(target.pathname);
+  if (!match) return url;
+  const token = match[1]!;
+  const parts = token.split(".");
+  if (parts.length !== 2) return url;
+  const [encodedPayload, signature] = parts;
+  if (!encodedPayload || !signature) return url;
+  const claims = decodeClaims(encodedPayload);
+  if (
+    !claims ||
+    (claims.kind !== "attachment" &&
+      claims.kind !== "workspace-file" &&
+      claims.kind !== "workspace-file-exact" &&
+      claims.kind !== "media-file-exact" &&
+      claims.kind !== "managed-preview-resource")
+  )
+    return url;
+  const now = yield* Clock.currentTimeMillis;
+  const secretStore = yield* ServerSecretStore.ServerSecretStore;
+  const signingSecret = yield* secretStore.getOrCreateRandom(SIGNING_SECRET_NAME, 32);
+  if (!timingSafeEqualBase64Url(signature, signPayload(encodedPayload, signingSecret))) return url;
+  if (canonicalOrigin !== undefined) {
+    const origin = new URL(canonicalOrigin);
+    target.protocol = origin.protocol;
+    target.host = origin.host;
+    target.username = "";
+    target.password = "";
+  }
+  if (claims.expiresAt > now + minimumValidityMs) return target.href;
+  // Keep the original path/inode restrictions; renewal grants no additional files.
+  const renewedPayload = base64UrlEncode(
+    encodeAssetClaims({ ...claims, expiresAt: now + PREVIEW_DOCUMENT_TOKEN_TTL_MS }),
+  );
+  const renewedToken = `${renewedPayload}.${signPayload(renewedPayload, signingSecret)}`;
+  target.pathname = `${ASSET_ROUTE_PREFIX}/${renewedToken}/${match[2]}`;
+  return target.href;
+});
+
 export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
   token: string,
   relativePath: string,
@@ -899,6 +1062,15 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
 
   const claims = decodeClaims(encodedPayload);
   if (!claims || claims.expiresAt <= (yield* Clock.currentTimeMillis)) return null;
+
+  if (claims.kind === "managed-preview-resource") {
+    return {
+      kind: "managed-preview-resource",
+      threadId: claims.threadId,
+      leaseId: claims.leaseId,
+      url: claims.url,
+    } satisfies ResolvedAsset;
+  }
 
   if (claims.kind === "attachment") {
     const config = yield* ServerConfig.ServerConfig;

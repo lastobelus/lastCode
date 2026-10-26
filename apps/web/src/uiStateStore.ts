@@ -30,6 +30,7 @@ export interface PersistedUiState {
   threadChangedFilesExpansionVersion?: number;
   threadChangedFilesExpandedById?: Record<string, Record<string, boolean>>;
   pullRequestMergeMethod?: string;
+  threadAnnotationExpandedById?: Record<string, boolean>;
 }
 
 export interface UiProjectState {
@@ -41,6 +42,7 @@ export interface UiProjectState {
 export interface UiThreadState {
   threadLastVisitedAtById: Record<string, string>;
   threadChangedFilesExpandedById: Record<string, Record<string, boolean>>;
+  threadAnnotationExpandedById: Record<string, boolean>;
 }
 
 export interface UiEndpointState {
@@ -60,6 +62,7 @@ const initialState: UiState = {
   sidebarProjectScopeKey: null,
   threadLastVisitedAtById: {},
   threadChangedFilesExpandedById: {},
+  threadAnnotationExpandedById: {},
   defaultAdvertisedEndpointKey: null,
   pullRequestMergeMethod: "merge",
 };
@@ -149,6 +152,7 @@ export function parsePersistedState(parsed: PersistedUiState): UiState {
       parsed.threadChangedFilesExpansionVersion === THREAD_CHANGED_FILES_EXPANSION_VERSION
         ? sanitizePersistedThreadChangedFilesExpanded(parsed.threadChangedFilesExpandedById)
         : {},
+    threadAnnotationExpandedById: sanitizeBooleanRecord(parsed.threadAnnotationExpandedById),
     defaultAdvertisedEndpointKey: sanitizeOptionalKey(parsed.defaultAdvertisedEndpointKey),
     sidebarProjectScopeKey: sanitizeOptionalKey(parsed.sidebarProjectScopeKey),
     pullRequestMergeMethod: isPullRequestMergeMethod(parsed.pullRequestMergeMethod)
@@ -228,6 +232,7 @@ export function persistState(state: UiState): void {
         threadChangedFilesExpansionVersion: THREAD_CHANGED_FILES_EXPANSION_VERSION,
         threadChangedFilesExpandedById: state.threadChangedFilesExpandedById,
         pullRequestMergeMethod: state.pullRequestMergeMethod,
+        threadAnnotationExpandedById: state.threadAnnotationExpandedById,
       } satisfies PersistedUiState),
     );
     if (!legacyKeysCleanedUp) {
@@ -421,6 +426,7 @@ interface UiStateStore extends UiState {
   markThreadVisited: (threadId: string, visitedAt: string) => void;
   markThreadUnread: (threadId: string, latestTurnCompletedAt: string | null | undefined) => void;
   setThreadChangedFilesExpanded: (threadId: string, turnId: string, expanded: boolean) => void;
+  setThreadAnnotationExpanded: (threadKey: string, expanded: boolean) => void;
   setDefaultAdvertisedEndpointKey: (key: string | null) => void;
   setSidebarProjectScopeKey: (projectKey: string | null) => void;
   setPullRequestMergeMethod: (method: PullRequestMergeMethod) => void;
@@ -432,6 +438,20 @@ interface UiStateStore extends UiState {
   ) => void;
 }
 
+export function setThreadAnnotationExpanded(
+  state: UiState,
+  threadKey: string,
+  expanded: boolean,
+): UiState {
+  const currentlyExpanded = state.threadAnnotationExpandedById[threadKey] === true;
+  if (currentlyExpanded === expanded) return state;
+
+  const threadAnnotationExpandedById = { ...state.threadAnnotationExpandedById };
+  if (expanded) threadAnnotationExpandedById[threadKey] = true;
+  else delete threadAnnotationExpandedById[threadKey];
+  return { ...state, threadAnnotationExpandedById };
+}
+
 export const useUiStateStore = create<UiStateStore>((set) => ({
   ...readPersistedState(),
   markThreadVisited: (threadId, visitedAt) =>
@@ -440,6 +460,8 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
     set((state) => markThreadUnread(state, threadId, latestTurnCompletedAt)),
   setThreadChangedFilesExpanded: (threadId, turnId, expanded) =>
     set((state) => setThreadChangedFilesExpanded(state, threadId, turnId, expanded)),
+  setThreadAnnotationExpanded: (threadKey, expanded) =>
+    set((state) => setThreadAnnotationExpanded(state, threadKey, expanded)),
   setDefaultAdvertisedEndpointKey: (key) =>
     set((state) => setDefaultAdvertisedEndpointKey(state, key)),
   setSidebarProjectScopeKey: (projectKey) =>

@@ -1,12 +1,13 @@
+import { act, render as renderUi } from "../../../test/render";
 import { EnvironmentId, MessageId } from "@t3tools/contracts";
 import type { LegendListRef } from "@legendapp/list/react";
 import { formatActionResumeFollowUp } from "@t3tools/shared/actionResume";
-import { act, createRef, useState, type ComponentProps, type ReactElement } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { createRef, useState, type ComponentProps, type ReactElement } from "react";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { userEvent } from "vite-plus/test/browser";
 import "~/index.css";
 import { MessagesTimeline } from "./MessagesTimeline";
+import { randomUUID } from "../../lib/utils";
 const ENVIRONMENT_ID = EnvironmentId.make("environment-local");
 const CREATED_AT = "2026-03-17T19:12:28.000Z";
 
@@ -15,10 +16,8 @@ type Entry = TimelineProps["timelineEntries"][number];
 
 // The timeline remembers scroll position and open disclosures per thread key,
 // so every render gets a fresh thread.
-let threadCount = 0;
-
 function baseProps(): Omit<TimelineProps, "timelineEntries"> {
-  threadCount += 1;
+  const threadId = randomUUID();
   return {
     isWorking: false,
     activeTurnInProgress: false,
@@ -26,7 +25,7 @@ function baseProps(): Omit<TimelineProps, "timelineEntries"> {
     latestRun: null,
     turnDiffSummaries: [],
     runs: [],
-    routeThreadKey: `environment-local:thread-${threadCount}`,
+    routeThreadKey: `environment-local:thread-${threadId}`,
     onOpenTurnDiff: () => {},
     onOpenThread: () => {},
     onForkFromRun: async () => {},
@@ -73,26 +72,10 @@ function message(
   };
 }
 
-const roots: Root[] = [];
-let container: HTMLDivElement;
-
-beforeEach(() => {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-});
-
-afterEach(async () => {
-  for (const root of roots.splice(0)) await act(async () => root.unmount());
-  document.body.replaceChildren();
-  vi.unstubAllGlobals();
-});
-
 async function renderElement(element: ReactElement) {
-  container = document.body.appendChild(document.createElement("div"));
+  const container = document.createElement("div");
   container.style.cssText = "height: 1200px; width: 900px; display: flex; flex-direction: column;";
-  const root = createRoot(container);
-  roots.push(root);
-  await act(async () => root.render(element));
-  return container;
+  return renderUi(element, { container });
 }
 
 describe("Action result timeline integration", () => {
@@ -148,7 +131,8 @@ describe("Action result timeline integration", () => {
         </div>
       );
     }
-    await renderElement(<Chat />);
+    await using screen = await renderElement(<Chat />);
+    const { container } = screen;
     const viewport = await waitForList(props);
     await userEvent.wheel(viewport, { delta: { y: -600 } });
     const selector = '[data-message-id="action-result"]';

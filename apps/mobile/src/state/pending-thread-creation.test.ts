@@ -141,7 +141,12 @@ describe("resolvePendingThreadCreation", () => {
     expect(pendingThreadCreationShell(creation)?.runtime).toMatchObject({
       status: "preparing",
       activeRunId: null,
+      activityStartedAt: undefined,
       providerInstanceId: creation.modelSelection!.instanceId,
+      providerName: null,
+      lastError: null,
+      lastErrorClass: null,
+      usageLimitResetAt: null,
       updatedAt: creation.createdAt,
     });
   });

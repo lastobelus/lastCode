@@ -1149,6 +1149,51 @@ export function createServerEnvironmentAtoms<R, E>(
 
   return {
     configValueAtom,
+    deleteThreads: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:delete-threads",
+      tag: WS_METHODS.serverDeleteThreads,
+      concurrency: { mode: "singleFlight", key: ({ environmentId }) => environmentId },
+    }),
+    previewWorkspaceLifecycle: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:preview-workspace-lifecycle",
+      tag: WS_METHODS.serverPreviewWorkspaceLifecycle,
+    }),
+    listSavedWorkspaces: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:list-saved-workspaces",
+      tag: WS_METHODS.serverListSavedWorkspaces,
+    }),
+    previewWorktreeSuspension: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:preview-worktree-suspension",
+      tag: WS_METHODS.serverPreviewWorktreeSuspension,
+    }),
+    suspendWorktree: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:suspend-worktree",
+      tag: WS_METHODS.serverSuspendWorktree,
+      concurrency: { mode: "singleFlight", key: ({ environmentId }) => environmentId },
+    }),
+    restoreWorktree: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:restore-worktree",
+      tag: WS_METHODS.serverRestoreWorktree,
+      concurrency: { mode: "singleFlight", key: ({ environmentId }) => environmentId },
+    }),
+    previewWorktreeDiscard: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:preview-worktree-discard",
+      tag: WS_METHODS.serverPreviewWorktreeDiscard,
+    }),
+    discardWorktreeSnapshots: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:discard-worktree-snapshots",
+      tag: WS_METHODS.serverDiscardWorktreeSnapshots,
+      concurrency: { mode: "singleFlight", key: ({ environmentId }) => environmentId },
+    }),
+    setKeepWorkspace: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:set-keep-workspace",
+      tag: WS_METHODS.serverSetKeepWorkspace,
+    }),
+    createFreshWorktree: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:create-fresh-worktree",
+      tag: WS_METHODS.serverCreateFreshWorktree,
+      concurrency: { mode: "singleFlight", key: ({ environmentId }) => environmentId },
+    }),
     buildReviewTargets: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:build-review-targets",
       tag: WS_METHODS.serverGetBuildReviewTargets,

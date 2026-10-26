@@ -1,10 +1,10 @@
-import { afterEach, expect, it, vi } from "vite-plus/test";
+import { expect, it, vi } from "vite-plus/test";
 import { bindSidebarRailScroll } from "./sidebarRailScroll";
 
-afterEach(() => document.body.replaceChildren());
-
 function sidebar() {
+  using resources = new DisposableStack();
   const inner = document.createElement("div");
+  resources.defer(() => inner.remove());
   inner.dataset.slot = "sidebar-inner";
   inner.innerHTML =
     '<div data-slot="scroll-area-viewport"><div data-sidebar="content"></div></div><button></button>';
@@ -16,18 +16,24 @@ function sidebar() {
     clientHeight: { value: 600 },
   });
   viewport.style.lineHeight = "20px";
-  vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue({ top: 100, bottom: 700 } as DOMRect);
+  resources
+    .use(vi.spyOn(viewport, "getBoundingClientRect"))
+    .mockReturnValue({ top: 100, bottom: 700 } as DOMRect);
   viewport.scrollBy = vi.fn();
-  return { viewport, rail };
+  const owned = resources.move();
+  return { viewport, rail, [Symbol.dispose]: () => owned.dispose() };
 }
 
 const wheel = (options: WheelEventInit = {}) =>
   new WheelEvent("wheel", { cancelable: true, deltaY: 120, clientY: 300, ...options });
 
 it("sends wheel input on the resize strip to its own sidebar viewport and releases the binding", () => {
-  const unrelated = sidebar();
-  const { rail, viewport } = sidebar();
+  using unrelated = sidebar();
+  using fixture = sidebar();
+  const { rail, viewport } = fixture;
+  using binding = new DisposableStack();
   const dispose = bindSidebarRailScroll(rail);
+  binding.defer(dispose);
   const event = wheel();
   rail.dispatchEvent(event);
   expect(event.defaultPrevented).toBe(true);
@@ -41,8 +47,11 @@ it("sends wheel input on the resize strip to its own sidebar viewport and releas
 });
 
 it("normalizes mouse line and page deltas while leaving zoom, header and non-scrollable regions alone", () => {
-  const { rail, viewport } = sidebar();
+  using fixture = sidebar();
+  const { rail, viewport } = fixture;
+  using binding = new DisposableStack();
   const dispose = bindSidebarRailScroll(rail);
+  binding.defer(dispose);
   rail.dispatchEvent(wheel({ deltaY: 3, deltaMode: WheelEvent.DOM_DELTA_LINE }));
   rail.dispatchEvent(wheel({ deltaY: -1, deltaMode: WheelEvent.DOM_DELTA_PAGE }));
   expect(viewport.scrollBy).toHaveBeenNthCalledWith(1, { top: 60, behavior: "instant" });
@@ -61,13 +70,15 @@ it("normalizes mouse line and page deltas while leaving zoom, header and non-scr
 });
 
 it("follows the visible retained presentation after mode switches without rebinding", () => {
-  const first = sidebar();
-  const second = sidebar();
+  using first = sidebar();
+  using second = sidebar();
   first.rail.before(second.viewport);
   const firstBounds = vi.mocked(first.viewport.getBoundingClientRect);
   const secondBounds = vi.mocked(second.viewport.getBoundingClientRect);
   firstBounds.mockReturnValue({ top: 0, bottom: 0 } as DOMRect);
+  using binding = new DisposableStack();
   const dispose = bindSidebarRailScroll(first.rail);
+  binding.defer(dispose);
   const event = wheel();
   first.rail.dispatchEvent(event);
   expect(event.defaultPrevented).toBe(true);

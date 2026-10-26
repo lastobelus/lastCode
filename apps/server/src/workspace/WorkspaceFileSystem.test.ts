@@ -8,6 +8,8 @@ import { it, describe, expect } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as WorkspaceAcquisitionTestkit from "./WorkspaceAcquisition.testkit.ts";
+import { WorkspaceUnavailableError } from "./WorkspaceAcquisition.ts";
 import * as Path from "effect/Path";
 
 import * as ServerConfig from "../config.ts";
@@ -34,24 +36,34 @@ const layerKnownWorkspacesTest = Layer.mock(KnownWorkspaces.KnownWorkspaces)({
       : Effect.void,
 });
 
-const layerProject = WorkspaceFileSystem.layer.pipe(
-  Layer.provide(layerKnownWorkspacesTest),
-  Layer.provide(WorkspacePaths.layer),
-  Layer.provide(WorkspaceEntries.layer.pipe(Layer.provide(WorkspacePaths.layer))),
-);
+const layerProject = (
+  acquisitionLayer = WorkspaceAcquisitionTestkit.layer,
+  knownWorkspacesLayer = layerKnownWorkspacesTest,
+) =>
+  WorkspaceFileSystem.layer.pipe(
+    Layer.provide(acquisitionLayer),
+    Layer.provide(knownWorkspacesLayer),
+    Layer.provide(WorkspacePaths.layer),
+    Layer.provide(WorkspaceEntries.layer.pipe(Layer.provide(WorkspacePaths.layer))),
+  );
 
-const layerTest = Layer.empty.pipe(
-  Layer.provideMerge(layerProject),
-  Layer.provideMerge(WorkspaceEntries.layer.pipe(Layer.provide(WorkspacePaths.layer))),
-  Layer.provideMerge(WorkspacePaths.layer),
-  Layer.provideMerge(VcsDriverRegistry.layer.pipe(Layer.provide(VcsProcess.layer))),
-  Layer.provide(
-    ServerConfig.ServerConfig.layerTest(process.cwd(), {
-      prefix: "t3-workspace-files-test-",
-    }),
-  ),
-  Layer.provideMerge(NodeServices.layer),
-);
+const layerTestWith = (
+  acquisitionLayer = WorkspaceAcquisitionTestkit.layer,
+  knownWorkspacesLayer = layerKnownWorkspacesTest,
+) =>
+  Layer.empty.pipe(
+    Layer.provideMerge(layerProject(acquisitionLayer, knownWorkspacesLayer)),
+    Layer.provideMerge(WorkspaceEntries.layer.pipe(Layer.provide(WorkspacePaths.layer))),
+    Layer.provideMerge(WorkspacePaths.layer),
+    Layer.provideMerge(VcsDriverRegistry.layer.pipe(Layer.provide(VcsProcess.layer))),
+    Layer.provide(
+      ServerConfig.ServerConfig.layerTest(process.cwd(), {
+        prefix: "t3-workspace-files-test-",
+      }),
+    ),
+    Layer.provideMerge(NodeServices.layer),
+  );
+const layerTest = layerTestWith();
 
 const makeTempDir = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
@@ -73,6 +85,66 @@ const writeTextFile = Effect.fn("writeTextFile")(function* (
     .pipe(Effect.orDie);
   yield* fileSystem.writeFileString(absolutePath, contents).pipe(Effect.orDie);
 });
+
+it.effect("writes into a restored workspace before resolving the file destination", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const parent = yield* makeTempDir;
+    const original = path.join(parent, "absent");
+    const restored = path.join(parent, "restored");
+    yield* fs.makeDirectory(restored);
+    yield* Effect.gen(function* () {
+      const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+      yield* workspaceFileSystem.writeFile({
+        cwd: original,
+        relativePath: "notes.txt",
+        contents: "recovered edit",
+      });
+    }).pipe(
+      Effect.provide(
+        layerTestWith(
+          WorkspaceAcquisitionTestkit.layerWith(() =>
+            Effect.succeed({ path: restored, branch: "recovered", restored: true }),
+          ),
+          Layer.mock(KnownWorkspaces.KnownWorkspaces)({
+            assertContains: (cwd) =>
+              fs.realPath(cwd).pipe(
+                Effect.asVoid,
+                Effect.mapError(
+                  (cause) => new KnownWorkspaces.UnknownWorkspaceError({ cwd, cause }),
+                ),
+              ),
+          }),
+        ),
+      ),
+    );
+    expect(yield* fs.readFileString(path.join(restored, "notes.txt"))).toBe("recovered edit");
+    expect(yield* fs.exists(path.join(original, "notes.txt"))).toBe(false);
+  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect("does not write a file when saved workspace acquisition fails", () =>
+  Effect.gen(function* () {
+    const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+    const fs = yield* FileSystem.FileSystem;
+    const cwd = yield* makeTempDir;
+    const error = yield* workspaceFileSystem
+      .writeFile({ cwd, relativePath: "notes.txt", contents: "blocked edit" })
+      .pipe(Effect.flip);
+    expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceFileSystemOperationError);
+    expect(yield* fs.exists(`${cwd}/notes.txt`)).toBe(false);
+  }).pipe(
+    Effect.provide(
+      layerTestWith(
+        WorkspaceAcquisitionTestkit.layerWith(() =>
+          Effect.fail(new WorkspaceUnavailableError({ reason: "snapshot-unavailable" })),
+        ),
+      ),
+    ),
+    Effect.scoped,
+  ),
+);
 
 it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (it) => {
   describe("getMetadata", () => {
@@ -148,7 +220,7 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
               },
             }),
           ),
-          Effect.provide(layerKnownWorkspacesTest),
+          Effect.provide(Layer.merge(layerKnownWorkspacesTest, WorkspaceAcquisitionTestkit.layer)),
         );
         const paths = [
           "\\\\attacker.test\\s\\a.ts",
@@ -252,7 +324,13 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
     it.effect("reads the network path it checked", () =>
       Effect.gen(function* () {
         const workspaceFileSystem = yield* WorkspaceFileSystem.make.pipe(
-          Effect.provide(Layer.merge(layerKnownWorkspacesTest, NodePath.layerWin32)),
+          Effect.provide(
+            Layer.mergeAll(
+              layerKnownWorkspacesTest,
+              WorkspaceAcquisitionTestkit.layer,
+              NodePath.layerWin32,
+            ),
+          ),
         );
         // Rejects without touching the filesystem, so a Windows runner never looks the share up.
         const realpath = vi

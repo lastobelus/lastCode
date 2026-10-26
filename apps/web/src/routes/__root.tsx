@@ -1,3 +1,4 @@
+import { WorkspaceLifecycleDialogHost } from "../components/WorkspaceLifecycleDialog";
 import { type ServerLifecycleWelcomePayload } from "@t3tools/contracts";
 import { scopedProjectKey, scopeProjectRef } from "@t3tools/client-runtime/environment";
 import {
@@ -21,6 +22,7 @@ import { GuestShareDialogHost } from "../components/chat/GuestShareControls";
 import { AddProjectToMachineDialogHost } from "../components/AddProjectToMachineDialog";
 import { ConfirmDialogHost } from "../components/ConfirmDialogHost";
 import { KeybindingsConfigWarning } from "../components/KeybindingsConfigWarning";
+import { ThreadArchiveDialogHost } from "../components/ThreadArchiveDialog";
 import { FirstRunGate } from "../components/onboarding/FirstRunGate";
 import { ConnectOnboardingDialog } from "../components/cloud/ConnectOnboardingDialog";
 import { RelayClientInstallDialog } from "../components/cloud/RelayClientInstallDialog";
@@ -48,6 +50,7 @@ import {
 } from "../components/ui/toast";
 import { isElectron } from "../env";
 import { cn } from "../lib/utils";
+import { applyScrollbarAppearance } from "~/scrollbarAppearance";
 import { useClientSettings } from "../hooks/useSettings";
 import {
   deriveLogicalProjectKeyFromSettings,
@@ -227,6 +230,7 @@ function RootRouteBranch() {
       <EnvironmentThemeSync />
       <ChatGptWelcomeCoordinator />
       <ProjectIconAppearanceSync />
+      <ScrollbarAppearanceSync />
       <FirstRunGate
         enabled={primaryEnvironmentAuthenticated}
         hostedStatic={authGateState.status === "hosted-static"}
@@ -241,6 +245,8 @@ function RootRouteBranch() {
         <SnapShotCoordinator />
         <ReopenClosedViewShortcut />
         <ConfirmDialogHost />
+        <ThreadArchiveDialogHost />
+        <WorkspaceLifecycleDialogHost />
         <CustomSnoozeDialogHost />
         <GuestShareDialogHost />
         <SlowRpcRequestToastCoordinator />
@@ -268,6 +274,30 @@ function ProjectIconAppearanceSync() {
       document.documentElement.removeAttribute("data-rounded-project-icons");
     };
   }, [roundedProjectIcons]);
+
+  return null;
+}
+
+function ScrollbarAppearanceSync() {
+  const largerScrollbarsEnabled = useClientSettings((settings) => settings.largerScrollbarsEnabled);
+  const scrollbarWidth = useClientSettings((settings) => settings.scrollbarWidth);
+  const scrollbarMargin = useClientSettings((settings) => settings.scrollbarMargin);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    applyScrollbarAppearance(root, {
+      enabled: largerScrollbarsEnabled,
+      width: scrollbarWidth,
+      margin: scrollbarMargin,
+    });
+    return () => {
+      applyScrollbarAppearance(root, {
+        enabled: false,
+        width: scrollbarWidth,
+        margin: scrollbarMargin,
+      });
+    };
+  }, [largerScrollbarsEnabled, scrollbarMargin, scrollbarWidth]);
 
   return null;
 }

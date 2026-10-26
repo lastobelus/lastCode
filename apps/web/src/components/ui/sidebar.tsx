@@ -24,8 +24,6 @@ import { bindSidebarRailScroll } from "./sidebarRailScroll";
 import { bindSidebarPageScroll } from "./sidebarPageScroll";
 import * as Schema from "effect/Schema";
 
-const SIDEBAR_COOKIE_NAME = "sidebar_state";
-const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 7;
 const SIDEBAR_WIDTH = "16rem";
 const SIDEBAR_WIDTH_MOBILE = "calc(100vw - 3 * var(--spacing))";
 const SIDEBAR_WIDTH_ICON = "3rem";
@@ -118,20 +116,13 @@ function SidebarProvider({
 
   const [_open, _setOpen] = React.useState(defaultOpen);
   const open = openProp ?? _open;
-  const setOpen = async (value: boolean | ((value: boolean) => boolean)) => {
+  const setOpen = (value: boolean | ((value: boolean) => boolean)) => {
     const openState = typeof value === "function" ? value(open) : value;
     if (setOpenProp) {
       setOpenProp(openState);
     } else {
       _setOpen(openState);
     }
-
-    await cookieStore.set({
-      expires: Date.now() + SIDEBAR_COOKIE_MAX_AGE * 1000,
-      name: SIDEBAR_COOKIE_NAME,
-      path: "/",
-      value: String(openState),
-    });
   };
 
   const toggleSidebar = () => {

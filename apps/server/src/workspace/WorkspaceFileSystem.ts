@@ -25,6 +25,8 @@ import * as KnownWorkspaces from "./KnownWorkspaces.ts";
 import * as WorkspaceEntries from "./WorkspaceEntries.ts";
 import * as WorkspacePaths from "./WorkspacePaths.ts";
 import { fileHeaderMimeType } from "./fileHeaderMimeType.ts";
+import * as WorkspaceAcquisition from "./WorkspaceAcquisition.ts";
+import { withWorkspaceLease } from "./workspaceLease.ts";
 
 const PROJECT_READ_FILE_MAX_BYTES = 1024 * 1024;
 
@@ -139,6 +141,7 @@ export const make = Effect.gen(function* () {
   const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
   const knownWorkspaces = yield* KnownWorkspaces.KnownWorkspaces;
   const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+  const workspaceAcquisition = yield* WorkspaceAcquisition.WorkspaceAcquisition;
 
   const metadataForPath = Effect.fnUntraced(function* (requestedPath: string) {
     const expandedPath = expandHomePath(requestedPath, yield* HostProcess.HomeDirectory);
@@ -525,9 +528,9 @@ export const make = Effect.gen(function* () {
     return { relativePath: target.relativePath, realTargetPath };
   });
 
-  const writeFile: WorkspaceFileSystem["Service"]["writeFile"] = Effect.fn(
-    "WorkspaceFileSystem.writeFile",
-  )(function* (input) {
+  const writeFileInWorkspace = Effect.fn("WorkspaceFileSystem.writeFile")(function* (
+    input: ProjectWriteFileInput,
+  ) {
     yield* knownWorkspaces.assertContains(input.cwd);
     const target = yield* resolveWriteTarget(input);
     const realTargetPath = target.realTargetPath;
@@ -567,6 +570,38 @@ export const make = Effect.gen(function* () {
     });
     yield* workspaceEntries.refresh(input.cwd);
     return { relativePath: target.relativePath };
+  });
+
+  const writeFile: WorkspaceFileSystem["Service"]["writeFile"] = Effect.fn(
+    "WorkspaceFileSystem.acquireAndWriteFile",
+  )(function* (input) {
+    return yield* withWorkspaceLease(
+      input.cwd,
+      Effect.gen(function* () {
+        const acquired = yield* workspaceAcquisition
+          .acquire({
+            path: input.cwd,
+            purpose: "file-write",
+          })
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new WorkspaceFileSystemOperationError({
+                  workspaceRoot: input.cwd,
+                  relativePath: input.relativePath,
+                  resolvedPath: path.resolve(input.cwd, input.relativePath),
+                  operationPath: input.cwd,
+                  operation: "write-file",
+                  cause,
+                }),
+            ),
+          );
+        return yield* withWorkspaceLease(
+          acquired.path,
+          writeFileInWorkspace({ ...input, cwd: acquired.path }),
+        );
+      }),
+    );
   });
 
   return WorkspaceFileSystem.of({ getMetadata, readFile, writeFile });
