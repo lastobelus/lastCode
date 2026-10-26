@@ -46,6 +46,7 @@ function makeHarness(
     readonly replacementEvents?: ReadonlyArray<TerminalEvent>;
     readonly terminatingPreviousShell?: boolean;
     readonly writeEffect?: Effect.Effect<void>;
+    readonly foregroundEffect?: Effect.Effect<boolean>;
     readonly terminalLinkProfileName?: string;
   } = {},
 ) {
@@ -191,7 +192,7 @@ function makeHarness(
           subscribe,
           closeIdle,
           refreshMetadata: Effect.succeed([]),
-          hasForegroundSubprocess: () => Effect.sync(() => busy),
+          hasForegroundSubprocess: () => options.foregroundEffect ?? Effect.sync(() => busy),
           metadata: Effect.sync(() =>
             previousSnapshot
               ? [
@@ -436,6 +437,73 @@ it.effect("types into a quiet shell without trusting restored line editor histor
       assert.equal(write.mock.calls.length, 1);
     }).pipe(Effect.provide(layer));
   }),
+);
+
+it.effect("accepts foreground readiness while background output arrives during inspection", () =>
+  Effect.gen(function* () {
+    const inspecting = yield* Deferred.make<void>();
+    const foreground = yield* Deferred.make<boolean>();
+    const written = yield* Deferred.make<void>();
+    const { layer, projectId, write, emit } = makeHarness({
+      manualReadiness: true,
+      foregroundEffect: Deferred.succeed(inspecting, undefined).pipe(
+        Effect.andThen(Deferred.await(foreground)),
+      ),
+      writeEffect: Deferred.succeed(written, undefined).pipe(Effect.asVoid),
+    });
+    yield* Effect.gen(function* () {
+      const runner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
+      yield* runner.runForThread({ ...event, projectId, worktreePath: "/repo-worktree" });
+      yield* TestClock.adjust("3 seconds");
+      yield* Deferred.await(inspecting);
+      yield* emit({ ...event, type: "output", data: "background log\r\n" });
+      yield* Deferred.succeed(foreground, false);
+      yield* Deferred.await(written);
+      assert.equal(write.mock.calls.length, 1);
+    }).pipe(Effect.provide(layer));
+  }),
+);
+
+it.effect.each(["restart", "activity", "editor"] as const)(
+  "discards a foreground result invalidated by %s while inspection is pending",
+  (change) =>
+    Effect.gen(function* () {
+      const inspecting = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const written = yield* Deferred.make<void>();
+      let first = true;
+      const { layer, projectId, write, emit, terminalSnapshot, open } = makeHarness({
+        manualReadiness: true,
+        foregroundEffect: Effect.suspend(() => {
+          if (!first) return Effect.succeed(true);
+          first = false;
+          return Deferred.succeed(inspecting, undefined).pipe(
+            Effect.andThen(Deferred.await(release)),
+            Effect.as(false),
+          );
+        }),
+        writeEffect: Deferred.succeed(written, undefined).pipe(Effect.asVoid),
+      });
+      yield* Effect.gen(function* () {
+        const runner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
+        yield* runner.runForThread({ ...event, projectId, worktreePath: "/repo-worktree" });
+        yield* TestClock.adjust("3 seconds");
+        yield* Deferred.await(inspecting);
+        yield* emit(
+          change === "restart"
+            ? { ...event, type: "restarted", snapshot: terminalSnapshot(open.mock.calls[0]![0]) }
+            : change === "activity"
+              ? { ...event, type: "activity", hasRunningSubprocess: true, label: "fnm" }
+              : { ...event, type: "output", data: "\x1b[?2004l" },
+        );
+        yield* Deferred.succeed(release, undefined);
+        yield* TestClock.adjust("3 seconds");
+        assert.equal(write.mock.calls.length, 0);
+        yield* emit({ ...event, type: "output", data: "\x1b[?2004h" });
+        yield* Deferred.await(written);
+        assert.equal(write.mock.calls.length, 1);
+      }).pipe(Effect.provide(layer));
+    }),
 );
 
 it.effect("does not type into a shell that exits during startup", () => {

@@ -5388,7 +5388,7 @@ it.layer(
   );
 
   it.effect(
-    "setup proceeds with a retained background job after the foreground startup prompt returns",
+    "setup proceeds with a retained background writer after the foreground startup prompt returns",
     () =>
       Effect.gen(function* () {
         const foregroundStartup = yield* Ref.make<"separate" | "shared" | "background">("separate");
@@ -5461,15 +5461,23 @@ it.layer(
             return yield* Effect.die("missing setup completion");
           const process = ptyAdapter.processes[0]!;
           process.exitOnKill = "SIGTERM";
+          const backgroundOutput = Effect.forEach(
+            ["background one\r\n", "background two\r\n", "background three\r\n"],
+            (data) =>
+              Effect.sync(() => process.emitData(data)).pipe(
+                Effect.andThen(TestClock.adjust("1 second")),
+              ),
+            { discard: true },
+          );
           yield* manager.refreshMetadata;
-          yield* TestClock.adjust("3 seconds");
+          yield* backgroundOutput;
           expect(process.writes).toEqual([]);
           yield* Ref.set(foregroundStartup, "shared");
-          yield* TestClock.adjust("3 seconds");
+          yield* backgroundOutput;
           expect(process.writes).toEqual([]);
           yield* Ref.set(foregroundStartup, "background");
           expect((yield* manager.metadata)[0]?.hasRunningSubprocess).toBe(true);
-          yield* TestClock.adjust("3 seconds");
+          yield* backgroundOutput;
           expect(process.writes).toHaveLength(1);
           expect(yield* Ref.get(owned)).toContain(9001);
           const sentinel = /__T3_SETUP_DONE___[a-f0-9]+:/u.exec(process.writes[0]!)?.[0];
