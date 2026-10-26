@@ -21,7 +21,11 @@ import { threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { useTerminalUiStateStore } from "../../terminalUiStateStore";
-import { interruptedActionBanner, runningActionBanner } from "./ComposerActionResume";
+import {
+  heldActionBanner,
+  interruptedActionBanner,
+  runningActionBanner,
+} from "./ComposerActionResume";
 
 type ActionDeliveryOperation = "resume" | "discard";
 
@@ -156,5 +160,6 @@ export function useActionResumeBanners(input: ActionResumeBannerInput) {
   return {
     runningBanner: runningActionBanner(running),
     interruptedBanner: interruptedActionBanner(interrupted),
+    heldBanner: heldActionBanner(input.action),
   };
 }

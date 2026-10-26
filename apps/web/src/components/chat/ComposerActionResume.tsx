@@ -1,5 +1,5 @@
 import type { ActionResumeState } from "@t3tools/contracts";
-import { actionRunningPresentation } from "@t3tools/shared/actionResume";
+import { actionResultPresentation, actionRunningPresentation } from "@t3tools/shared/actionResume";
 import { CircleAlertIcon, TerminalIcon } from "lucide-react";
 import { memo, useEffect, useState } from "react";
 
@@ -8,6 +8,34 @@ import { Button } from "../ui/button";
 import { cn } from "~/lib/utils";
 import { RotateCcwClockIcon } from "../icons/RotateCcwClockIcon";
 import type { ComposerBannerStackItem } from "./ComposerBannerStack";
+
+export function heldActionBanner(action: ActionResumeState | null): ComposerBannerStackItem | null {
+  if (
+    action === null ||
+    action.outcome === "running" ||
+    action.delivery !== "pending" ||
+    action.heldByEnvironmentPause !== true
+  ) {
+    return null;
+  }
+  const presentation = actionResultPresentation({
+    lifecycleOutcome: action.outcome,
+    validatedStatus: action.outcome,
+    exitCode: action.exitCode,
+    report: action.report ?? null,
+    lastOutputLine: "",
+  });
+  const summary = presentation.summary.trim();
+  const summaryCopy = summary ? `${summary}${/[.!?]$/.test(summary) ? " " : ". "}` : "";
+  return {
+    id: `action-held:${action.runId}`,
+    variant: "warning",
+    role: "status",
+    icon: <CircleAlertIcon />,
+    title: `${presentation.label}: ${action.actionName}`,
+    description: `${summaryCopy}The agent hasn't picked up this result. If this environment is paused, resume it in Settings → Connections to let the agent follow up.`,
+  };
+}
 
 export function runningActionBanner({
   action,

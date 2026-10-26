@@ -115,7 +115,9 @@ function Probe({ route = a, thread = route, action = running, mismatch = false }
   useLayoutEffect(() => {
     observation.banners = value;
   });
-  const items = [value.interruptedBanner, value.runningBanner].filter((item) => item !== null);
+  const items = [value.interruptedBanner, value.heldBanner, value.runningBanner].filter(
+    (item) => item !== null,
+  );
   return (
     <ComposerBannerStack
       items={
@@ -389,6 +391,42 @@ describe("interrupted Action delivery", () => {
     expect(container.textContent).toBe("");
     expect(state.resume).not.toHaveBeenCalled();
     expect(state.discard).not.toHaveBeenCalled();
+  });
+});
+
+describe("completed Action held by Pause", () => {
+  it("shows the retained result with read-only destination access and keeps pending intent until delivery changes", async () => {
+    setup();
+    grant(a, []);
+    await using screen = await render(null);
+    const held: ActionResumeState = {
+      ...running,
+      outcome: "succeeded",
+      delivery: "pending",
+      heldByEnvironmentPause: true,
+      finishedAt: "2026-08-25T12:01:00.000Z",
+      exitCode: 0,
+      report: { version: 1, outcome: "success", summary: "Documentation preview ready" },
+    };
+    await show(screen, { action: held });
+    await expect.element(screen.getByText("Succeeded: Check work")).toBeVisible();
+    await expect
+      .element(screen.getByText(/Documentation preview ready.*If this environment is paused/))
+      .toBeVisible();
+    expect(screen.container.textContent).toContain("Settings → Connections");
+    expect(screen.container.querySelector("button")).toBeNull();
+    expect(state.resume).not.toHaveBeenCalled();
+    expect(state.discard).not.toHaveBeenCalled();
+    expect(state.close).not.toHaveBeenCalled();
+    expect(state.ensureTerminal).not.toHaveBeenCalled();
+
+    await show(screen, { action: { ...held, delivery: "delivered" } });
+    await expect.element(screen.getByText("Succeeded: Check work")).not.toBeInTheDocument();
+    expect(screen.container.textContent).toBe("");
+    await show(screen, { action: { ...held, delivery: "available" } });
+    await expect.element(screen.getByText("Check work was interrupted")).toBeVisible();
+    expect(button(screen.container, "Resume agent").disabled).toBe(true);
+    expect(button(screen.container, "Discard").disabled).toBe(true);
   });
 });
 

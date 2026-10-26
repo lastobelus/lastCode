@@ -2471,6 +2471,7 @@ export default function ChatView(props: ChatViewProps) {
   const {
     runningBanner: runningResumableActionBannerItem,
     interruptedBanner: interruptedActionBannerItem,
+    heldBanner: heldActionBannerItem,
   } = useActionResumeBanners({
     routeThreadRef,
     threadRef: activeThreadRef,
@@ -2625,6 +2626,7 @@ export default function ChatView(props: ChatViewProps) {
     );
     const interruptedActionItems =
       interruptedActionBannerItem === null ? [] : [interruptedActionBannerItem];
+    const heldActionItems = heldActionBannerItem === null ? [] : [heldActionBannerItem];
     const runningActionItems =
       runningResumableActionBannerItem === null ? [] : [runningResumableActionBannerItem];
     const usageLimitsItems = usageLimitsBanner === null ? [] : [usageLimitsBanner];
@@ -2639,6 +2641,7 @@ export default function ChatView(props: ChatViewProps) {
         ...projectCloneItems,
         ...systemComposerBannerItems,
         ...interruptedActionItems,
+        ...heldActionItems,
         ...runningActionItems,
         ...backgroundWorkItems,
         ...annotationItems,
@@ -2652,6 +2655,7 @@ export default function ChatView(props: ChatViewProps) {
       ...projectCloneItems,
       ...systemComposerBannerItems,
       ...interruptedActionItems,
+      ...heldActionItems,
       ...runningActionItems,
       ...backgroundWorkItems,
       branchMismatchBannerItem({
