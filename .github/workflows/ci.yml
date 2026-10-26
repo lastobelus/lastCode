@@ -233,8 +233,8 @@ jobs:
       - name: Install C toolchain for process-tree fixtures
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential
-          command -v cc
+          sudo apt-get install -y --no-install-recommends build-essential attr acl e2fsprogs
+          command -v cc getfattr getfacl lsattr
 
       - uses: ./.github/actions/setup-apt-mirrors
 
@@ -376,6 +376,16 @@ jobs:
       - name: Detect affected jobs
         id: changes
         uses: ./.github/actions/ci-changes
+
+      - uses: ./.github/actions/setup-apt-mirrors
+        if: steps.changes.outputs.test_server != 'false'
+
+      - name: Install workspace metadata inspection tools
+        if: steps.changes.outputs.test_server != 'false'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends attr acl e2fsprogs
+          command -v getfattr getfacl lsattr
 
       - name: Setup Vite+
         if: steps.changes.outputs.test_server != 'false'
