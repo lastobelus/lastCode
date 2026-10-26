@@ -3,6 +3,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 
 import {
   GitManagerError,
@@ -37,6 +38,8 @@ import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import * as WorkspaceAcquisition from "../workspace/WorkspaceAcquisition.ts";
 import * as SuspensionRegistry from "../workspace/WorktreeSuspensionRegistry.ts";
+
+const isGitCommandError = Schema.is(GitCommandError);
 
 export class GitWorkflowService extends Context.Service<
   GitWorkflowService,
@@ -534,7 +537,7 @@ export const make = Effect.gen(function* () {
               });
             }).pipe(
               Effect.mapError((cause) =>
-                cause instanceof GitCommandError
+                isGitCommandError(cause)
                   ? cause
                   : new GitCommandError({
                       operation: "GitWorkflowService.createWorktree",

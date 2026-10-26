@@ -446,8 +446,8 @@ it.live("keeps a workspace with an actionable dashboard request until it is reso
         priority: "normal" as const,
         effort: "quick" as const,
         requiresComputer: false,
-        createdAt: at,
-        updatedAt: at,
+        createdAt: DateTime.formatIso(at),
+        updatedAt: DateTime.formatIso(at),
       };
       h.threads.set(firstId, { ...owner, dashboardItems: [request] });
       expect(

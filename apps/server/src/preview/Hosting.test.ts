@@ -705,6 +705,7 @@ describe("PreviewHosting", () => {
           retain: Effect.void,
         });
         const layer = PreviewHosting.layer.pipe(
+          Layer.provide(WorkspaceAcquisitionTestkit.layer),
           Layer.provideMerge(
             Layer.mergeAll(
               NodeServices.layer,
@@ -798,6 +799,7 @@ describe("PreviewHosting", () => {
       });
       const original = fixture.leases[0]!;
       const layer = PreviewHosting.layer.pipe(
+        Layer.provide(WorkspaceAcquisitionTestkit.layer),
         Layer.provideMerge(
           Layer.mergeAll(
             NodeServices.layer,
@@ -2383,7 +2385,6 @@ describe("PreviewHosting", () => {
         });
         const layer = PreviewHosting.layer.pipe(
           Layer.provide(WorkspaceAcquisitionTestkit.layer),
-          Layer.provide(WorkspaceAcquisitionTestkit.layer),
           Layer.provide(fileSystem),
           Layer.provideMerge(
             Layer.mergeAll(
@@ -3257,6 +3258,7 @@ describe("PreviewHosting", () => {
         retain: Effect.void,
       });
       const layer = PreviewHosting.layer.pipe(
+        Layer.provide(WorkspaceAcquisitionTestkit.layer),
         Layer.provide(fileSystemLayer),
         Layer.provideMerge(
           Layer.mergeAll(
@@ -3991,6 +3993,7 @@ describe("PreviewHosting", () => {
             }),
         });
         const layer = PreviewHosting.layer.pipe(
+          Layer.provide(WorkspaceAcquisitionTestkit.layer),
           Layer.provideMerge(
             Layer.mergeAll(
               NodeServices.layer,
@@ -4085,6 +4088,7 @@ describe("PreviewHosting", () => {
         terminal: { threadId: ThreadId.make(saved.threadId), terminalId: saved.terminalId },
       };
       const layer = PreviewHosting.layer.pipe(
+        Layer.provide(WorkspaceAcquisitionTestkit.layer),
         Layer.provideMerge(
           Layer.mergeAll(
             NodeServices.layer,

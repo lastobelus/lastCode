@@ -713,8 +713,7 @@ function makeManager(input?: {
       yield* input.seed.pipe(Effect.provideContext(stores), Effect.orDie);
     }
     const manager = yield* GitManager.make.pipe(
-      Effect.provide(WorkspaceAcquisitionTestkit.layer),
-      Effect.provide(layerManager),
+      Effect.provide(Layer.merge(WorkspaceAcquisitionTestkit.layer, layerManager)),
       Effect.provideContext(stores),
     );
     return { manager, providerCalls };

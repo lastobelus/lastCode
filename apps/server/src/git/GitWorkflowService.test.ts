@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import { GitCommandError } from "@t3tools/contracts";
 import * as Layer from "effect/Layer";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -73,7 +74,18 @@ it.layer(NodeServices.layer)("GitWorkflowService", (it) => {
                     );
                     noteCreated = true;
                   }
-                }),
+                }).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new GitCommandError({
+                        operation: "test.recreate",
+                        command: "fixture late workspace creation",
+                        detail: "Could not create late fixture notes",
+                        cwd,
+                        cause,
+                      }),
+                  ),
+                ),
               ),
             ),
         };
