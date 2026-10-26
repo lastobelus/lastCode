@@ -2237,7 +2237,7 @@ const make = Effect.gen(function* () {
         visible: candidate.viewers.size > 0,
         ...(candidate.profileId === undefined ? {} : { profileId: candidate.profileId }),
       }));
-    // Idle pages and detached native roots keep their session without a connected page.
+    // Idle pages and dormant or detached native tabs keep their session without a connected page.
     const detachedRoots = [...nativeRoots.values()].filter(
       (root) =>
         root.published &&
@@ -2255,6 +2255,7 @@ const make = Effect.gen(function* () {
           snapshot.runtime === "server" &&
           !tabs.has(tabKey(snapshot.threadId, snapshot.tabId)) &&
           (snapshot.backingPage === "server" ||
+            snapshot.backingPage === "desktop" ||
             detachedRoots.some(
               (root) => snapshot.tabId === root.key.tabId && snapshot.desktopRootId === root.rootId,
             )),

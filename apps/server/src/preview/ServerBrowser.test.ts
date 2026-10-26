@@ -3530,6 +3530,34 @@ it.live(
         expect(dormant.snapshot.desktopRootId).toBeUndefined();
         expect(rootClosures).toEqual([]);
         expect((yield* manager.list({})).sessions).toHaveLength(1);
+        const connectionsBefore = desktopConnections.length;
+        const status = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "status",
+          input: {},
+        });
+        expect(status.available).toBe(false);
+        expect(status.tabs).toEqual([
+          {
+            tabId,
+            url: "https://native.example.test/saved",
+            owner: "agent",
+            ownedByCaller: true,
+            visible: false,
+            profileId: "work",
+          },
+        ]);
+        const observed = yield* broker.invoke<PreviewAutomationStatus>({
+          scope: asSession("other-agent"),
+          tabId,
+          operation: "status",
+          input: {},
+        });
+        expect(observed.tabs).toEqual([{ ...status.tabs![0], ownedByCaller: false }]);
+        expect(desktopConnections).toHaveLength(connectionsBefore);
+        expect(rootCreations).toHaveLength(1);
+        expect(contexts).toHaveLength(0);
+        expect((yield* manager.list({})).sessions).toEqual([dormant.snapshot]);
         expect(
           yield* broker.invoke({
             scope,
@@ -3538,8 +3566,24 @@ it.live(
             input: { expression: "restored()" },
           }),
         ).toBe("evaluated");
+        expect(
+          (yield* broker
+            .invoke<void>({
+              scope: asSession("other-agent"),
+              tabId,
+              operation: "close",
+              input: {},
+            })
+            .pipe(Effect.flip)).message,
+        ).toContain("another agent session");
         expect(rootCreations).toHaveLength(1);
         expect(contexts).toHaveLength(0);
+        const restored = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "status",
+          input: {},
+        });
+        expect(restored.tabs?.map((tab) => tab.tabId)).toEqual([tabId]);
       }),
     ).pipe(Effect.provide(layer)),
 );

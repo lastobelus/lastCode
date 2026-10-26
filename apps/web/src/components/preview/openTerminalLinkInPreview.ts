@@ -18,7 +18,13 @@ import {
 } from "~/browser/preparedPreviewOpenTarget";
 import { openPreparedExternalUrl } from "~/browser/openPreparedExternalUrl";
 import { recordVisitForThread } from "~/browserHistoryStore";
-import { applyPreviewServerSnapshot } from "~/previewStateStore";
+import {
+  applyPreviewServerSnapshot,
+  capturePreviewOpenFocus,
+  hiddenPreviewTabIds,
+  readThreadPreviewState,
+  updatePreviewServerSnapshot,
+} from "~/previewStateStore";
 import { useRightPanelStore } from "~/rightPanelStore";
 
 import { mayBeHostedPreviewUrl, prepareHostedPreview } from "./previewHostingRecovery";
@@ -69,6 +75,8 @@ export async function openTerminalLinkInPreview<E>(
   if (webClient && input.terminalLinkProfileName !== undefined) {
     throw new TerminalLinkProfileUnavailableError({ reason: "hosted-web" });
   }
+  const focus = capturePreviewOpenFocus(input.threadRef, input.forceBrowser);
+  const handledOpenTabIds = readThreadPreviewState(input.threadRef).handledOpenTabIds;
   // Resolve explicit intent before either browser opens. Never infer it from the URL.
   const explicitDefaults =
     input.terminalLinkProfileName === undefined ? undefined : await resolveBrowserDefaults();
@@ -117,6 +125,7 @@ export async function openTerminalLinkInPreview<E>(
         ...preparedPreviewOpenTarget(input.threadRef.environmentId, prepared, input.url, profileId),
         viewport: browserDefaultOpenViewport(defaults),
         profileId,
+        focus,
       },
     });
     if (result._tag === "Failure") {
@@ -129,8 +138,25 @@ export async function openTerminalLinkInPreview<E>(
       return hostedPreviewNavigationUrl(prepared);
     }
     recordVisitForThread(input.threadRef, input.url);
-    applyPreviewServerSnapshot(input.threadRef, result.value);
-    useRightPanelStore.getState().openBrowser(input.threadRef, result.value.tabId);
+    const creationFocusHandled =
+      !handledOpenTabIds.has(result.value.tabId) &&
+      readThreadPreviewState(input.threadRef).handledOpenTabIds.has(result.value.tabId);
+    const panel = useRightPanelStore.getState();
+    if (
+      creationFocusHandled ||
+      panel.getUserActionRevision(input.threadRef) !== focus.userActionRevision
+    ) {
+      updatePreviewServerSnapshot(input.threadRef, result.value, { consumeOpenFocus: true });
+    } else {
+      applyPreviewServerSnapshot(input.threadRef, result.value);
+      const state = readThreadPreviewState(input.threadRef);
+      panel.reconcileBrowserSurfaces(
+        input.threadRef,
+        Object.keys(state.sessions),
+        hiddenPreviewTabIds(state.sessions),
+        result.value.tabId,
+      );
+    }
     return null;
   };
 

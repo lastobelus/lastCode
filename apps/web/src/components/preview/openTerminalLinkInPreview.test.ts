@@ -6,6 +6,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 
 import * as previewRuntime from "~/browser/previewRuntime";
 import type { OpenPreviewMutation } from "~/browser/openFileInPreview";
+import {
+  applyPreviewServerEvent,
+  readThreadPreviewState,
+  resetPreviewStateForTests,
+} from "~/previewStateStore";
+import { selectActiveRightPanelSurface, useRightPanelStore } from "~/rightPanelStore";
 
 import {
   openTerminalLinkInPreview,
@@ -30,15 +36,9 @@ vi.mock("~/state/entities", () => ({
   useEnvironmentSupportsServerBrowser: () => true,
 }));
 
-vi.mock("~/previewStateStore", () => ({
-  applyPreviewServerSnapshot: vi.fn(),
+vi.mock("~/previewStateStore", async (original) => ({
+  ...(await original<typeof import("~/previewStateStore")>()),
   isPreviewSupportedInRuntime: () => true,
-}));
-
-vi.mock("~/rightPanelStore", () => ({
-  useRightPanelStore: {
-    getState: () => ({ openBrowser: vi.fn() }),
-  },
 }));
 
 const browserDefaultsMocks = vi.hoisted(() => ({
@@ -104,6 +104,12 @@ function deferredRecovery() {
 
 beforeEach(() => {
   vi.stubGlobal("window", { desktopBridge: {} });
+  resetPreviewStateForTests();
+  useRightPanelStore.setState({
+    byThreadKey: {},
+    threadPanelVisibilityByThreadKey: {},
+    userActionRevisionByThreadKey: {},
+  });
   hostingMocks.prepare
     .mockReset()
     .mockImplementation(async (_ref, url) => ({ url, managed: false, restored: false }));
@@ -118,6 +124,57 @@ afterEach(() => {
 });
 
 describe("openTerminalLinkInPreview", () => {
+  it.each(
+    ["desktop", "web"].flatMap((client) =>
+      ["before", "after"].map((delivery) => ({ client, delivery })),
+    ),
+  )(
+    "preserves a newer panel choice on $client when the opened event arrives $delivery the reply",
+    async ({ client, delivery }) => {
+      const popup = client === "web" ? installWebPopup() : undefined;
+      vi.spyOn(previewRuntime, "isPreviewAvailableFor").mockReturnValue(true);
+      const recovery = deferredRecovery();
+      hostingMocks.prepare.mockReturnValueOnce(recovery.promise);
+      const emitOpened = (focus: PreviewOpenInput["focus"]) =>
+        applyPreviewServerEvent(threadRef, {
+          type: "opened",
+          threadId: threadRef.threadId,
+          tabId: snapshot.tabId,
+          snapshot,
+          createdAt: snapshot.updatedAt,
+          serverEpoch: "terminal-focus-epoch",
+          revision: 1,
+          ...(focus === undefined ? {} : { focus }),
+        });
+      const openPreview = vi.fn<OpenPreviewMutation<never>>(async ({ input }) => {
+        if (delivery === "before") emitOpened(input.focus);
+        return AsyncResult.success(snapshot);
+      });
+      const revision = useRightPanelStore.getState().getUserActionRevision(threadRef);
+      const opening = openTerminalLinkInPreview({
+        url: "http://localhost:5173/app",
+        threadRef,
+        openPreview,
+        fallbackToBrowser: vi.fn(),
+        forceBrowser: false,
+      });
+      useRightPanelStore.getState().open(threadRef, "files");
+      recovery.resolve({ url: "http://localhost:5173/app", managed: true, restored: true });
+      await opening;
+      if (delivery === "after") emitOpened(openPreview.mock.calls[0]?.[0].input.focus);
+      expect(
+        selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, threadRef)?.id,
+      ).toBe("files");
+      expect(readThreadPreviewState(threadRef).sessions[snapshot.tabId]).toEqual(snapshot);
+      expect(openPreview.mock.calls[0]?.[0].input.focus?.userActionRevision).toBe(revision + 1);
+      expect(hostingMocks.prepare).toHaveBeenCalledOnce();
+      if (popup) {
+        expect(popup.tab.close).toHaveBeenCalledOnce();
+        expect(popup.tab.location.replace).not.toHaveBeenCalled();
+      }
+    },
+  );
+
   it("opens an ordinary managed app in its environment rather than this desktop", async () => {
     vi.spyOn(previewRuntime, "previewRuntimeFor").mockReturnValue(undefined);
     const url = "http://workstation.example:5173/app?case=terminal#section";
@@ -409,6 +466,7 @@ describe("openTerminalLinkInPreview", () => {
         url: "https://example.com/docs",
         viewport: hydratedDefaults.viewport,
         profileId: "work",
+        focus: expect.objectContaining({ userActionRevision: expect.any(Number) }),
       },
     });
     expect(hydratedDefaults.profileId).toBe("default");
