@@ -5,9 +5,11 @@ import {
   FILL_PREVIEW_VIEWPORT,
 } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
+import * as Cause from "effect/Cause";
 import { type ComponentProps, useEffect, useEffectEvent, useState } from "react";
 
 import { primaryEnvironmentIdAtom } from "~/state/primaryEnvironment";
+import { toastManager } from "~/components/ui/toast";
 
 import { isElectron } from "~/env";
 import { useClientSettingsHydrated } from "~/hooks/useSettings";
@@ -24,11 +26,21 @@ import { HostedBrowserWebview } from "./HostedBrowserWebview";
 import { openUrlInPreview } from "./openFileInPreview";
 import { rendersServerTabNatively } from "./previewRuntime";
 import { previewRuntimeTabId } from "./previewRuntimeTabId";
+import { useDesktopBrowserSessions } from "./useDesktopBrowserSessions";
+
+function reportLinkOpenFailure(cause: unknown) {
+  toastManager.add({
+    type: "error",
+    title: "Could not open the link in the browser",
+    description: cause instanceof Error ? cause.message : undefined,
+  });
+}
 
 export function ElectronBrowserHost() {
   const previewByThreadKey = useActivePreviewSessions();
   const primaryEnvironmentId = useAtomValue(primaryEnvironmentIdAtom);
   useDesktopHostedPreviewSessions(primaryEnvironmentId);
+  useDesktopBrowserSessions(primaryEnvironmentId);
   const activeSessions = Object.entries(previewByThreadKey).flatMap(([threadKey, previewState]) => {
     const threadRef = parseScopedThreadKey(threadKey);
     return threadRef
@@ -105,7 +117,13 @@ export function ElectronBrowserHost() {
       openPreview,
       profileId: source.snapshot.profileId,
       background,
-    });
+    })
+      .then((result) => {
+        if (result._tag === "Failure" && !Cause.hasInterruptsOnly(result.cause)) {
+          reportLinkOpenFailure(Cause.squash(result.cause));
+        }
+      })
+      .catch(reportLinkOpenFailure);
   });
   useEffect(() => {
     const preview = window.desktopBridge?.preview;

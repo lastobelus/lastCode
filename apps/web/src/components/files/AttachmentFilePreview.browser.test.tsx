@@ -496,14 +496,14 @@ describe("large text preview recovery", () => {
       state(`${changed}#updated`, "two");
       await screen.rerender(preview("file-edit"));
       await vi.waitFor(() => expect(screen.container.textContent).toContain("changed"));
-      expect(workers).toHaveLength(2);
+      await vi.waitFor(() => expect(workers).toHaveLength(2));
       await screen.rerender(preview("file-edit", 1));
       await vi.waitFor(() => expect(workers).toHaveLength(3));
       await vi.waitFor(() => expect(screen.container.textContent).toContain("changed"));
       state(`${original}#legacy`);
       await screen.rerender(preview("legacy-edit", 1));
       await vi.waitFor(() => expect(screen.container.textContent).toContain("original"));
-      expect(workers).toHaveLength(4);
+      await vi.waitFor(() => expect(workers).toHaveLength(4));
       assetUrlState.mockReturnValue({ _tag: "Failure" });
       await screen.rerender(preview("legacy-edit", 1));
       expect(screen.container.textContent).toContain("Unable to load file preview.");
