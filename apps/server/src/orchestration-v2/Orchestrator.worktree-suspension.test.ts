@@ -284,7 +284,7 @@ it.effect("does not reinterpret an automatic command as adoption when its receip
     const replayed = yield* dispatchUserCommand(command).pipe(
       Effect.provide(ThreadManagement.layer),
     );
-    assert.deepEqual(replayed, accepted);
+    assert.deepEqual(replayed, { ...accepted, replayed: true });
     assert.isFalse((yield* projections.getThread(firstId)).workspaceUserAdopted);
   }).pipe(Effect.provide(testLayer)),
 );

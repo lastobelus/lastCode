@@ -2040,6 +2040,27 @@ it.live("bounds and rotates automatic candidates past an inconsistent shared che
           },
         },
       });
+      const awaitSuspended = (entries: readonly Registry.CheckoutAuthority[]) =>
+        Stream.fromQueue(h.updates).pipe(
+          Stream.filter(
+            (record) =>
+              entries.some((entry) => entry.checkoutId === record.checkoutId) &&
+              (record.blockedReason !== null ||
+                (record.summary.state === "suspended" &&
+                  record.operation === undefined &&
+                  record.pendingProjection === undefined)),
+          ),
+          Stream.take(entries.length),
+          Stream.runCollect,
+          Effect.tap((records) =>
+            Effect.sync(() => {
+              expect(records.map((record) => record.checkoutId).sort()).toEqual(
+                entries.map((entry) => entry.checkoutId).sort(),
+              );
+              for (const record of records) expect(record.blockedReason).toBeNull();
+            }),
+          ),
+        );
       yield* h.service.previewSuspend({ threadId: firstId });
       const original = (yield* h.registry.list)[0]!;
       h.threads.set(secondId, {
@@ -2060,13 +2081,7 @@ it.live("bounds and rotates automatic candidates past an inconsistent shared che
       yield* h.service.sweep;
       const first = (yield* h.registry.list).filter((record) => paths.includes(record.path));
       expect(first).toHaveLength(3);
-      for (const entry of first)
-        yield* h.awaitRecord(
-          (record) =>
-            record.checkoutId === entry.checkoutId &&
-            record.summary.state === "suspended" &&
-            record.operation === undefined,
-        );
+      yield* awaitSuspended(first);
       yield* h.service.sweep;
       const rest = (yield* h.registry.list).filter(
         (record) =>
@@ -2074,13 +2089,7 @@ it.live("bounds and rotates automatic candidates past an inconsistent shared che
           !first.some((prior) => prior.checkoutId === record.checkoutId),
       );
       expect(rest).toHaveLength(3);
-      for (const entry of rest)
-        yield* h.awaitRecord(
-          (record) =>
-            record.checkoutId === entry.checkoutId &&
-            record.summary.state === "suspended" &&
-            record.operation === undefined,
-        );
+      yield* awaitSuspended(rest);
       expect(
         (yield* h.registry.list).find((record) => record.checkoutId === original.checkoutId)!
           .summary.state,

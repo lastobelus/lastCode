@@ -230,11 +230,7 @@ function SuspensionPolicyForm({
   );
 }
 
-export function WorktreeSuspensionSettings({
-  savedWorkspaces,
-}: {
-  readonly savedWorkspaces?: ReactNode;
-}) {
+function WorktreeSuspensionSettings({ savedWorkspaces }: { readonly savedWorkspaces?: ReactNode }) {
   const settings = useScopedSettings();
   const mixed = useScopedSettingsMixed(["worktreeSuspension"]);
   const canWrite = useScopedSettingsWriteAllowed();

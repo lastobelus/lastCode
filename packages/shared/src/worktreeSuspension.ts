@@ -9,7 +9,7 @@ import * as NodeStreamPromises from "node:stream/promises";
 import * as NodeZlib from "node:zlib";
 import * as HostProcess from "./HostProcess.ts";
 
-export const DEFAULT_WORKTREE_SUSPENSION_LIMITS = {
+const DEFAULT_WORKTREE_SUSPENSION_LIMITS = {
   maxEntries: 100_000,
   maxBytes: 512 * 1024 * 1024,
   maxFileBytes: 64 * 1024 * 1024,

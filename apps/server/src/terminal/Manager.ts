@@ -25,7 +25,7 @@ import {
   type TerminalCloseInput,
   type TerminalEvent,
   type TerminalMetadataStreamEvent,
-  type TerminalOpenInput,
+  TerminalOpenInput,
   type TerminalObserveInput,
   type TerminalResizeInput,
   type ResourceMonitorProcessTableEntry,
@@ -168,6 +168,11 @@ class TerminalProcessSignalError extends Schema.TaggedError<TerminalProcessSigna
     return `Failed to send ${this.signal} to terminal process ${this.terminalPid}`;
   }
 }
+
+class TerminalLaunchRequired extends Schema.TaggedError<TerminalLaunchRequired>()(
+  "TerminalLaunchRequired",
+  { input: TerminalOpenInput },
+) {}
 
 export class TerminalShutdownError extends Schema.TaggedError<TerminalShutdownError>()(
   "TerminalShutdownError",
@@ -3520,23 +3525,31 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     };
   });
 
-  const openLocked = (input: TerminalOpenInput) =>
+  // Both workspace paths must be leased before the thread lock: Actions and setup already own a lease.
+  const withLaunchWorkspaceLease = <
+    Input extends TerminalOpenInput | TerminalRestartInput,
+    A,
+    E,
+    R,
+  >(
+    input: Input,
+    use: (resolved: Input) => Effect.Effect<A, E, R>,
+  ) =>
     withWorkspaceLease(
       path.resolve(input.worktreePath ?? input.cwd),
       acquireLaunchInput(input).pipe(
         Effect.flatMap((resolved) =>
-          withWorkspaceLease(
-            resolved.worktreePath ?? resolved.cwd,
-            openWithWorkspaceLease(resolved),
-          ),
+          withWorkspaceLease(resolved.worktreePath ?? resolved.cwd, use(resolved)),
         ),
       ),
     );
 
   const open: TerminalManager["Service"]["open"] = (input) =>
-    withThreadLock(
-      input.threadId,
-      resolveLaunchInputEnvironment(input).pipe(Effect.flatMap(openLocked)),
+    withLaunchWorkspaceLease(input, (resolved) =>
+      withThreadLock(
+        input.threadId,
+        resolveLaunchInputEnvironment(resolved).pipe(Effect.flatMap(openWithWorkspaceLease)),
+      ),
     );
 
   const observeAttachment = (input: TerminalAttachInput) => {
@@ -3556,11 +3569,12 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     };
   };
 
-  const openOrAttachForStream = Effect.fnUntraced(function* (
+  const openOrAttachForStream = Effect.fnUntraced(function* <E>(
     input: TerminalAttachInput,
     startIfNeeded: boolean | undefined,
     observed: ReturnType<typeof observeAttachment>,
-  ): Effect.fn.Return<TerminalSessionSnapshot | null, TerminalError> {
+    launch: (input: TerminalOpenInput) => Effect.Effect<TerminalSessionSnapshot, E>,
+  ): Effect.fn.Return<TerminalSessionSnapshot | null, TerminalError | E> {
     const terminalId = input.terminalId;
     const existing = yield* getSession(input.threadId, terminalId);
 
@@ -3612,14 +3626,11 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         });
       }
 
-      const resolvedInput = yield* resolveLaunchInputEnvironment({
+      return yield* launch({
         ...input,
         terminalId,
         cwd: input.cwd,
       });
-      return yield* Effect.uninterruptible(
-        openLocked(resolvedInput).pipe(Effect.map(publicSnapshot)),
-      );
     }
 
     const session = existing.value;
@@ -3633,7 +3644,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       input.restartIfNotRunning === true &&
       startIfNeeded !== false
     ) {
-      const resolvedInput = yield* resolveLaunchInputEnvironment({
+      return yield* launch({
         ...input,
         ...(input.terminalLinkProfileName !== undefined ||
         session.terminalLinkProfileName === undefined
@@ -3642,9 +3653,6 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         terminalId,
         cwd: input.cwd,
       });
-      return yield* Effect.uninterruptible(
-        openLocked(resolvedInput).pipe(Effect.map(publicSnapshot)),
-      );
     }
 
     if (
@@ -3713,9 +3721,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 
   // Subscribe after taking the lock so contention cannot accumulate an unbounded replay.
   // Snapshot listeners run under that lock and must not block.
-  const streamSession = (
+  const streamSession = <E>(
     input: TerminalObserveInput,
-    initial: Effect.Effect<TerminalSessionSnapshot | null, TerminalError>,
+    initial: Effect.Effect<TerminalSessionSnapshot | null, E>,
     listener: (event: TerminalAttachStreamEvent) => Effect.Effect<void>,
     registerCleanup?: (stop: () => void) => void,
   ) => {
@@ -3806,14 +3814,44 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     registerCleanup,
     startIfNeeded,
   ) =>
-    Effect.suspend(() =>
-      streamSession(
+    Effect.suspend(() => {
+      const observed = observeAttachment(input);
+      return streamSession(
         input,
-        openOrAttachForStream(input, startIfNeeded, observeAttachment(input)),
+        openOrAttachForStream(input, startIfNeeded, observed, (launchInput) =>
+          Effect.fail(new TerminalLaunchRequired({ input: launchInput })),
+        ),
         listener,
         registerCleanup,
-      ),
-    );
+      ).pipe(
+        Effect.catchTags({
+          TerminalLaunchRequired: ({ input: launchInput }) =>
+            withLaunchWorkspaceLease(launchInput, (acquired) =>
+              streamSession(
+                input,
+                openOrAttachForStream(input, startIfNeeded, observed, (current) =>
+                  resolveLaunchInputEnvironment({
+                    ...current,
+                    cwd: acquired.cwd,
+                    ...(acquired.worktreePath === undefined
+                      ? {}
+                      : { worktreePath: acquired.worktreePath }),
+                    ...(acquired.env === undefined ? {} : { env: acquired.env }),
+                  }).pipe(
+                    Effect.flatMap((resolved) =>
+                      Effect.uninterruptible(
+                        openWithWorkspaceLease(resolved).pipe(Effect.map(publicSnapshot)),
+                      ),
+                    ),
+                  ),
+                ),
+                listener,
+                registerCleanup,
+              ),
+            ),
+        }),
+      );
+    });
 
   const observeStream: TerminalManager["Service"]["observeStream"] = (
     input,
@@ -4102,22 +4140,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   });
 
   const restart: TerminalManager["Service"]["restart"] = (input) =>
-    withThreadLock(
-      input.threadId,
-      resolveLaunchInputEnvironment(input).pipe(
-        Effect.flatMap((resolved) =>
-          withWorkspaceLease(
-            path.resolve(resolved.worktreePath ?? resolved.cwd),
-            acquireLaunchInput(resolved).pipe(
-              Effect.flatMap((acquired) =>
-                withWorkspaceLease(
-                  acquired.worktreePath ?? acquired.cwd,
-                  restartResolved(acquired),
-                ),
-              ),
-            ),
-          ),
-        ),
+    withLaunchWorkspaceLease(input, (acquired) =>
+      withThreadLock(
+        input.threadId,
+        resolveLaunchInputEnvironment(acquired).pipe(Effect.flatMap(restartResolved)),
       ),
     );
 

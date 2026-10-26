@@ -2495,12 +2495,12 @@ export const make = Effect.gen(function* () {
   };
   const sweep = Effect.gen(function* () {
     const catalog = yield* registry.list;
-    const unfinished = catalog.filter(
+    const reconcilable = catalog.filter(
       (entry) =>
         !liveOperations.has(entry.checkoutId) &&
-        (entry.operation !== undefined || entry.pendingProjection !== undefined),
+        (!entry.detached || entry.operation !== undefined || entry.pendingProjection !== undefined),
     );
-    for (const entry of rotate(unfinished, (entry) => entry.checkoutId, lastRecoveryId).slice(
+    for (const entry of rotate(reconcilable, (entry) => entry.checkoutId, lastRecoveryId).slice(
       0,
       sweepBudget,
     )) {

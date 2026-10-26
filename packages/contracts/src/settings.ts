@@ -1112,7 +1112,7 @@ export const WorktreeSuspensionPolicy = Schema.Union([
   }),
 ]);
 export type WorktreeSuspensionPolicy = typeof WorktreeSuspensionPolicy.Type;
-export const DEFAULT_WORKTREE_SUSPENSION_POLICY: WorktreeSuspensionPolicy = { mode: "off" };
+const DEFAULT_WORKTREE_SUSPENSION_POLICY: WorktreeSuspensionPolicy = { mode: "off" };
 
 export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "worktreeCleanup",
