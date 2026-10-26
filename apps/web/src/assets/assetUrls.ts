@@ -4,6 +4,7 @@ import {
   assetUrlStateFromResult,
   blockedAssetUrlState,
   EMPTY_ASSET_URL_ATOM,
+  fileAssetResourceForAccess,
   resolveAssetUrl,
 } from "@t3tools/client-runtime/state/assets";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
@@ -23,12 +24,18 @@ export function useAssetUrlState(
   environmentId: EnvironmentId | null,
   resource: AssetResource | null,
 ): AssetUrlState {
-  const blocked = blockedAssetUrlState(resource, useFilesystemReadAccess(environmentId));
+  const fileAccess = useFilesystemReadAccess(environmentId);
+  const scopedResource =
+    resource === null ? null : fileAssetResourceForAccess(resource, fileAccess.canReadFiles);
+  const blocked = blockedAssetUrlState(scopedResource, fileAccess);
   const preparedConnection = usePreparedConnection(environmentId);
   const result = useAtomValue(
-    blocked !== null || environmentId === null || resource === null
+    blocked !== null || environmentId === null || scopedResource === null
       ? EMPTY_ASSET_URL_ATOM
-      : assetEnvironment.createUrl({ environmentId, input: { resource } }),
+      : assetEnvironment.createUrl({
+          environmentId,
+          input: { resource: scopedResource },
+        }),
   );
   if (blocked !== null) return blocked;
   return {
@@ -44,6 +51,7 @@ export function useAssetUrlRefresh(
   environmentId: EnvironmentId | null,
   resource: AssetResource | null,
 ): () => Promise<string | null> {
+  const fileAccess = useFilesystemReadAccess(environmentId);
   const connection = usePreparedConnection(environmentId);
   const httpBaseUrl = connection._tag === "Some" ? connection.value.httpBaseUrl : null;
   const refresh = useAtomQueryRunner(assetEnvironment.createUrl, {
@@ -52,7 +60,14 @@ export function useAssetUrlRefresh(
   });
   return async () => {
     if (environmentId === null || resource === null || httpBaseUrl === null) return null;
-    const result = await refresh({ environmentId, input: { resource } });
+    const result = await refresh({
+      environmentId,
+      input: {
+        resource: fileAccess.canReadThreadFiles
+          ? fileAssetResourceForAccess(resource, fileAccess.canReadFiles)
+          : resource,
+      },
+    });
     if (result._tag === "Failure") throw squashAtomCommandFailure(result);
     return resolveAssetUrl(httpBaseUrl, result.value.relativeUrl);
   };
@@ -63,10 +78,16 @@ export function useAssetUrls(
   resources: ReadonlyArray<AssetResource>,
 ): ReadonlyArray<string | null> {
   const preparedConnection = usePreparedConnection(environmentId);
-  const { canReadFiles } = useFilesystemReadAccess(environmentId);
-  const allowedResources = canReadFiles
-    ? resources
-    : resources.filter((resource) => !isFileResource(resource));
+  const { canReadFiles, canReadThreadFiles } = useFilesystemReadAccess(environmentId);
+  const allowedResources = resources
+    .filter(
+      (resource) =>
+        canReadFiles ||
+        (canReadThreadFiles &&
+          (resource._tag === "workspace-file" || resource._tag === "media-file")) ||
+        !isFileResource(resource),
+    )
+    .map((resource) => fileAssetResourceForAccess(resource, canReadFiles));
   const results = useAtomValue(
     assetEnvironment.createUrls({
       environmentId,
@@ -77,7 +98,11 @@ export function useAssetUrls(
   const urls: Array<string | null> = [];
   let resultIndex = 0;
   for (const resource of resources) {
-    if (!canReadFiles && isFileResource(resource)) {
+    if (
+      !canReadFiles &&
+      ((!canReadThreadFiles && isFileResource(resource)) ||
+        resource._tag === "draft-workspace-file")
+    ) {
       urls.push(null);
       continue;
     }

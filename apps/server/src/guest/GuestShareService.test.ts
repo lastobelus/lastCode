@@ -58,6 +58,7 @@ const adapter = {
   openSession: () => Effect.die("No provider process needed for guest shares"),
 } as ProviderAdapter.ProviderAdapterV2["Service"];
 const layerDatabase = SqlitePersistence.layerMemory;
+const layerSettings = ServerSettings.layerTest({ guestSharingEnabled: true });
 const layerOrchestration = Layer.mergeAll(
   layerDatabase,
   ProjectionStore.layer.pipe(Layer.provide(layerDatabase)),
@@ -65,7 +66,11 @@ const layerOrchestration = Layer.mergeAll(
   ProviderReplayHarness.layerWithRegistry(
     { name: "guest-share-service" },
     ProviderAdapterRegistry.layerFromAdapters([adapter]),
-    { databaseLayer: layerDatabase, runEffectWorker: false },
+    {
+      databaseLayer: layerDatabase,
+      runEffectWorker: false,
+      serverSettingsLayer: layerSettings,
+    },
   ),
 );
 
@@ -92,6 +97,7 @@ const layerCleanup = Layer.effect(
       cleanupScheduledTasks: () => Effect.void,
       cleanupTerminals: () => Effect.void,
       cleanupPreviews: () => Effect.void,
+      cleanupArchivedTerminals: () => Effect.void,
       cleanupAttachments: (attachmentIds) =>
         Effect.forEach(
           attachmentIds,
@@ -111,7 +117,7 @@ const layerTest = GuestShareService.layer.pipe(
     ),
   ),
   Layer.provide(layerProviders),
-  Layer.provideMerge(ServerSettings.layerTest({ guestSharingEnabled: true })),
+  Layer.provideMerge(layerSettings),
   Layer.provide(layerConnect),
   Layer.provide(ServerSecretStore.layer),
   Layer.provideMerge(layerConfig),

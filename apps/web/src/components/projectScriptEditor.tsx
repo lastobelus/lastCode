@@ -97,6 +97,7 @@ export interface NewProjectScriptInput {
   autoOpenPreview: boolean;
   /** Permit provider-scoped MCP launch plus a one-shot automated follow-up. */
   allowAgentResume: boolean;
+  terminalLinkProfileName?: string;
 }
 
 export type ProjectScriptActionResult = AtomCommandResult<void, unknown>;
@@ -134,6 +135,9 @@ export function editorRequestForScript(
       waitForSetup: script.runOnWorktreeCreate && script.async === false,
       runOnSettle: script.runOnSettle ?? false,
       keybinding: keybindingValueForCommand(keybindings, commandForProjectScript(script.id)),
+      ...(script.terminalLinkProfileName === undefined
+        ? {}
+        : { terminalLinkProfileName: script.terminalLinkProfileName }),
       previewUrl: script.previewUrl ?? null,
       autoOpenPreview: script.autoOpenPreview ?? false,
       allowAgentResume: script.allowAgentResume ?? false,
@@ -273,6 +277,7 @@ function ProjectScriptEditorForm({
   const [runOnSettle, setRunOnSettle] = useState(false);
   const [keybinding, setKeybinding] = useState("");
   const [previewUrl, setPreviewUrl] = useState("");
+  const [terminalLinkProfileName, setTerminalLinkProfileName] = useState("");
   const [autoOpenPreview, setAutoOpenPreview] = useState(false);
   const [allowAgentResume, setAllowAgentResume] = useState(false);
   const [savingRequest, setSavingRequest] = useState<ProjectScriptEditorRequest | null>(null);
@@ -303,6 +308,7 @@ function ProjectScriptEditorForm({
       setRunOnSettle(request.initial.runOnSettle);
       setKeybinding(request.initial.keybinding ?? "");
       setPreviewUrl(request.initial.previewUrl ?? "");
+      setTerminalLinkProfileName(request.initial.terminalLinkProfileName ?? "");
       setAutoOpenPreview(request.initial.autoOpenPreview);
       setAllowAgentResume(request.initial.allowAgentResume);
       setSavingRequest(null);
@@ -369,6 +375,7 @@ function ProjectScriptEditorForm({
         command: commandForProjectScript(scriptIdForValidation),
       });
       const trimmedPreviewUrl = previewUrl.trim();
+      const trimmedTerminalLinkProfileName = terminalLinkProfileName.trim();
       payload = {
         name: trimmedName,
         command: trimmedCommand,
@@ -382,6 +389,9 @@ function ProjectScriptEditorForm({
         previewUrl: trimmedPreviewUrl.length > 0 ? trimmedPreviewUrl : null,
         autoOpenPreview: trimmedPreviewUrl.length > 0 ? autoOpenPreview : false,
         allowAgentResume,
+        ...(trimmedTerminalLinkProfileName.length > 0
+          ? { terminalLinkProfileName: trimmedTerminalLinkProfileName }
+          : {}),
       } satisfies NewProjectScriptInput;
     } catch (error) {
       setValidationError(error instanceof Error ? error.message : "Failed to save action.");
@@ -500,6 +510,34 @@ function ProjectScriptEditorForm({
                 value={command}
                 onChange={(event) => setCommand(event.target.value)}
               />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="script-terminal-link-profile">
+                Browser profile for terminal links (optional)
+              </Label>
+              <div className="flex items-center gap-2">
+                <Input
+                  id="script-terminal-link-profile"
+                  aria-describedby="script-terminal-link-profile-help"
+                  placeholder="Existing desktop profile name"
+                  value={terminalLinkProfileName}
+                  onChange={(event) => setTerminalLinkProfileName(event.target.value)}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  aria-label="Clear terminal link profile"
+                  disabled={terminalLinkProfileName.length === 0}
+                  onClick={() => setTerminalLinkProfileName("")}
+                >
+                  Clear
+                </Button>
+              </div>
+              <p id="script-terminal-link-profile-help" className="text-xs text-muted-foreground">
+                Enter the exact name of an existing Browser profile. Open this Action's terminal
+                links in the desktop app that owns the profile. Leave blank to use your usual
+                link-opening settings.
+              </p>
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="script-preview-url">Preview URL (optional)</Label>

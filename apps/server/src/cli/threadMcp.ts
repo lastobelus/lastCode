@@ -496,35 +496,36 @@ const decodeThreadId = (value: string) =>
     Effect.mapError(() => new ThreadUsageError({ detail: `'${value}' is not a thread id.` })),
   );
 
-export const listProjectThreads = Effect.fn("cli.thread.listProjectThreads")((flags: {
-  readonly baseDir: Option.Option<string>;
-  readonly stateDir?: Option.Option<string>;
-  readonly project: string;
-  readonly json: boolean;
-}) =>
-  withThreadTools(
-    flags,
-    Effect.fn("cli.thread.list")(function* (tools) {
-      const project = yield* resolveProject(tools, flags.project);
-      const threads: Array<OrchestratorMcpThreadListItem> = [];
-      let cursor: number | null = 0;
-      while (cursor !== null) {
-        const page: OrchestratorMcpThreadListResult = yield* tools.call(
-          "t3_thread_list",
-          { projectId: project.id, includeSubagents: false, limit: 100, cursor },
-          OrchestratorMcpThreadListResult,
-        );
-        threads.push(...page.threads);
-        cursor = page.nextCursor;
-      }
-      if (flags.json) {
-        return yield* printJson(threads);
-      }
-      for (const thread of threads) {
-        yield* Console.log(`${thread.threadId}  ${thread.status.padEnd(11)}  ${thread.title}`);
-      }
-    }),
-  ).pipe(reportThreadErrors),
+export const listProjectThreads = Effect.fn("cli.thread.listProjectThreads")(
+  (flags: {
+    readonly baseDir: Option.Option<string>;
+    readonly stateDir?: Option.Option<string>;
+    readonly project: string;
+    readonly json: boolean;
+  }) =>
+    withThreadTools(
+      flags,
+      Effect.fn("cli.thread.list")(function* (tools) {
+        const project = yield* resolveProject(tools, flags.project);
+        const threads: Array<OrchestratorMcpThreadListItem> = [];
+        let cursor: number | null = 0;
+        while (cursor !== null) {
+          const page: OrchestratorMcpThreadListResult = yield* tools.call(
+            "t3_thread_list",
+            { projectId: project.id, includeSubagents: false, limit: 100, cursor },
+            OrchestratorMcpThreadListResult,
+          );
+          threads.push(...page.threads);
+          cursor = page.nextCursor;
+        }
+        if (flags.json) {
+          return yield* printJson(threads);
+        }
+        for (const thread of threads) {
+          yield* Console.log(`${thread.threadId}  ${thread.status.padEnd(11)}  ${thread.title}`);
+        }
+      }),
+    ).pipe(reportThreadErrors),
 );
 
 export const threadStartCommand = Command.make("start", {

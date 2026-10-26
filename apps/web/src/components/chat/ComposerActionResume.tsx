@@ -3,7 +3,7 @@ import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import { CircleAlertIcon, TerminalIcon } from "lucide-react";
 import { memo, useEffect, useState } from "react";
 
-import { formatWorkingDurationLabel } from "../Sidebar.logic";
+import { formatWorkingDurationLabel } from "@t3tools/client-runtime/state/models";
 import { Button } from "../ui/button";
 import { cn } from "~/lib/utils";
 import { RotateCcwClockIcon } from "../icons/RotateCcwClockIcon";

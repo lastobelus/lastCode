@@ -486,23 +486,26 @@ export const make = Effect.gen(function* () {
           )
         : script.command;
 
-    const { observed, readiness } = yield* updateDrainAdmission
+    const observed = yield* updateDrainAdmission
       .admit(
         "setup-script",
         Effect.gen(function* () {
-          // Subscribe before opening so neither startup activity nor the sentinel can race the listeners.
+          const pendingKey = `${input.threadId}\u0000${terminalId}`;
+          const previous = pendingWrites.get(pendingKey);
+          if (previous) yield* Fiber.interrupt(previous);
+          const events = yield* stageTerminalEvents({ threadId: input.threadId, terminalId });
           const observed =
             observe && completionToken
               ? yield* observeTerminalCompletion({
                   threadId: input.threadId,
                   terminalId,
+                  subscribe: events.subscribe,
                   sentinel: completionSentinel(completionToken),
                   sentinelPattern: completionSentinelPattern(completionToken),
                   echoedWrapperLines: commandLine.split("\r").filter((line) => line.length > 0),
                   onOutputLine: observe.onOutputLine,
                 })
               : undefined;
-          // PowerShell has no line-editor signal; keep its immediate write.
           const readiness =
             completionShell === "powershell"
               ? undefined
@@ -510,6 +513,7 @@ export const make = Effect.gen(function* () {
                   threadId: input.threadId,
                   terminalId,
                   onStartupPrompt: observed?.flushPartialLine ?? Effect.void,
+                  subscribe: events.subscribe,
                 });
 
           yield* terminalManager
@@ -517,6 +521,7 @@ export const make = Effect.gen(function* () {
               threadId: input.threadId,
               terminalId,
               cwd,
+              terminalLinkProfileName: script.terminalLinkProfileName ?? null,
               worktreePath: input.worktreePath,
               env: { ...env, NO_COLOR: "1", FORCE_COLOR: "0" },
             })
@@ -533,51 +538,72 @@ export const make = Effect.gen(function* () {
                 Effect.sync(() => {
                   observed?.unsubscribe();
                   readiness?.unsubscribe();
+                  events.unsubscribe();
                 }),
               ),
             );
-          return { observed, readiness };
+
+          yield* events.activate;
+
+          // Readiness can wait on user input; only the actual write holds admission again.
+          const writing = yield* (readiness?.wait ?? Effect.succeed("ready" as const)).pipe(
+            Effect.flatMap((shell) =>
+              shell === "exited"
+                ? Effect.void
+                : updateDrainAdmission.admit(
+                    "setup-script",
+                    Effect.suspend(() =>
+                      terminalManager.write({
+                        threadId: input.threadId,
+                        terminalId,
+                        data: projectScriptTerminalInput(commandLine),
+                      }),
+                    ),
+                  ),
+            ),
+            Effect.onError(() => observed?.abandon ?? Effect.void),
+            Effect.catchCause((cause) =>
+              Effect.logWarning("project script command was not written", {
+                ...errorContext,
+                terminalId,
+                cause,
+              }),
+            ),
+            Effect.ensuring(
+              Effect.sync(() => {
+                readiness?.unsubscribe();
+                if (!observed) events.unsubscribe();
+              }),
+            ),
+            Effect.forkIn(serviceScope, { startImmediately: true }),
+          );
+          pendingWrites.set(pendingKey, writing);
+          writing.addObserver(() => {
+            if (pendingWrites.get(pendingKey) === writing) pendingWrites.delete(pendingKey);
+          });
+          return observed;
         }),
       )
       .pipe(
-        Effect.catchTag(["UpdateDrainAdmissionError", "UpdateDrainError"], (cause) =>
-          Effect.fail(
-            new ProjectSetupScriptOperationError({
-              ...errorContext,
-              operation: "admitSetupScript",
-              cause,
-            }),
-          ),
-        ),
-      );
-
-    // Return once the terminal exists; release admission so users can answer startup prompts.
-    // Recheck admission at the delayed write so a drain can prevent it during shell startup.
-    yield* (readiness?.wait ?? Effect.succeed("ready" as const)).pipe(
-      Effect.flatMap((shell) =>
-        shell === "exited"
-          ? Effect.void
-          : updateDrainAdmission.admit(
-              "setup-script",
-              Effect.suspend(() =>
-                terminalManager.write({
-                  threadId: input.threadId,
-                  terminalId,
-                  data: projectScriptTerminalInput(commandLine),
-                }),
-              ),
+        Effect.catchTags({
+          UpdateDrainAdmissionError: (cause) =>
+            Effect.fail(
+              new ProjectSetupScriptOperationError({
+                ...errorContext,
+                operation: "admitSetupScript",
+                cause,
+              }),
             ),
-      ),
-      Effect.catchCause((cause) =>
-        Effect.logWarning("project script command was not written", {
-          ...errorContext,
-          terminalId,
-          cause,
-        }).pipe(Effect.andThen(observed?.abandon ?? Effect.void)),
-      ),
-      Effect.ensuring(Effect.sync(() => readiness?.unsubscribe())),
-      Effect.forkIn(serviceScope),
-    );
+          UpdateDrainError: (cause) =>
+            Effect.fail(
+              new ProjectSetupScriptOperationError({
+                ...errorContext,
+                operation: "admitSetupScript",
+                cause,
+              }),
+            ),
+        }),
+      );
 
     const completion = observed?.completion.pipe(
       Effect.tap(({ exitCode }) =>

@@ -100,6 +100,9 @@ export function ProjectActionsSettings() {
       waitForSetup: fileScript.runOnWorktreeCreate === true && fileScript.async === false,
       runOnSettle: fileScript.runOnSettle ?? false,
       keybinding: null,
+      ...(fileScript.terminalLinkProfileName === undefined
+        ? {}
+        : { terminalLinkProfileName: fileScript.terminalLinkProfileName }),
       previewUrl: fileScript.previewUrl ?? null,
       autoOpenPreview: fileScript.previewUrl ? (fileScript.autoOpenPreview ?? false) : false,
       // Import never grants an agent permission to execute a checked-in command.

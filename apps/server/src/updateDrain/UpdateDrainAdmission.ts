@@ -71,99 +71,105 @@ function internalError(_cause: unknown) {
   });
 }
 
-export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(function* () {
+export const currentExecutionBlockers = Effect.fn("currentExecutionBlockers")(function* () {
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const terminals = yield* TerminalManager;
   const outbox = yield* EffectOutbox.EffectOutboxV2;
   const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
-  const currentBlockers = Effect.fn("UpdateDrainAdmission.currentBlockers")(function* () {
-    // Readers can commit cleanup after native turns become idle; cleanup can
-    // then transfer to a runtime finalizer. Keep both runtime snapshots around
-    // the outbox read so neither handoff disappears between these reads.
-    const shell = yield* projections.getShellSnapshot().pipe(Effect.mapError(internalError));
-    const firstRuntimeWork = yield* providerSessions.pendingExecution.pipe(
-      Effect.mapError(internalError),
-    );
-    const cleanup = yield* outbox.pendingCleanup.pipe(Effect.mapError(internalError));
-    const secondRuntimeWork = yield* providerSessions.pendingExecution.pipe(
-      Effect.mapError(internalError),
-    );
-    const terminalState = yield* terminals.refreshMetadata.pipe(Effect.mapError(internalError));
-    const cleanupThreads = new Set(cleanup.map((pending) => pending.threadId));
-    const blockers: UpdateDrainBlocker[] = [];
 
-    // V2 commits the accepted run before provider start, so preparing and queued
-    // work are already durable blockers. Restart recovery owns interruption of
-    // old runs; admission must not discard a still-live run on its own.
-    for (const thread of [...shell.threads, ...shell.archivedThreads]) {
-      // Archive cancels projected runs before provider shutdown. Keep the hold
-      // until completion, and retain failed/unfinished runtime close evidence
-      // even after the failed archive banner is dismissed.
-      if (thread.archivePending?.status === "stopping")
-        blockers.push({ type: "provider-teardown", threadId: thread.id });
-      if (
-        thread.worktreeCleanup?.status === "queued" ||
-        thread.worktreeCleanup?.status === "deleting"
-      )
-        cleanupThreads.add(thread.id);
-      if (thread.deletedAt != null) continue;
-      const status = thread.activityRunStatus ?? thread.status;
-      if (["preparing", "queued", "starting", "running", "waiting"].includes(status)) {
-        blockers.push({
-          type: "thread-turn",
-          threadId: thread.id,
-          turnId: thread.activeRunId === null ? null : TurnId.make(thread.activeRunId),
-          status: status === "running" || status === "waiting" ? "running" : "starting",
-        });
-      }
-      if ((thread.pendingBackgroundTasks?.length ?? 0) > 0) {
-        blockers.push({
-          type: "thread-background",
-          threadId: thread.id,
-          status: thread.pendingBackgroundTasks!.some((task) => task.kind !== "monitor")
-            ? "working"
-            : "monitoring",
-        });
-      }
-    }
+  // Readers can commit cleanup after native turns become idle; cleanup can
+  // then transfer to a runtime finalizer. Keep both runtime snapshots around
+  // the outbox read so neither handoff disappears between these reads.
+  const shell = yield* projections.getShellSnapshot().pipe(Effect.mapError(internalError));
+  const firstRuntimeWork = yield* providerSessions.pendingExecution.pipe(
+    Effect.mapError(internalError),
+  );
+  const cleanup = yield* outbox.pendingCleanup.pipe(Effect.mapError(internalError));
+  const secondRuntimeWork = yield* providerSessions.pendingExecution.pipe(
+    Effect.mapError(internalError),
+  );
+  const terminalState = yield* terminals.refreshMetadata.pipe(Effect.mapError(internalError));
+  const cleanupThreads = new Set(cleanup.map((pending) => pending.threadId));
+  const blockers: UpdateDrainBlocker[] = [];
 
-    for (const threadId of cleanupThreads) blockers.push({ type: "thread-cleanup", threadId });
-
-    for (const terminal of terminalState) {
-      if (terminal.status !== "starting" && !terminal.hasRunningSubprocess) continue;
+  // V2 commits the accepted run before provider start, so preparing and queued
+  // work are already durable blockers. Restart recovery owns interruption of
+  // old runs; admission must not discard a still-live run on its own.
+  for (const thread of [...shell.threads, ...shell.archivedThreads]) {
+    // Archive cancels projected runs before provider shutdown. Keep the hold
+    // until completion, and retain failed/unfinished runtime close evidence
+    // even after the failed archive banner is dismissed.
+    if (thread.archivePending?.status === "stopping")
+      blockers.push({ type: "provider-teardown", threadId: thread.id });
+    if (
+      thread.worktreeCleanup?.status === "queued" ||
+      thread.worktreeCleanup?.status === "deleting"
+    )
+      cleanupThreads.add(thread.id);
+    if (thread.deletedAt != null) continue;
+    const status = thread.activityRunStatus ?? thread.status;
+    if (["preparing", "queued", "starting", "running", "waiting"].includes(status)) {
       blockers.push({
-        type: "terminal-process",
-        threadId: ThreadId.make(terminal.threadId),
-        terminalId: terminal.terminalId,
-        label: terminal.label,
-        status: terminal.status === "starting" ? "starting" : "running",
+        type: "thread-turn",
+        threadId: thread.id,
+        turnId: thread.activeRunId === null ? null : TurnId.make(thread.activeRunId),
+        status: status === "running" || status === "waiting" ? "running" : "starting",
       });
     }
-
-    const runtimeWork = new Map<ProviderSessionId, (typeof firstRuntimeWork)[number]>();
-    for (const pending of [...firstRuntimeWork, ...secondRuntimeWork]) {
-      if (runtimeWork.get(pending.providerSessionId)?.status !== "stopping")
-        runtimeWork.set(pending.providerSessionId, pending);
+    if ((thread.pendingBackgroundTasks?.length ?? 0) > 0) {
+      blockers.push({
+        type: "thread-background",
+        threadId: thread.id,
+        status: thread.pendingBackgroundTasks!.some((task) => task.kind !== "monitor")
+          ? "working"
+          : "monitoring",
+      });
     }
-    for (const pending of runtimeWork.values())
-      blockers.push({ type: "provider-runtime", ...pending });
+  }
 
-    return blockers.sort((left, right) => {
-      const leftOwner = left.type === "provider-runtime" ? left.providerSessionId : left.threadId;
-      const rightOwner =
-        right.type === "provider-runtime" ? right.providerSessionId : right.threadId;
-      const threadOrder = leftOwner.localeCompare(rightOwner);
-      if (threadOrder !== 0) return threadOrder;
-      const typeOrder = left.type.localeCompare(right.type);
-      if (typeOrder !== 0) return typeOrder;
-      if (left.type === "terminal-process" && right.type === "terminal-process") {
-        return left.terminalId.localeCompare(right.terminalId);
-      }
-      return 0;
+  for (const threadId of cleanupThreads) blockers.push({ type: "thread-cleanup", threadId });
+
+  for (const terminal of terminalState) {
+    if (terminal.status !== "starting" && !terminal.hasRunningSubprocess) continue;
+    blockers.push({
+      type: "terminal-process",
+      threadId: ThreadId.make(terminal.threadId),
+      terminalId: terminal.terminalId,
+      label: terminal.label,
+      status: terminal.status === "starting" ? "starting" : "running",
     });
-  });
+  }
 
-  return yield* makeAdmission(currentBlockers());
+  const runtimeWork = new Map<ProviderSessionId, (typeof firstRuntimeWork)[number]>();
+  for (const pending of [...firstRuntimeWork, ...secondRuntimeWork]) {
+    if (runtimeWork.get(pending.providerSessionId)?.status !== "stopping")
+      runtimeWork.set(pending.providerSessionId, pending);
+  }
+  for (const pending of runtimeWork.values())
+    blockers.push({ type: "provider-runtime", ...pending });
+
+  return blockers.sort((left, right) => {
+    const leftOwner = left.type === "provider-runtime" ? left.providerSessionId : left.threadId;
+    const rightOwner = right.type === "provider-runtime" ? right.providerSessionId : right.threadId;
+    const threadOrder = leftOwner.localeCompare(rightOwner);
+    if (threadOrder !== 0) return threadOrder;
+    const typeOrder = left.type.localeCompare(right.type);
+    if (typeOrder !== 0) return typeOrder;
+    if (left.type === "terminal-process" && right.type === "terminal-process") {
+      return left.terminalId.localeCompare(right.terminalId);
+    }
+    return 0;
+  });
+});
+
+export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(function* () {
+  const context = yield* Effect.context<
+    | ProjectionStore.ProjectionStoreV2
+    | TerminalManager
+    | EffectOutbox.EffectOutboxV2
+    | ProviderSessionManager.ProviderSessionManagerV2
+  >();
+  return yield* makeAdmission(currentExecutionBlockers().pipe(Effect.provide(context)));
 });
 
 const makeAdmission = Effect.fn("UpdateDrainAdmission.makeAdmission")(function* (

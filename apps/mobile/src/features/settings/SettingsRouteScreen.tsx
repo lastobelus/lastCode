@@ -273,7 +273,10 @@ function useSettingsIndexSections(): SettingsListSection[] {
     },
     {
       title: "App",
-      rows: [page("SettingsAbout", "info.circle", "About T3 Code")],
+      rows: [
+        page("SettingsLastCode", "gearshape", "LastCode"),
+        page("SettingsAbout", "info.circle", "About T3 Code"),
+      ],
     },
   ];
 }

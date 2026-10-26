@@ -667,3 +667,15 @@ it("keeps accepted workspace completions outside client dispatch commands", () =
   };
   expect(decodeClientWorkspaceCompletion(completion)._tag).toBe("Failure");
 });
+
+it("retains a failed-attempt precondition across archive command decoding", () => {
+  const archive = {
+    type: "thread.archive",
+    commandId: "retry-archive",
+    threadId: "archive-owner",
+    childDisposition: "stop_and_archive",
+    expectedChildThreadIds: ["archive-participant"],
+    expectedArchiveCommandId: "observed-failed-archive",
+  };
+  expect(decodeOrchestrationV2Command(archive)).toEqual(archive);
+});

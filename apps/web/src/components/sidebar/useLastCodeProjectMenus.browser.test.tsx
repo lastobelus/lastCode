@@ -1,8 +1,8 @@
+import { act, render } from "../../../test/render";
 import { LastCodeProjectRenameDialog } from "./LastCodeProjectRenameDialog";
 import { LastCodeProjectGroupingDialog } from "./LastCodeProjectGroupingDialog";
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+
+import { describe, expect, it, vi } from "vite-plus/test";
 import {
   EnvironmentId,
   ProjectId,
@@ -148,32 +148,31 @@ function Harness({ threads }: { threads: readonly SidebarThreadSummary[] }) {
     </>
   );
 }
-let root: Root, container: HTMLDivElement;
-beforeEach(() => {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+
+function setup() {
   vi.clearAllMocks();
   mocks.canOperate = true;
+  mocks.openRename = () => {};
+  mocks.openGrouping = () => {};
+  mocks.getThreads = () => [];
+  mocks.getThread = () => null;
   mocks.command.mockResolvedValue(AsyncResult.success(undefined));
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-});
-afterEach(async () => {
-  await act(() => root.unmount());
-  container.remove();
-  document.body.replaceChildren();
-  vi.unstubAllGlobals();
-});
+  mocks.settings = {
+    sidebarProjectGroupingMode: "repository",
+    sidebarProjectGroupingOverrides: {},
+  };
+}
 const input = () => document.querySelector<HTMLInputElement>('input[aria-label="Project title"]')!;
 describe("project-scoped menu and editor ownership", () => {
   it("keeps existing menu callbacks stable while event-time reads use refreshed scoped members", async () => {
-    await act(() => root.render(<Harness threads={[first, second]} />));
+    setup();
+    await using screen = await render(<Harness threads={[first, second]} />);
     const getThread = mocks.getThread,
       getThreads = mocks.getThreads;
     const ref = scopeThreadRef(first.environmentId, first.id);
     expect(getThread(ref)).toBe(first);
     const refreshed = { ...second, title: "Updated second environment" };
-    await act(() => root.render(<Harness threads={[refreshed]} />));
+    await screen.rerender(<Harness threads={[refreshed]} />);
     expect(mocks.getThread).toBe(getThread);
     expect(mocks.getThreads).toBe(getThreads);
     expect(getThread(ref)).toBeNull();
@@ -181,7 +180,8 @@ describe("project-scoped menu and editor ownership", () => {
     expect(getThreads()).toEqual([refreshed]);
   });
   it("preserves the actual rename draft through member refresh and independent grouping open/close", async () => {
-    await act(() => root.render(<Harness threads={[first]} />));
+    setup();
+    await using screen = await render(<Harness threads={[first]} />);
     await act(() => mocks.openRename(member));
     const draft = input();
     await act(() => {
@@ -191,7 +191,7 @@ describe("project-scoped menu and editor ownership", () => {
       );
       draft.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    await act(() => root.render(<Harness threads={[{ ...first, title: "Refreshed thread" }]} />));
+    await screen.rerender(<Harness threads={[{ ...first, title: "Refreshed thread" }]} />);
     expect(input()).toBe(draft);
     expect(input().value).toBe("Unsaved title");
     await act(() => mocks.openGrouping(member));
@@ -205,7 +205,8 @@ describe("project-scoped menu and editor ownership", () => {
     expect(mocks.update).not.toHaveBeenCalled();
   });
   it("rejects denied rename entry without opening an editor or invoking a mutation", async () => {
-    await act(() => root.render(<Harness threads={[first]} />));
+    setup();
+    await using _screen = await render(<Harness threads={[first]} />);
     mocks.canOperate = false;
     await act(() => mocks.openRename(member));
     expect(input()).toBeNull();

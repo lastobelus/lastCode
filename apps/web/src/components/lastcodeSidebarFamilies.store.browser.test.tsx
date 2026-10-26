@@ -1,31 +1,20 @@
+import { act, render } from "../../test/render";
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
+
+import { expect, it } from "vite-plus/test";
 import {
   useCollapsedLastCodeSidebarFamilies,
   useLastCodeSidebarFamiliesStore,
 } from "./lastcodeSidebarFamilies.store";
 import { lastcodeSidebarSubagentGroupKey } from "./lastcodeSidebarFamilies.logic";
 
-let root: Root;
-
 const key = (environment: string, thread: string) =>
   scopedThreadKey(scopeThreadRef(EnvironmentId.make(environment), ThreadId.make(thread)));
 
-beforeEach(() => {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  root = createRoot(document.createElement("div"));
-  useLastCodeSidebarFamiliesStore.setState({ collapsedByKey: {} });
-});
-
-afterEach(async () => {
-  await act(() => root.unmount());
-  vi.unstubAllGlobals();
-});
-
 it("only updates a project subscription for its scoped threads, including grouped environments", async () => {
+  useLastCodeSidebarFamiliesStore.setState({ collapsedByKey: {} });
+  await using screen = await render(null);
   const firstKey = key("environment-one", "parent");
   const groupedKey = key("environment-two", "parent");
   const subagentGroupKey = lastcodeSidebarSubagentGroupKey(firstKey);
@@ -36,7 +25,7 @@ it("only updates a project subscription for its scoped threads, including groupe
   }
   const threadKeys = [firstKey, groupedKey, subagentGroupKey];
   await act(() => {
-    root.render(<Probe threadKeys={threadKeys} />);
+    return screen.rerender(<Probe threadKeys={threadKeys} />);
   });
   const initial = observed.at(-1);
   const initialRenderCount = observed.length;
@@ -47,7 +36,7 @@ it("only updates a project subscription for its scoped threads, including groupe
     setCollapsed(key("environment-three", "parent"), true);
   });
   expect(observed).toHaveLength(initialRenderCount);
-  await act(() => root.render(<Probe threadKeys={[...threadKeys]} />));
+  await act(() => screen.rerender(<Probe threadKeys={[...threadKeys]} />));
   expect(observed.at(-1)).toBe(initial);
 
   await act(() => setCollapsed(firstKey, true));
@@ -63,6 +52,6 @@ it("only updates a project subscription for its scoped threads, including groupe
     [subagentGroupKey]: false,
   });
 
-  await act(() => root.render(<Probe threadKeys={[firstKey]} />));
+  await act(() => screen.rerender(<Probe threadKeys={[firstKey]} />));
   expect(observed.at(-1)).toEqual({ [firstKey]: false });
 });

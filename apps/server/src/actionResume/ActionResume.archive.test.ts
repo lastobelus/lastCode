@@ -26,6 +26,7 @@ import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.testkit.ts";
@@ -115,6 +116,9 @@ const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (
         ProjectionStore.layer.pipe(Layer.provide(database)),
         IdAllocator.layer,
         ThreadCommandExecutor.layer,
+        Layer.mock(GitVcsDriver.GitVcsDriver)({
+          resolveBranchName: () => Effect.succeed(null),
+        }),
       ),
     ),
   );

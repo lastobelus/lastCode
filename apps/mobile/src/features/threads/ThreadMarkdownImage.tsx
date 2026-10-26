@@ -1,10 +1,18 @@
 import { MISSING_FILE_ACCESS_MESSAGE } from "@t3tools/client-runtime/state/assets";
 import type { AssetResource, EnvironmentId } from "@t3tools/contracts";
 import { Image } from "expo-image";
-import { createContext, useContext, useEffect, useEffectEvent, useId, useState } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useEffectEvent,
+  useId,
+  useState,
+  type ReactNode,
+} from "react";
 import { fetch } from "expo/fetch";
 import { parse, SvgAst, type JsxAST } from "react-native-svg";
-import { ActivityIndicator, Pressable, StyleSheet, View, type ViewStyle } from "react-native";
+import { Pressable, StyleSheet, View, type ViewStyle } from "react-native";
 
 import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import { useFilePreviewGallery } from "../../components/FilePreviewGallery";
@@ -16,6 +24,10 @@ import { useMediaActions } from "../../state/mediaActions";
 import type { MediaActionsSource } from "../../lib/mediaActionsSource";
 import { useAssetUrlState } from "../../state/assets";
 import {
+  startPreparingThreadFeedMediaUrl,
+  type ThreadFeedMediaPreparation,
+} from "../../lib/prepareThreadFeedPreview";
+import {
   MARKDOWN_IMAGE_MAX_WIDTH,
   type MarkdownImageDisplaySize,
   resolveMarkdownImageDisplaySize,
@@ -24,6 +36,35 @@ import {
 
 /** Use known feed width immediately; later image measurement would move already-positioned rows. */
 export const MarkdownImageAvailableWidthContext = createContext(0);
+
+/** Keeps remote media unloaded until its owning thread's managed preview is ready. */
+export function ThreadMarkdownPreparedUri(props: {
+  readonly uri: string;
+  readonly sourceKey: string;
+  readonly prepareUrl?: ((url: string) => Promise<string>) | undefined;
+  readonly children: (result: ThreadFeedMediaPreparation) => ReactNode;
+}) {
+  const [prepared, setPrepared] = useState<{
+    readonly sourceKey: string;
+    readonly originalUri: string;
+    readonly result: ThreadFeedMediaPreparation;
+  } | null>(null);
+  const requiresPreparation = props.prepareUrl !== undefined && /^https?:\/\//i.test(props.uri);
+
+  useEffect(() => {
+    if (!props.prepareUrl || !/^https?:\/\//i.test(props.uri)) return;
+    return startPreparingThreadFeedMediaUrl(props.uri, props.prepareUrl, (result) =>
+      setPrepared({ sourceKey: props.sourceKey, originalUri: props.uri, result }),
+    );
+  }, [props.prepareUrl, props.sourceKey, props.uri]);
+
+  const result: ThreadFeedMediaPreparation = requiresPreparation
+    ? prepared?.sourceKey === props.sourceKey && prepared.originalUri === props.uri
+      ? prepared.result
+      : { status: "pending", uri: null }
+    : { status: "ready", uri: props.uri };
+  return props.children(result);
+}
 
 export function ThreadMarkdownImageView(props: {
   readonly uri: string | null;

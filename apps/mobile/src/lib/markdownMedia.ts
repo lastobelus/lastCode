@@ -1,7 +1,7 @@
 import {
   classifyMarkdownImageSource,
   markdownImageSourceFragment,
-} from "@t3tools/client-runtime/markdown-images";
+} from "@t3tools/shared/markdownImages";
 import { splitFilePathPosition } from "@t3tools/shared/fileLinks";
 import {
   mediaFileReference,

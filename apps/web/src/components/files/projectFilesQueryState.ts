@@ -1,6 +1,7 @@
 import { useAtomRefresh, useAtomValue } from "@effect/atom-react";
 import {
   type EnvironmentId,
+  type ThreadId,
   type ProjectListEntriesResult,
   ProjectReadFileError,
   type ProjectReadFileResult,
@@ -69,6 +70,7 @@ export function getProjectFileQueryAtom(
   environmentId: EnvironmentId,
   cwd: string,
   relativePath: string | null,
+  linkedThreadId?: ThreadId,
 ) {
   return projectEnvironment.readFile({
     environmentId,
@@ -76,6 +78,7 @@ export function getProjectFileQueryAtom(
       cwd,
       relativePath: relativePath ?? EMPTY_PROJECT_FILE_PATH,
       ...(relativePath === T3_PROJECT_FILE_NAME ? { allowMissing: true } : {}),
+      ...(linkedThreadId === undefined ? {} : { linkedThreadId }),
     },
   });
 }
@@ -248,14 +251,21 @@ export function useProjectFileQuery(
   cwd: string,
   relativePath: string | null,
   enabled = true,
+  linkedThreadId?: ThreadId,
 ): ProjectFileQueryState {
   // Read media-like paths too; a failed read is how folders with those names are detected.
   const fileAccess = useFilesystemReadAccess(environmentId);
   const { canReadFiles } = fileAccess;
   const isQueryEnabled = enabled;
+  const canReadLinkedFile = linkedThreadId !== undefined && fileAccess.canReadThreadFiles;
   const atom =
-    enabled && canReadFiles
-      ? getProjectFileQueryAtom(environmentId, cwd, relativePath)
+    enabled && (canReadFiles || canReadLinkedFile)
+      ? getProjectFileQueryAtom(
+          environmentId,
+          cwd,
+          relativePath,
+          canReadFiles ? undefined : linkedThreadId,
+        )
       : EMPTY_PROJECT_FILE_QUERY_ATOM;
   const result = useAtomValue(atom);
   const refreshAtom = useAtomRefresh(atom);
@@ -268,7 +278,11 @@ export function useProjectFileQuery(
   const optimisticFile = relativePath === null ? null : optimisticResult;
   const cause = failureCause(result);
   const readError = isProjectReadFileError(cause) ? cause : null;
-  const data = canReadFiles ? (optimisticFile?.data ?? (isMissing ? null : readData)) : null;
+  const data = canReadFiles
+    ? (optimisticFile?.data ?? (isMissing ? null : readData))
+    : canReadLinkedFile && !isMissing
+      ? readData
+      : null;
   const isNotFile = readError?.failure === "path_not_file";
 
   return {
@@ -276,8 +290,8 @@ export function useProjectFileQuery(
     error:
       !isQueryEnabled || fileAccess.isPending
         ? null
-        : canReadFiles
-          ? isMissing && !optimisticFile
+        : canReadFiles || canReadLinkedFile
+          ? isMissing && !(canReadFiles && optimisticFile)
             ? `'${relativePath}' does not exist.`
             : errorMessage(cause)
           : (fileAccess.error ?? "This connection cannot read host files."),

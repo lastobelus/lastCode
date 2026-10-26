@@ -1,6 +1,7 @@
 import {
   EnvironmentId,
   type RelayClientInstallProgressEvent,
+  type ServerConfig,
   type ServerLifecycleStreamEvent,
   WS_METHODS,
 } from "@t3tools/contracts";
@@ -79,6 +80,44 @@ const makeHarness = Effect.fn("TestEnvironmentRpc.makeHarness")(function* () {
 });
 
 describe("environment RPC", () => {
+  it.effect("tags unsupported capability values with their session without opening an RPC", () =>
+    Effect.gen(function* () {
+      const client = {} as WsRpcProtocolClient;
+      const unsupportedSession = {
+        ...session(client),
+        initialConfig: Effect.succeed({ environment: { capabilities: {} } } as ServerConfig),
+      };
+      const { activeSession, supervisor } = yield* makeHarness();
+      yield* SubscriptionRef.set(activeSession, Option.some(unsupportedSession));
+      let inputs = 0;
+      const result = yield* subscribeDynamicWithSession(
+        WS_METHODS.subscribePreviewHosting,
+        () =>
+          Effect.sync(() => {
+            inputs += 1;
+            return {};
+          }),
+        {
+          capability: {
+            supports: (config) =>
+              config.environment.capabilities.previewHostingProcessControl === true,
+            unsupportedValue: [],
+          },
+        },
+      ).pipe(
+        Stream.runHead,
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+      );
+
+      expect(Option.isSome(result)).toBe(true);
+      if (Option.isSome(result)) {
+        expect(result.value[0]).toBe(unsupportedSession);
+        expect(result.value[1]).toEqual([]);
+      }
+      expect(inputs).toBe(0);
+    }),
+  );
+
   it.effect("binds finite streaming commands to one active session", () =>
     Effect.gen(function* () {
       const firstEvents = yield* Queue.unbounded<RelayClientInstallProgressEvent>();

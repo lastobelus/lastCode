@@ -32,13 +32,19 @@ interface MarkdownFileLinkProps {
   iconPath: string;
   workspaceRelativePath: string | null;
   panelPath: string | null;
+  isBareFilename: boolean;
   line?: number | undefined;
   label: string;
   copyMarkdown: string;
   theme: "light" | "dark";
   threadRef?: ScopedThreadRef | undefined;
   onOpen?: (() => Promise<AtomCommandResult<unknown, unknown>>) | undefined;
-  onOpenInPanel: (panelPath: string, line: number | undefined) => void;
+  onOpenInPanel: (
+    panelPath: string,
+    line: number | undefined,
+    label: string | undefined,
+    isBareFilename: boolean,
+  ) => void;
   resolveCopyPaths: () => Promise<ReturnType<typeof markdownFileCopyPaths>>;
   openInEditorMenuLabel: string;
   onOpenInBrowser?: (() => Promise<AtomCommandResult<unknown, unknown>>) | undefined;
@@ -64,6 +70,7 @@ export const MarkdownFileLink = memo(function MarkdownFileLink({
   iconPath,
   workspaceRelativePath,
   panelPath,
+  isBareFilename,
   line,
   label,
   copyMarkdown,
@@ -118,7 +125,8 @@ export const MarkdownFileLink = memo(function MarkdownFileLink({
 
   const handleOpenInFilePreview = () => {
     if (threadRef && panelPath) {
-      onOpenInPanel(panelPath, line);
+      const authoredLabel = children ? nodeToPlainText(children).trim() : "";
+      onOpenInPanel(panelPath, line, authoredLabel || undefined, isBareFilename);
       return;
     }
     if (onOpenMedia) {
@@ -332,12 +340,7 @@ export const MarkdownFileLink = memo(function MarkdownFileLink({
   });
 
   const chip = (
-    <FileTagChipContent
-      path={iconPath}
-      environmentId={environmentId}
-      label={label}
-      theme={theme}
-    />
+    <FileTagChipContent path={iconPath} environmentId={environmentId} label={label} theme={theme} />
   );
   const content = children ? (
     <>
@@ -401,7 +404,7 @@ export const MarkdownFileLink = memo(function MarkdownFileLink({
         render={children ? link : <ContextChip kind="mention" dir="ltr" render={link} />}
       />
       <TooltipPopup side="top" variant="code">
-        <div className="overflow-x-auto whitespace-nowrap scrollbar-thumb-border/78 scrollbar-track-transparent [scrollbar-width:thin] [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border/78 [&::-webkit-scrollbar-track]:bg-transparent">
+        <div className="overflow-x-auto whitespace-nowrap scrollbar-thumb-border/78 scrollbar-track-transparent [scrollbar-width:var(--app-native-scrollbar-width)] [&::-webkit-scrollbar]:h-[var(--app-compact-scrollbar-height)] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border/78 [&::-webkit-scrollbar-track]:bg-transparent">
           <WorkspaceEntryTooltip path={iconPath} label={targetPath} environmentId={environmentId} />
         </div>
       </TooltipPopup>
@@ -421,6 +424,7 @@ function areMarkdownFileLinkPropsEqual(
     previous.environmentId === next.environmentId &&
     previous.workspaceRelativePath === next.workspaceRelativePath &&
     previous.panelPath === next.panelPath &&
+    previous.isBareFilename === next.isBareFilename &&
     previous.line === next.line &&
     previous.label === next.label &&
     previous.copyMarkdown === next.copyMarkdown &&

@@ -15,6 +15,7 @@ import {
   type PreviewAutomationStreamEvent,
   SERVER_BROWSER_AUTOMATION_CLIENT_ID,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
@@ -290,6 +291,94 @@ it.effect("announces a live replacement stream before delivering requests", () =
       expect(result).toBe("ready");
     }),
   ),
+);
+
+it.effect.each(["open", "openWithProfile"] as const)(
+  "keeps a server-host %s alive for installation without extending other operations",
+  (operation) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const broker = yield* makeBroker;
+        const received = yield* Deferred.make<RoutedRequest>();
+        const requests = requestsFrom(
+          yield* broker.connect(
+            makeHost({
+              supportedOperations: ["open", "openWithProfile", "status", "navigate", "profiles"],
+            }),
+            { preferred: true, disconnectOnTimeout: false },
+          ),
+        );
+        yield* Stream.runForEach(requests, (request) =>
+          request.operation === operation
+            ? Deferred.succeed(received, request)
+            : broker.respond({
+                clientId: "client-1",
+                connectionId: request.connectionId,
+                requestId: request.requestId,
+                ok: true,
+                result: request.timeoutMs,
+              }),
+        ).pipe(Effect.forkScoped);
+        const opening = yield* broker
+          .invoke({
+            scope,
+            operation,
+            input: operation === "openWithProfile" ? { profileId: "work" } : {},
+          })
+          .pipe(Effect.forkScoped);
+        const request = yield* Deferred.await(received);
+        expect(request.timeoutMs).toBe(660_000);
+        yield* TestClock.adjust(16_000);
+        yield* broker.respond({
+          clientId: "client-1",
+          connectionId: request.connectionId,
+          requestId: request.requestId,
+          ok: true,
+          result: "opened",
+        });
+        expect(yield* Fiber.join(opening)).toBe("opened");
+        expect(yield* broker.invoke({ scope, operation: "status", input: {} })).toBe(15_000);
+        expect(yield* broker.invoke({ scope, operation: "navigate", input: {} })).toBe(15_000);
+        expect(yield* broker.invoke({ scope, operation: "profiles", input: {} })).toBe(15_000);
+      }),
+    ),
+);
+
+it.effect.each([
+  { operation: "open", preferred: false },
+  { operation: "openWithProfile", preferred: false },
+  { operation: "profiles", preferred: true },
+  { operation: "open", preferred: true, timeoutMs: 15_000 },
+  { operation: "openWithProfile", preferred: true, timeoutMs: 15_000 },
+] as const)(
+  "retains the ordinary deadline for $operation (preferred: $preferred, override: $timeoutMs)",
+  ({ operation, preferred, ...override }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const broker = yield* makeBroker;
+        const received = yield* Deferred.make<RoutedRequest>();
+        const requests = requestsFrom(
+          yield* broker.connect(makeHost({ supportedOperations: [operation] }), {
+            preferred,
+            disconnectOnTimeout: false,
+          }),
+        );
+        yield* Stream.runForEach(requests, (request) => Deferred.succeed(received, request)).pipe(
+          Effect.forkScoped,
+        );
+        const pending = yield* broker
+          .invoke({ scope, operation, input: {}, ...override })
+          .pipe(Effect.exit, Effect.forkScoped);
+        const request = yield* Deferred.await(received);
+        expect(request.timeoutMs).toBe(15_000);
+        yield* TestClock.adjust(15_000);
+        const result = yield* Fiber.join(pending);
+        expect(Exit.isFailure(result)).toBe(true);
+        if (Exit.isFailure(result)) {
+          expect(Cause.squash(result.cause)).toBeInstanceOf(PreviewAutomationTimeoutError);
+        }
+      }),
+    ),
 );
 
 it.effect.each([

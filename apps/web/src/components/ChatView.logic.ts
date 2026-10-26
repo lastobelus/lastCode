@@ -93,7 +93,7 @@ import {
 import { serializeLegacyContextMessage } from "@t3tools/shared/composerContextLegacySend";
 import type { ComposerDispatchMode } from "@t3tools/client-runtime/state/composer-dispatch";
 import type { DraftThreadEnvMode } from "../composerDraftStore";
-import { collapseExpandedComposerCursor, type ComposerSubmissionIntent } from "../composer-logic";
+import type { ComposerSubmissionIntent } from "../composer-logic";
 import type { ReviewCommentContext } from "../reviewCommentContext";
 import { derivePhase, type TimelineEntry } from "../session-logic";
 import type { PreviewMiniPlayerSource } from "../previewMiniPlayerStore";
@@ -807,17 +807,27 @@ export function resolveBackgroundDraftWorkspaceOptions(input: {
   envMode: DraftThreadEnvMode;
   branch: string | null;
   startFromOrigin: boolean;
+  canAutoBalance: boolean;
+  environmentSelection?: DraftThreadState["environmentSelection"];
 }): {
   envMode: DraftThreadEnvMode;
   branch: string | null;
   worktreePath: null;
   startFromOrigin: boolean;
+  environmentSelection?: "auto" | "manual";
 } {
+  // Default automatic intent also exists on single-host drafts. Keep their
+  // carried base branch when opening the next draft cannot rebalance it.
+  const environmentSelection =
+    input.environmentSelection === "auto" && !input.canAutoBalance
+      ? undefined
+      : input.environmentSelection;
   return {
     envMode: input.envMode,
     branch: input.branch,
     worktreePath: null,
     startFromOrigin: input.envMode === "worktree" && input.startFromOrigin,
+    ...(environmentSelection ? { environmentSelection } : {}),
   };
 }
 
@@ -1303,7 +1313,7 @@ export function restorePlanFollowUpComposer(input: {
   input.writePreviewAnnotations(input.snapshot.previewAnnotations);
   input.writeThreadContexts(input.snapshot.threadContexts);
   input.resetCursor({
-    cursor: collapseExpandedComposerCursor(input.snapshot.prompt, input.snapshot.prompt.length),
+    cursor: input.snapshot.prompt.length,
     prompt: input.snapshot.prompt,
     detectTrigger: true,
   });

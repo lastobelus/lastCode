@@ -1,10 +1,13 @@
+import { selectProjectScriptTerminal } from "../../projectScripts";
+import { scopedThreadKey } from "@t3tools/client-runtime/environment";
+import type { useKnownTerminalSessions } from "../../state/terminalSessions";
 import type {
   EnvironmentProject,
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
 import type { Dispatch } from "react";
 import type { ComposerHandleRef } from "../../composerHandleContext";
-import type { selectThreadTerminalUiState } from "../../terminalUiStateStore";
+import { selectThreadTerminalUiState } from "../../terminalUiStateStore";
 import { useStableCallback } from "../../hooks/useStableCallback";
 import { useThreadTerminalActions } from "../terminal/useThreadTerminalActions";
 import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
@@ -22,7 +25,7 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { MAX_TERMINALS_PER_GROUP } from "../../types";
+import { DEFAULT_THREAD_TERMINAL_ID, MAX_TERMINALS_PER_GROUP } from "../../types";
 import { type RightPanelSurface, useRightPanelStore } from "../../rightPanelStore";
 import { isPreviewSupportedInRuntime } from "../../previewStateStore";
 import { openUrlInPreview } from "../../browser/openFileInPreview";
@@ -62,6 +65,7 @@ interface ChatTerminalActionsInput {
   readonly activeRightPanelSurface: RightPanelSurface | null;
   readonly runningTerminalIds: ReadonlyArray<string>;
   readonly activeServerOrderedTerminalIds: ReadonlyArray<string>;
+  readonly activeThreadKnownSessions: NonNullable<ReturnType<typeof useKnownTerminalSessions>>;
   readonly activeTerminalLabelsById: ReadonlyMap<string, string>;
   readonly panelTerminalIds: ReadonlySet<string>;
   readonly canReuseTerminal: boolean;
@@ -87,6 +91,7 @@ export function useChatTerminalActions(input: ChatTerminalActionsInput) {
     activeRightPanelSurface,
     runningTerminalIds,
     activeServerOrderedTerminalIds,
+    activeThreadKnownSessions,
     activeTerminalLabelsById,
     panelTerminalIds,
     canReuseTerminal,
@@ -199,7 +204,14 @@ export function useChatTerminalActions(input: ChatTerminalActionsInput) {
       shellHistory?: "preserve" | "suppress";
     },
   ) => {
-    if (!hasTerminalWriteAccess() || !activeThreadId || !activeProject || !activeThread) return;
+    if (
+      !hasTerminalWriteAccess() ||
+      !activeThreadId ||
+      !activeProject ||
+      !activeThread ||
+      !activeThreadRef
+    )
+      return;
     if (options?.rememberAsLastInvoked !== false) {
       setLastInvokedScriptByProjectId((current) => {
         if (current[activeProject.id] === script.id) return current;
@@ -207,21 +219,39 @@ export function useChatTerminalActions(input: ChatTerminalActionsInput) {
       });
     }
     const targetCwd = options?.cwd ?? gitCwd ?? activeProject.workspaceRoot;
-    const reusableTerminalId =
-      options?.preferNewTerminal ||
-      !canReuseTerminal ||
-      !readEnvironmentScope(environmentId, AuthTerminalReadScope)
-        ? null
-        : findReusableProjectScriptTerminal({
-            // Server sessions cover drawer terminals this client has not opened yet, such as a
-            // worktree setup shell; the helper drops the panel-owned ones.
-            drawerTerminalIds: [
-              ...new Set([...terminalUiState.terminalIds, ...activeServerOrderedTerminalIds]),
-            ],
-            activeTerminalId: terminalUiState.activeTerminalId,
-            panelTerminalIds,
-            runningTerminalIds,
-          });
+    const terminalStore = useTerminalUiStateStore.getState();
+    const currentTerminalUiState = selectThreadTerminalUiState(
+      terminalStore.terminalUiStateByThreadKey,
+      activeThreadRef,
+    );
+    const existingTerminalIds = [
+      ...new Set([...activeServerOrderedTerminalIds, ...currentTerminalUiState.terminalIds]),
+    ];
+    const reusableTerminalId = findReusableProjectScriptTerminal({
+      drawerTerminalIds: [
+        ...new Set([...currentTerminalUiState.terminalIds, ...activeServerOrderedTerminalIds]),
+      ],
+      activeTerminalId: currentTerminalUiState.activeTerminalId,
+      panelTerminalIds,
+      runningTerminalIds,
+    });
+    const baseTerminalId = reusableTerminalId ?? DEFAULT_THREAD_TERMINAL_ID;
+    const terminalLaunch = selectProjectScriptTerminal({
+      script,
+      baseTerminalId,
+      existingTerminalIds,
+      pendingTerminalLinkProfiles:
+        terminalStore.pendingTerminalLinkProfilesByThreadKey[scopedThreadKey(activeThreadRef)],
+      baseTerminalLinkProfileName: activeThreadKnownSessions.find(
+        (session) => session.target.terminalId === baseTerminalId,
+      )?.state.terminalLinkProfileName,
+      isBaseTerminalBusy: runningTerminalIds.includes(baseTerminalId),
+      preferNewTerminal: Boolean(options?.preferNewTerminal),
+      canReuseTerminal: canReuseTerminal && reusableTerminalId !== null,
+      canReadTerminal: readEnvironmentScope(environmentId, AuthTerminalReadScope),
+      allocateTerminalId: terminalActions.allocateTerminalId,
+    });
+    const shouldCreateNewTerminal = terminalLaunch.createNewTerminal;
     const targetWorktreePath = options?.worktreePath ?? activeThread.worktreePath ?? null;
 
     setTerminalUiLaunchContext({
@@ -238,12 +268,16 @@ export function useChatTerminalActions(input: ChatTerminalActionsInput) {
       // The drawer opens with the target already placed: opening it empty would claim
       // DEFAULT_THREAD_TERMINAL_ID, which a right-panel terminal may already own.
       place: (terminalId) =>
-        reusableTerminalId === null
-          ? storeNewTerminal(activeThreadRef, terminalId)
+        shouldCreateNewTerminal
+          ? storeNewTerminal(activeThreadRef, terminalId, terminalLaunch.terminalLinkProfileName)
           : storeEnsureTerminal(activeThreadRef, terminalId, { open: true }),
-      ...(reusableTerminalId === null
+      terminalId: terminalLaunch.terminalId,
+      terminalLinkProfileName: shouldCreateNewTerminal
+        ? (terminalLaunch.terminalLinkProfileName ?? null)
+        : null,
+      ...(shouldCreateNewTerminal
         ? { size: { cols: SCRIPT_TERMINAL_COLS, rows: SCRIPT_TERMINAL_ROWS } }
-        : { terminalId: reusableTerminalId }),
+        : {}),
       location: { cwd: targetCwd, worktreePath: targetWorktreePath },
       ...(options?.env ? { extraEnv: options.env } : {}),
     });
@@ -251,6 +285,7 @@ export function useChatTerminalActions(input: ChatTerminalActionsInput) {
     const targetTerminalId = launched.terminalId;
     const openResult = await launched.result;
     if (openResult._tag === "Failure") {
+      terminalStore.releasePendingTerminalLinkProfile(activeThreadRef, targetTerminalId);
       if (!isAtomCommandInterrupted(openResult)) {
         const error = squashAtomCommandFailure(openResult);
         setThreadError(

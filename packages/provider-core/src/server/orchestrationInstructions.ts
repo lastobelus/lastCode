@@ -16,6 +16,7 @@ Ordinary coding tasks need no T3 tools.
 - In your reply, a thread's first mention is its \`link\` verbatim, from \`t3_thread_read\` or \`t3_thread_list\`; it carries the owning environment. Never build a link, or use a plain title or bare id. No link retrievable: say so.
 - A secret: call \`request_secret\` yourself. Pass its \`secretRef\` to a T3 tool, or use \`delivery: "file"\` for a shell command. Never ask in chat or invent one. When asked only to schedule, \`schedule_task\` without running its prompt.
 - T3 tools may load late. Try the name once before you call it absent.`,
+  `- Whoever you brief is a peer. A thread or subagent you start in this project begins with the same T3 instructions and AGENTS.md that you have, and is as careful as you are. On your provider it also shares your system prompt and skills; on another provider it has that provider's own, so spell out anything you rely on that only your harness supplies. Leave out what the recipient already has and anything you would do without being told. Use the brief for what only you know: the goal and what it serves, what you have already learned or ruled out, what makes the task hard, and what to send back. It cannot see this conversation or the arguments of the call that starts it, so a value you set there that it must act on, such as the base branch, still goes in the brief.`,
   `### Find mentioned threads
 
 When the user mentions or pastes another thread, finding it is your job; they should not have to track which environment owns it. Thread IDs are opaque. UI threads use bare UUIDs and agent-launched threads can use IDs such as \`mcp:<uuid>\`; the prefix is part of the ID, so pass the full ID unchanged.
@@ -38,7 +39,7 @@ ${T3_CODE_ORCHESTRATION_SECTIONS.join("\n\n")}
 
 export const T3_CODE_BROWSER_TOOL_INSTRUCTIONS = `
 
-## T3 Code collaborative browser
+## T3 Code browser
 
 You are running inside T3 Code. The \`t3-code\` MCP server is the product-native collaborative browser shared with the user. When it exposes \`preview_*\` tools, prefer those tools for browser navigation, inspection, interaction, screenshots, and recordings.
 
@@ -95,10 +96,7 @@ export function t3AcpPromptWithInstructions(input: {
       ? T3_CODE_ACP_PLAN_MODE_INSTRUCTIONS
       : T3_CODE_ACP_DEFAULT_MODE_INSTRUCTIONS,
     ...(input.state.hasT3Mcp
-      ? [
-          T3_CODE_MCP_INSTRUCTIONS,
-          T3_CODE_ACP_MCP_FALLBACK_INSTRUCTIONS,
-        ]
+      ? [T3_CODE_MCP_INSTRUCTIONS, T3_CODE_ACP_MCP_FALLBACK_INSTRUCTIONS]
       : []),
   ];
   return `<t3_code_instructions>\n${instructions.join("\n\n")}\n</t3_code_instructions>\n\n<user_request>\n${input.prompt}\n</user_request>`;

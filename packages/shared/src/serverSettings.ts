@@ -489,6 +489,8 @@ export function applyServerSettingsPatch(
                   mode: "custom" as const,
                   rules: {
                     worktreeKeepWhen: next.storageCleanup.worktreeKeepWhen,
+                    worktreeDependenciesAfterDays:
+                      next.storageCleanup.worktreeDependenciesAfterDays,
                     worktreeAfterDays: next.storageCleanup.worktreeAfterDays,
                     worktreeSettledAfterDays: next.storageCleanup.worktreeSettledAfterDays,
                     worktreeOnMerge: next.storageCleanup.worktreeOnMerge,

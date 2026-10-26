@@ -1,15 +1,6 @@
-import { act, useEffect } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import {
-  afterAll,
-  afterEach,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vite-plus/test";
+import { act, render } from "../../../test/render";
+import { useEffect } from "react";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId, ThreadId, RunId } from "@t3tools/contracts";
 import {
   scopedThreadKey,
@@ -106,34 +97,12 @@ function Harness({
   useEffect(() => observe(value), [value]);
   return <output>{value.familyProjection.orderedThreadKeys.join(",")}</output>;
 }
-let root: Root, container: HTMLDivElement;
-const original = Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-beforeAll(() =>
-  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
-    configurable: true,
-    value: true,
-  }),
-);
-afterAll(() => {
-  if (original) Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", original);
-  else Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-});
-beforeEach(() => {
-  settings.legacySidebarThreadGroupingStyle = "typed-groups";
-  useLastCodeSidebarFamiliesStore.setState({ collapsedByKey: {} });
-  useUiStateStore.setState({ threadLastVisitedAtById: {} });
-  observe.mockClear();
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-});
-afterEach(async () => {
-  await act(() => root.unmount());
-  container.remove();
-});
+
 const latest = () => observe.mock.calls.at(-1)![0];
 describe("project-local thread projection", () => {
-  it("preserves sorted tie precedence and reports status from hidden visible roots", () => {
+  it("preserves sorted tie precedence and reports status from hidden visible roots", async () => {
+    setup();
+
     const result = projectLastCodeProjectThreads([other, parent, archived], "created_at", {
       collapsedByKey: {},
       activeThreadKey: null,
@@ -154,13 +123,16 @@ describe("project-local thread projection", () => {
     expect(result.familyProjection.hiddenThreads.map((thread) => thread.id)).toEqual([other.id]);
   });
   it("preserves rendering/navigation parity for every expansion, grouping and selected-path input", async () => {
+    setup();
+    await using screen = await render(null);
+
     for (const grouping of ["minimal", "typed-groups"] as const) {
       settings.legacySidebarThreadGroupingStyle = grouping;
       for (const expanded of [false, true])
         for (const list of [false, true])
           for (const active of [null, key(child)]) {
             await act(() =>
-              root.render(<Harness expanded={expanded} list={list} active={active} />),
+              screen.rerender(<Harness expanded={expanded} list={list} active={active} />),
             );
             const rendering = latest();
             const { familyProjection: navigation } = projectLastCodeProjectThreads(
@@ -187,7 +159,10 @@ describe("project-local thread projection", () => {
     }
   });
   it("ignores foreign collapse/visit updates and reacts to its own family and subagent keys", async () => {
-    await act(() => root.render(<Harness list />));
+    setup();
+    await using screen = await render(null);
+
+    await act(() => screen.rerender(<Harness list />));
     const count = observe.mock.calls.length;
     await act(() => {
       useLastCodeSidebarFamiliesStore.setState({ collapsedByKey: { foreign: false } });
@@ -215,7 +190,9 @@ describe("project-local thread projection", () => {
     );
     expect(observe.mock.calls.length).toBeGreaterThan(count + 2);
   });
-  it("keeps visit watermarks scoped when thread IDs collide across environments", () => {
+  it("keeps visit watermarks scoped when thread IDs collide across environments", async () => {
+    setup();
+
     const completed = {
       ...parent,
       lastVisitedAt: "2026-01-02T00:00:00.000Z",
@@ -242,3 +219,10 @@ describe("project-local thread projection", () => {
     expect(resolve(foreign)).toBeNull();
   });
 });
+
+function setup() {
+  settings.legacySidebarThreadGroupingStyle = "typed-groups";
+  useLastCodeSidebarFamiliesStore.setState({ collapsedByKey: {} });
+  useUiStateStore.setState({ threadLastVisitedAtById: {} });
+  observe.mockClear();
+}

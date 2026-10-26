@@ -17,6 +17,7 @@ import { terminalEnvironment } from "../../state/terminal";
 import { useKnownTerminalSessions } from "../../state/terminalSessions";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../../terminalUiStateStore";
+import { useEffect } from "react";
 
 /** Where a new terminal starts. Omitted fields fall back to the thread's project and worktree. */
 export interface TerminalLaunchLocation {
@@ -44,6 +45,12 @@ export function useThreadTerminalActions(threadRef: ScopedThreadRef | null) {
     environmentId: threadRef?.environmentId ?? null,
     threadId: threadRef?.threadId ?? null,
   });
+  useEffect(() => {
+    if (!threadRef) return;
+    useTerminalUiStateStore
+      .getState()
+      .confirmPendingTerminalLinkProfiles(threadRef, knownSessions ?? []);
+  }, [knownSessions, threadRef]);
   const drawerTerminalIds = useTerminalUiStateStore(
     (state) => selectThreadTerminalUiState(state.terminalUiStateByThreadKey, threadRef).terminalIds,
   );
@@ -85,6 +92,7 @@ export function useThreadTerminalActions(threadRef: ScopedThreadRef | null) {
   const launchTerminal = (input: {
     readonly place: (terminalId: string) => void;
     readonly terminalId?: string;
+    readonly terminalLinkProfileName?: string | null;
     readonly location?: TerminalLaunchLocation | null;
     readonly extraEnv?: Record<string, string>;
     readonly size?: { readonly cols: number; readonly rows: number };
@@ -99,6 +107,9 @@ export function useThreadTerminalActions(threadRef: ScopedThreadRef | null) {
       input: {
         threadId: threadRef.threadId,
         terminalId,
+        ...(input.terminalLinkProfileName === undefined
+          ? {}
+          : { terminalLinkProfileName: input.terminalLinkProfileName }),
         cwd: location.cwd,
         ...(location.worktreePath !== null ? { worktreePath: location.worktreePath } : {}),
         env: projectScriptRuntimeEnv({

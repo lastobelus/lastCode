@@ -1750,6 +1750,55 @@ describe("PreviewManager", () => {
     }).pipe(Effect.provide(managerLayer()), Effect.scoped),
   );
 
+  effectIt.effect.each(["https://example.com/", "https://example.com/next"])(
+    "detaches the server binding when a native tab closes after navigating to %s",
+    (url) =>
+      Effect.gen(function* () {
+        const host = yield* DesktopBrowserHost.DesktopBrowserHost;
+        using detach = vi.spyOn(host, "detach");
+        const serverTab = { threadId: "thread-1", tabId: "server-tab-1" };
+        const lines = yield* Queue.unbounded<string>();
+        yield* host.events.pipe(
+          Stream.runForEach((line) => Queue.offer(lines, new TextDecoder().decode(line))),
+          Effect.forkScoped,
+        );
+        const nextType = Queue.take(lines).pipe(
+          Effect.map((line) => /"type":"(\w+)"/.exec(line)?.[1]),
+        );
+        const capturePage = vi.fn(async () => ({
+          toPNG: () => Buffer.from("png"),
+          toJPEG: () => Buffer.from("jpeg"),
+          getSize: () => ({ width: 100, height: 80 }),
+        }));
+        const loadURL = vi.fn(async () => undefined);
+        const reload = vi.fn();
+        fromId.mockReturnValue(
+          Object.assign(makeTestPreviewWebContents(capturePage, 42), {
+            isDevToolsOpened: () => false,
+            getUserAgent: () => "Electron",
+            getURL: () => "https://example.com/",
+            loadURL,
+            reload,
+          }),
+        );
+        const manager = yield* PreviewManager.PreviewManager;
+        yield* manager.createTab("tab_1", { serverTab });
+        yield* manager.registerWebview("tab_1", 42);
+        expect(yield* nextType).toBe("attached");
+
+        yield* manager.navigate("tab_1", url);
+        if (url === "https://example.com/") {
+          expect(reload).toHaveBeenCalledOnce();
+        } else {
+          expect(loadURL).toHaveBeenCalledWith(url);
+        }
+        yield* manager.closeTab("tab_1");
+
+        expect(detach).toHaveBeenCalledWith(serverTab);
+        expect(yield* nextType).toBe("detached");
+      }).pipe(Effect.provide(managerLayer()), Effect.scoped),
+  );
+
   effectIt.effect("discards a screenshot that resolves after its guest is replaced", () =>
     withManager((manager) =>
       Effect.gen(function* () {

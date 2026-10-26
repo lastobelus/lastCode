@@ -3,11 +3,12 @@ import type { EnvironmentId } from "@t3tools/contracts";
 import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import * as Cause from "effect/Cause";
 import { useCallback, useEffect, useState } from "react";
-import { Alert, View } from "react-native";
+import { View } from "react-native";
+import * as Dialog from "../../components/ui/Dialog";
 
-import { SymbolView } from "../../components/AppSymbol";
-import { AppText as Text } from "../../components/AppText";
-import { ControlPill } from "../../components/ControlPill";
+import { SymbolView } from "../../components/ui/AppSymbol";
+import { AppText as Text } from "../../components/ui/AppText";
+import { Button } from "../../components/ui/Button";
 import { terminalEnvironment } from "../../state/terminal";
 import { threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -38,7 +39,7 @@ export function ActionResumeNotice(props: {
     });
     if (result._tag === "Failure") {
       setPendingAction(null);
-      Alert.alert(
+      Dialog.alert(
         "Could not cancel Action",
         failureMessage(result.cause, "The Project Action could not be cancelled."),
       );
@@ -56,7 +57,7 @@ export function ActionResumeNotice(props: {
       });
       if (result._tag === "Failure") {
         setPendingAction(null);
-        Alert.alert(
+        Dialog.alert(
           choice === "resume" ? "Could not resume agent" : "Could not discard follow-up",
           failureMessage(result.cause, "The interrupted Action follow-up could not be updated."),
         );
@@ -110,12 +111,12 @@ export function ActionResumeNotice(props: {
               {presentation.summary}
             </Text>
           </View>
-          <ControlPill
-            accessibilityLabel={`Cancel ${action.actionName}`}
+          <Button
+            accessibilityHint={`Cancel ${action.actionName}`}
             disabled={pendingAction !== null}
             label={pendingAction === "cancel" ? "Cancelling…" : "Cancel"}
             onPress={() => void cancel()}
-            variant="pill"
+            tone="secondary"
           />
         </View>
       </View>
@@ -142,17 +143,17 @@ export function ActionResumeNotice(props: {
             when you are ready.
           </Text>
           <View className="mt-2.5 flex-row justify-end gap-2">
-            <ControlPill
+            <Button
               disabled={pendingAction !== null}
               label={pendingAction === "discard" ? "Discarding…" : "Discard"}
               onPress={() => void recover("discard")}
-              variant="pill"
+              tone="secondary"
             />
-            <ControlPill
+            <Button
               disabled={pendingAction !== null}
               label={pendingAction === "resume" ? "Resuming…" : "Resume agent"}
               onPress={() => void recover("resume")}
-              variant="primary"
+              tone="primary"
             />
           </View>
         </View>

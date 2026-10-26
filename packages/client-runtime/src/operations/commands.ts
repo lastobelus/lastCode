@@ -23,8 +23,9 @@ import {
   type RunId,
   type RuntimeMode,
   type RuntimeRequestId,
-  type ThreadId,
+  ThreadId,
   type ThreadEnvMode,
+  type ThreadArchiveChildDisposition,
   type UploadChatAttachment,
   type GuestMessageId,
 } from "@t3tools/contracts";
@@ -83,9 +84,31 @@ export interface ThreadCommandInput extends CommandMetadata {
   readonly threadId: ThreadId;
 }
 
-export type DeleteThreadInput = ThreadCommandInput;
-export type ArchiveThreadInput = ThreadCommandInput;
-export type UnarchiveThreadInput = ThreadCommandInput;
+export interface DeleteThreadInput extends ThreadCommandInput {
+  readonly deleteWorktree?: boolean;
+  readonly repositoryKey?: string;
+}
+export type RetryThreadWorktreeCleanupInput = ThreadCommandInput;
+export type AbandonThreadWorktreeCleanupInput = ThreadCommandInput;
+export type ResolveThreadAnnotationInput = ThreadCommandInput;
+export type ReopenThreadAnnotationInput = ThreadCommandInput;
+
+export interface SetThreadPersistenceInput extends ThreadCommandInput {
+  readonly persistent: boolean;
+}
+
+export interface UpsertThreadAnnotationInput extends ThreadCommandInput {
+  readonly body: string;
+}
+
+export interface ArchiveThreadInput extends ThreadCommandInput {
+  readonly childDisposition?: ThreadArchiveChildDisposition;
+  readonly expectedChildThreadIds?: ReadonlyArray<ThreadId>;
+  readonly expectedArchiveCommandId?: CommandId;
+}
+export type UnarchiveThreadInput = ThreadCommandInput & {
+  readonly expectedArchiveCommandId?: CommandId;
+};
 export type SettleThreadInput = ThreadCommandInput;
 
 export interface UnsettleThreadInput extends ThreadCommandInput {
@@ -218,6 +241,12 @@ export interface ForkThreadFromRunInput extends CommandMetadata {
   readonly targetThreadId: ThreadId;
   readonly runId: RunId;
   readonly title?: string;
+}
+
+export type RequestSubagentPromotionInput = ThreadCommandInput;
+
+export interface CancelSubagentPromotionInput extends ThreadCommandInput {
+  readonly requestId: CommandId;
 }
 
 export interface MergeThreadBackInput extends CommandMetadata {
@@ -415,6 +444,10 @@ export const createThread = Effect.fn("EnvironmentCommands.createThread")(functi
 
 function simpleThreadCommand(
   type:
+    | "thread.worktree-cleanup.retry"
+    | "thread.worktree-cleanup.abandon"
+    | "thread.annotation.resolve"
+    | "thread.annotation.reopen"
     | "thread.delete"
     | "thread.archive"
     | "thread.unarchive"
@@ -432,7 +465,13 @@ function simpleThreadCommand(
 export const deleteThread = Effect.fn("EnvironmentCommands.deleteThread")(function* (
   input: DeleteThreadInput,
 ) {
-  return yield* simpleThreadCommand("thread.delete", input);
+  return yield* dispatch({
+    type: "thread.delete",
+    commandId: yield* allocateCommandId(input),
+    threadId: input.threadId,
+    ...(input.deleteWorktree === undefined ? {} : { deleteWorktree: input.deleteWorktree }),
+    ...(input.repositoryKey === undefined ? {} : { repositoryKey: input.repositoryKey }),
+  });
 });
 
 export type CloseGuestShareInput = ThreadCommandInput;
@@ -474,16 +513,80 @@ export const resolveGuestMessage = Effect.fn("EnvironmentCommands.resolveGuestMe
   });
 });
 
+export const retryThreadWorktreeCleanup = Effect.fn(
+  "EnvironmentCommands.retryThreadWorktreeCleanup",
+)(function* (input: RetryThreadWorktreeCleanupInput) {
+  return yield* simpleThreadCommand("thread.worktree-cleanup.retry", input);
+});
+
+export const abandonThreadWorktreeCleanup = Effect.fn(
+  "EnvironmentCommands.abandonThreadWorktreeCleanup",
+)(function* (input: AbandonThreadWorktreeCleanupInput) {
+  return yield* simpleThreadCommand("thread.worktree-cleanup.abandon", input);
+});
+
+export const resolveThreadAnnotation = Effect.fn("EnvironmentCommands.resolveThreadAnnotation")(
+  function* (input: ResolveThreadAnnotationInput) {
+    return yield* simpleThreadCommand("thread.annotation.resolve", input);
+  },
+);
+
+export const reopenThreadAnnotation = Effect.fn("EnvironmentCommands.reopenThreadAnnotation")(
+  function* (input: ReopenThreadAnnotationInput) {
+    return yield* simpleThreadCommand("thread.annotation.reopen", input);
+  },
+);
+
+export const setThreadPersistence = Effect.fn("EnvironmentCommands.setThreadPersistence")(
+  function* (input: SetThreadPersistenceInput) {
+    return yield* dispatch({
+      type: "thread.persistence.set",
+      commandId: yield* allocateCommandId(input),
+      threadId: input.threadId,
+      persistent: input.persistent,
+    });
+  },
+);
+
+export const upsertThreadAnnotation = Effect.fn("EnvironmentCommands.upsertThreadAnnotation")(
+  function* (input: UpsertThreadAnnotationInput) {
+    return yield* dispatch({
+      type: "thread.annotation.upsert",
+      commandId: yield* allocateCommandId(input),
+      threadId: input.threadId,
+      body: input.body,
+    });
+  },
+);
+
 export const archiveThread = Effect.fn("EnvironmentCommands.archiveThread")(function* (
   input: ArchiveThreadInput,
 ) {
-  return yield* simpleThreadCommand("thread.archive", input);
+  return yield* dispatch({
+    type: "thread.archive",
+    commandId: yield* allocateCommandId(input),
+    threadId: input.threadId,
+    ...(input.childDisposition === undefined ? {} : { childDisposition: input.childDisposition }),
+    ...(input.expectedChildThreadIds === undefined
+      ? {}
+      : { expectedChildThreadIds: input.expectedChildThreadIds }),
+    ...(input.expectedArchiveCommandId === undefined
+      ? {}
+      : { expectedArchiveCommandId: input.expectedArchiveCommandId }),
+  });
 });
 
 export const unarchiveThread = Effect.fn("EnvironmentCommands.unarchiveThread")(function* (
   input: UnarchiveThreadInput,
 ) {
-  return yield* simpleThreadCommand("thread.unarchive", input);
+  return yield* dispatch({
+    type: "thread.unarchive",
+    commandId: yield* allocateCommandId(input),
+    threadId: input.threadId,
+    ...(input.expectedArchiveCommandId === undefined
+      ? {}
+      : { expectedArchiveCommandId: input.expectedArchiveCommandId }),
+  });
 });
 
 export const settleThread = Effect.fn("EnvironmentCommands.settleThread")(function* (
@@ -1040,6 +1143,33 @@ export const forkThreadFromRun = Effect.fn("EnvironmentCommands.forkThreadFromRu
     ...(input.title === undefined ? {} : { title: input.title }),
   });
 });
+
+export const requestSubagentPromotion = Effect.fn("EnvironmentCommands.requestSubagentPromotion")(
+  function* (input: RequestSubagentPromotionInput) {
+    const commandId = yield* allocateCommandId(input);
+    return yield* dispatch({
+      type: "subagent.promote.request",
+      commandId,
+      threadId: input.threadId,
+      // The server keeps a usable canonical target; a retry offers a fresh ID
+      // so it can recover when that destination has become occupied.
+      targetThreadId: ThreadId.make(`${commandId}:interactive`),
+      createdBy: "user",
+      creationSource: input.creationSource ?? "web",
+    });
+  },
+);
+
+export const cancelSubagentPromotion = Effect.fn("EnvironmentCommands.cancelSubagentPromotion")(
+  function* (input: CancelSubagentPromotionInput) {
+    return yield* dispatch({
+      type: "subagent.promote.cancel",
+      commandId: yield* allocateCommandId(input),
+      threadId: input.threadId,
+      requestId: input.requestId,
+    });
+  },
+);
 
 export const mergeThreadBack = Effect.fn("EnvironmentCommands.mergeThreadBack")(function* (
   input: MergeThreadBackInput,
