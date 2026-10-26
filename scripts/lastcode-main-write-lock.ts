@@ -147,7 +147,15 @@ export function acquireMainWriteLock(
         "state,headRefOid",
       ]);
       if (confirmation.error || confirmation.status !== 0) {
-        throw new Error(`Cannot confirm PR merge completion under ${identity}.`);
+        throw new Error(
+          [
+            `Cannot confirm PR merge completion under ${identity}: gh pr view failed with exit code ${confirmation.status ?? "unknown"}${confirmation.signal ? ` (signal ${confirmation.signal})` : ""}.`,
+            confirmation.error?.message,
+            confirmation.stderr?.trim(),
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        );
       }
       const completed = JSON.parse(confirmation.stdout) as { state?: string; headRefOid?: string };
       if (completed.state !== "MERGED" || completed.headRefOid !== expectedHead) {
