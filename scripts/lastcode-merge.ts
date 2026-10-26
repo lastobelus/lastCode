@@ -286,9 +286,21 @@ function main(argv: ReadonlyArray<string>): void {
     } finally {
       squashBody.cleanup();
     }
-  } finally {
-    lock.release();
+  } catch (error) {
+    try {
+      lock.release();
+    } catch (cleanupError) {
+      const failures = [error, cleanupError];
+      throw new AggregateError(
+        failures,
+        failures
+          .map((failure) => (failure instanceof Error ? failure.message : String(failure)))
+          .join("\n"),
+      );
+    }
+    throw error;
   }
+  lock.release();
   const checkpointArguments = postMergeCheckpointArguments(skipCheckpoint);
   if (checkpointArguments === null) {
     console.log("[lastcode:merge] Merge complete. No checkpoint requested.");

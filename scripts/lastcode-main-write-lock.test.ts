@@ -6,6 +6,9 @@ import * as NodePath from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
+import { githubCiRunTitle } from "./lastcode-github-ci.ts";
+import { assertSupportedNodeVersion } from "./lastcode-local-ci.ts";
+
 import { acquireMainWriteLock, MAIN_WRITE_LOCK_REF } from "./lastcode-main-write-lock.ts";
 
 const directories: string[] = [];
@@ -65,7 +68,114 @@ function mergeArgs(head: string) {
   return ["pr", "merge", "1", "--repo", "example/repository", "--match-head-commit", head];
 }
 
+function fixtureNodeExecutable(): string {
+  // Vite+ may host tests on a newer Node than the runtime required by the merge CLI.
+  const candidates = [
+    process.execPath,
+    ...(process.env.PATH?.split(NodePath.delimiter).map((directory) =>
+      NodePath.join(directory, "node"),
+    ) ?? []),
+  ];
+  for (const node of new Set(candidates)) {
+    if (!NodeFS.existsSync(node)) continue;
+    const version = NodeChildProcess.spawnSync(node, ["-p", "process.versions.node"], {
+      encoding: "utf8",
+    });
+    if (version.status !== 0) continue;
+    try {
+      assertSupportedNodeVersion(version.stdout.trim());
+      return node;
+    } catch {
+      // Ignore an unrelated runtime on PATH.
+    }
+  }
+  throw new Error("Merge lifecycle fixture requires the supported project Node on PATH.");
+}
+
 describe("main write lock", () => {
+  it.each(["merge", "confirmation"])(
+    "reports primary and retained-lock failures after %s fails",
+    (phase) => {
+      const f = fixture();
+      f.git(f.first, ["checkout", "-b", "feature"]);
+      const node = fixtureNodeExecutable();
+      const log = NodePath.join(f.root, "gh-commands");
+      const pr = {
+        number: 1,
+        body: "Fixture",
+        url: "https://github.com/example/repository/pull/1",
+        state: "OPEN",
+        isDraft: false,
+        headRefOid: f.source,
+        baseRefOid: f.source,
+        baseRefName: "lastcode/main",
+        mergeable: "MERGEABLE",
+        mergeStateStatus: "CLEAN",
+      };
+      fakeGh(
+        f,
+        `exec "${node}" --input-type=commonjs - "$@" <<'JS'
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+const pr = ${JSON.stringify(pr)};
+const log = ${JSON.stringify(log)};
+const endpoint = args.find(arg => arg.startsWith('repos/'));
+let result;
+if (args[0] === 'pr' && args[1] === 'merge') {
+  fs.appendFileSync(log, 'merge\\n');
+  if ('${phase}' === 'merge') {
+    process.stderr.write('fixture merge failure\\n');
+    process.exit(7);
+  }
+} else if (args[0] === 'pr' && args[1] === 'view') {
+  if (fs.existsSync(log)) {
+    fs.appendFileSync(log, 'confirmation\\n');
+    process.stderr.write('fixture confirmation failure\\n');
+    process.exit(9);
+  }
+  result = pr;
+} else if (args[0] === 'api' && args[1] === 'graphql') {
+  result = [{data: {repository: {pullRequest: {reviewThreads: {nodes: [], pageInfo: {hasNextPage: false}}}}}}];
+} else if (endpoint?.endsWith('/pulls/1/reviews?per_page=100')) {
+  result = [[{id: 1, user: {login: 'chatgpt-codex-connector[bot]'}, state: 'APPROVED', commit_id: pr.headRefOid, submitted_at: '2026-10-01T00:00:00Z'}]];
+} else if (endpoint?.endsWith('/comments?per_page=100')) result = [[]];
+else if (args[0] === 'api' && args[1].includes('/rules/branches/')) {
+  result = [{type: 'required_status_checks', parameters: {required_status_checks: [{context: 'CI Gate'}]}}];
+} else if (args[0] === 'api' && args[1].includes('/runs?')) {
+  result = {workflow_runs: [{id: 1, display_title: ${JSON.stringify(githubCiRunTitle({ pullRequestNumber: 1, headSha: f.source, baseSha: f.source, mergeSha: f.source }))}, event: 'pull_request', head_sha: pr.headRefOid, status: 'completed', conclusion: 'success'}]};
+} else if (args[0] === 'api' && args[1].includes('/jobs?')) {
+  result = {jobs: [{name: 'CI Gate', status: 'completed', conclusion: 'success'}]};
+} else if (args[0] === 'api' && args[1].endsWith('/actions/workflows/ci.yml')) result = {state: 'active'};
+else throw new Error('Unexpected gh command: ' + args.join(' '));
+if (result !== undefined) process.stdout.write(JSON.stringify(result));
+JS`,
+      );
+      const result = NodeChildProcess.spawnSync(
+        node,
+        [NodePath.join(import.meta.dirname, "lastcode-merge.ts")],
+        {
+          cwd: f.first,
+          encoding: "utf8",
+          env: { ...process.env, LASTCODE_GITHUB_REPOSITORY: "example/repository" },
+        },
+      );
+      expect(result.status, result.stderr).toBe(1);
+      expect(result.stderr).toContain(`fixture ${phase} failure`);
+      expect(result.stderr).toContain("Retained main write lock");
+      const owner = f.owner();
+      expect(result.stderr).toContain(`owner ${owner}`);
+      expect(f.git(f.first, ["rev-parse", `${owner}^`])).toBe(f.source);
+      expect(f.git(f.root, ["--git-dir", f.remote, "rev-parse", "refs/heads/lastcode/main"])).toBe(
+        f.source,
+      );
+      expect(NodeFS.readFileSync(log, "utf8")).toBe(
+        phase === "merge" ? "merge\n" : "merge\nconfirmation\n",
+      );
+      expect(result.stdout).not.toContain("Merge complete");
+      if (phase === "confirmation") expect(result.stderr).toContain("exit code 9");
+    },
+  );
+
   it("acquires the lock without resending already published source objects", () => {
     const f = fixture();
     NodeFS.writeFileSync(NodePath.join(f.first, "source.txt"), "already published source\n");
@@ -298,8 +408,12 @@ describe("main write lock", () => {
     ["malformed JSON", "echo invalid", "Unexpected token"],
     ["missing head", `echo '{"state":"MERGED"}'`, "has not completed"],
     ["wrong head", `echo '{"state":"MERGED","headRefOid":"wrong"}'`, "has not completed"],
-    ["failed confirmation", "exit 1", "Cannot confirm"],
-    ["signalled confirmation", "kill -TERM $$", "Cannot confirm"],
+    [
+      "failed confirmation",
+      "echo fixture confirmation diagnostic >&2; exit 9",
+      /Cannot confirm[^]*exit code 9[^]*fixture confirmation diagnostic/u,
+    ],
+    ["signalled confirmation", "kill -TERM $$", /Cannot confirm[^]*SIGTERM/u],
   ])("retains exact ownership after %s", (_name, script, error) => {
     const f = fixture();
     fakeGh(f, `if [ "$2" = view ]; then ${script}; fi`);
