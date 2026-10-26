@@ -65,15 +65,16 @@ export function isClosedCodeFence(
   );
 }
 
-export function nodeToPlainText(node: ReactNode): string {
+export function nodeToPlainText(node: ReactNode, normalizeSoftBreaks = false): string {
   if (typeof node === "string" || typeof node === "number") {
-    return String(node);
+    return normalizeSoftBreaks ? String(node).replace(/\r?\n/g, " ") : String(node);
   }
   if (Array.isArray(node)) {
-    return node.map((child) => nodeToPlainText(child)).join("");
+    return node.map((child) => nodeToPlainText(child, normalizeSoftBreaks)).join("");
   }
   if (isValidElement<{ children?: ReactNode }>(node)) {
-    return nodeToPlainText(node.props.children);
+    if (node.type === "br") return "\n";
+    return nodeToPlainText(node.props.children, normalizeSoftBreaks);
   }
   return "";
 }

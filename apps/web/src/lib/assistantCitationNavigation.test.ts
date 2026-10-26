@@ -28,6 +28,8 @@ function createCitationRouter(initialEntry = "/environment-one/thread-one") {
   const root = createRootRoute();
   const thread = createRoute({ getParentRoute: () => root, path: "/$environmentId/$threadId" });
   return createRouter({
+    isServer: false,
+    origin: "http://router.test",
     routeTree: root.addChildren([thread]),
     history: createMemoryHistory({ initialEntries: [initialEntry] }),
   });

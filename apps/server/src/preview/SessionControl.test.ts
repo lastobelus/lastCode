@@ -3,6 +3,45 @@ import { describe, expect, it } from "vite-plus/test";
 import { BrowserControlInterrupted, SessionControl } from "./SessionControl.ts";
 
 describe("SessionControl", () => {
+  it("discards an expired queued action without replaying it after the active action drains", async () => {
+    const control = new SessionControl("agent");
+    const started = Promise.withResolvers<void>();
+    const finish = Promise.withResolvers<void>();
+    const events: string[] = [];
+    const running = control.agent("agent", async () => {
+      started.resolve();
+      await finish.promise;
+      events.push("finished");
+    });
+    await started.promise;
+    const expired = new AbortController();
+    const queued = expect(
+      control.agent("agent", async () => events.push("late click"), expired.signal),
+    ).rejects.toThrow("request expired");
+    expired.abort(new Error("request expired"));
+    const next = control.agent("agent", async () => events.push("fresh action"));
+    finish.resolve();
+    await Promise.all([running, queued, next]);
+    expect(events).toEqual(["finished", "fresh action"]);
+  });
+
+  it("rejects an already cancelled action before it reaches the queue", async () => {
+    const control = new SessionControl("agent");
+    const cancelled = AbortSignal.abort(new Error("request cancelled"));
+    let executed = false;
+    await expect(
+      control.agent(
+        "agent",
+        async () => {
+          executed = true;
+        },
+        cancelled,
+      ),
+    ).rejects.toThrow("request cancelled");
+    expect(executed).toBe(false);
+    await expect(control.agent("agent", async () => "ready")).resolves.toBe("ready");
+  });
+
   it("returns an action result before tracked navigation but drains it before already queued actions", async () => {
     const control = new SessionControl("agent");
     const committed = Promise.withResolvers<void>();
@@ -25,6 +64,53 @@ describe("SessionControl", () => {
     await control.agent("agent", async () => control.track(committed.promise));
     committed.reject(new Error("navigation failed"));
     await expect(control.agent("agent", async () => "resumed")).resolves.toBe("resumed");
+  });
+
+  it.each(["release", "disconnect"] as const)(
+    "%s drains every viewer navigation and cleanup before agent actions",
+    async (handoff) => {
+      const control = new SessionControl("agent");
+      await control.take("viewer");
+      const slow = Promise.withResolvers<void>();
+      const replacement = Promise.withResolvers<void>();
+      const events: string[] = [];
+      await control.human("viewer", async () => control.trackUntilHandoff(slow.promise));
+      await control.human("viewer", async () => control.trackUntilHandoff(replacement.promise));
+      await control.human("viewer", async () => events.push("human typed"));
+      const handingOff = control[handoff]("viewer", async () => {
+        events.push("input released");
+      });
+      const cancelled = new AbortController();
+      const expired = expect(
+        control.agent("agent", async () => events.push("expired action"), cancelled.signal),
+      ).rejects.toThrow("request expired");
+      cancelled.abort(new Error("request expired"));
+      const resumed = control.agent("agent", async () => events.push("agent resumed"));
+      replacement.resolve();
+      await replacement.promise;
+      expect(events).toEqual(["human typed"]);
+      slow.reject(new Error("navigation replaced"));
+      await Promise.all([handingOff, expired, resumed]);
+      expect(events).toEqual(["human typed", "input released", "agent resumed"]);
+    },
+  );
+
+  it("closing does not wait for a viewer navigation or allow it to revive control", async () => {
+    const control = new SessionControl("agent");
+    await control.take("viewer");
+    const navigation = Promise.withResolvers<void>();
+    await control.human("viewer", async () => control.trackUntilHandoff(navigation.promise));
+    const queued = expect(control.human("viewer", async () => "stale input")).rejects.toThrow(
+      "closed",
+    );
+    await control.close();
+    await queued;
+    await expect(control.agent("agent", async () => "late action")).rejects.toThrow("closed");
+    await expect(control.take("viewer")).rejects.toThrow("closed");
+    navigation.reject(new Error("page closed"));
+    await control.disconnect("viewer");
+    expect(control.controller).toBeNull();
+    expect(control.generation).toBe(2);
   });
 
   it("only lets the assigned agent act and restores that agent after human control", async () => {

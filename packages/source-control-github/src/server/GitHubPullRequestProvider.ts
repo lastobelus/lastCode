@@ -557,8 +557,8 @@ export const make = Effect.gen(function* () {
               editedAt: reviewThreads.editedAtById.get(comment.id) ?? comment.editedAt ?? null,
             }))
             .toSorted((left, right) => left.createdAt.localeCompare(right.createdAt)),
-          commentCount: pullRequest.comments.length + reviewThreads.commentCount,
-          commentsTruncated: reviewThreads.truncated,
+          commentCount: pullRequest.commentCount + reviewThreads.commentCount,
+          commentsTruncated: pullRequest.truncated || reviewThreads.truncated,
           reviewThreadsTruncated: reviewThreads.reviewThreadsTruncated,
           reviewThreads: reviewThreads.reviewThreads.map((thread) => ({
             ...thread,

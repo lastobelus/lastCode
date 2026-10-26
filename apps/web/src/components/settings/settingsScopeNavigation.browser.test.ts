@@ -6,7 +6,7 @@ import {
   createRouter,
   redirect,
 } from "@tanstack/react-router";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import { resolveSettingsScope } from "./settingsScope";
 import { retainSettingsScope, validateSettingsRouteSearch } from "./settingsScopeNavigation";
@@ -20,6 +20,7 @@ const checkoutSearch = {
 };
 
 function createSettingsRouter(initialEntry = "/settings/general") {
+  const redirectSpy = vi.fn((value: ReturnType<typeof redirect>) => value);
   const root = createRootRoute();
   const settings = createRoute({
     getParentRoute: () => root,
@@ -28,10 +29,11 @@ function createSettingsRouter(initialEntry = "/settings/general") {
     search: { middlewares: [retainSettingsScope] },
     beforeLoad: ({ location }) => {
       if (location.pathname === "/settings") {
-        throw redirect({ to: "/settings/general", replace: true });
+        throw redirectSpy(redirect({ to: "/settings/general", replace: true }));
       }
     },
   });
+  const archived = createRoute({ getParentRoute: () => settings, path: "archived" });
   const general = createRoute({ getParentRoute: () => settings, path: "general" });
   const projects = createRoute({ getParentRoute: () => settings, path: "projects" });
   const integrations = createRoute({ getParentRoute: () => settings, path: "integrations" });
@@ -57,14 +59,16 @@ function createSettingsRouter(initialEntry = "/settings/general") {
     getParentRoute: () => root,
     path: "projects/$projectKey",
     beforeLoad: ({ params }) => {
-      throw redirect({
-        to: "/settings/projects",
-        search: { project: params.projectKey, machine: undefined },
-        replace: true,
-      });
+      throw redirectSpy(
+        redirect({
+          to: "/settings/projects",
+          search: { project: params.projectKey, machine: undefined },
+          replace: true,
+        }),
+      );
     },
   });
-  return createRouter({
+  const router = createRouter({
     routeTree: root.addChildren([
       settings.addChildren([
         general,
@@ -73,14 +77,40 @@ function createSettingsRouter(initialEntry = "/settings/general") {
         sourceControl,
         providers,
         scheduledTasks,
+        archived,
       ]),
       legacyProject,
     ]),
     history: createMemoryHistory({ initialEntries: [initialEntry] }),
   });
+  return Object.assign(router, { redirectSpy });
 }
 
 describe("settings scope navigation", () => {
+  it("keeps Archive scope through search navigation and clears only the selected project", async () => {
+    const router = createSettingsRouter();
+    await router.load();
+    await router.navigate({ to: "/settings/general", search: checkoutSearch });
+    await router.navigate({ to: "/settings/archived", hash: "archive" });
+    expect(router.state.location.search).toEqual(checkoutSearch);
+
+    await router.navigate({
+      from: "/settings",
+      to: "/settings/archived",
+      search: () => ({ project: undefined, checkout: undefined, machine: "remote-server" }),
+      hash: "",
+    });
+    expect(router.state.location.pathname).toBe("/settings/archived");
+    expect(router.state.location.search).toEqual({ machine: "remote-server" });
+
+    await router.navigate({
+      from: "/settings",
+      to: "/settings/archived",
+      search: () => ({ project: undefined, checkout: undefined, machine: undefined }),
+    });
+    expect(router.state.location.search).toEqual({});
+  });
+
   it("clears a checkout when selecting all environments and all projects", async () => {
     const router = createSettingsRouter();
     await router.navigate({ to: "/settings/general", search: checkoutSearch, hash: "old-setting" });
@@ -106,7 +136,7 @@ describe("settings scope navigation", () => {
     expect(router.state.location.search).toEqual(checkoutSearch);
   });
 
-  it.each(["/settings/projects", "/settings/scheduled-tasks"] as const)(
+  it.each(["/settings/projects", "/settings/scheduled-tasks", "/settings/archived"] as const)(
     "keeps %s when regrouping or selecting a target from the shared settings layout",
     async (to) => {
       const router = createSettingsRouter();
@@ -122,7 +152,7 @@ describe("settings scope navigation", () => {
       });
       expect(router.state.location.pathname).toBe(to);
       expect(router.state.location.search).toEqual(regroupedCheckout);
-      expect(router.state.redirect).toBeUndefined();
+      expect(router.redirectSpy.mock.results.at(-1)?.value).toBeUndefined();
 
       await router.navigate({
         from: "/settings",
@@ -220,8 +250,8 @@ describe("settings scope navigation", () => {
       to: "/projects/$projectKey",
       params: { projectKey: "legacy-project" },
     });
-    expect(router.state.redirect).not.toBeUndefined();
-    await router.navigate(router.state.redirect!.options);
+    expect(router.redirectSpy.mock.results.at(-1)?.value).not.toBeUndefined();
+    await router.navigate(router.redirectSpy.mock.results.at(-1)!.value.options);
     expect(router.state.location.pathname).toBe("/settings/projects");
     expect(router.state.location.search).toEqual({ project: "legacy-project" });
   });
@@ -229,8 +259,8 @@ describe("settings scope navigation", () => {
   it("keeps scope through the settings index redirect", async () => {
     const router = createSettingsRouter();
     await router.navigate({ to: "/settings", search: { machine: "remote-server" } });
-    expect(router.state.redirect).not.toBeUndefined();
-    await router.navigate(router.state.redirect!.options);
+    expect(router.redirectSpy.mock.results.at(-1)?.value).not.toBeUndefined();
+    await router.navigate(router.redirectSpy.mock.results.at(-1)!.value.options);
     expect(router.state.location.pathname).toBe("/settings/general");
     expect(router.state.location.search).toEqual({ machine: "remote-server" });
   });

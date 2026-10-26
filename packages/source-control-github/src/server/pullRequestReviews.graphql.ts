@@ -169,26 +169,6 @@ export const PullRequestReviewThreadConnection = Schema.Struct({
 })
 export interface PullRequestReviewThreadConnection extends Schema.Struct.Type<typeof PullRequestReviewThreadConnection.fields> {}
 
-/** Represents a comment on an Issue. */
-export const IssueComment = Schema.Struct({
-  /** The Node ID of the IssueComment object */
-  id: Shared.ID,
-  /** The moment the editor made the last edit */
-  lastEditedAt: Schema.NullOr(Shared.DateTime),
-  /** The actor who authored the comment. */
-  author: Schema.NullOr(Actor),
-  /** A list of reactions grouped by content left on the subject. */
-  reactionGroups: Schema.NullOr(Schema.Array(ReactionGroup))
-})
-export interface IssueComment extends Schema.Struct.Type<typeof IssueComment.fields> {}
-
-/** The connection type for IssueComment. */
-export const IssueCommentConnection = Schema.Struct({
-  /** A list of nodes. */
-  nodes: Schema.NullOr(Schema.Array(Schema.NullOr(IssueComment)))
-})
-export interface IssueCommentConnection extends Schema.Struct.Type<typeof IssueCommentConnection.fields> {}
-
 /** A review object for a given pull request. */
 export const ReviewsNodesPullRequestReview = Schema.Struct({
   /** The Node ID of the PullRequestReview object */
@@ -392,8 +372,6 @@ export const ReviewThreadsRepositoryPullRequestPullRequest = Schema.Struct({
   author: Schema.NullOr(Actor),
   /** A list of reactions grouped by content left on the subject. */
   reactionGroups: Schema.NullOr(Schema.Array(ReactionGroup)),
-  /** A list of comments associated with the pull request. */
-  comments: IssueCommentConnection,
   /** A list of reviews associated with the pull request. */
   reviews: Schema.NullOr(ReviewsPullRequestReviewConnection),
   /** A list of review requests associated with the pull request. */
@@ -426,7 +404,7 @@ export const ReviewThreads = GraphQL.query("ReviewThreads", {
     ],
     selections: [
       { name: "viewer", body: ["{login}"] },
-      { name: "repository", body: ["(owner:$", "owner", " name:$", "name", "){pullRequest(number:$", "number", "){reviewThreads(first:100 after:$", "after", "){totalCount pageInfo{hasNextPage endCursor}nodes{id isResolved isOutdated path line diffSide comments(first:10){totalCount pageInfo{hasNextPage endCursor}nodes{...ThreadComment}}}}viewerCanUpdate viewerDidAuthor author{__typename login avatarUrl}...Reactions comments(first:100){nodes{id lastEditedAt author{__typename login avatarUrl}...Reactions}}reviews(first:100){nodes{id lastEditedAt author{__typename login avatarUrl}...Reactions}}reviewRequests(first:$", "requestedReviewers", "){nodes{requestedReviewer{__typename...on User{login name avatarUrl}...on Bot{login avatarUrl}...on Team{combinedSlug teamName:name teamAvatarUrl:avatarUrl}}}}latestReviews(first:50){nodes{state author{__typename login avatarUrl}}}reviewDismissals:timelineItems(itemTypes:[REVIEW_DISMISSED_EVENT]first:100){pageInfo{hasNextPage endCursor}nodes{__typename...on ReviewDismissedEvent{dismissalMessage review{id}}}}commits(last:100){nodes{commit{oid messageHeadline committedDate additions deletions parents(first:1){totalCount}authors(first:3){nodes{name avatarUrl user{login}}}}}}}}"] }
+      { name: "repository", body: ["(owner:$", "owner", " name:$", "name", "){pullRequest(number:$", "number", "){reviewThreads(first:100 after:$", "after", "){totalCount pageInfo{hasNextPage endCursor}nodes{id isResolved isOutdated path line diffSide comments(first:10){totalCount pageInfo{hasNextPage endCursor}nodes{...ThreadComment}}}}viewerCanUpdate viewerDidAuthor author{__typename login avatarUrl}...Reactions reviews(first:100){nodes{id lastEditedAt author{__typename login avatarUrl}...Reactions}}reviewRequests(first:$", "requestedReviewers", "){nodes{requestedReviewer{__typename...on User{login name avatarUrl}...on Bot{login avatarUrl}...on Team{combinedSlug teamName:name teamAvatarUrl:avatarUrl}}}}latestReviews(first:50){nodes{state author{__typename login avatarUrl}}}reviewDismissals:timelineItems(itemTypes:[REVIEW_DISMISSED_EVENT]first:100){pageInfo{hasNextPage endCursor}nodes{__typename...on ReviewDismissedEvent{dismissalMessage review{id}}}}commits(last:100){nodes{commit{oid messageHeadline committedDate additions deletions parents(first:1){totalCount}authors(first:3){nodes{name avatarUrl user{login}}}}}}}}"] }
     ],
     fragments: [
       { name: "ThreadComment", body: ["on PullRequestReviewComment{id author{__typename login avatarUrl}body createdAt lastEditedAt url...Reactions}"] },

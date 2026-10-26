@@ -5,7 +5,7 @@ import {
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
-import { memo, type MouseEvent as ReactMouseEvent } from "react";
+import { isValidElement, memo, type ReactNode, type MouseEvent as ReactMouseEvent } from "react";
 
 import { readLocalApi } from "../../localApi";
 import { cn } from "../../lib/utils";
@@ -14,6 +14,7 @@ import type { markdownFileCopyPaths } from "../../markdownFileHostPath";
 import { ContextChip } from "../ContextChip";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { nodeToPlainText } from "./MarkdownCodeBlock.logic";
 import { FileTagChipContent } from "./FileTagChip";
 import {
   hasMarkdownFilePrimaryAction,
@@ -25,6 +26,7 @@ import { WorkspaceEntryTooltip } from "./WorkspaceEntryIcon";
 
 interface MarkdownFileLinkProps {
   environmentId: EnvironmentId | null;
+  children?: ReactNode;
   href: string;
   targetPath: string;
   iconPath: string;
@@ -47,8 +49,16 @@ interface MarkdownFileLinkProps {
 
 const MARKDOWN_FILE_LINK_CLASS_NAME = "chat-markdown-file-link";
 
+function nodeImageCount(node: ReactNode): number {
+  if (Array.isArray(node)) return node.reduce((count, child) => count + nodeImageCount(child), 0);
+  if (!isValidElement<{ children?: ReactNode; node?: { tagName?: string } }>(node)) return 0;
+  if (node.type === "img" || node.props.node?.tagName === "img") return 1;
+  return nodeImageCount(node.props.children);
+}
+
 export const MarkdownFileLink = memo(function MarkdownFileLink({
   environmentId,
+  children,
   href,
   targetPath,
   iconPath,
@@ -321,60 +331,74 @@ export const MarkdownFileLink = memo(function MarkdownFileLink({
     canOpenInPanel,
   });
 
+  const chip = (
+    <FileTagChipContent
+      path={iconPath}
+      environmentId={environmentId}
+      label={label}
+      theme={theme}
+    />
+  );
+  const content = children ? (
+    <>
+      {children} (
+      <ContextChip kind="mention" dir="ltr">
+        {chip}
+      </ContextChip>
+      )
+    </>
+  ) : (
+    chip
+  );
+
+  const link = hasPrimaryAction ? (
+    <a
+      href={href}
+      className={cn(children ? "text-left" : undefined, MARKDOWN_FILE_LINK_CLASS_NAME)}
+      data-markdown-copy={copyMarkdown}
+      data-markdown-copy-images={children ? nodeImageCount(children) : undefined}
+      data-markdown-copy-text={children ? `${nodeToPlainText(children)} (${label})` : undefined}
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (onOpen && shouldOpenMarkdownFileLinkInEditor(event)) {
+          handleOpenInEditor();
+          return;
+        }
+        if (useBrowserPrimaryAction) {
+          handleOpenInBrowser();
+          return;
+        }
+        handleOpenInFilePreview();
+      }}
+      onContextMenu={handleContextMenu}
+    >
+      {content}
+    </a>
+  ) : (
+    <button
+      type="button"
+      aria-label={children ? undefined : `File options for ${label}`}
+      aria-haspopup="menu"
+      className={cn(
+        children ? "text-left" : undefined,
+        MARKDOWN_FILE_LINK_CLASS_NAME,
+        "select-text",
+      )}
+      data-markdown-copy={copyMarkdown}
+      data-markdown-copy-images={children ? nodeImageCount(children) : undefined}
+      data-markdown-copy-text={children ? `${nodeToPlainText(children)} (${label})` : undefined}
+      onClick={handleContextMenu}
+      onContextMenu={handleContextMenu}
+    >
+      {content}
+    </button>
+  );
+
   return (
     <Tooltip>
       <TooltipTrigger
-        render={
-          hasPrimaryAction ? (
-            <ContextChip
-              kind="mention"
-              dir="ltr"
-              render={<a href={href} />}
-              className={MARKDOWN_FILE_LINK_CLASS_NAME}
-              data-markdown-copy={copyMarkdown}
-              onClick={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                if (onOpen && shouldOpenMarkdownFileLinkInEditor(event)) {
-                  handleOpenInEditor();
-                  return;
-                }
-                if (useBrowserPrimaryAction) {
-                  handleOpenInBrowser();
-                  return;
-                }
-                handleOpenInFilePreview();
-              }}
-              onContextMenu={handleContextMenu}
-            >
-              <FileTagChipContent
-                path={iconPath}
-                environmentId={environmentId}
-                label={label}
-                theme={theme}
-              />
-            </ContextChip>
-          ) : (
-            <ContextChip
-              kind="mention"
-              dir="ltr"
-              render={<button type="button" />}
-              aria-label={`File options for ${label}`}
-              aria-haspopup="menu"
-              className={cn(MARKDOWN_FILE_LINK_CLASS_NAME, "select-text")}
-              data-markdown-copy={copyMarkdown}
-              onClick={handleContextMenu}
-              onContextMenu={handleContextMenu}
-            >
-              <FileTagChipContent
-                path={iconPath}
-                environmentId={environmentId}
-                label={label}
-                theme={theme}
-              />
-            </ContextChip>
-          )
-        }
+        render={children ? link : <ContextChip kind="mention" dir="ltr" render={link} />}
       />
       <TooltipPopup side="top" variant="code">
         <div className="overflow-x-auto whitespace-nowrap scrollbar-thumb-border/78 scrollbar-track-transparent [scrollbar-width:thin] [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border/78 [&::-webkit-scrollbar-track]:bg-transparent">
@@ -390,6 +414,7 @@ function areMarkdownFileLinkPropsEqual(
   next: Readonly<MarkdownFileLinkProps>,
 ): boolean {
   return (
+    previous.children === next.children &&
     previous.href === next.href &&
     previous.targetPath === next.targetPath &&
     previous.iconPath === next.iconPath &&

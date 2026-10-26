@@ -92,18 +92,19 @@ function presentation(
 export function useEnrichedLinkVariants(
   urls: ReadonlyArray<string>,
   props: SelectableMarkdownTextProps,
+  authoredFileLinks: ReadonlySet<string>,
 ) {
   const { linkCustomization, skills, textStyle } = props;
   const theme = useUniwindTheme();
   const links = useMemo(() => {
     const byUrl = new Map<string, MarkdownLinkCustomization>();
     for (const url of urls) {
-      if (byUrl.has(url)) continue;
+      if (byUrl.has(url) || authoredFileLinks.has(url)) continue;
       const value = presentation(url, { linkCustomization, skills, textStyle });
       if (value) byUrl.set(url, value);
     }
     return byUrl;
-  }, [urls, linkCustomization, skills, textStyle]);
+  }, [urls, linkCustomization, skills, textStyle, authoredFileLinks]);
   const chipForegrounds = useMemo(
     () =>
       new Map(
