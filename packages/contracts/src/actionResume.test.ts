@@ -6,12 +6,14 @@ import {
   ActionReport,
   ActionResumeState,
   ActionRunInspection,
+  ActionRunSummary,
 } from "./actionResume.ts";
 
 const decodeActionProgress = Schema.decodeUnknownSync(ActionProgress);
 const decodeActionReport = Schema.decodeUnknownSync(ActionReport);
 const decodeActionResumeState = Schema.decodeUnknownSync(ActionResumeState);
 const decodeActionRunInspection = Schema.decodeUnknownSync(ActionRunInspection);
+const decodeActionRunSummary = Schema.decodeUnknownSync(ActionRunSummary);
 
 describe("Action resume contracts", () => {
   it("decodes compact domain results independently from host lifecycle outcomes", () => {
@@ -155,12 +157,63 @@ describe("Action resume contracts", () => {
     });
   });
 
+  it("bounds summary reports and requires their untrusted label", () => {
+    const summary = {
+      runId: "run-1",
+      actionId: "qa",
+      actionName: "QA",
+      outcome: "succeeded",
+      delivery: "delivered",
+      startedAt: "2026-08-29T12:00:00.000Z",
+      finishedAt: null,
+      exitCode: 0,
+      exitSignal: null,
+      status: {
+        state: "follow_up_dispatched",
+        environmentPaused: false,
+        automaticResumeArmed: false,
+        attentionRequired: false,
+      },
+    };
+    expect(() =>
+      decodeActionRunSummary({
+        ...summary,
+        report: { outcome: "success", summary: "x".repeat(280), untrusted: true },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      decodeActionRunSummary({
+        ...summary,
+        report: { outcome: "success", summary: "x".repeat(281), untrusted: true },
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeActionRunSummary({
+        ...summary,
+        report: { outcome: "success", summary: "Checks passed" },
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeActionRunSummary({
+        ...summary,
+        report: { outcome: "success", summary: "Checks passed", untrusted: false },
+      }),
+    ).toThrow();
+  });
+
   it("bounds retained output returned by Action run inspection", () => {
     expect(() =>
       decodeActionRunInspection({
         runId: "run-1",
         actionName: "QA",
         lifecycleOutcome: "succeeded",
+        delivery: "delivered",
+        status: {
+          state: "follow_up_dispatched",
+          environmentPaused: false,
+          automaticResumeArmed: false,
+          attentionRequired: false,
+        },
         exitCode: 0,
         exitSignal: null,
         outputTail: "x".repeat(12_001),

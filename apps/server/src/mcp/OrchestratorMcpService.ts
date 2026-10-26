@@ -70,6 +70,7 @@ import {
 import { getProviderOptionCurrentValue } from "@t3tools/shared/model";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import * as ThreadReadBroker from "./ThreadReadBroker.ts";
+import * as ActionResume from "../actionResume/ActionResume.ts";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import {
   normalizeThreadPullRequestKey,
@@ -947,6 +948,10 @@ function threadDetail(
       (request) => request.status === "pending",
     ).length,
     archived: projection.thread.archivedAt !== null,
+    autoSettleDisabledAt:
+      projection.thread.autoSettleDisabledAt == null
+        ? null
+        : DateTime.formatIso(projection.thread.autoSettleDisabledAt),
     ...threadSettlement(projection.thread),
     ...threadSnooze(shell, nowMs),
     createdAt: DateTime.formatIso(projection.thread.createdAt),
@@ -1082,6 +1087,7 @@ function timelineItem(input: {
 const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const threadReadBroker = yield* ThreadReadBroker.ThreadReadBroker;
+  const actionResume = yield* ActionResume.ActionResume;
   const threadManagement = yield* ThreadManagementService.ThreadManagementService;
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
   const providerAdapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
@@ -1902,13 +1908,18 @@ const make = Effect.gen(function* () {
       }
     }
     return {
-      thread: threadDetail(
-        target,
-        timeline.totalItems,
-        shell,
-        yield* Clock.currentTimeMillis,
-        scope.environmentId,
-      ),
+      thread: {
+        ...threadDetail(
+          target,
+          timeline.totalItems,
+          shell,
+          yield* Clock.currentTimeMillis,
+          scope.environmentId,
+        ),
+        actionResume: yield* actionResume
+          .readLatestSummary(target.thread.id)
+          .pipe(Effect.mapError((error) => failure("orchestration_error", error.message))),
+      },
       recentRuns: target.runs
         .toSorted((left, right) => right.ordinal - left.ordinal)
         .slice(0, input.runLimit ?? DEFAULT_THREAD_RUN_LIMIT)
@@ -3017,6 +3028,7 @@ export const layer: Layer.Layer<
   OrchestratorMcpService,
   never,
   | Crypto.Crypto
+  | ActionResume.ActionResume
   | ThreadReadBroker.ThreadReadBroker
   | ThreadManagementService.ThreadManagementService
   | ThreadLaunchService.ThreadLaunchService

@@ -103,6 +103,68 @@ If the agent manually polls instead, inspect the repository guidance first. Comm
 or conflicting workflow instructions, a skill that mentions the Action without prescribing the
 tool sequence, or an Action that is missing or disabled in the current environment.
 
+## Parent-mediated Actions for delegated children
+
+App-owned delegated child tasks do not yet complete reliably across an Action wait, so for now
+their parent owns every resumable Action they need, including dependency preparation, CI, build,
+and checkpoint waits. A child can technically call `run_project_action_and_resume`; the injected
+runtime instructions ask it not to. Child PR watches stay with the parent as well. Ordinary
+top-level threads launch their own Actions as usual. Issue #482 tracks the work that removes this
+handoff.
+
+The injected instructions carry the sequence each side follows: the child ends its turn with a
+handoff request as its final response, and the parent waits for that recorded result, protects
+itself from automatic settlement, verifies the target, launches, and queues the result back to the
+child with a `taskId` receipt. This section holds the setup detail they leave out.
+
+### Choose the target
+
+A listed, eligible Action shows only that it exists and is opted in. Before launching for a child,
+confirm in **Settings → Projects** that its saved command, opt-in, working directory, environment,
+and any worktree-local package or build selection match the child's exact checkout and head.
+
+- **Shared checkout.** When the child works in the parent's checkout, the parent's saved Action
+  usually targets it already; verify it as above. Serialize changes to that checkout while the
+  Action runs.
+- **Separate child worktree.** The parent needs a saved Action explicitly targeted at that
+  worktree and opted in, set up as in [Let the agent complete the UI setup](#let-the-agent-complete-the-ui-setup).
+  Its setup must not depend on packages the child's worktree is still missing. Keep concrete
+  paths and selections in the environment's settings, not in repository files.
+
+If a correctly targeted Action cannot be prepared, use the shared checkout when that is safe, and
+otherwise report the specific blocker before launch.
+
+### Protect the parent from automatic settlement
+
+A parent whose linked PRs have merged can be settled automatically while it still owes a child its
+result. The parent thread's existing menu control disables automatic settlement for that thread;
+`t3_thread_read` reports the current value as `autoSettleDisabledAt`, and no MCP tool changes it.
+
+1. Read and record the current value.
+2. Ask the user to disable automatic settlement from the parent thread's menu, or use the
+   collaborative browser if the user has already authorized that setup under the machine
+   interaction policy.
+3. Read the value again and record the new timestamp as the receipt.
+
+If neither route is available, report that blocker; the workflow has no other supported setup.
+After the workflow finishes, restore the recorded value the same way only if the current timestamp
+still equals the receipt and the user has made no later choice that conflicts. Otherwise leave it
+and explain why. An explicit Stop or Settle from the user always stands.
+
+### Observe progress
+
+A parent reads a child's latest Action run through `t3_thread_read`, which returns a bounded
+summary: identity, outcome, delivery, timing, exit, derived status, and an untrusted report
+summary. Hold detail, follow-up status, and raw output are available only through
+`inspect_action_run` in the thread that launched the run, which for mediated Actions is the parent.
+
+### When the handoff ends
+
+The restriction lifts only after an installed checkpoint containing same-task Action support
+passes acceptance on that environment. A newer source tree or version number is not enough, and
+no capability flag reports it yet. Mediated work already in flight keeps its recorded owner until
+someone deliberately hands it over.
+
 ## Troubleshooting
 
 ### The Action list is empty
