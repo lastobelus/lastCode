@@ -2980,12 +2980,14 @@ const make = Effect.gen(function* () {
         (localListener
           ? isLocalLoopbackHost(target.hostname)
           : target.hostname.replace(/^\[|\]$/g, "") === configuredHost));
-    if (!ownOrigin && (tab.desktop || config.port === 0)) return url;
+    if (!ownOrigin && !tab.desktop && config.port === 0) return url;
     const canonicalHost =
       configuredHost === "0.0.0.0" ? "127.0.0.1" : configuredHost === "::" ? "::1" : configuredHost;
-    const canonicalOrigin = ownOrigin
-      ? undefined
-      : `http://${canonicalHost.includes(":") ? `[${canonicalHost}]` : canonicalHost}:${config.port}`;
+    // Native pages keep their reachable origin; the environment's signature still gates renewal.
+    const canonicalOrigin =
+      ownOrigin || tab.desktop
+        ? undefined
+        : `http://${canonicalHost.includes(":") ? `[${canonicalHost}]` : canonicalHost}:${config.port}`;
     return Effect.runPromise(
       AssetAccess.renewPreviewAssetUrl(url, minimumValidityMs, canonicalOrigin).pipe(
         Effect.provideService(ServerSecretStore.ServerSecretStore, secretStore),

@@ -4872,6 +4872,58 @@ it.live("retained signed documents renew automatically on warm and cold viewer r
   ).pipe(Effect.provide(layer)),
 );
 
+it.live.each(
+  ["http:", "https:"].flatMap((protocol) => [true, false].map((owned) => ({ protocol, owned }))),
+)(
+  "native roots renew only their environment's signed documents on cold and warm returns ($protocol, owned=$owned)",
+  ({ protocol, owned }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const initial = yield* Clock.currentTimeMillis;
+        using clock = vi.spyOn(Date, "now").mockReturnValue(initial);
+        const { browser, manager, tabId } = yield* dormantNativeRoot();
+        const claims = {
+          version: 1,
+          kind: "media-file-exact",
+          filePath: "/workspace/report.html",
+          device: "1",
+          inode: "42",
+          expiresAt: initial - 1000,
+        };
+        const payload = base64UrlEncode(JSON.stringify(claims));
+        const token = `${payload}.${signPayload(payload, new Uint8Array(32).fill(owned ? 7 : 8))}`;
+        const originalUrl = `${protocol}//environment.example.test:3773/api/assets/${token}/report.html?mode=preview#top`;
+        yield* manager.reportStatus({
+          threadId: scope.thread.threadId,
+          tabId,
+          serverControlled: true,
+          navStatus: { _tag: "Success", url: originalUrl, title: "Saved document" },
+          canGoBack: false,
+          canGoForward: false,
+        });
+        let previousUrl = originalUrl;
+        for (const hours of [0, 25]) {
+          clock.mockReturnValue(initial + hours * 60 * 60_000);
+          yield* Effect.scoped(browser.attachViewer(viewerInput(tabId, false)));
+          const destination = desktopConnections.at(-1)!.context.page.url();
+          expect(new URL(destination).origin).toBe(new URL(originalUrl).origin);
+          expect(new URL(destination).search).toBe("?mode=preview");
+          expect(new URL(destination).hash).toBe("#top");
+          if (owned) {
+            expect(destination).not.toBe(previousUrl);
+            const renewed = JSON.parse(
+              base64UrlDecodeUtf8(new URL(destination).pathname.split("/")[3]!.split(".")[0]!),
+            );
+            expect(renewed).toEqual({ ...claims, expiresAt: initial + (hours + 24) * 60 * 60_000 });
+          } else expect(destination).toBe(originalUrl);
+          previousUrl = destination;
+        }
+        expect(rootCreations).toHaveLength(2);
+        expect(contexts).toHaveLength(0);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
 it.live(
   "returning to a dormant handoff releases the oldest inactive rendering without deleting destinations",
   () =>
