@@ -1,6 +1,7 @@
 import {
   prepareHostedPreview as prepareOwnedPreview,
   HostedPreviewRecoveryError,
+  isSavedDocumentCapability,
   type PreparedHostedPreview,
 } from "@t3tools/client-runtime/preview-hosting";
 import {
@@ -30,7 +31,7 @@ export function mayBeHostedPreviewUrl(threadRef: ScopedThreadRef, url: string): 
     const parsed = new URL(url);
     return (
       (parsed.protocol === "http:" || parsed.protocol === "https:") &&
-      (parsed.pathname.startsWith("/api/assets/") ||
+      (isSavedDocumentCapability(parsed) ||
         isPrivateNetworkHost(parsed.hostname) ||
         (connection !== null && parsed.hostname === new URL(connection.httpBaseUrl).hostname))
     );
@@ -57,7 +58,7 @@ export async function prepareHostedPreview(
     }
     if (
       (target.protocol !== "http:" && target.protocol !== "https:") ||
-      (!target.pathname.startsWith("/api/assets/") &&
+      (!isSavedDocumentCapability(target) &&
         !isPrivateNetworkHost(target.hostname) &&
         ![connection?.httpBaseUrl, configuredEndpoint].some((endpoint) => {
           if (!endpoint) return false;

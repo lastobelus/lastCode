@@ -1,4 +1,5 @@
 import {
+  AssetPreviewDocumentError,
   EnvironmentId,
   PreviewHostingLeaseId,
   ThreadId,
@@ -348,6 +349,44 @@ describe("prepareHostedPreview", () => {
     });
     expect(result).toEqual({ url, managed: false, restored: false });
     expect(renewDocumentUrl).not.toHaveBeenCalled();
+  });
+
+  it.each(["empty", "unavailable"])(
+    "preserves another environment's signed loopback document with %s leases",
+    async (listing) => {
+      const url = `http://127.0.0.1:3773${savedDocumentPath}?page=2#chart`;
+      const renewDocumentUrl = vi.fn(async () => {
+        throw new AssetPreviewDocumentError({});
+      });
+      const result = await prepareHostedPreview({
+        threadRef,
+        url,
+        environmentUrl: "https://environment.example/",
+        list: async () => {
+          if (listing === "unavailable") throw new Error("Lease lookup unavailable");
+          return [];
+        },
+        recover: async () => lease,
+        renewDocumentUrl,
+      });
+      expect(result).toEqual({ url, managed: false, restored: false });
+      expect(renewDocumentUrl).toHaveBeenCalledExactlyOnceWith(url, true);
+    },
+  );
+
+  it("keeps document rejection actionable on the environment's own origin", async () => {
+    await expect(
+      prepareHostedPreview({
+        threadRef,
+        url: `https://environment.example${savedDocumentPath}`,
+        environmentUrl: "https://environment.example/",
+        list: async () => [],
+        recover: async () => lease,
+        renewDocumentUrl: async () => {
+          throw new AssetPreviewDocumentError({});
+        },
+      }),
+    ).rejects.toBeInstanceOf(HostedPreviewRecoveryError);
   });
 
   it.each(["https://external.example/api/assets/signed/report.pdf", "/other/report.pdf"])(

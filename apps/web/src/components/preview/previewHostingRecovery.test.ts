@@ -6,6 +6,7 @@ import {
 } from "@t3tools/contracts";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import * as Cause from "effect/Cause";
+import * as Base64Url from "effect/encoding/Base64Url";
 import { AsyncResult } from "effect/reactivity";
 
 const mocks = vi.hoisted(() => ({
@@ -78,6 +79,9 @@ const lease: PreviewHostingLeaseSummary = {
   expiresAt: "2026-10-03T00:00:00.000Z",
   status: "active",
 };
+const savedDocumentUrl = `https://managed-server.example/api/assets/${Base64Url.encode(
+  JSON.stringify({ version: 1, kind: "attachment", expiresAt: 1 }),
+)}.signature/report.html`;
 beforeEach(() => {
   mocks.config.mockReset();
   mocks.config.mockReturnValue({ environment: { capabilities: { previewAssetRecovery: true } } });
@@ -96,7 +100,8 @@ describe("native preview reopening", () => {
   it.each([
     ["http://localhost:5173/qa", true],
     ["http://192.168.1.30:5173/qa", true],
-    ["https://managed-server.example/api/assets/saved/report.html", true],
+    [savedDocumentUrl, true],
+    ["https://cdn.example/api/assets/logo.png", false],
     ["https://github.com/example/project/pull/73", false],
     ["mailto:developer@example.com", false],
     ["not-a-url", false],
@@ -135,6 +140,29 @@ describe("native preview reopening", () => {
     expect(mocks.query).not.toHaveBeenCalled();
     expect(mocks.run).not.toHaveBeenCalled();
   });
+
+  it.each(
+    ["disconnected", "loading"].flatMap((state) =>
+      (["navigation", "resource"] as const).map((purpose) => ({ state, purpose })),
+    ),
+  )(
+    "opens foreign assets during $state for $purpose without bootstrap",
+    async ({ state, purpose }) => {
+      if (state === "disconnected") mocks.connection.mockReturnValue(null);
+      mocks.config.mockReturnValue(null);
+      mocks.query.mockResolvedValue(
+        AsyncResult.failure(Cause.fail(new Error("Environment offline"))),
+      );
+      const url = "https://cdn.example/api/assets/logo.png";
+      await expect(prepareHostedPreview(owner, url, purpose)).resolves.toEqual({
+        url,
+        managed: false,
+        restored: false,
+      });
+      expect(mocks.query).not.toHaveBeenCalled();
+      expect(mocks.run).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(["http://localhost:5173/qa", "http://managed-server.example:5173/qa"])(
     "still bootstraps a saved app while its connection or config is loading: %s",

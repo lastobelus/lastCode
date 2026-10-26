@@ -5,6 +5,7 @@ import * as Schema from "effect/Schema";
 import type { ConnectionCatalogEntry } from "./connection/catalog.ts";
 import type { PreparedConnection } from "./connection/model.ts";
 import {
+  AssetPreviewDocumentError,
   PREVIEW_URL_MAX_LENGTH,
   PreviewHostingError,
   type PreviewHostingLeaseSummary,
@@ -130,7 +131,7 @@ const decodeSavedDocumentClaims = Schema.decodeUnknownOption(
   ),
 );
 
-function isSavedDocumentCapability(url: URL): boolean {
+export function isSavedDocumentCapability(url: URL): boolean {
   const match = /^\/api\/assets\/([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\/.+$/u.exec(url.pathname);
   if (!match) return false;
   const decoded = Base64Url.decodeString(match[1]!);
@@ -209,6 +210,8 @@ export function prepareHostedPreview(
         ...(renewed === input.url ? {} : { restarted: true }),
       };
     } catch (cause) {
+      if (!targetIsEnvironmentOrigin && Schema.is(AssetPreviewDocumentError)(cause))
+        return original;
       throw new HostedPreviewRecoveryError(cause);
     }
   };
