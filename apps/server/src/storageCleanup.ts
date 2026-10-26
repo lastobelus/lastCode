@@ -33,7 +33,7 @@ import type {
   ThreadId,
 } from "@t3tools/contracts";
 import { resolveWorktreeCleanup } from "@t3tools/shared/projectSettings";
-import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
+import { makeDrainableWorker, type DrainableWorker } from "@t3tools/shared/DrainableWorker";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Layer from "effect/Layer";
@@ -102,11 +102,14 @@ const ORPHAN_WORKTREE_GRACE_MS = 60 * 60 * 1_000;
 
 const sentence = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 const REPORT_ENTRY_LIMIT = 200;
+const AUTOMATIC_OUTPUT_ROOT_LIMIT = 4;
 const isGitCommandError = Schema.is(GitCommandError);
 
 type CleanupWorkingEntry = {
   -readonly [Key in keyof StorageCleanupReportEntry]: StorageCleanupReportEntry[Key];
 };
+
+type AutomaticOutputWork = { paths: ReadonlySet<string> | null };
 
 type OwnershipScope = {
   readonly cwd: string;
@@ -1158,6 +1161,24 @@ const make = Effect.gen(function* () {
   });
 
   const dependencyEstimates = new WeakMap<StorageCleanupReportEntry, number>();
+  let lastAutomaticOutputPath: string | null = null;
+  const selectAutomaticOutputs = (
+    work: AutomaticOutputWork | undefined,
+    candidates: Iterable<string>,
+  ) => {
+    if (work === undefined || work.paths !== null) return;
+    // Advance even when a candidate is protected or unavailable, so one large
+    // install cannot starve the remaining worktrees on every scheduled pass.
+    const paths = [...new Set(candidates)].sort();
+    const next = paths.findIndex(
+      (cwd) => lastAutomaticOutputPath === null || cwd > lastAutomaticOutputPath,
+    );
+    const start = next < 0 ? 0 : next;
+    const ordered = [...paths.slice(start), ...paths.slice(0, start)];
+    const selected = ordered.slice(0, AUTOMATIC_OUTPUT_ROOT_LIMIT);
+    work.paths = new Set(selected);
+    lastAutomaticOutputPath = selected.at(-1) ?? null;
+  };
   const cleanDisposableOutputs = Effect.fn("StorageCleanup.cleanDisposableOutputs")(function* (
     serverSettings: ServerSettings,
     now: number,
@@ -1166,6 +1187,7 @@ const make = Effect.gen(function* () {
     observationProcessPaths: Effect.Effect<ReadonlyArray<string> | null>,
     observationTargets: WorktreeConsumers.TargetObservation,
     review?: BuildReviewRequest,
+    automaticWork?: AutomaticOutputWork,
   ) {
     const generatedBuilds = resource === "generated-builds";
     const outputPath = (cwd: string) => (generatedBuilds ? cwd : path.join(cwd, "node_modules"));
@@ -1347,52 +1369,55 @@ const make = Effect.gen(function* () {
       string,
       { lastUsedAt: number; renewed: boolean; protectedReason: string | null } | null
     >();
-    for (const [cwd, owners] of Map.groupBy(
-      [...liveOwners, ...deletedOwners],
-      (owner) => owner.cleanupPath,
-    )) {
-      const owner = owners[0]!;
-      if (
-        owners.length !== 1 ||
-        owner.archivedAt !== null ||
-        owner.worktreePath === null ||
-        resolveWorktreeCleanup(serverSettings, owner.projectId).worktreeDependenciesAfterDays ===
-          null ||
-        !(yield* outputExists(cwd))
-      )
-        continue;
-      const root = roots.find((root) => inside(root, cwd));
-      const project =
-        "workspaceRoot" in owner
-          ? { workspaceRoot: owner.workspaceRoot }
-          : snapshot.projects.find((project) => project.id === owner.projectId);
-      if (root === undefined || project === undefined) continue;
-      const protectedReason =
-        processCwds === null
-          ? "Could not check running processes safely"
-          : processCwds.some((processCwd) => processCwd === cwd || inside(cwd, processCwd))
-            ? "A running process is using this worktree"
-            : (yield* terminalUsesDependencies(cwd, owner.recordedWorktreePath))
-              ? "A terminal is still using this worktree"
-              : (yield* previewUsesDependencies(cwd, owner.recordedWorktreePath))
-                ? "A preview is using this worktree, or preview ownership could not be checked"
-                : (yield* hasLiveProviderSession(cwd, owner.id))
-                  ? "A provider session is still open"
-                  : null;
-      const activity = yield* observe(
-        { managedWorktreesRoot: root, worktreePath: cwd, repositoryRoot: project.workspaceRoot },
-        now,
-        processCwds?.some(
-          (processCwd) =>
-            processCwd === path.join(cwd, "node_modules") ||
-            inside(path.join(cwd, "node_modules"), processCwd),
-        ) ?? false,
-      ).pipe(Effect.orElseSucceed(() => null));
-      dependencyActivityByPath.set(
-        cwd,
-        activity === null ? null : { ...activity, protectedReason },
-      );
-    }
+    const observeOwnedActivity = Effect.gen(function* () {
+      for (const [cwd, owners] of Map.groupBy(
+        [...liveOwners, ...deletedOwners],
+        (owner) => owner.cleanupPath,
+      )) {
+        const owner = owners[0]!;
+        if (
+          (automaticWork !== undefined && !automaticWork.paths?.has(cwd)) ||
+          owners.length !== 1 ||
+          owner.archivedAt !== null ||
+          owner.worktreePath === null ||
+          resolveWorktreeCleanup(serverSettings, owner.projectId).worktreeDependenciesAfterDays ===
+            null ||
+          !(yield* outputExists(cwd))
+        )
+          continue;
+        const root = roots.find((root) => inside(root, cwd));
+        const project =
+          "workspaceRoot" in owner
+            ? { workspaceRoot: owner.workspaceRoot }
+            : snapshot.projects.find((project) => project.id === owner.projectId);
+        if (root === undefined || project === undefined) continue;
+        const protectedReason =
+          processCwds === null
+            ? "Could not check running processes safely"
+            : processCwds.some((processCwd) => processCwd === cwd || inside(cwd, processCwd))
+              ? "A running process is using this worktree"
+              : (yield* terminalUsesDependencies(cwd, owner.recordedWorktreePath))
+                ? "A terminal is still using this worktree"
+                : (yield* previewUsesDependencies(cwd, owner.recordedWorktreePath))
+                  ? "A preview is using this worktree, or preview ownership could not be checked"
+                  : (yield* hasLiveProviderSession(cwd, owner.id))
+                    ? "A provider session is still open"
+                    : null;
+        const activity = yield* observe(
+          { managedWorktreesRoot: root, worktreePath: cwd, repositoryRoot: project.workspaceRoot },
+          now,
+          processCwds?.some(
+            (processCwd) =>
+              processCwd === path.join(cwd, "node_modules") ||
+              inside(path.join(cwd, "node_modules"), processCwd),
+          ) ?? false,
+        ).pipe(Effect.orElseSucceed(() => null));
+        dependencyActivityByPath.set(
+          cwd,
+          activity === null ? null : { ...activity, protectedReason },
+        );
+      }
+    });
     const reports = new Map<string, CleanupWorkingEntry>();
     const noteCandidate = (
       thread: Pick<OrchestrationV2ThreadShell, "id" | "title">,
@@ -1486,6 +1511,13 @@ const make = Effect.gen(function* () {
             ),
     )).flat();
     const registeredGroups = Map.groupBy(registered, (entry) => entry.cwd);
+    selectAutomaticOutputs(
+      automaticWork,
+      [...groups.keys(), ...deletedGroups.keys(), ...registeredGroups.keys()].filter((cwd) =>
+        roots.some((root) => inside(root, cwd)),
+      ),
+    );
+    yield* observeOwnedActivity;
     // Include durable deleted records even when their project no longer exists.
     const durableOwners = yield* sql<{
       payload_json: string;
@@ -1987,6 +2019,10 @@ const make = Effect.gen(function* () {
         ),
       );
       const leasedPaths = [...new Set([cwd, recordedPath])].sort();
+      if (automaticWork !== undefined && !automaticWork.paths?.has(cwd)) {
+        entry.reason = "Automatic inspection deferred to a later scheduled pass";
+        continue;
+      }
       yield* leasedPaths.reduceRight(
         (effect, target) => withWorkspaceLease(target, effect),
         cleanOwnerless,
@@ -2090,6 +2126,8 @@ const make = Effect.gen(function* () {
           Object.assign(entry, { reason });
           return [];
         };
+        if (automaticWork !== undefined && !automaticWork.paths?.has(worktreePath))
+          return keep("Automatic inspection deferred to a later scheduled pass");
         const archived = owners.every((owner) => owner.archivedAt !== null);
         if (
           owners.some(
@@ -2178,7 +2216,8 @@ const make = Effect.gen(function* () {
         ];
       }),
     )).flat();
-    const batchSize = GeneratedDependencies.MAX_DEPENDENCY_REMOVAL_BATCH_SIZE;
+    const batchSize =
+      automaticWork === undefined ? GeneratedDependencies.MAX_DEPENDENCY_REMOVAL_BATCH_SIZE : 1;
     for (let offset = 0; offset < eligible.length; offset += batchSize) {
       const group = eligible.slice(offset, offset + batchSize);
       const removeGroup = Effect.gen(function* () {
@@ -2577,6 +2616,7 @@ const make = Effect.gen(function* () {
     now: number,
     entries: CleanupWorkingEntry[],
     runId: string,
+    automaticWork?: AutomaticOutputWork,
   ) {
     if (!anyWorktreePolicy(serverSettings, worktreeCleanupEnabled)) return;
     const roots = yield* managedRoots(serverSettings);
@@ -2609,6 +2649,10 @@ const make = Effect.gen(function* () {
         }),
     );
     const groups = Map.groupBy(ownedPaths, (owner) => owner.canonicalPath);
+    selectAutomaticOutputs(
+      automaticWork,
+      [...groups.keys()].filter((cwd) => roots.some((root) => inside(root, cwd))),
+    );
     const candidates = [...groups.values()];
     const historicalRows = yield* sql<{ threadId: ThreadId; worktreePath: string | null }>`
       SELECT thread_id AS "threadId", json_extract(payload_json, '$.worktreePath') AS "worktreePath"
@@ -2756,6 +2800,8 @@ const make = Effect.gen(function* () {
         if (!(yield* fs.exists(worktreePath))) return;
         const savedProtection = yield* savedWorkspaceProtection(worktreePath);
         if (savedProtection !== null) return keep(savedProtection);
+        if (automaticWork !== undefined && !automaticWork.paths?.has(worktreePath))
+          return keep("automatic inspection deferred to a later scheduled pass");
         if (
           deleted &&
           !settings.worktreeOnDelete &&
@@ -3356,6 +3402,8 @@ const make = Effect.gen(function* () {
     // native identity metadata. Final removal scans remain independent and fresh.
     const observationProcessPaths = yield* Effect.cached(processPaths);
     const observationTargets = WorktreeConsumers.createTargetObservation();
+    const automaticWork: AutomaticOutputWork | undefined =
+      trigger === "automatic" ? { paths: null } : undefined;
     yield* audit({
       event: "sweep-start",
       runId,
@@ -3370,6 +3418,8 @@ const make = Effect.gen(function* () {
       "dependencies",
       observationProcessPaths,
       observationTargets,
+      undefined,
+      automaticWork,
     ).pipe(
       Effect.catch((error) =>
         Effect.gen(function* () {
@@ -3398,6 +3448,8 @@ const make = Effect.gen(function* () {
       "generated-builds",
       observationProcessPaths,
       observationTargets,
+      undefined,
+      automaticWork,
     ).pipe(
       Effect.catch((error) =>
         Effect.sync(() =>
@@ -3416,7 +3468,7 @@ const make = Effect.gen(function* () {
         ),
       ),
     );
-    yield* cleanWorktrees(serverSettings, now, entries, runId).pipe(
+    yield* cleanWorktrees(serverSettings, now, entries, runId, automaticWork).pipe(
       Effect.catch((error) =>
         Effect.gen(function* () {
           const entry: CleanupWorkingEntry = {
@@ -3569,10 +3621,12 @@ const make = Effect.gen(function* () {
     yield* SubscriptionRef.set(reportRef, latestReport);
     return latestReport;
   });
-  const automaticSweepQueued = yield* Ref.make(false);
-  const worker = yield* makeDrainableWorker(
+  const automaticSweepState = yield* Ref.make<"idle" | "queued" | "running" | "followup">("idle");
+  const worker: DrainableWorker<
+    Deferred.Deferred<StorageCleanupReport, ServerSettingsError> | undefined
+  > = yield* makeDrainableWorker(
     (completion: Deferred.Deferred<StorageCleanupReport, ServerSettingsError> | undefined) =>
-      (completion === undefined ? Ref.set(automaticSweepQueued, false) : Effect.void).pipe(
+      (completion === undefined ? Ref.set(automaticSweepState, "running") : Effect.void).pipe(
         Effect.andThen(sweep(completion === undefined ? "automatic" : "manual")),
         Effect.exit,
         Effect.flatMap((exit) =>
@@ -3585,11 +3639,24 @@ const make = Effect.gen(function* () {
               )
             : Deferred.done(completion, exit).pipe(Effect.asVoid),
         ),
+        Effect.ensuring(
+          completion === undefined
+            ? Ref.modify(automaticSweepState, (state) =>
+                state === "followup" ? [true, "queued" as const] : [false, "idle" as const],
+              ).pipe(Effect.flatMap((again) => (again ? worker.enqueue(undefined) : Effect.void)))
+            : Effect.void,
+        ),
       ),
   );
-  const requestSweep = Ref.getAndSet(automaticSweepQueued, true).pipe(
-    Effect.flatMap((queued) => (queued ? Effect.void : worker.enqueue(undefined))),
-  );
+  const requestSweep = (followup = false) =>
+    Ref.modify(automaticSweepState, (state) =>
+      state === "idle"
+        ? [true, "queued" as const]
+        : [false, followup && state === "running" ? ("followup" as const) : state],
+    ).pipe(
+      Effect.flatMap((enqueue) => (enqueue ? worker.enqueue(undefined) : Effect.void)),
+      Effect.uninterruptible,
+    );
   const runNow = Effect.gen(function* () {
     const completion = yield* Deferred.make<StorageCleanupReport, ServerSettingsError>();
     yield* worker.enqueue(completion);
@@ -3677,7 +3744,7 @@ const make = Effect.gen(function* () {
     const events = engine.streamDomainEvents;
     let lastSettings = yield* settingsService.getSettings.pipe(Effect.orDie);
     yield* forkParked(
-      requestSweep.pipe(
+      requestSweep().pipe(
         Effect.andThen(worker.drain),
         Effect.repeat(Schedule.spaced("1 hour")),
         Effect.asVoid,
@@ -3693,7 +3760,7 @@ const make = Effect.gen(function* () {
         )
           return Effect.void;
         lastSettings = settings;
-        return requestSweep;
+        return requestSweep(true);
       }),
     );
     yield* forkParked(
@@ -3705,7 +3772,7 @@ const make = Effect.gen(function* () {
           lastSettings,
           (rules) => rules.worktreeOnDelete || dependencyCleanupEnabled(rules),
         )
-          ? requestSweep
+          ? requestSweep(event.type === "thread.deleted")
           : Effect.void,
       ).pipe(
         Effect.catchCause((cause) =>

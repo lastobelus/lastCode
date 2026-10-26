@@ -1,5 +1,8 @@
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
-import { observeDependencyActivity } from "@t3tools/shared/dependencyActivity";
+import {
+  dependencyActivitySnapshot,
+  observeDependencyActivity,
+} from "@t3tools/shared/dependencyActivity";
 import {
   createGeneratedBuildStage,
   generatedBuildActivity,
@@ -66,6 +69,7 @@ import {
   EventId,
   ProjectId,
   ProviderSessionId,
+  ProviderDriverKind,
   ProviderInstanceId,
   RunId,
   RuntimeRequestId,
@@ -423,7 +427,9 @@ const cleanupFixture = (
     let previewPaths: ReadonlyArray<string> = [];
     let ownershipRevision = 0;
     let dependencyInspectionHook: Effect.Effect<void> | null = null;
+    let dependencyInspectionOperation = "GeneratedDependencies.inspect";
     const resourceGitCalls: Array<{ operation: string; cwd: string }> = [];
+    const unavailableDependencyRoots = new Set<string>();
     const savedWorkspaceProtection = new Map<string, string | "unavailable">();
     const terminalListeners: Parameters<
       TerminalManager.TerminalManager["Service"]["subscribeMetadata"]
@@ -475,7 +481,19 @@ const cleanupFixture = (
             )
               resourceGitCalls.push({ operation: input.operation, cwd: input.cwd });
             if (
-              input.operation === "GeneratedDependencies.inspect" &&
+              input.operation === "GeneratedDependencies.observe" &&
+              unavailableDependencyRoots.has(input.cwd)
+            )
+              return yield* Effect.fail(
+                new GitCommandError({
+                  operation: input.operation,
+                  command: "git rev-parse",
+                  cwd: input.cwd,
+                  detail: "Fixture dependency observation unavailable",
+                }),
+              );
+            if (
+              input.operation === dependencyInspectionOperation &&
               dependencyInspectionHook !== null
             ) {
               const hook = dependencyInspectionHook;
@@ -785,6 +803,7 @@ const cleanupFixture = (
       },
       service: Context.get(context, StorageCleanup.StorageCleanup),
       resourceGitCalls,
+      failDependencyObservation: (cwd: string) => unavailableDependencyRoots.add(cwd),
       publishSettings: (next: typeof settings) =>
         Effect.gen(function* () {
           settings = next;
@@ -894,8 +913,12 @@ const cleanupFixture = (
           yield* seedAgedDependencyUse;
           return { canonicalPath: moved, recordedPath: worktree, cleanupDirectory };
         }),
-      onDependencyInspection: (hook: Effect.Effect<void>) => {
+      onDependencyInspection: (
+        hook: Effect.Effect<void>,
+        operation = "GeneratedDependencies.inspect",
+      ) => {
         dependencyInspectionHook = hook;
+        dependencyInspectionOperation = operation;
       },
       setTerminalCwd: (cwd: string) =>
         terminalListeners[0]!({
@@ -2919,12 +2942,23 @@ describe("automatic cleanup churn", () => {
           const fixture = yield* cleanupFixture();
           yield* fixture.enableDependencies;
           fixture.setDependencyRetention(90);
+          const location = yield* fixture.command(fixture.worktree, [
+            "rev-parse",
+            "--absolute-git-dir",
+          ]);
+          observeDependencyActivity(
+            location.stdout.trim(),
+            fixture.worktree,
+            fixture.now - 4 * DAY_MS,
+            true,
+          );
           const inspecting = yield* Deferred.make<void>();
           const resume = yield* Deferred.make<void>();
           const sendEvents = yield* Deferred.make<void>();
           const eventsHandled = yield* Deferred.make<void>();
           fixture.onDependencyInspection(
             Deferred.succeed(inspecting, undefined).pipe(Effect.andThen(Deferred.await(resume))),
+            "GeneratedDependencies.observe",
           );
           const events = Array.from({ length: 12 }, (_, index): OrchestrationV2DomainEvent => {
             const base = {
@@ -2943,7 +2977,7 @@ describe("automatic cleanup churn", () => {
                   type: "provider-session.updated",
                   payload: {
                     id: ProviderSessionId.make("cleanup-session"),
-                    driver: "codex",
+                    driver: ProviderDriverKind.make("codex"),
                     providerInstanceId: ProviderInstanceId.make("codex"),
                     status: index % 2 === 0 ? "stopped" : "error",
                     cwd: fixture.worktree,
@@ -3001,9 +3035,9 @@ describe("automatic cleanup churn", () => {
       ),
   );
 
-  it.effect(
-    "bounds distinct automatic roots, reuses them for builds, rotates kept roots, and leaves manual complete",
-    () =>
+  it.effect.each(["kept", "unavailable"] as const)(
+    "bounds distinct automatic roots, reuses them for builds, rotates %s roots, and leaves manual complete",
+    (outcome) =>
       runCleanupTest(
         Effect.gen(function* () {
           yield* TestClock.setTime(NOW_MS);
@@ -3037,16 +3071,19 @@ describe("automatic cleanup churn", () => {
             observeDependencyActivity(location.stdout.trim(), cwd, fixture.now - 4 * DAY_MS, true);
             roots.push(cwd);
           }
+          const alias = `${fixture.config.baseDir}/bounded-alias`;
+          yield* fixture.fs.symlink(fixture.config.worktreesDir, alias);
           fixture.setThreads(
             roots.map((worktreePath, index) =>
               shell({
                 id: ThreadId.make(`bounded-owner-${index}`),
                 branch: index === 0 ? "feature" : `bounded-${index}`,
-                worktreePath,
+                worktreePath: index === 2 ? `${alias}/bounded-2` : worktreePath,
               }),
             ),
           );
           fixture.setStoredWorktreePaths(roots);
+          if (outcome === "unavailable") fixture.failDependencyObservation(roots[1]!);
           const reports = yield* Queue.unbounded<StorageCleanupReport>();
           yield* fixture.service.reports.pipe(
             Stream.filter((report): report is StorageCleanupReport => report !== null),
@@ -3056,17 +3093,32 @@ describe("automatic cleanup churn", () => {
           const observedRoots = () =>
             new Set(
               fixture.resourceGitCalls
-                .filter((call) => call.operation === "GeneratedDependencies.observe")
+                .filter(
+                  (call) =>
+                    call.operation === "GeneratedDependencies.observe" && roots.includes(call.cwd),
+                )
                 .map((call) => call.cwd),
             );
+          const usageBefore = new Map(roots.map((cwd) => [cwd, dependencyActivitySnapshot(cwd)]));
+          const buildsBefore = new Map(
+            roots.map((cwd) => [cwd, generatedBuildActivity(cwd, "apps/web/dist")]),
+          );
           yield* fixture.activate();
           yield* Queue.take(reports);
           yield* fixture.service.drain;
           const first = observedRoots();
-          expect(first.size).toBe(4);
+          for (const cwd of roots.filter((root) => !first.has(root))) {
+            expect(dependencyActivitySnapshot(cwd)).toBe(usageBefore.get(cwd));
+            expect(generatedBuildActivity(cwd, "apps/web/dist")).toEqual(buildsBefore.get(cwd));
+          }
+          expect([...first]).toHaveLength(4);
+          expect(first.has(roots[1]!)).toBe(true);
           const firstBuildRoots = new Set(
             fixture.resourceGitCalls
-              .filter((call) => call.operation === "GeneratedBuilds.recognize")
+              .filter(
+                (call) =>
+                  call.operation === "GeneratedBuilds.recognize" && roots.includes(call.cwd),
+              )
               .map((call) => call.cwd),
           );
           expect(firstBuildRoots).toEqual(first);
@@ -3076,6 +3128,7 @@ describe("automatic cleanup churn", () => {
           yield* fixture.service.drain;
           const second = observedRoots();
           expect(second.size).toBe(4);
+          expect(second.has(roots[1]!)).toBe(true);
           expect(new Set([...first, ...second])).toEqual(new Set(roots));
           fixture.resourceGitCalls.length = 0;
           const manual = yield* fixture.service.runNow;
