@@ -12,6 +12,7 @@ const FALLBACK_ACCENT_COLOR = "#2563eb";
 
 function ProviderCustomColorPanel(props: {
   readonly value: string;
+  readonly label: string;
   readonly onCommit: (value: string) => void;
 }) {
   const { onCommit } = props;
@@ -27,14 +28,14 @@ function ProviderCustomColorPanel(props: {
   return (
     <div className="w-56 bg-popover">
       <ColorSaturationValuePlane
-        label="Accent color"
+        label={props.label}
         value={hsv}
         onChange={commitHsv}
         variant="edge"
       />
       <div className="grid gap-3 p-3">
         <ColorHueSlider
-          label="Accent color hue"
+          label={`${props.label} hue`}
           value={hsv.h}
           onChange={(h) => commitHsv({ ...hsv, h })}
         />
@@ -51,7 +52,7 @@ function ProviderCustomColorPanel(props: {
           }}
           onBlur={() => setHexDraft(null)}
           font="mono"
-          aria-label="Custom hex accent color"
+          aria-label={`Custom hex ${props.label.toLowerCase()}`}
           spellCheck={false}
         />
       </div>
@@ -61,9 +62,11 @@ function ProviderCustomColorPanel(props: {
 
 function ProviderCustomColorPicker(props: {
   readonly displayName: string;
+  readonly label: string;
   readonly value: string | undefined;
   readonly onCommit: (value: string) => void;
   readonly onClear: () => void;
+  readonly clearLabel?: string;
 }) {
   const normalized = normalizeProviderAccentColor(props.value);
 
@@ -76,10 +79,10 @@ function ProviderCustomColorPicker(props: {
             size="icon-sm"
             variant="ghost-muted"
             style={normalized ? { backgroundColor: normalized } : undefined}
-            aria-label={`${normalized ? "Change" : "Add"} accent color for ${props.displayName}`}
+            aria-label={`${normalized ? "Change" : "Add"} ${props.label.toLowerCase()} for ${props.displayName}`}
           >
             {normalized ? (
-              <span className="sr-only">Change accent color</span>
+              <span className="sr-only">Change {props.label.toLowerCase()}</span>
             ) : (
               <PlusIcon aria-hidden />
             )}
@@ -89,6 +92,7 @@ function ProviderCustomColorPicker(props: {
       <PopoverPopup side="bottom" align="start" sideOffset={6} padding="none">
         <ProviderCustomColorPanel
           value={normalized ?? FALLBACK_ACCENT_COLOR}
+          label={props.label}
           onCommit={props.onCommit}
         />
         {normalized ? (
@@ -103,7 +107,7 @@ function ProviderCustomColorPicker(props: {
                   onClick={props.onClear}
                 >
                   <XIcon className="size-3.5" aria-hidden />
-                  Clear color
+                  {props.clearLabel ?? "Clear color"}
                 </Button>
               }
             />
@@ -118,14 +122,18 @@ export function ProviderAccentColorPicker(props: {
   readonly displayName: string;
   readonly value: string | undefined;
   readonly onCommit: (value: string) => void;
+  readonly label?: string;
+  readonly defaultOptionLabel?: string;
   readonly description?: string;
   readonly commitDelayMs?: number;
   readonly layout?: "stacked" | "inline";
 }) {
   const {
     commitDelayMs = 0,
+    defaultOptionLabel,
     description,
     displayName,
+    label = "Accent color",
     layout = "stacked",
     onCommit,
     value,
@@ -188,9 +196,11 @@ export function ProviderAccentColorPicker(props: {
   const picker = (
     <ProviderCustomColorPicker
       displayName={displayName}
+      label={label}
       value={normalized}
       onCommit={commitAccentColor}
       onClear={() => commitAccentColor("")}
+      {...(defaultOptionLabel ? { clearLabel: defaultOptionLabel } : {})}
     />
   );
 
@@ -200,7 +210,7 @@ export function ProviderAccentColorPicker(props: {
 
   return (
     <div className="grid gap-2">
-      <span className="text-xs font-medium text-foreground">Accent color</span>
+      <span className="text-xs font-medium text-foreground">{label}</span>
       {picker}
       {description ? <span className="text-xs text-muted-foreground">{description}</span> : null}
     </div>
