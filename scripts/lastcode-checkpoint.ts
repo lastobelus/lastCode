@@ -1971,8 +1971,8 @@ function finishPublishedRecovery(
       "[lastcode:checkpoint] Repaired checkpoint published and promoted; recovery released.",
     );
   } else {
-    console.log(
-      `[lastcode:checkpoint] Repaired checkpoint ${selection.head} published; promotion is still pending. Retained the selected target and recovery worktree. Inspect before selecting an incorporated repair or releasing this selection.`,
+    throw new Error(
+      `Repaired checkpoint ${selection.head} published; promotion is still pending. Retained the selected target and recovery worktree. Inspect before selecting an incorporated repair or releasing this selection.`,
     );
   }
 }
