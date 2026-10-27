@@ -1833,23 +1833,26 @@ it.each([60, 100])("renders all %i pages of a table-heavy Word report", async (p
   archive.file("word/media/image.png", new Uint8Array(2_500_000));
   const file = await archive.generateAsync({ type: "blob", compression: "DEFLATE" });
   await using screen = await render(
-    <AttachmentFilePreview
-      name="report.docx"
-      mimeType="application/octet-stream"
-      file={file}
-      sizeBytes={file.size}
-    />,
+    <div style={{ display: "flex", height: 800, width: 600 }}>
+      <AttachmentFilePreview
+        name="report.docx"
+        mimeType="application/octet-stream"
+        file={file}
+        sizeBytes={file.size}
+      />
+    </div>,
   );
-  await vi.waitFor(() => expect(screen.container.textContent).toMatch(/\d+ pages/), {
-    timeout: 30_000,
-  });
+  await expect.element(screen.getByText(/\d+ pages/)).toBeInTheDocument();
   expect(screen.container.textContent).not.toContain("Preview limited");
   expect(screen.container.querySelector('[role="alert"]')).toBeNull();
+  const pageCount = Number(screen.container.textContent!.match(/(\d+) pages/)![1]);
+  await expect
+    .element(screen.getByRole("group", { name: `Page ${pageCount}`, exact: true }))
+    .toBeInTheDocument();
   const scroll = screen.container.querySelector<HTMLElement>("[data-office-pages]")!;
+  expect(scroll.scrollHeight).toBeGreaterThan(scroll.clientHeight);
   await act(() => scroll.scrollTo({ top: scroll.scrollHeight }));
-  await vi.waitFor(() => expect(screen.container.textContent).toContain("page " + pages), {
-    timeout: 30_000,
-  });
+  await expect.element(screen.container).toMatchTextContent("page " + pages);
 });
 
 describe("standalone Mermaid previews", () => {
@@ -2462,9 +2465,10 @@ it("mounts a bounded set of saved notebook outputs as the reader scrolls", async
       />
     </div>,
   );
-  await vi.waitFor(() =>
-    expect(screen.container.querySelectorAll("iframe").length).toBeGreaterThan(0),
-  );
+  await expect
+    .element(screen.getByTitle("Cell 1 HTML output", { exact: true }).first())
+    .toHaveAttribute("srcdoc", expect.stringContaining("saved 0-0"));
+  expect(screen.container.querySelectorAll("iframe").length).toBeGreaterThan(0);
   expect(screen.container.querySelectorAll("iframe").length).toBeLessThanOrEqual(16);
   const first = screen.container.querySelector("iframe")!;
   expect(first.srcdoc).toContain("saved 0-0");
@@ -2472,21 +2476,17 @@ it("mounts a bounded set of saved notebook outputs as the reader scrolls", async
   await act(() => {
     viewport.scrollTop = viewport.scrollHeight;
   });
-  await vi.waitFor(() => {
-    expect(
-      [...screen.container.querySelectorAll("iframe")].some((frame) =>
-        frame.srcdoc.includes("saved 19-99"),
-      ),
-    ).toBe(true);
-    expect(first.isConnected).toBe(false);
-  });
+  await expect
+    .element(screen.getByTitle("Cell 20 HTML output", { exact: true }).last())
+    .toHaveAttribute("srcdoc", expect.stringContaining("saved 19-99"));
+  expect(first.isConnected).toBe(false);
   expect(screen.container.querySelectorAll("iframe").length).toBeLessThanOrEqual(16);
   await act(() => {
     viewport.scrollTop = 0;
   });
-  await vi.waitFor(() =>
-    expect(screen.container.querySelector("iframe")?.srcdoc).toContain("saved 0-0"),
-  );
+  await expect
+    .element(screen.getByTitle("Cell 1 HTML output", { exact: true }).first())
+    .toHaveAttribute("srcdoc", expect.stringContaining("saved 0-0"));
 });
 
 it.each([
