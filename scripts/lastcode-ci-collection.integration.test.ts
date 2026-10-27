@@ -169,6 +169,9 @@ it.each(
       const env = { ...process.env };
       delete env.T3CODE_ACTION_RUN_ID;
       delete env.T3CODE_ACTION_EVENT_TOKEN;
+      const settingsPath = NodePath.join(directory, "ci-settings.json");
+      // These subprocesses share CI workers; background priority can starve them on Linux.
+      write(settingsPath, JSON.stringify({ lastcodeLocalCi: { backgroundPriority: false } }));
       const result = NodeChildProcess.spawnSync(
         node,
         [
@@ -196,6 +199,7 @@ it.each(
           timeout: 120_000,
           env: {
             ...env,
+            T3CODE_LOCAL_CI_SETTINGS_PATH: settingsPath,
             PATH: [bin, NodePath.dirname(node), env.PATH ?? ""].join(NodePath.delimiter),
           },
         },
@@ -216,7 +220,7 @@ it.each(
         };
         steps: Array<{ label: string; status: string; blockedBy?: string[]; logPath: string }>;
       };
-      expect(report.status).toBe(
+      expect(report.status, result.stderr).toBe(
         changeCandidate || changeUpstream
           ? "incomplete"
           : allPass

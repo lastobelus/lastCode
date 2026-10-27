@@ -168,6 +168,12 @@ function initFixture(): Fixture {
   const upstream = NodePath.join(root, "upstream.git");
   const home = NodePath.join(root, "home");
   NodeFS.mkdirSync(home);
+  // These subprocesses share CI workers; background priority can starve them on Linux.
+  write(
+    home,
+    "ci-settings.json",
+    JSON.stringify({ lastcodeLocalCi: { backgroundPriority: false } }),
+  );
   NodeFS.mkdirSync(repo);
   git(repo, ["init", "--quiet", "--initial-branch=fixture"]);
   for (const path of FIXTURE_RUNTIME_PATHS) {
