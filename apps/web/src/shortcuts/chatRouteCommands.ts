@@ -9,12 +9,13 @@ import { dispatchPreviewAction, type PreviewAction } from "../components/preview
 import { isAppModalPage } from "../components/sidebar/mainAppLocation";
 import { createNewThreadHandler, resolveDefaultProjectRef } from "../hooks/useHandleNewThread";
 import { createScratchProjectActions } from "../hooks/useScratchProject";
-import { getClientSettings } from "../hooks/useSettings";
+import { getClientSettings, getClientSettingsHydratedSnapshot } from "../hooks/useSettings";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { selectProjectGroupingSettings } from "../logicalProject";
 import { selectActiveRightPanel, useRightPanelStore } from "../rightPanelStore";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { buildSidebarProjectSnapshots } from "../sidebarProjectGrouping";
+import { resolveSidebarMode, shouldChooseNewThreadProject, useSidebarModeStore } from "../sidebarMode";
 import { readProjects, readThreadShell } from "../state/entities";
 import { environmentPresentations } from "../state/presentation";
 import { primaryEnvironmentIdAtom } from "../state/primaryEnvironment";
@@ -119,7 +120,12 @@ export function installChatRouteCommands(router: AnyRouter): () => void {
       },
       "chat.new": (event) => {
         // Pre-hydration settings are the defaults, where the legacy sidebar is off.
-        if (!getClientSettings().legacySidebarEnabled && readProjectGroupCount() > 1) {
+        const sidebarMode = resolveSidebarMode(
+          getClientSettings(),
+          getClientSettingsHydratedSnapshot(),
+          useSidebarModeStore.getState().lastcodeHidden,
+        );
+        if (shouldChooseNewThreadProject(sidebarMode, readProjectGroupCount())) {
           claim(event);
           openCommandPalette({ open: "new-thread-in" });
           return;

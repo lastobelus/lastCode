@@ -64,6 +64,9 @@ function startClientAppearance(): void {
     if (previous?.redesignEnabled !== settings.redesignEnabled) {
       root.toggleAttribute("data-redesign", settings.redesignEnabled);
     }
+    if (previous?.roundedProjectIcons !== settings.roundedProjectIcons) {
+      root.toggleAttribute("data-rounded-project-icons", settings.roundedProjectIcons);
+    }
     if (previous?.appearanceContrast !== settings.appearanceContrast) {
       applyAppearanceContrast(root, settings.appearanceContrast);
     }

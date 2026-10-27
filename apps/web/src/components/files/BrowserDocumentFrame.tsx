@@ -113,13 +113,15 @@ export function BrowserDocumentFrame(props: {
   return props.pdf ? (
     <PdfDocument key={key} src={props.src} title={props.title} />
   ) : props.htmlRender ? (
-    <HtmlRenderDocument
-      key={key}
-      src={props.src}
-      title={props.title}
-      threadRef={props.threadRef}
-      className="min-h-0 flex-1"
-    />
+    <div className="flex min-h-0 flex-1 flex-col p-(--app-scrollbar-lane-width)">
+      <HtmlRenderDocument
+        key={key}
+        src={props.src}
+        title={props.title}
+        threadRef={props.threadRef}
+        className="min-h-0 flex-1"
+      />
+    </div>
   ) : (
     <FileDocument key={key} src={props.src} title={props.title} />
   );
