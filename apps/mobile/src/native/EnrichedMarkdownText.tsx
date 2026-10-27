@@ -4,10 +4,9 @@ import {
   formatComposerContextHref,
   formatComposerContextReference,
 } from "@t3tools/shared/composerContextReferences";
+import { prepareEnrichedMarkdown } from "../lib/enrichedMarkdown";
 import {
-  markdownForNativeRendering,
   markdownWithFileEmbeds,
-  markdownWithHtml,
   markdownWithInlineFileLinks,
   markdownWithTableBreaks,
 } from "../lib/markdownDocument";
@@ -157,19 +156,19 @@ function enrichedStyle(
 export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
   const { renderImage, resolveImageSource, fileEmbedLabel } = props;
   const { themeAppearance, mathRenderingEnabled } = useAppearancePreferences();
-  const { markdown, fileHrefs } = useMemo(() => {
+  const { markdown, fileHrefs, authoredFileLinks } = useMemo(() => {
+    const prepared = prepareEnrichedMarkdown(props.markdown);
+    const content = markdownWithInlineFileLinks(prepared.markdown, ENRICHED_INLINE_FILE_LINK_REGEX);
+    const { authoredFileLinks } = prepared;
     if (!fileEmbedLabel) {
       return {
-        markdown: markdownForNativeRendering(props.markdown, ENRICHED_INLINE_FILE_LINK_REGEX),
+        markdown: markdownWithTableBreaks(content),
         fileHrefs: new Set<string>(),
+        authoredFileLinks,
       };
     }
-    const content = markdownWithInlineFileLinks(
-      markdownWithHtml(props.markdown),
-      ENRICHED_INLINE_FILE_LINK_REGEX,
-    );
     const files = markdownWithFileEmbeds(content, fileEmbedLabel);
-    return { ...files, markdown: markdownWithTableBreaks(files.markdown) };
+    return { ...files, markdown: markdownWithTableBreaks(files.markdown), authoredFileLinks };
   }, [props.markdown, fileEmbedLabel]);
   const [parsedLinkUrls, setParsedLinkUrls] = useState<ReadonlyArray<string>>([]);
   const onLinksChange = useCallback((links: MarkdownLinkOccurrence[]) => {
@@ -197,7 +196,12 @@ export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
         : parsedLinkUrls,
     [parsedLinkUrls, skillLinkKey],
   );
-  const { linkVariants, linkPillContent } = useEnrichedLinkVariants(linkUrls, props, fileHrefs);
+  const { linkVariants, linkPillContent } = useEnrichedLinkVariants(
+    linkUrls,
+    props,
+    fileHrefs,
+    authoredFileLinks,
+  );
   const linkRecognition = useMemo(() => ({ text: skillRegex ?? undefined }), [skillRegex]);
   const [activeMenu, setActiveMenu] = useState<{
     url: string;
