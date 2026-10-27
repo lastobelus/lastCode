@@ -186,7 +186,7 @@ const FULL_STEPS: ReadonlyArray<LocalCiStep> = [
       "--concurrency-limit",
       "1",
       "test",
-      "--maxWorkers=1",
+      "--maxWorkers=2",
       "--maxConcurrency=1",
     ],
     isolatedGitConfig: true,
@@ -464,7 +464,7 @@ export function resolveCollectedCiSteps(
           "--concurrency-limit",
           "1",
           task,
-          ...(task === "test" ? ["--maxWorkers=1", "--maxConcurrency=1"] : []),
+          ...(task === "test" ? ["--maxWorkers=2", "--maxConcurrency=1"] : []),
         ],
         ...(task === "test" && manifest.name === "@t3tools/desktop"
           ? { dependsOn: ["Ensure Electron runtime"] }
