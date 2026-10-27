@@ -2617,18 +2617,22 @@ it.each(["rtf", "epub", "ods"] as const)(
         />
       </div>,
     );
-    await vi.waitFor(() => {
-      if (kind === "ods") {
+    if (kind === "ods") {
+      await vi.waitFor(() => {
         expect(screen.container.textContent).toContain("North");
         expect(screen.container.textContent).toContain("150");
         expect(screen.container.textContent).not.toContain("private note");
         expect(screen.container.textContent).toContain("1 rows · 2 columns");
         expect(screen.container.textContent).not.toContain("Limited to 500");
-      } else {
-        const frame = screen.container.querySelector("iframe");
-        expect(frame?.srcdoc).toContain(kind === "rtf" ? "10–20" : "first<br>second<br>third");
-      }
-    });
+      });
+    } else {
+      await expect
+        .element(screen.getByTitle(new RegExp(`^report\\.${kind}: `)))
+        .toHaveAttribute(
+          "srcdoc",
+          expect.stringContaining(kind === "rtf" ? "10–20" : "first<br>second<br>third"),
+        );
+    }
     expect(screen.container.querySelector('[role="alert"]')).toBeNull();
   },
 );
