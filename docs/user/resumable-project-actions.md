@@ -35,3 +35,7 @@ On mobile, the thread shows a **Waiting for _Action name_** notice above the com
 If LastCode restarts after an Action finished but before its follow-up was queued, the thread
 explains that the Action was interrupted. Choose **Resume agent** to deliver only the saved
 follow-up, or **Discard** to remove it. LastCode does not restart the command automatically.
+
+Archiving works differently. When you archive a thread, LastCode cancels a running Action and
+discards its follow-up, even if the Action had already finished. Restoring the thread does not
+bring the follow-up back. The Action's saved output and report remain available to inspect.
