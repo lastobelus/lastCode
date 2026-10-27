@@ -12,6 +12,7 @@ const NO_ATTEMPTS: RemoteDesktopUpdateAttempts = { checks: 0, downloads: 0 };
 function makeState(overrides: Partial<DesktopUpdateState> = {}): DesktopUpdateState {
   return {
     enabled: true,
+    source: "hosted",
     status: "idle",
     channel: "latest",
     currentVersion: "1.2.3",
@@ -27,6 +28,8 @@ function makeState(overrides: Partial<DesktopUpdateState> = {}): DesktopUpdateSt
     errorContext: null,
     canRetry: false,
     omittedReleaseCount: 0,
+    localBuildProgress: null,
+    localBuildFailure: null,
     ...overrides,
   };
 }

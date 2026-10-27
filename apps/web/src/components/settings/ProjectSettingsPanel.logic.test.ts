@@ -29,7 +29,7 @@ describe("project removal confirmation", () => {
     });
     expect(plan.projectThreads).toHaveLength(1);
     expect(plan.confirmationMessage).toBe(
-      'Remove checkout "Repo" and delete its 1 thread?\nPath: /work/repo\nEnvironment: Local\nThis permanently clears conversation history for those threads and any archived threads.\nOther entries in this grouped project are unaffected.\nThis action cannot be undone.',
+      'Remove checkout "Repo" and delete its 1 thread?\nPath: /work/repo\nEnvironment: Local\nThis deletes all threads in the selected project entries, including archived threads, forks, independent threads, and subagents. This cannot be undone.\nOther entries in this grouped project are unaffected.',
     );
   });
 
@@ -47,7 +47,7 @@ describe("project removal confirmation", () => {
       "Other entries in this grouped project are unaffected.",
     );
     expect(plan.confirmationMessage).toContain(
-      "This permanently clears any archived conversation history.",
+      "This deletes all threads in the selected project entries, including archived threads, forks, independent threads, and subagents. This cannot be undone.",
     );
   });
 

@@ -12,6 +12,7 @@ import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
 
 import { requestCheckpointServiceRunNow } from "./lib/lastcode-checkpoint-service-run-now.mjs";
+import { triggerIntelBuild } from "./lib/lastcode-intel-build-trigger.mjs";
 
 import { acquirePortableLock, PortableLockContentionError } from "./lastcode-lock.mjs";
 
@@ -780,7 +781,7 @@ function buildUnlocked(options, updateRoot) {
     incompleteBuildError = error;
   }
   if (existing) {
-    return { schemaVersion: 1, status: "built", checkpointTag: options.checkpointTag, ...existing };
+    return completeLocalBuild(options, checkpointCommit, existing);
   }
 
   NodeFS.mkdirSync(updateRoot, { recursive: true });
@@ -885,11 +886,30 @@ function buildUnlocked(options, updateRoot) {
   });
   if (!built)
     throw new Error(`Build completed without a usable artifact for ${options.checkpointTag}.`);
+  return completeLocalBuild(options, checkpointCommit, built);
+}
+
+export function completeLocalBuild(options, checkpointCommit, artifact, overrides = {}) {
+  const intelTrigger = triggerIntelBuild(
+    {
+      home: options.home,
+      repoRoot: options.repoRoot,
+      tag: options.checkpointTag,
+      commit: checkpointCommit,
+    },
+    overrides,
+  );
+  if (intelTrigger.status === "failed") {
+    process.stderr.write(
+      `[lastcode:local-update] Local package is ready; Intel dispatch failed: ${intelTrigger.error}\n`,
+    );
+  }
   return {
     schemaVersion: 1,
     status: "built",
     checkpointTag: options.checkpointTag,
-    ...built,
+    ...artifact,
+    intelTrigger,
   };
 }
 
