@@ -1806,8 +1806,8 @@ it.live("cancelled authentication drains cookie writes before takeover and typin
       yield* Queue.clear(viewer.output);
       const takeover = yield* viewer.input({ type: "takeControl" }).pipe(Effect.forkScoped);
       let control = yield* Queue.take(viewer.output);
-      while (control._tag !== "control" || control.controller !== "you")
-        control = yield* Queue.take(viewer.output);
+      while (control._tag !== "control") control = yield* Queue.take(viewer.output);
+      expect(control).toMatchObject({ controller: "taking-control" });
       const cdp = context.sessions.at(-1)!;
       const send = cdp.send.getMockImplementation()!;
       cdp.send.mockImplementation(async (method, input) => {
@@ -1819,6 +1819,9 @@ it.live("cancelled authentication drains cookie writes before takeover and typin
       expect(events).toEqual([]);
       response.resolve();
       yield* Fiber.join(takeover);
+      expect(yield* Queue.takeAll(viewer.output)).toContainEqual(
+        expect.objectContaining({ _tag: "control", controller: "you" }),
+      );
       yield* Fiber.join(typing);
       expect(events).toEqual(["cookie written", "response disposed", "human typed"]);
       expect(context.page.goto).not.toHaveBeenCalled();
@@ -2364,6 +2367,82 @@ it.live("enforces provider ownership and explicit targets when a session has mul
   ).pipe(Effect.provide(layer)),
 );
 
+it.live("coalesces queued pointer movement before clicks on a slow viewer connection", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { browser, tabId } = yield* ready;
+      const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
+      yield* viewer.input({ type: "takeControl" });
+      const session = contexts[0]!.sessions.at(-1)!;
+      const send = session.send.getMockImplementation()!;
+      const started = Promise.withResolvers<void>();
+      const finish = Promise.withResolvers<void>();
+      yield* Effect.addFinalizer(() => Effect.sync(() => finish.resolve()));
+      session.send.mockImplementation(async (method, input) => {
+        if (method === "Input.dispatchMouseEvent" && (input as { x: number }).x === 0) {
+          started.resolve();
+          await finish.promise;
+        }
+        return send(method, input);
+      });
+      const move = (x: number) => ({
+        type: "mouse",
+        action: "move",
+        x,
+        y: 10,
+        button: "none",
+        buttons: 0,
+        modifiers: 0,
+      });
+      const first = yield* viewer.input(move(0)).pipe(Effect.forkScoped);
+      yield* Effect.promise(() => started.promise);
+      const pending = yield* Effect.forEach(
+        Array.from({ length: 100 }, (_, i) => i + 1),
+        (x) => viewer.input(move(x)).pipe(Effect.forkScoped({ startImmediately: true })),
+      );
+      const click = yield* viewer
+        .input({ ...move(100), action: "down", button: "left", buttons: 1 })
+        .pipe(Effect.forkScoped({ startImmediately: true }));
+      const dragging = yield* Effect.forEach(
+        Array.from({ length: 100 }, (_, i) => i + 101),
+        (x) =>
+          viewer
+            .input({ ...move(x), button: "left", buttons: 1 })
+            .pipe(Effect.forkScoped({ startImmediately: true })),
+      );
+      const release = yield* viewer
+        .input({ ...move(200), action: "up", button: "left" })
+        .pipe(Effect.forkScoped({ startImmediately: true }));
+      const typing = yield* viewer
+        .input({ type: "text", text: "ready" })
+        .pipe(Effect.forkScoped({ startImmediately: true }));
+      finish.resolve();
+      yield* Fiber.join(first);
+      yield* Effect.forEach([...pending, click, ...dragging, release, typing], Fiber.join);
+      expect(
+        session.send.mock.calls
+          .filter(([method]) => method.startsWith("Input."))
+          .map(([method, input]) => ({ method, ...(input as object) })),
+      ).toEqual([
+        expect.objectContaining({ method: "Input.dispatchMouseEvent", type: "mouseMoved", x: 0 }),
+        expect.objectContaining({ method: "Input.dispatchMouseEvent", type: "mouseMoved", x: 100 }),
+        expect.objectContaining({
+          method: "Input.dispatchMouseEvent",
+          type: "mousePressed",
+          x: 100,
+        }),
+        expect.objectContaining({ method: "Input.dispatchMouseEvent", type: "mouseMoved", x: 200 }),
+        expect.objectContaining({
+          method: "Input.dispatchMouseEvent",
+          type: "mouseReleased",
+          x: 200,
+        }),
+        expect.objectContaining({ method: "Input.insertText", text: "ready" }),
+      ]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live("streams to a read-only viewer without allowing takeover, input, or viewport changes", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -2656,11 +2735,13 @@ it.live(
           Effect.sync(() => finish.resolve({ result: { value: "finished" } })),
         );
         yield* Effect.promise(() => started.promise);
+        yield* Queue.clear(viewer.output);
         const takeover = yield* viewer.input({ type: "takeControl" }).pipe(Effect.forkScoped);
         let control = yield* Queue.take(viewer.output);
-        while (control._tag !== "control" || control.controller !== "you") {
+        while (control._tag !== "control") {
           control = yield* Queue.take(viewer.output);
         }
+        expect(control).toMatchObject({ controller: "taking-control" });
         const rejected = yield* broker
           .invoke<void>({ scope, tabId, operation: "evaluate", input: { expression: "racing()" } })
           .pipe(Effect.flip);
@@ -2689,83 +2770,99 @@ it.live(
     ).pipe(Effect.provide(layer)),
 );
 
-it.live("reports a pending dialog without evaluating the page and resolves it explicitly", () =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const { broker, tabId } = yield* ready;
-      const page = contexts[0]!.page;
-      yield* broker.invoke({
-        scope,
-        tabId,
-        operation: "navigate",
-        input: { url: "http://localhost:5173" },
-      });
-      const started = Promise.withResolvers<void>();
-      const resolvedEvaluation = Promise.withResolvers<Record<string, unknown>>();
-      const session = contexts[0]!.sessions[0]!;
-      const send = session.send.getMockImplementation()!;
-      session.send.mockImplementation(async (method, input) => {
-        if (method !== "Runtime.evaluate") return send(method, input);
-        started.resolve();
-        return resolvedEvaluation.promise;
-      });
-      const blockedAction = yield* broker
-        .invoke({
+it.live.each(["agent", "viewer"] as const)(
+  "reports and resolves a pending dialog (%s)",
+  (controller) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { browser, broker, tabId } = yield* ready;
+        const page = contexts[0]!.page;
+        yield* broker.invoke({
           scope,
           tabId,
-          operation: "evaluate",
-          input: { expression: 'confirm("Delete row?")' },
-        })
-        .pipe(Effect.forkScoped);
-      yield* Effect.addFinalizer(() =>
-        Effect.sync(() => resolvedEvaluation.resolve({ result: { value: true } })),
-      );
-      yield* Effect.promise(() => started.promise);
-      const dialog = {
-        type: () => "confirm",
-        message: () => "Delete row?",
-        defaultValue: () => "",
-        accept: vi.fn(async () => {
-          resolvedEvaluation.resolve({ result: { value: true } });
-        }),
-        dismiss: vi.fn(async () => {}),
-      };
-      page.emit("dialog", dialog);
-      page.title.mockClear();
-      const status = yield* broker.invoke<PreviewAutomationStatus>({
-        scope,
-        tabId,
-        operation: "status",
-        input: {},
-      });
-      expect(status.dialog).toMatchObject({ type: "confirm", message: "Delete row?" });
-      expect(page.title).not.toHaveBeenCalled();
-      expect(dialog.dismiss).not.toHaveBeenCalled();
-      const reuse = yield* broker
-        .invoke<void>({
+          operation: "navigate",
+          input: { url: "http://localhost:5173" },
+        });
+        const started = Promise.withResolvers<void>();
+        const resolvedEvaluation = Promise.withResolvers<Record<string, unknown>>();
+        const session = contexts[0]!.sessions[0]!;
+        const send = session.send.getMockImplementation()!;
+        session.send.mockImplementation(async (method, input) => {
+          if (method !== "Runtime.evaluate") return send(method, input);
+          started.resolve();
+          return resolvedEvaluation.promise;
+        });
+        const blockedAction = yield* broker
+          .invoke({
+            scope,
+            tabId,
+            operation: "evaluate",
+            input: { expression: 'confirm("Delete row?")' },
+          })
+          .pipe(Effect.forkScoped);
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => resolvedEvaluation.resolve({ result: { value: true } })),
+        );
+        yield* Effect.promise(() => started.promise);
+        const dialog = {
+          type: () => "confirm",
+          message: () => "Delete row?",
+          defaultValue: () => "",
+          accept: vi.fn(async () => {
+            resolvedEvaluation.resolve({ result: { value: true } });
+          }),
+          dismiss: vi.fn(async () => {}),
+        };
+        page.emit("dialog", dialog);
+        page.title.mockClear();
+        const status = yield* broker.invoke<PreviewAutomationStatus>({
           scope,
           tabId,
-          operation: "open",
-          input: { url: "http://localhost:5173/other" },
-        })
-        .pipe(Effect.flip);
-      expect(reuse).toMatchObject({
-        _tag: "PreviewAutomationControlInterruptedError",
-        reason: "dialogPending",
-      });
-      expect(page.goto).toHaveBeenCalledTimes(1);
-      yield* broker.invoke({ scope, tabId, operation: "dialog", input: { accept: true } });
-      expect(yield* Fiber.join(blockedAction)).toBe(true);
-      expect(dialog.accept).toHaveBeenCalledTimes(1);
-      const resolved = yield* broker.invoke<PreviewAutomationStatus>({
-        scope,
-        tabId,
-        operation: "status",
-        input: {},
-      });
-      expect(resolved.dialog).toBeNull();
-    }),
-  ).pipe(Effect.provide(layer)),
+          operation: "status",
+          input: {},
+        });
+        expect(status.dialog).toMatchObject({ type: "confirm", message: "Delete row?" });
+        expect(page.title).not.toHaveBeenCalled();
+        expect(dialog.dismiss).not.toHaveBeenCalled();
+        const reuse = yield* broker
+          .invoke<void>({
+            scope,
+            tabId,
+            operation: "open",
+            input: { url: "http://localhost:5173/other" },
+          })
+          .pipe(Effect.flip);
+        expect(reuse).toMatchObject({
+          _tag: "PreviewAutomationControlInterruptedError",
+          reason: "dialogPending",
+        });
+        expect(page.goto).toHaveBeenCalledTimes(1);
+        if (controller === "viewer") {
+          const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
+          yield* Queue.clear(viewer.output);
+          const takeover = yield* viewer.input({ type: "takeControl" }).pipe(Effect.forkScoped);
+          let control = yield* Queue.take(viewer.output);
+          while (control._tag !== "control") control = yield* Queue.take(viewer.output);
+          expect(control).toMatchObject({
+            controller: "taking-control",
+            dialog: { type: "confirm", message: "Delete row?" },
+          });
+          yield* viewer.input({ type: "dialog", accept: true });
+          yield* Fiber.join(takeover);
+        } else {
+          yield* broker.invoke({ scope, tabId, operation: "dialog", input: { accept: true } });
+        }
+        expect(yield* Fiber.join(blockedAction)).toBe(true);
+        expect(dialog.accept).toHaveBeenCalledTimes(1);
+        const resolved = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "status",
+          input: {},
+        });
+        expect(resolved.dialog).toBeNull();
+      }),
+    ).pipe(Effect.provide(layer)),
 );
 
 it.live.each([false, true])(

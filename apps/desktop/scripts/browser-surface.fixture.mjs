@@ -35,6 +35,7 @@ import { runNativeKeyboardChannelFixture } from "./browser-keyboard-channel.fixt
 
 const [scratch, wsModulePath] = process.argv.slice(2);
 const credentialAccessOnly = process.argv.includes("--credential-access");
+const keyboardChannelOnly = process.argv.includes("--keyboard-channel");
 NodeAssert.ok(scratch && wsModulePath, "isolated fixture arguments required");
 app.setPath("userData", NodePath.join(scratch, "user-data"));
 app.on("window-all-closed", () => {});
@@ -640,6 +641,15 @@ async function main() {
         environmentId,
       }),
     );
+    if (keyboardChannelOnly) {
+      const report = { passed: true, mode: "keyboard-channel", results };
+      await NodeFSP.writeFile(
+        NodePath.join(scratch, "result.json"),
+        JSON.stringify(report, null, 2),
+      );
+      console.log(JSON.stringify(report));
+      return;
+    }
     await page.evaluate(() => {
       document.cookie = "root-shared=; max-age=0; path=/";
     });

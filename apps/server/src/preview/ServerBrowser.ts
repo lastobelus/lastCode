@@ -179,7 +179,7 @@ export type ServerBrowserViewerOutput =
   | {
       readonly _tag: "control";
       readonly canOperate: boolean;
-      readonly controller: "agent" | "you" | "another-viewer" | "unclaimed";
+      readonly controller: "agent" | "you" | "taking-control" | "another-viewer" | "unclaimed";
       readonly generation: number;
       readonly dialog: {
         readonly type: string;
@@ -763,7 +763,9 @@ const make = Effect.gen(function* () {
         canOperate: viewer.canOperate,
         controller:
           tab.control.controller === viewer.id
-            ? "you"
+            ? tab.control.controllerReady
+              ? "you"
+              : "taking-control"
             : tab.control.controller !== null
               ? "another-viewer"
               : tab.control.agentId !== null
@@ -4524,6 +4526,10 @@ const make = Effect.gen(function* () {
     // An idle page does not repaint for a new screencast, so the viewer
     // starts from a still unless a live frame beat it.
     if (!screencastStarted) yield* Effect.promise(pushStill);
+    let queuedMove: {
+      readonly move: { message: Record<string, unknown> };
+      readonly result: Promise<void>;
+    } | null = null;
     return {
       output,
       input: (raw: unknown) =>
@@ -4532,10 +4538,37 @@ const make = Effect.gen(function* () {
           const message = asRecord(raw);
           if (!message) return;
           try {
+            if (message.type === "mouse" && message.action === "move") {
+              const previous = queuedMove;
+              if (
+                previous &&
+                previous.move.message.button === message.button &&
+                previous.move.message.buttons === message.buttons &&
+                previous.move.message.modifiers === message.modifiers
+              ) {
+                previous.move.message = message;
+                await previous.result;
+                return;
+              }
+              const move = { message };
+              const result = tab.control.human(viewer.id, async () => {
+                if (queuedMove?.move === move) queuedMove = null;
+                await dispatchViewerInput(tab, session, viewer, move.message);
+              });
+              queuedMove = { move, result };
+              try {
+                await result;
+              } finally {
+                if (queuedMove?.move === move) queuedMove = null;
+              }
+              return;
+            }
+            queuedMove = null;
             if (message.type === "takeControl") {
               const taking = tab.control.take(viewer.id);
               broadcastControl(tab);
               await taking;
+              broadcastControl(tab);
               pushFileChooser(tab);
             } else if (message.type === "releaseControl") {
               const releasing = tab.control.release(viewer.id, () =>

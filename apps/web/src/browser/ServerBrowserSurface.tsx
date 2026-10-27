@@ -726,10 +726,19 @@ export function ServerBrowserSurface(props: {
             size="xs"
             disabled={control.controller === "another-viewer"}
             onClick={() =>
-              send({ type: control.controller === "you" ? "releaseControl" : "takeControl" })
+              send({
+                type:
+                  control.controller === "you" || control.controller === "taking-control"
+                    ? "releaseControl"
+                    : "takeControl",
+              })
             }
           >
-            {control.controller === "you" ? "Release control" : "Take control"}
+            {control.controller === "you"
+              ? "Release control"
+              : control.controller === "taking-control"
+                ? "Cancel"
+                : "Take control"}
           </Button>
         ) : null}
       </div>
@@ -826,7 +835,7 @@ export function ServerBrowserSurface(props: {
             aria-label="Browser dialog"
           >
             <p className="break-words text-sm">{control.dialog.message}</p>
-            {control.controller === "you" ? (
+            {control.controller === "you" || control.controller === "taking-control" ? (
               <>
                 {control.dialog.type === "prompt" ? (
                   <Input

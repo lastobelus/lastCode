@@ -333,11 +333,22 @@ function PreviewStreamDocumentView({
           </AppText>
           {control?.canOperate ? (
             <Button
-              label={control.controller === "you" ? "Release control" : "Take control"}
+              label={
+                control.controller === "you"
+                  ? "Release control"
+                  : control.controller === "taking-control"
+                    ? "Cancel"
+                    : "Take control"
+              }
               tone="secondary"
               disabled={control.controller === "another-viewer"}
               onPress={() =>
-                command({ type: control.controller === "you" ? "releaseControl" : "takeControl" })
+                command({
+                  type:
+                    control.controller === "you" || control.controller === "taking-control"
+                      ? "releaseControl"
+                      : "takeControl",
+                })
               }
             />
           ) : null}
@@ -449,7 +460,7 @@ function PreviewStreamDocumentView({
       {!compact && control?.dialog ? (
         <View className="absolute inset-x-3 top-16 gap-3 rounded-xl border border-secondary-border bg-secondary p-4">
           <AppText className="text-sm text-secondary-foreground">{control.dialog.message}</AppText>
-          {control.controller === "you" ? (
+          {control.controller === "you" || control.controller === "taking-control" ? (
             <>
               {control.dialog.type === "prompt" ? (
                 <TextInput

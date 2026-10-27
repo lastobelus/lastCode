@@ -20,6 +20,7 @@ import * as Channel from "../../server/src/preview/DesktopBrowserChannel.ts";
 import * as Manager from "../../server/src/preview/Manager.ts";
 import * as Hosting from "../../server/src/preview/Hosting.ts";
 import * as PreviewBrowser from "../../server/src/preview/PreviewBrowser.ts";
+import * as PreviewAgentActivity from "../../server/src/preview/PreviewAgentActivity.ts";
 import * as ServerBrowser from "../../server/src/preview/ServerBrowser.ts";
 
 export async function runNativeKeyboardChannelFixture({
@@ -130,6 +131,7 @@ export async function runNativeKeyboardChannelFixture({
           );
           yield* Deferred.await(announced);
           const dependencies = Layer.mergeAll(
+            PreviewAgentActivity.layer,
             Broker.layer,
             Manager.layer.pipe(Layer.provide(configLayer)),
             configLayer,
@@ -362,7 +364,39 @@ export async function runNativeKeyboardChannelFixture({
             maxHeight: 480,
             quality: 70,
           });
+          yield* host.handleRemoteCommand({
+            desktopHostId,
+            command: { type: "turn", threadId: scope.thread.threadId, active: false },
+          });
+          const point = yield* Effect.promise(() =>
+            roots[0].webContents.executeJavaScript(`(() => {
+              const field = document.querySelector('#draft');
+              field.blur();
+              window.viewerClicks = [];
+              field.addEventListener('click', event => window.viewerClicks.push(event.isTrusted));
+              const rect = field.getBoundingClientRect();
+              return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+            })()`),
+          );
           yield* viewer.input({ type: "takeControl" });
+          for (const action of ["down", "up"])
+            yield* viewer.input({
+              type: "mouse",
+              action,
+              ...point,
+              button: "left",
+              buttons: action === "down" ? 1 : 0,
+              clickCount: 1,
+            });
+          for (const action of ["down", "up"])
+            yield* viewer.input({
+              type: "key",
+              action,
+              key: "h",
+              code: "KeyH",
+              keyCode: 72,
+              ...(action === "down" ? { text: "h" } : {}),
+            });
           yield* viewer.input({ type: "text", text: "viewer attribution" });
           NodeAssert.equal(
             host.humanStartedDownload(roots[0].webContents),
@@ -372,14 +406,21 @@ export async function runNativeKeyboardChannelFixture({
           const viewerState = yield* Effect.promise(() =>
             roots[0].webContents.executeJavaScript(`({
               text: document.querySelector('#draft').value,
+              active: document.activeElement.id,
+              clicks: window.viewerClicks,
               input: window.keyboardEvents.at(-1)
             })`),
           );
-          NodeAssert.ok(viewerState.text.includes("viewer attribution"));
+          NodeAssert.ok(viewerState.text.includes("hviewer attribution"));
+          NodeAssert.equal(viewerState.active, "draft");
+          NodeAssert.deepEqual(viewerState.clicks, [true]);
           NodeAssert.equal(viewerState.input.type, "input");
           NodeAssert.equal(viewerState.input.target, "draft");
           NodeAssert.equal(viewerState.input.trusted, true);
-          steps.push({ operation: "viewer attribution", host: yield* Effect.promise(assertHost) });
+          steps.push({
+            operation: "viewer click, keys and text after agent turn ends",
+            host: yield* Effect.promise(assertHost),
+          });
           yield* viewer.input({ type: "releaseControl" });
           yield* invoke("press", { key: "v" });
           NodeAssert.equal(

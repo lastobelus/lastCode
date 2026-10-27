@@ -1,6 +1,6 @@
 // Run explicitly: node apps/desktop/scripts/browser-surface.smoke.mjs; --build-only skips Electron.
 // Use --existing-electron to avoid runtime installation.
-// --react-lifecycle, --credential-access, and --open-link select focused proofs.
+// --react-lifecycle, --credential-access, --keyboard-channel, and --open-link select focused proofs.
 import * as NodeAssert from "node:assert/strict";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
@@ -18,9 +18,10 @@ const serverDirectory = NodePath.resolve(directory, "../../server");
 const repositoryDirectory = NodePath.resolve(desktopDirectory, "../..");
 const reactLifecycle = process.argv.includes("--react-lifecycle");
 const credentialAccessOnly = process.argv.includes("--credential-access");
+const keyboardChannelOnly = process.argv.includes("--keyboard-channel");
 const openLink = process.argv.includes("--open-link");
 NodeAssert.ok(
-  [reactLifecycle, credentialAccessOnly, openLink].filter(Boolean).length <= 1,
+  [reactLifecycle, credentialAccessOnly, keyboardChannelOnly, openLink].filter(Boolean).length <= 1,
   "Select one integration scenario.",
 );
 const webDirectory = NodePath.resolve(directory, "../../web");
@@ -368,6 +369,7 @@ if (!process.argv.includes("--build-only")) {
       scratch,
       wsModulePath,
       ...(credentialAccessOnly ? ["--credential-access"] : []),
+      ...(keyboardChannelOnly ? ["--keyboard-channel"] : []),
     ],
     {
       encoding: "utf8",
