@@ -187,19 +187,30 @@ const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (
       });
     }),
   ).pipe(Layer.provide(Layer.merge(threads, replay)));
-  let listener: ((event: TerminalEvent) => Effect.Effect<void>) | undefined;
+  const listeners = new Set<(event: TerminalEvent) => Effect.Effect<void>>();
+  const emit = (event: TerminalEvent) =>
+    Effect.forEach([...listeners], (listener) => listener(event), { discard: true });
+  const written = yield* Deferred.make<void>();
   let terminalWrites = 0;
   let terminalCloses = 0;
   const terminal = Layer.mock(TerminalManager.TerminalManager)({
     subscribe: (next) =>
       Effect.sync(() => {
-        listener = next;
+        listeners.add(next);
         return () => {
-          listener = undefined;
+          listeners.delete(next);
         };
       }),
-    open: () =>
+    open: (input) =>
       Effect.suspend(() => archiveAtOpen).pipe(
+        Effect.andThen(
+          emit({
+            type: "output",
+            threadId: input.threadId,
+            terminalId: input.terminalId!,
+            data: "\x1b[?2004h",
+          }),
+        ),
         Effect.andThen(
           Effect.succeed({
             status: "running",
@@ -210,7 +221,7 @@ const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (
     write: () =>
       Effect.sync(() => {
         terminalWrites += 1;
-      }),
+      }).pipe(Effect.andThen(Deferred.succeed(written, undefined))),
     close: () =>
       Effect.sync(() => {
         terminalCloses += 1;
@@ -238,6 +249,7 @@ const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (
   return {
     layer: Layer.mergeAll(replay, threads, receipts, runs, actions, ingestor),
     attempted,
+    written,
     beforeDelivery: (effect: Effect.Effect<void>) => {
       beforeDelivery = effect;
     },
@@ -246,8 +258,7 @@ const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (
     },
     terminalWrites: () => terminalWrites,
     terminalCloses: () => terminalCloses,
-    emit: (event: TerminalEvent) =>
-      Effect.suspend(() => listener?.(event) ?? Effect.die("Action terminal is not subscribed")),
+    emit: (event: TerminalEvent) => emit(event),
   };
 });
 
@@ -315,6 +326,13 @@ it.effect("queues one Action result when notification promotion wins the eligibi
         { threadId, providerInstanceId: instanceId },
         "qa",
       );
+      yield* Deferred.await(harness.written);
+      yield* harness.emit({
+        type: "output",
+        threadId,
+        terminalId: action.terminalId,
+        data: ActionResume.actionOutputMarker(action.runId, "start"),
+      });
       harness.beforeEligibilityRead(
         Effect.gen(function* () {
           const now = yield* DateTime.now;
@@ -449,6 +467,13 @@ it.effect.each(["command", "user_input"] as const)(
           { threadId, providerInstanceId: instanceId },
           "qa",
         );
+        yield* Deferred.await(harness.written);
+        yield* harness.emit({
+          type: "output",
+          threadId,
+          terminalId: action.terminalId,
+          data: ActionResume.actionOutputMarker(action.runId, "start"),
+        });
         // The preliminary read sees no request. Real provider ingestion commits before dispatch locks.
         harness.beforeDelivery(ingest(request));
         yield* harness.emit({
@@ -667,6 +692,13 @@ it.effect.each([false, true])(
           { threadId, providerInstanceId: instanceId },
           "qa",
         );
+        yield* Deferred.await(harness.written);
+        yield* harness.emit({
+          type: "output",
+          threadId,
+          terminalId: state.terminalId,
+          data: ActionResume.actionOutputMarker(state.runId, "start"),
+        });
         if (!raceDelivery)
           yield* orchestrator.dispatch({
             type: "thread.archive",

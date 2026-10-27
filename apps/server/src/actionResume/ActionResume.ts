@@ -12,6 +12,7 @@ import {
   type ProviderInstanceId,
   type ProjectScript,
   type ThreadId,
+  type TerminalEvent,
 } from "@t3tools/contracts";
 import { projectScriptRuntimeEnv, resolveProjectScripts } from "@t3tools/shared/projectScripts";
 import {
@@ -31,6 +32,7 @@ import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -41,6 +43,7 @@ import { forkParked } from "../serverActivation.ts";
 import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
+import * as ShellReadiness from "../terminal/shellReadiness.ts";
 import * as WorkspaceAcquisition from "../workspace/WorkspaceAcquisition.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
@@ -75,6 +78,7 @@ interface FinishActionInput {
   readonly exitSignal?: number | null;
   readonly deliver?: boolean;
   readonly publishShell?: boolean;
+  readonly outputTail?: string;
 }
 
 interface ActionProtocolCapture {
@@ -87,6 +91,16 @@ interface ActionProtocolCapture {
   progressFlushGeneration: number;
   progressFlushScheduled?: boolean;
   progressLimitWarned?: boolean;
+}
+
+interface ActionStartup {
+  readonly started: Deferred.Deferred<void>;
+  readonly stopped: Deferred.Deferred<void>;
+  rawPending: string;
+  output: string;
+  written: boolean;
+  acknowledged: boolean;
+  replaced: boolean;
 }
 
 const progressEquals = (left: ActionProgress | undefined, right: ActionProgress) =>
@@ -316,9 +330,12 @@ const make = Effect.gen(function* () {
       [...latestByThreadId.values()].filter((state) => state.outcome === "running").length,
   };
   const terminals = yield* TerminalManager.TerminalManager;
+  const shellReadiness = yield* ShellReadiness.make;
   const providers = yield* ProviderRegistry;
   const mutex = yield* Semaphore.make(1);
   const outputCaptureByRunId = new Map<string, ActionOutputCapture>();
+  const startups = new Map<string, ActionStartup>();
+  const stagedTerminals = new Set<string>();
   const protocolCaptureByRunId = new Map<string, ActionProtocolCapture>();
 
   const providerSupportsActionResume = Effect.fn("ActionResume.providerSupportsActionResume")(
@@ -632,8 +649,13 @@ const make = Effect.gen(function* () {
     const capture = outputCaptureByRunId.get(current.runId);
     if (capture !== undefined && protocol !== undefined)
       consumeActionTerminalOutput(capture, protocol.decoder.finish());
-    const outputTail = capture === undefined ? undefined : finishActionOutputCapture(capture);
+    const outputTail =
+      input.outputTail ??
+      (capture === undefined ? undefined : finishActionOutputCapture(capture)) ??
+      startups.get(current.runId)?.output;
     yield* persistState(next, outputTail, input.publishShell);
+    const startup = startups.get(current.runId);
+    if (startup) yield* Deferred.succeed(startup.stopped, undefined);
     if (next.delivery === "disposed") {
       outputCaptureByRunId.delete(next.runId);
       protocolCaptureByRunId.delete(next.runId);
@@ -780,6 +802,31 @@ const make = Effect.gen(function* () {
     });
   });
 
+  const failStartup = Effect.fn("ActionResume.failStartup")(function* (
+    state: ActionResumeState,
+    startup: ActionStartup,
+    message: string,
+  ) {
+    const failed = yield* mutex.withPermits(1)(
+      Effect.gen(function* () {
+        const current = registry.getLatest(state.threadId);
+        if (current?.runId !== state.runId || current.outcome !== "running") return false;
+        yield* finishUnlocked({
+          threadId: state.threadId,
+          runId: state.runId,
+          outcome: "failed",
+          outputTail: `${startup.output}\n${message}\n`.slice(-MAX_ACTION_OUTPUT_CHARS),
+        });
+        return true;
+      }),
+    );
+    if (!failed) return;
+    yield* terminals
+      .close({ threadId: state.threadId, terminalId: state.terminalId })
+      .pipe(Effect.ignoreCause({ log: true }));
+    yield* deliverPending(state.threadId);
+  });
+
   const launchActionUnlocked = Effect.fn("ActionResume.launchActionUnlocked")(function* (
     invocation: ActionResumeInvocation,
     script: ProjectScript,
@@ -844,6 +891,49 @@ const make = Effect.gen(function* () {
                 [ACTION_EVENT_TOKEN_ENV]: eventToken,
               },
             });
+            const startup: ActionStartup = {
+              started: yield* Deferred.make<void>(),
+              stopped: yield* Deferred.make<void>(),
+              rawPending: "",
+              output: "",
+              written: false,
+              acknowledged: false,
+              replaced: false,
+            };
+            startups.set(runId, startup);
+            stagedTerminals.add(terminalId);
+            const events = yield* shellReadiness.stageTerminalEvents({
+              threadId: state.threadId,
+              terminalId,
+            });
+            const readiness = yield* shellReadiness.watchShellReadiness({
+              threadId: state.threadId,
+              terminalId,
+              subscribe: events.subscribe,
+              onStartupPrompt: Effect.void,
+            });
+            let activated = false;
+            let terminalPid: number | null = null;
+            const unsubscribe = yield* events.subscribe((event) =>
+              Effect.gen(function* () {
+                if (
+                  (event.type === "started" || event.type === "restarted") &&
+                  (activated || event.snapshot.pid !== terminalPid)
+                ) {
+                  startup.replaced = true;
+                  yield* Deferred.succeed(startup.stopped, undefined);
+                  return;
+                }
+                yield* handleTerminalEvent(event);
+              }),
+            );
+            const cleanup = () => {
+              readiness.unsubscribe();
+              unsubscribe();
+              events.unsubscribe();
+              startups.delete(runId);
+              stagedTerminals.delete(terminalId);
+            };
             const launch = Effect.gen(function* () {
               const terminal = yield* terminals.open({
                 threadId: invocation.threadId,
@@ -857,6 +947,7 @@ const make = Effect.gen(function* () {
                 cols: 120,
                 rows: 30,
               });
+              terminalPid = terminal.pid;
               if (terminal.status !== "running") {
                 return yield* Effect.die("Action terminal exited during launch.");
               }
@@ -867,14 +958,63 @@ const make = Effect.gen(function* () {
                 acceptedProgressCount: 0,
                 progressFlushGeneration: 0,
               });
-              yield* terminals.write({
-                threadId: invocation.threadId,
-                terminalId,
-                data: actionCommandForShell(script.command, terminal.shellFamily, runId),
-              });
+              const start = Effect.gen(function* () {
+                const waiting = Effect.gen(function* () {
+                  yield* events.activate;
+                  activated = true;
+                  const posix =
+                    terminal.shellFamily !== "powershell" && terminal.shellFamily !== "cmd";
+                  const ready = posix ? yield* readiness.wait : "ready";
+                  if (ready !== "ready") return yield* Deferred.await(startup.stopped);
+                  const written = yield* mutex.withPermits(1)(
+                    admission.admit(
+                      "action-resume",
+                      Effect.gen(function* () {
+                        const current = registry.getLatest(state.threadId);
+                        if (
+                          current?.runId !== runId ||
+                          current.outcome !== "running" ||
+                          startup.replaced
+                        )
+                          return false;
+                        yield* resolveProjectContext(state.threadId);
+                        startup.written = true;
+                        yield* terminals.write({
+                          threadId: state.threadId,
+                          terminalId,
+                          data: actionCommandForShell(script.command, terminal.shellFamily, runId),
+                        });
+                        return true;
+                      }),
+                    ),
+                  );
+                  if (written && posix) yield* Deferred.await(startup.started);
+                }).pipe(
+                  Effect.raceFirst(Deferred.await(startup.stopped)),
+                  Effect.timeoutOption("30 seconds"),
+                );
+                const result = yield* Effect.exit(waiting);
+                const message = startup.replaced
+                  ? "Action launch stopped because its terminal was replaced; the command may not have been sent."
+                  : result._tag === "Failure"
+                    ? "Action command could not be written to the terminal; launch stopped."
+                    : Option.isNone(result.value)
+                      ? startup.written
+                        ? "Action command was sent, but it did not start within 30 seconds; it was not resent."
+                        : "Action shell was not ready within 30 seconds; the command was not sent."
+                      : null;
+                if (message !== null) yield* failStartup(state, startup, message);
+              }).pipe(
+                Effect.catchCause((cause) =>
+                  Effect.logError("Could not settle Action startup", { runId, cause }),
+                ),
+                Effect.ensuring(Effect.sync(cleanup)),
+              );
+              return { state, start };
             });
             const launched = yield* Effect.exit(launch);
             if (launched._tag === "Failure") {
+              cleanup();
               yield* finishUnlocked({
                 threadId: invocation.threadId,
                 runId,
@@ -889,7 +1029,7 @@ const make = Effect.gen(function* () {
                 message: `Failed to launch Action "${script.name}".`,
               });
             }
-            return state;
+            return launched.value;
           }),
         );
       }),
@@ -919,7 +1059,7 @@ const make = Effect.gen(function* () {
           message: `Project Action "${script.name}" is not opted in for agent-triggered resume.`,
         });
       }
-      return yield* mutex.withPermits(1)(
+      const launched = yield* mutex.withPermits(1)(
         admission.admit("action-resume", launchActionUnlocked(invocation, script)).pipe(
           Effect.catchTags({
             UpdateDrainAdmissionError: (error) =>
@@ -933,6 +1073,8 @@ const make = Effect.gen(function* () {
           }),
         ),
       );
+      yield* Effect.forkIn(launched.start, serviceScope, { startImmediately: true });
+      return launched.state;
     },
   );
 
@@ -1053,13 +1195,25 @@ const make = Effect.gen(function* () {
     );
   });
 
-  const unsubscribeTerminal = yield* terminals.subscribe((event) => {
+  // Terminal chunks share the enclosing launch/event span.
+  const handleTerminalEvent = Effect.fnUntraced(function* (event: TerminalEvent) {
     const state = registry.getLatest(event.threadId);
     if (state === null || state.outcome !== "running" || state.terminalId !== event.terminalId) {
-      return Effect.void;
+      return;
     }
     if (event.type === "output") {
-      return Effect.gen(function* () {
+      return yield* Effect.gen(function* () {
+        const startup = startups.get(state.runId);
+        if (startup) {
+          startup.output = `${startup.output}${event.data}`.slice(-MAX_ACTION_OUTPUT_CHARS);
+          const marker = actionOutputMarker(state.runId, "start");
+          const raw = startup.rawPending + event.data;
+          if (startup.written && raw.includes(marker)) {
+            startup.acknowledged = true;
+            yield* Deferred.succeed(startup.started, undefined);
+          }
+          startup.rawPending = raw.slice(-(marker.length - 1));
+        }
         const capture =
           outputCaptureByRunId.get(state.runId) ?? createActionOutputCapture(state.runId);
         outputCaptureByRunId.set(state.runId, capture);
@@ -1109,10 +1263,13 @@ const make = Effect.gen(function* () {
         if (protocol) consumeActionTerminalOutput(capture, protocol.decoder.finish());
         finishActionOutputCapture(capture);
       }
-      return finish({
+      return yield* finish({
         threadId: state.threadId,
         runId: state.runId,
-        outcome: event.exitCode === 0 ? "succeeded" : "failed",
+        outcome:
+          event.exitCode === 0 && (startups.get(state.runId)?.acknowledged ?? true)
+            ? "succeeded"
+            : "failed",
         exitCode: event.exitCode,
         exitSignal: event.exitSignal,
       });
@@ -1124,7 +1281,7 @@ const make = Effect.gen(function* () {
         if (protocol) consumeActionTerminalOutput(capture, protocol.decoder.finish());
         finishActionOutputCapture(capture);
       }
-      return finish({
+      return yield* finish({
         threadId: state.threadId,
         runId: state.runId,
         outcome: "cancelled_by_user",
@@ -1138,10 +1295,13 @@ const make = Effect.gen(function* () {
         if (protocol) consumeActionTerminalOutput(capture, protocol.decoder.finish());
         finishActionOutputCapture(capture);
       }
-      return finish({ threadId: state.threadId, runId: state.runId, outcome: "failed" });
+      return yield* finish({ threadId: state.threadId, runId: state.runId, outcome: "failed" });
     }
-    return Effect.void;
+    return;
   });
+  const unsubscribeTerminal = yield* terminals.subscribe((event) =>
+    stagedTerminals.has(event.terminalId) ? Effect.void : handleTerminalEvent(event),
+  );
   yield* Effect.addFinalizer(() => Effect.sync(unsubscribeTerminal));
 
   const hydrate = Effect.fn("ActionResume.hydrate")(function* () {
