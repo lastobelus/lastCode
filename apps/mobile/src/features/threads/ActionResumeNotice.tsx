@@ -1,7 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
 import {
   actionRunningPresentation,
   actionResultPresentation,
@@ -31,15 +30,12 @@ function failureMessage(cause: Cause.Cause<unknown>, fallback: string): string {
 export function ActionResumeNotice(props: {
   readonly environmentId: EnvironmentId;
   readonly thread: EnvironmentThreadShell;
+  readonly threadDetailRef: ScopedThreadRef | null;
 }) {
   const action = props.thread.actionResume ?? null;
   const pause = useActionEnvironmentPause(props.environmentId);
   const pauseControl = useEnvironmentPauseControl(props.environmentId);
-  const { presentation } = useActionResumeWait(
-    scopeThreadRef(props.environmentId, props.thread.id),
-    action,
-    pause.paused,
-  );
+  const { presentation } = useActionResumeWait(props.threadDetailRef, action, pause.paused);
   const canCancel = useAtomValue(terminalEnvironment.close.permissionAtom(props.environmentId));
   const canResume = useAtomValue(
     threadEnvironment.resumeAction.permissionAtom(props.environmentId),

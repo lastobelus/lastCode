@@ -9,7 +9,7 @@ import {
   type EnvironmentPauseStatus,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
-import { AsyncResult } from "effect/reactivity";
+import { AsyncResult, AtomRegistry, type Atom } from "effect/reactivity";
 import { expect, it, vi } from "vite-plus/test";
 
 const mocks = vi.hoisted(() => ({
@@ -30,12 +30,21 @@ vi.mock("../../state/threads", () => ({
   environmentThreadDetails: { actionResumeContextAtom: mocks.contextAtom },
 }));
 vi.mock("@effect/atom-react", () => ({
-  useAtomValue: (atom: { kind: string }) =>
-    atom.kind === "connections"
-      ? mocks.connections
-      : atom.kind === "context"
-        ? mocks.context
-        : mocks.result,
+  useAtomValue: (atom: Atom.Atom<unknown> | { kind: string }) => {
+    if ("kind" in atom) {
+      return atom.kind === "connections"
+        ? mocks.connections
+        : atom.kind === "context"
+          ? mocks.context
+          : mocks.result;
+    }
+    const registry = AtomRegistry.make();
+    try {
+      return registry.get(atom);
+    } finally {
+      registry.dispose();
+    }
+  },
 }));
 
 import { useActionEnvironmentPause, useActionResumeWait } from "./action-resume-state";
@@ -85,6 +94,20 @@ function setup() {
     },
   };
 }
+
+it("does not subscribe to a local draft and starts after its guarded detail reference exists", () => {
+  setup();
+  const ref = { environmentId, threadId };
+  expect(useActionResumeWait(null, null, false).presentation).toBeNull();
+  expect(mocks.contextAtom).not.toHaveBeenCalled();
+  expect(useActionResumeWait(ref, null, false).presentation).toBeNull();
+  expect(mocks.contextAtom).not.toHaveBeenCalled();
+  mocks.context = { ...mocks.context!, followUp: { status: "running", queueHeld: false } };
+  expect(useActionResumeWait(ref, mocks.context.action, false).status?.state).toBe(
+    "follow_up_active",
+  );
+  expect(mocks.contextAtom).toHaveBeenCalledExactlyOnceWith(ref);
+});
 
 it("rejects retained pause observations from before reconnect and failed observations", () => {
   const screen = setup();

@@ -1514,6 +1514,7 @@ function ThreadDetailBody(props: ThreadDetailScreenProps) {
                   <ActionResumeNotice
                     environmentId={props.environmentId}
                     thread={props.selectedThread}
+                    threadDetailRef={props.selectedThreadDetailRef}
                   />
                   {props.activePendingApproval || props.activePendingUserInput ? (
                     <Animated.View

@@ -75,7 +75,14 @@ it.each([
     } as unknown as EnvironmentThreadShell;
     act(() =>
       root.render(
-        <ActionResumeNotice environmentId={EnvironmentId.make("environment")} thread={thread} />,
+        <ActionResumeNotice
+          environmentId={EnvironmentId.make("environment")}
+          thread={thread}
+          threadDetailRef={{
+            environmentId: EnvironmentId.make("environment"),
+            threadId: action.threadId,
+          }}
+        />,
       ),
     );
     expect(container.textContent).toContain(label);
