@@ -53,6 +53,21 @@ describe("RPC authorization scopes", () => {
     }
   });
 
+  it("allows drain observation without granting drain control", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.serverGetUpdateDrainStatus)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.serverStartUpdateDrain)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.serverCancelUpdateDrain)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.serverClaimUpdateActivation)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+  });
+
   it("separates passive terminal observation from operations that can change a shell", () => {
     for (const method of [
       WS_METHODS.terminalObserve,
