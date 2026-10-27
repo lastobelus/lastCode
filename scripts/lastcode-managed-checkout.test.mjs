@@ -111,7 +111,7 @@ describe("managed checkout configuration", () => {
     const test = fixture();
     const projectActions = {
       baseDir: "/srv/example/t3-home",
-      trustedActionIds: ["lc-wait-for-pr"],
+      trustedActionIds: ["lc-wait-for-checkpoint"],
     };
     expect(() => normalizeManagedCheckoutConfig({ ...test.config, projectActions })).toThrow(
       "lastcode/main anchor",
@@ -159,7 +159,7 @@ describe("syncManagedCheckout", () => {
     const test = fixture();
     git(test.managed, ["branch", "-m", "lastcode/main"]);
     git(test.managed, ["push", "origin", "HEAD:refs/heads/lastcode/main"]);
-    const reconcileProjectActions = vi.fn(() => ({ created: ["lc-wait-for-pr"] }));
+    const reconcileProjectActions = vi.fn(() => ({ created: ["lc-wait-for-checkpoint"] }));
     const installDependencies = vi.fn();
     const config = {
       ...test.config,
@@ -177,7 +177,7 @@ describe("syncManagedCheckout", () => {
     ).toEqual({
       commit: git(test.managed, ["rev-parse", "HEAD"]),
       status: "current",
-      projectActions: { created: ["lc-wait-for-pr"] },
+      projectActions: { created: ["lc-wait-for-checkpoint"] },
     });
     expect(installDependencies).toHaveBeenCalledOnce();
     expect(reconcileProjectActions).toHaveBeenCalledOnce();

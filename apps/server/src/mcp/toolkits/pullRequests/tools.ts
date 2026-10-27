@@ -313,7 +313,7 @@ const ListThreadPullRequestsTool = Tool.make("list_thread_pull_requests", {
 
 const WatchPullRequestTool = Tool.make("watch_pull_request", {
   description:
-    "Watch an open PR for this thread, linking it first if needed. T3 wakes you on failed checks, passed required checks, new comments or reviews, others' reactions to your account's comments, or conflicts. Handle old comments first. Only later ones wake you. Reactions carry no timestamp, so old ones may wake you once on the first check. After this call, end your turn. The watch stays on after each wake, so do not call this again on a wake. A wake is not a merge decision. Check readiness yourself.",
+    "Watch an open PR for this thread, linking it first if needed. T3 wakes you on failed checks, passed required checks, new comments or reviews, others' reactions to your account's top-level conversation comments, or conflicts. Reactions on your reviews and inline review comments may not wake you until a slower periodic full read, up to about 30 minutes later. Handle old comments first. Only later ones wake you. Reactions carry no timestamp, so old ones may wake you once on the first check. After this call, end your turn. The watch stays on after each wake, so do not call this again on a wake. A wake is not a merge decision. Check readiness yourself.",
   parameters: PullRequestTargetInput,
   success: WatchPullRequestResult,
   failure: PullRequestToolError,
