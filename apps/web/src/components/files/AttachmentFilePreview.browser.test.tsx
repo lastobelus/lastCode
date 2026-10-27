@@ -2618,13 +2618,14 @@ it.each(["rtf", "epub", "ods"] as const)(
       </div>,
     );
     if (kind === "ods") {
-      await vi.waitFor(() => {
-        expect(screen.container.textContent).toContain("North");
-        expect(screen.container.textContent).toContain("150");
-        expect(screen.container.textContent).not.toContain("private note");
-        expect(screen.container.textContent).toContain("1 rows · 2 columns");
-        expect(screen.container.textContent).not.toContain("Limited to 500");
-      });
+      await expect
+        .element(screen.getByRole("cell", { name: "North", exact: true }))
+        .toBeInTheDocument();
+      expect(screen.container.textContent).toContain("North");
+      expect(screen.container.textContent).toContain("150");
+      expect(screen.container.textContent).not.toContain("private note");
+      expect(screen.container.textContent).toContain("1 rows · 2 columns");
+      expect(screen.container.textContent).not.toContain("Limited to 500");
     } else {
       await expect
         .element(screen.getByTitle(new RegExp(`^report\\.${kind}: `)))
