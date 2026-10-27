@@ -20,6 +20,12 @@ import {
 } from "./ui/dialog";
 import { Spinner } from "./ui/spinner";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
+import { useActionEnvironmentPause } from "../state/actionResume";
+import {
+  actionResumeControlCopy,
+  actionResumeUnknownPresentation,
+  environmentPausePresentation,
+} from "@t3tools/shared/actionResume";
 
 type EnvironmentPauseControlProps = {
   environment: EnvironmentPresentation;
@@ -27,6 +33,44 @@ type EnvironmentPauseControlProps = {
   size?: "titlebar-icon" | "icon-sm";
   showEnvironmentLabel?: boolean;
 };
+
+export function EnvironmentPauseNotice({
+  environmentId,
+}: {
+  readonly environmentId: EnvironmentId;
+}) {
+  const { environment, phase, known } = useActionEnvironmentPause(environmentId);
+  const [open, setOpen] = useState(false);
+  if (environment === null || (phase === null && !open)) return null;
+  const presentation =
+    known && phase !== null ? environmentPausePresentation(phase) : actionResumeUnknownPresentation;
+  return (
+    <div
+      role="status"
+      className="rounded-xl border border-warning/30 bg-warning/10 px-3 py-2 text-sm"
+    >
+      <div className="flex items-center justify-between gap-3">
+        <span className="min-w-0 font-medium">
+          {environment.label} · {presentation.label}
+        </span>
+        <Button size="xs" variant="outline" onClick={() => setOpen(true)}>
+          {actionResumeControlCopy.manage_pause.label}
+        </Button>
+      </div>
+      <p className="mt-1 text-xs text-muted-foreground">{presentation.detail}</p>
+      {open ? (
+        <EnvironmentPauseDialog
+          key={environmentId}
+          environmentId={environmentId}
+          label={environment.label}
+          connected={environment.connection.phase === "connected"}
+          enabled={environment.serverConfig?.settings.environmentPauseEnabled === true}
+          onClose={() => setOpen(false)}
+        />
+      ) : null}
+    </div>
+  );
+}
 
 /** Every entry point stays bound to one machine, including while its dialog is open. */
 export function EnvironmentPauseControl(props: EnvironmentPauseControlProps) {

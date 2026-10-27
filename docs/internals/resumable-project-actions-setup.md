@@ -109,12 +109,12 @@ App-owned delegated child tasks do not yet complete reliably across an Action wa
 their parent owns every resumable Action they need, including dependency preparation, CI, build,
 and checkpoint waits. A child can technically call `run_project_action_and_resume`; the injected
 runtime instructions ask it not to. Child PR watches stay with the parent as well. Ordinary
-top-level threads launch their own Actions as usual. Issue #482 tracks the work that removes this
-handoff.
+top-level threads launch and resume their own Actions directly; nothing in this section, including
+settlement protection, applies to them. Issue #482 tracks the work that removes this handoff.
 
 The injected instructions carry the sequence each side follows: the child ends its turn with a
-handoff request as its final response, and the parent waits for that recorded result, protects
-itself from automatic settlement, verifies the target, launches, and queues the result back to the
+handoff request as its final response, and the parent waits for that recorded result, keeps
+itself from being settled away, verifies the target, launches, and queues the result back to the
 child with a `taskId` receipt. This section holds the setup detail they leave out.
 
 ### Choose the target
@@ -139,9 +139,12 @@ otherwise report the specific blocker before launch.
 
 ### Protect the parent from automatic settlement
 
-A parent whose linked PRs have merged can be settled automatically while it still owes a child its
-result. The parent thread's existing menu control disables automatic settlement for that thread;
-`t3_thread_read` reports the current value as `autoSettleDisabledAt`, and no MCP tool changes it.
+A parent whose linked PRs have merged can be settled automatically, and filed away, while it still
+owes a child its result. Protection keeps it visible until the relay is done. It does not enable
+anything: `run_project_action_and_resume` never checks it, and Actions launch and resume the same
+way with or without it. When asking the user, give the visibility reason. The parent thread's
+existing menu control disables automatic settlement for that thread; `t3_thread_read` reports the
+current value as `autoSettleDisabledAt`, and no MCP tool changes it.
 
 Set protection up once per mediated workflow, then reuse its record for later Action requests.
 

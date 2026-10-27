@@ -1,4 +1,8 @@
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import {
+  childActionResumeContext,
+  actionResumeWait,
+} from "@t3tools/client-runtime/state/action-resume";
 import { resolveProviderInstanceDisplayName } from "@t3tools/client-runtime/state/provider-instance-display";
 import { resolveSubagentMetadata } from "@t3tools/client-runtime/state/subagent-display";
 import type { EnvironmentId, OrchestrationV2Subagent } from "@t3tools/contracts";
@@ -10,6 +14,7 @@ import { SymbolView } from "../../components/ui/AppSymbol";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import { cn } from "../../lib/cn";
 import { useEnvironmentServerConfig, useProject, useThreadShell } from "../../state/entities";
+import { useActionEnvironmentPause } from "./action-resume-state";
 import { subagentCardDetail } from "./subagent-card-presentation";
 import { SUBAGENT_TONE_TEXT_CLASS, SubagentStatusDot } from "./SubagentStatusDot";
 import { resolveSubagentRowPresentation } from "./threadAgentsPresentation";
@@ -27,7 +32,8 @@ type SubagentRowSubagent = Pick<
   | "progress"
   | "result"
   | "remoteChild"
->;
+> &
+  Partial<Pick<OrchestrationV2Subagent, "origin">>;
 
 export function SubagentRow(props: {
   readonly environmentId: EnvironmentId;
@@ -79,6 +85,12 @@ export function SubagentRow(props: {
           ) : null}
         </View>
         <SubagentMetadata environmentId={props.environmentId} subagent={props.subagent} />
+        {props.subagent.origin === "app_owned" && props.subagent.childThreadId !== null ? (
+          <ChildActionWait
+            environmentId={props.environmentId}
+            childThreadId={props.subagent.childThreadId}
+          />
+        ) : null}
         {detail ? (
           <Text
             numberOfLines={3}
@@ -152,5 +164,21 @@ function SubagentMetadata(props: {
         </View>
       ))}
     </View>
+  );
+}
+
+function ChildActionWait(props: {
+  readonly environmentId: EnvironmentId;
+  readonly childThreadId: NonNullable<OrchestrationV2Subagent["childThreadId"]>;
+}) {
+  const shell = useThreadShell(scopeThreadRef(props.environmentId, props.childThreadId))?.source;
+  const context = shell ? childActionResumeContext(shell) : null;
+  const { paused } = useActionEnvironmentPause(props.environmentId);
+  const { presentation } = actionResumeWait(context, context?.action ?? null, paused);
+  if (!presentation || !context) return null;
+  return (
+    <Text className="text-xs font-t3-medium text-foreground-secondary" numberOfLines={2}>
+      {context.action.actionName} · {presentation.label}
+    </Text>
   );
 }

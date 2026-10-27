@@ -317,7 +317,9 @@ import { useThreadLinkedPullRequest } from "./pullRequest/useThreadLinkedPullReq
 import { useProactivePanels } from "../hooks/useProactivePanels";
 import { useIncrementalTimelineEntries } from "../hooks/useIncrementalTimelineEntries";
 import { useRightPanelSurfaceClose } from "../hooks/useRightPanelSurfaceClose";
-import type { ComposerBannerStackItem } from "./chat/ComposerBannerStack";
+import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
+import { EnvironmentPauseNotice } from "./EnvironmentPauseControl";
+import { useActionResumeWait } from "../state/actionResume";
 import { ComposerSurface } from "./chat/ComposerSurface";
 import { resolveThreadSyncPhase } from "../threadSync";
 import {
@@ -2395,14 +2397,20 @@ export default function ChatView(props: ChatViewProps) {
     scrollToEnd,
     persistThreadSettingsForNextTurn,
   });
+  const resumableActionWait = useActionResumeWait(
+    routeThreadRef,
+    activeThreadShell?.actionResume ?? null,
+  );
   const {
     runningBanner: runningResumableActionBannerItem,
+    pendingBanner: pendingActionBannerItem,
     interruptedBanner: interruptedActionBannerItem,
-    heldBanner: heldActionBannerItem,
   } = useActionResumeBanners({
     routeThreadRef,
     threadRef: activeThreadRef,
-    action: activeThreadShell?.actionResume ?? null,
+    action:
+      resumableActionWait.presentation === null ? null : (activeThreadShell?.actionResume ?? null),
+    status: resumableActionWait.status,
     onRequestTerminalFocus: (terminalId) => {
       if (activeThreadRef) focusTerminal(activeThreadRef, terminalId);
     },
@@ -3518,6 +3526,18 @@ export default function ChatView(props: ChatViewProps) {
                               status={providerSubagentStatus}
                               onOpenParent={parentThreadLink?.open ?? null}
                             />
+                          ) : null}
+                          {composerMounted ? (
+                            <div className="space-y-2">
+                              <EnvironmentPauseNotice environmentId={environmentId} />
+                              <ComposerBannerStack
+                                items={[
+                                  interruptedActionBannerItem,
+                                  pendingActionBannerItem,
+                                  runningResumableActionBannerItem,
+                                ].filter((item) => item !== null)}
+                              />
+                            </div>
                           ) : null}
                           {!composerMounted ? null : (
                             <ChatComposer

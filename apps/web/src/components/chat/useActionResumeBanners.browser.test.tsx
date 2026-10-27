@@ -13,6 +13,8 @@ import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { useLayoutEffect } from "react";
+import { actionResumeStatus } from "@t3tools/shared/actionResume";
+import { actionResumeWait } from "@t3tools/client-runtime/state/action-resume";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
@@ -102,12 +104,31 @@ interface ProbeProps {
   thread?: ScopedThreadRef | null;
   action?: ActionResumeState | null;
   mismatch?: boolean;
+  environmentPaused?: boolean;
+  hasPendingRequest?: boolean;
+  followUp?: Parameters<typeof actionResumeStatus>[0]["followUp"];
+  unknown?: boolean;
 }
-function Probe({ route = a, thread = route, action = running, mismatch = false }: ProbeProps) {
+function Probe({
+  route = a,
+  thread = route,
+  action = running,
+  mismatch = false,
+  environmentPaused = false,
+  hasPendingRequest = false,
+  followUp,
+  unknown = false,
+}: ProbeProps) {
+  const wait = actionResumeWait(
+    action ? { action, followUp: followUp ?? null, hasPendingRequest } : null,
+    action,
+    unknown ? null : environmentPaused,
+  );
   const value = useActionResumeBanners({
     routeThreadRef: route,
     threadRef: thread,
-    action,
+    action: wait.presentation === null ? null : action,
+    status: wait.status,
     onRequestTerminalFocus: state.focus,
     // Each render captures the route just as ChatView's error setter does.
     onThreadError: (threadId, message) => state.error(route, threadId, message),
@@ -115,7 +136,7 @@ function Probe({ route = a, thread = route, action = running, mismatch = false }
   useLayoutEffect(() => {
     observation.banners = value;
   });
-  const items = [value.interruptedBanner, value.heldBanner, value.runningBanner].filter(
+  const items = [value.interruptedBanner, value.pendingBanner, value.runningBanner].filter(
     (item) => item !== null,
   );
   return (
@@ -162,6 +183,65 @@ function grant(ref: ScopedThreadRef, scopes: string[]) {
   state.scopes.set(ref.environmentId, new Set(scopes));
 }
 const allScopes = [AuthTerminalReadScope, AuthTerminalOperateScope, AuthOrchestrationOperateScope];
+
+it("keeps a finished Action visible while its follow-up is pending", async () => {
+  setup();
+  await using screen = await render(null);
+  await show(screen, {
+    action: { ...running, outcome: "succeeded", delivery: "pending", exitCode: 0 },
+  });
+  await expect.element(screen.getByText(/Check work/)).toBeVisible();
+  expect(screen.container.textContent).not.toContain("Cancel");
+});
+
+it("distinguishes current pause from a retained hold and a remaining request", async () => {
+  setup();
+  await using screen = await render(null);
+  const action = {
+    ...running,
+    outcome: "succeeded",
+    delivery: "pending",
+    heldByEnvironmentPause: true,
+  } as const;
+  await show(screen, { action, environmentPaused: true });
+  await expect.element(screen.getByText("Check work · Environment paused")).toBeVisible();
+  await show(screen, { action, hasPendingRequest: true });
+  await expect.element(screen.getByText("Check work · Needs your input")).toBeVisible();
+  expect(screen.container.textContent).not.toContain("Resume the environment");
+  await show(screen, { action });
+  await expect.element(screen.getByText("Check work · Sending result")).toBeVisible();
+});
+it("keeps a held exact follow-up visible and removes the notice when that run ends", async () => {
+  setup();
+  await using screen = await render(null);
+  const action = { ...running, outcome: "succeeded", delivery: "delivered" } as const;
+  await show(screen, { action, followUp: { status: "queued", queueHeld: true } });
+  await expect.element(screen.getByText("Check work · Needs attention")).toBeVisible();
+  await show(screen, { action, followUp: { status: "completed", queueHeld: false } });
+  expect(screen.container.textContent).toBe("");
+});
+it("opens the originating retained terminal for a pending Action with read access", async () => {
+  setup();
+  await using screen = await render(null);
+  grant(a, [AuthTerminalReadScope]);
+  await show(screen, { action: { ...running, outcome: "succeeded", delivery: "pending" } });
+  await click(screen.container, "Open terminal");
+  expect(state.ensureTerminal).toHaveBeenCalledExactlyOnceWith(a, running.terminalId, {
+    open: true,
+    active: true,
+  });
+  expect(state.close).not.toHaveBeenCalled();
+});
+it("does not promise automatic continuation when the environment state is unknown", async () => {
+  setup();
+  await using screen = await render(null);
+  await show(screen, {
+    action: { ...running, outcome: "succeeded", delivery: "pending" },
+    unknown: true,
+  });
+  await expect.element(screen.getByText("Check work · Status unknown")).toBeVisible();
+  expect(screen.container.textContent).not.toContain("pick up its result automatically");
+});
 
 describe("running Action controls", () => {
   it("opens only the existing Action terminal with read-only access", async () => {
@@ -282,7 +362,9 @@ describe("interrupted Action delivery", () => {
       await settle(pending, success());
       expect([...container.querySelectorAll("button")].every((node) => node.disabled)).toBe(true);
       await show(screen, { action: { ...interrupted, delivery: "delivered" } });
-      expect(container.querySelector("button")).toBeNull();
+      expect([...container.querySelectorAll("button")].map((node) => node.textContent)).toEqual([
+        "Open terminal",
+      ]);
       expect(state.close).not.toHaveBeenCalled();
       expect(state.ensureTerminal).not.toHaveBeenCalled();
     },
@@ -408,23 +490,32 @@ describe("completed Action held by Pause", () => {
       exitCode: 0,
       report: { version: 1, outcome: "success", summary: "Documentation preview ready" },
     };
-    await show(screen, { action: held });
-    await expect.element(screen.getByText("Succeeded: Check work")).toBeVisible();
+    await show(screen, { action: held, environmentPaused: true });
+    await expect.element(screen.getByText("Check work · Environment paused")).toBeVisible();
     await expect
-      .element(screen.getByText(/Documentation preview ready.*If this environment is paused/))
+      .element(screen.getByText(/Documentation preview ready.*Automatic wake-ups are held/))
       .toBeVisible();
-    expect(screen.container.textContent).toContain("Settings → Connections");
-    expect(screen.container.querySelector("button")).toBeNull();
+    expect(screen.container.textContent).toContain("Resume the environment");
+    for (const name of ["Resume agent", "Discard", "Cancel", "Open terminal"]) {
+      await expect
+        .element(screen.getByRole("button", { name, exact: true }))
+        .not.toBeInTheDocument();
+    }
     expect(state.resume).not.toHaveBeenCalled();
     expect(state.discard).not.toHaveBeenCalled();
     expect(state.close).not.toHaveBeenCalled();
     expect(state.ensureTerminal).not.toHaveBeenCalled();
 
-    await show(screen, { action: { ...held, delivery: "delivered" } });
-    await expect.element(screen.getByText("Succeeded: Check work")).not.toBeInTheDocument();
+    await show(screen, {
+      action: { ...held, delivery: "delivered" },
+      followUp: { status: "completed", queueHeld: false },
+    });
+    await expect
+      .element(screen.getByText("Check work · Environment paused"))
+      .not.toBeInTheDocument();
     expect(screen.container.textContent).toBe("");
     await show(screen, { action: { ...held, delivery: "available" } });
-    await expect.element(screen.getByText("Check work was interrupted")).toBeVisible();
+    await expect.element(screen.getByText("Check work · Needs attention")).toBeVisible();
     expect(button(screen.container, "Resume agent").disabled).toBe(true);
     expect(button(screen.container, "Discard").disabled).toBe(true);
   });
@@ -439,30 +530,19 @@ describe("Action banner stack", () => {
 
       setup();
 
-      await show(screen, { action: { ...running, delivery: "available" }, mismatch });
-      expect(observation.banners!.runningBanner).toMatchObject({
-        id: "action-running:run-a",
-        group: "environment",
-        variant: "warning",
-      });
+      await show(screen, { action: interrupted, mismatch });
+      expect(observation.banners!.runningBanner).toBeNull();
       expect(observation.banners!.interruptedBanner).toMatchObject({
         id: "action-interrupted:run-a",
         variant: "warning",
       });
-      const [runningNotice, interruptedNotice] = container.querySelectorAll(
-        '[data-composer-banner-stack="true"]',
+      const interruptedNotice = container.querySelector('[data-composer-banner-stack="true"]')!;
+      expect(interruptedNotice.textContent).toContain("Check work · Interrupted");
+      expect(interruptedNotice.textContent).toContain(
+        "The command was interrupted and the agent won't continue automatically.",
       );
-      expect(interruptedNotice!.textContent).toContain("Check work was interrupted");
-      expect(interruptedNotice!.textContent).toContain(
-        "LastCode did not restart the command or wake the agent.",
-      );
-      expect(runningNotice!.textContent).toContain("Waiting for review");
-      expect(runningNotice!.textContent).toContain("Checks in progress");
-      expect(runningNotice!.textContent).toContain("Resumes when this thread is idle.");
-      if (mismatch)
-        expect(container.textContent!.indexOf("Waiting for review")).toBeLessThan(
-          container.textContent!.indexOf("Branch changed"),
-        );
+      if (mismatch) await expect.element(screen.getByText("Branch changed")).toBeVisible();
+      else await expect.element(screen.getByText("Branch changed")).not.toBeInTheDocument();
       await show(screen, {
         action: {
           ...running,
@@ -476,9 +556,11 @@ describe("Action banner stack", () => {
         mismatch,
       });
       expect(observation.banners!.runningBanner?.variant).toBe("info");
-      expect(container.querySelector('[data-composer-banner-stack="true"]')?.textContent).toContain(
-        "Compiling",
-      );
+      await expect.element(screen.getByText("Compiling")).toBeVisible();
+      if (mismatch)
+        expect(container.textContent!.indexOf("Compiling")).toBeLessThan(
+          container.textContent!.indexOf("Branch changed"),
+        );
     },
   );
 });

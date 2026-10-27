@@ -515,6 +515,10 @@
       "types": "./src/state/dashboard.ts",
       "default": "./src/state/dashboard.ts"
     },
+    "./state/action-resume": {
+      "types": "./src/state/actionResume.ts",
+      "default": "./src/state/actionResume.ts"
+    },
     "./state/environment-pause": {
       "types": "./src/state/environmentPause.ts",
       "default": "./src/state/environmentPause.ts"

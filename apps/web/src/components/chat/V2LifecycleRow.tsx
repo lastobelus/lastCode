@@ -7,6 +7,7 @@ import { useEnvironment } from "../../state/environments";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { useNavigate } from "@tanstack/react-router";
 import { SubagentTooltipContent } from "./SubagentTooltipContent";
+import { ChildActionWait } from "./ChildActionWait";
 import { useAtomValue } from "@effect/atom-react";
 import { scopeThreadRef, scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { environmentThreadDetails } from "../../state/threads";
@@ -443,6 +444,9 @@ function SubagentTimelineLink(props: {
             <span className="block truncate">{detail}</span>
           )}
         </span>
+        {props.origin === "app_owned" && threadId !== null ? (
+          <ChildActionWait threadRef={scopeThreadRef(props.parentRef.environmentId, threadId)} />
+        ) : null}
       </span>
       {detail !== null && (props.event !== undefined || status !== "completed") ? (
         <span

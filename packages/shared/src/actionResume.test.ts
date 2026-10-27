@@ -4,6 +4,8 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   actionResumeStatus,
+  actionWaitPresentation,
+  environmentPausePresentation,
   actionResumeSummary,
   actionResultDetails,
   actionResultPresentation,
@@ -394,5 +396,52 @@ describe("Action resume summary", () => {
     });
     const { report: _report, ...withoutReport } = action;
     expect(actionResumeSummary(withoutReport, status)).not.toHaveProperty("report");
+  });
+});
+
+describe("Action wait notice", () => {
+  const action = { outcome: "succeeded", delivery: "pending" } as const;
+  it("keeps an ended command visible until its continuation ends", () => {
+    const status = actionResumeStatus({
+      action,
+      environmentPaused: false,
+      hasPendingRequest: false,
+    });
+    expect(actionWaitPresentation(action, status)).not.toBeNull();
+    const ended = actionResumeStatus({
+      action: { ...action, delivery: "delivered" },
+      environmentPaused: false,
+      hasPendingRequest: false,
+      followUp: { status: "completed", queueHeld: false },
+    });
+    expect(actionWaitPresentation({ ...action, delivery: "delivered" }, ended)).toBeNull();
+  });
+  it("makes no automatic-resume promise when the environment state is unknown", () => {
+    expect(actionWaitPresentation(action, null)?.automaticResumeArmed).toBe(false);
+    expect(actionWaitPresentation(action, null)?.tone).toBe("warning");
+  });
+  it("describes a paused running command without promising an automatic wake", () => {
+    const running = { outcome: "running", delivery: "armed" } as const;
+    const status = actionResumeStatus({
+      action: running,
+      environmentPaused: true,
+      hasPendingRequest: false,
+    });
+    expect(actionWaitPresentation(running, status)?.automaticResumeArmed).toBe(false);
+    expect(actionWaitPresentation(running, status)?.label).toBe("Environment paused");
+  });
+  it("keeps a remaining request visible after Resume", () => {
+    const status = actionResumeStatus({
+      action,
+      environmentPaused: false,
+      hasPendingRequest: true,
+    });
+    expect(actionWaitPresentation(action, status)?.label).toBe("Needs your input");
+    expect(actionWaitPresentation(action, status)?.automaticResumeArmed).toBe(false);
+    expect(environmentPausePresentation("resuming").detail).toContain("back on");
+  });
+  it("removes a disposed follow-up rather than calling it completed work", () => {
+    const disposed = { ...action, delivery: "disposed" } as const;
+    expect(actionWaitPresentation(disposed, null)).toBeNull();
   });
 });

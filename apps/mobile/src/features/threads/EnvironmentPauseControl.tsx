@@ -59,7 +59,7 @@ export function useEnvironmentPauseControl(environmentId: EnvironmentId) {
   const onPress = useCallback(() => setOpen(true), []);
   return {
     visible: entry?.availability.visible ?? false,
-    hasSession: entry?.status?.session != null,
+    hasSession: entry?.availability.known === true && entry.status?.session != null,
     environmentLabel: entry?.environmentLabel ?? "Environment",
     onPress,
     modal:
@@ -163,7 +163,7 @@ function EnvironmentPauseDetails(props: {
       <Text accessibilityRole="header" className="text-xl font-t3-semibold">
         {entry.environmentLabel}
       </Text>
-      {resumed && session === null ? (
+      {resumed && availability.known && session === null ? (
         <Text className="text-base text-foreground-secondary">Pause session finished.</Text>
       ) : !availability.known ? (
         <Text accessibilityRole="alert" className="text-base text-foreground-secondary">
@@ -265,7 +265,7 @@ function EnvironmentPauseDetails(props: {
       ) : null}
       <View className="flex-row flex-wrap justify-end gap-3">
         <Button label="Close" tone="secondary" onPress={props.onClose} />
-        {resumed && session === null ? null : session === null ? (
+        {resumed && availability.known && session === null ? null : session === null ? (
           <Button
             label={pending ? "Pausing…" : "Pause to go offline"}
             tone="primary"

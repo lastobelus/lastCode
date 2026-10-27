@@ -1,6 +1,13 @@
+import { useAtomValue } from "@effect/atom-react";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import type { EnvironmentId } from "@t3tools/contracts";
-import { actionRunningPresentation } from "@t3tools/shared/actionResume";
+import {
+  actionRunningPresentation,
+  actionResumeControlCopy,
+  actionResumeUnknownPresentation,
+  environmentPausePresentation,
+} from "@t3tools/shared/actionResume";
 import * as Cause from "effect/Cause";
 import { useCallback, useState } from "react";
 import { View } from "react-native";
@@ -12,6 +19,8 @@ import { Button } from "../../components/ui/Button";
 import { terminalEnvironment } from "../../state/terminal";
 import { threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { useActionEnvironmentPause, useActionResumeWait } from "./action-resume-state";
+import { useEnvironmentPauseControl } from "./EnvironmentPauseControl";
 
 function failureMessage(cause: Cause.Cause<unknown>, fallback: string): string {
   const error = Cause.squash(cause);
@@ -23,6 +32,26 @@ export function ActionResumeNotice(props: {
   readonly thread: EnvironmentThreadShell;
 }) {
   const action = props.thread.actionResume ?? null;
+  const pause = useActionEnvironmentPause(props.environmentId);
+  const pauseControl = useEnvironmentPauseControl(props.environmentId);
+  const { presentation } = useActionResumeWait(
+    scopeThreadRef(props.environmentId, props.thread.id),
+    action,
+    pause.paused,
+  );
+  const canCancel = useAtomValue(terminalEnvironment.close.permissionAtom(props.environmentId));
+  const canResume = useAtomValue(
+    threadEnvironment.resumeAction.permissionAtom(props.environmentId),
+  );
+  const canDiscard = useAtomValue(
+    threadEnvironment.discardAction.permissionAtom(props.environmentId),
+  );
+  const pausePresentation =
+    pause.phase !== null
+      ? environmentPausePresentation(pause.phase)
+      : pause.showUnknown && presentation === null
+        ? actionResumeUnknownPresentation
+        : null;
   const closeTerminal = useAtomCommand(terminalEnvironment.close, { reportFailure: false });
   const resumeAction = useAtomCommand(threadEnvironment.resumeAction, { reportFailure: false });
   const discardAction = useAtomCommand(threadEnvironment.discardAction, { reportFailure: false });
@@ -34,7 +63,7 @@ export function ActionResumeNotice(props: {
   const pendingAction = pending?.key === actionKey ? pending.choice : null;
 
   const cancel = useCallback(async () => {
-    if (action?.outcome !== "running" || pendingAction !== null) return;
+    if (action?.outcome !== "running" || pendingAction !== null || !canCancel) return;
     setPending({ key: actionKey, choice: "cancel" });
     const result = await closeTerminal({
       environmentId: props.environmentId,
@@ -47,11 +76,20 @@ export function ActionResumeNotice(props: {
         failureMessage(result.cause, "The Project Action could not be cancelled."),
       );
     }
-  }, [action, actionKey, closeTerminal, pendingAction, props.environmentId, props.thread.id]);
+  }, [
+    action,
+    actionKey,
+    canCancel,
+    closeTerminal,
+    pendingAction,
+    props.environmentId,
+    props.thread.id,
+  ]);
 
   const recover = useCallback(
     async (choice: "resume" | "discard") => {
       if (action?.delivery !== "available" || pendingAction !== null) return;
+      if (choice === "resume" ? !canResume : !canDiscard) return;
       setPending({ key: actionKey, choice });
       const command = choice === "resume" ? resumeAction : discardAction;
       const result = await command({
@@ -69,6 +107,8 @@ export function ActionResumeNotice(props: {
     [
       action?.delivery,
       actionKey,
+      canDiscard,
+      canResume,
       discardAction,
       pendingAction,
       props.environmentId,
@@ -77,91 +117,100 @@ export function ActionResumeNotice(props: {
     ],
   );
 
-  if (action?.outcome === "running") {
-    const presentation = actionRunningPresentation(action);
-    const working = presentation.state === "working";
-    return (
-      <View
-        className={
-          working
-            ? "rounded-2xl border border-sky-500/25 bg-sky-500/10 px-3.5 py-3"
-            : "rounded-2xl border border-adaptive-yellow-400-a35-300-a20 bg-yellow-500/10 px-3.5 py-3"
-        }
-      >
-        <View className="flex-row items-center gap-2.5">
-          <SymbolView
-            name={working ? "gearshape" : "clock"}
-            size={18}
-            tintColor={working ? "#0a84ff" : "#eab308"}
-            type="monochrome"
-          />
-          <View className="min-w-0 flex-1">
-            <Text
-              className={
-                working
-                  ? "text-sm font-t3-bold text-adaptive-sky-700-300"
-                  : "text-sm font-t3-bold text-adaptive-yellow-800-200"
-              }
-            >
-              {presentation.label}: {action.actionName}
-            </Text>
-            <Text
-              className={
-                working
-                  ? "mt-0.5 text-xs text-adaptive-sky-700-300 opacity-75"
-                  : "mt-0.5 text-xs text-adaptive-yellow-800-a75-200-a70"
-              }
-            >
-              {presentation.summary}
-            </Text>
-          </View>
-          <Button
-            accessibilityHint={`Cancel ${action.actionName}`}
-            disabled={pendingAction !== null}
-            label={pendingAction === "cancel" ? "Cancelling…" : "Cancel"}
-            onPress={() => void cancel()}
-            tone="secondary"
-          />
-        </View>
-      </View>
-    );
-  }
-
-  if (action?.delivery !== "available") return null;
-
+  const running = action?.outcome === "running" ? actionRunningPresentation(action) : null;
+  if (presentation === null && pausePresentation === null && pauseControl.modal === null)
+    return null;
   return (
-    <View className="rounded-2xl border border-adaptive-yellow-400-a35-300-a20 bg-yellow-500/10 px-3.5 py-3">
-      <View className="flex-row items-start gap-2.5">
-        <SymbolView
-          name="exclamationmark.triangle"
-          size={18}
-          tintColor="#eab308"
-          type="monochrome"
-        />
-        <View className="min-w-0 flex-1">
-          <Text className="text-sm font-t3-bold text-adaptive-yellow-800-200">
-            {action.actionName} was interrupted
-          </Text>
-          <Text className="mt-0.5 text-xs text-adaptive-yellow-800-a75-200-a70">
-            LastCode did not restart the command or wake the agent. Resume only the agent follow-up
-            when you are ready.
-          </Text>
-          <View className="mt-2.5 flex-row justify-end gap-2">
-            <Button
-              disabled={pendingAction !== null}
-              label={pendingAction === "discard" ? "Discarding…" : "Discard"}
-              onPress={() => void recover("discard")}
-              tone="secondary"
+    <View className="gap-3 px-4 pb-3">
+      {presentation && action ? (
+        <View
+          className={
+            presentation.tone === "warning"
+              ? "rounded-2xl border border-adaptive-yellow-400-a35-300-a20 bg-yellow-500/10 px-3.5 py-3"
+              : "rounded-2xl border border-sky-500/25 bg-sky-500/10 px-3.5 py-3"
+          }
+        >
+          <View className="flex-row items-start gap-2.5">
+            <SymbolView
+              name={presentation.tone === "warning" ? "exclamationmark.triangle" : "gearshape"}
+              size={18}
+              tintColor={presentation.tone === "warning" ? "#eab308" : "#0a84ff"}
+              type="monochrome"
             />
-            <Button
-              disabled={pendingAction !== null}
-              label={pendingAction === "resume" ? "Resuming…" : "Resume agent"}
-              onPress={() => void recover("resume")}
-              tone="primary"
-            />
+            <View className="min-w-0 flex-1 gap-1">
+              <Text className="text-sm font-t3-bold text-foreground">{action.actionName}</Text>
+              <Text className="text-xs font-t3-medium text-foreground-secondary">
+                {presentation.label}
+              </Text>
+              {running ? (
+                <Text className="text-xs text-foreground-secondary">
+                  {running.label}: {running.summary}
+                </Text>
+              ) : null}
+              <Text className="text-xs text-foreground-secondary">{presentation.detail}</Text>
+              {running || action.delivery === "available" ? (
+                <View className="mt-2 flex-row flex-wrap justify-end gap-2">
+                  {running ? (
+                    <Button
+                      accessibilityHint={actionResumeControlCopy.cancel.detail}
+                      disabled={pendingAction !== null || !canCancel}
+                      label={
+                        pendingAction === "cancel"
+                          ? "Cancelling…"
+                          : actionResumeControlCopy.cancel.label
+                      }
+                      onPress={() => void cancel()}
+                      tone="secondary"
+                    />
+                  ) : (
+                    <>
+                      <Button
+                        accessibilityHint={actionResumeControlCopy.discard.detail}
+                        disabled={pendingAction !== null || !canDiscard}
+                        label={
+                          pendingAction === "discard"
+                            ? "Discarding…"
+                            : actionResumeControlCopy.discard.label
+                        }
+                        onPress={() => void recover("discard")}
+                        tone="secondary"
+                      />
+                      <Button
+                        accessibilityHint={actionResumeControlCopy.resume_agent.detail}
+                        disabled={pendingAction !== null || !canResume}
+                        label={
+                          pendingAction === "resume"
+                            ? "Resuming…"
+                            : actionResumeControlCopy.resume_agent.label
+                        }
+                        onPress={() => void recover("resume")}
+                        tone="primary"
+                      />
+                    </>
+                  )}
+                </View>
+              ) : null}
+            </View>
           </View>
         </View>
-      </View>
+      ) : null}
+      {pausePresentation ? (
+        <View className="gap-1 rounded-2xl border border-adaptive-yellow-400-a35-300-a20 bg-yellow-500/10 px-3.5 py-3">
+          <Text className="text-sm font-t3-bold text-foreground">{pausePresentation.label}</Text>
+          <Text className="text-xs text-foreground-secondary">{pausePresentation.detail}</Text>
+          {pauseControl.visible ? (
+            <View className="mt-2 items-end">
+              <Button
+                label={actionResumeControlCopy.manage_pause.label}
+                accessibilityHint={actionResumeControlCopy.manage_pause.detail}
+                onPress={pauseControl.onPress}
+                tone="secondary"
+              />
+            </View>
+          ) : null}
+        </View>
+      ) : null}
+      {pauseControl.modal}
     </View>
   );
 }
