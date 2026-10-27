@@ -98,7 +98,7 @@ describe("lastcode-local-ci", () => {
             "--concurrency-limit",
             "1",
             "test",
-            "--maxWorkers=1",
+            "--maxWorkers=2",
             "--maxConcurrency=1",
           ],
         },
@@ -316,7 +316,7 @@ describe("lastcode-local-ci", () => {
         "--concurrency-limit",
         "1",
         "test",
-        "--maxWorkers=1",
+        "--maxWorkers=2",
         "--maxConcurrency=1",
       ],
     });
