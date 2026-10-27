@@ -94,6 +94,7 @@ const project = {
 const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (
   raceDelivery: boolean,
   raceLaunch = false,
+  readyOnOpen = true,
 ) {
   const database = SqlitePersistence.layerMemory;
   const replay = ProviderReplayHarness.layerWithRegistry(
@@ -191,6 +192,7 @@ const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (
   const emit = (event: TerminalEvent) =>
     Effect.forEach([...listeners], (listener) => listener(event), { discard: true });
   const written = yield* Deferred.make<void>();
+  const closed = yield* Deferred.make<void>();
   let terminalWrites = 0;
   let terminalCloses = 0;
   const terminal = Layer.mock(TerminalManager.TerminalManager)({
@@ -204,12 +206,14 @@ const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (
     open: (input) =>
       Effect.suspend(() => archiveAtOpen).pipe(
         Effect.andThen(
-          emit({
-            type: "output",
-            threadId: input.threadId,
-            terminalId: input.terminalId!,
-            data: "\x1b[?2004h",
-          }),
+          readyOnOpen
+            ? emit({
+                type: "output",
+                threadId: input.threadId,
+                terminalId: input.terminalId!,
+                data: "\x1b[?2004h",
+              })
+            : Effect.void,
         ),
         Effect.andThen(
           Effect.succeed({
@@ -225,7 +229,7 @@ const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (
     close: () =>
       Effect.sync(() => {
         terminalCloses += 1;
-      }),
+      }).pipe(Effect.andThen(Deferred.succeed(closed, undefined))),
     history: () => Effect.succeed("retained Action output"),
   });
   const actions = ActionResume.layer.pipe(
@@ -250,6 +254,7 @@ const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (
     layer: Layer.mergeAll(replay, threads, receipts, runs, actions, ingestor),
     attempted,
     written,
+    closed,
     beforeDelivery: (effect: Effect.Effect<void>) => {
       beforeDelivery = effect;
     },
@@ -518,6 +523,88 @@ it.effect.each(["command", "user_input"] as const)(
         );
       }).pipe(Effect.provide(harness.layer));
     }),
+);
+
+it.effect("rejects deferred Action input when archive stopping begins before shell readiness", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness(false, false, false);
+    yield* Effect.gen(function* () {
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const actions = yield* ActionResume.ActionResume;
+      const runs = yield* ActionRunStore.ActionRunStore;
+      const receipts = yield* CommandReceipts.CommandReceiptStoreV2;
+      yield* threads.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("action-archive:create"),
+        threadId,
+        projectId,
+        title: "Action archive",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* threads.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("action-archive:busy"),
+        threadId,
+        messageId: MessageId.make("action-archive:busy"),
+        text: "Keep this turn prepared",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "defer_start" },
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const state = yield* actions.runProjectActionAndResume(
+        { threadId, providerInstanceId: instanceId },
+        "qa",
+      );
+      assert.equal(state.outcome, "running");
+      assert.equal(harness.terminalWrites(), 0);
+      yield* orchestrator.dispatch({
+        type: "thread.archive",
+        threadId,
+        commandId: archiveId,
+        childDisposition: "stop_and_archive",
+        expectedChildThreadIds: [],
+      });
+      const stopping = (yield* threads.getThreadRecords(threadId, [])).thread;
+      assert.equal(stopping.archivePending?.status, "stopping");
+      assert.isNull(stopping.archivedAt);
+      yield* harness.emit({
+        type: "output",
+        threadId,
+        terminalId: state.terminalId,
+        data: "\x1b[?2004h",
+      });
+      const boundary = yield* Deferred.await(harness.written).pipe(
+        Effect.as("written"),
+        Effect.raceFirst(Deferred.await(harness.closed).pipe(Effect.as("closed"))),
+      );
+      assert.equal(boundary, "closed");
+      assert.equal(harness.terminalWrites(), 0);
+      const retained = yield* runs.get(threadId, state.runId);
+      assert.isTrue(Option.isSome(retained));
+      if (Option.isSome(retained)) {
+        assert.equal(retained.value.state.outcome, "failed");
+        assert.equal(retained.value.state.delivery, "pending");
+      }
+      yield* actions.retryPendingFollowUps;
+      assert.isTrue(
+        Option.isNone(
+          yield* receipts.getByCommandId(
+            CommandId.make(`server:action-resume:${state.runId}:delivery`),
+          ),
+        ),
+      );
+      assert.equal(harness.terminalWrites(), 0);
+    }).pipe(Effect.provide(harness.layer));
+  }),
 );
 
 it.effect.each([false, true])(

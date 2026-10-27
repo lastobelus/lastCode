@@ -977,7 +977,12 @@ const make = Effect.gen(function* () {
                           startup.replaced
                         )
                           return false;
-                        yield* resolveProjectContext(state.threadId);
+                        const { thread } = yield* resolveProjectContext(state.threadId);
+                        if (thread.archivePending?.status === "stopping")
+                          return yield* new ActionResumeError({
+                            reason: "launch_failed",
+                            message: "The originating thread is archiving.",
+                          });
                         startup.written = true;
                         yield* terminals.write({
                           threadId: state.threadId,
