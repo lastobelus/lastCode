@@ -3,23 +3,34 @@ import {
   EnvironmentId,
   ThreadId,
   type AssetCreateUrlResult,
+  type PreviewOpenInput,
   type PreviewSessionSnapshot,
 } from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
 import * as Cause from "effect/Cause";
+import type { PreparedHostedPreview } from "@t3tools/client-runtime/preview-hosting";
 
 const mocks = vi.hoisted(() => ({
-  prepareHostedPreview: vi.fn(async (_ref: unknown, url: string) => ({ url })),
+  prepareHostedPreview: vi.fn(
+    async (_ref: unknown, url: string): Promise<PreparedHostedPreview> => ({
+      url,
+      managed: false,
+      restored: false,
+    }),
+  ),
   rememberHandoff: vi.fn(),
+  runtime: vi.fn<() => "server" | undefined>(() => "server"),
+  desktopHost: vi.fn<() => string | undefined>(() => undefined),
 }));
 vi.mock("~/components/preview/previewHostingRecovery", () => ({
   prepareHostedPreview: mocks.prepareHostedPreview,
 }));
 vi.mock("~/browser/previewRuntime", () => ({
   isPreviewAvailableFor: () => true,
-  previewRuntimeFor: () => "server",
-  desktopBrowserHostFor: () => undefined,
+  previewRuntimeFor: mocks.runtime,
+  desktopBrowserHostFor: mocks.desktopHost,
 }));
+vi.mock("~/state/entities", () => ({ readEnvironmentSupportsServerBrowser: () => true }));
 vi.mock("~/handoffs/handoffsStore", async (importOriginal) => ({
   ...(await importOriginal<typeof import("~/handoffs/handoffsStore")>()),
   rememberHandoffBrowser: mocks.rememberHandoff,
@@ -30,7 +41,7 @@ vi.mock("./browserDefaults", () => ({
   browserDefaultOpenProfileId: () => "default",
 }));
 
-import { openFileInPreview } from "./openFileInPreview";
+import { openFileInPreview, openUrlInPreview } from "./openFileInPreview";
 import { readThreadPreviewState, resetPreviewStateForTests } from "~/previewStateStore";
 import { selectActiveRightPanelSurface, useRightPanelStore } from "~/rightPanelStore";
 
@@ -48,6 +59,13 @@ const snapshot: PreviewSessionSnapshot = {
 };
 
 beforeEach(() => {
+  mocks.prepareHostedPreview.mockImplementation(async (_ref, url) => ({
+    url,
+    managed: false,
+    restored: false,
+  }));
+  mocks.runtime.mockReturnValue("server");
+  mocks.desktopHost.mockReturnValue(undefined);
   resetPreviewStateForTests();
   useRightPanelStore.setState({
     byThreadKey: {},
@@ -65,7 +83,9 @@ describe("linked file browser previews", () => {
       const createAssetUrl = vi.fn(async () =>
         AsyncResult.success({ relativeUrl: "/api/assets/linked-file", expiresAt: 1790000000000 }),
       );
-      const openPreview = vi.fn(async () => AsyncResult.success(snapshot));
+      const openPreview = vi.fn(async (_input: { input: PreviewOpenInput }) =>
+        AsyncResult.success(snapshot),
+      );
       const result = await openFileInPreview({
         threadRef,
         filePath,
@@ -89,8 +109,12 @@ describe("linked file browser previews", () => {
       });
       expect(openPreview).toHaveBeenCalledWith({
         environmentId: threadRef.environmentId,
-        input: expect.objectContaining({ threadId: threadRef.threadId }),
+        input: expect.objectContaining({
+          threadId: threadRef.threadId,
+          url: "https://workstation.example/api/assets/linked-file",
+        }),
       });
+      expect(openPreview.mock.calls[0]?.[0].input).not.toHaveProperty("browserHost");
       expect(readThreadPreviewState(threadRef).snapshot).toEqual(snapshot);
       expect(
         selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, threadRef)?.id,
@@ -159,5 +183,64 @@ describe("linked file browser previews", () => {
       selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, threadRef),
     ).toBeNull();
     expect(mocks.rememberHandoff).not.toHaveBeenCalled();
+  });
+});
+
+describe("managed app links", () => {
+  it.each(["default", "incognito"])(
+    "opens a remote loopback app in its environment with the %s profile",
+    async (profileId) => {
+      mocks.runtime.mockReturnValue(undefined);
+      mocks.desktopHost.mockReturnValue("remote-desktop");
+      const url = "http://workstation.example:5173/app/a%2Fb?q=1#section";
+      const localUrl = "http://127.0.0.1:5173/app/a%2Fb?q=1#section";
+      mocks.prepareHostedPreview.mockResolvedValue({
+        url,
+        localUrl,
+        managed: true,
+        restored: true,
+      });
+      const openPreview = vi.fn(async (_input: { input: PreviewOpenInput }) =>
+        AsyncResult.success(snapshot),
+      );
+      await openUrlInPreview({ threadRef, url, profileId, openPreview });
+      expect(openPreview.mock.calls[0]?.[0].input).toMatchObject({
+        url: localUrl,
+        runtime: "server",
+        browserHost: "environment",
+        profileId,
+      });
+      expect(openPreview.mock.calls[0]?.[0].input).not.toHaveProperty("desktopHostId");
+    },
+  );
+
+  it("preserves an explicitly selected desktop profile for a managed app", async () => {
+    mocks.desktopHost.mockReturnValue("remote-desktop");
+    const url = "http://workstation.example:5173/sign-in";
+    mocks.prepareHostedPreview.mockResolvedValue({
+      url,
+      localUrl: "http://127.0.0.1:5173/sign-in",
+      managed: true,
+      restored: true,
+    });
+    const openPreview = vi.fn(async (_input: { input: unknown }) => AsyncResult.success(snapshot));
+    await openUrlInPreview({ threadRef, url, profileId: "work-account", openPreview });
+    expect(openPreview.mock.calls[0]?.[0].input).toMatchObject({
+      url,
+      runtime: "server",
+      desktopHostId: "remote-desktop",
+      profileId: "work-account",
+    });
+    expect(openPreview.mock.calls[0]?.[0].input).not.toHaveProperty("browserHost");
+  });
+
+  it("leaves an unmanaged app URL on the usual desktop route", async () => {
+    mocks.runtime.mockReturnValue(undefined);
+    const url = "http://workstation.example:5173/another-app?q=1";
+    const openPreview = vi.fn(async (_input: { input: unknown }) => AsyncResult.success(snapshot));
+    await openUrlInPreview({ threadRef, url, openPreview });
+    expect(openPreview.mock.calls[0]?.[0].input).toMatchObject({ url });
+    expect(openPreview.mock.calls[0]?.[0].input).not.toHaveProperty("browserHost");
+    expect(openPreview.mock.calls[0]?.[0].input).not.toHaveProperty("runtime");
   });
 });

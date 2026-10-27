@@ -15,7 +15,11 @@ import { selectProjectGroupingSettings } from "../logicalProject";
 import { selectActiveRightPanel, useRightPanelStore } from "../rightPanelStore";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { buildSidebarProjectSnapshots } from "../sidebarProjectGrouping";
-import { resolveSidebarMode, shouldChooseNewThreadProject, useSidebarModeStore } from "../sidebarMode";
+import {
+  resolveSidebarMode,
+  shouldChooseNewThreadProject,
+  useSidebarModeStore,
+} from "../sidebarMode";
 import { readProjects, readThreadShell } from "../state/entities";
 import { environmentPresentations } from "../state/presentation";
 import { primaryEnvironmentIdAtom } from "../state/primaryEnvironment";

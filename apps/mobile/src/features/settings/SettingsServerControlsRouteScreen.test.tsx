@@ -78,6 +78,7 @@ vi.mock("../../components/ui/Button", () => ({
     </button>
   ),
 }));
+vi.mock("../../components/ui/AppSymbol", () => ({ SymbolView: () => null }));
 vi.mock("./components/SettingsScreen", () => ({ SettingsScreen: Children }));
 vi.mock("./components/SettingsEnvironmentFilterHeader", () => ({
   AndroidSettingsEnvironmentFilter: () => null,

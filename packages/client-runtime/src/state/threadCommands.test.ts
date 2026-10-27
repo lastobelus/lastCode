@@ -1,5 +1,9 @@
+import { vi } from "vite-plus/test";
 import { describe, expect, it } from "@effect/vitest";
 import {
+  AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
+  type AuthSessionState,
   CommandId,
   RuntimeRequestId,
   EnvironmentId,
@@ -10,6 +14,8 @@ import {
   ThreadId,
   type OrchestrationV2Command,
   type OrchestrationV2ShellSnapshot,
+  type OrchestrationV2ThreadArchiveFamily,
+  type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Crypto from "effect/Crypto";
@@ -22,14 +28,22 @@ import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
 import * as SubscriptionRef from "effect/SubscriptionRef";
-import { Atom, AtomRegistry } from "effect/reactivity";
+import * as Stream from "effect/Stream";
+import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import type { RpcSession } from "../rpc/session.ts";
 import { createThreadEnvironmentAtoms } from "./threadCommands.ts";
 import * as ThreadHistoryController from "./threadHistoryController.ts";
+import { AVAILABLE_CONNECTION_STATE } from "../connection/model.ts";
 
+vi.mock("./session.ts", () => ({
+  createEnvironmentSessionAtoms: () => ({ sessionStateAtom: sessions }),
+}));
+const sessions = Atom.family((_id: EnvironmentId) =>
+  Atom.make<AsyncResult.AsyncResult<AuthSessionState>>(AsyncResult.initial()),
+);
 const ENVIRONMENT_ID = EnvironmentId.make("remote");
 const THREAD_ID = ThreadId.make("thread");
 const NOW = DateTime.makeUnsafe("2026-09-12T10:00:00.000Z");
@@ -87,7 +101,28 @@ const SNAPSHOT: OrchestrationV2ShellSnapshot = {
 
 const makeHarness = Effect.fn("TestThreadCommands.makeHarness")(function* (options?: {
   readonly reconcilePendingWork?: (threadId: ThreadId) => Effect.Effect<void>;
+  readonly archiveFamily?: readonly OrchestrationV2ThreadShell[];
+  readonly archiveFamilyError?: Error;
+  readonly decision?: Omit<OrchestrationV2ThreadArchiveFamily, "threads">;
 }) {
+  const {
+    archiveFamily = SNAPSHOT.threads,
+    archiveFamilyError,
+    decision = {
+      childThreadIds: [],
+      activeChildThreadIds: [],
+      activeThreadIds: [],
+      unreadThreadIds: [],
+      promotableChildThreadIds: [],
+      keptThreadIds: [],
+      protectedChildThreadIds: [],
+      nativeStopCount: 0,
+      requiresConfirmation: false,
+      canPromote: false,
+      canStopAndArchive: true,
+    },
+  } = options ?? {};
+  const familyReads: { threadId: ThreadId }[] = [];
   const requests = yield* Queue.unbounded<{
     command: OrchestrationV2Command;
     reply: Deferred.Deferred<{ sequence: number }, Error>;
@@ -95,9 +130,20 @@ const makeHarness = Effect.fn("TestThreadCommands.makeHarness")(function* (optio
   const reconciled = yield* Queue.unbounded<ThreadId>();
   const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
     target: { environmentId: ENVIRONMENT_ID },
+    state: yield* SubscriptionRef.make({
+      ...AVAILABLE_CONNECTION_STATE,
+      phase: "connected",
+      desired: true,
+    }),
     session: yield* SubscriptionRef.make(
       Option.some({
         client: {
+          [ORCHESTRATION_V2_WS_METHODS.getThreadArchiveFamily]: (input: { threadId: ThreadId }) => {
+            familyReads.push(input);
+            return archiveFamilyError === undefined
+              ? Effect.succeed({ ...decision, threads: archiveFamily })
+              : Effect.fail(archiveFamilyError);
+          },
           [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command: OrchestrationV2Command) =>
             Effect.gen(function* () {
               const reply = yield* Deferred.make<{ sequence: number }, Error>();
@@ -113,6 +159,8 @@ const makeHarness = Effect.fn("TestThreadCommands.makeHarness")(function* (optio
       Layer.succeed(EnvironmentRegistry.EnvironmentRegistry, {
         run: (_environmentId, effect) =>
           Effect.provideService(effect, EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        followStream: (_environmentId, stream) =>
+          Stream.provideService(stream, EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
       } as EnvironmentRegistry.EnvironmentRegistry["Service"]),
       Layer.succeed(
         Crypto.Crypto,
@@ -139,7 +187,21 @@ const makeHarness = Effect.fn("TestThreadCommands.makeHarness")(function* (optio
   yield* Effect.addFinalizer(() => Effect.sync(() => registry.dispose()));
   const visibleAtom = commands.snapshotAtom(ENVIRONMENT_ID);
   registry.mount(visibleAtom);
-  return { registry, commands, snapshotAtom, visibleAtom, requests, reconciled };
+  registry.set(
+    sessions(ENVIRONMENT_ID),
+    AsyncResult.success({
+      authenticated: true,
+      scopes: [AuthOrchestrationReadScope, AuthOrchestrationOperateScope],
+      permissions: [AuthOrchestrationReadScope, AuthOrchestrationOperateScope],
+      auth: {
+        policy: "remote-reachable",
+        bootstrapMethods: [],
+        sessionMethods: [],
+        sessionCookieName: "test",
+      },
+    }),
+  );
+  return { registry, commands, snapshotAtom, visibleAtom, requests, reconciled, familyReads };
 });
 
 describe("interrupt turn", () => {
@@ -197,6 +259,93 @@ describe("interrupt turn", () => {
     }),
   );
 });
+
+it.effect("reads a scoped complete family without replacing the active shell snapshot", () =>
+  Effect.gen(function* () {
+    const intermediateId = ThreadId.make("inactive-owner");
+    const liveChildId = ThreadId.make("live-child");
+    const root = SNAPSHOT.threads[0]!;
+    const shells = [
+      root,
+      {
+        ...root,
+        id: intermediateId,
+        archivedAt: NOW,
+        lineage: {
+          parentThreadId: root.id,
+          rootThreadId: root.id,
+          relationshipToParent: "subagent" as const,
+        },
+      },
+      {
+        ...root,
+        id: liveChildId,
+        status: "running" as const,
+        lineage: {
+          parentThreadId: intermediateId,
+          rootThreadId: root.id,
+          relationshipToParent: "subagent" as const,
+        },
+      },
+    ];
+    const h = yield* makeHarness({
+      archiveFamily: shells,
+      decision: {
+        childThreadIds: [liveChildId],
+        activeChildThreadIds: [liveChildId],
+        activeThreadIds: [liveChildId],
+        unreadThreadIds: [root.id],
+        promotableChildThreadIds: [],
+        keptThreadIds: [],
+        protectedChildThreadIds: [liveChildId],
+        nativeStopCount: 1,
+        requiresConfirmation: true,
+        canPromote: false,
+        canStopAndArchive: false,
+      },
+    });
+    const result = yield* Effect.promise(() =>
+      h.commands.loadArchiveFamily.run(h.registry, {
+        environmentId: ENVIRONMENT_ID,
+        input: { threadId: THREAD_ID },
+      }),
+    );
+    expect(result._tag).toBe("Success");
+    if (result._tag !== "Success") return;
+    expect(result.value.threads.map(({ id, environmentId }) => ({ id, environmentId }))).toEqual(
+      shells.map(({ id }) => ({ id, environmentId: ENVIRONMENT_ID })),
+    );
+    expect(result.value.children.map(({ id }) => id)).toEqual([liveChildId]);
+    expect(result.value.activeChildren[0]?.runtime?.status).toBe("running");
+    expect(result.value.activeThreads.map(({ id }) => id)).toEqual([liveChildId]);
+    expect(result.value.unreadThreads.map(({ id }) => id)).toEqual([root.id]);
+    expect(result.value.protectedChildren.map(({ id }) => id)).toEqual([liveChildId]);
+    expect(result.value.promotableChildren).toEqual([]);
+    expect(result.value.requiresConfirmation).toBe(true);
+    expect(result.value.canStopAndArchive).toBe(false);
+    expect(result.value.nativeStopCount).toBe(1);
+    expect(h.familyReads).toEqual([{ threadId: THREAD_ID }]);
+    expect(h.registry.get(h.visibleAtom)).toBe(SNAPSHOT);
+  }),
+);
+
+it.effect("fails family inspection rather than returning the local active-only snapshot", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness({
+      archiveFamily: [],
+      archiveFamilyError: new Error("Family unavailable"),
+    });
+    const result = yield* Effect.promise(() =>
+      h.commands.loadArchiveFamily.run(h.registry, {
+        environmentId: ENVIRONMENT_ID,
+        input: { threadId: THREAD_ID },
+      }),
+    );
+    expect(result._tag).toBe("Failure");
+    expect(h.familyReads).toEqual([{ threadId: THREAD_ID }]);
+    expect(h.registry.get(h.visibleAtom)).toBe(SNAPSHOT);
+  }),
+);
 
 describe("remote thread lifecycle commands", () => {
   const actions = [
@@ -452,3 +601,28 @@ describe("remote thread lifecycle commands", () => {
       }),
   );
 });
+
+it.effect("requires operate permission before verifying archive-family activity", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness();
+    const session = h.registry.get(sessions(ENVIRONMENT_ID));
+    if (session._tag !== "Success") throw new Error("Missing test session.");
+    h.registry.set(
+      sessions(ENVIRONMENT_ID),
+      AsyncResult.success({
+        ...session.value,
+        scopes: [AuthOrchestrationReadScope],
+        permissions: [AuthOrchestrationReadScope],
+      }),
+    );
+    expect(h.registry.get(h.commands.loadArchiveFamily.permissionAtom(ENVIRONMENT_ID))).toBe(false);
+    const result = yield* Effect.promise(() =>
+      h.commands.loadArchiveFamily.run(h.registry, {
+        environmentId: ENVIRONMENT_ID,
+        input: { threadId: THREAD_ID },
+      }),
+    );
+    expect(result._tag).toBe("Failure");
+    expect(h.familyReads).toEqual([]);
+  }),
+);

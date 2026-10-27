@@ -41,9 +41,9 @@ import { refreshPreviewStreamAccess, usePreviewStreamAccess } from "~/state/prev
 import { observeResize } from "~/lib/observeResize";
 
 export interface ServerBrowserHandle {
-  readonly navigate: (url: string) => void;
+  readonly navigate: (url: string) => boolean;
   readonly history: (delta: -1 | 1) => void;
-  readonly reload: (options?: { readonly ignoreCache?: boolean }) => void;
+  readonly reload: (options?: { readonly ignoreCache?: boolean }) => boolean;
   readonly viewport: (setting: PreviewViewportSetting) => void;
   readonly canvas: () => HTMLCanvasElement | null;
 }
@@ -160,6 +160,15 @@ export function ServerBrowserSurface(props: {
     pdfUrl = null,
     ref,
   } = props;
+  const [documentVisible, setDocumentVisible] = useState(
+    () => document.visibilityState === "visible",
+  );
+  useEffect(() => {
+    const changed = () => setDocumentVisible(document.visibilityState === "visible");
+    changed();
+    document.addEventListener("visibilitychange", changed);
+    return () => document.removeEventListener("visibilitychange", changed);
+  }, []);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const keySentRef = useRef(false);
@@ -214,7 +223,7 @@ export function ServerBrowserSurface(props: {
 
   // Keep clearInput stable: a new identity reconnects the stream.
   const send = (input: PreviewStreamInput) => {
-    clientRef.current?.send(input);
+    return clientRef.current?.send(input) ?? false;
   };
 
   const clearInput = () => {
@@ -355,7 +364,8 @@ export function ServerBrowserSurface(props: {
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!visible || accessDenied || hostSetup || !access || !cap || !canvas) return;
+    if (!visible || !documentVisible || accessDenied || hostSetup || !access || !cap || !canvas)
+      return;
     let refreshTimer: ReturnType<typeof setTimeout> | null = null;
     const painter = createPreviewFramePainter(canvas, () => {
       if (hasFrameRef.current) return;
@@ -450,6 +460,7 @@ export function ServerBrowserSurface(props: {
     cap,
     clearInput,
     environmentId,
+    documentVisible,
     followSize,
     hostSetup,
     tabId,

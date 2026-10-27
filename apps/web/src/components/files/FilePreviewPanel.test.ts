@@ -5,12 +5,12 @@ import { ProjectReadFileError } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { describe, expect, it, vi } from "vite-plus/test";
 
+import { setMarkdownTaskChecked } from "../../markdownTaskList";
 import { remapFileCommentAnnotations } from "./fileCommentAnnotations";
 import {
   filePreviewReadErrorMessage,
   isMarkdownPreviewFile,
   resolveFilePreviewPath,
-  setMarkdownTaskChecked,
   shouldShowFileExplorer,
   workspaceAssetResource,
 } from "./filePreviewMode";

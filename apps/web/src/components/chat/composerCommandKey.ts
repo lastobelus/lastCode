@@ -13,7 +13,6 @@ import {
 import {
   type ComposerSubmissionIntent,
   type ComposerTrigger,
-  collapseExpandedComposerCursor,
   composerSubmissionIntentForKey,
 } from "../../composer-logic";
 import { type PendingUserInput } from "../../session-logic";
@@ -33,6 +32,7 @@ export function composerCommandKeyHandler(input: {
   readonly sendShortcut: ChatComposerProps["settings"]["sendShortcut"];
   readonly routeKind: ChatComposerProps["routeKind"];
   readonly phase: ChatComposerProps["phase"];
+  readonly forceQueue: boolean;
   readonly isCompacting: boolean;
   readonly followUpBehavior: ChatComposerProps["settings"]["followUpBehavior"];
   readonly isSoftwareKeyboardOpen: boolean;
@@ -85,6 +85,7 @@ export function composerCommandKeyHandler(input: {
     sendShortcut,
     routeKind,
     phase,
+    forceQueue,
     isCompacting,
     followUpBehavior,
     isSoftwareKeyboardOpen,
@@ -126,7 +127,7 @@ export function composerCommandKeyHandler(input: {
   const replacePromptFromHistory = (nextPrompt: string) => {
     promptRef.current = nextPrompt;
     setComposerDraftPrompt(composerDraftTarget, nextPrompt);
-    setComposerCursor(collapseExpandedComposerCursor(nextPrompt, nextPrompt.length));
+    setComposerCursor(nextPrompt.length);
     setComposerTrigger(null);
     setComposerHighlightedItemId(null);
   };
@@ -178,7 +179,7 @@ export function composerCommandKeyHandler(input: {
       keybindings,
       isSoftwareKeyboardOpen,
       isDraftThread: routeKind === "draft",
-      isRunning: phase === "running",
+      isRunning: phase === "running" || forceQueue,
       sendShortcut,
       prompt: promptRef.current,
     });
@@ -223,6 +224,7 @@ export function composerCommandKeyHandler(input: {
           alternateModifier: submissionIntent === "alternate",
           activeTurnDefault: followUpBehavior,
           canSteer: !isCompacting,
+          forceQueue,
         }),
         submissionIntent,
       );

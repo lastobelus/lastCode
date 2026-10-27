@@ -1,4 +1,5 @@
 import { AudioPreviewUnmountContext } from "../files/AudioPreview";
+import type { ThreadAnnotation } from "@t3tools/contracts";
 import { ThreadFindTimelineContext } from "./ThreadFindProvider";
 import { MarkdownFindContext } from "./markdownFindContext";
 import { useChatCanvas } from "./ChatCanvasContext";
@@ -199,6 +200,11 @@ export interface MessagesTimelineHistoryControls {
 }
 
 interface MessagesTimelineProps {
+  annotation?: ThreadAnnotation | null;
+  onAnnotationEdit?: () => void;
+  onAnnotationBodyChange?: (body: string) => Promise<boolean>;
+  onAnnotationResolve?: () => void;
+  onAnnotationReopen?: () => void;
   citationRequest?: AssistantCitationRequest | null;
   citationHistory?: CitedHistory;
   onCiteAssistantText?: (
@@ -309,6 +315,11 @@ export function MessagesTimeline(props: MessagesTimelineProps) {
 }
 
 const ConversationTimeline = memo(function ConversationTimeline({
+  annotation = null,
+  onAnnotationEdit = () => {},
+  onAnnotationBodyChange,
+  onAnnotationResolve = () => {},
+  onAnnotationReopen = () => {},
   citationRequest = null,
   citationHistory = CITED_HISTORY_LOADING,
   onCiteAssistantText,
@@ -1346,6 +1357,13 @@ const ConversationTimeline = memo(function ConversationTimeline({
               ListFooterComponent={timelineListFooter}
             />
             <TimelineMinimap
+              annotation={annotation}
+              threadRef={parseScopedThreadKey(routeThreadKey)}
+              markdownCwd={markdownCwd}
+              onAnnotationEdit={onAnnotationEdit}
+              onAnnotationBodyChange={onAnnotationBodyChange}
+              onAnnotationResolve={onAnnotationResolve}
+              onAnnotationReopen={onAnnotationReopen}
               items={minimapItems}
               hasPersistentGutter={minimapHasPersistentGutter}
               hitStripWidth={minimapHitStripWidth}
@@ -1494,6 +1512,9 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
         <AssistantTimelineRow row={row} />
       ) : null}
       {row.kind === "assistant-meta" ? <AssistantMetaTimelineRow row={row} /> : null}
+      {row.kind === "message" && row.message.role === "system" ? (
+        <SystemTimelineRow row={row} />
+      ) : null}
       {row.kind === "proposed-plan" ? <ProposedPlanTimelineRow row={row} /> : null}
       {row.kind === "html-render" ? <HtmlRenderTimelineRow row={row} /> : null}
       {row.kind === "mcp-app" ? <McpAppTimelineRow row={row} /> : null}

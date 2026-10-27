@@ -7,6 +7,7 @@ import {
   buildPhysicalToLogicalProjectKeyMap,
   buildSidebarProjectPickerEntries,
   buildSidebarProjectSnapshots,
+  orderProjectMembersForPicker,
   resolveSidebarProjectScopeKey,
   getSidebarProjectSettingsKey,
   resolveSidebarProjectSettingsKey,
@@ -28,6 +29,43 @@ const defaultGroupingSettings = {
   sidebarProjectGroupingMode: "repository" as const,
   sidebarProjectGroupingOverrides: {},
 };
+
+describe("orderProjectMembersForPicker", () => {
+  const members = [
+    {
+      ...makeProject({ id: ProjectId.make("first") }),
+      physicalProjectKey: "first",
+      environmentLabel: "First",
+    },
+    {
+      ...makeProject({ id: ProjectId.make("second"), environmentId: remoteEnvironmentId }),
+      physicalProjectKey: "second",
+      environmentLabel: "Second",
+    },
+    {
+      ...makeProject({ id: ProjectId.make("third") }),
+      physicalProjectKey: "third",
+      environmentLabel: "Third",
+    },
+  ];
+
+  it("moves the preferred physical project first and preserves the remaining order", () => {
+    const ordered = orderProjectMembersForPicker(members, members[1]!);
+    expect(ordered.map((member) => member.id)).toEqual(["second", "first", "third"]);
+    expect(members.map((member) => member.id)).toEqual(["first", "second", "third"]);
+    expect(ordered[0]).toBe(members[1]);
+  });
+
+  it("matches both project and environment and keeps the fallback order", () => {
+    expect(orderProjectMembersForPicker(members, members[0]!)).toBe(members);
+    expect(
+      orderProjectMembersForPicker(members, {
+        environmentId: primaryEnvironmentId,
+        id: members[1]!.id,
+      }),
+    ).toBe(members);
+  });
+});
 
 function makeProject(overrides: Partial<Project> = {}): Project {
   return {
@@ -347,7 +385,9 @@ describe("No project sidebar group", () => {
   );
 
   it("preserves upstream filter and settings identities alongside the legacy row", () => {
-    const projects = groupingInput.projects.map((project) => ({ ...project, isScratch: true }));
+    const projects = groupingInput.projects.map((project) =>
+      makeProject({ ...project, isScratch: true }),
+    );
     const input = { ...groupingInput, projects, resolveEnvironmentLabel };
     const legacyGroups = buildSidebarProjectSnapshots(input);
     const filters = buildSidebarProjectSnapshots({ ...input, groupScratchProjects: true });
@@ -381,7 +421,9 @@ describe("No project sidebar group", () => {
   });
 
   it("retains identified scratch projects in the legacy row before root config is available", () => {
-    const projects = groupingInput.projects.map((project) => ({ ...project, isScratch: true }));
+    const projects = groupingInput.projects.map((project) =>
+      makeProject({ ...project, isScratch: true }),
+    );
     const groups = buildSidebarProjectSnapshots({
       ...groupingInput,
       projects,

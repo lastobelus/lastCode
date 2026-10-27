@@ -63,7 +63,9 @@ asks for an upstream contribution; never pause to ask whether to go upstream.
    is not a local pass. In GitHub-only mode, publish without requiring the local
    Action. The ordinary pre-push hook follows the same policy; keep it enabled.
    Always local mode waits for capacity, and `--require-local` explicitly forces
-   local Quick CI. Settings → LastCode → Local CI selects the mode.
+   local Quick CI. Settings → LastCode → Local CI selects the mode. A delegated
+   child task hands this and every other Action in this workflow to its parent;
+   see [Parent-mediated Actions](../../../docs/internals/resumable-project-actions-setup.md#parent-mediated-actions-for-delegated-children).
 5. Open a PR targeting `lastcode/main` only when the user explicitly asks.
 
 For an explicitly requested stack, a child may instead branch from and target

@@ -22,6 +22,16 @@ const REPO_ROOT = NodePath.resolve(import.meta.dirname, "..");
 const READY_PREFIX = "LASTCODE_DOCS_FIXTURE_READY=";
 const FIXTURE_SCHEMA_VERSION = 1;
 const STARTUP_TIMEOUT_MS = 120_000;
+// Use the server's persistence setup without booting an application just to migrate an empty DB.
+const MIGRATE_FIXTURE_DATABASE_SCRIPT = `
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as SqlitePersistence from "../apps/server/src/persistence/Sqlite.ts";
+await Effect.runPromise(Effect.scoped(Layer.build(
+  SqlitePersistence.layerFromPath(process.argv[1]).pipe(Layer.provide(NodeServices.layer))
+)));
+`;
 
 export interface PublicDocsFixtureCliOptions {
   readonly commit: string;
@@ -243,14 +253,10 @@ function observeDevRunnerOutput(state: DevRunnerState, chunk: string): void {
   if (pairingUrl !== undefined) state.pairingUrl = pairingUrl;
 }
 
-function startDevRunner(
-  mode: "dev" | "dev:server",
-  baseDir: string,
-  environment: NodeJS.ProcessEnv,
-): OwnedDevRunner {
+function startDevRunner(baseDir: string, environment: NodeJS.ProcessEnv): OwnedDevRunner {
   const child = NodeChildProcess.spawn(
     NodeProcess.execPath,
-    ["scripts/dev-runner.ts", mode, "--home-dir", baseDir],
+    ["scripts/dev-runner.ts", "dev", "--home-dir", baseDir],
     {
       cwd: REPO_ROOT,
       detached: true,
@@ -343,23 +349,22 @@ export async function runPublicDocsFixture(
     homeDirectory,
   });
 
-  const bootstrap = startDevRunner("dev:server", baseDir, environment);
-  let workspaceRoot: string;
-  try {
-    await waitForReadiness(
-      bootstrap,
-      ({ serverPort, pairingUrl }) => serverPort !== undefined && pairingUrl !== undefined,
-      "Fixture migration server",
-    );
-    ({ workspaceRoot } = await seedShowcaseEnvironment({
-      baseDir,
-      profile: "public-docs",
-    }));
-  } finally {
-    await stopOwnedProcess(bootstrap.child);
-  }
+  await execFile(
+    NodeProcess.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      MIGRATE_FIXTURE_DATABASE_SCRIPT,
+      NodePath.join(baseDir, "userdata", "statev2.sqlite"),
+    ],
+    { cwd: NodePath.join(REPO_ROOT, "scripts"), env: environment },
+  );
+  const { workspaceRoot } = await seedShowcaseEnvironment({
+    baseDir,
+    profile: "public-docs",
+  });
 
-  const server = startDevRunner("dev", baseDir, environment);
+  const server = startDevRunner(baseDir, environment);
   try {
     await waitForReadiness(
       server,

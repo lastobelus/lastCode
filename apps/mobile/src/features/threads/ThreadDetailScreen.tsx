@@ -8,13 +8,15 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { AsyncResult, Atom } from "effect/reactivity";
 import * as Dialog from "../../components/ui/Dialog";
+import { recoverySuppressesWorking } from "@t3tools/client-runtime/state/thread-recovery";
+import { ThreadRecoveryNotice } from "./ThreadRecoveryNotice";
 import { useAtomMount, useAtomValue } from "@effect/atom-react";
 import { parseThreadKey, threadKey } from "@t3tools/client-runtime/state/entities";
 import { createThreadVisitTracker } from "@t3tools/client-runtime/state/thread-visits";
 import { useChildThreadInputs, useThreadReportedModelSelection } from "../../state/entities";
 import { UsageLimitRecoveryCard } from "./UsageLimitRecoveryCard";
 import { ChatGptUsageLimitNotice } from "./ChatGptUsageLimitNotice";
-import { useFocusEffect, useNavigation } from "@react-navigation/native";
+import { StackActions, useFocusEffect, useNavigation } from "@react-navigation/native";
 import {
   effectiveSnoozed,
   threadWokeAt,
@@ -154,6 +156,7 @@ import {
 } from "../../state/threads";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { threadStreamHaptics } from "./threadStreamHaptics";
+import { canPromoteSubagent } from "@t3tools/client-runtime/state/subagent-promotion";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useDelayedStatus } from "../../lib/useDelayedStatus";
 import type {
@@ -253,6 +256,7 @@ export interface ThreadDetailScreenProps {
   readonly composerDraftKey: string | null;
   readonly followUpBehavior: FollowUpBehavior;
   readonly canSteerActiveTurn: boolean;
+  readonly forceQueue: boolean;
   readonly isSavingQueuedEdit: boolean;
   readonly onCancelQueuedRunEdit: () => void;
   readonly onRemoveQueuedEditAttachment: (attachmentId: string) => void;
@@ -611,6 +615,7 @@ function ThreadDetailBody(props: ThreadDetailScreenProps) {
   const pendingBackgroundWork = presentPendingBackgroundWork(
     props.selectedThread.pendingBackgroundTasks,
   );
+  const suppressStaleWorking = recoverySuppressesWorking(props.selectedThread.recovery);
   const floatingStatus = ((): FloatingWorkingStatus | null => {
     const connectionStatus = connectionFloatingStatus({
       connectionError: props.connectionError,
@@ -621,6 +626,7 @@ function ThreadDetailBody(props: ThreadDetailScreenProps) {
     if (connectionStatus !== null && !props.draftMode) {
       return connectionStatus;
     }
+    if (suppressStaleWorking) return null;
     if (props.activePendingApproval !== null || props.activePendingUserInput !== null) {
       return null;
     }
@@ -1086,6 +1092,13 @@ function ThreadDetailBody(props: ThreadDetailScreenProps) {
       : (appAtomRegistry.get(
           environmentThreadDetails.pendingRequestsAtom(props.selectedThreadDetailRef),
         )?.approvals ?? []);
+
+  const requestSubagentPromotion = useAtomCommand(threadEnvironment.requestSubagentPromotion, {
+    reportFailure: false,
+  });
+  const cancelSubagentPromotion = useAtomCommand(threadEnvironment.cancelSubagentPromotion, {
+    reportFailure: false,
+  });
   const handleSendMessage = async (
     followUp?: ActiveTurnComposerAction,
     stillSendable?: () => boolean,
@@ -1309,8 +1322,8 @@ function ThreadDetailBody(props: ThreadDetailScreenProps) {
               agentLabel={agentLabel}
               threadTitle={props.selectedThread.title}
               latestRun={props.activityRun}
-              activeWorkStartedAt={props.activeWorkStartedAt}
-              runlessWorkActive={props.runlessWorkActive ?? false}
+              activeWorkStartedAt={suppressStaleWorking ? null : props.activeWorkStartedAt}
+              runlessWorkActive={!suppressStaleWorking && (props.runlessWorkActive ?? false)}
               listRef={listRef}
               freeze={freeze}
               anchorMessageId={anchorMessageId}
@@ -1432,6 +1445,11 @@ function ThreadDetailBody(props: ThreadDetailScreenProps) {
                       />
                     </Animated.View>
                   ) : null}
+                  <ThreadRecoveryNotice
+                    key={`${selectedThreadKey}:${props.selectedThread.recovery?.runId}:${props.selectedThread.recovery?.attemptId}`}
+                    thread={props.selectedThread}
+                    environmentId={props.environmentId}
+                  />
                   <UsageLimitRecoveryCard
                     key={props.selectedThread.latestRun?.runId}
                     thread={props.selectedThread}
@@ -1560,6 +1578,58 @@ function ThreadDetailBody(props: ThreadDetailScreenProps) {
                       }}
                     >
                       <ProviderSubagentBar
+                        key={String(props.selectedThread.id)}
+                        promotion={props.selectedThread.subagentPromotion ?? null}
+                        promotionAvailable={canPromoteSubagent(
+                          providerSubagentProvider?.threadCapabilities,
+                        )}
+                        onPromote={
+                          canPromoteSubagent(providerSubagentProvider?.threadCapabilities) &&
+                          props.connectionStateLabel === "connected"
+                            ? async () => {
+                                const result = await requestSubagentPromotion({
+                                  environmentId: props.environmentId,
+                                  input: {
+                                    threadId: props.selectedThread.id,
+                                    creationSource: "mobile",
+                                  },
+                                });
+                                if (result._tag === "Failure")
+                                  throw squashAtomCommandFailure(result);
+                              }
+                            : null
+                        }
+                        onCancelPromotion={
+                          props.selectedThread.subagentPromotion?.status === "waiting" &&
+                          props.connectionStateLabel === "connected"
+                            ? async () => {
+                                const promotion = props.selectedThread.subagentPromotion;
+                                if (!promotion) return;
+                                const result = await cancelSubagentPromotion({
+                                  environmentId: props.environmentId,
+                                  input: {
+                                    threadId: props.selectedThread.id,
+                                    requestId: promotion.requestId,
+                                  },
+                                });
+                                if (result._tag === "Failure")
+                                  throw squashAtomCommandFailure(result);
+                              }
+                            : null
+                        }
+                        onOpenPromoted={
+                          props.selectedThread.subagentPromotion?.status === "promoted"
+                            ? () =>
+                                navigation.dispatch(
+                                  StackActions.push("Thread", {
+                                    environmentId: String(props.environmentId),
+                                    threadId: String(
+                                      props.selectedThread.subagentPromotion!.targetThreadId,
+                                    ),
+                                  }),
+                                )
+                            : null
+                        }
                         provider={providerSubagentProvider ?? null}
                         modelLabel={
                           providerSubagentCatalogModel?.name ??
@@ -1629,6 +1699,7 @@ function ThreadDetailBody(props: ThreadDetailScreenProps) {
                         }
                         canSteerActiveTurn={props.canSteerActiveTurn}
                         hidden={composerSlotHidden}
+                        forceQueue={props.forceQueue}
                         queuedEdit={
                           props.queuedRunEdit === null
                             ? null

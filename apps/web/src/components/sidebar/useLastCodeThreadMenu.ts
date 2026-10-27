@@ -1,3 +1,4 @@
+import { mergeWorktreeSuspensionMenuItems } from "../worktreeSuspensionMenu";
 import { withThreadReadPermissions } from "../../hooks/threadReadActions";
 import type { ScopedThreadRef } from "@t3tools/contracts";
 import {
@@ -14,6 +15,7 @@ import { useClientSettings } from "~/hooks/useSettings";
 import { selectProjectGroupingSettings } from "../../logicalProject";
 import { useRouter } from "@tanstack/react-router";
 import { useOpenHandoff } from "../../handoffs/useOpenHandoff";
+import { useWorktreeSuspensionActions } from "../../hooks/useWorktreeSuspensionActions";
 import { useRightPanelStore } from "../../rightPanelStore";
 import { useSidebar } from "../ui/sidebar";
 import { readLocalApi } from "../../localApi";
@@ -47,17 +49,23 @@ export function useLastCodeThreadMenu(
   navigateToThread: (ref: ScopedThreadRef) => Promise<void>,
   handleNewThread: ReturnType<typeof useNewThreadHandler>,
 ) {
-  const { unarchiveThread, deleteThread, setThreadPersistence, markThreadUnread, markThreadRead } =
-    useLastCodeThreadActions();
+  const {
+    archiveThread,
+    unarchiveThread,
+    confirmAndDeleteThread,
+    setThreadPersistence,
+    markThreadUnread,
+    markThreadRead,
+  } = useLastCodeThreadActions();
   const updateMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
   const stopProcesses = useStopThreadProcesses();
   const { copyPath, copyId } = useLastCodeThreadClipboard();
   const handoffsLimit = useClientSettings((s) => s.handoffsMenuLimit);
-  const confirmDeletion = useClientSettings((s) => s.confirmThreadDelete);
   const settings = useClientSettings(selectProjectGroupingSettings);
   const router = useRouter();
+  const workspaceActions = useWorktreeSuspensionActions();
   const { isMobile, setOpenMobile } = useSidebar();
   const openHandoff = useThreadMenuHandoff(router, isMobile, setOpenMobile);
   const members = new Map(
@@ -82,9 +90,13 @@ export function useLastCodeThreadMenu(
       hasStoppableProcesses,
     );
     const clicked = await api.contextMenu.show(
-      withThreadReadPermissions(target.items, [ref]),
+      withThreadReadPermissions(
+        mergeWorktreeSuspensionMenuItems(target.items, workspaceActions.menuItems(thread)),
+        [ref],
+      ),
       position,
     );
+    if (await workspaceActions.run(clicked, ref)) return;
     const handoff = parseLastCodeHandoffAction(clicked);
     if (handoff) {
       await openHandoff(target, handoff);
@@ -185,13 +197,19 @@ export function useLastCodeThreadMenu(
         copyPath(target.workspacePath, { path: target.workspacePath });
       },
       "copy-thread-id": () => copyId(thread.id, { threadId: thread.id }),
+      "archive-discard": async () => {
+        reportThreadOperationFailure(
+          await archiveThread(ref, { discardSavedWorkspace: true }),
+          "Failed to archive thread",
+        );
+      },
       delete: () =>
         deleteLastCodeThread(ref, thread, {
           canOperate: checkTaskPermission,
           confirm: (message, options) => api.dialogs.confirm(message, options),
-          confirmDeletion,
+          confirmDeletion: false,
           readThread: readThreadShell,
-          deleteThread: deleteThread,
+          deleteThread: confirmAndDeleteThread,
         }),
       "handoffs-heading": () => {},
       "handoffs-empty": () => {},

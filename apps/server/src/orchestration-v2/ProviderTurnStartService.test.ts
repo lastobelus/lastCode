@@ -3,6 +3,7 @@ import { expect, it, vi } from "vite-plus/test";
 import { it as effectIt } from "@effect/vitest";
 import {
   CheckpointScopeId,
+  ContextHandoffId,
   GitCommandError,
   MessageId,
   NodeId,
@@ -30,9 +31,13 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../config.ts";
-import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
+import * as PreviewAgentActivity from "../preview/PreviewAgentActivity.ts";
+import { registerWorkspaceLeaseRoot, withWorkspaceLease } from "../workspace/workspaceLease.ts";
+import * as WorkspaceAcquisitionTestkit from "../workspace/WorkspaceAcquisition.testkit.ts";
+import * as WorkspaceAcquisition from "../workspace/WorkspaceAcquisition.ts";
 import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { layerRealGit } from "./ProviderTurnStartService.testkit.ts";
@@ -45,6 +50,24 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as McpAppModelContext from "../mcpApps/McpAppModelContext.ts";
+import * as CheckpointService from "./CheckpointService.ts";
+import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
+import * as Ref from "effect/Ref";
+import * as EffectWorker from "./EffectWorker.ts";
+import * as EffectOutbox from "./EffectOutbox.ts";
+import * as PauseStore from "../environment/EnvironmentPauseStore.ts";
+import * as RunFinalizationService from "./RunFinalizationService.ts";
+import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
+import * as ResourceCleanupService from "./ResourceCleanupService.ts";
+import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
+import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
+import * as RuntimeRequestService from "./RuntimeRequestService.ts";
+import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
+import * as IncomingMessageSummaryService from "./IncomingMessageSummaryService.ts";
+import * as ThreadManagementService from "./ThreadManagementService.ts";
+import * as SubagentPromotionService from "./SubagentPromotionService.ts";
+import { CommandId } from "@t3tools/contracts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnStart from "./ProviderTurnStartService.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
@@ -75,6 +98,7 @@ function startWithMissingWorktree(
     [managedWorktreesDir]: managedWorktreesDir,
     [`${managedWorktreesDir}/project`]: `${managedWorktreesDir}/project`,
   },
+  acquire?: WorkspaceAcquisition.WorkspaceAcquisition["Service"]["acquire"],
 ) {
   const threadId = ThreadId.make("thread_provider_turn_start_projection_failure");
   const runId = RunId.make("run_provider_turn_start_projection_failure");
@@ -126,6 +150,11 @@ function startWithMissingWorktree(
   const createWorktree = vi.fn(() => Effect.succeed({} as never));
   const listLocalBranchNames = vi.fn(() => Effect.succeed(["feature/restore"]));
   const layer = ProviderTurnStart.layer.pipe(
+    Layer.provide(
+      acquire === undefined
+        ? WorkspaceAcquisitionTestkit.layer
+        : WorkspaceAcquisitionTestkit.layerWith(acquire),
+    ),
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({}),
@@ -206,6 +235,22 @@ function startWithMissingWorktree(
   };
 }
 
+it.each(["snapshot-unavailable", "discarded", "blocked"] as const)(
+  "does not recreate from a branch when saved workspace acquisition is %s",
+  async (reason) => {
+    const fixture = startWithMissingWorktree(
+      `${managedWorktreesDir}/project/saved`,
+      undefined,
+      () => Effect.fail(new WorkspaceAcquisition.WorkspaceUnavailableError({ reason })),
+    );
+    const error = await fixture.start;
+    expect(error.cause).toBeInstanceOf(WorkspaceAcquisition.WorkspaceUnavailableError);
+    expect(fixture.pruneWorktrees).not.toHaveBeenCalled();
+    expect(fixture.createWorktree).not.toHaveBeenCalled();
+    expect(fixture.startRootRun).not.toHaveBeenCalled();
+  },
+);
+
 it.each([
   {
     label: "<managed>/<repo>/<branch>",
@@ -259,6 +304,7 @@ it.each([
   const harness = startWithMissingWorktree(input.worktreePath, input.realPaths);
   await harness.start;
   expect(harness.createWorktree).toHaveBeenCalledTimes(input.recreated ? 1 : 0);
+  expect(harness.pruneWorktrees).not.toHaveBeenCalled();
 });
 
 function makeLocalCommandHarness(input: {
@@ -286,6 +332,13 @@ function makeLocalCommandHarness(input: {
     readonly interruptFailure?: boolean;
     readonly interruptCurrentRun?: boolean;
   };
+  readonly nativeStart?: "accepted" | "ack-lost" | "handoff-failure";
+  readonly direction?: "pause" | "resume";
+  readonly retryThenContextFailure?: boolean;
+  readonly initialRunStatus?: OrchestrationV2ThreadProjection["runs"][number]["status"];
+  readonly skipStartAt?: "load" | "running-write" | "preparation" | "last-check" | "handoff";
+  readonly failFinalization?: boolean;
+  readonly onMessageDelivery?: (messageId: MessageId, delivered: boolean) => Effect.Effect<void>;
 }) {
   const now = DateTime.makeUnsafe("2026-09-04T12:00:00Z");
   const threadId = ThreadId.make("thread-native-account-command");
@@ -298,7 +351,11 @@ function makeLocalCommandHarness(input: {
   const oldInstanceId = ProviderInstanceId.make("antigravity-personal");
   const newInstanceId = ProviderInstanceId.make("codex-personal");
   const checkpointScopeId = CheckpointScopeId.make("scope-native-account-command");
-  const messageId = MessageId.make("message-native-account-command");
+  const messageId = MessageId.make(
+    input.nativeStart === undefined
+      ? "message-native-account-command"
+      : `environment-pause:fixture:${threadId}:${input.direction ?? "pause"}:0`,
+  );
   const run: OrchestrationV2ThreadProjection["runs"][number] = {
     id: runId,
     threadId,
@@ -309,7 +366,7 @@ function makeLocalCommandHarness(input: {
     userMessageId: messageId,
     rootNodeId,
     activeAttemptId: attemptId,
-    status: "starting",
+    status: input.initialRunStatus ?? "starting",
     requestedAt: now,
     startedAt: null,
     completedAt: null,
@@ -350,11 +407,27 @@ function makeLocalCommandHarness(input: {
   let projection: OrchestrationV2ThreadProjection = {
     thread: {
       id: threadId,
-      activeProviderThreadId: providerThreadId,
       projectId: ProjectId.make("project-native-account-command"),
+      title: "Example thread",
+      createdBy: "user",
+      creationSource: "web",
+      providerInstanceId: newInstanceId,
+      modelSelection: run.modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      activeProviderThreadId: providerThreadId,
       branch: input.worktreePath === undefined ? null : "feature/restore",
       worktreePath: input.worktreePath ?? null,
-    } as OrchestrationV2ThreadProjection["thread"],
+      lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+      forkedFrom: null,
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: null,
+      deletedAt: null,
+      settledAt: null,
+      settledOverride: null,
+      lastVisitedAt: null,
+    },
     runs: [
       ...(input.previousNativeSession
         ? [
@@ -539,6 +612,105 @@ function makeLocalCommandHarness(input: {
       if (input.previousTurn?.interruptCurrentRun) interruptRun();
     }),
   );
+  if (input.nativeStart === "handoff-failure" || input.skipStartAt === "handoff") {
+    projection = {
+      ...projection,
+      contextHandoffs: [
+        {
+          id: ContextHandoffId.make("handoff-fixture"),
+          threadId,
+          targetRunId: runId,
+          fromProviderThreadIds: [providerThreadId],
+          toProviderThreadId: providerThreadId,
+          coveredRunOrdinals: { from: 1, to: 1 },
+          strategy: "manual_context",
+          status: "ready",
+          summaryMessageId: null,
+          summaryText: "Example previous context",
+          createdByProviderInstanceId: newInstanceId,
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
+    };
+  }
+  const nativePrompts: string[] = [];
+  const nativeSession: ProviderAdapter.ProviderAdapterV2SessionRuntime = {
+    instanceId: newInstanceId,
+    driver: providerThread.driver,
+    providerSessionId,
+    providerSession: {
+      id: providerSessionId,
+      driver: providerThread.driver,
+      providerInstanceId: newInstanceId,
+      status: "ready",
+      cwd: "/tmp/native-account-command",
+      model: null,
+      capabilities: CodexProviderCapabilitiesV2,
+      createdAt: now,
+      updatedAt: now,
+      lastError: null,
+    },
+    events: Stream.never,
+    ensureThread: () =>
+      Effect.sync((): OrchestrationV2ThreadProjection["providerThreads"][number] => {
+        if (input.skipStartAt === "load") interruptRun();
+        return {
+          ...providerThread,
+          nativeThreadRef: {
+            driver: providerThread.driver,
+            nativeId: "native-fixture",
+            strength: "strong",
+          },
+        };
+      }),
+    ...(input.skipStartAt === "last-check"
+      ? {
+          subscribeEvents: Effect.sync(() => {
+            interruptRun();
+            return { events: Stream.never, close: Effect.void };
+          }),
+        }
+      : {}),
+    resumeThread: () => Effect.die("unused resume"),
+    injectHistory: () =>
+      input.skipStartAt === "handoff"
+        ? Effect.sync(() => {
+            interruptRun();
+            return true;
+          })
+        : Effect.fail(
+            new ProviderAdapter.ProviderAdapterEventStreamError({
+              driver: providerThread.driver,
+              providerSessionId,
+              cause: "History preparation failed before prompt start",
+            }),
+          ),
+    startTurn: (turn) =>
+      Effect.sync(() => {
+        nativePrompts.push(turn.message.text);
+      }).pipe(
+        Effect.andThen(
+          input.nativeStart === "ack-lost"
+            ? Effect.fail(
+                new ProviderAdapter.ProviderAdapterTurnStartError({
+                  driver: providerThread.driver,
+                  threadId,
+                  providerThreadId,
+                  runId,
+                  cause: "Native prompt received, acknowledgement lost",
+                }),
+              )
+            : Effect.void,
+        ),
+      ),
+    steerTurn: () => Effect.die("unused steer"),
+    interruptTurn: () => Effect.die("unused interrupt"),
+    respondToRuntimeRequest: () => Effect.die("unused response"),
+    readThreadSnapshot: () => Effect.die("unused snapshot"),
+    rollbackThread: () => Effect.die("unused rollback"),
+    forkThread: () => Effect.die("unused fork"),
+  };
   const events: Array<OrchestrationV2DomainEvent> = [];
   const interruptRun = () => {
     projection = {
@@ -598,25 +770,27 @@ function makeLocalCommandHarness(input: {
                   ),
                 ),
               )
-            : input.failReadsAfterRunning === true || input.previousTurn !== undefined
-              ? Effect.succeed({
-                  driver: providerThread.driver,
-                  providerSession: {
-                    id: providerSessionId,
+            : input.nativeStart !== undefined
+              ? Effect.succeed(nativeSession)
+              : input.failReadsAfterRunning === true || input.previousTurn !== undefined
+                ? Effect.succeed({
                     driver: providerThread.driver,
-                    providerInstanceId: newInstanceId,
-                    status: "ready",
-                    cwd: "/tmp/native-account-command",
-                    model: null,
-                    capabilities: CodexProviderCapabilitiesV2,
-                    createdAt: now,
-                    updatedAt: now,
-                    lastError: null,
-                  },
-                  ensureThread: () => Effect.succeed(providerThread),
-                  resumeThread: () => Effect.succeed(projection.providerThreads[0]),
-                } as never)
-              : Effect.die("A local command must not open a native session."),
+                    providerSession: {
+                      id: providerSessionId,
+                      driver: providerThread.driver,
+                      providerInstanceId: newInstanceId,
+                      status: "ready",
+                      cwd: "/tmp/native-account-command",
+                      model: null,
+                      capabilities: CodexProviderCapabilitiesV2,
+                      createdAt: now,
+                      updatedAt: now,
+                      lastError: null,
+                    },
+                    ensureThread: () => Effect.succeed(providerThread),
+                    resumeThread: () => Effect.succeed(projection.providerThreads[0]),
+                  } as never)
+                : Effect.die("A local command must not open a native session."),
   );
   const startRootRun = vi.fn<
     (input: RunExecutionService.RunExecutionServiceV2StartRootRunInput) => Effect.Effect<void>
@@ -646,29 +820,32 @@ function makeLocalCommandHarness(input: {
           }),
         ),
   );
-  const writeIfRunCurrent = vi.fn(({ events: incoming, activeAttemptId, expectedStatus }) =>
-    "writeFailure" in input
-      ? Effect.fail(
-          new EventSink.EventSinkWriteError({
-            eventCount: incoming.length,
-            cause: input.writeFailure,
-          }),
-        )
-      : Effect.sync(() => {
-          const current = projection.runs.find((candidate) => candidate.id === runId);
-          const committed =
-            current !== undefined &&
-            current.activeAttemptId === activeAttemptId &&
-            current.status === expectedStatus;
-          if (committed) {
-            for (const event of incoming) {
-              expect(isDomainEvent(event)).toBe(true);
-              events.push(event);
-              projection = ProjectionStore.applyToProjection(projection, event);
+  const writeIfRunCurrent = vi.fn<EventSink.EventSinkV2Shape["writeIfRunCurrent"]>(
+    ({ events: incoming, activeAttemptId, expectedStatus }) =>
+      "writeFailure" in input || (input.failFinalization === true && expectedStatus === "running")
+        ? Effect.fail(
+            new EventSink.EventSinkWriteError({
+              eventCount: incoming.length,
+              cause: input.writeFailure,
+            }),
+          )
+        : Effect.sync(() => {
+            if (input.skipStartAt === "running-write" && expectedStatus === "starting")
+              interruptRun();
+            const current = projection.runs.find((candidate) => candidate.id === runId);
+            const committed =
+              current !== undefined &&
+              current.activeAttemptId === activeAttemptId &&
+              current.status === expectedStatus;
+            if (committed) {
+              for (const event of incoming) {
+                expect(isDomainEvent(event)).toBe(true);
+                events.push(event);
+                projection = ProjectionStore.applyToProjection(projection, event);
+              }
             }
-          }
-          return { committed, storedEvents: [] };
-        }),
+            return { committed, storedEvents: [] };
+          }),
   );
   const resolveRuntimePolicy = vi.fn(
     ({ thread }: Parameters<RuntimePolicy.RuntimePolicyV2Shape["resolve"]>[0]) =>
@@ -680,23 +857,45 @@ function makeLocalCommandHarness(input: {
   const getThreadRecords = vi.fn<ProjectionStore.ProjectionStoreV2Shape["getThreadRecords"]>(() =>
     Effect.succeed(projection),
   );
+  let startContextReads = 0;
   const getTurnStartContext = vi.fn(() =>
-    Effect.succeed({
-      ...projection,
-      hasConversation: projection.messages.some(
-        (m) =>
-          m.role === "user" &&
-          (m.text.trim().toLowerCase() !== "/compact" || m.attachments.length > 0),
-      ),
+    Effect.suspend(() => {
+      startContextReads++;
+      return input.retryThenContextFailure && startContextReads > 1
+        ? Effect.fail(
+            new ProjectionStore.ProjectionStoreReadError({
+              threadId,
+              cause: "Retry context read failed",
+            }),
+          )
+        : Effect.succeed({
+            ...projection,
+            hasConversation: projection.messages.some(
+              (m) =>
+                m.role === "user" &&
+                (m.text.trim().toLowerCase() !== "/compact" || m.attachments.length > 0),
+            ),
+          });
     }),
   );
   const layer = ProviderTurnStart.layer.pipe(
+    Layer.provide(WorkspaceAcquisitionTestkit.layer),
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({
           prepareProviderHandoff: () => Effect.die("history read must fail first"),
         }),
-        Layer.mock(EventSink.EventSinkV2)({ writeIfRunCurrent }),
+        Layer.mock(EventSink.EventSinkV2)({
+          writeIfRunCurrent,
+          write: ({ events: incoming }) =>
+            Effect.sync(() => {
+              for (const event of incoming) {
+                events.push(event);
+                projection = ProjectionStore.applyToProjection(projection, event);
+              }
+              return [];
+            }),
+        }),
         IdAllocator.layer,
         layerWorktreeLocation(input.worktreesDir),
         input.fileSystem === undefined
@@ -749,7 +948,30 @@ function makeLocalCommandHarness(input: {
             ),
         }),
         Layer.mock(ProviderAuthService.ProviderAuthService)({ tryHandlePromptCommand }),
-        Layer.mock(RunExecutionService.RunExecutionServiceV2)({ startRootRun }),
+        input.nativeStart === undefined
+          ? Layer.mock(RunExecutionService.RunExecutionServiceV2)({ startRootRun })
+          : RunExecutionService.layer.pipe(
+              Layer.provide(
+                Layer.mergeAll(
+                  McpAppModelContext.layerEmpty,
+                  PreviewAgentActivity.layer,
+                  Layer.mock(TurnItemPositionStore.TurnItemPositionStoreV2)({
+                    allocate: () => Effect.succeed(1),
+                  }),
+                  Layer.mock(ProjectionStore.ProjectionStoreV2)({}),
+                  Layer.mock(CheckpointService.CheckpointServiceV2)({
+                    captureBaseline: () =>
+                      input.skipStartAt === "preparation" ? Effect.sync(interruptRun) : Effect.void,
+                  }),
+                  Layer.mock(EventSink.EventSinkV2)({ writeIfRunCurrent }),
+                  IdAllocator.layer,
+                  Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
+                    ingestNormalized: () => Effect.succeed([]),
+                  }),
+                  ServerSettings.layerTest(),
+                ),
+              ),
+            ),
         Layer.mock(RuntimePolicy.RuntimePolicyV2)({
           resolve: resolveRuntimePolicy,
         }),
@@ -773,15 +995,29 @@ function makeLocalCommandHarness(input: {
     oldInstanceId,
     newInstanceId,
     attemptId,
+    threadId,
+    runId,
+    messageId,
+    layer,
+    nativePrompts,
     projection: () => projection,
     start: Effect.gen(function* () {
-      yield* (yield* ProviderTurnStart.ProviderTurnStartServiceV2).start({ threadId, runId });
+      yield* (yield* ProviderTurnStart.ProviderTurnStartServiceV2).start({
+        threadId,
+        runId,
+        ...(input.onMessageDelivery === undefined
+          ? {}
+          : { onMessageDelivery: input.onMessageDelivery }),
+      });
     }).pipe(Effect.provide(layer)),
     startWithRetry: Effect.gen(function* () {
       yield* (yield* ProviderTurnStart.ProviderTurnStartServiceV2).start({
         threadId,
         runId,
         willRetry: true,
+        ...(input.onMessageDelivery === undefined
+          ? {}
+          : { onMessageDelivery: input.onMessageDelivery }),
       });
     }).pipe(Effect.provide(layer)),
   };
@@ -847,7 +1083,7 @@ effectIt.effect(
           failReadsAfterRunning: true,
         });
         const open = harness.open.getMockImplementation()!;
-        harness.open.mockImplementation(() =>
+        harness.open.mockImplementation((input) =>
           Effect.gen(function* () {
             expect(yield* git(worktreePath, ["branch", "--show-current"])).toBe("feature/restore");
             expect(yield* git(worktreePath, ["rev-parse", "HEAD"])).toBe(
@@ -858,7 +1094,7 @@ effectIt.effect(
                 path.join(worktreePath, scenario === "retained" ? "thread.txt" : "project.txt"),
               ),
             ).toBe(scenario === "retained" ? "thread work" : "new project code");
-            return yield* open();
+            return yield* open(input);
           }).pipe(Effect.orDie),
         );
 
@@ -1057,8 +1293,10 @@ effectIt.effect.each(["cleanup-first", "startup-first"])(
       const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-start-" });
       const worktreePath = path.join(workspaceRoot, "project", "worktree");
       yield* fileSystem.makeDirectory(worktreePath, { recursive: true });
+      yield* registerWorkspaceLeaseRoot(worktreePath);
       const release = yield* Deferred.make<void>();
       const openEntered = yield* Deferred.make<void>();
+      const cleanupStarted = yield* Deferred.make<void>();
       const harness = makeLocalCommandHarness({
         text: "Continue",
         worktreePath,
@@ -1083,6 +1321,7 @@ effectIt.effect.each(["cleanup-first", "startup-first"])(
         worktreePath,
         Effect.gen(function* () {
           cleanupEntered = true;
+          yield* Deferred.succeed(cleanupStarted, undefined);
           if (order === "cleanup-first") yield* Deferred.await(release);
           else {
             expect(harness.projection().providerSessions).toHaveLength(1);
@@ -1095,6 +1334,7 @@ effectIt.effect.each(["cleanup-first", "startup-first"])(
         order === "cleanup-first"
           ? yield* cleanupEffect.pipe(Effect.forkChild({ startImmediately: true }))
           : undefined;
+      if (order === "cleanup-first") yield* Deferred.await(cleanupStarted);
       const startup = yield* harness.start.pipe(Effect.forkChild({ startImmediately: true }));
       if (order === "cleanup-first") expect(harness.open).not.toHaveBeenCalled();
       if (order === "startup-first") yield* Deferred.await(openEntered);
@@ -1253,6 +1493,215 @@ effectIt.effect("starts another provider in the same checkout while a turn is pe
     yield* Deferred.succeed(releaseTurn, undefined);
     yield* Fiber.join(pending);
   }),
+);
+
+effectIt.effect.each([
+  {
+    nativeStart: "accepted",
+    failFinalization: false,
+    expected: [true],
+    prompts: 1,
+    status: "running",
+    fails: false,
+  },
+  {
+    nativeStart: "ack-lost",
+    failFinalization: false,
+    expected: [],
+    prompts: 1,
+    status: "failed",
+    fails: false,
+  },
+  {
+    nativeStart: "ack-lost",
+    failFinalization: true,
+    expected: [],
+    prompts: 1,
+    status: "running",
+    fails: true,
+  },
+  {
+    nativeStart: "ack-lost",
+    failFinalization: true,
+    retryThenContextFailure: true,
+    expected: [],
+    prompts: 1,
+    status: "running",
+    fails: true,
+  },
+  {
+    nativeStart: "accepted",
+    initialRunStatus: "running",
+    failFinalization: false,
+    expected: [],
+    prompts: 0,
+    status: "running",
+    fails: false,
+  },
+  ...(["load", "running-write", "preparation", "last-check", "handoff"] as const).map(
+    (skipStartAt) => ({
+      nativeStart: "accepted" as const,
+      skipStartAt,
+      failFinalization: false,
+      expected: [false],
+      prompts: 0,
+      status: "interrupted",
+      fails: false,
+    }),
+  ),
+  {
+    nativeStart: "ack-lost",
+    direction: "resume",
+    failFinalization: true,
+    expected: [],
+    prompts: 1,
+    status: "running",
+    fails: true,
+  },
+  {
+    nativeStart: "handoff-failure",
+    failFinalization: false,
+    expected: [false],
+    prompts: 0,
+    status: "failed",
+    fails: false,
+  },
+  {
+    nativeStart: "handoff-failure",
+    failFinalization: true,
+    expected: [false],
+    prompts: 0,
+    status: "running",
+    fails: true,
+  },
+  {
+    nativeStart: "accepted",
+    failFinalization: false,
+    writeFailure: new Error("Pre-native write failed"),
+    expected: [false],
+    prompts: 0,
+    status: "starting",
+    fails: true,
+  },
+] as const)(
+  "records safe Pause receipts through the worker for $nativeStart (finalization failure: $failFinalization)",
+  (scenario) =>
+    Effect.gen(function* () {
+      const direction = "direction" in scenario ? scenario.direction : "pause";
+      const harness = makeLocalCommandHarness({
+        text: direction === "pause" ? "pause to go offline" : "resume",
+        ...scenario,
+      });
+      const receipts = yield* Ref.make<ReadonlyArray<boolean>>([]);
+      const session: PauseStore.StoredSession = {
+        id: "fixture",
+        createdAt: "2026-09-04T12:00:00.000Z",
+        phase: direction === "pause" ? "pausing" : "resuming",
+        targets: [
+          {
+            threadId: harness.threadId,
+            projectId: harness.projection().thread.projectId,
+            title: "Example thread",
+            pause: direction === "pause" ? "pending" : "sent",
+            resume: "pending",
+            pauseAccepted: true,
+            resumeAccepted: direction === "resume",
+            pauseAttempt: 0,
+            resumeAttempt: 0,
+            error: null,
+          },
+        ],
+      };
+      const executorLayer = EffectWorker.layerExecutor.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            harness.layer,
+            Layer.mock(RunFinalizationService.RunFinalizationService)({}),
+            Layer.mock(ResourceCleanupService.ResourceCleanupService)({}),
+            Layer.mock(CheckpointRollbackService.CheckpointRollbackServiceV2)({}),
+            Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({}),
+            Layer.mock(ProviderTurnControlService.ProviderTurnControlServiceV2)({}),
+            Layer.mock(RuntimeRequestService.RuntimeRequestServiceV2)({}),
+            Layer.mock(ThreadTitleRegenerationService.ThreadTitleRegenerationService)({}),
+            Layer.mock(IncomingMessageSummaryService.IncomingMessageSummaryService)({}),
+            Layer.mock(ThreadManagementService.ThreadManagementService)({
+              getThreadRecords: () => Effect.succeed(harness.projection()),
+            }),
+            Layer.mock(SubagentPromotionService.SubagentPromotionService)({}),
+            Layer.mock(EffectOutbox.EffectOutboxV2)({
+              enqueue: () => Effect.void,
+              notifyAvailable: () => Effect.void,
+            }),
+            ServerSettings.layerTest(),
+            Layer.mock(PauseStore.EnvironmentPauseStore)({
+              get: Effect.succeed(session),
+              recordDelivery: (id, delivered) =>
+                Effect.gen(function* () {
+                  expect(id).toBe(harness.messageId);
+                  yield* Ref.update(receipts, (values) => [...values, delivered]);
+                }),
+            }),
+          ),
+        ),
+      );
+      const timestamp = session.createdAt;
+      const effect: EffectOutbox.OrchestrationEffectV2 = {
+        id: "effect-pause-start",
+        commandId: CommandId.make("command-pause-start"),
+        threadId: harness.threadId,
+        request: { type: "provider-turn.start", runId: harness.runId },
+        status: "running",
+        attemptCount: 1,
+        availableAt: timestamp,
+        leaseOwner: "test-worker",
+        leaseExpiresAt: timestamp,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        completedAt: null,
+        lastError: null,
+      };
+      const result = yield* Effect.gen(function* () {
+        const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
+        if ("retryThenContextFailure" in scenario) {
+          const first = yield* executor.execute(effect, { willRetry: true }).pipe(Effect.exit);
+          expect(first._tag).toBe("Failure");
+          expect(yield* Ref.get(receipts)).toEqual([]);
+          expect(harness.nativePrompts).toHaveLength(1);
+          return yield* executor
+            .execute({ ...effect, attemptCount: 2 }, { willRetry: false })
+            .pipe(Effect.exit);
+        }
+        return yield* executor.execute(effect).pipe(Effect.exit);
+      }).pipe(Effect.provide(executorLayer));
+      expect(result._tag).toBe(scenario.fails ? "Failure" : "Success");
+      expect(yield* Ref.get(receipts)).toEqual(scenario.expected);
+      expect(harness.nativePrompts).toHaveLength(scenario.prompts);
+      expect(harness.projection().runs.at(-1)?.status).toBe(scenario.status);
+    }),
+);
+
+effectIt.effect.each(["session-open", "thread-load"] as const)(
+  "reports a settled %s failure as undelivered, but leaves an internal retry pending",
+  (stage) =>
+    Effect.gen(function* () {
+      const receipts = yield* Ref.make<ReadonlyArray<boolean>>([]);
+      const setup = {
+        text: "pause to go offline",
+        ...(stage === "session-open"
+          ? { openFailure: new Error("Session setup failed") }
+          : { ensureThreadFailure: new Error("Thread setup failed") }),
+        onMessageDelivery: (_id: MessageId, delivered: boolean) =>
+          Ref.update(receipts, (values) => [...values, delivered]),
+      };
+      const retryHarness = makeLocalCommandHarness(setup);
+      const error = yield* retryHarness.startWithRetry.pipe(Effect.flip);
+      expect(error).toMatchObject({ _tag: "ProviderTurnStartError", deliveryRejected: true });
+      expect(yield* Ref.get(receipts)).toEqual([]);
+      const finalHarness = makeLocalCommandHarness(setup);
+      yield* finalHarness.start;
+      expect(yield* Ref.get(receipts)).toEqual([false]);
+      expect(finalHarness.projection().runs.at(-1)?.status).toBe("failed");
+    }),
 );
 
 effectIt.effect("terminalizes a starting run when its provider session cannot open", () =>

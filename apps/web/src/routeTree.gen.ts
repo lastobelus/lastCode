@@ -21,6 +21,7 @@ import { Route as ChatUsageRouteImport } from './routes/_chat.usage'
 import { Route as ChatSettingsRouteImport } from './routes/_chat.settings'
 import { Route as ChatPullRequestsRouteImport } from './routes/_chat.pull-requests'
 import { Route as ChatNewRouteImport } from './routes/_chat.new'
+import { Route as ChatDashboardRouteImport } from './routes/_chat.dashboard'
 import { Route as ChatSettingsWorktreesRouteImport } from './routes/_chat.settings.worktrees'
 import { Route as ChatSettingsThreadsRouteImport } from './routes/_chat.settings.threads'
 import { Route as ChatSettingsStorageRouteImport } from './routes/_chat.settings.storage'
@@ -31,8 +32,8 @@ import { Route as ChatSettingsProvidersRouteImport } from './routes/_chat.settin
 import { Route as ChatSettingsProjectsRouteImport } from './routes/_chat.settings.projects'
 import { Route as ChatSettingsOpenSourceLicensesRouteImport } from './routes/_chat.settings.open-source-licenses'
 import { Route as ChatSettingsMaintenanceRouteImport } from './routes/_chat.settings.maintenance'
-import { Route as ChatSettingsLabsRouteImport } from './routes/_chat.settings.labs'
 import { Route as ChatSettingsLastcodeRouteImport } from './routes/_chat.settings.lastcode'
+import { Route as ChatSettingsLabsRouteImport } from './routes/_chat.settings.labs'
 import { Route as ChatSettingsKeybindingsRouteImport } from './routes/_chat.settings.keybindings'
 import { Route as ChatSettingsIntegrationsRouteImport } from './routes/_chat.settings.integrations'
 import { Route as ChatSettingsGeneralRouteImport } from './routes/_chat.settings.general'
@@ -109,6 +110,11 @@ const ChatNewRoute = ChatNewRouteImport.update({
   path: '/new',
   getParentRoute: () => ChatRoute,
 } as any)
+const ChatDashboardRoute = ChatDashboardRouteImport.update({
+  id: '/dashboard',
+  path: '/dashboard',
+  getParentRoute: () => ChatRoute,
+} as any)
 const ChatSettingsWorktreesRoute = ChatSettingsWorktreesRouteImport.update({
   id: '/worktrees',
   path: '/worktrees',
@@ -162,14 +168,14 @@ const ChatSettingsMaintenanceRoute = ChatSettingsMaintenanceRouteImport.update({
   path: '/maintenance',
   getParentRoute: () => ChatSettingsRoute,
 } as any)
-const ChatSettingsLabsRoute = ChatSettingsLabsRouteImport.update({
-  id: '/labs',
-  path: '/labs',
-  getParentRoute: () => ChatSettingsRoute,
-} as any)
 const ChatSettingsLastcodeRoute = ChatSettingsLastcodeRouteImport.update({
   id: '/lastcode',
   path: '/lastcode',
+  getParentRoute: () => ChatSettingsRoute,
+} as any)
+const ChatSettingsLabsRoute = ChatSettingsLabsRouteImport.update({
+  id: '/labs',
+  path: '/labs',
   getParentRoute: () => ChatSettingsRoute,
 } as any)
 const ChatSettingsKeybindingsRoute = ChatSettingsKeybindingsRouteImport.update({
@@ -262,6 +268,7 @@ export interface FileRoutesByFullPath {
   '/guest': typeof GuestRoute
   '/pair': typeof PairRoute
   '/welcome': typeof WelcomeRoute
+  '/dashboard': typeof ChatDashboardRoute
   '/new': typeof ChatNewRoute
   '/pull-requests': typeof ChatPullRequestsRoute
   '/settings': typeof ChatSettingsRouteWithChildren
@@ -284,8 +291,8 @@ export interface FileRoutesByFullPath {
   '/settings/integrations': typeof ChatSettingsIntegrationsRoute
   '/settings/keybindings': typeof ChatSettingsKeybindingsRoute
   '/settings/labs': typeof ChatSettingsLabsRoute
-  '/settings/maintenance': typeof ChatSettingsMaintenanceRoute
   '/settings/lastcode': typeof ChatSettingsLastcodeRoute
+  '/settings/maintenance': typeof ChatSettingsMaintenanceRoute
   '/settings/open-source-licenses': typeof ChatSettingsOpenSourceLicensesRoute
   '/settings/projects': typeof ChatSettingsProjectsRoute
   '/settings/providers': typeof ChatSettingsProvidersRoute
@@ -302,6 +309,7 @@ export interface FileRoutesByTo {
   '/guest': typeof GuestRoute
   '/pair': typeof PairRoute
   '/welcome': typeof WelcomeRoute
+  '/dashboard': typeof ChatDashboardRoute
   '/new': typeof ChatNewRoute
   '/pull-requests': typeof ChatPullRequestsRoute
   '/settings': typeof ChatSettingsRouteWithChildren
@@ -325,8 +333,8 @@ export interface FileRoutesByTo {
   '/settings/integrations': typeof ChatSettingsIntegrationsRoute
   '/settings/keybindings': typeof ChatSettingsKeybindingsRoute
   '/settings/labs': typeof ChatSettingsLabsRoute
-  '/settings/maintenance': typeof ChatSettingsMaintenanceRoute
   '/settings/lastcode': typeof ChatSettingsLastcodeRoute
+  '/settings/maintenance': typeof ChatSettingsMaintenanceRoute
   '/settings/open-source-licenses': typeof ChatSettingsOpenSourceLicensesRoute
   '/settings/projects': typeof ChatSettingsProjectsRoute
   '/settings/providers': typeof ChatSettingsProvidersRoute
@@ -345,6 +353,7 @@ export interface FileRoutesById {
   '/guest': typeof GuestRoute
   '/pair': typeof PairRoute
   '/welcome': typeof WelcomeRoute
+  '/_chat/dashboard': typeof ChatDashboardRoute
   '/_chat/new': typeof ChatNewRoute
   '/_chat/pull-requests': typeof ChatPullRequestsRoute
   '/_chat/settings': typeof ChatSettingsRouteWithChildren
@@ -368,8 +377,8 @@ export interface FileRoutesById {
   '/_chat/settings/integrations': typeof ChatSettingsIntegrationsRoute
   '/_chat/settings/keybindings': typeof ChatSettingsKeybindingsRoute
   '/_chat/settings/labs': typeof ChatSettingsLabsRoute
-  '/_chat/settings/maintenance': typeof ChatSettingsMaintenanceRoute
   '/_chat/settings/lastcode': typeof ChatSettingsLastcodeRoute
+  '/_chat/settings/maintenance': typeof ChatSettingsMaintenanceRoute
   '/_chat/settings/open-source-licenses': typeof ChatSettingsOpenSourceLicensesRoute
   '/_chat/settings/projects': typeof ChatSettingsProjectsRoute
   '/_chat/settings/providers': typeof ChatSettingsProvidersRoute
@@ -389,6 +398,7 @@ export interface FileRouteTypes {
     | '/guest'
     | '/pair'
     | '/welcome'
+    | '/dashboard'
     | '/new'
     | '/pull-requests'
     | '/settings'
@@ -411,8 +421,8 @@ export interface FileRouteTypes {
     | '/settings/integrations'
     | '/settings/keybindings'
     | '/settings/labs'
-    | '/settings/maintenance'
     | '/settings/lastcode'
+    | '/settings/maintenance'
     | '/settings/open-source-licenses'
     | '/settings/projects'
     | '/settings/providers'
@@ -429,6 +439,7 @@ export interface FileRouteTypes {
     | '/guest'
     | '/pair'
     | '/welcome'
+    | '/dashboard'
     | '/new'
     | '/pull-requests'
     | '/settings'
@@ -452,8 +463,8 @@ export interface FileRouteTypes {
     | '/settings/integrations'
     | '/settings/keybindings'
     | '/settings/labs'
-    | '/settings/maintenance'
     | '/settings/lastcode'
+    | '/settings/maintenance'
     | '/settings/open-source-licenses'
     | '/settings/projects'
     | '/settings/providers'
@@ -471,6 +482,7 @@ export interface FileRouteTypes {
     | '/guest'
     | '/pair'
     | '/welcome'
+    | '/_chat/dashboard'
     | '/_chat/new'
     | '/_chat/pull-requests'
     | '/_chat/settings'
@@ -494,8 +506,8 @@ export interface FileRouteTypes {
     | '/_chat/settings/integrations'
     | '/_chat/settings/keybindings'
     | '/_chat/settings/labs'
-    | '/_chat/settings/maintenance'
     | '/_chat/settings/lastcode'
+    | '/_chat/settings/maintenance'
     | '/_chat/settings/open-source-licenses'
     | '/_chat/settings/projects'
     | '/_chat/settings/providers'
@@ -603,6 +615,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatNewRouteImport
       parentRoute: typeof ChatRoute
     }
+    '/_chat/dashboard': {
+      id: '/_chat/dashboard'
+      path: '/dashboard'
+      fullPath: '/dashboard'
+      preLoaderRoute: typeof ChatDashboardRouteImport
+      parentRoute: typeof ChatRoute
+    }
     '/_chat/settings/worktrees': {
       id: '/_chat/settings/worktrees'
       path: '/worktrees'
@@ -673,18 +692,18 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatSettingsMaintenanceRouteImport
       parentRoute: typeof ChatSettingsRoute
     }
-    '/_chat/settings/labs': {
-      id: '/_chat/settings/labs'
-      path: '/labs'
-      fullPath: '/settings/labs'
-      preLoaderRoute: typeof ChatSettingsLabsRouteImport
-      parentRoute: typeof ChatSettingsRoute
-    }
     '/_chat/settings/lastcode': {
       id: '/_chat/settings/lastcode'
       path: '/lastcode'
       fullPath: '/settings/lastcode'
       preLoaderRoute: typeof ChatSettingsLastcodeRouteImport
+      parentRoute: typeof ChatSettingsRoute
+    }
+    '/_chat/settings/labs': {
+      id: '/_chat/settings/labs'
+      path: '/labs'
+      fullPath: '/settings/labs'
+      preLoaderRoute: typeof ChatSettingsLabsRouteImport
       parentRoute: typeof ChatSettingsRoute
     }
     '/_chat/settings/keybindings': {
@@ -818,8 +837,8 @@ interface ChatSettingsRouteChildren {
   ChatSettingsIntegrationsRoute: typeof ChatSettingsIntegrationsRoute
   ChatSettingsKeybindingsRoute: typeof ChatSettingsKeybindingsRoute
   ChatSettingsLabsRoute: typeof ChatSettingsLabsRoute
-  ChatSettingsMaintenanceRoute: typeof ChatSettingsMaintenanceRoute
   ChatSettingsLastcodeRoute: typeof ChatSettingsLastcodeRoute
+  ChatSettingsMaintenanceRoute: typeof ChatSettingsMaintenanceRoute
   ChatSettingsOpenSourceLicensesRoute: typeof ChatSettingsOpenSourceLicensesRoute
   ChatSettingsProjectsRoute: typeof ChatSettingsProjectsRoute
   ChatSettingsProvidersRoute: typeof ChatSettingsProvidersRoute
@@ -847,8 +866,8 @@ const ChatSettingsRouteChildren: ChatSettingsRouteChildren = {
   ChatSettingsIntegrationsRoute: ChatSettingsIntegrationsRoute,
   ChatSettingsKeybindingsRoute: ChatSettingsKeybindingsRoute,
   ChatSettingsLabsRoute: ChatSettingsLabsRoute,
-  ChatSettingsMaintenanceRoute: ChatSettingsMaintenanceRoute,
   ChatSettingsLastcodeRoute: ChatSettingsLastcodeRoute,
+  ChatSettingsMaintenanceRoute: ChatSettingsMaintenanceRoute,
   ChatSettingsOpenSourceLicensesRoute: ChatSettingsOpenSourceLicensesRoute,
   ChatSettingsProjectsRoute: ChatSettingsProjectsRoute,
   ChatSettingsProvidersRoute: ChatSettingsProvidersRoute,
@@ -865,6 +884,7 @@ const ChatSettingsRouteWithChildren = ChatSettingsRoute._addFileChildren(
 )
 
 interface ChatRouteChildren {
+  ChatDashboardRoute: typeof ChatDashboardRoute
   ChatNewRoute: typeof ChatNewRoute
   ChatPullRequestsRoute: typeof ChatPullRequestsRoute
   ChatSettingsRoute: typeof ChatSettingsRouteWithChildren
@@ -875,6 +895,7 @@ interface ChatRouteChildren {
 }
 
 const ChatRouteChildren: ChatRouteChildren = {
+  ChatDashboardRoute: ChatDashboardRoute,
   ChatNewRoute: ChatNewRoute,
   ChatPullRequestsRoute: ChatPullRequestsRoute,
   ChatSettingsRoute: ChatSettingsRouteWithChildren,

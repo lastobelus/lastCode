@@ -22,14 +22,18 @@ import * as CommandReceiptStore from "../orchestration-v2/CommandReceiptStore.ts
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
+import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import * as ProviderReplayHarness from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
 import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
+import * as ActionResume from "../actionResume/ActionResume.ts";
 import * as ThreadReadBroker from "./ThreadReadBroker.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
@@ -52,6 +56,7 @@ const orchestration = ProviderReplayHarness.layerWithRegistry({ name: "mcp-creat
 });
 const dependencies = Layer.mergeAll(
   NodeServices.layer,
+  ServerSettings.layerTest(),
   orchestration,
   registry,
   ThreadManagement.layer.pipe(Layer.provide(orchestration)),
@@ -78,7 +83,14 @@ const dependencies = Layer.mergeAll(
   Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
   Layer.mock(SecretRequests.SecretRequests)({}),
 );
-const layer = OrchestratorMcpService.layer.pipe(
+const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
+  Layer.provide(
+    Layer.mock(ActionResume.ActionResume)({ readLatestSummary: () => Effect.succeed(null) }),
+  ),
+  Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
+  Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+);
+const layer = layerOrchestratorService.pipe(
   Layer.provideMerge(ThreadReadBroker.layer),
   Layer.provideMerge(dependencies),
 );
@@ -233,7 +245,7 @@ it.effect("accepts an MCP prompt before a concurrent archive can take its target
     const allowMessage = yield* Deferred.make<void>();
     const archiveQueued = yield* Deferred.make<void>();
     const commitCommand = sink.commitCommand;
-    const withLock = executor.withLock;
+    const withPersistenceLock = executor.withPersistenceLock;
     const commitSpy = vi.spyOn(sink, "commitCommand").mockImplementation((command) =>
       command.commandType === "thread.create"
         ? commitCommand(command).pipe(
@@ -250,11 +262,11 @@ it.effect("accepts an MCP prompt before a concurrent archive can take its target
         })
         .pipe(Effect.forkChild());
       const threadId = yield* Deferred.await(created);
-      const observeLock: typeof withLock = (key, effect) =>
-        key === threadId || key === parentThreadId
-          ? Deferred.succeed(archiveQueued, undefined).pipe(Effect.andThen(withLock(key, effect)))
-          : withLock(key, effect);
-      const lockSpy = vi.spyOn(executor, "withLock").mockImplementation(observeLock);
+      const observeLock: typeof withPersistenceLock = (effect) =>
+        Deferred.succeed(archiveQueued, undefined).pipe(
+          Effect.andThen(withPersistenceLock(effect)),
+        );
+      const lockSpy = vi.spyOn(executor, "withPersistenceLock").mockImplementation(observeLock);
       yield* Effect.gen(function* () {
         const archiving = yield* threads
           .dispatch({

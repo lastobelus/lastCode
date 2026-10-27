@@ -24,8 +24,6 @@ import { bindSidebarRailScroll } from "./sidebarRailScroll";
 import { bindSidebarPageScroll } from "./sidebarPageScroll";
 import * as Schema from "effect/Schema";
 
-const SIDEBAR_COOKIE_NAME = "sidebar_state";
-const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 7;
 const SIDEBAR_WIDTH = "16rem";
 const SIDEBAR_WIDTH_MOBILE = "calc(100vw - 3 * var(--spacing))";
 const SIDEBAR_WIDTH_ICON = "3rem";
@@ -105,15 +103,6 @@ function isMobileViewport(): boolean {
   return typeof window !== "undefined" && window.matchMedia(SIDEBAR_MOBILE_QUERY).matches;
 }
 
-async function persistSidebarOpen(open: boolean) {
-  await cookieStore.set({
-    expires: Date.now() + SIDEBAR_COOKIE_MAX_AGE * 1000,
-    name: SIDEBAR_COOKIE_NAME,
-    path: "/",
-    value: String(open),
-  });
-}
-
 // An offcanvas sidebar turns inert once collapsed, which drops focus to the body.
 function moveFocusOutOfCollapsingSidebar() {
   const sidebar = document.activeElement?.closest<HTMLElement>(
@@ -147,7 +136,6 @@ function createSidebarOpenStore(defaultOpen: boolean) {
       moveFocusOutOfCollapsingSidebar();
     }
     if (open !== state.open) publish({ ...state, open });
-    void persistSidebarOpen(open);
   };
   const setOpenMobile = (openMobile: boolean) => {
     if (openMobile !== state.openMobile) publish({ ...state, openMobile });
@@ -432,13 +420,14 @@ function SidebarRail({
 }: React.ComponentProps<"button">) {
   const { open, toggleSidebar, onCollapse } = useSidebar();
   const sidebarInstance = React.use(SidebarInstanceContext);
+  const railElementRef = React.useRef<HTMLButtonElement | null>(null);
   const suppressClickRef = React.useRef(false);
   const resolvedResizable = sidebarInstance?.resizable ?? null;
   const canResize = resolvedResizable !== null && open;
   const railLabel = canResize ? "Resize Sidebar" : "Toggle Sidebar";
   const railTitle = canResize ? "Drag to resize sidebar" : "Toggle Sidebar";
   React.useEffect(() => {
-    const rail = railRef.current;
+    const rail = railElementRef.current;
     if (!rail || !open || props.onWheel) return;
     return bindSidebarRailScroll(rail);
   }, [open, props.onWheel]);
@@ -516,10 +505,12 @@ function SidebarRail({
   const [railRef] = React.useState(() => {
     const { ref: dragRef, cancel } = resize;
     return (node: HTMLButtonElement | null) => {
+      railElementRef.current = node;
       const releaseDrag = dragRef(node);
       if (!releaseDrag) return undefined;
       const stopCancelOnCollapse = onCollapse(cancel);
       return () => {
+        railElementRef.current = null;
         stopCancelOnCollapse();
         releaseDrag();
       };

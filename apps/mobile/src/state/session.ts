@@ -1,4 +1,8 @@
+import { configuredPreviewEnvironmentUrl } from "@t3tools/client-runtime/preview-hosting";
+import type { PreparedConnection } from "@t3tools/client-runtime/connection";
+import { environmentCatalog } from "../connection/catalog";
 import { useAtomValue } from "@effect/atom-react";
+import { createEnvironmentBootstrapQuery } from "@t3tools/client-runtime/state/bootstrap";
 import { createEnvironmentSessionAtoms } from "@t3tools/client-runtime/state/session";
 import {
   type AuthEnvironmentScope,
@@ -14,6 +18,7 @@ import { connectionAtomRuntime } from "../connection/runtime";
 import { appAtomRegistry } from "./atom-registry";
 
 export const environmentSession = createEnvironmentSessionAtoms(connectionAtomRuntime);
+export const environmentBootstrap = createEnvironmentBootstrapQuery(connectionAtomRuntime);
 
 const EMPTY_SESSION_STATE_ATOM = Atom.make(AsyncResult.initial<AuthSessionState>());
 
@@ -75,4 +80,14 @@ export function usePreparedConnection(environmentId: EnvironmentId | null) {
       ? EMPTY_PREPARED_CONNECTION_ATOM
       : environmentSession.preparedConnectionValueAtom(environmentId),
   );
+}
+
+export function useConfiguredPreviewEnvironmentUrl(
+  environmentId: EnvironmentId,
+  connection: PreparedConnection | null,
+) {
+  const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
+  return connection === null
+    ? null
+    : configuredPreviewEnvironmentUrl(connection, catalog.entries.get(environmentId));
 }

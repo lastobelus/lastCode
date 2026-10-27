@@ -1,4 +1,5 @@
 import {
+  DesktopBrowserTransportError,
   DesktopPreviewAnnotationSendEnabledInputSchema,
   DesktopPreviewAnnotationThemeInputSchema,
   DesktopPreviewArtifactInputSchema,
@@ -20,8 +21,6 @@ import {
   DesktopPreviewWebviewConfigSchema,
   PreviewAnnotationSubmissionResultSchema,
   PreviewCaptureFailure,
-  DEFAULT_BROWSER_PROFILE_ID,
-  INCOGNITO_BROWSER_PROFILE_ID,
   PreviewForwardedShortcut,
   MAX_KEYBINDINGS_COUNT,
 } from "@t3tools/contracts";
@@ -32,7 +31,9 @@ import * as NodeURL from "node:url";
 
 import * as ElectronWindow from "../../electron/ElectronWindow.ts";
 import * as BrowserImport from "../../preview/BrowserImport/BrowserImport.ts";
+import * as BrowserProfileScope from "../../preview/BrowserProfileScope.ts";
 import * as PreviewManager from "../../preview/Manager.ts";
+import * as DesktopBrowserHost from "../../preview/DesktopBrowserHost.ts";
 import { normalizeCaptureFailure } from "../../preview/captureErrors.ts";
 import * as DesktopClientSettings from "../../settings/DesktopClientSettings.ts";
 import { PREVIEW_WEBVIEW_PREFERENCES } from "../../preview/WebviewPreferences.ts";
@@ -82,6 +83,10 @@ const createTab = DesktopIpc.makeIpcMethod({
     serverTab,
   }) {
     const manager = yield* PreviewManager.PreviewManager;
+    const host = yield* DesktopBrowserHost.DesktopBrowserHost;
+    if (serverTab && !host.reserveTab(tabId, serverTab)) {
+      return yield* new DesktopBrowserTransportError({ reason: "at-capacity" });
+    }
     yield* manager.createTab(tabId, { zoomFactor, colorScheme, serverTab });
   }),
 });
@@ -92,6 +97,8 @@ const closeTab = DesktopIpc.makeIpcMethod({
   result: Schema.Void,
   handler: Effect.fn("desktop.ipc.preview.closeTab")(function* ({ tabId }) {
     const manager = yield* PreviewManager.PreviewManager;
+    const host = yield* DesktopBrowserHost.DesktopBrowserHost;
+    host.releaseReservation(tabId);
     yield* manager.closeTab(tabId);
   }),
 });
@@ -242,7 +249,7 @@ const closePictureInPicture = tabMethod(
   (manager, tabId) => manager.closePictureInPicture(tabId),
 );
 
-const clearCookies = DesktopIpc.makeIpcMethod({
+export const clearCookies = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.PREVIEW_CLEAR_COOKIES_CHANNEL,
   payload: DesktopPreviewClearDataInputSchema,
   result: Schema.Void,
@@ -252,7 +259,7 @@ const clearCookies = DesktopIpc.makeIpcMethod({
   }),
 });
 
-const clearCache = DesktopIpc.makeIpcMethod({
+export const clearCache = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.PREVIEW_CLEAR_CACHE_CHANNEL,
   payload: DesktopPreviewClearDataInputSchema,
   result: Schema.Void,
@@ -262,26 +269,6 @@ const clearCache = DesktopIpc.makeIpcMethod({
   }),
 });
 
-/** Keep the default profile's bare environment id so existing logins retain their partition. */
-export function resolvePartitionScope(
-  environmentId: string,
-  profileId: string | undefined,
-): {
-  readonly scope: string;
-  readonly persistent: boolean;
-  readonly namespace?: "profile";
-} {
-  if (profileId === undefined || profileId === DEFAULT_BROWSER_PROFILE_ID) {
-    return { scope: environmentId, persistent: true };
-  }
-  // JSON framing preserves lone UTF-16 surrogates; URI encoding throws and replacement would collide.
-  return {
-    scope: JSON.stringify([environmentId, profileId]),
-    persistent: profileId !== INCOGNITO_BROWSER_PROFILE_ID,
-    namespace: "profile" as const,
-  };
-}
-
 /** Omitting a profile clears every partition; a named profile clears only its own partition. */
 const resolveClearPartitions = Effect.fn("desktop.ipc.preview.resolveClearPartitions")(function* (
   manager: PreviewManager.PreviewManager["Service"],
@@ -289,19 +276,25 @@ const resolveClearPartitions = Effect.fn("desktop.ipc.preview.resolveClearPartit
   profileId: string | undefined,
 ) {
   if (profileId === undefined) return undefined;
-  const { scope, persistent, namespace } = resolvePartitionScope(environmentId, profileId);
+  const { scope, persistent, namespace } = yield* BrowserProfileScope.browserProfileScope(
+    environmentId,
+    profileId,
+  );
   // getBrowserSession registers the partition; deriving its name alone leaves unopened profiles uncleared.
   yield* manager.getBrowserSession(scope, persistent, namespace);
   return [yield* manager.getBrowserPartition(scope, persistent, namespace)];
 });
 
-const getPreviewConfig = DesktopIpc.makeIpcMethod({
+export const getPreviewConfig = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.PREVIEW_GET_CONFIG_CHANNEL,
   payload: DesktopPreviewConfigInputSchema,
   result: DesktopPreviewWebviewConfigSchema,
   handler: Effect.fn("desktop.ipc.preview.getConfig")(function* ({ environmentId, profileId }) {
     const manager = yield* PreviewManager.PreviewManager;
-    const { scope, persistent, namespace } = resolvePartitionScope(environmentId, profileId);
+    const { scope, persistent, namespace } = yield* BrowserProfileScope.browserProfileScope(
+      environmentId,
+      profileId,
+    );
     // Session creation installs UA and permission handlers before a guest can attach.
     yield* manager.getBrowserSession(scope, persistent, namespace);
     return {
@@ -331,7 +324,7 @@ export const importBrowserCookies = DesktopIpc.makeIpcMethod({
     ...importInput
   }) {
     const browserImport = yield* BrowserImport.BrowserImport;
-    const { scope, persistent, namespace } = resolvePartitionScope(
+    const { scope, persistent, namespace } = yield* BrowserProfileScope.browserProfileScope(
       environmentId,
       importInput.targetProfileId,
     );
@@ -436,9 +429,6 @@ export const methods = [
   setZoomFactor,
   setAudioMuted,
   openDevTools,
-  clearCookies,
-  clearCache,
-  getPreviewConfig,
   setAnnotationTheme,
   setAnnotationSendEnabled,
   pickElement,
