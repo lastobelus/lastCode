@@ -4,6 +4,7 @@ import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell
 import type { EnvironmentId } from "@t3tools/contracts";
 import {
   actionRunningPresentation,
+  actionResultPresentation,
   actionResumeControlCopy,
   actionResumeUnknownPresentation,
   environmentPausePresentation,
@@ -118,6 +119,16 @@ export function ActionResumeNotice(props: {
   );
 
   const running = action?.outcome === "running" ? actionRunningPresentation(action) : null;
+  const result =
+    action && action.outcome !== "running"
+      ? actionResultPresentation({
+          lifecycleOutcome: action.outcome,
+          validatedStatus: action.outcome,
+          exitCode: action.exitCode,
+          report: action.report ?? null,
+          lastOutputLine: "",
+        })
+      : null;
   if (presentation === null && pausePresentation === null && pauseControl.modal === null)
     return null;
   return (
@@ -145,6 +156,12 @@ export function ActionResumeNotice(props: {
               {running ? (
                 <Text className="text-xs text-foreground-secondary">
                   {running.label}: {running.summary}
+                </Text>
+              ) : null}
+              {result ? (
+                <Text className="text-xs text-foreground-secondary">
+                  {result.label}
+                  {result.summary ? `: ${result.summary}` : ""}
                 </Text>
               ) : null}
               <Text className="text-xs text-foreground-secondary">{presentation.detail}</Text>

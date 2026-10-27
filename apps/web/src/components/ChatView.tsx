@@ -2398,7 +2398,7 @@ export default function ChatView(props: ChatViewProps) {
     persistThreadSettingsForNextTurn,
   });
   const resumableActionWait = useActionResumeWait(
-    routeThreadRef,
+    routeThreadDetailRef,
     activeThreadShell?.actionResume ?? null,
   );
   const {

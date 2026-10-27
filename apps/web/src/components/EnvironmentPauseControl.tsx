@@ -39,9 +39,9 @@ export function EnvironmentPauseNotice({
 }: {
   readonly environmentId: EnvironmentId;
 }) {
-  const { environment, phase, known } = useActionEnvironmentPause(environmentId);
+  const { environment, phase, known, showUnknown } = useActionEnvironmentPause(environmentId);
   const [open, setOpen] = useState(false);
-  if (environment === null || (phase === null && !open)) return null;
+  if (environment === null || (phase === null && !showUnknown && !open)) return null;
   const presentation =
     known && phase !== null ? environmentPausePresentation(phase) : actionResumeUnknownPresentation;
   return (
