@@ -556,7 +556,7 @@ describe("Action banner stack", () => {
         mismatch,
       });
       expect(observation.banners!.runningBanner?.variant).toBe("info");
-      await expect.element(screen.getByText("Compiling")).toBeVisible();
+      await expect.element(screen.getByText(/Compiling\./)).toBeVisible();
       if (mismatch)
         expect(container.textContent!.indexOf("Compiling")).toBeLessThan(
           container.textContent!.indexOf("Branch changed"),
