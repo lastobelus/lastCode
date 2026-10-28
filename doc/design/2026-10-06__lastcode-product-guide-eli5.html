@@ -1361,6 +1361,24 @@
               </li>
               <li>
                 <a
+                  data-source="apps/web/src/components/Sidebar.tsx"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/apps/web/src/components/Sidebar.tsx"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  >Sidebar entry points</a
+                >
+              </li>
+              <li>
+                <a
+                  data-source="apps/web/src/components/CommandPalette.tsx"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/apps/web/src/components/CommandPalette.tsx"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  >Command palette entry</a
+                >
+              </li>
+              <li>
+                <a
                   data-source="docs/lastcode/nightly-workflow.md"
                   href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/docs/lastcode/nightly-workflow.md"
                   target="_blank"
@@ -1488,10 +1506,9 @@
           </p>
           <h3>A device hub connects test devices</h3>
           <p>
-            Open <strong>Settings → Devices → Device hosts</strong>. The environment's device hub
-            finds simulators and emulators and streams them. By default they run beside its server.
-            Under <strong>Device hosts</strong>, an SSH-connected machine can supply devices without
-            owning your project or agent.
+            The environment's device hub finds simulators and emulators and streams them. By default
+            they run beside its server. In <strong>Settings → Devices → Device hosts</strong>, an
+            SSH-connected machine can supply devices without owning your project or agent.
           </p>
           <div class="example">
             <strong>Example: Linux work, iOS testing</strong>
@@ -1666,10 +1683,10 @@
               the same display name.
             </li>
             <li>
-              <strong>Default and Incognito stay environment-local.</strong> Default and custom
-              profiles persist across restarts. Desktop Incognito lasts until that desktop process
-              quits; environment-hosted Incognito is temporary. A temporary profile is a better
-              choice for an isolated test.
+              <strong>Default and Incognito belong to one environment.</strong> Default and named
+              profiles survive restarts. Incognito does not: on the desktop it lasts until the app
+              quits, and in an environment-hosted browser it is temporary. Use it for isolated
+              tests.
             </li>
             <li>
               You can create up to 24 custom profiles, with names up to 48 characters. Default and
@@ -1801,10 +1818,10 @@
             tabs provide your named desktop profiles and saved sign-ins.
           </p>
           <p>
-            Choose <strong>Open in the environment's browser</strong> for pages beside its server,
-            or <strong>Open on this computer</strong> for desktop browser access. This does not move
-            the agent or its files. Browser setup and host availability still matter; support in the
-            app does not guarantee the required browser is installed.
+            Choose <strong>Open in <em>environment name</em>'s browser</strong> for pages beside its
+            server, or <strong>Open on this computer</strong> for desktop browser access. This does
+            not move the agent or its files. Browser setup and host availability still matter;
+            support in the app does not guarantee the required browser is installed.
           </p>
           <h3>What retention deletes</h3>
           <p>
