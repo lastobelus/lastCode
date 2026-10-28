@@ -5581,6 +5581,39 @@ it.live.each([
   ).pipe(Effect.provide(layer)),
 );
 
+it.live.each([5_000, 10_000])(
+  "same-document recovery shares its timeout after navigation consumes %s ms",
+  (elapsed) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { broker, tabId } = yield* ready;
+        const url = "http://127.0.0.1:5173/check#saved";
+        hostingPreparation = () => Effect.succeed({ managed: true, runId: "first-run" });
+        yield* broker.invoke({ scope, tabId, operation: "navigate", input: { url } });
+        const clock = yield* Clock.Clock;
+        let monotonic = clock.monotonicTimeNanosUnsafe();
+        using _clock = vi
+          .spyOn(clock, "monotonicTimeNanosUnsafe")
+          .mockImplementation(() => monotonic);
+        const page = contexts[0]!.page;
+        page.goto.mockImplementation(async () => {
+          monotonic += BigInt(elapsed) * 1_000_000n;
+          return null;
+        });
+        hostingPreparation = () => Effect.succeed({ managed: true, runId: "next-run" });
+        const result = yield* broker
+          .invoke({ scope, tabId, operation: "navigate", input: { url, timeoutMs: 10_000 } })
+          .pipe(Effect.exit);
+        expect(Exit.isFailure(result)).toBe(elapsed === 10_000);
+        if (elapsed === 10_000) expect(page.reload).not.toHaveBeenCalled();
+        else
+          expect(page.reload).toHaveBeenCalledExactlyOnceWith(
+            expect.objectContaining({ timeout: 5_000 }),
+          );
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
 it.live("a redirect to another managed listener preserves its healthy page on return", () =>
   Effect.scoped(
     Effect.gen(function* () {

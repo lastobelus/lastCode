@@ -2453,25 +2453,37 @@ const make = Effect.gen(function* () {
     destination: Parameters<typeof hostedRunChanged>[1],
     readiness: "load" | "domContentLoaded" | "none",
     timeout: number,
+    signal: AbortSignal,
     onCommitted?: () => void,
   ) => {
     const { url } = destination;
     const runChanged = hostedRunChanged(tab, destination);
+    const started = serviceClock.monotonicTimeNanosUnsafe();
+    const navigationOptions = () => {
+      signal.throwIfAborted();
+      const remaining =
+        timeout - Number(serviceClock.monotonicTimeNanosUnsafe() - started) / 1_000_000;
+      if (remaining <= 0)
+        throw new ServerBrowserPage.ServerBrowserOperationError(
+          "PreviewAutomationTimeoutError",
+          "The browser operation exceeded its execution deadline.",
+        );
+      return {
+        timeout: Math.max(1, remaining),
+        waitUntil:
+          readiness === "domContentLoaded"
+            ? "domcontentloaded"
+            : readiness === "none"
+              ? "commit"
+              : "load",
+      } as const;
+    };
     const release = await acquireHostingDestination(tab, url);
     const navigation = Promise.resolve()
       .then(async () => {
-        const options = {
-          timeout,
-          waitUntil:
-            readiness === "domContentLoaded"
-              ? "domcontentloaded"
-              : readiness === "none"
-                ? "commit"
-                : "load",
-        } as const;
-        const response = await tab.page.goto(url, options);
+        const response = await tab.page.goto(url, navigationOptions());
         // A fragment navigation can succeed while retaining the previous app's document.
-        if (response === null && runChanged) await tab.page.reload(options);
+        if (response === null && runChanged) await tab.page.reload(navigationOptions());
       })
       .then(() => onCommitted?.())
       .finally(release);
@@ -3440,6 +3452,7 @@ const make = Effect.gen(function* () {
                       destination,
                       "load",
                       Math.min(navigationTimeout, remainingTimeoutMs()),
+                      signal,
                     );
                 } else {
                   // Await the original navigation failure even though background creation keeps the tab.
@@ -3803,6 +3816,7 @@ const make = Effect.gen(function* () {
             destination,
             navigateInput.readiness ?? "load",
             Math.min(originalInput.timeoutMs ?? request.timeoutMs, remainingTimeoutMs()),
+            signal,
             () => rememberHostedRun(tab, destination),
           );
         });
