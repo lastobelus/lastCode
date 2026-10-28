@@ -645,6 +645,8 @@ const metadataCheck = async (
     }
     const hiddenPaths: string[] = [];
     if (hasHidden) {
+      const flagPaths = new Set(paths);
+      if (recursive && (await exists(NodePath.join(root, ".git")))) flagPaths.add(".git");
       let batch: string[] = [];
       let argumentBytes = 0;
       const inspectFlags = async () => {
@@ -660,13 +662,13 @@ const metadataCheck = async (
         if (!/^(?:[0-9]+\n)+$/u.test(text) || flags.length !== batch.length)
           refuse("filesystem flags could not be verified");
         for (let index = 0; index < batch.length; index++) {
-          if (flags[index] === "32768") hiddenPaths.push(batch[index]!);
+          if (flags[index] === "32768" && batch[index] !== ".git") hiddenPaths.push(batch[index]!);
           else if (flags[index] !== "0") refuse("ACLs or filesystem flags are unsupported");
         }
         batch = [];
         argumentBytes = 0;
       };
-      for (const name of paths) {
+      for (const name of flagPaths) {
         const bytes = Buffer.byteLength(NodePath.join(root, name)) + 1;
         if (bytes > 32 * 1024) refuse("a metadata path exceeds inspection limits");
         if (batch.length === 128 || argumentBytes + bytes > 32 * 1024) await inspectFlags();

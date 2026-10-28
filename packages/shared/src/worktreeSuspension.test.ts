@@ -125,6 +125,34 @@ it.runIf(HostProcess.Platform.defaultValue() === "darwin")(
 );
 
 it.runIf(HostProcess.Platform.defaultValue() === "darwin")(
+  "refuses hidden metadata on the excluded Git pointer before hashing content",
+  async () => {
+    await using test = await fixture();
+    const pointer = NodePath.join(test.workspace, ".git");
+    const contents = await NodeFSP.readFile(pointer);
+    await execute("/usr/bin/chflags", ["hidden", pointer]);
+    using reads = vi.spyOn(NodeFSP, "open");
+    await expect(
+      test.store.capture({
+        sourcePath: test.workspace,
+        operationId: "hidden-git-pointer",
+        ownerBinding: "fixture-owner",
+      }),
+    ).rejects.toThrow("filesystem flags are unsupported");
+    expect(
+      reads.mock.calls.filter(
+        ([name]) =>
+          typeof name === "string" &&
+          name.startsWith(`${test.workspace}/`) &&
+          !name.endsWith("/.git"),
+      ),
+    ).toEqual([]);
+    expect(await NodeFSP.readFile(pointer)).toEqual(contents);
+    expect((await execute("/usr/bin/stat", ["-f", "%f", pointer])).stdout.trim()).toBe("32768");
+  },
+);
+
+it.runIf(HostProcess.Platform.defaultValue() === "darwin")(
   "retains a workspace whose hidden flag changes after verification",
   async () => {
     await using test = await fixture();
