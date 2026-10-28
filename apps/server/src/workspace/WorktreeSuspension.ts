@@ -442,7 +442,20 @@ export const make = Effect.gen(function* () {
     }
     const historical = yield* cleanup.historicalWorktreeOwners;
     for (const owner of historical) {
-      if (owner.worktreePath !== null && record.aliases.includes(owner.worktreePath))
+      if (owner.worktreePath === null) continue;
+      const actual = yield* canonical(owner.worktreePath);
+      if (!record.aliases.includes(owner.worktreePath) && !record.aliases.includes(actual))
+        continue;
+      const migratedDuplicate =
+        actual === record.path &&
+        owners.some(
+          (current) =>
+            current.id === owner.threadId &&
+            current.projectId === owner.projectId &&
+            current.worktreePath === owner.worktreePath &&
+            current.branch === owner.branch,
+        );
+      if (!migratedDuplicate)
         return yield* failure("protected", "Historical workspace ownership needs review.");
     }
     const previewPaths = yield* previews.protectedWorkspacePaths();

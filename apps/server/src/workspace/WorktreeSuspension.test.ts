@@ -135,6 +135,9 @@ const harness = (
   options: {
     failAfterPublication?: "suspended" | "active";
     cleanupThreads?: boolean;
+    historicalOwners?: Effect.Success<
+      Cleanup.WorktreeCleanupService["Service"]["historicalWorktreeOwners"]
+    >;
     settings?: SettingsValue;
     adoptOnCaptured?: boolean;
     pauseCaptured?: { entered: Deferred.Deferred<void>; release: Deferred.Deferred<void> };
@@ -354,7 +357,7 @@ const harness = (
             workspaceOwnership: Effect.succeed([]),
           }),
           Layer.mock(Cleanup.WorktreeCleanupService)({
-            historicalWorktreeOwners: Effect.succeed([]),
+            historicalWorktreeOwners: Effect.sync(() => options.historicalOwners ?? []),
           }),
           Layer.mock(TerminalManager.TerminalManager)({ refreshMetadata: Effect.succeed([]) }),
           Layer.mock(PreviewHosting.PreviewHosting)({
@@ -440,6 +443,132 @@ const realGit = <A, E, R>(test: (fixture: Fixture) => Effect.Effect<A, E, R>) =>
     (fixture) => provide(test(fixture), fixture),
     (fixture) => Effect.promise(() => fixture[Symbol.asyncDispose]()),
   );
+
+it.live("suspends exact historical migration duplicates of current owners", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const historicalOwners = [firstId, secondId].map((threadId) => ({
+        threadId,
+        projectId,
+        worktreePath: f.workspace,
+        branch: "topic",
+      }));
+      const h = yield* harness(f, { historicalOwners });
+      const saved = yield* h.suspend;
+      expect(saved.summary.state).toBe("suspended");
+      expect(
+        yield* Effect.promise(() =>
+          NodeFSP.stat(f.workspace).then(
+            () => true,
+            () => false,
+          ),
+        ),
+      ).toBe(false);
+      yield* h.acquisition.acquire({ path: f.workspace, purpose: "file-write" });
+      expect(
+        yield* Effect.promise(() =>
+          NodeFSP.readFile(NodePath.join(f.workspace, "tracked"), "utf8"),
+        ),
+      ).toBe("working\n");
+      expect(historicalOwners).toHaveLength(2);
+      yield* h.suspend;
+    }),
+  ),
+);
+
+it.live.each([
+  "thread",
+  "project",
+  "branch",
+  "missing branch",
+  "path",
+  "malformed",
+  "moved",
+  "current branch",
+  "deleted",
+  "unavailable",
+  "extra owner",
+  "symlink",
+] as const)("retains a workspace with %s historical ownership", (mismatch) =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const duplicate = {
+        threadId: firstId,
+        projectId,
+        worktreePath: f.workspace,
+        branch: "topic" as string | null,
+      };
+      const historicalOwners: Array<{
+        threadId: string;
+        projectId: string;
+        worktreePath: string;
+        branch: string | null;
+      }> = [duplicate];
+      const h = yield* harness(f, { historicalOwners });
+      switch (mismatch) {
+        case "thread":
+          historicalOwners[0] = { ...duplicate, threadId: "fixture:other" };
+          break;
+        case "project":
+          historicalOwners[0] = {
+            ...duplicate,
+            projectId: ProjectId.make("fixture:other-project"),
+          };
+          break;
+        case "branch":
+          historicalOwners[0] = { ...duplicate, branch: "other" };
+          break;
+        case "missing branch":
+          historicalOwners[0] = { ...duplicate, branch: null };
+          break;
+        case "path":
+          historicalOwners[0] = { ...duplicate, worktreePath: `${f.workspace}/.` };
+          break;
+        case "malformed":
+          historicalOwners[0] = { ...duplicate, threadId: "" };
+          break;
+        case "moved":
+          h.threads.set(firstId, { ...h.threads.get(firstId)!, worktreePath: f.repository });
+          break;
+        case "current branch":
+          h.threads.set(firstId, { ...h.threads.get(firstId)!, branch: "renamed" });
+          break;
+        case "deleted":
+          h.threads.set(firstId, { ...h.threads.get(firstId)!, deletedAt: at });
+          break;
+        case "unavailable":
+          h.threads.delete(firstId);
+          break;
+        case "extra owner":
+          historicalOwners.push({ ...duplicate, threadId: ThreadId.make("fixture:unknown") });
+          break;
+        case "symlink": {
+          const alias = NodePath.join(f.root, "alias");
+          yield* Effect.promise(() => NodeFSP.symlink(f.workspace, alias));
+          historicalOwners[0] = { ...duplicate, worktreePath: alias };
+          break;
+        }
+      }
+      const error = yield* h.service
+        .previewSuspend({
+          threadId: secondId,
+        })
+        .pipe(Effect.flip);
+      expect(error.reason).toBe("protected");
+      expect(error.message).toContain("Historical workspace ownership needs review.");
+      expect(
+        yield* Effect.promise(() =>
+          NodeFSP.readFile(NodePath.join(f.workspace, "tracked"), "utf8"),
+        ),
+      ).toBe("working\n");
+      expect(
+        yield* Effect.promise(() =>
+          NodeFSP.readFile(NodePath.join(f.workspace, "notes", "private"), "utf8"),
+        ),
+      ).toBe("ignored note\n");
+    }),
+  ),
+);
 
 it.live("keeps a workspace with an actionable dashboard request until it is resolved", () =>
   realGit((f) =>
