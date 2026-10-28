@@ -1,4 +1,4 @@
-import { RunId, type ActionResumeState } from "@t3tools/contracts";
+import { RunId, type ActionResumeState, type ThreadPullRequestLink } from "@t3tools/contracts";
 import { DEFAULT_CLIENT_SETTINGS } from "@t3tools/contracts/settings";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { expect, it, vi } from "vite-plus/test";
@@ -8,6 +8,7 @@ import { useUiStateStore } from "../../uiStateStore";
 import { SidebarThreadHoverContent } from "./SidebarThreadHoverContent";
 import { LastCodeThreadHoverDetails } from "./LastCodeThreadHoverDetails";
 import type { ThreadStatusPill } from "../Sidebar.logic";
+import type { SidebarThreadSummary } from "../../types";
 import "../../index.css";
 
 const mocks = vi.hoisted(() => ({ settingRead: vi.fn() }));
@@ -59,8 +60,9 @@ function setup(): Disposable {
 function hoverContent(
   lastVisitedAt: string | null | undefined,
   threadStatus?: ThreadStatusPill | null,
+  overrides: Partial<SidebarThreadSummary> = {},
 ) {
-  const renderedThread = { ...thread };
+  const renderedThread = { ...thread, ...overrides };
   if (lastVisitedAt === undefined) {
     delete renderedThread.lastVisitedAt;
   } else {
@@ -84,6 +86,72 @@ function hoverContent(
     />
   );
 }
+
+function pullRequest(number: number, watching: boolean): ThreadPullRequestLink {
+  return {
+    host: "github.com",
+    repository: "example/project",
+    number,
+    url: `https://github.com/example/project/pull/${number}`,
+    source: "agent",
+    linkedAt: thread.createdAt,
+    snapshot: null,
+    stack: null,
+    ...(watching
+      ? {
+          watch: {
+            startedAt: thread.createdAt,
+            headSha: null,
+            failedChecks: [],
+            passed: false,
+            passedChecks: [],
+            remarksThrough: thread.createdAt,
+            remarkIds: [],
+            reactionKeys: [],
+            reactionCounts: {},
+            conflicting: false,
+            wakes: 0,
+          },
+        }
+      : {}),
+  };
+}
+
+it("names active PR watches in the waiting hover and updates when watching stops", async () => {
+  using _state = setup();
+  const waiting: ThreadStatusPill = {
+    label: "Waiting",
+    dotClass: "bg-sidebar-muted-foreground",
+    colorClass: "text-sidebar-muted-foreground",
+    pulse: false,
+  };
+  await using screen = await render(
+    hoverContent(null, waiting, { pullRequests: [pullRequest(12, true), pullRequest(34, false)] }),
+  );
+  await expect.element(screen.getByText("Watching PR #12", { exact: true })).toBeVisible();
+  await screen.rerender(
+    hoverContent(null, waiting, { pullRequests: [pullRequest(12, true), pullRequest(34, true)] }),
+  );
+  await expect.element(screen.getByText("Watching PRs #12, #34", { exact: true })).toBeVisible();
+  await screen.rerender(hoverContent(null, waiting, { pullRequests: [pullRequest(12, false)] }));
+  await expect.element(screen.getByText("Waiting", { exact: true })).toBeVisible();
+});
+
+it.each(["Working", "Pending Approval", "Awaiting Input"] as const)(
+  "keeps %s ahead of the PR watch hover label",
+  async (label) => {
+    using _state = setup();
+    await using screen = await render(
+      hoverContent(
+        null,
+        { label, dotClass: "bg-sky-500", colorClass: "text-sky-600", pulse: false },
+        { pullRequests: [pullRequest(12, true)] },
+      ),
+    );
+    await expect.element(screen.getByText(label, { exact: true })).toBeVisible();
+    expect(screen.container.textContent).not.toContain("Watching PR");
+  },
+);
 
 it("uses local visits only when the server omits visited tracking, including live updates", async () => {
   using _state = setup();
