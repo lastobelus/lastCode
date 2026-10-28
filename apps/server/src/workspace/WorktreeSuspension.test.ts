@@ -860,9 +860,12 @@ it.live(
             record.operation === undefined &&
             record.pendingProjection === undefined &&
             record.owners.length === 1,
+          true,
         );
         expect(kept.owners[0]!.threadId).toBe(secondId);
         expect(kept.history).toEqual([]);
+        expect(kept.captureFailure?.reason).toBe(kept.blockedReason);
+        expect(yield* h.registry.automaticProtection(f.workspace)).not.toBeNull();
         expect(
           (yield* h.acquisition.acquire({
             path: f.workspace,
@@ -1215,6 +1218,8 @@ it.live(
         const active = (yield* h.registry.list)[0]!;
         expect(active.operation).toBeUndefined();
         expect(active.summary.state).toBe("active");
+        expect(active.captureFailure?.operationId).toBe(id);
+        expect(yield* h.registry.automaticProtection(f.workspace)).not.toBeNull();
         expect((yield* Effect.promise(() => h.store.readJournal(id))).trialPath).toBeUndefined();
         yield* Stream.fromQueue(h.updates).pipe(
           Stream.filter(
@@ -1222,7 +1227,7 @@ it.live(
               record.summary.state === "active" &&
               record.operation === undefined &&
               record.pendingProjection === undefined &&
-              record.blockedReason === null,
+              record.captureFailure?.operationId === id,
           ),
           Stream.take(1),
           Stream.runHead,
@@ -1232,11 +1237,13 @@ it.live(
           snapshotIds: [id],
         });
         yield* h.service.discard({ previewToken: discard.token });
-        yield* h.awaitRecord(
+        yield* awaitRecovered(
+          h.updates,
           (record) =>
             record.operation === undefined &&
             record.history.length === 0 &&
             record.summary.generation === summary.generation,
+          true,
         );
         expect((yield* Effect.promise(() => h.store.readJournal(id))).phase).toBe("discarded");
         yield* Effect.promise(async () =>
