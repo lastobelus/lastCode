@@ -1157,61 +1157,6 @@ export function groupSidebarThreadsByProject<
   return folders;
 }
 
-export type SidebarV2TopStatusKind =
-  | "archiving"
-  | "archive-failed"
-  | "approval"
-  | "done"
-  | "failed"
-  | "limited"
-  | "input"
-  | "request"
-  | "question"
-  | "waiting"
-  | "woke"
-  | "working"
-  | "cleanup-deleting"
-  | "cleanup-queued"
-  | "cleanup-failed"
-  | "not-responding"
-  | "needs-repair";
-
-export function resolveSidebarV2TopStatus(input: {
-  readonly status: SidebarThreadStatus;
-  readonly isUnread: boolean;
-  readonly isWoke: boolean;
-}): SidebarV2TopStatusKind | null {
-  if (
-    input.status === "archiving" ||
-    input.status === "archive-failed" ||
-    input.status === "not-responding" ||
-    input.status === "needs-repair" ||
-    input.status === "cleanup-deleting" ||
-    input.status === "cleanup-queued" ||
-    input.status === "cleanup-failed"
-  )
-    return input.status;
-  if (input.status === "working") {
-    return "working";
-  }
-  if (input.status === "waiting") {
-    return "waiting";
-  }
-  if (input.status === "approval") {
-    return "approval";
-  }
-  if (input.status === "input" || input.status === "request" || input.status === "question") {
-    return input.status;
-  }
-  if (input.status === "failed" || input.status === "limited") {
-    return input.status;
-  }
-  if (input.isWoke) {
-    return "woke";
-  }
-  return input.isUnread ? "done" : null;
-}
-
 export function firstValidTimestampMs(
   ...candidates: ReadonlyArray<string | null | undefined>
 ): number {
