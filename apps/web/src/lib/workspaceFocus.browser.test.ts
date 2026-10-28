@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 import { createWorkspaceFocusController } from "./workspaceFocus";
+import { registerCommands } from "../shortcuts/dispatcher";
 
 function setup() {
   const root = document.createElement("div");
@@ -32,6 +33,111 @@ function setup() {
 }
 
 describe("workspace area focus", () => {
+  it("runs configured page-key shortcuts before the scrolling fallback", () => {
+    using fixture = setup();
+    const area = fixture.area("conversation", 1);
+    const viewport = document.createElement("div");
+    viewport.style.cssText = "height: 100px; overflow-y: auto";
+    viewport.innerHTML = '<div style="height: 1000px">Scrollable content</div>';
+    area.element.append(viewport);
+    area.element.focus();
+    const command = vi.fn();
+    using stack = new DisposableStack();
+    stack.defer(
+      registerCommands(
+        { "chat.new": command },
+        {
+          keybindings: () => [
+            {
+              command: "chat.new",
+              shortcut: {
+                key: "pagedown",
+                metaKey: false,
+                ctrlKey: false,
+                shiftKey: false,
+                altKey: false,
+                modKey: false,
+              },
+            },
+          ],
+        },
+      ),
+    );
+    area.element.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "PageDown",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(command).toHaveBeenCalledOnce();
+    expect(viewport.scrollTop).toBe(0);
+  });
+
+  it("pages the scrolling content when the surrounding workspace region has focus", () => {
+    using fixture = setup();
+    for (const name of ["conversation", "sidebar", "panel"]) {
+      const area = fixture.area(name, 1);
+      const viewport = document.createElement("div");
+      viewport.style.cssText = "height: 100px; overflow-y: auto";
+      viewport.innerHTML = '<div style="height: 1000px">Scrollable content</div>';
+      area.element.append(viewport);
+      area.element.focus();
+      const page = (key: string) => {
+        const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+        area.element.dispatchEvent(event);
+        return event;
+      };
+      expect(page("PageDown").defaultPrevented).toBe(true);
+      expect(viewport.scrollTop).toBe(90);
+      expect(page("PageDown").defaultPrevented).toBe(true);
+      expect(viewport.scrollTop).toBe(180);
+      expect(page("PageUp").defaultPrevented).toBe(true);
+      expect(viewport.scrollTop).toBe(90);
+      expect(document.activeElement).toBe(area.element);
+    }
+  });
+
+  it("leaves focused controls, modified keys, and other workspace areas alone", () => {
+    using fixture = setup();
+    const panel = fixture.area("panel", 3);
+    const nested = fixture.area("nested", 4, panel.element);
+    const viewport = document.createElement("div");
+    viewport.style.cssText = "height: 100px; overflow-y: auto";
+    viewport.innerHTML = '<div style="height: 1000px">Scrollable content</div>';
+    nested.element.append(viewport);
+    const page = (target: HTMLElement, options: KeyboardEventInit = {}) => {
+      const event = new KeyboardEvent("keydown", {
+        key: "PageDown",
+        bubbles: true,
+        cancelable: true,
+        ...options,
+      });
+      target.dispatchEvent(event);
+      return event;
+    };
+    panel.element.focus();
+    expect(page(panel.element).defaultPrevented).toBe(false);
+    nested.button.focus();
+    expect(page(nested.button).defaultPrevented).toBe(false);
+    nested.element.focus();
+    for (const options of [
+      { altKey: true },
+      { ctrlKey: true },
+      { metaKey: true },
+      { shiftKey: true },
+      { isComposing: true },
+      { keyCode: 229 },
+    ])
+      expect(page(nested.element, options).defaultPrevented).toBe(false);
+    expect(viewport.scrollTop).toBe(0);
+    expect(page(nested.element).defaultPrevented).toBe(true);
+    expect(viewport.scrollTop).toBe(90);
+    fixture.controller.dispose();
+    expect(page(nested.element).defaultPrevented).toBe(false);
+    expect(viewport.scrollTop).toBe(90);
+  });
+
   it("cycles in workspace order in both directions, independent of DOM order", () => {
     using fixture = setup();
     const panel = fixture.area("panel", 3);

@@ -1,6 +1,7 @@
 import type { AnyRouter } from "@tanstack/react-router";
 import { dismissContextMenu } from "../contextMenuFallback";
 import { useRightPanelStore } from "../rightPanelStore";
+import { registerCommands } from "../shortcuts/dispatcher";
 
 const AREA_SELECTOR = "[data-workspace-area]";
 const FOCUS_BOUNDARY_SELECTOR =
@@ -104,6 +105,42 @@ export function createWorkspaceFocusController(doc: Document) {
     if (lastFocused.size > 64) lastFocused.delete(lastFocused.keys().next().value!);
   };
   doc.addEventListener("focusin", remember);
+
+  const pageFocusedArea = (event: KeyboardEvent) => {
+    if (
+      (event.key !== "PageUp" && event.key !== "PageDown") ||
+      event.defaultPrevented ||
+      event.isComposing ||
+      event.keyCode === 229 ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.shiftKey ||
+      !(event.target instanceof HTMLElement) ||
+      !event.target.matches(AREA_SELECTOR)
+    )
+      return false;
+    const area = event.target;
+    // A focused layout wrapper cannot natively page a scrolling descendant.
+    const viewport = [area, ...area.querySelectorAll<HTMLElement>("*")].find((element) => {
+      if (
+        element.scrollHeight <= element.clientHeight ||
+        workspaceArea(element) !== area ||
+        !isWorkspaceElementVisible(element)
+      )
+        return false;
+      const { overflowY } = getComputedStyle(element);
+      return overflowY === "auto" || overflowY === "scroll";
+    });
+    if (!viewport) return false;
+    event.preventDefault();
+    viewport.scrollBy({
+      top: (event.key === "PageUp" ? -1 : 1) * viewport.clientHeight * 0.9,
+      behavior: "instant",
+    });
+    return true;
+  };
+  const stopPageScroll = registerCommands({}, { fallback: true, onKeyDown: pageFocusedArea });
 
   const focusArea = (area: HTMLElement, restore = true) => {
     const key = area.dataset.workspaceFocusKey ?? area.dataset.workspaceArea!;
@@ -314,6 +351,7 @@ export function createWorkspaceFocusController(doc: Document) {
     dispose: () => {
       cancelRequest();
       doc.removeEventListener("focusin", remember);
+      stopPageScroll();
       doc.removeEventListener("focusout", recover);
       doc.removeEventListener("pointerdown", onUserInput, true);
       doc.removeEventListener("keydown", onUserInput, true);

@@ -220,6 +220,10 @@ export function createPageScrollController({
     const startTime = env.now();
 
     const step = (now: number) => {
+      if (getContainer() !== container) {
+        stop({ cancelDiscreteAnimation: true });
+        return;
+      }
       const progress = Math.min(1, (now - startTime) / PAGE_SCROLL_ANIMATION_MS);
       container.scrollTop = startScrollTop + deltaY * easeInOut(progress);
 
@@ -241,8 +245,8 @@ export function createPageScrollController({
     state.lastFrameTime = state.holdStartTime;
 
     const step = (now: number) => {
-      if (state.activeKey !== key) {
-        state.holdAnimationFrame = 0;
+      if (state.activeKey !== key || getContainer() !== container) {
+        stop({ cancelDiscreteAnimation: true });
         return;
       }
 
