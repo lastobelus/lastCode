@@ -244,6 +244,24 @@ describe("storage cleanup settings", () => {
   });
 });
 
+describe("ClientSettings current work details", () => {
+  it("defaults hover details off without adding omitted patches", () => {
+    expect(decodeClientSettings({}).hoverCurrentWorkDetails).toBe(false);
+    expect(decodeClientSettingsPatch({})).not.toHaveProperty("hoverCurrentWorkDetails");
+  });
+
+  it.each([true, false])("round-trips hover details set to %s", (hoverCurrentWorkDetails) => {
+    const preference = { hoverCurrentWorkDetails };
+    expect(encodeClientSettings(decodeClientSettings(preference))).toMatchObject(preference);
+    expect(decodeClientSettingsPatch(preference)).toEqual(preference);
+  });
+
+  it.each(["true", 1, null])("rejects invalid hover details: %j", (hoverCurrentWorkDetails) => {
+    expect(() => decodeClientSettings({ hoverCurrentWorkDetails })).toThrow();
+    expect(() => decodeClientSettingsPatch({ hoverCurrentWorkDetails })).toThrow();
+  });
+});
+
 describe("ClientSettings LastCode status icons", () => {
   it("defaults to no overrides and leaves omitted patches unchanged", () => {
     expect(decodeClientSettings({}).lastcodeStatusIcons).toEqual({});
