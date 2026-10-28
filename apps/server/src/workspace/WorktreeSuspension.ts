@@ -443,11 +443,15 @@ export const make = Effect.gen(function* () {
     const historical = yield* cleanup.historicalWorktreeOwners;
     for (const owner of historical) {
       if (owner.worktreePath === null) continue;
-      const actual = yield* canonical(owner.worktreePath);
-      if (!record.aliases.includes(owner.worktreePath) && !record.aliases.includes(actual))
+      const matchesRecordedPath =
+        record.aliases.includes(owner.worktreePath) ||
+        record.aliases.includes(path.resolve(owner.worktreePath));
+      const actual = yield* canonical(owner.worktreePath).pipe(Effect.option);
+      if (!matchesRecordedPath && (Option.isNone(actual) || !record.aliases.includes(actual.value)))
         continue;
       const migratedDuplicate =
-        actual === record.path &&
+        Option.isSome(actual) &&
+        actual.value === record.path &&
         owners.some(
           (current) =>
             current.id === owner.threadId &&

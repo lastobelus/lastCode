@@ -476,6 +476,31 @@ it.live("suspends exact historical migration duplicates of current owners", () =
   ),
 );
 
+it.live("ignores an unrelated historical path that cannot be resolved", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const loop = NodePath.join(f.root, "historical-loop");
+      yield* Effect.promise(() => NodeFSP.symlink(loop, loop));
+      const h = yield* harness(f, {
+        historicalOwners: [
+          {
+            threadId: "fixture:unrelated-history",
+            projectId: "fixture:unrelated-project",
+            worktreePath: loop,
+            branch: "unrelated",
+          },
+        ],
+      });
+      const saved = yield* h.suspend;
+      expect(saved.summary.state).toBe("suspended");
+      yield* Effect.promise(async () => {
+        await expect(NodeFSP.lstat(f.workspace)).rejects.toMatchObject({ code: "ENOENT" });
+        expect(await NodeFSP.readlink(loop)).toBe(loop);
+      });
+    }),
+  ),
+);
+
 it.live.each([
   "thread",
   "project",
