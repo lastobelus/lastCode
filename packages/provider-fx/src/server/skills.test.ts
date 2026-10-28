@@ -63,7 +63,9 @@ describe("discoverFxSkills", () => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const home = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-fx-skills-home-" });
+      const home = yield* fileSystem
+        .makeTempDirectoryScoped({ prefix: "t3-fx-skills-home-" })
+        .pipe(Effect.flatMap((directory) => fileSystem.realPath(directory)));
       const workspace = path.join(home, "app");
       const writeSkillFile = (folder: string, contents: string) =>
         fileSystem
@@ -184,9 +186,12 @@ describe("discoverFxSkills", () => {
         path.join(home, "dotfiles/fx-skills"),
         path.join(home, ".fx/skills"),
       );
+      const workspace = path.join(home, "app");
+      // fx canonicalizes an existing workspace before comparing its ancestors with HOME.
+      yield* fileSystem.makeDirectory(workspace);
 
       const skills = yield* discoverFxSkills({
-        cwd: path.join(home, "app"),
+        cwd: workspace,
         environment: { HOME: home },
       });
 

@@ -142,6 +142,7 @@ describe("LastCode userland build command", () => {
       ".lastcode/bin/lastcode-build.mjs",
       ".lastcode/bin/lastcode-local-update.mjs",
       ".lastcode/bin/lib/lastcode-build-progress.ts",
+      ".lastcode/bin/lib/lastcode-intel-build-trigger.mjs",
       ".lastcode/bin/lib/lastcode-checkpoint-service-run-now.mjs",
       ".lastcode/bin/lastcode-lock.mjs",
       ".lastcode/bin/lastcode-build",
@@ -161,6 +162,7 @@ describe("LastCode userland build command", () => {
           ".lastcode/bin/lastcode-build.mjs",
           ".lastcode/bin/lastcode-local-update.mjs",
           ".lastcode/bin/lib/lastcode-build-progress.ts",
+          ".lastcode/bin/lib/lastcode-intel-build-trigger.mjs",
           ".lastcode/bin/lib/lastcode-checkpoint-service-run-now.mjs",
           ".lastcode/bin/lastcode-lock.mjs",
           ".lastcode/bin/lastcode-build",
@@ -211,6 +213,12 @@ describe("LastCode userland build command", () => {
         "LastCode managed module: local-build-progress",
       );
       const installedHelper = NodePath.join(home, ".lastcode", "bin", "lastcode-local-update.mjs");
+      expect(
+        NodeFS.readFileSync(
+          NodePath.join(home, ".lastcode", "bin", "lib", "lastcode-intel-build-trigger.mjs"),
+          "utf8",
+        ),
+      ).toContain("LastCode managed module: intel-build-trigger");
       const invocation = NodeChildProcess.spawnSync(process.execPath, [installedHelper], {
         encoding: "utf8",
       });
@@ -306,7 +314,7 @@ describe("LastCode userland build command", () => {
 
   it("launches with the repository's pinned Node runtime", () => {
     expect(renderLauncher("/tmp/Last Code/lastcode-build.mjs")).toContain(
-      "mise exec node@24.13.1 -- node '/tmp/Last Code/lastcode-build.mjs' \"$@\"",
+      "env MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@24.13.1 -- node '/tmp/Last Code/lastcode-build.mjs' \"$@\"",
     );
   });
 });
