@@ -17,6 +17,100 @@ import {
   projectLastCodeProjectThreads,
   lastCodeProjectThreadStatus,
 } from "./lastcodeProjectThreads";
+const paging = vi.hoisted(() => ({ mount: vi.fn(), release: vi.fn() }));
+vi.mock("../../state/threads", async () => {
+  const { Atom } = await import("effect/reactivity");
+  const { ProjectId } = await import("@t3tools/contracts");
+  const shelf = Atom.family((key: string) =>
+    Atom.make(
+      new Map(
+        (
+          JSON.parse(key) as {
+            scope: { environmentId: EnvironmentId; projectIds: string[] };
+            pages: number;
+          }[]
+        ).map(({ scope }) => [
+          scope.environmentId,
+          {
+            older: {
+              before: "2026-01-01T00:00:00.000Z",
+              beforeMs: 1767225600000,
+              counts: new Map(scope.projectIds.map((id) => [ProjectId.make(id), 100])),
+            },
+            pages: {
+              reads: [],
+              frontier: { settledAt: "2026-01-01T00:00:00.000Z" },
+              status: "ready" as const,
+            },
+          },
+        ]),
+      ),
+    ),
+  );
+  return {
+    olderSettledThreads: {
+      shelfAtom: (scopes: unknown) => shelf(JSON.stringify(scopes)),
+      rowsKey: (scope: unknown, pages: number) => JSON.stringify({ scope, pages }),
+      pageRowsAtom: () => Atom.make([]),
+      retryPages: vi.fn(),
+    },
+    threadFamilies: {
+      mountRows: (_registry: unknown, environmentId: EnvironmentId, key: string) => {
+        paging.mount(environmentId, JSON.parse(key));
+        return () => paging.release(environmentId, JSON.parse(key));
+      },
+    },
+  };
+});
+function PagingHarness({
+  expanded = true,
+  list = false,
+  members = project.memberProjectRefs,
+}: {
+  expanded?: boolean;
+  list?: boolean;
+  members?: typeof project.memberProjectRefs;
+}) {
+  const value = useLastCodeProjectThreads({ memberProjectRefs: members }, null, expanded, list);
+  useEffect(() => observe(value), [value]);
+  return <output>{value.familyProjection.orderedThreadKeys.join(",")}</output>;
+}
+
+describe("project paging", () => {
+  it("mounts scoped pages only on expansion, grows one step, and releases them while collapsed", async () => {
+    setup();
+    paging.mount.mockClear();
+    paging.release.mockClear();
+    await using screen = await render(<PagingHarness />);
+    expect(latest().olderSettled.hasMore).toBe(true);
+    expect(paging.mount).not.toHaveBeenCalled();
+    await screen.rerender(<PagingHarness list />);
+    expect(paging.mount.mock.calls).toEqual(
+      project.memberProjectRefs.map((ref) => [
+        ref.environmentId,
+        { scope: { environmentId: ref.environmentId, projectIds: [ref.projectId] }, pages: 1 },
+      ]),
+    );
+    await act(() => latest().olderSettled.loadMore());
+    expect(paging.mount.mock.calls.slice(2).map(([, read]) => read.pages)).toEqual([2, 2]);
+    expect(paging.release).toHaveBeenCalledTimes(2);
+    await screen.rerender(<PagingHarness expanded={false} list />);
+    expect(paging.release).toHaveBeenCalledTimes(4);
+    const mounted = paging.mount.mock.calls.length;
+    await screen.rerender(<PagingHarness expanded={false} list />);
+    expect(paging.mount).toHaveBeenCalledTimes(mounted);
+    await screen.rerender(<PagingHarness list />);
+    expect(paging.mount.mock.calls.slice(mounted).map(([, read]) => read.pages)).toEqual([2, 2]);
+    await screen.rerender(<PagingHarness />);
+    expect(paging.release).toHaveBeenCalledTimes(6);
+    await screen.rerender(<PagingHarness list members={[project.memberProjectRefs[0]!]} />);
+    expect(paging.mount.mock.calls.at(-1)).toEqual([
+      parent.environmentId,
+      { scope: { environmentId: parent.environmentId, projectIds: [parent.projectId] }, pages: 1 },
+    ]);
+  });
+});
+
 const settings = vi.hoisted(() => ({
   sidebarThreadSortOrder: "created_at" as const,
   sidebarThreadPreviewCount: 1 as const,
