@@ -32,6 +32,29 @@ export class WorktreeSuspensionError extends Error {
   }
 }
 
+interface SuspensionMetadata {
+  readonly attributes: ReadonlyArray<SuspensionAttribute>;
+  readonly hiddenPaths: ReadonlyArray<string>;
+}
+
+interface SuspensionAttribute {
+  readonly path: string;
+  readonly name: string;
+  readonly hex: string;
+}
+
+// CLI writes must fit the platform argument limit; metadata also has an aggregate budget.
+const MAX_ATTRIBUTE_BYTES = 64 * 1024;
+const MAX_METADATA_BYTES = 4 * 1024 * 1024;
+const MAX_ATTRIBUTES = 4096;
+const supportedAttribute = (name: string) =>
+  [
+    "com.apple.FinderInfo",
+    "com.apple.ResourceFork",
+    "com.apple.TextEncoding",
+    "com.apple.quarantine",
+  ].includes(name) || /^com\.apple\.metadata:[A-Za-z0-9_]+$/u.test(name);
+
 export type SuspensionEntry =
   | { readonly path: string; readonly kind: "directory"; readonly mode: number }
   | {
@@ -70,6 +93,8 @@ export interface WorktreeSuspensionSnapshot {
   readonly indexTree: string;
   readonly headRef: string;
   readonly indexRef: string;
+  readonly attributes?: ReadonlyArray<SuspensionAttribute>;
+  readonly hiddenPaths?: ReadonlyArray<string>;
   readonly rootMode: number;
   readonly rootUid: number;
   readonly rootGid: number;
@@ -185,12 +210,13 @@ const command = (
   cwd?: string,
   env?: NodeJS.ProcessEnv,
   input?: string,
+  maxBuffer = 64 * 1024 * 1024,
 ) =>
   new Promise<Buffer>((resolve, reject) => {
     const child = NodeChildProcess.execFile(
       program,
       [...args],
-      { cwd, env, encoding: "buffer", maxBuffer: 64 * 1024 * 1024 },
+      { cwd, env, encoding: "buffer", maxBuffer },
       (error, stdout) => {
         if (error) {
           reject(
@@ -565,20 +591,91 @@ const metadataCheck = async (
   root: string,
   entries: ReadonlyArray<SuspensionEntry>,
   recursive = true,
-) => {
+  attributeLimits?: WorktreeSuspensionLimits,
+): Promise<SuspensionMetadata> => {
   if (HostProcess.Platform.defaultValue() === "darwin") {
     const attributes = await command("/usr/bin/xattr", [recursive ? "-rs" : "-s", root]);
-    if (attributes.length !== 0) refuse("extended attributes are unsupported");
+    const captured: Array<SuspensionAttribute> = [];
+    const paths = new Set(["", ...entries.map((entry) => entry.path)]);
+    let metadataBytes = 0;
+    const text = attributes.toString("utf8");
+    if (!Buffer.from(text).equals(attributes)) refuse("extended attribute names are unsupported");
+    for (const line of text.split("\n").filter(Boolean).sort()) {
+      const separator = recursive ? line.lastIndexOf(": ") : -1;
+      const absolute = recursive ? line.slice(0, separator) : root;
+      const name = recursive ? line.slice(separator + 2) : line;
+      const path = NodePath.relative(root, absolute);
+      if (
+        attributeLimits === undefined ||
+        (recursive && separator < 0) ||
+        !paths.has(path) ||
+        !supportedAttribute(name)
+      )
+        refuse("extended attributes are unsupported");
+      if (captured.length >= MAX_ATTRIBUTES) refuse("extended attributes exceed the record limit");
+      const value = await command(
+        "/usr/bin/xattr",
+        ["-spx", name, absolute],
+        undefined,
+        undefined,
+        undefined,
+        MAX_ATTRIBUTE_BYTES * 4,
+      );
+      const hex = value.toString("ascii").replace(/\s/gu, "").toLowerCase();
+      if (!/^(?:[a-f0-9]{2})*$/u.test(hex) || hex.length > MAX_ATTRIBUTE_BYTES * 2)
+        refuse("extended attributes exceed the value limit or are invalid");
+      metadataBytes += hex.length / 2 + Buffer.byteLength(name) + Buffer.byteLength(path);
+      if (metadataBytes > Math.min(MAX_METADATA_BYTES, attributeLimits!.maxBytes))
+        refuse("extended attributes exceed the byte limit");
+      captured.push({ path, name, hex });
+    }
     const listing = recursive ? await command("/bin/ls", ["-lAnReO", "--", root]) : Buffer.alloc(0);
     const rootListing = await command("/bin/ls", ["-ldneO", "--", root]);
+    let hasHidden = false;
     for (const line of Buffer.concat([listing, rootListing]).toString("utf8").split("\n")) {
       if (!/^[bcdlps-][rwxStTs-]{9}/u.test(line)) continue;
       const fields = line.trim().split(/\s+/u);
-      if (fields[0]?.includes("+") || fields[4] !== "-") {
+      if (
+        fields[0]?.includes("+") ||
+        (fields[4] !== "-" && !(attributeLimits !== undefined && fields[4] === "hidden"))
+      ) {
         refuse("ACLs or filesystem flags are unsupported");
       }
+      hasHidden ||= fields[4] === "hidden";
     }
-    return;
+    const hiddenPaths: string[] = [];
+    if (hasHidden) {
+      let batch: string[] = [];
+      let argumentBytes = 0;
+      const inspectFlags = async () => {
+        if (batch.length === 0) return;
+        const values = await command("/usr/bin/stat", [
+          "-f",
+          "%f",
+          "--",
+          ...batch.map((name) => NodePath.join(root, name)),
+        ]);
+        const text = values.toString("utf8");
+        const flags = text.trimEnd().split("\n");
+        if (!/^(?:[0-9]+\n)+$/u.test(text) || flags.length !== batch.length)
+          refuse("filesystem flags could not be verified");
+        for (let index = 0; index < batch.length; index++) {
+          if (flags[index] === "32768") hiddenPaths.push(batch[index]!);
+          else if (flags[index] !== "0") refuse("ACLs or filesystem flags are unsupported");
+        }
+        batch = [];
+        argumentBytes = 0;
+      };
+      for (const name of paths) {
+        const bytes = Buffer.byteLength(NodePath.join(root, name)) + 1;
+        if (bytes > 32 * 1024) refuse("a metadata path exceeds inspection limits");
+        if (batch.length === 128 || argumentBytes + bytes > 32 * 1024) await inspectFlags();
+        batch.push(name);
+        argumentBytes += bytes;
+      }
+      await inspectFlags();
+    }
+    return { attributes: captured, hiddenPaths };
   }
   if (HostProcess.Platform.defaultValue() === "linux") {
     // Missing platform inspection utilities deliberately keep the original.
@@ -628,12 +725,14 @@ const metadataCheck = async (
         refuse("filesystem flags are unsupported");
       }
     }
-    return;
+    return { attributes: [], hiddenPaths: [] };
   }
   refuse("this platform has no metadata verifier");
 };
 
 interface Inventory {
+  readonly attributes?: ReadonlyArray<SuspensionAttribute>;
+  readonly hiddenPaths?: ReadonlyArray<string>;
   readonly entries: ReadonlyArray<SuspensionEntry>;
   readonly rawBytes: number;
   readonly rootMode: number;
@@ -657,6 +756,7 @@ const inventory = async (
   const versions = new Map<string, string>([[root, version(rootStat)]]);
   const durable = durabilityBatch();
   let rawBytes = 0;
+  const files: Array<() => Promise<void>> = [];
   const inspect = async (directory: string, prefix: string): Promise<void> => {
     const names = (await NodeFSP.readdir(directory, { encoding: "buffer" }))
       .map((name) => {
@@ -702,87 +802,135 @@ const inventory = async (
         if (before.size > limits.maxFileBytes) refuse("a file exceeds the preservation limit");
         rawBytes += before.size;
         if (rawBytes > limits.maxBytes) refuse("the workspace exceeds the byte limit");
-        const handle = await NodeFSP.open(
-          absolute,
-          NodeFS.constants.O_RDONLY | NodeFS.constants.O_NOFOLLOW,
-        );
-        const gitPayload = gitPayloads?.get(relative);
-        const temporary =
-          objects === undefined || gitPayload?.bytes.length === before.size
-            ? undefined
-            : NodePath.join(objects, `${NodeCrypto.randomUUID()}.tmp`);
-        const hash = NodeCrypto.createHash("sha256");
-        let readBytes = 0;
-        try {
-          if (version(await handle.stat()) !== version(before))
-            refuse("a file changed during capture");
-          const hasher = new NodeStream.Transform({
-            transform(chunk: Buffer, _encoding, callback) {
-              readBytes += chunk.length;
-              if (readBytes > limits.maxFileBytes || readBytes > before.size) {
-                callback(new WorktreeSuspensionError("a file changed during capture"));
-              } else {
-                hash.update(chunk);
-                callback(null, chunk);
-              }
-            },
-          });
-          const input = handle.createReadStream({ autoClose: false });
-          if (temporary === undefined) {
-            await NodeStreamPromises.pipeline(
-              input,
-              hasher,
-              new NodeStream.Transform({
-                transform(_chunk, _encoding, callback) {
-                  callback();
-                },
-              }),
-            );
-          } else {
-            await NodeStreamPromises.pipeline(
-              input,
-              hasher,
-              NodeZlib.createGzip(),
-              NodeFS.createWriteStream(temporary, { flags: "wx", mode: 0o600 }),
-            );
-          }
-          if (version(await handle.stat()) !== version(before) || readBytes !== before.size) {
-            refuse("a file changed during capture");
-          }
-        } finally {
-          await handle.close();
-        }
-        const digest = hash.digest("hex");
-        if (objects !== undefined && temporary === undefined && gitPayload?.hash !== digest)
-          refuse("a Git-backed file changed during capture");
-        if (temporary !== undefined) {
-          await durable.add(async () => {
-            await syncFile(temporary);
-            const payload = NodePath.join(objects!, `${digest}.gz`);
-            if (await exists(payload)) await NodeFSP.unlink(temporary);
-            else await NodeFSP.rename(temporary, payload);
-          });
-        }
+        const entryIndex = entries.length;
         entries.push({
           path: relative,
           kind: "file",
           mode: before.mode & 0o777,
           size: before.size,
-          hash: digest,
+          hash: "",
+        });
+        files.push(async () => {
+          const handle = await NodeFSP.open(
+            absolute,
+            NodeFS.constants.O_RDONLY | NodeFS.constants.O_NOFOLLOW,
+          );
+          const gitPayload = gitPayloads?.get(relative);
+          const temporary =
+            objects === undefined || gitPayload?.bytes.length === before.size
+              ? undefined
+              : NodePath.join(objects, `${NodeCrypto.randomUUID()}.tmp`);
+          const hash = NodeCrypto.createHash("sha256");
+          let readBytes = 0;
+          try {
+            if (version(await handle.stat()) !== version(before))
+              refuse("a file changed during capture");
+            const hasher = new NodeStream.Transform({
+              transform(chunk: Buffer, _encoding, callback) {
+                readBytes += chunk.length;
+                if (readBytes > limits.maxFileBytes || readBytes > before.size) {
+                  callback(new WorktreeSuspensionError("a file changed during capture"));
+                } else {
+                  hash.update(chunk);
+                  callback(null, chunk);
+                }
+              },
+            });
+            const input = handle.createReadStream({ autoClose: false });
+            if (temporary === undefined) {
+              await NodeStreamPromises.pipeline(
+                input,
+                hasher,
+                new NodeStream.Transform({
+                  transform(_chunk, _encoding, callback) {
+                    callback();
+                  },
+                }),
+              );
+            } else {
+              await NodeStreamPromises.pipeline(
+                input,
+                hasher,
+                NodeZlib.createGzip(),
+                NodeFS.createWriteStream(temporary, { flags: "wx", mode: 0o600 }),
+              );
+            }
+            if (version(await handle.stat()) !== version(before) || readBytes !== before.size) {
+              refuse("a file changed during capture");
+            }
+          } finally {
+            await handle.close();
+          }
+          const digest = hash.digest("hex");
+          if (objects !== undefined && temporary === undefined && gitPayload?.hash !== digest)
+            refuse("a Git-backed file changed during capture");
+          if (temporary !== undefined) {
+            await durable.add(async () => {
+              await syncFile(temporary);
+              const payload = NodePath.join(objects!, `${digest}.gz`);
+              if (await exists(payload)) await NodeFSP.unlink(temporary);
+              else await NodeFSP.rename(temporary, payload);
+            });
+          }
+          entries[entryIndex] = {
+            path: relative,
+            kind: "file",
+            mode: before.mode & 0o777,
+            size: before.size,
+            hash: digest,
+          };
+          if (version(await NodeFSP.lstat(absolute)) !== version(before))
+            refuse("the workspace changed during capture");
         });
       } else refuse("special files are unsupported");
       if (version(await NodeFSP.lstat(absolute)) !== version(before))
         refuse("the workspace changed during capture");
     }
   };
+  let attributes: ReadonlyArray<SuspensionAttribute> = [];
+  let hiddenPaths: ReadonlyArray<string> = [];
   try {
     await inspect(root, "");
+    const metadata = await metadataCheck(
+      root,
+      entries,
+      true,
+      selected === undefined ? limits : undefined,
+    );
+    attributes = metadata.attributes;
+    hiddenPaths = metadata.hiddenPaths;
+    const metadataBytes =
+      hiddenPaths.reduce((sum, name) => sum + Buffer.byteLength(name), 0) +
+      attributes.reduce(
+        (sum, item) =>
+          sum + item.hex.length / 2 + Buffer.byteLength(item.path) + Buffer.byteLength(item.name),
+        0,
+      );
+    if (metadataBytes > Math.min(MAX_METADATA_BYTES, limits.maxBytes))
+      refuse("workspace metadata exceeds the byte limit");
+    rawBytes += metadataBytes;
+    if (rawBytes > limits.maxBytes) refuse("the workspace exceeds the byte limit");
+    for (const captureFile of files) await captureFile();
+    const afterMetadata = await metadataCheck(
+      root,
+      entries,
+      true,
+      selected === undefined ? limits : undefined,
+    );
+    if (JSON.stringify(attributes) !== JSON.stringify(afterMetadata.attributes))
+      refuse("extended attributes changed during capture");
+    if (JSON.stringify(hiddenPaths) !== JSON.stringify(afterMetadata.hiddenPaths))
+      refuse("filesystem flags changed during capture");
+    for (const [absolute, stamp] of versions)
+      if (version(await NodeFSP.lstat(absolute)) !== stamp)
+        refuse("the workspace changed during capture");
   } finally {
     await durable.drain();
   }
-  await metadataCheck(root, entries);
   if (objects !== undefined) await syncDirectory(objects);
   return {
+    ...(attributes.length === 0 ? {} : { attributes }),
+    ...(hiddenPaths.length === 0 ? {} : { hiddenPaths }),
     entries,
     rawBytes,
     rootMode: rootStat.mode & 0o777,
@@ -975,6 +1123,48 @@ const assertSnapshot = (value: unknown, id: string): WorktreeSuspensionSnapshot 
       refuse("the snapshot payload reference is invalid");
     if (entry.kind === "symlink" && typeof entry.target !== "string")
       refuse("the snapshot symlink is invalid");
+  }
+  if (snapshot.attributes !== undefined) {
+    if (!Array.isArray(snapshot.attributes) || snapshot.attributes.length > MAX_ATTRIBUTES)
+      refuse("the saved extended attributes exceed the record limit");
+    const paths = new Set(["", ...snapshot.entries.map((entry) => entry.path)]);
+    const keys = new Set<string>();
+    let bytes = 0;
+    for (const item of snapshot.attributes) {
+      if (
+        item === null ||
+        typeof item !== "object" ||
+        typeof item.name !== "string" ||
+        !paths.has(item.path) ||
+        !supportedAttribute(item.name) ||
+        typeof item.hex !== "string" ||
+        !/^(?:[a-f0-9]{2})*$/u.test(item.hex) ||
+        item.hex.length > MAX_ATTRIBUTE_BYTES * 2
+      )
+        refuse("the saved extended attributes are invalid");
+      const key = JSON.stringify([item.path, item.name]);
+      if (keys.has(key)) refuse("the saved extended attributes are duplicated");
+      keys.add(key);
+      bytes += item.hex.length / 2 + Buffer.byteLength(item.path) + Buffer.byteLength(item.name);
+      if (bytes > MAX_METADATA_BYTES) refuse("the saved extended attributes exceed the byte limit");
+    }
+  }
+  if (snapshot.hiddenPaths !== undefined) {
+    const paths = new Set(["", ...snapshot.entries.map((entry) => entry.path)]);
+    if (
+      !Array.isArray(snapshot.hiddenPaths) ||
+      snapshot.hiddenPaths.length > paths.size ||
+      new Set(snapshot.hiddenPaths).size !== snapshot.hiddenPaths.length ||
+      snapshot.hiddenPaths.some((name) => typeof name !== "string" || !paths.has(name)) ||
+      snapshot.hiddenPaths.reduce((sum, name) => sum + Buffer.byteLength(name), 0) +
+        (snapshot.attributes ?? []).reduce(
+          (sum, item) =>
+            sum + item.hex.length / 2 + Buffer.byteLength(item.path) + Buffer.byteLength(item.name),
+          0,
+        ) >
+        MAX_METADATA_BYTES
+    )
+      refuse("the saved filesystem flags are invalid");
   }
   if (
     snapshot.headRef !== `refs/lastcode/suspension/${id}/head` ||
@@ -1321,6 +1511,10 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       rootStat.uid !== snapshot.rootUid ||
       rootStat.gid !== snapshot.rootGid ||
       currentInventory.rootMode !== snapshot.rootMode ||
+      JSON.stringify(currentInventory.hiddenPaths ?? []) !==
+        JSON.stringify(snapshot.hiddenPaths ?? []) ||
+      JSON.stringify(currentInventory.attributes ?? []) !==
+        JSON.stringify(snapshot.attributes ?? []) ||
       JSON.stringify(currentInventory.entries) !== JSON.stringify(snapshot.entries)
     )
       refuse("the workspace contents changed after capture");
@@ -1478,6 +1672,8 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     if (
       JSON.stringify(before.entries) !== JSON.stringify(captured.entries) ||
       before.rootMode !== captured.rootMode ||
+      JSON.stringify(before.hiddenPaths ?? []) !== JSON.stringify(captured.hiddenPaths ?? []) ||
+      JSON.stringify(before.attributes ?? []) !== JSON.stringify(captured.attributes ?? []) ||
       JSON.stringify(metadataBefore.entries) !== JSON.stringify(metadata.entries)
     )
       refuse("the workspace changed while preserving it");
@@ -1504,12 +1700,21 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       headRef,
       indexRef,
       indexTree,
+      ...(captured.attributes === undefined ? {} : { attributes: captured.attributes }),
+      ...(captured.hiddenPaths === undefined ? {} : { hiddenPaths: captured.hiddenPaths }),
       rootMode: captured.rootMode,
       rootUid: sourceStat.uid,
       rootGid: sourceStat.gid,
       entries: captured.entries,
       rawBytes: captured.rawBytes + metadata.rawBytes,
-      savedBytes,
+      savedBytes:
+        savedBytes +
+        (captured.hiddenPaths === undefined
+          ? 0
+          : Buffer.byteLength(JSON.stringify(captured.hiddenPaths))) +
+        (captured.attributes === undefined
+          ? 0
+          : Buffer.byteLength(JSON.stringify(captured.attributes))),
       gitFiles: metadata.entries,
       gitRefs,
     };
@@ -1653,6 +1858,16 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
   ) => {
     const { indexPayloads } = await validateRepository(snapshot);
     const present = resume ? await inventory(destination, limits) : undefined;
+    if (
+      present?.attributes !== undefined &&
+      present.attributes.some(
+        (item) =>
+          !snapshot.attributes?.some((saved) => JSON.stringify(saved) === JSON.stringify(item)),
+      )
+    )
+      refuse("the partial restore contains unknown extended attributes");
+    if (present?.hiddenPaths?.some((name) => !snapshot.hiddenPaths?.includes(name)))
+      refuse("the partial restore contains unknown filesystem flags");
     const actual = new Map(present?.entries.map((entry) => [entry.path, entry]));
     const expected = new Map(snapshot.entries.map((entry) => [entry.path, entry]));
     for (const entry of actual.values()) {
@@ -1730,6 +1945,21 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       }
     } finally {
       await durable.drain();
+    }
+    for (const item of snapshot.attributes ?? []) {
+      if (HostProcess.Platform.defaultValue() !== "darwin")
+        refuse("saved extended attributes require macOS");
+      const absolute = NodePath.join(destination, item.path);
+      await command("/usr/bin/xattr", ["-swx", item.name, item.hex, absolute]);
+      const entry = expected.get(item.path);
+      if (durableRestore && entry?.kind !== "symlink") await syncFile(absolute);
+    }
+    for (const name of snapshot.hiddenPaths ?? []) {
+      if (HostProcess.Platform.defaultValue() !== "darwin")
+        refuse("saved filesystem flags require macOS");
+      const absolute = NodePath.join(destination, name);
+      await command("/usr/bin/chflags", ["-h", "hidden", absolute]);
+      if (durableRestore && expected.get(name)?.kind !== "symlink") await syncFile(absolute);
     }
     for (let offset = snapshot.entries.length - 1; offset >= 0; offset -= 1) {
       const entry = snapshot.entries[offset]!;
