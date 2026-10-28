@@ -1403,12 +1403,19 @@ const CHAT_MARKDOWN_COMPONENTS = {
               event.stopPropagation();
               void openDeferredMarkdownLink(href, {
                 event: { metaKey: event.metaKey, ctrlKey: event.ctrlKey },
-              }).catch((cause: unknown) =>
+              }).catch((cause: unknown) => {
                 reportMarkdownActionFailure(
                   { operation: "open-link-in-preview", target: href },
                   cause,
-                ),
-              );
+                );
+                toastManager.add(
+                  stackedThreadToast({
+                    type: "error",
+                    title: "Unable to open link in browser",
+                    description: cause instanceof Error ? cause.message : "The request failed.",
+                  }),
+                );
+              });
               return;
             }
             if (event.defaultPrevented) return;
