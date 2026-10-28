@@ -9,7 +9,10 @@ import {
 
 import type { ServerProviderSkill } from "@t3tools/contracts";
 import type { Editor } from "@tiptap/core";
-import { createElement, createRef, useEffect, useState } from "react";
+import { createElement, createRef, useEffect, useRef, useState } from "react";
+import type { LegendListRef } from "@legendapp/list/react";
+import { useTimelineFollow } from "./chat/useTimelineFollow";
+import { attachTimelineViewport } from "./chat/timelineViewport";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { userEvent } from "vite-plus/test/browser";
 
@@ -132,6 +135,114 @@ function textWithMark(editor: Editor, name: string) {
   });
   return text;
 }
+
+function FollowingTimeline({
+  value,
+  threadKey = "page-scroll-test",
+}: {
+  value: string;
+  threadKey?: string;
+}) {
+  const nodeRef = useRef<HTMLDivElement | null>(null);
+  const legendListRef = useRef<LegendListRef | null>({
+    getState: () => ({
+      data: [{}],
+      scroll: nodeRef.current?.scrollTop ?? 0,
+      scrollLength: 300,
+      contentLength: 2000,
+      positionAtIndex: () => 0,
+      sizeAtIndex: () => 2000,
+    }),
+    scrollToItem: () => {},
+    getScrollableNode: () => nodeRef.current,
+  } as unknown as LegendListRef);
+  const composerRef = useRef(null);
+  const follow = useTimelineFollow({
+    legendListRef,
+    composerRef,
+    composerTimelineInset: 0,
+    routeThreadKey: threadKey,
+    activeThreadKey: threadKey,
+    isServerThread: false,
+    serverProjection: null,
+    threadStatus: "live",
+    activeActivityRun: null,
+    activeRunningTurnId: null,
+    timelineEntries: [],
+    timelineAnchorMessageId: null,
+    setTimelineAnchor: () => {},
+  });
+  // The real list reattaches its viewport when following changes.
+  const attach = (node: HTMLDivElement | null) => {
+    if (!node) return;
+    if (nodeRef.current !== node) node.scrollTop = 1700;
+    nodeRef.current = node;
+    const viewport = attachTimelineViewport(node);
+    const detach = follow.attachTimelineViewport(viewport);
+    return () => {
+      detach();
+      viewport.dispose();
+    };
+  };
+  return (
+    <>
+      <div data-testid="timeline" style={{ height: 300, overflow: "auto" }} ref={attach}>
+        <div style={{ height: 2000 }} />
+      </div>
+      <ComposerPromptEditor
+        editorRef={createRef<ComposerPromptEditorHandle>()}
+        value={value}
+        cursor={0}
+        contextRecords={new Map()}
+        skills={[]}
+        disabled={false}
+        placeholder=""
+        onChange={() => {}}
+        onPaste={() => {}}
+        onPageScrollKeyDown={follow.onComposerPageScrollKeyDownStable}
+        onPageScrollKeyUp={follow.onComposerPageScrollKeyUpStable}
+      />
+    </>
+  );
+}
+
+it.each([
+  { name: "empty", value: "" },
+  { name: "short", value: "short prompt" },
+  {
+    name: "overflowing at its top",
+    value: Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n"),
+  },
+])(
+  "scrolls on the first PageUp from a $name composer while releasing follow",
+  async ({ value }) => {
+    await using screen = await render(<FollowingTimeline value={value} />);
+    const editor = editorIn(screen.container);
+    await act(() => editor.commands.focus("start"));
+    await vi.waitFor(() => expect(document.activeElement).toBe(editor.view.dom));
+    editor.view.dom.scrollTop = 0;
+    const timeline = screen.container.querySelector<HTMLElement>('[data-testid="timeline"]')!;
+    await userEvent.keyboard("{PageUp}");
+    await vi.waitFor(() => expect(timeline.scrollTop).toBeLessThan(1600));
+  },
+);
+
+it("cancels a page animation when another thread reuses the viewport", async () => {
+  await using screen = await render(<FollowingTimeline value="" />);
+  const editor = editorIn(screen.container);
+  await act(() => editor.commands.focus("start"));
+  const timeline = screen.container.querySelector<HTMLElement>('[data-testid="timeline"]')!;
+  using _timers = fakeTimers();
+  await act(() => {
+    editor.view.dom.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "PageUp", bubbles: true, cancelable: true }),
+    );
+  });
+  await screen.rerender(<FollowingTimeline value="" threadKey="another-thread" />);
+  timeline.scrollTop = 900;
+  await act(() => vi.advanceTimersByTime(500));
+  expect(timeline.scrollTop).toBe(900);
+});
 
 it.each([
   { value: "clean _build and node", code: [] },

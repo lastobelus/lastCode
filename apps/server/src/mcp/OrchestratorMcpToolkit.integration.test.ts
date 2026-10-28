@@ -45,6 +45,7 @@ import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as ThreadReadBroker from "./ThreadReadBroker.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
@@ -229,6 +230,7 @@ describe("orchestrator MCP toolkit", () => {
           }),
         ]);
         const layerTest = layerOrchestratorToolkit.pipe(
+          Layer.provide(ThreadReadBroker.layer),
           Layer.provideMerge(McpServer.McpServer.layer),
           Layer.provideMerge(layerOrchestration),
           Layer.provide(

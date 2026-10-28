@@ -2367,10 +2367,10 @@ it("mounts a bounded set of saved notebook outputs as the reader scrolls", async
     </div>,
   );
   // The first outputs wait on the lazy notebook viewer and the conversion worker, not on a frame.
-  await vi.waitFor(
-    () => expect(screen.container.querySelectorAll("iframe").length).toBeGreaterThan(0),
-    { timeout: 10_000 },
-  );
+  await expect
+    .element(screen.getByTitle("Cell 1 HTML output", { exact: true }).first(), { timeout: 10_000 })
+    .toHaveAttribute("srcdoc", expect.stringContaining("saved 0-0"));
+  expect(screen.container.querySelectorAll("iframe").length).toBeGreaterThan(0);
   expect(screen.container.querySelectorAll("iframe").length).toBeLessThanOrEqual(16);
   const first = screen.container.querySelector("iframe")!;
   expect(first.srcdoc).toContain("saved 0-0");
@@ -2378,21 +2378,17 @@ it("mounts a bounded set of saved notebook outputs as the reader scrolls", async
   await act(() => {
     viewport.scrollTop = viewport.scrollHeight;
   });
-  await vi.waitFor(() => {
-    expect(
-      [...screen.container.querySelectorAll("iframe")].some((frame) =>
-        frame.srcdoc.includes("saved 19-99"),
-      ),
-    ).toBe(true);
-    expect(first.isConnected).toBe(false);
-  });
+  await expect
+    .element(screen.getByTitle("Cell 20 HTML output", { exact: true }).last())
+    .toHaveAttribute("srcdoc", expect.stringContaining("saved 19-99"));
+  expect(first.isConnected).toBe(false);
   expect(screen.container.querySelectorAll("iframe").length).toBeLessThanOrEqual(16);
   await act(() => {
     viewport.scrollTop = 0;
   });
-  await vi.waitFor(() =>
-    expect(screen.container.querySelector("iframe")?.srcdoc).toContain("saved 0-0"),
-  );
+  await expect
+    .element(screen.getByTitle("Cell 1 HTML output", { exact: true }).first())
+    .toHaveAttribute("srcdoc", expect.stringContaining("saved 0-0"));
 });
 
 it.each([
@@ -2523,22 +2519,24 @@ it.each(["rtf", "epub", "ods"] as const)(
         />
       </div>,
     );
-    await vi.waitFor(
-      () => {
-        if (kind === "ods") {
-          expect(screen.container.textContent).toContain("North");
-          expect(screen.container.textContent).toContain("150");
-          expect(screen.container.textContent).not.toContain("private note");
-          expect(screen.container.textContent).toContain("1 rows · 2 columns");
-          expect(screen.container.textContent).not.toContain("Limited to 500");
-        } else {
-          const frame = screen.container.querySelector("iframe");
-          expect(frame?.srcdoc).toContain(kind === "rtf" ? "10–20" : "first<br>second<br>third");
-        }
-        // The viewer runs its own conversion worker behind lazy chunks.
-      },
-      { timeout: 10_000 },
-    );
+    // The viewer runs its own conversion worker behind lazy chunks.
+    if (kind === "ods") {
+      await expect
+        .element(screen.getByRole("cell", { name: "North", exact: true }), { timeout: 10_000 })
+        .toBeInTheDocument();
+      expect(screen.container.textContent).toContain("North");
+      expect(screen.container.textContent).toContain("150");
+      expect(screen.container.textContent).not.toContain("private note");
+      expect(screen.container.textContent).toContain("1 rows · 2 columns");
+      expect(screen.container.textContent).not.toContain("Limited to 500");
+    } else {
+      await expect
+        .element(screen.getByTitle(new RegExp(`^report\\.${kind}: `)), { timeout: 10_000 })
+        .toHaveAttribute(
+          "srcdoc",
+          expect.stringContaining(kind === "rtf" ? "10–20" : "first<br>second<br>third"),
+        );
+    }
     expect(screen.container.querySelector('[role="alert"]')).toBeNull();
   },
 );
