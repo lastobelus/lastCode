@@ -1,5 +1,10 @@
 <!doctype html>
-<html lang="en" data-repo-doc-path="doc/design/2026-10-06__lastcode-product-guide-eli5.html">
+<html
+  lang="en"
+  data-repo-doc-path="doc/design/2026-10-06__lastcode-product-guide-eli5.html"
+  data-checkpoint-tag="lastcode/checkpoint/v0.1.3-nightly.20261027.3748"
+  data-checkpoint-commit="2da9a07b51a1878bcbf9066e5c0429df8d7cba8d"
+>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -407,7 +412,8 @@
             work.
           </li>
           <li>
-            <a href="#storage">Storage</a>: automatic cleanup is careful; explicit deletion is not.
+            <a href="#storage">Storage</a>: tidy generated files, suspend a checkout, or delete it —
+            three different tools.
           </li>
           <li><a href="#dashboards">Dashboards</a>: the project Dashboard is LastCode's own.</li>
           <li>
@@ -419,9 +425,13 @@
           </li>
         </ol>
         <p class="muted">
-          Checked against the LastCode source on 6 October 2026. This page only explains; nothing on
-          it changes LastCode. Personal service names and disk measurements are kept in the private
-          companion at the bottom.
+          Checked on 27 October 2026 PT against the built checkpoint
+          <code>lastcode/checkpoint/v0.1.3-nightly.20261027.3748</code> (commit
+          <code>2da9a07b51a1</code>). A built package can be newer than the app you have installed,
+          so a label described here may not appear until you install that build. This page only
+          explains; nothing on it changes LastCode. Personal service names and disk measurements are
+          kept in the private companion at the bottom, which was written earlier and has not been
+          rechecked.
         </p>
       </header>
       <nav class="tabs" role="tablist" aria-label="Guide topics">
@@ -493,7 +503,7 @@
           aria-labelledby="tab-schedules"
           tabindex="0"
         >
-          <h2>A scheduled task is a recurring message to an agent.</h2>
+          <h2>A scheduled task sends a saved message to an agent.</h2>
           <p>
             At the time you choose, LastCode sends a saved prompt to an agent, which does the work
             in a thread. The environment that owns the task must be running. Your browser can be
@@ -536,8 +546,9 @@
                   <td>Project Action</td>
                   <td>Run an exact test command, Quick CI, a package build, or wait for a PR.</td>
                   <td>
-                    A saved command does predictable work. An opted-in Action can send its result
-                    back to the same agent when it finishes.
+                    A saved command does predictable work. An Action opted in with
+                    <strong>Allow Codex and Claude to run and resume</strong> sends its result back
+                    to the same agent when it finishes.
                   </td>
                 </tr>
                 <tr>
@@ -557,18 +568,21 @@
               that own the work.
             </li>
             <li>
-              Choose <strong>New task</strong>, then a prompt, model, workspace and permission mode.
-              Say clearly what the output should be and what the agent must not do.
+              Choose <strong>New task</strong>. Write the prompt, pick a model, and pick a
+              workspace: <strong>Create a new worktree</strong>,
+              <strong>Use the project checkout</strong> or <strong>Use a specific checkout</strong>.
+              Say clearly what the output should be and what the agent must not do — the form has no
+              permission-mode choice, and new tasks run with full access.
             </li>
             <li>
-              Choose <strong>At a time</strong>, an interval, or <strong>On webhook</strong>. Fixed
-              times use the environment's time zone, which may differ from your laptop's or phone's.
-              The shortest interval is one minute.
+              Choose <strong>At a time</strong>, <strong>Every interval</strong> or
+              <strong>On webhook</strong>. Fixed times use the environment's time zone, which may
+              differ from your laptop's or phone's. The shortest interval is one minute.
             </li>
             <li>
-              Save. From the list you can edit, pause, resume, run now or delete. Webhook tasks run
-              when a request arrives, so they have no Run now. Tasks bound to a thread also appear
-              in that thread's automations panel.
+              Choose <strong>Create task</strong>. From the list you can edit, pause, resume, run
+              now or delete. Webhook tasks run when a request arrives, so they have no Run now.
+              Tasks bound to a thread also appear in that thread's automations panel.
             </li>
           </ol>
           <h3>Where the results go</h3>
@@ -579,8 +593,9 @@
             </li>
             <li>
               <strong>An existing thread</strong> — the default for tasks an agent creates (they
-              bind to the calling thread). Good for a continuing investigation. The prompt waits
-              behind work already running there; it does not interrupt a tool.
+              bind to the calling thread). Good for a continuing investigation. The prompt is queued
+              behind work already running there; it does not interrupt a tool. It uses that thread's
+              current provider and model; the task's saved model is only for new threads.
             </li>
           </ul>
           <div class="example">
@@ -608,11 +623,20 @@
               Read the thread for the real outcome.
             </li>
             <li>A frequent schedule can queue work faster than the agent finishes it.</li>
+            <li>
+              While its environment is paused, no task wakes up. After you resume, each schedule
+              applies the catch-up rules above.
+            </li>
           </ul>
           <p>
             A webhook can react to events such as a CI failure or a new PR. A public webhook URL
-            uses T3 Connect; request signatures and optional offline holding are separate settings.
-            Read the existing webhook guide before connecting an outside sender.
+            uses T3 Connect. <strong>Filters</strong>, <strong>Replay key</strong>,
+            <strong>Coalesce key</strong>, <strong>Require signature</strong> and
+            <strong>Skip requests older than</strong> decide which requests reach the agent, and
+            <strong>Deliveries</strong> shows what arrived. To keep requests while LastCode is
+            offline, use <strong>Settings → Sharing & access → Hold webhooks while offline</strong>.
+            These shape what the agent receives; they do not turn the task into a fixed command.
+            Read the webhook guide before connecting an outside sender.
           </p>
           <div class="answer">
             <strong>Recommendation:</strong> keep whatever runs or updates LastCode outside
@@ -628,7 +652,7 @@
               <li>
                 <a
                   data-source="docs/user/project-settings.md"
-                  href="https://github.com/lastobelus/lastCode/blob/c69c2b80886c093fe1870cb5649ddd254f51f22b/docs/user/project-settings.md"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/docs/user/project-settings.md"
                   target="_blank"
                   rel="noopener noreferrer"
                   >Scheduled tasks, webhooks and Action setup</a
@@ -636,8 +660,17 @@
               </li>
               <li>
                 <a
+                  data-source="apps/web/src/components/settings/ScheduledTasksSettings.tsx"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/apps/web/src/components/settings/ScheduledTasksSettings.tsx"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  >Task form choices and new-task defaults</a
+                >
+              </li>
+              <li>
+                <a
                   data-source="apps/server/src/scheduledTasks/Schedule.ts"
-                  href="https://github.com/lastobelus/lastCode/blob/c69c2b80886c093fe1870cb5649ddd254f51f22b/apps/server/src/scheduledTasks/Schedule.ts"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/apps/server/src/scheduledTasks/Schedule.ts"
                   target="_blank"
                   rel="noopener noreferrer"
                   >Time calculation and ten-minute grace window</a
@@ -646,7 +679,7 @@
               <li>
                 <a
                   data-source="apps/server/src/scheduledTasks/ScheduledTaskService.ts"
-                  href="https://github.com/lastobelus/lastCode/blob/c69c2b80886c093fe1870cb5649ddd254f51f22b/apps/server/src/scheduledTasks/ScheduledTaskService.ts"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/apps/server/src/scheduledTasks/ScheduledTaskService.ts"
                   target="_blank"
                   rel="noopener noreferrer"
                   >Queueing, fresh threads and dispatch status</a
@@ -655,7 +688,7 @@
               <li>
                 <a
                   data-source="docs/user/resumable-project-actions.md"
-                  href="https://github.com/lastobelus/lastCode/blob/c69c2b80886c093fe1870cb5649ddd254f51f22b/docs/user/resumable-project-actions.md"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/docs/user/resumable-project-actions.md"
                   target="_blank"
                   rel="noopener noreferrer"
                   >Actions that return to the agent</a
@@ -726,11 +759,10 @@
           </div>
           <h3>Set the defaults</h3>
           <p>
-            On web or desktop, open <strong>Settings → General</strong> and find
-            <strong>Auto-resume limited threads</strong> and
-            <strong>Snooze limited threads</strong>. On mobile, use
-            <strong>Settings → Thread behavior</strong>. These belong to an environment, so select
-            the right one first. Projects cannot override them.
+            Open <strong>Settings → Threads → Usage limits</strong> on web, desktop or mobile.
+            <strong>Resume after usage limits</strong> is auto-resume;
+            <strong>Snooze until limits reset</strong> is snooze. These belong to an environment, so
+            select the right one first. Projects cannot override them.
           </p>
           <h3>Choose for one thread</h3>
           <ul>
@@ -762,6 +794,11 @@
               scheduler, not an exact alarm on your phone.
             </li>
             <li>
+              The environment is not paused. A paused environment wakes nothing, even after a
+              restart or reconnect, until you choose <strong>Resume</strong>. Reaching the reset
+              time does not override your pause.
+            </li>
+            <li>
               Nothing has changed the situation. A new turn, a different provider, archiving,
               deleting, settling, or a pending approval or question can prevent the continuation
               from starting. A longer manual snooze delays it.
@@ -773,17 +810,17 @@
             </li>
           </ul>
           <p>
-            Today only the Codex and Claude adapters add reset times to limit stops, when available;
-            the other adapters checked do not. Even then, the allowance may not actually be usable
-            at that moment. LastCode never guesses a reset time and never switches providers for
-            you.
+            Codex, Claude and Muse can report a reset time for limits they recognize, when one is
+            available. Not every provider or limit has one. Even with a reset time, the provider may
+            not accept the next turn at that moment. LastCode never guesses a reset time and never
+            switches providers for you.
           </p>
           <div class="example">
             <strong>Example</strong>
             <p>
-              A research turn hits its weekly limit at 10:00, with a reset reported for 14:00.
-              Snooze keeps your inbox quieter for four hours. Auto-resume asks the agent to continue
-              around 14:00. Turn on both to get both. Neither one answers a question the agent was
+              A research turn hits its weekly limit, with a reset reported four hours away. Snooze
+              keeps your inbox quieter until then. Auto-resume asks the agent to continue when the
+              reset arrives. Turn on both to get both. Neither one answers a question the agent was
               waiting on.
             </p>
           </div>
@@ -799,7 +836,7 @@
               <li>
                 <a
                   data-source="docs/user/thread-sidebar.md"
-                  href="https://github.com/lastobelus/lastCode/blob/c69c2b80886c093fe1870cb5649ddd254f51f22b/docs/user/thread-sidebar.md"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/docs/user/thread-sidebar.md"
                   target="_blank"
                   rel="noopener noreferrer"
                   >Limited threads and manual controls</a
@@ -808,7 +845,7 @@
               <li>
                 <a
                   data-source="apps/server/src/orchestration-v2/UsageLimitRecoveryWorker.ts"
-                  href="https://github.com/lastobelus/lastCode/blob/c69c2b80886c093fe1870cb5649ddd254f51f22b/apps/server/src/orchestration-v2/UsageLimitRecoveryWorker.ts"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/apps/server/src/orchestration-v2/UsageLimitRecoveryWorker.ts"
                   target="_blank"
                   rel="noopener noreferrer"
                   >Arming, stored choices and continuation text</a
@@ -817,7 +854,7 @@
               <li>
                 <a
                   data-source="apps/server/src/orchestration-v2/Orchestrator.ts"
-                  href="https://github.com/lastobelus/lastCode/blob/c69c2b80886c093fe1870cb5649ddd254f51f22b/apps/server/src/orchestration-v2/Orchestrator.ts"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/apps/server/src/orchestration-v2/Orchestrator.ts"
                   target="_blank"
                   rel="noopener noreferrer"
                   >Final checks before dispatch</a
@@ -826,10 +863,28 @@
               <li>
                 <a
                   data-source="packages/contracts/src/settings.ts"
-                  href="https://github.com/lastobelus/lastCode/blob/c69c2b80886c093fe1870cb5649ddd254f51f22b/packages/contracts/src/settings.ts"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/packages/contracts/src/settings.ts"
                   target="_blank"
                   rel="noopener noreferrer"
                   >Off-by-default settings</a
+                >
+              </li>
+              <li>
+                <a
+                  data-source="apps/web/src/components/settings/settingsSearch.ts"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/apps/web/src/components/settings/settingsSearch.ts"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  >Where each setting lives</a
+                >
+              </li>
+              <li>
+                <a
+                  data-source="packages/provider-muse/src/server/adapter.ts"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/packages/provider-muse/src/server/adapter.ts"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  >Muse quota stops and reset times</a
                 >
               </li>
             </ul>
@@ -846,29 +901,133 @@
           <h2>Keep the research. Reclaim what you can reinstall.</h2>
           <p>
             A worktree is another checkout of your project. One worktree can hold irreplaceable
-            notes and replaceable dependency installs side by side. Deleting the whole checkout and
-            deleting only its dependencies are very different decisions.
+            notes next to dependency installs and build output you can recreate. LastCode has three
+            separate tools for it, from gentlest to strongest.
           </p>
-          <div class="answer caution">
-            <strong>Automatic and explicit deletion are not equally careful.</strong>
-            <ul>
-              <li>
-                <strong>Automatic</strong> whole-worktree cleanup first checks for local work and
-                for anything still using the worktree.
-              </li>
-              <li>
-                <strong>Explicit</strong> worktree deletion currently force-removes the checkout,
-                without those Git and ignored-file checks.
-              </li>
-            </ul>
-            A confirmation dialog is not a backup of your research.
-          </div>
-          <h3>What the current storage switches do</h3>
           <div class="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>Setting in Settings → Storage</th>
+                  <th>Tool</th>
+                  <th>What goes</th>
+                  <th>What stays</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>1 · Remove generated files</td>
+                  <td>Recognized dependency installs and unchanged build output.</td>
+                  <td>The checkout, your source, notes and anything else you added.</td>
+                </tr>
+                <tr>
+                  <td>2 · Suspend the worktree</td>
+                  <td>The checkout folder, after its local work is saved.</td>
+                  <td>A saved copy you can restore by continuing the thread.</td>
+                </tr>
+                <tr>
+                  <td>3 · Delete the worktree</td>
+                  <td>The whole checkout, permanently.</td>
+                  <td>The branch and the conversation. Nothing else is saved for you.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div
+            class="diagram"
+            aria-label="Three storage tools from gentlest to strongest: remove generated files, suspend the worktree, delete the worktree"
+          >
+            <div class="box">
+              <strong>Remove generated files</strong><br />Reinstall or rebuild to continue.
+            </div>
+            <span class="arrow" aria-hidden="true">→</span>
+            <div class="box">
+              <strong>Suspend</strong><br />Saved locally; continuing the thread restores it.
+            </div>
+            <span class="arrow" aria-hidden="true">→</span>
+            <div class="box">
+              <strong>Delete</strong><br />Gone. Only Git and the conversation remain.
+            </div>
+          </div>
+          <div class="answer caution">
+            <strong
+              >Automatic rules and deleting a worktree yourself are not equally careful.</strong
+            >
+            <ul>
+              <li>
+                <strong>Automatic</strong> rules check for local work and for anything still using
+                the worktree first.
+              </li>
+              <li>
+                <strong>Deleting a worktree yourself</strong> force-removes the checkout and can
+                lose local work. It only stops for <strong>Keep workspace</strong>, a saved copy,
+                another owner, the project root or an open preview.
+              </li>
+            </ul>
+            A confirmation dialog is not a backup of your research.
+          </div>
+          <h3>1 · Remove generated files, keep the checkout</h3>
+          <p>
+            In <strong>Settings → Worktrees → Dependencies and verified builds</strong>, turn on
+            <strong>Remove inactive dependencies and build outputs</strong>. It reclaims npm and
+            pnpm installs and build files that LastCode's build tools recorded and that have not
+            changed since.
+          </p>
+          <ul>
+            <li>
+              Build folders it recognizes today: <code>apps/&lt;app&gt;/dist</code> and
+              <code>native/resource-monitor/target/debug</code>. It leaves other caches,
+              <code>vendor</code> folders, other Cargo targets and other stacks' dependencies alone.
+            </li>
+            <li>
+              The delay counts from when the dependencies or build output were last really used, not
+              from chat activity or folder dates. Archived threads qualify straight away.
+            </li>
+            <li>
+              An install shared by several threads stays until every one of them is archived with
+              cleanup on.
+            </li>
+            <li>Reinstall or rebuild before you continue work in that checkout.</li>
+            <li>
+              Build output from before LastCode recorded it stays protected. Use
+              <strong>Settings → Worktrees → Review older builds</strong> to approve exact files.
+              Saving approves; it does not delete or turn cleanup on. New, changed and unselected
+              files stay. Each review covers up to 1,000 files and 512 MiB per build folder.
+            </li>
+          </ul>
+          <h3>2 · Suspend a settled worktree</h3>
+          <p>
+            <strong>Suspend settled worktrees</strong>, also under
+            <strong>Settings → Worktrees</strong>, saves the checkout's local work — staged and
+            unstaged changes plus supported local and ignored files — and then removes the checkout.
+            The conversation stays where it is. Continue the thread and the saved copy is restored
+            first.
+          </p>
+          <ul>
+            <li>
+              Automatic suspension stays off until you set <strong>Suspend after</strong>, pick
+              which threads may suspend (<strong>Finished subagents</strong>,
+              <strong>Child threads you haven’t joined</strong>,
+              <strong>Top-level threads and threads you’ve joined</strong>) and choose
+              <strong>Save suspension policy</strong>.
+            </li>
+            <li>
+              To do it by hand, use <strong>Suspend worktree</strong> and
+              <strong>Restore worktree</strong>. A manual restore also turns on
+              <strong>Keep workspace</strong>; turn that off yourself when normal rules should apply
+              again.
+            </li>
+            <li>
+              Saved copies never expire on their own. Open <strong>Manage saved workspaces</strong>
+              to restore or discard them. They live on this machine: local recovery, not a backup.
+            </li>
+            <li>Active work, and workspaces it cannot save, are kept as they are.</li>
+          </ul>
+          <h3>3 · Delete a worktree permanently</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Setting under Permanent deletion</th>
                   <th>What it removes</th>
                   <th>Keep in mind</th>
                 </tr>
@@ -878,56 +1037,62 @@
                   <td>Delete worktrees with deleted threads</td>
                   <td>A managed worktree after its last thread is deleted.</td>
                   <td>
-                    The automatic safety checks still apply. Deleting a thread does not mean
-                    force-deleting its files.
-                  </td>
-                </tr>
-                <tr>
-                  <td>Delete unchanged worktrees</td>
-                  <td>Managed worktrees with no commits beyond the default branch.</td>
-                  <td>
-                    The safety checks for local files still apply. “Unchanged” does not mean
-                    “unimportant.”
-                  </td>
-                </tr>
-                <tr>
-                  <td>Delete inactive worktrees</td>
-                  <td>Managed worktrees after the number of inactive days you choose.</td>
-                  <td>
-                    Branches and conversations stay. Being inactive does not make research
-                    disposable.
+                    The automatic checks still apply. Deleting a thread does not force-delete its
+                    files.
                   </td>
                 </tr>
                 <tr>
                   <td>Delete merged worktrees</td>
+                  <td>A worktree whose pull request merged into the default branch.</td>
                   <td>
-                    A worktree whose PR is merged and whose commits are in the default branch.
-                  </td>
-                  <td>Squash merges can fail that commit-history check, so the checkout stays.</td>
-                </tr>
-                <tr>
-                  <td>Delete old browser artifacts</td>
-                  <td>Saved captures in the environment's browser-artifact folder, by age.</td>
-                  <td>
-                    Old capture links stop working. Browser profiles, message attachments and other
-                    copies of desktop captures are not touched.
+                    Squash and rebase merges count if the checkout is still exactly at the pull
+                    request's last commit.
                   </td>
                 </tr>
                 <tr>
-                  <td>Delete old rotated logs</td>
-                  <td>Old rotated log files.</td>
-                  <td>Current logs are kept. This is not a general log-folder cleanup.</td>
+                  <td>Delete inactive worktrees</td>
+                  <td>Worktrees inactive for the number of days you choose.</td>
+                  <td>
+                    Clean archived checkouts qualify straight away. Inactive does not mean
+                    disposable.
+                  </td>
+                </tr>
+                <tr>
+                  <td>Delete settled worktrees</td>
+                  <td>A worktree after its thread settles.</td>
+                  <td>0 days means at the next cleanup after settling.</td>
+                </tr>
+                <tr>
+                  <td>Delete unchanged worktrees</td>
+                  <td>Worktrees with no commits beyond the default branch.</td>
+                  <td>“Unchanged” does not mean “unimportant.”</td>
                 </tr>
               </tbody>
             </table>
           </div>
+          <p>
+            Automatic deletion always keeps a checkout that has edits, untracked files or unknown
+            ignored files; settings show this as <strong>Local work is preserved</strong>. Generated
+            files are reclaimed separately first, so a leftover <code>node_modules</code> alone no
+            longer decides anything. Other ignored contents still block deletion (an ordinary
+            <code>.DS_Store</code> does not).
+          </p>
+          <h3>Rules shared by all three</h3>
           <ul>
             <li>Every rule is off by default.</li>
-            <li>Cleanup runs at startup, after a setting changes, and every hour.</li>
+            <li>Automatic cleanup runs at startup, after a setting changes, and every hour.</li>
             <li>
-              Worktree rules can be <strong>Inherit</strong>, <strong>Off</strong> or
-              <strong>Custom</strong> for each project or checkout. Browser and log retention apply
-              to the whole environment.
+              Each project or checkout can <strong>Inherit</strong>, turn rules
+              <strong>Off</strong>, or use <strong>Custom</strong> rules. Off stops automatic
+              cleanup and suspension for that project.
+            </li>
+            <li>
+              <strong>Keep workspace</strong> protects one checkout from all three automatic tools.
+            </li>
+            <li>
+              Running agents, sessions, terminals, previews, processes and project roots block
+              automatic removal. If many worktrees are kept, the safeguards may be working as
+              intended.
             </li>
             <li>
               Choosing <strong>All environments</strong> changes connected servers only, not offline
@@ -935,80 +1100,55 @@
             </li>
           </ul>
           <h3>Does an ignored tmp/ folder protect my work?</h3>
-          <p>
-            <strong
-              >Yes, from automatic whole-worktree cleanup — if tmp/ really is ignored there.</strong
-            >
-          </p>
           <ul>
             <li>
-              The only ignored folder automatic cleanup will delete is <code>node_modules/</code>.
-              Any other ignored content, such as research in <code>tmp/</code>, blocks removal.
-              Tracked changes and untracked files block it too.
+              <strong>From automatic deletion: yes</strong>, if <code>tmp/</code> really is ignored
+              there.
+            </li>
+            <li>
+              <strong>From suspension: not by keeping the folder.</strong> Supported notes are saved
+              with the rest of the local work and come back when you restore.
+            </li>
+            <li>
+              <strong>From deleting the worktree yourself: no.</strong> That force-removes it.
             </li>
             <li>
               Whether <code>tmp/</code> is ignored depends on the checkout. The current repository's
               root ignore file does not ignore it. Older worktrees, local exclude rules and your
               global ignore file may. Check the real rules instead of trusting the folder name.
             </li>
-            <li>
-              None of this protects against explicit deletion, which force-removes the checkout.
-            </li>
           </ul>
+          <h3>Captures and logs</h3>
           <p>
-            Automatic removal is also blocked by active or queued work, live provider sessions,
-            terminals, preview leases, shared worktrees and project roots. If many worktrees are
-            kept, the safeguards may be working as intended.
-          </p>
-          <div
-            class="diagram"
-            aria-label="Current whole-worktree cleanup retains research-bearing checkouts; reviewing individual generated directories is a separate decision"
-          >
-            <div class="box">
-              <strong>A kept checkout</strong><br />Source + research + dependencies
-            </div>
-            <span class="arrow" aria-hidden="true">→</span>
-            <div class="box">
-              <strong>Today's automatic rule</strong><br />Research or active use? Keep the whole
-              checkout.
-            </div>
-            <span class="arrow" aria-hidden="true">→</span>
-            <div class="box">
-              <strong>A separate decision</strong><br />Review individual generated directories
-              before approving any removal.
-            </div>
-          </div>
-          <p>
-            The cleanup controls checked here remove eligible whole worktrees. They do not clear
-            individual generated directories from a retained checkout. Keeping the checkout while
-            reclaiming generated files needs a separate, explicitly approved cleanup.
-          </p>
-          <p>
-            Check exactly what a cleanup covers. Removing a root <code>node_modules</code> install
-            does not reclaim compiler output or another stack's dependencies. Conversely, a folder
-            named <code>vendor</code> may contain source you must keep. Preserve reference source,
-            local state, research and retained release files; measure hidden folders too.
+            <strong>Settings → Maintenance</strong> holds
+            <strong>Delete old browser artifacts</strong> and
+            <strong>Delete old rotated logs</strong>. These apply to the whole environment. Old
+            capture links stop working; browser profiles, message attachments and other copies of
+            captures are not touched, and current logs are kept. <strong>Delete now</strong> runs
+            your enabled rules immediately, with their usual safeguards; it is not the same as
+            deleting a worktree yourself. On mobile, all cleanup settings, including the worktree
+            rules, are under <strong>Settings → Maintenance</strong>.
           </p>
           <h3>Screenshot settings will not save much disk</h3>
           <p>
             <strong>Settings → SnapShots</strong> controls desktop capture, app text, the shortcut,
             sound, flash and animation. There is no format, quality or maximum-size setting for
-            screenshots. Captures start as PNG, and oversized attachments are compressed
+            screenshots. Captures start as PNG, and attachments are resized and compressed
             automatically. Turning off app text avoids some extra data, but it will not fix a large
-            dependency folder. Browser-artifact retention does not remove attached screenshots.
+            dependency folder.
           </p>
           <div class="answer">
-            <strong>Recommendation:</strong> keep the broad inactive and merged rules off while
-            uncommitted research matters. Keep sensible browser and log retention, and save lasting
-            evidence somewhere that does not expire. For space, measure build output and installed
-            dependencies, including hidden folders, before ranking cleanup targets. Reclaim only
-            recognized, inactive files in a separately approved cleanup. Folder names alone are not
-            permission to delete.
+            <strong>Recommendation:</strong> start with generated-file cleanup; it is the least
+            risky way to win back space you can reinstall. Use suspension for settled work you might
+            return to. Keep the broad inactive and merged deletion rules off while uncommitted
+            research matters. Keep sensible capture and log retention, and save lasting evidence
+            somewhere that does not expire. Folder names alone are not permission to delete.
           </div>
           <p>
-            Your actual switch settings, measurements, cleanup proposal details and personalized
-            next steps are in the private companion below. This guide does not enable rules, remove
-            files, or repeat the storage owner's disk audit.
+            Your switch settings, disk measurements and earlier cleanup proposal are in the private
+            companion below. It was written before generated-file cleanup and suspension shipped, so
+            read it as history. This guide does not enable rules, remove files, or repeat the disk
+            audit.
           </p>
           <details>
             <summary>Where these answers come from</summary>
@@ -1016,7 +1156,7 @@
               <li>
                 <a
                   data-source="docs/user/project-settings.md"
-                  href="https://github.com/lastobelus/lastCode/blob/c69c2b80886c093fe1870cb5649ddd254f51f22b/docs/user/project-settings.md"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/docs/user/project-settings.md"
                   target="_blank"
                   rel="noopener noreferrer"
                   >Storage policy and inheritance</a
@@ -1024,8 +1164,35 @@
               </li>
               <li>
                 <a
+                  data-source="apps/web/src/components/settings/StorageSettings.tsx"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/apps/web/src/components/settings/StorageSettings.tsx"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  >Generated-file cleanup and permanent deletion settings</a
+                >
+              </li>
+              <li>
+                <a
+                  data-source="apps/web/src/components/settings/LastCodeStorageSettings.tsx"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/apps/web/src/components/settings/LastCodeStorageSettings.tsx"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  >Suspension policy and saved workspaces</a
+                >
+              </li>
+              <li>
+                <a
+                  data-source="packages/shared/src/generatedBuildOwnership.ts"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/packages/shared/src/generatedBuildOwnership.ts"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  >Recognized build folders</a
+                >
+              </li>
+              <li>
+                <a
                   data-source="apps/server/src/storageCleanup.ts"
-                  href="https://github.com/lastobelus/lastCode/blob/c69c2b80886c093fe1870cb5649ddd254f51f22b/apps/server/src/storageCleanup.ts"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/apps/server/src/storageCleanup.ts"
                   target="_blank"
                   rel="noopener noreferrer"
                   >Automatic cleanup and artifact retention</a
@@ -1034,7 +1201,7 @@
               <li>
                 <a
                   data-source="apps/server/src/orchestration-v2/WorktreeCleanupService.ts"
-                  href="https://github.com/lastobelus/lastCode/blob/c69c2b80886c093fe1870cb5649ddd254f51f22b/apps/server/src/orchestration-v2/WorktreeCleanupService.ts"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/apps/server/src/orchestration-v2/WorktreeCleanupService.ts"
                   target="_blank"
                   rel="noopener noreferrer"
                   >Explicit worktree deletion</a
@@ -1043,7 +1210,7 @@
               <li>
                 <a
                   data-source="docs/user/snap-shot.md"
-                  href="https://github.com/lastobelus/lastCode/blob/c69c2b80886c093fe1870cb5649ddd254f51f22b/docs/user/snap-shot.md"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/docs/user/snap-shot.md"
                   target="_blank"
                   rel="noopener noreferrer"
                   >SnapShot controls</a
@@ -1062,10 +1229,9 @@
         >
           <h2>The project Dashboard shows what needs your attention.</h2>
           <div class="answer">
-            <strong>LastCode built it.</strong> In LastCode's history, “Open dashboard” comes from
-            LastCode's live-project-dashboard contribution. The upstream branch we checked has
-            neither the route nor the menu entry, so there is no upstream dashboard to rebuild our
-            reports on.
+            <strong>LastCode built it.</strong> This checkpoint records the live project Dashboard
+            as a LastCode contribution. It is the app's view of project activity; a saved HTML
+            report or a build-progress screen answers a different question.
           </div>
           <h3>How to open it</h3>
           <ul>
@@ -1097,9 +1263,17 @@
           </div>
           <p>
             It shows one project on one environment. The sidebar can group matching projects from
-            several machines, but the dashboard does not combine their work. Subagents, archived
-            threads and deleted threads are left out. The mobile app has no equivalent dashboard in
-            the checked code.
+            several machines, but the dashboard does not combine their work. Archived and deleted
+            threads and subagents still owned by another thread are left out. An independent thread
+            can appear even if it began as a subagent. The native mobile app has no equivalent
+            dashboard in this checkpoint.
+          </p>
+          <p>
+            Use <strong>Dashboard project</strong> to switch projects. Attention filters such as
+            <strong>Quick</strong>, <strong>Focused</strong>, <strong>Computer</strong> and
+            <strong>On my phone</strong> help you choose what to handle next. The phone filter does
+            not add a native mobile dashboard. Check the connection label: <strong>Live</strong>
+            means current data; a disconnected dashboard shows the last known state.
           </p>
           <h3>Where the other status views are</h3>
           <div class="table-wrap">
@@ -1170,7 +1344,7 @@
               <li>
                 <a
                   data-source="apps/web/src/components/dashboard/ProjectDashboard.tsx"
-                  href="https://github.com/lastobelus/lastCode/blob/c69c2b80886c093fe1870cb5649ddd254f51f22b/apps/web/src/components/dashboard/ProjectDashboard.tsx"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/apps/web/src/components/dashboard/ProjectDashboard.tsx"
                   target="_blank"
                   rel="noopener noreferrer"
                   >Project dashboard layout and selected scope</a
@@ -1179,7 +1353,7 @@
               <li>
                 <a
                   data-source="packages/client-runtime/src/state/dashboard.ts"
-                  href="https://github.com/lastobelus/lastCode/blob/c69c2b80886c093fe1870cb5649ddd254f51f22b/packages/client-runtime/src/state/dashboard.ts"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/packages/client-runtime/src/state/dashboard.ts"
                   target="_blank"
                   rel="noopener noreferrer"
                   >Attention/progress data and exclusions</a
@@ -1188,7 +1362,7 @@
               <li>
                 <a
                   data-source="docs/lastcode/nightly-workflow.md"
-                  href="https://github.com/lastobelus/lastCode/blob/c69c2b80886c093fe1870cb5649ddd254f51f22b/docs/lastcode/nightly-workflow.md"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/docs/lastcode/nightly-workflow.md"
                   target="_blank"
                   rel="noopener noreferrer"
                   >Checkpoint terminal dashboard</a
@@ -1197,7 +1371,7 @@
               <li>
                 <a
                   data-source="docs/lastcode/local-nightly-updates.md"
-                  href="https://github.com/lastobelus/lastCode/blob/c69c2b80886c093fe1870cb5649ddd254f51f22b/docs/lastcode/local-nightly-updates.md"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/docs/lastcode/local-nightly-updates.md"
                   target="_blank"
                   rel="noopener noreferrer"
                   >Updater and build progress</a
@@ -1205,10 +1379,20 @@
               </li>
               <li>
                 <a
-                  href="https://github.com/lastobelus/lastCode/commit/c69c2b80886c093fe1870cb5649ddd254f51f22b"
+                  data-source="scripts/lastcode-carry-set.json"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/scripts/lastcode-carry-set.json"
                   target="_blank"
                   rel="noopener noreferrer"
                   >Carry history attributing the live dashboard contribution</a
+                >
+              </li>
+              <li>
+                <a
+                  data-source="apps/web/src/components/sidebar/lastcodeProjectMenu.ts"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/apps/web/src/components/sidebar/lastcodeProjectMenu.ts"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  >Project menu entry points</a
                 >
               </li>
             </ul>
@@ -1295,16 +1479,16 @@
             </li>
           </ul>
           <p>
-            Manage routes in <strong>Settings → Connections</strong> on web or desktop, and
-            <strong>Settings → Environments</strong> on mobile. A saved machine can have several
-            routes. LastCode tries them in order, falls back when one fails, and can return to an
-            earlier route once it works again. Pairing the same machine at another address adds a
-            route, not another machine. The hosted HTTPS web client needs a secure route the browser
-            can reach.
+            Manage routes in <strong>Settings → Environments</strong> on web, desktop or mobile.
+            Open <strong>Routes</strong> to see the route <strong>In use</strong>, or choose
+            <strong>Add route</strong>. A saved environment can have several routes. LastCode tries
+            them in order, falls back when one fails, and can return to an earlier route once it
+            works again. Pairing the same machine at another address adds a route, not another
+            machine. The hosted HTTPS web client needs a secure route the browser can reach.
           </p>
           <h3>A device hub connects test devices</h3>
           <p>
-            Open <strong>Settings → Integrations → Devices</strong>. The environment's device hub
+            Open <strong>Settings → Devices → Device hosts</strong>. The environment's device hub
             finds simulators and emulators and streams them. By default they run beside its server.
             Under <strong>Device hosts</strong>, an SSH-connected machine can supply devices without
             owning your project or agent.
@@ -1348,14 +1532,20 @@
             environment yourself.
           </p>
           <div class="example">
-            <strong>Why an agent may not open a thread ID from another environment</strong>
+            <strong>Reading another environment is possible; sending there is separate.</strong>
             <p>
-              Your client can connect to several environments, but the agent's thread-read and
-              thread-send tools only look in their own environment. They take a thread ID with no
-              way to name an environment or route, so a bare ID from elsewhere is not enough.
-              Instead, open that environment in the client and ask an agent there, or paste the
-              relevant text into this conversation. Cross-environment links do not yet work with
-              these tools.
+              An agent's <code>t3_thread_read</code> first checks its own environment, then can ask
+              your connected client to check its other authorized environment connections. It needs
+              permission captured from that client and an eligible client that is still connected.
+              It can also select an <code>environmentId</code>; later pages should use the
+              environment returned by the first read. Use the returned thread link when sharing it.
+            </p>
+            <p>
+              If a destination is unavailable, that does not prove the thread is missing. A
+              not-found result covers only the environments actually reached. Remote reading does
+              not move the conversation or make <code>t3_thread_send</code> work across
+              environments. To send there, use an agent or an authorized thread command on the
+              owning environment.
             </p>
           </div>
           <p>
@@ -1375,7 +1565,7 @@
               <li>
                 <a
                   data-source="docs/user/remote-access.md"
-                  href="https://github.com/lastobelus/lastCode/blob/c69c2b80886c093fe1870cb5649ddd254f51f22b/docs/user/remote-access.md"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/docs/user/remote-access.md"
                   target="_blank"
                   rel="noopener noreferrer"
                   >Routes, tunnels, SSH and auto balance</a
@@ -1384,7 +1574,7 @@
               <li>
                 <a
                   data-source="docs/user/devices.md"
-                  href="https://github.com/lastobelus/lastCode/blob/c69c2b80886c093fe1870cb5649ddd254f51f22b/docs/user/devices.md"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/docs/user/devices.md"
                   target="_blank"
                   rel="noopener noreferrer"
                   >Device hub and SSH hosts</a
@@ -1393,7 +1583,7 @@
               <li>
                 <a
                   data-source="apps/web/src/components/LegacySidebar.tsx"
-                  href="https://github.com/lastobelus/lastCode/blob/c69c2b80886c093fe1870cb5649ddd254f51f22b/apps/web/src/components/LegacySidebar.tsx"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/apps/web/src/components/LegacySidebar.tsx"
                   target="_blank"
                   rel="noopener noreferrer"
                   >Ordinary creator ownership</a
@@ -1401,8 +1591,8 @@
               </li>
               <li>
                 <a
-                  data-source="apps/web/src/components/legacySidebarFamilies.logic.ts"
-                  href="https://github.com/lastobelus/lastCode/blob/c69c2b80886c093fe1870cb5649ddd254f51f22b/apps/web/src/components/legacySidebarFamilies.logic.ts"
+                  data-source="apps/web/src/components/lastcodeSidebarFamilies.logic.ts"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/apps/web/src/components/lastcodeSidebarFamilies.logic.ts"
                   target="_blank"
                   rel="noopener noreferrer"
                   >Grouping within environment/project</a
@@ -1411,10 +1601,28 @@
               <li>
                 <a
                   data-source="docs/internals/glossary.md"
-                  href="https://github.com/lastobelus/lastCode/blob/c69c2b80886c093fe1870cb5649ddd254f51f22b/docs/internals/glossary.md"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/docs/internals/glossary.md"
                   target="_blank"
                   rel="noopener noreferrer"
                   >Environment, project and thread definitions</a
+                >
+              </li>
+              <li>
+                <a
+                  data-source="apps/server/src/mcp/ThreadReadBroker.ts"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/apps/server/src/mcp/ThreadReadBroker.ts"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  >Authorized cross-environment thread reads</a
+                >
+              </li>
+              <li>
+                <a
+                  data-source="packages/client-runtime/src/connection/threadRead.ts"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/packages/client-runtime/src/connection/threadRead.ts"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  >Client connection limits for remote reads</a
                 >
               </li>
             </ul>
@@ -1442,22 +1650,26 @@
           <h3>Browser profiles: separate accounts without signing out</h3>
           <p>
             Go to
-            <strong>Settings → Integrations → Browser profiles → Add profile → Blank profile</strong
-            >. Make one called Work and one called Personal, then pick a profile when you open a
+            <strong>Settings → Browser → Browser profiles → Add profile → Blank profile</strong>.
+            Make one called Work and one called Personal, then pick a profile when you open a
             Browser tab. A tab keeps its profile for life; changing the default only affects new
             tabs.
           </p>
           <ul>
             <li>
-              <strong>Logins are shared per device, environment and profile.</strong> Tabs using the
-              same profile on the same desktop and environment share cookies, logins and site
-              storage. Another desktop or another environment has separate login data, even with the
-              same profile name.
+              <strong
+                >A named desktop profile shares sign-ins across environments on that
+                desktop.</strong
+              >
+              Work can keep the same account while you switch environments. Another desktop has
+              separate login data. Select the same saved profile, not merely another profile with
+              the same display name.
             </li>
             <li>
-              Default and custom profiles survive a restart.
-              <strong>Incognito lasts until the desktop app process quits</strong>; closing one tab
-              does not clear it.
+              <strong>Default and Incognito stay environment-local.</strong> Default and custom
+              profiles persist across restarts. Desktop Incognito lasts until that desktop process
+              quits; environment-hosted Incognito is temporary. A temporary profile is a better
+              choice for an isolated test.
             </li>
             <li>
               You can create up to 24 custom profiles, with names up to 48 characters. Default and
@@ -1465,9 +1677,9 @@
             </li>
             <li>
               <strong>Clear cookies and cache</strong> also clears site storage, IndexedDB and
-              service workers, so expect to sign in again.
-              <strong>Remove profile and data</strong> deletes that profile's data across the
-              environments it knows about, where possible.
+              service workers, so expect to sign in again. For a shared named desktop profile, that
+              affects its tabs across environments on that desktop.
+              <strong>Remove profile and data</strong> deletes the saved profile and its data.
             </li>
             <li>
               Importing cookies copies them once. It does not keep syncing logins from another
@@ -1505,8 +1717,8 @@
                   <td>Agent preview snapshot</td>
                   <td>An agent calls <code>preview_snapshot</code>.</td>
                   <td>
-                    Page text, controls, diagnostics and an image, returned to the agent. A saved
-                    PNG path needs <code>save: true</code>.
+                    Page text and controls by default. <code>includeImage: true</code> also returns
+                    an image; <code>save: true</code> saves a PNG in the owning environment.
                   </td>
                 </tr>
                 <tr>
@@ -1534,9 +1746,9 @@
               A recording captures the <strong>preview browser tab</strong> only, with no audio.
             </li>
             <li>
-              <strong>Settings → Integrations → Browser</strong> sets a maximum frame rate of 30 fps
-              (the default) or 60 fps, and optional key and mouse overlays. Password fields never
-              appear in the key overlay. Changes apply to new recordings.
+              <strong>Settings → Browser</strong> sets a maximum frame rate of 30 fps (the default)
+              or 60 fps, and optional key and mouse overlays. Password fields never appear in the
+              key overlay. Changes apply to new recordings.
             </li>
             <li>
               The format is picked automatically: MP4 (H.264) when supported, otherwise WebM.
@@ -1549,12 +1761,10 @@
           </ul>
           <h3>Desktop SnapShots: show the agent what you see</h3>
           <ul>
+            <li>Off by default. Available on macOS and Linux Wayland; X11 is not supported.</li>
             <li>
-              Off by default. Available on macOS, Windows and Linux Wayland; X11 is not supported.
-            </li>
-            <li>
-              The default shortcut on macOS and Windows is both Shift keys together. On Linux, setup
-              depends on the desktop.
+              The default shortcut on macOS is both Shift keys together. On Linux, setup depends on
+              the desktop.
             </li>
             <li>
               macOS needs Screen Recording permission, plus Accessibility when
@@ -1569,31 +1779,42 @@
           </ul>
           <p>
             <strong>There are no format, quality or size controls.</strong> Captures start as PNG.
-            Images within the 10 MiB attachment limit are kept as they are. Larger ones are
-            automatically shrunk and compressed to WebP or JPEG, with the longest edge at most 2048
-            pixels. Anything over 50 MiB is rejected.
+            Attachments have a longest edge of at most <strong>2000 pixels</strong>, so even an
+            image smaller than 10 MiB may be resized. Extra compression is applied when needed to
+            meet the 10 MiB attachment limit. Compressible sources up to 50 MiB can be processed;
+            anything larger is rejected.
           </p>
           <h3>Agent snapshots</h3>
           <p>
             An agent snapshot helps the agent find buttons and understand the page, not just see
-            pixels. Its image is at most 1280 pixels wide; text is capped near 20 KB, and the
-            snapshot says what was left out. <code>includeImage: false</code> asks for text only;
-            <code>save: true</code> saves a PNG; using both returns the saved path or URL without
-            the full page description.
+            pixels. Requested images are at most 1280 pixels wide, and page text is capped near
+            20,000 characters. Text-only is the default; <code>includeImage: true</code> adds the
+            image. <code>save: true</code> saves a PNG and, without includeImage, returns its path
+            or URL. Use both true to get the saved path and the usual page/image result.
           </p>
           <h3>Which apps can do this</h3>
           <p>
-            Browser profiles, the camera and recording are provided by the desktop app. Web and
-            mobile can control an agent whose environment has a connected desktop browser host, but
-            they do not provide Electron capture themselves. Without such a host, the agent's
-            browser tools are unavailable.
+            The Browser panel can use a browser on your desktop or one running beside the
+            environment server. Environment-hosted tabs stream to web, desktop and mobile; they do
+            not require a desktop browser host. They support Default and Incognito, with
+            agent-opened tabs using isolated Incognito unless Default is selected. Desktop-hosted
+            tabs provide your named desktop profiles and saved sign-ins.
+          </p>
+          <p>
+            Choose <strong>Open in the environment's browser</strong> for pages beside its server,
+            or <strong>Open on this computer</strong> for desktop browser access. This does not move
+            the agent or its files. Browser setup and host availability still matter; support in the
+            app does not guarantee the required browser is installed.
           </p>
           <h3>What retention deletes</h3>
           <p>
             Browser-artifact retention deletes expiring captures in its environment's artifact
             folder. It does not erase browser profiles, attached screenshots, recordings copied
-            elsewhere, or Git checkpoints. A saved screenshot path and a conversation attachment
-            last for different lengths of time.
+            elsewhere, or Git checkpoints. Desktop camera and recording outputs stay on that
+            desktop. When an agent stops a recording, it transfers or claims the result in the
+            owning environment's attachments store, with a 50 MiB limit. Recordings are not all
+            stored in the expiring browser-artifact folder. Desktop recording options do not
+            necessarily apply to the environment-hosted recorder.
           </p>
           <div class="answer">
             <strong>Recommendation:</strong> use persistent Work and Personal profiles for accounts,
@@ -1608,7 +1829,7 @@
               <li>
                 <a
                   data-source="packages/contracts/src/browserProfile.ts"
-                  href="https://github.com/lastobelus/lastCode/blob/c69c2b80886c093fe1870cb5649ddd254f51f22b/packages/contracts/src/browserProfile.ts"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/packages/contracts/src/browserProfile.ts"
                   target="_blank"
                   rel="noopener noreferrer"
                   >Profile limits and persistence</a
@@ -1617,7 +1838,7 @@
               <li>
                 <a
                   data-source="docs/user/browser-import.md"
-                  href="https://github.com/lastobelus/lastCode/blob/c69c2b80886c093fe1870cb5649ddd254f51f22b/docs/user/browser-import.md"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/docs/user/browser-import.md"
                   target="_blank"
                   rel="noopener noreferrer"
                   >Cookie import limitations</a
@@ -1626,7 +1847,7 @@
               <li>
                 <a
                   data-source="apps/web/src/browser/browserRecording.ts"
-                  href="https://github.com/lastobelus/lastCode/blob/c69c2b80886c093fe1870cb5649ddd254f51f22b/apps/web/src/browser/browserRecording.ts"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/apps/web/src/browser/browserRecording.ts"
                   target="_blank"
                   rel="noopener noreferrer"
                   >Recording format and rate</a
@@ -1635,7 +1856,7 @@
               <li>
                 <a
                   data-source="docs/user/snap-shot.md"
-                  href="https://github.com/lastobelus/lastCode/blob/c69c2b80886c093fe1870cb5649ddd254f51f22b/docs/user/snap-shot.md"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/docs/user/snap-shot.md"
                   target="_blank"
                   rel="noopener noreferrer"
                   >SnapShot setup and draft behavior</a
@@ -1644,10 +1865,37 @@
               <li>
                 <a
                   data-source="apps/server/src/mcp/toolkits/preview/tools.ts"
-                  href="https://github.com/lastobelus/lastCode/blob/c69c2b80886c093fe1870cb5649ddd254f51f22b/apps/server/src/mcp/toolkits/preview/tools.ts"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/apps/server/src/mcp/toolkits/preview/tools.ts"
                   target="_blank"
                   rel="noopener noreferrer"
                   >Agent snapshot/save and recording transfer</a
+                >
+              </li>
+              <li>
+                <a
+                  data-source="apps/desktop/src/preview/BrowserProfileScope.ts"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/apps/desktop/src/preview/BrowserProfileScope.ts"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  >Named desktop profile sharing</a
+                >
+              </li>
+              <li>
+                <a
+                  data-source="apps/server/src/preview/ServerBrowserContexts.ts"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/apps/server/src/preview/ServerBrowserContexts.ts"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  >Environment browser profiles</a
+                >
+              </li>
+              <li>
+                <a
+                  data-source="packages/client-runtime/src/imageAttachmentSize.ts"
+                  href="https://github.com/lastobelus/lastCode/blob/2da9a07b51a1878bcbf9066e5c0429df8d7cba8d/packages/client-runtime/src/imageAttachmentSize.ts"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  >Current image attachment dimensions</a
                 >
               </li>
             </ul>
@@ -1657,7 +1905,7 @@
       <aside class="private" aria-labelledby="private-title">
         <h3 id="private-title" style="margin-top: 0">Your private companion</h3>
         <p>
-          Personal service names, paths, current settings and disk measurements live in a separate
+          Personal service names, paths, earlier settings and disk measurements live in a separate
           file, <strong>private-inventory.html</strong>, not in this public guide. Open it directly,
           or choose it below to read it here. The file is read inside this page and is never
           uploaded.
