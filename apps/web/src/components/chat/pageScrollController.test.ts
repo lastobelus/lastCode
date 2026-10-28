@@ -83,7 +83,7 @@ describe("page scroll helpers", () => {
     const clearTimeout = vi.fn();
     const controller = createPageScrollController({
       getContainer: () => current,
-      getScrollPaddingBottomPx: () => 0,
+      getPageScrollDistancePx: () => 264,
       env: {
         now: () => 0,
         requestAnimationFrame: (callback) => frames.push(callback),

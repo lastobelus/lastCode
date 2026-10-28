@@ -18,7 +18,11 @@ import {
   type TimelineRunObservation,
 } from "./timelineScrollAnchoring";
 import { type ChatComposerHandle } from "./ChatComposer";
-import { createPageScrollController, type PageScrollKey } from "./pageScrollController";
+import {
+  createPageScrollController,
+  getTimelinePageScrollDistancePx,
+  type PageScrollKey,
+} from "./pageScrollController";
 import {
   FOLLOWING,
   initialTimelineFollow,
@@ -121,7 +125,8 @@ function createTimelineFollowStore() {
     attachComposerOverlay: (element: HTMLElement | null) => {
       composerOverlay = element;
     },
-    readComposerOverlayHeight: () => composerOverlay?.getBoundingClientRect().height ?? 0,
+    readPageScrollDistancePx: (viewport: HTMLElement) =>
+      getTimelinePageScrollDistancePx(viewport, composerOverlay),
     dispatch: (visit: TimelineFollowVisit, event: TimelineFollowEvent) => {
       const before = read(visit);
       const after = transitionTimelineFollow(before, event);
@@ -320,7 +325,10 @@ export function useTimelineFollow(input: TimelineFollowInput) {
   const [pageScrollController] = useState(() =>
     createPageScrollController({
       getContainer: readPageScrollContainer,
-      getScrollPaddingBottomPx: followStore.readComposerOverlayHeight,
+      getPageScrollDistancePx: () => {
+        const viewport = readPageScrollContainer();
+        return viewport ? followStore.readPageScrollDistancePx(viewport) : 0;
+      },
       onScrollStart: handlePageScrollStart,
     }),
   );

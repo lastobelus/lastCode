@@ -33,6 +33,38 @@ function setup() {
 }
 
 describe("workspace area focus", () => {
+  it("pages the visible conversation above the composer with one line of overlap", () => {
+    using fixture = setup();
+    const area = fixture.area("conversation", 1);
+    area.button.remove();
+    const viewport = document.createElement("div");
+    viewport.style.cssText = "height: 200px; overflow-y: auto";
+    viewport.innerHTML =
+      '<div class="chat-markdown" style="height: 2000px; line-height: 20px">Content\n\nwith blank lines</div>';
+    area.element.append(viewport);
+    const composer = fixture.append('<div data-chat-composer-overlay="true"></div>');
+    composer.style.cssText = `position: fixed; top: ${viewport.getBoundingClientRect().top + 140}px; height: 60px`;
+    area.element.focus();
+    viewport.scrollTop = 300;
+    const page = (key: string) =>
+      area.element.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    page("PageDown");
+    expect(viewport.scrollTop).toBe(420);
+    page("PageUp");
+    expect(viewport.scrollTop).toBe(300);
+    composer.style.top = `${viewport.getBoundingClientRect().top + 100}px`;
+    composer.style.height = "100px";
+    page("PageDown");
+    expect(viewport.scrollTop).toBe(380);
+    expect(document.activeElement).toBe(area.element);
+  });
+
   it("runs configured page-key shortcuts before the scrolling fallback", () => {
     using fixture = setup();
     const area = fixture.area("conversation", 1);
@@ -79,7 +111,7 @@ describe("workspace area focus", () => {
     for (const name of ["conversation", "sidebar", "panel"]) {
       const area = fixture.area(name, 1);
       const viewport = document.createElement("div");
-      viewport.style.cssText = "height: 100px; overflow-y: auto";
+      viewport.style.cssText = "height: 100px; overflow-y: auto; line-height: 10px";
       viewport.innerHTML = '<div style="height: 1000px">Scrollable content</div>';
       area.element.append(viewport);
       area.element.focus();
