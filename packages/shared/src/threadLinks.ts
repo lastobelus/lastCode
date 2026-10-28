@@ -121,7 +121,7 @@ function linkReference(link: ThreadLink): ThreadLinkReference {
   };
 }
 
-export function percentDecodedThreadLinkId(threadId: ThreadId): ThreadId | null {
+function percentDecodedThreadLinkId(threadId: ThreadId): ThreadId | null {
   try {
     const decoded = decodeURIComponent(threadId);
     return decoded === threadId ? null : Option.getOrNull(decodeThreadId(decoded));
