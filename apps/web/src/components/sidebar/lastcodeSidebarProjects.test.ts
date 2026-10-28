@@ -8,7 +8,7 @@ import {
 import type { Project } from "../../types";
 import { makeThreadFixture } from "../../test-fixtures";
 import { buildSidebarProjectSnapshots, NO_PROJECT_GROUP_KEY } from "../../sidebarProjectGrouping";
-import type { ProjectGroupingSettings } from "../../logicalProject";
+import type { ProjectGroupingSettings } from "@t3tools/client-runtime/state/project-grouping";
 import {
   createLastCodeSidebarProjectLookup,
   indexLastCodeSidebarThreads,

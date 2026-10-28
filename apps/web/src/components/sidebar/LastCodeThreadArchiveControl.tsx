@@ -26,6 +26,7 @@ export function LastCodeThreadArchiveControl({
 }) {
   const confirmRequired = useClientSettings((settings) => settings.confirmThreadArchive);
   const confirmButton = useRef<HTMLButtonElement | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- focuses the mounted archive confirmation button after its DOM is available and cancels pending focus on cleanup
   useEffect(() => {
     if (!confirming) return;
     const frame = requestAnimationFrame(() => confirmButton.current?.focus());

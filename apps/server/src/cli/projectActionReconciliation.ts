@@ -7,6 +7,7 @@ const ManagedProjectActionFields = Schema.Struct({
   command: Schema.String,
   icon: Schema.Literals(["play", "test", "lint", "configure", "build", "debug"]),
   runOnWorktreeCreate: Schema.Boolean,
+  terminalLinkProfileName: Schema.optional(Schema.String),
   previewUrl: Schema.optional(Schema.String),
   autoOpenPreview: Schema.optional(Schema.Boolean),
 });
@@ -33,7 +34,7 @@ export const ManagedProjectActionState = Schema.Struct({
 });
 export type ManagedProjectActionState = typeof ManagedProjectActionState.Type;
 
-export class ProjectActionReconciliationError extends Schema.TaggedErrorClass<ProjectActionReconciliationError>()(
+export class ProjectActionReconciliationError extends Schema.TaggedError<ProjectActionReconciliationError>()(
   "ProjectActionReconciliationError",
   {
     reason: Schema.Literals([
@@ -109,6 +110,9 @@ const managedFieldsFromDeclaration = (
   command: declaration.command,
   icon: declaration.icon ?? "play",
   runOnWorktreeCreate: false,
+  ...(declaration.terminalLinkProfileName === undefined
+    ? {}
+    : { terminalLinkProfileName: declaration.terminalLinkProfileName }),
   ...(declaration.previewUrl === undefined
     ? {}
     : {
@@ -122,6 +126,9 @@ const managedFieldsFromScript = (script: ProjectScript): ManagedProjectActionFie
   command: script.command,
   icon: script.icon,
   runOnWorktreeCreate: script.runOnWorktreeCreate,
+  ...(script.terminalLinkProfileName === undefined
+    ? {}
+    : { terminalLinkProfileName: script.terminalLinkProfileName }),
   ...(script.previewUrl === undefined
     ? {}
     : {

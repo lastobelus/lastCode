@@ -30,8 +30,8 @@ import {
   SERVICE_LAUNCHER_CONTEXT_ENV,
   SERVICE_LAUNCHER_PROTOCOL,
 } from "../cloud/serviceProtocol.ts";
-import { deriveServerPaths } from "../config.ts";
-import { resolveServerConfig } from "./config.ts";
+import { DEFAULT_PORT, deriveServerPaths } from "../config.ts";
+import { resolveServerConfig, resolveThreadInspectionConfig } from "./config.ts";
 
 const deriveExplicitServerPaths = (baseDir: string, devUrl: URL | undefined) =>
   deriveServerPaths(baseDir, devUrl, { baseDirIsExplicit: true });
@@ -982,4 +982,36 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("derives thread inspection config without probing ports or provisioning paths", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const { join } = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "thread-config-read-only-" });
+      const baseDir = join(root, "missing-home");
+      let portProbeCount = 0;
+      const netLayer = Layer.succeed(NetService.NetService, {
+        canListenOnHost: () => Effect.die("unexpected port probe"),
+        isPortAvailableOnLoopback: () => Effect.die("unexpected port probe"),
+        hasListenerOnHost: () => Effect.die("unexpected port probe"),
+        reserveLoopbackPort: () => Effect.die("unexpected port probe"),
+        findAvailablePort: () => {
+          portProbeCount += 1;
+          return Effect.die("unexpected port probe");
+        },
+      });
+      const resolved = yield* resolveThreadInspectionConfig(
+        { baseDir: Option.some(baseDir) },
+        Option.none(),
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })), netLayer),
+        ),
+      );
+
+      assert.equal(resolved.port, DEFAULT_PORT);
+      assert.equal(resolved.baseDir, baseDir);
+      assert.equal(portProbeCount, 0);
+      assert.isFalse(yield* fs.exists(baseDir));
+    }).pipe(Effect.scoped),
+  );
 });

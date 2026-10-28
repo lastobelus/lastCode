@@ -1,3 +1,4 @@
+import * as DocumentText from "../src/provider/DocumentText.ts";
 // @effect-diagnostics nodeBuiltinImport:off - Measures real local HTTP/WebSocket sockets.
 import * as NodeHttp from "node:http";
 import * as NodeUtil from "node:util";
@@ -154,6 +155,7 @@ const layerServices = layerManagement.pipe(
     }),
   ),
   Layer.provideMerge(ProjectStore.layer),
+  Layer.provideMerge(Layer.mock(DocumentText.DocumentText)({})),
   Layer.provideMerge(Layer.mock(ProjectService.ProjectService)({})),
   Layer.provideMerge(Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({})),
   Layer.provideMerge(Layer.mock(ThreadWait.ThreadWait)({})),

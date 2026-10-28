@@ -1,6 +1,10 @@
 import { assert, describe, it } from "@effect/vitest";
 
-import { resolveWebDevServerHost, SHARED_DEV_LOOPBACK_HOST } from "./devProxy.ts";
+import {
+  DEV_PROXIED_ORIGIN_PRESERVING_PREFIXES,
+  resolveWebDevServerHost,
+  SHARED_DEV_LOOPBACK_HOST,
+} from "./devProxy.ts";
 
 describe("resolveWebDevServerHost", () => {
   it("uses the same IPv4 loopback selected for Tailscale sharing", () => {
@@ -35,5 +39,12 @@ describe("resolveWebDevServerHost", () => {
       }),
       "127.0.0.1",
     );
+  });
+});
+
+describe("dev proxy origin policy", () => {
+  it("preserves browser Host for cookie-authenticated API and RPC WebSocket upgrades", () => {
+    assert.isTrue(DEV_PROXIED_ORIGIN_PRESERVING_PREFIXES.has("/api"));
+    assert.isTrue(DEV_PROXIED_ORIGIN_PRESERVING_PREFIXES.has("/ws"));
   });
 });

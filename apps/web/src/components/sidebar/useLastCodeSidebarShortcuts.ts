@@ -34,6 +34,7 @@ function useKeyboardNavigation(
   const navigateToThread = useLastCodeNavigateToThread(useRouter());
   const platform = navigator.platform;
   const { routeThreadKey, routeTerminalOpen } = route;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- registers the window keyboard listener with the current sidebar navigation targets and removes it on cleanup
   useEffect(() => {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       const context = {
@@ -58,6 +59,7 @@ function useKeyboardNavigation(
 }
 function useSelectionDismissal() {
   const clearSelection = useThreadSelectionStore((state) => state.clearSelection);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- registers the window mouse listener to dismiss thread selection on outside clicks and removes it on cleanup
   useEffect(() => {
     const onMouseDown = (event: globalThis.MouseEvent) => {
       if (!useThreadSelectionStore.getState().hasSelection()) return;

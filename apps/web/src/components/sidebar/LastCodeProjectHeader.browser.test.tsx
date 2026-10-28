@@ -1,15 +1,5 @@
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import {
-  afterAll,
-  afterEach,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vite-plus/test";
+import { act, render } from "../../../test/render";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId, ProjectId, ProviderInstanceId } from "@t3tools/contracts";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import type {
@@ -108,46 +98,34 @@ function Harness({ manual = true }: { manual?: boolean }) {
     </SidebarProvider>
   );
 }
-let root: Root, container: HTMLDivElement;
-const original = Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-beforeAll(() =>
-  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
-    configurable: true,
-    value: true,
-  }),
-);
-afterAll(() => {
-  if (original) Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", original);
-  else Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-});
-beforeEach(() => {
+function setup() {
+  const ui = useUiStateStore.getState();
+  const selection = useThreadSelectionStore.getState();
   vi.clearAllMocks();
   gestures.dragInProgressRef.current = false;
   gestures.suppressProjectClickAfterDragRef.current = false;
   gestures.suppressProjectClickForContextMenuRef.current = false;
   useUiStateStore.setState({ projectExpandedById: {} });
   useThreadSelectionStore.getState().clearSelection();
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-});
-afterEach(async () => {
-  await act(() => root.unmount());
-  container.remove();
-  document.body.replaceChildren();
-});
-async function render(manual = true) {
-  await act(() => root.render(<Harness manual={manual} />));
+  return {
+    [Symbol.dispose]() {
+      useUiStateStore.setState(ui);
+      useThreadSelectionStore.setState(selection);
+    },
+  };
 }
-const button = () =>
-  container.querySelector<HTMLButtonElement>('[data-slot="sidebar-menu-button"]')!;
-async function click() {
-  await act(() => button().click());
+async function renderHeader(manual = true) {
+  const screen = await render(<Harness manual={manual} />, { router: false });
+  const button = () =>
+    screen.container.querySelector<HTMLButtonElement>('[data-slot="sidebar-menu-button"]')!;
+  return Object.assign(screen, { button, click: () => act(() => button().click()) });
 }
 const expanded = () => resolveProjectExpanded(useUiStateStore.getState().projectExpandedById, keys);
 describe("project header gestures", () => {
   it("toggles logical, physical and legacy preferences and clears selection on ordinary click", async () => {
-    await render();
+    using _fixture = setup();
+    await using screen = await renderHeader();
+    const { click } = screen;
     useThreadSelectionStore.getState().toggleThread("selected");
     await click();
     expect(expanded()).toBe(false);
@@ -169,7 +147,9 @@ describe("project header gestures", () => {
   it.each(["context", "dragging", "after drag"])(
     "suppresses %s click without clearing selection or toggling",
     async (reason) => {
-      await render();
+      using _fixture = setup();
+      await using screen = await renderHeader();
+      const { click } = screen;
       useThreadSelectionStore.getState().toggleThread("selected");
       if (reason === "context") gestures.suppressProjectClickForContextMenuRef.current = true;
       if (reason === "dragging") gestures.dragInProgressRef.current = true;
@@ -184,7 +164,9 @@ describe("project header gestures", () => {
   it.each(["Enter", " "])(
     "toggles with %s, preserves selection and blocks during drag",
     async (key) => {
-      await render();
+      using _fixture = setup();
+      await using screen = await renderHeader();
+      const { button } = screen;
       useThreadSelectionStore.getState().toggleThread("selected");
       const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
       await act(() => button().dispatchEvent(event));
@@ -201,7 +183,9 @@ describe("project header gestures", () => {
     },
   );
   it("leaves unrelated keys unchanged", async () => {
-    await render();
+    using _fixture = setup();
+    await using screen = await renderHeader();
+    const { button } = screen;
     const event = new KeyboardEvent("keydown", {
       key: "ArrowRight",
       bubbles: true,
@@ -212,7 +196,9 @@ describe("project header gestures", () => {
     expect(expanded()).toBe(true);
   });
   it("opens context menu at native coordinates and suppresses its following click", async () => {
-    await render();
+    using _fixture = setup();
+    await using screen = await renderHeader();
+    const { button, click } = screen;
     const event = new MouseEvent("contextmenu", {
       bubbles: true,
       cancelable: true,
@@ -228,10 +214,12 @@ describe("project header gestures", () => {
   it.each(["MacIntel", "Win32"])(
     "prevents context pointer starting sort on %s and keeps ordinary sorting",
     async (platform) => {
+      using _fixture = setup();
       const prior = Object.getOwnPropertyDescriptor(navigator, "platform");
       Object.defineProperty(navigator, "platform", { configurable: true, value: platform });
       try {
-        await render();
+        await using screen = await renderHeader();
+        const { button } = screen;
         gestures.suppressProjectClickAfterDragRef.current = true;
         gestures.suppressProjectClickForContextMenuRef.current = true;
         await act(() =>
@@ -259,10 +247,12 @@ describe("project header gestures", () => {
     },
   );
   it("detaches sortable activation/listeners on automatic sorting without remounting the header", async () => {
-    await render();
+    using _fixture = setup();
+    await using screen = await renderHeader();
+    const { button, click } = screen;
     const before = button();
     expect(attach).toHaveBeenLastCalledWith(before);
-    await render(false);
+    await screen.rerender(<Harness manual={false} />);
     expect(button()).toBe(before);
     expect(attach).toHaveBeenLastCalledWith(null);
     await act(() =>
@@ -273,7 +263,9 @@ describe("project header gestures", () => {
     expect(expanded()).toBe(false);
   });
   it("keeps the overlaid New thread action isolated from expansion", async () => {
-    await render();
+    using _fixture = setup();
+    await using screen = await renderHeader();
+    const { container } = screen;
     await act(() =>
       [...container.querySelectorAll("button")]
         .find((value) => value.textContent === "New thread")!

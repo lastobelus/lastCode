@@ -43,7 +43,11 @@ export interface AcquiredDesktopTab {
 
 export function acquireDesktopTab(
   tabId: string,
-  serverTab?: { readonly threadId: string; readonly tabId: string },
+  serverTab?: {
+    readonly threadId: string;
+    readonly tabId: string;
+    readonly desktopHostId?: string | undefined;
+  },
 ): AcquiredDesktopTab {
   const current =
     leases.get(tabId) ??

@@ -93,6 +93,7 @@ export function ThreadAnnotationEditorDialog(props: {
   const canSaveRef = useRef(false);
   const wasOpenRef = useRef(false);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- initializes the uncontrolled textarea DOM value and its save eligibility when the annotation dialog opens
   useEffect(() => {
     const justOpened = props.open && !wasOpenRef.current;
     wasOpenRef.current = props.open;
@@ -352,6 +353,7 @@ export function ThreadAnnotationHoverPopover(props: {
   const popupRef = useRef<HTMLDivElement | null>(null);
   const actionsRef = useRef<PopoverPrimitive.Root.Actions | null>(null);
   const openedByHover = useRef(false);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- releases the detached popover handle and its imperative mounted content when the annotation row unmounts
   useEffect(() => {
     // The detached row outlives annotations removed or resolved by another client.
     const actions = actionsRef.current;

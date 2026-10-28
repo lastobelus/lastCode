@@ -1,6 +1,6 @@
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vite-plus/test";
+import { act, render } from "../../../test/render";
+
+import { describe, expect, it, vi } from "vite-plus/test";
 import { ThreadId, MessageId } from "@t3tools/contracts";
 import { makeThreadFixture } from "../../test-fixtures";
 import { LastCodeThreadMetadata } from "./LastCodeThreadMetadata";
@@ -169,35 +169,8 @@ function Harness({
     </LastCodeThreadRowLayout>
   );
 }
-let root: Root | null = null;
-let container: HTMLDivElement;
-const original = Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-beforeAll(() =>
-  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
-    configurable: true,
-    value: true,
-  }),
-);
-afterAll(() => {
-  if (original) Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", original);
-  else Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-});
-afterEach(async () => {
-  await act(() => root?.unmount());
-  container?.remove();
-  document.body.replaceChildren();
-  vi.clearAllMocks();
-  mocks.permission.mockReturnValue(true);
-  mocks.subheaders = true;
-  root = null;
-});
-async function render(jump: string | null, active = true) {
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-  await act(() => root?.render(<Harness jump={jump} active={active} />));
-}
-function trigger() {
+
+function trigger(container: HTMLElement) {
   return container.querySelector<HTMLButtonElement>('button[aria-label*="annotation"]')!;
 }
 
@@ -206,26 +179,34 @@ function action(label: string) {
     (button) => button.textContent === label,
   )!;
 }
-async function open() {
-  await act(() => trigger().click());
+async function open(container: HTMLElement) {
+  await act(() => trigger(container).click());
 }
+function setup() {
+  vi.clearAllMocks();
+  mocks.permission.mockReturnValue(true);
+  mocks.subheaders = true;
+  mocks.worktrees = true;
+}
+
 describe("row details composition", () => {
   it("announces the expanded compact family summary only while subheaders are off", async () => {
-    container = document.createElement("div");
-    document.body.append(container);
-    root = createRoot(container);
-    await act(() => root?.render(<Harness withChildren active={false} />));
+    setup();
+    await using screen = await render(<Harness withChildren active={false} />);
+    const container = screen.container;
     const row = () => container.querySelector(`[data-testid="thread-row-${thread.id}"]`)!;
     expect(row().getAttribute("aria-label")).not.toContain("1 subagent");
     mocks.subheaders = false;
-    await act(() => root?.render(<Harness withChildren />));
+    await screen.rerender(<Harness withChildren />);
     expect(row().getAttribute("aria-label")).toContain("1 subagent");
     mocks.subheaders = true;
-    await act(() => root?.render(<Harness withChildren active={false} />));
+    await screen.rerender(<Harness withChildren active={false} />);
     expect(row().getAttribute("aria-label")).not.toContain("1 subagent");
   });
   it("keeps the lease on the li and cancels confirmation when an unannotated row loses hover", async () => {
-    await render(null, false);
+    setup();
+    await using screen = await render(<Harness jump={null} active={false} />);
+    const container = screen.container;
     const li = container.querySelector<HTMLLIElement>("li[data-thread-item]")!;
     expect(mocks.lease).toHaveBeenCalledWith(li);
     const row = container.querySelector<HTMLElement>(`[data-testid="thread-row-${thread.id}"]`)!;
@@ -242,7 +223,9 @@ describe("row details composition", () => {
     expect(container.querySelector("li[data-thread-item]")).toBe(li);
   });
   it("leaves annotation activation to the existing trigger when focus and hover enter its row", async () => {
-    await render(null);
+    setup();
+    await using screen = await render(<Harness jump={null} active={true} />);
+    const container = screen.container;
     const li = container.querySelector<HTMLLIElement>("li[data-thread-item]")!;
     await act(() => {
       container.querySelector<HTMLElement>(`[data-testid="thread-row-${thread.id}"]`)!.focus();
@@ -257,7 +240,9 @@ describe("row details composition", () => {
   it.each(["Enter", " "])(
     "navigates once with %s without opening its annotation, while nested keys stay isolated",
     async (key) => {
-      await render(null);
+      setup();
+      await using screen = await render(<Harness jump={null} active={true} />);
+      const container = screen.container;
       const row = container.querySelector<HTMLElement>(`[data-testid="thread-row-${thread.id}"]`)!;
       await act(() => {
         row.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
@@ -273,7 +258,7 @@ describe("row details composition", () => {
       expect(mocks.navigate).toHaveBeenCalledTimes(1);
       await act(() => action("Archive").click());
       expect(mocks.archive).toHaveBeenCalledTimes(1);
-      await open();
+      await open(container);
       expect(document.querySelector('[data-slot="popover-popup"]')?.textContent).toContain(
         "Follow up here",
       );
@@ -281,7 +266,9 @@ describe("row details composition", () => {
     },
   );
   it("routes a native context-menu key through the same surface and leaves nested controls alone", async () => {
-    await render(null);
+    setup();
+    await using screen = await render(<Harness jump={null} active={true} />);
+    const container = screen.container;
     const row = container.querySelector<HTMLElement>(`[data-testid="thread-row-${thread.id}"]`)!;
     await act(() =>
       row.dispatchEvent(
@@ -300,8 +287,10 @@ describe("row details composition", () => {
   it.each([null, "⌘1"])(
     "opens annotation from metadata %s with shared content and no navigation",
     async (jump) => {
-      await render(jump);
-      await open();
+      setup();
+      await using screen = await render(<Harness jump={jump} active={true} />);
+      const container = screen.container;
+      await open(container);
       const popup = document.querySelector('[data-slot="popover-popup"]')!;
       expect(popup.textContent).toContain("Follow up here");
       expect(popup.textContent).toContain("Thread details");
@@ -312,24 +301,28 @@ describe("row details composition", () => {
     },
   );
   it("checks the destination permission at edit time after the popup opens", async () => {
-    await render(null);
-    await open();
+    setup();
+    await using screen = await render(<Harness jump={null} active={true} />);
+    const container = screen.container;
+    await open(container);
     mocks.permission.mockReturnValue(false);
     await act(() => action("Edit").click());
     expect(mocks.permission).toHaveBeenCalledExactlyOnceWith(thread.environmentId);
     expect(mocks.edit).not.toHaveBeenCalled();
-    await open();
+    await open(container);
     mocks.permission.mockReturnValue(true);
     await act(() => action("Edit").click());
     expect(mocks.edit).toHaveBeenCalledExactlyOnceWith(thread);
   });
   it("unmounts a resolved annotation popup and keeps the archive control mounted", async () => {
-    await render(null);
-    await open();
+    setup();
+    await using screen = await render(<Harness jump={null} active={true} />);
+    const container = screen.container;
+    await open(container);
     const archive = action("Archive");
-    await act(() => root?.render(<Harness active={false} />));
+    await screen.rerender(<Harness active={false} />);
     expect(document.querySelector('[data-slot="popover-popup"]')).toBeNull();
     expect(action("Archive")).toBe(archive);
-    expect(trigger()).toBeNull();
+    expect(trigger(container)).toBeNull();
   });
 });

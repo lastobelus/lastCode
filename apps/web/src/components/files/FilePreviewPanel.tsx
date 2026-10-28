@@ -9,7 +9,7 @@ import {
   type ScopedThreadRef,
 } from "@t3tools/contracts";
 import { filePreviewDelimiter } from "@t3tools/shared/delimitedPreview";
-import { AuthFilesystemWriteScope } from "@t3tools/contracts";
+import { AuthFilesystemReadScope, AuthFilesystemWriteScope } from "@t3tools/contracts";
 import {
   isWorkspaceAudioPreviewPath,
   isWorkspaceImagePreviewPath,
@@ -44,7 +44,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import { mediaFileReference } from "@t3tools/client-runtime/media-reference";
-import { FolderTree, Globe2, WrapTextIcon } from "lucide-react";
+import { FolderTree, Globe2, RotateCw, WrapTextIcon } from "lucide-react";
 import { Code2, Eye, Table2 } from "lucide";
 import * as Schema from "effect/Schema";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
@@ -65,6 +65,8 @@ import { cn } from "~/lib/utils";
 import type { ChatFileAttachment } from "~/types";
 import { isHostPath } from "@t3tools/shared/path";
 import { resolvePathLinkTarget } from "@t3tools/shared/fileLinks";
+import { setMarkdownTaskChecked } from "~/markdownTaskList";
+import { hasFileHandoff, recordKnownFileHandoff } from "~/handoffs/handoffsStore";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { type DraftId, useComposerDraftStore } from "~/composerDraftStore";
@@ -74,13 +76,14 @@ import { usePreviewAvailable } from "~/browser/previewRuntime";
 import { useEnvironmentHttpBaseUrl, usePrimaryEnvironmentId } from "~/state/environments";
 import { previewEnvironment } from "~/state/preview";
 import { serverEnvironment } from "~/state/server";
-import { useEnvironmentScope } from "~/state/session";
+import { readEnvironmentScope, useEnvironmentScope } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
 
 import { AttachmentFilePreview } from "./AttachmentFilePreview";
 import { AudioPreview } from "./AudioPreview";
-import { BrowserDocumentFrame, isPdfPreviewFile } from "./BrowserDocumentFrame";
+import { WorkspaceBrowserPreview } from "./WorkspaceBrowserPreview";
+import { isPdfPreviewFile } from "./BrowserDocumentFrame";
 import { DelimitedTablePreview } from "./DelimitedTablePreview";
 import { PreviewImage } from "./PreviewImage";
 import FileBrowserPanel from "./FileBrowserPanel";
@@ -113,7 +116,6 @@ import {
   filePreviewReadErrorMessage,
   isMarkdownPreviewFile,
   resolveFilePreviewPath,
-  setMarkdownTaskChecked,
   shouldShowFileExplorer,
   workspaceAssetResource,
 } from "./filePreviewMode";
@@ -218,52 +220,6 @@ function WorkspaceImagePreview(props: {
     <div className="flex min-h-0 flex-1 items-center justify-center text-muted-foreground">
       <Spinner size="lg" />
     </div>
-  );
-}
-
-function WorkspaceBrowserPreview(props: {
-  readonly environmentId: EnvironmentId;
-  readonly threadRef: ScopedThreadRef;
-  readonly draft: boolean;
-  readonly absolutePath: string;
-  readonly workspaceRoot: string;
-  readonly title: string;
-  readonly workspaceMutationId: string | null;
-}) {
-  const resource = workspaceAssetResource({
-    kind: "workspace-file",
-    threadRef: props.threadRef,
-    draft: props.draft,
-    workspaceRoot: props.workspaceRoot,
-    absolutePath: props.absolutePath,
-  });
-  const assetUrl = useAssetUrlState(props.environmentId, resource);
-  const revisionSuffix =
-    props.workspaceMutationId === null
-      ? ""
-      : `${assetUrl._tag === "Success" && assetUrl.url.includes("?") ? "&" : "?"}workspace-revision=${encodeURIComponent(props.workspaceMutationId)}`;
-
-  if (assetUrl._tag === "Failure") {
-    return (
-      <div className="flex min-h-0 flex-1 items-center justify-center px-6 text-center text-xs leading-relaxed text-destructive">
-        Unable to load file preview.
-      </div>
-    );
-  }
-  if (assetUrl._tag !== "Success") {
-    return (
-      <div className="flex min-h-0 flex-1 items-center justify-center text-muted-foreground">
-        <Spinner size="lg" />
-      </div>
-    );
-  }
-  return (
-    <BrowserDocumentFrame
-      src={`${assetUrl.url}${revisionSuffix}`}
-      documentKey={`${props.environmentId}:${resource._tag}:${props.threadRef.threadId}:${props.absolutePath}:${props.workspaceMutationId}`}
-      title={props.title}
-      pdf={isPdfPreviewFile(props.absolutePath)}
-    />
   );
 }
 
@@ -992,7 +948,7 @@ export default function FilePreviewPanel({
   selectedFilePending,
   workspaceMutationId,
 }: FilePreviewPanelProps) {
-  const relativePath =
+  const queryPath =
     attachment === undefined ? resolveFilePreviewPath(requestedPath, cwd) : requestedPath;
   const draft = typeof composerDraftTarget === "string";
   const { resolvedTheme } = useTheme();
@@ -1009,6 +965,23 @@ export default function FilePreviewPanel({
   const openPreview = useAtomCommand(previewEnvironment.open, {
     reportFailure: false,
   });
+  const fileAccess = useFilesystemReadAccess(environmentId);
+  const { canReadFiles, canReadThreadFiles } = fileAccess;
+  const canWriteFiles = useEnvironmentScope(environmentId, AuthFilesystemWriteScope);
+  // Media and PDFs render from their absolute path, so their contents are never
+  // shown. The read still runs: a folder named `assets.png` is only knowable as a
+  // folder from the read failure, and the server stats before reading, so a folder
+  // costs an open and a stat and returns no body.
+  const file = useProjectFileQuery(
+    environmentId,
+    cwd,
+    queryPath,
+    attachment === undefined && queryPath !== null,
+    threadRef.threadId,
+  );
+  // A published bare filename may resolve to a nested workspace file. Keep
+  // the query anchored to the requested path and render using the resolved one.
+  const relativePath = file.data?.relativePath ?? queryPath;
   const isVideo = relativePath !== null && isWorkspaceVideoPreviewPath(relativePath);
   const isAudio = relativePath !== null && !isVideo && isWorkspaceAudioPreviewPath(relativePath);
   const isImage = relativePath !== null && !isVideo && isWorkspaceImagePreviewPath(relativePath);
@@ -1022,15 +995,6 @@ export default function FilePreviewPanel({
   const isHtml = relativePath !== null && !isPdf && isBrowserPreviewFile(relativePath);
   const isHostFile =
     attachment !== undefined || (relativePath !== null && isHostPath(relativePath));
-  const fileAccess = useFilesystemReadAccess(environmentId);
-  const { canReadFiles } = fileAccess;
-  const canWriteFiles = useEnvironmentScope(environmentId, AuthFilesystemWriteScope);
-  const file = useProjectFileQuery(
-    environmentId,
-    cwd,
-    relativePath,
-    attachment === undefined && relativePath !== null,
-  );
   const [fileRefreshRevision, setFileRefreshRevision] = useState(0);
   const attemptedPath = file.readError?.resolvedPath ?? file.readError?.operationPath;
   // Folder links fail file reads; retain mutation refresh to detect conversion to files. Host folders own
@@ -1053,12 +1017,17 @@ export default function FilePreviewPanel({
     serverConfig?.shellRevealInFileManager === true;
   // Everything preview-related keys off previewPath; a folder has no preview.
   const previewPath = isFolder ? null : relativePath;
+  const [browserRevision, setBrowserRevision] = useState(0);
   const [explorerOpen, setExplorerOpen] = useState(initialExplorerOpen);
-  const showExplorer = shouldShowFileExplorer({
-    relativePath: previewPath,
-    explorerOpen,
-    attachmentOpen: attachment !== undefined,
-  });
+  const showExplorer =
+    canReadFiles &&
+    shouldShowFileExplorer({
+      relativePath: previewPath,
+      explorerOpen,
+      attachmentOpen: attachment !== undefined,
+    });
+  // Reading markdown rendered is a preference, not a property of one file. Keeping
+  // it on the panel meant a thread switch dropped it and forced source back.
   const [renderMarkdownPreferred, setRenderMarkdownPreferred] = useLocalStorage(
     RENDER_MARKDOWN_STORAGE_KEY,
     false,
@@ -1129,6 +1098,7 @@ export default function FilePreviewPanel({
         ? setRenderTablePreferred
         : setRenderBrowserFilePreferred;
   const canOpenInBrowser =
+    (canReadFiles || canReadThreadFiles) &&
     canOperatePreview &&
     previewPath !== null &&
     attachment === undefined &&
@@ -1152,14 +1122,19 @@ export default function FilePreviewPanel({
   const onFilePostRender = useFileLineReveal(relativePath, revealLine, revealRequestId);
   // Mounting the file read under the workspace mutation id refetches it after each mutation.
   useAtomMount(
-    canReadFiles &&
+    (canReadFiles || canReadThreadFiles) &&
       attachment === undefined &&
-      relativePath !== null &&
+      queryPath !== null &&
       // Skip mutation reads for media and documents; folders still detect conversion to files.
       (isFolder || (!isMedia && !isPdf && !isDocument)) &&
       !selectedFilePending
       ? revisionedQuery(
-          getProjectFileQueryAtom(environmentId, cwd, relativePath),
+          getProjectFileQueryAtom(
+            environmentId,
+            cwd,
+            queryPath,
+            canReadFiles ? undefined : threadRef.threadId,
+          ),
           workspaceMutationId,
         )
       : NO_FILE_REVISION_ATOM,
@@ -1189,17 +1164,29 @@ export default function FilePreviewPanel({
   };
 
   const handleOpenInBrowser = () => {
-    if (!canReadFiles || !canOperatePreview || !absolutePath || !environmentHttpBaseUrl) return;
+    if (
+      (!canReadFiles && !canReadThreadFiles) ||
+      !canOperatePreview ||
+      !absolutePath ||
+      !environmentHttpBaseUrl
+    )
+      return;
     void (async () => {
       const result = await openFileInPreview({
         threadRef,
         filePath: absolutePath,
         workspaceRoot: cwd,
+        canReadFiles: readEnvironmentScope(environmentId, AuthFilesystemReadScope),
         httpBaseUrl: environmentHttpBaseUrl,
         createAssetUrl,
         openPreview,
       });
       if (result._tag === "Success" || isAtomCommandInterrupted(result)) {
+        if (result._tag === "Success" && hasFileHandoff(threadRef, absolutePath)) {
+          recordKnownFileHandoff(threadRef, absolutePath);
+          // The preview opener owns the tab id; the store association is filled
+          // by the browser opener when a tab is available.
+        }
         return;
       }
       const error = squashAtomCommandFailure(result);
@@ -1213,7 +1200,7 @@ export default function FilePreviewPanel({
     })();
   };
 
-  if (attachment === undefined && !canReadFiles) {
+  if (attachment === undefined && !canReadFiles && !fileAccess.canReadThreadFiles) {
     if (fileAccess.isPending) {
       return (
         <div className="flex min-h-0 flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
@@ -1242,16 +1229,20 @@ export default function FilePreviewPanel({
             data-file-breadcrumbs
           >
             <div className="flex h-full w-max min-w-full items-center text-xs">
-              <FileBreadcrumbs
-                cwd={cwd}
-                environmentId={environmentId}
-                onNavigateFolder={navigateToFolder}
-                onOpenFile={onOpenFile}
-                projectName={projectName}
-                relativePath={breadcrumbPath}
-                trail={breadcrumbTrail}
-                workspaceMutationId={workspaceMutationId}
-              />
+              {canReadFiles ? (
+                <FileBreadcrumbs
+                  cwd={cwd}
+                  environmentId={environmentId}
+                  onNavigateFolder={navigateToFolder}
+                  onOpenFile={onOpenFile}
+                  projectName={projectName}
+                  relativePath={breadcrumbPath}
+                  trail={breadcrumbTrail}
+                  workspaceMutationId={workspaceMutationId}
+                />
+              ) : (
+                <span className="px-3">{relativePath}</span>
+              )}
             </div>
           </ScrollArea>
           {absolutePath &&
@@ -1296,12 +1287,23 @@ export default function FilePreviewPanel({
               <WrapTextIcon className="size-3.5" />
             </FileSurfaceAction>
           ) : null}
+          {previewPath && renderBrowserFile ? (
+            <FileSurfaceAction
+              label="Reload preview"
+              onPress={() => {
+                setBrowserRevision((revision) => revision + 1);
+                file.refresh();
+              }}
+            >
+              <RotateCw className="size-3.5" />
+            </FileSurfaceAction>
+          ) : null}
           {canOpenInBrowser ? (
             <FileSurfaceAction label="Open file in preview browser" onPress={handleOpenInBrowser}>
               <Globe2 className="size-3.5" />
             </FileSurfaceAction>
           ) : null}
-          {!isHostFile && previewPath !== null ? (
+          {canReadFiles && !isHostFile && previewPath !== null ? (
             <FileSurfaceAction
               label={explorerOpen ? "Hide file explorer" : "Show file explorer"}
               pressed={explorerOpen}
@@ -1376,14 +1378,14 @@ export default function FilePreviewPanel({
             />
           ) : relativePath && renderBrowserFile && absolutePath ? (
             <WorkspaceBrowserPreview
-              key={absolutePath}
+              key={`${environmentId}:${threadRef.threadId}:${absolutePath}`}
               environmentId={environmentId}
               threadRef={threadRef}
               draft={draft}
               absolutePath={absolutePath}
               workspaceRoot={cwd}
               title={relativePath}
-              workspaceMutationId={workspaceMutationId}
+              revision={browserRevision}
             />
           ) : relativePath &&
             absolutePath &&

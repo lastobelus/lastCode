@@ -5,6 +5,8 @@ import {
   reduceDesktopUpdateStateOnCheckFailure,
   reduceDesktopUpdateStateOnCheckStart,
   reduceDesktopUpdateStateOnDownloadComplete,
+  reduceDesktopUpdateStateOnDownloadStart,
+  reduceDesktopUpdateStateOnDownloadProgress,
   reduceDesktopUpdateStateOnDownloadFailure,
   reduceDesktopUpdateStateOnInstallFailure,
   reduceDesktopUpdateStateOnLocalBuildFailure,

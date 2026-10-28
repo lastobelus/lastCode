@@ -5,13 +5,13 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as UpdateDrainRepositoryPersistence from "../persistence/UpdateDrainRepository.ts";
 import { UpdateDrainRepository } from "../persistence/UpdateDrainRepository.ts";
 import { UpdateDrain, layer, makeUpdateDrain } from "./UpdateDrain.ts";
 
 const repositoryLayer = UpdateDrainRepositoryPersistence.layer.pipe(
-  Layer.provideMerge(SqlitePersistenceMemory),
+  Layer.provideMerge(SqlitePersistence.layerMemory),
 );
 const testLayer = layer.pipe(Layer.provideMerge(repositoryLayer));
 const tests = it.layer(testLayer);

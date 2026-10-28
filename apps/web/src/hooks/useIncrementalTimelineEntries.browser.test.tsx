@@ -1,7 +1,7 @@
+import { act, render } from "../../test/render";
 import { EnvironmentId, MessageId } from "@t3tools/contracts";
-import { act, createElement, type ComponentType } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { createElement, type ComponentType } from "react";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import { useAssetUrls } from "../assets/assetUrls";
 import type { TimelineEntriesInput, TimelineEntriesProjection } from "../session-logic";
@@ -69,20 +69,6 @@ function makeProbe(compiled: boolean): ComponentType<ProbeProps> {
   )(useAssetUrls, useIncrementalTimelineEntries, EnvironmentId.make("timeline-environment"));
 }
 
-let root: Root;
-let host: HTMLDivElement;
-beforeEach(() => {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  host = document.createElement("div");
-  document.body.append(host);
-  root = createRoot(host);
-});
-afterEach(async () => {
-  await act(() => root.unmount());
-  host.remove();
-  vi.unstubAllGlobals();
-});
-
 const message: ChatMessage = {
   id: MessageId.make("draft-message"),
   role: "user",
@@ -95,6 +81,8 @@ const message: ChatMessage = {
 
 describe.each([false, true])("incremental timeline (compiled=%s)", (compiled) => {
   it("mounts and updates a draft with fresh equivalent asset and timeline collections", async () => {
+    await using screen = await render(null);
+    const host = screen.container;
     const Probe = makeProbe(compiled);
     let entries: Entries = [];
     const observe = (next: Entries) => {
@@ -102,11 +90,11 @@ describe.each([false, true])("incremental timeline (compiled=%s)", (compiled) =>
     };
     const input: TimelineEntriesInput = { visibleTurnItems: [], optimisticMessages: [] };
     await act(() => {
-      root.render(createElement(Probe, { threadKey: "draft-one", input, observe }));
+      return screen.rerender(createElement(Probe, { threadKey: "draft-one", input, observe }));
     });
     expect(host.textContent).toBe("0");
     await act(() =>
-      root.render(
+      screen.rerender(
         createElement(Probe, {
           threadKey: "draft-one",
           input: { ...input, optimisticMessages: [message] },
@@ -118,7 +106,7 @@ describe.each([false, true])("incremental timeline (compiled=%s)", (compiled) =>
     expect(entries[0]).toMatchObject({ kind: "message", message: { text: "Keep this draft" } });
     const previous = entries[0];
     await act(() =>
-      root.render(
+      screen.rerender(
         createElement(Probe, {
           threadKey: "draft-one",
           input: { ...input, optimisticMessages: [message] },
@@ -128,7 +116,7 @@ describe.each([false, true])("incremental timeline (compiled=%s)", (compiled) =>
     );
     expect(entries[0]).toBe(previous);
     await act(() =>
-      root.render(
+      screen.rerender(
         createElement(Probe, {
           threadKey: "draft-two",
           input,
@@ -139,6 +127,7 @@ describe.each([false, true])("incremental timeline (compiled=%s)", (compiled) =>
     expect(host.textContent).toBe("0");
   });
   it("refreshes attachment URLs without losing unchanged committed rows", async () => {
+    await using screen = await render(null);
     const Probe = makeProbe(compiled);
     const fixture = makeStreamingTimelineFixture();
     const visibleTurnItems = fixture.visibleTurnItems.slice(0, 1).map((row) => ({
@@ -169,14 +158,14 @@ describe.each([false, true])("incremental timeline (compiled=%s)", (compiled) =>
       attachmentUrlById: new Map([["image", "https://assets.example/first"]]),
     };
     await act(() => {
-      root.render(createElement(Probe, { threadKey: "server-one", input, observe }));
+      return screen.rerender(createElement(Probe, { threadKey: "server-one", input, observe }));
     });
     const original = entries[0];
     expect(original).toMatchObject({
       message: { attachments: [{ previewUrl: "https://assets.example/first" }] },
     });
     await act(() =>
-      root.render(
+      screen.rerender(
         createElement(Probe, {
           threadKey: "server-one",
           input: {
@@ -189,7 +178,7 @@ describe.each([false, true])("incremental timeline (compiled=%s)", (compiled) =>
     );
     expect(entries[0]).toBe(original);
     await act(() =>
-      root.render(
+      screen.rerender(
         createElement(Probe, {
           threadKey: "server-one",
           input: {

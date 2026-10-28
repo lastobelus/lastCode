@@ -3,6 +3,11 @@ import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay
 import * as Random from "effect/Random";
 import * as DatabaseStorage from "./persistence/DatabaseStorage.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
+import * as WorktreeSuspension from "./workspace/WorktreeSuspension.ts";
+import * as WorkspaceAcquisition from "./workspace/WorkspaceAcquisition.ts";
+import * as WorktreeSuspensionRegistry from "./workspace/WorktreeSuspensionRegistry.ts";
+import * as WorkspaceLifecycle from "./workspace/WorkspaceLifecycle.ts";
+import * as CommandReceiptStore from "./orchestration-v2/CommandReceiptStore.ts";
 import * as PullRequestSyncReactor from "./orchestration-v2/PullRequestSyncReactor.ts";
 import * as PullRequestWatchReactor from "./orchestration-v2/PullRequestWatchReactor.ts";
 import * as DelegatedTaskQuestionReactor from "./orchestration-v2/DelegatedTaskQuestionReactor.ts";
@@ -10,6 +15,8 @@ import * as DelegatedTaskQuestionReactor from "./orchestration-v2/DelegatedTaskQ
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeHttp from "node:http";
 
+import * as NodeChildProcessSpawner from "@effect/platform-node/NodeChildProcessSpawner";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { EnvironmentHttpApi, type RepositoryIdentity } from "@t3tools/contracts";
@@ -17,6 +24,8 @@ import * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Option from "effect/Option";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
@@ -28,6 +37,7 @@ import * as HostPowerMonitor from "./background/HostPowerMonitor.ts";
 import * as ServerConfig from "./config.ts";
 import { withUntracedRequests } from "./http.ts";
 import * as ServerHttp from "./http.ts";
+import * as ServerOwnerLease from "./serverOwnerLease.ts";
 import {
   guardHttpResponseWriteErrors,
   rejectRequestsUntilServing,
@@ -67,6 +77,7 @@ import * as TextGeneration from "./textGeneration/TextGeneration.ts";
 import * as ProviderInstanceRegistryHydration from "./provider/ProviderInstanceRegistryHydration.ts";
 import * as ProjectSettingsOverrideSweep from "./provider/ProjectSettingsOverrideSweep.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
+import * as PublishedDocumentPreview from "./preview/PublishedDocumentPreview.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
 import * as PeerForwarding from "./peer/PeerForwarding.ts";
 import * as RemoteDelegation from "./peer/RemoteDelegation.ts";
@@ -95,6 +106,7 @@ import * as EnvironmentTheme from "./environmentTheme.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as ServerOwnership from "./serverOwnership.ts";
+import * as PreviewHosting from "./preview/Hosting.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
 import * as ServerSettings from "./serverSettings.ts";
@@ -113,6 +125,7 @@ import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolve
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as KnownWorkspaces from "./workspace/KnownWorkspaces.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
+import * as ThreadLinkedFiles from "./workspace/ThreadLinkedFiles.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "./vcs/VcsDriverRegistry.ts";
@@ -453,6 +466,11 @@ const layerTerminal = TerminalManager.layer.pipe(
   Layer.provide(layerNativeTelemetry),
 );
 
+const layerPreviewHosting = PreviewHosting.layer.pipe(
+  Layer.provideMerge(layerTerminal),
+  Layer.provideMerge(layerPortScanner),
+);
+
 const layerPreview = Layer.empty.pipe(
   Layer.provideMerge(PreviewManager.layer),
   Layer.provideMerge(layerPortScanner),
@@ -483,6 +501,11 @@ const layerWorkspace = Layer.mergeAll(
   WorkspacePaths.layer,
   layerWorkspaceEntries,
   layerWorkspaceFileSystem,
+  ThreadLinkedFiles.layer.pipe(
+    Layer.provide(layerWorkspaceFileSystem),
+    Layer.provide(layerWorkspaceEntries),
+    Layer.provide(Layer.merge(ProjectionStoreV2.layer, ProjectStore.layer)),
+  ),
 );
 
 const layerProjectFaviconResolver = ProjectFaviconResolver.layer.pipe(
@@ -598,7 +621,14 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   HeldHooksWaker.layer,
   layerThreadSettlementWorker,
   layerIdleCompactionWorker,
-  StorageCleanup.layer.pipe(Layer.provide(ProjectionStoreV2.layer)),
+  StorageCleanup.layer.pipe(
+    Layer.provideMerge(
+      WorktreeSuspension.layer.pipe(
+        Layer.provide(CommandReceiptStore.layerFromApplicationReceipts),
+      ),
+    ),
+    Layer.provide(ProjectionStoreV2.layer),
+  ),
   DatabaseStorage.layer.pipe(
     Layer.provide(ProjectionMaintenance.layer),
     Layer.provide(
@@ -639,13 +669,14 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   Layer.effectDiscard(ProjectSettingsOverrideSweep.sweep),
 ).pipe(
   Layer.provideMerge(layerOrchestrationApplication),
+  Layer.provideMerge(RuntimeLayer.layerUpdateDrainAdmission),
   Layer.provideMerge(RuntimeLayer.layerEventInfrastructure),
   Layer.provideMerge(Layer.merge(ProjectStore.layer, ThreadSearch.layer)),
   Layer.provideMerge(layerServerSettings),
   Layer.provideMerge(layerSourceControlProviderRegistry),
   Layer.provideMerge(layerGit),
   Layer.provideMerge(layerVcs),
-  Layer.provideMerge(Layer.mergeAll(layerTerminal, layerPreview, layerDevice)),
+  Layer.provideMerge(Layer.mergeAll(layerPreviewHosting, layerPreview, layerDevice)),
   Layer.provideMerge(layerPersistence),
   Layer.provideMerge(
     Layer.mergeAll(Keybindings.layer, EnvironmentTheme.layer, UsageLimitSources.layer),
@@ -718,6 +749,9 @@ const layerRuntimeDependencies = layerRuntimeCoreDependencies.pipe(
   Layer.provideMerge(DirectEndpoints.layer),
   Layer.provideMerge(ServerLifecycleEvents.layer),
   Layer.provide(NetService.layer),
+  Layer.provideMerge(WorkspaceAcquisition.layer),
+  Layer.provideMerge(WorktreeSuspensionRegistry.layer),
+  Layer.provideMerge(WorkspaceLifecycle.layer),
 );
 
 const layerCommandReadiness = HttpRouter.middleware(
@@ -773,15 +807,13 @@ const layerMakeRoutes = Layer.mergeAll(
   Layer.provide(RemoteDelegation.layer.pipe(Layer.provide(ProjectionStoreV2.layer))),
   // Links agents ask for: shown in a thread from /mcp, answered over WebSocket.
   Layer.provide(PeerLinkRequests.layer),
+  Layer.provide(PublishedDocumentPreview.layer),
   // Share the service so HTTP/WS clients single-flight reads and invalidate each other's cached patches.
   Layer.provide(layerPullRequestService),
   Layer.provide(ProjectionStoreV2.layer),
   // The same activity instance RunExecutionService reports to, by layer memoization.
-  Layer.provide(
-    ServerBrowser.layer.pipe(
-      Layer.provide(Layer.merge(DesktopBrowserChannel.layer, PreviewAgentActivity.layer)),
-    ),
-  ),
+  Layer.provide(ServerBrowser.layer.pipe(Layer.provide(PreviewAgentActivity.layer))),
+  Layer.provide(DesktopBrowserChannel.layer),
   Layer.provide(PreviewBrowser.layer),
   // Links to other environments, shared by Settings (WebSocket) and agents (/mcp).
   Layer.provide(
@@ -801,6 +833,10 @@ const layerMakeRoutes = Layer.mergeAll(
 const layerMakeServer = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
+    yield* Effect.acquireRelease(
+      ServerOwnerLease.acquireServerOwnerLease(config.stateDir),
+      (lease) => lease.release,
+    );
     // Before anything opens the database: one server per T3 home.
     const ownership = yield* ServerOwnership.acquireServerOwnership(config.serverRuntimeStatePath);
     const activation = yield* Deferred.make<void>();
@@ -1135,6 +1171,17 @@ const layerMakeServer = Layer.unwrap(
       Layer.provideMerge(layerPlatformServices),
     );
   }),
-).pipe(Layer.provide(ProcessRunner.layer));
+).pipe(
+  Layer.provide(ProcessRunner.layer),
+  // Ownership is acquired before the application's platform layer is constructed.
+  Layer.provide(Layer.merge(NodeChildProcessSpawner.layer, NodeCrypto.layer)),
+);
 
-export const runServer = Layer.launch(layerMakeServer);
+// The CLI supplies configuration and the filesystem used by owner-lease acquisition.
+// Keep those requirements explicit: deriving them through the runtime layer can
+// lose their type when this entry point is imported by the CLI.
+export const runServer: Effect.Effect<
+  never,
+  Layer.Error<typeof layerMakeServer>,
+  ServerConfig.ServerConfig | FileSystem.FileSystem | Path.Path
+> = Layer.launch(layerMakeServer);

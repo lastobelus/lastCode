@@ -85,6 +85,8 @@ import { detachStackFrame } from "./detachStackFrame.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import type { GitManagerServiceError } from "@t3tools/contracts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import * as WorkspaceAcquisition from "../workspace/WorkspaceAcquisition.ts";
+import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import * as SourceControlProvider from "@t3tools/source-control-core/server/SourceControlProvider";
 import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
@@ -649,6 +651,33 @@ function toPullRequestHeadRemoteInfo(pr: {
 
 export const make = Effect.gen(function* () {
   const gitCore = yield* GitVcsDriver.GitVcsDriver;
+  const workspaceAcquisition = yield* WorkspaceAcquisition.WorkspaceAcquisition;
+  const acquireDestination = Effect.fn("GitManager.acquireWorktreeDestination")(function* (
+    destination: string,
+  ) {
+    const acquired = yield* workspaceAcquisition
+      .acquire({ path: destination, purpose: "git" })
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new GitCommandError({
+              operation: "GitManager.createWorktree",
+              command: "workspace-acquisition",
+              cwd: destination,
+              detail: "The worktree destination is reserved by saved workspace data.",
+              cause,
+            }),
+        ),
+      );
+    if (acquired.restored || acquired.path !== destination)
+      return yield* new GitCommandError({
+        operation: "GitManager.createWorktree",
+        command: "workspace-acquisition",
+        cwd: destination,
+        detail: "A saved workspace occupies this destination. Use its current checkout.",
+      });
+    return acquired.path;
+  });
   const sourceControlProviders = yield* SourceControlProviderRegistry.SourceControlProviderRegistry;
   const textGeneration = yield* TextGeneration.TextGeneration;
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
@@ -756,6 +785,7 @@ export const make = Effect.gen(function* () {
       worktreesDirectory,
       ...options,
       submodules,
+      acquireDestination,
     });
     if (input.newRefName && input.baseRefName) {
       yield* shareBranchBase(input.cwd, input.newRefName);
@@ -2784,89 +2814,109 @@ export const make = Effect.gen(function* () {
         resolvePullRequestWorktreeLocalBranchName(pullRequestWithRemoteInfo);
 
       // Git refuses to move checked-out branches; advance reused checkouts from inside their worktree.
-      const reuseExistingWorktree = Effect.fn("reuseExistingWorktree")(function* (
-        worktreePath: string,
-        checkedOutBranch: string,
-      ) {
-        if (checkedOutBranch !== localPullRequestBranch) {
-          // Bare-name matches may be unrelated local branches; preserve their work and tracking config.
-          return {
-            pullRequest,
-            branch: localPullRequestBranch,
+      const reuseExistingWorktree = Effect.fn("reuseExistingWorktree")(
+        function* (worktreePath: string, checkedOutBranch: string) {
+          const acquired = yield* workspaceAcquisition
+            .acquire({ path: worktreePath, purpose: "git" })
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new GitManagerError({
+                    operation: "preparePullRequestThread",
+                    cwd: worktreePath,
+                    detail: "The worktree must be restored before preparing this pull request.",
+                    cause,
+                  }),
+              ),
+            );
+          worktreePath = acquired.path;
+          if (acquired.restored) checkedOutBranch = acquired.branch ?? checkedOutBranch;
+          return yield* withWorkspaceLease(
             worktreePath,
-            isOnPullRequestHead: false,
-          };
-        }
-
-        // Capture upstream before its forced fetch so rewritten heads remain distinguishable from local commits.
-        const upstreamCommitBeforeFetch = yield* gitCore
-          .resolveCommit({ cwd: worktreePath, revision: "@{upstream}" })
-          .pipe(
-            Effect.map((resolved) => resolved.commitSha),
-            Effect.orElseSucceed(() => null),
-          );
-
-        yield* ensureExistingWorktreeUpstream(worktreePath);
-
-        // The pull request's own ref, because it is the only thing that certainly names its
-        // head. The branch's upstream does not: configuring it is best-effort, so a branch cut
-        // from `origin/main` whose head branch has since been deleted still resolves — and
-        // following it would move the checkout onto main and call that the pull request.
-        const refreshed = yield* changeRequestHeadRef(worktreePath, pullRequest.number).pipe(
-          Effect.flatMap((ref) => gitCore.fetchRefCommit({ cwd: worktreePath, ref })),
-          // A host that publishes no head ref leaves the remote-tracking branch,
-          // taken only where it is the head branch's own rather than whatever the checkout
-          // happened to be cut from.
-          Effect.catch(() =>
             Effect.gen(function* () {
-              const details = yield* gitCore.statusDetails(worktreePath);
-              if (
-                details.upstreamRef === null ||
-                !details.upstreamRef.endsWith(`/${pullRequest.headBranch}`)
-              ) {
-                return yield* new GitManagerError({
-                  operation: "preparePullRequestThread",
-                  cwd: worktreePath,
-                  detail: "The pull request head could not be resolved for this checkout.",
-                });
+              if (checkedOutBranch !== localPullRequestBranch) {
+                // Bare-name matches may be unrelated local branches; preserve their work and tracking config.
+                return {
+                  pullRequest,
+                  branch: localPullRequestBranch,
+                  worktreePath,
+                  isOnPullRequestHead: false,
+                };
               }
-              return yield* gitCore.resolveCommit({
-                cwd: worktreePath,
-                revision: details.upstreamRef,
-              });
-            }),
-          ),
-          Effect.flatMap((target) =>
-            gitCore.refreshCheckedOutBranch({
-              cwd: worktreePath,
-              targetCommit: target.commitSha,
-              resetWhenHeadCommit: upstreamCommitBeforeFetch,
-            }),
-          ),
-          Effect.catch((error) =>
-            Effect.logWarning(
-              "GitManager.preparePullRequestThread reused worktree refresh failed",
-              {
+
+              // Capture upstream before its forced fetch so rewritten heads remain distinguishable from local commits.
+              const upstreamCommitBeforeFetch = yield* gitCore
+                .resolveCommit({ cwd: worktreePath, revision: "@{upstream}" })
+                .pipe(
+                  Effect.map((resolved) => resolved.commitSha),
+                  Effect.orElseSucceed(() => null),
+                );
+
+              yield* ensureExistingWorktreeUpstream(worktreePath);
+
+              // The pull request's own ref, because it is the only thing that certainly names its
+              // head. The branch's upstream does not: configuring it is best-effort, so a branch cut
+              // from `origin/main` whose head branch has since been deleted still resolves — and
+              // following it would move the checkout onto main and call that the pull request.
+              const refreshed = yield* changeRequestHeadRef(worktreePath, pullRequest.number).pipe(
+                Effect.flatMap((ref) => gitCore.fetchRefCommit({ cwd: worktreePath, ref })),
+                // A host that publishes no head ref leaves the remote-tracking branch,
+                // taken only where it is the head branch's own rather than whatever the checkout
+                // happened to be cut from.
+                Effect.catch(() =>
+                  Effect.gen(function* () {
+                    const details = yield* gitCore.statusDetails(worktreePath);
+                    if (
+                      details.upstreamRef === null ||
+                      !details.upstreamRef.endsWith(`/${pullRequest.headBranch}`)
+                    ) {
+                      return yield* new GitManagerError({
+                        operation: "preparePullRequestThread",
+                        cwd: worktreePath,
+                        detail: "The pull request head could not be resolved for this checkout.",
+                      });
+                    }
+                    return yield* gitCore.resolveCommit({
+                      cwd: worktreePath,
+                      revision: details.upstreamRef,
+                    });
+                  }),
+                ),
+                Effect.flatMap((target) =>
+                  gitCore.refreshCheckedOutBranch({
+                    cwd: worktreePath,
+                    targetCommit: target.commitSha,
+                    resetWhenHeadCommit: upstreamCommitBeforeFetch,
+                  }),
+                ),
+                Effect.catch((error) =>
+                  Effect.logWarning(
+                    "GitManager.preparePullRequestThread reused worktree refresh failed",
+                    {
+                      worktreePath,
+                      localBranch: localPullRequestBranch,
+                      cause: error,
+                    },
+                  ).pipe(Effect.as({ moved: false, onTarget: false })),
+                ),
+              );
+
+              // Setup can disrupt other threads using this worktree; rerun only when the checkout moved.
+              if (refreshed.moved) {
+                yield* maybeRunSetupScript(worktreePath);
+              }
+
+              return {
+                pullRequest,
+                branch: localPullRequestBranch,
                 worktreePath,
-                localBranch: localPullRequestBranch,
-                cause: error,
-              },
-            ).pipe(Effect.as({ moved: false, onTarget: false })),
-          ),
-        );
-
-        // Setup can disrupt other threads using this worktree; rerun only when the checkout moved.
-        if (refreshed.moved) {
-          yield* maybeRunSetupScript(worktreePath);
-        }
-
-        return {
-          pullRequest,
-          branch: localPullRequestBranch,
-          worktreePath,
-          isOnPullRequestHead: refreshed.onTarget,
-        };
-      });
+                isOnPullRequestHead: refreshed.onTarget,
+              };
+            }),
+          );
+        },
+        (effect, worktreePath) => withWorkspaceLease(worktreePath, effect),
+      );
 
       const findLocalHeadBranch = Effect.fn("findLocalHeadBranch")(function* (cwd: string) {
         for (const [index, name] of [
@@ -2960,6 +3010,7 @@ export const make = Effect.gen(function* () {
         },
         {
           worktreesDirectory: yield* readWorktreesDirectory,
+          acquireDestination,
           submodules: yield* projectSettingsFor(input).pipe(
             Effect.map(({ settings }) => settings.worktreeSubmodules),
             Effect.orElseSucceed(() => null),

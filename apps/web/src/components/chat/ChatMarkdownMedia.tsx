@@ -292,6 +292,7 @@ export function ChatMarkdownVideo(props: {
   readonly mediaIdentity?: string | undefined;
   readonly actionsSource?: MediaActionSource | undefined;
   readonly onRetry?: (() => Promise<unknown>) | undefined;
+  readonly onOpen?: (() => void) | undefined;
 }) {
   const insideLink = use(MarkdownLinkContext);
   if (insideLink) {
@@ -336,6 +337,7 @@ export function ChatMarkdownVideo(props: {
         CHAT_MARKDOWN_MEDIA_FRAME_CLASS_NAME,
       )}
       onRetry={props.onRetry}
+      onOpen={props.onOpen}
       actionsSource={props.actionsSource}
     />
   );

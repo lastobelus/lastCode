@@ -1,6 +1,12 @@
+import { WorktreeSuspensionRequestError } from "@t3tools/contracts";
 import { ThreadReadAuthorization } from "./orchestration-v2/ThreadReadAuthorization.ts";
-import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
-import * as Context from "effect/Context";
+import * as EnvironmentPause from "./environment/EnvironmentPause.ts";
+import { ThreadRecoveryOperationError } from "@t3tools/contracts";
+import * as ThreadRecovery from "./orchestration-v2/ThreadRecoveryService.ts";
+import * as ThreadRecoveryRepair from "./orchestration-v2/ThreadRecoveryRepairService.ts";
+import { OrchestrationDispatchCommandError, ActionResumeError } from "@t3tools/contracts";
+import * as ActionResume from "./actionResume/ActionResume.ts";
+import * as UpdateDrainAdmission from "./updateDrain/UpdateDrainAdmission.ts";
 import * as Crypto from "effect/Crypto";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as PeerLinkRequests from "./peer/PeerLinkRequests.ts";
@@ -28,6 +34,7 @@ import {
   AuthAccessStreamError,
   type AuthAccessStreamEvent,
   AuthOrchestrationOperateScope,
+  AuthEnvironmentMaintainScope,
   type AuthEnvironmentScope,
   type ScheduledTaskListResult,
   AuthSessionId,
@@ -74,6 +81,8 @@ import {
   ProjectSearchEntriesError,
   ProjectWriteFileError,
   ProjectMutationError,
+  ExternalLauncherEditorSpawnError,
+  AuthFilesystemWriteScope,
   ProviderUploadFeedbackError,
   ProviderSetupError,
   RelayClientInstallFailedError,
@@ -94,6 +103,8 @@ import {
   type ProjectId,
   type ProviderDriverKind,
   type ProviderInstanceId,
+  PreviewHostingError as ContractPreviewHostingError,
+  type PreviewHostingLeaseMetadata,
   ThreadId,
   type TerminalMetadataStreamEvent,
   type PullRequestRef,
@@ -125,6 +136,7 @@ import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
 import * as GuestShareService from "./guest/GuestShareService.ts";
 import {
+  attachRelatedThreadShellItems,
   buildActiveShellSnapshot,
   bufferShellLiveStream,
   coalesceShellApplicationEvents,
@@ -185,14 +197,20 @@ import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as ServerSettings from "./serverSettings.ts";
 import * as DatabaseStorage from "./persistence/DatabaseStorage.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
+import * as WorktreeSuspension from "./workspace/WorktreeSuspension.ts";
+import { WorkspaceAcquisition } from "./workspace/WorkspaceAcquisition.ts";
+import { WorkspaceLifecycle } from "./workspace/WorkspaceLifecycle.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import { terminalOutputStream, withTerminalOutputWindow } from "./terminal/OutputProtocol.ts";
 import * as ThreadReadBroker from "./mcp/ThreadReadBroker.ts";
 import * as OrchestratorMcpService from "./mcp/OrchestratorMcpService.ts";
 import * as ServerBrowser from "./preview/ServerBrowser.ts";
+import * as DesktopBrowserChannel from "./preview/DesktopBrowserChannel.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import { remoteSshDeviceHosts } from "./device/localSshDeviceHost.ts";
 import * as PreviewManager from "./preview/Manager.ts";
+import * as PreviewHosting from "./preview/Hosting.ts";
+import { makeHostingClientActivity } from "./preview/HostingClientActivity.ts";
 import { issueAssetUrl } from "./assets/AssetAccess.ts";
 import {
   attachmentRelativePath,
@@ -205,6 +223,7 @@ import * as PortScanner from "./preview/PortScanner.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as KnownWorkspaces from "./workspace/KnownWorkspaces.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
+import * as ThreadLinkedFiles from "./workspace/ThreadLinkedFiles.ts";
 import { readWorkflowScript } from "./orchestration-v2/workflowScriptQuery.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
@@ -522,7 +541,9 @@ function projectFileFailureContext(
   error:
     | WorkspaceFileSystem.WorkspaceFileSystemError
     | WorkspacePaths.WorkspacePathOutsideRootError
-    | KnownWorkspaces.UnknownWorkspaceError,
+    | KnownWorkspaces.UnknownWorkspaceError
+    | ThreadLinkedFiles.ThreadLinkedFileDeniedError
+    | ThreadLinkedFiles.ThreadLinkedFileResolutionError,
 ): {
   readonly failure: ProjectFileFailure;
   readonly resolvedPath?: string;
@@ -531,6 +552,9 @@ function projectFileFailureContext(
   readonly operationPath?: string;
 } {
   switch (error._tag) {
+    case "ThreadLinkedFileDeniedError":
+    case "ThreadLinkedFileResolutionError":
+      return { failure: "operation_failed" };
     case "WorkspacePathOutsideRootError":
     case "UnknownWorkspaceError":
       return { failure: "workspace_path_outside_root" };
@@ -560,17 +584,36 @@ const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
 // Middleware added later wraps middleware added earlier, so instrumentation wraps authorization.
 const ServerWsRpcGroup = WsRpcGroup.middleware(RpcInstrumentation);
-const MainServerWsRpcGroup = ServerWsRpcGroup.omit(
+// Keep complex handlers separate so the main table stays within TypeScript's inference limit.
+const CoreServerWsRpcGroup = ServerWsRpcGroup.omit(
+  ...Object.values(ORCHESTRATION_V2_WS_METHODS),
+  WS_METHODS.assetsCreateUrl,
+  WS_METHODS.serverDeleteThreads,
+  WS_METHODS.serverSetKeepWorkspace,
   WS_METHODS.threadReadLocal,
   WS_METHODS.threadReadConnect,
   WS_METHODS.threadReadRespond,
+  WS_METHODS.serverEnvironmentPauseStatus,
+  WS_METHODS.serverPauseEnvironment,
+  WS_METHODS.serverRetryEnvironmentPause,
+  WS_METHODS.serverResumeEnvironment,
+);
+const layerEnvironmentPauseRpc = Layer.unwrap(
+  Effect.map(EnvironmentPause.EnvironmentPause, (pause) =>
+    Layer.mergeAll(
+      ServerWsRpcGroup.toLayerHandler(WS_METHODS.serverEnvironmentPauseStatus, () => pause.status),
+      ServerWsRpcGroup.toLayerHandler(WS_METHODS.serverPauseEnvironment, () => pause.start),
+      ServerWsRpcGroup.toLayerHandler(WS_METHODS.serverRetryEnvironmentPause, () => pause.retry),
+      ServerWsRpcGroup.toLayerHandler(WS_METHODS.serverResumeEnvironment, () => pause.resume),
+    ),
+  ),
 );
 
 // RpcGroup.toLayer derives each handler's requirements by scanning every RPC in
 // the group, so its type cost grows with handlers × RPCs. Near 200 methods that
 // crosses TypeScript's instantiation limit and the layer's requirements degrade to
 // `any`, so the handlers are registered as two disjoint, smaller groups.
-type ServerWsRpc = RpcGroup.Rpcs<typeof MainServerWsRpcGroup>;
+type ServerWsRpc = RpcGroup.Rpcs<typeof CoreServerWsRpcGroup>;
 const SPLIT_WS_RPC_PREFIXES = ["server", "pullRequests", "provider", "orchestration"] as const;
 type SplitWsRpc = Extract<
   ServerWsRpc,
@@ -580,7 +623,7 @@ const isSplitWsRpc = (rpc: ServerWsRpc): rpc is SplitWsRpc =>
   SPLIT_WS_RPC_PREFIXES.some((prefix) => rpc._tag.startsWith(`${prefix}.`));
 const isOtherWsRpc = (rpc: ServerWsRpc): rpc is Exclude<ServerWsRpc, SplitWsRpc> =>
   !isSplitWsRpc(rpc);
-const serverWsRpcs = Array.from(MainServerWsRpcGroup.requests.values());
+const serverWsRpcs = Array.from(CoreServerWsRpcGroup.requests.values());
 const SplitWsRpcGroup = RpcGroup.make(...serverWsRpcs.filter(isSplitWsRpc));
 const OtherWsRpcGroup = RpcGroup.make(...serverWsRpcs.filter(isOtherWsRpc));
 // Replaying each intervening event costs a shell refetch; past this gap a
@@ -1067,7 +1110,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
     const projectShellItems = Effect.fn("ws.orchestrationV2.projectShellItems")(function* (
       events: ReadonlyArray<ShellApplicationEvent>,
     ) {
-      return yield* Effect.forEach(
+      const items = yield* Effect.forEach(
         coalesceShellApplicationEvents(events),
         (stored) =>
           Effect.gen(function* () {
@@ -1079,6 +1122,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
           }),
         { concurrency: 8 },
       );
+      return attachRelatedThreadShellItems(items);
     });
 
     const toShellStream = <E, R>(stream: Stream.Stream<ShellApplicationEvent, E, R>) =>
@@ -1193,7 +1237,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
             // highWater, so a dropped row never hides later events.
             skipUnknownEventTypes: true,
           })
-          .pipe(Stream.filter(filterSubagentTranscript)),
+          .pipe(Stream.filter(filterSubagentTranscript), Stream.map(toShellApplicationEvent)),
       );
       return composeShellStreamWithEnrichment({
         initial: initialEnrichmentItems(loaded),
@@ -1223,18 +1267,21 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
   },
 );
 
-export const layerWsRpc = (
+const layerCoreWsRpc = (
   currentSession: EnvironmentAuth.AuthenticatedSession,
   clientAnalyticsProps: Readonly<Record<string, unknown>>,
+  desktopBrowserChannel: DesktopBrowserChannel.DesktopBrowserChannel["Service"],
   threadReadBroker: ThreadReadBroker.ThreadReadBroker["Service"],
   threadReads: OrchestratorMcpService.OrchestratorMcpService["Service"],
   serverBrowser: ServerBrowser.ServerBrowser["Service"],
 ) =>
-  Layer.effectContext(
+  Layer.unwrap(
     Effect.gen(function* () {
       const currentSessionId = currentSession.sessionId;
       const sql = yield* SqlClient.SqlClient;
       const threadManagement = yield* ThreadManagementService.ThreadManagementService;
+      const actionResume = yield* Effect.serviceOption(ActionResume.ActionResume);
+      const updateDrainAdmission = yield* UpdateDrainAdmission.UpdateDrainAdmission;
       const intakeContext = yield* Effect.context<
         | ThreadManagementService.ThreadManagementService
         | ThreadLaunchService.ThreadLaunchService
@@ -1273,19 +1320,9 @@ export const layerWsRpc = (
       };
       const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
       const commandOutputHub = yield* CommandOutputHub.CommandOutputHub;
-      const authorizeThreadRead = (threadId: ThreadId, messageId: MessageId) =>
-        Effect.gen(function* () {
-          const records = yield* threadManagement.getThreadRecords(threadId, ["runs"]);
-          yield* threadReadBroker.authorize({
-            threadId,
-            messageId,
-            sessionId: currentSessionId,
-            alreadyStored: records.runs.some((run) => run.userMessageId === messageId),
-          });
-        }).pipe(
-          // Failure to inspect the source must deny remote routing, without preventing a turn.
-          Effect.catch(() => Effect.void),
-        );
+      const threadReadAuthorization = threadReadBroker.forSession(currentSessionId);
+      const threadRecovery = yield* ThreadRecovery.ThreadRecoveryService;
+      const threadRepair = yield* ThreadRecoveryRepair.ThreadRecoveryRepairService;
       const providerSessionManager = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const scheduledTasks = yield* ScheduledTasks.ScheduledTaskService;
       const secretRequests = yield* SecretRequests.SecretRequests;
@@ -1302,6 +1339,7 @@ export const layerWsRpc = (
       const terminalViewerPrefix = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
       const terminalViewerId = (metadata: { readonly client: { readonly id: number } }) =>
         `${terminalViewerPrefix}:${metadata.client.id}`;
+      const desktopBrowserOwner = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
       const serverCommandId = (tag: string) =>
         crypto.randomUUIDv4().pipe(
           Effect.orDie,
@@ -1336,6 +1374,11 @@ export const layerWsRpc = (
       const vcsProvisioning = yield* VcsProvisioningService.VcsProvisioningService;
       const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
       const terminalManager = yield* TerminalManager.TerminalManager;
+      const previewHosting = yield* PreviewHosting.PreviewHosting;
+      const setHostingActivity = yield* makeHostingClientActivity(
+        previewHosting,
+        desktopBrowserOwner,
+      );
       const previewManager = yield* PreviewManager.PreviewManager;
       const portDiscovery = yield* PortScanner.PortDiscovery;
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
@@ -1352,6 +1395,9 @@ export const layerWsRpc = (
       const config = yield* ServerConfig.ServerConfig;
       const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
       const storageCleanup = yield* StorageCleanup.StorageCleanup;
+      const savedWorkspaces = yield* WorktreeSuspension.WorktreeSuspension;
+      const workspaceAcquisition = yield* WorkspaceAcquisition;
+      const workspaceLifecycle = yield* WorkspaceLifecycle;
       const databaseStorage = yield* DatabaseStorage.DatabaseStorage;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const peerLinks = yield* PeerLinks.PeerLinks;
@@ -1359,6 +1405,7 @@ export const layerWsRpc = (
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
       const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+      const threadLinkedFiles = yield* ThreadLinkedFiles.ThreadLinkedFiles;
       const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
       const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;
       const rpcClientIds = yield* Ref.make(new Set<RpcClientId>());
@@ -1876,8 +1923,8 @@ export const layerWsRpc = (
       const mutateProject = (mutation: ProjectMutation) =>
         projectMutationOperation(projectService, mutation, projectCloneTracker.discard);
 
-      const handlers = MainServerWsRpcGroup.of({
-        [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command) =>
+      const layerOrchestrationRpc = Layer.mergeAll(
+        ServerWsRpcGroup.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.dispatchCommand, (command) =>
           Effect.annotateCurrentSpan({
             "orchestration_v2.command_id": command.commandId,
             "orchestration_v2.command_type": command.type,
@@ -1900,7 +1947,7 @@ export const layerWsRpc = (
                 .enqueueCommand(
                   (command.type === "prepared-run.retry"
                     ? threadLaunch.retryPreparation(command)
-                    : ThreadMessageIntake.dispatchCommand(
+                    : ThreadMessageIntake.dispatchUserCommand(
                         ThreadManagementService.withCreationProvenance(command, {
                           createdBy: "user",
                           creationSource:
@@ -1909,7 +1956,7 @@ export const layerWsRpc = (
                       )
                   ).pipe(Effect.provide(intakeContext), (effect) =>
                     (command.type === "message.dispatch"
-                      ? authorizeThreadRead(command.threadId, command.messageId)
+                      ? threadReadAuthorization.authorize(command.threadId, command.messageId)
                       : Effect.void
                     ).pipe(Effect.andThen(effect)),
                   ),
@@ -1932,10 +1979,14 @@ export const layerWsRpc = (
                 ),
             ),
           ),
-        [ORCHESTRATION_V2_WS_METHODS.stopWorkflow]: (input) => threadManagement.stopWorkflow(input),
-        [ORCHESTRATION_V2_WS_METHODS.getWorkflowScript]: (input) =>
+        ),
+        ServerWsRpcGroup.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.stopWorkflow, (input) =>
+          threadManagement.stopWorkflow(input),
+        ),
+        ServerWsRpcGroup.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.getWorkflowScript, (input) =>
           readWorkflowScript({ scriptPath: input.scriptPath }),
-        [ORCHESTRATION_V2_WS_METHODS.getTurnItem]: (input) =>
+        ),
+        ServerWsRpcGroup.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.getTurnItem, (input) =>
           threadManagement.getTurnItem(input).pipe(
             Effect.mapError(
               (cause) =>
@@ -1946,7 +1997,8 @@ export const layerWsRpc = (
                 }),
             ),
           ),
-        [ORCHESTRATION_V2_WS_METHODS.getTurnDiff]: (input) =>
+        ),
+        ServerWsRpcGroup.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.getTurnDiff, (input) =>
           checkpointDiffQuery.getTurnDiff(input).pipe(
             Effect.mapError(
               (cause) =>
@@ -1956,7 +2008,8 @@ export const layerWsRpc = (
                 }),
             ),
           ),
-        [ORCHESTRATION_V2_WS_METHODS.getFullThreadDiff]: (input) =>
+        ),
+        ServerWsRpcGroup.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.getFullThreadDiff, (input) =>
           checkpointDiffQuery.getFullThreadDiff(input).pipe(
             Effect.mapError(
               (cause) =>
@@ -1966,15 +2019,35 @@ export const layerWsRpc = (
                 }),
             ),
           ),
-        [ORCHESTRATION_V2_WS_METHODS.searchThread]: (input) =>
+        ),
+        ServerWsRpcGroup.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.searchThread, (input) =>
           threadManagement
             .searchThread(input)
             .pipe(Effect.mapError((cause) => new OrchestrationV2SearchThreadError({ cause }))),
-        [ORCHESTRATION_V2_WS_METHODS.searchThreadStream]: (input) =>
+        ),
+        ServerWsRpcGroup.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.searchThreadStream, (input) =>
           threadManagement
             .searchThreadStream(input)
             .pipe(Stream.mapError((cause) => new OrchestrationV2SearchThreadError({ cause }))),
-        [ORCHESTRATION_V2_WS_METHODS.searchThreads]: (input) =>
+        ),
+        ServerWsRpcGroup.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.recoverThread, (input) =>
+          startup.enqueueCommand(threadRecovery.recover(input)).pipe(
+            Effect.as({ ok: true as const }),
+            Effect.mapError(
+              (cause) => new ThreadRecoveryOperationError({ message: cause.message, cause }),
+            ),
+          ),
+        ),
+        ServerWsRpcGroup.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.repairThread, (input) =>
+          startup
+            .enqueueCommand(threadRepair.launch(input))
+            .pipe(
+              Effect.mapError(
+                (cause) => new ThreadRecoveryOperationError({ message: cause.message, cause }),
+              ),
+            ),
+        ),
+        ServerWsRpcGroup.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.searchThreads, (input) =>
           ThreadSearch.searchThreadsWithOlderSettledRows({
             request: input,
             search: threadSearch.search,
@@ -1992,32 +2065,54 @@ export const layerWsRpc = (
                 }),
             ),
           ),
-        [ORCHESTRATION_V2_WS_METHODS.getArchivedShellSnapshot]: (_input) =>
-          getOrchestrationV2ArchivedShellSnapshot,
-        [ORCHESTRATION_V2_WS_METHODS.getThreadFamily]: (input) =>
-          readOmittableShellRows({ familyOf: input.threadId }, "Failed to load the thread family"),
-        [ORCHESTRATION_V2_WS_METHODS.getOlderSettledThreads]: (input) =>
-          loadOlderSettledThreadsPage({
-            sql,
-            listThreads: threadManagement.listOlderSettledThreads(input),
-            readThreads: (threadIds) =>
-              threadManagement.readShellSnapshot({ location: "active", threadIds }),
-            latestSequence: applicationEvents.latestApplicationSequence,
-          }).pipe(
-            Effect.mapError(
-              (cause) =>
-                new OrchestrationV2GetShellSnapshotError({
-                  message: "Failed to load older settled threads",
-                  cause,
-                }),
+        ),
+        ServerWsRpcGroup.toLayerHandler(
+          ORCHESTRATION_V2_WS_METHODS.getOlderSettledThreads,
+          (input) =>
+            loadOlderSettledThreadsPage({
+              sql,
+              listThreads: threadManagement.listOlderSettledThreads(input),
+              readThreads: (threadIds) =>
+                threadManagement.readShellSnapshot({ location: "active", threadIds }),
+              latestSequence: applicationEvents.latestApplicationSequence,
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationV2GetShellSnapshotError({
+                    message: "Failed to load older settled threads",
+                    cause,
+                  }),
+              ),
             ),
-          ),
-        [ORCHESTRATION_V2_WS_METHODS.getWorktreeThreadIds]: (input) =>
+        ),
+        ServerWsRpcGroup.toLayerHandler(
+          ORCHESTRATION_V2_WS_METHODS.getArchivedShellSnapshot,
+          (_input) => getOrchestrationV2ArchivedShellSnapshot,
+        ),
+        ServerWsRpcGroup.toLayerHandler(
+          ORCHESTRATION_V2_WS_METHODS.getThreadArchiveFamily,
+          (input) =>
+            threadManagement.getThreadArchiveFamily(input.threadId).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationV2GetThreadProjectionError({
+                    threadId: input.threadId,
+                    message: "Failed to load the thread archive family",
+                    cause,
+                  }),
+              ),
+            ),
+        ),
+        ServerWsRpcGroup.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.getThreadFamily, (input) =>
+          readOmittableShellRows({ familyOf: input.threadId }, "Failed to load the thread family"),
+        ),
+        ServerWsRpcGroup.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.getWorktreeThreadIds, (input) =>
           readOmittableShellRows(
             { worktreePath: input.worktreePath },
             "Failed to load the worktree's threads",
           ).pipe(Effect.map(({ threads }) => ({ threadIds: threads.map((thread) => thread.id) }))),
-        [ORCHESTRATION_V2_WS_METHODS.getThreadProjection]: (input) =>
+        ),
+        ServerWsRpcGroup.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.getThreadProjection, (input) =>
           Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
             Effect.andThen(
               // Bound compatibility snapshots so pre-pagination clients cannot materialize unlimited transcripts.
@@ -2044,7 +2139,8 @@ export const layerWsRpc = (
                 ),
             ),
           ),
-        [ORCHESTRATION_V2_WS_METHODS.launchThread]: (input) =>
+        ),
+        ServerWsRpcGroup.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.launchThread, (input) =>
           Effect.annotateCurrentSpan({
             "orchestration_v2.command_id": input.commandId,
             "orchestration_v2.project_id": input.projectId,
@@ -2084,9 +2180,7 @@ export const layerWsRpc = (
                     createdBy: "user",
                     creationSource: input.creationSource ?? "web",
                   }).pipe(
-                    Effect.provideService(ThreadReadAuthorization, {
-                      authorize: authorizeThreadRead,
-                    }),
+                    Effect.provideService(ThreadReadAuthorization, threadReadAuthorization),
                     Effect.provide(intakeContext),
                   ),
                 )
@@ -2146,20 +2240,136 @@ export const layerWsRpc = (
                 ),
             ),
           ),
-        [ORCHESTRATION_V2_WS_METHODS.subscribeShell]: (input) =>
+        ),
+        ServerWsRpcGroup.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.subscribeShell, (input) =>
           Stream.unwrap(subscribeOrchestrationV2Shell(input)),
-        [ORCHESTRATION_V2_WS_METHODS.subscribeThread]: (input) =>
+        ),
+        ServerWsRpcGroup.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.subscribeThread, (input) =>
           Stream.unwrap(
             Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
               Effect.andThen(subscribeOrchestrationV2Thread(input)),
             ),
           ),
-        [ORCHESTRATION_V2_WS_METHODS.subscribeCommandOutput]: (input) =>
-          Stream.unwrap(
-            Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
-              Effect.as(commandOutputHub.subscribe(input)),
+        ),
+        ServerWsRpcGroup.toLayerHandler(
+          ORCHESTRATION_V2_WS_METHODS.subscribeCommandOutput,
+          (input) =>
+            Stream.unwrap(
+              Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
+                Effect.as(commandOutputHub.subscribe(input)),
+              ),
+            ),
+        ),
+      );
+
+      const layerAssetRpc = ServerWsRpcGroup.toLayerHandler(WS_METHODS.assetsCreateUrl, (input) =>
+        Effect.gen(function* () {
+          const path = yield* Path.Path;
+          // An absolute media path can be linked from a thread on another environment.
+          if (
+            input.resource._tag === "attachment" ||
+            input.resource._tag === "native-app-icon" ||
+            input.resource._tag === "tool-output-image" ||
+            input.resource._tag === "managed-preview-resource" ||
+            input.resource._tag === "preview-document" ||
+            input.resource._tag === SOURCE_CONTROL_MEDIA_ASSET ||
+            (input.resource._tag === "media-file" && input.resource.linkedThreadFile === true) ||
+            // A network path is served only from the thread's project, looked up below.
+            (input.resource._tag === "media-file" &&
+              path.isAbsolute(input.resource.path) &&
+              !isNetworkPath(input.resource.path))
+          ) {
+            return yield* issueAssetUrl({ resource: input.resource });
+          }
+          if (input.resource._tag === "draft-workspace-file") {
+            // A project draft names its workspace directly; there is no
+            // thread to resolve one from.
+            return yield* issueAssetUrl({
+              resource: input.resource,
+              workspaceRoot: input.resource.cwd,
+            });
+          }
+          if (input.resource._tag === "project-favicon") {
+            const project = yield* projectStore.findActiveByWorkspaceRoot(input.resource.cwd).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new AssetWorkspaceContextResolutionError({
+                    resource: input.resource,
+                    cause,
+                  }),
+              ),
+            );
+            if (Option.isNone(project)) {
+              return yield* new AssetWorkspaceContextNotFoundError({
+                resource: input.resource,
+              });
+            }
+            // Clone projects precede their files; clients retry asset URLs after clone completion.
+            const clone = yield* projectCloneTracker.get(project.value.projectId);
+            return yield* issueAssetUrl({
+              resource: input.resource,
+              ...(project.value.faviconPath
+                ? { projectFaviconPath: project.value.faviconPath }
+                : {}),
+              ...(clone !== null && clone.destinationPath === project.value.workspaceRoot
+                ? { projectCheckout: clone.phase === "done" ? "cloned" : "pending" }
+                : {}),
+            });
+          }
+          const thread = yield* threadManagement.getThreadRecords(input.resource.threadId, []).pipe(
+            Effect.mapError(
+              (cause) =>
+                new AssetWorkspaceContextResolutionError({
+                  resource: input.resource,
+                  cause,
+                }),
+            ),
+          );
+          const project = yield* projectService.getById(thread.thread.projectId).pipe(
+            Effect.mapError(
+              (cause) =>
+                new AssetWorkspaceContextResolutionError({
+                  resource: input.resource,
+                  cause,
+                }),
+            ),
+          );
+          if (Option.isNone(project)) {
+            return yield* new AssetWorkspaceContextNotFoundError({
+              resource: input.resource,
+            });
+          }
+          return yield* issueAssetUrl({
+            resource: input.resource,
+            workspaceRoot: thread.thread.worktreePath ?? project.value.workspaceRoot,
+          });
+        }),
+      );
+
+      const layerThreadDeletionRpc = ServerWsRpcGroup.toLayerHandler(
+        WS_METHODS.serverDeleteThreads,
+        (input) =>
+          startup.enqueueCommand(threadManagement.deleteMany(input)).pipe(
+            Effect.mapError((cause) =>
+              cause._tag === "WorktreeSuspensionRequestError"
+                ? cause
+                : new WorktreeSuspensionRequestError({
+                    reason: "unavailable",
+                    message: "Thread deletion is unavailable before command readiness.",
+                  }),
             ),
           ),
+      );
+
+      const layerWorkspaceHoldRpc = ServerWsRpcGroup.toLayerHandler(
+        WS_METHODS.serverSetKeepWorkspace,
+        (input) =>
+          savedWorkspaces.setKeepWorkspace(input, {
+            allowOrphans: currentSession.scopes.includes(AuthEnvironmentMaintainScope),
+          }),
+      );
+
+      const handlers = CoreServerWsRpcGroup.of({
         [WS_METHODS.scheduledTasksSubscribe]: (_input) =>
           scheduledTasks.subscribeList().pipe(Stream.map(withVisibleWebhookUrls)),
         [WS_METHODS.scheduledTasksUpsert]: (input) => scheduledTasks.upsert(input),
@@ -2496,6 +2706,35 @@ export const layerWsRpc = (
         [WS_METHODS.providerInstallSubscribe]: (input) => providerInstallation.subscribe(input),
         [WS_METHODS.providerInstallRemove]: (input) => providerInstallation.remove(input),
         [WS_METHODS.serverUpdateServer]: (input) => serverSelfUpdate.update(input),
+        [WS_METHODS.serverStartUpdateDrain]: (input) =>
+          DateTime.now.pipe(
+            Effect.flatMap((now) =>
+              updateDrainAdmission.dispatch({
+                type: "update-drain.start",
+                ...input,
+                createdAt: DateTime.formatIso(now),
+              }),
+            ),
+          ),
+        [WS_METHODS.serverCancelUpdateDrain]: (input) =>
+          DateTime.now.pipe(
+            Effect.flatMap((now) =>
+              updateDrainAdmission.dispatch({
+                type: "update-drain.cancel",
+                ...input,
+                createdAt: DateTime.formatIso(now),
+              }),
+            ),
+            Effect.tap(() =>
+              Option.match(actionResume, {
+                onNone: () => Effect.void,
+                onSome: (service) => service.retryPendingFollowUps,
+              }),
+            ),
+          ),
+        [WS_METHODS.serverClaimUpdateActivation]: (input) =>
+          updateDrainAdmission.claimActivation(input),
+        [WS_METHODS.serverGetUpdateDrainStatus]: () => updateDrainAdmission.status,
         [WS_METHODS.serverUpdateServerWithProgress]: (input) =>
           ServerSelfUpdate.updateProgressStream(serverSelfUpdate, input),
         [WS_METHODS.serverCommitDesktopUpdate]: (input) =>
@@ -2513,6 +2752,24 @@ export const layerWsRpc = (
             return { keybindings: keybindingsConfig, issues: [] };
           }),
         [WS_METHODS.serverRunStorageCleanup]: () => storageCleanup.runNow,
+        [WS_METHODS.serverListSavedWorkspaces]: (input) =>
+          savedWorkspaces.list(input, {
+            allowOrphans: currentSession.scopes.includes(AuthEnvironmentMaintainScope),
+          }),
+        [WS_METHODS.serverPreviewWorkspaceLifecycle]: (input) =>
+          workspaceLifecycle.preview(input, {
+            allowOrphans: currentSession.scopes.includes(AuthEnvironmentMaintainScope),
+          }),
+        [WS_METHODS.serverPreviewWorktreeSuspension]: (input) =>
+          savedWorkspaces.previewSuspend(input),
+        [WS_METHODS.serverSuspendWorktree]: (input) => savedWorkspaces.suspend(input),
+        [WS_METHODS.serverRestoreWorktree]: (input) =>
+          savedWorkspaces.restore(input, {
+            allowOrphans: currentSession.scopes.includes(AuthEnvironmentMaintainScope),
+          }),
+        [WS_METHODS.serverPreviewWorktreeDiscard]: (input) => savedWorkspaces.previewDiscard(input),
+        [WS_METHODS.serverDiscardWorktreeSnapshots]: (input) => savedWorkspaces.discard(input),
+        [WS_METHODS.serverCreateFreshWorktree]: (input) => savedWorkspaces.createFresh(input),
         [WS_METHODS.serverGetStorageCleanupReport]: () => storageCleanup.reports,
         [WS_METHODS.serverGetBuildReviewTargets]: (input) =>
           storageCleanup.buildReviewTargets(input),
@@ -2807,7 +3064,10 @@ export const layerWsRpc = (
             ),
           ),
         [WS_METHODS.projectsReadFile]: (input) =>
-          workspaceFileSystem.readFile(input).pipe(
+          (input.linkedThreadId === undefined
+            ? workspaceFileSystem.readFile(input)
+            : threadLinkedFiles.readFile({ ...input, linkedThreadId: input.linkedThreadId })
+          ).pipe(
             Effect.mapError(
               (cause) =>
                 new ProjectReadFileError({
@@ -2843,7 +3103,27 @@ export const layerWsRpc = (
                 }),
             ),
           ),
-        [WS_METHODS.shellOpenInEditor]: (input) => externalLauncher.launchEditor(input),
+        [WS_METHODS.shellOpenInEditor]: (input) =>
+          input.editor === "file-manager"
+            ? externalLauncher.launchEditor(input)
+            : authorizeEffect(
+                AuthFilesystemWriteScope,
+                workspaceAcquisition.acquire({ path: input.cwd, purpose: "editor" }).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ExternalLauncherEditorSpawnError({
+                        command: "restore-workspace",
+                        args: [],
+                        editor: input.editor,
+                        target: input.cwd,
+                        cause,
+                      }),
+                  ),
+                  Effect.flatMap((workspace) =>
+                    externalLauncher.launchEditor({ ...input, cwd: workspace.path }),
+                  ),
+                ),
+              ),
         [WS_METHODS.filesystemGetMetadata]: (input) => workspaceFileSystem.getMetadata(input),
         [WS_METHODS.filesystemBrowse]: (input) =>
           workspaceEntries.browse(input).pipe(
@@ -2861,87 +3141,6 @@ export const layerWsRpc = (
         [WS_METHODS.agentSessionsScan]: () => agentSessionScanner.scan,
         [WS_METHODS.agentSessionsImport]: (input) =>
           agentSessionImporter.importRecentAgentThreads(input),
-        [WS_METHODS.assetsCreateUrl]:
-          /* Request instrumentation already owns the span; keep this helper in that context. */
-          Effect.fnUntraced(function* (input) {
-            const path = yield* Path.Path;
-            if (
-              input.resource._tag === "attachment" ||
-              input.resource._tag === "native-app-icon" ||
-              input.resource._tag === "tool-output-image" ||
-              input.resource._tag === SOURCE_CONTROL_MEDIA_ASSET ||
-              // A network path is served only from the thread's project, looked up below.
-              (input.resource._tag === "media-file" &&
-                path.isAbsolute(input.resource.path) &&
-                !isNetworkPath(input.resource.path))
-            ) {
-              return yield* issueAssetUrl({ resource: input.resource });
-            }
-            if (input.resource._tag === "draft-workspace-file") {
-              return yield* issueAssetUrl({
-                resource: input.resource,
-                workspaceRoot: input.resource.cwd,
-              });
-            }
-            if (input.resource._tag === "project-favicon") {
-              const project = yield* projectStore
-                .findActiveByWorkspaceRoot(input.resource.cwd)
-                .pipe(
-                  Effect.mapError(
-                    (cause) =>
-                      new AssetWorkspaceContextResolutionError({
-                        resource: input.resource,
-                        cause,
-                      }),
-                  ),
-                );
-              if (Option.isNone(project)) {
-                return yield* new AssetWorkspaceContextNotFoundError({
-                  resource: input.resource,
-                });
-              }
-              // Clone projects precede their files; clients retry asset URLs after clone completion.
-              const clone = yield* projectCloneTracker.get(project.value.projectId);
-              return yield* issueAssetUrl({
-                resource: input.resource,
-                ...(project.value.faviconPath
-                  ? { projectFaviconPath: project.value.faviconPath }
-                  : {}),
-                ...(clone !== null && clone.destinationPath === project.value.workspaceRoot
-                  ? { projectCheckout: clone.phase === "done" ? "cloned" : "pending" }
-                  : {}),
-              });
-            }
-            const thread = yield* threadManagement
-              .getThreadRecords(input.resource.threadId, [])
-              .pipe(
-                Effect.mapError(
-                  (cause) =>
-                    new AssetWorkspaceContextResolutionError({
-                      resource: input.resource,
-                      cause,
-                    }),
-                ),
-              );
-            const project = yield* projectService.getById(thread.thread.projectId).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new AssetWorkspaceContextResolutionError({
-                    resource: input.resource,
-                    cause,
-                  }),
-              ),
-            );
-            if (Option.isNone(project)) {
-              return yield* new AssetWorkspaceContextNotFoundError({
-                resource: input.resource,
-              });
-            }
-            return yield* issueAssetUrl({
-              resource: input.resource,
-              workspaceRoot: thread.thread.worktreePath ?? project.value.workspaceRoot,
-            });
-          }),
         [WS_METHODS.assetsPersistChatAttachments]: (input) =>
           persistChatAttachments(input).pipe(Effect.map((attachments) => ({ attachments }))),
         [WS_METHODS.subscribeVcsStatus]: (input) => vcsStatusBroadcaster.streamStatus(input),
@@ -3018,10 +3217,49 @@ export const layerWsRpc = (
           vcsProvisioning.initRepository(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
         [WS_METHODS.reviewGetDiffPreview]: (input) => review.getDiffPreview(input),
         [WS_METHODS.reviewGetDiffFileContents]: (input) => review.getDiffFileContents(input),
-        [WS_METHODS.terminalOpen]: (input) => terminalManager.open(input),
+        [WS_METHODS.terminalOpen]: (input) =>
+          updateDrainAdmission.admit("terminal-open", terminalManager.open(input)),
         [WS_METHODS.terminalAttach]: (input, metadata) =>
-          terminalManager.attachOutputStream(input, terminalViewerId(metadata)),
-        [WS_METHODS.terminalWrite]: (input) => terminalManager.write(input),
+          Stream.unwrap(
+            Effect.gen(function* () {
+              const viewerId = terminalViewerId(metadata);
+              const starting = yield* Stream.toPull(
+                terminalManager.attachOutputStream(input, viewerId, true),
+              );
+              const observing = yield* Stream.toPull(
+                terminalManager.attachOutputStream(input, viewerId, false),
+              );
+              let canStart: boolean | undefined;
+              // The initial pull registers the viewer and may spawn; keep it under admission.
+              return Stream.fromPull(
+                Effect.succeed(
+                  Effect.suspend(() => {
+                    if (canStart === true) return starting;
+                    if (canStart === false) return observing;
+                    return updateDrainAdmission.admitOrElse(
+                      "terminal-open",
+                      starting.pipe(
+                        Effect.tap(() =>
+                          Effect.sync(() => {
+                            canStart = true;
+                          }),
+                        ),
+                      ),
+                      observing.pipe(
+                        Effect.tap(() =>
+                          Effect.sync(() => {
+                            canStart = false;
+                          }),
+                        ),
+                      ),
+                    );
+                  }),
+                ),
+              );
+            }),
+          ),
+        [WS_METHODS.terminalWrite]: (input) =>
+          updateDrainAdmission.admit("terminal-write", terminalManager.write(input)),
         [WS_METHODS.terminalResize]: (input, metadata) =>
           terminalManager.resize(input, terminalViewerId(metadata)),
         [WS_METHODS.terminalClear]: (input) => terminalManager.clear(input),
@@ -3033,6 +3271,28 @@ export const layerWsRpc = (
             (listener, registerCleanup) =>
               terminalManager.resyncStream(input, listener, registerCleanup),
           ),
+        [WS_METHODS.actionResumeResume]: (input) =>
+          Option.match(actionResume, {
+            onNone: () =>
+              Effect.fail(
+                new ActionResumeError({
+                  reason: "internal_error",
+                  message: "Action resume is unavailable in this server runtime.",
+                }),
+              ),
+            onSome: (service) => service.resumeInterrupted(input.threadId),
+          }),
+        [WS_METHODS.actionResumeDiscard]: (input) =>
+          Option.match(actionResume, {
+            onNone: () =>
+              Effect.fail(
+                new ActionResumeError({
+                  reason: "internal_error",
+                  message: "Action resume is unavailable in this server runtime.",
+                }),
+              ),
+            onSome: (service) => service.discardInterrupted(input.threadId),
+          }),
         [WS_METHODS.subscribeTerminalMetadata]: (_input) =>
           Stream.callback<TerminalMetadataStreamEvent>((queue) =>
             Effect.acquireRelease(
@@ -3045,9 +3305,84 @@ export const layerWsRpc = (
         [WS_METHODS.previewAdjust]: (input) => previewManager.adjust(input),
         [WS_METHODS.previewClose]: (input) => previewManager.close(input),
         [WS_METHODS.previewList]: (input) => previewManager.list(input),
+        [WS_METHODS.subscribeDesktopBrowserCommands]: (input) =>
+          desktopBrowserChannel.subscribeCommands(desktopBrowserOwner, input.desktopHostId),
+        [WS_METHODS.desktopBrowserEvent]: (input) =>
+          desktopBrowserChannel.receiveEvent(desktopBrowserOwner, input.desktopHostId, input.event),
         [WS_METHODS.previewClearProfile]: (input) => serverBrowser.clearProfile(input.profileId),
         [WS_METHODS.previewReportProfiles]: (input) => serverBrowser.reportProfiles(input),
+        [WS_METHODS.previewHostingList]: (input) =>
+          previewHosting.list(input.threadId).pipe(
+            Effect.map((leases) => leases.map(PreviewHosting.toPreviewHostingLeaseSummary)),
+            Effect.mapError(
+              () =>
+                new ContractPreviewHostingError({
+                  reason: "unavailable",
+                  message: "Preview hosting is unavailable on this server.",
+                }),
+            ),
+          ),
+        [WS_METHODS.previewHostingRecover]: (input) =>
+          previewHosting.recoverForBrowser(input).pipe(
+            Effect.mapError(
+              (error) =>
+                new ContractPreviewHostingError({
+                  reason:
+                    error._tag === "PreviewHostingError" && error.operation === "capacity"
+                      ? "capacity"
+                      : error._tag === "PreviewHostingError" &&
+                          error.operation === "validate" &&
+                          error.detail?.includes("already served")
+                        ? "url_in_use"
+                        : "unavailable",
+                  message:
+                    error._tag === "PreviewHostingError" &&
+                    (error.operation === "validate" || error.operation === "capacity")
+                      ? error.message
+                      : "Preview hosting is unavailable on this server.",
+                }),
+            ),
+          ),
+        [WS_METHODS.previewHostingActivity]: (input) =>
+          setHostingActivity(input).pipe(
+            Effect.mapError(
+              () =>
+                new ContractPreviewHostingError({
+                  reason: "unavailable",
+                  message: "Preview hosting activity is unavailable on this server.",
+                }),
+            ),
+          ),
+        [WS_METHODS.previewHostingStopThread]: (input) =>
+          previewHosting.stopThread(input.threadId).pipe(
+            Effect.mapError(
+              () =>
+                new ContractPreviewHostingError({
+                  reason: "unavailable",
+                  message: "Some previews or processes could not be stopped. Please try again.",
+                }),
+            ),
+          ),
+        [WS_METHODS.subscribePreviewHosting]: (_input) =>
+          Stream.callback<
+            ReadonlyArray<PreviewHostingLeaseMetadata>,
+            PreviewHosting.PreviewHostingError
+          >((queue) =>
+            Effect.acquireRelease(
+              previewHosting.subscribe((leases) => Queue.offer(queue, leases)),
+              (unsubscribe) => Effect.sync(unsubscribe),
+            ),
+          ).pipe(
+            Stream.mapError(
+              () =>
+                new ContractPreviewHostingError({
+                  reason: "unavailable",
+                  message: "Preview hosting is unavailable on this server.",
+                }),
+            ),
+          ),
         [WS_METHODS.previewReportStatus]: (input) => previewManager.reportStatus(input),
+        [WS_METHODS.previewClaimRecovery]: (input) => previewManager.claimRecovery(input),
         [WS_METHODS.subscribePreviewEvents]: (_input) => previewManager.events,
         [WS_METHODS.deviceConfigure]: (input) => deviceService.configure(input),
         [WS_METHODS.deviceTestHost]: (input) => deviceService.testHost(input),
@@ -3264,9 +3599,13 @@ export const layerWsRpc = (
       const splitHandlers: Pick<typeof handlers, SplitWsRpc["_tag"]> = handlers;
       const otherHandlers: Pick<typeof handlers, Exclude<ServerWsRpc, SplitWsRpc>["_tag"]> =
         handlers;
-      return Context.merge(
-        yield* SplitWsRpcGroup.toHandlers(splitHandlers),
-        yield* OtherWsRpcGroup.toHandlers(otherHandlers),
+      return Layer.mergeAll(
+        SplitWsRpcGroup.toLayer(splitHandlers),
+        OtherWsRpcGroup.toLayer(otherHandlers),
+        layerAssetRpc,
+        layerOrchestrationRpc,
+        layerThreadDeletionRpc,
+        layerWorkspaceHoldRpc,
       );
     }),
   ).pipe(
@@ -3277,8 +3616,9 @@ export const layerWsRpc = (
           Effect.gen(function* () {
             const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
             const environmentId = yield* serverEnvironment.getEnvironmentId;
+            // Without a calling thread, forwarded reads stay in this environment.
             return (input) =>
-              threadReads.readThreadLocal(
+              threadReads.readThread(
                 {
                   environmentId,
                   capabilities: new Set(["orchestration"]),
@@ -3301,146 +3641,269 @@ export const layerWsRpc = (
     ),
   );
 
+export const layerWsRpc = (...args: Parameters<typeof layerCoreWsRpc>) =>
+  Layer.merge(layerCoreWsRpc(...args), layerEnvironmentPauseRpc);
+
 // Default socket-level Defect frames end every pending client request.
 export const WS_RPC_SERVER_OPTIONS = {
   disableTracing: true,
   disableFatalDefects: true,
 } as const;
 
-export const layer = Layer.unwrap(
-  Effect.gen(function* () {
-    const threadReadBroker = yield* ThreadReadBroker.ThreadReadBroker;
-    const threadReads = yield* OrchestratorMcpService.OrchestratorMcpService;
-    const serverBrowser = yield* ServerBrowser.ServerBrowser;
-    const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
-    const pullRequests = yield* PullRequestService.PullRequestService;
-    const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
-    const peerLinks = yield* PeerLinks.PeerLinks;
-    const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
-    const sql = yield* SqlClient.SqlClient;
-    return HttpRouter.add(
-      "GET",
-      "/ws",
-      Effect.gen(function* () {
-        const request = yield* HttpServerRequest.HttpServerRequest;
-        const requestUrl = HttpServerRequest.toURL(request);
-        if (Option.isNone(requestUrl) || !hasCompatibleOrchestrationProtocol(requestUrl.value)) {
-          return HttpServerResponse.jsonUnsafe(
-            {
-              code: "orchestration_protocol_incompatible",
-              message: `Update this client to one that supports orchestration protocol ${ORCHESTRATION_PROTOCOL_VERSION}.`,
-              orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
-            },
-            { status: 426 },
-          );
-        }
-        const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
-        const sessions = yield* SessionStore.SessionStore;
-        const analytics = yield* AnalyticsService.AnalyticsService;
-        const session = yield* serverAuth.authenticateWebSocketUpgrade(request, "rpc").pipe(
-          Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
-            failEnvironmentAuthInvalid(
-              EnvironmentAuth.serverAuthCredentialReason(error),
-              EnvironmentAuth.serverAuthDpopFailureReason(error),
-            ),
-          ),
-          Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
-            failEnvironmentInternal("internal_error", error),
-          ),
+// Keep constructor and request dependencies explicit so composing this route does not
+// reopen the large RPC handler table during contextual type inference.
+type WsRequestServices =
+  | AcpRegistryRuntimeCoordinator.AcpRegistryRuntimeCoordinator
+  | AcpRegistrySupport.AcpRegistryCatalog
+  | AgentSessionImporter.AgentSessionImporter
+  | AnalyticsService.AnalyticsService
+  | BackgroundPolicy.BackgroundPolicy
+  | CheckpointDiffQuery.CheckpointDiffQuery
+  | Crypto.Crypto
+  | DeviceService.DeviceService
+  | DirectEndpoints.DirectEndpoints
+  | DocumentText.DocumentText
+  | EnvironmentAuth.EnvironmentAuth
+  | EnvironmentPause.EnvironmentPause
+  | EnvironmentTheme.EnvironmentThemeService
+  | ExternalLauncher.ExternalLauncher
+  | FileSystem.FileSystem
+  | GitWorkflowService.GitWorkflowService
+  | GuestShareService.GuestShareService
+  | HostResources.HostResources
+  | Keybindings.Keybindings
+  | ManagedProjectFolders.ManagedProjectFolders
+  | McpAppRequests.McpAppRequests
+  | ModelManifest.ModelManifest
+  | OrchestrationEventStore.OrchestrationEventStore
+  | Orchestrator.OrchestratorV2
+  | PairingGrantStore.PairingGrantStore
+  | Path.Path
+  | PortScanner.PortDiscovery
+  | PreviewHosting.PreviewHosting
+  | PreviewManager.PreviewManager
+  | ProcessDiagnostics.ProcessDiagnostics
+  | ProcessResourceMonitor.ProcessResourceMonitor
+  | ProjectCloneTracker.ProjectCloneTracker
+  | ProjectEnrichmentService.ProjectEnrichmentService
+  | ProjectService.ProjectService
+  | ProjectStore.ProjectStoreV2
+  | ProviderAuthService.ProviderAuthService
+  | ProviderInstanceRegistry.ProviderInstanceRegistry
+  | ProviderLatestVersions.ProviderLatestVersions
+  | ProviderRegistry.ProviderRegistry
+  | ProviderSessionManager.ProviderSessionManagerV2
+  | PullRequestSyncReactor.PullRequestSyncReactor
+  | RelayClient.RelayClient
+  | RemoteOpenTargets.RemoteOpenTargets
+  | RepositoryIdentityResolver.RepositoryIdentityResolver
+  | ResourceTelemetry.ResourceTelemetry
+  | ReviewService.ReviewService
+  | ScheduledTasks.ScheduledTaskService
+  | SecretRequests.SecretRequests
+  | ServerConfig.ServerConfig
+  | ServerEnvironment.ServerEnvironment
+  | ServerLifecycleEvents.ServerLifecycleEvents
+  | ServerRuntimeStartup.ServerRuntimeStartup
+  | ServerSettings.ServerSettingsService
+  | SessionStore.SessionStore
+  | SourceControlRepositoryService.SourceControlRepositoryService
+  | SourceControlSignIn.SourceControlSignIn
+  | StorageCleanup.StorageCleanup
+  | WorktreeSuspension.WorktreeSuspension
+  | WorkspaceAcquisition
+  | WorkspaceLifecycle
+  | TerminalManager.TerminalManager
+  | ThreadLaunchService.ThreadLaunchService
+  | ThreadLinkedFiles.ThreadLinkedFiles
+  | ThreadManagementService.ThreadManagementService
+  | ThreadRecovery.ThreadRecoveryService
+  | ThreadRecoveryRepair.ThreadRecoveryRepairService
+  | ThreadSearch.ThreadSearch
+  | TraceDiagnostics.TraceDiagnostics
+  | TriageService.TriageService
+  | UpdateDrainAdmission.UpdateDrainAdmission
+  | UsageLimitSources.UsageLimitSources
+  | UsageService.UsageService
+  | VcsProvisioningService.VcsProvisioningService
+  | VcsStatusBroadcaster.VcsStatusBroadcaster
+  | WorkspaceEntries.WorkspaceEntries
+  | WorkspaceFileSystem.WorkspaceFileSystem
+  | WorkspacePaths.WorkspacePaths
+  | WorktreeSetupTracker.WorktreeSetupTracker
+  | import("./auth/ServerSecretStore.ts").ServerSecretStore
+  | import("./project/ProjectFaviconResolver.ts").ProjectFaviconResolver
+  | import("./assets/NativeAppIconResolver.ts").NativeAppIconResolver
+  | import("./provider/AntigravityInstallation.ts").AntigravityInstallation
+  | import("./provider/CodexInstallation.ts").CodexInstallation
+  | import("./vcs/VcsProcess.ts").VcsProcess
+  | import("effect/http/HttpClient").HttpClient
+  | import("effect/process/ChildProcessSpawner").ChildProcessSpawner;
+
+type WsRouteRequirements =
+  | HttpRouter.HttpRouter
+  | HttpRouter.Request.From<"Requires", WsRequestServices>
+  | HttpRouter.Request<"Error", import("effect/Config").ConfigError>;
+
+type WsCapturedServices =
+  | CommandOutputHub.CommandOutputHub
+  | DatabaseStorage.DatabaseStorage
+  | DesktopBrowserChannel.DesktopBrowserChannel
+  | OrchestratorMcpService.OrchestratorMcpService
+  | PeerLinks.PeerLinks
+  | PeerLinkRequests.PeerLinkRequests
+  | PullRequestService.PullRequestService
+  | PullRequestReviewGuideService.PullRequestReviewGuideService
+  | ServerBrowser.ServerBrowser
+  | ServerSelfUpdate.ServerSelfUpdate
+  | SqlClient.SqlClient
+  | ThreadReadBroker.ThreadReadBroker;
+
+const makeRoutes: Effect.Effect<
+  Layer.Layer<never, never, WsRouteRequirements>,
+  never,
+  WsCapturedServices
+> = Effect.gen(function* () {
+  const commandOutputHub = yield* CommandOutputHub.CommandOutputHub;
+  const databaseStorage = yield* DatabaseStorage.DatabaseStorage;
+  const desktopBrowserChannel = yield* DesktopBrowserChannel.DesktopBrowserChannel;
+  const threadReadBroker = yield* ThreadReadBroker.ThreadReadBroker;
+  const threadReads = yield* OrchestratorMcpService.OrchestratorMcpService;
+  const serverBrowser = yield* ServerBrowser.ServerBrowser;
+  const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
+  const pullRequests = yield* PullRequestService.PullRequestService;
+  const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
+  const peerLinks = yield* PeerLinks.PeerLinks;
+  const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
+  const sql = yield* SqlClient.SqlClient;
+  return HttpRouter.add(
+    "GET",
+    "/ws",
+    Effect.gen(function* () {
+      const request = yield* HttpServerRequest.HttpServerRequest;
+      const requestUrl = HttpServerRequest.toURL(request);
+      if (Option.isNone(requestUrl) || !hasCompatibleOrchestrationProtocol(requestUrl.value)) {
+        return HttpServerResponse.jsonUnsafe(
+          {
+            code: "orchestration_protocol_incompatible",
+            message: `Update this client to one that supports orchestration protocol ${ORCHESTRATION_PROTOCOL_VERSION}.`,
+            orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
+          },
+          { status: 426 },
         );
-        const clientAnalyticsProps = readClientAnalyticsProps(request);
-        yield* analytics.recordOwners(readClientOwners(request), "client");
-        const rpcWebSocketHttpEffect = yield* Effect.gen(function* () {
-          const { protocol, httpEffect } = yield* RpcServer.makeProtocolWithHttpEffectWebsocket;
-          yield* RpcServer.make(ServerWsRpcGroup, WS_RPC_SERVER_OPTIONS).pipe(
-            Effect.provideService(RpcServer.Protocol, withTerminalOutputWindow(protocol)),
-            Effect.provide(
-              Layer.merge(
-                RpcAuthorization.layer(session.scopes, (method, payload) => {
-                  // Anonymous product signal: the feature and its enum variant,
-                  // credited to the connecting client's surface only.
-                  const usage = featureUsage(method, payload);
-                  return usage === undefined
-                    ? Effect.void
-                    : analytics
-                        .record("feature.used", {
-                          ...usage,
-                          ...(clientAnalyticsProps.surface === undefined
-                            ? {}
-                            : { surface: clientAnalyticsProps.surface }),
-                        })
-                        .pipe(Effect.ignore);
-                }),
-                rpcInstrumentationLayer,
+      }
+      const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+      const sessions = yield* SessionStore.SessionStore;
+      const analytics = yield* AnalyticsService.AnalyticsService;
+      const session = yield* serverAuth.authenticateWebSocketUpgrade(request, "rpc").pipe(
+        Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
+          failEnvironmentAuthInvalid(
+            EnvironmentAuth.serverAuthCredentialReason(error),
+            EnvironmentAuth.serverAuthDpopFailureReason(error),
+          ),
+        ),
+        Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
+          failEnvironmentInternal("internal_error", error),
+        ),
+      );
+      const clientAnalyticsProps = readClientAnalyticsProps(request);
+      yield* analytics.recordOwners(readClientOwners(request), "client");
+      const rpcWebSocketHttpEffect = yield* Effect.gen(function* () {
+        const { protocol, httpEffect } = yield* RpcServer.makeProtocolWithHttpEffectWebsocket;
+        yield* RpcServer.make(ServerWsRpcGroup, WS_RPC_SERVER_OPTIONS).pipe(
+          Effect.provideService(RpcServer.Protocol, withTerminalOutputWindow(protocol)),
+          Effect.provide(
+            Layer.merge(
+              RpcAuthorization.layer(session.scopes, (method, payload) => {
+                // Anonymous product signal: the feature and its enum variant,
+                // credited to the connecting client's surface only.
+                const usage = featureUsage(method, payload);
+                return usage === undefined
+                  ? Effect.void
+                  : analytics
+                      .record("feature.used", {
+                        ...usage,
+                        ...(clientAnalyticsProps.surface === undefined
+                          ? {}
+                          : { surface: clientAnalyticsProps.surface }),
+                      })
+                      .pipe(Effect.ignore);
+              }),
+              rpcInstrumentationLayer,
+            ),
+          ),
+          Effect.forkScoped,
+        );
+        return httpEffect;
+      }).pipe(
+        Effect.provide(
+          layerWsRpc(
+            session,
+            clientAnalyticsProps,
+            desktopBrowserChannel,
+            threadReadBroker,
+            threadReads,
+            serverBrowser,
+          ).pipe(
+            Layer.provideMerge(RpcSerialization.layerJson),
+            // Handler-context reporters see only request defects, not server-wide defects.
+            Layer.provide(DefectReporter.layer),
+            Layer.provide(Layer.succeed(SqlClient.SqlClient, sql)),
+            Layer.provide(Layer.succeed(CommandOutputHub.CommandOutputHub, commandOutputHub)),
+            Layer.provide(Layer.succeed(DatabaseStorage.DatabaseStorage, databaseStorage)),
+            Layer.provide(AgentSessionScanner.layer),
+            Layer.provide(ProviderMaintenanceRunner.layer),
+            Layer.provide(Layer.succeed(ServerSelfUpdate.ServerSelfUpdate, serverSelfUpdate)),
+            // Share server-lifetime PR caches so WS mutations invalidate every client's HTTP diffs.
+            Layer.provide(Layer.succeed(PullRequestService.PullRequestService, pullRequests)),
+            Layer.provide(OtlpEndpointCheck.layer),
+            // Shared like the pull request service, so concurrent generations single-flight.
+            Layer.provide(
+              Layer.succeed(
+                PullRequestReviewGuideService.PullRequestReviewGuideService,
+                reviewGuides,
               ),
             ),
-            Effect.forkScoped,
-          );
-          return httpEffect;
-        }).pipe(
-          Effect.provide(
-            layerWsRpc(
-              session,
-              clientAnalyticsProps,
-              threadReadBroker,
-              threadReads,
-              serverBrowser,
-            ).pipe(
-              Layer.provideMerge(RpcSerialization.layerJson),
-              // Handler-context reporters see only request defects, not server-wide defects.
-              Layer.provide(DefectReporter.layer),
-              Layer.provide(Layer.succeed(SqlClient.SqlClient, sql)),
-              Layer.provide(AgentSessionScanner.layer),
-              Layer.provide(ProviderMaintenanceRunner.layer),
-              Layer.provide(Layer.succeed(ServerSelfUpdate.ServerSelfUpdate, serverSelfUpdate)),
-              // Share server-lifetime PR caches so WS mutations invalidate every client's HTTP diffs.
-              Layer.provide(Layer.succeed(PullRequestService.PullRequestService, pullRequests)),
-              Layer.provide(OtlpEndpointCheck.layer),
-              Layer.provide(
-                Layer.succeed(
-                  PullRequestReviewGuideService.PullRequestReviewGuideService,
-                  reviewGuides,
-                ),
-              ),
-              Layer.provide(Layer.succeed(PeerLinks.PeerLinks, peerLinks)),
-              Layer.provide(Layer.succeed(PeerLinkRequests.PeerLinkRequests, peerLinkRequests)),
-              Layer.provide(
-                SourceControlDiscovery.layer.pipe(
-                  Layer.provide(
-                    SourceControlProviderRegistry.layer.pipe(
-                      Layer.provide(SourceControlBuiltInDrivers.layer),
-                      Layer.provideMerge(GitVcsDriver.layer),
-                      Layer.provide(
-                        VcsDriverRegistry.layer.pipe(Layer.provide(VcsProjectConfig.layer)),
-                      ),
+            Layer.provide(Layer.succeed(PeerLinks.PeerLinks, peerLinks)),
+            Layer.provide(Layer.succeed(PeerLinkRequests.PeerLinkRequests, peerLinkRequests)),
+            Layer.provide(
+              SourceControlDiscovery.layer.pipe(
+                Layer.provide(
+                  SourceControlProviderRegistry.layer.pipe(
+                    Layer.provide(SourceControlBuiltInDrivers.layer),
+                    Layer.provideMerge(GitVcsDriver.layer),
+                    Layer.provide(
+                      VcsDriverRegistry.layer.pipe(Layer.provide(VcsProjectConfig.layer)),
                     ),
                   ),
                 ),
               ),
             ),
           ),
-        );
-        return yield* Effect.acquireUseRelease(
-          sessions.markConnected(session.sessionId),
-          () =>
-            Effect.raceFirst(
-              rpcWebSocketHttpEffect,
-              sessions.awaitInvalidation(session.sessionId).pipe(
-                Effect.as(HttpServerResponse.empty()),
-                Effect.catchTags({
-                  SessionCredentialVerificationError: (error) =>
-                    failEnvironmentInternal("internal_error", error),
-                }),
-              ),
+        ),
+      );
+      return yield* Effect.acquireUseRelease(
+        sessions.markConnected(session.sessionId),
+        () =>
+          Effect.raceFirst(
+            rpcWebSocketHttpEffect,
+            sessions.awaitInvalidation(session.sessionId).pipe(
+              Effect.as(HttpServerResponse.empty()),
+              Effect.catchTags({
+                SessionCredentialVerificationError: (error) =>
+                  failEnvironmentInternal("internal_error", error),
+              }),
             ),
-          () => sessions.markDisconnected(session.sessionId),
-        );
-      }).pipe(
-        Effect.catchTags({
-          EnvironmentAuthInvalidError: HttpServerRespondable.toResponse,
-          EnvironmentInternalError: HttpServerRespondable.toResponse,
-        }),
-      ),
-    );
-  }),
-);
+          ),
+        () => sessions.markDisconnected(session.sessionId),
+      );
+    }).pipe(
+      Effect.catchTags({
+        EnvironmentAuthInvalidError: HttpServerRespondable.toResponse,
+        EnvironmentInternalError: HttpServerRespondable.toResponse,
+      }),
+    ),
+  );
+});
+
+export const layer = Layer.unwrap(makeRoutes);

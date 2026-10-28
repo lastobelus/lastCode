@@ -4,9 +4,98 @@ import {
   type ActionReport as ActionReportType,
   type ActionResumeOutcome as ActionResumeOutcomeType,
   type ActionResumeState,
+  type ActionResumeStatus,
+  type ActionRunSummary,
+  type OrchestrationV2Run,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+
+export function actionResumeStatus(input: {
+  readonly action: Pick<ActionResumeState, "outcome" | "delivery">;
+  readonly environmentPaused: boolean;
+  /** Only the continuation corresponding to this Action, never unrelated thread work. */
+  readonly followUp?: Pick<OrchestrationV2Run, "status" | "queueHeld"> | null | undefined;
+  readonly hasPendingRequest: boolean;
+}): ActionResumeStatus {
+  const { action, environmentPaused, followUp, hasPendingRequest } = input;
+  const status = (
+    state: ActionResumeStatus["state"],
+    automaticResumeArmed = false,
+    attentionRequired = false,
+  ): ActionResumeStatus => ({ state, environmentPaused, automaticResumeArmed, attentionRequired });
+
+  if (action.delivery === "disposed") return status("disposed");
+  if (action.delivery === "available") {
+    return status(
+      action.outcome === "process_lost" || action.outcome.startsWith("cancelled_")
+        ? "interrupted"
+        : "attention_required",
+      false,
+      true,
+    );
+  }
+  if (followUp) {
+    switch (followUp.status) {
+      case "completed":
+      case "failed":
+      case "interrupted":
+      case "cancelled":
+      case "rolled_back":
+        return status("follow_up_ended", false, followUp.status !== "completed");
+      case "preparing":
+      case "starting":
+      case "running":
+      case "waiting":
+        return hasPendingRequest
+          ? status("waiting_for_input", false, true)
+          : status("follow_up_active");
+      case "queued":
+        if (followUp.queueHeld) return status("attention_required", false, true);
+        if (environmentPaused) return status("environment_paused", false, true);
+        if (hasPendingRequest) return status("waiting_for_input", false, true);
+        return status("follow_up_queued", true);
+    }
+  }
+  if (action.outcome === "running") {
+    return status(
+      "running",
+      action.delivery === "armed" && !environmentPaused && !hasPendingRequest,
+      environmentPaused || hasPendingRequest,
+    );
+  }
+  if (action.delivery === "delivered") return status("follow_up_dispatched");
+  if (environmentPaused) return status("environment_paused", false, true);
+  if (hasPendingRequest) return status("waiting_for_input", false, true);
+  return status("pending_delivery", true);
+}
+
+export function actionResumeSummary(
+  action: ActionResumeState,
+  status: ActionResumeStatus,
+): ActionRunSummary {
+  return {
+    runId: action.runId,
+    actionId: action.actionId,
+    actionName: action.actionName,
+    outcome: action.outcome,
+    delivery: action.delivery,
+    startedAt: action.startedAt,
+    finishedAt: action.finishedAt,
+    exitCode: action.exitCode,
+    exitSignal: action.exitSignal,
+    status,
+    ...(action.report
+      ? {
+          report: {
+            outcome: action.report.outcome,
+            summary: action.report.summary,
+            untrusted: true,
+          },
+        }
+      : {}),
+  };
+}
 
 const ACTION_FOLLOW_UP_HEADER = "Automated Project Action follow-up.";
 const ACTION_OUTPUT_HEADER =

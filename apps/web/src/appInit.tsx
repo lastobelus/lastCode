@@ -3,6 +3,7 @@ import type { ClientSettings } from "@t3tools/contracts/settings";
 import { createBrowserHistory, createHashHistory } from "@tanstack/react-router";
 
 import { applyAppearanceContrast } from "./appearanceContrast";
+import { applyScrollbarAppearance } from "./scrollbarAppearance";
 import { applyAppearanceFontVariables } from "./appearanceFonts";
 import { startElectronBrowserHost } from "./browser/ElectronBrowserHost";
 import { startBrowserProfileReporting } from "./browser/BrowserProfileReporter";
@@ -70,6 +71,17 @@ function startClientAppearance(): void {
     }
     if (previous?.roundedProjectIcons !== settings.roundedProjectIcons) {
       root.toggleAttribute("data-rounded-project-icons", settings.roundedProjectIcons);
+    }
+    if (
+      previous?.largerScrollbarsEnabled !== settings.largerScrollbarsEnabled ||
+      previous.scrollbarWidth !== settings.scrollbarWidth ||
+      previous.scrollbarMargin !== settings.scrollbarMargin
+    ) {
+      applyScrollbarAppearance(root, {
+        enabled: settings.largerScrollbarsEnabled,
+        width: settings.scrollbarWidth,
+        margin: settings.scrollbarMargin,
+      });
     }
     if (previous?.appearanceContrast !== settings.appearanceContrast) {
       applyAppearanceContrast(root, settings.appearanceContrast);
