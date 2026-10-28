@@ -3,6 +3,7 @@ import { describe, expect, it } from "@effect/vitest";
 import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
+  type AuthEnvironmentScope,
   type AuthSessionState,
   CommandId,
   RuntimeRequestId,
@@ -12,12 +13,14 @@ import {
   ProjectId,
   ProviderInstanceId,
   ThreadId,
+  SAVED_WORKSPACE_DISCARD_SCOPES,
   type OrchestrationV2Command,
   type OrchestrationV2ShellSnapshot,
   type OrchestrationV2ThreadArchiveFamily,
   type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -100,6 +103,8 @@ const SNAPSHOT: OrchestrationV2ShellSnapshot = {
 };
 
 const makeHarness = Effect.fn("TestThreadCommands.makeHarness")(function* (options?: {
+  readonly scopes?: readonly AuthEnvironmentScope[];
+  readonly replyImmediately?: boolean;
   readonly reconcilePendingWork?: (threadId: ThreadId) => Effect.Effect<void>;
   readonly archiveFamily?: readonly OrchestrationV2ThreadShell[];
   readonly archiveFamilyError?: Error;
@@ -128,6 +133,14 @@ const makeHarness = Effect.fn("TestThreadCommands.makeHarness")(function* (optio
     reply: Deferred.Deferred<{ sequence: number }, Error>;
   }>();
   const reconciled = yield* Queue.unbounded<ThreadId>();
+  const dispatchCommand = vi.fn((command: OrchestrationV2Command) =>
+    Effect.gen(function* () {
+      if (options?.replyImmediately) return { sequence: 1 };
+      const reply = yield* Deferred.make<{ sequence: number }, Error>();
+      yield* Queue.offer(requests, { command, reply });
+      return yield* Deferred.await(reply);
+    }),
+  );
   const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
     target: { environmentId: ENVIRONMENT_ID },
     state: yield* SubscriptionRef.make({
@@ -144,12 +157,7 @@ const makeHarness = Effect.fn("TestThreadCommands.makeHarness")(function* (optio
               ? Effect.succeed({ ...decision, threads: archiveFamily })
               : Effect.fail(archiveFamilyError);
           },
-          [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command: OrchestrationV2Command) =>
-            Effect.gen(function* () {
-              const reply = yield* Deferred.make<{ sequence: number }, Error>();
-              yield* Queue.offer(requests, { command, reply });
-              return yield* Deferred.await(reply);
-            }),
+          [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: dispatchCommand,
         },
       } as unknown as RpcSession),
     ),
@@ -191,8 +199,8 @@ const makeHarness = Effect.fn("TestThreadCommands.makeHarness")(function* (optio
     sessions(ENVIRONMENT_ID),
     AsyncResult.success({
       authenticated: true,
-      scopes: [AuthOrchestrationReadScope, AuthOrchestrationOperateScope],
-      permissions: [AuthOrchestrationReadScope, AuthOrchestrationOperateScope],
+      scopes: options?.scopes ?? [AuthOrchestrationReadScope, AuthOrchestrationOperateScope],
+      permissions: options?.scopes ?? [AuthOrchestrationReadScope, AuthOrchestrationOperateScope],
       auth: {
         policy: "remote-reachable",
         bootstrapMethods: [],
@@ -201,7 +209,85 @@ const makeHarness = Effect.fn("TestThreadCommands.makeHarness")(function* (optio
       },
     }),
   );
-  return { registry, commands, snapshotAtom, visibleAtom, requests, reconciled, familyReads };
+  return {
+    registry,
+    commands,
+    snapshotAtom,
+    visibleAtom,
+    requests,
+    reconciled,
+    familyReads,
+    dispatchCommand,
+  };
+});
+
+describe("single thread deletion permissions", () => {
+  const savedWorkspace = { mode: "discard", previewToken: "reviewed-workspace" } as const;
+
+  it.effect("deletes a thread and its saved workspace with the destination session grants", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness({
+        scopes: SAVED_WORKSPACE_DISCARD_SCOPES,
+        replyImmediately: true,
+      });
+      const result = yield* Effect.promise(() =>
+        h.commands.delete.run(h.registry, {
+          environmentId: ENVIRONMENT_ID,
+          input: { threadId: THREAD_ID, savedWorkspace },
+        }),
+      );
+      expect(result._tag).toBe("Success");
+      expect(h.dispatchCommand).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ type: "thread.delete", threadId: THREAD_ID, savedWorkspace }),
+      );
+    }),
+  );
+
+  it.effect.each(SAVED_WORKSPACE_DISCARD_SCOPES)(
+    "blocks saved workspace disposal without %s before sending the request",
+    (missing) =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness({
+          scopes: SAVED_WORKSPACE_DISCARD_SCOPES.filter((scope) => scope !== missing),
+          replyImmediately: true,
+        });
+        const result = yield* Effect.promise(() =>
+          h.commands.delete.run(h.registry, {
+            environmentId: ENVIRONMENT_ID,
+            input: { threadId: THREAD_ID, savedWorkspace },
+          }),
+        );
+        expect(result._tag).toBe("Failure");
+        if (result._tag === "Failure") {
+          expect(Cause.squash(result.cause)).toMatchObject({
+            _tag: "EnvironmentAuthorizationError",
+            requiredPermission: missing,
+          });
+        }
+        expect(h.dispatchCommand).not.toHaveBeenCalled();
+      }),
+  );
+
+  it.effect.each([undefined, { mode: "retain" }] as const)(
+    "allows ordinary thread deletion without maintenance permission (%j)",
+    (disposition) =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness({ replyImmediately: true });
+        const result = yield* Effect.promise(() =>
+          h.commands.delete.run(h.registry, {
+            environmentId: ENVIRONMENT_ID,
+            input: {
+              threadId: THREAD_ID,
+              ...(disposition === undefined ? {} : { savedWorkspace: disposition }),
+            },
+          }),
+        );
+        expect(result._tag).toBe("Success");
+        expect(h.dispatchCommand).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ type: "thread.delete", threadId: THREAD_ID }),
+        );
+      }),
+  );
 });
 
 describe("interrupt turn", () => {
