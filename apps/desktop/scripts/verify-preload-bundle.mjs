@@ -108,6 +108,7 @@ const executeBundle = (source, sandboxModules) => {
     {
       process: sandboxProcess,
       require: requireSandboxModule,
+      window: { addEventListener: () => undefined },
     },
     {
       filename: "desktop-preload.cjs",

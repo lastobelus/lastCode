@@ -11,6 +11,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   resolvePendingThreadCreation,
   selectThreadCreationDetail,
+  pendingThreadCreationShell,
   type PendingThreadCreation,
 } from "./pending-thread-creation";
 import type { QueuedThreadMessage } from "./thread-outbox-model";
@@ -104,20 +105,23 @@ describe("resolvePendingThreadCreation", () => {
     ).toBe(pending);
   });
 
-  it("preserves rejected task recovery", () => {
-    const failed: PendingThreadCreation = {
-      message: creation,
-      outcome: { kind: "failed", message: creation, reason: "Checkout failed" },
-    };
-    expect(
-      resolvePendingThreadCreation({
-        threadKey,
-        pending: failed,
-        previous: pending,
-        detail: { messages: [], runs: [] },
-      }),
-    ).toBe(failed);
-  });
+  it.each([{ runs: [] }, { runs: [{ status: "failed" }] }])(
+    "preserves rejected task recovery",
+    ({ runs }) => {
+      const failed: PendingThreadCreation = {
+        message: creation,
+        outcome: { kind: "failed", message: creation, reason: "Checkout failed" },
+      };
+      expect(
+        resolvePendingThreadCreation({
+          threadKey,
+          pending: failed,
+          previous: pending,
+          detail: { messages: [], runs },
+        }),
+      ).toBe(failed);
+    },
+  );
 
   it("does not carry setup into another thread or invent it for existing threads", () => {
     expect(
@@ -136,6 +140,14 @@ describe("resolvePendingThreadCreation", () => {
         detail: null,
       }),
     ).toBeNull();
+  });
+  it("shows preparation while a queued thread is waiting for its first shell", () => {
+    expect(pendingThreadCreationShell(creation)?.runtime).toMatchObject({
+      status: "preparing",
+      activeRunId: null,
+      providerInstanceId: creation.modelSelection!.instanceId,
+      updatedAt: creation.createdAt,
+    });
   });
 });
 

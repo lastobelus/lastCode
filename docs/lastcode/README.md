@@ -33,6 +33,12 @@ directories.
 - [Contribution and fork conventions](fork-conventions.md): the two workstreams,
   contribution bases, paired upstream/LastCode changes, remotes, branches, and
   evaluation tags.
+- [Local nightly updates](local-nightly-updates.md): the opt-in in-app
+  checkpoint build, staging, installation, safety boundaries, and logs.
+- [Packaged server runtime foundation](packaged-server-runtime.md): immutable
+  LastCode runtime validation and the headless LaunchAgent activation boundary.
+- [Remote update activation helper](update-activation-helper.md): the dormant,
+  one-owner crash-safe app, plist, and database selection transaction.
 - [Codex Computer Use lifecycle](computer-use-lifecycle.md): lingering native
   indicators, upstream findings, and the limits of LastCode cleanup.
 

@@ -975,7 +975,7 @@ export function createGeneratedBuildStage(worktreePath: string, root: string) {
       allocation(NodeFS.lstatSync(directory)) !== initialAllocation
     )
       throw new Error("Build stage changed identity");
-    NodeFS.rmSync(directory, { recursive: true }); // Only the fresh, runner-owned stage, never an actual output root.
+    NodeFS.rmSync(directory, { recursive: true, maxRetries: 3 }); // Only the fresh, runner-owned stage, never an actual output root.
     finished = true;
   };
   return {

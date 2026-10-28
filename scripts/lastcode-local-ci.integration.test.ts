@@ -128,8 +128,8 @@ it("runs the affected-workspace command through the installed task runner", () =
       .map((line) => JSON.parse(line));
     expect(argumentsByPackage).toEqual(
       expect.arrayContaining([
-        { name: "selected", args: ["--maxWorkers=1", "--maxConcurrency=1"] },
-        { name: "unrelated", args: ["--maxWorkers=1", "--maxConcurrency=1"] },
+        { name: "selected", args: ["--maxWorkers=2", "--maxConcurrency=1"] },
+        { name: "unrelated", args: ["--maxWorkers=2", "--maxConcurrency=1"] },
       ]),
     );
   } finally {

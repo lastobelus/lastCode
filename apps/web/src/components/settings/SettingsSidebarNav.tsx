@@ -22,6 +22,7 @@ import {
   MessagesSquareIcon,
   PanelsTopLeftIcon,
   KeyboardIcon,
+  MoonStarIcon,
   PaletteIcon,
   SearchIcon,
   ServerIcon,
@@ -105,6 +106,7 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/maintenance": WrenchIcon,
   "/settings/labs": FlaskConicalIcon,
   "/settings/about": InfoIcon,
+  "/settings/lastcode": MoonStarIcon,
   "/settings/archived": ArchiveIcon,
 };
 

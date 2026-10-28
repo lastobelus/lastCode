@@ -27,20 +27,28 @@ interface ScopeChoice {
   search: SettingsScopeSearch;
 }
 
-export function SettingsScopeNotice({
-  children,
-  target,
-  targetId,
-  eligibleEnvironmentIds,
-  inline = false,
-}: {
+interface SettingsScopeNoticeProps {
   children: string;
   /** Renders inside a section instead of as its own page. */
   inline?: boolean;
   target: "environment" | "all" | "project" | "checkout";
   targetId?: string;
   eligibleEnvironmentIds?: readonly EnvironmentId[];
-}) {
+}
+
+/** Offer an explicit target change when a category has no settings at this scope. */
+export function SettingsScopeNotice({ inline = false, ...props }: SettingsScopeNoticeProps) {
+  const notice = <SettingsScopeNoticeContent {...props} />;
+  return inline ? notice : <SettingsPageContainer>{notice}</SettingsPageContainer>;
+}
+
+/** Scope recovery within a section that already belongs to a settings page. */
+export function SettingsScopeNoticeContent({
+  children,
+  target,
+  targetId,
+  eligibleEnvironmentIds,
+}: SettingsScopeNoticeProps) {
   const { selectScope, search, groups } = useSettingsScope();
   const navigate = useNavigate({ from: "/settings" });
   const pathname = useLocation({ select: (location) => location.pathname });
@@ -128,7 +136,16 @@ export function SettingsScopeNotice({
         )}
         onClick={() => {
           if (targetId)
-            void navigate({ to: pathname, search: () => choice.search, hash: targetId });
+            void navigate({
+              to: pathname,
+              // Explicit axes let an "all" choice clear the retained scope.
+              search: () => ({
+                project: choice.search.project,
+                machine: choice.search.machine,
+                checkout: choice.search.checkout,
+              }),
+              hash: targetId,
+            });
           else selectScope(choice.search);
         }}
       >
@@ -150,7 +167,7 @@ export function SettingsScopeNotice({
       </button>
     ));
   };
-  const notice = (
+  return (
     <div className="space-y-3">
       <p role="status" className="px-3 text-sm text-muted-foreground sm:px-4">
         {children}
@@ -168,5 +185,4 @@ export function SettingsScopeNotice({
       </div>
     </div>
   );
-  return inline ? notice : <SettingsPageContainer>{notice}</SettingsPageContainer>;
 }

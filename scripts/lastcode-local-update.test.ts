@@ -28,7 +28,7 @@ import {
 import { checkpointServiceRunNowPaths } from "./lib/lastcode-checkpoint-service-run-now.mjs";
 
 // oxlint-disable-next-line t3code/no-global-process-runtime -- This integration test exercises a macOS-only kernel lock.
-const itMacOnly = process.platform === "darwin" ? it : it.skip;
+const itMacOnly = it.runIf(process.platform === "darwin");
 
 function runGit(cwd: string, args: ReadonlyArray<string>): string {
   return NodeChildProcess.execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
