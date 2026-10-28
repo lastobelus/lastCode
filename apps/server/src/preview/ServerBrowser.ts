@@ -510,6 +510,19 @@ const make = Effect.gen(function* () {
     // A listener owns every path; a redirect cannot transfer its prepared run to another origin.
     tab.hostedRunOrigin = new URL(destination.url).origin;
   };
+  const hostedRunChanged = (
+    tab: ServerTab,
+    destination: {
+      readonly url: string;
+      readonly runId?: string | undefined;
+      readonly restarted?: boolean | undefined;
+    },
+  ) =>
+    tab.hostedRunOrigin !== new URL(destination.url).origin ||
+    tab.hostedRunId === undefined ||
+    destination.runId === undefined
+      ? destination.restarted === true
+      : destination.runId !== tab.hostedRunId;
   const backgroundFibers = new Set<Fiber.Fiber<unknown, unknown>>();
   const pendingReports = new Set<Promise<void>>();
   const runFork = <A, E>(effect: Effect.Effect<A, E>) => {
@@ -2437,15 +2450,17 @@ const make = Effect.gen(function* () {
 
   const navigate = async (
     tab: ServerTab,
-    url: string,
+    destination: Parameters<typeof hostedRunChanged>[1],
     readiness: "load" | "domContentLoaded" | "none",
     timeout: number,
     onCommitted?: () => void,
   ) => {
+    const { url } = destination;
+    const runChanged = hostedRunChanged(tab, destination);
     const release = await acquireHostingDestination(tab, url);
     const navigation = Promise.resolve()
-      .then(() =>
-        tab.page.goto(url, {
+      .then(async () => {
+        const options = {
           timeout,
           waitUntil:
             readiness === "domContentLoaded"
@@ -2453,8 +2468,11 @@ const make = Effect.gen(function* () {
               : readiness === "none"
                 ? "commit"
                 : "load",
-        }),
-      )
+        } as const;
+        const response = await tab.page.goto(url, options);
+        // A fragment navigation can succeed while retaining the previous app's document.
+        if (response === null && runChanged) await tab.page.reload(options);
+      })
       .then(() => onCommitted?.())
       .finally(release);
     if (readiness === "none") {
@@ -3416,10 +3434,10 @@ const make = Effect.gen(function* () {
                   await prepareBrowserCredential(tab, destination, signal, remainingTimeoutMs());
                 signal.throwIfAborted();
                 if (existing || destination?.managed) {
-                  if (url)
+                  if (destination)
                     await navigate(
                       tab,
-                      url,
+                      destination,
                       "load",
                       Math.min(navigationTimeout, remainingTimeoutMs()),
                     );
@@ -3782,7 +3800,7 @@ const make = Effect.gen(function* () {
           signal.throwIfAborted();
           await navigate(
             tab,
-            destination.url,
+            destination,
             navigateInput.readiness ?? "load",
             Math.min(originalInput.timeoutMs ?? request.timeoutMs, remainingTimeoutMs()),
             () => rememberHostedRun(tab, destination),
@@ -4363,13 +4381,7 @@ const make = Effect.gen(function* () {
           tab.hostedOrigins.has(parsed.origin) || isLocalLoopbackHost(parsed.hostname)
             ? await prepareRetainedBrowserNavigation(tab, assetUrl, signal, 0)
             : { url: assetUrl, restarted: false, runId: undefined };
-        const shouldReload = () =>
-          prepared.url !== currentUrl ||
-          (tab.hostedRunOrigin !== parsed.origin ||
-          tab.hostedRunId === undefined ||
-          prepared.runId === undefined
-            ? prepared.restarted
-            : prepared.runId !== tab.hostedRunId);
+        const shouldReload = () => prepared.url !== currentUrl || hostedRunChanged(tab, prepared);
         if (!shouldReload()) {
           rememberHostedRun(tab, prepared);
           return;
