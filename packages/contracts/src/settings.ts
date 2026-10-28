@@ -593,6 +593,7 @@ export const ClientSettingsSchema = Schema.Struct({
   legacySidebarScale: LegacySidebarScale.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_LEGACY_SIDEBAR_SCALE)),
   ),
+  pageScrollOverlapEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   largerScrollbarsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   scrollbarWidth: ScrollbarWidth.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SCROLLBAR_WIDTH)),
@@ -1936,6 +1937,7 @@ export const ClientSettingsPatch = Schema.Struct({
   lastcodeSidebarEnabled: Schema.optionalKey(Schema.Boolean),
   sidebarWorkingShelfEnabled: Schema.optionalKey(Schema.Boolean),
   legacySidebarScale: Schema.optionalKey(LegacySidebarScale),
+  pageScrollOverlapEnabled: Schema.optionalKey(Schema.Boolean),
   largerScrollbarsEnabled: Schema.optionalKey(Schema.Boolean),
   scrollbarWidth: Schema.optionalKey(ScrollbarWidth),
   scrollbarMargin: Schema.optionalKey(ScrollbarMargin),

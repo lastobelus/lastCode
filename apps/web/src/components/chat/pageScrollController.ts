@@ -2,7 +2,6 @@ const PAGE_SCROLL_ANIMATION_MS = 150;
 const PAGE_SCROLL_ACCELERATION_MS = 400;
 const PAGE_SCROLL_MAX_MULTIPLIER = 2;
 
-const PAGE_SCROLL_ALIGNMENT_OFFSET_PX = 36;
 const PAGE_SCROLL_BOUNDARY_EPSILON_PX = 1;
 const PAGE_SCROLL_HOLD_DELAY_MS = PAGE_SCROLL_ANIMATION_MS;
 
@@ -69,12 +68,6 @@ export function getTimelinePageScrollKey({
   return editorCanScroll ? null : key;
 }
 
-type PageScrollContainer = PageScrollMetrics & {
-  getBoundingClientRect: () => {
-    height: number;
-  };
-};
-
 type PageScrollEnv = {
   now: () => number;
   requestAnimationFrame: (callback: FrameRequestCallback) => number;
@@ -110,14 +103,21 @@ function getPageScrollVelocityPxPerMs({
   return (pageScrollDistancePx * getPageScrollMultiplier(holdElapsedMs)) / PAGE_SCROLL_ANIMATION_MS;
 }
 
-function getPageScrollDistancePx({
-  containerHeightPx,
-  scrollPaddingBottomPx,
-}: {
-  containerHeightPx: number;
-  scrollPaddingBottomPx: number;
-}): number {
-  return Math.max(0, containerHeightPx - PAGE_SCROLL_ALIGNMENT_OFFSET_PX - scrollPaddingBottomPx);
+export function getTimelinePageScrollDistancePx(
+  viewport: HTMLElement,
+  composerOverlay: HTMLElement | null,
+  keepOneLine: boolean,
+): number {
+  const bounds = viewport.getBoundingClientRect();
+  const composerBounds = composerOverlay?.getBoundingClientRect();
+  const bottom =
+    composerBounds && composerBounds.height > 0
+      ? Math.min(bounds.bottom, Math.max(bounds.top, composerBounds.top))
+      : bounds.bottom;
+  if (!keepOneLine) return Math.max(0, bottom - bounds.top);
+  const style = getComputedStyle(viewport.querySelector(".chat-markdown") ?? viewport);
+  const lineHeight = Number.parseFloat(style.lineHeight) || Number.parseFloat(style.fontSize) * 1.5;
+  return Math.max(0, bottom - bounds.top - lineHeight);
 }
 
 function getDirection(key: PageScrollKey): -1 | 1 {
@@ -149,12 +149,12 @@ function easeInOut(progress: number): number {
 
 export function createPageScrollController({
   getContainer,
-  getScrollPaddingBottomPx,
+  getPageScrollDistancePx,
   onScrollStart,
   env = getDefaultEnv(),
 }: {
-  getContainer: () => PageScrollContainer | null;
-  getScrollPaddingBottomPx: () => number;
+  getContainer: () => PageScrollMetrics | null;
+  getPageScrollDistancePx: () => number;
   onScrollStart?: (key: PageScrollKey) => void;
   env?: PageScrollEnv;
 }) {
@@ -167,12 +167,6 @@ export function createPageScrollController({
     lastFrameTime: 0,
     holdActive: false,
   };
-
-  const readPageScrollDistance = (container: PageScrollContainer) =>
-    getPageScrollDistancePx({
-      containerHeightPx: container.getBoundingClientRect().height,
-      scrollPaddingBottomPx: getScrollPaddingBottomPx(),
-    });
 
   const cancelDiscreteAnimation = () => {
     if (state.discreteAnimationFrame === 0) {
@@ -208,7 +202,7 @@ export function createPageScrollController({
     state.holdActive = false;
   };
 
-  const scrollBy = (container: PageScrollContainer, deltaY: number) => {
+  const scrollBy = (container: PageScrollMetrics, deltaY: number) => {
     cancelDiscreteAnimation();
 
     if (env.prefersReducedMotion()) {
@@ -220,6 +214,10 @@ export function createPageScrollController({
     const startTime = env.now();
 
     const step = (now: number) => {
+      if (getContainer() !== container) {
+        stop({ cancelDiscreteAnimation: true });
+        return;
+      }
       const progress = Math.min(1, (now - startTime) / PAGE_SCROLL_ANIMATION_MS);
       container.scrollTop = startScrollTop + deltaY * easeInOut(progress);
 
@@ -234,15 +232,15 @@ export function createPageScrollController({
     state.discreteAnimationFrame = env.requestAnimationFrame(step);
   };
 
-  const startHoldScroll = (key: PageScrollKey, container: PageScrollContainer) => {
+  const startHoldScroll = (key: PageScrollKey, container: PageScrollMetrics) => {
     cancelDiscreteAnimation();
     state.holdActive = true;
     state.holdStartTime = env.now();
     state.lastFrameTime = state.holdStartTime;
 
     const step = (now: number) => {
-      if (state.activeKey !== key) {
-        state.holdAnimationFrame = 0;
+      if (state.activeKey !== key || getContainer() !== container) {
+        stop({ cancelDiscreteAnimation: true });
         return;
       }
 
@@ -251,7 +249,7 @@ export function createPageScrollController({
 
       const velocityPxPerMs = getPageScrollVelocityPxPerMs({
         holdElapsedMs: now - state.holdStartTime,
-        pageScrollDistancePx: readPageScrollDistance(container),
+        pageScrollDistancePx: getPageScrollDistancePx(),
       });
       const previousScrollTop = container.scrollTop;
       container.scrollTop = previousScrollTop + velocityPxPerMs * deltaMs * getDirection(key);
@@ -286,7 +284,7 @@ export function createPageScrollController({
       state.activeKey = key;
       onScrollStart?.(key);
 
-      scrollBy(container, readPageScrollDistance(container) * getDirection(key));
+      scrollBy(container, getPageScrollDistancePx() * getDirection(key));
 
       state.holdDelayTimeout = env.setTimeout(() => {
         state.holdDelayTimeout = 0;

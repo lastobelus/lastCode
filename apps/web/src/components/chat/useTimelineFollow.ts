@@ -1,4 +1,5 @@
 import { useStableCallback } from "../../hooks/useStableCallback";
+import { getClientSettings } from "../../hooks/useSettings";
 import { type MessageId, type RunId } from "@t3tools/contracts";
 import { CHAT_LIST_ANCHOR_OFFSET } from "@t3tools/shared/chatList";
 import { Debouncer } from "@tanstack/react-pacer";
@@ -18,7 +19,11 @@ import {
   type TimelineRunObservation,
 } from "./timelineScrollAnchoring";
 import { type ChatComposerHandle } from "./ChatComposer";
-import { createPageScrollController, type PageScrollKey } from "./pageScrollController";
+import {
+  createPageScrollController,
+  getTimelinePageScrollDistancePx,
+  type PageScrollKey,
+} from "./pageScrollController";
 import {
   FOLLOWING,
   initialTimelineFollow,
@@ -121,7 +126,12 @@ function createTimelineFollowStore() {
     attachComposerOverlay: (element: HTMLElement | null) => {
       composerOverlay = element;
     },
-    readComposerOverlayHeight: () => composerOverlay?.getBoundingClientRect().height ?? 0,
+    readPageScrollDistancePx: (viewport: HTMLElement) =>
+      getTimelinePageScrollDistancePx(
+        viewport,
+        composerOverlay,
+        getClientSettings().pageScrollOverlapEnabled,
+      ),
     dispatch: (visit: TimelineFollowVisit, event: TimelineFollowEvent) => {
       const before = read(visit);
       const after = transitionTimelineFollow(before, event);
@@ -306,9 +316,6 @@ export function useTimelineFollow(input: TimelineFollowInput) {
       composerInset: composerTimelineInset,
       anchorOffset: CHAT_TIMELINE_ANCHOR_OFFSET,
     });
-  const pageScrollControllerRef = useRef<ReturnType<typeof createPageScrollController> | null>(
-    null,
-  );
   const handlePageScrollStart = useStableCallback((key: PageScrollKey) => {
     visitScroll().intent = key === "PageUp" ? "away-from-end" : "toward-end";
     composerRef.current?.collapseForTimelineScrollKey(key);
@@ -317,16 +324,31 @@ export function useTimelineFollow(input: TimelineFollowInput) {
       viewportRef.current?.navigate({ releasesFollow: true });
     }
   });
+  // Releasing follow changes the list's ref callback. Its detach/attach cycle
+  // must not cancel the page animation that triggered that render.
+  const readPageScrollContainer = useStableCallback(() => viewportRef.current?.scrollNode ?? null);
+  const [pageScrollController] = useState(() =>
+    createPageScrollController({
+      getContainer: readPageScrollContainer,
+      getPageScrollDistancePx: () => {
+        const viewport = readPageScrollContainer();
+        return viewport ? followStore.readPageScrollDistancePx(viewport) : 0;
+      },
+      onScrollStart: handlePageScrollStart,
+    }),
+  );
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync, react/exhaustive-effect-dependencies -- visit keys animation cleanup before another thread reuses the viewport, and on unmount
+  useLayoutEffect(() => () => pageScrollController.dispose(), [pageScrollController, visit]);
   const onComposerPageScrollKeyDown = (key: PageScrollKey) => {
-    pageScrollControllerRef.current?.handleKeyDown(key);
+    pageScrollController.handleKeyDown(key);
   };
   const onComposerPageScrollKeyDownStable = useStableCallback(onComposerPageScrollKeyDown);
   const onComposerPageScrollKeyUp = (key: string) => {
-    pageScrollControllerRef.current?.handleKeyUp(key);
+    pageScrollController.handleKeyUp(key);
   };
   const onComposerPageScrollKeyUpStable = useStableCallback(onComposerPageScrollKeyUp);
   const onComposerPageScrollRelease = () => {
-    pageScrollControllerRef.current?.releaseActiveKey();
+    pageScrollController.releaseActiveKey();
   };
   const onComposerPageScrollReleaseStable = useStableCallback(onComposerPageScrollRelease);
   const scrollToEnd = (animated: boolean = false) => {
@@ -400,16 +422,8 @@ export function useTimelineFollow(input: TimelineFollowInput) {
   const attachTimelineViewport = (viewport: TimelineViewport) => {
     viewportRef.current = viewport;
     const unsubscribe = viewport.subscribe(handleNavigationStable);
-    const controller = createPageScrollController({
-      getContainer: () => viewport.scrollNode,
-      getScrollPaddingBottomPx: followStore.readComposerOverlayHeight,
-      onScrollStart: handlePageScrollStart,
-    });
-    pageScrollControllerRef.current = controller;
     return () => {
       unsubscribe();
-      controller.dispose();
-      if (pageScrollControllerRef.current === controller) pageScrollControllerRef.current = null;
       if (viewportRef.current === viewport) viewportRef.current = null;
       const scroll = visitScrollRef.current;
       scroll?.releaseAnchorScrollHold?.();

@@ -17,7 +17,7 @@ export function isBufferedProviderNotification(
   );
 }
 
-export const ENVIRONMENT_PAUSE_MESSAGE_PREFIX = "environment-pause:";
+const ENVIRONMENT_PAUSE_MESSAGE_PREFIX = "environment-pause:";
 
 export function isEnvironmentPauseMessageId(messageId: MessageId): boolean {
   return messageId.startsWith(ENVIRONMENT_PAUSE_MESSAGE_PREFIX);

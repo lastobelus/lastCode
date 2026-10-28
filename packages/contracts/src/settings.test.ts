@@ -866,6 +866,20 @@ describe("ClientSettings incoming message appearance", () => {
   );
 });
 
+describe("ClientSettings page scroll overlap", () => {
+  it("defaults to enabled and leaves omitted patches unchanged", () => {
+    expect(decodeClientSettings({}).pageScrollOverlapEnabled).toBe(true);
+    expect(decodeClientSettingsPatch({})).not.toHaveProperty("pageScrollOverlapEnabled");
+  });
+
+  it.each([false, true])("preserves and patches an explicit %s preference", (enabled) => {
+    const preference = { pageScrollOverlapEnabled: enabled };
+    expect(decodeClientSettings(preference)).toMatchObject(preference);
+    expect(encodeClientSettings(decodeClientSettings(preference))).toMatchObject(preference);
+    expect(decodeClientSettingsPatch(preference)).toEqual(preference);
+  });
+});
+
 describe("ClientSettings larger scrollbars", () => {
   it("is opt-in with defaults that clear the pane resize target", () => {
     const settings = decodeClientSettings({});
