@@ -9,12 +9,13 @@ import { dispatchPreviewAction, type PreviewAction } from "../components/preview
 import { isAppModalPage } from "../components/sidebar/mainAppLocation";
 import { createNewThreadHandler, resolveDefaultProjectRef } from "../hooks/useHandleNewThread";
 import { createScratchProjectActions } from "../hooks/useScratchProject";
-import { getClientSettings } from "../hooks/useSettings";
+import { getClientSettings, getClientSettingsHydratedSnapshot } from "../hooks/useSettings";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { selectProjectGroupingSettings } from "@t3tools/client-runtime/state/project-grouping";
 import { selectActiveRightPanel, useRightPanelStore } from "../rightPanelStore";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { buildSidebarProjectSnapshots } from "../sidebarProjectGrouping";
+import { resolveSidebarMode, shouldChooseNewThreadProject, useSidebarModeStore } from "../sidebarMode";
 import { readProjects, readThreadShell } from "../state/entities";
 import { environmentPresentations } from "../state/presentation";
 import { primaryEnvironmentIdAtom } from "../state/primaryEnvironment";
@@ -117,10 +118,14 @@ export function installChatRouteCommands(router: AnyRouter): () => void {
         void scratch.startScratchThread(environmentId);
       },
       "chat.new": (event) => {
-        // The boring sidebar's folders already show the context, so it starts in
-        // the current project like the legacy sidebar did.
-        const { boringSidebarEnabled, legacySidebarEnabled } = getClientSettings();
-        if (!boringSidebarEnabled && !legacySidebarEnabled && readProjectGroupCount() > 1) {
+        // Pre-hydration settings are the defaults, where the legacy sidebar is off.
+        const settings = getClientSettings();
+        const sidebarMode = resolveSidebarMode(
+          settings,
+          getClientSettingsHydratedSnapshot(),
+          useSidebarModeStore.getState().lastcodeHidden,
+        );
+        if (!settings.boringSidebarEnabled && shouldChooseNewThreadProject(sidebarMode, readProjectGroupCount())) {
           claim(event);
           openCommandPalette({ open: "new-thread-in" });
           return;
