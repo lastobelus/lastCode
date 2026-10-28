@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 import { createWorkspaceFocusController } from "./workspaceFocus";
 import { registerCommands } from "../shortcuts/dispatcher";
+import * as settings from "../hooks/useSettings";
 
 function setup() {
   const root = document.createElement("div");
@@ -63,6 +64,17 @@ describe("workspace area focus", () => {
     page("PageDown");
     expect(viewport.scrollTop).toBe(380);
     expect(document.activeElement).toBe(area.element);
+    const previousSettings = settings.getClientSettings();
+    using stack = new DisposableStack();
+    stack.defer(() => settings.__setClientSettingsForTests(previousSettings));
+    settings.__setClientSettingsForTests({
+      ...previousSettings,
+      pageScrollOverlapEnabled: false,
+    });
+    page("PageDown");
+    expect(viewport.scrollTop).toBe(480);
+    page("PageUp");
+    expect(viewport.scrollTop).toBe(380);
   });
 
   it("runs configured page-key shortcuts before the scrolling fallback", () => {

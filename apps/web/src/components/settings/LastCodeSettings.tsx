@@ -3,6 +3,7 @@ import { HardDriveIcon, PaletteIcon } from "lucide-react";
 import { LastCodeMessageAppearanceSettings } from "./LastCodeMessageAppearanceSettings";
 import { LastCodeHandoffSettings } from "./LastCodeHandoffSettings";
 import { LastCodeScrollbarSettings } from "./LastCodeScrollbarSettings";
+import { LastCodePageScrollSettings } from "./LastCodePageScrollSettings";
 import { LastCodeSidebarSettings } from "./LastCodeSidebarSettings";
 import { LastCodeImportSettings } from "./LastCodeImportSettings";
 import { LastCodeLocalUpdatesSettings } from "./LastCodeLocalUpdatesSettings";
@@ -35,6 +36,7 @@ export function LastCodeSettingsPanel() {
         <LastCodeScrollbarSettings />
         <LastCodeSidebarSettings />
       </SettingsSection>
+      <LastCodePageScrollSettings />
       <LastCodeEnvironmentIconSettings />
       <LastCodeImportSettings />
     </SettingsPageContainer>

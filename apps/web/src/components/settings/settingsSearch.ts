@@ -275,6 +275,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["width margin resize handle pane drag thumb"],
   },
   {
+    id: "page-scroll-overlap",
+    title: "Keep 1 line when scrolling page-at-a-time",
+    to: "/settings/lastcode",
+    searchTerms: ["page up page down pageup pagedown overlap scrolling composer conversation"],
+  },
+  {
     id: "incoming-message-style",
     title: "Incoming message style",
     to: "/settings/lastcode",

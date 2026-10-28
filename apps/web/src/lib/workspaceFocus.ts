@@ -3,6 +3,7 @@ import { dismissContextMenu } from "../contextMenuFallback";
 import { useRightPanelStore } from "../rightPanelStore";
 import { registerCommands } from "../shortcuts/dispatcher";
 import { getTimelinePageScrollDistancePx } from "../components/chat/pageScrollController";
+import { getClientSettings } from "../hooks/useSettings";
 
 const AREA_SELECTOR = "[data-workspace-area]";
 const FOCUS_BOUNDARY_SELECTOR =
@@ -139,6 +140,7 @@ export function createWorkspaceFocusController(doc: Document) {
         ? getTimelinePageScrollDistancePx(
             viewport,
             area.parentElement?.querySelector("[data-chat-composer-overlay]") ?? null,
+            getClientSettings().pageScrollOverlapEnabled,
           )
         : viewport.clientHeight * 0.9;
     event.preventDefault();
