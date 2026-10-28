@@ -19,6 +19,7 @@ import { createWorktreeSuspensionStore } from "@t3tools/shared/worktreeSuspensio
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
@@ -2157,11 +2158,91 @@ it.live("finishes separate recovery when its published thread is deleted before 
   ),
 );
 
-it.live("bounds and rotates automatic candidates past an inconsistent shared checkout", () =>
+it.live(
+  "finishes every automatic candidate past inconsistent and missing checkouts in one pass",
+  () =>
+    realGit((f) =>
+      Effect.gen(function* () {
+        const h = yield* harness(f, {
+          cleanupThreads: true,
+          settings: {
+            ...automaticSettings,
+            worktreeSuspension: {
+              ...automaticSettings.worktreeSuspension,
+              scopes: { subagents: false, untouchedChildren: false, otherThreads: true },
+            },
+          },
+        });
+        const awaitSuspended = (entries: readonly Registry.CheckoutAuthority[]) =>
+          Stream.fromQueue(h.updates).pipe(
+            Stream.filter(
+              (record) =>
+                entries.some((entry) => entry.checkoutId === record.checkoutId) &&
+                (record.blockedReason !== null ||
+                  (record.summary.state === "suspended" &&
+                    record.operation === undefined &&
+                    record.pendingProjection === undefined)),
+            ),
+            Stream.take(entries.length),
+            Stream.runCollect,
+            Effect.tap((records) =>
+              Effect.sync(() => {
+                expect(records.map((record) => record.checkoutId).sort()).toEqual(
+                  entries.map((entry) => entry.checkoutId).sort(),
+                );
+                for (const record of records) expect(record.blockedReason).toBeNull();
+              }),
+            ),
+          );
+        yield* h.service.previewSuspend({ threadId: firstId });
+        const original = (yield* h.registry.list)[0]!;
+        h.threads.set(secondId, {
+          ...h.threads.get(secondId)!,
+          worktreeSuspension: { ...original.summary, generation: 99 },
+        });
+        for (let i = 0; i < 5; i++) {
+          const id = ThreadId.make(`fixture:missing-${i}`);
+          h.threads.set(
+            id,
+            shell(id, NodePath.join(NodePath.dirname(f.workspace), `missing-${i}`)),
+          );
+        }
+        const paths: string[] = [];
+        for (let i = 0; i < 6; i++) {
+          const name = `zz-candidate-${i}`;
+          const workspace = NodePath.join(NodePath.dirname(f.workspace), name);
+          yield* Effect.promise(() =>
+            git(f.repository, "worktree", "add", "-b", name, workspace, "HEAD"),
+          );
+          const id = ThreadId.make(`fixture:${name}`);
+          h.threads.set(id, { ...shell(id, workspace), branch: name });
+          paths.push(workspace);
+        }
+        yield* h.service.sweep;
+        const saved = (yield* h.registry.list).filter((record) => paths.includes(record.path));
+        expect(saved).toHaveLength(6);
+        yield* awaitSuspended(saved);
+        expect(saved.every((record) => record.summary.state === "suspended")).toBe(true);
+        yield* Effect.promise(async () => {
+          for (const workspace of paths)
+            await expect(NodeFSP.lstat(workspace)).rejects.toMatchObject({ code: "ENOENT" });
+        });
+        expect(
+          (yield* h.registry.list).find((record) => record.checkoutId === original.checkoutId)!
+            .summary.state,
+        ).toBe("active");
+      }),
+    ),
+);
+
+it.live("waits for each automatic save and ignores overlapping sweep requests", () =>
   realGit((f) =>
     Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
       const h = yield* harness(f, {
         cleanupThreads: true,
+        pauseCaptured: { entered, release },
         settings: {
           ...automaticSettings,
           worktreeSuspension: {
@@ -2170,60 +2251,24 @@ it.live("bounds and rotates automatic candidates past an inconsistent shared che
           },
         },
       });
-      const awaitSuspended = (entries: readonly Registry.CheckoutAuthority[]) =>
-        Stream.fromQueue(h.updates).pipe(
-          Stream.filter(
-            (record) =>
-              entries.some((entry) => entry.checkoutId === record.checkoutId) &&
-              (record.blockedReason !== null ||
-                (record.summary.state === "suspended" &&
-                  record.operation === undefined &&
-                  record.pendingProjection === undefined)),
-          ),
-          Stream.take(entries.length),
-          Stream.runCollect,
-          Effect.tap((records) =>
-            Effect.sync(() => {
-              expect(records.map((record) => record.checkoutId).sort()).toEqual(
-                entries.map((entry) => entry.checkoutId).sort(),
-              );
-              for (const record of records) expect(record.blockedReason).toBeNull();
-            }),
-          ),
-        );
-      yield* h.service.previewSuspend({ threadId: firstId });
-      const original = (yield* h.registry.list)[0]!;
-      h.threads.set(secondId, {
-        ...h.threads.get(secondId)!,
-        worktreeSuspension: { ...original.summary, generation: 99 },
-      });
-      const paths: string[] = [];
-      for (let i = 0; i < 6; i++) {
-        const name = `zz-candidate-${i}`;
-        const workspace = NodePath.join(NodePath.dirname(f.workspace), name);
-        yield* Effect.promise(() =>
-          git(f.repository, "worktree", "add", "-b", name, workspace, "HEAD"),
-        );
-        const id = ThreadId.make(`fixture:${name}`);
-        h.threads.set(id, { ...shell(id, workspace), branch: name });
-        paths.push(workspace);
-      }
-      yield* h.service.sweep;
-      const first = (yield* h.registry.list).filter((record) => paths.includes(record.path));
-      expect(first).toHaveLength(3);
-      yield* awaitSuspended(first);
-      yield* h.service.sweep;
-      const rest = (yield* h.registry.list).filter(
-        (record) =>
-          paths.includes(record.path) &&
-          !first.some((prior) => prior.checkoutId === record.checkoutId),
+      const workspace = NodePath.join(NodePath.dirname(f.workspace), "zz-next-save");
+      yield* Effect.promise(() =>
+        git(f.repository, "worktree", "add", "-b", "next-save", workspace, "HEAD"),
       );
-      expect(rest).toHaveLength(3);
-      yield* awaitSuspended(rest);
+      const id = ThreadId.make("fixture:next-save");
+      h.threads.set(id, { ...shell(id, workspace), branch: "next-save" });
+      const pass = yield* Effect.forkChild(h.service.sweep);
+      yield* Deferred.await(entered);
+      yield* h.service.sweep;
+      expect((yield* h.registry.list).map((record) => record.path)).toEqual([f.workspace]);
       expect(
-        (yield* h.registry.list).find((record) => record.checkoutId === original.checkoutId)!
-          .summary.state,
-      ).toBe("active");
+        yield* Effect.promise(() => NodeFSP.stat(workspace).then((entry) => entry.isDirectory())),
+      ).toBe(true);
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(pass);
+      const records = yield* h.registry.list;
+      expect(records).toHaveLength(2);
+      expect(records.every((record) => record.summary.state === "suspended")).toBe(true);
     }),
   ),
 );

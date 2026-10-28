@@ -1,8 +1,5 @@
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
-import {
-  dependencyActivitySnapshot,
-  observeDependencyActivity,
-} from "@t3tools/shared/dependencyActivity";
+import { observeDependencyActivity } from "@t3tools/shared/dependencyActivity";
 import {
   createGeneratedBuildStage,
   generatedBuildActivity,
@@ -2939,6 +2936,61 @@ describe("saved workspace retention across cleanup resources", () => {
 });
 
 describe("automatic cleanup churn", () => {
+  it.live("does not start another pass for provider updates after cleanup becomes idle", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture();
+        yield* fixture.enableDependencies;
+        fixture.setDependencyRetention(90);
+        const send = yield* Deferred.make<void>();
+        const handled = yield* Deferred.make<void>();
+        yield* fixture.activate(
+          Stream.fromEffect(Deferred.await(send)).pipe(
+            Stream.flatMap(() =>
+              Stream.make({
+                id: EventId.make("unrelated-provider-stop"),
+                threadId: ThreadId.make("unrelated-thread"),
+                occurredAt: fixture.at(0),
+                type: "provider-session.updated" as const,
+                payload: {
+                  id: ProviderSessionId.make("unrelated-session"),
+                  driver: ProviderDriverKind.make("codex"),
+                  providerInstanceId: ProviderInstanceId.make("codex"),
+                  status: "stopped" as const,
+                  cwd: fixture.repo,
+                  model: null,
+                  capabilities: CodexProviderCapabilitiesV2,
+                  createdAt: fixture.at(0),
+                  updatedAt: fixture.at(0),
+                  lastError: null,
+                },
+              }),
+            ),
+            Stream.ensuring(Deferred.succeed(handled, undefined)),
+          ),
+        );
+        yield* fixture.service.reports.pipe(
+          Stream.filter((report) => report !== null),
+          Stream.take(1),
+          Stream.runDrain,
+        );
+        yield* fixture.service.drain;
+        const calls = fixture.resourceGitCalls.length;
+        yield* Deferred.succeed(send, undefined);
+        yield* Deferred.await(handled);
+        yield* fixture.service.drain;
+        expect(fixture.resourceGitCalls).toHaveLength(calls);
+        const audit = yield* fixture.fs.readFileString(
+          `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+        );
+        expect(
+          audit.split("\n").filter((line) => line.includes('"event":"sweep-finish"')),
+        ).toHaveLength(1);
+        expect(fixture.suspensionSweeps()).toBe(1);
+      }),
+    ),
+  );
+
   it.live.each(["provider burst", "settings burst", "deletion burst", "manual request"] as const)(
     "coalesces a %s while an automatic pass is running",
     (change) =>
@@ -2975,7 +3027,10 @@ describe("automatic cleanup churn", () => {
               ? ({
                   ...base,
                   type: "thread.deleted",
-                  payload: { ...shell(), deletedAt: fixture.at(index) },
+                  payload: {
+                    ...shell({ worktreePath: fixture.worktree }),
+                    deletedAt: fixture.at(index),
+                  },
                 } as OrchestrationV2DomainEvent)
               : {
                   ...base,
@@ -3043,14 +3098,28 @@ describe("automatic cleanup churn", () => {
       ),
   );
 
-  it.effect("prioritizes a deleted worktree outside the next four-root rotation", () =>
+  it.effect("targets deletion cleanup without rechecking unrelated worktrees", () =>
     runCleanupTest(
       Effect.gen(function* () {
         yield* TestClock.setTime(NOW_MS);
+        const fs = yield* FileSystem.FileSystem;
+        const directories: string[] = [];
         const fixture = yield* cleanupFixture({
           ...DEFAULT_SERVER_SETTINGS.storageCleanup,
           worktreeAfterDays: null,
           worktreeOnDelete: true,
+        }).pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            readDirectory: (directory, options) => {
+              directories.push(directory);
+              return fs.readDirectory(directory, options);
+            },
+          }),
+        );
+        yield* fixture.enableDependencies;
+        fixture.setSettings({
+          storageCleanup: { ...fixture.settings.storageCleanup, worktreeOnDelete: true },
         });
         const owners = [shell({ worktreePath: fixture.worktree, branch: "feature" })];
         for (let index = 0; index < 7; index++) {
@@ -3088,11 +3157,13 @@ describe("automatic cleanup churn", () => {
         expect(checkoutEntries(initial)).toContainEqual(
           expect.objectContaining({
             path: target.worktreePath,
-            reason: "Automatic inspection deferred to a later scheduled pass",
+            outcome: "kept",
           }),
         );
         fixture.setThreads(owners.filter((owner) => owner.id !== target.id));
         fixture.setDeletedThreads([deleted]);
+        expect(directories).toContain(fixture.config.worktreesDir);
+        directories.length = 0;
         yield* Deferred.succeed(sendDeletion, undefined);
         const report = yield* Queue.take(reports);
         yield* fixture.service.drain;
@@ -3105,13 +3176,16 @@ describe("automatic cleanup churn", () => {
         );
         expect(yield* fixture.fs.exists(target.worktreePath!)).toBe(false);
         expect(yield* fixture.fs.exists(fixture.worktree)).toBe(true);
+        expect(checkoutEntries(report)).toHaveLength(1);
         expect(fixture.suspensionSweeps()).toBe(1);
+        expect(directories).not.toContain(fixture.config.worktreesDir);
+        expect(directories).not.toContain(fixture.worktree);
       }),
     ),
   );
 
   it.effect.each(["kept", "unavailable"] as const)(
-    "bounds distinct automatic roots, reuses them for builds, rotates %s roots, and leaves manual complete",
+    "inspects every distinct automatic root once despite %s roots and retains fresh manual checks",
     (outcome) =>
       runCleanupTest(
         Effect.gen(function* () {
@@ -3174,19 +3248,11 @@ describe("automatic cleanup churn", () => {
                 )
                 .map((call) => call.cwd),
             );
-          const usageBefore = new Map(roots.map((cwd) => [cwd, dependencyActivitySnapshot(cwd)]));
-          const buildsBefore = new Map(
-            roots.map((cwd) => [cwd, generatedBuildActivity(cwd, "apps/web/dist")]),
-          );
           yield* fixture.activate();
           yield* Queue.take(reports);
           yield* fixture.service.drain;
           const first = observedRoots();
-          for (const cwd of roots.filter((root) => !first.has(root))) {
-            expect(dependencyActivitySnapshot(cwd)).toBe(usageBefore.get(cwd));
-            expect(generatedBuildActivity(cwd, "apps/web/dist")).toEqual(buildsBefore.get(cwd));
-          }
-          expect([...first]).toHaveLength(4);
+          expect(first).toEqual(new Set(roots));
           expect(first.has(roots[1]!)).toBe(true);
           const firstBuildRoots = new Set(
             fixture.resourceGitCalls
@@ -3202,7 +3268,7 @@ describe("automatic cleanup churn", () => {
           yield* Queue.take(reports);
           yield* fixture.service.drain;
           const second = observedRoots();
-          expect(second.size).toBe(4);
+          expect(second).toEqual(new Set(roots));
           expect(second.has(roots[1]!)).toBe(true);
           expect(new Set([...first, ...second])).toEqual(new Set(roots));
           fixture.resourceGitCalls.length = 0;
