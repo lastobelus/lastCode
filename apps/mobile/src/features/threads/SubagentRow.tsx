@@ -17,7 +17,7 @@ import { useEnvironmentServerConfig, useProject, useThreadShell } from "../../st
 import { useActionEnvironmentPause } from "./action-resume-state";
 import { subagentCardDetail } from "./subagent-card-presentation";
 import { SUBAGENT_TONE_TEXT_CLASS, SubagentStatusDot } from "./SubagentStatusDot";
-import { resolveSubagentRowPresentation } from "./threadAgentsPresentation";
+import { resolveSubagentRowPresentation, subagentThreadTarget } from "./threadAgentsPresentation";
 
 type SubagentRowSubagent = Pick<
   OrchestrationV2Subagent,
@@ -44,6 +44,11 @@ export function SubagentRow(props: {
 }) {
   const presentation = resolveSubagentRowPresentation(props.subagent, props.canOpenRemote);
   const detail = subagentCardDetail(presentation.detail);
+  const childTarget = subagentThreadTarget(
+    props.subagent,
+    props.environmentId,
+    () => props.canOpenRemote === true,
+  );
   return (
     <View className="flex-row gap-3">
       <View className="h-5 justify-center">
@@ -85,10 +90,10 @@ export function SubagentRow(props: {
           ) : null}
         </View>
         <SubagentMetadata environmentId={props.environmentId} subagent={props.subagent} />
-        {props.subagent.origin === "app_owned" && props.subagent.childThreadId !== null ? (
+        {props.subagent.origin === "app_owned" && childTarget !== null ? (
           <ChildActionWait
-            environmentId={props.environmentId}
-            childThreadId={props.subagent.childThreadId}
+            environmentId={childTarget.environmentId}
+            childThreadId={childTarget.threadId}
           />
         ) : null}
         {detail ? (
