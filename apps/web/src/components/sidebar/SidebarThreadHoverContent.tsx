@@ -79,6 +79,11 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
     );
   const fallbackThreadStatus = useLastCodeThreadStatus(props.thread);
   const threadStatus = props.threadStatus === undefined ? fallbackThreadStatus : props.threadStatus;
+  const watchedPullRequests = props.thread.pullRequests.filter((pr) => pr.watch !== undefined);
+  const statusLabel =
+    threadStatus?.label === "Waiting" && watchedPullRequests.length > 0
+      ? `Watching ${watchedPullRequests.length === 1 ? "PR" : "PRs"} ${watchedPullRequests.map((pr) => `#${pr.number}`).join(", ")}`
+      : threadStatus?.label;
   const actionPresentation =
     props.thread.actionResume?.outcome === "running"
       ? actionRunningPresentation(props.thread.actionResume)
@@ -199,7 +204,7 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
                 <span className={cn("size-1.5 rounded-full", threadStatus.dotClass)} />
               )}
             </span>
-            <div className="min-w-0 truncate">{threadStatus.label}</div>
+            <div className="min-w-0 truncate">{statusLabel}</div>
           </div>
         ) : null}
         {actionPresentation ? (
