@@ -1,6 +1,7 @@
 import {
   EnvironmentId,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
   type ActionResumeState,
@@ -96,12 +97,11 @@ it.each([
               label: "Remote environment",
             },
             providerInstanceId: ProviderInstanceId.make("codex"),
-            driver: "codex",
+            driver: ProviderDriverKind.make("codex"),
             model: null,
             title: "Review changes",
             prompt: "Review changes",
             status: "waiting",
-            progress: null,
             result: null,
           }}
         />,
