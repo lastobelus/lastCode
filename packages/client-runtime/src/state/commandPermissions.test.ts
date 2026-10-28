@@ -738,6 +738,8 @@ it.effect.each([
   WS_METHODS.serverPauseEnvironment,
   WS_METHODS.serverRetryEnvironmentPause,
   WS_METHODS.serverResumeEnvironment,
+  WS_METHODS.actionResumeResume,
+  WS_METHODS.actionResumeDiscard,
 ] as const)("checks destination grants for %s", (tag) =>
   Effect.scoped(
     Effect.gen(function* () {

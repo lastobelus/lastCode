@@ -43,6 +43,8 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.serverPauseEnvironment]: AuthOrchestrationOperateScope,
   [WS_METHODS.serverRetryEnvironmentPause]: AuthOrchestrationOperateScope,
   [WS_METHODS.serverResumeEnvironment]: AuthOrchestrationOperateScope,
+  [WS_METHODS.actionResumeResume]: AuthOrchestrationOperateScope,
+  [WS_METHODS.actionResumeDiscard]: AuthOrchestrationOperateScope,
   [WS_METHODS.pullRequestsRunAction]: AuthSourceControlWriteScope,
   [WS_METHODS.pullRequestsUpdate]: AuthSourceControlWriteScope,
   [WS_METHODS.pullRequestsComment]: AuthSourceControlWriteScope,
