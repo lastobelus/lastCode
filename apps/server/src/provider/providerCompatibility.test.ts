@@ -14,6 +14,7 @@ import * as ProviderRegistry from "./ProviderRegistry.ts";
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
 import * as ProviderInstanceRegistry from "./ProviderInstanceRegistry.ts";
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
+import { ProviderAdapterCapabilitiesError } from "@t3tools/provider-core/server/ProviderAdapter";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "@t3tools/provider-core/server/maintenanceResolver";
 import * as Schema from "effect/Schema";
 import {
@@ -240,7 +241,13 @@ it.effect("a remote policy refresh preserves a newer health result on the regist
             makeManualOnlyProviderMaintenanceCapabilities({ provider: driver, packageName: null }),
           ),
       },
-      orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+      orchestrationAdapter: {
+        instanceId: provider.instanceId,
+        driver,
+        getCapabilities: () => Effect.fail(new ProviderAdapterCapabilitiesError({ driver })),
+        planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
+        openSession: () => Effect.die("Compatibility tests do not start provider sessions"),
+      },
       textGeneration: {} as ProviderInstance["textGeneration"],
     };
     const refresh = Deferred.succeed(started, undefined).pipe(

@@ -18,6 +18,14 @@ Ordinary coding tasks need no T3 tools.
 - In your reply, a thread's first mention is its \`link\` verbatim, from \`t3_thread_read\` or \`t3_thread_list\`; it carries the owning environment. Never build a link, or use a plain title or bare id. No link retrievable: say so.
 - A secret: call \`request_secret\` yourself. Pass its \`secretRef\` to a T3 tool, or use \`delivery: "file"\` for a shell command. Never ask in chat or invent one. When asked only to schedule, \`schedule_task\` without running its prompt.
 - T3 tools may load late. Try the name once before you call it absent.`,
+  `- Whoever you brief is a peer. A thread or subagent you start in this project begins with the same T3 instructions and AGENTS.md that you have, and is as careful as you are. On your provider it also shares your system prompt and skills; on another provider it has that provider's own, so spell out anything you rely on that only your harness supplies. Leave out what the recipient already has and anything you would do without being told. Use the brief for what only you know: the goal and what it serves, what you have already learned or ruled out, what makes the task hard, and what to send back. It cannot see this conversation or the arguments of the call that starts it, so a value you set there that it must act on, such as the base branch, still goes in the brief.`,
+  `- For now, delegated children leave resumable Project Actions to you. Mediate each request in order:
+  1. Receive it as the child's final response and recorded task result, through the async completion notification or a terminal \`delegate_task\` wait return. Never poll; a message from a still-running child is not yet a handoff. Keep one outstanding Action per parent thread and hold further requests in your handoff record.
+  2. Protect this parent thread once per workflow: read and record \`autoSettleDisabledAt\` with \`t3_thread_read\`. If it is already set, keep that timestamp as your receipt, skip setup, and restore nothing you did not change. Otherwise have the user disable automatic settlement from this thread's menu or use a browser setup they already authorized, then read back and record the timestamp. Reuse that receipt for later requests; if protection changes, respect the user's choice and report the blocker. Without a supported route, add no tool or database workaround.
+  3. Verify the target. An eligible listing proves neither command nor target: check the saved command, its opt-in, cwd, environment, and worktree-local package or build selection against the child's checkout. If an isolated target cannot be prepared, use a shared checkout with serialized changes, or report the blocker. Never substitute your own default Action, run its command in a shell, or rebind yourself to the child's worktree.
+  4. Launch the Action and end your turn.
+  5. On its result, \`t3_thread_send\` to that child with \`mode: "queue"\` and a stable \`clientRequestId\`, never \`auto\` or \`steer\`. Claim tracking only once the receipt returns a \`taskId\`; report a missing one instead of resending.
+  6. When the workflow ends, restore only a setting changed for this workflow, through the user or an authorized setup route, and only if the timestamp still matches your receipt and later user choices allow it. Otherwise leave it and say why.`,
   `### Find mentioned threads
 
 When the user mentions or pastes another thread, finding it is your job; they should not have to track which environment owns it. Thread IDs are opaque. UI threads use bare UUIDs and agent-launched threads can use IDs such as \`mcp:<uuid>\`; the prefix is part of the ID, so pass the full ID unchanged.
@@ -40,7 +48,7 @@ ${T3_CODE_ORCHESTRATION_SECTIONS.join("\n\n")}
 
 export const T3_CODE_BROWSER_TOOL_INSTRUCTIONS = `
 
-## T3 Code collaborative browser
+## T3 Code browser
 
 You are running inside T3 Code. The \`t3-code\` MCP server is the product-native collaborative browser shared with the user. When it exposes \`preview_*\` tools, prefer those tools for browser navigation, inspection, interaction, screenshots, and recordings.
 
@@ -97,10 +105,7 @@ export function t3AcpPromptWithInstructions(input: {
       ? T3_CODE_ACP_PLAN_MODE_INSTRUCTIONS
       : T3_CODE_ACP_DEFAULT_MODE_INSTRUCTIONS,
     ...(input.state.hasT3Mcp
-      ? [
-          T3_CODE_MCP_INSTRUCTIONS,
-          T3_CODE_ACP_MCP_FALLBACK_INSTRUCTIONS,
-        ]
+      ? [T3_CODE_MCP_INSTRUCTIONS, T3_CODE_ACP_MCP_FALLBACK_INSTRUCTIONS]
       : []),
   ];
   return `<t3_code_instructions>\n${instructions.join("\n\n")}\n</t3_code_instructions>\n\n<user_request>\n${input.prompt}\n</user_request>`;

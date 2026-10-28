@@ -3,7 +3,7 @@ import { actionResultPresentation, actionRunningPresentation } from "@t3tools/sh
 import { CircleAlertIcon, TerminalIcon } from "lucide-react";
 import { memo, useEffect, useState } from "react";
 
-import { formatWorkingDurationLabel } from "../Sidebar.logic";
+import { formatWorkingDurationLabel } from "@t3tools/client-runtime/state/models";
 import { Button } from "../ui/button";
 import { cn } from "~/lib/utils";
 import { RotateCcwClockIcon } from "../icons/RotateCcwClockIcon";
@@ -114,6 +114,7 @@ function ActionElapsed({ startedAt }: { readonly startedAt: string }) {
   const startedMs = Date.parse(startedAt);
   const [now, setNow] = useState(Date.now);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- owns a browser interval while mounted to refresh the elapsed action time and releases it on unmount
   useEffect(() => {
     if (Number.isNaN(startedMs)) return;
     const intervalId = window.setInterval(() => setNow(Date.now()), 1_000);

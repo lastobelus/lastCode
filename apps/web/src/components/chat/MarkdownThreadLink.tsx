@@ -32,12 +32,19 @@ export function MarkdownThreadLink(props: {
       { threadId: linkedThreadId, environmentId: linkedEnvironmentId, version, legacyThreadId },
       (threadId, environmentId) => {
         const owner = environmentId ?? messageEnvironmentId;
-        return get(environmentThreadShells.threadShellAtom(scopeThreadRef(owner, threadId))) ?? undefined;
+        return (
+          get(environmentThreadShells.threadShellAtom(scopeThreadRef(owner, threadId))) ?? undefined
+        );
       },
     );
     if (resolved.value !== undefined || version === 2) return resolved;
     const target = guessThreadLinkRef(
-      { environmentId: linkedEnvironmentId ?? null, threadId: linkedThreadId, version, legacyThreadId },
+      {
+        environmentId: linkedEnvironmentId ?? null,
+        threadId: linkedThreadId,
+        version,
+        legacyThreadId,
+      },
       get(environmentThreadShells.threadRefsAtom),
     );
     return target === null

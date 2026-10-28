@@ -44,7 +44,7 @@
         "docs/user/thread-sidebar.md",
         "apps/web/src/components/thread-annotation/",
         "apps/web/src/components/LastCodeSidebar.tsx",
-        "apps/server/src/orchestration-v2/ThreadLifecycleService.ts",
+        "apps/server/src/orchestration-v2/Orchestrator.ts",
         "apps/server/src/orchestration-v2/ProjectionStore.ts",
         "packages/contracts/src/orchestrationV2.ts",
         "apps/web/src/components/sidebar/useLastCodeThreadAnnotations.tsx",

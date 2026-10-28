@@ -168,6 +168,8 @@ export const ActionResumeState = Schema.Struct({
   terminalId: TrimmedNonEmptyString,
   outcome: ActionResumeOutcome,
   delivery: ActionResumeDelivery,
+  /** Retains automatic delivery intent across restart after environment Resume. */
+  heldByEnvironmentPause: Schema.optional(Schema.Boolean),
   startedAt: IsoDateTime,
   finishedAt: Schema.NullOr(IsoDateTime),
   exitCode: Schema.NullOr(Schema.Int),
@@ -181,10 +183,54 @@ export const ActionResumeState = Schema.Struct({
 });
 export type ActionResumeState = typeof ActionResumeState.Type;
 
+export const ActionResumeStatus = Schema.Struct({
+  state: Schema.Literals([
+    "running",
+    "environment_paused",
+    "waiting_for_input",
+    "pending_delivery",
+    "follow_up_queued",
+    "follow_up_active",
+    "follow_up_ended",
+    "follow_up_dispatched",
+    "attention_required",
+    "interrupted",
+    "disposed",
+  ]),
+  environmentPaused: Schema.Boolean,
+  automaticResumeArmed: Schema.Boolean,
+  attentionRequired: Schema.Boolean,
+});
+export type ActionResumeStatus = typeof ActionResumeStatus.Type;
+
+export const ActionRunSummary = Schema.Struct({
+  runId: TrimmedNonEmptyString,
+  actionId: TrimmedNonEmptyString,
+  actionName: TrimmedNonEmptyString,
+  outcome: ActionResumeOutcome,
+  delivery: ActionResumeDelivery,
+  startedAt: IsoDateTime,
+  finishedAt: Schema.NullOr(IsoDateTime),
+  exitCode: Schema.NullOr(Schema.Int),
+  exitSignal: Schema.NullOr(Schema.Int),
+  status: ActionResumeStatus,
+  report: Schema.optional(
+    Schema.Struct({
+      outcome: ActionReportOutcome,
+      summary: ActionReportShortText,
+      untrusted: Schema.Literal(true),
+    }),
+  ),
+});
+export type ActionRunSummary = typeof ActionRunSummary.Type;
+
 export const ActionRunInspection = Schema.Struct({
   runId: TrimmedNonEmptyString,
   actionName: TrimmedNonEmptyString,
   lifecycleOutcome: ActionResumeOutcome,
+  delivery: ActionResumeDelivery,
+  heldByEnvironmentPause: Schema.optional(Schema.Boolean),
+  status: ActionResumeStatus,
   exitCode: Schema.NullOr(Schema.Int),
   exitSignal: Schema.NullOr(Schema.Int),
   outputTail: Schema.String.check(Schema.isMaxLength(12_000)),
@@ -207,5 +253,6 @@ export class ActionResumeError extends Schema.TaggedError<ActionResumeError>()(
       "internal_error",
     ]),
     message: Schema.String,
+    cause: Schema.optionalKey(Schema.Defect()),
   },
 ) {}

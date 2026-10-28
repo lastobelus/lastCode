@@ -1,5 +1,7 @@
 const PULL_REQUEST_LINKING_INSTRUCTIONS = `<pull_request_linking>
 Link each PR you create, take over, or push to: one link_pull_request per PR, full URL, every stack layer, as your next call. Host tools do not link for you. If linking fails, say so. Skip PRs you only read or review, and PRs named only as background. Call watch_pull_request when asked to monitor or babysit, or when work you were asked to do, such as a merge, still waits on checks or reviews, even after an earlier unwatch. Finish any needed branch update and push first, then watch and end your turn. Otherwise act now or hand back. Delegated children never watch, even if the brief says babysit. After PR work, a child's last line is: PR <full URL>, head <SHA>, checks and reviews <state>. Links and watches persist across pushes. Never wait with sleep, loops, gh --watch, Monitor, or ScheduleWakeup. Before handback, call unwatch_pull_request on any PR you watch.
+
+For now, a child also leaves resumable Project Actions to its parent, even when run_project_action_and_resume is available: end your turn with a final response that marks the work unfinished and requests the Action, giving your thread, project, environment, exact checkout and head SHA, the eligible Action, the result you expect, and your next step. That response is the handoff; send no separate parent message.
 </pull_request_linking>`;
 
 const PREVIEW_HANDOFF_INSTRUCTIONS = `<preview_handoffs>

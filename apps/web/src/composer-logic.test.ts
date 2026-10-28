@@ -22,6 +22,7 @@ import {
   extendReplacementRangeForTrailingSpace,
   formatAssistantCitationForComposer,
   isPathSuggestionCurrent,
+  parseThreadAnnotationSlashCommand,
   replaceTextRange,
 } from "./composer-logic";
 import { carryDisplacedCustomAnswerIntoPrompt } from "./pendingUserInput";
@@ -546,5 +547,26 @@ describe("extendReplacementRangeForTrailingSpace", () => {
     expect(extendReplacementRangeForTrailingSpace("@firest", 3, "@file ")).toBe(3);
     expect(extendReplacementRangeForTrailingSpace("@fi rest", 3, "@file")).toBe(3);
     expect(extendReplacementRangeForTrailingSpace("@fi", 3, "@file ")).toBe(3);
+  });
+});
+
+describe("parseThreadAnnotationSlashCommand", () => {
+  it("opens the editor for a bare command", () => {
+    expect(parseThreadAnnotationSlashCommand(" /annotate ")).toEqual({ kind: "open-editor" });
+  });
+
+  it("captures inline and multiline markdown", () => {
+    expect(parseThreadAnnotationSlashCommand("/annotate # Follow up\n- [ ] ship it")).toEqual({
+      kind: "save",
+      body: "# Follow up\n- [ ] ship it",
+    });
+  });
+
+  it("is case insensitive but requires a command boundary", () => {
+    expect(parseThreadAnnotationSlashCommand("/ANNOTATE #tag")).toEqual({
+      kind: "save",
+      body: "#tag",
+    });
+    expect(parseThreadAnnotationSlashCommand("/annotated nope")).toBeNull();
   });
 });

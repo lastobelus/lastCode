@@ -3,12 +3,64 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { PreviewEvent, PreviewOpenInput } from "./preview.ts";
 
-import { PreviewAutomationHost, PreviewAutomationStatus } from "./previewAutomation.ts";
+import {
+  PreviewAutomationHost,
+  PreviewAutomationOpenInput,
+  PreviewAutomationMcpOpenInput,
+  PreviewAutomationStatus,
+} from "./previewAutomation.ts";
 
+const decodeMcpOpenInput = Schema.decodeUnknownSync(PreviewAutomationMcpOpenInput);
+const decodeOpenInput = Schema.decodeUnknownSync(PreviewAutomationOpenInput);
 const decodeAutomationHost = Schema.decodeUnknownSync(PreviewAutomationHost);
 const decodeAutomationStatus = Schema.decodeUnknownSync(PreviewAutomationStatus);
 
+describe("PreviewAutomationOpenInput", () => {
+  it("accepts either an explicit profile ID or an exact name", () => {
+    expect(decodeOpenInput({ profileId: "work-id" })).toEqual({ profileId: "work-id" });
+    expect(decodeOpenInput({ profileName: "Work" })).toEqual({ profileName: "Work" });
+  });
+
+  it("rejects conflicting profile selectors and blank selectors", () => {
+    expect(() => decodeOpenInput({ profileId: "work-id", profileName: "Work" })).toThrow();
+    expect(() => decodeOpenInput({ profileName: " " })).toThrow();
+    expect(() => decodeOpenInput({ profileId: "" })).toThrow();
+  });
+
+  it("accepts an own-thread published document target", () => {
+    expect(
+      decodeMcpOpenInput({ target: { kind: "published-document", path: "report.html" } }),
+    ).toEqual({
+      target: { kind: "published-document", path: "report.html" },
+    });
+  });
+
+  it("rejects ambiguous or desktop-hosted published document targets", () => {
+    const target = { kind: "published-document", path: "report.html" };
+    expect(() => decodeMcpOpenInput({ profileId: "work", profileName: "Work" })).toThrow();
+    expect(() => decodeMcpOpenInput({ tabId: "tab", reuseExistingTab: false })).toThrow();
+    expect(() => decodeMcpOpenInput({ target, url: "https://example.com" })).toThrow();
+    expect(() => decodeMcpOpenInput({ target, browserHost: "desktop" })).toThrow();
+    expect(() =>
+      decodeMcpOpenInput({ target: { kind: "published-document", path: " " } }),
+    ).toThrow();
+    expect(() =>
+      decodeMcpOpenInput({ target: { kind: "attachment", path: "report.html" } }),
+    ).toThrow();
+  });
+});
+
 describe("PreviewAutomationHost", () => {
+  it("advertises native profile operations directly", () => {
+    expect(
+      decodeAutomationHost({
+        clientId: "server-browser",
+        environmentId: "environment-1",
+        supportedOperations: ["profiles", "openWithProfile"],
+      }),
+    ).toMatchObject({ supportedOperations: ["profiles", "openWithProfile"] });
+  });
+
   it("accepts legacy hosts and current operation advertisements", () => {
     expect(decodeAutomationHost({ clientId: "legacy", environmentId: "environment-1" })).toEqual({
       clientId: "legacy",

@@ -1,3 +1,4 @@
+import { threadShellIsVisible } from "@t3tools/client-runtime/state/models";
 import type { OlderSettledScope } from "@t3tools/client-runtime/state/threads";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { useMemo, useSyncExternalStore } from "react";
@@ -100,7 +101,7 @@ export function useThreadListV2(input: {
   });
   const layout = buildThreadListV2Items({
     pendingOrder: input.pendingOrder,
-    threads: threads.filter((thread) => thread.archivedAt === null),
+    threads: threads.filter(threadShellIsVisible),
     environmentId: input.environmentId,
     projectRefs: input.projectRefs,
     searchQuery: input.searchQuery,
