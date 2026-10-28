@@ -15,6 +15,7 @@ interface Props {
     ReturnType<typeof useLastCodeProjectThreads>,
     "familyProjection" | "hiddenThreadStatus"
   >;
+  olderSettled?: ReturnType<typeof useLastCodeProjectThreads>["olderSettled"];
   projectExpanded: boolean;
   listExpanded: boolean;
   onListExpandedChange: (expanded: boolean) => void;
@@ -68,6 +69,7 @@ function ThreadListExpansion({
 export function LastCodeThreadList({
   scale,
   projection,
+  olderSettled,
   projectExpanded,
   listExpanded,
   onListExpandedChange,
@@ -79,6 +81,7 @@ export function LastCodeThreadList({
   const { hiddenThreadStatus, familyProjection } = projection;
   const { hasOverflowingThreads, renderedItems, showEmptyThreadState, shouldShowThreadPanel } =
     familyProjection;
+  const hasOlder = olderSettled?.hasMore || olderSettled?.loading || olderSettled?.failed;
   return (
     <ul
       ref={attachAnimation}
@@ -91,7 +94,7 @@ export function LastCodeThreadList({
         marginLeft: "calc(8px * var(--lastcode-sidebar-content-zoom) - 8px)",
       }}
     >
-      {shouldShowThreadPanel && showEmptyThreadState ? (
+      {shouldShowThreadPanel && showEmptyThreadState && !hasOlder ? (
         <SidebarMenuSubItem className="w-full" data-thread-selection-safe>
           <div
             data-thread-selection-safe
@@ -112,7 +115,25 @@ export function LastCodeThreadList({
             </Fragment>
           ),
         )}
-      {projectExpanded && hasOverflowingThreads && (
+      {projectExpanded && listExpanded && hasOlder && (
+        <SidebarMenuSubItem className="ml-6">
+          <SidebarMenuSubButton
+            render={<button type="button" disabled={olderSettled?.loading ?? false} />}
+            data-thread-selection-safe
+            size="sm"
+            onClick={olderSettled?.failed ? olderSettled.retry : olderSettled?.loadMore}
+          >
+            <span>
+              {olderSettled?.loading
+                ? "Loading…"
+                : olderSettled?.failed
+                  ? "Retry"
+                  : "Load older threads"}
+            </span>
+          </SidebarMenuSubButton>
+        </SidebarMenuSubItem>
+      )}
+      {projectExpanded && (hasOverflowingThreads || hasOlder || listExpanded) && (
         <ThreadListExpansion
           expanded={listExpanded}
           status={hiddenThreadStatus}

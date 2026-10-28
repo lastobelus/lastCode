@@ -47,11 +47,19 @@ function Harness({
   projectExpanded = true,
   empty = false,
   subheaders = true,
+  olderSettled,
 }: {
   selectedChild?: boolean;
   projectExpanded?: boolean;
   empty?: boolean;
   subheaders?: boolean;
+  olderSettled?: {
+    hasMore: boolean;
+    loading: boolean;
+    failed: boolean;
+    loadMore: () => void;
+    retry: () => void;
+  };
 }) {
   const [expanded, setExpanded] = useState(false);
   const collapsedByKey = useLastCodeSidebarFamiliesStore((s) => s.collapsedByKey);
@@ -71,6 +79,7 @@ function Harness({
   return (
     <LastCodeThreadList
       scale={100}
+      {...(olderSettled === undefined ? {} : { olderSettled })}
       projection={{ familyProjection, hiddenThreadStatus: null }}
       projectExpanded={projectExpanded}
       listExpanded={expanded}
@@ -206,6 +215,31 @@ describe("project thread list composition", () => {
     expect(container.textContent).toContain("Child");
     expect(button(container, "Show more")).toBeUndefined();
     expect(button(container, "Show less")).toBeUndefined();
+  });
+  it("browses an omitted-only project in bounded steps and can collapse it again", async () => {
+    using _store = setup();
+    const loadMore = vi.fn();
+    const retry = vi.fn();
+    const olderSettled = { hasMore: true, loading: false, failed: false, loadMore, retry };
+    await using screen = await render(<Harness empty olderSettled={olderSettled} />);
+    expect(screen.container.textContent).not.toContain("No threads yet");
+    await expect
+      .element(screen.getByRole("button", { name: "Show more", exact: true }))
+      .toBeVisible();
+    await act(() => button(screen.container, "Show more").click());
+    await expect.element(screen.getByRole("button", { name: "Load older threads" })).toBeVisible();
+    await act(() => button(screen.container, "Load older threads").click());
+    expect(loadMore).toHaveBeenCalledTimes(1);
+    await screen.rerender(<Harness empty olderSettled={{ ...olderSettled, loading: true }} />);
+    await expect.element(screen.getByRole("button", { name: "Loading…" })).toBeDisabled();
+    await screen.rerender(<Harness empty olderSettled={{ ...olderSettled, failed: true }} />);
+    await act(() => button(screen.container, "Retry").click());
+    expect(retry).toHaveBeenCalledTimes(1);
+    await act(() => button(screen.container, "Show less").click());
+    await expect
+      .element(screen.getByRole("button", { name: "Show more", exact: true }))
+      .toBeVisible();
+    expect(loadMore).toHaveBeenCalledTimes(1);
   });
   it("shows an empty project only while expanded", async () => {
     using _store = setup();

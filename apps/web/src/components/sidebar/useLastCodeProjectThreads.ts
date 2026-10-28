@@ -1,3 +1,5 @@
+import type { OlderSettledScope } from "@t3tools/client-runtime/state/threads";
+import { useOlderSettledShelf } from "../../state/olderSettledShelf";
 import { useShallow } from "zustand/react/shallow";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { useClientSetting } from "../../hooks/useSettings";
@@ -18,6 +20,27 @@ export function useLastCodeProjectThreads(
   listExpanded: boolean,
 ) {
   const threads = useThreadShellsForProjectRefs(project.memberProjectRefs);
+  const scopes: OlderSettledScope[] = [
+    ...new Set(project.memberProjectRefs.map((ref) => ref.environmentId)),
+  ].map((environmentId) => ({
+    environmentId,
+    projectIds: project.memberProjectRefs.flatMap((ref) =>
+      ref.environmentId === environmentId ? [ref.projectId] : [],
+    ),
+  }));
+  const shelf = useOlderSettledShelf({
+    scopes,
+    expanded: projectExpanded && listExpanded,
+    initialPages: 1,
+    visibleCount: 0,
+  });
+  const olderSettled = {
+    hasMore: shelf.hasMore || shelf.unloadedCount(threads) > 0,
+    loading: shelf.loading,
+    failed: shelf.failed,
+    loadMore: shelf.loadMore,
+    retry: shelf.retry,
+  };
   const sortOrder = useClientSetting("sidebarThreadSortOrder");
   const previewCount = useClientSetting("sidebarThreadPreviewCount");
   const groupingStyle = useClientSetting("legacySidebarThreadGroupingStyle");
@@ -54,5 +77,5 @@ export function useLastCodeProjectThreads(
     showFamilyStatusSubheaders,
     statusForThread,
   });
-  return { ...result, threadsByKey, groupingStyle };
+  return { ...result, threadsByKey, groupingStyle, olderSettled };
 }
