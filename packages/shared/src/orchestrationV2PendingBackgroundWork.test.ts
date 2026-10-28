@@ -420,6 +420,50 @@ describe("derivePendingBackgroundWork kinds", () => {
       ).toEqual(["pull-request-watch:github.com/acme/app#1"]);
     });
 
+    it.each(["queued", "preparing", "starting", "running"] as const)(
+      "can present ongoing work while the agent is %s without changing its waiting status",
+      (status) => {
+        const input = {
+          latestRun: { id: "active-run" as never, ordinal: 2, status },
+          runs: [
+            { id: "active-run" as never, ordinal: 2, status },
+            { id: "old-run" as never, ordinal: 1, status: "rolled_back" as const },
+          ],
+          providerThreads: [],
+          turnItems: [
+            {
+              id: "child",
+              runId: "active-run",
+              type: "subagent" as const,
+              status: "running" as const,
+              title: "Review permissions",
+            },
+            {
+              id: "foreground",
+              runId: "active-run",
+              type: "command_execution" as const,
+              status: "running" as const,
+              title: "Read source",
+            },
+            {
+              id: "rolled-back",
+              runId: "old-run",
+              type: "subagent" as const,
+              status: "running" as const,
+              title: "Old review",
+            },
+          ],
+          pullRequests,
+        };
+        expect(derivePendingBackgroundWork(input)).toEqual([]);
+        expect(
+          derivePendingBackgroundWork({ ...input, includeWhileActive: true }).map(
+            (task) => task.taskId,
+          ),
+        ).toEqual(["child", "pull-request-watch:github.com/acme/app#1"]);
+      },
+    );
+
     it("lists no watch while a run is active", () => {
       expect(
         derivePendingBackgroundWork({
