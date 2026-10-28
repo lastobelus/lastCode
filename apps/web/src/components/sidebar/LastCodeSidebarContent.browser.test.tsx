@@ -147,6 +147,17 @@ vi.mock("../../state/threads", () => ({
     }, [env, id]);
   },
 }));
+// Paging transport stays outside this loaded-row composition fixture.
+vi.mock("../../state/olderSettledShelf", () => ({
+  useOlderSettledShelf: () => ({
+    hasMore: false,
+    unloadedCount: () => 0,
+    loading: false,
+    failed: false,
+    loadMore: () => {},
+    retry: () => {},
+  }),
+}));
 vi.mock("../../state/entities", () => ({
   useThreadShellsForProjectRefs: (
     refs: readonly { environmentId: EnvironmentId; projectId: ProjectId }[],
