@@ -101,6 +101,11 @@ it.runIf(HostProcess.Platform.defaultValue() === "darwin")(
       operationId: "hidden-flags",
       ownerBinding: "fixture-owner",
     });
+    expect(snapshot.version).toBe(2);
+    const manifestPath = NodePath.join(test.root, "saved", snapshot.id, "manifest.json");
+    await NodeFSP.writeFile(manifestPath, JSON.stringify({ ...snapshot, version: 1 }));
+    await expect(test.store.read(snapshot.id)).rejects.toThrow("snapshot format is unsupported");
+    await NodeFSP.writeFile(manifestPath, JSON.stringify(snapshot));
     await test.store.trialRestore(snapshot.id);
     await test.store.isolate(snapshot.id, {
       quarantineParent: NodePath.join(test.root, "quarantine"),
@@ -371,8 +376,9 @@ it.runIf(HostProcess.Platform.defaultValue() === "darwin")(
       await NodeFSP.writeFile(manifest, JSON.stringify({ ...snapshot, attributes }));
       await expect(test.store.read(snapshot.id)).rejects.toThrow("extended attributes");
     }
-    // A deployed version 1 manifest has no attribute field and needs no migration.
-    await NodeFSP.writeFile(manifest, JSON.stringify(snapshot));
+    // Already deployed version 1 snapshots remain readable without metadata fields.
+    await NodeFSP.writeFile(manifest, JSON.stringify({ ...snapshot, version: 1 }));
+    expect((await test.store.read(snapshot.id)).version).toBe(1);
     expect((await test.store.read(snapshot.id)).attributes).toBeUndefined();
     await test.store.trialRestore(snapshot.id);
   },

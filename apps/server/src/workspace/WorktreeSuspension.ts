@@ -1513,7 +1513,7 @@ export const make = Effect.gen(function* () {
     const settledCapture = (current: CheckoutAuthority): CheckoutAuthority => {
       const reason =
         current.blockedReason ??
-        "The save operation stopped before completion. Retry saving after checking the workspace.";
+        "Saving didn't finish, so the worktree was kept as it was. You can keep using it as usual, or try suspending it again.";
       return {
         ...clearOperation(current),
         captureFailure: current.captureFailure ?? {

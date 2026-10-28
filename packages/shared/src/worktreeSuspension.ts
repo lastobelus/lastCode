@@ -77,7 +77,7 @@ interface FileIdentity {
 }
 
 export interface WorktreeSuspensionSnapshot {
-  readonly version: 1;
+  readonly version: 1 | 2;
   readonly id: string;
   readonly operationId: string;
   readonly ownerBinding: string;
@@ -1103,7 +1103,13 @@ const assertSnapshot = (value: unknown, id: string): WorktreeSuspensionSnapshot 
   if (typeof value !== "object" || value === null)
     return refuse("the snapshot manifest is invalid");
   const snapshot = value as WorktreeSuspensionSnapshot;
-  if (snapshot.version !== 1 || snapshot.id !== id || !Array.isArray(snapshot.entries))
+  if (
+    (snapshot.version !== 1 && snapshot.version !== 2) ||
+    (snapshot.version === 1 &&
+      (snapshot.attributes !== undefined || snapshot.hiddenPaths !== undefined)) ||
+    snapshot.id !== id ||
+    !Array.isArray(snapshot.entries)
+  )
     refuse("the snapshot format is unsupported");
   if (!Array.isArray(snapshot.gitFiles) || !Array.isArray(snapshot.gitRefs))
     refuse("the private Git snapshot is invalid");
@@ -1689,7 +1695,7 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     for (const object of objects)
       savedBytes += (await NodeFSP.stat(NodePath.join(objectsPath(id), object))).size;
     const snapshot: WorktreeSuspensionSnapshot = {
-      version: 1,
+      version: 2,
       id,
       operationId: input.operationId,
       ownerBinding: input.ownerBinding,
@@ -1866,7 +1872,8 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       )
     )
       refuse("the partial restore contains unknown extended attributes");
-    if (present?.hiddenPaths?.some((name) => !snapshot.hiddenPaths?.includes(name)))
+    const savedHiddenPaths = new Set(snapshot.hiddenPaths);
+    if (present?.hiddenPaths?.some((name) => !savedHiddenPaths.has(name)))
       refuse("the partial restore contains unknown filesystem flags");
     const actual = new Map(present?.entries.map((entry) => [entry.path, entry]));
     const expected = new Map(snapshot.entries.map((entry) => [entry.path, entry]));
