@@ -2488,9 +2488,9 @@ export const make = Effect.gen(function* () {
       Effect.ensuring(reconcileRetained),
     );
   });
-  const sweepBudget = 4;
+  const recoveryBudget = 4;
+  const sweepPermit = yield* Semaphore.make(1);
   let lastRecoveryId = "";
-  let lastAutomaticPath = "";
   const rotate = <A>(values: readonly A[], key: (value: A) => string, after: string) => {
     const sorted = [...values].sort((left, right) => key(left).localeCompare(key(right)));
     const next = sorted.findIndex((value) => key(value).localeCompare(after) > 0);
@@ -2505,7 +2505,7 @@ export const make = Effect.gen(function* () {
     );
     for (const entry of rotate(reconcilable, (entry) => entry.checkoutId, lastRecoveryId).slice(
       0,
-      sweepBudget,
+      recoveryBudget,
     )) {
       lastRecoveryId = entry.checkoutId;
       yield* withWorkspaceLease(
@@ -2554,13 +2554,9 @@ export const make = Effect.gen(function* () {
         continue;
       candidates.set(record?.path ?? thread.worktreePath, thread.id);
     }
-    for (const [workspacePath, threadId] of rotate(
-      [...candidates],
-      ([workspacePath]) => workspacePath,
-      lastAutomaticPath,
-    ).slice(0, sweepBudget)) {
-      lastAutomaticPath = workspacePath;
+    for (const [workspacePath, threadId] of candidates) {
       yield* Effect.gen(function* () {
+        if (!(yield* fs.exists(workspacePath))) return;
         const identified = yield* identify(threadId, catalog);
         if (
           identified.summary.state !== "active" ||
@@ -2569,10 +2565,16 @@ export const make = Effect.gen(function* () {
         )
           return;
         const record = yield* refreshActiveOwners(identified);
-        if (yield* automaticallyEligible(record)) yield* acceptCapture(record, true);
+        if (yield* automaticallyEligible(record)) {
+          yield* acceptCapture(record, true);
+          const running = liveOperations.get(record.checkoutId);
+          if (running !== undefined) yield* Deferred.await(running.completed);
+        }
       }).pipe(Effect.ignoreCause);
     }
   }).pipe(
+    sweepPermit.withPermitsIfAvailable(1),
+    Effect.asVoid,
     Effect.catchCause((cause) =>
       Effect.logWarning("Saved workspace sweep retained incomplete candidates", { cause }),
     ),
