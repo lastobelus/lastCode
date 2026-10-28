@@ -63,9 +63,9 @@ const assistantSegments = (text: string, cwd?: string) =>
 it("searches displayed prose and file-chip labels without hidden paths", () => {
   expect(
     assistantSegments("[important description](/tmp/actual.ts). `/tmp/inline-example.ts:42`"),
-  ).toEqual(["important description actual.ts. inline-example.ts · L42"]);
+  ).toEqual(["important description (actual.ts). inline-example.ts · L42"]);
   expect(assistantSegments("[label](src/main.ts#L3C2)", "/workspace/repo")).toEqual([
-    "label main.ts · L3:C2",
+    "label (main.ts · L3:C2)",
   ]);
   expect(assistantSegments("[label](src/main.ts#L3C2)")).toEqual(["label"]);
 });
@@ -104,5 +104,20 @@ it("indexes the citation chip label instead of its link text", () => {
   const commented = serializeAssistantCitation({ ...citation, comment: "my note" });
   expect(searchableMessageSegments({ role: "user", text: commented, streaming: false })).toEqual([
     "my note",
+  ]);
+});
+
+it("indexes file-label punctuation and visible prose without image alt text", () => {
+  expect(assistantSegments("[![diagram](https://example.com/a.png)](/tmp/file.ts)")).toEqual([
+    " (file.ts)",
+  ]);
+  expect(
+    assistantSegments("[See ![hidden alt](https://example.com/a.png) now](/tmp/file.ts)"),
+  ).toEqual(["See  now (file.ts)"]);
+  expect(assistantSegments("[first\nsecond](/tmp/file.ts)")).toEqual([
+    "first second (file.ts)",
+  ]);
+  expect(assistantSegments("[first<br>second](/tmp/file.ts)")).toEqual([
+    "first\nsecond (file.ts)",
   ]);
 });
