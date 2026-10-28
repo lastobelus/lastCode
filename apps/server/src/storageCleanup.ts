@@ -1713,7 +1713,7 @@ const make = Effect.gen(function* () {
     }
     // The managed layout is root/repository/worktree. Unknown repositories never
     // receive an inactivity record or automatic deletion authority.
-    for (const root of metadataOnly ? [] : roots) {
+    for (const root of metadataOnly || automaticWork?.paths != null ? [] : roots) {
       const pending = [{ directory: root, depth: 0 }];
       let visited = 0;
       while (pending.length > 0 && visited < 1000) {

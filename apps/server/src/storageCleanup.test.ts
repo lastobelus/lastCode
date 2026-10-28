@@ -3102,10 +3102,24 @@ describe("automatic cleanup churn", () => {
     runCleanupTest(
       Effect.gen(function* () {
         yield* TestClock.setTime(NOW_MS);
+        const fs = yield* FileSystem.FileSystem;
+        const directories: string[] = [];
         const fixture = yield* cleanupFixture({
           ...DEFAULT_SERVER_SETTINGS.storageCleanup,
           worktreeAfterDays: null,
           worktreeOnDelete: true,
+        }).pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            readDirectory: (directory, options) => {
+              directories.push(directory);
+              return fs.readDirectory(directory, options);
+            },
+          }),
+        );
+        yield* fixture.enableDependencies;
+        fixture.setSettings({
+          storageCleanup: { ...fixture.settings.storageCleanup, worktreeOnDelete: true },
         });
         const owners = [shell({ worktreePath: fixture.worktree, branch: "feature" })];
         for (let index = 0; index < 7; index++) {
@@ -3148,6 +3162,8 @@ describe("automatic cleanup churn", () => {
         );
         fixture.setThreads(owners.filter((owner) => owner.id !== target.id));
         fixture.setDeletedThreads([deleted]);
+        expect(directories).toContain(fixture.config.worktreesDir);
+        directories.length = 0;
         yield* Deferred.succeed(sendDeletion, undefined);
         const report = yield* Queue.take(reports);
         yield* fixture.service.drain;
@@ -3162,6 +3178,8 @@ describe("automatic cleanup churn", () => {
         expect(yield* fixture.fs.exists(fixture.worktree)).toBe(true);
         expect(checkoutEntries(report)).toHaveLength(1);
         expect(fixture.suspensionSweeps()).toBe(1);
+        expect(directories).not.toContain(fixture.config.worktreesDir);
+        expect(directories).not.toContain(fixture.worktree);
       }),
     ),
   );

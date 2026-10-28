@@ -2223,6 +2223,10 @@ it.live(
         expect(saved).toHaveLength(6);
         yield* awaitSuspended(saved);
         expect(saved.every((record) => record.summary.state === "suspended")).toBe(true);
+        yield* Effect.promise(async () => {
+          for (const workspace of paths)
+            await expect(NodeFSP.lstat(workspace)).rejects.toMatchObject({ code: "ENOENT" });
+        });
         expect(
           (yield* h.registry.list).find((record) => record.checkoutId === original.checkoutId)!
             .summary.state,
