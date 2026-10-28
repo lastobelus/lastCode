@@ -44,6 +44,13 @@ export const CheckoutAuthority = Schema.Struct({
     ),
   ),
   blockedReason: Schema.NullOr(Schema.String),
+  captureFailure: Schema.optionalKey(
+    Schema.Struct({
+      operationId: TrimmedNonEmptyString,
+      reason: Schema.String,
+      retryOnce: Schema.optionalKey(Schema.Literal(true)),
+    }),
+  ),
   lastWorkspaceUseAt: Schema.optionalKey(IsoDateTime),
   lastHead: Schema.optionalKey(TrimmedNonEmptyString),
   sourceCheckoutId: Schema.optionalKey(TrimmedNonEmptyString),
@@ -260,6 +267,7 @@ const make = Effect.gen(function* () {
       for (const entry of yield* list) {
         if (entry.detached) continue;
         if (!entry.aliases.some(overlaps) && !overlaps(entry.path)) continue;
+        if (entry.captureFailure !== undefined) return entry.captureFailure.reason;
         if (entry.summary.keepWorkspace) return "Keep workspace is enabled.";
         if (
           entry.pendingProjection !== undefined ||

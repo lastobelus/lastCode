@@ -616,7 +616,7 @@ export const make = Effect.gen(function* () {
     const destination = transition.workspace?.worktreePath ?? pending.path;
     const committed = {
       ...pending,
-      blockedReason: null,
+      blockedReason: pending.captureFailure?.reason ?? null,
       path: destination,
       aliases:
         transition.next.state === "active"
@@ -749,7 +749,11 @@ export const make = Effect.gen(function* () {
     if (paths.length > 1)
       return yield* failure("changed", "Sharing owners no longer agree on one active checkout.");
     const destination = paths[0] ?? record.path;
-    let next: CheckoutAuthority = { ...record, owners: attached.map(ownerOf), blockedReason: null };
+    let next: CheckoutAuthority = {
+      ...record,
+      owners: attached.map(ownerOf),
+      blockedReason: record.captureFailure?.reason ?? null,
+    };
     if (record.summary.state === "active" && attached.length > 0) {
       if (destination !== record.path && !(yield* isManaged(destination)))
         return yield* failure("protected", "The rebound checkout is outside managed worktrees.");
@@ -823,12 +827,16 @@ export const make = Effect.gen(function* () {
     reason?: WorktreeSuspensionRequestError,
   ) {
     const record = yield* requireRecord(checkoutId);
+    const message =
+      reason?.message ??
+      "The operation stopped. Recovery data is retained; retry recovery before starting workspace commands.";
     yield* registry.put(
       {
         ...record,
-        blockedReason:
-          reason?.message ??
-          "The operation stopped. Recovery data is retained; retry recovery before starting workspace commands.",
+        blockedReason: message,
+        ...(record.operation?.kind === "capture"
+          ? { captureFailure: { operationId: record.operation.id, reason: message } }
+          : {}),
       },
       record,
     );
@@ -950,6 +958,8 @@ export const make = Effect.gen(function* () {
   const automaticallyEligible = Effect.fn("WorktreeSuspension.automaticallyEligible")(function* (
     record: CheckoutAuthority,
   ) {
+    if (record.captureFailure !== undefined && record.captureFailure.retryOnce !== true)
+      return false;
     const currentSettings = yield* settings.getSettings;
     const timestamp = yield* milliseconds;
     const owners = yield* checkOwners(record);
@@ -1498,6 +1508,22 @@ export const make = Effect.gen(function* () {
       return yield* requireRecord(record.checkoutId);
     }
     if (record.operation?.kind !== "capture") return yield* refreshActiveOwners(record);
+    // Legacy intents get one attempt with the current capture implementation.
+    // Keep cleanup protection even while that attempt is waiting for the sweep.
+    const settledCapture = (current: CheckoutAuthority): CheckoutAuthority => {
+      const reason =
+        current.blockedReason ??
+        "The save operation stopped before completion. Retry saving after checking the workspace.";
+      return {
+        ...clearOperation(current),
+        captureFailure: current.captureFailure ?? {
+          operationId: current.operation!.id,
+          reason,
+          retryOnce: true as const,
+        },
+        blockedReason: reason,
+      };
+    };
     const id = record.operation.snapshotIds[0];
     if (id === undefined)
       return yield* failure("changed", "The save operation has no exact snapshot identity.");
@@ -1511,7 +1537,7 @@ export const make = Effect.gen(function* () {
           "The incomplete preservation directory has no verified journal. Its recovery authority has been retained.",
         );
       yield* originalStillOwned(record);
-      const active = yield* publish(record, clearOperation(record), {
+      const active = yield* publish(record, settledCapture(record), {
         ...record.summary,
         state: "active",
         snapshotId: null,
@@ -1532,7 +1558,7 @@ export const make = Effect.gen(function* () {
     }
     if (journal.phase === "capture-cancelled") {
       yield* originalStillOwned(record);
-      return yield* publish(record, clearOperation(record), {
+      return yield* publish(record, settledCapture(record), {
         ...record.summary,
         state: "active",
         snapshotId: null,
@@ -1556,7 +1582,9 @@ export const make = Effect.gen(function* () {
     if (journal.phase === "suspended") {
       const snapshot = yield* native(() => store.read(id));
       record = yield* remember(record, snapshot);
-      return yield* publish(record, clearOperation(record), {
+      const completed = { ...clearOperation(record) };
+      delete completed.captureFailure;
+      return yield* publish(record, completed, {
         ...record.summary,
         state: "suspended",
       });
@@ -1576,7 +1604,7 @@ export const make = Effect.gen(function* () {
       if (Option.isSome(manifest) && !record.history.includes(id))
         record = yield* remember(record, manifest.value);
       if (journal.phase !== "active") yield* native(() => store.keepOriginal(id));
-      const active = yield* publish(record, clearOperation(record), {
+      const active = yield* publish(record, settledCapture(record), {
         ...record.summary,
         state: "active",
         snapshotId: null,
@@ -1660,22 +1688,38 @@ export const make = Effect.gen(function* () {
     const completed = yield* Deferred.make<void>();
     const job = { completed, started: false, cancelled: false };
     liveOperations.set(record.checkoutId, job);
+    const settleFailure = Effect.fn("WorktreeSuspension.settleFailure")(
+      function* (cause: Cause.Cause<E>) {
+        const current = yield* requireRecord(record.checkoutId);
+        if (
+          current.operation?.id !== record.operation?.id &&
+          !(
+            current.operation === undefined &&
+            current.summary.generation === record.summary.generation
+          )
+        )
+          return;
+        yield* markBlocked(
+          record.checkoutId,
+          safeFailure(Option.getOrUndefined(Cause.findErrorOption(cause))),
+        );
+        if (current.operation?.kind === "capture")
+          yield* reconcile(yield* requireRecord(record.checkoutId));
+      },
+      (effect) => effect.pipe(Effect.ignore),
+    );
     const run = withWorkspaceLease(
       record.path,
       Effect.suspend(() => {
         if (job.cancelled) return Effect.void;
         job.started = true;
-        return operation;
+        // Persist the outcome before releasing the lease: acquirers can hold it
+        // while awaiting completed, so reacquiring it here would deadlock.
+        return operation.pipe(Effect.catchCause(settleFailure));
       }),
     );
     const limited = record.operation.kind === "capture" ? saves.withPermits(1)(run) : run;
     yield* limited.pipe(
-      Effect.catchCause((cause) =>
-        markBlocked(
-          record.checkoutId,
-          safeFailure(Option.getOrUndefined(Cause.findErrorOption(cause))),
-        ).pipe(Effect.ignore),
-      ),
       Effect.ensuring(
         Effect.gen(function* () {
           liveOperations.delete(record.checkoutId);
@@ -1709,10 +1753,12 @@ export const make = Effect.gen(function* () {
             return yield* failure("busy", "Finish the current workspace operation first.");
           if (automatic && !(yield* automaticallyEligible(fresh))) return null;
           const id = yield* crypto.randomUUIDv4();
+          const retrying = { ...fresh };
+          delete retrying.captureFailure;
           const record = yield* publish(
             fresh,
             {
-              ...fresh,
+              ...retrying,
               aliases: [
                 ...new Set([
                   ...fresh.aliases,
@@ -2556,6 +2602,7 @@ export const make = Effect.gen(function* () {
           record.summary.state !== "active" ||
           record.operation !== undefined ||
           record.pendingProjection !== undefined ||
+          (record.captureFailure !== undefined && record.captureFailure.retryOnce !== true) ||
           liveOperations.has(record.checkoutId))
       )
         continue;
@@ -2574,7 +2621,7 @@ export const make = Effect.gen(function* () {
     for (const [workspacePath, threadId] of candidates) {
       yield* Effect.gen(function* () {
         if (!(yield* fs.exists(workspacePath))) return;
-        const identified = yield* identify(threadId, catalog);
+        const identified = yield* identify(threadId);
         if (
           identified.summary.state !== "active" ||
           identified.operation !== undefined ||
@@ -2684,6 +2731,9 @@ export const make = Effect.gen(function* () {
               yield* checkOwners(current);
               if (positiveUse(input.purpose)) {
                 const used = { ...current, lastWorkspaceUseAt: yield* now };
+                if (used.captureFailure !== undefined)
+                  used.captureFailure = { ...used.captureFailure, retryOnce: true };
+                else used.blockedReason = null;
                 yield* registry.put(used, current);
               }
               return {

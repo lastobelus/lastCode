@@ -819,9 +819,10 @@ it.live(
 const awaitRecovered = (
   updates: Queue.Queue<Registry.CheckoutAuthority>,
   predicate: (record: Registry.CheckoutAuthority) => boolean,
+  allowBlocked = false,
 ) =>
   Stream.fromQueue(updates).pipe(
-    Stream.filter((record) => predicate(record) && record.blockedReason === null),
+    Stream.filter((record) => predicate(record) && (allowBlocked || record.blockedReason === null)),
     Stream.take(1),
     Stream.runHead,
     Effect.map(Option.getOrThrow),
@@ -926,7 +927,10 @@ it.live.each(["retain", "discard"] as const)(
             record.operation === undefined &&
             record.pendingProjection === undefined &&
             record.owners.length === (mode === "retain" ? 1 : 0),
+          true,
         );
+        expect(kept.captureFailure).toBeDefined();
+        expect(kept.blockedReason).not.toBeNull();
         expect(kept.history).toHaveLength(1);
         expect(kept.aliases).toEqual([f.workspace]);
         expect(kept.snapshots![0]!.owners.map((owner) => owner.threadId).sort()).toEqual(
@@ -1611,6 +1615,206 @@ const untouchedOwners = (threads: Map<ThreadId, OrchestrationV2ThreadShell>) => 
       workspaceUserAdopted: false,
     });
 };
+
+it.live.each(["manual", "activity"] as const)(
+  "settles unsupported captures and allows %s retry after restart",
+  (retry) =>
+    realGit((f) =>
+      Effect.gen(function* () {
+        const h = yield* harness(f, { cleanupThreads: true, settings: automaticSettings });
+        untouchedOwners(h.threads);
+        yield* h.service.previewSuspend({ threadId: firstId });
+        const initial = (yield* h.registry.list)[0]!;
+        yield* h.registry.put({ ...initial, lastWorkspaceUseAt: DateTime.formatIso(at) }, initial);
+        yield* Effect.promise(() =>
+          NodeFSP.link(
+            NodePath.join(f.workspace, "tracked"),
+            NodePath.join(f.workspace, "hardlink"),
+          ),
+        );
+        yield* h.service.sweep;
+        const stopped = (yield* h.registry.list)[0]!;
+        expect(stopped.summary.state).toBe("active");
+        expect(stopped.operation).toBeUndefined();
+        expect(stopped.blockedReason).toContain("hardlinked");
+        const journals = yield* Effect.promise(() =>
+          NodeFSP.readdir(NodePath.join(h.registry.root, "snapshots")),
+        );
+        expect(journals).toHaveLength(1);
+        expect((yield* Effect.promise(() => h.store.readJournal(journals[0]!))).phase).toBe(
+          "capture-cancelled",
+        );
+        yield* h.service.sweep;
+        // A new service decodes the persisted catalog; the retry veto must survive it.
+        const restarted = yield* harness(f, { cleanupThreads: true, settings: automaticSettings });
+        for (const [id, thread] of h.threads) restarted.threads.set(id, thread);
+        yield* restarted.service.sweep;
+        expect(
+          yield* Effect.promise(() => NodeFSP.readdir(NodePath.join(h.registry.root, "snapshots"))),
+        ).toEqual(journals);
+        yield* Effect.promise(() => NodeFSP.unlink(NodePath.join(f.workspace, "hardlink")));
+        if (retry === "activity") {
+          yield* restarted.acquisition.acquire({
+            path: f.workspace,
+            purpose: "git",
+            threadId: firstId,
+          });
+          expect((yield* restarted.registry.list)[0]!.captureFailure).toBeDefined();
+          yield* restarted.acquisition.acquire({
+            path: f.workspace,
+            purpose: "editor",
+            threadId: firstId,
+          });
+          const used = (yield* restarted.registry.list)[0]!;
+          expect(used.captureFailure?.retryOnce).toBe(true);
+          expect(yield* restarted.registry.automaticProtection(f.workspace)).not.toBeNull();
+          // Once the normal inactivity period elapses, positive use permits a new attempt.
+          yield* restarted.registry.put(
+            { ...used, lastWorkspaceUseAt: DateTime.formatIso(at) },
+            used,
+          );
+          yield* restarted.service.sweep;
+        } else {
+          yield* restarted.suspend;
+        }
+        const saved = (yield* restarted.registry.list)[0]!;
+        expect(saved.summary.state).toBe("suspended");
+        expect(saved.blockedReason).toBeNull();
+      }),
+    ),
+);
+
+it.live.each([false, true])(
+  "admits one protected retry for legacy incomplete captures (repaired: %s)",
+  (repaired) =>
+    realGit((f) =>
+      Effect.gen(function* () {
+        const h = yield* harness(f, { cleanupThreads: true, settings: automaticSettings });
+        untouchedOwners(h.threads);
+        yield* h.service.previewSuspend({ threadId: firstId });
+        const initial = (yield* h.registry.list)[0]!;
+        const id = "30d188de-7851-4d2b-b3e9-ac622221cd26";
+        yield* Effect.promise(() =>
+          NodeFSP.link(
+            NodePath.join(f.workspace, "tracked"),
+            NodePath.join(f.workspace, "hardlink"),
+          ),
+        );
+        const result = yield* Effect.tryPromise(() =>
+          h.store.capture({
+            sourcePath: f.workspace,
+            snapshotId: id,
+            operationId: id,
+            ownerBinding: initial.checkoutId,
+          }),
+        ).pipe(Effect.exit);
+        expect(result._tag).toBe("Failure");
+        const summary = {
+          ...initial.summary,
+          state: "capturing" as const,
+          snapshotId: id,
+          generation: initial.summary.generation + 1,
+        };
+        const interrupted = {
+          ...initial,
+          summary,
+          owners: initial.owners.map((owner) => ({ ...owner, generation: summary.generation })),
+          lastWorkspaceUseAt: DateTime.formatIso(at),
+          operation: {
+            id,
+            kind: "capture" as const,
+            snapshotIds: [id],
+            manual: false,
+            acceptedAt: DateTime.formatIso(at),
+          },
+          blockedReason: "Interrupted capture",
+        };
+        yield* h.registry.put(interrupted, initial);
+        for (const [key, thread] of h.threads)
+          h.threads.set(key, { ...thread, worktreeSuspension: summary });
+        yield* h.service.sweep;
+        const recovered = (yield* h.registry.list)[0]!;
+        expect(recovered.summary.state).toBe("active");
+        expect(recovered.operation).toBeUndefined();
+        expect(recovered.captureFailure?.operationId).toBe(id);
+        expect((yield* Effect.promise(() => h.store.readJournal(id))).phase).toBe(
+          "capture-cancelled",
+        );
+        expect(recovered.captureFailure?.retryOnce).toBe(true);
+        expect(yield* h.registry.automaticProtection(f.workspace)).not.toBeNull();
+        if (repaired)
+          yield* Effect.promise(() => NodeFSP.unlink(NodePath.join(f.workspace, "hardlink")));
+        yield* h.service.sweep;
+        const retried = (yield* h.registry.list)[0]!;
+        expect(retried.summary.state).toBe(repaired ? "suspended" : "active");
+        expect(retried.captureFailure?.retryOnce).toBeUndefined();
+        if (repaired) expect(retried.captureFailure).toBeUndefined();
+        else expect(retried.captureFailure?.operationId).not.toBe(id);
+        const directories = yield* Effect.promise(() =>
+          NodeFSP.readdir(NodePath.join(h.registry.root, "snapshots")),
+        );
+        expect(directories).toHaveLength(2);
+        expect(directories).toContain(id);
+        yield* h.service.sweep;
+        expect(
+          yield* Effect.promise(() => NodeFSP.readdir(NodePath.join(h.registry.root, "snapshots"))),
+        ).toEqual(directories);
+      }),
+    ),
+);
+
+it.live(
+  "retains a verified snapshot when a consumer appears after capture and allows manual retry",
+  () =>
+    realGit((f) =>
+      Effect.gen(function* () {
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const processPaths: string[] = [];
+        const h = yield* harness(f, {
+          cleanupThreads: true,
+          settings: automaticSettings,
+          pauseCaptured: { entered, release },
+        });
+        untouchedOwners(h.threads);
+        yield* h.service.previewSuspend({ threadId: firstId });
+        const initial = (yield* h.registry.list)[0]!;
+        yield* h.registry.put({ ...initial, lastWorkspaceUseAt: DateTime.formatIso(at) }, initial);
+        const pass = yield* Effect.forkChild(
+          h.service.sweep.pipe(
+            Effect.provideService(
+              Consumers.ProcessPaths,
+              Effect.sync(() => [...processPaths]),
+            ),
+          ),
+        );
+        yield* Deferred.await(entered);
+        processPaths.push(NodePath.join(f.workspace, "tracked"));
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(pass);
+        const retained = (yield* h.registry.list)[0]!;
+        expect(retained.summary.state).toBe("active");
+        expect(retained.operation).toBeUndefined();
+        expect(retained.captureFailure).toBeDefined();
+        expect(retained.history).toHaveLength(1);
+        expect((yield* Effect.promise(() => h.store.readJournal(retained.history[0]!))).phase).toBe(
+          "active",
+        );
+        expect(
+          yield* Effect.promise(() =>
+            NodeFSP.readFile(NodePath.join(f.workspace, "tracked"), "utf8"),
+          ),
+        ).toBe("working\n");
+        yield* h.service.sweep;
+        expect((yield* h.registry.list)[0]!.history).toEqual(retained.history);
+        processPaths.length = 0;
+        yield* Queue.clear(h.updates);
+        const saved = yield* h.suspend;
+        expect(saved.history).toHaveLength(2);
+        expect(saved.captureFailure).toBeUndefined();
+      }),
+    ),
+);
 
 it.live(
   "retains promoted and unknown legacy children instead of treating no authored messages as untouched",

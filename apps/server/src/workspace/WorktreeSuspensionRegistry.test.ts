@@ -48,6 +48,30 @@ it.effect("persists authority privately and rejects a stale generation write", (
     const error = yield* registry.put(record, record).pipe(Effect.flip);
     assert.strictEqual(error.operation, "ownership-changed");
     assert.deepStrictEqual(yield* registry.list, [next]);
+    const failed = {
+      ...next,
+      summary: { ...next.summary, keepWorkspace: false },
+      captureFailure: { operationId: "failed-capture", reason: "Unsupported capture" },
+    };
+    yield* registry.put(failed, next);
+    assert.deepStrictEqual(yield* registry.list, [failed]);
+    for (const target of [
+      "/managed/feature",
+      "/managed/feature/node_modules",
+      "/managed/feature/dist",
+      "/managed",
+    ]) {
+      assert.strictEqual(yield* registry.automaticProtection(target), "Unsupported capture");
+    }
+    const legacy = {
+      ...failed,
+      captureFailure: { ...failed.captureFailure, retryOnce: true as const },
+    };
+    yield* registry.put(legacy, failed);
+    assert.strictEqual(
+      yield* registry.automaticProtection("/managed/feature"),
+      "Unsupported capture",
+    );
   }).pipe(Effect.provide(layer)),
 );
 
