@@ -53,6 +53,15 @@ const ITEMS: ReadonlyArray<SettingsSearchItem> = [
 ];
 
 describe("searchSettings", () => {
+  it.each(["work details hover", "current work status", "full list info button"])(
+    "finds the current work hover preference for %s",
+    (query) => {
+      expect(searchSettings(query)).toContainEqual(
+        expect.objectContaining({ id: "hover-current-work-details", to: "/settings/lastcode" }),
+      );
+    },
+  );
+
   it.each([
     ["suspend settled worktrees", "storage-suspension-policy"],
     ["LastCode restore saved workspace", "storage-saved-workspaces"],
