@@ -14,6 +14,7 @@ import {
   OrchestrationV2ThreadShellJson,
   OrchestrationV2SubagentJson,
   OrchestrationV2ThreadHistoryPage,
+  OrchestrationV2SearchThreadsInput,
   OrchestrationV2TurnItem,
   OrchestrationV2TurnItemJson,
 } from "./orchestrationV2.ts";
@@ -36,6 +37,15 @@ const decodeOrchestrationV2ProviderCapabilities = Schema.decodeUnknownSync(
 );
 
 describe("orchestration V2 contracts", () => {
+  it("allows exact-ID mention metadata lookup while preserving ordinary query bounds", () => {
+    const valid = Schema.is(OrchestrationV2SearchThreadsInput);
+    expect(valid({ query: "", mode: "thread-mention", threadIds: ["thread:one"] })).toBe(true);
+    expect(valid({ query: "co", mode: "thread-mention" })).toBe(true);
+    expect(valid({ query: "c", mode: "thread-mention" })).toBe(false);
+    expect(valid({ query: "", threadIds: ["thread:one"] })).toBe(false);
+    expect(valid({ query: "co" })).toBe(true);
+  });
+
   it("decodes thread event types from a newer server as skippable items", () => {
     const decodeWireItems = Schema.decodeUnknownSync(
       Schema.toCodecJson(Schema.Array(OrchestrationV2RpcSchemas.subscribeThread.output)),

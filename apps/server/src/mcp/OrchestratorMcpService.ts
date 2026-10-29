@@ -3064,8 +3064,27 @@ const make = Effect.gen(function* () {
     }),
     readThreadLocal,
     readThread: Effect.fn("OrchestratorMcpService.readThread")(function* (scope, input) {
+      if (input.via === "client" && input.environmentId === undefined) {
+        return yield* failure("invalid_request", "A client-routed read requires environmentId.");
+      }
       // Validate the caller before allowing a miss to leave this environment.
       const { parent } = yield* loadCaller(scope, false);
+      if (input.environmentId === scope.environmentId) return yield* readThreadLocal(scope, input);
+      const clientAuthority =
+        parent !== undefined &&
+        scope.client === undefined &&
+        parent.thread.linkOrigin === undefined;
+      if (input.via === "client" && !clientAuthority) {
+        return yield* new OrchestratorMcpFailure({
+          code: "capability_denied",
+          threadReadReason: "permission_denied",
+          message:
+            "This caller has no authority to read through the initiating client. Setting via does not grant that authority.",
+        });
+      }
+      if (input.via === "client" && parent !== undefined) {
+        return yield* threadReadBroker.read(parent.thread.id, callerRunId(parent), input);
+      }
       const remote = PeerForwarding.remoteTarget(scope, input.environmentId);
       if (remote !== undefined) {
         const link = yield* peerLinks
@@ -3079,10 +3098,8 @@ const make = Effect.gen(function* () {
       return yield* readThreadLocal(scope, input).pipe(
         Effect.catchIf(
           (error) => error.code === "thread_not_found",
-          // For unlinked targets, only a T3 thread's run carries client authority.
-          // OAuth clients and reads forwarded from a client stay in this environment.
           (error) =>
-            parent === undefined
+            !clientAuthority || parent === undefined || input.environmentId !== undefined
               ? Effect.fail(error)
               : threadReadBroker.read(parent.thread.id, callerRunId(parent), input),
         ),

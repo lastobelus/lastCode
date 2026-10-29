@@ -369,12 +369,6 @@ const linksUnavailable = new OrchestratorMcpFailure({
   message: "This environment cannot reach linked environments.",
 });
 
-/**
- * Every tool that takes a linked environment runs there the same way: its
- * declaration checks the caller here, and the same call goes to the other
- * environment, which checks the rest. The handler here never sees
- * `environmentId`, so it cannot leak into what it writes.
- */
 const routed = Effect.fn("McpToolAccess.routed")(function* <Tools extends Record<string, Tool.Any>>(
   toolkit: Toolkit.Toolkit<Tools>,
   declarations: Handlers<Tools>,
@@ -398,6 +392,13 @@ const routed = Effect.fn("McpToolAccess.routed")(function* <Tools extends Record
       Effect.gen(function* () {
         const scope = yield* McpInvocationContext.McpInvocationContext;
         const target = PeerForwarding.remoteTarget(scope, environmentId);
+        if (
+          name === "t3_thread_read" &&
+          (target === undefined ||
+            (Predicate.hasProperty(params, "via") && params.via === "client"))
+        ) {
+          return yield* here({ ...params, environmentId });
+        }
         if (target === undefined) return yield* here(params);
         if (scope.linkedEnvironments === false) return yield* PeerForwarding.linkedEnvironmentsOff;
         yield* (remote as RemoteCheck<typeof params>)(params);

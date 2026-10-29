@@ -20,11 +20,12 @@ describe("projectPendingUserInputAnswer", () => {
     "Reference work",
   );
 
-  it("sends thread chips as readable links with the actual thread ID", () => {
+  it("preserves the attached thread's owner and client read route in an answer", () => {
     const answer = `Compare ${formatInlineContextReference(threadContextReference(record))}`;
-    expect(projectPendingUserInputAnswer(answer, [record])).toBe(
-      "Compare [Reference work](t3-thread://v2/env-answer/reference-thread)",
-    );
+    const projected = projectPendingUserInputAnswer(answer, [record]);
+    expect(projected).toContain('"environmentId":"env-answer"');
+    expect(projected).toContain('"threadId":"reference-thread"');
+    expect(projected).toContain('"via":"client"');
   });
 
   // regression: #18789 answers to pending questions lost exact text and option values

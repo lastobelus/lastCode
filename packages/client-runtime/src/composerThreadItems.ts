@@ -1,10 +1,4 @@
-import {
-  isListedThreadLineage,
-  type EnvironmentId,
-  type EnvironmentMachineKind,
-  type ScopedThreadRef,
-  type ThreadId,
-} from "@t3tools/contracts";
+import type { EnvironmentId, EnvironmentMachineKind, ScopedThreadRef } from "@t3tools/contracts";
 import { foldSearchQuery, rankSearchItems, scoreThreadSearch } from "@t3tools/shared/paletteSearch";
 
 import type { EnvironmentThreadShell } from "./state/models.ts";
@@ -13,7 +7,10 @@ import { threadSearchSubject, type ThreadSearchShell } from "./state/threadSearc
 const COMPOSER_THREAD_RESULT_LIMIT = 5;
 
 export type ComposerThreadCandidate = ThreadSearchShell &
-  Pick<EnvironmentThreadShell, "archivedAt" | "lineage">;
+  Pick<EnvironmentThreadShell, "archivedAt" | "lineage"> & {
+    readonly projectId?: string;
+    readonly projectTitle?: string;
+  };
 
 export interface ComposerThreadItem {
   readonly id: string;
@@ -25,48 +22,65 @@ export interface ComposerThreadItem {
 
 /**
  * Threads to reference from the composer, matched and ranked like the command
- * palette, without subagent or side chat threads. The agent reads threads on its own server
- * and on the machines it links to, so candidates stay within those, and a linked
- * machine's threads say which machine they are on.
+ * palette. Eligibility comes from the client's authorized environment catalog,
+ * not peer-link membership or sidebar visibility.
  */
 export function matchComposerThreadItems(input: {
   shells: ReadonlyArray<ComposerThreadCandidate>;
   environmentId: EnvironmentId;
-  /** The machines the composer's environment links to, by name. */
-  linkedEnvironments: ReadonlyMap<EnvironmentId, string>;
-  excludeThreadId: ThreadId | null;
+  /** All connected, read-authorized environments, including the current one. */
+  allowedEnvironmentIds: ReadonlySet<EnvironmentId>;
+  /** Names for disambiguating results across environments. */
+  environmentLabels?: ReadonlyMap<EnvironmentId, string>;
+  /** Current scoped thread, if any. */
+  excludeThread: ScopedThreadRef | null;
+  /** Lightweight server candidates for archived/subagent/omitted shells. */
+  candidates?: ReadonlyArray<ComposerThreadCandidate>;
   query: string;
   /** Recency is measured against this time. */
   now: number;
 }): ComposerThreadItem[] {
   const query = foldSearchQuery(input.query);
   if (query.length === 0) return [];
-  const candidates = input.shells.filter(
-    (shell) =>
-      (shell.environmentId === input.environmentId ||
-        input.linkedEnvironments.has(shell.environmentId)) &&
-      shell.id !== input.excludeThreadId &&
-      shell.archivedAt === null &&
-      isListedThreadLineage(shell.lineage),
-  );
+  const byKey = new Map<string, ComposerThreadCandidate>();
+  for (const shell of [...input.shells, ...(input.candidates ?? [])]) {
+    byKey.set(JSON.stringify([shell.environmentId, shell.id]), shell);
+  }
+  const candidates = [...byKey.values()].filter((shell) => {
+    const isAllowed = input.allowedEnvironmentIds.has(shell.environmentId);
+    const excluded = input.excludeThread
+      ? input.excludeThread.environmentId === shell.environmentId &&
+        input.excludeThread.threadId === shell.id
+      : false;
+    return isAllowed && !excluded;
+  });
   return rankSearchItems(candidates, (shell, options) =>
-    scoreThreadSearch(query, threadSearchSubject(shell, null), input.now, {
-      ...options,
-      picks: false,
-    }),
+    scoreThreadSearch(
+      query,
+      threadSearchSubject(
+        shell,
+        shell.projectTitle,
+        input.environmentLabels?.get(shell.environmentId),
+      ),
+      input.now,
+      {
+        ...options,
+        picks: false,
+      },
+    ),
   )
     .slice(0, COMPOSER_THREAD_RESULT_LIMIT)
     .map(({ item: shell }) => {
-      const machine =
+      const environment =
         shell.environmentId === input.environmentId
           ? undefined
-          : input.linkedEnvironments.get(shell.environmentId);
+          : input.environmentLabels?.get(shell.environmentId);
       return {
         id: `thread:${shell.environmentId}:${shell.id}`,
         type: "thread",
         thread: { environmentId: shell.environmentId, threadId: shell.id },
         label: shell.title,
-        description: machine === undefined ? "Thread" : `Thread on ${machine}`,
+        description: [shell.projectTitle, environment].filter(Boolean).join(" · ") || "Thread",
       };
     });
 }

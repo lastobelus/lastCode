@@ -26,6 +26,7 @@ const threadId = ThreadId.make("thread-remote-example");
 const sourceThreadId = ThreadId.make("source-thread");
 const environmentId = EnvironmentId.make("remote-environment");
 const result: OrchestratorMcpThreadReadResult = {
+  readVia: "client",
   thread: {
     threadId,
     environmentId,
@@ -354,6 +355,7 @@ describe("ThreadReadBroker", () => {
         const input: OrchestratorMcpThreadReadInput = {
           threadId,
           environmentId,
+          via: "client",
           itemId: TurnItemId.make("example-item"),
           textOffset: 5000,
           afterPosition: 40,
@@ -447,8 +449,65 @@ describe("ThreadReadBroker", () => {
         expect(
           yield* respondTo(broker, "client-session", request, wrongEnvironment).pipe(Effect.flip),
         ).toMatchObject({ code: "invalid_request" });
+        expect(
+          yield* broker
+            .respond("client-session", {
+              connectionId: request.connectionId,
+              requestId: request.requestId,
+              result: null,
+              unavailableEnvironmentIds: [],
+              failure: {
+                environmentId: wrongEnvironment.thread.environmentId,
+                reason: "permission_denied",
+              },
+            })
+            .pipe(Effect.flip),
+        ).toMatchObject({ code: "invalid_request" });
         yield* respondTo(broker, "client-session", request);
         expect(yield* Fiber.join(reading)).toEqual(result);
+      }),
+    ),
+  );
+
+  it.effect("preserves revocation on the exact client route without changing authority", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { broker } = yield* makeHarness;
+        yield* (yield* broker.connect("client-session")).pipe(
+          Stream.runForEach((request) =>
+            broker.respond("client-session", {
+              connectionId: request.connectionId,
+              requestId: request.requestId,
+              result: null,
+              unavailableEnvironmentIds: [environmentId],
+            }),
+          ),
+          Effect.forkScoped,
+        );
+        yield* (yield* broker.connect("client-session")).pipe(
+          Stream.runForEach((request) =>
+            broker.respond("client-session", {
+              connectionId: request.connectionId,
+              requestId: request.requestId,
+              result: null,
+              unavailableEnvironmentIds: [],
+              failure: { environmentId, reason: "permission_denied" },
+            }),
+          ),
+          Effect.forkScoped,
+        );
+        expect(
+          yield* broker
+            .read(sourceThreadId, sourceRunId, {
+              threadId,
+              environmentId,
+              via: "client",
+            })
+            .pipe(Effect.flip),
+        ).toMatchObject({
+          code: "capability_denied",
+          threadReadReason: "permission_denied",
+        });
       }),
     ),
   );

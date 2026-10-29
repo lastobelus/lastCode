@@ -1,3 +1,4 @@
+import { readUnavailableThreadReference } from "../../lib/composerThreadReferences";
 import type { ThreadStructure } from "@t3tools/client-runtime/state/shell";
 import {
   AuthOrchestrationOperateScope,
@@ -315,6 +316,18 @@ export function usePendingThreadRequests(input: {
       );
       if ((useQuestionAttachmentPreparation.getState().counts[target] ?? 0) > 0) return;
       const draft = useComposerDraftStore.getState().getComposerDraft(target);
+      const answer = answers[question.id];
+      const unavailable =
+        typeof answer === "string"
+          ? readUnavailableThreadReference(answer, draft?.threadContexts ?? [], environmentId)
+          : undefined;
+      if (unavailable) {
+        setThreadError(
+          activeThreadId,
+          "An attached thread cannot be read. Check connections, read permissions and server updates for the source and destination environments, or remove the reference before submitting. Your answer is saved.",
+        );
+        return;
+      }
       providerAnswers[question.id] = projectPendingUserInputAnswer(
         answers[question.id],
         draft?.threadContexts ?? [],

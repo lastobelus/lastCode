@@ -9,7 +9,13 @@ import type {
   EnvironmentId,
   ProjectId,
   ScopedThreadRef,
+  ThreadContextRecord,
 } from "@t3tools/contracts";
+import { AuthOrchestrationReadScope } from "@t3tools/contracts";
+import { threadReferenceUnavailableReason } from "@t3tools/shared/composerContextReferences";
+import { useEnvironments } from "../state/environments";
+import { useEnvironmentsWithScope } from "../state/session";
+import { useThreadSearch } from "../state/queries";
 import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 import { videoMimeType } from "@t3tools/shared/video";
@@ -72,6 +78,68 @@ function ContextSource(props: { source: ElementContextSource | null }) {
       value={[source.functionName, location].filter(Boolean).join("\n")}
       code
     />
+  );
+}
+
+function ThreadReferenceDetails(props: {
+  record: ThreadContextRecord;
+  destinationEnvironmentId: EnvironmentId | undefined;
+}) {
+  const { environments } = useEnvironments();
+  const readable = useEnvironmentsWithScope(environments, AuthOrchestrationReadScope);
+  const availability = new Map(
+    environments.map((item) => [
+      item.environmentId,
+      {
+        connected: item.connection.phase === "connected",
+        canRead: readable.has(item.environmentId),
+        supportsUniversalThreadReferences:
+          item.serverConfig?.environment.capabilities.universalThreadReferences === true,
+      },
+    ]),
+  );
+  const source = environments.find((item) => item.environmentId === props.record.environmentId);
+  const sourceState = availability.get(props.record.environmentId);
+  const canResolve =
+    sourceState?.connected && sourceState.canRead && sourceState.supportsUniversalThreadReferences;
+  const metadata = useThreadSearch(canResolve ? [props.record.environmentId] : [], "", {
+    mode: "thread-mention",
+    threadIds: [props.record.threadId],
+    titlesOnly: true,
+  });
+  const candidate = metadata.mentionCandidates?.find((item) => item.id === props.record.threadId);
+  const resolved =
+    metadata.mentionResolvedEnvironments?.includes(props.record.environmentId) === true &&
+    !metadata.mentionsTruncated;
+  const reason =
+    props.destinationEnvironmentId === undefined
+      ? null
+      : threadReferenceUnavailableReason({
+          record: props.record,
+          destinationEnvironmentId: props.destinationEnvironmentId,
+          environments: availability,
+        });
+  const status =
+    reason === "permission-denied"
+      ? "Check read permission for the source and destination environments, or remove this reference."
+      : reason === "disconnected"
+        ? "Check the connections to the source and destination environments to read this reference."
+        : reason === "unsupported"
+          ? "Check for server updates on the source and destination environments to read this reference."
+          : resolved && candidate === undefined
+            ? "This thread was not found in its source environment. Its saved title is shown."
+            : candidate === undefined
+              ? "Thread details are unavailable. Its saved title is shown; this does not mean the thread was deleted."
+              : null;
+  return (
+    <>
+      <ContextField label="Thread" value={candidate?.title || props.record.title} />
+      <ContextField
+        label="Source"
+        value={[candidate?.projectTitle, source?.label].filter(Boolean).join(" · ")}
+      />
+      <ContextField label="Availability" value={status} />
+    </>
   );
 }
 
@@ -308,7 +376,10 @@ export function ComposerContextSheet(props: {
             ) : null}
             {record.kind === "thread" ? (
               <View className="gap-3">
-                <ContextField label="Thread" value={record.title} />
+                <ThreadReferenceDetails
+                  record={record}
+                  destinationEnvironmentId={props.environmentId}
+                />
                 {props.onOpenThread ? (
                   <Button
                     label="Open thread"

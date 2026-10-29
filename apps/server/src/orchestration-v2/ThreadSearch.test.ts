@@ -921,11 +921,26 @@ it.layer(layerTest)("ThreadSearch.searchThreadsWithOlderSettledRows", (it) => {
           request: { query: "plover", olderSettledBefore: DateTime.formatIso(at(30)), ...request },
           search: search.search,
           searchOlderSettled: search.searchOlderSettled,
+          searchMentionCandidates: search.searchMentionCandidates,
           sql,
           readThreads: (threadIds) =>
             projections.readShellSnapshot({ location: "active", threadIds }),
           latestSequence: Effect.succeed(7),
         });
+      const mentions = yield* ThreadSearch.searchThreadsWithOlderSettledRows({
+        request: { query: "plover", mode: "thread-mention" },
+        search: search.search,
+        searchOlderSettled: search.searchOlderSettled,
+        searchMentionCandidates: search.searchMentionCandidates,
+        sql,
+        readThreads: (threadIds) =>
+          projections.readShellSnapshot({ location: "active", threadIds }),
+        latestSequence: Effect.succeed(7),
+      });
+      assert.deepEqual(
+        mentions.mentionCandidates?.map((candidate) => candidate.id),
+        [old, recent],
+      );
       const withMessages = yield* run({});
       assert.deepEqual(
         withMessages.matches.map((match) => match.threadId),
@@ -948,6 +963,7 @@ it.layer(layerTest)("ThreadSearch.searchThreadsWithOlderSettledRows", (it) => {
           request: { query: "plover" },
           search: search.search,
           searchOlderSettled: search.searchOlderSettled,
+          searchMentionCandidates: search.searchMentionCandidates,
           sql,
           readThreads: (threadIds) =>
             projections.readShellSnapshot({ location: "active", threadIds }),
@@ -959,6 +975,67 @@ it.layer(layerTest)("ThreadSearch.searchThreadsWithOlderSettledRows", (it) => {
 });
 
 it.layer(layerTest)("ThreadSearch.searchThreads", (it) => {
+  it.effect(
+    "searches mention candidates across archived and completed subagent threads without a cutoff",
+    () =>
+      Effect.gen(function* () {
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const search = yield* ThreadSearch.ThreadSearch;
+        const firstProject = ProjectId.make("project:mention-primary");
+        const secondProject = ProjectId.make("project:mention-secondary");
+        yield* createProject(firstProject);
+        yield* createProject(secondProject);
+        const archived = ThreadId.make("thread:mention-archived");
+        const subagent = ThreadId.make("thread:mention-subagent");
+        const deleted = ThreadId.make("thread:mention-deleted");
+        const ordinary = ThreadId.make("thread:mention-ordinary");
+        yield* Effect.forEach(
+          [
+            thread(archived, firstProject, { title: "Comet archival", archivedAt: at(2) }),
+            thread(subagent, secondProject, {
+              title: "Comet completed helper",
+              subagentOf: ordinary,
+              settledAt: at(3),
+            }),
+            thread(deleted, secondProject, { title: "Comet deleted", deletedAt: at(4) }),
+            thread(ordinary, firstProject, { title: "Ordinary conversation" }),
+          ],
+          projections.apply,
+          { discard: true },
+        );
+
+        const mention = yield* search.searchMentionCandidates({ query: "comet", limit: 50 });
+        assert.deepEqual(
+          mention.mentionCandidates.map((candidate) => candidate.id),
+          [archived, subagent],
+        );
+        assert.equal(mention.mentionsTruncated, false);
+        assert.equal(
+          mention.mentionCandidates.find((candidate) => candidate.id === archived)?.archivedAt,
+          DateTime.formatIso(at(2)),
+        );
+        assert.equal(
+          mention.mentionCandidates.find((candidate) => candidate.id === subagent)?.lineage
+            .relationshipToParent,
+          "subagent",
+        );
+
+        const exact = yield* search.searchMentionCandidates({
+          query: "",
+          threadIds: [archived, deleted],
+        });
+        assert.deepEqual(
+          exact.mentionCandidates.map((candidate) => candidate.id),
+          [archived],
+        );
+        assert.equal(exact.mentionCandidates[0]?.projectId, firstProject);
+        assert.equal(exact.mentionsTruncated, false);
+
+        const ordinarySearch = yield* search.searchThreads({ query: "comet", limit: 50 });
+        assert.deepEqual(ordinarySearch.matches, []);
+      }),
+  );
+
   it.effect("keeps room for a message-only thread behind many titled ones", () =>
     Effect.gen(function* () {
       const projections = yield* ProjectionStore.ProjectionStoreV2;
