@@ -16,6 +16,14 @@ export function createPromptSnippetsEnvironmentAtoms<R, E>(
   });
   return {
     list,
+    save: createEnvironmentRpcCommand(runtime, {
+      label: "prompt-snippets:save",
+      tag: WS_METHODS.promptSnippetsSave,
+      onSuccess: (target, registry) =>
+        Effect.sync(() =>
+          registry.refresh(list({ environmentId: target.environmentId, input: {} })),
+        ),
+    }),
     recordUse: createEnvironmentRpcCommand(runtime, {
       label: "prompt-snippets:record-use",
       tag: WS_METHODS.promptSnippetsRecordUse,

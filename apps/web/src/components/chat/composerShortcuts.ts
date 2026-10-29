@@ -26,6 +26,7 @@ export function composerShortcutCommands(
     },
     "composer.host": openControl(composerRef, "composer.host"),
     "composer.promptSnippets": openControl(composerRef, "composer.promptSnippets"),
+    "composer.editPromptSnippets": openControl(composerRef, "composer.editPromptSnippets"),
     "composer.effort": openControl(composerRef, "composer.effort"),
     "composer.mode": openControl(composerRef, "composer.mode"),
     "composer.workspace": openControl(composerRef, "composer.workspace"),

@@ -220,11 +220,10 @@ import { pendingDraftWork } from "./pendingDraftWork";
 import { observeResize } from "~/lib/observeResize";
 
 import { toastManager } from "../ui/toast";
-import { BuildingIcon, MessageSquareTextIcon, PlayIcon } from "lucide-react";
+import { BuildingIcon, PlayIcon } from "lucide-react";
 import { Button } from "../ui/button";
 import { useManagedPolicy } from "../../state/managedPolicy";
-import { PromptSnippetsDialog } from "./PromptSnippetsDialog";
-import { ComposerControl } from "./ComposerControl";
+import { useComposerPromptSnippets } from "~/lastcode/prompts/useComposerPromptSnippets";
 import { proposedPlanTitle } from "@t3tools/shared/proposedPlanText";
 import { hasProviderSetup } from "./ProviderStatusBanner";
 import { type AppModelOption, getAppModelOptionsForInstance } from "../../modelSelection";
@@ -1028,11 +1027,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const [isDragOverComposer, setIsDragOverComposer] = useState(false);
   const [isComposerPrimaryActionsCompact, setIsComposerPrimaryActionsCompact] = useState(false);
   const [isComposerModelPickerOpen, setIsComposerModelPickerOpen] = useState(false);
-  const [promptSnippetsSelection, setPromptSnippetsSelection] = useState<{
-    target: string;
-    cursor: number;
-  } | null>(null);
-  const promptSnippetsReturnCursor = useRef(0);
   const isMobileViewport = useMediaQuery("max-sm");
   const isSoftwareKeyboardOpen = useSoftwareKeyboardOpen();
   const [isComposerFocused, setIsComposerFocused] = useState(false);
@@ -2772,6 +2766,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   };
   const openModelPickerStable = useStableCallback(openModelPicker);
 
+  const promptSnippets = useComposerPromptSnippets({
+    environmentId,
+    keybindings,
+    target: attachmentTargetKey,
+    available: canOperateThread && pendingUserInputs.length === 0,
+    disabled: projectSelectionRequired,
+    readSnapshot: readComposerSnapshotStable,
+    insert: applyPromptReplacementStable,
+    focusAt: (cursor) => composerEditorRef.current?.focusAt(cursor),
+  });
+
   useImperativeHandle(
     composerRef,
     () => ({
@@ -2851,6 +2856,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         }
       },
       openControl: (command) => {
+        if (promptSnippets.openControl(command)) return;
         if (composerBlurFrameRef.current !== null) {
           window.cancelAnimationFrame(composerBlurFrameRef.current);
           composerBlurFrameRef.current = null;
@@ -3010,6 +3016,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       isComposerModelPickerOpen,
       openModelPickerStable,
       readComposerSnapshotStable,
+      promptSnippets.openControl,
       resetComposerTrigger,
       setComposerTrigger,
       selectedModel,
@@ -3133,26 +3140,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       data-chat-composer-form="true"
       {...threadContextDropTargetProps()}
     >
-      {promptSnippetsSelection?.target === attachmentTargetKey ? (
-        <PromptSnippetsDialog
-          key={attachmentTargetKey}
-          environmentId={environmentId}
-          keybindings={keybindings}
-          onClose={() => setPromptSnippetsSelection(null)}
-          onInsert={(text) => {
-            if (!canOperateThread || pendingUserInputs.length > 0 || projectSelectionRequired)
-              return false;
-            const cursor = Math.min(promptSnippetsSelection.cursor, promptRef.current.length);
-            const insertion = `${cursor > 0 && !/\s/u.test(promptRef.current[cursor - 1] ?? "") ? " " : ""}${text}\n`;
-            const inserted = applyPromptReplacementStable(cursor, cursor, insertion);
-            if (inserted) promptSnippetsReturnCursor.current = cursor + insertion.length;
-            return inserted;
-          }}
-          onReturnFocus={() =>
-            composerEditorRef.current?.focusAt(promptSnippetsReturnCursor.current)
-          }
-        />
-      ) : null}
+      {promptSnippets.dialog}
       <ComposerBanner.Dock>
         <ComposerBanner.Column>
           <ComposerBannerStack items={shelfItems} />
@@ -3449,26 +3437,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 )}
               >
                 {composerAttachButton ? <div className="me-2">{composerAttachButton}</div> : null}
-                {canOperateThread && pendingUserInputs.length === 0 ? (
-                  <div className="me-2 shrink-0">
-                    <ComposerControl
-                      data-composer-shortcut="composer.promptSnippets"
-                      aria-label="Common prompts"
-                      onPointerDown={(event) => event.preventDefault()}
-                      onClick={() => {
-                        const cursor = readComposerSnapshotStable().expandedCursor;
-                        promptSnippetsReturnCursor.current = cursor;
-                        setPromptSnippetsSelection({ target: attachmentTargetKey, cursor });
-                      }}
-                      disabled={projectSelectionRequired}
-                    >
-                      <MessageSquareTextIcon aria-hidden="true" className="size-4" />
-                      <span data-composer-control-label className="sr-only sm:not-sr-only">
-                        Prompts
-                      </span>
-                    </ComposerControl>
-                  </div>
-                ) : null}
+                {promptSnippets.trigger}
                 <div
                   data-chat-composer-actions="right"
                   data-chat-composer-transition-actions="true"

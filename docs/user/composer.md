@@ -24,8 +24,17 @@ Your environment builds the list from your conversations once a day, using the
 model configured for thread titles, so you don't need to maintain it. Close
 rewordings of one instruction merge into a single entry, while prompts that
 differ in a detail stay separate. **Find new prompts** runs discovery now. The
-picker remembers what you typed before choosing a prompt and ranks that prompt
-higher when you type it again. Dismiss a prompt you don't want and discovery
+miner keeps your shorthand instead of expanding it. The picker remembers what
+you typed before choosing a prompt and ranks that prompt
+higher when you type it again.
+
+Choose **Edit prompts** or press **Ctrl+,** to open the editor. Search the list,
+select a prompt, and save changes to its title or text. Use **New prompt** to add
+your own. Saved edits keep their learned searches and are left unchanged by
+daily discovery. **Search prompts** returns to the picker with the same selection.
+On mobile, switch between **Search** and **Edit** at the bottom of the sheet.
+
+Dismiss a prompt you don't want and discovery
 won't add it back; choose **Undo** right away to restore it with its history.
 
 ## Formatting

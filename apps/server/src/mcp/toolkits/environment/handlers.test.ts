@@ -58,7 +58,10 @@ const writeTools = [
   "t3_environment_pause_retry",
   "t3_environment_pause_resume",
 ] as const;
-type PauseTool = (typeof writeTools)[number] | "t3_environment_pause_status";
+type PauseTool =
+  | (typeof writeTools)[number]
+  | "t3_environment_pause_status"
+  | "prompt_snippets_save";
 
 const pauseHarness = (scope = callerScope, initialCaller = liveThreadShell(threadId)) =>
   Effect.gen(function* () {
@@ -76,6 +79,20 @@ const pauseHarness = (scope = callerScope, initialCaller = liveThreadShell(threa
         ),
       );
     const dependencies = Layer.mergeAll(
+      Layer.mock(PromptSnippets.PromptSnippets)({
+        save: (input) =>
+          Ref.update(calls, (previous) => [...previous, "save"]).pipe(
+            Effect.as({
+              id: "saved",
+              title: input.title,
+              text: input.text,
+              userEdited: true as const,
+              useCount: 0,
+              lastUsedAt: null,
+              queryUses: [],
+            }),
+          ),
+      }),
       Layer.succeed(ThreadCommandExecutor.ThreadCommandExecutor, executor),
       Layer.succeed(McpInvocationContext.McpInvocationContext, scope),
       Layer.mock(ThreadManagement.ThreadManagementService)({
@@ -114,7 +131,12 @@ const pauseHarness = (scope = callerScope, initialCaller = liveThreadShell(threa
     const invoke = (name: PauseTool) =>
       Effect.gen(function* () {
         const toolkit = yield* EnvironmentToolkit;
-        const results = yield* toolkit.handle(name, {}).pipe(Stream.unwrap, Stream.runCollect);
+        const results = yield* toolkit
+          .handle(
+            name,
+            name === "prompt_snippets_save" ? { title: "Review", text: "Review carefully" } : {},
+          )
+          .pipe(Stream.unwrap, Stream.runCollect);
         return results.at(-1)?.result;
       }).pipe(
         Effect.provide(
@@ -312,4 +334,32 @@ it.effect("refuses a preferences update when the caller's turn ends while it wai
       ),
     );
   }),
+);
+
+it.effect("saves common prompts only for an authorized environment caller", () =>
+  Effect.gen(function* () {
+    for (const access of ["read-only", "approval-required", "full-access"] as const) {
+      const h = yield* pauseHarness({
+        ...callerScope,
+        thread: undefined,
+        client: { sessionId: "client-save", label: "Test", access },
+      });
+      const result = yield* h.invoke("prompt_snippets_save");
+      if (access === "full-access") {
+        expect(result).toMatchObject({ id: "saved", title: "Review", userEdited: true });
+        expect(yield* Ref.get(h.calls)).toEqual(["save"]);
+      } else {
+        expect(result).toMatchObject({ code: "capability_denied" });
+        expect(yield* Ref.get(h.calls)).toEqual([]);
+      }
+    }
+    const wrongEnvironment = yield* pauseHarness({
+      ...callerScope,
+      environmentId: EnvironmentId.make("other-environment"),
+    });
+    expect(yield* wrongEnvironment.invoke("prompt_snippets_save")).toMatchObject({
+      code: "capability_denied",
+    });
+    expect(yield* Ref.get(wrongEnvironment.calls)).toEqual([]);
+  }).pipe(Effect.provide(ThreadCommandExecutor.layer)),
 );

@@ -109,7 +109,7 @@ export interface ProviderTextGeneration {
     cwd: string;
     modelSelection: ModelSelection;
     messages: readonly string[];
-    existing: readonly { id: string; title: string; text: string }[];
+    existing: readonly { id: string; title: string; text: string; userEdited?: true }[];
     dismissed?: readonly { id: string; title: string; text: string }[];
   }) => Effect.Effect<
     { snippets: readonly { existingIds: readonly string[]; title: string; text: string }[] },

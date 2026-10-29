@@ -5,6 +5,7 @@ import {
   PromptSnippetsState,
   TextGenerationError,
   PromptSnippet,
+  type PromptSnippetSaveInput,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
@@ -100,6 +101,8 @@ export function consolidate(
       mentioned.add(id);
       return found;
     });
+    // Manual entries remain editor-owned, including edits made while discovery was running.
+    if (previous.some((snippet) => snippet.userEdited)) continue;
     // Ignore a duplicate proposal without replacing either saved entry or its usage history.
     if (
       replacements.some((snippet) => normalizedText(snippet.text) === normalizedText(text)) ||
@@ -137,6 +140,9 @@ export class PromptSnippets extends Context.Service<
   PromptSnippets,
   {
     readonly list: Effect.Effect<PromptSnippetsState>;
+    readonly save: (
+      input: PromptSnippetSaveInput,
+    ) => Effect.Effect<PromptSnippet, PromptSnippetsError>;
     readonly recordUse: (input: {
       snippetId: string;
       query: string;
@@ -205,7 +211,7 @@ const make = Effect.gen(function* () {
     discovering,
     lastError: state.lastError,
   }));
-  const save = Effect.fn("PromptSnippets.save")(
+  const persist = Effect.fn("PromptSnippets.persist")(
     function* (next: State) {
       if (preserveUnreadable) {
         const backup = yield* crypto.randomUUIDv4();
@@ -227,7 +233,7 @@ const make = Effect.gen(function* () {
         const now = DateTime.formatIso(yield* DateTime.now);
         const run = Effect.gen(function* () {
           yield* mutation.withPermits(1)(
-            Effect.suspend(() => save({ ...state, lastAttemptAt: now, lastError: null })),
+            Effect.suspend(() => persist({ ...state, lastAttemptAt: now, lastError: null })),
           );
           const rows = yield* sql<{
             payload_json: string;
@@ -240,7 +246,12 @@ const make = Effect.gen(function* () {
               cwd: config.cwd,
               modelSelection: currentSettings.textGenerationModelSelection,
               messages,
-              existing: state.snippets.map(({ id, title, text }) => ({ id, title, text })),
+              existing: state.snippets.map(({ id, title, text, userEdited }) => ({
+                id,
+                title,
+                text,
+                ...(userEdited ? { userEdited } : {}),
+              })),
               dismissed: state.dismissed.map(({ id, title, text }) => ({ id, title, text })),
             })
             .pipe(Effect.timeout("3 minutes"));
@@ -251,7 +262,7 @@ const make = Effect.gen(function* () {
               const snippets = yield* Effect.try(() =>
                 consolidate(state.snippets, output.snippets, () => ids[index++]!, state.dismissed),
               );
-              yield* save({ ...state, snippets, lastDiscoveryAt: now, lastError: null });
+              yield* persist({ ...state, snippets, lastDiscoveryAt: now, lastError: null });
             }),
           );
           return yield* list;
@@ -263,7 +274,7 @@ const make = Effect.gen(function* () {
                 mutation
                   .withPermits(1)(
                     Effect.suspend(() =>
-                      save({
+                      persist({
                         ...state,
                         lastError:
                           isTextGenerationError(cause) &&
@@ -289,6 +300,53 @@ const make = Effect.gen(function* () {
   });
   return PromptSnippets.of({
     list,
+    save: Effect.fn("PromptSnippets.save")(function* (input) {
+      return yield* mutation.withPermits(1)(
+        Effect.gen(function* () {
+          const title = input.title.trim();
+          const text = input.text.trim();
+          const previous =
+            input.snippetId === undefined
+              ? undefined
+              : state.snippets.find((entry) => entry.id === input.snippetId);
+          if (
+            !title ||
+            title.length > 100 ||
+            !text ||
+            text.length > 4000 ||
+            (input.snippetId !== undefined && !previous) ||
+            (!previous && state.snippets.length >= 100) ||
+            [...state.snippets, ...state.dismissed].some(
+              (entry) =>
+                entry.id !== previous?.id && normalizedText(entry.text) === normalizedText(text),
+            )
+          )
+            return yield* new PromptSnippetsError({ operation: "save" });
+          const snippet: PromptSnippet = {
+            ...(previous ?? {
+              id: yield* crypto
+                .randomUUIDv4()
+                .pipe(
+                  Effect.mapError((cause) => new PromptSnippetsError({ operation: "save", cause })),
+                ),
+              useCount: 0,
+              lastUsedAt: null,
+              queryUses: [],
+            }),
+            title,
+            text,
+            userEdited: true,
+          };
+          yield* persist({
+            ...state,
+            snippets: previous
+              ? state.snippets.map((entry) => (entry.id === previous.id ? snippet : entry))
+              : [...state.snippets, snippet],
+          });
+          return snippet;
+        }),
+      );
+    }),
     discover,
     discoverIfDue: Effect.gen(function* () {
       if (discoveryDue(state.lastAttemptAt, yield* Clock.currentTimeMillis)) yield* discover();
@@ -305,7 +363,7 @@ const make = Effect.gen(function* () {
           const snippet = state.dismissed.find((snippet) => snippet.id === input.snippetId);
           if (!snippet || state.snippets.length >= 100)
             return yield* new PromptSnippetsError({ operation: "restore" });
-          yield* save({
+          yield* persist({
             ...state,
             snippets: [...state.snippets, snippet],
             dismissed: state.dismissed.filter((entry) => entry.id !== snippet.id),
@@ -321,7 +379,7 @@ const make = Effect.gen(function* () {
             if (state.dismissed.some((snippet) => snippet.id === input.snippetId)) return;
             return yield* new PromptSnippetsError({ operation: "dismiss" });
           }
-          yield* save({
+          yield* persist({
             ...state,
             snippets: state.snippets.filter((entry) => entry.id !== snippet.id),
             dismissed: [...state.dismissed, snippet],
@@ -353,7 +411,7 @@ const make = Effect.gen(function* () {
                 .slice(0, 100),
             };
           });
-          yield* save({ ...state, snippets });
+          yield* persist({ ...state, snippets });
         }),
       );
     }),
