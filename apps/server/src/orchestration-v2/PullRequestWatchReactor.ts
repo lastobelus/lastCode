@@ -137,6 +137,14 @@ function planRead(
   fingerprint: ProviderChangeRequestWatchFingerprint | null,
   now: number,
 ): ReadPlan {
+  if (
+    group.targets.some(
+      ({ watch }) =>
+        watch.quietDeadline?.dueAt != null && now >= Date.parse(watch.quietDeadline.dueAt),
+    )
+  ) {
+    return { detail: true, activity: true };
+  }
   if (last === undefined || group.targets.some((target) => !last.watches.has(watchKey(target)))) {
     return { detail: true, activity: true };
   }
@@ -158,6 +166,8 @@ function planRead(
 function watchesEqual(left: ThreadPullRequestWatch, right: ThreadPullRequestWatch): boolean {
   return (
     left.startedAt === right.startedAt &&
+    left.quietDeadline?.timeoutMinutes === right.quietDeadline?.timeoutMinutes &&
+    left.quietDeadline?.dueAt === right.quietDeadline?.dueAt &&
     left.headSha === right.headSha &&
     left.failedChecks.join("\n") === right.failedChecks.join("\n") &&
     left.passed === right.passed &&
@@ -279,6 +289,7 @@ export const make = Effect.gen(function* () {
       threadId: target.thread.id,
       ...identityOf(target.link),
       startedAt: target.watch.startedAt,
+      expectedQuietDeadline: target.watch.quietDeadline ?? null,
       watch: next,
       ...(endedWatch === undefined ? {} : { endedWatch }),
       ...(wake === undefined

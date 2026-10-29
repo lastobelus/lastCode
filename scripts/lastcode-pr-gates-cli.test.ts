@@ -79,9 +79,9 @@ if (args[0] === "pr" && args[1] === "view") {
   } else if (endpoint?.includes("/issues/302/comments?")) {
     result = [[{id:40,user:{login:"maintainer"},author_association:"OWNER",
       body:"@codex review\\n<!-- lastcode-review-head: " + selected.headRefOid + " -->",
-      created_at:"2026-09-01T12:00:00Z"}]];
+      created_at:state.requestedAt}]];
   } else if (endpoint?.includes("/reactions?")) {
-    result = [[]];
+    result = [[{id:41,user:{login:"chatgpt-codex-connector[bot]"},content:"eyes",created_at:"2026-09-01T12:01:00Z"}]];
   } else if (endpoint?.includes("/comments?")) {
     result = [[]];
   } else {
@@ -96,6 +96,11 @@ function fixture(stacked = false) {
   temporaryDirectories.push(root);
   const cwd = NodePath.join(root, "checkout");
   const bin = NodePath.join(root, "bin");
+  const runtimePath = NodePath.join(root, "runtime.mjs");
+  NodeFS.writeFileSync(runtimePath, 'Date.now = () => Date.parse("2026-09-01T12:10:00Z");');
+  const settingsHome = NodePath.join(root, "settings-home");
+  const settingsPath = NodePath.join(settingsHome, "userdata", "settings.json");
+  NodeFS.mkdirSync(NodePath.dirname(settingsPath), { recursive: true });
   const statePath = NodePath.join(root, "github.json");
   NodeFS.mkdirSync(cwd);
   NodeFS.mkdirSync(bin);
@@ -107,6 +112,7 @@ function fixture(stacked = false) {
     ciRunBase: null as string | null,
     driftDuringObservation: false,
     reviewMode: "clean",
+    requestedAt: "2026-09-01T12:00:00Z",
     changeReviewOnConfirmation: false,
     unresolved: false,
   };
@@ -129,20 +135,22 @@ function fixture(stacked = false) {
     "fixture",
   );
   const runFrom = (workingDirectory: string, ...args: string[]) =>
-    NodeChildProcess.spawnSync(process.execPath, [script, ...args], {
+    NodeChildProcess.spawnSync(process.execPath, ["--import", runtimePath, script, ...args], {
       cwd: workingDirectory,
       env: {
         ...process.env,
         PATH: `${bin}${NodePath.delimiter}${process.env.PATH ?? ""}`,
         LASTCODE_GITHUB_REPOSITORY: repository,
         GATES_TEST_STATE: statePath,
+        T3CODE_PR_WATCH_SETTINGS_PATH: undefined,
+        T3CODE_HOME: settingsHome,
       },
       encoding: "utf8",
       timeout: 15_000,
     });
 
   const run = (...args: string[]) => runFrom(cwd, ...args);
-  return { cwd, state, save, run, runFrom, git };
+  return { cwd, state, save, run, runFrom, git, settingsPath };
 }
 
 describe("one-shot PR gates CLI", () => {
@@ -188,6 +196,71 @@ describe("one-shot PR gates CLI", () => {
     const ci = test.run("--pr", "302");
     expect(ci.status, ci.stdout).toBe(0);
     expect(JSON.parse(ci.stdout)).toMatchObject({ status: "pending", reason: "ci-pending" });
+  });
+  it("uses the saved deadline and original request age despite lingering eyes", () => {
+    const test = fixture();
+    test.state.reviewMode = "pending";
+    test.save();
+    NodeFS.writeFileSync(
+      test.settingsPath,
+      JSON.stringify({ lastcodePullRequestWatchQuietMinutes: 11, unrelated: "ignored" }),
+    );
+    expect(JSON.parse(test.run("--pr", "302").stdout)).toMatchObject({
+      status: "pending",
+      reason: "review-pending",
+    });
+    NodeFS.writeFileSync(
+      test.settingsPath,
+      JSON.stringify({ lastcodePullRequestWatchQuietMinutes: 10 }),
+    );
+    const boundary = test.run("--pr", "302");
+    expect(boundary.status).toBe(1);
+    expect(JSON.parse(boundary.stdout)).toMatchObject({
+      status: "attention",
+      reason: "review-stalled",
+    });
+    NodeFS.rmSync(test.settingsPath);
+    test.state.requestedAt = "2026-08-31T18:10:00Z";
+    test.save();
+    expect(JSON.parse(test.run("--pr", "302").stdout)).toMatchObject({
+      status: "attention",
+      reason: "review-stalled",
+    });
+    test.state.reviewMode = "clean";
+    test.save();
+    expect(JSON.parse(test.run("--pr", "302").stdout)).toMatchObject({ status: "ready" });
+  });
+  it("rejects invalid saved deadlines without exposing private settings", () => {
+    const test = fixture();
+    for (const value of [0, 1441, 1.5, "45", null]) {
+      NodeFS.writeFileSync(
+        test.settingsPath,
+        JSON.stringify({
+          lastcodePullRequestWatchQuietMinutes: value,
+          private: "private-sentinel",
+        }),
+      );
+      const result = test.run("--pr", "302");
+      expect(result.status).toBe(1);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        status: "attention",
+        reason: "observation-failed",
+        detail: expect.stringContaining("integer from 1 to 1440"),
+      });
+      expect(result.stdout).not.toContain("private-sentinel");
+      expect(result.stdout).not.toContain(test.settingsPath);
+    }
+    NodeFS.writeFileSync(test.settingsPath, "private-sentinel");
+    const malformed = test.run("--pr", "302");
+    expect(JSON.parse(malformed.stdout).detail).toContain("valid JSON");
+    expect(malformed.stdout).not.toContain("private-sentinel");
+    NodeFS.writeFileSync(test.settingsPath, "[]");
+    expect(JSON.parse(test.run("--pr", "302").stdout).detail).toContain("an object");
+    NodeFS.rmSync(test.settingsPath);
+    NodeFS.mkdirSync(test.settingsPath);
+    const unreadable = test.run("--pr", "302");
+    expect(JSON.parse(unreadable.stdout).detail).toContain("Unable to read PR watch settings");
+    expect(unreadable.stdout).not.toContain(test.settingsPath);
   });
   it("hands a missing CI run to the watch only while review is pending", () => {
     const test = fixture();

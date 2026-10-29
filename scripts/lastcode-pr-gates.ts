@@ -2,6 +2,9 @@
 
 // @effect-diagnostics nodeBuiltinImport:off globalConsole:off globalDate:off -- Bounded host-side GitHub reads.
 import * as NodeChildProcess from "node:child_process";
+import { DEFAULT_LASTCODE_PULL_REQUEST_WATCH_QUIET_MINUTES } from "../packages/contracts/src/lastcodePullRequestWatchSettings.ts";
+
+import { readPullRequestWatchQuietMinutes } from "./lib/lastcode-pr-watch-settings.ts";
 
 import { type GithubCiEvidence, type RunGithubJson, readGithubCi } from "./lastcode-github-ci.ts";
 
@@ -77,6 +80,7 @@ export interface ReviewState {
   readonly pending: boolean;
   readonly ready: boolean;
   readonly latestTriggerId: number | null;
+  readonly latestTriggerAt: string | null;
 }
 
 export interface GateObservation {
@@ -369,6 +373,7 @@ export function deriveReviewState(input: {
     pending: requestPresent && !matchedCleanReaction && latestTerminalAt <= latestPendingAt,
     ready: artifacts.length > 0 && artifacts.every(({ key }) => readyArtifacts.has(key)),
     latestTriggerId: latestTrigger?.id ?? null,
+    latestTriggerAt: latestTrigger?.created_at ?? null,
   };
 }
 
@@ -612,6 +617,7 @@ export type GateDecision = {
 export function evaluatePullRequestGates(
   current: GateObservation,
   expectedBase = LASTCODE_BASE_BRANCH,
+  options: { readonly nowMs?: number; readonly quietMinutes?: number } = {},
 ): GateDecision {
   const pr = current.pullRequest;
   const attention = (reason: string, detail: string): GateDecision => ({
@@ -660,6 +666,21 @@ export function evaluatePullRequestGates(
     );
   if (!current.review.pending && !current.review.ready)
     return attention("review-unhandled", "The current-head Codex review has an unhandled finding.");
+  if (current.review.pending) {
+    const nowMs = options.nowMs ?? Date.now();
+    const quietMinutes = options.quietMinutes ?? DEFAULT_LASTCODE_PULL_REQUEST_WATCH_QUIET_MINUTES;
+    const requestedAt = Date.parse(current.review.latestTriggerAt ?? "");
+    if (!Number.isFinite(nowMs) || !Number.isFinite(requestedAt) || requestedAt > nowMs)
+      return attention(
+        "review-age-unknown",
+        "The pending current-head review request has no valid age.",
+      );
+    if (nowMs - requestedAt >= quietMinutes * 60_000)
+      return attention(
+        "review-stalled",
+        `The current-head Codex review has been pending for at least ${quietMinutes} minutes.`,
+      );
+  }
   if (current.ci.state === "satisfied" && !current.review.pending && current.review.ready) {
     // The native watch does not wake when GitHub finishes computing mergeability, so unknown
     // mergeability cannot be pending once CI and review are complete.
@@ -725,6 +746,7 @@ export function readPullRequestGates(
   target: string | number,
   trackLocalState: boolean,
   execute: RunGithubJson = runGhJson,
+  options: { readonly nowMs?: number; readonly quietMinutes?: number } = {},
 ) {
   const read = () => execute<PullRequestState>(pullRequestViewArgs(repository, target));
   const chain = (pr: PullRequestState) =>
@@ -787,7 +809,7 @@ export function readPullRequestGates(
       local: finalLocal,
     };
   }
-  const decision = evaluatePullRequestGates(observation, selected.pullRequest.baseRefName);
+  const decision = evaluatePullRequestGates(observation, selected.pullRequest.baseRefName, options);
   return {
     ...decision,
     repository,
@@ -821,10 +843,13 @@ export function parsePrGatesOptions(args: ReadonlyArray<string>): {
 if (import.meta.main) {
   try {
     const { pullRequestNumber } = parsePrGatesOptions(process.argv.slice(2));
+    const quietMinutes = await readPullRequestWatchQuietMinutes();
     const result = readPullRequestGates(
       LASTCODE_GITHUB_REPOSITORY,
       pullRequestNumber ?? currentBranch(),
       pullRequestNumber === null,
+      runGhJson,
+      { quietMinutes },
     );
     console.log(JSON.stringify(result));
     if (result.status === "attention") process.exitCode = 1;

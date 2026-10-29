@@ -1,5 +1,9 @@
 import { EasDeviceHostConfigs, SimlockDeviceHostConfigs, SshDeviceHostConfigs } from "./device.ts";
 import {
+  DEFAULT_LASTCODE_PULL_REQUEST_WATCH_QUIET_MINUTES,
+  LastCodePullRequestWatchQuietMinutes,
+} from "./lastcodePullRequestWatchSettings.ts";
+import {
   AuthOrchestrationOperateScope,
   AuthSettingsWriteScope,
   AuthProvidersManageScope,
@@ -1344,6 +1348,9 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   environmentPauseEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  lastcodePullRequestWatchQuietMinutes: LastCodePullRequestWatchQuietMinutes.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_LASTCODE_PULL_REQUEST_WATCH_QUIET_MINUTES)),
+  ),
   lastcodeLocalCi: LastCodeLocalCiSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_LASTCODE_LOCAL_CI_SETTINGS)),
   ),
@@ -1696,6 +1703,7 @@ export const ServerSettingsPatch = Schema.Struct({
     }),
   ),
   environmentPauseEnabled: Schema.optionalKey(Schema.Boolean),
+  lastcodePullRequestWatchQuietMinutes: Schema.optionalKey(LastCodePullRequestWatchQuietMinutes),
   lastcodeLocalCi: Schema.optionalKey(
     Schema.Struct({
       quickCiMode: Schema.optionalKey(LastCodeQuickCiMode),

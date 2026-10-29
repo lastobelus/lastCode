@@ -76,6 +76,8 @@ import {
   ThreadPullRequestSnapshot,
   ThreadPullRequestStack,
   ThreadPullRequestWatch,
+  ThreadPullRequestWatchQuietDeadline,
+  PullRequestWatchQuietTimeoutMinutes,
 } from "./threadPullRequest.ts";
 import {
   ProviderApprovalDecision,
@@ -3242,6 +3244,8 @@ export const OrchestrationV2Command = Schema.Union([
     threadId: ThreadId,
     ...ThreadPullRequestKey.fields,
     watching: Schema.Boolean,
+    /** Omitted preserves an armed timer or uses the environment default; null disables it. */
+    quietTimeoutMinutes: Schema.optional(Schema.NullOr(PullRequestWatchQuietTimeoutMinutes)),
     link: Schema.optional(
       Schema.Struct({
         url: TrimmedNonEmptyString,
@@ -3646,6 +3650,7 @@ const OrchestrationV2InternalCommand = Schema.Union([
     threadId: ThreadId,
     ...ThreadPullRequestKey.fields,
     startedAt: IsoDateTime,
+    expectedQuietDeadline: Schema.optional(Schema.NullOr(ThreadPullRequestWatchQuietDeadline)),
     watch: Schema.NullOr(ThreadPullRequestWatch),
     /** With `watch: null`, the state the ended watch keeps instead of its last saved one. */
     endedWatch: Schema.optional(ThreadPullRequestWatch),

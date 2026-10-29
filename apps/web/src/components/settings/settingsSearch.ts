@@ -672,6 +672,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["pause resume offline active threads sidebar environment"],
   },
   {
+    id: "pr-watch-quiet-deadline",
+    title: "PR watch quiet deadline",
+    to: "/settings/lastcode",
+    scope: "environment-defaults",
+    searchTerms: ["pull request review timeout stalled waiting minutes wake"],
+  },
+  {
     id: "continue-threads-after-server-update",
     title: "Continue threads after restarts",
     to: "/settings/maintenance",
