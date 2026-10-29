@@ -270,6 +270,9 @@ export const make = Effect.gen(function* () {
       peerLinks: true,
       mcpModeLimitHeader: true,
       linkFence: true,
+      localDesktopBrowser:
+        serverConfig.desktopBrowserFd !== undefined &&
+        serverConfig.desktopBrowserControlFd !== undefined,
     },
   };
 

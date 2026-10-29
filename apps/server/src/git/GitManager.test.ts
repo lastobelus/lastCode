@@ -2969,6 +2969,12 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       yield* runGit(repoDir, ["add", "retried.txt"]);
       yield* runGit(repoDir, ["commit", "-m", "Retried push"]);
       const rejectOnce = NodePath.join(remoteDir, "reject-once");
+      yield* runGit(remoteDir, [
+        "--git-dir=.",
+        "config",
+        "core.hooksPath",
+        NodePath.join(remoteDir, "hooks"),
+      ]);
       NodeFS.writeFileSync(rejectOnce, "");
       NodeFS.writeFileSync(
         NodePath.join(remoteDir, "hooks", "pre-receive"),

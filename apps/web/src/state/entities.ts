@@ -310,6 +310,18 @@ export function readEnvironmentSupportsServerBrowser(environmentId: EnvironmentI
   );
 }
 
+export function readEnvironmentHasLocalDesktopBrowser(environmentId: EnvironmentId) {
+  return appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment
+    .capabilities.localDesktopBrowser;
+}
+
+export function useEnvironmentHasLocalDesktopBrowser(environmentId: EnvironmentId | null) {
+  const configs = useServerConfigs();
+  return environmentId === null
+    ? undefined
+    : configs.get(environmentId)?.environment.capabilities.localDesktopBrowser;
+}
+
 export function readEnvironmentServerConfigLoaded(environmentId: EnvironmentId): boolean {
   return appAtomRegistry.get(environmentServerConfigsAtom).has(environmentId);
 }

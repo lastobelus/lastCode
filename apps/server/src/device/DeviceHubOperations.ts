@@ -90,7 +90,9 @@ export const makeDeviceHubOperations = (options: {
       Effect.flatMap((request) => hubJson(request, HubActionResult, "attach stream", BOOT_TIMEOUT)),
     );
 
-  const list: DeviceOperations["list"] = Effect.gen(function* () {
+  const listDevices: (includeAvailableAvds: boolean) => DeviceOperations["list"] = Effect.fn(
+    "DeviceHubOperations.list",
+  )(function* (includeAvailableAvds: boolean) {
     const hubList = yield* hubJson(
       HttpClientRequest.get(`${origin}/api/devices`),
       HubDeviceList,
@@ -111,7 +113,7 @@ export const makeDeviceHubOperations = (options: {
     );
     const details = warnings?.map((error) => error.message) ?? [];
     let androidDiscoveryIncomplete = false;
-    if (androidAvailable) {
+    if (includeAvailableAvds && androidAvailable) {
       const avds = yield* run("emulator", ["-list-avds"]);
       // Discovered devices stay listed; the AVDs that could not be listed are a warning.
       if (avds.code !== 0) {
@@ -141,7 +143,10 @@ export const makeDeviceHubOperations = (options: {
       detail: details.join("\n") || undefined,
       androidDiscoveryIncomplete,
     };
-  }).pipe(Effect.withSpan("DeviceHubOperations.list"));
+  });
+
+  const list = listDevices(true);
+  const listCurrent = listDevices(false);
 
   const boot: DeviceOperations["boot"] = Effect.fn("DeviceHubOperations.boot")(function* (device) {
     const result = yield* postJson(
@@ -246,5 +251,5 @@ export const makeDeviceHubOperations = (options: {
         Effect.withSpan("DeviceHubOperations.screenshot"),
       );
 
-  return { list, boot, attach, shutdown, screenshot };
+  return { list, listCurrent, boot, attach, shutdown, screenshot };
 };

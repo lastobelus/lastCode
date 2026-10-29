@@ -6,10 +6,12 @@ import {
   type DevicePlatform,
   type DeviceSummary,
   DeviceToolUnavailableError,
+  DeviceHostUnavailableError,
   LOCAL_DEVICE_HOST_ID,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Exit from "effect/Exit";
 import * as DeviceService from "../../../device/DeviceService.ts";
 import { threadWorkspaceRoot } from "../../../project/threadWorkspaceRoot.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -79,11 +81,12 @@ export function agentDeviceQuickStart(
           "The command is removed when the device closes or T3 Code restarts. If it is missing, call device_open again.",
         ]
       : []),
+    "Power off with device_close({ shutdown: true }). Use explicit commands or batch steps; replay/test scripts are unavailable through this scoped session.",
     platformNotes,
   ].join("\n");
 }
 
-const requireDeviceAccess = McpInvocationContext.requireThreadMcpCapability("device").pipe(
+const requireDeviceAccess = McpInvocationContext.requireCurrentThreadDeviceAccess.pipe(
   Effect.mapError(
     () =>
       new DeviceToolUnavailableError({
@@ -205,13 +208,16 @@ const handlers = {
         });
       }
       const target = yield* pickDevice(state, input);
-      // Resolve consent and agent connectivity before booting or registering a session.
-      if (!(yield* devices.agentReadinessIfSupported(target.hostId))) {
-        return yield* new DeviceToolUnavailableError({
+      // Check consent and connectivity before booting, without issuing a credential yet.
+      if (!(yield* devices.agentReadinessIfSupported(target.hostId, true))) {
+        return yield* new DeviceHostUnavailableError({
+          hostId: target.hostId,
           reason:
             "Agent device access requires enabled device support, agent access, and an available simulator platform on this host.",
         });
       }
+      // Installing or starting agent tools can outlive the caller's consent.
+      yield* requireDeviceAccess;
       const session = yield* devices.open(
         {
           threadId: scope.thread.threadId,
@@ -219,53 +225,77 @@ const handlers = {
           deviceId: target.id,
           platform: target.platform,
         },
-        { workspaceRoot: yield* threadWorkspaceRoot(scope.thread.threadId) },
+        {
+          rollbackOnFailure: true,
+          workspaceRoot: yield* threadWorkspaceRoot(scope.thread.threadId),
+        },
       );
-      const after = yield* devices.state;
-      const device =
-        after.devices.find(
-          (candidate) => candidate.hostId === session.hostId && candidate.id === session.deviceId,
-        ) ?? target;
-      // Target the opened device: an EAS device and its agent-device daemon
-      // exist only once its session runs, and Android ids change on boot.
-      const opened = {
-        threadId: scope.thread.threadId,
-        hostId: session.hostId,
-        deviceId: session.deviceId,
-      };
-      const agent = yield* devices.agentTarget(opened);
-      const hostKind = after.hosts.find((host) => host.id === device.hostId)?.kind;
-      const targetArgs = [
-        ...(agent.agentDeviceId === null
-          ? []
-          : agentDeviceTargetArgs({ ...device, id: agent.agentDeviceId })),
-        ...agent.args,
-      ];
-      const launcher = yield* devices.agentLauncher({ ...opened, targetArgs });
-      if (Option.isNone(launcher)) {
-        return yield* new DeviceToolUnavailableError({
-          reason:
-            "The device was closed while device_open was preparing it. Call device_open again only if you still need it.",
+      return yield* Effect.gen(function* () {
+        // Android boot resolves an AVD name to the serial used by subsequent CLI commands.
+        const agent = yield* devices.agentTarget({
+          openedSession: session,
+          agentAccessEnabled: true,
         });
-      }
-      const command = launcher.value;
-      return {
-        device,
-        agentDevice: { command, targetArgs, session: agent.session },
-        quickStart: agentDeviceQuickStart(
+        const after = yield* devices.state;
+        const device = after.devices.find(
+          (candidate) => candidate.hostId === session.hostId && candidate.id === session.deviceId,
+        ) ?? {
+          ...target,
+          hostId: session.hostId,
+          id: session.deviceId,
+          platform: session.platform,
+        };
+        const hostKind = after.hosts.find((host) => host.id === device.hostId)?.kind;
+        const targetArgs = [
+          ...(agent.agentDeviceId === null
+            ? []
+            : agentDeviceTargetArgs({ ...device, id: agent.agentDeviceId })),
+          ...agent.args,
+        ];
+        const launcher = yield* devices.agentLauncher({
+          threadId: scope.thread.threadId,
+          hostId: session.hostId,
+          deviceId: session.deviceId,
+          targetArgs,
+        });
+        if (Option.isNone(launcher)) {
+          return yield* new DeviceToolUnavailableError({
+            reason:
+              "The device was closed while device_open was preparing it. Call device_open again only if you still need it.",
+          });
+        }
+        const command = launcher.value;
+        return {
           device,
-          [],
-          command,
-          hostKind === "simlock"
-            ? {
-                kind: "simlock",
-                ...(agent.installDirectory ? { installDirectory: agent.installDirectory } : {}),
-              }
-            : hostKind === "eas"
-              ? { kind: "eas" }
-              : undefined,
+          agentDevice: { command, targetArgs, session: agent.session },
+          quickStart: agentDeviceQuickStart(
+            device,
+            [],
+            command,
+            hostKind === "simlock"
+              ? {
+                  kind: "simlock",
+                  ...(agent.installDirectory ? { installDirectory: agent.installDirectory } : {}),
+                }
+              : hostKind === "eas"
+                ? { kind: "eas" }
+                : undefined,
+          ),
+        };
+      }).pipe(
+        Effect.onExit((exit) =>
+          Exit.isFailure(exit)
+            ? devices.abortOpen(session).pipe(
+                Effect.catch(() =>
+                  Effect.logWarning("Could not roll back failed device open", {
+                    hostId: session.hostId,
+                    deviceId: session.deviceId,
+                  }),
+                ),
+              )
+            : devices.completeOpen(session),
         ),
-      };
+      );
     }).pipe(Effect.mapError(toolError)),
   ),
   device_screenshot: McpToolAccess.readsAsCaller((input) =>

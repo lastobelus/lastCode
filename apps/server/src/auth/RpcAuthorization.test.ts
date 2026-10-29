@@ -33,6 +33,16 @@ describe("RPC authorization scopes", () => {
     expect(new Set(Object.keys(RPC_REQUIRED_SCOPES))).toEqual(new Set(WsRpcGroup.requests.keys()));
   });
 
+  });
+
+  it("requires history read permission for each cross-environment routing operation", () => {
+    for (const method of [
+      WS_METHODS.threadReadLocal,
+      WS_METHODS.threadReadConnect,
+      WS_METHODS.threadReadRespond,
+    ]) {
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationReadScope);
+    }
   it("keeps webhook delivery logs, which hold request bodies, behind operate scope", () => {
     for (const method of [
       WS_METHODS.scheduledTasksListWebhookDeliveries,
