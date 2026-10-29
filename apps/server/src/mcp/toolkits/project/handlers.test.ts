@@ -70,6 +70,9 @@ it.effect(
               thread: { id: threadId },
               runs: runs.get(threadId) ?? [],
               contextTransfers: [],
+              runtimeRequests: [],
+              nodes: [],
+              messages: [],
             } as unknown as OrchestrationV2ThreadProjection;
           }),
       });
