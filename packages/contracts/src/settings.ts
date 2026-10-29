@@ -11,6 +11,7 @@ import * as Duration from "effect/Duration";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 import {
+  EnvironmentId,
   ForwardCompatibleNullable,
   ForwardCompatibleOptional,
   OmittedWhenNull,
@@ -72,6 +73,58 @@ export const SidebarProjectGroupingMode = Schema.Literals([
 ]);
 export type SidebarProjectGroupingMode = typeof SidebarProjectGroupingMode.Type;
 const DEFAULT_SIDEBAR_PROJECT_GROUPING_MODE: SidebarProjectGroupingMode = "repository";
+export const MIN_SIDEBAR_THREAD_PREVIEW_COUNT = 1;
+export const MAX_SIDEBAR_THREAD_PREVIEW_COUNT = 15;
+export const SidebarThreadPreviewCount = Schema.Int.check(
+  Schema.isBetween({
+    minimum: MIN_SIDEBAR_THREAD_PREVIEW_COUNT,
+    maximum: MAX_SIDEBAR_THREAD_PREVIEW_COUNT,
+  }),
+);
+export type SidebarThreadPreviewCount = typeof SidebarThreadPreviewCount.Type;
+const DEFAULT_SIDEBAR_THREAD_PREVIEW_COUNT: SidebarThreadPreviewCount = 6;
+export const MIN_HANDOFFS_MENU_LIMIT = 1;
+export const MAX_HANDOFFS_MENU_LIMIT = 50;
+export const HandoffsMenuLimit = Schema.Int.check(
+  Schema.isBetween({ minimum: MIN_HANDOFFS_MENU_LIMIT, maximum: MAX_HANDOFFS_MENU_LIMIT }),
+);
+export type HandoffsMenuLimit = typeof HandoffsMenuLimit.Type;
+export const DEFAULT_HANDOFFS_MENU_LIMIT: HandoffsMenuLimit = 7;
+export const MIN_LEGACY_SIDEBAR_SCALE = 50;
+export const MAX_LEGACY_SIDEBAR_SCALE = 100;
+export const LEGACY_SIDEBAR_SCALE_REFERENCE = 75;
+export const LegacySidebarScale = Schema.Int.check(
+  Schema.isBetween({
+    minimum: MIN_LEGACY_SIDEBAR_SCALE,
+    maximum: MAX_LEGACY_SIDEBAR_SCALE,
+  }),
+);
+export type LegacySidebarScale = typeof LegacySidebarScale.Type;
+export const DEFAULT_LEGACY_SIDEBAR_SCALE: LegacySidebarScale = 100;
+
+export const MIN_THREAD_PROVIDER_BADGE_SIZE = 10;
+export const MAX_THREAD_PROVIDER_BADGE_SIZE = 100;
+export const ThreadProviderBadgeSize = Schema.Int.check(
+  Schema.isBetween({
+    minimum: MIN_THREAD_PROVIDER_BADGE_SIZE,
+    maximum: MAX_THREAD_PROVIDER_BADGE_SIZE,
+  }),
+);
+export type ThreadProviderBadgeSize = typeof ThreadProviderBadgeSize.Type;
+const DEFAULT_THREAD_PROVIDER_BADGE_SIZE: ThreadProviderBadgeSize = 80;
+export const MIN_THREAD_PROVIDER_BADGE_TRANSPARENCY = 0;
+export const MAX_THREAD_PROVIDER_BADGE_TRANSPARENCY = 100;
+export const ThreadProviderBadgeTransparency = Schema.Int.check(
+  Schema.isBetween({
+    minimum: MIN_THREAD_PROVIDER_BADGE_TRANSPARENCY,
+    maximum: MAX_THREAD_PROVIDER_BADGE_TRANSPARENCY,
+  }),
+);
+export type ThreadProviderBadgeTransparency = typeof ThreadProviderBadgeTransparency.Type;
+const DEFAULT_THREAD_PROVIDER_BADGE_TRANSPARENCY: ThreadProviderBadgeTransparency = 0;
+
+export const LegacySidebarThreadGroupingStyle = Schema.Literals(["minimal", "typed-groups"]);
+export type LegacySidebarThreadGroupingStyle = typeof LegacySidebarThreadGroupingStyle.Type;
 export const MIN_SIDEBAR_AUTO_SETTLE_AFTER_DAYS = 1;
 export const MAX_SIDEBAR_AUTO_SETTLE_AFTER_DAYS = 90;
 export const SidebarAutoSettleAfterDays = Schema.Number.check(
@@ -139,6 +192,22 @@ export const AppearanceContrast = Schema.Int.check(
 );
 export type AppearanceContrast = typeof AppearanceContrast.Type;
 const DEFAULT_APPEARANCE_CONTRAST: AppearanceContrast = 100;
+export const MIN_SCROLLBAR_WIDTH = 1;
+export const MAX_SCROLLBAR_WIDTH = 12;
+export const ScrollbarWidth = Schema.Int.check(
+  Schema.isBetween({ minimum: MIN_SCROLLBAR_WIDTH, maximum: MAX_SCROLLBAR_WIDTH }),
+);
+export type ScrollbarWidth = typeof ScrollbarWidth.Type;
+export const DEFAULT_SCROLLBAR_WIDTH: ScrollbarWidth = 10;
+export const MIN_SCROLLBAR_MARGIN = 0;
+export const MAX_SCROLLBAR_MARGIN = 6;
+export const ScrollbarMargin = Schema.Int.check(
+  Schema.isBetween({ minimum: MIN_SCROLLBAR_MARGIN, maximum: MAX_SCROLLBAR_MARGIN }),
+);
+export type ScrollbarMargin = typeof ScrollbarMargin.Type;
+// The inline preview resize handle reaches four pixels into its neighboring
+// pane, so this default keeps the whole scrollbar thumb clear of that target.
+export const DEFAULT_SCROLLBAR_MARGIN: ScrollbarMargin = 4;
 export const MIN_PANEL_ANIMATION_DURATION_MS = 0;
 export const MAX_PANEL_ANIMATION_DURATION_MS = 400;
 export const PanelAnimationDurationMs = Schema.Int.check(
@@ -278,6 +347,13 @@ const LegacyConfirmQuit = Schema.Boolean.pipe(
 
 const QuitConfirmationModeSetting = Schema.Union([QuitConfirmationMode, LegacyConfirmQuit]);
 
+export const EnvironmentIconColor = TrimmedNonEmptyString.check(Schema.isPattern(/^#[\da-f]{6}$/i));
+export type EnvironmentIconColor = typeof EnvironmentIconColor.Type;
+
+/**
+ * A user-chosen font family (a single name or a comma-separated list). Empty
+ * means "use the app default"; clients compose their own fallback stacks.
+ */
 export const FontFamilyPreference = Schema.String.check(Schema.isMaxLength(200));
 export type FontFamilyPreference = typeof FontFamilyPreference.Type;
 
@@ -347,6 +423,21 @@ export type ModelPreferences = {
   readonly providerModelPreferences: typeof ProviderModelPreferences.Type;
 };
 
+export const IncomingMessageStyle = Schema.Literals(["neutral", "outline"]);
+export type IncomingMessageStyle = typeof IncomingMessageStyle.Type;
+export const IncomingMessageFillColor = Schema.NullOr(
+  TrimmedNonEmptyString.check(Schema.isPattern(/^#[\da-f]{6}$/i)),
+);
+export type IncomingMessageFillColor = typeof IncomingMessageFillColor.Type;
+
+export const LastCodeStatusIcon = Schema.Struct({
+  shape: Schema.Literals(["triangle", "triangle-right", "square", "diamond", "circle"]),
+  style: Schema.Literals(["open", "solid", "outline-fill"]),
+});
+export type LastCodeStatusIcon = typeof LastCodeStatusIcon.Type;
+
+const LastCodeStatusIcons = Schema.Record(Schema.String, LastCodeStatusIcon);
+
 export const ClientSettingsSchema = Schema.Struct({
   notificationMode: NotificationMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("off" as const)),
@@ -357,6 +448,12 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   chatWidth: ChatWidth.pipe(Schema.withDecodingDefault(Effect.succeed("comfortable" as const))),
   effortDisplay: EffortDisplay.pipe(Schema.withDecodingDefault(Effect.succeed("label" as const))),
+  incomingMessageStyle: IncomingMessageStyle.pipe(
+    Schema.withDecodingDefault(Effect.succeed("neutral" as const)),
+  ),
+  incomingMessageFillColor: IncomingMessageFillColor.pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   loadBalancingEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   loadBalancingWeights: LoadBalancingWeights.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   appearanceContrast: AppearanceContrast.pipe(
@@ -416,11 +513,20 @@ export const ClientSettingsSchema = Schema.Struct({
   confirmThreadArchive: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   confirmThreadDelete: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   confirmThreadUnpin: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  compactLegacySidebarStatuses: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
+  showThreadWorktreeIndicators: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(true)),
+  ),
   diffFilesCollapsed: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   diffIgnoreWhitespace: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   diffLayout: DiffLayout.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_DIFF_LAYOUT))),
   environmentIdentificationMode: EnvironmentIdentificationMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_ENVIRONMENT_IDENTIFICATION_MODE)),
+  ),
+  environmentIconColors: Schema.Record(EnvironmentId, EnvironmentIconColor).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
   ),
   glassOpacity: GlassOpacity.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_GLASS_OPACITY)),
@@ -480,7 +586,35 @@ export const ClientSettingsSchema = Schema.Struct({
   // Opt-in for the removed legacy sidebar. Still read so those users land in
   // the boring sidebar; the boring sidebar toggle clears it.
   legacySidebarEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  // LastCode overrides either upstream sidebar without changing the fallback preference.
+  lastcodeSidebarEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   sidebarWorkingShelfEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  lastcodeSidebarFamilyStatusSubheaders: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(true)),
+  ),
+  lastcodeStatusIcons: LastCodeStatusIcons.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  legacySidebarThreadGroupingStyle: LegacySidebarThreadGroupingStyle.pipe(
+    Schema.withDecodingDefault(Effect.succeed("minimal")),
+  ),
+  legacySidebarScale: LegacySidebarScale.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_LEGACY_SIDEBAR_SCALE)),
+  ),
+  largerScrollbarsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  scrollbarWidth: ScrollbarWidth.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_SCROLLBAR_WIDTH)),
+  ),
+  scrollbarMargin: ScrollbarMargin.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_SCROLLBAR_MARGIN)),
+  ),
+  roundedProjectIcons: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  showLocalEnvironmentIcon: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  showThreadProviderBadge: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  threadProviderBadgeSize: ThreadProviderBadgeSize.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_THREAD_PROVIDER_BADGE_SIZE)),
+  ),
+  threadProviderBadgeTransparency: ThreadProviderBadgeTransparency.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_THREAD_PROVIDER_BADGE_TRANSPARENCY)),
+  ),
   sidebarProjectGroupingMode: SidebarProjectGroupingMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_PROJECT_GROUPING_MODE)),
   ),
@@ -493,6 +627,12 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   sidebarThreadSortOrder: SidebarThreadSortOrder.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_THREAD_SORT_ORDER)),
+  ),
+  sidebarThreadPreviewCount: SidebarThreadPreviewCount.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_THREAD_PREVIEW_COUNT)),
+  ),
+  handoffsMenuLimit: HandoffsMenuLimit.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_HANDOFFS_MENU_LIMIT)),
   ),
   timestampFormat: TimestampFormat.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_TIMESTAMP_FORMAT)),
@@ -976,6 +1116,9 @@ export const WorktreeCleanupRules = Schema.Struct({
   worktreeSettledAfterDays: SettledWorktreeRetentionDays.pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
+  worktreeDependenciesAfterDays: StorageRetentionDays.pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   worktreeOnMerge: Schema.Boolean,
   worktreeOnDelete: Schema.Boolean,
   worktreeUnchanged: Schema.Boolean,
@@ -1099,6 +1242,8 @@ export function shouldRecommendDatabaseCompaction(status: DatabaseStorageStatus)
 
 export const StorageCleanupReportEntry = Schema.Struct({
   kind: Schema.Literals(["worktree", "browser-artifacts", "logs"]),
+  // Worktree content is detail within the existing category. Readers may ignore unfamiliar resources.
+  worktreeResource: Schema.optionalKey(Schema.String),
   outcome: Schema.Literals(["removed", "kept", "failed"]),
   reason: Schema.String,
   path: Schema.NullOr(Schema.String),
@@ -1123,6 +1268,9 @@ export type StorageCleanupReport = typeof StorageCleanupReport.Type;
 export const StorageCleanupSettings = Schema.Struct({
   worktreeKeepWhen: WorktreeKeepWhen.pipe(
     Schema.withDecodingDefault(Effect.succeed("uncommitted-changes")),
+  ),
+  worktreeDependenciesAfterDays: StorageRetentionDays.pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   worktreeAfterDays: StorageRetentionDays.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   worktreeSettledAfterDays: SettledWorktreeRetentionDays.pipe(
@@ -1162,6 +1310,7 @@ export const ServerSettings = Schema.Struct({
   providerModelPreferences: Schema.NullOr(ProviderModelPreferences).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
+  environmentPauseEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   lastcodeLocalCi: LastCodeLocalCiSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_LASTCODE_LOCAL_CI_SETTINGS)),
   ),
@@ -1510,6 +1659,7 @@ export const ServerSettingsPatch = Schema.Struct({
       providerModelPreferences: Schema.optionalKey(ProviderModelPreferences),
     }),
   ),
+  environmentPauseEnabled: Schema.optionalKey(Schema.Boolean),
   lastcodeLocalCi: Schema.optionalKey(
     Schema.Struct({
       quickCiMode: Schema.optionalKey(LastCodeQuickCiMode),
@@ -1527,6 +1677,7 @@ export const ServerSettingsPatch = Schema.Struct({
           mode: Schema.Literal("custom"),
           rules: Schema.Struct({
             worktreeKeepWhen: Schema.optionalKey(WorktreeKeepWhen),
+            worktreeDependenciesAfterDays: Schema.optionalKey(StorageRetentionDays),
             worktreeAfterDays: Schema.optionalKey(StorageRetentionDays),
             worktreeSettledAfterDays: Schema.optionalKey(SettledWorktreeRetentionDays),
             worktreeOnMerge: Schema.optionalKey(Schema.Boolean),
@@ -1540,6 +1691,7 @@ export const ServerSettingsPatch = Schema.Struct({
   storageCleanup: Schema.optionalKey(
     Schema.Struct({
       worktreeKeepWhen: Schema.optionalKey(WorktreeKeepWhen),
+      worktreeDependenciesAfterDays: Schema.optionalKey(StorageRetentionDays),
       worktreeAfterDays: Schema.optionalKey(StorageRetentionDays),
       worktreeSettledAfterDays: Schema.optionalKey(SettledWorktreeRetentionDays),
       worktreeOnMerge: Schema.optionalKey(Schema.Boolean),
@@ -1695,6 +1847,8 @@ export const ClientSettingsPatch = Schema.Struct({
   diffColorScheme: Schema.optionalKey(DiffColorScheme),
   chatWidth: Schema.optionalKey(ChatWidth),
   effortDisplay: Schema.optionalKey(EffortDisplay),
+  incomingMessageStyle: Schema.optionalKey(IncomingMessageStyle),
+  incomingMessageFillColor: Schema.optionalKey(IncomingMessageFillColor),
   loadBalancingEnabled: Schema.optionalKey(Schema.Boolean),
   loadBalancingWeights: Schema.optionalKey(LoadBalancingWeights),
   appearanceContrast: Schema.optionalKey(AppearanceContrast),
@@ -1716,9 +1870,13 @@ export const ClientSettingsPatch = Schema.Struct({
   confirmThreadDelete: Schema.optionalKey(Schema.Boolean),
   confirmThreadUnpin: Schema.optionalKey(Schema.Boolean),
   diffFilesCollapsed: Schema.optionalKey(Schema.Boolean),
+  compactLegacySidebarStatuses: Schema.optionalKey(Schema.Boolean),
+  showThreadWorktreeIndicators: Schema.optionalKey(Schema.Boolean),
+  handoffsMenuLimit: Schema.optionalKey(HandoffsMenuLimit),
   diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
   diffLayout: Schema.optionalKey(DiffLayout),
   environmentIdentificationMode: Schema.optionalKey(EnvironmentIdentificationMode),
+  environmentIconColors: Schema.optionalKey(Schema.Record(EnvironmentId, EnvironmentIconColor)),
   glassOpacity: Schema.optionalKey(GlassOpacity),
   onboardingCompletedAt: Schema.optionalKey(Schema.NullOr(Schema.String)),
   fontSizeInterface: Schema.optionalKey(InterfaceFontSize),
@@ -1746,14 +1904,28 @@ export const ClientSettingsPatch = Schema.Struct({
   showSkillsInSlashMenu: Schema.optionalKey(Schema.Boolean),
   boringSidebarEnabled: Schema.optionalKey(Schema.Boolean),
   boringSidebarMultilineRows: Schema.optionalKey(Schema.Boolean),
+  lastcodeSidebarFamilyStatusSubheaders: Schema.optionalKey(Schema.Boolean),
+  lastcodeStatusIcons: Schema.optionalKey(LastCodeStatusIcons),
+  legacySidebarThreadGroupingStyle: Schema.optionalKey(LegacySidebarThreadGroupingStyle),
   legacySidebarEnabled: Schema.optionalKey(Schema.Boolean),
+  lastcodeSidebarEnabled: Schema.optionalKey(Schema.Boolean),
   sidebarWorkingShelfEnabled: Schema.optionalKey(Schema.Boolean),
+  legacySidebarScale: Schema.optionalKey(LegacySidebarScale),
+  largerScrollbarsEnabled: Schema.optionalKey(Schema.Boolean),
+  scrollbarWidth: Schema.optionalKey(ScrollbarWidth),
+  scrollbarMargin: Schema.optionalKey(ScrollbarMargin),
+  roundedProjectIcons: Schema.optionalKey(Schema.Boolean),
+  showLocalEnvironmentIcon: Schema.optionalKey(Schema.Boolean),
+  showThreadProviderBadge: Schema.optionalKey(Schema.Boolean),
+  threadProviderBadgeSize: Schema.optionalKey(ThreadProviderBadgeSize),
+  threadProviderBadgeTransparency: Schema.optionalKey(ThreadProviderBadgeTransparency),
   sidebarProjectGroupingMode: Schema.optionalKey(SidebarProjectGroupingMode),
   sidebarProjectGroupingOverrides: Schema.optionalKey(
     Schema.Record(TrimmedNonEmptyString, SidebarProjectGroupingMode),
   ),
   sidebarProjectSortOrder: Schema.optionalKey(SidebarProjectSortOrder),
   sidebarThreadSortOrder: Schema.optionalKey(SidebarThreadSortOrder),
+  sidebarThreadPreviewCount: Schema.optionalKey(SidebarThreadPreviewCount),
   timestampFormat: Schema.optionalKey(TimestampFormat),
   snapShotEnabled: Schema.optionalKey(Schema.Boolean),
   snapShotIncludeAccessibility: Schema.optionalKey(Schema.Boolean),
