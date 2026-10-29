@@ -1,4 +1,4 @@
-import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -99,6 +99,42 @@ it("excludes only the exact current scoped thread and retains archived subagent 
     now: Date.parse("2026-10-23T00:00:00.000Z"),
   });
   expect(items.map((item) => item.thread)).toEqual([{ environmentId: other, threadId: "same" }]);
+  const candidate = {
+    ...archivedSubagent,
+    title: "Unrelated title",
+    searchPullRequests: [
+      {
+        number: 42,
+        title: "Reconnect bug",
+        references: ["acme/app#42", "https://github.com/acme/app/pull/42"],
+      },
+    ],
+  };
+  const cached = shell("same", "Unrelated title", {
+    environmentId: other,
+    linkedPullRequest: {
+      projectId: ProjectId.make("project"),
+      repository: "acme/app",
+      number: 42,
+      url: "https://github.com/acme/app/pull/42",
+    },
+  });
+  for (const shells of [[], [cached]]) {
+    for (const query of ["#42", "Reconnect bug", "acme/app#42"]) {
+      const matched = matchComposerThreadItems({
+        shells,
+        candidates: [candidate],
+        environmentId,
+        allowedEnvironmentIds: new Set([environmentId, other]),
+        excludeThread: null,
+        query,
+        now: Date.parse("2026-10-23T00:00:00.000Z"),
+      });
+      expect(matched.map((item) => item.thread)).toEqual([
+        { environmentId: other, threadId: "same" },
+      ]);
+    }
+  }
 });
 
 describe("matchComposerEnvironmentItems", () => {

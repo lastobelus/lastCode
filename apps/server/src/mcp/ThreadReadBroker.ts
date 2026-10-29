@@ -160,12 +160,16 @@ const make = Effect.gen(function* () {
     }
   >();
 
-  const finishMiss = Effect.fn("ThreadReadBroker.finishMiss")(function* (requestId: string) {
+  const finishMiss = Effect.fn("ThreadReadBroker.finishMiss")(function* (
+    requestId: string,
+    expired = false,
+  ) {
     const entry = pending.get(requestId);
-    if (entry === undefined || entry.clients.size > 0) return;
+    if (entry === undefined || (!expired && entry.clients.size > 0)) return;
     yield* Deferred.fail(
       entry.result,
-      entry.failure !== "permission_denied" && (entry.incomplete || entry.failure === "unavailable")
+      entry.failure !== "permission_denied" &&
+        (expired || entry.incomplete || entry.failure === "unavailable")
         ? unavailable()
         : entry.failure !== undefined
           ? new OrchestratorMcpFailure({
@@ -282,7 +286,7 @@ const make = Effect.gen(function* () {
         return yield* Deferred.await(result).pipe(
           Effect.timeoutOrElse({
             duration: "15 seconds",
-            orElse: () => Effect.fail(unavailable()),
+            orElse: () => finishMiss(requestId, true).pipe(Effect.andThen(Deferred.await(result))),
           }),
         );
       }).pipe(Effect.ensuring(Effect.sync(() => pending.delete(requestId))));

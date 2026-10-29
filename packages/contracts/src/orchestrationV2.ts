@@ -4041,6 +4041,13 @@ export const OrchestrationV2ThreadMentionCandidate = Schema.Struct({
   projectTitle: Schema.String,
   title: Schema.String,
   branch: Schema.NullOr(TrimmedNonEmptyString),
+  searchPullRequests: Schema.Array(
+    Schema.Struct({
+      number: PositiveInt,
+      title: Schema.NullOr(Schema.String),
+      references: Schema.Array(Schema.String),
+    }),
+  ),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   latestUserMessageAt: Schema.NullOr(IsoDateTime),
