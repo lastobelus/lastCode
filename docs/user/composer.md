@@ -12,6 +12,19 @@ becomes an attachment when inserting it would exceed the message limit. On a
 hardware keyboard, use `Cmd+Shift+V` on Apple devices or `Ctrl+Shift+V` elsewhere
 to keep a large paste editable in the composer instead.
 
+## Common prompts
+
+Open **Prompts** in the composer or press **Ctrl+.** to search your common
+instructions. Pick one to insert it at the cursor, then edit or send it as usual.
+The shortcut can be changed in **Settings → Keyboard shortcuts**. On mobile,
+open **Common Prompts** from the attachment menu.
+
+Your environment finds reusable instructions in your conversations once a day,
+using the model configured for thread titles. It combines close wording variants
+while preserving different instructions. The picker learns which abbreviations
+you use for each prompt and moves those entries up the results. **Find new
+prompts** runs discovery immediately; you do not need to maintain the list.
+
 ## Formatting
 
 The composer keeps the Markdown you type, including every delimiter. With

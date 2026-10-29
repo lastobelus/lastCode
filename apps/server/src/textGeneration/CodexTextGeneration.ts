@@ -234,7 +234,8 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     );
 
     const runCodexCommand = Effect.fn("runCodexJson.runCodexCommand")(function* () {
-      const promptOnly = operation === "generateIncomingMessageSummary";
+      const promptOnly =
+        operation === "generateIncomingMessageSummary" || operation === "generatePromptSnippets";
       const isolatedCwd = promptOnly
         ? yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3code-incoming-preview-" }).pipe(
             Effect.mapError(

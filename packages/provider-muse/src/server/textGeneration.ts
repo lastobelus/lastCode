@@ -349,6 +349,14 @@ export const makeMuseTextGeneration = Effect.fn("makeMuseTextGeneration")(functi
     runMuseJson,
   );
   return {
+    generatePromptSnippets: () =>
+      Effect.fail(
+        new TextGenerationError({
+          operation: "generatePromptSnippets",
+          detail:
+            "Muse cannot guarantee tool-free prompt mining. Choose another text-generation provider.",
+        }),
+      ),
     generateIncomingMessageSummary,
     generateCommitMessage,
     generatePrContent,

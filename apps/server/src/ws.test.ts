@@ -1,4 +1,5 @@
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
+import * as PromptSnippets from "./promptSnippets/PromptSnippets.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
@@ -556,6 +557,7 @@ it.effect("shell snapshots omit idle children and older settled threads only on 
 
 // Build the production RPC layer; unrelated capabilities fail if this test calls them.
 const layerUnusedConfigRpcServices = Layer.mergeAll(
+  Layer.mock(PromptSnippets.PromptSnippets)({}),
   Layer.mock(DocumentText.DocumentText)({}),
   Layer.mock(EnvironmentPause.EnvironmentPause)({}),
   Layer.mock(PreviewHosting.PreviewHosting)({}),

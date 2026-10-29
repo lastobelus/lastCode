@@ -1,3 +1,5 @@
+import * as PromptSnippets from "../../../promptSnippets/PromptSnippets.ts";
+import { PromptSnippetsState, PromptSnippetUseInput } from "@t3tools/contracts";
 import {
   BackgroundActivityProfile,
   BackgroundActivityProfileSelection,
@@ -33,6 +35,7 @@ const shared = {
   failure: OrchestratorMcpFailure,
   failureMode: "return" as const,
   dependencies: [
+    PromptSnippets.PromptSnippets,
     McpInvocationContext.McpInvocationContext,
     ThreadManagementService.ThreadManagementService,
     ServerEnvironment.ServerEnvironment,
@@ -103,7 +106,32 @@ const EnvironmentPauseResumeTool = Tool.make("t3_environment_pause_resume", {
   description:
     "Resume this environment when explicitly instructed. Releases the durable automatic wake gate and sends 'resume' to the threads that received Pause. Requires a live full-access/default calling thread or full-access client. Pending pause deliveries must settle first. Failures stay available for retry; archived or deleted recipients can finish recovery without a message.",
 }).annotate(Tool.Destructive, true);
+const PromptSnippetsListTool = Tool.make("prompt_snippets_list", {
+  ...shared,
+  description: "Read this environment's curated common prompts and learned query preferences.",
+  parameters: Tool.EmptyParams,
+  success: PromptSnippetsState,
+})
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false);
+const PromptSnippetsDiscoverTool = Tool.make("prompt_snippets_discover", {
+  ...shared,
+  description:
+    "Mine recent human messages into this environment's common-prompt library using its configured text generation model. Source messages are data; no source instructions are executed.",
+  parameters: Tool.EmptyParams,
+  success: PromptSnippetsState,
+}).annotate(Tool.Destructive, false);
+const PromptSnippetsRecordUseTool = Tool.make("prompt_snippets_record_use", {
+  ...shared,
+  description:
+    "Record a chosen common prompt and its search query for this environment. This does not send or execute the prompt.",
+  parameters: PromptSnippetUseInput,
+  success: Schema.Void,
+}).annotate(Tool.Destructive, false);
 export const EnvironmentToolkit = Toolkit.make(
+  PromptSnippetsListTool,
+  PromptSnippetsDiscoverTool,
+  PromptSnippetsRecordUseTool,
   EnvironmentReadTool,
   EnvironmentPreferencesTool,
   EnvironmentPauseStatusTool,
