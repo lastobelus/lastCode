@@ -27,6 +27,7 @@ import * as Schema from "effect/Schema";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
+import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
 import * as ProjectService from "./ProjectService.ts";
 
 export interface ProjectSetupScriptRunnerResultNoScript {
@@ -91,7 +92,13 @@ export class ProjectSetupScriptOperationError extends Schema.TaggedError<Project
     projectId: Schema.optional(Schema.String),
     projectCwd: Schema.optional(Schema.String),
     worktreePath: Schema.String,
-    operation: Schema.Literals(["readThread", "resolveProject", "readSettings", "openTerminal"]),
+    operation: Schema.Literals([
+      "readThread",
+      "resolveProject",
+      "readSettings",
+      "admitSetupScript",
+      "openTerminal",
+    ]),
     cause: Schema.Defect(),
   },
 ) {
@@ -200,6 +207,7 @@ export const make = Effect.gen(function* () {
   const projects = yield* ProjectService.ProjectService;
   const threads = yield* ProjectionStore.ProjectionStoreV2;
   const terminalManager = yield* TerminalManager.TerminalManager;
+  const updateDrainAdmission = yield* UpdateDrainAdmission.UpdateDrainAdmission;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const crypto = yield* Crypto.Crypto;
   const serviceScope = yield* Effect.scope;
@@ -504,63 +512,87 @@ export const make = Effect.gen(function* () {
           )
         : script.command;
 
-    // Subscribe before opening so neither startup activity nor the sentinel can race the listeners.
-    const observed =
-      observe && completionToken
-        ? yield* observeTerminalCompletion({
-            threadId: input.threadId,
-            terminalId,
-            sentinel: completionSentinel(completionToken),
-            sentinelPattern: completionSentinelPattern(completionToken),
-            echoedWrapperLines: commandLine.split("\r").filter((line) => line.length > 0),
-            onOutputLine: observe.onOutputLine,
-          })
-        : undefined;
-    // PowerShell has no line-editor signal; keep its immediate write.
-    const readiness =
-      completionShell === "powershell"
-        ? undefined
-        : yield* watchShellReadiness({
-            threadId: input.threadId,
-            terminalId,
-            onStartupPrompt: observed?.flushPartialLine ?? Effect.void,
-          });
+    const { observed, readiness } = yield* updateDrainAdmission
+      .admit(
+        "setup-script",
+        Effect.gen(function* () {
+          // Subscribe before opening so neither startup activity nor the sentinel can race the listeners.
+          const observed =
+            observe && completionToken
+              ? yield* observeTerminalCompletion({
+                  threadId: input.threadId,
+                  terminalId,
+                  sentinel: completionSentinel(completionToken),
+                  sentinelPattern: completionSentinelPattern(completionToken),
+                  echoedWrapperLines: commandLine.split("\r").filter((line) => line.length > 0),
+                  onOutputLine: observe.onOutputLine,
+                })
+              : undefined;
+          // PowerShell has no line-editor signal; keep its immediate write.
+          const readiness =
+            completionShell === "powershell"
+              ? undefined
+              : yield* watchShellReadiness({
+                  threadId: input.threadId,
+                  terminalId,
+                  onStartupPrompt: observed?.flushPartialLine ?? Effect.void,
+                });
 
-    yield* terminalManager
-      .open({
-        threadId: input.threadId,
-        terminalId,
-        cwd,
-        worktreePath: input.worktreePath,
-        env: { ...env, NO_COLOR: "1", FORCE_COLOR: "0" },
-      })
+          yield* terminalManager
+            .open({
+              threadId: input.threadId,
+              terminalId,
+              cwd,
+              worktreePath: input.worktreePath,
+              env: { ...env, NO_COLOR: "1", FORCE_COLOR: "0" },
+            })
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProjectSetupScriptOperationError({
+                    ...errorContext,
+                    operation: "openTerminal",
+                    cause,
+                  }),
+              ),
+              Effect.onError(() =>
+                Effect.sync(() => {
+                  observed?.unsubscribe();
+                  readiness?.unsubscribe();
+                }),
+              ),
+            );
+          return { observed, readiness };
+        }),
+      )
       .pipe(
-        Effect.mapError(
-          (cause) =>
+        Effect.catchTag(["UpdateDrainAdmissionError", "UpdateDrainError"], (cause) =>
+          Effect.fail(
             new ProjectSetupScriptOperationError({
               ...errorContext,
-              operation: "openTerminal",
+              operation: "admitSetupScript",
               cause,
             }),
-        ),
-        Effect.onError(() =>
-          Effect.sync(() => {
-            observed?.unsubscribe();
-            readiness?.unsubscribe();
-          }),
+          ),
         ),
       );
 
-    // Return once the terminal exists so callers can show it while a startup prompt waits.
+    // Return once the terminal exists; release admission so users can answer startup prompts.
+    // Recheck admission at the delayed write so a drain can prevent it during shell startup.
     yield* (readiness?.wait ?? Effect.succeed("ready" as const)).pipe(
       Effect.flatMap((shell) =>
         shell === "exited"
           ? Effect.void
-          : terminalManager.write({
-              threadId: input.threadId,
-              terminalId,
-              data: projectScriptTerminalInput(commandLine),
-            }),
+          : updateDrainAdmission.admit(
+              "setup-script",
+              Effect.suspend(() =>
+                terminalManager.write({
+                  threadId: input.threadId,
+                  terminalId,
+                  data: projectScriptTerminalInput(commandLine),
+                }),
+              ),
+            ),
       ),
       Effect.catchCause((cause) =>
         Effect.logWarning("project script command was not written", {
