@@ -64,7 +64,7 @@ const unavailable = () =>
     code: "environment_unavailable",
     threadReadReason: "unavailable",
     message:
-      "The requested thread could not be checked through the initiating client. Reconnect that client to the required environments and retry. If this run no longer has client access, send a new message from that client. This does not mean the thread is missing.",
+      "The initiating client could not check the thread; this does not mean it is missing. For an attached reference or exact-source read, report this and ask the user to reconnect that client or send a new message from it if client access expired; do not switch routes. For ID-only discovery, continue through already-authorized discovery routes. Never bypass a permission refusal.",
   });
 
 const bindingIdleMillis = 7 * 24 * 60 * 60 * 1000;
@@ -177,8 +177,8 @@ const make = Effect.gen(function* () {
               threadReadReason: entry.failure,
               message:
                 entry.failure === "permission_denied"
-                  ? "The source connection does not permit reading this thread. Restore read permission on that connection and retry."
-                  : "Update the source environment to read this thread reference.",
+                  ? "The source connection does not permit reading this thread. Report this to the user; do not use another route."
+                  : "The source environment needs a server update to read this thread reference. Report this to the user; do not use another route.",
             })
           : new OrchestratorMcpFailure({
               code: "thread_not_found",

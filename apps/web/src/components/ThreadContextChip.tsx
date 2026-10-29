@@ -65,13 +65,13 @@ export function ThreadContextChip(props: {
       />
       <TooltipPopup side="top">
         {props.unavailableReason === "permission-denied"
-          ? "Check read permission for the source and destination environments, or remove the reference."
+          ? "Check read permission for the source and selected machines, or remove the reference."
           : props.unavailableReason === "disconnected"
-            ? "Check the connections to the source and destination environments to read this reference."
+            ? "Check the connections to the source and selected machines to read this reference."
             : props.unavailableReason === "unsupported"
-              ? "Check for server updates on the source and destination environments to read this reference."
+              ? "Check for server updates on the source and selected machines to read this reference."
               : props.unreadable
-                ? "This thread cannot currently be read from this destination. Check connections, read permissions and server updates, or remove the reference."
+                ? "This thread can't be read from the selected machine. Check connections, read permissions and server updates, or remove the reference."
                 : shell
                   ? "Open thread"
                   : candidate

@@ -328,7 +328,7 @@ const OrchestratorMcpProjectTarget = Schema.optional(
 export const OrchestratorMcpEnvironmentTarget = Schema.optional(
   EnvironmentId.annotate({
     description:
-      "Environment to act in. Omit for this one. Ids belong to that environment; foreign operations require a peer link unless this tool explicitly selects the client read route.",
+      'Environment to act in. Omit for this one. Ids belong to that environment. Other environments need a peer link, except t3_thread_read with via: "client".',
   }),
 );
 
@@ -417,7 +417,7 @@ export const OrchestratorMcpThreadReadInput = Schema.Struct({
   via: Schema.optional(
     Schema.Literal("client").annotate({
       description:
-        "Use client for attached thread references or when a prior read returned readVia:client. Requires the exact environmentId and the initiating client session’s authority. Reuse on every page and item chunk. Never change routes after refusal, disconnection or expired authority. Omit for machine-directed peer reads.",
+        'Use via: "client" for attached references or a prior readVia: "client" result. Requires the exact environmentId and initiating client authority. Reuse for every page and item chunk; never switch routes after refusal, disconnection or expired authority. Omit for machine-directed peer reads.',
     }),
   ),
   itemId: Schema.optional(TurnItemId),

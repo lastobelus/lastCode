@@ -452,7 +452,7 @@ export function useComposerMenuItems({
         : hasUnsearchedEnvironments || (mentionSearch.mentionFailures?.length ?? 0) > 0
           ? "Some environments could not be searched. Results may be incomplete."
           : mentionSearch.mentionsTruncated
-            ? "More threads match than can be shown. Add to your search to narrow the results."
+            ? "More threads match than can be shown. Keep typing to narrow the results."
             : null;
   const emptyState = (() => {
     if (searchStatus !== null) return searchStatus;

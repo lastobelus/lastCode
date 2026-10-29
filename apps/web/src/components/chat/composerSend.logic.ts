@@ -25,7 +25,7 @@ export function loadBalancingSendWarning(input: {
   return {
     title: "Choose a machine to continue",
     description: !input.hasReadableReferenceDestination
-      ? "No available destination can read every attached thread. Check connections, read permissions and server updates for the source and destination environments, or remove the references."
+      ? "No available machine can read every attached thread. Check connections, read permissions and server updates for the source and selected machines, or remove the references."
       : "No eligible machine has available resources. Choose a machine in the composer to override.",
   };
 }

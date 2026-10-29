@@ -324,7 +324,7 @@ export function usePendingThreadRequests(input: {
       if (unavailable) {
         setThreadError(
           activeThreadId,
-          "An attached thread cannot be read. Check connections, read permissions and server updates for the source and destination environments, or remove the reference before submitting. Your answer is saved.",
+          "An attached thread can't be read. Check connections, read permissions and server updates for the source and selected machines, or remove the reference before submitting. Your answer is saved.",
         );
         return;
       }

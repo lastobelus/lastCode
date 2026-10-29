@@ -652,13 +652,13 @@ export function useComposerSend(input: ComposerSendInput) {
         const { record: strandedThread, reason } = unavailableThread;
         const owner =
           readEnvironmentPresentation(strandedThread.environmentId)?.entry.target.label ??
-          "its environment";
+          "its machine";
         const recovery =
           reason === "permission-denied"
-            ? `Check that this session has read access to ${owner} and the destination environment.`
+            ? `Check that you have read access to ${owner} and to the machine you're sending to.`
             : reason === "unsupported"
-              ? `Check for server updates on ${owner} and the destination environment.`
-              : `Check the connections to ${owner} and the destination environment before sending.`;
+              ? `Check for server updates on ${owner} and the machine you're sending to.`
+              : `Check the connections to ${owner} and the machine you're sending to before sending.`;
         toastManager.add(
           stackedThreadToast({
             type: "warning",
