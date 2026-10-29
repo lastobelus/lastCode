@@ -133,6 +133,17 @@ function migrationPath(registry: string, implementation: string): string {
   return resolved;
 }
 
+function releasedMigrationSource(source: string): string {
+  // Effect 4 moved SqlClient without changing our SQL. Only recognize that
+  // namespace import in the leading import block; keep the body byte-exact.
+  return source.replace(/^(?:import [^\r\n]+;\r?\n)+/u, (imports) =>
+    imports.replace(
+      /^(import \* as [\w$]+ from ")effect\/unstable\/sql\/SqlClient(";\r?$)/gmu,
+      "$1effect/sql/SqlClient$2",
+    ),
+  );
+}
+
 export function assertMigrationHistory(input: {
   readonly repoRoot: string;
   readonly candidateRef: string;
@@ -189,7 +200,10 @@ export function assertMigrationHistory(input: {
   for (const [index, entry] of prior.entries()) {
     const oldPath = migrationPath(LASTCODE_REGISTRY, entry.implementation);
     const newPath = migrationPath(LASTCODE_REGISTRY, next[index]!.implementation);
-    if (read(previous, oldPath) !== read(candidate, newPath)) {
+    if (
+      releasedMigrationSource(read(previous, oldPath)) !==
+      releasedMigrationSource(read(candidate, newPath))
+    ) {
       throw new Error(
         `LastCode migration ${entry.id}_${entry.name} changed after release. Append a repair migration instead.`,
       );

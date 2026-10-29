@@ -25,6 +25,7 @@ function run(command, args, options = {}) {
   if (result.status !== 0) {
     fail(result.stderr.trim() || result.stdout.trim() || `${command} failed.`);
   }
+  if (options.forwardStderr && result.stderr) process.stderr.write(result.stderr);
   return result.stdout.trim();
 }
 
@@ -122,7 +123,7 @@ export function reconcileLastCodeProjectActions(options, dependencies = {}) {
   }
   const releaseLock = acquireLock(stateFile);
   try {
-    const output = execute(process.execPath, args, { cwd: realRoot });
+    const output = execute(process.execPath, args, { cwd: realRoot, forwardStderr: true });
     return JSON.parse(output);
   } finally {
     releaseLock();

@@ -692,7 +692,7 @@ const build = Effect.fn("nativeClient.build")(function* (
       message: "Native directory contains tracked files; clean prebuild would overwrite them.",
     });
   const prebuild = command(
-    "vp",
+    path.join(repo, "node_modules", ".bin", "vp"),
     ["exec", "expo", "prebuild", "--clean", "--platform", platform, "--no-install"],
     true,
   ).pipe(Effect.asVoid);
