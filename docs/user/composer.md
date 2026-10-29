@@ -14,16 +14,19 @@ to keep a large paste editable in the composer instead.
 
 ## Common prompts
 
-Open **Prompts** in the composer or press **Ctrl+.** to search your common
-instructions. Pick one to insert it at the cursor, then edit or send it as usual.
-The shortcut can be changed in **Settings → Keyboard shortcuts**. On mobile,
-open **Common Prompts** from the attachment menu.
+Common prompts are instructions you send often, ready to insert without
+retyping. Open **Prompts** in the composer, choose **Insert a common prompt** in
+the command palette, or press **Ctrl+.**, which you can change in
+**Settings → Keyboard shortcuts**. On mobile, open **Common Prompts** from the
+plus menu. The prompt goes in at the cursor and waits for you to edit or send it.
 
-Your environment finds reusable instructions in your conversations once a day,
-using the model configured for thread titles. It combines close wording variants
-while preserving different instructions. The picker learns which abbreviations
-you use for each prompt and moves those entries up the results. **Find new
-prompts** runs discovery immediately; you do not need to maintain the list.
+Your environment builds the list from your conversations once a day, using the
+model configured for thread titles, so you don't need to maintain it. Close
+rewordings of one instruction merge into a single entry, while prompts that
+differ in a detail stay separate. **Find new prompts** runs discovery now. The
+picker remembers what you typed before choosing a prompt and ranks that prompt
+higher when you type it again. Dismiss a prompt you don't want and discovery
+won't add it back; choose **Undo** right away to restore it with its history.
 
 ## Formatting
 

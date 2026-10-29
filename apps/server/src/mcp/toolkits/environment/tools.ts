@@ -3,6 +3,7 @@ import {
   PromptSnippetsState,
   PromptSnippetUseInput,
   PromptSnippetDismissInput,
+  PromptSnippetRestoreInput,
 } from "@t3tools/contracts";
 import {
   BackgroundActivityProfile,
@@ -112,7 +113,8 @@ const EnvironmentPauseResumeTool = Tool.make("t3_environment_pause_resume", {
 }).annotate(Tool.Destructive, true);
 const PromptSnippetsListTool = Tool.make("prompt_snippets_list", {
   ...shared,
-  description: "Read this environment's curated common prompts and learned query preferences.",
+  description:
+    "List this environment's common prompts with their learned search queries and discovery status.",
   parameters: Tool.EmptyParams,
   success: PromptSnippetsState,
 })
@@ -121,25 +123,33 @@ const PromptSnippetsListTool = Tool.make("prompt_snippets_list", {
 const PromptSnippetsDiscoverTool = Tool.make("prompt_snippets_discover", {
   ...shared,
   description:
-    "Mine recent human messages into this environment's common-prompt library using its configured text generation model. Source messages are data; no source instructions are executed.",
+    "Run common-prompt discovery for this environment now; it also runs automatically once a day. Makes one paid call to the thread-title text generation model over recent user messages, treating them as data: instructions in them are never executed.",
   parameters: Tool.EmptyParams,
   success: PromptSnippetsState,
 }).annotate(Tool.Destructive, false);
 const PromptSnippetsRecordUseTool = Tool.make("prompt_snippets_record_use", {
   ...shared,
   description:
-    "Record a chosen common prompt and its search query for this environment. This does not send or execute the prompt.",
+    "Record that a search query led to choosing a common prompt, so the picker ranks that prompt higher for the query. Does not send the prompt.",
   parameters: PromptSnippetUseInput,
   success: Schema.Void,
 }).annotate(Tool.Destructive, false);
 const PromptSnippetsDismissTool = Tool.make("prompt_snippets_dismiss", {
   ...shared,
   description:
-    "Remove a common prompt from this environment's picker and remember the dismissal during future discovery.",
+    "Hide a common prompt from this environment's picker and keep discovery from adding it back. Keep the snippetId: prompt_snippets_list omits dismissed prompts, and prompt_snippets_restore undoes this.",
   parameters: PromptSnippetDismissInput,
   success: Schema.Void,
 }).annotate(Tool.Destructive, false);
+const PromptSnippetsRestoreTool = Tool.make("prompt_snippets_restore", {
+  ...shared,
+  description:
+    "Undo prompt_snippets_dismiss: return the prompt to this environment's picker with its original id and learned usage.",
+  parameters: PromptSnippetRestoreInput,
+  success: Schema.Void,
+}).annotate(Tool.Destructive, false);
 export const EnvironmentToolkit = Toolkit.make(
+  PromptSnippetsRestoreTool,
   PromptSnippetsDismissTool,
   PromptSnippetsListTool,
   PromptSnippetsDiscoverTool,

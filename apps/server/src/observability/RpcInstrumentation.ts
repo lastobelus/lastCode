@@ -116,6 +116,7 @@ const RPC_AGGREGATES = {
   [WS_METHODS.serverReportClientActivity]: "server",
   [WS_METHODS.promptSnippetsList]: "promptSnippets",
   [WS_METHODS.promptSnippetsRecordUse]: "promptSnippets",
+  [WS_METHODS.promptSnippetsRestore]: "promptSnippets",
   [WS_METHODS.promptSnippetsDismiss]: "promptSnippets",
   [WS_METHODS.promptSnippetsDiscover]: "promptSnippets",
   [WS_METHODS.scheduledTasksSubscribe]: "scheduledTasks",
