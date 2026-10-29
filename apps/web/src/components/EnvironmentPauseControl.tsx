@@ -25,6 +25,7 @@ import {
   actionResumeControlCopy,
   actionResumeUnknownPresentation,
   environmentPausePresentation,
+  environmentPauseBlockerLabel,
 } from "@t3tools/shared/actionResume";
 
 type EnvironmentPauseControlProps = {
@@ -162,11 +163,15 @@ function EnvironmentPauseDialog({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const pauseFailures = session?.targets.filter((thread) => thread.pause === "failed") ?? [];
-  const resumeFailures = session?.targets.filter((thread) => thread.resume === "failed") ?? [];
+  const resumeFailures =
+    session?.targets.filter((thread) => thread.pause === "sent" && thread.resume === "failed") ??
+    [];
   const resuming = session?.phase === "resuming";
   const unavailableRecipients =
-    session?.targets.filter(
-      (thread) => thread.pause === "unavailable" || (resuming && thread.resume === "unavailable"),
+    session?.targets.filter((thread) =>
+      resuming
+        ? thread.pause === "sent" && thread.resume === "unavailable"
+        : thread.pause === "unavailable",
     ) ?? [];
   const quiet = known && status.quiet && pauseFailures.length === 0;
   const canCancelPause =
@@ -272,7 +277,26 @@ function EnvironmentPauseDialog({
                 go offline”.
               </p>
             )}
-            {pauseFailures.length > 0 || resumeFailures.length > 0 ? (
+            {known && session && !resuming && status.blockers.length > 0 ? (
+              <div className="space-y-1 text-sm text-muted-foreground">
+                <p>Unfinished work</p>
+                <ul className="list-inside list-disc">
+                  {status.blockers.map((blocker) => {
+                    const target =
+                      "threadId" in blocker
+                        ? session.targets.find((thread) => thread.threadId === blocker.threadId)
+                        : undefined;
+                    return (
+                      <li key={JSON.stringify(blocker)}>
+                        {environmentPauseBlockerLabel(blocker)}
+                        {target ? ` · ${target.title}` : ""}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            ) : null}
+            {(resuming ? resumeFailures : pauseFailures).length > 0 ? (
               <div role="alert" className="space-y-1 text-sm text-destructive">
                 <p>
                   {resuming
@@ -281,7 +305,10 @@ function EnvironmentPauseDialog({
                 </p>
                 <ul className="list-inside list-disc">
                   {(resuming ? resumeFailures : pauseFailures).map((thread) => (
-                    <li key={thread.threadId}>{thread.title}</li>
+                    <li key={thread.threadId}>
+                      {thread.title}
+                      {thread.error ? `: ${thread.error}` : ""}
+                    </li>
                   ))}
                 </ul>
                 <p>Retry sends only the messages that are still missing.</p>
@@ -289,13 +316,13 @@ function EnvironmentPauseDialog({
             ) : null}
             {unavailableRecipients.length > 0 ? (
               <div className="space-y-1 text-sm text-muted-foreground">
-                <p>
-                  Archived or deleted threads cannot receive {resuming ? "resume" : "pause"}{" "}
-                  requests.
-                </p>
+                <p>{resuming ? "Resume unavailable" : "No pause needed"}</p>
                 <ul className="list-inside list-disc">
                   {unavailableRecipients.map((thread) => (
-                    <li key={thread.threadId}>{thread.title}</li>
+                    <li key={thread.threadId}>
+                      {thread.title}
+                      {thread.error ? `: ${thread.error}` : ""}
+                    </li>
                   ))}
                 </ul>
               </div>

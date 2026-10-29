@@ -1,8 +1,4 @@
-import {
-  environmentPauseResumeComplete,
-  type EnvironmentPauseStatus,
-  type UpdateDrainBlocker,
-} from "@t3tools/contracts";
+import { environmentPauseResumeComplete, type EnvironmentPauseStatus } from "@t3tools/contracts";
 
 export function environmentPauseAvailability(input: {
   readonly enabled: boolean;
@@ -13,7 +9,9 @@ export function environmentPauseAvailability(input: {
   const session = input.status?.session ?? null;
   const known = input.connected && input.fresh && input.status?.observation === "known";
   const pauseFailed = session?.targets.some((target) => target.pause === "failed") ?? false;
-  const resumeFailed = session?.targets.some((target) => target.resume === "failed") ?? false;
+  const resumeFailed =
+    session?.targets.some((target) => target.pause === "sent" && target.resume === "failed") ??
+    false;
   const pauseSettled = session?.targets.every((target) => target.pause !== "pending") ?? false;
   const showPauseRemaining = session?.phase === "pausing" && input.status?.quiet === false;
   const showRetryPause =
@@ -42,21 +40,4 @@ export function environmentPauseAvailability(input: {
     pauseFailed,
     resumeFailed,
   };
-}
-
-export function environmentPauseBlockerLabel(blocker: UpdateDrainBlocker) {
-  switch (blocker.type) {
-    case "thread-turn":
-      return "Agent turn";
-    case "thread-background":
-      return "Background work";
-    case "terminal-process":
-      return blocker.label || "Terminal process";
-    case "provider-runtime":
-      return "Provider activity";
-    case "thread-cleanup":
-      return "Thread cleanup";
-    case "provider-teardown":
-      return "Provider shutdown";
-  }
 }

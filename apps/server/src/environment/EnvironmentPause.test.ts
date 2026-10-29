@@ -563,7 +563,19 @@ it.effect(
         true,
       );
       assert.strictEqual((yield* h.store.get)?.targets[1]?.pause, "unavailable");
-      assert.isNull((yield* h.pause.resume).session);
+      yield* Ref.set(h.queued, true);
+      const resuming = yield* h.pause.resume;
+      assert.strictEqual(resuming.session?.targets[1]?.resume, "pending");
+      assert.strictEqual(resuming.observation, "known");
+      const recovered = yield* restart(h);
+      yield* Ref.set(h.readFailures, new Set([b]));
+      assert.strictEqual((yield* recovered.pause.status).observation, "known");
+      const pending = (yield* recovered.store.get)!;
+      yield* recovered.store.recordDelivery(
+        Store.deliveryIdentity(pending, pending.targets[0]!, "resume").messageId,
+        true,
+      );
+      assert.isNull((yield* recovered.pause.resume).session);
       assert.deepEqual(
         (yield* Ref.get(h.calls))
           .filter((call) => call.text === "resume")

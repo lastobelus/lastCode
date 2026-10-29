@@ -6438,6 +6438,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       command.dispatchMode,
       command.deliveryIntent,
     );
+    if (dispatchMode.type === "steer_active_native" && (yield* PauseRecipientMustBeActive)) {
+      const targetRunId = dispatchMode.targetRunId;
+      const target = projection.runs.find((run) => run.id === targetRunId);
+      // Pause intake can select native steering before the run ends. Reconcile
+      // under the dispatch lock: wait behind remaining work without interrupting.
+      // The lock-time activity guard already rejects an idle recipient.
+      if (target !== undefined && target.status !== "running") {
+        dispatchMode = { type: "queue_after_active" };
+      }
+    }
     if (dispatchMode.type === "steer_active") {
       const targetRunId = dispatchMode.targetRunId;
       const target = projection.runs.find((run) => run.id === targetRunId);
