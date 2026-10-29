@@ -88,6 +88,117 @@ const fixture = async (normalizeMetadata = true) => {
   };
 };
 
+it.runIf(HostProcess.Platform.defaultValue() === "darwin")(
+  "preserves hidden flags on actual Finder-style workspace entries",
+  async () => {
+    await using test = await fixture();
+    await NodeFSP.writeFile(NodePath.join(test.workspace, ".DS_Store"), "finder data");
+    const names = ["", "notes", ".DS_Store", "tracked.txt", "link"];
+    for (const name of names)
+      await execute("/usr/bin/chflags", ["-h", "hidden", NodePath.join(test.workspace, name)]);
+    const snapshot = await test.store.capture({
+      sourcePath: test.workspace,
+      operationId: "hidden-flags",
+      ownerBinding: "fixture-owner",
+    });
+    expect(snapshot.version).toBe(2);
+    const manifestPath = NodePath.join(test.root, "saved", snapshot.id, "manifest.json");
+    await NodeFSP.writeFile(manifestPath, JSON.stringify({ ...snapshot, version: 1 }));
+    await expect(test.store.read(snapshot.id)).rejects.toThrow("snapshot format is unsupported");
+    await NodeFSP.writeFile(manifestPath, JSON.stringify(snapshot));
+    await test.store.trialRestore(snapshot.id);
+    await test.store.isolate(snapshot.id, {
+      quarantineParent: NodePath.join(test.root, "quarantine"),
+    });
+    await test.store.removeIsolated(snapshot.id);
+    await test.store.restore(snapshot.id, { destinationPath: test.workspace });
+    for (const name of names)
+      expect(
+        (
+          await execute("/usr/bin/stat", ["-f", "%f", NodePath.join(test.workspace, name)])
+        ).stdout.trim(),
+      ).toBe("32768");
+    expect(await NodeFSP.readFile(NodePath.join(test.workspace, ".DS_Store"), "utf8")).toBe(
+      "finder data",
+    );
+  },
+);
+
+it.runIf(HostProcess.Platform.defaultValue() === "darwin")(
+  "refuses hidden metadata on the excluded Git pointer before hashing content",
+  async () => {
+    await using test = await fixture();
+    const pointer = NodePath.join(test.workspace, ".git");
+    const contents = await NodeFSP.readFile(pointer);
+    await execute("/usr/bin/chflags", ["hidden", pointer]);
+    using reads = vi.spyOn(NodeFSP, "open");
+    await expect(
+      test.store.capture({
+        sourcePath: test.workspace,
+        operationId: "hidden-git-pointer",
+        ownerBinding: "fixture-owner",
+      }),
+    ).rejects.toThrow("filesystem flags are unsupported");
+    expect(
+      reads.mock.calls.filter(
+        ([name]) =>
+          typeof name === "string" &&
+          name.startsWith(`${test.workspace}/`) &&
+          !name.endsWith("/.git"),
+      ),
+    ).toEqual([]);
+    expect(await NodeFSP.readFile(pointer)).toEqual(contents);
+    expect((await execute("/usr/bin/stat", ["-f", "%f", pointer])).stdout.trim()).toBe("32768");
+  },
+);
+
+it.runIf(HostProcess.Platform.defaultValue() === "darwin")(
+  "retains a workspace whose hidden flag changes after verification",
+  async () => {
+    await using test = await fixture();
+    const file = NodePath.join(test.workspace, "tracked.txt");
+    await execute("/usr/bin/chflags", ["hidden", file]);
+    const snapshot = await test.store.capture({
+      sourcePath: test.workspace,
+      operationId: "changed-flags",
+      ownerBinding: "fixture-owner",
+    });
+    await test.store.trialRestore(snapshot.id);
+    await execute("/usr/bin/chflags", ["nohidden", file]);
+    await expect(
+      test.store.isolate(snapshot.id, { quarantineParent: NodePath.join(test.root, "quarantine") }),
+    ).rejects.toThrow("workspace contents changed");
+    expect(await NodeFSP.readFile(file, "utf8")).toBe("unstaged\n");
+  },
+);
+
+it.runIf(HostProcess.Platform.defaultValue() === "darwin")(
+  "refuses unsupported filesystem flags before hashing content",
+  async () => {
+    await using test = await fixture();
+    const file = NodePath.join(test.workspace, "tracked.txt");
+    await execute("/usr/bin/chflags", ["nodump", file]);
+    using reads = vi.spyOn(NodeFSP, "open");
+    await expect(
+      test.store.capture({
+        sourcePath: test.workspace,
+        operationId: "unsupported-flags",
+        ownerBinding: "fixture-owner",
+      }),
+    ).rejects.toThrow("filesystem flags are unsupported");
+    expect(
+      reads.mock.calls.filter(
+        ([name]) =>
+          typeof name === "string" &&
+          name.startsWith(`${test.workspace}/`) &&
+          !name.endsWith("/.git"),
+      ),
+    ).toEqual([]);
+    expect(await NodeFSP.readFile(file, "utf8")).toBe("unstaged\n");
+    expect((await execute("/usr/bin/stat", ["-f", "%f", file])).stdout.trim()).toBe("1");
+  },
+);
+
 it
   .runIf(HostProcess.Platform.defaultValue() === "darwin")
   .each(["", "tracked.txt", "notes", "../saved"])(
@@ -100,6 +211,7 @@ it
     await execute("/usr/bin/xattr", ["-sw", attribute, "retain me", path]);
     const indexPath = NodePath.join(test.repository, ".git", "worktrees", "workspace", "index");
     const index = await NodeFSP.readFile(indexPath);
+    using reads = vi.spyOn(NodeFSP, "open");
     await expect(
       test.store.capture({
         sourcePath: test.workspace,
@@ -107,6 +219,14 @@ it
         ownerBinding: "fixture-owner",
       }),
     ).rejects.toThrow("extended attributes are unsupported");
+    expect(
+      reads.mock.calls.filter(
+        ([name]) =>
+          typeof name === "string" &&
+          name.startsWith(`${test.workspace}/`) &&
+          !name.endsWith("/.git"),
+      ),
+    ).toEqual([]);
     expect(await NodeFSP.readFile(indexPath)).toEqual(index);
     expect(await NodeFSP.readFile(NodePath.join(test.workspace, "tracked.txt"), "utf8")).toBe(
       "unstaged\n",
@@ -137,6 +257,268 @@ it.runIf(HostProcess.Platform.defaultValue() === "darwin")(
     );
   },
 );
+
+it.runIf(HostProcess.Platform.defaultValue() === "darwin")(
+  "roundtrips FinderInfo on the root, directories and .DS_Store without losing raw bytes",
+  async () => {
+    await using test = await fixture();
+    await NodeFSP.writeFile(NodePath.join(test.workspace, ".DS_Store"), "finder data");
+    const extra = [
+      { path: ".DS_Store", name: "com.apple.ResourceFork", hex: "0001ff00" },
+      { path: "notes", name: "com.apple.metadata:_kMDItemUserTags", hex: "" },
+    ];
+    for (const item of extra)
+      await execute("/usr/bin/xattr", [
+        "-swx",
+        item.name,
+        item.hex,
+        NodePath.join(test.workspace, item.path),
+      ]);
+    const value = "0123456789abcdef".repeat(4);
+    for (const name of ["", "notes", ".DS_Store", "tracked.txt", "link"])
+      await execute("/usr/bin/xattr", [
+        "-swx",
+        "com.apple.FinderInfo",
+        value,
+        NodePath.join(test.workspace, name),
+      ]);
+    const snapshot = await test.store.capture({
+      sourcePath: test.workspace,
+      operationId: "finder",
+      ownerBinding: "fixture-owner",
+    });
+    await test.store.trialRestore(snapshot.id);
+    await test.store.isolate(snapshot.id, {
+      quarantineParent: NodePath.join(test.root, "quarantine"),
+    });
+    await test.store.removeIsolated(snapshot.id);
+    await test.store.restore(snapshot.id, { destinationPath: test.workspace });
+    for (const name of ["", "notes", ".DS_Store", "tracked.txt", "link"])
+      expect(
+        (
+          await execute("/usr/bin/xattr", [
+            "-spx",
+            "com.apple.FinderInfo",
+            NodePath.join(test.workspace, name),
+          ])
+        ).stdout
+          .replace(/\s/gu, "")
+          .toLowerCase(),
+      ).toBe(value);
+    for (const item of extra)
+      expect(
+        (
+          await execute("/usr/bin/xattr", [
+            "-spx",
+            item.name,
+            NodePath.join(test.workspace, item.path),
+          ])
+        ).stdout
+          .replace(/\s/gu, "")
+          .toLowerCase(),
+      ).toBe(item.hex);
+    expect(await NodeFSP.readFile(NodePath.join(test.workspace, ".DS_Store"), "utf8")).toBe(
+      "finder data",
+    );
+  },
+);
+
+it
+  .runIf(HostProcess.Platform.defaultValue() === "darwin")
+  .each(["", "notes", "tracked.txt", "link"])(
+  "retains the isolated checkout when attributes change at '%s', including after removal preparation",
+  async (relative) => {
+    await using test = await fixture();
+    const attribute = "com.apple.metadata:_kMDItemUserTags";
+    await execute("/usr/bin/xattr", [
+      "-swx",
+      attribute,
+      "0001ff",
+      NodePath.join(test.workspace, relative),
+    ]);
+    const snapshot = await test.store.capture({
+      sourcePath: test.workspace,
+      operationId: "attribute-change",
+      ownerBinding: "fixture-owner",
+    });
+    await test.store.trialRestore(snapshot.id);
+    const isolated = await test.store.isolate(snapshot.id, {
+      quarantineParent: NodePath.join(test.root, "quarantine"),
+    });
+    const path = NodePath.join(isolated.isolatedPath!, relative);
+    await execute("/usr/bin/xattr", ["-swx", attribute, "0002ff", path]);
+    await expect(test.store.verifyIsolated(snapshot.id)).rejects.toThrow("contents changed");
+    await execute("/usr/bin/xattr", ["-swx", attribute, "0001ff", path]);
+    await test.store.prepareRemoval(snapshot.id);
+    await execute("/usr/bin/xattr", ["-sd", attribute, path]);
+    await expect(test.store.finishRemoval(snapshot.id)).rejects.toThrow("changed before removal");
+    expect(
+      await NodeFSP.readFile(NodePath.join(isolated.isolatedPath!, "tracked.txt"), "utf8"),
+    ).toBe("unstaged\n");
+  },
+);
+
+it.runIf(HostProcess.Platform.defaultValue() === "darwin")(
+  "bounds attribute values before hashing and validates saved attribute records",
+  async () => {
+    await using test = await fixture();
+    const path = NodePath.join(test.workspace, "tracked.txt");
+    await execute("/usr/bin/xattr", [
+      "-swx",
+      "com.apple.ResourceFork",
+      "ab".repeat(64 * 1024 + 1),
+      path,
+    ]);
+    using reads = vi.spyOn(NodeFSP, "open");
+    await expect(
+      test.store.capture({
+        sourcePath: test.workspace,
+        operationId: "attribute-limit",
+        ownerBinding: "fixture-owner",
+      }),
+    ).rejects.toThrow("value limit");
+    expect(
+      reads.mock.calls.filter(
+        ([name]) =>
+          typeof name === "string" &&
+          name.startsWith(`${test.workspace}/`) &&
+          !name.endsWith("/.git"),
+      ),
+    ).toEqual([]);
+    await execute("/usr/bin/xattr", ["-sd", "com.apple.ResourceFork", path]);
+    const snapshot = await test.store.capture({
+      sourcePath: test.workspace,
+      operationId: "attribute-manifest",
+      ownerBinding: "fixture-owner",
+    });
+    const manifest = NodePath.join(test.root, "saved", snapshot.id, "manifest.json");
+    const attribute = { path: "tracked.txt", name: "com.apple.ResourceFork", hex: "00" };
+    for (const attributes of [
+      [{ ...attribute, path: "../outside" }],
+      [{ ...attribute, name: "com.apple.provenance" }],
+      [{ ...attribute, hex: "0x" }],
+      [{ ...attribute, hex: "00".repeat(64 * 1024 + 1) }],
+      [attribute, attribute],
+      Array.from({ length: 4097 }, () => attribute),
+    ]) {
+      await NodeFSP.writeFile(manifest, JSON.stringify({ ...snapshot, attributes }));
+      await expect(test.store.read(snapshot.id)).rejects.toThrow("extended attributes");
+    }
+    // Already deployed version 1 snapshots remain readable without metadata fields.
+    await NodeFSP.writeFile(manifest, JSON.stringify({ ...snapshot, version: 1 }));
+    expect((await test.store.read(snapshot.id)).version).toBe(1);
+    expect((await test.store.read(snapshot.id)).attributes).toBeUndefined();
+    await test.store.trialRestore(snapshot.id);
+  },
+);
+
+it.runIf(HostProcess.Platform.defaultValue() === "darwin")(
+  "keeps the original and a recoverable snapshot when an attribute write fails in trial restore",
+  async () => {
+    await using test = await fixture();
+    await execute("/usr/bin/xattr", [
+      "-swx",
+      "com.apple.FinderInfo",
+      "01".repeat(32),
+      test.workspace,
+    ]);
+    const snapshot = await test.store.capture({
+      sourcePath: test.workspace,
+      operationId: "attribute-write",
+      ownerBinding: "fixture-owner",
+    });
+    const native = await vi.importActual<typeof NodeChildProcess>("node:child_process");
+    const original = fixtureMetadataExecFile(test.root, native.execFile);
+    using _failure = vi.spyOn(NodeChildProcess, "execFile").mockImplementation(((
+      ...parameters: Parameters<typeof NodeChildProcess.execFile>
+    ) => {
+      const [program, args] = parameters;
+      if (program === "/usr/bin/xattr" && args?.[0] === "-swx")
+        return original("/usr/bin/false", [], parameters[2], parameters[3]);
+      return original(...parameters);
+    }) as typeof NodeChildProcess.execFile);
+    await expect(test.store.trialRestore(snapshot.id)).rejects.toThrow(
+      "xattr could not complete verification",
+    );
+    expect(await NodeFSP.readFile(NodePath.join(test.workspace, "tracked.txt"), "utf8")).toBe(
+      "unstaged\n",
+    );
+    await test.store.verify(snapshot.id);
+  },
+);
+
+it.runIf(HostProcess.Platform.defaultValue() === "darwin")(
+  "rejects an unreadable attribute and the aggregate byte limit before hashing",
+  async () => {
+    await using test = await fixture();
+    const path = NodePath.join(test.workspace, "tracked.txt");
+    await execute("/usr/bin/xattr", ["-swx", "com.apple.ResourceFork", "ab".repeat(1024), path]);
+    const bounded = createWorktreeSuspensionStore({
+      storeRoot: NodePath.join(test.root, "bounded"),
+      limits: { maxBytes: 512 },
+    });
+    await expect(
+      bounded.capture({
+        sourcePath: test.workspace,
+        operationId: "attribute-bytes",
+        ownerBinding: "fixture-owner",
+      }),
+    ).rejects.toThrow("extended attributes exceed the byte limit");
+    const native = await vi.importActual<typeof NodeChildProcess>("node:child_process");
+    const original = fixtureMetadataExecFile(test.root, native.execFile);
+    using _failure = vi.spyOn(NodeChildProcess, "execFile").mockImplementation(((
+      ...parameters: Parameters<typeof NodeChildProcess.execFile>
+    ) => {
+      if (parameters[0] === "/usr/bin/xattr" && parameters[1]?.[0] === "-spx")
+        return original("/usr/bin/false", [], parameters[2], parameters[3]);
+      return original(...parameters);
+    }) as typeof NodeChildProcess.execFile);
+    using reads = vi.spyOn(NodeFSP, "open");
+    await expect(
+      test.store.capture({
+        sourcePath: test.workspace,
+        operationId: "attribute-read",
+        ownerBinding: "fixture-owner",
+      }),
+    ).rejects.toThrow("xattr could not complete verification");
+    expect(
+      reads.mock.calls.filter(
+        ([name]) =>
+          typeof name === "string" &&
+          name.startsWith(`${test.workspace}/`) &&
+          !name.endsWith("/.git"),
+      ),
+    ).toEqual([]);
+  },
+);
+
+it("retains Linux sources when attribute inspection reports metadata or fails", async () => {
+  await using test = await fixture();
+  using _platform = vi.spyOn(HostProcess.Platform, "defaultValue").mockReturnValue("linux");
+  const native = await vi.importActual<typeof NodeChildProcess>("node:child_process");
+  using inspect = vi.spyOn(NodeChildProcess, "execFile");
+  for (const program of ["/usr/bin/printf", "/usr/bin/false"]) {
+    inspect.mockImplementation(((...parameters: Parameters<typeof NodeChildProcess.execFile>) => {
+      if (parameters[0] === "getfattr")
+        return native.execFile(program, ["user.fixture=value"], parameters[2], parameters[3]);
+      return native.execFile(...parameters);
+    }) as typeof NodeChildProcess.execFile);
+    await expect(
+      test.store.capture({
+        sourcePath: test.workspace,
+        operationId: "linux-attributes",
+        ownerBinding: "fixture-owner",
+      }),
+    ).rejects.toThrow(
+      program.endsWith("printf")
+        ? "extended attributes are unsupported"
+        : "getfattr could not complete verification",
+    );
+  }
+  expect(await NodeFSP.readFile(NodePath.join(test.workspace, "tracked.txt"), "utf8")).toBe(
+    "unstaged\n",
+  );
+});
 
 it("preserves a real dirty linked worktree privately, isolates it, survives GC, and restores exact raw and staged state", async () => {
   await using test = await fixture();
@@ -415,6 +797,7 @@ it("keeps the original for unsupported hardlinks, intent-to-add, and bounded cap
     NodePath.join(test.workspace, "tracked.txt"),
     NodePath.join(test.workspace, "hardlink"),
   );
+  using reads = vi.spyOn(NodeFSP, "open");
   await expect(
     test.store.capture({
       sourcePath: test.workspace,
@@ -422,6 +805,14 @@ it("keeps the original for unsupported hardlinks, intent-to-add, and bounded cap
       ownerBinding: "fixture-owner",
     }),
   ).rejects.toThrow("hardlinked");
+  expect(
+    reads.mock.calls.filter(
+      ([name]) =>
+        typeof name === "string" &&
+        name.startsWith(`${test.workspace}/`) &&
+        !name.endsWith("/.git"),
+    ),
+  ).toEqual([]);
   await NodeFSP.unlink(NodePath.join(test.workspace, "hardlink"));
   await NodeFSP.writeFile(NodePath.join(test.workspace, "intent"), "intent");
   await git(test.workspace, "add", "--intent-to-add", "intent");
