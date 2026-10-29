@@ -159,7 +159,7 @@ export function PromptSnippetsPicker(props: {
             setHighlighted(null);
           }}
           onItemHighlighted={(value) => setHighlighted(typeof value === "string" ? value : null)}
-          footerActionLabel="Insert prompt"
+          footerActionLabel="Insert"
           footerTrailing={
             <div className="flex items-center gap-1">
               {selected && props.onDismiss ? (
