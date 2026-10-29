@@ -218,9 +218,10 @@ function initFixture(): Fixture {
   );
   write(repo, `${persistence}/DatabaseMigrations.ts`, "export {};\n");
   write(repo, `${persistence}/DatabaseMigrations.test.ts`, "export {};\n");
-  git(repo, ["config", "user.name", "Carry lifecycle test"]);
-  git(repo, ["config", "user.email", "carry-lifecycle@localhost"]);
-  git(repo, ["config", "core.hooksPath", "/dev/null"]);
+  NodeFS.appendFileSync(
+    NodePath.join(repo, ".git", "config"),
+    "\n[user]\n\tname = Carry lifecycle test\n\temail = carry-lifecycle@localhost\n[core]\n\thooksPath = /dev/null\n",
+  );
   git(root, ["init", "--quiet", "--bare", origin]);
   git(root, ["init", "--quiet", "--bare", upstream]);
   git(repo, ["remote", "add", "origin", origin]);
@@ -254,11 +255,15 @@ function checkpoint(
   ];
   const node = [...new Set(candidates)].find((candidate) => {
     if (!NodeFS.existsSync(candidate)) return false;
-    const version = NodeChildProcess.spawnSync(candidate, ["-p", "process.versions.node"], {
-      encoding: "utf8",
-    });
-    if (version.status !== 0) return false;
     try {
+      if (candidate === process.execPath) {
+        assertSupportedNodeVersion();
+        return true;
+      }
+      const version = NodeChildProcess.spawnSync(candidate, ["-p", "process.versions.node"], {
+        encoding: "utf8",
+      });
+      if (version.status !== 0) return false;
       assertSupportedNodeVersion(version.stdout.trim());
       return true;
     } catch {
