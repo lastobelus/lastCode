@@ -1,3 +1,4 @@
+import * as PromptSnippets from "../../../promptSnippets/PromptSnippets.ts";
 import {
   OrchestratorMcpFailure,
   type EnvironmentPauseError,
@@ -58,6 +59,30 @@ const pauseWrite = (operation: "start" | "retry" | "resume") =>
     }),
   );
 export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
+  prompt_snippets_list: McpToolAccess.reads(() =>
+    Effect.gen(function* () {
+      yield* access;
+      return yield* (yield* PromptSnippets.PromptSnippets).list;
+    }),
+  ),
+  prompt_snippets_discover: McpToolAccess.writesEnvironment((_input, check) =>
+    Effect.gen(function* () {
+      yield* access;
+      yield* check;
+      return yield* (yield* PromptSnippets.PromptSnippets)
+        .discover()
+        .pipe(Effect.mapError(unavailable));
+    }),
+  ),
+  prompt_snippets_record_use: McpToolAccess.writesEnvironment((input, check) =>
+    Effect.gen(function* () {
+      yield* access;
+      yield* check;
+      yield* (yield* PromptSnippets.PromptSnippets)
+        .recordUse(input)
+        .pipe(Effect.mapError(unavailable));
+    }),
+  ),
   t3_environment_pause_status: McpToolAccess.reads(() =>
     Effect.gen(function* () {
       yield* access;

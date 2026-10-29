@@ -562,6 +562,10 @@
     "./worktreeSuspensionPolicy": {
       "types": "./src/worktreeSuspensionPolicy.ts",
       "import": "./src/worktreeSuspensionPolicy.ts"
+    },
+    "./promptSnippetSearch": {
+      "types": "./src/promptSnippetSearch.ts",
+      "import": "./src/promptSnippetSearch.ts"
     }
   },
   "scripts": {

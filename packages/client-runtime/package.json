@@ -375,6 +375,10 @@
       "types": "./src/state/turnItemPresentation.ts",
       "default": "./src/state/turnItemPresentation.ts"
     },
+    "./state/promptSnippets": {
+      "types": "./src/state/promptSnippets.ts",
+      "default": "./src/state/promptSnippets.ts"
+    },
     "./state/vcs": {
       "types": "./src/state/vcs.ts",
       "default": "./src/state/vcs.ts"

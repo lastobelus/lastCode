@@ -56,7 +56,12 @@ export function useChatShortcuts(input: ChatShortcutsInput) {
       event.stopPropagation();
       return;
     }
-    if (!input.enabled || isCommandPaletteOpen()) return;
+    if (
+      !input.enabled ||
+      isCommandPaletteOpen() ||
+      document.querySelector("[data-prompt-snippets]")
+    )
+      return;
     const terminalFocusOwner = getTerminalFocusOwner();
     if (event.defaultPrevented && terminalFocusOwner === null) return;
     const shortcutContext = input.getShortcutContext(event.target);

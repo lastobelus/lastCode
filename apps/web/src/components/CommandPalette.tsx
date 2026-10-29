@@ -377,7 +377,11 @@ function OpenCommandPaletteDialog(props: {
   ) => void;
   readonly initialContext: CommandPaletteReturnContext | undefined;
 }) {
+  const composerHandleRef = useComposerHandleContext();
   const navigate = useNavigate();
+  const insertCommonPrompt = useStableCallback(async () => {
+    composerHandleRef?.current?.openControl("composer.promptSnippets");
+  });
   const pathname = useLocation({ select: (location) => location.pathname });
   const { openChildSearch, setOpen } = props;
   // Keyed by palette session: the intent and restored search only seed this
@@ -1236,6 +1240,18 @@ function OpenCommandPaletteDialog(props: {
   };
 
   const actionItems: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> = [];
+
+  if (activeThread || activeDraftThread) {
+    actionItems.push({
+      kind: "action",
+      value: "action:common-prompts",
+      title: "Insert a common prompt",
+      searchTerms: ["prompt", "snippet", "template", "insert", "common"],
+      shortcutCommand: "composer.promptSnippets",
+      icon: <MessageSquareIcon className={ITEM_ICON_CLASS} />,
+      run: insertCommonPrompt,
+    });
+  }
 
   if (projects.length > 0) {
     const activeProjectTitle =

@@ -1,3 +1,4 @@
+import * as PromptSnippets from "../../../promptSnippets/PromptSnippets.ts";
 import { expect, it } from "@effect/vitest";
 import {
   DEFAULT_SERVER_SETTINGS,
@@ -248,6 +249,7 @@ it.effect("refuses a preferences update when the caller's turn ends while it wai
     const updates = yield* Ref.make(0);
     const checked = yield* Deferred.make<void>();
     const layerDependencies = Layer.mergeAll(
+      Layer.mock(PromptSnippets.PromptSnippets)({}),
       ThreadCommandExecutor.layer,
       Layer.succeed(McpInvocationContext.McpInvocationContext, {
         environmentId,

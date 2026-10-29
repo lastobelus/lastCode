@@ -132,6 +132,7 @@ import * as ThreadLaunchService from "./orchestration-v2/ThreadLaunchService.ts"
 import * as ThreadMessageIntake from "./orchestration-v2/ThreadMessageIntake.ts";
 import * as DocumentText from "./provider/DocumentText.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as PromptSnippets from "./promptSnippets/PromptSnippets.ts";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
 import * as GuestShareService from "./guest/GuestShareService.ts";
@@ -1325,6 +1326,7 @@ const layerCoreWsRpc = (
       const threadRecovery = yield* ThreadRecovery.ThreadRecoveryService;
       const threadRepair = yield* ThreadRecoveryRepair.ThreadRecoveryRepairService;
       const providerSessionManager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const promptSnippets = yield* PromptSnippets.PromptSnippets;
       const scheduledTasks = yield* ScheduledTasks.ScheduledTaskService;
       const secretRequests = yield* SecretRequests.SecretRequests;
       const guestShares = yield* GuestShareService.GuestShareService;
@@ -2371,6 +2373,9 @@ const layerCoreWsRpc = (
       );
 
       const handlers = CoreServerWsRpcGroup.of({
+        [WS_METHODS.promptSnippetsList]: () => promptSnippets.list,
+        [WS_METHODS.promptSnippetsRecordUse]: (input) => promptSnippets.recordUse(input),
+        [WS_METHODS.promptSnippetsDiscover]: () => promptSnippets.discover(),
         [WS_METHODS.scheduledTasksSubscribe]: (_input) =>
           scheduledTasks.subscribeList().pipe(Stream.map(withVisibleWebhookUrls)),
         [WS_METHODS.scheduledTasksUpsert]: (input) => scheduledTasks.upsert(input),
@@ -3655,6 +3660,7 @@ export const WS_RPC_SERVER_OPTIONS = {
 // Keep constructor and request dependencies explicit so composing this route does not
 // reopen the large RPC handler table during contextual type inference.
 type WsRequestServices =
+  | PromptSnippets.PromptSnippets
   | AcpRegistryRuntimeCoordinator.AcpRegistryRuntimeCoordinator
   | AcpRegistrySupport.AcpRegistryCatalog
   | AgentSessionImporter.AgentSessionImporter

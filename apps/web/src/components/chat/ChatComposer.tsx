@@ -225,7 +225,9 @@ import { observeResize } from "~/lib/observeResize";
 
 const isEnvironmentRequestInvalidError = Schema.is(EnvironmentRequestInvalidError);
 import { toastManager } from "../ui/toast";
-import { PlayIcon } from "lucide-react";
+import { MessageSquareTextIcon, PlayIcon } from "lucide-react";
+import { PromptSnippetsDialog } from "./PromptSnippetsDialog";
+import { ComposerControl } from "./ComposerControl";
 import { proposedPlanTitle } from "@t3tools/shared/proposedPlanText";
 import { hasProviderSetup } from "./ProviderStatusBanner";
 import { type AppModelOption, getAppModelOptionsForInstance } from "../../modelSelection";
@@ -1010,6 +1012,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const [isDragOverComposer, setIsDragOverComposer] = useState(false);
   const [isComposerPrimaryActionsCompact, setIsComposerPrimaryActionsCompact] = useState(false);
   const [isComposerModelPickerOpen, setIsComposerModelPickerOpen] = useState(false);
+  const [isPromptSnippetsOpen, setIsPromptSnippetsOpen] = useState(false);
   const isMobileViewport = useMediaQuery("max-sm");
   const isSoftwareKeyboardOpen = useSoftwareKeyboardOpen();
   const [isComposerFocused, setIsComposerFocused] = useState(false);
@@ -3152,6 +3155,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       data-chat-composer-form="true"
       {...threadContextDropTargetProps()}
     >
+      {isPromptSnippetsOpen ? (
+        <PromptSnippetsDialog
+          key={attachmentTargetKey}
+          environmentId={environmentId}
+          keybindings={keybindings}
+          onClose={() => setIsPromptSnippetsOpen(false)}
+          onInsert={(text) =>
+            insertComposerTextStable(`${text}\n`, "cursor", { ensureLeadingBoundary: true })
+          }
+          onReturnFocus={focusComposer}
+        />
+      ) : null}
       <ComposerBanner.Dock>
         <ComposerBanner.Column>
           <ComposerBannerStack items={shelfItems} />
@@ -3445,6 +3460,21 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 )}
               >
                 {composerAttachButton ? <div className="me-2">{composerAttachButton}</div> : null}
+                {canOperateThread && pendingUserInputs.length === 0 ? (
+                  <div className="me-2 shrink-0">
+                    <ComposerControl
+                      data-composer-shortcut="composer.promptSnippets"
+                      aria-label="Common prompts"
+                      onClick={() => setIsPromptSnippetsOpen(true)}
+                      disabled={projectSelectionRequired}
+                    >
+                      <MessageSquareTextIcon aria-hidden="true" className="size-4" />
+                      <span data-composer-control-label className="sr-only sm:not-sr-only">
+                        Prompts
+                      </span>
+                    </ComposerControl>
+                  </div>
+                ) : null}
                 <div
                   data-chat-composer-actions="right"
                   data-chat-composer-transition-actions="true"

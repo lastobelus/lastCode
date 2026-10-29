@@ -1,3 +1,4 @@
+import * as PromptSnippets from "../promptSnippets/PromptSnippets.ts";
 import * as DocumentText from "../provider/DocumentText.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as PublishedDocumentPreview from "../preview/PublishedDocumentPreview.ts";
@@ -129,6 +130,7 @@ it.effect("isolates full and restricted tool discovery over HTTP", () =>
         Layer.provide(ThreadReadBroker.layer),
         Layer.provide(
           Layer.mergeAll(
+            Layer.mock(PromptSnippets.PromptSnippets)({}),
             McpProviderSessions.layer,
             Layer.mock(McpSessionRegistry.McpSessionRegistry)({
               resolve: (token) =>

@@ -33,6 +33,12 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
   const runGrokJson: TextGenerationOperations.Runner = Effect.fn("GrokTextGeneration.runGrokJson")(
     function* (request) {
       const { operation, cwd, prompt, modelSelection } = request;
+      if (operation === "generatePromptSnippets")
+        return yield* new TextGenerationError({
+          operation,
+          detail:
+            "Grok cannot guarantee tool-free prompt mining. Choose another text-generation provider.",
+        });
 
       const outputRef = yield* Ref.make("");
       const runtime = yield* makeGrokAcpRuntime({

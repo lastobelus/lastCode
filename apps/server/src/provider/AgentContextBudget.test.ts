@@ -1,3 +1,4 @@
+import * as PromptSnippets from "../promptSnippets/PromptSnippets.ts";
 import { PreviewHosting } from "../preview/Hosting.ts";
 import { ProjectStoreV2 } from "../orchestration-v2/ProjectStore.ts";
 import { ProjectionStoreV2 } from "../orchestration-v2/ProjectionStore.ts";
@@ -55,6 +56,7 @@ import budget from "./agentContextBudget.json" with { type: "json" };
 
 // Registration only stores tool definitions, so the handlers' services are never called.
 const toolHandlerServices = Layer.mergeAll(
+  Layer.mock(PromptSnippets.PromptSnippets)({}),
   Layer.mock(PreviewHosting)({}),
   Layer.mock(ProjectStoreV2)({}),
   Layer.mock(ProjectionStoreV2)({}),

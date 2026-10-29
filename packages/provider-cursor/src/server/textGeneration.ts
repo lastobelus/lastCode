@@ -82,6 +82,12 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
     function* (input) {
       const { operation, prompt, modelSelection } = input;
 
+      if (operation === "generatePromptSnippets")
+        return yield* new TextGenerationError({
+          operation,
+          detail:
+            "Cursor cannot guarantee tool-free prompt mining. Choose another text-generation provider.",
+        });
       const apiKey = yield* resolveCursorApiKey(operation);
       // sandbox.json expands writable paths independently of settingSources; the public API cannot override it.
       if (yield* fs.exists(`${yield* HostProcess.HomeDirectory}/.cursor/sandbox.json`)) {

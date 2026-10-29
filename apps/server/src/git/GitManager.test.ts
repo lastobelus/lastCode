@@ -271,6 +271,7 @@ function createTextGeneration(
   overrides: Partial<FakeGitTextGeneration> = {},
 ): TextGeneration.TextGeneration["Service"] {
   const implementation: FakeGitTextGeneration = {
+    generatePromptSnippets: () => Effect.die("unused"),
     generateIncomingMessageSummary: () =>
       Effect.die("Preview generation is not used by GitManager"),
     generateCommitMessage: (input) =>
@@ -297,6 +298,7 @@ function createTextGeneration(
   };
 
   return {
+    generatePromptSnippets: () => Effect.die("unused"),
     generateIncomingMessageSummary: () =>
       Effect.die("Preview generation is not used by GitManager"),
     generateCommitMessage: (input) =>
