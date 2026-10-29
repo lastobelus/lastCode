@@ -76,8 +76,13 @@ interface FileIdentity {
   readonly ino: number;
 }
 
+interface SuspensionHardlink {
+  readonly path: string;
+  readonly target: string;
+}
+
 export interface WorktreeSuspensionSnapshot {
-  readonly version: 1 | 2;
+  readonly version: 1 | 2 | 3;
   readonly id: string;
   readonly operationId: string;
   readonly ownerBinding: string;
@@ -95,6 +100,7 @@ export interface WorktreeSuspensionSnapshot {
   readonly indexRef: string;
   readonly attributes?: ReadonlyArray<SuspensionAttribute>;
   readonly hiddenPaths?: ReadonlyArray<string>;
+  readonly hardlinks?: ReadonlyArray<SuspensionHardlink>;
   readonly rootMode: number;
   readonly rootUid: number;
   readonly rootGid: number;
@@ -735,6 +741,7 @@ const metadataCheck = async (
 interface Inventory {
   readonly attributes?: ReadonlyArray<SuspensionAttribute>;
   readonly hiddenPaths?: ReadonlyArray<string>;
+  readonly hardlinks?: ReadonlyArray<SuspensionHardlink>;
   readonly entries: ReadonlyArray<SuspensionEntry>;
   readonly rawBytes: number;
   readonly rootMode: number;
@@ -743,7 +750,7 @@ interface Inventory {
 }
 
 const version = (stat: Awaited<ReturnType<typeof NodeFSP.lstat>>) =>
-  `${stat.dev}:${stat.ino}:${stat.mode}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+  `${stat.dev}:${stat.ino}:${stat.nlink}:${stat.mode}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
 
 const inventory = async (
   root: string,
@@ -759,6 +766,8 @@ const inventory = async (
   const durable = durabilityBatch();
   let rawBytes = 0;
   const files: Array<() => Promise<void>> = [];
+  const linkGroups = new Map<string, { count: number; paths: string[] }>();
+  const hardlinks: SuspensionHardlink[] = [];
   const inspect = async (directory: string, prefix: string): Promise<void> => {
     const names = (await NodeFSP.readdir(directory, { encoding: "buffer" }))
       .map((name) => {
@@ -800,7 +809,18 @@ const inventory = async (
           target: target.toString("utf8"),
         });
       } else if (before.isFile()) {
-        if (before.nlink !== 1) refuse("hardlinked files are unsupported");
+        if (before.nlink !== 1) {
+          // Selected inventories cover private Git files; they cannot certify
+          // a complete workspace group and retain the single-link requirement.
+          if (selected !== undefined || !Number.isSafeInteger(before.nlink) || before.nlink < 2)
+            refuse("hardlinked files are unsupported");
+          const key = `${before.dev}:${before.ino}`;
+          const group = linkGroups.get(key) ?? { count: before.nlink, paths: [] };
+          if (group.count !== before.nlink) refuse("hardlinked files changed during capture");
+          group.paths.push(relative);
+          linkGroups.set(key, group);
+          if (group.paths.length > 1) hardlinks.push({ path: relative, target: group.paths[0]! });
+        }
         if (before.size > limits.maxFileBytes) refuse("a file exceeds the preservation limit");
         rawBytes += before.size;
         if (rawBytes > limits.maxBytes) refuse("the workspace exceeds the byte limit");
@@ -893,6 +913,9 @@ const inventory = async (
   let hiddenPaths: ReadonlyArray<string> = [];
   try {
     await inspect(root, "");
+    for (const group of linkGroups.values())
+      if (group.paths.length !== group.count)
+        refuse("hardlinked files extend outside the workspace");
     const metadata = await metadataCheck(
       root,
       entries,
@@ -902,6 +925,10 @@ const inventory = async (
     attributes = metadata.attributes;
     hiddenPaths = metadata.hiddenPaths;
     const metadataBytes =
+      hardlinks.reduce(
+        (sum, item) => sum + Buffer.byteLength(item.path) + Buffer.byteLength(item.target),
+        0,
+      ) +
       hiddenPaths.reduce((sum, name) => sum + Buffer.byteLength(name), 0) +
       attributes.reduce(
         (sum, item) =>
@@ -933,6 +960,7 @@ const inventory = async (
   return {
     ...(attributes.length === 0 ? {} : { attributes }),
     ...(hiddenPaths.length === 0 ? {} : { hiddenPaths }),
+    ...(hardlinks.length === 0 ? {} : { hardlinks }),
     entries,
     rawBytes,
     rootMode: rootStat.mode & 0o777,
@@ -1106,7 +1134,8 @@ const assertSnapshot = (value: unknown, id: string): WorktreeSuspensionSnapshot 
     return refuse("the snapshot manifest is invalid");
   const snapshot = value as WorktreeSuspensionSnapshot;
   if (
-    (snapshot.version !== 1 && snapshot.version !== 2) ||
+    (snapshot.version !== 1 && snapshot.version !== 2 && snapshot.version !== 3) ||
+    (snapshot.version !== 3 && snapshot.hardlinks !== undefined) ||
     (snapshot.version === 1 &&
       (snapshot.attributes !== undefined || snapshot.hiddenPaths !== undefined)) ||
     snapshot.id !== id ||
@@ -1173,6 +1202,48 @@ const assertSnapshot = (value: unknown, id: string): WorktreeSuspensionSnapshot 
         MAX_METADATA_BYTES
     )
       refuse("the saved filesystem flags are invalid");
+  }
+  if (snapshot.version === 3) {
+    if (!Array.isArray(snapshot.hardlinks) || snapshot.hardlinks.length > snapshot.entries.length)
+      refuse("the saved hardlinks are invalid");
+    const entries = new Map(snapshot.entries.map((entry, index) => [entry.path, { entry, index }]));
+    const aliases = new Set<string>();
+    let bytes = 0;
+    for (const link of snapshot.hardlinks) {
+      if (
+        link === null ||
+        typeof link !== "object" ||
+        typeof link.path !== "string" ||
+        typeof link.target !== "string"
+      )
+        refuse("the saved hardlinks are invalid");
+      const alias = entries.get(link.path);
+      const target = entries.get(link.target);
+      if (
+        alias === undefined ||
+        target === undefined ||
+        alias.index <= target.index ||
+        alias.entry.kind !== "file" ||
+        target.entry.kind !== "file" ||
+        alias.entry.hash !== target.entry.hash ||
+        alias.entry.size !== target.entry.size ||
+        alias.entry.mode !== target.entry.mode ||
+        aliases.has(link.path)
+      )
+        refuse("the saved hardlinks are invalid");
+      aliases.add(link.path);
+      bytes += Buffer.byteLength(link.path) + Buffer.byteLength(link.target);
+    }
+    if (snapshot.hardlinks.some((link) => aliases.has(link.target)))
+      refuse("the saved hardlinks are chained");
+    bytes +=
+      (snapshot.hiddenPaths ?? []).reduce((sum, name) => sum + Buffer.byteLength(name), 0) +
+      (snapshot.attributes ?? []).reduce(
+        (sum, item) =>
+          sum + item.hex.length / 2 + Buffer.byteLength(item.path) + Buffer.byteLength(item.name),
+        0,
+      );
+    if (bytes > MAX_METADATA_BYTES) refuse("the saved hardlinks exceed the metadata byte limit");
   }
   if (
     snapshot.headRef !== `refs/lastcode/suspension/${id}/head` ||
@@ -1523,7 +1594,8 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
         JSON.stringify(snapshot.hiddenPaths ?? []) ||
       JSON.stringify(currentInventory.attributes ?? []) !==
         JSON.stringify(snapshot.attributes ?? []) ||
-      JSON.stringify(currentInventory.entries) !== JSON.stringify(snapshot.entries)
+      JSON.stringify(currentInventory.entries) !== JSON.stringify(snapshot.entries) ||
+      JSON.stringify(currentInventory.hardlinks ?? []) !== JSON.stringify(snapshot.hardlinks ?? [])
     )
       refuse("the workspace contents changed after capture");
     for (const [file, stamp] of [...currentInventory.versions, ...gitInventory.versions])
@@ -1679,6 +1751,7 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     );
     if (
       JSON.stringify(before.entries) !== JSON.stringify(captured.entries) ||
+      JSON.stringify(before.hardlinks ?? []) !== JSON.stringify(captured.hardlinks ?? []) ||
       before.rootMode !== captured.rootMode ||
       JSON.stringify(before.hiddenPaths ?? []) !== JSON.stringify(captured.hiddenPaths ?? []) ||
       JSON.stringify(before.attributes ?? []) !== JSON.stringify(captured.attributes ?? []) ||
@@ -1697,7 +1770,7 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     for (const object of objects)
       savedBytes += (await NodeFSP.stat(NodePath.join(objectsPath(id), object))).size;
     const snapshot: WorktreeSuspensionSnapshot = {
-      version: 2,
+      version: captured.hardlinks === undefined ? 2 : 3,
       id,
       operationId: input.operationId,
       ownerBinding: input.ownerBinding,
@@ -1710,6 +1783,7 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       indexTree,
       ...(captured.attributes === undefined ? {} : { attributes: captured.attributes }),
       ...(captured.hiddenPaths === undefined ? {} : { hiddenPaths: captured.hiddenPaths }),
+      ...(captured.hardlinks === undefined ? {} : { hardlinks: captured.hardlinks }),
       rootMode: captured.rootMode,
       rootUid: sourceStat.uid,
       rootGid: sourceStat.gid,
@@ -1717,6 +1791,9 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       rawBytes: captured.rawBytes + metadata.rawBytes,
       savedBytes:
         savedBytes +
+        (captured.hardlinks === undefined
+          ? 0
+          : Buffer.byteLength(JSON.stringify(captured.hardlinks))) +
         (captured.hiddenPaths === undefined
           ? 0
           : Buffer.byteLength(JSON.stringify(captured.hiddenPaths))) +
@@ -1879,6 +1956,10 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       refuse("the partial restore contains unknown filesystem flags");
     const actual = new Map(present?.entries.map((entry) => [entry.path, entry]));
     const expected = new Map(snapshot.entries.map((entry) => [entry.path, entry]));
+    const hardlinks = new Map(snapshot.hardlinks?.map((link) => [link.path, link.target]));
+    for (const link of present?.hardlinks ?? [])
+      if ((hardlinks.get(link.path) ?? link.path) !== (hardlinks.get(link.target) ?? link.target))
+        refuse("the partial restore contains unknown hardlinked files");
     for (const entry of actual.values()) {
       const saved = expected.get(entry.path);
       if (saved === undefined || saved.kind !== entry.kind)
@@ -1936,6 +2017,18 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
           else await NodeFSP.chmod(absolute, 0o700);
         } else if (entry.kind === "symlink") {
           if (existing === undefined) await NodeFSP.symlink(entry.target, absolute);
+        } else if (hardlinks.has(entry.path)) {
+          const target = NodePath.join(destination, hardlinks.get(entry.path)!);
+          let linked = false;
+          if (existing !== undefined) {
+            const [aliasStat, targetStat] = await Promise.all([
+              NodeFSP.lstat(absolute),
+              NodeFSP.lstat(target),
+            ]);
+            linked = sameIdentity(identity(aliasStat), identity(targetStat));
+            if (!linked) await NodeFSP.unlink(absolute);
+          }
+          if (!linked) await NodeFSP.link(target, absolute);
         } else if (
           existing?.kind !== "file" ||
           existing.hash !== entry.hash ||
@@ -2973,6 +3066,8 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     };
     const checkContents = async (root: string, complete: boolean) => {
       const current = await inventory(root, limits);
+      if (current.hardlinks !== undefined)
+        refuse("the fresh-worktree contains unexpected hardlinked files");
       const present = new Set<string>();
       for (const entry of current.entries) {
         const saved = expected.get(entry.path);

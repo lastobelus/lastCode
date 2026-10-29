@@ -1633,10 +1633,11 @@ it.live.each(["manual", "activity"] as const)(
         yield* h.service.previewSuspend({ threadId: firstId });
         const initial = (yield* h.registry.list)[0]!;
         yield* h.registry.put({ ...initial, lastWorkspaceUseAt: DateTime.formatIso(at) }, initial);
+        // Internal groups are supported; an outside alias must still block capture.
         yield* Effect.promise(() =>
           NodeFSP.link(
             NodePath.join(f.workspace, "tracked"),
-            NodePath.join(f.workspace, "hardlink"),
+            NodePath.join(f.root, "external-hardlink"),
           ),
         );
         yield* h.service.sweep;
@@ -1659,7 +1660,7 @@ it.live.each(["manual", "activity"] as const)(
         expect(
           yield* Effect.promise(() => NodeFSP.readdir(NodePath.join(h.registry.root, "snapshots"))),
         ).toEqual(journals);
-        yield* Effect.promise(() => NodeFSP.unlink(NodePath.join(f.workspace, "hardlink")));
+        yield* Effect.promise(() => NodeFSP.unlink(NodePath.join(f.root, "external-hardlink")));
         if (retry === "activity") {
           yield* restarted.acquisition.acquire({
             path: f.workspace,
@@ -1704,7 +1705,7 @@ it.live.each([false, true])(
         yield* Effect.promise(() =>
           NodeFSP.link(
             NodePath.join(f.workspace, "tracked"),
-            NodePath.join(f.workspace, "hardlink"),
+            NodePath.join(f.root, "external-hardlink"),
           ),
         );
         const result = yield* Effect.tryPromise(() =>
@@ -1750,7 +1751,7 @@ it.live.each([false, true])(
         expect(recovered.captureFailure?.retryOnce).toBe(true);
         expect(yield* h.registry.automaticProtection(f.workspace)).not.toBeNull();
         if (repaired)
-          yield* Effect.promise(() => NodeFSP.unlink(NodePath.join(f.workspace, "hardlink")));
+          yield* Effect.promise(() => NodeFSP.unlink(NodePath.join(f.root, "external-hardlink")));
         yield* h.service.sweep;
         const retried = (yield* h.registry.list)[0]!;
         expect(retried.summary.state).toBe(repaired ? "suspended" : "active");

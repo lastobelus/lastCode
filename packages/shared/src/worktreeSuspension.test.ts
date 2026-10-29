@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off -- These real linked-worktree fixtures test the native filesystem and Git preservation boundary.
 import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -791,52 +792,270 @@ it("keeps late edits and rolls isolation back when a fresh guard refuses", async
   expect((await test.store.readJournal(snapshot.id)).phase).toBe("ready");
 });
 
-it("keeps the original for unsupported hardlinks, intent-to-add, and bounded capture", async () => {
+it.each([false, true])(
+  "keeps the original for external hardlinks, intent-to-add, and bounded capture (mixed group: %s)",
+  async (mixed) => {
+    await using test = await fixture();
+    await NodeFSP.link(
+      NodePath.join(test.workspace, "tracked.txt"),
+      NodePath.join(test.root, "external-hardlink"),
+    );
+    if (mixed)
+      await NodeFSP.link(
+        NodePath.join(test.workspace, "tracked.txt"),
+        NodePath.join(test.workspace, "notes", "installed"),
+      );
+    using reads = vi.spyOn(NodeFSP, "open");
+    await expect(
+      test.store.capture({
+        sourcePath: test.workspace,
+        operationId: "operation",
+        ownerBinding: "fixture-owner",
+      }),
+    ).rejects.toThrow("hardlinked");
+    expect(
+      reads.mock.calls.filter(
+        ([name]) =>
+          typeof name === "string" &&
+          name.startsWith(`${test.workspace}/`) &&
+          !name.endsWith("/.git"),
+      ),
+    ).toEqual([]);
+    await NodeFSP.unlink(NodePath.join(test.root, "external-hardlink"));
+    if (mixed) await NodeFSP.unlink(NodePath.join(test.workspace, "notes", "installed"));
+    await NodeFSP.writeFile(NodePath.join(test.workspace, "intent"), "intent");
+    await git(test.workspace, "add", "--intent-to-add", "intent");
+    await expect(
+      test.store.capture({
+        sourcePath: test.workspace,
+        operationId: "operation",
+        ownerBinding: "fixture-owner",
+      }),
+    ).rejects.toThrow("extended Git index");
+    const bounded = createWorktreeSuspensionStore({
+      storeRoot: NodePath.join(test.root, "bounded"),
+      limits: { maxBytes: 1 },
+    });
+    await expect(
+      bounded.capture({
+        sourcePath: test.workspace,
+        operationId: "operation",
+        ownerBinding: "fixture-owner",
+      }),
+    ).rejects.toThrow("byte limit");
+    expect(await NodeFSP.readFile(NodePath.join(test.workspace, "tracked.txt"), "utf8")).toBe(
+      "unstaged\n",
+    );
+  },
+);
+
+it("refuses complete hardlink groups in private Git metadata before hashing workspace content", async () => {
   await using test = await fixture();
-  await NodeFSP.link(
-    NodePath.join(test.workspace, "tracked.txt"),
-    NodePath.join(test.workspace, "hardlink"),
-  );
+  const { gitDirectory } = await test.store.inspectSource(test.workspace);
+  await NodeFSP.unlink(NodePath.join(gitDirectory, "ORIG_HEAD"));
+  await NodeFSP.link(NodePath.join(gitDirectory, "HEAD"), NodePath.join(gitDirectory, "ORIG_HEAD"));
   using reads = vi.spyOn(NodeFSP, "open");
   await expect(
     test.store.capture({
       sourcePath: test.workspace,
-      operationId: "operation",
+      operationId: "private-links",
       ownerBinding: "fixture-owner",
     }),
-  ).rejects.toThrow("hardlinked");
+  ).rejects.toThrow();
   expect(
     reads.mock.calls.filter(
-      ([name]) =>
-        typeof name === "string" &&
-        name.startsWith(`${test.workspace}/`) &&
-        !name.endsWith("/.git"),
+      ([path]) =>
+        typeof path === "string" &&
+        path.startsWith(`${test.workspace}/`) &&
+        !path.endsWith("/.git"),
     ),
   ).toEqual([]);
-  await NodeFSP.unlink(NodePath.join(test.workspace, "hardlink"));
-  await NodeFSP.writeFile(NodePath.join(test.workspace, "intent"), "intent");
-  await git(test.workspace, "add", "--intent-to-add", "intent");
-  await expect(
-    test.store.capture({
-      sourcePath: test.workspace,
-      operationId: "operation",
-      ownerBinding: "fixture-owner",
-    }),
-  ).rejects.toThrow("extended Git index");
-  const bounded = createWorktreeSuspensionStore({
-    storeRoot: NodePath.join(test.root, "bounded"),
-    limits: { maxBytes: 1 },
+});
+
+it.each(["payload", "journal"])("refuses hardlinked private snapshot %s files", async (kind) => {
+  await using test = await fixture();
+  const snapshot = await test.store.capture({
+    sourcePath: test.workspace,
+    operationId: "private-links",
+    ownerBinding: "fixture-owner",
   });
-  await expect(
-    bounded.capture({
-      sourcePath: test.workspace,
-      operationId: "operation",
-      ownerBinding: "fixture-owner",
-    }),
-  ).rejects.toThrow("byte limit");
+  const directory = NodePath.join(test.root, "saved", snapshot.id);
+  const entry = snapshot.entries.find((entry) => entry.path === "tracked.txt");
+  if (entry?.kind !== "file") throw new Error("fixture file missing");
+  const path =
+    kind === "journal"
+      ? NodePath.join(directory, "journal.json")
+      : NodePath.join(directory, "objects", `${entry.hash}.gz`);
+  await NodeFSP.link(path, NodePath.join(NodePath.dirname(path), "private-alias"));
+  await expect(test.store.verify(snapshot.id)).rejects.toThrow();
   expect(await NodeFSP.readFile(NodePath.join(test.workspace, "tracked.txt"), "utf8")).toBe(
     "unstaged\n",
   );
+});
+
+it.each([1, 2])(
+  "roundtrips a pnpm-style internal hardlink group with %i installed aliases",
+  async (aliases) => {
+    await using test = await fixture();
+    const installed = "node_modules/.pnpm/package/node_modules/package";
+    await NodeFSP.appendFile(NodePath.join(test.workspace, ".gitignore"), "node_modules/\n");
+    await NodeFSP.mkdir(NodePath.join(test.workspace, installed), { recursive: true });
+    const paths = [
+      "tracked.txt",
+      ...Array.from({ length: aliases }, (_, index) => `${installed}/source-${index}.js`),
+    ];
+    for (const path of paths.slice(1))
+      await NodeFSP.link(
+        NodePath.join(test.workspace, paths[0]!),
+        NodePath.join(test.workspace, path),
+      );
+    const snapshot = await test.store.capture({
+      sourcePath: test.workspace,
+      operationId: "internal-links",
+      ownerBinding: "fixture-owner",
+    });
+    expect(snapshot.version).toBe(3);
+    const members = snapshot.entries.filter((entry) => paths.includes(entry.path));
+    expect(members).toHaveLength(paths.length);
+    expect(snapshot).toMatchObject({
+      hardlinks: members.slice(1).map((entry) => ({ path: entry.path, target: members[0]!.path })),
+    });
+
+    // Inspect the actual trial checkout before Git removes it.
+    const native = await vi.importActual<typeof NodeChildProcess>("node:child_process");
+    const original = fixtureMetadataExecFile(test.root, native.execFile);
+    let trials = 0;
+    using _trial = vi.spyOn(NodeChildProcess, "execFile").mockImplementation(((
+      ...parameters: Parameters<typeof NodeChildProcess.execFile>
+    ) => {
+      const [program, args] = parameters;
+      if (program === "git" && args?.includes("worktree") && args.includes("remove")) {
+        const trialPath = args.at(-1)!;
+        const stats = paths.map((path) => NodeFS.statSync(NodePath.join(trialPath, path)));
+        expect(new Set(stats.map((stat) => `${stat.dev}:${stat.ino}`)).size).toBe(1);
+        expect(stats[0]!.nlink).toBe(paths.length);
+        trials++;
+      }
+      return original(...parameters);
+    }) as typeof NodeChildProcess.execFile);
+    await test.store.trialRestore(snapshot.id);
+    expect(trials).toBe(1);
+    _trial.mockRestore();
+    await test.store.suspend(snapshot.id, {
+      quarantineParent: NodePath.join(test.root, "quarantine"),
+      guard: async () => {},
+    });
+    await test.store.restore(snapshot.id, { destinationPath: test.workspace });
+    const stats = await Promise.all(
+      paths.map((path) => NodeFSP.stat(NodePath.join(test.workspace, path))),
+    );
+    expect(new Set(stats.map((stat) => `${stat.dev}:${stat.ino}`)).size).toBe(1);
+    expect(stats[0]!.nlink).toBe(paths.length);
+    for (const path of paths)
+      expect(await NodeFSP.readFile(NodePath.join(test.workspace, path), "utf8")).toBe(
+        "unstaged\n",
+      );
+    expect(await git(test.workspace, "show", ":tracked.txt")).toBe("staged");
+    expect(await git(test.workspace, "show", "HEAD:tracked.txt")).toBe("base");
+    await NodeFSP.writeFile(NodePath.join(test.workspace, paths[1]!), "shared edit\n");
+    expect(await NodeFSP.readFile(NodePath.join(test.workspace, paths[0]!), "utf8")).toBe(
+      "shared edit\n",
+    );
+  },
+);
+
+it.each(["external", "split"])(
+  "refuses a late %s hardlink graph change before source removal",
+  async (change) => {
+    await using test = await fixture();
+    await NodeFSP.link(
+      NodePath.join(test.workspace, "tracked.txt"),
+      NodePath.join(test.workspace, "notes", "installed"),
+    );
+    const snapshot = await test.store.capture({
+      sourcePath: test.workspace,
+      operationId: "late-links",
+      ownerBinding: "fixture-owner",
+    });
+    await test.store.trialRestore(snapshot.id);
+    const journal = await test.store.isolate(snapshot.id, {
+      quarantineParent: NodePath.join(test.root, "quarantine"),
+    });
+    await test.store.prepareRemoval(snapshot.id);
+    const tracked = NodePath.join(journal.isolatedPath!, "tracked.txt");
+    const alias = NodePath.join(journal.isolatedPath!, "notes", "installed");
+    if (change === "external") await NodeFSP.link(tracked, NodePath.join(test.root, "external"));
+    else {
+      const bytes = await NodeFSP.readFile(alias);
+      const mode = (await NodeFSP.stat(alias)).mode & 0o777;
+      await NodeFSP.unlink(alias);
+      await NodeFSP.writeFile(alias, bytes, { mode });
+    }
+    await expect(test.store.finishRemoval(snapshot.id)).rejects.toThrow();
+    expect(await NodeFSP.readFile(tracked, "utf8")).toBe("unstaged\n");
+    expect(await NodeFSP.readFile(alias, "utf8")).toBe("unstaged\n");
+    expect((await test.store.reconcileRemoval(snapshot.id)).status).toBe("original-kept");
+  },
+);
+
+it("rejects hardlink metadata on version 2 snapshots", async () => {
+  await using test = await fixture();
+  const snapshot = await test.store.capture({
+    sourcePath: test.workspace,
+    operationId: "legacy-links",
+    ownerBinding: "fixture-owner",
+  });
+  expect(snapshot.version).toBe(2);
+  const manifest = NodePath.join(test.root, "saved", snapshot.id, "manifest.json");
+  for (const hardlinks of [[], [{ path: "tracked.txt", target: "notes/private" }]]) {
+    await NodeFSP.writeFile(manifest, JSON.stringify({ ...snapshot, hardlinks }));
+    await expect(test.store.read(snapshot.id)).rejects.toThrow();
+  }
+});
+
+it("validates version 3 hardlink targets and matching file records", async () => {
+  await using test = await fixture();
+  await NodeFSP.writeFile(NodePath.join(test.workspace, "notes", "private"), "unstaged\n");
+  await NodeFSP.chmod(NodePath.join(test.workspace, "notes", "private"), 0o751);
+  const snapshot = await test.store.capture({
+    sourcePath: test.workspace,
+    operationId: "link-manifest",
+    ownerBinding: "fixture-owner",
+  });
+  const hardlinks = [{ path: "tracked.txt", target: "notes/private" }];
+  const valid = { ...snapshot, version: 3, hardlinks };
+  const manifest = NodePath.join(test.root, "saved", snapshot.id, "manifest.json");
+  await NodeFSP.writeFile(manifest, JSON.stringify(valid));
+  await expect(test.store.read(snapshot.id)).resolves.toMatchObject({ version: 3, hardlinks });
+  const malformed = [
+    null,
+    [{ path: "tracked.txt", target: "missing" }],
+    [{ path: "tracked.txt", target: "empty" }],
+    [{ path: "tracked.txt", target: "link" }],
+    [{ path: "tracked.txt", target: "tracked.txt" }],
+    [{ path: "../escape", target: "notes/private" }],
+    [{ path: "tracked.txt", target: "/outside" }],
+    [...hardlinks, ...hardlinks],
+    [{ path: "notes/private", target: "tracked.txt" }],
+    [...hardlinks, { path: "staged-add", target: "tracked.txt" }],
+    [{ path: "binary", target: "notes/private" }],
+  ];
+  for (const links of malformed) {
+    await NodeFSP.writeFile(manifest, JSON.stringify({ ...valid, hardlinks: links }));
+    await expect(test.store.read(snapshot.id)).rejects.toThrow();
+  }
+  for (const field of [{ mode: 0o600 }, { size: 999 }, { hash: "a".repeat(64) }]) {
+    await NodeFSP.writeFile(
+      manifest,
+      JSON.stringify({
+        ...valid,
+        entries: snapshot.entries.map((entry) =>
+          entry.path === "tracked.txt" ? { ...entry, ...field } : entry,
+        ),
+      }),
+    );
+    await expect(test.store.read(snapshot.id)).rejects.toThrow();
+  }
 });
 
 it("retains a complete snapshot after a durable removal-boundary interruption and refuses occupied restoration", async () => {
@@ -1385,41 +1604,81 @@ it("reconciles an interrupted intact removal back to the original path", async (
   );
 });
 
-it("resumes a positively owned partial restore only from saved byte prefixes", async () => {
-  await using test = await fixture();
-  const snapshot = await test.store.capture({
-    sourcePath: test.workspace,
-    operationId: "operation",
-    ownerBinding: "fixture-owner",
-  });
-  await test.store.trialRestore(snapshot.id);
-  await test.store.suspend(snapshot.id, {
-    quarantineParent: NodePath.join(test.root, "quarantine"),
-    guard: async () => {},
-  });
-  let restoringBoundaries = 0;
-  const stopped = createWorktreeSuspensionStore({
-    storeRoot: NodePath.join(test.root, "saved"),
-    onBoundary: async (phase) => {
-      if (phase === "restoring" && ++restoringBoundaries === 3)
-        throw new Error("interrupted after owned checkout creation");
-    },
-  });
-  await expect(
-    stopped.stageRestore(snapshot.id, { destinationPath: test.workspace }),
-  ).rejects.toThrow("owned checkout creation");
-  const journal = await test.store.readJournal(snapshot.id);
-  await NodeFSP.writeFile(NodePath.join(journal.restorePath!, "tracked.txt"), "uns", {
-    mode: 0o600,
-  });
-  const restored = await test.store.resumeRestore(snapshot.id);
-  expect(restored.path).toBe(test.workspace);
-  expect(await NodeFSP.readFile(NodePath.join(test.workspace, "tracked.txt"), "utf8")).toBe(
-    "unstaged\n",
-  );
-  expect(await git(test.workspace, "show", ":tracked.txt")).toBe("staged");
-  await test.store.finalizeRestore(snapshot.id);
-});
+it.each(["no links", "missing aliases", "incomplete group", "external link", "undeclared link"])(
+  "resumes a positively owned partial restore only from saved byte prefixes: %s",
+  async (links) => {
+    await using test = await fixture();
+    if (links !== "no links") {
+      for (const name of ["installed", "second"])
+        await NodeFSP.link(
+          NodePath.join(test.workspace, "tracked.txt"),
+          NodePath.join(test.workspace, "notes", name),
+        );
+    }
+    const snapshot = await test.store.capture({
+      sourcePath: test.workspace,
+      operationId: "operation",
+      ownerBinding: "fixture-owner",
+    });
+    await test.store.trialRestore(snapshot.id);
+    await test.store.suspend(snapshot.id, {
+      quarantineParent: NodePath.join(test.root, "quarantine"),
+      guard: async () => {},
+    });
+    let restoringBoundaries = 0;
+    const stopped = createWorktreeSuspensionStore({
+      storeRoot: NodePath.join(test.root, "saved"),
+      onBoundary: async (phase) => {
+        if (phase === "restoring" && ++restoringBoundaries === 3)
+          throw new Error("interrupted after owned checkout creation");
+      },
+    });
+    await expect(
+      stopped.stageRestore(snapshot.id, { destinationPath: test.workspace }),
+    ).rejects.toThrow("owned checkout creation");
+    const journal = await test.store.readJournal(snapshot.id);
+    await NodeFSP.writeFile(NodePath.join(journal.restorePath!, "tracked.txt"), "uns", {
+      mode: 0o600,
+    });
+    const partial = journal.restorePath!;
+    const tracked = NodePath.join(partial, "tracked.txt");
+    if (links === "incomplete group") {
+      await NodeFSP.mkdir(NodePath.join(partial, "notes"), { recursive: true });
+      await NodeFSP.link(tracked, NodePath.join(partial, "notes", "installed"));
+    }
+    if (links === "external link" || links === "undeclared link") {
+      const unknown =
+        links === "external link"
+          ? NodePath.join(test.root, "external")
+          : NodePath.join(partial, "binary");
+      await NodeFSP.link(tracked, unknown);
+      await expect(test.store.resumeRestore(snapshot.id)).rejects.toThrow();
+      expect(await NodeFSP.readFile(tracked, "utf8")).toBe("uns");
+      expect(await NodeFSP.readFile(unknown, "utf8")).toBe("uns");
+      await expect(NodeFSP.lstat(test.workspace)).rejects.toMatchObject({ code: "ENOENT" });
+      return;
+    }
+    const restored = await test.store.resumeRestore(snapshot.id);
+    expect(restored.path).toBe(test.workspace);
+    expect(await NodeFSP.readFile(NodePath.join(test.workspace, "tracked.txt"), "utf8")).toBe(
+      "unstaged\n",
+    );
+    expect(await git(test.workspace, "show", ":tracked.txt")).toBe("staged");
+    if (links !== "no links") {
+      const stats = await Promise.all(
+        ["tracked.txt", "notes/installed", "notes/second"].map((path) =>
+          NodeFSP.stat(NodePath.join(test.workspace, path)),
+        ),
+      );
+      expect(new Set(stats.map((stat) => `${stat.dev}:${stat.ino}`)).size).toBe(1);
+      expect(stats[0]!.nlink).toBe(3);
+      expect(
+        await NodeFSP.readFile(NodePath.join(test.workspace, "notes", "installed"), "utf8"),
+      ).toBe("unstaged\n");
+    }
+    await test.store.finalizeRestore(snapshot.id);
+  },
+);
 
 it("recovers an already-published restore and finishes an exact committed disposal after interruption", async () => {
   await using test = await fixture();
