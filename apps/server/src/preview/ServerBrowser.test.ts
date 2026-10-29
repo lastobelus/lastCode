@@ -274,7 +274,7 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
     setViewportSize: vi.fn(async (size: typeof viewport) => {
       viewport = size;
     }),
-    goto: vi.fn(async (next: string) => {
+    goto: vi.fn(async (next: string): Promise<void | null> => {
       url = next;
       history.splice(++historyIndex, history.length, next);
       events.emit("load");
@@ -5430,39 +5430,186 @@ it.live.each([false, true])(
     ).pipe(Effect.provide(layer)),
 );
 
-it.live.each(["about:blank", "http://127.0.0.1:5175/original"])(
-  "a nonblocking navigation from %s records its run after the destination commits",
-  (original) =>
+it.live.each([
+  ...[false, true].flatMap((restarted) =>
+    ["saved", "changed"].map((fragment) => ({
+      destination: `/check?case=return#${fragment}`,
+      previousRunId: "first-run",
+      runId: "next-run",
+      restarted,
+      reload: true,
+      documentRun: "next-run",
+    })),
+  ),
+  {
+    destination: "/check?case=return#changed",
+    previousRunId: "first-run",
+    runId: "first-run",
+    restarted: false,
+    reload: false,
+    documentRun: "first-run",
+  },
+  {
+    destination: "/other?case=return#saved",
+    previousRunId: "first-run",
+    runId: "next-run",
+    restarted: false,
+    reload: false,
+    documentRun: "next-run",
+  },
+  {
+    destination: "/check?case=return#saved",
+    previousRunId: undefined,
+    runId: undefined,
+    restarted: true,
+    reload: true,
+    documentRun: "next-run",
+  },
+])(
+  "reused native automation loads $documentRun at $destination (restarted: $restarted)",
+  ({ destination, previousRunId, runId, restarted, reload, documentRun: expectedRun }) =>
     Effect.scoped(
       Effect.gen(function* () {
+        desktopRendersNext = true;
         const { browser, broker, tabId } = yield* ready;
-        hostingPreparation = () => Effect.succeed({ managed: true, runId: "first-run" });
-        const page = contexts[0]!.page;
-        if (original !== "about:blank")
-          yield* broker.invoke({ scope, tabId, operation: "navigate", input: { url: original } });
-        const commit = Promise.withResolvers<void>();
-        yield* Effect.addFinalizer(() => Effect.sync(() => commit.resolve()));
+        const url = "http://127.0.0.1:5173/check?case=return#saved";
+        hostingPreparation = () => Effect.succeed({ managed: true, runId: previousRunId });
+        yield* broker.invoke({ scope, tabId, operation: "navigate", input: { url } });
+        const page = desktopConnections[0]!.context.page;
+        let documentRun = "first-run";
+        let input = "edited";
+        const goto = page.goto.getMockImplementation()!;
+        page.goto.mockImplementation(async (next) => {
+          const sameDocument = next.split("#")[0] === page.url().split("#")[0];
+          await goto(next);
+          if (sameDocument) return null;
+          documentRun = "next-run";
+          input = "";
+        });
+        page.reload.mockImplementation(async () => {
+          documentRun = "next-run";
+          input = "";
+        });
+        hostingPreparation = () => Effect.succeed({ managed: true, runId, restarted });
+        const target = new URL(destination, url).href;
+        yield* broker.invoke({ scope, tabId, operation: "navigate", input: { url: target } });
+        expect(page.url()).toBe(target);
+        expect(documentRun).toBe(expectedRun);
+        expect(input).toBe(expectedRun === "first-run" ? "edited" : "");
+        expect(page.reload).toHaveBeenCalledTimes(reload ? 1 : 0);
+        page.reload.mockClear();
+        hostingPreparation = () => Effect.succeed({ managed: true, runId });
+        yield* browser.attachViewer(viewerInput(tabId, false));
+        expect(page.reload).not.toHaveBeenCalled();
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live("a failed same-document recovery keeps the old run for an automation retry", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { browser, broker, tabId } = yield* ready;
+      const url = "http://127.0.0.1:5173/check#saved";
+      hostingPreparation = () => Effect.succeed({ managed: true, runId: "first-run" });
+      yield* broker.invoke({ scope, tabId, operation: "navigate", input: { url } });
+      const page = contexts[0]!.page;
+      page.goto.mockResolvedValue(null);
+      page.reload.mockRejectedValueOnce(new Error("net::ERR_CONNECTION_REFUSED"));
+      hostingPreparation = () => Effect.succeed({ managed: true, runId: "next-run" });
+      const failed = yield* broker
+        .invoke({ scope, tabId, operation: "navigate", input: { url } })
+        .pipe(Effect.exit);
+      expect(Exit.isFailure(failed)).toBe(true);
+      yield* broker.invoke({ scope, tabId, operation: "navigate", input: { url } });
+      expect(page.reload).toHaveBeenCalledTimes(2);
+      page.reload.mockClear();
+      yield* browser.attachViewer(viewerInput(tabId, false));
+      expect(page.reload).not.toHaveBeenCalled();
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live.each([
+  "about:blank",
+  "http://127.0.0.1:5175/original",
+  "http://127.0.0.1:5173/delayed#saved",
+])("a nonblocking navigation from %s records its run after the destination commits", (original) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { browser, broker, tabId } = yield* ready;
+      hostingPreparation = () => Effect.succeed({ managed: true, runId: "first-run" });
+      const page = contexts[0]!.page;
+      if (original !== "about:blank")
+        yield* broker.invoke({ scope, tabId, operation: "navigate", input: { url: original } });
+      const commit = Promise.withResolvers<void>();
+      yield* Effect.addFinalizer(() => Effect.sync(() => commit.resolve()));
+      const destination = "http://127.0.0.1:5173/delayed#saved";
+      const sameDocument = original === destination;
+      if (sameDocument) {
+        hostingPreparation = () => Effect.succeed({ managed: true, runId: "next-run" });
+        page.goto.mockResolvedValue(null);
+        const reload = page.reload.getMockImplementation()!;
+        page.reload.mockImplementationOnce(async () => {
+          await commit.promise;
+          await reload();
+        });
+      } else {
         const goto = page.goto.getMockImplementation()!;
         page.goto.mockImplementationOnce(async (url) => {
           await commit.promise;
           await goto(url);
         });
-        const destination = "http://127.0.0.1:5173/delayed";
-        yield* broker.invoke({
-          scope,
-          tabId,
-          operation: "navigate",
-          input: { url: destination, readiness: "none" },
+      }
+      yield* broker.invoke({
+        scope,
+        tabId,
+        operation: "navigate",
+        input: { url: destination, readiness: "none" },
+      });
+      expect(page.url()).toBe(original);
+      commit.resolve();
+      yield* broker.invoke({ scope, tabId, operation: "evaluate", input: { expression: "1" } });
+      expect(page.url()).toBe(destination);
+      expect(page.reload).toHaveBeenCalledTimes(sameDocument ? 1 : 0);
+      page.goto.mockClear();
+      page.reload.mockClear();
+      hostingPreparation = () => Effect.succeed({ managed: true, runId: "recovered-run" });
+      yield* browser.attachViewer(viewerInput(tabId, false));
+      expect(page.goto).not.toHaveBeenCalled();
+      expect(page.reload).toHaveBeenCalledExactlyOnceWith(expect.anything());
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live.each([5_000, 10_000])(
+  "same-document recovery shares its timeout after navigation consumes %s ms",
+  (elapsed) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { broker, tabId } = yield* ready;
+        const url = "http://127.0.0.1:5173/check#saved";
+        hostingPreparation = () => Effect.succeed({ managed: true, runId: "first-run" });
+        yield* broker.invoke({ scope, tabId, operation: "navigate", input: { url } });
+        const clock = yield* Clock.Clock;
+        let monotonic = clock.monotonicTimeNanosUnsafe();
+        using _clock = vi
+          .spyOn(clock, "monotonicTimeNanosUnsafe")
+          .mockImplementation(() => monotonic);
+        const page = contexts[0]!.page;
+        page.goto.mockImplementation(async () => {
+          monotonic += BigInt(elapsed) * 1_000_000n;
+          return null;
         });
-        expect(page.url()).toBe(original);
-        commit.resolve();
-        yield* broker.invoke({ scope, tabId, operation: "evaluate", input: { expression: "1" } });
-        expect(page.url()).toBe(destination);
-        page.goto.mockClear();
-        hostingPreparation = () => Effect.succeed({ managed: true, runId: "recovered-run" });
-        yield* browser.attachViewer(viewerInput(tabId, false));
-        expect(page.goto).not.toHaveBeenCalled();
-        expect(page.reload).toHaveBeenCalledExactlyOnceWith(expect.anything());
+        hostingPreparation = () => Effect.succeed({ managed: true, runId: "next-run" });
+        const result = yield* broker
+          .invoke({ scope, tabId, operation: "navigate", input: { url, timeoutMs: 10_000 } })
+          .pipe(Effect.exit);
+        expect(Exit.isFailure(result)).toBe(elapsed === 10_000);
+        if (elapsed === 10_000) expect(page.reload).not.toHaveBeenCalled();
+        else
+          expect(page.reload).toHaveBeenCalledExactlyOnceWith(
+            expect.objectContaining({ timeout: 5_000 }),
+          );
       }),
     ).pipe(Effect.provide(layer)),
 );
