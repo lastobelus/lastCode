@@ -1,6 +1,9 @@
 import * as NodeAssert from "node:assert/strict";
 
-import { T3_CODE_DEVICE_TOOL_INSTRUCTIONS } from "@t3tools/provider-core/server/orchestrationInstructions";
+import {
+  T3_CODE_BROWSER_TOOL_INSTRUCTIONS,
+  T3_CODE_DEVICE_TOOL_INSTRUCTIONS,
+} from "@t3tools/provider-core/server/orchestrationInstructions";
 import { describe, it } from "vite-plus/test";
 
 import {
@@ -28,6 +31,46 @@ describe("buildCodexAdditionalContext", () => {
         }
       },
     );
+  });
+
+  it.each([
+    { browser: false, device: false },
+    { browser: true, device: false },
+    { browser: false, device: true },
+    { browser: true, device: true },
+  ])("replaces unavailable tool guidance with tools %j", (availability) => {
+    const enabled = buildCodexAdditionalContext(
+      { model: "gpt-6.1-sol", reasoningEffort: "high" },
+      { browser: true, device: true },
+    );
+    const context = buildCodexAdditionalContext(
+      { model: "gpt-6.1-sol", reasoningEffort: "high" },
+      availability,
+    );
+    if (availability.browser) {
+      NodeAssert.equal(context.t3_code_tools_browser?.value, T3_CODE_BROWSER_TOOL_INSTRUCTIONS);
+    } else {
+      NodeAssert.match(context.t3_code_tools_browser?.value ?? "", /browser tools are unavailable/);
+      NodeAssert.match(context.t3_code_tools_browser?.value ?? "", /Disregard earlier/);
+      NodeAssert.notEqual(
+        context.t3_code_tools_browser?.value,
+        enabled.t3_code_tools_browser?.value,
+      );
+    }
+    if (availability.device) {
+      NodeAssert.match(
+        context.t3_code_tools_device?.value ?? "",
+        /1\. Call `device_list`[\s\S]*2\. Call `device_open`/,
+      );
+      NodeAssert.match(
+        context.t3_code_tools_device?.value ?? "",
+        /`agent-device` command bound to that device/,
+      );
+    } else {
+      NodeAssert.match(context.t3_code_tools_device?.value ?? "", /device tools are unavailable/);
+      NodeAssert.match(context.t3_code_tools_device?.value ?? "", /Disregard earlier/);
+      NodeAssert.notEqual(context.t3_code_tools_device?.value, enabled.t3_code_tools_device?.value);
+    }
   });
 });
 
@@ -80,8 +123,8 @@ describe("Codex orchestration context", () => {
 describe("Codex device context", () => {
   it("adds the shared device block only when the session holds device access", () => {
     const tools = (device: boolean) =>
-      buildCodexAdditionalContext({ model: "gpt-6.1-sol" }, { browser: true, device }).t3_code_tools
-        ?.value ?? "";
+      buildCodexAdditionalContext({ model: "gpt-6.1-sol" }, { browser: true, device })
+        .t3_code_tools_device?.value ?? "";
 
     NodeAssert.ok(tools(true).includes(T3_CODE_DEVICE_TOOL_INSTRUCTIONS));
     NodeAssert.ok(!tools(true).includes("ToolSearch"));

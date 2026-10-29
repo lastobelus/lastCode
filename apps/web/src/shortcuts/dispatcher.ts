@@ -26,6 +26,8 @@ export interface CommandScopeOptions {
    * themselves (the terminal encodes Ctrl+Shift+T and stops propagation).
    */
   readonly capture?: boolean;
+  /** Run native input fallbacks only after configured commands decline the key. */
+  readonly fallback?: boolean;
   /**
    * Hear every bubbling keydown after the scopes ran, with whether one of them
    * (or the page) consumed it. Observers never consume. For listeners that react to keys other
@@ -42,6 +44,7 @@ interface CommandScope {
 // Within each list the newest scope wins.
 const globalScopes: CommandScope[] = [];
 const captureScopes: CommandScope[] = [];
+const fallbackScopes: CommandScope[] = [];
 const observerScopes: CommandScope[] = [];
 
 function readFocusContext(event: KeyboardEvent): Partial<ShortcutMatchContext> {
@@ -80,7 +83,8 @@ function dispatchCaptureKeyDown(event: KeyboardEvent): void {
 }
 
 function dispatchKeyDown(event: KeyboardEvent): void {
-  const consumed = runScopes(globalScopes, event) || event.defaultPrevented;
+  const consumed =
+    runScopes(globalScopes, event) || runScopes(fallbackScopes, event) || event.defaultPrevented;
   for (const scope of observerScopes.slice()) scope.options.observe?.(event, consumed);
 }
 
@@ -106,7 +110,13 @@ export function registerCommands(
   commands: CommandHandlers,
   options: CommandScopeOptions = {},
 ): () => void {
-  const scopes = options.observe ? observerScopes : options.capture ? captureScopes : globalScopes;
+  const scopes = options.observe
+    ? observerScopes
+    : options.capture
+      ? captureScopes
+      : options.fallback
+        ? fallbackScopes
+        : globalScopes;
   return pushScope(scopes, { commands, options });
 }
 
