@@ -496,6 +496,34 @@ it("stops a sample only once a must-not check has failed", () => {
 
 const decodeMcpToolUseCase = Schema.decodeUnknownSync(McpToolUseCase);
 const decodeDeviceCase = Schema.decodeSync(Schema.fromJsonString(McpToolUseCase));
+it.each([
+  ["quiet-watch-stalled-review-handback", "The review is STALLED."],
+  ["quiet-watch-pending-gates-handback", "CI is STILL PENDING."],
+])("grades the authored quiet-deadline handback: %s", (id, text) => {
+  const testCase = NodeFS.readFileSync(
+    new URL("./cases/pull-requests.ndjson", import.meta.url),
+    "utf8",
+  )
+    .trim()
+    .split("\n")
+    .map((line) => decodeMcpToolUseCase(JSON.parse(line)))
+    .find((testCase) => testCase.id === id)!;
+  const run: SampleRun = {
+    calls: [
+      {
+        step: 0,
+        tool: "unwatch_pull_request",
+        input: { url: "https://github.com/acme/app/pull/123" },
+      },
+    ],
+    text,
+    finalText: text,
+    stopReason: "end_turn",
+  };
+  assert.deepEqual(failed(testCase.expect, run), []);
+  assert.isNotEmpty(failed(testCase.expect, { ...run, text: "All work is complete." }));
+});
+
 const deviceCases = () =>
   NodeFS.readFileSync(new URL("./cases/device-manager.ndjson", import.meta.url), "utf8")
     .trim()
