@@ -1,4 +1,4 @@
-import type { MessageId, ThreadId } from "@t3tools/contracts";
+import { MessageId, type CommandId, type ThreadId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 
@@ -8,3 +8,6 @@ export class ThreadReadAuthorization extends Context.Reference<{
 }>("t3/orchestration/ThreadReadAuthorization", {
   defaultValue: () => ({ authorize: () => Effect.void }),
 }) {}
+
+export const questionAnswerAuthorizationId = (commandId: CommandId): MessageId =>
+  MessageId.make(`answer-context:${commandId}`);
