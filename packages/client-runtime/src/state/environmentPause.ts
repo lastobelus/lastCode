@@ -1,13 +1,42 @@
 import { type EnvironmentId, WS_METHODS } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Clock from "effect/Clock";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import * as Option from "effect/Option";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
+import type { EnvironmentConnectionSummary } from "./presentation.ts";
 import {
   createAtomCommandScheduler,
   createEnvironmentRpcCommand,
   createEnvironmentRpcQueryAtomFamily,
 } from "./runtime.ts";
+
+type PauseConnection = EnvironmentConnectionSummary & {
+  readonly connected: boolean;
+  readonly since: number;
+};
+
+export function createEnvironmentPauseConnectionsAtom(
+  environmentsAtom: Atom.Atom<readonly EnvironmentConnectionSummary[]>,
+) {
+  return Atom.make((get) => {
+    const previous = Option.getOrNull(get.self<readonly PauseConnection[]>());
+    return get(environmentsAtom).map((environment) => {
+      const connected = environment.isEnabled && environment.connectionState === "connected";
+      const prior = previous?.find(
+        (candidate) => candidate.environmentId === environment.environmentId,
+      );
+      return {
+        ...environment,
+        connected,
+        since:
+          prior && prior.connected === connected
+            ? prior.since
+            : Effect.runSync(Clock.currentTimeMillis),
+      };
+    });
+  });
+}
 
 export function createEnvironmentPauseAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,

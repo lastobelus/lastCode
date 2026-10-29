@@ -109,16 +109,7 @@ export function LastCodeCurrentWork({
                   {item.icon}
                 </span>
                 <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                  {action?.outcome === "running" ? (
-                    <div className="wrap-anywhere">{action.actionName}</div>
-                  ) : null}
-                  <div
-                    className={cn("wrap-anywhere", runningPresentation && secondaryTextClassName)}
-                  >
-                    {runningPresentation
-                      ? `${runningPresentation.label} ${runningPresentation.summary}`
-                      : item.title}
-                  </div>
+                  <div className="wrap-anywhere">{item.title}</div>
                   {item.description ? (
                     <div className={secondaryTextClassName}>{item.description}</div>
                   ) : null}

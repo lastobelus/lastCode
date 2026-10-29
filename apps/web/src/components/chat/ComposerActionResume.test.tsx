@@ -6,8 +6,9 @@ import {
   ComposerActionResumeActions,
   ComposerActionResumeDescription,
   ComposerActionResumeTitle,
-  heldActionBanner,
+  pendingActionBanner,
 } from "./ComposerActionResume";
+import { actionResumeStatus } from "@t3tools/shared/actionResume";
 
 const action = {
   runId: "run-1",
@@ -44,15 +45,26 @@ const heldAction: ActionResumeState = {
   },
 };
 
-describe("completed Action held by environment Pause", () => {
-  it("selects a completed pending result and retains its summary without delivery controls", () => {
-    const banner = heldActionBanner(heldAction);
+function pendingBanner(state: ActionResumeState | null, paused = true) {
+  return pendingActionBanner({
+    action: state,
+    status: state
+      ? actionResumeStatus({ action: state, environmentPaused: paused, hasPendingRequest: false })
+      : null,
+    canRead: false,
+    onOpenTerminal: () => undefined,
+  });
+}
+
+describe("completed Action result awaiting continuation", () => {
+  it("retains the result summary and wait reason without mutation controls", () => {
+    const banner = pendingBanner(heldAction);
     expect(banner).toMatchObject({
-      id: "action-held:run-1",
-      title: "Succeeded: Wait for PR",
-      description:
-        "Documentation preview ready. The agent hasn't picked up this result. If this environment is paused, resume it in Settings → Connections to let the agent follow up.",
+      id: "action-follow-up:run-1",
+      title: "Wait for PR · Environment paused",
     });
+    expect(banner?.description).toContain("Succeeded: Documentation preview ready.");
+    expect(banner?.description).toContain("Resume the environment");
     expect(banner?.actions).toBeUndefined();
     expect(banner?.onDismiss).toBeUndefined();
     expect(heldAction.delivery).toBe("pending");
@@ -62,14 +74,9 @@ describe("completed Action held by environment Pause", () => {
     null,
     action,
     { ...heldAction, outcome: "running" as const },
-    { ...heldAction, heldByEnvironmentPause: false },
-    { ...heldAction, heldByEnvironmentPause: undefined },
-    ...(["armed", "available", "delivered", "disposed"] as const).map((delivery) => ({
-      ...heldAction,
-      delivery,
-    })),
-  ])("does not relabel other lifecycle states: %j", (state) => {
-    expect(heldActionBanner(state)).toBeNull();
+    ...(["available", "disposed"] as const).map((delivery) => ({ ...heldAction, delivery })),
+  ])("leaves running, recovery and disposed states to their own presentation: %j", (state) => {
+    expect(pendingBanner(state)).toBeNull();
   });
 
   it.each([
@@ -83,20 +90,17 @@ describe("completed Action held by environment Pause", () => {
     ["process_lost", "success", "Interrupted"],
   ] as const)("preserves %s / %s result meaning", (outcome, reportOutcome, label) => {
     expect(
-      heldActionBanner({
+      pendingBanner({
         ...heldAction,
         outcome,
         report: { ...heldAction.report!, outcome: reportOutcome },
-      })?.title,
-    ).toBe(`${label}: Wait for PR`);
+      })?.description,
+    ).toContain(`${label}: Documentation preview ready.`);
   });
 
-  it("still identifies the completed result without a retained report", () => {
-    const banner = heldActionBanner({ ...heldAction, report: undefined });
-    expect(banner?.title).toBe("Succeeded: Wait for PR");
-    expect(banner?.children).toBeUndefined();
-    expect(banner?.description).toBe(
-      "The agent hasn't picked up this result. If this environment is paused, resume it in Settings → Connections to let the agent follow up.",
+  it("identifies the result even without a retained report", () => {
+    expect(pendingBanner({ ...heldAction, report: undefined })?.description).toMatch(
+      /^Succeeded\./,
     );
   });
 
@@ -104,21 +108,19 @@ describe("completed Action held by environment Pause", () => {
     "preserves report punctuation in %s",
     (summary) => {
       expect(
-        heldActionBanner({
-          ...heldAction,
-          report: { ...heldAction.report!, summary },
-        })?.description,
-      ).toBe(
-        `${summary} The agent hasn't picked up this result. If this environment is paused, resume it in Settings → Connections to let the agent follow up.`,
-      );
+        pendingBanner({ ...heldAction, report: { ...heldAction.report!, summary } })?.description,
+      ).toContain(`Succeeded: ${summary} Automatic wake-ups`);
     },
   );
 
-  it("keeps retained pending intent after Resume without claiming the environment is still paused", () => {
-    expect(heldActionBanner(heldAction)?.description).toContain("If this environment is paused");
-    expect(heldActionBanner({ ...heldAction, heldByEnvironmentPause: false })).toBeNull();
-    expect(heldActionBanner({ ...heldAction, delivery: "delivered" })).toBeNull();
-    expect(heldActionBanner({ ...heldAction, delivery: "available" })).toBeNull();
+  it("uses current pause truth independently of retained intent after Resume", () => {
+    expect(pendingBanner(heldAction, false)?.title).toBe("Wait for PR · Sending result");
+    expect(pendingBanner({ ...heldAction, heldByEnvironmentPause: false })?.title).toBe(
+      "Wait for PR · Environment paused",
+    );
+    expect(pendingBanner({ ...heldAction, delivery: "delivered" }, false)?.title).toBe(
+      "Wait for PR · Result sent",
+    );
   });
 });
 
@@ -127,14 +129,21 @@ describe("ComposerActionResume", () => {
     const markup = renderToStaticMarkup(
       <>
         <ComposerActionResumeTitle action={action} />
-        <ComposerActionResumeDescription action={action} />
+        <ComposerActionResumeDescription
+          action={action}
+          status={actionResumeStatus({
+            action,
+            environmentPaused: false,
+            hasPendingRequest: false,
+          })}
+        />
       </>,
     );
 
     expect(markup).toContain("Waiting");
     expect(markup).toContain("Waiting for Codex review");
     expect(markup).toContain("Watching checks and review feedback");
-    expect(markup).toContain("Resumes when this thread is idle.");
+    expect(markup).toContain("The agent continues automatically when the command ends.");
     expect(markup).not.toContain("chat-composer-shoulder-tab");
     expect(markup).not.toContain("chat-composer-top-drawer");
   });
@@ -170,9 +179,12 @@ describe("ComposerActionResume", () => {
 
   it("falls back to the resume timing when no progress detail is available", () => {
     const markup = renderToStaticMarkup(
-      <ComposerActionResumeDescription action={{ ...action, progress: undefined }} />,
+      <ComposerActionResumeDescription
+        action={{ ...action, progress: undefined }}
+        status={actionResumeStatus({ action, environmentPaused: false, hasPendingRequest: false })}
+      />,
     );
 
-    expect(markup).toContain("Resumes when this thread is idle.");
+    expect(markup).toContain("The agent continues automatically when the command ends.");
   });
 });

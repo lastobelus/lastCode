@@ -1511,19 +1511,11 @@ function ThreadDetailBody(props: ThreadDetailScreenProps) {
                       />
                     </Animated.View>
                   ) : null}
-                  {props.selectedThread.actionResume?.outcome === "running" ||
-                  props.selectedThread.actionResume?.delivery === "available" ? (
-                    <Animated.View
-                      className="shrink-0 px-4 pb-3"
-                      entering={FadeInDown.duration(220)}
-                      exiting={FadeOut.duration(140)}
-                    >
-                      <ActionResumeNotice
-                        environmentId={props.environmentId}
-                        thread={props.selectedThread}
-                      />
-                    </Animated.View>
-                  ) : null}
+                  <ActionResumeNotice
+                    environmentId={props.environmentId}
+                    thread={props.selectedThread}
+                    threadDetailRef={props.selectedThreadDetailRef}
+                  />
                   {props.activePendingApproval || props.activePendingUserInput ? (
                     <Animated.View
                       className="shrink-0 gap-3 px-4 pb-3"

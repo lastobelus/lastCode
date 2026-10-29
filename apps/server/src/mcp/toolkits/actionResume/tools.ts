@@ -40,7 +40,7 @@ const ListProjectActionsTool = Tool.make("list_project_actions", {
 
 const RunProjectActionAndResumeTool = Tool.make("run_project_action_and_resume", {
   description:
-    "Launch one explicitly opted-in Project Action in a dedicated terminal, arm exactly one same-thread automated follow-up, and return immediately. The Action may run indefinitely; do not poll it. The user can cancel it from LastCode. Use only an eligible id returned by list_project_actions. For now, a delegated child task ends its turn with a handoff request instead of launching; the parent verifies the target, launches the Action in its own thread, and queues the result back to the child.",
+    "Launch one opted-in Project Action in a terminal, arm one same-thread automated follow-up, and return immediately. It may run indefinitely; do not poll it. The user can cancel it from LastCode. Use only an eligible id returned by list_project_actions. For now, a child ends its turn with a handoff request instead of launching; the parent verifies the target, launches it in its own thread, and queues the result to the child. Eligibility is independent of automatic-settlement settings.",
   parameters: Schema.Struct({ actionId: Schema.String }),
   success: ActionResumeState,
   failure: ActionResumeToolError,

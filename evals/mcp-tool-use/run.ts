@@ -39,6 +39,7 @@ import { EnvironmentId, ORCHESTRATOR_MCP_RUNNING_TASK_NEXT, ThreadId } from "@t3
 import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import { buildCodexAdditionalContext } from "../../apps/server/src/provider/CodexDeveloperInstructions.ts";
+import { ActionResumeToolkit } from "../../apps/server/src/mcp/toolkits/actionResume/tools.ts";
 import { AttachmentToolkit } from "../../apps/server/src/mcp/toolkits/attachment/tools.ts";
 import { DeviceToolkit } from "../../apps/server/src/mcp/toolkits/device/tools.ts";
 import { EnvironmentToolkit } from "../../apps/server/src/mcp/toolkits/environment/tools.ts";
@@ -74,10 +75,11 @@ const MODELS = {
   "claude-opus-5-5": "Opus 5.5",
   "gpt-6.1-sol": "GPT-6.1 Sol",
   "gpt-6-astra": "GPT-6 Astra",
+  "gpt-6-luna": "GPT-6 Luna",
 } as const;
 type Model = keyof typeof MODELS;
 /** GPT models replay a Codex capture through CLIProxyAPI, the rest a Claude Code capture. */
-const isCodex = (model: Model): model is Extract<Model, `gpt-${string}`> =>
+const isCodex = (model: Model | PricedModel): model is Extract<Model, `gpt-${string}`> =>
   model.startsWith("gpt-");
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 // USD per million tokens. Cache writes use the 5-minute rate.
@@ -87,6 +89,7 @@ const PRICES = {
   "claude-opus-5-5": { input: 4, output: 20, cacheWrite: 5, cacheRead: 0.2 },
 };
 type PricedModel = keyof typeof PRICES;
+type ShellModel = PricedModel | Extract<Model, `gpt-${string}`>;
 const T3_PREFIX = "mcp__t3-code__";
 const RUNTIME_MARKER = "<runtime_info>";
 const TOOL_LOADED = "Tool loaded.";
@@ -248,7 +251,14 @@ export const McpToolUseCase = Schema.Struct({
     mocks: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
     /** Regexes on one part of a shell command. A match wins over the shell simulator. */
     shellMocks: Schema.optional(
-      Schema.Array(Schema.Struct({ match: Schema.String, output: Schema.String })),
+      Schema.Array(
+        Schema.Struct({
+          match: Schema.String,
+          output: Schema.String,
+          /** Match the entire command, including compound commands, without shell parsing. */
+          wholeCommand: Schema.optional(Schema.Boolean),
+        }),
+      ),
     ),
   }),
   prompt: Schema.String,
@@ -355,6 +365,7 @@ export const normalizeToolInput = (name: string, input: unknown) =>
 // description, and schema through unchanged.
 const t3SourceTools: ReadonlyArray<Tool.Any> = [
   OrchestratorToolkit,
+  ActionResumeToolkit,
   ThreadToolkit,
   AttachmentToolkit,
   ProjectToolkit,
@@ -1192,12 +1203,13 @@ export const shellOutput = (content: ReadonlyArray<Block>) => {
   });
 };
 
-/** A shell mock's output, when the command is one simple command that the mock matches. */
+/** Compound commands require an explicit whole-command mock; defaults match simple commands. */
 export const mockOutput = (sample: Sample, command: string) =>
-  /&&|\|\||[;|\n]/.test(command.trim())
-    ? undefined
-    : sample.testCase.setup.shellMocks?.find((mock) => new RegExp(mock.match).test(command))
-        ?.output;
+  sample.testCase.setup.shellMocks?.find((mock) =>
+    mock.wholeCommand
+      ? new RegExp(`^(?:${mock.match})$`).test(command.trim())
+      : !/&&|\|\||[;|\n]/.test(command.trim()) && new RegExp(mock.match).test(command),
+  )?.output;
 
 type Config = {
   readonly apiKey: string;
@@ -1205,7 +1217,7 @@ type Config = {
   readonly proxy?: { readonly url: string; readonly headers: Readonly<Record<string, string>> };
   readonly effort: string;
   readonly maxSteps: number;
-  readonly shellModel: PricedModel;
+  readonly shellModel: ShellModel;
 };
 
 /**
@@ -1218,7 +1230,7 @@ export const cannedOutput = (sample: Sample, command: string) =>
   sample.devices?.sessionError(sample.shell, command);
 
 /** Output for a shell, file, or web tool: canned output, else the shell simulator. */
-const simulate = Effect.fn("evaluateMcpToolUse.simulate")(function* (
+export const simulate = Effect.fn("evaluateMcpToolUse.simulate")(function* (
   sample: Sample,
   config: Config,
   call: Omit<ShellEntry, "output">,
@@ -1227,10 +1239,11 @@ const simulate = Effect.fn("evaluateMcpToolUse.simulate")(function* (
   let output = typeof command === "string" ? cannedOutput(sample, command) : undefined;
   if (output === undefined) {
     const body = shellRequest(sample, call, config.shellModel);
+    const codexShell = isCodex(config.shellModel);
     const response = yield* callModel(
-      config.apiKey,
+      codexShell ? "" : config.apiKey,
       body,
-      config.apiKey ? undefined : config.proxy,
+      codexShell || !config.apiKey ? config.proxy : undefined,
     );
     addUsage(sample.shellUsage, response.usage);
     output = shellOutput(response.content);
@@ -1773,7 +1786,7 @@ const spend = (usages: ReadonlyArray<Usage>, model: PricedModel | undefined) => 
 /** Markdown report. With a baseline, each case shows its earlier pass rate and the change. */
 export const summarize = (
   rows: Array<ResultRow>,
-  options: { readonly header: string; readonly shellModel: PricedModel; readonly model: Model },
+  options: { readonly header: string; readonly shellModel: ShellModel; readonly model: Model },
   before?: Map<string, number>,
 ) => {
   const codex = isCodex(options.model);
@@ -1783,7 +1796,7 @@ export const summarize = (
   );
   const shell = spend(
     rows.map((row) => row.shellUsage),
-    options.shellModel,
+    isCodex(options.shellModel) ? undefined : options.shellModel,
   );
   const cost = agent.cost + shell.cost;
   const table = (title: string, key: (row: ResultRow) => string, compare = false) => [
@@ -1821,7 +1834,7 @@ export const summarize = (
       ? "- Cost: not applicable (subscription through proxy)."
       : `- Estimated cost $${cost.toFixed(2)}, $${(cost / rows.length).toFixed(3)} per sample.`,
     `- Agent tokens: ${agent.tokens}${codex ? "." : ` ($${agent.cost.toFixed(2)}).`}`,
-    `- Shell simulator (${options.shellModel}) tokens: ${shell.tokens} (API-price estimate $${shell.cost.toFixed(2)}).`,
+    `- Shell simulator (${options.shellModel}) tokens: ${shell.tokens}${isCodex(options.shellModel) ? " (subscription through proxy)." : ` (API-price estimate $${shell.cost.toFixed(2)}).`}`,
     ...(codex
       ? [
           "- Code-mode tools use case mocks and a simulated machine. Native subagent prompts and asynchronous notifications are approximate.",
@@ -1851,7 +1864,10 @@ const Flags = Schema.Struct({
   concurrency: PositiveInt,
   "max-steps": Schema.optional(PositiveInt),
   effort: Schema.optional(Schema.Literals(EFFORTS)),
-  "shell-model": Schema.Literals(Object.keys(PRICES) as Array<PricedModel>),
+  "shell-model": Schema.Literals([
+    ...(Object.keys(PRICES) as Array<PricedModel>),
+    ...(Object.keys(MODELS) as Array<Model>).filter(isCodex),
+  ]),
   "user-instructions": Schema.Literals(["keep", "drop"]),
   "dry-run": Schema.Boolean,
   "stop-on-regression": Schema.Boolean,
@@ -2031,7 +2047,7 @@ const main = Effect.gen(function* () {
   const config: Config = {
     apiKey,
     model: flags.model,
-    ...(codex ? { proxy: proxyConfig() } : {}),
+    ...(codex || isCodex(flags["shell-model"]) ? { proxy: proxyConfig() } : {}),
     effort,
     maxSteps: flags["max-steps"] ?? (codex ? 10 : 6),
     shellModel: flags["shell-model"],

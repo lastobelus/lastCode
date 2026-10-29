@@ -318,6 +318,8 @@ import { useProactivePanels } from "../hooks/useProactivePanels";
 import { useIncrementalTimelineEntries } from "../hooks/useIncrementalTimelineEntries";
 import { useRightPanelSurfaceClose } from "../hooks/useRightPanelSurfaceClose";
 import type { ComposerBannerStackItem } from "./chat/ComposerBannerStack";
+import { EnvironmentPauseNotice } from "./EnvironmentPauseControl";
+import { useActionResumeWait } from "../state/actionResume";
 import { ComposerSurface } from "./chat/ComposerSurface";
 import { resolveThreadSyncPhase } from "../threadSync";
 import {
@@ -2395,14 +2397,20 @@ export default function ChatView(props: ChatViewProps) {
     scrollToEnd,
     persistThreadSettingsForNextTurn,
   });
+  const resumableActionWait = useActionResumeWait(
+    routeThreadDetailRef,
+    activeThreadShell?.actionResume ?? null,
+  );
   const {
     runningBanner: runningResumableActionBannerItem,
+    pendingBanner: pendingActionBannerItem,
     interruptedBanner: interruptedActionBannerItem,
-    heldBanner: heldActionBannerItem,
   } = useActionResumeBanners({
     routeThreadRef,
     threadRef: activeThreadRef,
-    action: activeThreadShell?.actionResume ?? null,
+    action:
+      resumableActionWait.presentation === null ? null : (activeThreadShell?.actionResume ?? null),
+    status: resumableActionWait.status,
     onRequestTerminalFocus: (terminalId) => {
       if (activeThreadRef) focusTerminal(activeThreadRef, terminalId);
     },
@@ -2985,7 +2993,7 @@ export default function ChatView(props: ChatViewProps) {
     backgroundWorkNow !== null ||
     runningResumableActionBannerItem !== null ||
     interruptedActionBannerItem !== null ||
-    heldActionBannerItem !== null ||
+    pendingActionBannerItem !== null ||
     goalNow !== null ||
     shownThreadSyncPhase !== null;
   const queuedRunCount = serverProjection ? getUserQueuedThreadRuns(serverProjection).length : 0;
@@ -3031,7 +3039,7 @@ export default function ChatView(props: ChatViewProps) {
           action={activeThreadShell?.actionResume ?? null}
           actionItems={[
             interruptedActionBannerItem,
-            heldActionBannerItem,
+            pendingActionBannerItem,
             runningResumableActionBannerItem,
           ]}
           tasks={pendingBackgroundTasks}
@@ -3518,6 +3526,11 @@ export default function ChatView(props: ChatViewProps) {
                               status={providerSubagentStatus}
                               onOpenParent={parentThreadLink?.open ?? null}
                             />
+                          ) : null}
+                          {composerMounted ? (
+                            <div className="space-y-2">
+                              <EnvironmentPauseNotice environmentId={environmentId} />
+                            </div>
                           ) : null}
                           {!composerMounted ? null : (
                             <ChatComposer
