@@ -287,6 +287,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["page up page down pageup pagedown overlap scrolling composer conversation"],
   },
   {
+    id: "expand-thread-annotations",
+    title: "Expand thread annotations by default",
+    to: "/settings/lastcode",
+    searchTerms: ["annotation note composer eyebrow expand collapse edited"],
+  },
+  {
     id: "incoming-message-style",
     title: "Incoming message style",
     to: "/settings/lastcode",

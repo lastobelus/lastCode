@@ -860,6 +860,18 @@ describe("ClientSettings LastCode sidebar preferences", () => {
   });
 });
 
+describe("ClientSettings annotation expansion", () => {
+  it("defaults annotations to expanded and preserves an explicit preference", () => {
+    expect(decodeClientSettings({}).expandThreadAnnotations).toBe(true);
+    expect(decodeClientSettingsPatch({})).not.toHaveProperty("expandThreadAnnotations");
+    for (const expandThreadAnnotations of [true, false]) {
+      const preference = { expandThreadAnnotations };
+      expect(encodeClientSettings(decodeClientSettings(preference))).toMatchObject(preference);
+      expect(decodeClientSettingsPatch(preference)).toEqual(preference);
+    }
+  });
+});
+
 describe("ClientSettings incoming message appearance", () => {
   it("uses neutral theme fill when existing settings have no appearance choice", () => {
     expect(decodeClientSettings({ timestampFormat: "12-hour" })).toMatchObject({

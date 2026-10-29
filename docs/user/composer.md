@@ -356,6 +356,9 @@ save, or add it to chat.
 In LastCode, enter `/annotate` to open the current thread's annotation editor. Enter `/annotate`
 followed by Markdown to save the annotation directly without sending a message to the agent.
 Annotations become available after the first message turns a draft into a saved thread.
+They start expanded above the composer. Collapse one to keep it collapsed until you expand or edit
+it. Turn off **Settings → LastCode → Expand thread annotations by default** to start added or
+edited annotations collapsed.
 
 ## Images and videos in messages
 
