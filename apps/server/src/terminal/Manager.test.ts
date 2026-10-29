@@ -6564,15 +6564,24 @@ it.layer(
   it.effect("binds action terminals to the server settings path over shell overrides", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager(5, {
-        env: { T3CODE_LOCAL_CI_SETTINGS_PATH: "/inherited/settings.json" },
+        env: {
+          T3CODE_LOCAL_CI_SETTINGS_PATH: "/inherited/settings.json",
+          T3CODE_PR_WATCH_SETTINGS_PATH: "/inherited/watch-settings.json",
+        },
         localCiSettingsPath: "/server/custom-state/settings.json",
       });
       yield* manager.open(
         openInput({
-          env: { T3CODE_LOCAL_CI_SETTINGS_PATH: "/client/settings.json" },
+          env: {
+            T3CODE_LOCAL_CI_SETTINGS_PATH: "/client/settings.json",
+            T3CODE_PR_WATCH_SETTINGS_PATH: "/client/watch-settings.json",
+          },
         }),
       );
       expect(ptyAdapter.spawnInputs[0]?.env.T3CODE_LOCAL_CI_SETTINGS_PATH).toBe(
+        "/server/custom-state/settings.json",
+      );
+      expect(ptyAdapter.spawnInputs[0]?.env.T3CODE_PR_WATCH_SETTINGS_PATH).toBe(
         "/server/custom-state/settings.json",
       );
     }),

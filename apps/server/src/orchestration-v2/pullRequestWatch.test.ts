@@ -247,6 +247,47 @@ describe("evaluatePullRequestWatch", () => {
     assert.isTrue(report.exhausted);
   });
 
+  it("reports an unchanged wait once, then rearms only on actionable news or a push", () => {
+    const start = Date.parse(STARTED);
+    const dueAt = "2026-10-02T12:45:00.000Z";
+    const armed = {
+      ...watch({ headSha: "aaaaaaaaaa", wakes: 3 }),
+      quietDeadline: { timeoutMinutes: 45, dueAt },
+    };
+    const before = evaluate(armed, detail(), noRemarks, start + 44 * 60_000);
+    assert.deepEqual(before.changes, []);
+    assert.deepEqual(before.next.quietDeadline, armed.quietDeadline);
+
+    const quiet = evaluate(before.next, detail(), noRemarks, start + 45 * 60_000);
+    assert.deepEqual(quiet.changes, [{ kind: "quiet", minutes: 45 }]);
+    assert.deepEqual(quiet.next.quietDeadline, { timeoutMinutes: 45, dueAt: null });
+    assert.equal(quiet.next.wakes, 3);
+    assert.isFalse(quiet.exhausted);
+    assert.deepEqual(evaluate(quiet.next, detail(), noRemarks, start + 90 * 60_000).changes, []);
+
+    const pushed = evaluate(
+      quiet.next,
+      detail({ headSha: "bbbbbbbbbb" }),
+      noRemarks,
+      start + 91 * 60_000,
+    );
+    assert.deepEqual(pushed.next.quietDeadline, {
+      timeoutMinutes: 45,
+      dueAt: "2026-10-02T14:16:00.000Z",
+    });
+    const done = evaluate(
+      armed,
+      detail({ checks: [check("lint", "success")] }),
+      noRemarks,
+      start + 45 * 60_000,
+    );
+    assert.deepEqual(
+      done.changes.map((change) => change.kind),
+      ["checks-passed"],
+    );
+    assert.equal(done.next.quietDeadline?.dueAt, "2026-10-02T13:30:00.000Z");
+  });
+
   it("reports each failure at once, even while another check never finishes", () => {
     const bot = check("CodeRabbit", "pending");
     const first = detail({ checks: [check("lint", "failure"), check("test", "pending"), bot] });

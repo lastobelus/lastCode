@@ -230,6 +230,7 @@ export const McpToolUseCase = Schema.Struct({
     /** delegate_task `role` for a delegated child. T3 builds the child's first message from it. */
     delegateRole: Schema.optional(OrchestratorMcpTaskRole),
     context: Schema.optional(Schema.String),
+    contextFiles: Schema.optional(Schema.Array(Schema.String)),
     priorTurns: Schema.optional(
       Schema.Array(
         Schema.Struct({
@@ -1925,10 +1926,24 @@ const main = Effect.gen(function* () {
   const wanted = flags.case?.flatMap((ids) => ids.split(","));
   const codex = isCodex(flags.model);
   const harness = codex ? "codex" : "claude";
-  const selected = cases.filter(
+  const matching = cases.filter(
     ({ id, setup }) =>
       (wanted === undefined || wanted.includes(id)) &&
       (setup.harness === undefined || setup.harness === harness),
+  );
+  const selected = yield* Effect.forEach(matching, (testCase) =>
+    Effect.gen(function* () {
+      const guidance = yield* Effect.forEach(testCase.setup.contextFiles ?? [], (file) =>
+        fs.readFileString(path.resolve(import.meta.dirname, "../..", file)),
+      );
+      return {
+        ...testCase,
+        setup: {
+          ...testCase.setup,
+          context: [testCase.setup.context, ...guidance].filter(Boolean).join("\n\n"),
+        },
+      };
+    }),
   );
   if (selected.length === 0) return yield* Effect.die(new Error("No case matches --case."));
   // Trimmed captures without user data ship beside the cases. `--template` also takes a raw

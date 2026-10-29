@@ -297,7 +297,7 @@ const layerTest = Layer.mergeAll(
   Layer.provide(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
-  Layer.provide(ServerSettings.layerTest()),
+  Layer.provideMerge(ServerSettings.layerTest()),
   Layer.provide(layerTestProviderInstanceRegistry),
   Layer.provide(layerGitWorkflowTest),
   Layer.provide(layerProjectServiceTest),
@@ -373,6 +373,7 @@ it.effect.each(
           repository: "pingdotgg/t3code",
           number: 9,
           watching: true,
+          quietTimeoutMinutes: null,
           link: { url: "https://github.com/pingdotgg/t3code/pull/9", source: "agent" },
         });
         yield* orchestrator.dispatch({
@@ -524,6 +525,7 @@ it.effect("suspends PR polling while paused without advancing its watch", () =>
         repository: "pingdotgg/t3code",
         number: 9,
         watching: true,
+        quietTimeoutMinutes: 45,
         link: { url: "https://github.com/pingdotgg/t3code/pull/9", source: "agent" },
       });
       const watchedShell = yield* orchestrator.getThreadShell(threadId);
@@ -597,6 +599,7 @@ it.effect("suspends PR polling while paused without advancing its watch", () =>
           ),
         ),
       );
+      yield* TestClock.adjust("1 hour");
       yield* reactor.sweep;
       yield* reactor.sweep;
       assert.equal(reads, 0);
@@ -3411,6 +3414,7 @@ it.layer(layerTest)("RuntimeLayer.layer lifecycle", (it) => {
         threadId,
         ...key,
         watching: true,
+        quietTimeoutMinutes: null,
         link: { url, source: "agent" },
       });
       assert.equal(
@@ -3420,6 +3424,7 @@ it.layer(layerTest)("RuntimeLayer.layer lifecycle", (it) => {
       const started = yield* watchOf;
       assert.isDefined(started);
       if (started === undefined) return;
+      assert.isUndefined(started.quietDeadline);
 
       yield* orchestrator.dispatch({
         type: "thread.metadata.update",
@@ -3499,6 +3504,7 @@ it.layer(layerTest)("RuntimeLayer.layer lifecycle", (it) => {
           ...key,
           number,
           watching: true,
+          quietTimeoutMinutes: null,
           link: { url: `https://github.com/pingdotgg/t3code/pull/${number}`, source: "agent" },
         });
       }
@@ -3553,6 +3559,7 @@ it.layer(layerTest)("RuntimeLayer.layer lifecycle", (it) => {
         ...key,
         number: 7,
         watching: true,
+        quietTimeoutMinutes: null,
       };
       const blocked = yield* orchestrator
         .dispatch({
@@ -3601,6 +3608,7 @@ it.layer(layerTest)("RuntimeLayer.layer lifecycle", (it) => {
         repository: "pingdotgg/t3code",
         number: 7,
         watching: true,
+        quietTimeoutMinutes: null,
         link: { url: "https://github.com/pingdotgg/t3code/pull/7", source: "agent" as const },
       };
       const watched = Effect.map(
@@ -3667,6 +3675,7 @@ it.layer(layerTest)("RuntimeLayer.layer lifecycle", (it) => {
         repository: "pingdotgg/t3code",
         number: 8,
         watching: true,
+        quietTimeoutMinutes: null,
         link: { url: "https://github.com/pingdotgg/t3code/pull/8", source: "agent" },
       });
       const reactor = yield* PullRequestWatchReactor.make.pipe(
@@ -3732,6 +3741,7 @@ it.layer(layerTest)("RuntimeLayer.layer lifecycle", (it) => {
               repository: "pingdotgg/t3code",
               number: 9,
               watching: true,
+              quietTimeoutMinutes: null,
               link: { url: "https://github.com/pingdotgg/t3code/pull/9", source: "agent" },
             });
           });
@@ -4107,6 +4117,7 @@ it.layer(layerTest)("RuntimeLayer.layer lifecycle", (it) => {
           threadId,
           ...key,
           watching: true,
+          quietTimeoutMinutes: null,
           link: { url: "https://github.com/pingdotgg/t3code/pull/13", source: "agent" },
         });
       const watchOf = Effect.map(
@@ -4228,6 +4239,7 @@ it.layer(layerTest)("RuntimeLayer.layer lifecycle", (it) => {
         threadId,
         ...key,
         watching: true,
+        quietTimeoutMinutes: null,
         link: { url: "https://github.com/pingdotgg/t3code/pull/14", source: "agent" },
       });
 
@@ -4299,6 +4311,200 @@ it.layer(layerTest)("RuntimeLayer.layer lifecycle", (it) => {
     }),
   );
 
+  it.effect("persists one quiet wake across restarts and unchanged host fingerprints", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+      const threadId = ThreadId.make("pr-watch-quiet");
+      const projectId = ProjectId.make("pr-watch-quiet-project");
+      yield* seedProject({
+        projectId,
+        title: "Quiet watch",
+        workspaceRoot: "/workspace/quiet-watch",
+        defaultModelSelection: null,
+        createdAt: "2026-10-01T00:00:00.000Z",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("quiet-create"),
+        createdBy: "user",
+        creationSource: "web",
+        threadId,
+        projectId,
+        title: "Quiet watch",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+      });
+      const key = { host: "github.com", repository: "pingdotgg/t3code", number: 15 };
+      const watching = (id: string, quietTimeoutMinutes?: number | null) =>
+        orchestrator.dispatch({
+          type: "thread.pull-request.watch",
+          commandId: CommandId.make(`quiet-watch-${id}`),
+          threadId,
+          ...key,
+          watching: true,
+          ...(quietTimeoutMinutes === undefined ? {} : { quietTimeoutMinutes }),
+          link: { url: "https://github.com/pingdotgg/t3code/pull/15", source: "agent" },
+        });
+      const watchOf = Effect.map(
+        orchestrator.getThreadShell(threadId),
+        (thread) => thread?.pullRequests?.[0]?.watch,
+      );
+      const wakes = Effect.map(
+        orchestrator.getThreadRecords(threadId, ["messages"]),
+        ({ messages }) => messages.filter((message) => message.notification != null),
+      );
+      let state: PullRequestDetail["state"] = "open";
+      let reads = 0;
+      let headSha = "abc1234def";
+      let holdRead = false;
+      const readStarted = yield* Deferred.make<void>();
+      const finishRead = yield* Deferred.make<void>();
+      const host = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.mock(PullRequestService.PullRequestService)({
+          watchFingerprint: () => Effect.succeed({ status: "running", remarks: "unchanged" }),
+          invalidate: () => Effect.void,
+          detail: () =>
+            Effect.gen(function* () {
+              reads++;
+              if (holdRead) {
+                yield* Deferred.succeed(readStarted, undefined);
+                yield* Deferred.await(finishRead);
+              }
+              return {
+                ...watchedPullRequestDetail({
+                  projectId,
+                  number: key.number,
+                  at: "2026-10-01T00:00:00.000Z",
+                }),
+                state,
+                headSha,
+                capabilities: {
+                  ...watchedPullRequestDetail({
+                    projectId,
+                    number: key.number,
+                    at: "2026-10-01T00:00:00.000Z",
+                  }).capabilities,
+                  checksAlwaysReport: false,
+                },
+                checks: [],
+              };
+            }),
+          activity: () =>
+            Effect.succeed({
+              comments: [],
+              commentCount: 0,
+              commentsTruncated: false,
+              reviewThreads: [],
+              commits: [],
+            }),
+        }),
+      );
+      yield* watching("default");
+      assert.equal((yield* watchOf)?.quietDeadline?.timeoutMinutes, 45);
+      const settings = yield* ServerSettings.ServerSettingsService;
+      yield* settings.updateSettings({ lastcodePullRequestWatchQuietMinutes: 90 });
+      yield* watching("keep-armed-default");
+      assert.equal((yield* watchOf)?.quietDeadline?.timeoutMinutes, 45);
+      yield* watching("start", 5);
+      const initial = yield* watchOf;
+      assert.equal(initial?.quietDeadline?.timeoutMinutes, 5);
+      const reactor = yield* PullRequestWatchReactor.make.pipe(Effect.provide(host));
+      yield* reactor.sweep;
+      yield* TestClock.adjust("4 minutes");
+      yield* watching("idempotent");
+      assert.deepEqual((yield* watchOf)?.quietDeadline, initial?.quietDeadline);
+      const restarted = yield* PullRequestWatchReactor.make.pipe(Effect.provide(host));
+      yield* restarted.sweep;
+      assert.lengthOf(yield* wakes, 0);
+      assert.equal(reads, 2);
+      yield* TestClock.adjust("1 minute");
+      yield* restarted.sweep;
+      assert.equal(reads, 3, "the deadline bypasses the unchanged fingerprint cache");
+      const delivered = yield* watchOf;
+      assert.deepEqual(delivered?.quietDeadline, { timeoutMinutes: 5, dueAt: null });
+      assert.lengthOf(yield* wakes, 1);
+      assert.equal((yield* wakes)[0]!.notification?.summary, "#15: still waiting");
+      assert.isTrue((yield* maintenance.rebuild).valid);
+      assert.deepEqual((yield* watchOf)?.quietDeadline, delivered?.quietDeadline);
+
+      const stale = yield* orchestrator
+        .dispatch({
+          type: "thread.pull-request-watch.sync",
+          commandId: CommandId.make("quiet-stale"),
+          threadId,
+          ...key,
+          startedAt: initial!.startedAt,
+          expectedQuietDeadline: initial!.quietDeadline!,
+          watch: delivered!,
+          wake: {
+            messageId: MessageId.make("quiet-duplicate"),
+            text: "Duplicate",
+            notification: { source: { kind: "monitor" }, outcome: "updated", summary: "Duplicate" },
+          },
+        })
+        .pipe(Effect.flip);
+      assert.equal(stale._tag, "OrchestratorDispatchError");
+      yield* TestClock.adjust("1 hour");
+      const again = yield* PullRequestWatchReactor.make.pipe(Effect.provide(host));
+      yield* again.sweep;
+      assert.lengthOf(yield* wakes, 1);
+
+      yield* watching("rearm");
+      assert.isString((yield* watchOf)?.quietDeadline?.dueAt);
+      assert.equal((yield* watchOf)?.quietDeadline?.timeoutMinutes, 90);
+      yield* TestClock.adjust("90 minutes");
+      yield* again.sweep;
+      assert.lengthOf(yield* wakes, 2);
+      headSha = "new-head";
+      holdRead = true;
+      const racing = yield* PullRequestWatchReactor.make.pipe(Effect.provide(host));
+      const inFlight = yield* Effect.forkChild(racing.sweep);
+      yield* Deferred.await(readStarted);
+      yield* watching("disable-during-read", null);
+      yield* Deferred.succeed(finishRead, undefined);
+      yield* Fiber.join(inFlight);
+      assert.isUndefined((yield* watchOf)?.quietDeadline, "a stale read must not undo disable");
+      yield* watching("keep-disabled");
+      assert.isUndefined((yield* watchOf)?.quietDeadline);
+
+      yield* watching("enable", 5);
+      const enabled = yield* watchOf;
+      yield* TestClock.adjust("1 minute");
+      yield* watching("change-duration", 7);
+      assert.equal((yield* watchOf)?.quietDeadline?.timeoutMinutes, 7);
+      assert.notEqual((yield* watchOf)?.quietDeadline?.dueAt, enabled?.quietDeadline?.dueAt);
+      state = "closed";
+      yield* TestClock.adjust("7 minutes");
+      yield* again.sweep;
+      assert.isUndefined(yield* watchOf);
+      assert.lengthOf(yield* wakes, 3);
+      assert.include((yield* wakes)[2]!.text, "was closed");
+
+      yield* watching("disabled", null);
+      assert.isUndefined((yield* watchOf)?.quietDeadline);
+      yield* settings.updateSettings({ lastcodePullRequestWatchQuietMinutes: 45 });
+      const disabledUpdatedAt = (yield* orchestrator.getThreadShell(threadId))!.updatedAt;
+      yield* TestClock.adjust("1 minute");
+      yield* watching("disable-again", null);
+      assert.equal(
+        DateTime.toEpochMillis((yield* orchestrator.getThreadShell(threadId))!.updatedAt),
+        DateTime.toEpochMillis(disabledUpdatedAt),
+      );
+      yield* orchestrator.dispatch({
+        type: "thread.pull-request.watch",
+        commandId: CommandId.make("quiet-end"),
+        threadId,
+        ...key,
+        watching: false,
+      });
+    }),
+  );
+
   it.effect("wakes for checks that complete after the no-checks notice on the same head", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -4332,6 +4538,7 @@ it.layer(layerTest)("RuntimeLayer.layer lifecycle", (it) => {
         threadId,
         ...key,
         watching: true,
+        quietTimeoutMinutes: null,
         link: { url: "https://github.com/pingdotgg/t3code/pull/14", source: "agent" },
       });
 
@@ -4529,6 +4736,7 @@ it.layer(layerTest)("RuntimeLayer.layer lifecycle", (it) => {
         threadId,
         ...key,
         watching: true,
+        quietTimeoutMinutes: null,
       });
 
       const at = "2026-10-02T12:00:00.000Z";
@@ -7202,6 +7410,7 @@ it.layer(Layer.fresh(layerSharedApplicationDataPlaneTest))("compact PR events", 
         ...key,
         number: 3,
         watching: true,
+        quietTimeoutMinutes: null,
         link: watchedLink,
       });
       yield* orchestrator.dispatch({
@@ -7211,6 +7420,7 @@ it.layer(Layer.fresh(layerSharedApplicationDataPlaneTest))("compact PR events", 
         ...key,
         number: 2,
         watching: true,
+        quietTimeoutMinutes: null,
       });
       const before = yield* orchestrator.getThreadShell(threadId);
       yield* orchestrator.dispatch({

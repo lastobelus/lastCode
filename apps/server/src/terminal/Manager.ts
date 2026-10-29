@@ -2893,6 +2893,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             );
             if (options.localCiSettingsPath !== undefined) {
               terminalEnv.T3CODE_LOCAL_CI_SETTINGS_PATH = options.localCiSettingsPath;
+              terminalEnv.T3CODE_PR_WATCH_SETTINGS_PATH = options.localCiSettingsPath;
             }
             // Append managed install directories so agent commands resolve without shadowing user/system tools.
             if (

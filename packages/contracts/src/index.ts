@@ -1,4 +1,5 @@
 export * from "./baseSchemas.ts";
+export * from "./lastcodePullRequestWatchSettings.ts";
 export * from "./assistantCitations.ts";
 export * from "./composerContext.ts";
 export * from "./composerContextClipboard.ts";

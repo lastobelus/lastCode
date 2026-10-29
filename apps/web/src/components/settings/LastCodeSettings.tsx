@@ -11,6 +11,7 @@ import { LastCodeLocalUpdatesSettings } from "./LastCodeLocalUpdatesSettings";
 import { LastCodeEnvironmentPauseSettings } from "./LastCodeEnvironmentPauseSettings";
 import { LastCodeEnvironmentIconSettings } from "./LastCodeEnvironmentIconSettings";
 import { LocalCiSettingsSection } from "./LocalCiSettings";
+import { LastCodePullRequestWatchSettings } from "./LastCodePullRequestWatchSettings";
 import { Button } from "../ui/button";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
 
@@ -30,6 +31,7 @@ export function LastCodeSettingsPanel() {
       </SettingsSection>
       <LastCodeLocalUpdatesSettings />
       <LastCodeEnvironmentPauseSettings />
+      <LastCodePullRequestWatchSettings />
       <LocalCiSettingsSection />
       <SettingsSection title="Appearance" icon={<PaletteIcon className="size-5" />}>
         <LastCodeMessageAppearanceSettings />

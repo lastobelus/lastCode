@@ -17,6 +17,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import type { Tool } from "effect/ai";
 
@@ -32,10 +33,15 @@ import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as McpToolAccessTestkit from "../../McpToolAccess.testkit.ts";
 import { listThreadPullRequests } from "./handlers.ts";
 import * as PullRequestsHandlers from "./handlers.ts";
-import { CHILD_PULL_REQUEST_REPORT_NEXT, PullRequestsToolkit } from "./tools.ts";
+import {
+  CHILD_PULL_REQUEST_REPORT_NEXT,
+  PullRequestsToolkit,
+  WatchPullRequestInput,
+} from "./tools.ts";
 
 const PROJECT_ID = ProjectId.make("project-1");
 const THREAD_ID = ThreadId.make("thread-1");
+const isWatchPullRequestInput = Schema.is(WatchPullRequestInput);
 
 const testCrypto = Crypto.make({
   randomBytes: (size) => new Uint8Array(size).fill(7),
@@ -225,6 +231,16 @@ const makeHarness = Effect.fn("makePullRequestsToolkitHarness")(function* (
 });
 
 describe("pull request toolkit handlers", () => {
+  it.each([
+    [0, false],
+    [1, true],
+    [10080, true],
+    [10081, false],
+    [2e11, false],
+  ])("bounds quiet wait duration %s", (quietTimeoutMinutes, accepted) => {
+    expect(isWatchPullRequestInput({ quietTimeoutMinutes })).toBe(accepted);
+  });
+
   it.effect("refuses a credential without the pull-requests capability", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness();
@@ -271,6 +287,7 @@ describe("pull request toolkit handlers", () => {
       const harness = yield* makeHarness();
       const result = yield* harness.call("watch_pull_request", {
         url: "https://github.com/t3tools/t3code/pull/9",
+        quietTimeoutMinutes: 45,
       });
       expect(result).toMatchObject({ number: 9, watching: false, wasWatching: false });
       expect(yield* Ref.get(harness.commands)).toMatchObject([
@@ -278,6 +295,7 @@ describe("pull request toolkit handlers", () => {
           type: "thread.pull-request.watch",
           number: 9,
           watching: true,
+          quietTimeoutMinutes: 45,
           link: { url: "https://github.com/t3tools/t3code/pull/9", source: "agent" },
         },
       ]);

@@ -148,6 +148,7 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   localServerStop: Schema.optionalKey(Schema.Boolean),
   threadPullRequests: Schema.optionalKey(Schema.Boolean),
   threadPullRequestWatch: Schema.optionalKey(Schema.Boolean),
+  pullRequestWatchQuietDeadline: Schema.optionalKey(Schema.Boolean),
   pullRequestStackActions: Schema.optionalKey(Schema.Boolean),
   /** Server understands thread annotation create/edit/resolve/reopen commands
       and exposes annotation state in thread shell/detail snapshots. */

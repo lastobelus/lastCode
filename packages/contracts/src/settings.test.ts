@@ -94,6 +94,23 @@ describe("storage cleanup report wire format", () => {
   });
 });
 
+describe("ServerSettings PR watch deadline", () => {
+  it("defaults to 45 minutes and validates saved and patched deadlines", () => {
+    expect(decodeServerSettings({}).lastcodePullRequestWatchQuietMinutes).toBe(45);
+    const input = { lastcodePullRequestWatchQuietMinutes: 90 };
+    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+    expect(decodeServerSettingsPatch(input)).toEqual(input);
+    for (const minutes of [0, -1, 1.5, 1441, "45", null]) {
+      expect(() =>
+        decodeServerSettings({ lastcodePullRequestWatchQuietMinutes: minutes }),
+      ).toThrow();
+      expect(() =>
+        decodeServerSettingsPatch({ lastcodePullRequestWatchQuietMinutes: minutes }),
+      ).toThrow();
+    }
+  });
+});
+
 describe("ServerSettings local CI limits", () => {
   it("uses responsive defaults and fills omitted persisted limits", () => {
     expect(decodeServerSettings({}).lastcodeLocalCi).toEqual({
