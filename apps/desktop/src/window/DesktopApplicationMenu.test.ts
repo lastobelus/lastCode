@@ -345,9 +345,15 @@ describe("DesktopApplicationMenu", () => {
       for (const platform of ["darwin", "linux", "win32"] as const) {
         const applicationMenuTemplate =
           yield* Deferred.make<readonly Electron.MenuItemConstructorOptions[]>();
-        yield* configureMenu(yield* Deferred.make<string>(), applicationMenuTemplate, {
-          platform,
-        });
+        yield* configureMenu(
+          yield* Deferred.make<string>(),
+          applicationMenuTemplate,
+          undefined,
+          undefined,
+          {
+            platform,
+          },
+        );
 
         const items: Electron.MenuItemConstructorOptions[] = [];
         const collect = (template: readonly Electron.MenuItemConstructorOptions[]) => {

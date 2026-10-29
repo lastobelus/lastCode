@@ -89,6 +89,7 @@ function setup() {
     ...DEFAULT_SERVER_SETTINGS,
     storageCleanup: {
       worktreeKeepWhen: "uncommitted-changes",
+      worktreeDependenciesAfterDays: null,
       worktreeAfterDays: null,
       worktreeSettledAfterDays: null,
       worktreeOnMerge: false,
@@ -121,4 +122,19 @@ it("keeps cleanup disabled when settled retention and all other rules are off", 
   expect(button.disabled).toBe(true);
   await act(async () => button.click());
   expect(state.run).not.toHaveBeenCalled();
+});
+
+it("enables cleanup when only dependency and build retention is configured", async () => {
+  setup();
+  state.settings = {
+    ...state.settings,
+    storageCleanup: { ...state.settings.storageCleanup, worktreeDependenciesAfterDays: 8 },
+  };
+  state.run.mockResolvedValue({ _tag: "Success", value: { entries: [] } });
+  await using screen = await render(panel());
+  const button = deleteButton(screen.container);
+
+  expect(button.disabled).toBe(false);
+  await act(async () => button.click());
+  expect(state.run).toHaveBeenCalledExactlyOnceWith({ environmentId: "env", input: {} });
 });

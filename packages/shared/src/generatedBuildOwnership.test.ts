@@ -11,6 +11,7 @@ import {
   removeGeneratedBuildFilesAsync,
   copyOwnedGeneratedBuild,
   recordGeneratedBuildUse,
+  acquireGeneratedWorktreeMutation,
 } from "./generatedBuildOwnership.ts";
 
 const fixture = () => {
@@ -430,6 +431,44 @@ const startPublisher = (
   };
   return { child, next, exit };
 };
+
+it("workspace preservation excludes a separate publisher for every output root", async () => {
+  const { cwd } = fixture();
+  const release = acquireGeneratedWorktreeMutation(cwd);
+  const publisher = startPublisher(cwd, "apps/server/dist", "competing", "verified emission");
+  try {
+    assert.equal(await publisher.next(), "ready");
+    publisher.child.send("publish");
+    assert.equal(await publisher.next(), "stage-created");
+    assert.match(await publisher.next(), /^blocked:PortableLockContentionError:/);
+    assert.isFalse(NodeFS.existsSync(NodePath.join(cwd, "apps/server/dist/old.js")));
+  } finally {
+    release();
+  }
+  publisher.child.send("publish");
+  assert.equal(await publisher.next(), "published");
+  assert.equal(
+    NodeFS.readFileSync(NodePath.join(cwd, "apps/server/dist/old.js"), "utf8"),
+    "verified emission",
+  );
+  publisher.child.send("close");
+  await publisher.exit;
+});
+
+it("a live publisher excludes preservation until its native critical section exits", async () => {
+  const { cwd, emit } = fixture();
+  const root = "apps/web/dist";
+  const initial = createGeneratedBuildStage(cwd, root)!;
+  emit(initial.directory, "old.js", "original emission");
+  initial.publish(100);
+  const publisher = startPublisher(cwd, root, "paused");
+  assert.equal(await publisher.next(), "paused-before-retirement");
+  assert.throws(() => acquireGeneratedWorktreeMutation(cwd), "workspace preservation");
+  publisher.child.stdin!.write("r");
+  assert.equal(await publisher.next(), "published");
+  await publisher.exit;
+  acquireGeneratedWorktreeMutation(cwd)();
+});
 
 it.each(["complete", "throw", "owner-death"] as const)(
   "publication exclusion protects identical competing emissions and permits recovery retry after %s",

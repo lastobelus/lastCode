@@ -10,6 +10,8 @@ import * as Option from "effect/Option";
 
 import { environmentCatalog } from "../connection/catalog";
 import { appAtomRegistry } from "../rpc/atomRegistry";
+import { isClientLocalPrimaryTarget } from "../connection/localPrimaryEnvironment";
+import { isElectron } from "../env";
 import {
   environmentPresentations,
   environmentSummaries,
@@ -80,6 +82,12 @@ export function useEnvironment(
 
 export function usePrimaryEnvironment(): EnvironmentPresentation | null {
   return useEnvironment(usePrimaryEnvironmentId());
+}
+
+/** A remote or hosted web client must never treat its server as the user's machine. */
+export function useLocalEnvironment(): EnvironmentPresentation | null {
+  const primary = usePrimaryEnvironment();
+  return isClientLocalPrimaryTarget(primary?.entry.target, isElectron) ? primary : null;
 }
 
 export function useEnvironmentHttpBaseUrl(environmentId: EnvironmentId | null): string | null {

@@ -4,15 +4,15 @@ import {
   type ScopedThreadRef,
 } from "@t3tools/contracts";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
-import { readEnvironmentSupportsVisitedTracking } from "../state/entities";
+import { readEnvironmentServerConfigLoaded } from "../state/entities";
 import { readEnvironmentScope } from "../state/session";
 
 export type ThreadReadOutcome = "applied" | "unchanged" | "unsupported" | "failed";
 
-/** Older servers keep browser-local markers; synced markers require destination authority. */
+/** Synced markers require destination authority once the server config is loaded. */
 export function canMarkThreadReadState(target: ScopedThreadRef) {
   return (
-    !readEnvironmentSupportsVisitedTracking(target.environmentId) ||
+    !readEnvironmentServerConfigLoaded(target.environmentId) ||
     readEnvironmentScope(target.environmentId, AuthOrchestrationOperateScope)
   );
 }

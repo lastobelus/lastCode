@@ -18,8 +18,12 @@ import * as Layer from "effect/Layer";
 
 import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
+import * as WorkspaceAcquisitionTestkit from "../workspace/WorkspaceAcquisition.testkit.ts";
+import * as SuspensionRegistryTestkit from "../workspace/WorktreeSuspensionRegistry.testkit.ts";
 
-export const layer = Layer.merge(
+export const layer = Layer.mergeAll(
+  WorkspaceAcquisitionTestkit.layer,
+  SuspensionRegistryTestkit.layer,
   Layer.mock(GitWorkflow.GitWorkflowService)({
     pruneWorktrees: () => Effect.void,
     createWorktree: () => Effect.succeed({} as never),
@@ -32,6 +36,8 @@ export const layer = Layer.merge(
 // Keep repository detection, branch selection and worktree creation on the real Git path.
 export const layerRealGit = GitWorkflow.layer.pipe(
   Layer.provide(GitManager.layer),
+  Layer.provide(WorkspaceAcquisitionTestkit.layer),
+  Layer.provide(SuspensionRegistryTestkit.layer),
   Layer.provide(
     Layer.mergeAll(
       Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({

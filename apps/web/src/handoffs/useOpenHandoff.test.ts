@@ -4,6 +4,7 @@ import {
 } from "@t3tools/client-runtime/preview-hosting";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import {
+  AuthFilesystemReadScope,
   EnvironmentId,
   ThreadId,
   type ChatFileAttachment,
@@ -20,7 +21,14 @@ import {
   useHandoffsStore,
 } from "./handoffsStore";
 import { selectThreadRightPanelState, useRightPanelStore } from "~/rightPanelStore";
-import { applyPreviewServerSnapshot, resetPreviewStateForTests } from "~/previewStateStore";
+import {
+  applyPreviewServerSnapshot,
+  readThreadPreviewState,
+  resetPreviewStateForTests,
+} from "~/previewStateStore";
+import { toastManager } from "~/components/ui/toast";
+
+const filesystem = vi.hoisted(() => ({ readScope: vi.fn() }));
 
 vi.mock("~/state/entities", () => ({
   readThreadShell: () => ({ projectId: "project", worktreePath: "/workspace" }),
@@ -30,6 +38,7 @@ vi.mock("~/state/entities", () => ({
 }));
 vi.mock("~/state/session", async (importOriginal) => ({
   ...(await importOriginal<typeof import("~/state/session")>()),
+  readEnvironmentScope: filesystem.readScope,
   readPreparedConnection: () => ({
     httpBaseUrl: "https://environment.example",
     target: {
@@ -43,14 +52,17 @@ vi.mock("~/components/ui/toast", () => ({
   toastManager: { add: vi.fn() },
 }));
 vi.mock("~/browser/browserDefaults", () => ({
-  resolveBrowserDefaults: async () => ({}),
-  browserDefaultOpenProfileId: () => "default",
-  browserDefaultOpenViewport: () => ({ width: 800, height: 600 }),
+  resolveBrowserDefaults: async () => ({
+    profileId: "default",
+    viewport: { _tag: "freeform", width: 800, height: 600 },
+  }),
 }));
 
 const native = vi.hoisted(() => ({
   bridge: null as null | { navigate: ReturnType<typeof vi.fn> },
+  ensure: vi.fn<(tabId: string) => Promise<void>>(),
 }));
+vi.mock("~/browser/desktopBrowserDemand", () => ({ ensureDesktopBrowserTab: native.ensure }));
 vi.mock("~/components/preview/previewBridge", () => ({
   get previewBridge() {
     return native.bridge;
@@ -83,6 +95,7 @@ const ref = { environmentId: EnvironmentId.make("env"), threadId: ThreadId.make(
 const snapshot = (url: string, tabId = "tab"): PreviewSessionSnapshot => ({
   threadId: ref.threadId,
   tabId,
+  ...(native.bridge === null ? { runtime: "server" as const, backingPage: "server" as const } : {}),
   navStatus: { _tag: "Loading", url, title: "" },
   canGoBack: false,
   canGoForward: false,
@@ -93,16 +106,16 @@ const operations = () => ({
   openPreview: vi.fn<Operations["openPreview"]>(async () =>
     AsyncResult.success(snapshot("https://example.com/")),
   ),
-  navigatePreview: vi.fn<Operations["navigatePreview"]>(async () =>
-    AsyncResult.success(snapshot("https://environment.example/api/assets/fresh")),
-  ),
   createAssetUrl: vi.fn<Operations["createAssetUrl"]>(async () =>
     AsyncResult.success({ relativeUrl: "/api/assets/fresh", expiresAt: 12345 }),
   ),
 });
 const panel = () => selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, ref);
 beforeEach(() => {
+  filesystem.readScope.mockReset().mockReturnValue(true);
+  vi.mocked(toastManager.add).mockClear();
   native.bridge = null;
+  native.ensure.mockReset().mockResolvedValue(undefined);
   refresh.request.mockClear();
   hosting.prepare.mockReset();
   hosting.prepare.mockImplementation(async (_ref, url) => ({
@@ -155,17 +168,95 @@ describe("opening a saved handoff", () => {
     applyPreviewServerSnapshot(ref, snapshot(oldUrl));
     rememberHandoffBrowser(ref, "tab", entry.target, oldUrl);
     await openHandoff(ref, entry, ops);
-    expect(ops.navigatePreview).toHaveBeenCalledWith({
-      environmentId: ref.environmentId,
-      input: {
-        threadId: ref.threadId,
-        tabId: "tab",
-        url: "https://environment.example/api/assets/fresh",
-      },
-    });
+    expect(refresh.request).toHaveBeenCalledWith(
+      ref,
+      "tab",
+      "https://environment.example/api/assets/fresh",
+    );
     expect(panel().activeSurfaceId).toBe("browser:tab");
     expect(ops.openPreview).not.toHaveBeenCalled();
     expect(readThreadHandoffs(ref)).toHaveLength(1);
+  });
+  it.each(["/workspace/report.html", "/tmp/report.pdf"])(
+    "renews conversation access to %s on the destination environment",
+    async (path) => {
+      filesystem.readScope.mockReturnValue(false);
+      const destinationRef = {
+        environmentId: EnvironmentId.make("destination-env"),
+        threadId: ThreadId.make("destination-thread"),
+      };
+      const ops = operations();
+      const oldUrl = "https://environment.example/api/assets/expired";
+      const entry = recordHandoff(destinationRef, { kind: "file", path });
+      applyPreviewServerSnapshot(destinationRef, {
+        ...snapshot(oldUrl),
+        threadId: destinationRef.threadId,
+      });
+      rememberHandoffBrowser(destinationRef, "tab", entry.target, oldUrl);
+
+      await openHandoff(destinationRef, entry, ops);
+      expect(filesystem.readScope).toHaveBeenCalledExactlyOnceWith(
+        destinationRef.environmentId,
+        AuthFilesystemReadScope,
+      );
+      expect(ops.createAssetUrl).toHaveBeenCalledExactlyOnceWith({
+        environmentId: destinationRef.environmentId,
+        input: {
+          resource: {
+            _tag: "media-file",
+            threadId: destinationRef.threadId,
+            path,
+            linkedThreadFile: true,
+          },
+        },
+      });
+      expect(refresh.request).toHaveBeenCalledExactlyOnceWith(
+        destinationRef,
+        "tab",
+        "https://environment.example/api/assets/fresh",
+      );
+      expect(handoffBrowserTarget(destinationRef, "tab")).toEqual({
+        target: entry.target,
+        url: "https://environment.example/api/assets/fresh",
+      });
+      expect(
+        selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, destinationRef)
+          .activeSurfaceId,
+      ).toBe("browser:tab");
+      expect(ops.openPreview).not.toHaveBeenCalled();
+      expect(toastManager.add).not.toHaveBeenCalled();
+    },
+  );
+  it("keeps an expired browser capability unused when fresh conversation access is denied", async () => {
+    filesystem.readScope.mockReturnValue(false);
+    const ops = operations();
+    ops.createAssetUrl.mockResolvedValueOnce(
+      AsyncResult.failure(Cause.fail(new Error("The file is no longer published"))),
+    );
+    const path = "/workspace/revoked.html";
+    const oldUrl = "https://environment.example/api/assets/expired";
+    const entry = recordHandoff(ref, { kind: "file", path });
+    applyPreviewServerSnapshot(ref, snapshot(oldUrl));
+    rememberHandoffBrowser(ref, "tab", entry.target, oldUrl);
+
+    await openHandoff(ref, entry, ops);
+    expect(ops.createAssetUrl).toHaveBeenCalledExactlyOnceWith({
+      environmentId: ref.environmentId,
+      input: {
+        resource: { _tag: "media-file", threadId: ref.threadId, path, linkedThreadFile: true },
+      },
+    });
+    expect(ops.openPreview).not.toHaveBeenCalled();
+    expect(refresh.request).not.toHaveBeenCalled();
+    expect(panel().surfaces).toEqual([]);
+    expect(readThreadHandoffs(ref)).toEqual([entry]);
+    expect(handoffBrowserTarget(ref, "tab")).toEqual({ target: entry.target, url: oldUrl });
+    expect(toastManager.add).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "Unable to open handoff",
+        description: "The file is no longer published",
+      }),
+    );
   });
   it("renews a native browser through the desktop bridge", async () => {
     const ops = operations();
@@ -179,7 +270,6 @@ describe("opening a saved handoff", () => {
       JSON.stringify([ref.environmentId, ref.threadId, null, "tab"]),
       "https://environment.example/api/assets/fresh",
     );
-    expect(ops.navigatePreview).not.toHaveBeenCalled();
     expect(panel().activeSurfaceId).toBe("browser:tab");
   });
   it("enriches completed page titles without capturing navigation or changing recency", () => {
@@ -210,7 +300,6 @@ describe("opening a saved handoff", () => {
     applyPreviewServerSnapshot(ref, snapshot("https://elsewhere.example/"));
     await openHandoff(ref, entry, ops);
     expect(panel().activeSurfaceId).toBe("file:mockup.html");
-    expect(ops.navigatePreview).not.toHaveBeenCalled();
   });
   it("reuses an exact URL tab without making asset requests", async () => {
     const ops = operations();
@@ -220,6 +309,170 @@ describe("opening a saved handoff", () => {
     expect(panel().activeSurfaceId).toBe("browser:tab");
     expect(ops.openPreview).not.toHaveBeenCalled();
     expect(ops.createAssetUrl).not.toHaveBeenCalled();
+  });
+  it("opens and reopens a remote managed app at its loopback origin after its tab disappears", async () => {
+    const remote = { ...ref, environmentId: EnvironmentId.make("remote-environment") };
+    const ops = operations();
+    const url = "http://workstation.example:8123/app/a%2Fb?q=1#section";
+    const localUrl = "http://127.0.0.1:8123/app/a%2Fb?q=1#section";
+    native.bridge = { navigate: vi.fn(async () => undefined) };
+    hosting.prepare.mockResolvedValue({ url, localUrl, managed: true, restored: true });
+    let sequence = 0;
+    ops.openPreview.mockImplementation(async ({ input }) =>
+      AsyncResult.success({
+        ...snapshot(input.url ?? "", `managed-${++sequence}`),
+        runtime: "server",
+        backingPage: "server",
+        profileId: input.profileId,
+      }),
+    );
+    const entry = recordHandoff(remote, { kind: "url", url });
+
+    await openHandoff(remote, entry, ops);
+    expect(ops.openPreview.mock.calls[0]?.[0]).toMatchObject({
+      environmentId: remote.environmentId,
+      input: { url: localUrl, runtime: "server", browserHost: "environment" },
+    });
+    expect(handoffBrowserTarget(remote, "managed-1")?.url).toBe(localUrl);
+    // A healthy environment-backed tab matches even though the saved URL uses another host.
+    await openHandoff(remote, entry, ops);
+    expect(ops.openPreview).toHaveBeenCalledTimes(1);
+
+    applyPreviewServerSnapshot(remote, null);
+    await openHandoff(remote, entry, ops);
+    expect(ops.openPreview).toHaveBeenCalledTimes(2);
+    expect(ops.openPreview.mock.calls[1]?.[0].input).toMatchObject({
+      url: localUrl,
+      runtime: "server",
+      browserHost: "environment",
+    });
+    expect(native.bridge.navigate).not.toHaveBeenCalled();
+    expect(readThreadHandoffs(remote)).toHaveLength(1);
+  });
+  it("leaves a failed desktop app tab intact and opens its handoff in the owning environment", async () => {
+    const ops = operations();
+    const url = "http://workstation.example:8123/app?q=1#section";
+    const localUrl = "http://127.0.0.1:8123/app?q=1#section";
+    native.bridge = { navigate: vi.fn(async () => undefined) };
+    hosting.prepare.mockResolvedValue({ url, localUrl, managed: true, restored: true });
+    const entry = recordHandoff(ref, { kind: "url", url });
+    const failed: PreviewSessionSnapshot = {
+      ...snapshot(url, "desktop-tab"),
+      profileId: "default",
+      runtime: "server",
+      backingPage: "desktop",
+      desktopHostId: "local",
+      navStatus: { _tag: "LoadFailed", url, title: "", code: -102, description: "Unreachable" },
+    };
+    applyPreviewServerSnapshot(ref, failed);
+    rememberHandoffBrowser(ref, failed.tabId, entry.target, url);
+    ops.openPreview.mockImplementation(async ({ input }) =>
+      AsyncResult.success({
+        ...snapshot(input.url ?? "", "environment-tab"),
+        runtime: "server",
+        backingPage: "server",
+      }),
+    );
+
+    await openHandoff(ref, entry, ops);
+    expect(ops.openPreview.mock.calls[0]?.[0].input).toMatchObject({
+      url: localUrl,
+      runtime: "server",
+      browserHost: "environment",
+    });
+    expect(native.bridge.navigate).not.toHaveBeenCalled();
+    expect(panel().activeSurfaceId).toBe("browser:environment-tab");
+    expect(readThreadPreviewState(ref).sessions[failed.tabId]).toEqual(failed);
+    await openHandoff(ref, entry, ops);
+    expect(ops.openPreview).toHaveBeenCalledTimes(1);
+    expect(panel().activeSurfaceId).toBe("browser:environment-tab");
+  });
+
+  it("keeps a managed handoff in its existing named desktop profile", async () => {
+    const ops = operations();
+    const url = "http://workstation.example:8123/account";
+    native.bridge = { navigate: vi.fn(async () => undefined) };
+    hosting.prepare.mockResolvedValue({
+      url,
+      localUrl: "http://127.0.0.1:8123/account",
+      managed: true,
+      restored: true,
+    });
+    const entry = recordHandoff(ref, { kind: "url", url });
+    applyPreviewServerSnapshot(ref, {
+      ...snapshot(url),
+      profileId: "work-account",
+      runtime: "server",
+      backingPage: "desktop",
+      desktopHostId: "local",
+    });
+    await openHandoff(ref, entry, ops);
+    expect(ops.openPreview).not.toHaveBeenCalled();
+    expect(native.bridge.navigate).not.toHaveBeenCalled();
+    expect(panel().activeSurfaceId).toBe("browser:tab");
+  });
+  it.each(["url", "file"] as const)(
+    "restores an unloaded native %s handoff before navigating the retained tab",
+    async (kind) => {
+      const ops = operations();
+      const url = "http://workstation.example:8123/account";
+      let finishRestore!: () => void;
+      const restored = new Promise<void>((resolve) => (finishRestore = resolve));
+      let restorationAttempted!: () => void;
+      const attempted = new Promise<void>((resolve) => (restorationAttempted = resolve));
+      native.ensure.mockImplementationOnce(() => {
+        restorationAttempted();
+        return restored;
+      });
+      native.bridge = { navigate: vi.fn(async () => restorationAttempted()) };
+      hosting.prepare.mockResolvedValue({ url, managed: true, restored: true, restarted: true });
+      const entry = recordHandoff(
+        ref,
+        kind === "url" ? { kind: "url", url } : { kind: "file", path: "/workspace/report.html" },
+      );
+      const retained: PreviewSessionSnapshot = {
+        ...snapshot(url),
+        profileId: "work-account",
+        runtime: "server",
+        backingPage: "desktop",
+        desktopHostId: "local",
+      };
+      applyPreviewServerSnapshot(ref, retained);
+      rememberHandoffBrowser(ref, "tab", entry.target, url);
+      const opening = openHandoff(ref, entry, ops);
+      await attempted;
+      expect(native.bridge.navigate).not.toHaveBeenCalled();
+      expect(panel().surfaces).toEqual([]);
+      finishRestore();
+      await opening;
+      const destination = kind === "url" ? url : "https://environment.example/api/assets/fresh";
+      expect(native.bridge.navigate).toHaveBeenCalledExactlyOnceWith(
+        JSON.stringify([ref.environmentId, ref.threadId, null, "tab"]),
+        destination,
+      );
+      expect(readThreadPreviewState(ref).sessions.tab?.profileId).toBe("work-account");
+      expect(ops.openPreview).not.toHaveBeenCalled();
+      expect(panel().activeSurfaceId).toBe("browser:tab");
+      expect(toastManager.add).not.toHaveBeenCalled();
+    },
+  );
+  it("keeps a failed native restoration available for retry without navigating or selecting it", async () => {
+    const ops = operations();
+    const url = "http://localhost:8123/account";
+    native.bridge = { navigate: vi.fn(async () => undefined) };
+    native.ensure.mockRejectedValueOnce(new Error("Restoration failed"));
+    hosting.prepare.mockResolvedValue({ url, managed: true, restored: true, restarted: true });
+    const entry = recordHandoff(ref, { kind: "url", url });
+    const retained: PreviewSessionSnapshot = { ...snapshot(url), profileId: "work-account" };
+    applyPreviewServerSnapshot(ref, retained);
+    await openHandoff(ref, entry, ops);
+    expect(native.bridge.navigate).not.toHaveBeenCalled();
+    expect(panel().surfaces).toEqual([]);
+    expect(readThreadPreviewState(ref).sessions.tab).toEqual(retained);
+    expect(readThreadHandoffs(ref)[0]?.sequence).toBe(entry.sequence);
+    expect(toastManager.add).toHaveBeenCalledWith(
+      expect.objectContaining({ description: "Restoration failed" }),
+    );
   });
   it("reopens a healthy managed server form without navigating or creating another tab", async () => {
     const ops = operations();
@@ -238,7 +491,6 @@ describe("opening a saved handoff", () => {
     applyPreviewServerSnapshot(ref, healthy);
     await openHandoff(ref, entry, ops);
     expect(hosting.prepare).toHaveBeenCalledExactlyOnceWith(ref, authoredUrl, "resource");
-    expect(ops.navigatePreview).not.toHaveBeenCalled();
     expect(native.bridge.navigate).not.toHaveBeenCalled();
     expect(ops.openPreview).not.toHaveBeenCalled();
     expect(refresh.request).not.toHaveBeenCalled();
@@ -279,7 +531,6 @@ describe("opening a saved handoff", () => {
       await openHandoff(ref, entry, ops);
       expect(hosting.prepare).toHaveBeenCalledExactlyOnceWith(ref, authoredUrl, "resource");
       expect(refresh.request).toHaveBeenCalledExactlyOnceWith(ref, "tab", authoredUrl);
-      expect(ops.navigatePreview).not.toHaveBeenCalled();
       expect(native.bridge.navigate).not.toHaveBeenCalled();
       expect(ops.openPreview).not.toHaveBeenCalled();
       expect(panel().activeSurfaceId).toBe("browser:tab");
@@ -305,7 +556,6 @@ describe("opening a saved handoff", () => {
       url,
     );
     expect(refresh.request).not.toHaveBeenCalled();
-    expect(ops.navigatePreview).not.toHaveBeenCalled();
     expect(ops.openPreview).not.toHaveBeenCalled();
   });
   it.each(["server", undefined] as const)(
@@ -325,7 +575,6 @@ describe("opening a saved handoff", () => {
       await openHandoff(ref, entry, ops);
       expect(refresh.request).toHaveBeenCalledExactlyOnceWith(ref, "tab", url);
       expect(native.bridge.navigate).not.toHaveBeenCalled();
-      expect(ops.navigatePreview).not.toHaveBeenCalled();
       expect(ops.openPreview).not.toHaveBeenCalled();
       expect(panel().activeSurfaceId).toBe("browser:tab");
       expect(panel().surfaces).toHaveLength(1);
@@ -359,10 +608,7 @@ describe("opening a saved handoff", () => {
       },
     });
     await openHandoff(ref, entry, ops);
-    expect(ops.navigatePreview).toHaveBeenCalledWith({
-      environmentId: ref.environmentId,
-      input: { threadId: ref.threadId, tabId: "tab", url },
-    });
+    expect(refresh.request).toHaveBeenCalledWith(ref, "tab", url);
     expect(panel().activeSurfaceId).toBe("browser:tab");
     expect(ops.openPreview).not.toHaveBeenCalled();
     expect(readThreadHandoffs(ref)).toHaveLength(1);
@@ -389,7 +635,7 @@ describe("opening a saved handoff", () => {
       expect(ops.openPreview).toHaveBeenCalledTimes(1);
       expect(handoffBrowserTarget(ref, "tab")).toEqual({
         target: entry.target,
-        url: destinationUrl,
+        url: client === "desktop" ? destinationUrl : authoredUrl,
       });
       applyPreviewServerSnapshot(ref, {
         ...recoveredSnapshot(destinationUrl),
@@ -416,11 +662,9 @@ describe("opening a saved handoff", () => {
           JSON.stringify([ref.environmentId, ref.threadId, null, "tab"]),
           destinationUrl,
         );
-        expect(ops.navigatePreview).not.toHaveBeenCalled();
         expect(refresh.request).not.toHaveBeenCalled();
       } else {
         expect(refresh.request).toHaveBeenCalledExactlyOnceWith(ref, "tab", authoredUrl);
-        expect(ops.navigatePreview).not.toHaveBeenCalled();
       }
       expect(readThreadHandoffs(ref)).toHaveLength(1);
       expect(readThreadHandoffs(ref)[0]?.target).toEqual(entry.target);
@@ -456,7 +700,6 @@ describe("opening a saved handoff", () => {
     applyPreviewServerSnapshot(ref, snapshot("https://elsewhere.example/"));
     completeRecovery({ url: destinationUrl, managed: true, restored: true });
     await opening;
-    expect(ops.navigatePreview).not.toHaveBeenCalled();
     expect(ops.openPreview).toHaveBeenCalledTimes(1);
   });
   it("preserves a newer native navigation while handoff navigation access is prepared", async () => {
@@ -485,7 +728,6 @@ describe("opening a saved handoff", () => {
     resolveNavigation({ url, managed: true, restored: true });
     await opening;
     expect(native.bridge.navigate).not.toHaveBeenCalled();
-    expect(ops.navigatePreview).not.toHaveBeenCalled();
     expect(ops.openPreview).not.toHaveBeenCalled();
     expect(refresh.request).not.toHaveBeenCalled();
     expect(panel().surfaces).toEqual([]);
@@ -497,7 +739,6 @@ describe("opening a saved handoff", () => {
     hosting.prepare.mockRejectedValue(new HostedPreviewUrlTooLongError());
     await openHandoff(ref, entry, ops);
     expect(ops.openPreview).not.toHaveBeenCalled();
-    expect(ops.navigatePreview).not.toHaveBeenCalled();
     expect(panel().surfaces).toEqual([]);
     expect(readThreadHandoffs(ref)).toEqual([entry]);
   });
@@ -529,22 +770,26 @@ describe("opening a saved handoff", () => {
     });
     expect(ops.openPreview).not.toHaveBeenCalled();
   });
-  it("opens attachments by identity", async () => {
-    const ops = operations();
-    const attachment = {
-      id: "attachment",
-      name: "report.pdf",
-      mimeType: "application/pdf",
-      sizeBytes: 100,
-      type: "file",
-    } as ChatFileAttachment;
-    const entry = recordHandoff(ref, { kind: "attachment", attachment });
-    await openHandoff(ref, entry, ops);
-    expect(panel().surfaces[0]).toMatchObject({ kind: "file", attachment });
-    expect(ops.createAssetUrl.mock.calls[0]?.[0]).toMatchObject({
-      input: { resource: { _tag: "attachment", attachmentId: "attachment" } },
-    });
-  });
+  it.each([true, false])(
+    "opens attachments by identity with filesystem access %s",
+    async (canReadFiles) => {
+      filesystem.readScope.mockReturnValue(canReadFiles);
+      const ops = operations();
+      const attachment = {
+        id: "attachment",
+        name: "report.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 100,
+        type: "file",
+      } as ChatFileAttachment;
+      const entry = recordHandoff(ref, { kind: "attachment", attachment });
+      await openHandoff(ref, entry, ops);
+      expect(panel().surfaces[0]).toMatchObject({ kind: "file", attachment });
+      expect(ops.createAssetUrl.mock.calls[0]?.[0]).toMatchObject({
+        input: { resource: { _tag: "attachment", attachmentId: "attachment" } },
+      });
+    },
+  );
   it("keeps missing files available for retry without moving recency", async () => {
     const ops = {
       ...operations(),

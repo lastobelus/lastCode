@@ -2,7 +2,6 @@ import type { AnyRouter } from "@tanstack/react-router";
 import { dismissContextMenu } from "../contextMenuFallback";
 import { useRightPanelStore } from "../rightPanelStore";
 import { registerCommands } from "../shortcuts/dispatcher";
-import { getTimelinePageScrollDistancePx } from "../components/chat/pageScrollController";
 
 const AREA_SELECTOR = "[data-workspace-area]";
 const FOCUS_BOUNDARY_SELECTOR =
@@ -122,6 +121,8 @@ export function createWorkspaceFocusController(doc: Document) {
     )
       return false;
     const area = event.target;
+    // The timeline owns conversation paging and its follow/composer navigation state.
+    if (area.dataset.workspaceArea === "conversation") return false;
     // A focused layout wrapper cannot natively page a scrolling descendant.
     const viewport = [area, ...area.querySelectorAll<HTMLElement>("*")].find((element) => {
       if (
@@ -134,16 +135,9 @@ export function createWorkspaceFocusController(doc: Document) {
       return overflowY === "auto" || overflowY === "scroll";
     });
     if (!viewport) return false;
-    const distance =
-      area.dataset.workspaceArea === "conversation"
-        ? getTimelinePageScrollDistancePx(
-            viewport,
-            area.parentElement?.querySelector("[data-chat-composer-overlay]") ?? null,
-          )
-        : viewport.clientHeight * 0.9;
     event.preventDefault();
     viewport.scrollBy({
-      top: (event.key === "PageUp" ? -1 : 1) * distance,
+      top: (event.key === "PageUp" ? -1 : 1) * viewport.clientHeight * 0.9,
       behavior: "instant",
     });
     return true;

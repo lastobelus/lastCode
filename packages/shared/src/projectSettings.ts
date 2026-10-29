@@ -12,6 +12,7 @@ import {
   type T3ProjectFile,
   type ThreadEnvMode,
   type WorktreeCleanupRules,
+  type WorktreeSuspensionPolicy,
 } from "@t3tools/contracts";
 import { normalizeProjectPathForComparison } from "./path.ts";
 import { fallbackTextGenerationModelSelection } from "./serverSettings.ts";
@@ -221,6 +222,7 @@ export function resolveWorktreeCleanup(
   if (policy?.mode === "off")
     return {
       worktreeKeepWhen: settings.storageCleanup.worktreeKeepWhen,
+      worktreeDependenciesAfterDays: null,
       worktreeAfterDays: null,
       worktreeSettledAfterDays: null,
       worktreeOnMerge: false,
@@ -229,6 +231,7 @@ export function resolveWorktreeCleanup(
     };
   const {
     worktreeKeepWhen,
+    worktreeDependenciesAfterDays,
     worktreeAfterDays,
     worktreeSettledAfterDays,
     worktreeOnMerge,
@@ -237,10 +240,24 @@ export function resolveWorktreeCleanup(
   } = settings.storageCleanup;
   return {
     worktreeKeepWhen,
+    worktreeDependenciesAfterDays,
     worktreeAfterDays,
     worktreeSettledAfterDays,
     worktreeOnMerge,
     worktreeOnDelete,
     worktreeUnchanged,
   };
+}
+
+export function resolveWorktreeSuspension(
+  settings: ServerSettings,
+  projectId: ProjectId | null,
+): WorktreeSuspensionPolicy {
+  const resolved = resolveProjectSettings(settings, projectId);
+  // An explicit project Off keeps its workspace even when the environment
+  // enables suspension. Environment cleanup can be Off independently.
+  const projectOff =
+    resolved.sources.worktreeCleanup === "project" &&
+    resolved.settings.worktreeCleanup?.mode === "off";
+  return projectOff ? { mode: "off" } : resolved.settings.worktreeSuspension;
 }

@@ -19,8 +19,8 @@ const secondId = "second" as EnvironmentId;
 const firstProject = "first-project" as ProjectId;
 const secondProject = "second-project" as ProjectId;
 
-describe("mobile usage-limit settings across environments", () => {
-  it.each(["autoResumeLimitedThreads", "snoozeLimitedThreads"] as const)(
+describe("mobile environment settings across environments", () => {
+  it.each(["autoResumeLimitedThreads", "snoozeLimitedThreads", "environmentPauseEnabled"] as const)(
     "shows %s as mixed and can enable it everywhere without changing other settings",
     (key) => {
       const targets = resolveMobileSettingsTargets(
@@ -160,5 +160,8 @@ describe("mobile project settings scope", () => {
     expect(
       planMobileScopedSettingsPatch(targets, true, { enableProviderUpdateChecks: false }),
     ).toEqual([]);
+    expect(planMobileScopedSettingsPatch(targets, true, { environmentPauseEnabled: true })).toEqual(
+      [],
+    );
   });
 });

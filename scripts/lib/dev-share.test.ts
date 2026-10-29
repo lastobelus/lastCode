@@ -78,9 +78,7 @@ describe("unshareDevServer", () => {
     Effect.gen(function* () {
       const calls: Array<ReadonlyArray<string>> = [];
       const result = yield* unshareDevServer(5788, { port: 7733, host: "127.0.0.1" }).pipe(
-        Effect.provide(
-          spawnerLayer({ calls, serveStatus: serveStatus("http://127.0.0.1:7733") }),
-        ),
+        Effect.provide(spawnerLayer({ calls, serveStatus: serveStatus("http://127.0.0.1:7733") })),
       );
       assert.isTrue(result.cleared);
       assert.deepEqual(calls, [

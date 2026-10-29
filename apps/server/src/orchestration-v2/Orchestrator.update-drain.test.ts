@@ -302,9 +302,7 @@ it.effect("commits an admitted archive before drain and prevents activation unti
         ...(yield* outbox.listByCommandId(CommandId.make("archive-update:complete"))),
       ];
       for (const _effect of durableEffects) {
-        const next = Option.getOrThrow(
-          yield* outbox.claimNext({ workerId: "test-cleanup", leaseDurationMs: 60000 }),
-        );
+        const next = Option.getOrThrow(yield* outbox.claimNext({ workerId: "test-cleanup" }));
         yield* outbox.succeed({ effectId: next.id, workerId: "test-cleanup" });
       }
       yield* admission.claimActivation({ requestId });
@@ -475,9 +473,7 @@ it.effect("keeps an accepted idle deletion blocked through pending and running c
       );
       const pending = yield* outbox.listByCommandId(command.commandId);
       for (let count = 0; count < pending.length; count += 1) {
-        const running = Option.getOrThrow(
-          yield* outbox.claimNext({ workerId: "delete-cleanup", leaseDurationMs: 60000 }),
-        );
+        const running = Option.getOrThrow(yield* outbox.claimNext({ workerId: "delete-cleanup" }));
         assert.equal(
           (yield* admission.claimActivation({ requestId }).pipe(Effect.result))._tag,
           "Failure",
@@ -512,9 +508,7 @@ it.effect(
         yield* orchestrator.dispatch(settle);
         const pending = yield* outbox.listByCommandId(settle.commandId);
         for (let count = 0; count < pending.length; count += 1) {
-          const effect = Option.getOrThrow(
-            yield* outbox.claimNext({ workerId: "settle-cleanup", leaseDurationMs: 60000 }),
-          );
+          const effect = Option.getOrThrow(yield* outbox.claimNext({ workerId: "settle-cleanup" }));
           yield* outbox.succeed({ effectId: effect.id, workerId: "settle-cleanup" });
         }
         yield* admission.claimActivation({ requestId });
@@ -744,9 +738,7 @@ it.effect("refuses an accepted workspace cleanup after claim when it would detac
       };
       const acceptedBinding = yield* orchestrator.dispatch(binding);
       for (const _effect of yield* outbox.listByCommandId(binding.commandId)) {
-        const next = Option.getOrThrow(
-          yield* outbox.claimNext({ workerId: "workspace-cleanup", leaseDurationMs: 60000 }),
-        );
+        const next = Option.getOrThrow(yield* outbox.claimNext({ workerId: "workspace-cleanup" }));
         yield* outbox.succeed({ effectId: next.id, workerId: "workspace-cleanup" });
       }
       const { providerThreads } = yield* projections.getThreadRecords(threadId, [
