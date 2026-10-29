@@ -1019,19 +1019,19 @@ const WsServerReportClientActivityRpc = Rpc.make(WS_METHODS.serverReportClientAc
   error: EnvironmentAuthorizationError,
 });
 
-export const WsServerStartUpdateDrainRpc = Rpc.make(WS_METHODS.serverStartUpdateDrain, {
+const WsServerStartUpdateDrainRpc = Rpc.make(WS_METHODS.serverStartUpdateDrain, {
   payload: UpdateDrainStartInput,
   success: UpdateDrainCommandReceipt,
   error: Schema.Union([UpdateDrainError, EnvironmentAuthorizationError]),
 });
 
-export const WsServerCancelUpdateDrainRpc = Rpc.make(WS_METHODS.serverCancelUpdateDrain, {
+const WsServerCancelUpdateDrainRpc = Rpc.make(WS_METHODS.serverCancelUpdateDrain, {
   payload: UpdateDrainCancelInput,
   success: UpdateDrainCommandReceipt,
   error: Schema.Union([UpdateDrainError, EnvironmentAuthorizationError]),
 });
 
-export const WsServerGetUpdateDrainStatusRpc = Rpc.make(WS_METHODS.serverGetUpdateDrainStatus, {
+const WsServerGetUpdateDrainStatusRpc = Rpc.make(WS_METHODS.serverGetUpdateDrainStatus, {
   payload: Schema.Struct({}),
   success: UpdateDrainState,
   error: Schema.Union([UpdateDrainError, EnvironmentAuthorizationError]),

@@ -369,7 +369,7 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
   });
   // The interrupt path also accepts a completed run while its provider still
   // has background work.
-  const activeBackgroundTasks = !isWorking && activeThread ? pendingBackgroundTasks : [];
+  const activeBackgroundTasks = activeThread ? pendingBackgroundTasks : [];
   const [stoppingBackgroundWorkKey, setStoppingBackgroundWorkKey] = useState<string | null>(null);
   const isStoppingBackgroundWork =
     stoppingBackgroundWorkKey === `${environmentId}:${activeThreadId}`;
@@ -514,7 +514,7 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
         threadId: activeThread.id,
         tasks: activeBackgroundTasks,
         turnItems,
-        stopDisabled: !canOperateThread || isStoppingBackgroundWork,
+        stopDisabled: !canOperateThread || isStoppingBackgroundWork || isWorking,
         stopping: isStoppingBackgroundWork,
         onStop: handleStopBackgroundWorkStable,
         onOpenThread: onOpenRelatedThreadStable,
