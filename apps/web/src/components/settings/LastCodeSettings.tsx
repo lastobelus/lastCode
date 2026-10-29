@@ -1,5 +1,6 @@
 import { Link } from "@tanstack/react-router";
 import { HardDriveIcon, PaletteIcon } from "lucide-react";
+import { LastCodeAnnotationSettings } from "./LastCodeAnnotationSettings";
 import { LastCodeMessageAppearanceSettings } from "./LastCodeMessageAppearanceSettings";
 import { LastCodeWorkStatusSettings } from "./LastCodeWorkStatusSettings";
 import { LastCodeHandoffSettings } from "./LastCodeHandoffSettings";
@@ -34,6 +35,7 @@ export function LastCodeSettingsPanel() {
       <LastCodePullRequestWatchSettings />
       <LocalCiSettingsSection />
       <SettingsSection title="Appearance" icon={<PaletteIcon className="size-5" />}>
+        <LastCodeAnnotationSettings />
         <LastCodeMessageAppearanceSettings />
         <LastCodeWorkStatusSettings />
         <LastCodeHandoffSettings />

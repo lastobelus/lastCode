@@ -453,6 +453,7 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   chatWidth: ChatWidth.pipe(Schema.withDecodingDefault(Effect.succeed("comfortable" as const))),
   effortDisplay: EffortDisplay.pipe(Schema.withDecodingDefault(Effect.succeed("label" as const))),
+  expandThreadAnnotations: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   incomingMessageStyle: IncomingMessageStyle.pipe(
     Schema.withDecodingDefault(Effect.succeed("neutral" as const)),
   ),
@@ -1900,6 +1901,7 @@ export const ClientSettingsPatch = Schema.Struct({
   diffColorScheme: Schema.optionalKey(DiffColorScheme),
   chatWidth: Schema.optionalKey(ChatWidth),
   effortDisplay: Schema.optionalKey(EffortDisplay),
+  expandThreadAnnotations: Schema.optionalKey(Schema.Boolean),
   incomingMessageStyle: Schema.optionalKey(IncomingMessageStyle),
   incomingMessageFillColor: Schema.optionalKey(IncomingMessageFillColor),
   loadBalancingEnabled: Schema.optionalKey(Schema.Boolean),

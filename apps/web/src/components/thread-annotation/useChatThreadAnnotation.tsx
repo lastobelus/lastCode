@@ -14,6 +14,7 @@ import { useState } from "react";
 import { useEnvironmentScope } from "../../state/session";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { threadEnvironment } from "../../state/threads";
+import { useClientSettings } from "../../hooks/useSettings";
 import { useUiStateStore } from "../../uiStateStore";
 import { useComposerDraftStore, type ComposerThreadTarget } from "../../composerDraftStore";
 import { Button } from "../ui/button";
@@ -109,7 +110,12 @@ function useAnnotationBanner(input: {
     onResolve,
   } = input;
   const key = scopedThreadKey(routeThreadRef);
-  const expanded = useUiStateStore((store) => store.threadAnnotationExpandedById[key] === true);
+  const expandByDefault = useClientSettings((settings) => settings.expandThreadAnnotations);
+  const savedExpansion = useUiStateStore((store) => store.threadAnnotationExpansionById[key]);
+  const expanded =
+    savedExpansion?.updatedAt === annotation?.updatedAt
+      ? (savedExpansion?.expanded ?? expandByDefault)
+      : expandByDefault;
   const setExpanded = useUiStateStore((store) => store.setThreadAnnotationExpanded);
   const [dismissal, setDismissal] = useState<{ route: string; version: string | null }>({
     route: key,
@@ -119,7 +125,7 @@ function useAnnotationBanner(input: {
   if (annotation?.resolvedAt !== null) return null;
   const version = `${key}:${annotation.updatedAt}`;
   if (dismissal.version === version) return null;
-  const toggleExpanded = () => setExpanded(key, !expanded);
+  const toggleExpanded = () => setExpanded(key, annotation.updatedAt, !expanded);
   const banner: ComposerBannerStackItem = {
     id: `thread-annotation:${version}`,
     variant: "warning",

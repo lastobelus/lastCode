@@ -7,6 +7,7 @@ import {
   type ScopedThreadRef,
   type ThreadAnnotation,
 } from "@t3tools/contracts";
+import { DEFAULT_CLIENT_SETTINGS, type ClientSettings } from "@t3tools/contracts/settings";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
@@ -19,6 +20,7 @@ const state = vi.hoisted(() => ({
   resolve: vi.fn<(value: unknown) => Promise<AtomCommandResult<void, Error>>>(),
   reopen: vi.fn<(value: unknown) => Promise<AtomCommandResult<void, Error>>>(),
   toast: vi.fn(),
+  expandThreadAnnotations: true,
 }));
 vi.mock(import("../../state/session"), async (original) => ({
   ...(await original()),
@@ -42,6 +44,17 @@ vi.mock(import("../../state/threads"), async (original) => ({
 vi.mock(import("../ui/toast"), async (original) => ({
   ...(await original()),
   toastManager: { add: state.toast } as never,
+}));
+
+vi.mock(import("../../hooks/useSettings"), async (original) => ({
+  ...(await original()),
+  useClientSettings: <T = ClientSettings,>(selector?: (settings: ClientSettings) => T): T => {
+    const settings = {
+      ...DEFAULT_CLIENT_SETTINGS,
+      expandThreadAnnotations: state.expandThreadAnnotations,
+    };
+    return selector ? selector(settings) : (settings as T);
+  },
 }));
 
 import { useChatThreadAnnotation } from "./useChatThreadAnnotation";
@@ -86,21 +99,22 @@ const defaults: Input = {
 async function setup() {
   await using stack = new AsyncDisposableStack();
   const previousDrafts = useComposerDraftStore.getState();
-  const previousExpanded = useUiStateStore.getState().threadAnnotationExpandedById;
+  const previousExpanded = useUiStateStore.getState().threadAnnotationExpansionById;
   stack.defer(() => {
     useComposerDraftStore.setState({
       draftsByThreadKey: previousDrafts.draftsByThreadKey,
       draftThreadsByThreadKey: previousDrafts.draftThreadsByThreadKey,
     });
-    useUiStateStore.setState({ threadAnnotationExpandedById: previousExpanded });
+    useUiStateStore.setState({ threadAnnotationExpansionById: previousExpanded });
   });
   state.scopes.set(a.environmentId, true);
   state.scopes.set(b.environmentId, true);
   for (const command of [state.save, state.resolve, state.reopen])
     command.mockReset().mockResolvedValue(success());
   state.toast.mockReset();
+  state.expandThreadAnnotations = true;
   useComposerDraftStore.setState({ draftsByThreadKey: {}, draftThreadsByThreadKey: {} });
-  useUiStateStore.setState({ threadAnnotationExpandedById: {} });
+  useUiStateStore.setState({ threadAnnotationExpansionById: {} });
   const screen = stack.use(await renderUi(null));
   const { container, rerender } = screen;
   let controls: ReturnType<typeof useChatThreadAnnotation>;
@@ -174,6 +188,36 @@ async function setup() {
 }
 
 describe("chat annotation ownership", () => {
+  it.each([true, false])(
+    "uses expansion setting %s until manually toggled or edited",
+    async (enabled) => {
+      await using fixture = await setup();
+      const { render, button, click } = fixture;
+      state.expandThreadAnnotations = enabled;
+      await render();
+      expect(button(enabled ? "Collapse annotation" : "Expand annotation")).toBeDefined();
+      if (!enabled) await click("Expand annotation");
+      await click("Collapse annotation");
+      await render({ routeThreadRef: b, threadRef: b });
+      await render();
+      expect(button("Expand annotation")).toBeDefined();
+      state.expandThreadAnnotations = !enabled;
+      await render();
+      expect(button("Expand annotation")).toBeDefined();
+      state.expandThreadAnnotations = enabled;
+      await render({
+        annotation: { ...note, body: "Edited note", updatedAt: "2026-09-04T00:00:00.000Z" },
+      });
+      expect(button(enabled ? "Collapse annotation" : "Expand annotation")).toBeDefined();
+      if (enabled) await click("Collapse annotation");
+      await click("Expand annotation");
+      await render({ routeThreadRef: b, threadRef: b });
+      await render({
+        annotation: { ...note, body: "Edited note", updatedAt: "2026-09-04T00:00:00.000Z" },
+      });
+      expect(button("Collapse annotation")).toBeDefined();
+    },
+  );
   it("edits and saves Markdown through the destination command", async () => {
     await using fixture = await setup();
     const { render, click, editor, enter } = fixture;
@@ -234,6 +278,7 @@ describe("chat annotation ownership", () => {
     expect(fixture.controls.canAnnotate).toBe(false);
     expect(fixture.controls.timeline.onAnnotationBodyChange).toBeUndefined();
     expect(container.textContent).not.toContain("Resolve");
+    await click("Collapse annotation");
     await click("Expand annotation");
     expect(button("Collapse annotation")).toBeDefined();
   });
@@ -413,10 +458,9 @@ describe("chat annotation ownership", () => {
   });
   it("shares body-save exclusion with sidebar saves and banner checkboxes", async () => {
     await using fixture = await setup();
-    const { container, render, click } = fixture;
+    const { container, render } = fixture;
 
     await render();
-    await click("Expand annotation");
     let release!: (value: boolean) => void;
     const sidebar = runThreadAnnotationBodySave(
       a,
