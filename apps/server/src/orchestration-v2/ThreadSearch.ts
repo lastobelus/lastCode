@@ -294,7 +294,7 @@ export class ThreadSearch extends Context.Service<
 // Rows a client gets per search: enough for the shown results without sending every match.
 const OLDER_SETTLED_TITLE_ROWS = 15;
 const OLDER_SETTLED_MESSAGE_ROWS = 5;
-const MENTION_CANDIDATE_FETCH_LIMIT = 501;
+const MENTION_CANDIDATE_BATCH_SIZE = 501;
 
 const MentionCandidateRow = Schema.Struct({
   thread: Schema.fromJsonString(OrchestrationV2AppThreadJson),
@@ -380,7 +380,7 @@ export const make = Effect.gen(function* () {
           OR threads.thread_id IN (SELECT value FROM json_each(${threadIds})))
         AND (${afterThreadId} IS NULL OR threads.thread_id > ${afterThreadId})
       ORDER BY threads.thread_id
-      LIMIT ${MENTION_CANDIDATE_FETCH_LIMIT}
+      LIMIT ${MENTION_CANDIDATE_BATCH_SIZE}
     `,
   });
 
@@ -664,32 +664,37 @@ export const make = Effect.gen(function* () {
       activityAt: Date.parse(row.latestUserMessageAt ?? DateTime.formatIso(row.thread.createdAt)),
       opens: row.thread.opens ?? null,
     });
-    const candidates: Array<typeof MentionCandidateRow.Type> = [];
+    let candidates: ReadonlyArray<typeof MentionCandidateRow.Type> = [];
+    let typoCandidates: ReadonlyArray<typeof MentionCandidateRow.Type> = [];
+    let hasStrongMatch = false;
     let afterThreadId: ThreadId | null = null;
-    // Apply the shared matcher before bounding candidates; SQL substrings lose cross-field tokens and folded names.
-    while (candidates.length < MENTION_CANDIDATE_FETCH_LIMIT) {
+    // Scan every metadata page, retaining only the best results plus one for truncation.
+    // Keep typo matches separate until any strong match disables the fallback globally.
+    while (true) {
       const rows: ReadonlyArray<typeof MentionCandidateRow.Type> = yield* read(
         mentionCandidates({ threadIds: null, afterThreadId }),
       );
-      for (const row of rows) {
-        if (
-          scoreThreadSearch(normalizedQuery, subjectOf(row), now, { typos: true, picks: false }) !==
-          null
-        ) {
-          candidates.push(row);
-          if (candidates.length === MENTION_CANDIDATE_FETCH_LIMIT) break;
-        }
+      const ranked = rankSearchItems([...candidates, ...rows], (row) =>
+        scoreThreadSearch(normalizedQuery, subjectOf(row), now, { typos: false, picks: false }),
+      );
+      hasStrongMatch ||= ranked.some(({ match }) => match.strong);
+      candidates = ranked.slice(0, limit + 1).map(({ item }) => item);
+      if (hasStrongMatch) {
+        typoCandidates = [];
+      } else {
+        typoCandidates = rankSearchItems([...typoCandidates, ...rows], (row) =>
+          scoreThreadSearch(normalizedQuery, subjectOf(row), now, { typos: true, picks: false }),
+        )
+          .slice(0, limit + 1)
+          .map(({ item }) => item);
       }
-      if (rows.length < MENTION_CANDIDATE_FETCH_LIMIT) break;
+      if (rows.length < MENTION_CANDIDATE_BATCH_SIZE) break;
       afterThreadId = rows[rows.length - 1]!.thread.id;
     }
-    const ranked = rankSearchItems(candidates, (row, options) =>
-      scoreThreadSearch(normalizedQuery, subjectOf(row), now, { ...options, picks: false }),
-    );
+    const ranked = hasStrongMatch ? candidates : typoCandidates;
     return {
-      mentionCandidates: ranked.slice(0, limit).map(({ item }) => candidateOf(item)),
-      mentionsTruncated:
-        candidates.length >= MENTION_CANDIDATE_FETCH_LIMIT || ranked.length > limit,
+      mentionCandidates: ranked.slice(0, limit).map(candidateOf),
+      mentionsTruncated: ranked.length > limit,
     };
   });
 

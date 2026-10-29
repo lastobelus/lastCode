@@ -989,11 +989,13 @@ it.layer(layerTest)("ThreadSearch.searchThreads", (it) => {
         const subagent = ThreadId.make("thread:mention-subagent");
         const deleted = ThreadId.make("thread:mention-deleted");
         const ordinary = ThreadId.make("thread:mention-ordinary");
+        const bestTitle = ThreadId.make("thread:zz-best-title");
+        const strongAfterTypos = ThreadId.make("thread:zzz-strong-after-typos");
         yield* Effect.forEach(
           [
             ...Array.from({ length: 520 }, (_, index) =>
               thread(ThreadId.make(`thread:000-unrelated-${index}`), firstProject, {
-                title: "Build notes",
+                title: "Build notes follow-up",
               }),
             ),
             thread(archived, firstProject, {
@@ -1013,6 +1015,8 @@ it.layer(layerTest)("ThreadSearch.searchThreads", (it) => {
             }),
             thread(deleted, secondProject, { title: "Comet deleted", deletedAt: at(4) }),
             thread(ordinary, firstProject, { title: "Fix broken login" }),
+            thread(bestTitle, firstProject, { title: "Build notes", archivedAt: at(2) }),
+            thread(strongAfterTypos, firstProject, { title: "Buidl notes" }),
           ],
           projections.apply,
           { discard: true },
@@ -1045,11 +1049,26 @@ it.layer(layerTest)("ThreadSearch.searchThreads", (it) => {
         assert.equal(exact.mentionCandidates[0]?.projectId, firstProject);
         assert.equal(exact.mentionsTruncated, false);
 
+        const ranked = yield* search.searchMentionCandidates({ query: "build notes", limit: 1 });
+        assert.deepEqual(
+          ranked.mentionCandidates.map((candidate) => candidate.id),
+          [bestTitle],
+        );
+        assert.equal(ranked.mentionsTruncated, true);
+
+        const withoutTypos = yield* search.searchMentionCandidates({ query: "buidl notes" });
+        assert.deepEqual(
+          withoutTypos.mentionCandidates.map((candidate) => candidate.id),
+          [strongAfterTypos],
+        );
+        assert.equal(withoutTypos.mentionsTruncated, false);
+
         for (const [query, environmentLabel, expected] of [
           ["fix login", "", ordinary],
           ["mobile helper", "", subagent],
           ["remote helper", "Remote server", subagent],
           ["the comet helper", "", subagent],
+          ["comet archvial", "", archived],
           ["#42", "", archived],
           ["acme/app#42", "", archived],
         ] as const) {
