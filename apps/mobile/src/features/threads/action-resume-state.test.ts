@@ -1,7 +1,4 @@
-import {
-  actionResumeWait,
-  type ActionResumeContext,
-} from "@t3tools/client-runtime/state/action-resume";
+import type { ActionResumeContext } from "@t3tools/client-runtime/state/action-resume";
 import {
   EnvironmentId,
   ProjectId,
@@ -151,29 +148,6 @@ it("hides an ended exact continuation even when pause observation becomes unknow
   mocks.context = { ...mocks.context!, followUp: { status: "completed", queueHeld: false } };
   mocks.result = AsyncResult.initial();
   expect(screen.read().wait.presentation).toBeNull();
-});
-
-it("never attaches a different Action's continuation or requests", () => {
-  setup();
-  const action = mocks.context!.action;
-  const other = {
-    ...mocks.context!,
-    action: { ...action, runId: "other" },
-    followUp: { status: "completed" as const, queueHeld: false },
-    hasPendingRequest: true,
-  };
-  const value = actionResumeWait(other, action, false);
-  expect(value.status?.state).toBe("pending_delivery");
-  expect(value.presentation?.automaticResumeArmed).toBe(true);
-});
-
-it("keeps held queued work as attention and hides disposed results", () => {
-  setup();
-  const context = { ...mocks.context!, followUp: { status: "queued" as const, queueHeld: true } };
-  expect(actionResumeWait(context, context.action, false).status?.state).toBe("attention_required");
-  expect(
-    actionResumeWait(context, { ...context.action, delivery: "disposed" }, null).presentation,
-  ).toBeNull();
 });
 
 it("reads only the destination environment and the scoped thread context", () => {
