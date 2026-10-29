@@ -420,6 +420,18 @@ describe("Darwin worktree consumers", () => {
         ]);
       }),
   );
+  it.effect.each(["/shared-memory.example", "/workspace/example/not-a-file"])(
+    "does not mistake a POSIX shared-memory name for a workspace consumer (%s)",
+    (name) =>
+      Effect.gen(function* () {
+        darwinFixture(`p123\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\nf56\0tPSXSHM\0n${name}\0\n`);
+        native.realpath.mockImplementation(async (path: string) => {
+          if (path === name) throw missing();
+          return path;
+        });
+        expect(yield* guard(yield* inventory("darwin"))).toBeNull();
+      }),
+  );
   it.effect(
     "accepts the exact numeric ENOENT no-current-path marker without treating unknown descriptors as safe",
     () =>
@@ -443,6 +455,12 @@ describe("Darwin worktree consumers", () => {
     "f1\0tREG\0n0x1234\0\n",
     "fcwd\0tNPOLICY\0n0x1234\0\n",
     "ftxt\0tNEXUS\0n0x1234\0\n",
+    "fcwd\0tPSXSHM\0n/shared-memory.example\0\n",
+    "ftxt\0tPSXSHM\0n/shared-memory.example\0\n",
+    "ffp.17\0tPSXSHM\0n/shared-memory.example\0\n",
+    "f56u\0tPSXSHM\0n/shared-memory.example\0\n",
+    "f56\0tPSXSHM\0D0x12\0n/shared-memory.example\0\n",
+    "f56\0tPSXSHM\0i42\0n/shared-memory.example\0\n",
   ])(
     "keeps missing or unknown file evidence that does not match an explicit revoked descriptor",
     (record) =>
