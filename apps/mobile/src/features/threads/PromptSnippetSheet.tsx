@@ -24,6 +24,10 @@ export function PromptSnippetSheet(props: {
   );
   const recordUse = useAtomCommand(promptSnippetsEnvironment.recordUse, { reportFailure: false });
   const discover = useAtomCommand(promptSnippetsEnvironment.discover);
+  const dismiss = useAtomCommand(promptSnippetsEnvironment.dismiss);
+  const canDismiss = useAtomValue(
+    promptSnippetsEnvironment.dismiss.permissionAtom(props.environmentId),
+  );
   const canLearn = useAtomValue(
     promptSnippetsEnvironment.recordUse.permissionAtom(props.environmentId),
   );
@@ -70,27 +74,41 @@ export function PromptSnippetSheet(props: {
           </Text>
         ) : null}
         {results.map((snippet) => (
-          <Pressable
-            key={snippet.id}
-            accessibilityRole="button"
-            accessibilityLabel={`Insert ${snippet.title}`}
-            className="gap-1 rounded-xl border border-border px-3.5 py-2.5 active:opacity-60"
-            onPress={() => {
-              props.onSelect(snippet);
-              if (canLearn)
-                void recordUse({
-                  environmentId: props.environmentId,
-                  input: { snippetId: snippet.id, query },
-                });
-            }}
-          >
-            <Text className="text-base font-t3-medium text-foreground" numberOfLines={2}>
-              {snippet.title}
-            </Text>
-            <Text className="text-sm text-foreground-muted" numberOfLines={3}>
-              {snippet.text}
-            </Text>
-          </Pressable>
+          <View key={snippet.id} className="gap-1">
+            <Pressable
+              key={snippet.id}
+              accessibilityRole="button"
+              accessibilityLabel={`Insert ${snippet.title}`}
+              className="gap-1 rounded-xl border border-border px-3.5 py-2.5 active:opacity-60"
+              onPress={() => {
+                props.onSelect(snippet);
+                if (canLearn)
+                  void recordUse({
+                    environmentId: props.environmentId,
+                    input: { snippetId: snippet.id, query },
+                  });
+              }}
+            >
+              <Text className="text-base font-t3-medium text-foreground" numberOfLines={2}>
+                {snippet.title}
+              </Text>
+              <Text className="text-sm text-foreground-muted" numberOfLines={3}>
+                {snippet.text}
+              </Text>
+            </Pressable>
+            {canDismiss ? (
+              <Button
+                label="Dismiss prompt"
+                tone="text"
+                onPress={() => {
+                  void dismiss({
+                    environmentId: props.environmentId,
+                    input: { snippetId: snippet.id },
+                  });
+                }}
+              />
+            ) : null}
+          </View>
         ))}
         {results.length === 0 ? (
           <View className="py-4">

@@ -1,5 +1,9 @@
 import * as PromptSnippets from "../../../promptSnippets/PromptSnippets.ts";
-import { PromptSnippetsState, PromptSnippetUseInput } from "@t3tools/contracts";
+import {
+  PromptSnippetsState,
+  PromptSnippetUseInput,
+  PromptSnippetDismissInput,
+} from "@t3tools/contracts";
 import {
   BackgroundActivityProfile,
   BackgroundActivityProfileSelection,
@@ -128,7 +132,15 @@ const PromptSnippetsRecordUseTool = Tool.make("prompt_snippets_record_use", {
   parameters: PromptSnippetUseInput,
   success: Schema.Void,
 }).annotate(Tool.Destructive, false);
+const PromptSnippetsDismissTool = Tool.make("prompt_snippets_dismiss", {
+  ...shared,
+  description:
+    "Remove a common prompt from this environment's picker and remember the dismissal during future discovery.",
+  parameters: PromptSnippetDismissInput,
+  success: Schema.Void,
+}).annotate(Tool.Destructive, false);
 export const EnvironmentToolkit = Toolkit.make(
+  PromptSnippetsDismissTool,
   PromptSnippetsListTool,
   PromptSnippetsDiscoverTool,
   PromptSnippetsRecordUseTool,

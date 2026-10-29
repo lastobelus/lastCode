@@ -287,13 +287,16 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
           : {}),
       };
       const execLaunchArgs = codexExecLaunchArgs(launchArgs);
-      const mcpServersOff = yield* listEnabledMcpServers({
-        binary,
-        cwd,
-        env,
-        // `codex mcp` rejects --strict-config; the overrides still apply.
-        launchArgs: execLaunchArgs.filter((arg) => arg !== "--strict-config"),
-      }).pipe(Effect.map(codexMcpServersOff));
+      // Ignoring user config also omits MCP transports; disable-only entries would be invalid.
+      const mcpServersOff = promptOnly
+        ? null
+        : yield* listEnabledMcpServers({
+            binary,
+            cwd,
+            env,
+            // `codex mcp` rejects --strict-config; the overrides still apply.
+            launchArgs: execLaunchArgs.filter((arg) => arg !== "--strict-config"),
+          }).pipe(Effect.map(codexMcpServersOff));
       const spawnCommand = yield* resolveSpawnCommand(
         binary,
         [

@@ -11,12 +11,22 @@ export function createPromptSnippetsEnvironmentAtoms<R, E>(
     label: "prompt-snippets:list",
     tag: WS_METHODS.promptSnippetsList,
     staleTimeMs: 0,
+    refreshIntervalMs: 2_000,
+    isFinal: (state) => !state.discovering,
   });
   return {
     list,
     recordUse: createEnvironmentRpcCommand(runtime, {
       label: "prompt-snippets:record-use",
       tag: WS_METHODS.promptSnippetsRecordUse,
+      onSuccess: (target, registry) =>
+        Effect.sync(() =>
+          registry.refresh(list({ environmentId: target.environmentId, input: {} })),
+        ),
+    }),
+    dismiss: createEnvironmentRpcCommand(runtime, {
+      label: "prompt-snippets:dismiss",
+      tag: WS_METHODS.promptSnippetsDismiss,
       onSuccess: (target, registry) =>
         Effect.sync(() =>
           registry.refresh(list({ environmentId: target.environmentId, input: {} })),
