@@ -2,11 +2,13 @@
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
+import * as NodeChildProcess from "node:child_process";
 import { assert, it, onTestFinished } from "vite-plus/test";
 import {
   createGeneratedBuildStage,
   inspectGeneratedBuildOwnership,
   removeGeneratedBuildFiles,
+  removeGeneratedBuildFilesAsync,
   copyOwnedGeneratedBuild,
   recordGeneratedBuildUse,
 } from "./generatedBuildOwnership.ts";
@@ -110,8 +112,15 @@ it("rejects linked or hardlinked destinations and forged roots; ordinary checkou
   assert.isFalse(NodeFS.existsSync(NodePath.join(retained, "index.html")));
   assert.throws(() => createGeneratedBuildStage(cwd, "notes"), "Unrecognized");
   NodeFS.unlinkSync(NodePath.join(cwd, ".git"));
+  assert.throws(
+    () => copyOwnedGeneratedBuild(cwd, "apps/web/dist", NodePath.join(temporary, "release")),
+    "requires repository metadata",
+  );
   NodeFS.mkdirSync(NodePath.join(cwd, ".git"));
   assert.equal(createGeneratedBuildStage(cwd, "apps/web/dist"), null);
+  assert.isFalse(
+    copyOwnedGeneratedBuild(cwd, "apps/web/dist", NodePath.join(temporary, "release")),
+  );
 });
 
 it("copies only verified web emissions into an owned server stage", () => {

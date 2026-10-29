@@ -55,7 +55,7 @@ it("config inspection alone leaves aged dependencies unchanged; direct compiler 
   let now = 100;
   const before = dependencyActivitySnapshot(cwd);
   const plugin = createBuildOwnershipPlugin(cwd, null, () => now);
-  plugin.configResolved.call(context, { build: { outDir: "dist" } });
+  plugin.configResolved.call(context, { root: cwd, build: { outDir: "dist" } });
   plugin.closeBundle.call(context);
   NodeAssert.equal(readClock(), 1);
   NodeAssert.equal(dependencyActivitySnapshot(cwd), before);
