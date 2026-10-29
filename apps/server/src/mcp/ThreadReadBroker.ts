@@ -23,7 +23,10 @@ import * as Stream from "effect/Stream";
 
 import type { OrchestratorV2Error } from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
-import { ThreadReadAuthorization } from "../orchestration-v2/ThreadReadAuthorization.ts";
+import {
+  ThreadReadAuthorization,
+  referencedThreads,
+} from "../orchestration-v2/ThreadReadAuthorization.ts";
 
 type Authorization = Context.Service.Shape<typeof ThreadReadAuthorization>;
 
@@ -90,10 +93,11 @@ const make = Effect.gen(function* () {
 
   const bind = Effect.fn("ThreadReadBroker.bind")(
     function* (threadId: ThreadId, messageId: MessageId, sessionId: string) {
-      const { runs, runtimeRequests } = yield* threads.getThreadRecords(threadId, [
-        "runs",
-        "runtimeRequests",
-      ]);
+      const { runs, runtimeRequests, messages } = yield* threads.getThreadRecords(
+        threadId,
+        ["runs", "runtimeRequests", "messages"],
+        { messageRoles: ["user"] },
+      );
       const now = yield* pruneBindings;
       const key = bindingKey(threadId, messageId);
       // A replay cannot claim an existing execution, including after eviction,
@@ -103,6 +107,7 @@ const make = Effect.gen(function* () {
         runtimeRequests.some(
           (request) => request.threadReadContext?.authorizationId === messageId,
         ) ||
+        messages.some((message) => message.threadReadContext?.authorizationId === messageId) ||
         bindings.has(key)
       )
         return;
@@ -179,6 +184,23 @@ const make = Effect.gen(function* () {
       return {
         sessionId: yield* bindingSession(threadId, request.threadReadContext.authorizationId),
       };
+    }
+    const { messages } = yield* threads.getThreadRecords(threadId, ["messages"], {
+      messageIds: [run.userMessageId],
+      messageRoles: ["user"],
+    });
+    const editedMessage = messages.find((message) => message.id === run.userMessageId);
+    const editedContext = editedMessage?.threadReadContext;
+    if (
+      editedMessage !== undefined &&
+      editedContext !== undefined &&
+      (before === undefined || editedContext.capturedAt < before) &&
+      referencedThreads(editedMessage.text, editedMessage.context).some(
+        (record) =>
+          record.environmentId === input.environmentId && record.threadId === input.threadId,
+      )
+    ) {
+      return { sessionId: yield* bindingSession(threadId, editedContext.authorizationId) };
     }
     const spawn = source.contextTransfers.find(
       (transfer) => transfer.type === "subagent_spawn" && transfer.targetRunId === runId,

@@ -1419,6 +1419,12 @@ export const OrchestrationV2ConversationMessage = Schema.Struct({
   role: Schema.Literals(["user", "assistant", "system"]),
   text: Schema.String,
   context: Schema.optional(OrchestrationMessageContext),
+  threadReadContext: Schema.optional(
+    Schema.Struct({
+      authorizationId: MessageId,
+      capturedAt: NonNegativeInt,
+    }),
+  ),
   attachments: Schema.Array(ChatAttachment),
   streaming: Schema.Boolean,
   createdAt: Schema.DateTimeUtc,

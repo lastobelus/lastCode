@@ -7571,19 +7571,42 @@ it.layer(layerTest)("RuntimeLayer.layer lifecycle", (it) => {
       const queuedRun = before.runs.find((run) => run.status === "queued");
       assert.isDefined(queuedRun);
 
+      const reference = {
+        version: 1 as const,
+        contextId: ComposerContextId.make("queued-reference"),
+        kind: "thread" as const,
+        label: "Reference",
+        title: "Reference",
+        environmentId: EnvironmentId.make("source-environment"),
+        threadId: ThreadId.make("source-thread"),
+      };
+      const stale = {
+        ...reference,
+        contextId: ComposerContextId.make("unused-reference"),
+        threadId: ThreadId.make("unused-thread"),
+      };
       yield* orchestrator.dispatch({
         type: "queued-run.edit",
         commandId: CommandId.make("runtime-layer-queued-edit-edit"),
         threadId,
         runId: queuedRun.id,
-        text: "Updated queued text.",
+        text: "Updated [Reference](t3-context://v1/thread/queued-reference).",
+        context: { version: 1, records: [reference, stale] },
       });
 
       const afterEdit = yield* orchestrator.getThreadProjection(threadId);
       assert.equal(
         afterEdit.messages.find((message) => message.id === queuedRun.userMessageId)?.text,
-        "Updated queued text.",
+        "Updated [Reference](t3-context://v1/thread/queued-reference).",
       );
+      const editedMessage = afterEdit.messages.find(
+        (message) => message.id === queuedRun.userMessageId,
+      )!;
+      assert.deepEqual(editedMessage.threadReadContext, {
+        authorizationId: MessageId.make("queued-edit-context:runtime-layer-queued-edit-edit"),
+        capturedAt: DateTime.toEpochMillis(editedMessage.updatedAt),
+      });
+      assert.deepEqual(editedMessage.context?.records, [reference, stale]);
       const editedItem = afterEdit.turnItems.find(
         (item) => item.type === "user_message" && item.messageId === queuedRun.userMessageId,
       );
@@ -7606,6 +7629,15 @@ it.layer(layerTest)("RuntimeLayer.layer lifecycle", (it) => {
         ],
       });
       const afterAttachmentEdit = yield* orchestrator.getThreadProjection(threadId);
+      assert.isUndefined(
+        afterAttachmentEdit.messages.find((message) => message.id === queuedRun.userMessageId)
+          ?.threadReadContext,
+        "removing references clears scoped edit authority without changing the run identity",
+      );
+      assert.equal(
+        afterAttachmentEdit.runs.find((run) => run.id === queuedRun.id)?.userMessageId,
+        queuedRun.userMessageId,
+      );
       assert.deepEqual(
         afterAttachmentEdit.messages
           .find((message) => message.id === queuedRun.userMessageId)

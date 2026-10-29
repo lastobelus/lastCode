@@ -2,8 +2,15 @@ import {
   projectComposerContextForProvider,
   replaceComposerContextReferences,
 } from "@t3tools/shared/composerContextReferences";
-import { OrchestrationV2RuntimeRequest } from "@t3tools/contracts";
-import { questionAnswerAuthorizationId } from "./ThreadReadAuthorization.ts";
+import {
+  OrchestrationV2RuntimeRequest,
+  OrchestrationV2ConversationMessage,
+} from "@t3tools/contracts";
+import {
+  questionAnswerAuthorizationId,
+  queuedEditAuthorizationId,
+  referencedThreads,
+} from "./ThreadReadAuthorization.ts";
 import type {
   GuestShareId,
   ThreadContextRecord,
@@ -62,7 +69,6 @@ import {
   type OrchestrationV2ContextSourcePoint,
   type OrchestrationV2ContextTransfer,
   type OrchestrationV2ContextTransferResolution,
-  type OrchestrationV2ConversationMessage,
   type OrchestrationV2DelegatedCompletionCohort,
   type OrchestrationV2DelegatedCompletionDelivery,
   type OrchestrationV2DomainEvent,
@@ -220,6 +226,10 @@ import * as ServerSettings from "../serverSettings.ts";
 
 const decodeThreadReadContext = Schema.decodeUnknownEffect(
   OrchestrationV2RuntimeRequest.fields.threadReadContext,
+);
+
+const decodeMessageThreadReadContext = Schema.decodeUnknownEffect(
+  OrchestrationV2ConversationMessage.fields.threadReadContext,
 );
 
 const isMessageQuestionAnswer = Schema.is(
@@ -11092,6 +11102,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     );
 
     const now = yield* DateTime.now;
+    const referenceRecords = referencedThreads(
+      command.text,
+      command.context ?? queuedMessage.context,
+    );
+    const threadReadContext =
+      referenceRecords.length > 0
+        ? yield* decodeMessageThreadReadContext({
+            authorizationId: queuedEditAuthorizationId(command.commandId),
+            capturedAt: DateTime.toEpochMillis(now),
+          }).pipe(mapDispatchError(command))
+        : undefined;
+    const { threadReadContext: _oldGrant, ...messageWithoutGrant } = queuedMessage;
     const emitEvent = emit(events, command);
     const editedAttachments =
       command.attachments === undefined ? {} : { attachments: command.attachments };
@@ -11103,7 +11125,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       providerInstanceId: queuedRun.providerInstanceId,
       occurredAt: now,
       payload: withoutGuestAttribution({
-        ...queuedMessage,
+        ...messageWithoutGrant,
+        ...(threadReadContext === undefined ? {} : { threadReadContext }),
         text: command.text,
         ...editedAttachments,
         ...(command.context ? { context: command.context } : {}),
