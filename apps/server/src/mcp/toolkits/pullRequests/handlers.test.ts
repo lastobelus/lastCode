@@ -294,6 +294,8 @@ describe("pull request toolkit handlers", () => {
         passedChecks: [],
         remarksThrough: "2026-08-20T00:00:00.000Z",
         remarkIds: [],
+        reactionKeys: [],
+        reactionCounts: {},
         conflicting: false,
         wakes: 0,
       };
