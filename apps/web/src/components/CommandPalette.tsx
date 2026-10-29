@@ -1,3 +1,4 @@
+import { promptSnippetActions } from "~/lastcode/prompts/commandPaletteActions";
 import { threadPullRequestLinkMode } from "@t3tools/client-runtime/thread-pull-request-compatibility";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 
@@ -380,9 +381,6 @@ function OpenCommandPaletteDialog(props: {
 }) {
   const composerHandleRef = useComposerHandleContext();
   const navigate = useNavigate();
-  const insertCommonPrompt = useStableCallback(async () => {
-    composerHandleRef?.current?.openControl("composer.promptSnippets");
-  });
   const [commonPromptsAvailable] = useState(
     () =>
       document.querySelector(
@@ -1248,17 +1246,12 @@ function OpenCommandPaletteDialog(props: {
 
   const actionItems: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> = [];
 
-  if ((activeThread || activeDraftThread) && commonPromptsAvailable) {
-    actionItems.push({
-      kind: "action",
-      value: "action:common-prompts",
-      title: "Insert a common prompt",
-      searchTerms: ["prompt", "snippet", "template", "insert", "common"],
-      shortcutCommand: "composer.promptSnippets",
-      icon: <MessageSquareIcon className={ITEM_ICON_CLASS} />,
-      run: insertCommonPrompt,
-    });
-  }
+  actionItems.push(
+    ...promptSnippetActions(
+      composerHandleRef,
+      Boolean((activeThread || activeDraftThread) && commonPromptsAvailable),
+    ),
+  );
 
   if (projects.length > 0) {
     const activeProjectTitle =

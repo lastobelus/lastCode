@@ -579,3 +579,119 @@ it.effect("preserves the full library and dismissal when restore has no free slo
     }).pipe(Effect.provide(PromptSnippets.layer));
   }).pipe(Effect.provide(testDependencies())),
 );
+
+it("keeps manually edited entries intact when mining consolidates them", () => {
+  const edited = { ...savedSnippet, userEdited: true as const };
+  expect(
+    PromptSnippets.consolidate(
+      [edited],
+      [{ existingIds: [edited.id], title: "Changed", text: "Changed by mining" }],
+      () => "new",
+    ),
+  ).toEqual([edited]);
+});
+
+it.effect("saves edits during discovery and preserves their history across reload", () =>
+  Effect.gen(function* () {
+    yield* seedLibrary([savedSnippet]);
+    const started = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    let calls = 0;
+    const generation = Layer.mock(TextGeneration.TextGeneration)({
+      generatePromptSnippets: (input) =>
+        Effect.gen(function* () {
+          if (calls++ === 0) {
+            yield* Deferred.succeed(started, undefined);
+            yield* Deferred.await(release);
+          } else {
+            expect(input.existing[0]).toMatchObject({ userEdited: true });
+          }
+          return {
+            snippets: [
+              { existingIds: [savedSnippet.id], title: "Mined", text: "Stale mined text" },
+            ],
+          };
+        }),
+    });
+    const serviceLayer = PromptSnippets.layer.pipe(Layer.provide(generation));
+    const edited = yield* Effect.gen(function* () {
+      const service = yield* PromptSnippets.PromptSnippets;
+      const mining = yield* service.discover().pipe(Effect.forkScoped({ startImmediately: true }));
+      yield* Deferred.await(started);
+      const edited = yield* service.save({
+        snippetId: savedSnippet.id,
+        title: "  My review  ",
+        text: "  My exact instructions.  ",
+      });
+      expect(edited).toEqual({
+        ...savedSnippet,
+        title: "My review",
+        text: "My exact instructions.",
+        userEdited: true,
+      });
+      yield* Deferred.succeed(release, undefined);
+      expect((yield* Fiber.join(mining)).snippets).toEqual([edited]);
+      return edited;
+    }).pipe(Effect.provide(serviceLayer));
+    const created = yield* Effect.gen(function* () {
+      const service = yield* PromptSnippets.PromptSnippets;
+      expect((yield* service.list).snippets).toEqual([edited]);
+      expect((yield* service.discover()).snippets).toEqual([edited]);
+      const created = yield* service.save({ title: " New ", text: " New prompt " });
+      expect(created).toMatchObject({
+        title: "New",
+        text: "New prompt",
+        userEdited: true,
+        useCount: 0,
+        lastUsedAt: null,
+        queryUses: [],
+      });
+      expect(created.id).not.toBe(savedSnippet.id);
+      for (const input of [
+        { title: " ", text: "valid" },
+        { title: "valid", text: " " },
+        { title: "x".repeat(101), text: "valid" },
+        { title: "valid", text: "x".repeat(4001) },
+        { snippetId: "missing", title: "valid", text: "valid" },
+        { title: "duplicate", text: " ＮＥＷ   prompt " },
+        { snippetId: savedSnippet.id, title: "duplicate", text: "new prompt" },
+      ])
+        expect(yield* service.save(input).pipe(Effect.flip)).toMatchObject({ operation: "save" });
+      expect((yield* service.list).snippets).toEqual([edited, created]);
+      return created;
+    }).pipe(Effect.provide(serviceLayer));
+    yield* Effect.gen(function* () {
+      const service = yield* PromptSnippets.PromptSnippets;
+      expect((yield* service.list).snippets).toEqual([edited, created]);
+    }).pipe(Effect.provide(serviceLayer));
+  }).pipe(Effect.provide(testDependencies())),
+);
+
+it.effect("rejects creation at capacity while allowing edits", () =>
+  Effect.gen(function* () {
+    const entries = Array.from({ length: 100 }, (_, i) => ({
+      ...savedSnippet,
+      id: `entry-${i}`,
+      text: `Prompt ${i}`,
+    }));
+    yield* seedLibrary(entries);
+    yield* Effect.gen(function* () {
+      const service = yield* PromptSnippets.PromptSnippets;
+      expect(
+        yield* service.save({ title: "New", text: "New prompt" }).pipe(Effect.flip),
+      ).toMatchObject({ operation: "save" });
+      const edited = yield* service.save({
+        snippetId: entries[0]!.id,
+        title: "Edited",
+        text: "Edited prompt",
+      });
+      expect(edited).toEqual({
+        ...entries[0],
+        title: "Edited",
+        text: "Edited prompt",
+        userEdited: true,
+      });
+      expect((yield* service.list).snippets).toHaveLength(100);
+    }).pipe(Effect.provide(PromptSnippets.layer));
+  }).pipe(Effect.provide(testDependencies())),
+);

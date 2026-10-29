@@ -2373,6 +2373,7 @@ const layerCoreWsRpc = (
       );
 
       const handlers = CoreServerWsRpcGroup.of({
+        [WS_METHODS.promptSnippetsSave]: (input) => promptSnippets.save(input),
         [WS_METHODS.promptSnippetsList]: () => promptSnippets.list,
         [WS_METHODS.promptSnippetsRecordUse]: (input) => promptSnippets.recordUse(input),
         [WS_METHODS.promptSnippetsRestore]: (input) => promptSnippets.restore(input),

@@ -59,6 +59,15 @@ const pauseWrite = (operation: "start" | "retry" | "resume") =>
     }),
   );
 export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
+  prompt_snippets_save: McpToolAccess.writesEnvironment((input, check) =>
+    Effect.gen(function* () {
+      yield* access;
+      yield* check;
+      return yield* (yield* PromptSnippets.PromptSnippets)
+        .save(input)
+        .pipe(Effect.mapError(unavailable));
+    }),
+  ),
   prompt_snippets_restore: McpToolAccess.writesEnvironment((input, check) =>
     Effect.gen(function* () {
       yield* access;

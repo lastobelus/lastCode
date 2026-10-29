@@ -2,6 +2,7 @@ import * as Schema from "effect/Schema";
 
 export const PromptSnippet = Schema.Struct({
   id: Schema.String,
+  userEdited: Schema.optional(Schema.Literal(true)),
   title: Schema.String,
   text: Schema.String,
   useCount: Schema.Number,
@@ -34,3 +35,10 @@ export class PromptSnippetsError extends Schema.TaggedError<PromptSnippetsError>
 
 export const PromptSnippetRestoreInput = Schema.Struct({ snippetId: Schema.String });
 export const PromptSnippetDismissInput = Schema.Struct({ snippetId: Schema.String });
+
+export const PromptSnippetSaveInput = Schema.Struct({
+  snippetId: Schema.optional(Schema.String),
+  title: Schema.String,
+  text: Schema.String,
+});
+export type PromptSnippetSaveInput = typeof PromptSnippetSaveInput.Type;

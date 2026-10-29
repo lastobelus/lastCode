@@ -1,6 +1,8 @@
 import * as PromptSnippets from "../../../promptSnippets/PromptSnippets.ts";
 import {
   PromptSnippetsState,
+  PromptSnippet,
+  PromptSnippetSaveInput,
   PromptSnippetUseInput,
   PromptSnippetDismissInput,
   PromptSnippetRestoreInput,
@@ -111,6 +113,13 @@ const EnvironmentPauseResumeTool = Tool.make("t3_environment_pause_resume", {
   description:
     "Resume this environment when explicitly instructed. Releases the durable automatic wake gate and sends 'resume' to the threads that received Pause. Requires a live full-access/default calling thread or full-access client. Pending pause deliveries must settle first. Failures stay available for retry; archived or deleted recipients can finish recovery without a message.",
 }).annotate(Tool.Destructive, true);
+const PromptSnippetsSaveTool = Tool.make("prompt_snippets_save", {
+  ...shared,
+  description:
+    "Create a common prompt, or edit one by passing its snippetId; editing keeps its learned usage. Title is at most 100 characters and text at most 4000, and text must not match another saved or dismissed prompt. Discovery never rewrites or merges a prompt saved here.",
+  parameters: PromptSnippetSaveInput,
+  success: PromptSnippet,
+}).annotate(Tool.Destructive, false);
 const PromptSnippetsListTool = Tool.make("prompt_snippets_list", {
   ...shared,
   description:
@@ -149,6 +158,7 @@ const PromptSnippetsRestoreTool = Tool.make("prompt_snippets_restore", {
   success: Schema.Void,
 }).annotate(Tool.Destructive, false);
 export const EnvironmentToolkit = Toolkit.make(
+  PromptSnippetsSaveTool,
   PromptSnippetsRestoreTool,
   PromptSnippetsDismissTool,
   PromptSnippetsListTool,

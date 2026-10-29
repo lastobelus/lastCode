@@ -1,4 +1,6 @@
 import {
+  PromptSnippet,
+  PromptSnippetSaveInput,
   PromptSnippetsState,
   PromptSnippetUseInput,
   PromptSnippetDismissInput,
@@ -639,6 +641,7 @@ export const WS_METHODS = {
   serverClaimUpdateActivation: "server.claimUpdateActivation",
   serverGetUpdateDrainStatus: "server.getUpdateDrainStatus",
 
+  promptSnippetsSave: "promptSnippets.save",
   promptSnippetsList: "promptSnippets.list",
   promptSnippetsRecordUse: "promptSnippets.recordUse",
   promptSnippetsRestore: "promptSnippets.restore",
@@ -2270,6 +2273,11 @@ export class RpcScopeAuthorization extends RpcMiddleware.Service<RpcScopeAuthori
 ) {}
 
 export const WsRpcGroup = RpcGroup.make(
+  Rpc.make(WS_METHODS.promptSnippetsSave, {
+    payload: PromptSnippetSaveInput,
+    success: PromptSnippet,
+    error: Schema.Union([PromptSnippetsError, EnvironmentAuthorizationError]),
+  }),
   Rpc.make(WS_METHODS.promptSnippetsList, {
     payload: Schema.Struct({}),
     success: PromptSnippetsState,
