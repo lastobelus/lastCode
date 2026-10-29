@@ -66,7 +66,14 @@ interface OwnedDevRunner {
   readonly state: DevRunnerState;
 }
 
+type SpawnDevRunner = (
+  command: string,
+  args: ReadonlyArray<string>,
+  options: NodeChildProcess.SpawnOptions,
+) => NodeChildProcess.ChildProcess;
+
 interface PublicDocsFixtureRuntime {
+  readonly spawnDevRunner: SpawnDevRunner;
   readonly resolveSourceCommit: (requestedCommit: string) => Promise<string>;
   readonly waitForShutdown: (child: NodeChildProcess.ChildProcess) => Promise<void>;
   readonly writeReady: (ready: Record<string, unknown>) => void;
@@ -253,8 +260,12 @@ function observeDevRunnerOutput(state: DevRunnerState, chunk: string): void {
   if (pairingUrl !== undefined) state.pairingUrl = pairingUrl;
 }
 
-function startDevRunner(baseDir: string, environment: NodeJS.ProcessEnv): OwnedDevRunner {
-  const child = NodeChildProcess.spawn(
+function startDevRunner(
+  baseDir: string,
+  environment: NodeJS.ProcessEnv,
+  spawn: SpawnDevRunner = NodeChildProcess.spawn,
+): OwnedDevRunner {
+  const child = spawn(
     NodeProcess.execPath,
     ["scripts/dev-runner.ts", "dev", "--home-dir", baseDir],
     {
@@ -364,7 +375,7 @@ export async function runPublicDocsFixture(
     profile: "public-docs",
   });
 
-  const server = startDevRunner(baseDir, environment);
+  const server = startDevRunner(baseDir, environment, runtime.spawnDevRunner);
   try {
     await waitForReadiness(
       server,
