@@ -32,4 +32,5 @@ export class PromptSnippetsError extends Schema.TaggedError<PromptSnippetsError>
   }
 }
 
+export const PromptSnippetRestoreInput = Schema.Struct({ snippetId: Schema.String });
 export const PromptSnippetDismissInput = Schema.Struct({ snippetId: Schema.String });

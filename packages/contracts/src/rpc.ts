@@ -2,6 +2,7 @@ import {
   PromptSnippetsState,
   PromptSnippetUseInput,
   PromptSnippetDismissInput,
+  PromptSnippetRestoreInput,
   PromptSnippetsError,
 } from "./promptSnippets.ts";
 import {
@@ -656,6 +657,7 @@ export const WS_METHODS = {
 
   promptSnippetsList: "promptSnippets.list",
   promptSnippetsRecordUse: "promptSnippets.recordUse",
+  promptSnippetsRestore: "promptSnippets.restore",
   promptSnippetsDismiss: "promptSnippets.dismiss",
   promptSnippetsDiscover: "promptSnippets.discover",
   scheduledTasksSubscribe: "scheduledTasks.subscribe",
@@ -2336,6 +2338,11 @@ export const WsRpcGroup = RpcGroup.make(
   Rpc.make(WS_METHODS.promptSnippetsList, {
     payload: Schema.Struct({}),
     success: PromptSnippetsState,
+    error: Schema.Union([PromptSnippetsError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WS_METHODS.promptSnippetsRestore, {
+    payload: PromptSnippetRestoreInput,
+    success: Schema.Void,
     error: Schema.Union([PromptSnippetsError, EnvironmentAuthorizationError]),
   }),
   Rpc.make(WS_METHODS.promptSnippetsDismiss, {

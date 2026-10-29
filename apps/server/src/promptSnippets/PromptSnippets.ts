@@ -140,6 +140,7 @@ export class PromptSnippets extends Context.Service<
       snippetId: string;
       query: string;
     }) => Effect.Effect<void, PromptSnippetsError>;
+    readonly restore: (input: { snippetId: string }) => Effect.Effect<void, PromptSnippetsError>;
     readonly dismiss: (input: { snippetId: string }) => Effect.Effect<void, PromptSnippetsError>;
     readonly discover: () => Effect.Effect<PromptSnippetsState, PromptSnippetsError>;
     readonly discoverIfDue: Effect.Effect<number, PromptSnippetsError>;
@@ -294,6 +295,21 @@ const make = Effect.gen(function* () {
       return Math.max(
         1_000,
         DAY - (state.lastAttemptAt === null ? 0 : now - Date.parse(state.lastAttemptAt)),
+      );
+    }),
+    restore: Effect.fn("PromptSnippets.restore")(function* (input) {
+      yield* mutation.withPermits(1)(
+        Effect.gen(function* () {
+          if (state.snippets.some((snippet) => snippet.id === input.snippetId)) return;
+          const snippet = state.dismissed.find((snippet) => snippet.id === input.snippetId);
+          if (!snippet || state.snippets.length >= 100)
+            return yield* new PromptSnippetsError({ operation: "restore" });
+          yield* save({
+            ...state,
+            snippets: [...state.snippets, snippet],
+            dismissed: state.dismissed.filter((entry) => entry.id !== snippet.id),
+          });
+        }),
       );
     }),
     dismiss: Effect.fn("PromptSnippets.dismiss")(function* (input) {

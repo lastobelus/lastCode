@@ -248,10 +248,13 @@ const savedSnippet: PromptSnippet = {
   lastUsedAt: null,
   queryUses: [{ query: "review", count: 4 }],
 };
-const fixtureJson = (snippets: readonly PromptSnippet[]) =>
+const fixtureJson = (
+  snippets: readonly PromptSnippet[],
+  dismissed: readonly PromptSnippet[] = [],
+) =>
   JSON.stringify({
     snippets,
-    dismissed: [],
+    dismissed,
     discovering: false,
     lastError: null,
     lastAttemptAt: null,
@@ -328,11 +331,22 @@ it.effect(
     Effect.gen(function* () {
       const kept = { ...savedSnippet, id: "kept", text: "Review the server only; do not merge." };
       yield* seedLibrary([savedSnippet, kept]);
+      let restored = false;
       const generation = Layer.mock(TextGeneration.TextGeneration)({
         generatePromptSnippets: (input) => {
-          expect(input.dismissed).toEqual([
-            { id: savedSnippet.id, title: savedSnippet.title, text: savedSnippet.text },
-          ]);
+          expect(input.dismissed).toEqual(
+            restored
+              ? []
+              : [{ id: savedSnippet.id, title: savedSnippet.title, text: savedSnippet.text }],
+          );
+          if (restored) {
+            expect(input.existing).toContainEqual({
+              id: savedSnippet.id,
+              title: savedSnippet.title,
+              text: savedSnippet.text,
+            });
+            return Effect.succeed({ snippets: [] });
+          }
           return Effect.succeed({
             snippets: [
               {
@@ -373,6 +387,22 @@ it.effect(
           title: "Scoped review",
         });
         expect(result.snippets.some((entry) => entry.text.includes("REVIEW this"))).toBe(false);
+        yield* service.restore({ snippetId: savedSnippet.id });
+        yield* service.restore({ snippetId: savedSnippet.id });
+        expect(
+          (yield* service.list).snippets.find((entry) => entry.id === savedSnippet.id),
+        ).toEqual(savedSnippet);
+        restored = true;
+      }).pipe(Effect.provide(serviceLayer));
+      yield* Effect.gen(function* () {
+        const service = yield* PromptSnippets.PromptSnippets;
+        expect(
+          (yield* service.list).snippets.find((entry) => entry.id === savedSnippet.id),
+        ).toEqual(savedSnippet);
+        expect((yield* service.discover()).lastError).toBeNull();
+        expect(
+          (yield* service.list).snippets.find((entry) => entry.id === savedSnippet.id),
+        ).toEqual(savedSnippet);
       }).pipe(Effect.provide(serviceLayer));
     }).pipe(Effect.provide(testDependencies())),
 );
@@ -477,4 +507,35 @@ it.effect(
         Effect.provideService(FileSystem.FileSystem, fileSystem),
       );
     }).pipe(Effect.provide(testDependencies())),
+);
+
+it.effect("preserves the full library and dismissal when restore has no free slot", () =>
+  Effect.gen(function* () {
+    const full = Array.from({ length: 100 }, (_, index) => ({
+      ...savedSnippet,
+      id: `full-${index}`,
+      text: `Review synthetic module ${index}; do not merge.`,
+    }));
+    yield* seedLibrary(full);
+    const fs = yield* FileSystem.FileSystem;
+    const config = yield* ServerConfig.ServerConfig;
+    const filename = `${config.stateDir}/prompt-snippets.json`;
+    yield* fs.writeFileString(filename, fixtureJson(full, [savedSnippet]));
+    yield* Effect.gen(function* () {
+      const service = yield* PromptSnippets.PromptSnippets;
+      const before = yield* fs.readFileString(filename);
+      yield* service.restore({ snippetId: full[0]!.id });
+      expect(
+        yield* service.restore({ snippetId: savedSnippet.id }).pipe(Effect.flip),
+      ).toMatchObject({ _tag: "PromptSnippetsError", operation: "restore" });
+      expect(yield* fs.readFileString(filename)).toBe(before);
+      expect((yield* service.list).snippets).toEqual(full);
+      yield* service.dismiss({ snippetId: full[0]!.id });
+      yield* service.restore({ snippetId: savedSnippet.id });
+      expect((yield* service.list).snippets).toHaveLength(100);
+      expect((yield* service.list).snippets.find((entry) => entry.id === savedSnippet.id)).toEqual(
+        savedSnippet,
+      );
+    }).pipe(Effect.provide(PromptSnippets.layer));
+  }).pipe(Effect.provide(testDependencies())),
 );

@@ -2,11 +2,14 @@ import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId, PromptSnippet, ResolvedKeybindingsConfig } from "@t3tools/contracts";
 import { searchPromptSnippets } from "@t3tools/shared/promptSnippetSearch";
 import { MessageSquareTextIcon } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { AsyncResult } from "effect/reactivity";
+import { toastManager } from "../ui/toast";
 
 import { promptSnippetsEnvironment } from "../../state/promptSnippets";
 import { useEnvironmentQuery } from "../../state/query";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { useStableCallback } from "../../hooks/useStableCallback";
 import { CommandPaletteContent } from "../CommandPaletteContent";
 import type { CommandPaletteActionItem } from "../CommandPalette.logic";
 import { CommandPaletteResults } from "../CommandPaletteResults";
@@ -25,6 +28,7 @@ export function PromptSnippetsDialog(props: {
   const recordUse = useAtomCommand(promptSnippetsEnvironment.recordUse, { reportFailure: false });
   const discover = useAtomCommand(promptSnippetsEnvironment.discover);
   const dismiss = useAtomCommand(promptSnippetsEnvironment.dismiss);
+  const restore = useAtomCommand(promptSnippetsEnvironment.restore);
   const canDismiss = useAtomValue(
     promptSnippetsEnvironment.dismiss.permissionAtom(props.environmentId),
   );
@@ -58,18 +62,36 @@ export function PromptSnippetsDialog(props: {
               void dismiss({
                 environmentId: props.environmentId,
                 input: { snippetId: snippet.id },
+              }).then((result) => {
+                if (!AsyncResult.isSuccess(result)) return;
+                const id = toastManager.add({
+                  type: "info",
+                  title: "Prompt dismissed",
+                  actionProps: {
+                    children: "Undo",
+                    onClick: () => {
+                      void restore({
+                        environmentId: props.environmentId,
+                        input: { snippetId: snippet.id },
+                      }).then((restored) => {
+                        if (AsyncResult.isSuccess(restored)) toastManager.close(id);
+                      });
+                    },
+                  },
+                });
               });
             }
           : undefined
       }
       onSelect={(snippet, query) => {
-        if (!props.onInsert(snippet.text)) return;
+        if (!props.onInsert(snippet.text)) return false;
         props.onClose();
         if (canLearn)
           void recordUse({
             environmentId: props.environmentId,
             input: { snippetId: snippet.id, query },
           });
+        return true;
       }}
     />
   );
@@ -82,13 +104,23 @@ export function PromptSnippetsPicker(props: {
   readonly discovering: boolean;
   readonly error: string | null;
   readonly onClose: () => void;
-  readonly onSelect: (snippet: PromptSnippet, query: string) => void;
+  readonly onSelect: (snippet: PromptSnippet, query: string) => boolean | void;
   readonly onDiscover?: (() => void) | undefined;
   readonly onDismiss?: ((snippet: PromptSnippet) => void) | undefined;
   readonly onReturnFocus: () => void;
 }) {
   const [query, setQuery] = useState("");
   const [highlighted, setHighlighted] = useState<string | null>(null);
+  const returnFocusOnCloseRef = useRef(true);
+  const selectSnippet = useStableCallback((snippet: PromptSnippet) => {
+    // Refocusing the old editor during close can overwrite an insertion still committing.
+    returnFocusOnCloseRef.current = false;
+    if (props.onSelect(snippet, query) === false) returnFocusOnCloseRef.current = true;
+  });
+  const returnFocus = useStableCallback(() => {
+    if (returnFocusOnCloseRef.current) props.onReturnFocus();
+    return false as const;
+  });
   const results = searchPromptSnippets(props.snippets, query);
   const selected = results.find((snippet) => snippet.id === highlighted) ?? results[0];
   const items: CommandPaletteActionItem[] = results.map((snippet) => ({
@@ -98,7 +130,7 @@ export function PromptSnippetsPicker(props: {
     description: <span className="line-clamp-2 whitespace-pre-wrap">{snippet.text}</span>,
     searchTerms: [],
     icon: <MessageSquareTextIcon className="size-4" />,
-    run: async () => props.onSelect(snippet, query),
+    run: async () => selectSnippet(snippet),
   }));
   return (
     <CommandDialog
@@ -111,10 +143,7 @@ export function PromptSnippetsPicker(props: {
         aria-label="Common prompts"
         data-prompt-snippets="true"
         className="overflow-hidden"
-        finalFocus={() => {
-          props.onReturnFocus();
-          return false;
-        }}
+        finalFocus={returnFocus}
         onBackdropPointerDown={props.onClose}
       >
         <CommandPaletteContent

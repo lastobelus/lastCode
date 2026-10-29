@@ -24,6 +24,14 @@ export function createPromptSnippetsEnvironmentAtoms<R, E>(
           registry.refresh(list({ environmentId: target.environmentId, input: {} })),
         ),
     }),
+    restore: createEnvironmentRpcCommand(runtime, {
+      label: "prompt-snippets:restore",
+      tag: WS_METHODS.promptSnippetsRestore,
+      onSuccess: (target, registry) =>
+        Effect.sync(() =>
+          registry.refresh(list({ environmentId: target.environmentId, input: {} })),
+        ),
+    }),
     dismiss: createEnvironmentRpcCommand(runtime, {
       label: "prompt-snippets:dismiss",
       tag: WS_METHODS.promptSnippetsDismiss,

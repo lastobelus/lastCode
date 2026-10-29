@@ -2,12 +2,14 @@ import type { EnvironmentId, PromptSnippet } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import { searchPromptSnippets } from "@t3tools/shared/promptSnippetSearch";
 import { useRef, useState } from "react";
+import { AsyncResult } from "effect/reactivity";
 import { Pressable, ScrollView, View, type TextInputInstance } from "react-native";
 
 import { AppText as Text } from "../../components/ui/AppText";
 import { SearchField } from "../../components/ui/SearchField";
 import { Sheet } from "../../components/ui/Sheet";
 import { Button } from "../../components/ui/Button";
+import { Toast } from "../../components/ui/Toast";
 import { promptSnippetsEnvironment } from "../../state/promptSnippets";
 import { useEnvironmentQuery } from "../../state/query";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -25,6 +27,8 @@ export function PromptSnippetSheet(props: {
   const recordUse = useAtomCommand(promptSnippetsEnvironment.recordUse, { reportFailure: false });
   const discover = useAtomCommand(promptSnippetsEnvironment.discover);
   const dismiss = useAtomCommand(promptSnippetsEnvironment.dismiss);
+  const restore = useAtomCommand(promptSnippetsEnvironment.restore);
+  const [dismissed, setDismissed] = useState<string | null>(null);
   const canDismiss = useAtomValue(
     promptSnippetsEnvironment.dismiss.permissionAtom(props.environmentId),
   );
@@ -52,6 +56,23 @@ export function PromptSnippetSheet(props: {
           value={query}
           onChangeText={setQuery}
         />
+        {dismissed ? (
+          <Toast
+            message="Prompt dismissed"
+            action={{
+              label: "Undo",
+              onPress: () => {
+                void restore({
+                  environmentId: props.environmentId,
+                  input: { snippetId: dismissed },
+                }).then((result) => {
+                  if (AsyncResult.isSuccess(result)) setDismissed(null);
+                });
+              },
+            }}
+            onDismiss={() => setDismissed(null)}
+          />
+        ) : null}
         {canDiscover ? (
           <Button
             label="Find new prompts"
@@ -104,6 +125,8 @@ export function PromptSnippetSheet(props: {
                   void dismiss({
                     environmentId: props.environmentId,
                     input: { snippetId: snippet.id },
+                  }).then((result) => {
+                    if (AsyncResult.isSuccess(result)) setDismissed(snippet.id);
                   });
                 }}
               />
