@@ -2072,6 +2072,7 @@ const layerCoreWsRpc = (
             request: input,
             search: threadSearch.search,
             searchOlderSettled: threadSearch.searchOlderSettled,
+            searchMentionCandidates: threadSearch.searchMentionCandidates,
             sql,
             readThreads: (threadIds) =>
               threadManagement.readShellSnapshot({ location: "active", threadIds }),
@@ -3655,7 +3656,7 @@ const layerCoreWsRpc = (
             const environmentId = yield* serverEnvironment.getEnvironmentId;
             // Without a calling thread, forwarded reads stay in this environment.
             return (input) =>
-              threadReads.readThread(
+              threadReads.readThreadLocal(
                 {
                   environmentId,
                   capabilities: new Set(["orchestration"]),

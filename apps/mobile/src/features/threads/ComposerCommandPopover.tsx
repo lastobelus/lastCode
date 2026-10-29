@@ -244,6 +244,13 @@ export const ComposerCommandPopover = memo(function ComposerCommandPopover(
           </Text>
         </View>
       )}
+      {props.items.length > 0 && props.error ? (
+        <View className="px-3.5 py-2.5">
+          <Text accessibilityRole="text" className="text-xs text-foreground-tertiary">
+            {props.error}
+          </Text>
+        </View>
+      ) : null}
     </PopoverSurface>
   );
 });

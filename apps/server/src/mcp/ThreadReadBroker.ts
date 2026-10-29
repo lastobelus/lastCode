@@ -7,6 +7,7 @@ import {
   type OrchestratorMcpThreadReadResult,
   type ThreadReadRequest,
   type ThreadReadResponse,
+  type ThreadReadFailureReason,
 } from "@t3tools/contracts";
 import type * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
@@ -61,8 +62,9 @@ export class ThreadReadBroker extends Context.Service<
 const unavailable = () =>
   new OrchestratorMcpFailure({
     code: "environment_unavailable",
+    threadReadReason: "unavailable",
     message:
-      "The local thread was not found, and the other environments could not all be checked. Keep a T3 client connected to the environments and retry; this does not mean the thread is missing.",
+      "The requested thread could not be checked through the initiating client. Reconnect that client to the required environments and retry. If this run no longer has client access, send a new message from that client. This does not mean the thread is missing.",
   });
 
 const bindingIdleMillis = 7 * 24 * 60 * 60 * 1000;
@@ -153,6 +155,7 @@ const make = Effect.gen(function* () {
       input: OrchestratorMcpThreadReadInput;
       clients: Set<string>;
       incomplete: boolean;
+      failure?: ThreadReadFailureReason;
       result: Deferred.Deferred<OrchestratorMcpThreadReadResult, OrchestratorMcpFailure>;
     }
   >();
@@ -162,12 +165,21 @@ const make = Effect.gen(function* () {
     if (entry === undefined || entry.clients.size > 0) return;
     yield* Deferred.fail(
       entry.result,
-      entry.incomplete
+      entry.failure !== "permission_denied" && (entry.incomplete || entry.failure === "unavailable")
         ? unavailable()
-        : new OrchestratorMcpFailure({
-            code: "thread_not_found",
-            message: `Thread ${entry.input.threadId} was not found in this environment or the client's other connected environments.`,
-          }),
+        : entry.failure !== undefined
+          ? new OrchestratorMcpFailure({
+              code: entry.failure === "permission_denied" ? "capability_denied" : "invalid_request",
+              threadReadReason: entry.failure,
+              message:
+                entry.failure === "permission_denied"
+                  ? "The source connection does not permit reading this thread. Restore read permission on that connection and retry."
+                  : "Update the source environment to read this thread reference.",
+            })
+          : new OrchestratorMcpFailure({
+              code: "thread_not_found",
+              message: `Thread ${entry.input.threadId} was not found in this environment or the client's other connected environments.`,
+            }),
     );
   });
 
@@ -205,6 +217,15 @@ const make = Effect.gen(function* () {
           message: "This client does not own the thread read request.",
         });
       }
+      if (
+        response.failure !== undefined &&
+        (entry.input.environmentId !== response.failure.environmentId || response.result !== null)
+      ) {
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "The failure does not match the requested thread environment.",
+        });
+      }
       if (response.result !== null) {
         if (
           response.result.thread.threadId !== entry.input.threadId ||
@@ -217,11 +238,16 @@ const make = Effect.gen(function* () {
               "The thread read response does not match the requested thread and environment.",
           });
         }
-        yield* Deferred.succeed(entry.result, response.result);
+        yield* Deferred.succeed(entry.result, { ...response.result, readVia: "client" });
         return;
       }
       entry.clients.delete(response.connectionId);
       entry.incomplete ||= response.unavailableEnvironmentIds.length > 0;
+      if (response.failure !== undefined) {
+        const reason = response.failure.reason;
+        if (reason === "unavailable") entry.incomplete = true;
+        if (entry.failure === undefined || reason === "permission_denied") entry.failure = reason;
+      }
       yield* finishMiss(response.requestId);
     },
   );
@@ -232,6 +258,7 @@ const make = Effect.gen(function* () {
       if (sessionId === undefined) {
         return yield* new OrchestratorMcpFailure({
           code: "environment_unavailable",
+          threadReadReason: "unavailable",
           message:
             "This run has no connected client authorized to read other environments. Send a new message from the client connected to those environments and retry.",
         });

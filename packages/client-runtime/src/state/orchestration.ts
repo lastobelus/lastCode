@@ -6,6 +6,7 @@ import {
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
+import * as Semaphore from "effect/Semaphore";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import type { HttpClient } from "effect/http";
 import { Atom } from "effect/reactivity";
@@ -23,7 +24,7 @@ import type { EnvironmentRegistry } from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import * as RemoteEnvironmentAuthorization from "../authorization/service.ts";
 import * as ManagedRelayDpopSigner from "../relay/managedRelay.ts";
-import { EnvironmentRpcUnavailableError } from "../rpc/client.ts";
+import { EnvironmentRpcUnavailableError, request } from "../rpc/client.ts";
 import { fetchEnvironmentThreadTranscript } from "./threadTranscriptHttp.ts";
 
 export function createOrchestrationEnvironmentAtoms<R, E>(
@@ -36,6 +37,7 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
     >;
   } = {},
 ) {
+  const mentionSearches = Semaphore.makeUnsafe(4);
   const onCheckpointDiffAnswer =
     options.onCheckpointDiffAnswer === undefined
       ? {}
@@ -139,6 +141,14 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
       tag: ORCHESTRATION_V2_WS_METHODS.searchThreads,
       staleTimeMs: 30_000,
       idleTtlMs: 60_000,
+    }),
+    threadMentionSearch: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:orchestration:thread-mention-search",
+      tag: ORCHESTRATION_V2_WS_METHODS.searchThreads,
+      staleTimeMs: 30_000,
+      idleTtlMs: 0,
+      execute: (input) =>
+        request(ORCHESTRATION_V2_WS_METHODS.searchThreads, input).pipe(mentionSearches.withPermit),
     }),
     archivedShellSnapshot: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:orchestration:archived-shell-snapshot",

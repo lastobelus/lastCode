@@ -1,5 +1,7 @@
 import {
   AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
+  ComposerContextId,
   CommandId,
   EnvironmentId,
   MessageId,
@@ -42,7 +44,7 @@ const state = vi.hoisted(() => ({
   config: {
     shellThreadFamilies: false,
     providers: [{ instanceId: "codex", driver: "codex" }],
-    environment: { capabilities: {} },
+    environment: { capabilities: { universalThreadReferences: true } },
   },
 }));
 vi.mock("react-native", () => ({ Alert: { alert: vi.fn() } }));
@@ -54,10 +56,10 @@ vi.mock("@t3tools/client-runtime/state/runtime", async (importOriginal) => ({
 vi.mock("./session", async () => {
   const { Atom } = await import("effect/reactivity");
   const { appAtomRegistry } = await import("./atom-registry");
-  // A session's state is reduced to whether it grants the operate scope.
+  // A session's state is reduced to whether it grants read and operate scopes.
   const sessionStateAtom = Atom.family((_id: string) => Atom.make(false).pipe(Atom.keepAlive));
   const sessionHasScope = (granted: boolean, scope: string) =>
-    granted && scope === AuthOrchestrationOperateScope;
+    granted && (scope === AuthOrchestrationOperateScope || scope === AuthOrchestrationReadScope);
   return {
     environmentSession: { sessionStateAtom },
     sessionHasScope,
@@ -73,7 +75,10 @@ vi.mock("./workspace", async () => {
   const { Atom } = await import("effect/reactivity");
   return {
     workspaceConnections: {
-      environmentsAtom: Atom.make([{ environmentId: "secondary", connectionState: "connected" }]),
+      environmentsAtom: Atom.make([
+        { environmentId: "secondary", connectionState: "connected" },
+        { environmentId: "source", connectionState: "connected" },
+      ]),
     },
   };
 });
@@ -319,6 +324,37 @@ describe("queued PR checkout", () => {
     await runDrain();
     expect(state.start).not.toHaveBeenCalled();
     expect(remaining()).toEqual([edited]);
+  });
+});
+
+describe("queued thread-reference delivery", () => {
+  it("restores a queued message when its foreign source no longer grants read access", async () => {
+    setOperateGrant("secondary", true);
+    setOperateGrant("source", false);
+    const queued = message({
+      text: "Compare with [Remote discussion](t3-context://v1/thread/thread_remote)",
+      context: {
+        version: 1,
+        records: [
+          {
+            version: 1,
+            kind: "thread",
+            contextId: ComposerContextId.make("thread_remote"),
+            label: "Remote discussion",
+            environmentId: EnvironmentId.make("source"),
+            threadId: ThreadId.make("remote-thread"),
+            title: "Remote discussion",
+          },
+        ],
+      },
+    });
+    await state.manager.enqueue(queued);
+
+    await runDrain();
+
+    expect(state.start).not.toHaveBeenCalled();
+    expect(remaining()).toEqual([]);
+    expect(state.draftText).toContain(queued.text);
   });
 });
 afterEach(() => {

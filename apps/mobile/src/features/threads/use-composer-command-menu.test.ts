@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import { ProviderDriverKind } from "@t3tools/contracts";
 
 vi.mock("react-native", () => ({ Alert: { alert: vi.fn() } }));
+vi.mock("../../state/environments", () => ({ useEnvironments: vi.fn() }));
+vi.mock("../../state/session", () => ({ useEnvironmentsWithScope: vi.fn() }));
 
 vi.mock("../../state/queries", () => ({
   useComposerPathSearch: () => ({ entries: [], isPending: false }),

@@ -67,7 +67,6 @@ import { appAtomRegistry } from "../../state/atom-registry";
 import type { ComposerDocumentAttachment } from "../../lib/composerContext";
 import { useProject, useThreadShells } from "../../state/entities";
 import { useMentionableEnvironments } from "../../state/environments";
-import { useLinkedEnvironments } from "../../state/peerLinks";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 
 import { AppText as Text } from "../../components/ui/AppText";
@@ -546,7 +545,6 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
     environments: offersLinkedEnvironments(props.serverConfig)
       ? mentionableEnvironments
       : NO_MACHINES,
-    linkedEnvironments: useLinkedEnvironments(props.environmentId),
     currentThreadId: props.selectedThread.id,
     projectCwd: props.projectCwd,
     pullRequestProjectId: props.serverConfig ? (project?.id ?? null) : null,

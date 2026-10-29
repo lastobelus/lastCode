@@ -11,6 +11,7 @@ import {
   type OrchestrationV2SearchThreadsInput,
   type OrchestrationV2SearchThreadsResult,
   type OrchestrationV2ThreadShellSnapshot,
+  type OrchestrationV2ThreadMentionCandidate,
   ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -21,6 +22,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
+import type * as SqlError from "effect/sql/SqlError";
 import * as SqlSchema from "effect/sql/SqlSchema";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import {
@@ -260,6 +262,19 @@ export class ThreadSearch extends Context.Service<
     readonly searchThreads: (
       input: OrchestrationSearchThreadsInput & { readonly projectId?: ProjectId | undefined },
     ) => Effect.Effect<{ readonly matches: ReadonlyArray<ThreadSearchHit> }, ThreadSearchError>;
+    /** Lightweight cross-project reference candidates, without sidebar eligibility filters. */
+    readonly searchMentionCandidates: (input: {
+      readonly query: string;
+      readonly threadIds?: ReadonlyArray<ThreadId> | undefined;
+      readonly limit?: number | undefined;
+      readonly environmentLabel?: string | undefined;
+    }) => Effect.Effect<
+      {
+        readonly mentionCandidates: ReadonlyArray<OrchestrationV2ThreadMentionCandidate>;
+        readonly mentionsTruncated: boolean;
+      },
+      ThreadSearchError
+    >;
     /**
      * The settled threads before `before` that clients omitting older settled threads should
      * receive for a query: the best title, branch, pull request and project matches, ranked as
@@ -279,6 +294,13 @@ export class ThreadSearch extends Context.Service<
 // Rows a client gets per search: enough for the shown results without sending every match.
 const OLDER_SETTLED_TITLE_ROWS = 15;
 const OLDER_SETTLED_MESSAGE_ROWS = 5;
+const MENTION_CANDIDATE_FETCH_LIMIT = 501;
+
+const MentionCandidateRow = Schema.Struct({
+  thread: Schema.fromJsonString(OrchestrationV2AppThreadJson),
+  projectTitle: Schema.String,
+  latestUserMessageAt: Schema.NullOr(IsoDateTime),
+});
 
 // Only the fields the palette scorer reads, so an interactive search does not decode payloads.
 const OlderSettledTitleRow = Schema.Struct({
@@ -335,6 +357,38 @@ export const make = Effect.gen(function* () {
           IS NOT 'subagent'
         AND json_extract(threads.payload_json, '$.lineage.sideChat') IS NOT 1
         AND (${projectId} IS NULL OR threads.project_id = ${projectId})
+    `,
+  });
+
+  const mentionCandidates = SqlSchema.findAll({
+    Request: Schema.Struct({
+      query: Schema.String,
+      threadIds: Schema.NullOr(TokenList),
+      environmentLabel: Schema.String,
+    }),
+    Result: MentionCandidateRow,
+    execute: ({ query, threadIds, environmentLabel }) => sql`
+      SELECT
+        threads.payload_json AS thread,
+        projects.title AS "projectTitle",
+        ${latestUserMessageAt(sql)} AS "latestUserMessageAt"
+      FROM orchestration_v2_projection_threads AS threads
+      INNER JOIN projection_projects AS projects
+        ON projects.project_id = threads.project_id
+      WHERE threads.deleted_at IS NULL
+        AND projects.deleted_at IS NULL
+        AND (
+          (${threadIds} IS NOT NULL
+            AND threads.thread_id IN (SELECT value FROM json_each(${threadIds})))
+          OR (${threadIds} IS NULL AND (
+            instr(lower(json_extract(threads.payload_json, '$.title')), lower(${query})) > 0
+            OR instr(lower(COALESCE(json_extract(threads.payload_json, '$.branch'), '')), lower(${query})) > 0
+            OR instr(lower(projects.title), lower(${query})) > 0
+            OR (length(${environmentLabel}) > 0
+              AND instr(lower(${environmentLabel}), lower(${query})) > 0)
+          ))
+        )
+      LIMIT ${MENTION_CANDIDATE_FETCH_LIMIT}
     `,
   });
 
@@ -575,6 +629,70 @@ export const make = Effect.gen(function* () {
     };
   });
 
+  const searchMentionCandidates: ThreadSearch["Service"]["searchMentionCandidates"] = Effect.fn(
+    "ThreadSearch.searchMentionCandidates",
+  )(function* ({ query, threadIds, limit = 50, environmentLabel = "" }) {
+    const exactIds = threadIds === undefined ? null : threadIds;
+    const candidates = yield* read(
+      mentionCandidates({
+        query,
+        threadIds: exactIds,
+        environmentLabel,
+      }),
+    );
+    const candidateOf = (
+      row: typeof MentionCandidateRow.Type,
+    ): OrchestrationV2ThreadMentionCandidate => ({
+      id: row.thread.id,
+      projectId: row.thread.projectId,
+      projectTitle: row.projectTitle,
+      title: row.thread.title,
+      branch: row.thread.branch,
+      createdAt: DateTime.formatIso(row.thread.createdAt),
+      updatedAt: DateTime.formatIso(row.thread.updatedAt),
+      latestUserMessageAt: row.latestUserMessageAt,
+      opens: row.thread.opens ?? null,
+      archivedAt: row.thread.archivedAt === null ? null : DateTime.formatIso(row.thread.archivedAt),
+      lineage: row.thread.lineage,
+    });
+    if (exactIds !== null) {
+      const byId = new Map(candidates.map((row) => [row.thread.id, candidateOf(row)]));
+      return {
+        mentionCandidates: exactIds.flatMap((id) => {
+          const row = byId.get(id);
+          return row === undefined ? [] : [row];
+        }),
+        mentionsTruncated: false,
+      };
+    }
+    const normalizedQuery = foldSearchQuery(query);
+    const now = DateTime.toEpochMillis(yield* DateTime.now);
+    const ranked = rankSearchItems(candidates, (row, options) =>
+      scoreThreadSearch(
+        normalizedQuery,
+        {
+          id: row.thread.id,
+          title: row.thread.title,
+          branch: row.thread.branch,
+          projectTitle: row.projectTitle,
+          environmentLabel,
+          pullRequests: threadSearchPullRequests(row.thread),
+          activityAt: Date.parse(
+            row.latestUserMessageAt ?? DateTime.formatIso(row.thread.createdAt),
+          ),
+          opens: row.thread.opens ?? null,
+        },
+        now,
+        { ...options, picks: false },
+      ),
+    );
+    return {
+      mentionCandidates: ranked.slice(0, limit).map(({ item }) => candidateOf(item)),
+      mentionsTruncated:
+        candidates.length >= MENTION_CANDIDATE_FETCH_LIMIT || ranked.length > limit,
+    };
+  });
+
   const searchOlderSettled: ThreadSearch["Service"]["searchOlderSettled"] = Effect.fn(
     "ThreadSearch.searchOlderSettled",
   )(function* ({ query, before, projectIds, environmentLabel, messageThreadIds }) {
@@ -624,7 +742,7 @@ export const make = Effect.gen(function* () {
     ];
   });
 
-  return ThreadSearch.of({ search, searchThreads, searchOlderSettled });
+  return ThreadSearch.of({ search, searchThreads, searchMentionCandidates, searchOlderSettled });
 });
 
 export const layer = Layer.effect(ThreadSearch, make);
@@ -643,14 +761,45 @@ export const searchThreadsWithOlderSettledRows = Effect.fn(
   readonly searchOlderSettled: (
     input: Parameters<ThreadSearch["Service"]["searchOlderSettled"]>[0],
   ) => Effect.Effect<ReadonlyArray<ThreadId>, E2>;
+  readonly searchMentionCandidates: (input: {
+    readonly query: string;
+    readonly threadIds?: ReadonlyArray<ThreadId> | undefined;
+    readonly limit?: number | undefined;
+    readonly environmentLabel?: string | undefined;
+  }) => Effect.Effect<
+    {
+      readonly mentionCandidates: ReadonlyArray<OrchestrationV2ThreadMentionCandidate>;
+      readonly mentionsTruncated: boolean;
+    },
+    E1
+  >;
   readonly sql: SqlClient.SqlClient;
   readonly readThreads: (
     threadIds: ReadonlyArray<ThreadId>,
   ) => Effect.Effect<Effect.Effect<OrchestrationV2ThreadShellSnapshot, E4>, E3>;
   readonly latestSequence: Effect.Effect<number, E5>;
-}) {
-  const { olderSettledBefore, projectIds, environmentLabel, titlesOnly, ...request } =
-    input.request;
+}): Effect.fn.Return<
+  OrchestrationV2SearchThreadsResult,
+  E1 | E2 | E3 | E4 | E5 | SqlError.SqlError
+> {
+  const {
+    mode,
+    threadIds: mentionThreadIds,
+    olderSettledBefore,
+    projectIds,
+    environmentLabel,
+    titlesOnly,
+    ...request
+  } = input.request;
+  if (mode === "thread-mention") {
+    const mentions = yield* input.searchMentionCandidates({
+      query: request.query,
+      threadIds: mentionThreadIds,
+      limit: request.limit,
+      environmentLabel,
+    });
+    return { matches: [], ...mentions };
+  }
   const messages: OrchestrationV2SearchThreadsResult =
     titlesOnly === true ? { matches: [] } : yield* input.search(request);
   if (olderSettledBefore === undefined) return messages;
