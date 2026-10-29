@@ -71,6 +71,7 @@ import { useAssistantCitationTarget } from "./useAssistantCitationTarget";
 import { worktreeSetupAgentStarted } from "@t3tools/client-runtime/worktree-setup";
 import { resolveCitationPhase, type CitedHistory } from "./citationProcedure";
 import {
+  isActionResumeResultMessage,
   resolveTimelineIsAtEnd,
   resolveTimelineMinimapHasPersistentGutter,
   resolveTimelineMinimapCurrentIndex,
@@ -112,6 +113,7 @@ import {
 } from "./TimelineWorkGroupRows";
 import { UserMessageRow } from "./TimelineUserMessageRow";
 import {
+  SystemTimelineRow,
   AssistantTimelineRow,
   AssistantMetaTimelineRow,
   ProposedPlanTimelineRow,
@@ -393,6 +395,9 @@ const ConversationTimeline = memo(function ConversationTimeline({
   topFadeEnabled = false,
   historyControls,
 }: MessagesTimelineProps) {
+  const [expandedActionMessageIds, setExpandedActionMessageIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   const listIdentityKey = displayThreadKey ?? routeThreadKey;
   // Snapshot restore positions on identity changes; ongoing scroll writes must not move them.
   // Find open at the opening is part of the snapshot: opening find later
@@ -531,6 +536,19 @@ const ConversationTimeline = memo(function ConversationTimeline({
         next.delete(attemptId);
       } else {
         next.add(attemptId);
+      }
+      return next;
+    });
+  };
+
+  const onToggleActionFollowUp = (rowId: string) => {
+    suspendEndScrollMaintenanceForDisclosure(rowId);
+    setExpandedActionMessageIds((existing) => {
+      const next = new Set(existing);
+      if (next.has(rowId)) {
+        next.delete(rowId);
+      } else {
+        next.add(rowId);
       }
       return next;
     });
@@ -1005,6 +1023,8 @@ const ConversationTimeline = memo(function ConversationTimeline({
     respondingRequestIds,
     canOperateThread,
     onRespondToApproval,
+    expandedActionMessageIds,
+    onToggleActionFollowUp,
     citationRequest: readyCitationRequest,
     listRef,
     timestampFormat,
@@ -1482,7 +1502,13 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       {row.kind === "turn-fold" ? <TurnFoldTimelineRow key={row.id} row={row} /> : null}
       {row.kind === "attempt-fold" ? <AttemptFoldTimelineRow row={row} /> : null}
       {row.kind === "context-compaction" ? <ContextCompactionTimelineRow row={row} /> : null}
-      {row.kind === "message" && row.message.role === "user" ? <UserMessageRow row={row} /> : null}
+      {row.kind === "message" && row.message.role === "user" ? (
+        isActionResumeResultMessage(row.message) ? (
+          <SystemTimelineRow row={row} />
+        ) : (
+          <UserMessageRow row={row} />
+        )
+      ) : null}
       {row.kind === "message" && row.message.role === "assistant" ? (
         <AssistantTimelineRow row={row} />
       ) : null}
