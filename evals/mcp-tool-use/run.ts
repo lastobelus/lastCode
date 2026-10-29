@@ -251,7 +251,14 @@ export const McpToolUseCase = Schema.Struct({
     mocks: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
     /** Regexes on one part of a shell command. A match wins over the shell simulator. */
     shellMocks: Schema.optional(
-      Schema.Array(Schema.Struct({ match: Schema.String, output: Schema.String })),
+      Schema.Array(
+        Schema.Struct({
+          match: Schema.String,
+          output: Schema.String,
+          /** Match the entire command, including compound commands, without shell parsing. */
+          wholeCommand: Schema.optional(Schema.Boolean),
+        }),
+      ),
     ),
   }),
   prompt: Schema.String,
@@ -1196,12 +1203,13 @@ export const shellOutput = (content: ReadonlyArray<Block>) => {
   });
 };
 
-/** A shell mock's output, when the command is one simple command that the mock matches. */
+/** Compound commands require an explicit whole-command mock; defaults match simple commands. */
 export const mockOutput = (sample: Sample, command: string) =>
-  /&&|\|\||[;|\n]/.test(command.trim())
-    ? undefined
-    : sample.testCase.setup.shellMocks?.find((mock) => new RegExp(mock.match).test(command))
-        ?.output;
+  sample.testCase.setup.shellMocks?.find((mock) =>
+    mock.wholeCommand
+      ? new RegExp(`^(?:${mock.match})$`).test(command.trim())
+      : !/&&|\|\||[;|\n]/.test(command.trim()) && new RegExp(mock.match).test(command),
+  )?.output;
 
 type Config = {
   readonly apiKey: string;
@@ -1222,7 +1230,7 @@ export const cannedOutput = (sample: Sample, command: string) =>
   sample.devices?.sessionError(sample.shell, command);
 
 /** Output for a shell, file, or web tool: canned output, else the shell simulator. */
-const simulate = Effect.fn("evaluateMcpToolUse.simulate")(function* (
+export const simulate = Effect.fn("evaluateMcpToolUse.simulate")(function* (
   sample: Sample,
   config: Config,
   call: Omit<ShellEntry, "output">,

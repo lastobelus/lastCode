@@ -3,6 +3,7 @@ import * as NodeFS from "node:fs";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import { HttpClient } from "effect/http";
 import { assert, expect, it } from "@effect/vitest";
 import { ComposerContextId, EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
@@ -22,6 +23,7 @@ import {
   type SampleRun,
   shellOutput,
   shellRequest,
+  simulate,
   summarize,
   t3SystemAppend,
   t3SubagentContext,
@@ -357,7 +359,7 @@ it("does not record a deferred tool called before it was loaded", () => {
   );
 });
 
-it("answers simple mocked commands itself and gives the simulator the sample's history", () => {
+it("answers simple mocked commands itself and gives the simulator the sample's history", async () => {
   const sample = makeSample(
     childCase,
     buildBase(template, { model: "claude-sonnet-5-5", keepUserInstructions: false }),
@@ -377,6 +379,69 @@ it("answers simple mocked commands itself and gives the simulator the sample's h
     history?.text,
     '<call>Bash {"command":"git push"}</call>\n<output>\npushed\n</output>\n\nNew call:\n<call>Bash {"command":"git push && gh pr create --fill"}</call>',
   );
+  const whole = makeSample(
+    Schema.decodeUnknownSync(McpToolUseCase)({
+      ...childCase,
+      setup: {
+        ...childCase.setup,
+        shellMocks: [
+          {
+            match: "git push && gh pr create --fill",
+            wholeCommand: true,
+            output: "https://github.com/acme/app/pull/124",
+          },
+        ],
+      },
+    }),
+    sample.base,
+  );
+  assert.equal(mockOutput(whole, call.input.command), "https://github.com/acme/app/pull/124");
+  assert.isUndefined(mockOutput(whole, `${call.input.command}; git status`));
+  assert.isUndefined(mockOutput(whole, `false && ${call.input.command}`));
+  const config = {
+    apiKey: "",
+    model: "gpt-6.1-sol",
+    effort: "medium",
+    maxSteps: 1,
+    shellModel: "gpt-6-luna",
+  } as const;
+  const offline = Effect.provideService(
+    HttpClient.HttpClient,
+    HttpClient.make(() => Effect.die("Mocked commands must not call a model")),
+  );
+  const output = await Effect.runPromise(simulate(whole, config, call).pipe(offline));
+  assert.deepEqual(whole.shell.at(-1), { ...call, output });
+  assert.deepEqual([...whole.linked], ["https://github.com/acme/app/pull/124"]);
+  assert.include(
+    shellRequest(whole, { tool: "Bash", input: { command: "git status" } }, config.shellModel)
+      .messages[0]?.content[1]?.text,
+    `<call>Bash ${JSON.stringify(call.input)}</call>\n<output>\n${output}\n</output>`,
+  );
+  assert.equal(whole.shellUsage.input, 0);
+  const readOnly = makeSample(
+    {
+      ...childCase,
+      setup: {
+        shellMocks: [
+          {
+            match: "git status; gh pr view 125 --json url",
+            wholeCommand: true,
+            output: "https://github.com/acme/app/pull/125",
+          },
+        ],
+        role: "top",
+      },
+    },
+    sample.base,
+  );
+  await Effect.runPromise(
+    simulate(readOnly, config, {
+      tool: "Bash",
+      input: { command: "git status; gh pr view 125 --json url" },
+    }).pipe(offline),
+  );
+  assert.equal(readOnly.shell.length, 1);
+  assert.deepEqual([...readOnly.linked], []);
 });
 
 it("links a PR a shell command created, as T3 does, but not one it only read", () => {
