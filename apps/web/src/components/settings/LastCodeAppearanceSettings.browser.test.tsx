@@ -5,6 +5,7 @@ import { type ReactNode } from "react";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { LastCodeMessageAppearanceSettings } from "./LastCodeMessageAppearanceSettings";
 import { LastCodeScrollbarSettings } from "./LastCodeScrollbarSettings";
+import { LastCodeWorkStatusSettings } from "./LastCodeWorkStatusSettings";
 import { LastCodeHandoffSettings } from "./LastCodeHandoffSettings";
 import { LastCodeSidebarSettings } from "./LastCodeSidebarSettings";
 
@@ -44,7 +45,7 @@ vi.mock("../ui/switch", () => ({
   }: {
     checked: boolean;
     onCheckedChange: (value: boolean) => void;
-  }) => <button {...props} onClick={() => onCheckedChange(!checked)} />,
+  }) => <button {...props} aria-checked={checked} onClick={() => onCheckedChange(!checked)} />,
 }));
 vi.mock("../ui/select", () => ({
   Select: ({
@@ -110,6 +111,28 @@ function setup() {
 }
 
 describe("LastCode appearance preferences", () => {
+  it("persists hover work details and reflects the saved preference when remounted", async () => {
+    setup();
+    {
+      await using screen = await render(<LastCodeWorkStatusSettings />);
+      const host = screen.container;
+      expect(control(host, "Show work details on hover").getAttribute("aria-checked")).toBe(
+        "false",
+      );
+      await act(() => control(host, "Show work details on hover").click());
+      expect(state.settings.hoverCurrentWorkDetails).toBe(true);
+      await screen.rerender(<LastCodeWorkStatusSettings />);
+      expect(control(host, "Show work details on hover").getAttribute("aria-checked")).toBe("true");
+    }
+    await using screen = await render(<LastCodeWorkStatusSettings />);
+    const host = screen.container;
+    expect(control(host, "Show work details on hover").getAttribute("aria-checked")).toBe("true");
+    await act(() => control(host, "Show work details on hover").click());
+    expect(state.settings.hoverCurrentWorkDetails).toBe(false);
+    await screen.rerender(<LastCodeWorkStatusSettings />);
+    expect(control(host, "Show work details on hover").getAttribute("aria-checked")).toBe("false");
+  });
+
   it("retains a custom fill across outline mode and resets style and fill independently", async () => {
     setup();
     state.settings = { ...state.settings, incomingMessageFillColor: "#123456" };

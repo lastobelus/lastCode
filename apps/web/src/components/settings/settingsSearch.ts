@@ -275,6 +275,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["width margin resize handle pane drag thumb"],
   },
   {
+    id: "hover-current-work-details",
+    title: "Show work details on hover",
+    to: "/settings/lastcode",
+    searchTerms: ["current work status full list info button tooltip"],
+  },
+  {
     id: "page-scroll-overlap",
     title: "Keep 1 line when scrolling page-at-a-time",
     to: "/settings/lastcode",

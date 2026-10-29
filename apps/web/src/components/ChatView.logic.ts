@@ -1555,7 +1555,10 @@ export function presentThreadShellFromProjection(
 }
 
 /** Background work the provider still runs after the latest run ended. */
-export function deriveThreadPendingBackgroundTasks(projection: ThreadStructure | null) {
+export function deriveThreadPendingBackgroundTasks(
+  projection: ThreadStructure | null,
+  includeWhileActive = false,
+) {
   if (projection === null) return [];
   const sessionError =
     projection.providerSessions.findLast(
@@ -1566,6 +1569,7 @@ export function deriveThreadPendingBackgroundTasks(projection: ThreadStructure |
     latestUnheldRun(projection.runs);
   return [
     ...derivePendingBackgroundWork({
+      includeWhileActive,
       latestRun,
       providerThreads: projection.providerThreads,
       turnItems: projection.turnItems,

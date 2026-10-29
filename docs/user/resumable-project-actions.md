@@ -21,13 +21,16 @@ thread lists show the same additional waiting indicator when the agent and Actio
 
 ## Inspect or stop the Action
 
-On web and desktop, a yellow shoulder above the composer shows the Action name, elapsed time, and
-running state. Select it to disclose the command and an explanation of what happens next. The
-disclosure also provides these controls:
+On web and desktop, the current-work status at the end of the conversation shows Actions alongside
+PR watches and subagents. It stays visible while the agent replies. Open its info button to see the
+full list, including Action progress, elapsed time, and these controls:
 
 - **Open terminal** opens the Action's terminal so you can inspect its live output.
-- **Cancel Action** stops the command. Once the thread is idle, the agent receives a follow-up that
+- **Cancel** stops the command. Once the thread is idle, the agent receives a follow-up that
   reports the cancellation and includes the available output from the command.
+
+Enable **Settings → LastCode → Appearance → Show work details on hover** to open the list by
+hovering over the status text. The setting defaults off; the info button works either way.
 
 On mobile, the thread shows a **Waiting for _Action name_** notice above the composer with a
 **Cancel** control.

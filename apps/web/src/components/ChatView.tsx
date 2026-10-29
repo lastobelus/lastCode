@@ -368,7 +368,7 @@ import { ChatTerminalDrawers } from "./chat/ChatTerminalDrawers";
 import { ChatRightPanel } from "./chat/ChatRightPanel";
 import { useDraftEnvironmentRouting } from "./chat/useDraftEnvironmentRouting";
 import { branchMismatchBannerItem } from "./chat/ThreadActivityBanners";
-import { ThreadNow } from "./chat/ThreadNow";
+import { LastCodeThreadNow } from "./chat/LastCodeThreadNow";
 import type { ThreadStructure } from "@t3tools/client-runtime/state/shell";
 import { useDelayedStatus } from "../hooks/useDelayedStatus";
 import { useTimelineFollow } from "./chat/useTimelineFollow";
@@ -1440,7 +1440,7 @@ export default function ChatView(props: ChatViewProps) {
     activeThreadLiveTokenUsage,
     activeProviderThread,
   );
-  const pendingBackgroundTasks = deriveThreadPendingBackgroundTasks(serverProjection);
+  const pendingBackgroundTasks = deriveThreadPendingBackgroundTasks(serverProjection, true);
   const activeWorkStartedAt =
     deriveActiveWorkStartedAt(activeActivityRun, activeRuntime, localDispatchStartedAt) ??
     runlessWorkStartedAt;
@@ -2597,11 +2597,6 @@ export default function ChatView(props: ChatViewProps) {
   const composerBannerItems = (() => {
     const threadRecoveryItems = threadRecoveryBanner === null ? [] : [threadRecoveryBanner];
     const limitRecoveryItems = limitRecoveryBanner === null ? [] : [limitRecoveryBanner];
-    const interruptedActionItems =
-      interruptedActionBannerItem === null ? [] : [interruptedActionBannerItem];
-    const heldActionItems = heldActionBannerItem === null ? [] : [heldActionBannerItem];
-    const runningActionItems =
-      runningResumableActionBannerItem === null ? [] : [runningResumableActionBannerItem];
     const usageLimitsItems = usageLimitsBanner === null ? [] : [usageLimitsBanner];
     const projectCloneItems = projectCloneBannerItem === null ? [] : [projectCloneBannerItem];
     const annotationItems = chatAnnotation.banner === null ? [] : [chatAnnotation.banner];
@@ -2613,9 +2608,6 @@ export default function ChatView(props: ChatViewProps) {
         ...usageLimitsItems,
         ...projectCloneItems,
         ...systemComposerBannerItems,
-        ...interruptedActionItems,
-        ...heldActionItems,
-        ...runningActionItems,
         ...annotationItems,
       ];
     }
@@ -2626,9 +2618,6 @@ export default function ChatView(props: ChatViewProps) {
       ...usageLimitsItems,
       ...projectCloneItems,
       ...systemComposerBannerItems,
-      ...interruptedActionItems,
-      ...heldActionItems,
-      ...runningActionItems,
       branchMismatchBannerItem({
         mismatchKey: activeBranchMismatchKey,
         mismatch: localCheckoutBranchMismatch,
@@ -3043,6 +3032,9 @@ export default function ChatView(props: ChatViewProps) {
   const hasThreadNow =
     childInputNow !== null ||
     backgroundWorkNow !== null ||
+    runningResumableActionBannerItem !== null ||
+    interruptedActionBannerItem !== null ||
+    heldActionBannerItem !== null ||
     goalNow !== null ||
     shownThreadSyncPhase !== null;
   const queuedRunCount = serverProjection ? getUserQueuedThreadRuns(serverProjection).length : 0;
@@ -3081,10 +3073,19 @@ export default function ChatView(props: ChatViewProps) {
             />
           </div>
         )}
-        <ThreadNow
+        <LastCodeThreadNow
           key={routeThreadKey}
           attention={childInputNow}
           work={backgroundWorkNow}
+          action={activeThreadShell?.actionResume ?? null}
+          actionItems={[
+            interruptedActionBannerItem,
+            heldActionBannerItem,
+            runningResumableActionBannerItem,
+          ]}
+          tasks={pendingBackgroundTasks}
+          turnItems={serverProjection?.turnItems ?? EMPTY_TURN_ITEMS}
+          onOpenThread={onOpenRelatedThreadStable}
           syncPhase={shownThreadSyncPhase}
           goal={goalNow}
         />

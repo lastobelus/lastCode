@@ -586,6 +586,7 @@ export const ClientSettingsSchema = Schema.Struct({
   lastcodeSidebarFamilyStatusSubheaders: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(true)),
   ),
+  hoverCurrentWorkDetails: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   lastcodeStatusIcons: LastCodeStatusIcons.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   legacySidebarThreadGroupingStyle: LegacySidebarThreadGroupingStyle.pipe(
     Schema.withDecodingDefault(Effect.succeed("minimal")),
@@ -1931,6 +1932,7 @@ export const ClientSettingsPatch = Schema.Struct({
   showSkillsInSlashMenu: Schema.optionalKey(Schema.Boolean),
   boringSidebarEnabled: Schema.optionalKey(Schema.Boolean),
   lastcodeSidebarFamilyStatusSubheaders: Schema.optionalKey(Schema.Boolean),
+  hoverCurrentWorkDetails: Schema.optionalKey(Schema.Boolean),
   lastcodeStatusIcons: Schema.optionalKey(LastCodeStatusIcons),
   legacySidebarThreadGroupingStyle: Schema.optionalKey(LegacySidebarThreadGroupingStyle),
   legacySidebarEnabled: Schema.optionalKey(Schema.Boolean),
