@@ -72,6 +72,7 @@ function makeHarness(
       (() => Effect.succeed({ text: "Review build changes; preserve release workflow" })),
   );
   const textGeneration = TextGeneration.TextGeneration.of({
+    generatePromptSnippets: () => Effect.die("unused"),
     generateIncomingMessageSummary: generate,
     generateCommitMessage: () => Effect.die("Commit messages are not used in preview tests"),
     generatePrContent: () => Effect.die("PR content is not used in preview tests"),

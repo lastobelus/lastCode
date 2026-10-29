@@ -33,6 +33,13 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
   const runGrokJson: TextGenerationOperations.Runner = Effect.fn("GrokTextGeneration.runGrokJson")(
     function* (request) {
       const { operation, cwd, prompt, modelSelection } = request;
+      if (operation === "generatePromptSnippets")
+        return yield* new TextGenerationError({
+          operation: "generatePromptSnippets",
+          reason: "prompt-mining-unsupported",
+          detail:
+            "The configured text-generation model used for thread titles cannot discover prompts without tools. Choose a supported text-generation model in Settings.",
+        });
 
       const outputRef = yield* Ref.make("");
       const runtime = yield* makeGrokAcpRuntime({

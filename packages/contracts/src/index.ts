@@ -1,3 +1,4 @@
+export * from "./promptSnippets.ts";
 export * from "./baseSchemas.ts";
 export * from "./lastcodePullRequestWatchSettings.ts";
 export * from "./assistantCitations.ts";

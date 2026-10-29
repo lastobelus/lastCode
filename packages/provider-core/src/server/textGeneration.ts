@@ -105,6 +105,17 @@ export interface IncomingMessageSummaryGenerationInput {
 
 /** Commit, change request, branch, title, summary, and review guide generation for one provider. */
 export interface ProviderTextGeneration {
+  readonly generatePromptSnippets: (input: {
+    cwd: string;
+    modelSelection: ModelSelection;
+    messages: readonly string[];
+    existing: readonly { id: string; title: string; text: string; userEdited?: true }[];
+    dismissed?: readonly { id: string; title: string; text: string }[];
+  }) => Effect.Effect<
+    { snippets: readonly { existingIds: readonly string[]; title: string; text: string }[] },
+    TextGenerationError
+  >;
+
   readonly generateIncomingMessageSummary: (
     input: IncomingMessageSummaryGenerationInput,
   ) => Effect.Effect<{ text: string }, TextGenerationError>;

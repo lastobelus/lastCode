@@ -321,6 +321,37 @@ describe("shortcutLabelForCommand", () => {
 });
 
 describe("sidebar mode shortcut", () => {
+  it("opens common prompts with the Dvorak period key and one modifier", () => {
+    for (const platform of ["MacIntel", "Linux"]) {
+      assert.strictEqual(
+        resolveShortcutCommand(
+          event({ key: ",", code: "KeyW", ctrlKey: true }),
+          DEFAULT_RESOLVED_KEYBINDINGS,
+          { platform },
+        ),
+        "composer.editPromptSnippets",
+      );
+      const shortcut = event({ key: ".", code: "KeyE", ctrlKey: true });
+      assert.strictEqual(
+        resolveShortcutCommand(shortcut, DEFAULT_RESOLVED_KEYBINDINGS, { platform }),
+        "composer.promptSnippets",
+      );
+      assert.isNull(
+        resolveShortcutCommand(shortcut, DEFAULT_RESOLVED_KEYBINDINGS, {
+          platform,
+          context: { terminalFocus: true },
+        }),
+      );
+      assert.isNull(
+        resolveShortcutCommand(
+          event({ key: "e", code: "Period", ctrlKey: true }),
+          DEFAULT_RESOLVED_KEYBINDINGS,
+          { platform },
+        ),
+      );
+    }
+  });
+
   it("dispatches a configured sidebar mode command", () => {
     assert.strictEqual(
       resolveShortcutCommand(event({ key: "b", metaKey: true, shiftKey: true }), DEFAULT_BINDINGS, {

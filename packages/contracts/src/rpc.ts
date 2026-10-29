@@ -1,4 +1,13 @@
 import {
+  PromptSnippet,
+  PromptSnippetSaveInput,
+  PromptSnippetsState,
+  PromptSnippetUseInput,
+  PromptSnippetDismissInput,
+  PromptSnippetRestoreInput,
+  PromptSnippetsError,
+} from "./promptSnippets.ts";
+import {
   WorkspaceLifecyclePreviewInput,
   WorkspaceLifecyclePreview,
   DeleteThreadsInput,
@@ -632,6 +641,12 @@ export const WS_METHODS = {
   serverClaimUpdateActivation: "server.claimUpdateActivation",
   serverGetUpdateDrainStatus: "server.getUpdateDrainStatus",
 
+  promptSnippetsSave: "promptSnippets.save",
+  promptSnippetsList: "promptSnippets.list",
+  promptSnippetsRecordUse: "promptSnippets.recordUse",
+  promptSnippetsRestore: "promptSnippets.restore",
+  promptSnippetsDismiss: "promptSnippets.dismiss",
+  promptSnippetsDiscover: "promptSnippets.discover",
   scheduledTasksSubscribe: "scheduledTasks.subscribe",
   scheduledTasksUpsert: "scheduledTasks.upsert",
   scheduledTasksSetEnabled: "scheduledTasks.setEnabled",
@@ -2258,6 +2273,36 @@ export class RpcScopeAuthorization extends RpcMiddleware.Service<RpcScopeAuthori
 ) {}
 
 export const WsRpcGroup = RpcGroup.make(
+  Rpc.make(WS_METHODS.promptSnippetsSave, {
+    payload: PromptSnippetSaveInput,
+    success: PromptSnippet,
+    error: Schema.Union([PromptSnippetsError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WS_METHODS.promptSnippetsList, {
+    payload: Schema.Struct({}),
+    success: PromptSnippetsState,
+    error: Schema.Union([PromptSnippetsError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WS_METHODS.promptSnippetsRestore, {
+    payload: PromptSnippetRestoreInput,
+    success: Schema.Void,
+    error: Schema.Union([PromptSnippetsError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WS_METHODS.promptSnippetsDismiss, {
+    payload: PromptSnippetDismissInput,
+    success: Schema.Void,
+    error: Schema.Union([PromptSnippetsError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WS_METHODS.promptSnippetsDiscover, {
+    payload: Schema.Struct({}),
+    success: PromptSnippetsState,
+    error: Schema.Union([PromptSnippetsError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WS_METHODS.promptSnippetsRecordUse, {
+    payload: PromptSnippetUseInput,
+    success: Schema.Void,
+    error: Schema.Union([PromptSnippetsError, EnvironmentAuthorizationError]),
+  }),
   WsGuestShareCreateRpc,
   WsThreadReadLocalRpc,
   WsThreadReadConnectRpc,

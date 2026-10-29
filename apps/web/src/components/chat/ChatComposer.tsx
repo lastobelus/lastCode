@@ -226,6 +226,7 @@ import { observeResize } from "~/lib/observeResize";
 const isEnvironmentRequestInvalidError = Schema.is(EnvironmentRequestInvalidError);
 import { toastManager } from "../ui/toast";
 import { PlayIcon } from "lucide-react";
+import { useComposerPromptSnippets } from "~/lastcode/prompts/useComposerPromptSnippets";
 import { proposedPlanTitle } from "@t3tools/shared/proposedPlanText";
 import { hasProviderSetup } from "./ProviderStatusBanner";
 import { type AppModelOption, getAppModelOptionsForInstance } from "../../modelSelection";
@@ -2790,6 +2791,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   };
   const openModelPickerStable = useStableCallback(openModelPicker);
 
+  const promptSnippets = useComposerPromptSnippets({
+    environmentId,
+    keybindings,
+    target: attachmentTargetKey,
+    available: canOperateThread && pendingUserInputs.length === 0,
+    disabled: projectSelectionRequired,
+    readSnapshot: readComposerSnapshotStable,
+    insert: applyPromptReplacementStable,
+    focusAt: (cursor) => composerEditorRef.current?.focusAt(cursor),
+  });
+
   useImperativeHandle(
     composerRef,
     () => ({
@@ -2871,6 +2883,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         }
       },
       openControl: (command) => {
+        if (promptSnippets.openControl(command)) return;
         if (composerBlurFrameRef.current !== null) {
           window.cancelAnimationFrame(composerBlurFrameRef.current);
           composerBlurFrameRef.current = null;
@@ -3029,6 +3042,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       isComposerModelPickerOpen,
       openModelPickerStable,
       readComposerSnapshotStable,
+      promptSnippets.openControl,
       resetComposerTrigger,
       setComposerTrigger,
       selectedModel,
@@ -3152,6 +3166,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       data-chat-composer-form="true"
       {...threadContextDropTargetProps()}
     >
+      {promptSnippets.dialog}
       <ComposerBanner.Dock>
         <ComposerBanner.Column>
           <ComposerBannerStack items={shelfItems} />
@@ -3445,6 +3460,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 )}
               >
                 {composerAttachButton ? <div className="me-2">{composerAttachButton}</div> : null}
+                {promptSnippets.trigger}
                 <div
                   data-chat-composer-actions="right"
                   data-chat-composer-transition-actions="true"

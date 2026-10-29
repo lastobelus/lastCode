@@ -166,6 +166,11 @@ describe("command permissions", () => {
   );
 
   it.effect.each([
+    [WS_METHODS.promptSnippetsSave, [AuthOrchestrationOperateScope]],
+    [WS_METHODS.promptSnippetsRecordUse, [AuthOrchestrationOperateScope]],
+    [WS_METHODS.promptSnippetsRestore, [AuthOrchestrationOperateScope]],
+    [WS_METHODS.promptSnippetsDismiss, [AuthOrchestrationOperateScope]],
+    [WS_METHODS.promptSnippetsDiscover, [AuthOrchestrationOperateScope]],
     [WS_METHODS.serverListSavedWorkspaces, [AuthFilesystemReadScope, AuthOrchestrationReadScope]],
     [
       WS_METHODS.serverPreviewWorkspaceLifecycle,
