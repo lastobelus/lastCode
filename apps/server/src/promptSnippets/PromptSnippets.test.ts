@@ -10,6 +10,7 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Deferred from "effect/Deferred";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as TestClock from "effect/testing/TestClock";
@@ -26,6 +27,45 @@ const proposals = Array.from({ length: 8 }, (_, i) => ({
 const human = (text: string) => ({
   payload_json: JSON.stringify({ role: "user", createdBy: "user", text }),
 });
+it.effect("runs daily discovery for installed builds and skips development and test runtimes", () =>
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    for (const { nodeEnv, devUrl, expected } of [
+      { nodeEnv: "production", devUrl: undefined, expected: 2 },
+      { nodeEnv: "production", devUrl: new URL("http://localhost:3000"), expected: 0 },
+      { nodeEnv: "test", devUrl: undefined, expected: 0 },
+    ]) {
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          let calls = 0;
+          yield* Layer.build(
+            PromptSnippets.worker.pipe(
+              Layer.provide(
+                Layer.mergeAll(
+                  Layer.succeed(ServerConfig.ServerConfig, { ...config, devUrl }),
+                  ConfigProvider.layer(ConfigProvider.fromEnv({ env: { NODE_ENV: nodeEnv } })),
+                  Layer.mock(PromptSnippets.PromptSnippets)({
+                    discoverIfDue: Effect.sync(() => calls++).pipe(Effect.as(24 * 60 * 60 * 1000)),
+                  }),
+                ),
+              ),
+            ),
+          );
+          yield* TestClock.adjust(0);
+          expect(calls).toBe(expected === 0 ? 0 : 1);
+          yield* TestClock.adjust("24 hours");
+          expect(calls).toBe(expected);
+        }),
+      );
+    }
+  }).pipe(
+    Effect.provide(
+      ServerConfig.layerTest(process.cwd(), { prefix: "prompt-snippets-worker-test-" }).pipe(
+        Layer.provide(NodeServices.layer),
+      ),
+    ),
+  ),
+);
 it("preserves repeated human messages as frequency evidence and excludes agent/system messages", () => {
   expect(
     PromptSnippets.selectCorpus([
