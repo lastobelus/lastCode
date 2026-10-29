@@ -22,7 +22,6 @@ const reactTests = [
   "src/features/threads/ThreadMarkdownImage.test.tsx",
   "src/features/threads/UsageLimitRecoveryCard.test.tsx",
   "src/features/threads/NewTaskDraftRouteScreen.test.tsx",
-  "src/features/threads/ActionResumeNotice.test.tsx",
   "src/features/threads/SubagentRow.test.tsx",
   "src/features/threads/incoming-message-disclosure.test.tsx",
   "src/native/NativeHeaderToolbar.test.tsx",
