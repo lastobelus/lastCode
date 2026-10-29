@@ -157,7 +157,7 @@ export const watchThreadReadRequests = Effect.fn("connection.watchThreadReadRequ
                                     code: "invalid_request",
                                     threadReadReason: "unsupported",
                                     message:
-                                      "Update the source environment before reading this thread reference.",
+                                      "The source environment needs a server update to read this thread reference. Report this to the user; do not use another route.",
                                   });
                                 }
                               }

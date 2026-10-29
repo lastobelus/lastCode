@@ -303,9 +303,9 @@ by any part of its pull request numbers. A complete number is also resolved dire
 pull request is older than the recent list. Type a single word after `#` to search pull requests in
 the repository by text. Choose a result to insert it as a chip.
 
-Another thread can be context too. Type `@` followed by part of its title, project or environment name to find threads across projects and connected environments. Archived threads and completed subagents can be references too. Bare `@` still opens the file picker. On web and desktop, drag threads from the sidebar onto the composer, or use **Copy thread** and paste on any client.
+Another thread can be context too. Type `@` followed by part of its title, project or environment name to find threads across projects and connected environments. Archived threads and completed subagents can be references too. Bare `@` opens the file picker. On web and desktop, drag threads from the sidebar onto the composer, or use **Copy thread** and paste on any client.
 
-The agent reads a thread's history on demand through your connected client. A reference does not message or change that thread, create a machine link, or grant write access. For references across environments, both servers must support thread references, and your client needs read permission for both. Keep the client connected while the agent reads. If access is unavailable, check the connections, read permissions and server updates for both environments, or remove the reference from your draft. References are live; they do not save an offline transcript.
+The agent reads a thread's history on demand through your connected client. A reference does not message or change that thread, link machines, or grant write access. For references across environments, both must run a T3 Code version that supports thread references, and your client needs read permission for both. Keep the client you sent from connected while the agent reads. If access is unavailable, check the connections, read permissions and server updates for both environments, or remove the reference from your draft. References are live; they do not save an offline transcript.
 
 Images keep their thumbnail shelf above the text and also get a chip at your cursor, so you can
 say exactly which image you mean. Deleting an image chip leaves the image on the shelf; removing

@@ -192,10 +192,10 @@ function unavailableComposerThreadReference(input: {
     )?.environmentLabel ?? "its machine";
   const recovery =
     unavailable.reason === "permission-denied"
-      ? `Check that this session has read access to ${owner} and the destination environment.`
+      ? `Check that you have read access to ${owner} and to the machine you're sending to.`
       : unavailable.reason === "unsupported"
-        ? `Check for server updates on ${owner} and the destination environment.`
-        : `Check the connections to ${owner} and the destination environment before sending.`;
+        ? `Check for server updates on ${owner} and the machine you're sending to.`
+        : `Check the connections to ${owner} and the machine you're sending to before sending.`;
   return `${recovery} The reference is still in your draft.`;
 }
 

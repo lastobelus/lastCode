@@ -121,11 +121,11 @@ function ThreadReferenceDetails(props: {
         });
   const status =
     reason === "permission-denied"
-      ? "Check read permission for the source and destination environments, or remove this reference."
+      ? "Check read permission for the source and selected machines, or remove this reference."
       : reason === "disconnected"
-        ? "Check the connections to the source and destination environments to read this reference."
+        ? "Check the connections to the source and selected machines to read this reference."
         : reason === "unsupported"
-          ? "Check for server updates on the source and destination environments to read this reference."
+          ? "Check for server updates on the source and selected machines to read this reference."
           : resolved && candidate === undefined
             ? "This thread was not found in its source environment. Its saved title is shown."
             : candidate === undefined
