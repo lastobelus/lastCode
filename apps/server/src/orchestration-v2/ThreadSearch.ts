@@ -362,12 +362,11 @@ export const make = Effect.gen(function* () {
 
   const mentionCandidates = SqlSchema.findAll({
     Request: Schema.Struct({
-      query: Schema.String,
       threadIds: Schema.NullOr(TokenList),
-      environmentLabel: Schema.String,
+      afterThreadId: Schema.NullOr(ThreadId),
     }),
     Result: MentionCandidateRow,
-    execute: ({ query, threadIds, environmentLabel }) => sql`
+    execute: ({ threadIds, afterThreadId }) => sql`
       SELECT
         threads.payload_json AS thread,
         projects.title AS "projectTitle",
@@ -377,17 +376,10 @@ export const make = Effect.gen(function* () {
         ON projects.project_id = threads.project_id
       WHERE threads.deleted_at IS NULL
         AND projects.deleted_at IS NULL
-        AND (
-          (${threadIds} IS NOT NULL
-            AND threads.thread_id IN (SELECT value FROM json_each(${threadIds})))
-          OR (${threadIds} IS NULL AND (
-            instr(lower(json_extract(threads.payload_json, '$.title')), lower(${query})) > 0
-            OR instr(lower(COALESCE(json_extract(threads.payload_json, '$.branch'), '')), lower(${query})) > 0
-            OR instr(lower(projects.title), lower(${query})) > 0
-            OR (length(${environmentLabel}) > 0
-              AND instr(lower(${environmentLabel}), lower(${query})) > 0)
-          ))
-        )
+        AND (${threadIds} IS NULL
+          OR threads.thread_id IN (SELECT value FROM json_each(${threadIds})))
+        AND (${afterThreadId} IS NULL OR threads.thread_id > ${afterThreadId})
+      ORDER BY threads.thread_id
       LIMIT ${MENTION_CANDIDATE_FETCH_LIMIT}
     `,
   });
@@ -633,13 +625,6 @@ export const make = Effect.gen(function* () {
     "ThreadSearch.searchMentionCandidates",
   )(function* ({ query, threadIds, limit = 50, environmentLabel = "" }) {
     const exactIds = threadIds === undefined ? null : threadIds;
-    const candidates = yield* read(
-      mentionCandidates({
-        query,
-        threadIds: exactIds,
-        environmentLabel,
-      }),
-    );
     const candidateOf = (
       row: typeof MentionCandidateRow.Type,
     ): OrchestrationV2ThreadMentionCandidate => ({
@@ -656,7 +641,8 @@ export const make = Effect.gen(function* () {
       lineage: row.thread.lineage,
     });
     if (exactIds !== null) {
-      const byId = new Map(candidates.map((row) => [row.thread.id, candidateOf(row)]));
+      const rows = yield* read(mentionCandidates({ threadIds: exactIds, afterThreadId: null }));
+      const byId = new Map(rows.map((row) => [row.thread.id, candidateOf(row)]));
       return {
         mentionCandidates: exactIds.flatMap((id) => {
           const row = byId.get(id);
@@ -667,24 +653,37 @@ export const make = Effect.gen(function* () {
     }
     const normalizedQuery = foldSearchQuery(query);
     const now = DateTime.toEpochMillis(yield* DateTime.now);
+    const subjectOf = (row: typeof MentionCandidateRow.Type): ThreadSearchSubject => ({
+      id: row.thread.id,
+      title: row.thread.title,
+      branch: row.thread.branch,
+      projectTitle: row.projectTitle,
+      environmentLabel,
+      pullRequests: threadSearchPullRequests(row.thread),
+      activityAt: Date.parse(row.latestUserMessageAt ?? DateTime.formatIso(row.thread.createdAt)),
+      opens: row.thread.opens ?? null,
+    });
+    const candidates: Array<typeof MentionCandidateRow.Type> = [];
+    let afterThreadId: ThreadId | null = null;
+    // Apply the shared matcher before bounding candidates; SQL substrings lose cross-field tokens and folded names.
+    while (candidates.length < MENTION_CANDIDATE_FETCH_LIMIT) {
+      const rows: ReadonlyArray<typeof MentionCandidateRow.Type> = yield* read(
+        mentionCandidates({ threadIds: null, afterThreadId }),
+      );
+      for (const row of rows) {
+        if (
+          scoreThreadSearch(normalizedQuery, subjectOf(row), now, { typos: true, picks: false }) !==
+          null
+        ) {
+          candidates.push(row);
+          if (candidates.length === MENTION_CANDIDATE_FETCH_LIMIT) break;
+        }
+      }
+      if (rows.length < MENTION_CANDIDATE_FETCH_LIMIT) break;
+      afterThreadId = rows[rows.length - 1]!.thread.id;
+    }
     const ranked = rankSearchItems(candidates, (row, options) =>
-      scoreThreadSearch(
-        normalizedQuery,
-        {
-          id: row.thread.id,
-          title: row.thread.title,
-          branch: row.thread.branch,
-          projectTitle: row.projectTitle,
-          environmentLabel,
-          pullRequests: threadSearchPullRequests(row.thread),
-          activityAt: Date.parse(
-            row.latestUserMessageAt ?? DateTime.formatIso(row.thread.createdAt),
-          ),
-          opens: row.thread.opens ?? null,
-        },
-        now,
-        { ...options, picks: false },
-      ),
+      scoreThreadSearch(normalizedQuery, subjectOf(row), now, { ...options, picks: false }),
     );
     return {
       mentionCandidates: ranked.slice(0, limit).map(({ item }) => candidateOf(item)),
