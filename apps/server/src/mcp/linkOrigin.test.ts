@@ -1,3 +1,7 @@
+import * as ActionResume from "../actionResume/ActionResume.ts";
+import * as ThreadReadBroker from "./ThreadReadBroker.ts";
+import * as ThreadRecoveryService from "../orchestration-v2/ThreadRecoveryService.ts";
+import * as ThreadRecoveryRepairService from "../orchestration-v2/ThreadRecoveryRepairService.ts";
 import * as DocumentText from "../provider/DocumentText.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -116,74 +120,83 @@ const layerTools = Layer.mergeAll(
   McpHttpServer.layerOrchestratorToolkit,
   McpHttpServer.layerThreadToolkit,
   McpHttpServer.layerProjectRegistration,
-).pipe(
-  Layer.provide(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
-  Layer.provideMerge(McpServer.McpServer.layer),
-  Layer.provide(layerLaunches),
-  Layer.provide(NodeCrypto.layer),
-  Layer.provide(
-    Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
-  ),
-  Layer.provide(
-    Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
-      list: () => Effect.succeed([]),
-    }),
-  ),
-  Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
-  Layer.provide(
-    Layer.mock(ProjectService.ProjectService)({
-      getById: () => Effect.succeedNone,
-      create: (input) =>
-        Effect.succeed({
-          id: input.projectId,
-          title: input.title,
-          workspaceRoot: input.workspaceRoot,
-          defaultModelSelection: null,
-          scripts: [],
-          createdAt: "2026-10-18T00:00:00.000Z",
-          updatedAt: "2026-10-18T00:00:00.000Z",
-          deletedAt: null,
-        }),
-      update: (input) =>
-        Effect.succeed({
-          id: input.projectId,
-          title: input.title ?? "Untitled",
-          workspaceRoot: "/p/t3code",
-          defaultModelSelection: null,
-          scripts: [],
-          createdAt: "2026-10-18T00:00:00.000Z",
-          updatedAt: "2026-10-18T00:00:00.000Z",
-          deletedAt: null,
-        }),
-    }),
-  ),
-  Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
-  Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
-  Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
-  Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
-  Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
-  Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
-  Layer.provide(
-    Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/p" }),
-  ),
-  Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
-  Layer.provide(
-    Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({
-      cloneRepository: (input) =>
-        Effect.succeed({
-          cwd: input.destinationPath,
-          remoteUrl: "https://github.com/pingdotgg/t3code.git",
-          repository: null,
-        }),
-    }),
-  ),
-  Layer.provide(
-    ServerConfig.layerTest(process.cwd(), { prefix: "t3-link-origin-" }).pipe(
-      Layer.provide(NodeServices.layer),
+)
+  .pipe(
+    Layer.provide(ThreadReadBroker.layer),
+    Layer.provide(
+      Layer.mock(ActionResume.ActionResume)({ readLatestSummary: () => Effect.succeed(null) }),
     ),
-  ),
-  Layer.provide(NodeServices.layer),
-);
+    Layer.provide(Layer.mock(ThreadRecoveryService.ThreadRecoveryService)({})),
+    Layer.provide(Layer.mock(ThreadRecoveryRepairService.ThreadRecoveryRepairService)({})),
+    Layer.provide(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
+    Layer.provideMerge(McpServer.McpServer.layer),
+    Layer.provide(layerLaunches),
+    Layer.provide(NodeCrypto.layer),
+    Layer.provide(
+      Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+    ),
+    Layer.provide(
+      Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+        list: () => Effect.succeed([]),
+      }),
+    ),
+    Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
+  )
+  .pipe(
+    Layer.provide(
+      Layer.mock(ProjectService.ProjectService)({
+        getById: () => Effect.succeedNone,
+        create: (input) =>
+          Effect.succeed({
+            id: input.projectId,
+            title: input.title,
+            workspaceRoot: input.workspaceRoot,
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: "2026-10-18T00:00:00.000Z",
+            updatedAt: "2026-10-18T00:00:00.000Z",
+            deletedAt: null,
+          }),
+        update: (input) =>
+          Effect.succeed({
+            id: input.projectId,
+            title: input.title ?? "Untitled",
+            workspaceRoot: "/p/t3code",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: "2026-10-18T00:00:00.000Z",
+            updatedAt: "2026-10-18T00:00:00.000Z",
+            deletedAt: null,
+          }),
+      }),
+    ),
+    Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
+    Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
+    Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
+    Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
+    Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
+    Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
+    Layer.provide(
+      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/p" }),
+    ),
+    Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+    Layer.provide(
+      Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({
+        cloneRepository: (input) =>
+          Effect.succeed({
+            cwd: input.destinationPath,
+            remoteUrl: "https://github.com/pingdotgg/t3code.git",
+            repository: null,
+          }),
+      }),
+    ),
+    Layer.provide(
+      ServerConfig.layerTest(process.cwd(), { prefix: "t3-link-origin-" }).pipe(
+        Layer.provide(NodeServices.layer),
+      ),
+    ),
+    Layer.provide(NodeServices.layer),
+  );
 
 const mcpClient = McpSchema.McpServerClient.of({
   clientId: 1,

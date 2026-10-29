@@ -220,7 +220,11 @@ async function downloadLocalUpdate(
     notifyDownloaded,
     isLocalBuild,
     reportError = toastUpdateError,
-  }: { readonly notifyDownloaded: boolean; readonly isLocalBuild: boolean; readonly reportError?: ReportLocalUpdateError },
+  }: {
+    readonly notifyDownloaded: boolean;
+    readonly isLocalBuild: boolean;
+    readonly reportError?: ReportLocalUpdateError;
+  },
 ): Promise<boolean> {
   try {
     const result = await bridge.downloadUpdate();
@@ -230,7 +234,11 @@ async function downloadLocalUpdate(
     const actionError = shouldToastDesktopUpdateActionResult(result)
       ? getDesktopUpdateActionError(result)
       : null;
-    if (actionError) reportError(isLocalBuild ? "Could not build local nightly" : "Could not download update", actionError);
+    if (actionError)
+      reportError(
+        isLocalBuild ? "Could not build local nightly" : "Could not download update",
+        actionError,
+      );
     return result.completed;
   } catch (error) {
     reportError(
@@ -386,9 +394,10 @@ function SidebarUpdateControl() {
     setIsActionPending(true);
 
     if (action === "download") {
-      void downloadLocalUpdate(bridge, { notifyDownloaded: true, isLocalBuild: state?.source === "lastcode-local" }).finally(() =>
-        setIsActionPending(false),
-      );
+      void downloadLocalUpdate(bridge, {
+        notifyDownloaded: true,
+        isLocalBuild: state?.source === "lastcode-local",
+      }).finally(() => setIsActionPending(false));
       return;
     }
 
@@ -457,7 +466,11 @@ function SidebarUpdateControl() {
         ...(bridge && action === "download"
           ? {
               downloadLocal: (reportError) =>
-                downloadLocalUpdate(bridge, { notifyDownloaded: false, isLocalBuild: state?.source === "lastcode-local", reportError }),
+                downloadLocalUpdate(bridge, {
+                  notifyDownloaded: false,
+                  isLocalBuild: state?.source === "lastcode-local",
+                  reportError,
+                }),
             }
           : {}),
         ...(bridge && action !== "none"
@@ -489,7 +502,13 @@ function SidebarUpdateControl() {
 
   if (!isElectron && !runsEverything && !isRunningEverything) return null;
 
-  if (!runsEverything && !isRunningEverything && state?.source === "lastcode-local" && !state.enabled) return null;
+  if (
+    !runsEverything &&
+    !isRunningEverything &&
+    state?.source === "lastcode-local" &&
+    !state.enabled
+  )
+    return null;
 
   const statusIcon = (
     <DesktopUpdateStatusIcon
@@ -560,7 +579,7 @@ function SidebarUpdateControl() {
           isInteractionDisabled,
           showUpdateIconState,
         }),
-        (disabled && !showUpdateIconState) && "opacity-60",
+        disabled && !showUpdateIconState && "opacity-60",
       )}
       onClick={handleAction}
       onBlur={() => {

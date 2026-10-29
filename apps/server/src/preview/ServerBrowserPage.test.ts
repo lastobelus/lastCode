@@ -1,3 +1,15 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- An ephemeral HTTP fixture verifies real Chromium redirects across origins.
+import * as NodeHttp from "node:http";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Temporary loopback TLS fixture; no certificate or key is retained.
+import * as NodeHttps from "node:https";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Temporary loopback TLS fixture.
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Temporary loopback TLS fixture.
+import * as NodePath from "node:path";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Generates an ephemeral test certificate, as in PortScanner.test.ts.
+import * as NodeChildProcess from "node:child_process";
+
 import {
   chromium,
   type Browser,
@@ -19,7 +31,7 @@ import {
 import * as ServerBrowserPage from "./ServerBrowserPage.ts";
 
 describe("native viewport", () => {
-  it("uses the CDP guest dimensions and scroll offset for a scaled capture", async () => {
+  it("reads the native CSS viewport and captures without a clip", async () => {
     const page = { viewportSize: () => null } as unknown as Page;
     const send = vi.fn(async (method: string) =>
       method === "Page.getLayoutMetrics"
@@ -28,14 +40,119 @@ describe("native viewport", () => {
     );
     const cdp = { send } as unknown as CDPSession;
     expect(await ServerBrowserPage.viewportSize(page, cdp)).toEqual({ width: 390, height: 844 });
-    expect(await ServerBrowserPage.captureViewport(page, cdp, { format: "png", scale: 0.5 })).toBe(
-      "image",
-    );
+    expect(await ServerBrowserPage.captureViewport(cdp, { format: "png" })).toBe("image");
     expect(send).toHaveBeenLastCalledWith("Page.captureScreenshot", {
       format: "png",
-      clip: { x: 20, y: 30, width: 390, height: 844, scale: 0.5 },
     });
   });
+
+  it.each([
+    {
+      zoom: 1.25,
+      css: { width: 800, height: 600 },
+    },
+    {
+      zoom: 0.75,
+      css: { width: 800, height: 600 },
+    },
+  ])(
+    "keeps native CSS dimensions and leaves capture unscaled at zoom $zoom",
+    async ({ zoom, css }) => {
+      const page = { viewportSize: () => null } as unknown as Page;
+      const send = vi.fn(async (method: string) =>
+        method === "Page.getLayoutMetrics"
+          ? {
+              cssVisualViewport: {
+                clientWidth: css.width,
+                clientHeight: css.height,
+                pageX: 20,
+                pageY: 40,
+                zoom,
+              },
+            }
+          : { data: "image" },
+      );
+      const cdp = { send } as unknown as CDPSession;
+      expect(await ServerBrowserPage.viewportSize(page, cdp)).toEqual(css);
+      await ServerBrowserPage.captureViewport(cdp, { format: "png" });
+      expect(send).toHaveBeenLastCalledWith("Page.captureScreenshot", {
+        format: "png",
+      });
+    },
+  );
+
+  it("retains the emulated viewport without consulting native zoom metrics", async () => {
+    const page = { viewportSize: () => ({ width: 1000, height: 750 }) } as unknown as Page;
+    const send = vi.fn(async (method: string) =>
+      method === "Page.getLayoutMetrics"
+        ? {
+            cssVisualViewport: {
+              clientWidth: 800,
+              clientHeight: 600,
+              pageX: 20,
+              pageY: 40,
+              zoom: 1.25,
+            },
+          }
+        : { data: "image" },
+    );
+    const cdp = { send } as unknown as CDPSession;
+    expect(await ServerBrowserPage.viewportSize(page, cdp)).toEqual({ width: 1000, height: 750 });
+    await ServerBrowserPage.captureViewport(cdp, { format: "png" });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenLastCalledWith("Page.captureScreenshot", {
+      format: "png",
+    });
+  });
+});
+
+describe("browser credential failures", () => {
+  it.each([
+    ["Protocol error (Storage.getCookies): unsupported; private diagnostic", "cookie-context"],
+    ["Protocol error (Storage.setCookies): unsupported; private diagnostic", "cookie-context"],
+    ["Request timed out; private diagnostic", "timeout"],
+    ["CERT_HAS_EXPIRED; private diagnostic", "TLS error"],
+    ["ECONNREFUSED; private diagnostic", "network error"],
+  ])("reports a safe failure category for %s", async (message, category) => {
+    const post = vi.fn().mockRejectedValue(new Error(message));
+    const page = { context: () => ({ request: { post } }) } as unknown as Page;
+    const error = await ServerBrowserPage.prepareBrowserCredential(
+      page,
+      "https://managed-server.example/qa",
+      "private-one-use-credential",
+      15_000,
+    ).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(ServerBrowserPage.ServerBrowserOperationError);
+    expect(error).toMatchObject({ detail: { boundary: "browser-credential", category } });
+    expect(String(error)).not.toContain("private");
+    expect(String(error)).not.toContain("managed-server.example");
+    if (category === "cookie-context") expect(String(error)).not.toContain("--share");
+  });
+
+  it.each([302, 401, 503])(
+    "preserves HTTP %s and disposes its response without exposing its body",
+    async (status) => {
+      const dispose = vi.fn().mockResolvedValue(undefined);
+      const page = {
+        context: () => ({
+          request: {
+            post: vi.fn().mockResolvedValue({ ok: () => false, status: () => status, dispose }),
+          },
+        }),
+      } as unknown as Page;
+      const error = await ServerBrowserPage.prepareBrowserCredential(
+        page,
+        "https://managed-server.example/qa",
+        "private-one-use-credential",
+        15_000,
+      ).catch((error: unknown) => error);
+      expect(error).toMatchObject({ detail: { category: "http", status } });
+      expect(String(error)).toContain(`HTTP ${status}`);
+      expect(String(error)).not.toContain("--share");
+      expect(String(error)).not.toContain("private");
+      expect(dispose).toHaveBeenCalledOnce();
+    },
+  );
 });
 
 describe("server browser element refs", () => {
@@ -68,6 +185,260 @@ describe("server browser element refs", () => {
       networkEntries: [],
       actionTimeline: [],
     });
+
+  it("automatically authenticates a fresh HTTPS cookie context before its first document load", async () => {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "preview-cold-tls-"));
+    const key = NodePath.join(directory, "test.key");
+    const certificate = NodePath.join(directory, "test.crt");
+    const requests: string[] = [];
+    const authenticationAndDocuments: { request: string; cookie: string | undefined }[] = [];
+    let server: NodeHttps.Server | undefined;
+    let fresh: BrowserContext | undefined;
+    let control: BrowserContext | undefined;
+    try {
+      NodeChildProcess.execFileSync(
+        "openssl",
+        [
+          "req",
+          "-x509",
+          "-newkey",
+          "rsa:2048",
+          "-nodes",
+          "-days",
+          "1",
+          "-subj",
+          "/CN=localhost",
+          "-keyout",
+          key,
+          "-out",
+          certificate,
+        ],
+        { stdio: "ignore" },
+      );
+      server = NodeHttps.createServer(
+        {
+          key: NodeFS.readFileSync(key),
+          cert: NodeFS.readFileSync(certificate),
+        },
+        (request, response) => {
+          const entry = `${request.method} ${request.url}`;
+          requests.push(entry);
+          if (
+            request.url === "/api/auth/browser-session" ||
+            request.headers["sec-fetch-dest"] === "document"
+          ) {
+            authenticationAndDocuments.push({ request: entry, cookie: request.headers.cookie });
+          }
+          if (request.url === "/api/auth/browser-session") {
+            let body = "";
+            request.setEncoding("utf8");
+            request.on("data", (chunk) => {
+              body += chunk;
+            });
+            request.on("end", () => {
+              if (JSON.parse(body).credential !== "fixture-one-use") {
+                response.writeHead(401).end();
+                return;
+              }
+              response.setHeader(
+                "Set-Cookie",
+                "fixture-session=accepted; Path=/; Secure; HttpOnly; SameSite=Lax",
+              );
+              response.setHeader("Content-Type", "application/json");
+              response.end("{}");
+            });
+            return;
+          }
+          const authenticated = request.headers.cookie?.includes("fixture-session=accepted");
+          if (request.url === "/api/auth/session") {
+            response.writeHead(authenticated ? 200 : 401).end();
+            return;
+          }
+          if (request.url === "/qa" && !authenticated) {
+            response.writeHead(302, { Location: "/pair" }).end();
+            return;
+          }
+          response.setHeader("Content-Type", "text/html");
+          response.end(request.url === "/pair" ? "<h1>Pair</h1>" : "<h1>cold-bootstrap-ready</h1>");
+        },
+      );
+      await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (address === null || typeof address === "string")
+        throw new Error("Missing TLS fixture listener");
+      const origin = `https://127.0.0.1:${address.port}`;
+      // Trust is confined to this throwaway certificate/context, never production.
+      fresh = await browser.newContext({ ignoreHTTPSErrors: true });
+      const selected = await fresh.newPage();
+      expect(await fresh.cookies()).toEqual([]);
+      const unauthenticated = await fresh.request.get(`${origin}/api/auth/session`);
+      expect(unauthenticated.status()).toBe(401);
+      await unauthenticated.dispose();
+      requests.length = 0;
+      await ServerBrowserPage.prepareBrowserCredential(
+        selected,
+        `${origin}/qa`,
+        "fixture-one-use",
+        15_000,
+      );
+      await selected.goto(`${origin}/qa`);
+      expect(await selected.locator("h1").innerText()).toBe("cold-bootstrap-ready");
+      expect(selected.url()).toBe(`${origin}/qa`);
+      expect((await fresh.cookies()).map((cookie) => cookie.name)).toEqual(["fixture-session"]);
+      // Assert every document load and its cookie; ancillary HTTP traffic is
+      // not a navigation and must not define the first-document auth gate.
+      expect(authenticationAndDocuments).toEqual([
+        { request: "POST /api/auth/browser-session", cookie: undefined },
+        { request: "GET /qa", cookie: "fixture-session=accepted" },
+      ]);
+      expect(requests).not.toContain("GET /pair");
+      control = await browser.newContext({ ignoreHTTPSErrors: true });
+      expect(await control.cookies()).toEqual([]);
+      const unprepared = await control.newPage();
+      await unprepared.goto(`${origin}/qa`);
+      expect(unprepared.url()).toBe(`${origin}/pair`);
+    } finally {
+      await control?.close();
+      await fresh?.close();
+      if (server)
+        await new Promise<void>((resolve, reject) =>
+          server!.close((error) => (error ? reject(error) : resolve())),
+        );
+      NodeFS.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["back", "forward", "reload", "same-document back"])(
+    "redirects a changed origin during %s without adding a history entry",
+    async (operation) => {
+      const requests: string[] = [];
+      const server = NodeHttp.createServer((request, response) => {
+        requests.push(`http://${request.headers.host}${request.url}`);
+        response.setHeader("Content-Type", "text/html");
+        response.end("<p>report</p>");
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      try {
+        const address = server.address();
+        if (address === null || typeof address === "string")
+          throw new Error("Missing test listener");
+        const origin = `http://127.0.0.1:${address.port}`;
+        const before = `${origin}/before`;
+        const after = `${origin}/after`;
+        const stored = `${origin}/report?mode=dark#anchor`;
+        const target =
+          operation === "same-document back" ? stored.replace("#anchor", "#first") : stored;
+        const destination = target.replace("127.0.0.1", "localhost");
+        await page.goto(before);
+        if (operation === "same-document back") await page.goto(target);
+        await page.goto(stored);
+        if (operation === "back" || operation === "forward") await page.goto(after);
+        if (operation === "forward") {
+          await page.goBack();
+          await page.goBack();
+        }
+        const history = await cdp.send("Page.getNavigationHistory");
+        requests.length = 0;
+        await ServerBrowserPage.navigateWithRedirect(page, target, destination, async () => {
+          if (operation === "forward") await page.goForward({ waitUntil: "commit" });
+          else if (operation === "reload") await page.reload({ waitUntil: "commit" });
+          else await page.goBack({ waitUntil: "commit" });
+        });
+        const navigated = await cdp.send("Page.getNavigationHistory");
+        expect(page.url()).toBe(destination);
+        expect(navigated.entries).toHaveLength(history.entries.length);
+        expect(navigated.currentIndex).toBe(
+          history.currentIndex + (operation === "forward" ? 1 : operation === "reload" ? 0 : -1),
+        );
+        expect(requests.filter((url) => new URL(url).pathname === "/report")).toEqual([
+          destination.split("#")[0],
+        ]);
+        await page.goBack();
+        expect(page.url()).toBe(before);
+        await page.goForward();
+        expect(page.url()).toBe(destination);
+        if (operation === "back" || operation === "forward") {
+          await page.goForward();
+          expect(page.url()).toBe(after);
+        }
+      } finally {
+        await new Promise<void>((resolve, reject) =>
+          server.close((error) => (error ? reject(error) : resolve())),
+        );
+      }
+    },
+  );
+
+  it("captures the full native DIP viewport with actual PNG pixels matching bounded snapshot metadata", async () => {
+    const nativeBrowser = await chromium.launch({
+      headless: true,
+      args: ["--force-device-scale-factor=2", "--window-size=1000,750"],
+    });
+    try {
+      const nativeContext = await nativeBrowser.newContext({ viewport: null });
+      const nativePage = await nativeContext.newPage();
+      const nativeSession = await nativeContext.newCDPSession(nativePage);
+      await nativePage.setContent('<p style="margin:0">native viewport</p>');
+      // Native window dimensions vary by Chromium build; model zoom against its actual pixels.
+      expect(nativePage.viewportSize()).toBeNull();
+      const unscaled = await nativeSession.send("Page.captureScreenshot", { format: "png" });
+      const unscaledPng = Buffer.from(unscaled.data, "base64");
+      const unscaledSize = {
+        width: unscaledPng.readUInt32BE(16),
+        height: unscaledPng.readUInt32BE(20),
+      };
+      expect(unscaledSize.width).toBeGreaterThan(1280);
+      const send = vi.fn(
+        async (
+          method: Parameters<CDPSession["send"]>[0],
+          options?: Parameters<CDPSession["send"]>[1],
+        ) => {
+          if (method === "Page.getLayoutMetrics")
+            return {
+              cssVisualViewport: {
+                clientWidth: unscaledSize.width / 2.5,
+                clientHeight: unscaledSize.height / 2.5,
+                pageX: 0,
+                pageY: 0,
+                zoom: 1.25,
+              },
+            };
+          return nativeSession.send(method, options);
+        },
+      );
+      const result = await ServerBrowserPage.snapshot({
+        page: nativePage,
+        cdp: { send } as unknown as CDPSession,
+        renderScale: 2.5,
+        consoleEntries: [],
+        networkEntries: [],
+        actionTimeline: [],
+      });
+      const png = Buffer.from(result.screenshot!.data, "base64");
+      expect(png.subarray(12, 16).toString()).toBe("IHDR");
+      const pixels = { width: png.readUInt32BE(16), height: png.readUInt32BE(20) };
+      expect(pixels).toEqual({
+        width: 1280,
+        height: Math.round((unscaledSize.height * 1280) / unscaledSize.width),
+      });
+      expect(result.screenshot).toMatchObject(pixels);
+      expect(send).toHaveBeenCalledWith("Page.captureScreenshot", { format: "png" });
+      expect(send).toHaveBeenCalledWith(
+        "Runtime.callFunctionOn",
+        expect.objectContaining({
+          arguments: [
+            { value: expect.any(String) },
+            { value: pixels.width },
+            { value: pixels.height },
+          ],
+          awaitPromise: true,
+          returnByValue: true,
+        }),
+      );
+    } finally {
+      await nativeBrowser.close();
+    }
+  });
   const locators = (tree: unknown) => {
     expect(typeof tree).toBe("string");
     return Array.from(
@@ -277,7 +648,9 @@ describe("server browser element refs", () => {
     await expect(
       ServerBrowserPage.evaluate(cdp, { expression: "for (;;) {}" }, { timeoutMs: 200 }),
     ).rejects.toMatchObject({ tag: "PreviewAutomationTimeoutError" });
-    expect(await ServerBrowserPage.evaluate(cdp, { expression: "1 + 1" }, { timeoutMs: 2_000 })).toBe(2);
+    expect(
+      await ServerBrowserPage.evaluate(cdp, { expression: "1 + 1" }, { timeoutMs: 2_000 }),
+    ).toBe(2);
   });
 });
 
@@ -327,6 +700,7 @@ describe("server browser snapshot screenshot", () => {
       networkEntries: [],
       actionTimeline: [],
     });
+    if (screenshot === undefined) throw new Error("Expected snapshot screenshot");
     // The server has no DOM types, so the decoder runs as page source.
     const points = [
       [0.15, 0.75],
@@ -380,6 +754,7 @@ describe("server browser snapshot screenshot", () => {
       actionTimeline: [],
     });
 
+    if (screenshot === undefined) throw new Error("Expected snapshot screenshot");
     expect([screenshot.width, screenshot.height]).toEqual([1280, 800]);
   });
 });

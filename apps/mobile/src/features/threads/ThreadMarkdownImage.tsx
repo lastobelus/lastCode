@@ -5,7 +5,7 @@ import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { Image } from "expo-image";
-import { createContext, useContext, useId, useState } from "react";
+import { createContext, useContext, useEffect, useId, useState, type ReactNode } from "react";
 import { fetch } from "expo/fetch";
 import { parse, SvgAst, type JsxAST } from "react-native-svg";
 import { Pressable, StyleSheet, View, type ViewStyle } from "react-native";
@@ -19,6 +19,10 @@ import { PresentationSource } from "../../components/ui/NativePresentation";
 import { useMediaActions } from "../../state/mediaActions";
 import type { MediaActionsSource } from "../../lib/mediaActionsSource";
 import { useAssetUrlState } from "../../state/assets";
+import {
+  startPreparingThreadFeedMediaUrl,
+  type ThreadFeedMediaPreparation,
+} from "../../lib/prepareThreadFeedPreview";
 import {
   MARKDOWN_IMAGE_MAX_WIDTH,
   type MarkdownImageDisplaySize,
@@ -80,6 +84,36 @@ const svgDocumentAtom = Atom.family((uri: string) =>
 );
 
 const noSvgDocumentAtom = Atom.make(AsyncResult.initial<SvgDocument, SvgLoadError>());
+
+/** Keeps remote media unloaded until its owning thread's managed preview is ready. */
+export function ThreadMarkdownPreparedUri(props: {
+  readonly uri: string;
+  readonly sourceKey: string;
+  readonly prepareUrl?: ((url: string) => Promise<string>) | undefined;
+  readonly children: (result: ThreadFeedMediaPreparation) => ReactNode;
+}) {
+  const [prepared, setPrepared] = useState<{
+    readonly sourceKey: string;
+    readonly originalUri: string;
+    readonly result: ThreadFeedMediaPreparation;
+  } | null>(null);
+  const requiresPreparation = props.prepareUrl !== undefined && /^https?:\/\//i.test(props.uri);
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- prepares hosted media authorization for the mounted image and cancels obsolete requests
+  useEffect(() => {
+    if (!props.prepareUrl || !/^https?:\/\//i.test(props.uri)) return;
+    return startPreparingThreadFeedMediaUrl(props.uri, props.prepareUrl, (result) =>
+      setPrepared({ sourceKey: props.sourceKey, originalUri: props.uri, result }),
+    );
+  }, [props.prepareUrl, props.sourceKey, props.uri]);
+
+  const result: ThreadFeedMediaPreparation = requiresPreparation
+    ? prepared?.sourceKey === props.sourceKey && prepared.originalUri === props.uri
+      ? prepared.result
+      : { status: "pending", uri: null }
+    : { status: "ready", uri: props.uri };
+  return props.children(result);
+}
 
 export function ThreadMarkdownImageView(props: {
   readonly uri: string | null;

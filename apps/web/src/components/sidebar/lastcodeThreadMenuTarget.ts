@@ -12,7 +12,7 @@ import {
   NO_PROJECT_GROUP_KEY,
   resolveSidebarProjectSettingsKey,
 } from "../../sidebarProjectGrouping";
-import type { ProjectGroupingSettings } from "../../logicalProject";
+import type { ProjectGroupingSettings } from "@t3tools/client-runtime/state/project-grouping";
 import type { SidebarThreadSummary } from "../../types";
 import {
   readProject,

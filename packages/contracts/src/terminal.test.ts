@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   DEFAULT_TERMINAL_ID,
   TerminalError,
+  TerminalAttachInput,
   TerminalOpenInput,
   TerminalProviderEnvironmentError,
 } from "./terminal.ts";
@@ -47,5 +48,24 @@ describe("TerminalOpenInput", () => {
       env: { "bad-key": "1", GOOD_KEY: "2" },
     });
     expect(parsed.env).toEqual({ GOOD_KEY: "2" });
+  });
+});
+
+describe("terminal link profile launch intent", () => {
+  const input = { threadId: "thread-1", terminalId: "term-action-a", cwd: "/workspace/example" };
+  it("distinguishes explicit ordinary launch intent from reopening retained intent", () => {
+    expect(
+      decodeSync(TerminalOpenInput, { ...input, terminalLinkProfileName: null })
+        .terminalLinkProfileName,
+    ).toBeNull();
+    expect(decodeSync(TerminalOpenInput, input)).not.toHaveProperty("terminalLinkProfileName");
+    expect(
+      decodeSync(TerminalAttachInput, { ...input, terminalLinkProfileName: null })
+        .terminalLinkProfileName,
+    ).toBeNull();
+    expect(
+      decodeSync(TerminalOpenInput, { ...input, terminalLinkProfileName: "Work account" })
+        .terminalLinkProfileName,
+    ).toBe("Work account");
   });
 });

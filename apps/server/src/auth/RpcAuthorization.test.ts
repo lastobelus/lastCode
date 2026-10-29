@@ -2,6 +2,8 @@ import {
   AuthEnvironmentMaintainScope,
   AuthDiagnosticsReadScope,
   AuthFilesystemReadScope,
+  AuthFilesystemWriteScope,
+  CommandId,
   AuthProvidersManageScope,
   AuthSettingsWriteScope,
   DEFAULT_SERVER_SETTINGS,
@@ -82,6 +84,9 @@ describe("RPC authorization scopes", () => {
     );
     expect(requiredScopeForRpcMethod(WS_METHODS.previewHostingRecover)).toBe(
       AuthTerminalOperateScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.previewHostingActivity)).toBe(
+      AuthPreviewOperateScope,
     );
     expect(requiredScopeForRpcMethod(WS_METHODS.subscribePreviewHosting)).toBe(
       AuthOrchestrationReadScope,
@@ -178,6 +183,255 @@ describe("RPC scope middleware", () => {
     }).pipe(Effect.scoped),
   );
 });
+
+const suspensionScopes = [
+  AuthEnvironmentMaintainScope,
+  AuthFilesystemReadScope,
+  AuthFilesystemWriteScope,
+  AuthSourceControlWriteScope,
+  AuthOrchestrationOperateScope,
+] as const;
+
+it.effect("requires maintenance permission to release an orphan checkout hold", () =>
+  Effect.gen(function* () {
+    const method = WS_METHODS.serverSetKeepWorkspace;
+    const group = WsRpcGroup.omit(
+      ...[...WsRpcGroup.requests.keys()].filter(
+        (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, typeof method> => tag !== method,
+      ),
+    );
+    const handled: unknown[] = [];
+    const client = yield* RpcTest.makeClient(group).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          group.toLayerHandler(method, (input) =>
+            Effect.sync(() => {
+              handled.push(input);
+              return {
+                operationId: "keep-request",
+                checkoutId: "checkout",
+                state: "complete" as const,
+                message: "Hold updated.",
+              };
+            }),
+          ),
+          RpcAuthorization.layer([AuthOrchestrationOperateScope]),
+        ),
+      ),
+    );
+    expect(
+      yield* client[method]({ checkoutId: "checkout", keep: false }).pipe(Effect.flip),
+    ).toMatchObject({
+      _tag: "EnvironmentAuthorizationError",
+      requiredPermission: AuthEnvironmentMaintainScope,
+    });
+    expect(handled).toEqual([]);
+    yield* client[method]({ threadId: ThreadId.make("live-thread"), keep: true });
+    expect(handled).toEqual([{ threadId: "live-thread", keep: true }]);
+  }).pipe(Effect.scoped),
+);
+
+it.effect.each([
+  WS_METHODS.serverSuspendWorktree,
+  WS_METHODS.serverRestoreWorktree,
+  WS_METHODS.serverCreateFreshWorktree,
+  WS_METHODS.serverDiscardWorktreeSnapshots,
+])("rejects Git-mutating saved workspace operation %s without source-control write", (method) =>
+  Effect.gen(function* () {
+    const group = WsRpcGroup.omit(
+      ...[...WsRpcGroup.requests.keys()].filter(
+        (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, typeof method> => tag !== method,
+      ),
+    );
+    let handled = false;
+    const client = yield* RpcTest.makeClient(group).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          group.toLayerHandler(method, () =>
+            Effect.sync(() => {
+              handled = true;
+            }).pipe(Effect.andThen(Effect.never)),
+          ),
+          RpcAuthorization.layer(
+            suspensionScopes.filter((scope) => scope !== AuthSourceControlWriteScope),
+          ),
+        ),
+      ),
+    );
+    const input = {
+      threadId: ThreadId.make("saved-workspace"),
+      checkoutId: "checkout",
+      snapshotId: "saved",
+      previewToken: "confirmed",
+    };
+    expect(yield* client[method](input).pipe(Effect.flip)).toMatchObject({
+      _tag: "EnvironmentAuthorizationError",
+      requiredPermission: AuthSourceControlWriteScope,
+    });
+    expect(handled).toBe(false);
+  }).pipe(Effect.scoped),
+);
+
+it.effect.each(suspensionScopes)(
+  "rejects suspension without %s before its handler runs",
+  (missing) =>
+    Effect.gen(function* () {
+      const method = WS_METHODS.serverSuspendWorktree;
+      const group = WsRpcGroup.omit(
+        ...[...WsRpcGroup.requests.keys()].filter(
+          (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, typeof method> => tag !== method,
+        ),
+      );
+      let handled = false;
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            group.toLayerHandler(method, () =>
+              Effect.sync(() => {
+                handled = true;
+              }).pipe(Effect.andThen(Effect.never)),
+            ),
+            RpcAuthorization.layer(suspensionScopes.filter((scope) => scope !== missing)),
+          ),
+        ),
+      );
+      expect(
+        yield* client[method]({
+          threadId: ThreadId.make("saved-workspace"),
+          previewToken: "reviewed-preview",
+        }).pipe(Effect.flip),
+      ).toMatchObject({ _tag: "EnvironmentAuthorizationError", requiredPermission: missing });
+      expect(handled).toBe(false);
+    }).pipe(Effect.scoped),
+);
+
+it.effect.each(suspensionScopes)(
+  "rejects archive-and-discard without %s before dispatch",
+  (missing) =>
+    Effect.gen(function* () {
+      const method = ORCHESTRATION_V2_WS_METHODS.dispatchCommand;
+      const group = WsRpcGroup.omit(
+        ...[...WsRpcGroup.requests.keys()].filter(
+          (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, typeof method> => tag !== method,
+        ),
+      );
+      let handled = false;
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            group.toLayerHandler(method, () =>
+              Effect.sync(() => {
+                handled = true;
+              }).pipe(Effect.andThen(Effect.never)),
+            ),
+            RpcAuthorization.layer(suspensionScopes.filter((scope) => scope !== missing)),
+          ),
+        ),
+      );
+      expect(
+        yield* client[method]({
+          type: "thread.archive",
+          commandId: CommandId.make("discard-command"),
+          threadId: ThreadId.make("saved-workspace"),
+          savedWorkspace: { mode: "discard", previewToken: "reviewed-preview" },
+        }).pipe(Effect.flip),
+      ).toMatchObject({ _tag: "EnvironmentAuthorizationError", requiredPermission: missing });
+      expect(handled).toBe(false);
+    }).pipe(Effect.scoped),
+);
+
+it.effect.each(suspensionScopes)(
+  "rejects bulk delete-and-discard without %s before dispatch",
+  (missing) =>
+    Effect.gen(function* () {
+      const method = WS_METHODS.serverDeleteThreads;
+      const group = WsRpcGroup.omit(
+        ...[...WsRpcGroup.requests.keys()].filter(
+          (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, typeof method> => tag !== method,
+        ),
+      );
+      let handled = false;
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            group.toLayerHandler(method, () =>
+              Effect.sync(() => {
+                handled = true;
+              }).pipe(Effect.andThen(Effect.never)),
+            ),
+            RpcAuthorization.layer(suspensionScopes.filter((scope) => scope !== missing)),
+          ),
+        ),
+      );
+      expect(
+        yield* client[method]({
+          commandId: CommandId.make("bulk-delete"),
+          threads: [{ threadId: ThreadId.make("first") }, { threadId: ThreadId.make("second") }],
+          savedWorkspace: { mode: "discard", previewToken: "whole-selection" },
+        }).pipe(Effect.flip),
+      ).toMatchObject({ _tag: "EnvironmentAuthorizationError", requiredPermission: missing });
+      expect(handled).toBe(false);
+    }).pipe(Effect.scoped),
+);
+
+it.effect("allows bulk deletion retaining saved data with only thread operation permission", () =>
+  Effect.gen(function* () {
+    const method = WS_METHODS.serverDeleteThreads;
+    const group = WsRpcGroup.omit(
+      ...[...WsRpcGroup.requests.keys()].filter(
+        (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, typeof method> => tag !== method,
+      ),
+    );
+    const first = ThreadId.make("first");
+    const client = yield* RpcTest.makeClient(group).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          group.toLayerHandler(method, () => Effect.succeed({ deletedThreadIds: [first] })),
+          RpcAuthorization.layer([AuthOrchestrationOperateScope]),
+        ),
+      ),
+    );
+    expect(
+      yield* client[method]({
+        commandId: CommandId.make("bulk-keep"),
+        threads: [{ threadId: first }],
+        savedWorkspace: { mode: "retain" },
+      }),
+    ).toEqual({ deletedThreadIds: [first] });
+  }).pipe(Effect.scoped),
+);
+
+it.effect("rejects bulk live worktree removal without source-control write permission", () =>
+  Effect.gen(function* () {
+    const method = WS_METHODS.serverDeleteThreads;
+    const group = WsRpcGroup.omit(
+      ...[...WsRpcGroup.requests.keys()].filter(
+        (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, typeof method> => tag !== method,
+      ),
+    );
+    let handled = false;
+    const client = yield* RpcTest.makeClient(group).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          group.toLayerHandler(method, () =>
+            Effect.sync(() => {
+              handled = true;
+            }).pipe(Effect.andThen(Effect.never)),
+          ),
+          RpcAuthorization.layer([AuthOrchestrationOperateScope]),
+        ),
+      ),
+    );
+    expect(
+      yield* client[method]({
+        commandId: CommandId.make("bulk-remove"),
+        threads: [{ threadId: ThreadId.make("first"), deleteWorktree: true }],
+        savedWorkspace: { mode: "retain" },
+      }).pipe(Effect.flip),
+    ).toMatchObject({ requiredPermission: AuthSourceControlWriteScope });
+    expect(handled).toBe(false);
+  }).pipe(Effect.scoped),
+);
 
 it("requires preview control permission for native browser messages", () => {
   for (const method of [
@@ -444,6 +698,19 @@ it.effect("separates host file URLs from readable attachment URLs", () =>
         requiredPermission: AuthFilesystemReadScope,
       });
     }
+    expect(
+      yield* client[WS_METHODS.assetsCreateUrl]({
+        resource: {
+          _tag: "managed-preview-resource",
+          threadId: ThreadId.make("thread"),
+          leaseId: "lease-resource",
+          url: "http://127.0.0.1:5173/image.png",
+        },
+      }).pipe(Effect.flip),
+    ).toMatchObject({
+      requiredScope: AuthTerminalOperateScope,
+      requiredPermission: AuthTerminalOperateScope,
+    });
     expect(handled).toBe(2);
   }).pipe(Effect.scoped),
 );

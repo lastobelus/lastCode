@@ -596,7 +596,13 @@ export function resolveSidebarRowThreadId(
 export function filterSidebarV2VisibleThreads<
   T extends Pick<
     SidebarThreadSummary,
-    "archivedAt" | "deletedAt" | "worktreeCleanup" | "lineage" | "archivePending" | "environmentId" | "id"
+    | "archivedAt"
+    | "deletedAt"
+    | "worktreeCleanup"
+    | "lineage"
+    | "archivePending"
+    | "environmentId"
+    | "id"
   > & {
     projectId: string;
   },
@@ -681,6 +687,7 @@ export interface ThreadStatusPill {
     | "Failed"
     | "Pending Approval"
     | "Awaiting Input"
+    | "Question"
     | "Guest Request"
     | "Waiting"
     | "Plan Ready"
@@ -692,6 +699,7 @@ export interface ThreadStatusPill {
     | "Archiving…"
     | "Archive failed";
   description?: string;
+  marker?: "?";
   colorClass: string;
   dotClass: string;
   pulse: boolean;
@@ -711,6 +719,15 @@ const THREAD_STATUS_PRIORITY = {
     presentation: {
       colorClass: "text-indigo-600 dark:text-indigo-300/90",
       dotClass: "bg-indigo-500 dark:bg-indigo-300/90",
+      pulse: false,
+    },
+  },
+  Question: {
+    priority: 5,
+    presentation: {
+      colorClass: "text-violet-600 dark:text-violet-300/90",
+      dotClass: "bg-violet-500 dark:bg-violet-300/90",
+      marker: "?" as const,
       pulse: false,
     },
   },
@@ -819,6 +836,7 @@ type ThreadStatusInput = Pick<
   | "recovery"
   | "archivePending"
 > & {
+  attention?: { readonly kind: "question"; readonly raisedAt: string } | null | undefined;
   lastVisitedAt?: string | null | undefined;
   pendingBackgroundTasks?: SidebarThreadSummary["pendingBackgroundTasks"] | undefined;
   blockedOnThreadWait?: boolean | undefined;
@@ -971,6 +989,7 @@ export type SidebarThreadStatus =
   | "approval"
   | "input"
   | "request"
+  | "question"
   | "working"
   | "waiting"
   | "failed"
@@ -1016,7 +1035,10 @@ type SidebarThreadStatusInput = Pick<
   | "worktreeCleanup"
   | "recovery"
   | "archivePending"
-> & { pendingBackgroundTasks?: SidebarThreadSummary["pendingBackgroundTasks"] | undefined };
+> &
+  Pick<ThreadStatusInput, "attention"> & {
+    pendingBackgroundTasks?: SidebarThreadSummary["pendingBackgroundTasks"] | undefined;
+  };
 
 export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): SidebarThreadStatus {
   const archive = presentThreadArchive(thread);
@@ -1032,6 +1054,7 @@ export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): Si
   if (thread.hasPendingUserInput || thread.pendingSubagentRequest === "user_input") {
     return "input";
   }
+  if (thread.attention?.kind === "question") return "question";
   // A guest is waiting on the owner; the agent's own requests come first.
   if ((thread.pendingGuestMessageCount ?? 0) > 0) {
     return "request";
@@ -1070,6 +1093,7 @@ export function resolveSidebarFolderDot(
     statuses.has("input") ||
     statuses.has("approval") ||
     statuses.has("request") ||
+    statuses.has("question") ||
     statuses.has("limited")
   ) {
     return "attention";
@@ -1132,60 +1156,6 @@ export function groupSidebarThreadsByProject<
     folderByProject.get(`${thread.environmentId}:${thread.projectId}`)?.threads.push(thread);
   }
   return keepEmpty ? folders : folders.filter((folder) => folder.threads.length > 0);
-}
-
-export type SidebarV2TopStatusKind =
-  | "archiving"
-  | "archive-failed"
-  | "approval"
-  | "done"
-  | "failed"
-  | "limited"
-  | "input"
-  | "request"
-  | "waiting"
-  | "woke"
-  | "working"
-  | "cleanup-deleting"
-  | "cleanup-queued"
-  | "cleanup-failed"
-  | "not-responding"
-  | "needs-repair";
-
-export function resolveSidebarV2TopStatus(input: {
-  readonly status: SidebarThreadStatus;
-  readonly isUnread: boolean;
-  readonly isWoke: boolean;
-}): SidebarV2TopStatusKind | null {
-  if (
-    input.status === "archiving" ||
-    input.status === "archive-failed" ||
-    input.status === "not-responding" ||
-    input.status === "needs-repair" ||
-    input.status === "cleanup-deleting" ||
-    input.status === "cleanup-queued" ||
-    input.status === "cleanup-failed"
-  )
-    return input.status;
-  if (input.status === "working") {
-    return "working";
-  }
-  if (input.status === "waiting") {
-    return "waiting";
-  }
-  if (input.status === "approval") {
-    return "approval";
-  }
-  if (input.status === "input" || input.status === "request") {
-    return input.status;
-  }
-  if (input.status === "failed" || input.status === "limited") {
-    return input.status;
-  }
-  if (input.isWoke) {
-    return "woke";
-  }
-  return input.isUnread ? "done" : null;
 }
 
 export function firstValidTimestampMs(
@@ -1365,6 +1335,10 @@ export function resolveThreadStatusPill(input: {
 
   if (thread.hasPendingUserInput || thread.pendingSubagentRequest === "user_input") {
     return { label: "Awaiting Input", ...THREAD_STATUS_PRIORITY["Awaiting Input"].presentation };
+  }
+
+  if (thread.attention?.kind === "question") {
+    return { label: "Question", ...THREAD_STATUS_PRIORITY.Question.presentation };
   }
 
   if ((thread.pendingGuestMessageCount ?? 0) > 0) {
@@ -1637,4 +1611,29 @@ export function sortScopedProjectsForSidebar<
       left.environmentId.localeCompare(right.environmentId) ||
       left.id.localeCompare(right.id),
   );
+}
+
+const SIDEBAR_THREAD_PREWARM_LIMIT = 3;
+
+const THREAD_SELECTION_SAFE_SELECTOR = "[data-thread-item], [data-thread-selection-safe]";
+
+export function shouldClearThreadSelectionOnMouseDown(target: HTMLElement | null): boolean {
+  if (target === null) return true;
+  return !target.closest(THREAD_SELECTION_SAFE_SELECTOR);
+}
+
+export function getSidebarThreadIdsToPrewarm<TThreadId>(
+  visibleThreadIds: readonly TThreadId[],
+  limit = SIDEBAR_THREAD_PREWARM_LIMIT,
+): TThreadId[] {
+  return visibleThreadIds.slice(0, Math.max(0, limit));
+}
+
+export function isContextMenuPointerDown(input: {
+  button: number;
+  ctrlKey: boolean;
+  isMac: boolean;
+}): boolean {
+  if (input.button === 2) return true;
+  return input.isMac && input.button === 0 && input.ctrlKey;
 }

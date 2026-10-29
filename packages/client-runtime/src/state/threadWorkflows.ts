@@ -5,6 +5,7 @@ import {
   type OrchestrationV2ProviderCapabilities,
 } from "@t3tools/contracts";
 import { copySorted } from "@t3tools/shared/Array";
+import { recoveryQueuesFollowUps } from "./threadRecovery.ts";
 
 import type { ThreadStructure } from "./models.ts";
 
@@ -137,6 +138,9 @@ export function deriveThreadQueueWorkflowState(projection: Projection): ThreadQu
   );
   const promoteSkipsCompaction =
     activeMessage !== undefined && isCompactionCommandMessage(activeMessage);
+  const recoveryForcesQueue =
+    recoveryQueuesFollowUps(projection.thread.recovery, activeRun?.id) &&
+    projection.thread.recovery?.attemptId === activeRun?.activeAttemptId;
   const hasSteerableProviderTurn =
     activeRun?.status === "running" &&
     activeRun.activeAttemptId !== null &&
@@ -170,10 +174,11 @@ export function deriveThreadQueueWorkflowState(projection: Projection): ThreadQu
       projection.thread.archivedAt == null &&
       projection.thread.deletedAt == null,
     canPromoteToSteer:
-      promoteSkipsCompaction ||
-      (hasSteerableProviderTurn &&
-        (capabilities?.supportsActiveSteering === true ||
-          capabilities?.supportsSteeringByInterruptRestart === true)),
+      !recoveryForcesQueue &&
+      (promoteSkipsCompaction ||
+        (hasSteerableProviderTurn &&
+          (capabilities?.supportsActiveSteering === true ||
+            capabilities?.supportsSteeringByInterruptRestart === true))),
     promoteSkipsCompaction,
   };
 }

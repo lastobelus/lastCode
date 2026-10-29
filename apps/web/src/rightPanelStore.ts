@@ -21,6 +21,7 @@ const RIGHT_PANEL_KINDS = [
   "terminal",
   "pull-request",
   "pull-requests",
+  "handoffs",
 ] as const;
 export type RightPanelKind = (typeof RIGHT_PANEL_KINDS)[number];
 
@@ -74,7 +75,8 @@ export type RightPanelSurface =
       url?: string;
       detailTab?: PullRequestDetailTab;
     }
-  | { id: "pull-requests"; kind: "pull-requests" };
+  | { id: "pull-requests"; kind: "pull-requests" }
+  | { id: "handoffs"; kind: "handoffs" };
 
 const RIGHT_PANEL_STORAGE_KEY = "t3code:right-panel-state:v2";
 const RIGHT_PANEL_STORAGE_VERSION = 14;
@@ -215,6 +217,8 @@ const singletonSurface = (
       return { id: "files", kind };
     case "pull-requests":
       return { id: "pull-requests", kind };
+    case "handoffs":
+      return { id: "handoffs", kind };
     case "device":
       return { id: "device", kind };
   }
@@ -994,9 +998,8 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
               current.surfaces.some((surface) => surface.kind === "preview" && surface.resourceId);
             return {
               ...current,
-              isOpen: closedLastSessionTab ? false : current.isOpen,
+              isOpen: closedLastSessionTab ? false : focusedSurface ? true : current.isOpen,
               surfaces,
-              isOpen: focusedSurface ? true : current.isOpen,
               activeSurfaceId:
                 focusedSurface?.id ??
                 (activeStillExists
