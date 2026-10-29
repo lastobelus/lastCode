@@ -15,6 +15,7 @@ import {
   type OrchestratorMcpThreadReadInput,
   type OrchestratorMcpThreadReadResult,
   type ThreadReadRequest,
+  type OrchestrationMessageContext,
 } from "@t3tools/contracts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as DateTime from "effect/DateTime";
@@ -88,6 +89,18 @@ const makeHarness = Effect.gen(function* () {
   const transfers = new Map<ThreadId, Array<Spawn>>();
   const requests = new Map<ThreadId, OrchestrationV2ThreadProjection["runtimeRequests"]>();
   const nodes = new Map<ThreadId, Array<{ id: string; runId: RunId }>>();
+  const messages = new Map<
+    ThreadId,
+    Array<{
+      id: MessageId;
+      text: string;
+      context?: OrchestrationMessageContext;
+      threadReadContext?: {
+        authorizationId: MessageId;
+        capturedAt: number;
+      };
+    }>
+  >();
   const broker = yield* ThreadReadBroker.ThreadReadBroker.pipe(
     Effect.provide(
       ThreadReadBroker.layer.pipe(
@@ -103,6 +116,7 @@ const makeHarness = Effect.gen(function* () {
                     contextTransfers: transfers.get(id) ?? [],
                     runtimeRequests: requests.get(id) ?? [],
                     nodes: nodes.get(id) ?? [],
+                    messages: messages.get(id) ?? [],
                   }) as unknown as OrchestrationV2ThreadProjection,
               ),
           }),
@@ -177,6 +191,7 @@ const makeHarness = Effect.gen(function* () {
     transfers,
     requests,
     nodes,
+    messages,
     start,
     send,
     answer,
@@ -345,6 +360,89 @@ describe("ThreadReadBroker", () => {
               via: "client",
             }),
           ).toBe("client-session");
+        }),
+      ),
+  );
+
+  it.effect(
+    "scopes edited queued references to their editing client without replacing run authority",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const h = yield* makeHarness;
+          const messageId = MessageId.make("edited-queue-message");
+          const authorizationId = MessageId.make("queued-edit-context:edit-command");
+          yield* h.send("client-session", sourceThreadId, messageId, "queued");
+          yield* h.broker.forSession("editing-client").authorize(sourceThreadId, authorizationId);
+          const capturedAt = DateTime.toEpochMillis(yield* DateTime.now);
+          h.messages.set(sourceThreadId, [
+            {
+              id: messageId,
+              text: "[Reference](t3-context://v1/thread/edited-reference)",
+              context: {
+                version: 1,
+                records: [
+                  {
+                    version: 1,
+                    contextId: ComposerContextId.make("edited-reference"),
+                    kind: "thread",
+                    label: "Reference",
+                    title: "Reference",
+                    environmentId,
+                    threadId,
+                  },
+                ],
+              },
+              threadReadContext: { authorizationId, capturedAt },
+            },
+          ]);
+          yield* h.answer("editing-client");
+          yield* h.answer("client-session", (request) => ({
+            ...result,
+            thread: {
+              ...result.thread,
+              threadId: request.input.threadId,
+              environmentId: request.input.environmentId ?? environmentId,
+            },
+          }));
+          const exact = { threadId, environmentId, via: "client" as const };
+          expect(yield* h.readFrom(sourceThreadId, runId(messageId), exact)).toBe("editing-client");
+          const unrelated = { ...exact, threadId: ThreadId.make("unmentioned-reference") };
+          expect(yield* h.readFrom(sourceThreadId, runId(messageId), unrelated)).toBe(
+            "client-session",
+          );
+          expect(yield* h.readFrom(sourceThreadId, runId(messageId), { threadId })).toBe(
+            "client-session",
+          );
+          const childThread = ThreadId.make("edited-queue-child");
+          const childMessage = MessageId.make("edited-queue-child-message");
+          h.start(childThread, childMessage);
+          yield* TestClock.adjust("1 millis");
+          h.transfers.set(childThread, [
+            {
+              type: "subagent_spawn",
+              createdAt: yield* DateTime.now,
+              targetRunId: runId(childMessage),
+              sourceThreadId,
+              sourcePoint: { threadId: sourceThreadId, runId: runId(messageId) },
+            },
+          ]);
+          expect(yield* h.readFrom(childThread, runId(childMessage), exact)).toBe("editing-client");
+          yield* TestClock.adjust("6 days");
+          expect(yield* h.readFrom(sourceThreadId, runId(messageId), unrelated)).toBe(
+            "client-session",
+          );
+          yield* TestClock.adjust("2 days");
+          yield* h.broker.forSession("replay-client").authorize(sourceThreadId, authorizationId);
+          yield* h.answer("replay-client");
+          expect(yield* h.readFrom(sourceThreadId, runId(messageId), exact)).toBe(
+            "environment_unavailable",
+          );
+          expect(yield* h.readFrom(childThread, runId(childMessage), exact)).toBe(
+            "environment_unavailable",
+          );
+          h.messages.set(sourceThreadId, [{ id: messageId, text: "Reference removed" }]);
+          expect(yield* h.readFrom(sourceThreadId, runId(messageId), exact)).toBe("client-session");
         }),
       ),
   );

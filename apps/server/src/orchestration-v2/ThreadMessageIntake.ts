@@ -1,7 +1,4 @@
-import {
-  collectComposerContextReferences,
-  remapComposerContextAttachments,
-} from "@t3tools/shared/composerContextReferences";
+import { remapComposerContextAttachments } from "@t3tools/shared/composerContextReferences";
 import { appendUserInputAttachmentPaths } from "../provider/userInputAttachments.ts";
 import {
   UpdateDrainAdmissionError,
@@ -20,6 +17,8 @@ import * as AttachmentClaims from "./AttachmentClaims.ts";
 import {
   ThreadReadAuthorization,
   questionAnswerAuthorizationId,
+  queuedEditAuthorizationId,
+  referencedThreads,
 } from "./ThreadReadAuthorization.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
@@ -152,14 +151,7 @@ function withQuestionContext(
     Object.entries(command.answers ?? {}).map(([questionId, answer]) => {
       const context = supplied.get(questionId);
       if (typeof answer !== "string" || context === undefined) return [questionId, answer];
-      const ids = new Set(
-        collectComposerContextReferences(answer)
-          .filter((reference) => reference.kind === "thread")
-          .map((reference) => reference.contextId),
-      );
-      const records = [
-        ...new Map(context.records.map((record) => [record.contextId, record])).values(),
-      ].filter((record) => record.kind === "thread" && ids.has(record.contextId));
+      const records = referencedThreads(answer, context);
       if (records.length === 0) return [questionId, answer];
       contexts.push([questionId, { version: 1, records }]);
       return [questionId, answer];
@@ -189,6 +181,10 @@ export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(
       command.threadId,
       questionAnswerAuthorizationId(command.commandId),
     );
+  }
+  if (command.type === "queued-run.edit") {
+    const authorization = yield* ThreadReadAuthorization;
+    yield* authorization.authorize(command.threadId, queuedEditAuthorizationId(command.commandId));
   }
   const threads = yield* ThreadManagement.ThreadManagementService;
   if (command.type === "runtime-request.respond" && command.attachmentsByQuestionId) {
