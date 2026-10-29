@@ -9,6 +9,7 @@ import type * as Electron from "electron";
 import { makeComponentLogger } from "../app/DesktopObservability.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronMenu from "../electron/ElectronMenu.ts";
+import * as ElectronShell from "../electron/ElectronShell.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopUpdates from "../updates/DesktopUpdates.ts";
 import * as DesktopWindow from "./DesktopWindow.ts";
@@ -35,11 +36,33 @@ export class DesktopApplicationMenu extends Context.Service<
 type DesktopApplicationMenuRuntimeServices =
   | DesktopUpdates.DesktopUpdates
   | DesktopWindow.DesktopWindow
-  | ElectronDialog.ElectronDialog;
+  | ElectronDialog.ElectronDialog
+  | ElectronShell.ElectronShell;
 
 const { logInfo: logUpdaterInfo } = makeComponentLogger("desktop-updater");
 
 const { logError: logMenuError } = makeComponentLogger("desktop-menu");
+
+const openProductGuideFromMenu = Effect.fn("desktop.menu.openProductGuide")(function* (
+  guidePath: string,
+) {
+  const electronShell = yield* ElectronShell.ElectronShell;
+  const electronDialog = yield* ElectronDialog.ElectronDialog;
+  yield* electronShell.openPath(guidePath).pipe(
+    Effect.catch((error) =>
+      Effect.gen(function* () {
+        yield* logMenuError(error.message, { error });
+        yield* electronDialog.showMessageBox({
+          type: "warning",
+          title: "Product guide unavailable",
+          message: "Could not open the local product guide.",
+          detail: guidePath,
+          buttons: ["OK"],
+        });
+      }),
+    ),
+  );
+});
 
 const dispatchMenuAction = Effect.fn("desktop.menu.dispatchMenuAction")(function* (
   action: string,
@@ -123,6 +146,12 @@ const handleCheckForUpdatesMenuClick = Effect.gen(function* () {
 export const make = Effect.gen(function* () {
   const electronMenu = yield* ElectronMenu.ElectronMenu;
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
+  const productGuidePath = environment.path.join(
+    environment.baseDir,
+    "local-docs",
+    "eli5-product-guide",
+    "index.html",
+  );
   const context = yield* Effect.context<DesktopApplicationMenuRuntimeServices>();
   const runPromise = Effect.runPromiseWith(context);
 
@@ -143,6 +172,9 @@ export const make = Effect.gen(function* () {
   };
 
   const configure = Effect.gen(function* () {
+    const productGuideClick = () => {
+      runMenuEffect("open-product-guide", openProductGuideFromMenu(productGuidePath));
+    };
     const checkForUpdatesClick = () => {
       runMenuEffect("check-for-updates", handleCheckForUpdatesMenuClick);
     };
@@ -313,6 +345,11 @@ export const make = Effect.gen(function* () {
       {
         role: "help",
         submenu: [
+          {
+            label: "Product Guide",
+            click: productGuideClick,
+          },
+          { type: "separator" },
           {
             label: "Check for Updates...",
             click: checkForUpdatesClick,
