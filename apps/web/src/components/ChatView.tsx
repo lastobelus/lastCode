@@ -317,7 +317,7 @@ import { useThreadLinkedPullRequest } from "./pullRequest/useThreadLinkedPullReq
 import { useProactivePanels } from "../hooks/useProactivePanels";
 import { useIncrementalTimelineEntries } from "../hooks/useIncrementalTimelineEntries";
 import { useRightPanelSurfaceClose } from "../hooks/useRightPanelSurfaceClose";
-import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
+import type { ComposerBannerStackItem } from "./chat/ComposerBannerStack";
 import { EnvironmentPauseNotice } from "./EnvironmentPauseControl";
 import { useActionResumeWait } from "../state/actionResume";
 import { ComposerSurface } from "./chat/ComposerSurface";

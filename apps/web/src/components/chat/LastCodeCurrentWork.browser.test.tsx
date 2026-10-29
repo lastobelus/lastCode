@@ -7,10 +7,11 @@ import {
 import { expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
 import { render } from "../../../test/render";
+import { actionResumeStatus } from "@t3tools/shared/actionResume";
 import {
   runningActionBanner,
   interruptedActionBanner,
-  heldActionBanner,
+  pendingActionBanner,
 } from "./ComposerActionResume";
 import { backgroundWorkNowItem } from "./ThreadActivityBanners";
 import { LastCodeThreadNow } from "./LastCodeThreadNow";
@@ -68,11 +69,22 @@ function setup() {
   function view(
     tasks: OrchestrationV2PendingBackgroundTask[] = [],
     current: ActionResumeState | null = action,
+    environmentPaused = false,
+    followUp: Parameters<typeof actionResumeStatus>[0]["followUp"] = null,
   ) {
+    const status = current
+      ? actionResumeStatus({
+          action: current,
+          environmentPaused,
+          followUp,
+          hasPendingRequest: false,
+        })
+      : null;
     const running =
       current?.outcome === "running"
         ? runningActionBanner({
             action: current,
+            status,
             cancelling: false,
             canRead: true,
             canOperate: true,
@@ -82,6 +94,7 @@ function setup() {
         : null;
     const interrupted = interruptedActionBanner({
       action: current?.delivery === "available" ? current : null,
+      status,
       canOperate: true,
       pending: null,
       onResume: vi.fn(),
@@ -105,7 +118,16 @@ function setup() {
           tasks={tasks}
           turnItems={[]}
           action={current}
-          actionItems={[interrupted, heldActionBanner(current), running]}
+          actionItems={[
+            interrupted,
+            pendingActionBanner({
+              action: current,
+              status,
+              canRead: true,
+              onOpenTerminal: vi.fn(),
+            }),
+            running,
+          ]}
           onOpenThread={openThread}
         />
       </div>
@@ -163,31 +185,28 @@ it("opens the same full list on status text hover when enabled, including long n
   await userEvent.click(details.getByRole("button", { name: "Open thread" }).last());
 });
 
-it("keeps interrupted and held Action recovery available alongside a watch, then removes delivered work", async () => {
+it("keeps interrupted and paused Action details alongside a watch, then removes ended continuation work", async () => {
   const { view, action, watch } = setup();
   await using screen = await render(
     view([watch], { ...action, outcome: "process_lost", delivery: "available" }),
   );
-  await expect.element(screen.getByText(/Quick CI was interrupted/)).toBeVisible();
+  await expect.element(screen.getByText(/Quick CI · Interrupted/)).toBeVisible();
   await userEvent.click(screen.getByRole("button", { name: "Show work details" }));
   const details = page.getByRole("dialog", { name: "Current work" });
   await expect.element(details.getByRole("button", { name: "Resume agent" })).toBeVisible();
   await expect.element(details.getByRole("button", { name: "Discard" })).toBeVisible();
   await userEvent.keyboard("{Escape}");
   await screen.rerender(
-    view([watch], {
-      ...action,
-      outcome: "succeeded",
-      delivery: "pending",
-      heldByEnvironmentPause: true,
-      exitCode: 0,
-    }),
+    view([watch], { ...action, outcome: "succeeded", delivery: "pending", exitCode: 0 }, true),
   );
   await userEvent.click(screen.getByRole("button", { name: "Show work details" }));
-  await expect.element(details.getByText(/The agent hasn't picked up this result/)).toBeVisible();
+  await expect.element(details.getByText(/Resume the environment/)).toBeVisible();
   await userEvent.keyboard("{Escape}");
   await screen.rerender(
-    view([watch], { ...action, outcome: "succeeded", delivery: "delivered", exitCode: 0 }),
+    view([watch], { ...action, outcome: "succeeded", delivery: "delivered", exitCode: 0 }, false, {
+      status: "completed",
+      queueHeld: false,
+    }),
   );
   await expect
     .element(screen.getByText("Watching pull request #526", { exact: true }))
