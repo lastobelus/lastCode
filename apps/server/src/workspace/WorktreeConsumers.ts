@@ -9,6 +9,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import { PersistedServerRuntimeState, isProcessAlive } from "../serverRuntimeState.ts";
+import * as ResourceMonitorBinary from "../resourceTelemetry/ResourceMonitorBinary.ts";
 import * as DependencyMounts from "./DependencyMounts.ts";
 
 const MAX_INVENTORY_BYTES = 16 * 1024 * 1024;
@@ -165,17 +166,39 @@ const decodeLsofPath = (printed: string): string | null => {
   return decoded.toString("utf8");
 };
 
-const lsofPaths = (output: string): ReadonlyArray<string> | null => {
+const lsofPaths = (
+  output: string,
+  emptyFdPids: ReadonlySet<number> = new Set(),
+): ReadonlyArray<string> | null => {
   if (!output.endsWith("\0\n") || output.includes("\uFFFD")) return null;
   const paths: string[] = [];
   const identities: CapturedObject[] = [];
   let processes = 0;
+  let pid = 0;
+  const recovered = new Set<number>();
+  const numericPids = new Set<number>();
   let cwdSeen = false;
   let file:
     | { descriptor: string; type?: string; name?: string; device?: string; inode?: string }
     | undefined;
   const finishFile = () => {
     if (!file) return true;
+    // Darwin's "err" record also covers successful empty FD lists with stale
+    // errno (darwin/libproc/dproc.c process_fds). Its text cannot distinguish
+    // that from a failed enumeration; accepting it needs independent OS proof.
+    if (file.descriptor === "err") {
+      if (
+        file.type !== undefined ||
+        file.device !== undefined ||
+        file.inode !== undefined ||
+        file.name !== "FD info error: Invalid argument" ||
+        !emptyFdPids.has(pid) ||
+        recovered.has(pid)
+      )
+        return false;
+      recovered.add(pid);
+      return true;
+    }
     // Darwin lsof emits this exact marker when its numeric-FD vnode-path query
     // returns ENOENT. It is a no-current-path observation, like a vanished Linux
     // fd, not proof of revocation. Keep cwd/text, fileport and other missing-type
@@ -232,11 +255,13 @@ const lsofPaths = (output: string): ReadonlyArray<string> | null => {
       case "p":
         if (!/^\d+$/.test(value) || !finishFile() || (processes > 0 && !cwdSeen)) return null;
         if (++processes > MAX_PROCESS_PATHS) return null;
+        pid = Number(value);
         cwdSeen = false;
         file = undefined;
         break;
       case "f":
         if (processes === 0 || value === "" || !finishFile()) return null;
+        if (/^\d+$/.test(value)) numericPids.add(pid);
         file = { descriptor: value };
         break;
       case "t":
@@ -260,28 +285,85 @@ const lsofPaths = (output: string): ReadonlyArray<string> | null => {
     }
   }
   if (!finishFile() || !cwdSeen || processes === 0) return null;
+  if (recovered.size !== emptyFdPids.size || [...recovered].some((pid) => numericPids.has(pid)))
+    return null;
   Object.defineProperty(paths, nativeIdentities, { value: Object.freeze(identities) });
   return Object.freeze(paths);
 };
 
-const captureProcessPaths = async (platform: NodeJS.Platform, uid: number) => {
+const helperPaths = (output: string, uid: number): ReadonlyArray<string> | null => {
+  const boundary = output.indexOf("\n");
+  if (boundary < 0 || boundary > MAX_PROCESS_PATHS * 12 + 128) return null;
+  try {
+    const header = JSON.parse(output.slice(0, boundary)) as {
+      version?: unknown;
+      type?: unknown;
+      uid?: unknown;
+      emptyFdPids?: unknown;
+    } | null;
+    if (
+      header === null ||
+      header.version !== 1 ||
+      header.type !== "lsofCapture" ||
+      header.uid !== uid ||
+      !Array.isArray(header.emptyFdPids) ||
+      header.emptyFdPids.length > MAX_PROCESS_PATHS ||
+      header.emptyFdPids.some(
+        (pid) => !Number.isSafeInteger(pid) || pid <= 0 || pid > 2_147_483_647,
+      )
+    )
+      return null;
+    const pids = new Set<number>(header.emptyFdPids);
+    if (pids.size !== header.emptyFdPids.length) return null;
+    const capture = output.slice(boundary + 1);
+    if (NodeBuffer.Buffer.byteLength(capture) > MAX_INVENTORY_BYTES) return null;
+    return lsofPaths(capture, pids);
+  } catch {
+    return null;
+  }
+};
+
+const captureProcessPaths = async (
+  platform: NodeJS.Platform,
+  uid: number,
+  binary: string | null,
+) => {
   if (platform === "linux") return linuxPaths(uid);
   if (platform !== "darwin") return null;
   return await new Promise<ReadonlyArray<string> | null>((resolve) => {
     NodeChildProcess.execFile(
-      "lsof",
-      ["-a", "-u", String(uid), "-F0pftnDi", "-n", "-P"],
-      { timeout: 10_000, maxBuffer: MAX_INVENTORY_BYTES },
-      (error, stdout, stderr) => resolve(error || stderr.trim() !== "" ? null : lsofPaths(stdout)),
+      binary ?? "lsof",
+      binary === null
+        ? ["-a", "-u", String(uid), "-F0pftnDi", "-n", "-P"]
+        : ["capture-lsof-v1", String(uid)],
+      {
+        timeout: 10_000,
+        maxBuffer:
+          binary === null
+            ? MAX_INVENTORY_BYTES
+            : MAX_INVENTORY_BYTES + MAX_PROCESS_PATHS * 12 + 128,
+      },
+      (error, stdout, stderr) =>
+        resolve(
+          error || stderr.trim() !== ""
+            ? null
+            : binary === null
+              ? lsofPaths(stdout)
+              : helperPaths(stdout, uid),
+        ),
     );
   });
 };
 
-const processPaths = async (platform: NodeJS.Platform, uid: number | undefined) => {
+const processPaths = async (
+  platform: NodeJS.Platform,
+  uid: number | undefined,
+  binary: string | null,
+) => {
   if (uid === undefined || (platform !== "linux" && platform !== "darwin")) return null;
   const capture = async () => {
     try {
-      return await captureProcessPaths(platform, uid);
+      return await captureProcessPaths(platform, uid, binary);
     } catch {
       return null;
     }
@@ -299,8 +381,12 @@ export class ProcessPaths extends Context.Reference<Effect.Effect<ReadonlyArray<
     defaultValue: Effect.fn("defaultValue")(function* () {
       const platform = yield* HostProcess.Platform;
       const uid = yield* HostProcess.UserId;
+      const binary =
+        platform === "darwin" && uid !== undefined
+          ? yield* yield* ResourceMonitorBinary.ProcessCaptureBinary
+          : null;
       return yield* Effect.tryPromise({
-        try: () => processPaths(platform, uid),
+        try: () => processPaths(platform, uid, binary),
         catch: () => null,
       }).pipe(Effect.orElseSucceed(() => null));
     }),

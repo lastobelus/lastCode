@@ -7,30 +7,46 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import { mergeProviderInstanceEnvironment } from "./instanceEnvironment.ts";
 
 describe("mergeProviderInstanceEnvironment", () => {
-  it.effect("binds provider shells to the server settings path over inherited and instance values", () =>
-    Effect.gen(function* () {
-    const inherited = { T3CODE_LOCAL_CI_SETTINGS_PATH: "/other/settings.json", PATH: "/bin" };
-    expect(
-      yield* mergeProviderInstanceEnvironment(
-        [
-          {
-            name: "T3CODE_LOCAL_CI_SETTINGS_PATH",
-            value: "/instance/settings.json",
-            sensitive: false,
-          },
-        ],
-        inherited,
-        "/server/custom-state/settings.json",
-      ),
-    ).toEqual({
-      ...inherited,
-      T3CODE_LOCAL_CI_SETTINGS_PATH: "/server/custom-state/settings.json",
-    });
-    expect(yield* mergeProviderInstanceEnvironment(undefined, inherited, "/server/settings.json")).toEqual(
-      { ...inherited, T3CODE_LOCAL_CI_SETTINGS_PATH: "/server/settings.json" },
-    );
-    expect(inherited.T3CODE_LOCAL_CI_SETTINGS_PATH).toBe("/other/settings.json");
-    }),
+  it.effect(
+    "binds provider shells to the server settings path over inherited and instance values",
+    () =>
+      Effect.gen(function* () {
+        const inherited = {
+          T3CODE_LOCAL_CI_SETTINGS_PATH: "/other/settings.json",
+          T3CODE_PR_WATCH_SETTINGS_PATH: "/other/watch-settings.json",
+          PATH: "/bin",
+        };
+        expect(
+          yield* mergeProviderInstanceEnvironment(
+            [
+              {
+                name: "T3CODE_LOCAL_CI_SETTINGS_PATH",
+                value: "/instance/settings.json",
+                sensitive: false,
+              },
+              {
+                name: "T3CODE_PR_WATCH_SETTINGS_PATH",
+                value: "/instance/watch-settings.json",
+                sensitive: false,
+              },
+            ],
+            inherited,
+            "/server/custom-state/settings.json",
+          ),
+        ).toEqual({
+          ...inherited,
+          T3CODE_LOCAL_CI_SETTINGS_PATH: "/server/custom-state/settings.json",
+          T3CODE_PR_WATCH_SETTINGS_PATH: "/server/custom-state/settings.json",
+        });
+        expect(
+          yield* mergeProviderInstanceEnvironment(undefined, inherited, "/server/settings.json"),
+        ).toEqual({
+          ...inherited,
+          T3CODE_LOCAL_CI_SETTINGS_PATH: "/server/settings.json",
+          T3CODE_PR_WATCH_SETTINGS_PATH: "/server/settings.json",
+        });
+        expect(inherited.T3CODE_LOCAL_CI_SETTINGS_PATH).toBe("/other/settings.json");
+      }),
   );
 
   it.effect.each([

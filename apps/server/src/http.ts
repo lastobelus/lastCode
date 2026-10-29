@@ -32,6 +32,7 @@ import { OtlpTracer, OtlpSerialization } from "effect/observability";
 import * as ServerConfig from "./config.ts";
 import { ASSET_ROUTE_PREFIX, readMcpAppHtml, resolveAsset } from "./assets/AssetAccess.ts";
 import { sourceControlMediaResponse } from "./assets/sourceControlMediaResponse.ts";
+import { managedPreviewResourceResponse } from "./assets/ManagedPreviewResource.ts";
 import { statMediaFile, streamMediaFile, type OpenMediaFile } from "./assets/MediaFile.ts";
 import {
   ATTACHMENT_UPLOAD_ROUTE_PREFIX,
@@ -437,6 +438,20 @@ export const layerAssetRoute = HttpRouter.add(
             reason: cause.reason._tag,
           }),
         ),
+        Effect.orElseSucceed(() =>
+          HttpServerResponse.empty({
+            status: 502,
+            headers: { "cache-control": "private, no-store", "x-content-type-options": "nosniff" },
+          }),
+        ),
+      );
+    }
+    if (asset.kind === "managed-preview-resource") {
+      return yield* managedPreviewResourceResponse(
+        asset,
+        request.headers,
+        request.method === "HEAD" ? "HEAD" : "GET",
+      ).pipe(
         Effect.orElseSucceed(() =>
           HttpServerResponse.empty({
             status: 502,

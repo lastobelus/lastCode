@@ -3,6 +3,7 @@ import * as Effect from "effect/Effect";
 import { it } from "@effect/vitest";
 import { beforeEach, describe, expect, vi } from "vite-plus/test";
 
+import * as ResourceMonitorBinary from "../resourceTelemetry/ResourceMonitorBinary.ts";
 import * as DependencyMounts from "./DependencyMounts.ts";
 import * as WorktreeConsumers from "./WorktreeConsumers.ts";
 
@@ -163,7 +164,147 @@ const darwinFixture = (output = lsof, stderr = "", error: Error | null = null) =
     callback(error, output, stderr),
   );
 };
+const emptyFdCapture =
+  "p123\0\nfcwd\0tDIR\0D0x12\0i1\0n/workspace/elsewhere\0\n" +
+  "ftxt\0tREG\0D0x12\0i2\0n/system/example/tool\0\n" +
+  "ferr\0nFD info error: Invalid argument\0\n";
+const helperOutput = (
+  output = emptyFdCapture,
+  header: unknown = {
+    version: 1,
+    type: "lsofCapture",
+    uid: 1000,
+    emptyFdPids: [123],
+  },
+) => `${JSON.stringify(header)}\n${output}`;
+const helperInventory = () =>
+  inventory("darwin").pipe(
+    Effect.provideService(
+      ResourceMonitorBinary.ProcessCaptureBinary,
+      Effect.succeed("/native/resource-monitor"),
+    ),
+  );
+describe("Native Darwin capture", () => {
+  it.effect("accepts only the empty table proved by the same native capture", () =>
+    Effect.gen(function* () {
+      darwinFixture(helperOutput());
+      const paths = yield* helperInventory();
+      expect(paths).toEqual(["/workspace/elsewhere", "/system/example/tool"]);
+      expect(yield* guard(paths)).toBeNull();
+      expect(native.execFile).toHaveBeenCalledWith(
+        "/native/resource-monitor",
+        ["capture-lsof-v1", "1000"],
+        { timeout: 10_000, maxBuffer: 16 * 1024 * 1024 + 100_000 * 12 + 128 },
+        expect.any(Function),
+      );
+      expect(native.execFile).toHaveBeenCalledOnce();
+    }),
+  );
+  it.effect("retains text and numeric-FD consumers from other processes", () =>
+    Effect.gen(function* () {
+      darwinFixture(
+        helperOutput(
+          emptyFdCapture +
+            "p456\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+            "f4\0tREG\0D0x12\0i42\0n/workspace/example/dist/consumer.js\0\n",
+        ),
+      );
+      expect(yield* guard(yield* helperInventory())).toBe(
+        "A process is using a file or directory in the worktree.",
+      );
+    }),
+  );
+  it.effect.each([
+    { version: 2, type: "lsofCapture", uid: 1000, emptyFdPids: [123] },
+    { version: 1, type: "hello", uid: 1000, emptyFdPids: [123] },
+    { version: 1, type: "lsofCapture", uid: 501, emptyFdPids: [123] },
+    { version: 1, type: "lsofCapture", uid: 1000, emptyFdPids: [] },
+    { version: 1, type: "lsofCapture", uid: 1000, emptyFdPids: [456] },
+    { version: 1, type: "lsofCapture", uid: 1000, emptyFdPids: [123, 123] },
+    { version: 1, type: "lsofCapture", uid: 1000, emptyFdPids: [123, 456] },
+    { version: 1, type: "lsofCapture", uid: 1000, emptyFdPids: [123.5] },
+    { version: 1, type: "lsofCapture", uid: 1000, emptyFdPids: ["123"] },
+    null,
+  ])("rejects mismatched or malformed proof metadata (%j)", (header) =>
+    Effect.gen(function* () {
+      darwinFixture(helperOutput(emptyFdCapture, header));
+      expect(yield* helperInventory()).toBeNull();
+      expect(native.execFile).toHaveBeenCalledTimes(2);
+    }),
+  );
+  it.effect.each([
+    emptyFdCapture.replace("Invalid argument", "Permission denied"),
+    emptyFdCapture.replace("ferr\0", "ferr\0tREG\0"),
+    emptyFdCapture.replace("ferr\0", "ferr\0D0x12\0"),
+    emptyFdCapture + "f4\0tREG\0n/system/example/open\0\n",
+    emptyFdCapture + "ferr\0nFD info error: Invalid argument\0\n",
+    emptyFdCapture.replace("fcwd", "f3"),
+    emptyFdCapture + "unknown\0\n",
+    emptyFdCapture.slice(0, -1),
+  ])("keeps incomplete and conflicting captures (%s)", (output) =>
+    Effect.gen(function* () {
+      darwinFixture(helperOutput(output));
+      expect(yield* helperInventory()).toBeNull();
+    }),
+  );
+  it.effect.each(["old-helper", "failed", "warning"])(
+    "rejects unavailable helper capability (%s)",
+    (failure) =>
+      Effect.gen(function* () {
+        darwinFixture(
+          failure === "old-helper" ? '{"version":3,"type":"hello"}\n' : helperOutput(),
+          failure === "warning" ? "incomplete" : "",
+          failure === "failed" ? new Error("unsupported command") : null,
+        );
+        expect(yield* helperInventory()).toBeNull();
+        expect(
+          native.execFile.mock.calls.every(([file]) => file === "/native/resource-monitor"),
+        ).toBe(true);
+      }),
+  );
+  it.effect("retries with a new helper capture and discards earlier evidence", () =>
+    Effect.gen(function* () {
+      darwinFixture(
+        helperOutput("p456\0\nfcwd\0tDIR\0n/workspace/example\0\n", {
+          version: 1,
+          type: "lsofCapture",
+          uid: 1000,
+          emptyFdPids: [],
+        }),
+      );
+      native.execFile.mockImplementationOnce((_file, _args, _options, callback) =>
+        callback(
+          null,
+          helperOutput(emptyFdCapture, {
+            version: 1,
+            type: "lsofCapture",
+            uid: 1000,
+            emptyFdPids: [],
+          }),
+          "",
+        ),
+      );
+      const paths = yield* helperInventory();
+      expect(paths).toEqual(["/workspace/example"]);
+      expect(yield* guard(paths)).toBe("A process is using a file or directory in the worktree.");
+    }),
+  );
+});
+
 describe("Darwin worktree consumers", () => {
+  it.effect("keeps an lsof FD enumeration error without independent empty-table proof", () =>
+    Effect.gen(function* () {
+      darwinFixture(
+        "p123\0\nfcwd\0tDIR\0D0x12\0i1\0n/workspace/elsewhere\0\n" +
+          "ftxt\0tREG\0D0x12\0i2\0n/system/example/tool\0\n" +
+          "ferr\0nFD info error: Invalid argument\0\n",
+      );
+      const paths = yield* inventory("darwin");
+      expect(paths).toBeNull();
+      expect(yield* guard(paths)).toBe("Process file-consumer inventory is unavailable.");
+      expect(native.execFile).toHaveBeenCalledTimes(2);
+    }),
+  );
   it.effect("reads every cwd, text and open path rather than a cwd-only selection", () =>
     Effect.gen(function* () {
       darwinFixture();
@@ -378,6 +519,22 @@ const targetFixture = (fileInode = 9007199254740993n) => {
 const objectProofReason = "Process object identity or target inventory could not be verified.";
 
 describe("Captured vnode identity proof", () => {
+  it.effect("retains vnode evidence through the helper capture", () =>
+    Effect.gen(function* () {
+      vnodeFixture();
+      targetFixture();
+      darwinFixture(
+        helperOutput(
+          emptyFdCapture +
+            "p456\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+            "f4\0tREG\0D0x12\0i9007199254740993\0n/system/example/file\0\n",
+        ),
+      );
+      expect(yield* guard(yield* helperInventory())).toBe(
+        "A process is using a file or directory in the worktree.",
+      );
+    }),
+  );
   it.effect("includes target directories in the device-unknown FIFO inode comparison", () =>
     Effect.gen(function* () {
       vnodeFixture("i2\0", "FIFO", "ENOENT");

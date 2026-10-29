@@ -215,6 +215,30 @@ const SOURCE_CONTROL_HOST_TERMS = sourceControlClients.definitions
 
 export const SETTINGS_SEARCH_ITEMS = [
   {
+    id: "storage-suspension-policy",
+    targetId: "storage-suspension",
+    title: "Suspend worktrees automatically",
+    to: "/settings/worktrees",
+    scope: "project-defaults",
+    searchTerms: [
+      "LastCode suspend settled worktrees restore saved workspace delay days subagents children untouched joined adopted keep workspace inherit off custom",
+    ],
+  },
+  {
+    id: "storage-saved-workspaces",
+    title: "Saved workspaces",
+    to: "/settings/worktrees",
+    scope: "project-defaults",
+    searchTerms: ["LastCode suspension recovery restore discard saved local work snapshot"],
+  },
+  {
+    id: "storage-dependencies",
+    title: "Dependencies and verified builds",
+    to: "/settings/worktrees",
+    scope: "project-defaults",
+    searchTerms: ["storage cleanup dependencies builds dist compiler cargo npm pnpm node_modules"],
+  },
+  {
     id: "storage-worktree-keep-when",
     targetId: "storage-worktrees",
     title: "Local work is preserved",
@@ -240,8 +264,53 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["storage cleanup run now results report removed kept failed"],
   },
   {
+    id: "import-t3-settings",
+    title: "Import settings from T3 Code",
+    to: "/settings/lastcode",
+  },
+  {
+    id: "larger-scrollbars",
+    title: "Larger scrollbars",
+    to: "/settings/lastcode",
+    searchTerms: ["width margin resize handle pane drag thumb"],
+  },
+  {
+    id: "hover-current-work-details",
+    title: "Show work details on hover",
+    to: "/settings/lastcode",
+    searchTerms: ["current work status full list info button tooltip"],
+  },
+  {
+    id: "page-scroll-overlap",
+    title: "Keep 1 line when scrolling page-at-a-time",
+    to: "/settings/lastcode",
+    searchTerms: ["page up page down pageup pagedown overlap scrolling composer conversation"],
+  },
+  {
+    id: "incoming-message-style",
+    title: "Incoming message style",
+    to: "/settings/lastcode",
+    searchTerms: ["agent assistant messages neutral fill outline bubble background appearance"],
+  },
+  {
+    id: "incoming-message-fill-color",
+    title: "Incoming message fill color",
+    to: "/settings/lastcode",
+    // The color row is hidden for Outline, so always land on the style control.
+    targetId: "incoming-message-style",
+    searchTerms: [
+      "agent assistant messages neutral background color automatic experimental picker",
+    ],
+  },
+  {
+    id: "handoffs-menu-limit",
+    title: "Handoffs shown in menus",
+    to: "/settings/lastcode",
+    searchTerms: ["handoffs history recent links files menu count"],
+  },
+  {
     id: "storage-worktrees",
-    title: "Worktree cleanup",
+    title: "Permanent deletion",
     to: "/settings/worktrees",
     scope: "project-defaults",
     searchTerms: [
@@ -600,6 +669,20 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/maintenance",
     searchTerms: ["installed cli versions newer available codex claude cursor grok fx opencode"],
     scope: "environment-defaults",
+  },
+  {
+    id: "environment-pause",
+    title: "Environment pause button",
+    to: "/settings/lastcode",
+    scope: "environment-defaults",
+    searchTerms: ["pause resume offline active threads sidebar environment"],
+  },
+  {
+    id: "pr-watch-quiet-deadline",
+    title: "PR watch quiet deadline",
+    to: "/settings/lastcode",
+    scope: "environment-defaults",
+    searchTerms: ["pull request review timeout stalled waiting minutes wake"],
   },
   {
     id: "continue-threads-after-server-update",
@@ -1166,6 +1249,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: "LastCode sidebar",
     to: "/settings/lastcode",
     searchTerms: ["navigation project tree override upstream legacy inbox"],
+  },
+  {
+    id: "legacy-sidebar",
+    title: "Sidebar (legacy)",
+    to: "/settings/lastcode",
+    searchTerms: ["navigation project tree upstream legacy inbox"],
   },
   {
     id: "scale-legacy-sidebar",

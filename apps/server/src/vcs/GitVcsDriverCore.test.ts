@@ -1289,6 +1289,12 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         yield* initRepoWithCommit(cwd);
         yield* git(cwd, ["init", "--bare", remote]);
         yield* git(cwd, ["remote", "add", "origin", remote]);
+        yield* git(remote, [
+          "--git-dir=.",
+          "config",
+          "core.hooksPath",
+          pathService.join(remote, "hooks"),
+        ]);
         const preReceive = pathService.join(remote, "hooks", "pre-receive");
         yield* writeTextFile(
           remote,
@@ -3147,6 +3153,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
           "#!/bin/sh\ngit config checkout.workers > checkout-workers\nexit 0\n",
         );
         yield* fs.chmod(path.join(cwd, ".git/hooks/post-checkout"), 0o755);
+        yield* git(cwd, ["config", "core.hooksPath", path.join(cwd, ".git/hooks")]);
         const worktreePath = path.join(yield* makeTmpDir("git-worktrees-"), "parallel");
 
         yield* driver.createWorktree({
@@ -3478,6 +3485,66 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
 
         assert.equal(created.worktree.path, worktreePath);
         assert.equal(yield* fileSystem.exists(worktreePath), true);
+      }),
+    );
+
+    it.effect(
+      "checks the allocated destination before adding a worktree or creating its branch",
+      () =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          const { initialBranch } = yield* initRepoWithCommit(cwd);
+          const destinationRoot = yield* makeTmpDir("git-worktrees-");
+          const driver = yield* GitVcsDriver.GitVcsDriver;
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          let checked: string | undefined;
+          const result = yield* driver
+            .createWorktree(
+              { cwd, path: null, refName: initialBranch, newRefName: "feature/reserved" },
+              {
+                worktreesDirectory: destinationRoot,
+                acquireDestination: (destination) => {
+                  checked = destination;
+                  return Effect.fail(
+                    new GitCommandError({
+                      operation: "test.destination",
+                      command: "workspace-acquisition",
+                      cwd,
+                      detail: "Destination retained",
+                    }),
+                  );
+                },
+              },
+            )
+            .pipe(Effect.result);
+          assert.equal(result._tag, "Failure");
+          assert.equal(checked, path.join(destinationRoot, path.basename(cwd), "feature-reserved"));
+          assert.isFalse(yield* fs.exists(checked!));
+          assert.isFalse((yield* driver.listLocalBranchNames(cwd)).includes("feature/reserved"));
+        }),
+    );
+
+    it.effect("uses an acquired destination without changing the requested worktree branch", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const path = yield* Path.Path;
+        const fs = yield* FileSystem.FileSystem;
+        const destinationRoot = yield* makeTmpDir("git-worktrees-");
+        const allocated = path.join(destinationRoot, "original");
+        const acquired = path.join(destinationRoot, "available");
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const result = yield* driver.createWorktree(
+          { cwd, path: allocated, refName: initialBranch, newRefName: "feature/acquired" },
+          { acquireDestination: () => Effect.succeed(acquired) },
+        );
+        assert.deepEqual(result.worktree, { path: acquired, refName: "feature/acquired" });
+        assert.isFalse(yield* fs.exists(allocated));
+        assert.equal(
+          (yield* git(acquired, ["branch", "--show-current"])).trim(),
+          "feature/acquired",
+        );
       }),
     );
 
@@ -4703,7 +4770,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         yield* driver.commit(cwd, "Add upstream update", "");
         yield* git(cwd, ["push", "upstream", "dev"]);
         const upstreamDevSha = yield* git(cwd, ["rev-parse", "HEAD"]);
-        yield* git(cwd, ["checkout", "-b", "feature/x", "upstream/dev"]);
+        yield* git(cwd, ["checkout", "--track", "-b", "feature/x", "upstream/dev"]);
         yield* writeTextFile(cwd, "feature.txt", "feature\n");
         yield* git(cwd, ["add", "-A"]);
         yield* driver.commit(cwd, "Add feature", "");

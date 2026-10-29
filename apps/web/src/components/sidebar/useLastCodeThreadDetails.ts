@@ -12,6 +12,7 @@ export function useLastCodeThreadDetails(
   const threadNavigationRef = useRef<HTMLDivElement | null>(null);
   const threadDetailsTooltipId = useId();
   const annotationTriggerId = useId();
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- observes document scrolling while row details are active because moving the DOM row need not emit mouseleave
   useEffect(() => {
     const anchor = threadNavigationRef.current;
     if (!threadRowActive || !anchor) return;

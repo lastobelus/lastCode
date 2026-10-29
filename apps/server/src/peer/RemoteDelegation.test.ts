@@ -33,6 +33,8 @@ import * as SubscriptionRef from "effect/SubscriptionRef";
 import type * as SqlClient from "effect/sql/SqlClient";
 import { McpSchema, McpServer } from "effect/ai";
 
+import * as ActionResume from "../actionResume/ActionResume.ts";
+import * as ThreadReadBroker from "../mcp/ThreadReadBroker.ts";
 import * as ServerConfig from "../config.ts";
 import * as McpHttpServer from "../mcp/McpHttpServer.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
@@ -464,13 +466,21 @@ const boxToolkitLayer = (thread: BoxThread) => {
     McpHttpServer.layerProjectRegistration,
   ).pipe(
     Layer.provide(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
+    Layer.provide(
+      Layer.mock(ActionResume.ActionResume)({ readLatestSummary: () => Effect.succeed(null) }),
+    ),
+    Layer.provide(ThreadReadBroker.layer),
     Layer.provide(NodeCrypto.layer),
     Layer.provide(layerBoxThreads),
     Layer.provide(layerBoxLaunches),
-    Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
-    Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
-    Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
-    Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(PeerForwarding.PeerForwarding)({}),
+        Layer.mock(PeerLinkRequests.PeerLinkRequests)({}),
+        Layer.mock(PeerLinks.PeerLinks)({}),
+      ),
+    ),
     Layer.provide(
       Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/p" }),
     ),
@@ -560,6 +570,10 @@ const makeLaptop = (
       Layer.provideMerge(Layer.merge(layerOrchestrator, ServerSettings.layerTest())),
     );
     const layerHere = McpHttpServer.layerOrchestratorToolkit.pipe(
+      Layer.provide(
+        Layer.mock(ActionResume.ActionResume)({ readLatestSummary: () => Effect.succeed(null) }),
+      ),
+      Layer.provide(ThreadReadBroker.layer),
       Layer.provideMerge(McpServer.McpServer.layer),
       Layer.provideMerge(
         RemoteDelegation.layer.pipe(
@@ -810,7 +824,7 @@ it.effect("a task delegated to the box wakes the laptop's parent when it ends th
       expect(yield* Ref.get(thread.launched)).toBe(delegated.remoteChild.threadId);
       // Its link opens the thread there, so the parent can mention it like any other.
       expect(delegated.link).toBe(
-        `<t3-thread://v2/${box.environmentId}/${delegated.remoteChild.threadId}>`,
+        `<t3-thread://v2/${encodeURIComponent(box.environmentId)}/${encodeURIComponent(delegated.remoteChild.threadId)}>`,
       );
       // ...naming the parent here, so the thread there links back to it.
       expect(yield* Ref.get(thread.delegatedFrom)).toEqual({

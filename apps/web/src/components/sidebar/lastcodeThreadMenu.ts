@@ -31,6 +31,7 @@ export const LASTCODE_THREAD_ACTION_POLICY = {
   "handoff-show-all": false,
   "dismiss-archive-failure": true,
   delete: true,
+  "archive-discard": true,
 } as const;
 export type LastCodeThreadActionId = keyof typeof LASTCODE_THREAD_ACTION_POLICY;
 export function isLastCodeThreadActionId(action: string | null): action is LastCodeThreadActionId {

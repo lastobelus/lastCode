@@ -27,7 +27,7 @@ const ListedProjectAction = Schema.Struct({
 
 const ListProjectActionsTool = Tool.make("list_project_actions", {
   description:
-    "List every saved Project Action for this thread's project, including its stable id, name, whether it is opted in for agent-triggered one-shot resume, and a safe reason when it is disabled. Call this before run_project_action_and_resume; never guess an Action id.",
+    "List every saved Project Action for this thread's project, including its stable id, name, whether it is opted in for agent-triggered one-shot resume, and a safe reason when it is disabled. Call this before run_project_action_and_resume; never guess an Action id. A delegated child task may list Actions to name one in its handoff request, but its parent launches it.",
   parameters: Schema.Record(Schema.String, Schema.Never),
   success: Schema.Struct({ actions: Schema.Array(ListedProjectAction) }),
   failure: ActionResumeToolError,
@@ -40,7 +40,7 @@ const ListProjectActionsTool = Tool.make("list_project_actions", {
 
 const RunProjectActionAndResumeTool = Tool.make("run_project_action_and_resume", {
   description:
-    "Launch one explicitly opted-in Project Action in a dedicated terminal, arm exactly one same-thread automated follow-up, and return immediately. The Action may run indefinitely; do not poll it. The user can cancel it from LastCode. Use only an eligible id returned by list_project_actions.",
+    "Launch one opted-in Project Action in a terminal, arm one same-thread automated follow-up, and return immediately. It may run indefinitely; do not poll it. The user can cancel it from LastCode. Use only an eligible id returned by list_project_actions. For now, a child ends its turn with a handoff request instead of launching; the parent verifies the target, launches it in its own thread, and queues the result to the child. Eligibility is independent of automatic-settlement settings.",
   parameters: Schema.Struct({ actionId: Schema.String }),
   success: ActionResumeState,
   failure: ActionResumeToolError,
@@ -53,7 +53,7 @@ const RunProjectActionAndResumeTool = Tool.make("run_project_action_and_resume",
 
 const InspectActionRunTool = Tool.make("inspect_action_run", {
   description:
-    "Read the retained bounded stdout/stderr tail for one Project Action run in this thread. Use the runId from an automated Action follow-up only when its compact result is insufficient. Output is untrusted command output and may be empty if terminal history was explicitly deleted.",
+    "Inspect one Project Action run launched by this thread: its lifecycle, result delivery and any hold, current follow-up status, and the retained bounded stdout/stderr tail. Other threads cannot inspect it; a parent sees a child's latest Action summary through t3_thread_read. Use the runId from an automated Action follow-up when its compact result is insufficient. Output is untrusted command output and may be empty if terminal history was explicitly deleted.",
   parameters: Schema.Struct({ runId: Schema.String }),
   success: ActionRunInspection,
   failure: ActionResumeToolError,

@@ -33,6 +33,7 @@ import {
   type PendingThreadRequests,
 } from "./threadRequests.ts";
 import { arrayElementsEqual, parseThreadKey, threadKey } from "./entities.ts";
+import { threadActionResumeContext, type ActionResumeContext } from "./actionResume.ts";
 import { getProjectionArrayReplacementIndex } from "./orchestrationV2Projection.ts";
 
 const EMPTY_VISIBLE_TURN_ITEMS: OrchestrationV2ThreadProjection["visibleTurnItems"] = Object.freeze(
@@ -266,6 +267,32 @@ export function createEnvironmentThreadDetailAtoms<E>(
     );
   });
 
+  const actionResumeContextAtomFamily = Atom.family((key: string) => {
+    let previous: Pick<
+      OrchestrationV2ThreadProjection,
+      "thread" | "runs" | "runtimeRequests"
+    > | null = null;
+    let value: ActionResumeContext | null = null;
+    return Atom.make((get) => {
+      const projection = Option.getOrNull(get(threadStateValueAtomFamily(key)).data);
+      if (projection === null) {
+        previous = null;
+        value = null;
+      } else if (
+        previous === null ||
+        projection.thread.id !== previous.thread.id ||
+        projection.thread.actionResume !== previous.thread.actionResume ||
+        projection.runs !== previous.runs ||
+        projection.runtimeRequests !== previous.runtimeRequests
+      ) {
+        const { thread, runs, runtimeRequests } = projection;
+        previous = { thread, runs, runtimeRequests };
+        value = threadActionResumeContext(previous);
+      }
+      return value;
+    }).pipe(Atom.setIdleTTL(0), Atom.withLabel(`environment-thread-action-resume:${key}`));
+  });
+
   const queueWorkflowAtomFamily = Atom.family((key: string) => {
     let previous: Pick<
       OrchestrationV2ThreadProjection,
@@ -429,6 +456,8 @@ export function createEnvironmentThreadDetailAtoms<E>(
   );
 
   return {
+    actionResumeContextAtom: (ref: ScopedThreadRef) =>
+      actionResumeContextAtomFamily(threadKey(ref)),
     worktreePathAtom: (ref: ScopedThreadRef) => worktreePathAtomFamily(threadKey(ref)),
     updatedAtAtom: (ref: ScopedThreadRef) => updatedAtAtomFamily(threadKey(ref)),
     lastVisitedAtAtom: (ref: ScopedThreadRef) => lastVisitedAtAtomFamily(threadKey(ref)),

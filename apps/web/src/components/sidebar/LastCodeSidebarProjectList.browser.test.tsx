@@ -1,6 +1,7 @@
-import { act, useState, type ComponentProps, type ReactNode } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { act, render } from "../../../test/render";
+import { useState, type ComponentProps, type ReactNode } from "react";
+
+import { describe, expect, it, vi } from "vite-plus/test";
 import type { DndContext, DragEndEvent } from "@dnd-kit/core";
 import { EnvironmentId, ProjectId, ProviderInstanceId } from "@t3tools/contracts";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
@@ -123,32 +124,27 @@ function Harness({ projects = defaultProjects }: { projects?: readonly SidebarPr
     />
   );
 }
-let container: HTMLDivElement, root: Root;
-const descriptor = Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-beforeEach(() => {
+
+function setup() {
   vi.clearAllMocks();
   mocks.manual = true;
-  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
-    configurable: true,
-    value: true,
-  });
+  mocks.drag = null;
+  mocks.props = null;
+  mocks.settingListeners.clear();
+  const previous = useUiStateStore.getState().projectOrder;
   useUiStateStore.setState({ projectOrder: [] });
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-});
-afterEach(async () => {
-  await act(() => root.unmount());
-  container.remove();
-  useUiStateStore.setState({ projectOrder: [] });
-  if (descriptor) Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", descriptor);
-  else Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-});
+  return {
+    [Symbol.dispose]() {
+      useUiStateStore.setState({ projectOrder: previous });
+    },
+  };
+}
 const endEvent = (active: string, over: string | null) =>
   ({ active: { id: active }, over: over ? { id: over } : null }) as DragEndEvent;
 describe("project list ordering and mount ownership", () => {
   it("moves all exact physical members, guards the post-drag click, and cancels without reordering", async () => {
-    await act(() => root.render(<Harness />));
+    using _store = setup();
+    await using _screen = await render(<Harness />);
     const gestures = mocks.props!.gestures;
     await act(() =>
       mocks.drag!.onDragStart?.(
@@ -168,9 +164,10 @@ describe("project list ordering and mount ownership", () => {
     expect(useUiStateStore.getState().projectOrder).toEqual(["three", "one", "two"]);
   });
   it("uses refreshed membership and ignores removed or missing drop targets", async () => {
-    await act(() => root.render(<Harness />));
+    using _store = setup();
+    await using screen = await render(<Harness />);
     const refreshed = project("group", ["one"]);
-    await act(() => root.render(<Harness projects={[refreshed, other]} />));
+    await screen.rerender(<Harness projects={[refreshed, other]} />);
     await act(() => mocks.drag!.onDragEnd?.(endEvent("other", "missing")));
     expect(useUiStateStore.getState().projectOrder).toEqual([]);
     await act(() => mocks.drag!.onDragEnd?.(endEvent("other", null)));
@@ -179,7 +176,9 @@ describe("project list ordering and mount ownership", () => {
     expect(useUiStateStore.getState().projectOrder).toEqual(["two", "three", "one"]);
   });
   it("retains editor DOM on ordinary refresh, remounts across sort modes, and keeps owner expansion", async () => {
-    await act(() => root.render(<Harness />));
+    using _store = setup();
+    await using screen = await render(<Harness />);
+    const container = screen.container;
     const editor = container.querySelector<HTMLInputElement>('input[aria-label="group"]')!;
     editor.value = "in progress";
     await act(() => container.querySelector<HTMLButtonElement>("button")!.click());
@@ -192,7 +191,7 @@ describe("project list ordering and mount ownership", () => {
     expect(automaticEditor.value).toBe("original");
     expect(container.querySelector("button")!.textContent).toBe("Expanded");
     expect(mocks.animate).toHaveBeenCalledTimes(1);
-    await act(() => root.render(<Harness />));
+    await screen.rerender(<Harness />);
     expect(container.querySelector('input[aria-label="group"]')).toBe(automaticEditor);
     expect(mocks.animate).toHaveBeenCalledTimes(1);
   });

@@ -780,7 +780,452 @@ fn write_history(
     Ok(())
 }
 
+// This one-shot protocol is separate from the streaming telemetry protocol.
+#[cfg(target_os = "macos")]
+mod lsof_capture {
+    use super::*;
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+
+    const MAX_BYTES: usize = 16 * 1024 * 1024;
+    const MAX_PIDS: usize = 100_000;
+    const TIMEOUT: Duration = Duration::from_secs(7);
+    const PROC_UID_ONLY: u32 = 4;
+    const PROC_PIDT_BSDINFOWITHUNIQID: i32 = 18;
+
+    // XNU sys/proc_info_private.h declares these fixed-size API structures.
+    #[repr(C)]
+    #[derive(Default)]
+    struct UniqueInfo {
+        uuid: [u8; 16],
+        unique_id: u64,
+        parent_unique_id: u64,
+        id_version: i32,
+        parent_id_version: i32,
+        reserved: [u64; 2],
+    }
+    #[repr(C)]
+    struct BsdUniqueInfo {
+        bsd: libc::proc_bsdinfo,
+        unique: UniqueInfo,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Identity {
+        uid: u32,
+        real_uid: u32,
+        saved_uid: u32,
+        unique_id: u64,
+        id_version: i32,
+        uuid: [u8; 16],
+    }
+    fn unavailable() -> io::Error {
+        io::Error::other("Incomplete native process file inventory")
+    }
+    fn identity(pid: i32) -> io::Result<Identity> {
+        // SAFETY: the C ABI buffer is fully initialized and has the SDK layout.
+        let mut info: BsdUniqueInfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of_val(&info) as i32;
+        let count = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                PROC_PIDT_BSDINFOWITHUNIQID,
+                0,
+                (&mut info as *mut BsdUniqueInfo).cast(),
+                size,
+            )
+        };
+        if count != size || info.bsd.pbi_pid != pid as u32 || info.unique.unique_id == 0 {
+            return Err(unavailable());
+        }
+        Ok(Identity {
+            uid: info.bsd.pbi_uid,
+            real_uid: info.bsd.pbi_ruid,
+            saved_uid: info.bsd.pbi_svuid,
+            unique_id: info.unique.unique_id,
+            id_version: info.unique.id_version,
+            uuid: info.unique.uuid,
+        })
+    }
+    fn census(uid: u32, deadline: Instant) -> io::Result<HashMap<i32, Identity>> {
+        let mut pids = vec![0i32; MAX_PIDS];
+        let bytes = std::mem::size_of_val(pids.as_slice()) as i32;
+        let count =
+            unsafe { libc::proc_listpids(PROC_UID_ONLY, uid, pids.as_mut_ptr().cast(), bytes) };
+        if count <= 0 || count >= bytes || count % 4 != 0 {
+            return Err(unavailable());
+        }
+        let mut identities = HashMap::new();
+        for pid in pids
+            .into_iter()
+            .take(count as usize / 4)
+            .filter(|pid| *pid > 0)
+        {
+            if Instant::now() >= deadline {
+                return Err(unavailable());
+            }
+            // A failed identity query never grants an exemption; lsof must still
+            // supply complete evidence for that process or the capture fails closed.
+            if let Ok(value) = identity(pid)
+                && value.uid == uid
+            {
+                identities.insert(pid, value);
+            }
+        }
+        Ok(identities)
+    }
+    fn empty_result(bytes: i32, errno: i32) -> bool {
+        bytes == 0 && errno == 0
+    }
+    fn empty_fds(pid: i32) -> bool {
+        let mut fd = libc::proc_fdinfo {
+            proc_fd: 0,
+            proc_fdtype: 0,
+        };
+        // A positive result (including a full/truncated buffer) is never proof.
+        // One slot suffices to distinguish zero open descriptors from any open FD.
+        unsafe {
+            *libc::__error() = 0;
+            let count = libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDLISTFDS,
+                0,
+                (&mut fd as *mut libc::proc_fdinfo).cast(),
+                std::mem::size_of_val(&fd) as i32,
+            );
+            let errno = *libc::__error();
+            empty_result(count, errno)
+        }
+    }
+    fn matching_empty(
+        uid: u32,
+        before: &Identity,
+        current: &Identity,
+        empty: bool,
+        after: &Identity,
+    ) -> bool {
+        before.uid == uid && before == current && before == after && empty
+    }
+    fn error_pids(output: &str) -> io::Result<Vec<i32>> {
+        if !output.ends_with("\0\n") {
+            return Err(unavailable());
+        }
+        let mut pid = None;
+        let mut seen = HashSet::new();
+        let mut errors = Vec::new();
+        let mut numeric = HashSet::new();
+        let mut fields: Vec<&str> = Vec::new();
+        let finish = |pid: Option<i32>, fields: &[&str], errors: &mut Vec<i32>| -> io::Result<()> {
+            if fields.first() == Some(&"ferr") {
+                if fields != ["ferr", "nFD info error: Invalid argument"] {
+                    return Err(unavailable());
+                }
+                let pid = pid.ok_or_else(unavailable)?;
+                if errors.contains(&pid) {
+                    return Err(unavailable());
+                }
+                errors.push(pid);
+            }
+            Ok(())
+        };
+        for raw in output.split('\0') {
+            let field = raw.strip_prefix('\n').unwrap_or(raw);
+            if field.is_empty() {
+                continue;
+            }
+            if let Some(value) = field.strip_prefix('p') {
+                finish(pid, &fields, &mut errors)?;
+                fields.clear();
+                let value = value.parse::<i32>().map_err(|_| unavailable())?;
+                if value <= 0 || !seen.insert(value) || seen.len() > MAX_PIDS {
+                    return Err(unavailable());
+                }
+                pid = Some(value);
+            } else if let Some(value) = field.strip_prefix('f') {
+                finish(pid, &fields, &mut errors)?;
+                fields.clear();
+                if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+                    numeric.insert(pid.ok_or_else(unavailable)?);
+                }
+                fields.push(field);
+            } else {
+                fields.push(field);
+            }
+        }
+        finish(pid, &fields, &mut errors)?;
+        if errors.iter().any(|pid| numeric.contains(pid)) {
+            return Err(unavailable());
+        }
+        Ok(errors)
+    }
+    fn bounded_read(reader: impl Read, limit: usize) -> io::Result<Vec<u8>> {
+        let mut output = Vec::new();
+        reader.take(limit as u64 + 1).read_to_end(&mut output)?;
+        if output.len() > limit {
+            return Err(unavailable());
+        }
+        Ok(output)
+    }
+    fn lsof(uid: u32, deadline: Instant) -> io::Result<String> {
+        if Instant::now() >= deadline {
+            return Err(unavailable());
+        }
+        let mut child = Command::new("/usr/sbin/lsof")
+            .args(["-a", "-u", &uid.to_string(), "-F0pftnDi", "-n", "-P"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let stdout = child.stdout.take().ok_or_else(unavailable)?;
+        let stderr = child.stderr.take().ok_or_else(unavailable)?;
+        let out = thread::spawn(move || bounded_read(stdout, MAX_BYTES));
+        let err = thread::spawn(move || bounded_read(stderr, 64 * 1024));
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+                result => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break Err(result.err().unwrap_or_else(unavailable));
+                }
+            }
+        };
+        let stdout = out.join().map_err(|_| unavailable())??;
+        let stderr = err.join().map_err(|_| unavailable())??;
+        if !status?.success() || !stderr.is_empty() {
+            return Err(unavailable());
+        }
+        String::from_utf8(stdout).map_err(|_| unavailable())
+    }
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Header {
+        version: u32,
+        #[serde(rename = "type")]
+        kind: &'static str,
+        uid: u32,
+        empty_fd_pids: Vec<i32>,
+    }
+    pub(super) fn run(uid: u32) -> io::Result<()> {
+        // Share one budget so the server's outer timeout cannot strand lsof
+        // after an unusually expensive census.
+        let deadline = Instant::now() + TIMEOUT;
+        let before = census(uid, deadline)?;
+        let output = lsof(uid, deadline)?;
+        let pids = error_pids(&output)?;
+        for pid in &pids {
+            if Instant::now() >= deadline {
+                return Err(unavailable());
+            }
+            let before = before.get(pid).ok_or_else(unavailable)?;
+            let current = identity(*pid)?;
+            let empty = empty_fds(*pid);
+            let after = identity(*pid)?;
+            if !matching_empty(uid, before, &current, empty, &after) {
+                return Err(unavailable());
+            }
+        }
+        let mut writer = BufWriter::new(io::stdout().lock());
+        serde_json::to_writer(
+            &mut writer,
+            &Header {
+                version: 1,
+                kind: "lsofCapture",
+                uid,
+                empty_fd_pids: pids,
+            },
+        )?;
+        writer.write_all(b"\n")?;
+        writer.write_all(output.as_bytes())?;
+        writer.flush()
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn refuses_error_nonempty_and_truncated_results() {
+            assert!(empty_result(0, 0));
+            for (bytes, errno) in [(0, libc::EINVAL), (-1, 0), (8, 0), (16, 0)] {
+                assert!(!empty_result(bytes, errno));
+            }
+        }
+        #[test]
+        fn exact_error_record_only_without_numeric_fds() {
+            let fixture = "p123\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\nferr\0nFD info error: Invalid argument\0\n";
+            assert_eq!(error_pids(fixture).unwrap(), [123]);
+            for output in [
+                fixture.replace("Invalid argument", "Permission denied"),
+                format!("{fixture}f4\0tREG\0n/example\0\n"),
+                fixture.replace("ferr\0", "ferr\0tREG\0"),
+                fixture.trim_end_matches('\n').to_string(),
+            ] {
+                assert!(error_pids(&output).is_err());
+            }
+        }
+        #[test]
+        fn identity_uid_and_generation_must_match() {
+            let id = Identity {
+                uid: 501,
+                real_uid: 501,
+                saved_uid: 501,
+                unique_id: 42,
+                id_version: 7,
+                uuid: [0; 16],
+            };
+            assert!(matching_empty(501, &id, &id, true, &id));
+            assert!(!matching_empty(501, &id, &id, false, &id));
+            assert!(!matching_empty(502, &id, &id, true, &id));
+            for changed in [
+                Identity {
+                    uid: 502,
+                    ..id.clone()
+                },
+                Identity {
+                    unique_id: 43,
+                    ..id.clone()
+                },
+                Identity {
+                    id_version: 8,
+                    ..id.clone()
+                },
+                Identity {
+                    uuid: [1; 16],
+                    ..id.clone()
+                },
+            ] {
+                assert!(!matching_empty(501, &id, &changed, true, &id));
+                assert!(!matching_empty(501, &id, &id, true, &changed));
+            }
+        }
+        #[test]
+        fn kernel_empty_fixture() {
+            if std::env::var_os("T3_TEST_EMPTY_FDS").is_none() {
+                return;
+            }
+            // This runs only in the test-owned child. Close stdout last so its
+            // EOF is the parent's deterministic readiness signal.
+            let mut fds = vec![
+                libc::proc_fdinfo {
+                    proc_fd: 0,
+                    proc_fdtype: 0
+                };
+                4096
+            ];
+            let count = unsafe {
+                libc::proc_pidinfo(
+                    std::process::id() as i32,
+                    libc::PROC_PIDLISTFDS,
+                    0,
+                    fds.as_mut_ptr().cast(),
+                    std::mem::size_of_val(fds.as_slice()) as i32,
+                )
+            };
+            assert!(count > 0 && count < std::mem::size_of_val(fds.as_slice()) as i32);
+            for fd in fds
+                .iter()
+                .take(count as usize / std::mem::size_of::<libc::proc_fdinfo>())
+            {
+                if fd.proc_fd != 1 {
+                    unsafe {
+                        libc::close(fd.proc_fd);
+                    }
+                }
+            }
+            unsafe {
+                libc::close(1);
+            }
+            loop {
+                unsafe {
+                    libc::pause();
+                }
+            }
+        }
+        #[test]
+        fn real_kernel_empty_table_clears_stale_errno() {
+            struct Child(std::process::Child);
+            impl Drop for Child {
+                fn drop(&mut self) {
+                    let _ = self.0.kill();
+                    let _ = self.0.wait();
+                }
+            }
+            let mut child = Child(
+                Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "lsof_capture::tests::kernel_empty_fixture",
+                        "--nocapture",
+                    ])
+                    .env("T3_TEST_EMPTY_FDS", "1")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+            bounded_read(child.0.stdout.take().unwrap(), 64 * 1024).unwrap();
+            let pid = child.0.id() as i32;
+            let before = identity(pid).unwrap();
+            unsafe {
+                *libc::__error() = libc::EINVAL;
+            }
+            assert!(empty_fds(pid));
+            let after = identity(pid).unwrap();
+            assert!(matching_empty(before.uid, &before, &before, true, &after));
+            // The actual OS lsof seam emits ferr for this successful empty table.
+            let capture = Command::new("/usr/sbin/lsof")
+                .args(["-a", "-p", &pid.to_string(), "-F0pftnDi", "-n", "-P"])
+                .output()
+                .unwrap();
+            assert!(capture.status.success());
+            assert!(capture.stderr.is_empty());
+            let output = String::from_utf8(capture.stdout).unwrap();
+            let errors = error_pids(&output).unwrap();
+            // Some lsof versions correctly omit the erroneous record.
+            assert!(errors.is_empty() || errors == [pid]);
+            assert!(matching_empty(
+                before.uid,
+                &before,
+                &identity(pid).unwrap(),
+                empty_fds(pid),
+                &identity(pid).unwrap()
+            ));
+        }
+        #[test]
+        fn bounded_capture_rejects_overflow() {
+            assert!(bounded_read(&b"12345"[..], 4).is_err());
+            assert_eq!(bounded_read(&b"1234"[..], 4).unwrap(), b"1234");
+        }
+        #[test]
+        fn real_kernel_nonempty_process_is_not_empty_and_has_stable_identity() {
+            let pid = std::process::id() as i32;
+            let before = identity(pid).unwrap();
+            assert!(!empty_fds(pid));
+            assert_eq!(before, identity(pid).unwrap());
+            assert_eq!(before.uid, unsafe { libc::geteuid() });
+            assert!(
+                census(before.uid, Instant::now() + TIMEOUT)
+                    .unwrap()
+                    .contains_key(&pid)
+            );
+            assert!(identity(i32::MAX).is_err());
+            assert!(!empty_fds(i32::MAX));
+        }
+    }
+}
+
 fn main() -> io::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if !args.is_empty() {
+        #[cfg(target_os = "macos")]
+        if args.len() == 2 && args[0] == "capture-lsof-v1" {
+            let uid = args[1]
+                .parse::<u32>()
+                .map_err(|_| io::Error::other("Invalid UID"))?;
+            return lsof_capture::run(uid);
+        }
+        return Err(io::Error::other("Unsupported resource monitor command"));
+    }
     let mut writer = BufWriter::new(io::stdout().lock());
     write_event(
         &mut writer,

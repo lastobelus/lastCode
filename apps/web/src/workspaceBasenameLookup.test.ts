@@ -1,9 +1,7 @@
+import { claimWorkspaceBasenameLookup } from "@t3tools/client-runtime/workspace-basename-lookup";
 import { describe, expect, it } from "vite-plus/test";
 
-import {
-  claimWorkspaceBasenameLookup,
-  pickWorkspaceBasenameMatch,
-} from "@t3tools/client-runtime/workspace-basename-lookup";
+import { pickWorkspaceBasenameMatch } from "@t3tools/shared/workspaceBasenameLookup";
 
 describe("pickWorkspaceBasenameMatch", () => {
   const entries = [

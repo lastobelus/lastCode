@@ -170,7 +170,7 @@ it.layer(NodeServices.layer)("LastCode docs feature registry", (it) => {
       assert.includeMembers(
         [...(sourcePrefixes.get("thread-annotations") ?? [])],
         [
-          "apps/server/src/orchestration-v2/ThreadLifecycleService.ts",
+          "apps/server/src/orchestration-v2/Orchestrator.ts",
           "apps/server/src/orchestration-v2/ProjectionStore.ts",
         ],
       );

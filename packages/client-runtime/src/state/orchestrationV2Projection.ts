@@ -272,6 +272,12 @@ export function applyOrchestrationV2ProjectionEvent(
         ...base,
         thread: applyThreadPullRequestLinkUpdate(projection.thread, event.payload),
       };
+    case "thread.persistence-changed":
+    case "thread.annotation-upserted":
+    case "thread.annotation-resolved":
+    case "thread.annotation-reopened":
+    case "thread.attention-set":
+    case "thread.attention-cleared":
     case "thread.created":
     case "thread.archived":
     case "thread.unarchived":

@@ -103,6 +103,79 @@ If the agent manually polls instead, inspect the repository guidance first. Comm
 or conflicting workflow instructions, a skill that mentions the Action without prescribing the
 tool sequence, or an Action that is missing or disabled in the current environment.
 
+## Parent-mediated Actions for delegated children
+
+App-owned delegated child tasks do not yet complete reliably across an Action wait, so for now
+their parent owns every resumable Action they need, including dependency preparation, CI, build,
+and checkpoint waits. A child can technically call `run_project_action_and_resume`; the injected
+runtime instructions ask it not to. Child PR watches stay with the parent as well. Ordinary
+top-level threads launch and resume their own Actions directly; nothing in this section, including
+settlement protection, applies to them. Issue #482 tracks the work that removes this handoff.
+
+The injected instructions carry the sequence each side follows: the child ends its turn with a
+handoff request as its final response, and the parent waits for that recorded result, keeps
+itself from being settled away, verifies the target, launches, and queues the result back to the
+child with a `taskId` receipt. This section holds the setup detail they leave out.
+
+### Choose the target
+
+A listed, eligible Action shows only that it exists and is opted in. Use `t3_project_read` to
+inspect the registered workspace and saved scripts, and `t3_thread_read` to check the parent's
+checkout. Before launching for a child, verify the saved command, opt-in, effective working
+directory, environment, and worktree-local package or build selection against the child's exact
+checkout and head. Use **Settings → Projects** when importing, changing, or opting in an Action;
+reading its definition does not itself need a UI visit.
+
+- **Shared checkout.** When the child works in the parent's checkout, the parent's saved Action
+  usually targets it already; verify it as above. Serialize changes to that checkout while the
+  Action runs.
+- **Separate child worktree.** The parent needs a saved Action explicitly targeted at that
+  worktree and opted in, set up as in [Let the agent complete the UI setup](#let-the-agent-complete-the-ui-setup).
+  Its setup must not depend on packages the child's worktree is still missing. Keep concrete
+  paths and selections in the environment's settings, not in repository files.
+
+If a correctly targeted Action cannot be prepared, use the shared checkout when that is safe, and
+otherwise report the specific blocker before launch.
+
+### Protect the parent from automatic settlement
+
+A parent whose linked PRs have merged can be settled automatically, and filed away, while it still
+owes a child its result. Protection keeps it visible until the relay is done. It does not enable
+anything: `run_project_action_and_resume` never checks it, and Actions launch and resume the same
+way with or without it. When asking the user, give the visibility reason. The parent thread's
+existing menu control disables automatic settlement for that thread; `t3_thread_read` reports the
+current value as `autoSettleDisabledAt`, and no MCP tool changes it.
+
+Set protection up once per mediated workflow, then reuse its record for later Action requests.
+
+1. Read and record the current value. If it is already set, keep that timestamp as the receipt,
+   skip setup, and restore nothing you did not change.
+2. If it is unset, ask the user to disable automatic settlement from the parent thread's menu, or
+   use the collaborative browser if the user has already authorized that setup under the machine
+   interaction policy. Read the value again and record the timestamp as the receipt.
+3. Before later requests, confirm protection still matches that receipt. If it changed, respect
+   the user's choice and report the blocker rather than changing it back.
+
+If setup is needed and neither route is available, report that blocker. After the workflow
+finishes, restore only a setting changed for this workflow, through the same authorized route,
+and only if the current timestamp still equals the receipt and later user choices permit it.
+Otherwise leave it and explain why. An explicit Stop or Settle from the user always stands.
+
+### Observe progress
+
+A parent reads the bounded latest-Action summary through `t3_thread_read`: identity, outcome,
+delivery, timing, exit, derived follow-up status, and an untrusted report summary. A mediated
+Action belongs to the parent's own thread; reading the child does not show that parent-owned run.
+The retained hold flag and raw output are available only through `inspect_action_run` in the
+thread that launched the run, which for mediated Actions is the parent.
+
+### When the handoff ends
+
+The restriction lifts only after an installed checkpoint containing same-task Action support
+passes acceptance on that environment. A newer source tree or version number is not enough, and
+no capability flag reports it yet. Mediated work already in flight keeps its recorded owner until
+someone deliberately hands it over.
+
 ## Troubleshooting
 
 ### The Action list is empty

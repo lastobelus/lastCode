@@ -123,7 +123,7 @@ export interface ThreadLaunchPreparationInput {
 export interface ThreadLaunchResult {
   readonly threadId: ThreadId;
   readonly projection: OrchestrationV2ThreadProjection;
-  /** The launch's last write (the initial message, else the thread claim) was accepted before this call. */
+  /** Replayed the final write or recovered a server-allocated thread from an accepted launch. */
   readonly resumed: boolean;
   readonly sequence?: number;
 }
@@ -568,6 +568,7 @@ const make = Effect.gen(function* () {
               cause,
             }),
           ),
+          Effect.asVoid,
           Effect.forkIn(preparationScope),
         );
       }
@@ -1122,12 +1123,12 @@ const make = Effect.gen(function* () {
         return {
           threadId,
           projection,
-          // An attempt that failed after claiming the thread recorded nothing, so
-          // only a repeat of the final write counts as resumed.
+          // Recovering a server-allocated thread continues its accepted launch.
+          // For caller-supplied ids, a claim alone does not replay the message.
           resumed:
             input.initialMessage === undefined
               ? Option.isSome(launchReceipt) || claimed.replayed === true
-              : messageWasAlreadyAccepted,
+              : reusableLaunchReceipt !== undefined || messageWasAlreadyAccepted,
           ...(messageSequence === undefined ? {} : { sequence: messageSequence }),
         };
       });

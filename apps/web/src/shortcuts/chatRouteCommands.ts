@@ -15,7 +15,11 @@ import { selectProjectGroupingSettings } from "@t3tools/client-runtime/state/pro
 import { selectActiveRightPanel, useRightPanelStore } from "../rightPanelStore";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { buildSidebarProjectSnapshots } from "../sidebarProjectGrouping";
-import { resolveSidebarMode, shouldChooseNewThreadProject, useSidebarModeStore } from "../sidebarMode";
+import {
+  resolveSidebarMode,
+  shouldChooseNewThreadProject,
+  useSidebarModeStore,
+} from "../sidebarMode";
 import { readProjects, readThreadShell } from "../state/entities";
 import { environmentPresentations } from "../state/presentation";
 import { primaryEnvironmentIdAtom } from "../state/primaryEnvironment";
@@ -125,7 +129,10 @@ export function installChatRouteCommands(router: AnyRouter): () => void {
           getClientSettingsHydratedSnapshot(),
           useSidebarModeStore.getState().lastcodeHidden,
         );
-        if (!settings.boringSidebarEnabled && shouldChooseNewThreadProject(sidebarMode, readProjectGroupCount())) {
+        if (
+          !settings.boringSidebarEnabled &&
+          shouldChooseNewThreadProject(sidebarMode, readProjectGroupCount())
+        ) {
           claim(event);
           openCommandPalette({ open: "new-thread-in" });
           return;

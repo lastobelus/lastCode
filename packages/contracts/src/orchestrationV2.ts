@@ -1,3 +1,16 @@
+import { ActionResumeState } from "./actionResume.ts";
+import {
+  WorktreeSuspensionSummary,
+  WorktreeSuspensionTransitionInput,
+} from "./worktreeSuspension.ts";
+import { SavedWorkspaceDisposition } from "./workspaceLifecycle.ts";
+import {
+  ThreadAnnotation,
+  ThreadDashboardItemInput,
+  ThreadDashboardItems,
+  ThreadWorktreeCleanup,
+} from "./threadMetadata.ts";
+export * from "./threadMetadata.ts";
 import { OrchestrationMessageContext } from "./composerContext.ts";
 import { withRecordIdTable } from "./orchestrationV2IdTable.ts";
 import * as DateTime from "effect/DateTime";
@@ -63,6 +76,8 @@ import {
   ThreadPullRequestSnapshot,
   ThreadPullRequestStack,
   ThreadPullRequestWatch,
+  ThreadPullRequestWatchQuietDeadline,
+  PullRequestWatchQuietTimeoutMinutes,
 } from "./threadPullRequest.ts";
 import {
   ProviderApprovalDecision,
@@ -154,8 +169,49 @@ export const OrchestrationV2AppThreadLineage = Schema.Struct({
   parentThreadId: Schema.NullOr(ThreadId),
   relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent"])),
   rootThreadId: ThreadId,
+  /** Releases delegated ownership without changing where the conversation came from. */
+  independent: Schema.optional(Schema.Boolean),
 });
 export type OrchestrationV2AppThreadLineage = typeof OrchestrationV2AppThreadLineage.Type;
+
+/** Idle archive is not consent to stop newly active work; the server rechecks before accepting it. */
+export const ThreadArchiveChildDisposition = Schema.Literals([
+  "archive_if_idle",
+  "archive_after_review",
+  "stop_and_archive",
+]);
+export type ThreadArchiveChildDisposition = typeof ThreadArchiveChildDisposition.Type;
+export const ThreadArchivedWith = Schema.Struct({ threadId: ThreadId, commandId: CommandId });
+export const ThreadArchiveParticipant = Schema.Struct({
+  threadId: ThreadId,
+  commandId: CommandId,
+  status: Schema.Literals(["stopping", "failed"]),
+  error: Schema.optional(Schema.String),
+});
+/** Only the operation owner stores the family plan; participants hold a compact reference. */
+export const ThreadArchiveOperation = Schema.Struct({
+  ...ThreadArchiveParticipant.fields,
+  /** Missing on deployed plans whose consent covered delegated ownership only. */
+  familyVersion: Schema.optional(Schema.Literal(1)),
+  // Already-deployed pending operations may finish their original promotion plan.
+  childDisposition: Schema.Literals([
+    "archive_if_idle",
+    "archive_after_review",
+    "stop_and_archive",
+    "promote",
+  ]),
+  childThreadIds: Schema.Array(ThreadId),
+  archiveThreadIds: Schema.Array(ThreadId),
+  promoteThreadIds: Schema.Array(ThreadId),
+  /** Keeps a limited caller's ceiling across provider shutdown and server recovery. */
+  modeLimit: Schema.optional(
+    Schema.Struct({ runtimeMode: RuntimeMode, interactionMode: ProviderInteractionMode }),
+  ),
+});
+export const ThreadArchivePending = Schema.Union([
+  ThreadArchiveOperation,
+  ThreadArchiveParticipant,
+]);
 
 export const OrchestrationV2ContextTransferType = Schema.Literals([
   "fork",
@@ -435,7 +491,31 @@ const LenientThreadOpens = Schema.NullOr(OrchestrationV2ThreadOpens).pipe(
   Schema.catchDecoding(() => Effect.succeedSome(null)),
 );
 
+export const OrchestrationV2SubagentPromotion = Schema.Struct({
+  requestId: CommandId,
+  targetThreadId: ThreadId,
+  sourceProviderTurnId: Schema.optional(ProviderTurnId),
+  status: Schema.Literals(["waiting", "forking", "failed", "promoted"]),
+  error: Schema.NullOr(Schema.String),
+  requestedAt: Schema.DateTimeUtc,
+  updatedAt: Schema.DateTimeUtc,
+  title: Schema.optional(TrimmedNonEmptyString),
+  ...OrchestrationV2CreationFields,
+});
+export type OrchestrationV2SubagentPromotion = typeof OrchestrationV2SubagentPromotion.Type;
+
+export const OrchestrationV2ThreadRecovery = Schema.Struct({
+  runId: RunId,
+  attemptId: RunAttemptId,
+  status: Schema.Literals(["suspect", "stale", "recovering", "recovered", "failed"]),
+  detail: Schema.String,
+  updatedAt: Schema.DateTimeUtc,
+  repairThreadId: Schema.optional(ThreadId),
+});
+export type OrchestrationV2ThreadRecovery = typeof OrchestrationV2ThreadRecovery.Type;
+
 export const OrchestrationV2AppThread = Schema.Struct({
+  recovery: Schema.optional(OrchestrationV2ThreadRecovery),
   ...OrchestrationV2CreationFields,
   /** Immutable creator conversation, separate from fork/subagent ownership and sidebar placement. */
   creatorThreadId: Schema.optional(ThreadId),
@@ -453,10 +533,18 @@ export const OrchestrationV2AppThread = Schema.Struct({
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   pullRequests: Schema.optional(Schema.Array(ThreadPullRequestLink)),
   branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
+  subagentPromotion: Schema.optional(Schema.NullOr(OrchestrationV2SubagentPromotion)),
   activeProviderThreadId: Schema.NullOr(ProviderThreadId),
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),
   linkOrigin: Schema.optional(OrchestrationV2LinkOrigin),
   delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
+  persistent: Schema.optional(Schema.Boolean),
+  annotation: Schema.optional(Schema.NullOr(ThreadAnnotation)),
+  dashboardItems: Schema.optional(ThreadDashboardItems),
+  actionResume: Schema.optional(Schema.NullOr(ActionResumeState)),
+  worktreeCleanup: Schema.optional(Schema.NullOr(ThreadWorktreeCleanup)),
+  worktreeSuspension: Schema.optional(WorktreeSuspensionSummary),
+  workspaceUserAdopted: Schema.optional(Schema.Boolean),
   lineage: OrchestrationV2AppThreadLineage,
   forkedFrom: Schema.NullOr(
     Schema.Union([
@@ -472,6 +560,8 @@ export const OrchestrationV2AppThread = Schema.Struct({
   createdAt: Schema.DateTimeUtc,
   updatedAt: Schema.DateTimeUtc,
   archivedAt: Schema.NullOr(Schema.DateTimeUtc),
+  archivedWith: Schema.optional(Schema.NullOr(ThreadArchivedWith)),
+  archivePending: Schema.optional(Schema.NullOr(ThreadArchivePending)),
   settledOverride: Schema.NullOr(Schema.Literals(["settled", "active"])).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
@@ -878,6 +968,7 @@ export const OrchestrationV2Subagent = Schema.Struct({
   modelSelection: Schema.optional(ModelSelection),
   completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
   completionDelivery: Schema.optional(OrchestrationV2DelegatedCompletionTaskDelivery),
+  ownershipReleased: Schema.optional(Schema.Boolean),
   status: Schema.Literals([
     "idle",
     "pending",
@@ -1263,7 +1354,16 @@ export type OrchestrationV2Notification = typeof OrchestrationV2Notification.Typ
 export const OrchestrationV2IdleCompaction = Schema.Literals(["beforeCacheExpires", "onReturn"]);
 export type OrchestrationV2IdleCompaction = typeof OrchestrationV2IdleCompaction.Type;
 
+export const OrchestrationV2IncomingMessageSummary = Schema.Union([
+  Schema.Struct({ status: Schema.Literal("pending") }),
+  Schema.Struct({ status: Schema.Literal("ready"), text: TrimmedNonEmptyString }),
+  Schema.Struct({ status: Schema.Literal("failed") }),
+]);
+export type OrchestrationV2IncomingMessageSummary =
+  typeof OrchestrationV2IncomingMessageSummary.Type;
+
 export const OrchestrationV2ConversationMessage = Schema.Struct({
+  incomingSummary: Schema.optional(OrchestrationV2IncomingMessageSummary),
   notification: Schema.optional(OrchestrationV2Notification),
   ...OrchestrationV2CreationFields,
   scheduledTaskId: Schema.optional(ScheduledTaskId),
@@ -1564,6 +1664,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
     ...OrchestrationV2TurnItemBaseFields,
     ...OrchestrationV2CreationFields,
     type: Schema.Literal("user_message"),
+    incomingSummary: Schema.optional(OrchestrationV2IncomingMessageSummary),
     messageId: MessageId,
     scheduledTaskId: Schema.optional(ScheduledTaskId),
     senderThreadId: Schema.optional(ThreadId),
@@ -1843,6 +1944,13 @@ export const OrchestrationV2DomainEvent = Schema.Union([
       "thread.visited",
       "thread.marked-unread",
       "thread.metadata-updated",
+      "thread.persistence-changed",
+      "thread.annotation-upserted",
+      "thread.annotation-resolved",
+      "thread.annotation-reopened",
+      // Retired metadata events remain decodable in persisted history.
+      "thread.attention-set",
+      "thread.attention-cleared",
       "thread.pull-request-synced",
       "thread.runtime-mode-updated",
       "thread.interaction-mode-updated",
@@ -2027,6 +2135,9 @@ export type OrchestrationV2LatestVisibleMessageSummary =
   typeof OrchestrationV2LatestVisibleMessageSummary.Type;
 
 export const OrchestrationV2ThreadShell = Schema.Struct({
+  archivedWith: OrchestrationV2AppThread.fields.archivedWith,
+  archivePending: OrchestrationV2AppThread.fields.archivePending,
+  recovery: Schema.optional(OrchestrationV2ThreadRecovery),
   ...OrchestrationV2CreationFields,
   creatorThreadId: Schema.optional(ThreadId),
   creatorGrouping: OrchestrationV2AppThread.fields.creatorGrouping,
@@ -2048,6 +2159,14 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),
   linkOrigin: Schema.optional(OrchestrationV2LinkOrigin),
   delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
+  persistent: Schema.optional(Schema.Boolean),
+  annotation: Schema.optional(Schema.NullOr(ThreadAnnotation)),
+  dashboardItems: Schema.optional(ThreadDashboardItems),
+  actionResume: Schema.optional(Schema.NullOr(ActionResumeState)),
+  subagentPromotion: Schema.optional(Schema.NullOr(OrchestrationV2SubagentPromotion)),
+  worktreeCleanup: Schema.optional(Schema.NullOr(ThreadWorktreeCleanup)),
+  worktreeSuspension: Schema.optional(WorktreeSuspensionSummary),
+  workspaceUserAdopted: Schema.optional(Schema.Boolean),
   latestRunId: Schema.NullOr(RunId),
   latestRunRequestedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   latestRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -2184,6 +2303,12 @@ export const OrchestrationV2ShellSnapshot = Schema.Struct({
 });
 export type OrchestrationV2ShellSnapshot = typeof OrchestrationV2ShellSnapshot.Type;
 
+const relatedThreadShellFields = {
+  /** Additional active-shell targets of the same event, applied before advancing its sequence. */
+  relatedThreads: Schema.optionalKey(Schema.Array(OrchestrationV2ThreadShell)),
+  relatedRemovedThreadIds: Schema.optionalKey(Schema.Array(ThreadId)),
+};
+
 export const OrchestrationV2ShellStreamItem = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("synchronized"),
@@ -2208,12 +2333,14 @@ export const OrchestrationV2ShellStreamItem = Schema.Union([
     sequence: NonNegativeInt,
     location: Schema.Literals(["active", "archive"]),
     thread: OrchestrationV2ThreadShell,
+    ...relatedThreadShellFields,
   }),
   Schema.Struct({
     kind: Schema.Literal("thread.removed"),
     sequence: NonNegativeInt,
     location: Schema.Literals(["active", "archive"]),
     threadId: ThreadId,
+    ...relatedThreadShellFields,
   }),
 ]);
 export type OrchestrationV2ShellStreamItem = typeof OrchestrationV2ShellStreamItem.Type;
@@ -2225,8 +2352,23 @@ export const OrchestrationV2StoredEvent = Schema.Struct({
 });
 export type OrchestrationV2StoredEvent = typeof OrchestrationV2StoredEvent.Type;
 
+const OrchestrationV2ThreadRecoveryJson = OrchestrationV2ThreadRecovery.mapFields((fields) => ({
+  ...fields,
+  updatedAt: Schema.DateTimeUtcFromString,
+}));
+
+const OrchestrationV2SubagentPromotionJson = OrchestrationV2SubagentPromotion.mapFields(
+  (fields) => ({
+    ...fields,
+    requestedAt: Schema.DateTimeUtcFromString,
+    updatedAt: Schema.DateTimeUtcFromString,
+  }),
+);
+
 export const OrchestrationV2AppThreadJson = OrchestrationV2AppThread.mapFields((fields) => ({
   ...fields,
+  subagentPromotion: Schema.optional(Schema.NullOr(OrchestrationV2SubagentPromotionJson)),
+  recovery: Schema.optional(OrchestrationV2ThreadRecoveryJson),
   createdAt: Schema.DateTimeUtcFromString,
   updatedAt: Schema.DateTimeUtcFromString,
   archivedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
@@ -2395,6 +2537,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     ...OrchestrationV2TurnItemJsonBaseFields,
     ...OrchestrationV2CreationFields,
     type: Schema.Literal("user_message"),
+    incomingSummary: Schema.optional(OrchestrationV2IncomingMessageSummary),
     messageId: MessageId,
     scheduledTaskId: Schema.optional(ScheduledTaskId),
     senderThreadId: Schema.optional(ThreadId),
@@ -2656,6 +2799,8 @@ export type OrchestrationV2LatestVisibleMessageSummaryJson =
 
 export const OrchestrationV2ThreadShellJson = OrchestrationV2ThreadShell.mapFields((fields) => ({
   ...fields,
+  subagentPromotion: Schema.optional(Schema.NullOr(OrchestrationV2SubagentPromotionJson)),
+  recovery: Schema.optional(OrchestrationV2ThreadRecoveryJson),
   latestRunRequestedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   latestRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   latestRunCompletedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
@@ -2725,6 +2870,13 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
       "thread.marked-unread",
       "thread.pull-request-synced",
       "thread.metadata-updated",
+      "thread.persistence-changed",
+      "thread.annotation-upserted",
+      "thread.annotation-resolved",
+      "thread.annotation-reopened",
+      // Retired metadata events remain decodable in persisted history.
+      "thread.attention-set",
+      "thread.attention-cleared",
       "thread.runtime-mode-updated",
       "thread.interaction-mode-updated",
       "thread.model-selection-updated",
@@ -2887,9 +3039,43 @@ export const OrchestrationV2Command = Schema.Union([
     ),
   }),
   Schema.Struct({
+    type: Schema.Literal("thread.persistence.set"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    persistent: Schema.Boolean,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.annotation.upsert"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    body: ThreadAnnotation.fields.body,
+  }),
+  Schema.Struct({
+    type: Schema.Literals(["thread.annotation.resolve", "thread.annotation.reopen"]),
+    commandId: CommandId,
+    threadId: ThreadId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.dashboard-item.upsert"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    item: ThreadDashboardItemInput,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.dashboard-item.remove"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    itemId: ThreadDashboardItemInput.fields.id,
+  }),
+  Schema.Struct({
     type: Schema.Literal("thread.archive"),
     commandId: CommandId,
     threadId: ThreadId,
+    childDisposition: Schema.optional(ThreadArchiveChildDisposition),
+    expectedChildThreadIds: Schema.optional(Schema.Array(ThreadId)),
+    /** Retries only this failed archive attempt on its original owner. */
+    expectedArchiveCommandId: Schema.optional(CommandId),
+    savedWorkspace: Schema.optionalKey(SavedWorkspaceDisposition),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.guest-share.close"),
@@ -2906,6 +3092,8 @@ export const OrchestrationV2Command = Schema.Union([
     type: Schema.Literal("thread.unarchive"),
     commandId: CommandId,
     threadId: ThreadId,
+    /** Dismisses this failed archive attempt on its active owner instead of restoring. */
+    expectedArchiveCommandId: Schema.optional(CommandId),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.delete"),
@@ -2913,6 +3101,7 @@ export const OrchestrationV2Command = Schema.Union([
     threadId: ThreadId,
     deleteWorktree: Schema.optional(Schema.Boolean),
     repositoryKey: Schema.optional(TrimmedNonEmptyString),
+    savedWorkspace: Schema.optionalKey(SavedWorkspaceDisposition),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.worktree-cleanup.retry"),
@@ -3009,6 +3198,8 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("thread.metadata.update"),
+    actionResume: Schema.optional(Schema.NullOr(ActionResumeState)),
+    workspaceUserAdopted: Schema.optional(Schema.Literal(true)),
     commandId: CommandId,
     threadId: ThreadId,
     title: Schema.optional(TrimmedNonEmptyString),
@@ -3053,6 +3244,8 @@ export const OrchestrationV2Command = Schema.Union([
     threadId: ThreadId,
     ...ThreadPullRequestKey.fields,
     watching: Schema.Boolean,
+    /** Omitted preserves an armed timer or uses the environment default; null disables it. */
+    quietTimeoutMinutes: Schema.optional(Schema.NullOr(PullRequestWatchQuietTimeoutMinutes)),
     link: Schema.optional(
       Schema.Struct({
         url: TrimmedNonEmptyString,
@@ -3265,6 +3458,20 @@ export const OrchestrationV2Command = Schema.Union([
     checkpointId: CheckpointId,
   }),
   Schema.Struct({
+    type: Schema.Literal("subagent.promote.request"),
+    ...OrchestrationV2CreationFields,
+    commandId: CommandId,
+    threadId: ThreadId,
+    targetThreadId: ThreadId,
+    title: Schema.optional(TrimmedNonEmptyString),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("subagent.promote.cancel"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: CommandId,
+  }),
+  Schema.Struct({
     type: Schema.Literal("thread.fork"),
     ...OrchestrationV2CreationFields,
     commandId: CommandId,
@@ -3366,6 +3573,10 @@ const OrchestrationV2InternalCommand = Schema.Union([
     text: Schema.String,
     attachments: Schema.optional(Schema.Array(ChatAttachment)),
   }),
+  Schema.Struct({
+    type: Schema.Literal("thread.worktree-suspension.transition"),
+    ...WorktreeSuspensionTransitionInput.fields,
+  }),
   /** Records the workspace result of an accepted launch or preparation retry. */
   Schema.Struct({
     type: Schema.Literal("thread.workspace.complete"),
@@ -3378,6 +3589,56 @@ const OrchestrationV2InternalCommand = Schema.Union([
     worktreePath: Schema.NullOr(TrimmedNonEmptyString),
     branch: Schema.NullOr(TrimmedNonEmptyString),
   }),
+  Schema.Struct({
+    type: Schema.Literal("message.incoming-summary.complete"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    messageId: MessageId,
+    sourceText: Schema.String,
+    summary: Schema.Union([
+      Schema.Struct({ status: Schema.Literal("ready"), text: TrimmedNonEmptyString }),
+      Schema.Struct({ status: Schema.Literal("failed") }),
+    ]),
+  }),
+
+  Schema.Struct({
+    type: Schema.Literal("thread.archive.complete"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: CommandId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.archive.fail"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: CommandId,
+    error: Schema.String,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("subagent.promote.advance"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: CommandId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("subagent.promote.complete"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: CommandId,
+    providerThread: OrchestrationV2ProviderThread,
+    snapshot: Schema.Struct({
+      providerTurns: Schema.Array(OrchestrationV2ProviderTurn),
+      messages: Schema.Array(OrchestrationV2ConversationMessage),
+    }),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("subagent.promote.fail"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: CommandId,
+    error: Schema.String,
+  }),
+
   /**
    * Records what a pull request watch saw, and wakes the agent in the same transaction when
    * `wake` is set. Rejected once the watch started at `startedAt` has ended, and a wake is
@@ -3389,6 +3650,7 @@ const OrchestrationV2InternalCommand = Schema.Union([
     threadId: ThreadId,
     ...ThreadPullRequestKey.fields,
     startedAt: IsoDateTime,
+    expectedQuietDeadline: Schema.optional(Schema.NullOr(ThreadPullRequestWatchQuietDeadline)),
     watch: Schema.NullOr(ThreadPullRequestWatch),
     /** With `watch: null`, the state the ended watch keeps instead of its last saved one. */
     endedWatch: Schema.optional(ThreadPullRequestWatch),
@@ -3545,10 +3807,13 @@ export const ORCHESTRATION_V2_WS_METHODS = {
   searchThreads: "orchestration.searchThreads",
   searchThread: "orchestration.searchThread",
   searchThreadStream: "orchestration.searchThreadStream",
+  recoverThread: "orchestration.recoverThread",
+  repairThread: "orchestration.repairThread",
   getArchivedShellSnapshot: "orchestration.getArchivedShellSnapshot",
   getThreadFamily: "orchestration.getThreadFamily",
   getWorktreeThreadIds: "orchestration.getWorktreeThreadIds",
   getOlderSettledThreads: "orchestration.getOlderSettledThreads",
+  getThreadArchiveFamily: "orchestration.getThreadArchiveFamily",
   getThreadProjection: "orchestration.getThreadProjection",
   getWorkflowScript: "orchestration.getWorkflowScript",
   stopWorkflow: "orchestration.stopWorkflow",
@@ -4084,6 +4349,23 @@ export class OrchestrationV2SearchThreadError extends Schema.TaggedError<Orchest
   }
 }
 
+/** Read-time choices; archive commands recheck ownership and work under their locks. */
+export const OrchestrationV2ThreadArchiveFamily = Schema.Struct({
+  threads: Schema.Array(OrchestrationV2ThreadShell),
+  childThreadIds: Schema.Array(ThreadId),
+  activeChildThreadIds: Schema.Array(ThreadId),
+  activeThreadIds: Schema.Array(ThreadId),
+  unreadThreadIds: Schema.Array(ThreadId),
+  promotableChildThreadIds: Schema.Array(ThreadId),
+  keptThreadIds: Schema.Array(ThreadId),
+  protectedChildThreadIds: Schema.Array(ThreadId),
+  nativeStopCount: Schema.Number,
+  requiresConfirmation: Schema.Boolean,
+  canPromote: Schema.Boolean,
+  canStopAndArchive: Schema.Boolean,
+});
+export type OrchestrationV2ThreadArchiveFamily = typeof OrchestrationV2ThreadArchiveFamily.Type;
+
 export const OrchestrationV2RpcSchemas = {
   searchThread: {
     input: OrchestrationV2SearchThreadInput,
@@ -4116,6 +4398,10 @@ export const OrchestrationV2RpcSchemas = {
   getOlderSettledThreads: {
     input: OrchestrationV2GetOlderSettledThreadsInput,
     output: OrchestrationV2OlderSettledThreadsPage,
+  },
+  getThreadArchiveFamily: {
+    input: Schema.Struct({ threadId: ThreadId }),
+    output: OrchestrationV2ThreadArchiveFamily,
   },
   getThreadProjection: {
     input: OrchestrationV2GetThreadProjectionInput,

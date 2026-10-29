@@ -1,10 +1,13 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import * as UpdateDrainAdmissionTestkit from "../updateDrain/UpdateDrainAdmission.testkit.ts";
 import { assert, it } from "@effect/vitest";
 import { ProjectId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as WorkspaceAcquisitionTestkit from "../workspace/WorkspaceAcquisition.testkit.ts";
+import * as SuspensionRegistryTestkit from "../workspace/WorktreeSuspensionRegistry.testkit.ts";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -137,6 +140,8 @@ const layerRuntime = (dbPath: string) => {
     RuntimeLayer.layer.pipe(Layer.provide(RuntimeLayer.layerProjectService)),
     RuntimeLayer.layerProjectService,
   ).pipe(
+    Layer.provide(WorkspaceAcquisitionTestkit.layer),
+    Layer.provide(SuspensionRegistryTestkit.layer),
     Layer.provide(
       Layer.mock(ProjectEnrichmentService.ProjectEnrichmentService)({
         peek: () => Effect.succeed(unusedEnrichment),
@@ -151,6 +156,7 @@ const layerRuntime = (dbPath: string) => {
     ),
     Layer.provide(McpSessionRegistryTestkit.layer),
     Layer.provide(McpProviderSessions.layer),
+    Layer.provide(UpdateDrainAdmissionTestkit.layerOpen),
     Layer.provideMerge(SqlitePersistence.layerFromPath(dbPath)),
     Layer.provide(layerCheckpointStore),
     Layer.provide(layerServerConfig),
