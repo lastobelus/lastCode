@@ -144,22 +144,24 @@ case at a time. This takes longer than the task-runner defaults but avoids
 cross-suite state leaks plus memory and CPU contention between the web, mobile,
 desktop, and server suites on whichever CI node runs the gate.
 
-The independent **Wait for PR** Project Action waits for both Codex review and
-the exact GitHub pull-request workflow run. GitHub CI records the PR number,
-head, base, and synthetic merge commit in the workflow run identity and exposes
-one stable aggregate `CI Gate`. Head or base drift invalidates the result and
-requires the agent to decide whether to rebase, republish, and request review
-again.
+PR waits use the native pull-request watch, not a Project Action. Call
+`watch_pull_request` with the PR URL, then run the one-shot
+`pnpm lastcode:pr-gates [--pr PR_NUMBER]` check; when it reports `pending`, end
+the turn. On each wake, run the check again. It reads the exact GitHub pull-request workflow run,
+whose identity records the PR number, head, base, and synthetic merge commit
+behind one stable aggregate `CI Gate`, together with exact-head Codex review
+and unresolved review threads. Head or base drift invalidates earlier evidence
+and requires the agent to decide whether to rebase, republish, and request
+review again. The watch has no review timeout. A CI run that never registers
+cannot wake it, so the check reports `ci-not-registered` attention once review
+is no longer pending.
 
-For sequential stacked PRs, the Action can observe one explicitly selected PR
-independently of its checkout. Prepare the selection with the bounded
-`scripts/lastcode-wait-for-pr.ts --target PR_NUMBER` command, then launch the
-saved Action as usual. Clear it with `--clear-target` before returning to
-checkout-derived waits. See
+For sequential stacked PRs, `--pr` checks one PR independently of the current
+checkout and rebuilds its parent chain live on every run. See
 [Sequential Stack Babysitting](../../.agents/skills/_references/stacked-pr-babysit.md)
-for parent pinning, target lifecycle, and ordered squash/restack requirements.
-Passing against a parent branch is stack validation; the final merge guard
-still requires current `lastcode/main` and fresh evidence.
+for which member to watch and ordered squash/restack requirements. Passing against a
+parent branch is stack validation; the final merge guard still requires current
+`lastcode/main` and fresh evidence.
 
 Open feature PRs do not pause checkpoints. When a checkpoint advances their
 base, update the feature branch to incorporate the new `lastcode/main`, push,
@@ -167,13 +169,8 @@ and obtain fresh validation before merging. Rerunning CI from an old base does
 not validate the new one.
 
 This applies to authorized repair PRs opened during checkpoint or build recovery,
-without a separate request to babysit. After handling existing findings, call
-`list_project_actions`, select the eligible **Wait for PR** action (prefer
-`lc-wait-for-pr`), call `run_project_action_and_resume`, and end the turn.
-Executing the script's polling mode directly in a shell keeps the agent turn
-open and defeats the quota-saving handoff. The bounded target preparation and
-clear commands do not poll. On resume, inspect the result
-and recheck the current revision before continuing.
+without a separate request to babysit. Handle existing findings first, then
+use the check and watch above. Do not poll GitHub or run a separate watcher.
 
 Merge the current ready PR with:
 
@@ -182,11 +179,12 @@ pnpm lastcode:merge
 ```
 
 The merge wrapper refuses dirty worktrees, missing or stale exact GitHub CI,
+exact-head Codex review that is missing or pending, unresolved review threads,
 stale bases, draft or non-clean PRs, and PRs that do not target
 `lastcode/main`. The wrapper and checkpoint publisher share a short exclusive
 Git ref lock on the remote. After acquiring it, the wrapper checks the exact PR
-head, base, and CI result again, then squash-merges with the exact-head guard.
-The lock protects only the final main write, not preparation or CI waits.
+head, base, CI result, and review readiness again, then squash-merges with the
+exact-head guard. The lock protects only the final main write, not preparation or CI waits.
 Ordinary merges request no checkpoint; `--skip-checkpoint` explicitly selects
 that default. Use `--checkpoint` only with separate user authorization for an
 extra service run. Permission to merge or a request for a dependent feature is
