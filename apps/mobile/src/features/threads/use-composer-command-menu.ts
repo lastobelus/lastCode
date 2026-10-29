@@ -567,13 +567,7 @@ export function useComposerCommandMenu({
     }
     if (item.type === "thread") {
       if (!ownerKey || trigger.kind !== "path") return;
-      const shell = threadShells.find(
-        (candidate) =>
-          candidate.environmentId === item.thread.environmentId &&
-          candidate.id === item.thread.threadId,
-      );
-      if (!shell) return;
-      const record = threadContextRecord(item.thread, shell.title);
+      const record = threadContextRecord(item.thread, item.label);
       const existing = getComposerDraftSnapshot(ownerKey).context?.records ?? [];
       const alreadyAttached = existing.some((entry) => entry.contextId === record.contextId);
       if (!alreadyAttached && existing.length >= COMPOSER_CONTEXT_MAX_RECORDS) {

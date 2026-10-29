@@ -982,7 +982,7 @@ it.layer(layerTest)("ThreadSearch.searchThreads", (it) => {
         const projections = yield* ProjectionStore.ProjectionStoreV2;
         const search = yield* ThreadSearch.ThreadSearch;
         const firstProject = ProjectId.make("project:mention-primary");
-        const secondProject = ProjectId.make("project:mention-secondary");
+        const secondProject = ProjectId.make("Mobile");
         yield* createProject(firstProject);
         yield* createProject(secondProject);
         const archived = ThreadId.make("thread:mention-archived");
@@ -991,6 +991,11 @@ it.layer(layerTest)("ThreadSearch.searchThreads", (it) => {
         const ordinary = ThreadId.make("thread:mention-ordinary");
         yield* Effect.forEach(
           [
+            ...Array.from({ length: 520 }, (_, index) =>
+              thread(ThreadId.make(`thread:000-unrelated-${index}`), firstProject, {
+                title: "Build notes",
+              }),
+            ),
             thread(archived, firstProject, { title: "Comet archival", archivedAt: at(2) }),
             thread(subagent, secondProject, {
               title: "Comet completed helper",
@@ -998,7 +1003,7 @@ it.layer(layerTest)("ThreadSearch.searchThreads", (it) => {
               settledAt: at(3),
             }),
             thread(deleted, secondProject, { title: "Comet deleted", deletedAt: at(4) }),
-            thread(ordinary, firstProject, { title: "Ordinary conversation" }),
+            thread(ordinary, firstProject, { title: "Fix broken login" }),
           ],
           projections.apply,
           { discard: true },
@@ -1030,6 +1035,19 @@ it.layer(layerTest)("ThreadSearch.searchThreads", (it) => {
         );
         assert.equal(exact.mentionCandidates[0]?.projectId, firstProject);
         assert.equal(exact.mentionsTruncated, false);
+
+        for (const [query, environmentLabel, expected] of [
+          ["fix login", "", ordinary],
+          ["mobile helper", "", subagent],
+          ["remote helper", "Remote server", subagent],
+          ["the comet helper", "", subagent],
+        ] as const) {
+          const result = yield* search.searchMentionCandidates({ query, environmentLabel });
+          assert.deepEqual(
+            result.mentionCandidates.map((candidate) => candidate.id),
+            [expected],
+          );
+        }
 
         const ordinarySearch = yield* search.searchThreads({ query: "comet", limit: 50 });
         assert.deepEqual(ordinarySearch.matches, []);
