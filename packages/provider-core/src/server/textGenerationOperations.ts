@@ -70,7 +70,7 @@ export const decodeJsonReply = <S extends Schema.Top>(
   );
 };
 
-export function buildPromptSnippetsPrompt(input: {
+function buildPromptSnippetsPrompt(input: {
   messages: readonly string[];
   existing: readonly { id: string; title: string; text: string }[];
   dismissed?: readonly { id: string; title: string; text: string }[];

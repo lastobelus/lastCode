@@ -7,6 +7,7 @@ import {
   PromptSnippet,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
+import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -34,7 +35,7 @@ type Proposal = {
   readonly title: string;
   readonly text: string;
 };
-export function discoveryDue(lastAttemptAt: string | null, now: number): boolean {
+function discoveryDue(lastAttemptAt: string | null, now: number): boolean {
   return lastAttemptAt === null || now - Date.parse(lastAttemptAt) >= DAY;
 }
 
@@ -362,8 +363,9 @@ export const layer = Layer.effect(PromptSnippets, make);
 export const worker = Layer.effectDiscard(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
-    // Development and test builds mine only on explicit discover calls.
-    if (config.devUrl !== undefined || ServerConfig.telemetryChannel === "dev") return;
+    // Development and test runtimes mine only on explicit discover calls.
+    const nodeEnv = yield* Config.String("NODE_ENV").pipe(Config.withDefault("production"));
+    if (config.devUrl !== undefined || nodeEnv === "test") return;
     const service = yield* PromptSnippets;
     yield* service.discoverIfDue.pipe(
       Effect.catch(() => Effect.logWarning("Prompt discovery worker failed").pipe(Effect.as(DAY))),
