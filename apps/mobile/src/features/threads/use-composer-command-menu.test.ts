@@ -75,6 +75,7 @@ it("selects an archived search-only thread into the draft without a cached shell
       projectId: ProjectId.make("project"),
       projectTitle: "Project",
       title: "Archived conversation",
+      searchPullRequests: [],
       branch: null,
       opens: null,
       createdAt: "2026-10-01T00:00:00Z",

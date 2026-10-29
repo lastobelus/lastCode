@@ -996,7 +996,16 @@ it.layer(layerTest)("ThreadSearch.searchThreads", (it) => {
                 title: "Build notes",
               }),
             ),
-            thread(archived, firstProject, { title: "Comet archival", archivedAt: at(2) }),
+            thread(archived, firstProject, {
+              title: "Comet archival",
+              archivedAt: at(2),
+              linkedPullRequest: {
+                projectId: firstProject,
+                repository: "acme/app",
+                number: 42,
+                url: "https://github.com/acme/app/pull/42",
+              },
+            }),
             thread(subagent, secondProject, {
               title: "Comet completed helper",
               subagentOf: ordinary,
@@ -1041,12 +1050,22 @@ it.layer(layerTest)("ThreadSearch.searchThreads", (it) => {
           ["mobile helper", "", subagent],
           ["remote helper", "Remote server", subagent],
           ["the comet helper", "", subagent],
+          ["#42", "", archived],
+          ["acme/app#42", "", archived],
         ] as const) {
           const result = yield* search.searchMentionCandidates({ query, environmentLabel });
           assert.deepEqual(
             result.mentionCandidates.map((candidate) => candidate.id),
             [expected],
           );
+          if (query === "#42")
+            assert.deepEqual(result.mentionCandidates[0]?.searchPullRequests, [
+              {
+                number: 42,
+                title: null,
+                references: ["acme/app#42", "https://github.com/acme/app/pull/42"],
+              },
+            ]);
         }
 
         const ordinarySearch = yield* search.searchThreads({ query: "comet", limit: 50 });

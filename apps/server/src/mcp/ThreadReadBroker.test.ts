@@ -528,6 +528,35 @@ describe("ThreadReadBroker", () => {
         yield* TestClock.adjust("15 seconds");
         expect(yield* Fiber.join(reading)).toMatchObject({ code: "environment_unavailable" });
         yield* respondTo(broker, "client-session", request);
+
+        const denied = yield* Deferred.make<void>();
+        yield* (yield* broker.connect("client-session")).pipe(
+          Stream.runForEach((next) =>
+            broker
+              .respond("client-session", {
+                connectionId: next.connectionId,
+                requestId: next.requestId,
+                result: null,
+                unavailableEnvironmentIds: [],
+                failure: { environmentId, reason: "permission_denied" },
+              })
+              .pipe(Effect.andThen(Deferred.succeed(denied, undefined))),
+          ),
+          Effect.forkScoped,
+        );
+        const revoked = yield* broker
+          .read(sourceThreadId, sourceRunId, {
+            threadId,
+            environmentId,
+            via: "client",
+          })
+          .pipe(Effect.flip, Effect.forkScoped);
+        yield* Deferred.await(denied);
+        yield* TestClock.adjust("15 seconds");
+        expect(yield* Fiber.join(revoked)).toMatchObject({
+          code: "capability_denied",
+          threadReadReason: "permission_denied",
+        });
       }),
     ),
   );

@@ -633,6 +633,7 @@ export const make = Effect.gen(function* () {
       projectTitle: row.projectTitle,
       title: row.thread.title,
       branch: row.thread.branch,
+      searchPullRequests: threadSearchPullRequests(row.thread),
       createdAt: DateTime.formatIso(row.thread.createdAt),
       updatedAt: DateTime.formatIso(row.thread.updatedAt),
       latestUserMessageAt: row.latestUserMessageAt,
