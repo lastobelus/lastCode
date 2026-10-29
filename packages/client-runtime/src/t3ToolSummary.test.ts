@@ -7,6 +7,17 @@ function completed(input: unknown, output?: unknown): T3ToolSummaryCall {
 }
 
 describe("summarizeT3ToolCalls", () => {
+  it.each([
+    ["environment-pause-status", "Checked environment pause status 1 time"],
+    ["environment-pause-start", "Requested environment pause 1 time"],
+    ["environment-pause-retry", "Retried environment pause deliveries 1 time"],
+    ["environment-pause-resume", "Requested environment resume 1 time"],
+  ] as const)("describes %s without claiming the environment is quiet", (action, label) => {
+    expect(summarizeT3ToolCalls(action, [completed({}, { quiet: false })])).toEqual({
+      label,
+      failedCount: 0,
+    });
+  });
   it("reads provider result envelopes without treating JSON in the message as result data", () => {
     const result = { messageId: "message-1", threadId: "actual-thread" };
     const json = JSON.stringify(result);
@@ -80,4 +91,11 @@ describe("summarizeT3ToolCalls", () => {
       failedCount: 0,
     });
   });
+});
+
+it("describes promotion as a request rather than completed promotion", () => {
+  expect(
+    summarizeT3ToolCalls("subagent-promote", [completed({ threadId: "child" }, { sequence: 4 })])
+      .label,
+  ).toBe("Requested 1 subagent promotion");
 });

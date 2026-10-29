@@ -165,6 +165,42 @@ function makePartitionedSquash(
 }
 
 describe("carry replay core", () => {
+  it("compiles large provenance without passing commit messages as process arguments", () => {
+    const { repo, cleanup } = initRepo();
+    try {
+      write(repo, "upstream.txt", "upstream\n");
+      const base = commit(repo, "upstream");
+      write(repo, "feature.txt", "carried behavior\n");
+      git(repo, ["add", "--all"]);
+      const tree = git(repo, ["write-tree"]);
+      const observation = "x".repeat(3 * 1024 * 1024);
+      const source = commitTree(
+        repo,
+        tree,
+        base,
+        `large provenance\n\nCarry-Group: incubator\nCarry-Observation: ${observation}\n`,
+      );
+      git(repo, ["checkout", "--quiet", "--detach", source]);
+
+      const result = compileCarrySetSameBase({
+        repo,
+        worktree: repo,
+        base,
+        source,
+        preparedPartition: { base, source, head: source },
+      });
+      assert.equal(git(repo, ["rev-parse", `${result.head}^{tree}`]), tree);
+      assert.equal(
+        result.groups?.find((group) => group.group === "incubator")?.contributions[0]?.metadata[
+          "Carry-Observation"
+        ][0],
+        observation,
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
   it.each([false, true])(
     "preserves later-group deletion with another source delta=%s",
     (anotherDelta) => {
