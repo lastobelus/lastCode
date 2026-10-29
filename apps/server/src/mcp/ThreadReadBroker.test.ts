@@ -94,6 +94,7 @@ const makeHarness = Effect.gen(function* () {
     Array<{
       id: MessageId;
       text: string;
+      runId?: RunId;
       context?: OrchestrationMessageContext;
       threadReadContext?: {
         authorizationId: MessageId;
@@ -445,6 +446,108 @@ describe("ThreadReadBroker", () => {
           expect(yield* h.readFrom(sourceThreadId, runId(messageId), exact)).toBe("client-session");
         }),
       ),
+  );
+
+  it.effect("uses the sending client for exact references steered into an existing run", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* makeHarness;
+        const priorAuthorization = MessageId.make("answer-context:prior-question");
+        const questionNode = NodeId.make("prior-question-node");
+        const priorQuestion = {
+          id: RuntimeRequestId.make("prior-question"),
+          nodeId: questionNode,
+          providerTurnId: null,
+          nativeRequestRef: null,
+          kind: "user_input" as const,
+          status: "resolved" as const,
+          responseCapability: { type: "message" as const },
+          createdAt: yield* DateTime.now,
+          resolvedAt: yield* DateTime.now,
+          threadReadContext: {
+            authorizationId: priorAuthorization,
+            records: [
+              {
+                version: 1 as const,
+                contextId: ComposerContextId.make("question-reference"),
+                kind: "thread" as const,
+                title: "Reference",
+                label: "Reference",
+                environmentId,
+                threadId,
+              },
+            ],
+          },
+        };
+        yield* h.broker
+          .forSession("answering-client")
+          .authorize(sourceThreadId, priorAuthorization);
+        h.requests.set(sourceThreadId, [priorQuestion]);
+        h.nodes.set(sourceThreadId, [{ id: questionNode, runId: sourceRunId }]);
+        yield* h.answer("answering-client");
+        yield* TestClock.adjust("1 millis");
+        const messageId = MessageId.make("steered-reference-message");
+        yield* h.broker.forSession("steering-client").authorize(sourceThreadId, messageId);
+        h.messages.set(sourceThreadId, [
+          {
+            id: messageId,
+            runId: sourceRunId,
+            text: "[Reference](t3-context://v1/thread/steered-reference)",
+            context: {
+              version: 1,
+              records: [
+                {
+                  version: 1,
+                  contextId: ComposerContextId.make("steered-reference"),
+                  kind: "thread",
+                  label: "Reference",
+                  title: "Reference",
+                  environmentId,
+                  threadId,
+                },
+              ],
+            },
+            threadReadContext: {
+              authorizationId: messageId,
+              capturedAt: DateTime.toEpochMillis(yield* DateTime.now),
+            },
+          },
+        ]);
+        yield* h.answer("steering-client");
+        yield* h.answer("client-session", (request) => ({
+          ...result,
+          thread: {
+            ...result.thread,
+            threadId: request.input.threadId,
+            environmentId: request.input.environmentId ?? environmentId,
+          },
+        }));
+        expect(
+          yield* h.readFrom(sourceThreadId, sourceRunId, {
+            threadId,
+            environmentId,
+            via: "client",
+          }),
+        ).toBe("steering-client");
+        expect(
+          yield* h.readFrom(sourceThreadId, sourceRunId, {
+            threadId: ThreadId.make("unmentioned"),
+            environmentId,
+            via: "client",
+          }),
+        ).toBe("client-session");
+        expect(yield* h.readFrom(sourceThreadId, sourceRunId, { threadId })).toBe("client-session");
+        yield* TestClock.adjust("1 millis");
+        h.requests.set(sourceThreadId, [{ ...priorQuestion, resolvedAt: yield* DateTime.now }]);
+        expect(
+          yield* h.readFrom(sourceThreadId, sourceRunId, {
+            threadId,
+            environmentId,
+            via: "client",
+          }),
+        ).toBe("answering-client");
+      }),
+    ),
   );
 
   it.effect("keeps running and queued inputs bound to their own authenticated clients", () =>

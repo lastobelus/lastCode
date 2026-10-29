@@ -5854,6 +5854,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly text: string;
     readonly attachments: ReadonlyArray<ChatAttachment>;
     readonly context?: import("@t3tools/contracts").OrchestrationMessageContext | undefined;
+    readonly threadReadContext?: OrchestrationV2ConversationMessage["threadReadContext"];
     readonly createdBy: OrchestrationV2ConversationMessage["createdBy"];
     readonly creationSource: OrchestrationV2ConversationMessage["creationSource"];
     readonly scheduledTaskId?: OrchestrationV2ConversationMessage["scheduledTaskId"];
@@ -6022,6 +6023,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         readonly providerThreadId: OrchestrationV2ProviderThread["id"];
         readonly providerInstanceId: ProviderInstanceId;
       }) {
+        const threadReadContext =
+          referencedThreads(input.text, input.context).length > 0
+            ? {
+                authorizationId: input.threadReadContext?.authorizationId ?? input.messageId,
+                capturedAt: DateTime.toEpochMillis(now),
+              }
+            : undefined;
         const message: OrchestrationV2ConversationMessage = {
           createdBy: input.createdBy,
           creationSource: input.creationSource,
@@ -6041,6 +6049,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           text: input.text,
           attachments: input.attachments,
           ...(input.context ? { context: input.context } : {}),
+          ...(threadReadContext === undefined ? {} : { threadReadContext }),
           streaming: false,
           createdAt: now,
           updatedAt: now,
@@ -11409,6 +11418,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       text: queuedMessage.text,
       attachments: queuedMessage.attachments,
       ...(queuedMessage.context ? { context: queuedMessage.context } : {}),
+      ...(queuedMessage.threadReadContext === undefined
+        ? {}
+        : { threadReadContext: queuedMessage.threadReadContext }),
       createdBy: queuedMessage.createdBy,
       creationSource: queuedMessage.creationSource,
       ...(queuedMessage.scheduledTaskId === undefined
