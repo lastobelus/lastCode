@@ -41,6 +41,7 @@ function PopoverPopup({
   tooltipStyle = false,
   elevated = false,
   keepMounted = false,
+  animated = true,
   anchor,
   touchBackdrop = false,
   ...props
@@ -55,13 +56,15 @@ function PopoverPopup({
   tooltipStyle?: boolean;
   elevated?: boolean;
   keepMounted?: PopoverPrimitive.Portal.Props["keepMounted"];
+  /** Animate the popup and content changes between triggers. */
+  animated?: boolean;
   anchor?: PopoverPrimitive.Positioner.Props["anchor"];
   width?: keyof typeof popoverPopupWidthClassName;
   touchBackdrop?: boolean;
 }) {
-  // Viewport rekeys on close; persistent single-trigger forms need stable containers for drafts and submit
-  // guards.
-  const Viewport = keepMounted ? "div" : PopoverPrimitive.Viewport;
+  // Viewport clones and measures content for trigger-to-trigger transitions. Persistent
+  // forms and instant hover cards use a stable container instead.
+  const Viewport = keepMounted || !animated ? "div" : PopoverPrimitive.Viewport;
   return (
     <PopoverPrimitive.Portal keepMounted={keepMounted}>
       {touchBackdrop ? (
@@ -82,6 +85,7 @@ function PopoverPopup({
           variant === "panel"
             ? "z-(--z-sheet) w-[min(calc(var(--thread-details-panel-width)+--spacing(4)),calc(var(--anchor-width)---spacing(2)))] transition-[top] duration-150 ease-out data-instant:transition-[top] motion-reduce:transition-none motion-reduce:data-instant:transition-none"
             : "z-[130]",
+          !animated && "transition-none",
         )}
         data-slot="popover-positioner"
         side={side}
@@ -100,6 +104,7 @@ function PopoverPopup({
             width !== "auto" && ["max-w-[calc(100vw-2rem)]", popoverPopupWidthClassName[width]],
             variant === "panel" &&
               "w-full overflow-visible rounded-none border-0 bg-transparent shadow-none before:hidden [backdrop-filter:none] [-webkit-backdrop-filter:none]",
+            !animated && "transition-none",
             className,
           )}
           data-slot="popover-popup"
