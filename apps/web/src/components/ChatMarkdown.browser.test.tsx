@@ -7,7 +7,7 @@ import { type ReactElement } from "react";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
 
-import { act, render } from "../../test/render";
+import { act, render, stubGlobal } from "../../test/render";
 import "../index.css";
 
 import { filesystemEnvironment } from "../state/filesystem";
@@ -25,6 +25,8 @@ const markdownOpenMocks = vi.hoisted(() => ({
   createAssetUrl: vi.fn(),
   openPullRequest: vi.fn(),
   denyFilesystemRead: false,
+  denyPreviewOperate: false,
+  openPreview: vi.fn(),
   preparedConnection: null as { httpBaseUrl: string } | null,
   localApi: undefined as unknown,
 }));
@@ -78,11 +80,13 @@ vi.mock(import("../state/server"), async (original) => {
   };
 });
 vi.mock(import("../state/session"), async (original) => {
-  const { AuthStandardClientScopes, AuthFilesystemReadScope } = await import("@t3tools/contracts");
+  const { AuthStandardClientScopes, AuthFilesystemReadScope, AuthPreviewOperateScope } =
+    await import("@t3tools/contracts");
   const granted = new Set<string>(AuthStandardClientScopes);
   const hasScope = (environmentId: unknown, scope: string) =>
     environmentId !== null &&
     !(markdownOpenMocks.denyFilesystemRead && scope === AuthFilesystemReadScope) &&
+    !(markdownOpenMocks.denyPreviewOperate && scope === AuthPreviewOperateScope) &&
     granted.has(scope);
   return {
     ...(await original()),
@@ -93,6 +97,25 @@ vi.mock(import("../state/session"), async (original) => {
       markdownOpenMocks.preparedConnection === null
         ? { _tag: "None" }
         : { _tag: "Some", value: markdownOpenMocks.preparedConnection }) as never,
+  };
+});
+vi.mock(import("../browser/browserLinkTarget"), async (original) => ({
+  ...(await original()),
+  resolveBrowserLinkTargetPreference: async () => "system" as const,
+}));
+vi.mock(import("../browser/browserDefaults"), async (original) => {
+  const actual = await original();
+  return { ...actual, resolveBrowserDefaults: async () => actual.getBrowserDefaults() };
+});
+vi.mock(import("../state/use-atom-command"), async (original) => {
+  const actual = await original();
+  const { previewEnvironment } = await import("../state/preview");
+  return {
+    ...actual,
+    useAtomCommand: ((command, options) =>
+      Object.is(command, previewEnvironment.open)
+        ? markdownOpenMocks.openPreview
+        : actual.useAtomCommand(command, options)) as typeof actual.useAtomCommand,
   };
 });
 vi.mock(import("../remoteOpen"), async (original) => ({
@@ -151,6 +174,7 @@ vi.mock(import("../hooks/useSettings"), async (original) => {
 
 import ChatMarkdown from "./ChatMarkdown";
 import { chatMarkdownClipboardPayload } from "../markdown-clipboard";
+import { FileMarkdownPreview } from "./files/FileMarkdownPreview";
 import { AudioPreview } from "./files/AudioPreview";
 
 it("keeps compact audio playback loaded across signed URL renewals", async () => {
@@ -186,6 +210,8 @@ function setup() {
   markdownOpenMocks.createAssetUrl.mockReset();
   markdownOpenMocks.openPullRequest.mockReset().mockReturnValue(false);
   markdownOpenMocks.denyFilesystemRead = false;
+  markdownOpenMocks.denyPreviewOperate = false;
+  markdownOpenMocks.openPreview.mockReset();
   markdownOpenMocks.preparedConnection = null;
   markdownOpenMocks.localApi = undefined;
   useHandoffsStore.setState({ byThreadKey: {} });
@@ -601,6 +627,124 @@ describe("ChatMarkdown managed destinations", () => {
     environmentId: EnvironmentId.make("markdown-env"),
     threadId: ThreadId.make("markdown-thread"),
   };
+  const href = "http://localhost:4173/completed-action";
+  const prepared = {
+    url: "https://workstation.example:4173/completed-action",
+    localUrl: href,
+    managed: true,
+    restored: true,
+  };
+  const renderFileLink = () =>
+    render(
+      <FileMarkdownPreview
+        cwd="/repo"
+        relativePath="docs/report.md"
+        text={`[Open the completed Action](${href})`}
+        threadRef={threadRef}
+        workspaceMutationId={null}
+      />,
+    );
+
+  it.each(["web", "desktop"])(
+    "reports a failed managed file-preview link on %s without external fallback",
+    async (surface) => {
+      setup();
+      using _bridge = stubGlobal("desktopBridge", surface === "desktop" ? {} : undefined);
+      const cause = new Error("Preview hosting could not be recovered.");
+      markdownOpenMocks.prepareHostedPreview.mockRejectedValueOnce(cause);
+      const openExternal = vi.fn();
+      markdownOpenMocks.localApi = { shell: { openExternal } };
+      await using screen = await renderFileLink();
+      using popup = vi.spyOn(window, "open").mockReturnValue(null);
+      using toast = vi.spyOn(toastManager, "add").mockReturnValue("managed-link-error");
+      using report = vi.spyOn(console, "error").mockImplementation(() => {});
+      await screen.getByRole("link", { name: "Open the completed Action" }).click();
+      await vi.waitFor(() =>
+        expect(report).toHaveBeenCalledWith(
+          "[chat-markdown] action failed",
+          { operation: "open-link-in-preview", target: href },
+          cause,
+        ),
+      );
+      expect(markdownOpenMocks.prepareHostedPreview).toHaveBeenCalledExactlyOnceWith(
+        threadRef,
+        href,
+      );
+      expect(toast).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          type: "error",
+          title: "Unable to open link in browser",
+          description: cause.message,
+        }),
+      );
+      expect(markdownOpenMocks.openPreview).not.toHaveBeenCalled();
+      expect(openExternal).not.toHaveBeenCalled();
+      expect(popup).toHaveBeenCalledTimes(surface === "web" ? 1 : 0);
+    },
+  );
+
+  it("opens a managed file-preview link in its owning panel without error feedback", async () => {
+    setup();
+    using _bridge = stubGlobal("desktopBridge", undefined);
+    markdownOpenMocks.prepareHostedPreview.mockResolvedValueOnce(prepared);
+    markdownOpenMocks.openPreview.mockResolvedValueOnce(
+      AsyncResult.success({
+        threadId: threadRef.threadId,
+        tabId: "markdown-browser-tab",
+        runtime: "server",
+        backingPage: "server",
+        navStatus: { _tag: "Idle" },
+        canGoBack: false,
+        canGoForward: false,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    await using screen = await renderFileLink();
+    using _popup = vi.spyOn(window, "open").mockReturnValue(null);
+    using toast = vi.spyOn(toastManager, "add").mockReturnValue("managed-link-error");
+    await screen.getByRole("link", { name: "Open the completed Action" }).click();
+    await vi.waitFor(() =>
+      expect(
+        selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, threadRef)
+          .activeSurfaceId,
+      ).toBe("browser:markdown-browser-tab"),
+    );
+    expect(markdownOpenMocks.openPreview).toHaveBeenCalledExactlyOnceWith({
+      environmentId: threadRef.environmentId,
+      input: expect.objectContaining({
+        threadId: threadRef.threadId,
+        url: href,
+        runtime: "server",
+        browserHost: "environment",
+      }),
+    });
+    expect(toast).not.toHaveBeenCalled();
+  });
+
+  it("reports a blocked popup without bypassing the owning environment's preview scope", async () => {
+    setup();
+    using _bridge = stubGlobal("desktopBridge", undefined);
+    markdownOpenMocks.denyPreviewOperate = true;
+    markdownOpenMocks.prepareHostedPreview.mockResolvedValueOnce(prepared);
+    const openExternal = vi.fn();
+    markdownOpenMocks.localApi = { shell: { openExternal } };
+    await using screen = await renderFileLink();
+    using _popup = vi.spyOn(window, "open").mockReturnValue(null);
+    using toast = vi.spyOn(toastManager, "add").mockReturnValue("managed-link-error");
+    using report = vi.spyOn(console, "error").mockImplementation(() => {});
+    await screen.getByRole("link", { name: "Open the completed Action" }).click();
+    await vi.waitFor(() => expect(report).toHaveBeenCalledOnce());
+    expect(toast).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        type: "error",
+        title: "Unable to open link in browser",
+        description: "Unable to open link. Allow popups and try again.",
+      }),
+    );
+    expect(markdownOpenMocks.openPreview).not.toHaveBeenCalled();
+    expect(openExternal).not.toHaveBeenCalled();
+  });
+
   function pendingPreparation() {
     let finish!: (result: { url: string; managed: boolean; restored: boolean }) => void;
     let entered!: () => void;
