@@ -1,0 +1,68 @@
+name: LastCode daily Intel package
+
+run-name: Ensure Intel package · ${{ github.event_name == 'push' && github.ref_name || inputs.installable_tag || 'newest' }} · ${{ github.event_name == 'push' && github.sha || inputs.installable_commit || 'latest' }}
+
+on:
+  push:
+    tags:
+      - "lastcode/checkpoint/v*"
+      - "lastcode/revision/v*"
+  schedule:
+    # 01:00 Pacific during daylight time; midnight during standard time.
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+    inputs:
+      installable_tag:
+        description: Exact checkpoint or revision tag (blank selects newest)
+        required: false
+        type: string
+      installable_commit:
+        description: Full advertised commit (required with installable_tag)
+        required: false
+        type: string
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: lastcode-daily-intel-package-${{ github.event_name == 'push' && github.ref_name || inputs.installable_tag || 'latest' }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    name: Ensure selected installable has an Intel package
+    if: github.event_name != 'push' || !github.event.deleted
+    runs-on: ubuntu-latest
+    # Allow the four-hour build waiter plus setup and registration.
+    timeout-minutes: 250
+    steps:
+      - name: Checkout LastCode automation
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          ref: lastcode/main
+          # The dispatcher needs automation, not the vendored reference files.
+          # Tracked gitlinks still require root .gitmodules entries for cleanup.
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup dispatcher dependencies
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: |
+            args:
+              - --filter=@t3tools/scripts...
+
+      - name: Build or reuse the selected Intel package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LASTCODE_GITHUB_REPOSITORY: ${{ github.repository }}
+          LASTCODE_INSTALLABLE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.installable_tag || '' }}
+          LASTCODE_INSTALLABLE_COMMIT: ${{ github.event_name == 'push' && github.sha || inputs.installable_commit || '' }}
+        run: node scripts/lastcode-daily-intel-package.ts
