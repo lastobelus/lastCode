@@ -205,6 +205,10 @@ const lsofPaths = (
     // evidence protected. Vendor source: lsof-org/lsof, darwin/dfile.c process_vnode.
     if (!file.type)
       return file.type === undefined && /^\d+$/.test(file.descriptor) && file.name === "(revoked)";
+    // POSIX shared-memory names belong to a kernel namespace, even when they
+    // start with '/'. Darwin reports these numeric descriptors without vnode D/i.
+    if (file.type === "PSXSHM")
+      return /^\d+$/.test(file.descriptor) && file.device === undefined && file.inode === undefined;
     if (file.name?.startsWith("/")) {
       // Hex escapes represent UTF-8 bytes, not individual Unicode characters.
       // Decode once so doubled backslashes keep literal escape-looking names.
@@ -243,7 +247,6 @@ const lsofPaths = (
       "NEXUS",
       "KQUEUE",
       "PSXSEM",
-      "PSXSHM",
       "systm",
     ].includes(file.type);
   };
