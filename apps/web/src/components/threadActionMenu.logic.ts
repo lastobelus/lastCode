@@ -20,6 +20,7 @@ export type ThreadActionMenuId =
   | "cancel-action"
   | "mark-unread"
   | "share-guest"
+  | "mark-read"
   | "copy"
   | "copy-path"
   | "copy-branch"
@@ -94,13 +95,14 @@ export interface ThreadActionMenuState {
   readonly canShareWithGuest?: boolean;
 }
 
-/** Local navigation, read markers, and copying remain available to read-only clients. */
+/** Local actions need no operate grant; synced read markers are gated by their destination. */
 export function threadActionRequiresOperate(action: ThreadActionMenuId): boolean {
   return ![
     "new-thread-on-branch",
     "project-settings",
     "mark-unread",
     "share-guest",
+    "mark-read",
     "copy",
     "copy-path",
     "copy-branch",
@@ -177,6 +179,7 @@ export function buildThreadActionMenuItems(
     ...(state.canShareWithGuest
       ? [{ id: "share-guest" as const, label: "Share with guest", icon: "user-plus" }]
       : []),
+    { id: "mark-read", label: "Mark read", icon: "check" },
     ...(state.projectFilter
       ? [
           {

@@ -726,6 +726,19 @@ export function LegacyFeaturesSection() {
           />
         }
       />
+      <SettingsRow
+        {...searchableSetting("legacy-sidebar")}
+        description="Choose the upstream per-project thread tree instead of the v2 inbox. Applies when LastCode sidebar is off."
+        control={
+          <Switch
+            checked={settings.legacySidebarEnabled}
+            onCheckedChange={(checked) =>
+              updateSettings({ legacySidebarEnabled: Boolean(checked) })
+            }
+            aria-label="Sidebar (legacy)"
+          />
+        }
+      />
     </SettingsSection>
   );
 }
