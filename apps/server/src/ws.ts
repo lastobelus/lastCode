@@ -1971,11 +1971,14 @@ const layerCoreWsRpc = (
                             "creationSource" in command ? command.creationSource : "web",
                         }),
                       )
-                  ).pipe(Effect.provide(intakeContext), (effect) =>
-                    (command.type === "message.dispatch"
-                      ? threadReadAuthorization.authorize(command.threadId, command.messageId)
-                      : Effect.void
-                    ).pipe(Effect.andThen(effect)),
+                  ).pipe(
+                    Effect.provide(intakeContext),
+                    Effect.provideService(ThreadReadAuthorization, threadReadAuthorization),
+                    (effect) =>
+                      (command.type === "message.dispatch"
+                        ? threadReadAuthorization.authorize(command.threadId, command.messageId)
+                        : Effect.void
+                      ).pipe(Effect.andThen(effect)),
                   ),
                 )
                 .pipe(

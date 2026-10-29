@@ -12,8 +12,10 @@ import {
   CheckpointId,
   CheckpointRef,
   CommandId,
+  ComposerContextId,
   ContextTransferId,
   EventId,
+  EnvironmentId,
   MessageId,
   NodeId,
   RuntimeRequestId,
@@ -2134,12 +2136,52 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
           commandId: CommandId.make(`recovery-answer-${trigger}-${scope}`),
           threadId,
           requestId,
-          answers: { color: "Blue", sizes: ["Small", "Large"] },
+          answers: {
+            color: "Blue [Reference](t3-context://v1/thread/answer-reference)",
+            sizes: ["Small", "Large"],
+          },
+          contextsByQuestionId: {
+            color: {
+              version: 1,
+              records: [
+                {
+                  version: 1,
+                  contextId: ComposerContextId.make("answer-reference"),
+                  kind: "thread",
+                  label: "Reference",
+                  title: "Reference",
+                  environmentId: EnvironmentId.make("source-environment"),
+                  threadId: ThreadId.make("source-thread"),
+                },
+              ],
+            },
+          },
         });
         const answered = yield* orchestrator.getThreadProjection(threadId);
         assert.equal(
           answered.runtimeRequests.find((row) => row.id === requestId)?.status,
           "resolved",
+        );
+        assert.deepEqual(
+          answered.runtimeRequests.find((row) => row.id === requestId)?.threadReadContext,
+          {
+            authorizationId: MessageId.make(`answer-context:recovery-answer-${trigger}-${scope}`),
+            records: [
+              {
+                version: 1,
+                contextId: ComposerContextId.make("answer-reference"),
+                kind: "thread",
+                label: "Reference",
+                title: "Reference",
+                environmentId: EnvironmentId.make("source-environment"),
+                threadId: ThreadId.make("source-thread"),
+              },
+            ],
+          },
+        );
+        assert.equal(
+          answered.runs.at(-1)?.userMessageId,
+          MessageId.make(`async-answer:${requestId}`),
         );
         assert.equal(answered.nodes.find((row) => row.id === nodeId)?.status, "completed");
         assert.equal(answered.turnItems.find((row) => row.id === itemId)?.status, "completed");
@@ -2147,8 +2189,20 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
         assert.equal(answered.messages.at(-1)?.runId, answered.runs.at(-1)?.id);
         assert.equal(
           answered.messages.at(-1)?.text,
-          "Which color?\nBlue\n\nWhich sizes?\nSmall, Large",
+          "Which color?\nBlue [Reference](t3-context://v1/thread/answer-reference)\n\nWhich sizes?\nSmall, Large",
         );
+        assert.deepEqual(
+          answered.messages.at(-1)?.context?.records,
+          answered.runtimeRequests.find((row) => row.id === requestId)?.threadReadContext?.records,
+        );
+        const answeredItem = answered.turnItems.find((row) => row.id === itemId);
+        assert.equal(
+          answeredItem?.type === "user_input_request"
+            ? answeredItem.questionAnswer?.answers.color
+            : undefined,
+          "Blue Reference",
+        );
+
         assert.deepEqual(
           (yield* (yield* EffectOutbox.EffectOutboxV2).listByCommandId(
             CommandId.make(`recovery-answer-${trigger}-${scope}`),
@@ -2581,14 +2635,61 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
           },
         ],
       });
+      yield* eventSink.write({
+        commandId: CommandId.make("runtime-lost-answer-question"),
+        events: [
+          {
+            id: EventId.make("runtime-lost-answer-question-event"),
+            type: "turn-item.updated",
+            threadId,
+            nodeId,
+            occurredAt: now,
+            payload: {
+              id: TurnItemId.make("runtime-lost-answer-item"),
+              type: "user_input_request",
+              threadId,
+              runId: null,
+              nodeId,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal: 1,
+              status: "waiting",
+              title: null,
+              startedAt: now,
+              completedAt: null,
+              updatedAt: now,
+              requestId,
+              questions: [{ id: "color", header: "Color", question: "Which color?", options: [] }],
+            },
+          },
+        ],
+      });
       const commandId = CommandId.make("runtime-lost-answer-answer");
-      const answers = { color: "Blue" };
+      const answers = { color: "Blue [Reference](t3-context://v1/thread/answer-reference)" };
       yield* orchestrator.dispatch({
         type: "runtime-request.respond",
         commandId,
         threadId,
         requestId,
         answers,
+        contextsByQuestionId: {
+          color: {
+            version: 1,
+            records: [
+              {
+                version: 1,
+                contextId: ComposerContextId.make("answer-reference"),
+                kind: "thread",
+                label: "Reference",
+                title: "Reference",
+                environmentId: EnvironmentId.make("source-environment"),
+                threadId: ThreadId.make("source-thread"),
+              },
+            ],
+          },
+        },
       });
       const errors = orchestrator
         .getThreadProjection(threadId)
@@ -2606,6 +2707,10 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
 
       const [deliveryEffect] = yield* outbox.listByCommandId(commandId);
       assert.equal(deliveryEffect?.request.type, "runtime-request.respond");
+      if (deliveryEffect?.request.type === "runtime-request.respond") {
+        assert.include(String(deliveryEffect.request.answers?.color), '"via":"client"');
+        assert.include(String(deliveryEffect.request.answers?.color), "source-thread");
+      }
       assert.equal(deliveryEffect?.status, "failed");
       const failed = yield* orchestrator.getThreadProjection(threadId);
       const reported = failed.turnItems.filter((item) => item.type === "error");
@@ -2616,6 +2721,15 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
       const request = failed.runtimeRequests.find((row) => row.id === requestId);
       assert.equal(request?.status, "resolved");
       assert.deepEqual(request?.answers, answers);
+      const answerItem = failed.turnItems.find(
+        (item) => item.id === TurnItemId.make("runtime-lost-answer-item"),
+      );
+      assert.equal(
+        answerItem?.type === "user_input_request"
+          ? answerItem.questionAnswer?.answers.color
+          : undefined,
+        "Blue Reference",
+      );
     }),
   );
 

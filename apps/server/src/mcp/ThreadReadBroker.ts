@@ -13,6 +13,7 @@ import type * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -64,7 +65,7 @@ const unavailable = () =>
     code: "environment_unavailable",
     threadReadReason: "unavailable",
     message:
-      "The initiating client could not check the thread; this does not mean it is missing. For an attached reference or exact-source read, report this and ask the user to reconnect that client or send a new message from it if client access expired; do not switch routes. For ID-only discovery, continue through already-authorized discovery routes. Never bypass a permission refusal.",
+      "The authorized client could not check the thread; this does not mean it is missing. For an attached reference or exact-source read, report this and ask the user to reconnect that client or send a new message from it if client access expired; do not switch routes. For ID-only discovery, continue through already-authorized discovery routes. Never bypass a permission refusal.",
   });
 
 const bindingIdleMillis = 7 * 24 * 60 * 60 * 1000;
@@ -89,12 +90,22 @@ const make = Effect.gen(function* () {
 
   const bind = Effect.fn("ThreadReadBroker.bind")(
     function* (threadId: ThreadId, messageId: MessageId, sessionId: string) {
-      const { runs } = yield* threads.getThreadRecords(threadId, ["runs"]);
+      const { runs, runtimeRequests } = yield* threads.getThreadRecords(threadId, [
+        "runs",
+        "runtimeRequests",
+      ]);
       const now = yield* pruneBindings;
       const key = bindingKey(threadId, messageId);
       // A replay cannot claim an existing execution, including after eviction,
       // or replace its original requester while the binding remains present.
-      if (runs.some((run) => run.userMessageId === messageId) || bindings.has(key)) return;
+      if (
+        runs.some((run) => run.userMessageId === messageId) ||
+        runtimeRequests.some(
+          (request) => request.threadReadContext?.authorizationId === messageId,
+        ) ||
+        bindings.has(key)
+      )
+        return;
       if (bindings.size >= maxBindings) {
         const oldest = bindings.keys().next().value;
         if (oldest !== undefined) bindings.delete(oldest);
@@ -109,6 +120,81 @@ const make = Effect.gen(function* () {
     authorize: (threadId, messageId) => bind(threadId, messageId, sessionId),
   });
 
+  const bindingSession = Effect.fn("ThreadReadBroker.bindingSession")(function* (
+    threadId: ThreadId,
+    messageId: MessageId,
+  ) {
+    const now = yield* pruneBindings;
+    const key = bindingKey(threadId, messageId);
+    const entry = bindings.get(key);
+    if (entry === undefined) return undefined;
+    bindings.delete(key);
+    bindings.set(key, { ...entry, lastUsedAt: now });
+    return entry.sessionId;
+  });
+
+  // A matched but expired answer grant must never fall back to the run's original client.
+  const referenceSession = Effect.fn("ThreadReadBroker.referenceSession")(function* (
+    threadId: ThreadId,
+    runId: RunId,
+    input: OrchestratorMcpThreadReadInput,
+    visited: Set<RunId>,
+    before?: number,
+  ): Effect.fn.Return<{ sessionId: string | undefined } | undefined, OrchestratorV2Error> {
+    if (input.environmentId === undefined) return undefined;
+    if (visited.has(runId)) return { sessionId: undefined };
+    visited.add(runId);
+    const source = yield* threads.getThreadRecords(threadId, [
+      "runs",
+      "runtimeRequests",
+      "nodes",
+      "contextTransfers",
+    ]);
+    const run = source.runs.find((candidate) => candidate.id === runId);
+    if (run === undefined) return undefined;
+    const nodeIds = new Set(
+      source.nodes.filter((node) => node.runId === runId).map((node) => node.id),
+    );
+    const request = source.runtimeRequests
+      .filter(
+        (request) =>
+          request.kind === "user_input" &&
+          request.status === "resolved" &&
+          request.resolvedAt !== null &&
+          (before === undefined || DateTime.toEpochMillis(request.resolvedAt) < before) &&
+          (nodeIds.has(request.nodeId) ||
+            (request.responseCapability.type === "message" &&
+              run.userMessageId === `async-answer:${request.id}`)) &&
+          request.threadReadContext?.records.some(
+            (record) =>
+              record.environmentId === input.environmentId && record.threadId === input.threadId,
+          ),
+      )
+      .sort(
+        (a, b) =>
+          DateTime.toEpochMillis(b.resolvedAt!) - DateTime.toEpochMillis(a.resolvedAt!) ||
+          b.id.localeCompare(a.id),
+      )[0];
+    if (request?.threadReadContext !== undefined) {
+      return {
+        sessionId: yield* bindingSession(threadId, request.threadReadContext.authorizationId),
+      };
+    }
+    const spawn = source.contextTransfers.find(
+      (transfer) => transfer.type === "subagent_spawn" && transfer.targetRunId === runId,
+    );
+    if (spawn?.sourcePoint.runId === undefined) return undefined;
+    // Equal timestamps cannot establish that an answer preceded this captured spawn.
+    const cutoff = DateTime.toEpochMillis(spawn.createdAt);
+    return yield* referenceSession(
+      spawn.sourceThreadId,
+      spawn.sourcePoint.runId,
+      input,
+      visited,
+      before === undefined ? cutoff : Math.min(before, cutoff),
+    );
+  });
+
   /** A delegated run inherits the exact run that spawned it, even after its parent moves on. */
   const runSession = Effect.fn("ThreadReadBroker.runSession")(function* (
     threadId: ThreadId,
@@ -120,14 +206,8 @@ const make = Effect.gen(function* () {
     const source = yield* threads.getThreadRecords(threadId, ["runs", "contextTransfers"]);
     const run = source.runs.find((candidate) => candidate.id === runId);
     if (run === undefined) return undefined;
-    const now = yield* pruneBindings;
-    const key = bindingKey(threadId, run.userMessageId);
-    const entry = bindings.get(key);
-    if (entry !== undefined) {
-      bindings.delete(key);
-      bindings.set(key, { ...entry, lastUsedAt: now });
-      return entry.sessionId;
-    }
+    const sessionId = yield* bindingSession(threadId, run.userMessageId);
+    if (sessionId !== undefined) return sessionId;
     const spawn = source.contextTransfers.find(
       (transfer) => transfer.type === "subagent_spawn" && transfer.targetRunId === run.id,
     );
@@ -258,8 +338,18 @@ const make = Effect.gen(function* () {
 
   const read: ThreadReadBroker["Service"]["read"] = Effect.fn("ThreadReadBroker.read")(
     function* (sourceThreadId, sourceRunId, input) {
-      const sessionId = yield* sourceSession(sourceThreadId, sourceRunId);
+      const reference =
+        sourceRunId === undefined
+          ? undefined
+          : yield* referenceSession(sourceThreadId, sourceRunId, input, new Set()).pipe(
+              Effect.orElseSucceed(() => ({ sessionId: undefined })),
+            );
+      const sessionId =
+        reference === undefined
+          ? yield* sourceSession(sourceThreadId, sourceRunId)
+          : reference.sessionId;
       if (sessionId === undefined) {
+        if (reference !== undefined) return yield* unavailable();
         return yield* new OrchestratorMcpFailure({
           code: "environment_unavailable",
           threadReadReason: "unavailable",

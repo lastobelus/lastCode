@@ -1,9 +1,13 @@
-import { remapComposerContextAttachments } from "@t3tools/shared/composerContextReferences";
+import {
+  collectComposerContextReferences,
+  remapComposerContextAttachments,
+} from "@t3tools/shared/composerContextReferences";
 import { appendUserInputAttachmentPaths } from "../provider/userInputAttachments.ts";
 import {
   UpdateDrainAdmissionError,
   UpdateDrainError,
   type ChatAttachment,
+  type OrchestrationMessageContext,
   type OrchestrationV2Command,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -13,6 +17,10 @@ import * as ServerConfig from "../config.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 
 import * as AttachmentClaims from "./AttachmentClaims.ts";
+import {
+  ThreadReadAuthorization,
+  questionAnswerAuthorizationId,
+} from "./ThreadReadAuthorization.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 
@@ -134,12 +142,54 @@ const withGuestAttachments = Effect.fn("ThreadMessageIntake.withGuestAttachments
   return { ...command, attachments: message?.attachments ?? [] };
 });
 
+function withQuestionContext(
+  command: Extract<OrchestrationV2Command, { type: "runtime-request.respond" }>,
+): typeof command {
+  if (command.contextsByQuestionId === undefined) return command;
+  const contexts: Array<[string, OrchestrationMessageContext]> = [];
+  const supplied = new Map(Object.entries(command.contextsByQuestionId));
+  const answers = Object.fromEntries(
+    Object.entries(command.answers ?? {}).map(([questionId, answer]) => {
+      const context = supplied.get(questionId);
+      if (typeof answer !== "string" || context === undefined) return [questionId, answer];
+      const ids = new Set(
+        collectComposerContextReferences(answer)
+          .filter((reference) => reference.kind === "thread")
+          .map((reference) => reference.contextId),
+      );
+      const records = [
+        ...new Map(context.records.map((record) => [record.contextId, record])).values(),
+      ].filter((record) => record.kind === "thread" && ids.has(record.contextId));
+      if (records.length === 0) return [questionId, answer];
+      contexts.push([questionId, { version: 1, records }]);
+      return [questionId, answer];
+    }),
+  );
+  const { contextsByQuestionId: _contexts, ...rest } = command;
+  return {
+    ...rest,
+    answers,
+    ...(contexts.length > 0 ? { contextsByQuestionId: Object.fromEntries(contexts) } : {}),
+  };
+}
+
 export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(function* (
   incoming: OrchestrationV2Command,
   options?: Orchestrator.OrchestratorV2DispatchOptions,
 ) {
   const command =
-    incoming.type === "message.dispatch" ? yield* withGuestAttachments(incoming) : incoming;
+    incoming.type === "message.dispatch"
+      ? yield* withGuestAttachments(incoming)
+      : incoming.type === "runtime-request.respond"
+        ? withQuestionContext(incoming)
+        : incoming;
+  if (command.type === "runtime-request.respond" && command.contextsByQuestionId !== undefined) {
+    const authorization = yield* ThreadReadAuthorization;
+    yield* authorization.authorize(
+      command.threadId,
+      questionAnswerAuthorizationId(command.commandId),
+    );
+  }
   const threads = yield* ThreadManagement.ThreadManagementService;
   if (command.type === "runtime-request.respond" && command.attachmentsByQuestionId) {
     const config = yield* ServerConfig.ServerConfig;

@@ -1,5 +1,4 @@
 import type { ThreadContextRecord, UserInputQuestion } from "@t3tools/contracts";
-import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
 import {
   buildPendingUserInputAnswers,
   normalizeSelectedOptionValues,
@@ -9,14 +8,6 @@ import {
 } from "@t3tools/client-runtime/state/pending-user-input";
 
 import { collectInlineContextIds } from "./lib/composerContextReferences";
-
-export function projectPendingUserInputAnswer(
-  answer: unknown,
-  threadContexts: ReadonlyArray<ThreadContextRecord>,
-) {
-  if (typeof answer !== "string" || threadContexts.length === 0) return answer;
-  return projectComposerContextForProvider({ text: answer, records: threadContexts });
-}
 
 // Question drafts retain deleted chip records for undo; only transfer referenced records.
 export function threadContextsReferencedByAnswer(

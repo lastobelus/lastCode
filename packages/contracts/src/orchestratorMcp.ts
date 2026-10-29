@@ -417,7 +417,7 @@ export const OrchestratorMcpThreadReadInput = Schema.Struct({
   via: Schema.optional(
     Schema.Literal("client").annotate({
       description:
-        'Use via: "client" for attached references or a prior readVia: "client" result. Requires the exact environmentId and initiating client authority. Reuse for every page and item chunk; never switch routes after refusal, disconnection or expired authority. Omit for machine-directed peer reads.',
+        'Use via: "client" for attached references or a prior readVia: "client" result. Requires the exact environmentId and captured client authority. Reuse for every page and item chunk; never switch routes after refusal, disconnection or expired authority. Omit for machine-directed peer reads.',
     }),
   ),
   itemId: Schema.optional(TurnItemId),

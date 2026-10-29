@@ -7,34 +7,8 @@ import { threadContextRecord } from "@t3tools/shared/composerContextReferences";
 import {
   carryDisplacedCustomAnswerIntoPrompt,
   derivePendingUserInputProgress,
-  projectPendingUserInputAnswer,
   threadContextsReferencedByAnswer,
 } from "./pendingUserInput";
-
-describe("projectPendingUserInputAnswer", () => {
-  const record = threadContextRecord(
-    {
-      environmentId: EnvironmentId.make("env-answer"),
-      threadId: ThreadId.make("reference-thread"),
-    },
-    "Reference work",
-  );
-
-  it("preserves the attached thread's owner and client read route in an answer", () => {
-    const answer = `Compare ${formatInlineContextReference(threadContextReference(record))}`;
-    const projected = projectPendingUserInputAnswer(answer, [record]);
-    expect(projected).toContain('"environmentId":"env-answer"');
-    expect(projected).toContain('"threadId":"reference-thread"');
-    expect(projected).toContain('"via":"client"');
-  });
-
-  // regression: #18789 answers to pending questions lost exact text and option values
-  it("preserves option values and exact answer text", () => {
-    const options = [" first\t", "second"];
-    expect(projectPendingUserInputAnswer(options, [record])).toBe(options);
-    expect(projectPendingUserInputAnswer("  Edited answer\n", [record])).toBe("  Edited answer\n");
-  });
-});
 
 describe("threadContextsReferencedByAnswer", () => {
   const kept = threadContextRecord(

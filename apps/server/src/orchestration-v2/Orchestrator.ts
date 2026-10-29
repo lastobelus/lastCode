@@ -1,5 +1,12 @@
+import {
+  projectComposerContextForProvider,
+  replaceComposerContextReferences,
+} from "@t3tools/shared/composerContextReferences";
+import { OrchestrationV2RuntimeRequest } from "@t3tools/contracts";
+import { questionAnswerAuthorizationId } from "./ThreadReadAuthorization.ts";
 import type {
   GuestShareId,
+  ThreadContextRecord,
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
   OrchestrationV2ThreadHistoryPage,
@@ -210,6 +217,10 @@ import {
 } from "./CreatorGrouping.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ServerSettings from "../serverSettings.ts";
+
+const decodeThreadReadContext = Schema.decodeUnknownEffect(
+  OrchestrationV2RuntimeRequest.fields.threadReadContext,
+);
 
 const isMessageQuestionAnswer = Schema.is(
   Schema.Union([TrimmedNonEmptyString, Schema.NonEmptyArray(TrimmedNonEmptyString)]),
@@ -10229,6 +10240,60 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }
       }
 
+      const questionIds = new Set(
+        approvalTurnItem?.type === "user_input_request"
+          ? approvalTurnItem.questions.map((question) => question.id)
+          : [],
+      );
+      const questionContexts = new Map(
+        Object.entries(command.contextsByQuestionId ?? {}).filter(([questionId]) =>
+          questionIds.has(questionId),
+        ),
+      );
+      const referenceRecords =
+        resolvedNodeStatus === "completed" &&
+        runtimeRequest.kind === "user_input" &&
+        approvalTurnItem?.type === "user_input_request"
+          ? approvalTurnItem.questions.flatMap(
+              (question) =>
+                questionContexts
+                  .get(question.id)
+                  ?.records.filter(
+                    (record): record is ThreadContextRecord => record.kind === "thread",
+                  ) ?? [],
+            )
+          : [];
+      const threadReadContext =
+        referenceRecords.length > 0
+          ? yield* decodeThreadReadContext({
+              authorizationId: questionAnswerAuthorizationId(command.commandId),
+              records: [
+                ...new Map(referenceRecords.map((record) => [record.contextId, record])).values(),
+              ],
+            }).pipe(mapDispatchError(command))
+          : undefined;
+      const displayAnswers =
+        answers === undefined
+          ? undefined
+          : Object.fromEntries(
+              Object.entries(answers).map(([questionId, answer]) => {
+                const records = questionContexts.get(questionId)?.records ?? [];
+                return [
+                  questionId,
+                  typeof answer === "string"
+                    ? replaceComposerContextReferences(answer, (reference) =>
+                        reference.kind === "thread" &&
+                        records.some(
+                          (record) =>
+                            record.kind === "thread" && record.contextId === reference.contextId,
+                        )
+                          ? reference.label
+                          : reference.source,
+                      )
+                    : answer,
+                ];
+              }),
+            );
       const now = yield* DateTime.now;
       const resolvedRequest = {
         ...runtimeRequest,
@@ -10237,6 +10302,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.decision === undefined ? {} : { decision: command.decision }),
         ...(command.feedback === undefined ? {} : { feedback: command.feedback }),
         ...(answers === undefined ? {} : { answers }),
+        ...(threadReadContext === undefined ? {} : { threadReadContext }),
       };
       const emitEvent = emit(events, command);
       const requestNode = context.node;
@@ -10356,7 +10422,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               ? {
                   questionAnswer: {
                     requestId: command.requestId,
-                    answers,
+                    answers: displayAnswers ?? answers,
                     attachmentsByQuestionId: command.attachmentsByQuestionId ?? {},
                     questionTextById: Object.fromEntries(
                       approvalTurnItem.questions.map((question) => [
@@ -10414,6 +10480,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           threadId: command.threadId,
           messageId: MessageId.make(`async-answer:${command.requestId}`),
           text: replies.join("\n\n"),
+          ...(threadReadContext === undefined
+            ? {}
+            : { context: { version: 1 as const, records: threadReadContext.records } }),
           attachments: [],
           createdBy: "user" as const,
           creationSource: "server" as const,
@@ -10423,6 +10492,22 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         return yield* recordSubagentFollowup(answer, events).pipe(mapDispatchError(answer));
       }
       if (providerSessionId === null) return;
+      const providerAnswers =
+        answers === undefined
+          ? undefined
+          : Object.fromEntries(
+              Object.entries(answers).map(([questionId, answer]) => [
+                questionId,
+                typeof answer === "string" &&
+                threadReadContext !== undefined &&
+                questionContexts.has(questionId)
+                  ? projectComposerContextForProvider({
+                      text: answer,
+                      records: questionContexts.get(questionId)?.records ?? [],
+                    })
+                  : answer,
+              ]),
+            );
       yield* Ref.update(effects, (existing) => [
         ...existing,
         {
@@ -10435,7 +10520,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             requestId: command.requestId,
             ...(command.decision === undefined ? {} : { decision: command.decision }),
             ...(command.feedback === undefined ? {} : { feedback: command.feedback }),
-            ...(answers === undefined ? {} : { answers }),
+            ...(providerAnswers === undefined ? {} : { answers: providerAnswers }),
           },
         } satisfies PendingOrchestrationEffectV2,
       ]);

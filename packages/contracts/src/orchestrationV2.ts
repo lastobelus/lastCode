@@ -11,7 +11,11 @@ import {
   ThreadWorktreeCleanup,
 } from "./threadMetadata.ts";
 export * from "./threadMetadata.ts";
-import { OrchestrationMessageContext } from "./composerContext.ts";
+import {
+  COMPOSER_CONTEXT_MAX_RECORDS,
+  OrchestrationMessageContext,
+  ThreadContextRecord,
+} from "./composerContext.ts";
 import { withRecordIdTable } from "./orchestrationV2IdTable.ts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -1321,6 +1325,14 @@ export const OrchestrationV2RuntimeRequest = Schema.Struct({
   decision: Schema.optional(ProviderApprovalDecision),
   feedback: Schema.optional(Schema.String),
   answers: Schema.optional(ProviderUserInputAnswers),
+  threadReadContext: Schema.optional(
+    Schema.Struct({
+      authorizationId: MessageId,
+      records: Schema.Array(ThreadContextRecord).check(
+        Schema.isMaxLength(COMPOSER_CONTEXT_MAX_RECORDS),
+      ),
+    }),
+  ),
 });
 export type OrchestrationV2RuntimeRequest = typeof OrchestrationV2RuntimeRequest.Type;
 
@@ -3482,6 +3494,9 @@ export const OrchestrationV2Command = Schema.Union([
     decision: Schema.optional(ProviderApprovalDecision),
     feedback: Schema.optional(Schema.String),
     answers: Schema.optional(ProviderUserInputAnswers),
+    contextsByQuestionId: Schema.optional(
+      Schema.Record(Schema.String, OrchestrationMessageContext),
+    ),
     attachmentsByQuestionId: Schema.optional(UserInputAttachments),
   }),
   Schema.Struct({
