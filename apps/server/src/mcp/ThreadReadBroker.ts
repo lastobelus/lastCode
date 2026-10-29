@@ -138,7 +138,7 @@ const make = Effect.gen(function* () {
     return entry.sessionId;
   });
 
-  // A matched but expired answer grant must never fall back to the run's original client.
+  // A matched but expired reference grant must never fall back to the run's original client.
   const referenceSession = Effect.fn("ThreadReadBroker.referenceSession")(function* (
     threadId: ThreadId,
     runId: RunId,
@@ -160,7 +160,7 @@ const make = Effect.gen(function* () {
     const nodeIds = new Set(
       source.nodes.filter((node) => node.runId === runId).map((node) => node.id),
     );
-    const request = source.runtimeRequests
+    const candidates = source.runtimeRequests
       .filter(
         (request) =>
           request.kind === "user_input" &&
@@ -175,32 +175,36 @@ const make = Effect.gen(function* () {
               record.environmentId === input.environmentId && record.threadId === input.threadId,
           ),
       )
-      .sort(
-        (a, b) =>
-          DateTime.toEpochMillis(b.resolvedAt!) - DateTime.toEpochMillis(a.resolvedAt!) ||
-          b.id.localeCompare(a.id),
-      )[0];
-    if (request?.threadReadContext !== undefined) {
-      return {
-        sessionId: yield* bindingSession(threadId, request.threadReadContext.authorizationId),
-      };
-    }
+      .map((request) => ({
+        id: String(request.id),
+        at: DateTime.toEpochMillis(request.resolvedAt!),
+        authorizationId: request.threadReadContext!.authorizationId,
+      }));
     const { messages } = yield* threads.getThreadRecords(threadId, ["messages"], {
-      messageIds: [run.userMessageId],
+      messageRunIds: [runId],
       messageRoles: ["user"],
     });
-    const editedMessage = messages.find((message) => message.id === run.userMessageId);
-    const editedContext = editedMessage?.threadReadContext;
-    if (
-      editedMessage !== undefined &&
-      editedContext !== undefined &&
-      (before === undefined || editedContext.capturedAt < before) &&
-      referencedThreads(editedMessage.text, editedMessage.context).some(
-        (record) =>
-          record.environmentId === input.environmentId && record.threadId === input.threadId,
-      )
-    ) {
-      return { sessionId: yield* bindingSession(threadId, editedContext.authorizationId) };
+    for (const message of messages) {
+      const context = message.threadReadContext;
+      if (
+        (message.runId === runId || message.id === run.userMessageId) &&
+        context !== undefined &&
+        (before === undefined || context.capturedAt < before) &&
+        referencedThreads(message.text, message.context).some(
+          (record) =>
+            record.environmentId === input.environmentId && record.threadId === input.threadId,
+        )
+      ) {
+        candidates.push({
+          id: String(message.id),
+          at: context.capturedAt,
+          authorizationId: context.authorizationId,
+        });
+      }
+    }
+    const latest = candidates.sort((a, b) => b.at - a.at || b.id.localeCompare(a.id))[0];
+    if (latest !== undefined) {
+      return { sessionId: yield* bindingSession(threadId, latest.authorizationId) };
     }
     const spawn = source.contextTransfers.find(
       (transfer) => transfer.type === "subagent_spawn" && transfer.targetRunId === runId,

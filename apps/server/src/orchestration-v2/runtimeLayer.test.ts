@@ -1694,6 +1694,15 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
 
       const steerCommandId = CommandId.make("runtime-delivery-intent-auto");
       const steerMessageId = MessageId.make("runtime-delivery-intent-auto");
+      const reference = {
+        version: 1 as const,
+        contextId: ComposerContextId.make("steering-reference"),
+        kind: "thread" as const,
+        label: "Reference",
+        title: "Reference",
+        environmentId: EnvironmentId.make("source-environment"),
+        threadId: ThreadId.make("source-thread"),
+      };
       yield* orchestrator.dispatch({
         type: "message.dispatch",
         createdBy: "user",
@@ -1701,13 +1710,18 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
         commandId: steerCommandId,
         threadId,
         messageId: steerMessageId,
-        text: "Include this in the active work.",
+        text: "Read [Reference](t3-context://v1/thread/steering-reference).",
+        context: { version: 1, records: [reference] },
         attachments: [],
         dispatchMode: { type: "start_immediately" },
         deliveryIntent: "auto",
       });
       const steered = yield* orchestrator.getThreadProjection(threadId);
       assert.lengthOf(steered.runs, 1);
+      assert.deepEqual(
+        steered.messages.find((message) => message.id === steerMessageId)?.threadReadContext,
+        { authorizationId: steerMessageId, capturedAt: DateTime.toEpochMillis(now) },
+      );
       assert.equal(
         steered.messages.find((message) => message.id === steerMessageId)?.runId,
         run.id,
@@ -1751,6 +1765,44 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
           },
         ],
       );
+      const queuedMessageId = MessageId.make("runtime-steer-promoted-message");
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-steer-queued"),
+        threadId,
+        messageId: queuedMessageId,
+        text: "Queued work",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "queue_after_active" },
+      });
+      const queued = yield* orchestrator.getThreadProjection(threadId);
+      const queuedRun = queued.runs.find((row) => row.userMessageId === queuedMessageId)!;
+      yield* orchestrator.dispatch({
+        type: "queued-run.edit",
+        commandId: CommandId.make("runtime-steer-edited"),
+        threadId,
+        runId: queuedRun.id,
+        text: "Read [Reference](t3-context://v1/thread/steering-reference).",
+        context: { version: 1, records: [reference] },
+      });
+      yield* TestClock.adjust("1 millis");
+      yield* orchestrator.dispatch({
+        type: "queued-message.promote-to-steer",
+        commandId: CommandId.make("runtime-steer-promote"),
+        threadId,
+        queuedRunId: queuedRun.id,
+        targetRunId: run.id,
+      });
+      const promoted = yield* orchestrator.getThreadProjection(threadId);
+      const promotedMessage = promoted.messages.find((row) => row.id === queuedMessageId)!;
+      assert.equal(promotedMessage.runId, run.id);
+      assert.deepEqual(promotedMessage.threadReadContext, {
+        authorizationId: MessageId.make("queued-edit-context:runtime-steer-edited"),
+        capturedAt: DateTime.toEpochMillis(yield* DateTime.now),
+      });
       for (const variant of ["selection", "interrupting", "unsupported", "stale"] as const) {
         const commandId = CommandId.make(`runtime-native-rejected-${variant}`);
         if (variant === "interrupting" || variant === "unsupported") {
@@ -1856,7 +1908,7 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
         .pipe(Effect.flip);
       assert.equal(yield* orchestrator.getThreadEventSequence(threadId), completedSequence);
       assert.deepEqual(yield* outbox.listByCommandId(completedNativeId), []);
-      assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, 1);
+      assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, 2);
 
       const nextCommandId = CommandId.make("runtime-delivery-intent-next");
       yield* orchestrator.dispatch({
@@ -1874,7 +1926,7 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
       const restarted = yield* orchestrator.getThreadProjection(threadId);
       assert.deepEqual(
         restarted.runs.map((candidate) => candidate.status),
-        ["completed", "starting"],
+        ["completed", "cancelled", "starting"],
       );
       assert.deepEqual(
         (yield* outbox.listByCommandId(nextCommandId)).map((effect) => effect.request.type),
