@@ -2993,7 +2993,7 @@ export default function ChatView(props: ChatViewProps) {
     backgroundWorkNow !== null ||
     runningResumableActionBannerItem !== null ||
     interruptedActionBannerItem !== null ||
-    heldActionBannerItem !== null ||
+    pendingActionBannerItem !== null ||
     goalNow !== null ||
     shownThreadSyncPhase !== null;
   const queuedRunCount = serverProjection ? getUserQueuedThreadRuns(serverProjection).length : 0;
@@ -3039,7 +3039,7 @@ export default function ChatView(props: ChatViewProps) {
           action={activeThreadShell?.actionResume ?? null}
           actionItems={[
             interruptedActionBannerItem,
-            heldActionBannerItem,
+            pendingActionBannerItem,
             runningResumableActionBannerItem,
           ]}
           tasks={pendingBackgroundTasks}
@@ -3530,13 +3530,6 @@ export default function ChatView(props: ChatViewProps) {
                           {composerMounted ? (
                             <div className="space-y-2">
                               <EnvironmentPauseNotice environmentId={environmentId} />
-                              <ComposerBannerStack
-                                items={[
-                                  interruptedActionBannerItem,
-                                  pendingActionBannerItem,
-                                  runningResumableActionBannerItem,
-                                ].filter((item) => item !== null)}
-                              />
                             </div>
                           ) : null}
                           {!composerMounted ? null : (
