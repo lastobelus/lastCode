@@ -23,6 +23,8 @@ vi.mock("../../state/use-orchestration-command", () => ({
   useOrchestrationCommand: (command: string) =>
     command === "upsert" ? mocks.upsert : mocks.resolve,
 }));
+// Markdown rendering is outside this annotation editor/action fixture.
+vi.mock("../ChatMarkdown", () => ({ default: () => null }));
 vi.mock("../ui/toast", () => ({
   toastManager: { add: mocks.toast },
   stackedThreadToast: (value: unknown) => value,
