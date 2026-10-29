@@ -249,3 +249,94 @@ it.effect("admits Pause for pending provider work even when the shell has no act
     assert.lengthOf((yield* h.orchestrator.getThreadProjection(h.threadId)).messages, 2);
   }).pipe(Effect.provide(testLayer)),
 );
+
+it.effect.each([
+  { status: "waiting" as const, pause: true, pendingProvider: false, expected: "queued" },
+  { status: "completed" as const, pause: true, pendingProvider: true, expected: "started" },
+  { status: "completed" as const, pause: true, pendingProvider: false, expected: "inactive" },
+  { status: "waiting" as const, pause: false, pendingProvider: false, expected: "rejected" },
+])("admits stale native Pause intent at dispatch: $status / $expected", (scenario) =>
+  Effect.gen(function* () {
+    const h = yield* setup;
+    // Intake selected native steering while this run was running. Admission
+    // must use the state under the dispatch lock, after the run changed.
+    yield* h.complete;
+    if (scenario.status === "waiting") {
+      const now = yield* DateTime.now;
+      yield* h.sink.write({
+        events: [
+          {
+            id: EventId.make("original-waiting"),
+            type: "run.updated",
+            threadId: h.threadId,
+            occurredAt: now,
+            payload: { ...h.run, status: "waiting", startedAt: now },
+          },
+        ],
+      });
+    }
+    if (scenario.pendingProvider) {
+      yield* h.outbox.enqueue([
+        {
+          id: "pending-provider-message",
+          threadId: h.threadId,
+          commandId: CommandId.make("pending-provider-example"),
+          request: { type: "provider-turn.start", runId: h.run.id },
+        },
+      ]);
+    }
+    const commandId = CommandId.make("stale-native-pause");
+    const messageId = MessageId.make("stale-native-pause");
+    const result = yield* h.orchestrator
+      .dispatch({
+        type: "message.dispatch",
+        commandId,
+        threadId: h.threadId,
+        messageId,
+        text: "pause to go offline",
+        attachments: [],
+        dispatchMode: { type: "steer_active_native", targetRunId: h.run.id },
+        createdBy: "user",
+        creationSource: "server",
+      })
+      .pipe(
+        Effect.provideService(Orchestrator.PauseRecipientMustBeActive, scenario.pause),
+        Effect.result,
+      );
+    const projection = yield* h.orchestrator.getThreadProjection(h.threadId);
+    const effects = yield* h.outbox.listByCommandId(commandId);
+    if (scenario.expected === "inactive" || scenario.expected === "rejected") {
+      assert.strictEqual(result._tag, "Failure");
+      if (result._tag === "Failure") {
+        assert.strictEqual(
+          result.failure._tag,
+          scenario.expected === "inactive"
+            ? "OrchestratorPauseRecipientInactiveError"
+            : "OrchestratorDispatchError",
+        );
+      }
+      assert.lengthOf(projection.messages, 1);
+      assert.lengthOf(projection.runs, 1);
+      assert.isEmpty(effects);
+    } else {
+      assert.strictEqual(
+        result._tag,
+        "Success",
+        result._tag === "Failure"
+          ? String("cause" in result.failure ? result.failure.cause : result.failure)
+          : undefined,
+      );
+      assert.lengthOf(projection.messages, 2);
+      assert.lengthOf(projection.runs, 2);
+      const admitted = projection.runs.find((run) => run.userMessageId === messageId)!;
+      assert.strictEqual(admitted.status, scenario.expected === "queued" ? "queued" : "starting");
+      assert.isFalse(
+        effects.some(
+          (effect) =>
+            effect.request.type === "provider-turn.steer" ||
+            effect.request.type === "provider-turn.interrupt",
+        ),
+      );
+    }
+  }).pipe(Effect.provide(testLayer)),
+);

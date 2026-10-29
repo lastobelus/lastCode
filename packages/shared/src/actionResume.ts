@@ -7,9 +7,27 @@ import {
   type ActionResumeStatus,
   type ActionRunSummary,
   type OrchestrationV2Run,
+  type UpdateDrainBlocker,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+
+export function environmentPauseBlockerLabel(blocker: UpdateDrainBlocker) {
+  switch (blocker.type) {
+    case "thread-turn":
+      return "Agent turn";
+    case "thread-background":
+      return "Background work";
+    case "terminal-process":
+      return blocker.label || "Terminal process";
+    case "provider-runtime":
+      return "Provider activity";
+    case "thread-cleanup":
+      return "Thread cleanup";
+    case "provider-teardown":
+      return "Provider shutdown";
+  }
+}
 
 export function actionResumeStatus(input: {
   readonly action: Pick<ActionResumeState, "outcome" | "delivery">;

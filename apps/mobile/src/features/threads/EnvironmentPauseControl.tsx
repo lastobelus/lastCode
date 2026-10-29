@@ -2,6 +2,7 @@ import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId, EnvironmentPauseStatus } from "@t3tools/contracts";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import { environmentPauseBlockerLabel } from "@t3tools/shared/actionResume";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { useCallback, useMemo, useRef, useState } from "react";
@@ -12,10 +13,7 @@ import { Button } from "../../components/ui/Button";
 import { environmentPause, environmentPauseConnectionsAtom } from "../../state/environment-pause";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
-import {
-  environmentPauseAvailability,
-  environmentPauseBlockerLabel,
-} from "./environment-pause-model";
+import { environmentPauseAvailability } from "./environment-pause-model";
 
 export function useEnvironmentPauseControl(environmentId: EnvironmentId) {
   const targets = useAtomValue(environmentPauseConnectionsAtom);
@@ -238,22 +236,25 @@ function EnvironmentPauseDetails(props: {
             );
           })}
           {session.targets
-            .filter((target) => target.pause === "failed" || target.resume === "failed")
+            .filter((target) =>
+              session.phase === "resuming"
+                ? target.pause === "sent" && target.resume === "failed"
+                : target.pause === "failed",
+            )
             .map((target) => (
               <Text key={target.threadId} selectable className="text-sm text-danger-foreground">
                 {target.title}: {target.error ?? "Message could not be sent."}
               </Text>
             ))}
           {session.targets
-            .filter(
-              (target) =>
-                target.pause === "unavailable" ||
-                (session.phase === "resuming" && target.resume === "unavailable"),
+            .filter((target) =>
+              session.phase === "resuming"
+                ? target.pause === "sent" && target.resume === "unavailable"
+                : target.pause === "unavailable",
             )
             .map((target) => (
               <Text key={target.threadId} className="text-sm text-foreground-muted">
-                {target.title}: Archived or deleted threads cannot receive{" "}
-                {session.phase === "resuming" ? "resume" : "pause"} requests.
+                {target.title}: {target.error ?? "Thread unavailable"}
               </Text>
             ))}
         </>

@@ -290,6 +290,7 @@ const make = Effect.gen(function* () {
     let unknown = false;
     for (const target of session.targets) {
       if (
+        (direction === "resume" && target.pause !== "sent") ||
         (target[direction] !== "pending" && target[direction] !== "failed") ||
         target[`${direction}Accepted`]
       )
@@ -383,6 +384,7 @@ const make = Effect.gen(function* () {
     if (session !== null) {
       for (const target of session.targets) {
         const direction = session.phase === "resuming" ? "resume" : "pause";
+        if (direction === "resume" && target.pause !== "sent") continue;
         if (target[direction] !== "pending") continue;
         if (!target[`${direction}Accepted`]) {
           if ((yield* readSubmission(session, target, direction)) === "unknown")
