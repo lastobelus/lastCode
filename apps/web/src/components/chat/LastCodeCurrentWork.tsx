@@ -15,6 +15,8 @@ import { ComposerBanner } from "./ComposerBanner";
 import type { ComposerBannerStackItem } from "./ComposerBannerStack";
 import type { ThreadNowItem } from "./ThreadNow";
 
+const secondaryTextClassName = "text-muted-foreground/60 light:text-muted-foreground/80";
+
 export interface LastCodeCurrentWorkProps {
   readonly work: ThreadNowItem | null;
   readonly tasks: ReadonlyArray<OrchestrationV2PendingBackgroundTask>;
@@ -38,11 +40,13 @@ export function LastCodeCurrentWork({
   const count = actions.length + (background?.items.length ?? 0);
   if (count === 0) return null;
 
+  const runningPresentation =
+    action?.outcome === "running" ? actionRunningPresentation(action) : null;
   const actionTitle =
     actions.length === 0 || action === null
       ? null
       : action.outcome === "running"
-        ? `${actionRunningPresentation(action).state === "waiting" ? "Waiting for" : "Running"} ${action.actionName}`
+        ? `${runningPresentation?.state === "waiting" ? "Waiting for" : "Running"} ${action.actionName}`
         : typeof actions[0]?.title === "string"
           ? actions[0].title
           : action.actionName;
@@ -59,6 +63,7 @@ export function LastCodeCurrentWork({
         role={needsAttention ? "status" : undefined}
         className={cn(
           "mx-auto flex w-full min-w-0 max-w-(--chat-content-max-width) items-center gap-1.5 px-1 pb-2 text-xs [&_svg]:size-3.5 [&_svg]:shrink-0",
+          "[&_button[data-slot=popover-trigger]]:-my-1.5",
           needsAttention ? "text-warning-foreground" : "text-muted-foreground",
         )}
       >
@@ -93,22 +98,30 @@ export function LastCodeCurrentWork({
         className="max-w-[min(30rem,calc(100vw-2rem))] whitespace-normal wrap-anywhere [--inline-button-text-align:start] [--inline-button-white-space:normal] [&_[data-slot=inline-button]]:max-w-full"
       >
         <ComposerBanner.Scroll className="max-h-[min(var(--available-height),24rem,40dvh)]">
-          <div className="flex flex-col gap-3" data-lastcode-work-list="true">
-            <div className="font-medium">Current work · {count}</div>
+          <div className="flex flex-col gap-1.5 font-normal" data-lastcode-work-list="true">
+            <div className="text-muted-foreground">Current work · {count}</div>
             {actions.map((item) => (
               <div key={item.id} className="flex min-w-0 gap-2">
                 <span
                   aria-hidden
-                  className="mt-0.5 flex size-3.5 shrink-0 items-center justify-center"
+                  className="mt-0.5 flex size-3.5 shrink-0 items-center justify-center text-muted-foreground"
                 >
                   {item.icon}
                 </span>
-                <div className="flex min-w-0 flex-1 flex-col gap-1">
+                <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                   {action?.outcome === "running" ? (
-                    <div className="wrap-anywhere font-medium">{action.actionName}</div>
+                    <div className="wrap-anywhere">{action.actionName}</div>
                   ) : null}
-                  <div className="wrap-anywhere">{item.title}</div>
-                  {item.description}
+                  <div
+                    className={cn("wrap-anywhere", runningPresentation && secondaryTextClassName)}
+                  >
+                    {runningPresentation
+                      ? `${runningPresentation.label} ${runningPresentation.summary}`
+                      : item.title}
+                  </div>
+                  {item.description ? (
+                    <div className={secondaryTextClassName}>{item.description}</div>
+                  ) : null}
                   {item.children}
                   {item.actions ? <div className="flex flex-wrap gap-2">{item.actions}</div> : null}
                 </div>
@@ -124,14 +137,16 @@ export function LastCodeCurrentWork({
                 <div key={task.taskId} className="flex min-w-0 gap-2">
                   <span
                     aria-hidden
-                    className="mt-0.5 flex size-3.5 shrink-0 items-center justify-center"
+                    className="mt-0.5 flex size-3.5 shrink-0 items-center justify-center text-muted-foreground"
                   >
                     {task.kind === "subagent" ? <CircleDashedIcon /> : <TerminalIcon />}
                   </span>
-                  <div className="flex min-w-0 flex-1 flex-col gap-1">
-                    <div className="wrap-anywhere font-medium">{task.label}</div>
+                  <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <div className="wrap-anywhere">{task.label}</div>
                     {subagent?.progress ? (
-                      <div className="wrap-anywhere">{subagent.progress}</div>
+                      <div className={cn("wrap-anywhere", secondaryTextClassName)}>
+                        {subagent.progress}
+                      </div>
                     ) : null}
                     {childThreadId != null && background.items.length > 1 ? (
                       <InlineButton tone="muted" onClick={() => onOpenThread(childThreadId)}>
