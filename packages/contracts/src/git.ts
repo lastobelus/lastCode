@@ -390,6 +390,7 @@ export class TextGenerationError extends Schema.TaggedError<TextGenerationError>
   "TextGenerationError",
   {
     operation: Schema.String,
+    reason: Schema.optional(Schema.Literal("prompt-mining-unsupported")),
     detail: Schema.String,
     cause: Schema.optional(Schema.Defect()),
   },

@@ -338,6 +338,7 @@ function CommandPaletteDialog(props: {
       data-palette-mode={props.mode}
       data-testid="command-palette"
       finalFocus={() => {
+        if (document.querySelector("[data-prompt-snippets]")) return false;
         if (restoreWorkspaceFocusFromPalette()) return false;
         const returnFocus = getCommandPaletteReturnFocus();
         if (returnFocus === false) return false;
@@ -382,6 +383,12 @@ function OpenCommandPaletteDialog(props: {
   const insertCommonPrompt = useStableCallback(async () => {
     composerHandleRef?.current?.openControl("composer.promptSnippets");
   });
+  const [commonPromptsAvailable] = useState(
+    () =>
+      document.querySelector(
+        'button[data-composer-shortcut~="composer.promptSnippets"]:not(:disabled)',
+      ) !== null,
+  );
   const pathname = useLocation({ select: (location) => location.pathname });
   const { openChildSearch, setOpen } = props;
   // Keyed by palette session: the intent and restored search only seed this
@@ -1241,7 +1248,7 @@ function OpenCommandPaletteDialog(props: {
 
   const actionItems: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> = [];
 
-  if (activeThread || activeDraftThread) {
+  if ((activeThread || activeDraftThread) && commonPromptsAvailable) {
     actionItems.push({
       kind: "action",
       value: "action:common-prompts",

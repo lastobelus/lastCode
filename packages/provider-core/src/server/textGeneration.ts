@@ -110,6 +110,7 @@ export interface ProviderTextGeneration {
     modelSelection: ModelSelection;
     messages: readonly string[];
     existing: readonly { id: string; title: string; text: string }[];
+    dismissed?: readonly { id: string; title: string; text: string }[];
   }) => Effect.Effect<
     { snippets: readonly { existingIds: readonly string[]; title: string; text: string }[] },
     TextGenerationError

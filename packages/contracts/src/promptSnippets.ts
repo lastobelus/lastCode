@@ -31,3 +31,5 @@ export class PromptSnippetsError extends Schema.TaggedError<PromptSnippetsError>
     return `Prompt snippets ${this.operation} failed.`;
   }
 }
+
+export const PromptSnippetDismissInput = Schema.Struct({ snippetId: Schema.String });

@@ -84,9 +84,10 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
 
       if (operation === "generatePromptSnippets")
         return yield* new TextGenerationError({
-          operation,
+          operation: "generatePromptSnippets",
+          reason: "prompt-mining-unsupported",
           detail:
-            "Cursor cannot guarantee tool-free prompt mining. Choose another text-generation provider.",
+            "The configured text-generation model used for thread titles cannot discover prompts without tools. Choose a supported text-generation model in Settings.",
         });
       const apiKey = yield* resolveCursorApiKey(operation);
       // sandbox.json expands writable paths independently of settingSources; the public API cannot override it.

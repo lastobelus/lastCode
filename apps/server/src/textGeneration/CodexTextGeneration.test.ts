@@ -246,6 +246,8 @@ it.layer(layerCodexTextGenerationTest)("CodexTextGeneration", (it) => {
             snippets: [{ existingIds: [], title: "Review", text: "Review; do not merge." }],
           }),
           requirePromptOnly: true,
+          mcpServers: [{ name: "node_repl", enabled: true }],
+          forbidArg: '--config mcp_servers={"node_repl"={enabled=false}}',
           requireServiceTier: "default",
           requireReasoningEffort: "xhigh",
           requireArg: "--model gpt-6-luna",

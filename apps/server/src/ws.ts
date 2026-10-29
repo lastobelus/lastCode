@@ -2375,6 +2375,7 @@ const layerCoreWsRpc = (
       const handlers = CoreServerWsRpcGroup.of({
         [WS_METHODS.promptSnippetsList]: () => promptSnippets.list,
         [WS_METHODS.promptSnippetsRecordUse]: (input) => promptSnippets.recordUse(input),
+        [WS_METHODS.promptSnippetsDismiss]: (input) => promptSnippets.dismiss(input),
         [WS_METHODS.promptSnippetsDiscover]: () => promptSnippets.discover(),
         [WS_METHODS.scheduledTasksSubscribe]: (_input) =>
           scheduledTasks.subscribeList().pipe(Stream.map(withVisibleWebhookUrls)),

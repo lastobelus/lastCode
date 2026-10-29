@@ -1012,7 +1012,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const [isDragOverComposer, setIsDragOverComposer] = useState(false);
   const [isComposerPrimaryActionsCompact, setIsComposerPrimaryActionsCompact] = useState(false);
   const [isComposerModelPickerOpen, setIsComposerModelPickerOpen] = useState(false);
-  const [isPromptSnippetsOpen, setIsPromptSnippetsOpen] = useState(false);
+  const [promptSnippetsSelection, setPromptSnippetsSelection] = useState<{
+    target: string;
+    cursor: number;
+  } | null>(null);
+  const promptSnippetsReturnCursor = useRef(0);
   const isMobileViewport = useMediaQuery("max-sm");
   const isSoftwareKeyboardOpen = useSoftwareKeyboardOpen();
   const [isComposerFocused, setIsComposerFocused] = useState(false);
@@ -3155,16 +3159,24 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       data-chat-composer-form="true"
       {...threadContextDropTargetProps()}
     >
-      {isPromptSnippetsOpen ? (
+      {promptSnippetsSelection?.target === attachmentTargetKey ? (
         <PromptSnippetsDialog
           key={attachmentTargetKey}
           environmentId={environmentId}
           keybindings={keybindings}
-          onClose={() => setIsPromptSnippetsOpen(false)}
-          onInsert={(text) =>
-            insertComposerTextStable(`${text}\n`, "cursor", { ensureLeadingBoundary: true })
+          onClose={() => setPromptSnippetsSelection(null)}
+          onInsert={(text) => {
+            if (!canOperateThread || pendingUserInputs.length > 0 || projectSelectionRequired)
+              return false;
+            const cursor = Math.min(promptSnippetsSelection.cursor, promptRef.current.length);
+            const insertion = `${cursor > 0 && !/\s/u.test(promptRef.current[cursor - 1] ?? "") ? " " : ""}${text}\n`;
+            const inserted = applyPromptReplacementStable(cursor, cursor, insertion);
+            if (inserted) promptSnippetsReturnCursor.current = cursor + insertion.length;
+            return inserted;
+          }}
+          onReturnFocus={() =>
+            composerEditorRef.current?.focusAt(promptSnippetsReturnCursor.current)
           }
-          onReturnFocus={focusComposer}
         />
       ) : null}
       <ComposerBanner.Dock>
@@ -3465,7 +3477,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     <ComposerControl
                       data-composer-shortcut="composer.promptSnippets"
                       aria-label="Common prompts"
-                      onClick={() => setIsPromptSnippetsOpen(true)}
+                      onPointerDown={(event) => event.preventDefault()}
+                      onClick={() => {
+                        const cursor = readComposerSnapshotStable().expandedCursor;
+                        promptSnippetsReturnCursor.current = cursor;
+                        setPromptSnippetsSelection({ target: attachmentTargetKey, cursor });
+                      }}
                       disabled={projectSelectionRequired}
                     >
                       <MessageSquareTextIcon aria-hidden="true" className="size-4" />

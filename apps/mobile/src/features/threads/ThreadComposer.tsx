@@ -837,7 +837,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
               const insertion = replaceTextSelection({
                 value: draft.text,
                 selection: { start: cursor, end: cursor },
-                text: snippet.text,
+                text: `${cursor > 0 && !/\s/u.test(draft.text[cursor - 1] ?? "") ? " " : ""}${snippet.text}\n`,
               });
               props.onChangeDraftMessage(insertion.value);
               composerMenu.onSelectionChange({ start: insertion.cursor, end: insertion.cursor });

@@ -24,6 +24,10 @@ export function PromptSnippetsDialog(props: {
   );
   const recordUse = useAtomCommand(promptSnippetsEnvironment.recordUse, { reportFailure: false });
   const discover = useAtomCommand(promptSnippetsEnvironment.discover);
+  const dismiss = useAtomCommand(promptSnippetsEnvironment.dismiss);
+  const canDismiss = useAtomValue(
+    promptSnippetsEnvironment.dismiss.permissionAtom(props.environmentId),
+  );
   const canDiscover = useAtomValue(
     promptSnippetsEnvironment.discover.permissionAtom(props.environmentId),
   );
@@ -45,6 +49,16 @@ export function PromptSnippetsDialog(props: {
               void discover({ environmentId: props.environmentId, input: {} }).finally(() =>
                 setRefreshing(false),
               );
+            }
+          : undefined
+      }
+      onDismiss={
+        canDismiss
+          ? (snippet) => {
+              void dismiss({
+                environmentId: props.environmentId,
+                input: { snippetId: snippet.id },
+              });
             }
           : undefined
       }
@@ -70,6 +84,7 @@ export function PromptSnippetsPicker(props: {
   readonly onClose: () => void;
   readonly onSelect: (snippet: PromptSnippet, query: string) => void;
   readonly onDiscover?: (() => void) | undefined;
+  readonly onDismiss?: ((snippet: PromptSnippet) => void) | undefined;
   readonly onReturnFocus: () => void;
 }) {
   const [query, setQuery] = useState("");
@@ -117,11 +132,18 @@ export function PromptSnippetsPicker(props: {
           onItemHighlighted={(value) => setHighlighted(typeof value === "string" ? value : null)}
           footerActionLabel="Insert prompt"
           footerTrailing={
-            props.onDiscover ? (
-              <CommandFooterAction disabled={props.discovering} onClick={props.onDiscover}>
-                {props.discovering ? "Finding prompts…" : "Find new prompts"}
-              </CommandFooterAction>
-            ) : undefined
+            <div className="flex items-center gap-1">
+              {selected && props.onDismiss ? (
+                <CommandFooterAction onClick={() => props.onDismiss?.(selected)}>
+                  Dismiss prompt
+                </CommandFooterAction>
+              ) : null}
+              {props.onDiscover ? (
+                <CommandFooterAction disabled={props.discovering} onClick={props.onDiscover}>
+                  {props.discovering ? "Finding prompts…" : "Find new prompts"}
+                </CommandFooterAction>
+              ) : null}
+            </div>
           }
           testId="prompt-snippets-picker"
         >

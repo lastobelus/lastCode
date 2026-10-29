@@ -1,6 +1,11 @@
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
-import { PromptSnippetsError, PromptSnippetsState, type PromptSnippet } from "@t3tools/contracts";
+import {
+  PromptSnippetsError,
+  PromptSnippetsState,
+  TextGenerationError,
+  PromptSnippet,
+} from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -15,9 +20,11 @@ import * as Settings from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 
 const DAY = 24 * 60 * 60 * 1000;
+const isTextGenerationError = Schema.is(TextGenerationError);
 const Stored = Schema.Struct({
   ...PromptSnippetsState.fields,
   lastAttemptAt: Schema.NullOr(Schema.String),
+  dismissed: Schema.Array(PromptSnippet).pipe(Schema.withDecodingDefaultKey(Effect.succeed([]))),
 });
 const encodeStored = Schema.encodeEffect(Schema.fromJsonString(Stored));
 const decodeStored = Schema.decodeUnknownEffect(Schema.fromJsonString(Stored));
@@ -54,29 +61,57 @@ export function selectCorpus(rows: readonly { payload_json: string }[]): string[
   return texts;
 }
 
+const normalizedText = (text: string) =>
+  text.normalize("NFKC").trim().replace(/\s+/gu, " ").toLowerCase();
+
 export function consolidate(
   snippets: readonly PromptSnippet[],
   proposals: readonly Proposal[],
   newId: () => string,
+  dismissed: readonly PromptSnippet[] = [],
 ): readonly PromptSnippet[] {
   if (
     proposals.length > 40 ||
-    (snippets.length === 0 && (proposals.length < 8 || proposals.length > 10))
+    (snippets.length === 0 &&
+      dismissed.length === 0 &&
+      (proposals.length < 8 || proposals.length > 10))
   )
     throw new Error("Invalid proposal count");
   const claimed = new Set<string>();
+  const mentioned = new Set<string>();
+  const dismissedTexts = new Set(dismissed.map((snippet) => normalizedText(snippet.text)));
+  const dismissedIds = new Set(dismissed.map((snippet) => snippet.id));
   const replacements: PromptSnippet[] = [];
+  let size = snippets.length;
   for (const proposal of proposals) {
     const title = proposal.title.trim();
     const text = proposal.text.trim();
     if (!title || title.length > 100 || !text || text.length > 4000)
       throw new Error("Invalid snippet length");
+    if (
+      dismissedTexts.has(normalizedText(text)) ||
+      proposal.existingIds.some((id) => dismissedIds.has(id))
+    )
+      continue;
     const previous = proposal.existingIds.map((id) => {
       const found = snippets.find((snippet) => snippet.id === id);
-      if (!found || claimed.has(id)) throw new Error("Invalid existing ID");
-      claimed.add(id);
+      if (!found || mentioned.has(id)) throw new Error("Invalid existing ID");
+      mentioned.add(id);
       return found;
     });
+    // Ignore a duplicate proposal without replacing either saved entry or its usage history.
+    if (
+      replacements.some((snippet) => normalizedText(snippet.text) === normalizedText(text)) ||
+      snippets.some(
+        (snippet) =>
+          !claimed.has(snippet.id) &&
+          !proposal.existingIds.includes(snippet.id) &&
+          normalizedText(snippet.text) === normalizedText(text),
+      )
+    )
+      continue;
+    if (previous.length === 0 && size >= 100) continue;
+    for (const snippet of previous) claimed.add(snippet.id);
     const queries = new Map<string, number>();
     for (const snippet of previous)
       for (const usage of snippet.queryUses)
@@ -92,11 +127,9 @@ export function consolidate(
       lastUsedAt: dates.at(-1) ?? null,
       queryUses: [...queries].map(([query, count]) => ({ query, count })),
     });
+    size += 1 - previous.length;
   }
-  const result = [...snippets.filter((snippet) => !claimed.has(snippet.id)), ...replacements];
-  if (result.length > 100 || new Set(result.map((snippet) => snippet.text)).size !== result.length)
-    throw new Error("Invalid library");
-  return result;
+  return [...snippets.filter((snippet) => !claimed.has(snippet.id)), ...replacements];
 }
 
 export class PromptSnippets extends Context.Service<
@@ -107,8 +140,9 @@ export class PromptSnippets extends Context.Service<
       snippetId: string;
       query: string;
     }) => Effect.Effect<void, PromptSnippetsError>;
+    readonly dismiss: (input: { snippetId: string }) => Effect.Effect<void, PromptSnippetsError>;
     readonly discover: () => Effect.Effect<PromptSnippetsState, PromptSnippetsError>;
-    readonly discoverIfDue: Effect.Effect<void, PromptSnippetsError>;
+    readonly discoverIfDue: Effect.Effect<number, PromptSnippetsError>;
   }
 >()("t3/promptSnippets/PromptSnippets") {}
 
@@ -125,17 +159,43 @@ const make = Effect.gen(function* () {
   const discovery = yield* Semaphore.make(1);
   const initial: State = {
     snippets: [],
+    dismissed: [],
     lastDiscoveryAt: null,
     lastAttemptAt: null,
     discovering: false,
     lastError: null,
   };
   let state = initial;
-  if (yield* fs.exists(filename))
-    state = yield* fs.readFileString(filename).pipe(
-      Effect.flatMap(decodeStored),
-      Effect.mapError((cause) => new PromptSnippetsError({ operation: "load", cause })),
-    );
+  let preserveUnreadable = false;
+  state = yield* Effect.gen(function* () {
+    if (!(yield* fs.exists(filename))) return initial;
+    return yield* fs.readFileString(filename).pipe(Effect.flatMap(decodeStored));
+  }).pipe(
+    Effect.catch((cause) =>
+      Effect.gen(function* () {
+        yield* Effect.logWarning("Could not load saved common prompts", { cause });
+        // Preserve the source before a later explicit discovery can replace the library.
+        preserveUnreadable = true;
+        const backup = yield* crypto.randomUUIDv4();
+        yield* fs.rename(filename, `${filename}.recovery-${backup}`).pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              preserveUnreadable = false;
+            }),
+          ),
+          Effect.catch((cause) =>
+            Effect.logWarning("Could not preserve unreadable common prompts", { cause }),
+          ),
+        );
+        return {
+          ...initial,
+          lastError: preserveUnreadable
+            ? "Couldn't read your saved prompts or make a recovery copy, so the list is empty and new prompts can't be saved yet. Check access to prompt-snippets.json and its folder, then choose Find new prompts."
+            : "Couldn't read your saved prompts, so the list is empty for now. Your old prompts file was kept as a recovery copy. Choose Find new prompts to rebuild the list.",
+        };
+      }),
+    ),
+  );
   let discovering = false;
   const list = Effect.sync(() => ({
     snippets: state.snippets,
@@ -145,6 +205,11 @@ const make = Effect.gen(function* () {
   }));
   const save = Effect.fn("PromptSnippets.save")(
     function* (next: State) {
+      if (preserveUnreadable) {
+        const backup = yield* crypto.randomUUIDv4();
+        yield* fs.rename(filename, `${filename}.recovery-${backup}`);
+        preserveUnreadable = false;
+      }
       yield* fs.makeDirectory(config.stateDir, { recursive: true });
       yield* fs.writeFileString(`${filename}.tmp`, yield* encodeStored(next), { mode: 0o600 });
       yield* fs.rename(`${filename}.tmp`, filename);
@@ -159,7 +224,9 @@ const make = Effect.gen(function* () {
         discovering = true;
         const now = DateTime.formatIso(yield* DateTime.now);
         const run = Effect.gen(function* () {
-          yield* mutation.withPermits(1)(save({ ...state, lastAttemptAt: now, lastError: null }));
+          yield* mutation.withPermits(1)(
+            Effect.suspend(() => save({ ...state, lastAttemptAt: now, lastError: null })),
+          );
           const rows = yield* sql<{
             payload_json: string;
           }>`SELECT payload_json FROM orchestration_v2_projection_messages WHERE role = 'user' AND json_extract(payload_json, '$.createdBy') = 'user' ORDER BY created_at DESC LIMIT 500`;
@@ -172,6 +239,7 @@ const make = Effect.gen(function* () {
               modelSelection: currentSettings.textGenerationModelSelection,
               messages,
               existing: state.snippets.map(({ id, title, text }) => ({ id, title, text })),
+              dismissed: state.dismissed.map(({ id, title, text }) => ({ id, title, text })),
             })
             .pipe(Effect.timeout("3 minutes"));
           yield* mutation.withPermits(1)(
@@ -179,7 +247,7 @@ const make = Effect.gen(function* () {
               const ids = yield* Effect.forEach(output.snippets, () => crypto.randomUUIDv4());
               let index = 0;
               const snippets = yield* Effect.try(() =>
-                consolidate(state.snippets, output.snippets, () => ids[index++]!),
+                consolidate(state.snippets, output.snippets, () => ids[index++]!, state.dismissed),
               );
               yield* save({ ...state, snippets, lastDiscoveryAt: now, lastError: null });
             }),
@@ -187,15 +255,25 @@ const make = Effect.gen(function* () {
           return yield* list;
         });
         return yield* run.pipe(
-          Effect.catch(() =>
-            mutation
-              .withPermits(1)(
-                save({
-                  ...state,
-                  lastError: "Couldn't find new prompts. Your saved prompts are unchanged.",
-                }),
-              )
-              .pipe(Effect.andThen(list)),
+          Effect.catch((cause) =>
+            Effect.logWarning("Common prompt discovery failed", { cause }).pipe(
+              Effect.andThen(
+                mutation
+                  .withPermits(1)(
+                    Effect.suspend(() =>
+                      save({
+                        ...state,
+                        lastError:
+                          isTextGenerationError(cause) &&
+                          cause.reason === "prompt-mining-unsupported"
+                            ? "Your text generation model can't find common prompts. Choose a model from a different provider in Settings > Text generation."
+                            : "Couldn't find new prompts. Your saved prompts are unchanged.",
+                      }),
+                    ),
+                  )
+                  .pipe(Effect.andThen(list)),
+              ),
+            ),
           ),
           Effect.ensuring(
             Effect.sync(() => {
@@ -212,6 +290,27 @@ const make = Effect.gen(function* () {
     discover,
     discoverIfDue: Effect.gen(function* () {
       if (discoveryDue(state.lastAttemptAt, yield* Clock.currentTimeMillis)) yield* discover();
+      const now = yield* Clock.currentTimeMillis;
+      return Math.max(
+        1_000,
+        DAY - (state.lastAttemptAt === null ? 0 : now - Date.parse(state.lastAttemptAt)),
+      );
+    }),
+    dismiss: Effect.fn("PromptSnippets.dismiss")(function* (input) {
+      yield* mutation.withPermits(1)(
+        Effect.gen(function* () {
+          const snippet = state.snippets.find((snippet) => snippet.id === input.snippetId);
+          if (!snippet) {
+            if (state.dismissed.some((snippet) => snippet.id === input.snippetId)) return;
+            return yield* new PromptSnippetsError({ operation: "dismiss" });
+          }
+          yield* save({
+            ...state,
+            snippets: state.snippets.filter((entry) => entry.id !== snippet.id),
+            dismissed: [...state.dismissed, snippet],
+          });
+        }),
+      );
     }),
     recordUse: Effect.fn("PromptSnippets.recordUse")(function* (input) {
       yield* mutation.withPermits(1)(
@@ -251,8 +350,8 @@ export const worker = Layer.effectDiscard(
     if (config.devUrl !== undefined || ServerConfig.telemetryChannel === "dev") return;
     const service = yield* PromptSnippets;
     yield* service.discoverIfDue.pipe(
-      Effect.catch(() => Effect.logWarning("Prompt discovery worker failed")),
-      Effect.andThen(Effect.sleep("24 hours")),
+      Effect.catch(() => Effect.logWarning("Prompt discovery worker failed").pipe(Effect.as(DAY))),
+      Effect.flatMap((delay) => Effect.sleep(delay)),
       Effect.forever,
       Effect.forkScoped,
     );
