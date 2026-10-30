@@ -7,6 +7,7 @@ import { useEnvironment } from "../../state/environments";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { useNavigate } from "@tanstack/react-router";
 import { SubagentTooltipContent } from "./SubagentTooltipContent";
+import { ChildActionWait } from "./ChildActionWait";
 import { useAtomValue } from "@effect/atom-react";
 import { scopeThreadRef, scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { environmentThreadDetails } from "../../state/threads";
@@ -385,15 +386,21 @@ function SubagentTimelineLink(props: {
   const remoteEnvironment = useEnvironment(remote?.environmentId ?? null);
   const navigate = useNavigate();
   const threadId = props.threadId;
+  const childRef =
+    threadId !== null
+      ? scopeThreadRef(props.parentRef.environmentId, threadId)
+      : remote !== undefined && remoteEnvironment !== null
+        ? scopeThreadRef(remote.environmentId, remote.threadId)
+        : null;
   // A task in a linked environment opens there, if this client is connected to it.
   const open =
     threadId !== null
       ? () => props.onOpenThread(threadId)
-      : remote !== undefined && remoteEnvironment !== null
+      : childRef !== null
         ? () =>
             void navigate({
               to: "/$environmentId/$threadId",
-              params: buildThreadRouteParams(scopeThreadRef(remote.environmentId, remote.threadId)),
+              params: buildThreadRouteParams(childRef),
             })
         : null;
   const liveStatus = agent?.status ?? props.status;
@@ -443,6 +450,9 @@ function SubagentTimelineLink(props: {
             <span className="block truncate">{detail}</span>
           )}
         </span>
+        {props.origin === "app_owned" && childRef !== null ? (
+          <ChildActionWait threadRef={childRef} />
+        ) : null}
       </span>
       {detail !== null && (props.event !== undefined || status !== "completed") ? (
         <span

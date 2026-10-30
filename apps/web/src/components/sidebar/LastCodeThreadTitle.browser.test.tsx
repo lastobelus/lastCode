@@ -1,15 +1,5 @@
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import {
-  beforeAll,
-  beforeEach,
-  afterAll,
-  afterEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vite-plus/test";
+import { act, render as renderUi } from "../../../test/render";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId, RunId, ThreadId, type ActionResumeState } from "@t3tools/contracts";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { AsyncResult } from "effect/reactivity";
@@ -165,58 +155,54 @@ function Harness({ revision = 0, pr = false }: { revision?: number; pr?: boolean
     </div>
   );
 }
-let root: Root | null = null,
-  container: HTMLDivElement | null = null;
-const original = Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-beforeAll(() =>
-  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
-    configurable: true,
-    value: true,
-  }),
-);
-afterAll(() => {
-  if (original) Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", original);
-  else Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-});
-beforeEach(() => {
+async function setup() {
+  await using stack = new AsyncDisposableStack();
+  const previousHidden = useSidebarModeStore.getState().lastcodeHidden;
+  stack.defer(() => useSidebarModeStore.setState({ lastcodeHidden: previousHidden }));
   useSidebarModeStore.setState({ lastcodeHidden: false });
   vi.clearAllMocks();
   mocks.canOperate = true;
   mocks.compact = false;
   mocks.subheaders = true;
   mocks.update.mockResolvedValue(AsyncResult.success(undefined));
-});
-afterEach(async () => {
-  await act(() => root?.unmount());
-  container?.remove();
-  root = null;
-  container = null;
-  document.body.replaceChildren();
-});
-async function render() {
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-  await act(() => root?.render(<Harness />));
-}
-async function click(label: string) {
-  const button = [...container!.querySelectorAll("button")].find((b) => b.textContent === label);
-  expect(button).toBeDefined();
-  await act(() => button!.click());
-}
-const input = () => container?.querySelector<HTMLInputElement>("input") ?? null;
-async function draft(value: string) {
-  await act(() => {
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input(), value);
-    input()!.dispatchEvent(new Event("input", { bubbles: true }));
-  });
-}
-async function key(value: string) {
-  await act(() =>
-    input()!.dispatchEvent(
-      new KeyboardEvent("keydown", { key: value, bubbles: true, cancelable: true }),
-    ),
-  );
+  const screen = stack.use(await renderUi(null));
+  const { container, rerender } = screen;
+  async function render() {
+    await rerender(<Harness />);
+  }
+  async function click(label: string) {
+    const button = [...container!.querySelectorAll("button")].find((b) => b.textContent === label);
+    expect(button).toBeDefined();
+    await act(() => button!.click());
+  }
+  const input = () => container?.querySelector<HTMLInputElement>("input") ?? null;
+  async function draft(value: string) {
+    await act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
+        input(),
+        value,
+      );
+      input()!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+  async function key(value: string) {
+    await act(() =>
+      input()!.dispatchEvent(
+        new KeyboardEvent("keydown", { key: value, bubbles: true, cancelable: true }),
+      ),
+    );
+  }
+  const owner = stack.move();
+  return {
+    container,
+    rerender,
+    render,
+    click,
+    input,
+    draft,
+    key,
+    [Symbol.asyncDispose]: () => owner.disposeAsync(),
+  };
 }
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -260,6 +246,9 @@ function OutcomeHarness({
 }
 describe("mounted family status presentation", () => {
   it("moves a real aggregate from the typed line into an inline compact count", async () => {
+    await using fixture = await setup();
+    const { container, rerender } = fixture;
+
     const family = familyFor(a, "Parent with a failed descendant");
     family.descendantCount = 2;
     family.descendantStatusCounts = new Map([
@@ -273,16 +262,11 @@ describe("mounted family status presentation", () => {
       pulse: false,
     };
     family.expanded = false;
-    container = document.createElement("div");
-    document.body.append(container);
-    root = createRoot(container);
-    await act(() =>
-      root?.render(
-        <>
-          <LastCodeThreadFamilySummary family={family} display="line" />
-          <LastCodeThreadFamilySummary family={family} display="inline" />
-        </>,
-      ),
+    await rerender(
+      <>
+        <LastCodeThreadFamilySummary family={family} display="line" />
+        <LastCodeThreadFamilySummary family={family} display="inline" />
+      </>,
     );
     expect(container.textContent).toContain("2 subagents");
     expect(container.textContent).not.toContain("+2");
@@ -294,9 +278,7 @@ describe("mounted family status presentation", () => {
     expect(container.textContent).not.toContain("2 subagents");
     expect(container.querySelector('[role="img"][aria-label="Failed"]')).not.toBeNull();
     family.expanded = true;
-    await act(() =>
-      root?.render(<LastCodeThreadFamilySummary family={{ ...family }} display="inline" />),
-    );
+    await rerender(<LastCodeThreadFamilySummary family={{ ...family }} display="inline" />);
     expect(container.textContent).toContain("+2");
     expect(container.textContent).not.toContain("Failed");
     expect(container.querySelector('[role="img"][aria-label="Failed"]')).not.toBeNull();
@@ -310,10 +292,10 @@ describe("compact child outcomes", () => {
     ["interrupted", null, "Stopped"],
     ["interrupted", "Completed", "Stopped"],
   ] as const)("retains %s when the leading indicator is %s", async (status, leading, label) => {
-    container = document.createElement("div");
-    document.body.append(container);
-    root = createRoot(container);
-    await act(() => root?.render(<OutcomeHarness status={status} leading={leading} />));
+    await using fixture = await setup();
+    const { container, rerender } = fixture;
+
+    await rerender(<OutcomeHarness status={status} leading={leading} />);
     const outcome = container.querySelector(`[role="img"][aria-label="${label}"]`);
     const marker = outcome?.querySelector("[data-lastcode-sidebar-unscaled-content]") ?? outcome;
     expect(marker?.textContent).toBe(label[0]);
@@ -323,22 +305,20 @@ describe("compact child outcomes", () => {
     expect(mocks.update).not.toHaveBeenCalled();
   });
   it("does not add a second compact marker for a matching leading outcome", async () => {
-    container = document.createElement("div");
-    document.body.append(container);
-    root = createRoot(container);
-    await act(() => root?.render(<OutcomeHarness status="failed" leading="Failed" />));
+    await using fixture = await setup();
+    const { container, rerender } = fixture;
+
+    await rerender(<OutcomeHarness status="failed" leading="Failed" />);
     expect(container.querySelectorAll('[role="img"][aria-label="Failed"]')).toHaveLength(1);
     expect(mocks.update).not.toHaveBeenCalled();
   });
   it.each(["failed", "interrupted"] as const)(
     "keeps %s and protection separately available",
     async (status) => {
-      container = document.createElement("div");
-      document.body.append(container);
-      root = createRoot(container);
-      await act(() =>
-        root?.render(<OutcomeHarness status={status} leading="Completed" protectedChild />),
-      );
+      await using fixture = await setup();
+      const { container, rerender } = fixture;
+
+      await rerender(<OutcomeHarness status={status} leading="Completed" protectedChild />);
       const label = status === "failed" ? "Failed" : "Stopped";
       expect(container.querySelector(`[role="img"][aria-label="${label}"]`)?.textContent).toContain(
         label[0],
@@ -385,6 +365,9 @@ describe("visible status transitions", () => {
     );
   }
   it("keeps Working and the concurrent waiting Action separate, then transitions to Waiting", async () => {
+    await using fixture = await setup();
+    const { container, rerender } = fixture;
+
     const family = familyFor(a, "Status transition");
     family.thread = {
       ...family.thread,
@@ -398,14 +381,11 @@ describe("visible status transitions", () => {
         updatedAt: "2026-01-01T00:00:00Z",
       },
     };
-    container = document.createElement("div");
-    document.body.append(container);
-    root = createRoot(container);
-    await act(() => root?.render(<StatusHarness family={family} />));
+    await rerender(<StatusHarness family={family} />);
     expect(container.querySelector('[aria-label="Working"]')?.textContent).toContain("Working");
     expect(container.querySelector('[aria-label^="Waiting for Fixture check."]')).not.toBeNull();
     family.thread = { ...family.thread, runtime: null };
-    await act(() => root?.render(<StatusHarness family={family} />));
+    await rerender(<StatusHarness family={family} />);
     expect(container.querySelector('[aria-label="Working"]')).toBeNull();
     expect(container.querySelector('[aria-label="Waiting"]')?.textContent).toContain("Waiting");
     expect(container.querySelector('[aria-label^="Waiting for Fixture check."]')).toBeNull();
@@ -415,6 +395,9 @@ describe("visible status transitions", () => {
     expect(mocks.update).not.toHaveBeenCalled();
   });
   it("retains distinct Connecting and Completed labels when a queued run settles", async () => {
+    await using fixture = await setup();
+    const { container, rerender } = fixture;
+
     const family = familyFor(a, "Connection transition");
     family.thread = {
       ...family.thread,
@@ -427,10 +410,7 @@ describe("visible status transitions", () => {
         updatedAt: "2026-01-01T00:00:00Z",
       },
     };
-    container = document.createElement("div");
-    document.body.append(container);
-    root = createRoot(container);
-    await act(() => root?.render(<StatusHarness family={family} />));
+    await rerender(<StatusHarness family={family} />);
     expect(container.querySelector('[aria-label="Connecting"]')?.textContent).toContain(
       "Connecting",
     );
@@ -447,7 +427,7 @@ describe("visible status transitions", () => {
         assistantMessageId: null,
       },
     };
-    await act(() => root?.render(<StatusHarness family={family} />));
+    await rerender(<StatusHarness family={family} />);
     expect(container.querySelector('[aria-label="Connecting"]')).toBeNull();
     expect(container.querySelector('[aria-label="Completed"]')?.textContent).toContain("Completed");
     expect(container.querySelector(`[data-testid="thread-title-${a.threadId}"]`)?.textContent).toBe(
@@ -460,24 +440,23 @@ describe("row-local rename editor", () => {
   it.each([false, true])(
     "retains the editor draft while respecting another focus owner=%s on mode return",
     async (otherOwnsFocus) => {
+      await using fixture = await setup();
+      const { rerender, render, click, input, draft, key } = fixture;
+
       await render();
-      await act(() =>
-        root?.render(
-          <SidebarPresentation visible>
-            <Harness />
-          </SidebarPresentation>,
-        ),
+      await rerender(
+        <SidebarPresentation visible>
+          <Harness />
+        </SidebarPresentation>,
       );
       await click("Rename A");
       await draft("Mode switch draft");
       const editor = input()!;
       useSidebarModeStore.setState({ lastcodeHidden: true });
-      await act(() =>
-        root?.render(
-          <SidebarPresentation visible={false}>
-            <Harness />
-          </SidebarPresentation>,
-        ),
+      await rerender(
+        <SidebarPresentation visible={false}>
+          <Harness />
+        </SidebarPresentation>,
       );
       await act(() => editor.blur());
       expect(mocks.update).not.toHaveBeenCalled();
@@ -485,12 +464,10 @@ describe("row-local rename editor", () => {
       document.body.append(composer);
       if (otherOwnsFocus) composer.focus();
       useSidebarModeStore.setState({ lastcodeHidden: false });
-      await act(() =>
-        root?.render(
-          <SidebarPresentation visible>
-            <Harness />
-          </SidebarPresentation>,
-        ),
+      await rerender(
+        <SidebarPresentation visible>
+          <Harness />
+        </SidebarPresentation>,
       );
       expect(input()).toBe(editor);
       expect(editor.value).toBe("Mode switch draft");
@@ -502,11 +479,14 @@ describe("row-local rename editor", () => {
     },
   );
   it("keeps an inline draft mounted when PR presentation changes beside it", async () => {
+    await using fixture = await setup();
+    const { container, rerender, render, click, input, draft } = fixture;
+
     await render();
     await click("Rename A");
     await draft("Retained draft");
     const editor = input();
-    await act(() => root?.render(<Harness pr />));
+    await rerender(<Harness pr />);
     expect(input()).toBe(editor);
     expect(input()?.value).toBe("Retained draft");
     await act(() => container!.querySelector<HTMLAnchorElement>("a")!.click());
@@ -518,11 +498,14 @@ describe("row-local rename editor", () => {
     expect(mocks.navigate).toHaveBeenCalledWith(a);
     expect(input()).toBe(editor);
     expect(mocks.update).not.toHaveBeenCalled();
-    await act(() => root?.render(<Harness />));
+    await rerender(<Harness />);
     expect(container!.querySelector("a")).toBeNull();
     expect(input()?.value).toBe("Retained draft");
   });
   it("focuses/selects on opening, retains draft through refresh, and isolates double-click word selection", async () => {
+    await using fixture = await setup();
+    const { rerender, render, click, input, draft } = fixture;
+
     await render();
     await click("Rename A");
     expect(document.activeElement).toBe(input());
@@ -530,13 +513,16 @@ describe("row-local rename editor", () => {
     expect(input()?.selectionEnd).toBe("A title".length);
     await draft("Draft");
     mocks.compact = true;
-    await act(() => root?.render(<Harness revision={1} />));
+    await rerender(<Harness revision={1} />);
     expect(input()?.value).toBe("Draft");
     await act(() => input()!.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
     expect(mocks.rowDoubleClick).not.toHaveBeenCalled();
     expect(input()?.value).toBe("Draft");
   });
   it("commits Enter and subsequent blur/repeated Enter only once", async () => {
+    await using fixture = await setup();
+    const { render, click, input, draft, key } = fixture;
+
     const pending = deferred<AtomCommandResult<unknown, unknown>>();
     mocks.update.mockReturnValueOnce(pending.promise);
     await render();
@@ -557,6 +543,9 @@ describe("row-local rename editor", () => {
     expect(input()).toBeNull();
   });
   it("commits ordinary blur only once and cancels Escape without mutation", async () => {
+    await using fixture = await setup();
+    const { render, click, input, draft, key } = fixture;
+
     await render();
     await click("Rename A");
     await draft("Changed");
@@ -570,6 +559,9 @@ describe("row-local rename editor", () => {
     expect(mocks.update).toHaveBeenCalledOnce();
   });
   it("finishes empty/unchanged titles without a command and keeps thread-rename failure close semantics", async () => {
+    await using fixture = await setup();
+    const { render, click, input, draft, key } = fixture;
+
     await render();
     await click("Rename A");
     await draft("  ");
@@ -600,6 +592,9 @@ describe("row-local rename editor", () => {
     expect(mocks.toast).not.toHaveBeenCalled();
   });
   it("does not let completion from A close the newer B session with the same thread ID", async () => {
+    await using fixture = await setup();
+    const { render, click, input, draft, key } = fixture;
+
     const pending = deferred<AtomCommandResult<unknown, unknown>>();
     mocks.update.mockReturnValueOnce(pending.promise);
     await render();
@@ -615,6 +610,9 @@ describe("row-local rename editor", () => {
     expect(input()?.value).toBe("Draft B");
   });
   it("does not let an older A completion close a newly opened A session", async () => {
+    await using fixture = await setup();
+    const { render, click, input, draft, key } = fixture;
+
     const pending = deferred<AtomCommandResult<unknown, unknown>>();
     mocks.update.mockReturnValueOnce(pending.promise);
     await render();
@@ -630,6 +628,9 @@ describe("row-local rename editor", () => {
     expect(input()?.value).toBe("New session");
   });
   it("keeps archive and rename independent and compares archive cancellation against the exact row", async () => {
+    await using fixture = await setup();
+    const { container, render, click, input, draft } = fixture;
+
     await render();
     await click("Rename A");
     await draft("Draft");
@@ -643,6 +644,9 @@ describe("row-local rename editor", () => {
     expect(input()?.value).toBe("Draft");
   });
   it("does not open a rename session on a read-only destination", async () => {
+    await using fixture = await setup();
+    const { render, click, input } = fixture;
+
     await render();
     mocks.canOperate = false;
     await click("Rename A");

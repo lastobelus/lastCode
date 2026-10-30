@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
@@ -7,6 +8,7 @@ import {
   type TerminalMetadataStreamEvent,
   type TerminalOpenInput,
   type TerminalSummary,
+  ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   TerminalProviderInstanceNotFoundError,
@@ -38,8 +40,14 @@ import { expect, vi } from "vite-plus/test";
 import * as ProcessRunner from "../processRunner.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TerminalManager from "./Manager.ts";
-import { terminalOutputStream } from "./OutputProtocol.ts";
+import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
+import * as ProjectService from "../project/ProjectService.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
 import * as PtyAdapter from "@t3tools/shared/PtyAdapter";
+import * as WorkspaceAcquisitionTestkit from "../workspace/WorkspaceAcquisition.testkit.ts";
+import * as WorkspaceAcquisition from "../workspace/WorkspaceAcquisition.ts";
+import { registerWorkspaceLeaseRoot, withWorkspaceLease } from "../workspace/workspaceLease.ts";
 
 vi.mock("effect/SynchronizedRef", async (importOriginal) => {
   const original = await importOriginal<typeof SynchronizedRef>();
@@ -231,7 +239,25 @@ const historyLogPath = (logsDir: string, threadId = "thread-1") =>
     Effect.map(({ join }) => join(logsDir, `terminal_${Base64Url.encode(threadId)}.log`)),
   );
 
+const multiTerminalHistoryLogPath = (
+  logsDir: string,
+  threadId = "thread-1",
+  terminalId = DEFAULT_TERMINAL_ID,
+) =>
+  Effect.service(Path.Path).pipe(
+    Effect.map(({ join }) => {
+      const threadPart = `terminal_${Base64Url.encode(threadId)}`;
+      return join(
+        logsDir,
+        terminalId === DEFAULT_TERMINAL_ID
+          ? `${threadPart}.log`
+          : `${threadPart}_${Base64Url.encode(terminalId)}.log`,
+      );
+    }),
+  );
+
 interface CreateManagerOptions {
+  workspaceAcquisition?: WorkspaceAcquisition.WorkspaceAcquisition["Service"]["acquire"];
   logsDir?: string;
   shellResolver?: () => string;
   env?: NodeJS.ProcessEnv;
@@ -327,7 +353,13 @@ const createManager = (
         ...(options.registerTerminalProcesses === undefined
           ? {}
           : { registerTerminalProcesses: options.registerTerminalProcesses }),
-      });
+      }).pipe(
+        Effect.provide(
+          options.workspaceAcquisition === undefined
+            ? WorkspaceAcquisitionTestkit.layer
+            : WorkspaceAcquisitionTestkit.layerWith(options.workspaceAcquisition),
+        ),
+      );
       const eventsRef = yield* Ref.make<ReadonlyArray<TerminalEvent>>([]);
       const unsubscribe = yield* manager.subscribe((event) =>
         Ref.update(eventsRef, (events) => [...events, event]),
@@ -437,6 +469,196 @@ it.layer(
   Layer.merge(NodeServices.layer, ProcessRunner.layer.pipe(Layer.provide(NodeServices.layer))),
   { excludeTestServices: true },
 )("TerminalManager", (it) => {
+  it.effect("opens a restored checkout using its new cwd and Action environment", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const restored = yield* fs.makeTempDirectoryScoped({ prefix: "terminal-restored-" });
+      yield* fs.makeDirectory(path.join(restored, "nested"));
+      const original = path.join(restored, "absent-original");
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        workspaceAcquisition: () =>
+          Effect.succeed({ path: restored, branch: "recovered", restored: true }),
+      });
+      const terminal = yield* manager.open(
+        openInput({
+          cwd: path.join(original, "nested"),
+          worktreePath: original,
+          env: { T3CODE_WORKTREE_PATH: original },
+        }),
+      );
+      assert.equal(terminal.cwd, path.join(restored, "nested"));
+      assert.equal(ptyAdapter.spawnInputs[0]?.cwd, path.join(restored, "nested"));
+      assert.equal(ptyAdapter.spawnInputs[0]?.env?.T3CODE_WORKTREE_PATH, restored);
+    }),
+  );
+
+  it.effect("starts no shell when saved-workspace acquisition blocks open or reopen", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        workspaceAcquisition: () =>
+          Effect.fail(
+            new WorkspaceAcquisition.WorkspaceUnavailableError({ reason: "snapshot-unavailable" }),
+          ),
+      });
+      for (const operation of [
+        manager.open(openInput()),
+        manager.close(openInput()).pipe(Effect.andThen(manager.open(openInput()))),
+      ])
+        assert.equal((yield* Effect.result(operation))._tag, "Failure");
+      assert.deepEqual(ptyAdapter.spawnInputs, []);
+    }),
+  );
+
+  it.effect.each(
+    (["open", "reopen", "attach"] as const).flatMap((operation) =>
+      [false, true].map((restored) => ({ operation, restored })),
+    ),
+  )(
+    "completes setup and concurrent terminal $operation (restored: $restored) without reversing workspace/thread locks",
+    ({ operation, restored }) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const original = yield* fs.makeTempDirectoryScoped({ prefix: "terminal-original-" });
+        const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "terminal-restored-" });
+        const { manager, ptyAdapter } = yield* createManager(5, {
+          workspaceAcquisition: (input) =>
+            Effect.succeed({
+              path: input.path === original ? baseDir : input.path,
+              branch: null,
+              restored: input.path === original,
+            }),
+        });
+        const scope = yield* Scope.Scope;
+        yield* registerWorkspaceLeaseRoot(baseDir);
+        yield* registerWorkspaceLeaseRoot(original);
+        const competing =
+          yield* Deferred.make<Fiber.Fiber<unknown, TerminalManager.TerminalError>>();
+        let launched = false;
+        const competingPath = restored ? original : baseDir;
+        const input = openInput({ cwd: competingPath, worktreePath: competingPath });
+        const runnerLayer = ProjectSetupScriptRunner.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              Layer.succeed(TerminalManager.TerminalManager, {
+                ...manager,
+                subscribe: (listener, registerCleanup) =>
+                  Effect.gen(function* () {
+                    if (!launched) {
+                      launched = true;
+                      const launch: Effect.Effect<unknown, TerminalManager.TerminalError> =
+                        operation === "open"
+                          ? manager.open(input)
+                          : operation === "reopen"
+                            ? manager.close(input).pipe(Effect.andThen(manager.open(input)))
+                            : manager.attachStream(input, () => Effect.void);
+                      const fiber = yield* launch.pipe(
+                        Effect.provideService(Scheduler.PreventSchedulerYield, true),
+                        Effect.forkIn(scope, { startImmediately: true }),
+                      );
+                      yield* Deferred.succeed(competing, fiber);
+                    }
+                    return yield* manager.subscribe(listener, registerCleanup);
+                  }),
+              }),
+              Layer.mock(ProjectService.ProjectService)({}),
+              Layer.mock(ProjectionStore.ProjectionStoreV2)({
+                getThreadShell: () => Effect.succeed(null),
+              }),
+              Layer.mock(UpdateDrainAdmission.UpdateDrainAdmission)({
+                admit: (_kind, effect) => effect,
+              }),
+              ServerSettings.layerTest(),
+              NodeCrypto.layer,
+              WorkspaceAcquisitionTestkit.layer,
+            ),
+          ),
+        );
+        yield* Effect.gen(function* () {
+          const runner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
+          const result = yield* runner.runForThread({
+            threadId: input.threadId,
+            worktreePath: baseDir,
+            project: {
+              id: ProjectId.make("setup-lock-order"),
+              workspaceRoot: baseDir,
+              scripts: [
+                {
+                  id: "setup",
+                  name: "Setup",
+                  command: "prepare-worktree",
+                  icon: "configure",
+                  runOnWorktreeCreate: true,
+                },
+              ],
+            },
+          });
+          expect(result.status).toBe("started");
+          const joined = yield* Fiber.join(yield* Deferred.await(competing));
+          if (typeof joined === "function") joined();
+          expect(ptyAdapter.spawnInputs).toHaveLength(2);
+          expect(ptyAdapter.spawnInputs.map(({ cwd }) => cwd)).toEqual([baseDir, baseDir]);
+        }).pipe(Effect.provide(runnerLayer));
+      }),
+  );
+
+  it.effect.each(["open", "reopen", "attach"] as const)(
+    "allows close and cancellation while terminal %s waits for a workspace lease",
+    (operation) =>
+      Effect.gen(function* () {
+        const { manager, ptyAdapter, baseDir } = yield* createManager();
+        yield* registerWorkspaceLeaseRoot(baseDir);
+        const input = openInput({ cwd: baseDir, worktreePath: baseDir });
+        yield* manager.open(input);
+        ptyAdapter.processes[0]!.exitOnKill = "SIGTERM";
+        yield* withWorkspaceLease(
+          baseDir,
+          Effect.gen(function* () {
+            const next = { ...input, terminalId: "competing" };
+            const launch: Effect.Effect<unknown, TerminalManager.TerminalError> =
+              operation === "open"
+                ? manager.open(next)
+                : operation === "reopen"
+                  ? manager.close(next).pipe(Effect.andThen(manager.open(next)))
+                  : manager.attachStream(next, () => Effect.void);
+            const competing = yield* launch.pipe(
+              Effect.provideService(Scheduler.PreventSchedulerYield, true),
+              Effect.forkScoped({ startImmediately: true }),
+            );
+            yield* manager.close(input);
+            yield* Fiber.interrupt(competing);
+            expect(Exit.isFailure(yield* Fiber.await(competing))).toBe(true);
+          }),
+        );
+        expect(ptyAdapter.spawnInputs).toHaveLength(1);
+        expect(ptyAdapter.processes[0]!.killed).toBe(true);
+      }),
+  );
+
+  it.effect("attaches to a running shell without reacquiring an unavailable workspace", () =>
+    Effect.gen(function* () {
+      let unavailable = false;
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        workspaceAcquisition: (input) =>
+          unavailable
+            ? Effect.fail(new WorkspaceAcquisition.WorkspaceUnavailableError({ reason: "busy" }))
+            : Effect.succeed({ path: input.path, branch: null, restored: false }),
+      });
+      const input = openInput();
+      yield* manager.open(input);
+      unavailable = true;
+      const events: TerminalAttachStreamEvent[] = [];
+      const stop = yield* manager.attachStream(input, (event) =>
+        Effect.sync(() => {
+          events.push(event);
+        }),
+      );
+      stop();
+      expect(events).toMatchObject([{ type: "snapshot", snapshot: { status: "running" } }]);
+      expect(ptyAdapter.spawnInputs).toHaveLength(1);
+    }),
+  );
+
   it.effect("spawns lazily and reuses running terminal per thread", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager();
@@ -518,8 +740,10 @@ it.layer(
         expect(ptyAdapter.spawnInputs).toHaveLength(2);
         const named = yield* manager.open(openInput({ terminalLinkProfileName: "Work account" }));
         assert.equal(named.terminalLinkProfileName, "Work account");
-        const restarted = yield* manager.restart({ ...openInput(), cols: 80, rows: 24 });
-        assert.notProperty(restarted, "terminalLinkProfileName");
+        const reopened = yield* manager.open(
+          openInput({ cols: 80, rows: 24, terminalLinkProfileName: null }),
+        );
+        assert.notProperty(reopened, "terminalLinkProfileName");
       }),
   );
 
@@ -916,23 +1140,22 @@ it.layer(
         openInput({ terminalId: "term-client-a", terminalLinkProfileName: "Work account" }),
         openInput({ terminalId: "term-client-b", terminalLinkProfileName: "Other account" }),
       ];
-      const opened = yield* Effect.all(
-        inputs.map((input) => manager.open(input)),
-        { concurrency: "unbounded" },
-      );
+      const opened = yield* Effect.forEach(inputs, (input) => manager.open(input), {
+        concurrency: "unbounded",
+      });
       expect(new Set(opened.map((entry) => entry.terminalId)).size).toBe(2);
       expect(opened.map((entry) => entry.terminalLinkProfileName)).toEqual([
         "Work account",
         "Other account",
       ]);
-      yield* Effect.all(
-        inputs.map((input, index) =>
+      yield* Effect.forEach(
+        inputs,
+        (input, index) =>
           manager.write({
             threadId: input.threadId,
             terminalId: input.terminalId,
             data: `echo client-${index}\r`,
           }),
-        ),
         { concurrency: "unbounded" },
       );
       expect(ptyAdapter.processes[0]?.writes).toContain("echo client-0\r");
@@ -1307,8 +1530,10 @@ it.layer(
         const original = ptyAdapter.processes[0]!;
         original.killFailure = new Error("signal failure");
         ptyAdapter.spawnFailures.push(new Error("replacement spawn failed"));
-        const failedRestart = yield* manager.restart(openInput());
-        expect(failedRestart.status).toBe("error");
+        const failedReplacement = yield* manager.open(
+          openInput({ env: { TERMINAL_CONTEXT: "replacement" } }),
+        );
+        expect(failedReplacement.status).toBe("error");
         expect((yield* manager.waitForThreadShutdown("thread-1").pipe(Effect.result))._tag).toBe(
           "Failure",
         );
@@ -1328,7 +1553,10 @@ it.layer(
         expect(yield* manager.metadata).toEqual(retainedMetadata);
         expect(original.killSignals).toEqual(["SIGTERM"]);
 
-        const replacement = yield* manager.restart(openInput());
+        const replacement = yield* manager.open(
+          openInput({ env: { TERMINAL_CONTEXT: "replacement" } }),
+        );
+        const { shellFamily: _shellFamily, ...replacementSnapshot } = replacement;
         const attachedEvents: TerminalAttachStreamEvent[] = [];
         const unsubscribe = yield* manager.attachStream(
           { ...openInput(), restartIfNotRunning: true },
@@ -1340,7 +1568,7 @@ it.layer(
         yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
         expect(ptyAdapter.spawnInputs).toHaveLength(3);
         expect(attachedEvents).toEqual([
-          expect.objectContaining({ type: "snapshot", snapshot: replacement }),
+          expect.objectContaining({ type: "snapshot", snapshot: replacementSnapshot }),
         ]);
         expect(original.killSignals).toEqual(["SIGTERM"]);
         const unsubscribeMetadata = yield* manager.subscribeMetadata((event) =>
@@ -1843,9 +2071,9 @@ it.layer(
   );
 
   it.effect.each([
-    { source: "native", replacement: "restart" },
-    { source: "fallback", replacement: "restart" },
-    { source: "custom", replacement: "restart" },
+    { source: "native", replacement: "context-changing open" },
+    { source: "fallback", replacement: "context-changing open" },
+    { source: "custom", replacement: "context-changing open" },
     { source: "native", replacement: "close and reopen" },
     { source: "fallback", replacement: "close and reopen" },
     { source: "custom", replacement: "close and reopen" },
@@ -1875,7 +2103,7 @@ it.layer(
         });
         const fs = yield* FileSystem.FileSystem;
         const cwdStat = yield* fs.stat(process.cwd());
-        // Restart/reopen should suspend only on the held inspection, rather
+        // Replacement should suspend only on the held inspection, rather
         // than real filesystem promises outside TestClock's scheduler.
         const replacementFileSystem = {
           ...fs,
@@ -1906,8 +2134,8 @@ it.layer(
         const closing = yield* manager.closeIdle(terminal).pipe(Effect.forkScoped);
         yield* Deferred.await(inspectionEntered);
         const replacing = yield* (
-          replacement === "restart"
-            ? manager.restart(openInput())
+          replacement === "context-changing open"
+            ? manager.open(openInput({ env: { TERMINAL_CONTEXT: "replacement" } }))
             : manager.close(terminal).pipe(Effect.andThen(manager.open(terminal)))
         ).pipe(Effect.forkScoped({ startImmediately: true }));
         yield* TestClock.adjust("100 millis");
@@ -2115,8 +2343,8 @@ it.layer(
   it.effect.each([
     { source: "native", boundary: "open" },
     { source: "fallback", boundary: "open" },
-    { source: "native", boundary: "restart" },
-    { source: "fallback", boundary: "restart" },
+    { source: "native", boundary: "close and reopen" },
+    { source: "fallback", boundary: "close and reopen" },
   ] as const)(
     "captures the actual wrapper shell after $boundary during an older $source snapshot",
     ({ source, boundary }) =>
@@ -2151,7 +2379,7 @@ it.layer(
         yield* manager.open(openInput(exec));
         yield* manager.write({ ...exec, data: "exec command\r" });
         const execProcess = ptyAdapter.processes.at(-1)!;
-        if (boundary === "restart") {
+        if (boundary === "close and reopen") {
           yield* manager.open(openInput(idle));
           ptyAdapter.processes.at(-1)!.exitOnKill = "SIGTERM";
         }
@@ -2159,8 +2387,10 @@ it.layer(
         const checkingHolder = yield* manager.closeIdle(holder).pipe(Effect.forkScoped);
         yield* Deferred.await(staleSnapshotStarted);
 
-        if (boundary === "restart") yield* manager.restart(openInput(idle));
-        else yield* manager.open(openInput(idle));
+        if (boundary === "close and reopen") {
+          yield* manager.close(idle);
+          yield* manager.open(openInput(idle));
+        } else yield* manager.open(openInput(idle));
         const idleProcess = ptyAdapter.processes.at(-1)!;
         idleProcess.exitOnKill = "SIGTERM";
         const writing = yield* manager.write({ ...idle, data: "noop\r" }).pipe(Effect.forkScoped);
@@ -3462,12 +3692,14 @@ it.layer(
         yield* write(laterTerminal);
         const callsAfterLaterTerminal = snapshotCalls;
         ptyAdapter.processes[0]!.exitOnKill = "SIGTERM";
-        yield* manager.restart(openInput(terminals[0]!));
+        yield* manager.open(
+          openInput({ ...terminals[0]!, env: { TERMINAL_CONTEXT: "replacement" } }),
+        );
         yield* write(terminals[0]!);
-        const callsAfterRestart = snapshotCalls;
+        const callsAfterReplacement = snapshotCalls;
         yield* exitSnapshotTestProcesses(manager, ptyAdapter, [...terminals, laterTerminal]);
         expect(callsAfterLaterTerminal).toBe(grouping === "threads" ? 7 : 9);
-        expect(callsAfterRestart).toBe(grouping === "threads" ? 10 : 12);
+        expect(callsAfterReplacement).toBe(grouping === "threads" ? 10 : 12);
       }).pipe(Effect.provide(TestClock.layer())),
   );
 
@@ -4668,7 +4900,7 @@ it.layer(
     }),
   );
 
-  it.effect.each(["restart", "context-changing open"] as const)(
+  it.effect.each(["close and reopen", "context-changing open"] as const)(
     "rejects queued input from the original process after %s",
     (operation) =>
       Effect.gen(function* () {
@@ -4742,8 +4974,8 @@ it.layer(
         // Hold later writers' Deferred resumptions until the replacement owns
         // the thread lock; lock wakeups need not outrun newly runnable input.
         const replacing = yield* (
-          operation === "restart"
-            ? manager.restart(openInput())
+          operation === "close and reopen"
+            ? manager.close(openInput()).pipe(Effect.andThen(manager.open(openInput())))
             : manager.open(openInput({ env: { TERMINAL_CONTEXT: "replacement" } }))
         ).pipe(Effect.forkScoped({ startImmediately: true }));
         yield* Effect.addFinalizer(() => Effect.sync(resumeInput));
@@ -4876,7 +5108,7 @@ it.layer(
     }),
   );
 
-  it.effect.each(["close", "restart"] as const)(
+  it.effect.each(["close", "context-changing open"] as const)(
     "freezes wrapper identity while first input and %s overlap",
     (operation) =>
       Effect.gen(function* () {
@@ -4932,7 +5164,7 @@ it.layer(
           Effect.andThen(
             operation === "close"
               ? manager.closeIdle({ threadId: "thread-1" })
-              : manager.restart(openInput()),
+              : manager.open(openInput({ env: { TERMINAL_CONTEXT: "replacement" } })),
           ),
           Effect.forkScoped,
         );
@@ -4948,9 +5180,9 @@ it.layer(
         expect(process.writes).toEqual(
           operation === "close" ? ["exec node\r", "second input\r"] : ["exec node\r"],
         );
-        expect(process.killed).toBe(operation === "restart");
-        if (operation === "restart") {
-          // Restart must capture the new shell, rather than retaining old identity.
+        expect(process.killed).toBe(operation === "context-changing open");
+        if (operation === "context-changing open") {
+          // Replacement must capture the new shell, rather than retaining old identity.
           commandName = "zsh";
           yield* manager.write({
             threadId: "thread-1",
@@ -5650,6 +5882,184 @@ it.layer(
       }),
   );
 
+  it.effect(
+    "setup proceeds with a retained background writer after the foreground startup prompt returns",
+    () =>
+      Effect.gen(function* () {
+        const foregroundStartup = yield* Ref.make<"separate" | "shared" | "background">("separate");
+        const owned = yield* Ref.make<ReadonlyArray<number>>([]);
+        const processRunner: ProcessRunner.ProcessRunner["Service"] = {
+          run: (input) =>
+            Ref.get(foregroundStartup).pipe(
+              Effect.map((stage) => {
+                const foreground = stage !== "background";
+                const group = stage === "separate" ? 9002 : 9000;
+                expect(input.args).toEqual(["-eo", "pid=,pgid=,tpgid=,comm="]);
+                return {
+                  stdout: `9000 9000 ${group} bash\n9001 9001 ${group} background-worker\n${foreground ? `9002 ${group} ${group} installer\n` : ""}`,
+                  stderr: "",
+                  code: ChildProcessSpawner.ExitCode(0),
+                  timedOut: false,
+                  stdoutTruncated: false,
+                  stderrTruncated: false,
+                  stdoutInvalidUtf8: false,
+                  stderrInvalidUtf8: false,
+                };
+              }),
+            ),
+        };
+        const { manager, ptyAdapter, baseDir } = yield* createManager(5, {
+          shellResolver: () => "/bin/bash",
+          processTable: Ref.get(foregroundStartup).pipe(
+            Effect.map((stage) => [
+              { pid: 9000, ppid: 1, name: "bash" },
+              { pid: 9001, ppid: 9000, name: "background-worker" },
+              ...(stage !== "background" ? [{ pid: 9002, ppid: 9000, name: "installer" }] : []),
+            ]),
+          ),
+          registerTerminalProcesses: ({ processIds }) => Ref.set(owned, processIds),
+        }).pipe(Effect.provideService(ProcessRunner.ProcessRunner, processRunner));
+        const runnerLayer = ProjectSetupScriptRunner.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              Layer.succeed(TerminalManager.TerminalManager, manager),
+              Layer.mock(ProjectService.ProjectService)({}),
+              Layer.mock(ProjectionStore.ProjectionStoreV2)({
+                getThreadShell: () => Effect.succeed(null),
+              }),
+              Layer.mock(UpdateDrainAdmission.UpdateDrainAdmission)({
+                admit: (_kind, effect) => effect,
+              }),
+              ServerSettings.layerTest(),
+              NodeCrypto.layer,
+              WorkspaceAcquisitionTestkit.layer,
+            ),
+          ),
+        );
+        yield* Effect.gen(function* () {
+          const runner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
+          const result = yield* runner.runForThread({
+            threadId: "thread-1",
+            worktreePath: baseDir,
+            observeCompletion: {},
+            project: {
+              id: ProjectId.make("setup-background"),
+              workspaceRoot: baseDir,
+              scripts: [
+                {
+                  id: "setup",
+                  name: "Setup",
+                  command: "prepare-worktree",
+                  icon: "configure",
+                  runOnWorktreeCreate: true,
+                },
+              ],
+            },
+          });
+          if (result.status !== "started" || !result.completion)
+            return yield* Effect.die("missing setup completion");
+          const process = ptyAdapter.processes[0]!;
+          process.exitOnKill = "SIGTERM";
+          const backgroundOutput = Effect.forEach(
+            ["background one\r\n", "background two\r\n", "background three\r\n"],
+            (data) =>
+              Effect.sync(() => process.emitData(data)).pipe(
+                Effect.andThen(TestClock.adjust("1 second")),
+              ),
+            { discard: true },
+          );
+          yield* manager.refreshMetadata;
+          yield* backgroundOutput;
+          expect(process.writes).toEqual([]);
+          yield* Ref.set(foregroundStartup, "shared");
+          yield* backgroundOutput;
+          expect(process.writes).toEqual([]);
+          yield* Ref.set(foregroundStartup, "background");
+          expect((yield* manager.metadata)[0]?.hasRunningSubprocess).toBe(true);
+          yield* backgroundOutput;
+          expect(process.writes).toHaveLength(1);
+          expect(yield* Ref.get(owned)).toContain(9001);
+          const sentinel = /__T3_SETUP_DONE___[a-f0-9]+:/u.exec(process.writes[0]!)?.[0];
+          expect(sentinel).toBeDefined();
+          process.emitData(`\r\n${sentinel}0\r\n$ `);
+          expect((yield* result.completion).exitCode).toBe(0);
+          expect(process.killed).toBe(false);
+          expect((yield* manager.metadata)[0]?.hasRunningSubprocess).toBe(true);
+          expect(yield* Ref.get(owned)).toContain(9001);
+        }).pipe(Effect.provide(runnerLayer));
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            TestClock.layer(),
+            layerWithHostPlatform("linux"),
+            Layer.succeed(HostProcess.Environment, { SHELL: "/bin/bash" }),
+          ),
+        ),
+      ),
+  );
+
+  it.effect("reads foreground activity while a previous shell is still terminating", () =>
+    Effect.gen(function* () {
+      const busy = yield* Ref.make(false);
+      const ptyAdapter = new FakePtyAdapter();
+      const processRunner: ProcessRunner.ProcessRunner["Service"] = {
+        run: () =>
+          Ref.get(busy).pipe(
+            Effect.map((foreground) => {
+              const current = ptyAdapter.processes.at(-1)!;
+              const group = foreground ? 9100 : current.pid;
+              return {
+                stdout: `${current.pid} ${current.pid} ${group} zsh\n${foreground ? `9100 9100 9100 tool\n` : ""}`,
+                stderr: "",
+                code: ChildProcessSpawner.ExitCode(0),
+                timedOut: false,
+                stdoutTruncated: false,
+                stderrTruncated: false,
+                stdoutInvalidUtf8: false,
+                stderrInvalidUtf8: false,
+              };
+            }),
+          ),
+      };
+      const { manager, baseDir } = yield* createManager(5, {
+        ptyAdapter,
+        subprocessInspector: () =>
+          Ref.get(busy).pipe(
+            Effect.map((hasRunningSubprocess) => ({
+              hasRunningSubprocess,
+              childCommand: hasRunningSubprocess ? "tool" : null,
+              processIds: [],
+            })),
+          ),
+      }).pipe(Effect.provideService(ProcessRunner.ProcessRunner, processRunner));
+      const input = openInput();
+      expect(yield* manager.hasForegroundSubprocess(input)).toBe(false);
+      yield* manager.open(input);
+      const previous = ptyAdapter.processes[0]!;
+      previous.exitOnKill = undefined;
+      const replacement = yield* manager.open({ ...input, cwd: baseDir, worktreePath: baseDir });
+      expect(replacement.pid).not.toBe(previous.pid);
+      expect((yield* manager.metadata)[0]).toMatchObject({
+        pid: previous.pid,
+        hasRunningSubprocess: true,
+      });
+      expect(yield* manager.hasForegroundSubprocess(input)).toBe(false);
+      yield* Ref.set(busy, true);
+      yield* manager.refreshMetadata;
+      expect(yield* manager.hasForegroundSubprocess(input)).toBe(true);
+      const removed = yield* Deferred.make<void>();
+      const unsubscribe = yield* manager.subscribeMetadata((event) =>
+        event.type === "upsert" && event.terminal.pid === replacement.pid
+          ? Deferred.succeed(removed, undefined).pipe(Effect.asVoid)
+          : Effect.void,
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+      previous.emitExit({ exitCode: 0, signal: 9 });
+      yield* Deferred.await(removed);
+      expect((yield* manager.metadata)[0]?.pid).toBe(replacement.pid);
+    }),
+  );
+
   it.effect("keeps a closing terminal in blocker metadata until kill escalation finishes", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager(5, { processKillGraceMs: 10 });
@@ -5733,12 +6143,12 @@ it.layer(
       const opening = yield* manager
         .open(openInput({ terminalId: "new-terminal" }))
         .pipe(Effect.forkScoped);
-      const restarting = yield* manager.restart(openInput()).pipe(Effect.forkScoped);
+      const reopening = yield* manager.open(openInput()).pipe(Effect.forkScoped);
       yield* manager.open(openInput({ threadId: "thread-2" }));
 
       expect(stopping.pollUnsafe()).toBeUndefined();
       expect(opening.pollUnsafe()).toBeUndefined();
-      expect(restarting.pollUnsafe()).toBeUndefined();
+      expect(reopening.pollUnsafe()).toBeUndefined();
       expect(process.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
       expect(ptyAdapter.processes).toHaveLength(2);
       expect(ptyAdapter.processes[1]?.killSignals).toEqual([]);
@@ -5752,7 +6162,7 @@ it.layer(
       process.emitExit({ exitCode: 0, signal: 9 });
       yield* Fiber.join(stopping);
       yield* Fiber.join(opening);
-      yield* Fiber.join(restarting);
+      yield* Fiber.join(reopening);
       expect(process.exitListenerCount).toBe(0);
       expect(ptyAdapter.processes[1]?.killSignals).toEqual([]);
       yield* manager.shutdownThread("thread-1");
@@ -5998,7 +6408,7 @@ it.layer(
     }).pipe(Effect.provide(TestClock.layer())),
   );
 
-  it.effect("keeps opens and restarts outside the selected thread's shutdown interval", () =>
+  it.effect("keeps opens and reopens outside the selected thread's shutdown interval", () =>
     Effect.gen(function* () {
       const cleanupStarted = yield* Deferred.make<void>();
       const finishCleanup = yield* Deferred.make<void>();
@@ -6018,12 +6428,12 @@ it.layer(
       const opening = yield* manager
         .open(openInput({ terminalId: "new-terminal" }))
         .pipe(Effect.forkScoped);
-      const restarting = yield* manager.restart(openInput()).pipe(Effect.forkScoped);
+      const reopening = yield* manager.open(openInput()).pipe(Effect.forkScoped);
 
       yield* manager.open(openInput({ threadId: "thread-2" }));
       expect(stopping.pollUnsafe()).toBeUndefined();
       expect(opening.pollUnsafe()).toBeUndefined();
-      expect(restarting.pollUnsafe()).toBeUndefined();
+      expect(reopening.pollUnsafe()).toBeUndefined();
       expect(ptyAdapter.processes).toHaveLength(2);
       expect(ptyAdapter.processes[0]?.killSignals).toEqual([]);
       expect(ptyAdapter.processes[1]?.killSignals).toEqual([]);
@@ -6032,7 +6442,7 @@ it.layer(
       yield* Deferred.succeed(finishCleanup, undefined);
       yield* Fiber.join(stopping);
       yield* Fiber.join(opening);
-      yield* Fiber.join(restarting);
+      yield* Fiber.join(reopening);
       expect(ptyAdapter.processes[0]?.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
       expect(ptyAdapter.processes[1]?.killSignals).toEqual([]);
       expect(ptyAdapter.processes).toHaveLength(4);
@@ -6334,15 +6744,24 @@ it.layer(
   it.effect("binds action terminals to the server settings path over shell overrides", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager(5, {
-        env: { T3CODE_LOCAL_CI_SETTINGS_PATH: "/inherited/settings.json" },
+        env: {
+          T3CODE_LOCAL_CI_SETTINGS_PATH: "/inherited/settings.json",
+          T3CODE_PR_WATCH_SETTINGS_PATH: "/inherited/watch-settings.json",
+        },
         localCiSettingsPath: "/server/custom-state/settings.json",
       });
       yield* manager.open(
         openInput({
-          env: { T3CODE_LOCAL_CI_SETTINGS_PATH: "/client/settings.json" },
+          env: {
+            T3CODE_LOCAL_CI_SETTINGS_PATH: "/client/settings.json",
+            T3CODE_PR_WATCH_SETTINGS_PATH: "/client/watch-settings.json",
+          },
         }),
       );
       expect(ptyAdapter.spawnInputs[0]?.env.T3CODE_LOCAL_CI_SETTINGS_PATH).toBe(
+        "/server/custom-state/settings.json",
+      );
+      expect(ptyAdapter.spawnInputs[0]?.env.T3CODE_PR_WATCH_SETTINGS_PATH).toBe(
         "/server/custom-state/settings.json",
       );
     }),
@@ -6591,10 +7010,7 @@ it.layer(
       };
       ptyAdapter.gate = gate;
       const consumer = yield* Stream.runDrain(
-        terminalOutputStream(
-          (listener, registerCleanup) => manager.attachStream(input, listener, registerCleanup),
-          (listener, registerCleanup) => manager.resyncStream(input, listener, registerCleanup),
-        ),
+        manager.attachOutputStream(input, "startup-viewer"),
       ).pipe(Effect.forkChild({ startImmediately: true }));
       yield* Deferred.await(gate.spawning);
       const cancelled = yield* Fiber.interrupt(consumer).pipe(
@@ -6621,14 +7037,9 @@ it.layer(
     Effect.gen(function* () {
       const ptyAdapter = new GatedPtyAdapter();
       const historyByteLimit = 64 * 1024;
-      const { manager } = yield* createManager(5, { ptyAdapter, historyByteLimit });
+      const { manager, baseDir } = yield* createManager(5, { ptyAdapter, historyByteLimit });
       const input = openInput();
-      const pull = yield* Stream.toPull(
-        terminalOutputStream(
-          (listener, registerCleanup) => manager.attachStream(input, listener, registerCleanup),
-          (listener, registerCleanup) => manager.resyncStream(input, listener, registerCleanup),
-        ),
-      );
+      const pull = yield* Stream.toPull(manager.attachOutputStream(input, "stalled-viewer"));
       expect(yield* pull).toMatchObject([{ type: "snapshot", snapshot: { history: "" } }]);
       const process = ptyAdapter.processes[0]!;
       yield* publishPastOutputBudget(manager, process);
@@ -6663,14 +7074,14 @@ it.layer(
       expect(yield* pull).toMatchObject([{ type: "output", data: "after reopen\n" }]);
 
       yield* publishPastOutputBudget(manager, reopenedProcess);
-      // Queue close/reopen ahead of recovery while another spawn owns the thread lock.
+      // Another workspace's spawn holds the thread lock without blocking reopen's workspace lease.
       const gate = {
         spawning: yield* Deferred.make<void>(),
         release: yield* Deferred.make<void>(),
       };
       ptyAdapter.gate = gate;
       const holder = yield* manager
-        .open(openInput({ terminalId: "other" }))
+        .open(openInput({ terminalId: "other", cwd: baseDir, worktreePath: baseDir }))
         .pipe(Effect.forkChild({ startImmediately: true }));
       yield* Deferred.await(gate.spawning);
       const closed = yield* manager.close(input).pipe(Effect.forkChild({ startImmediately: true }));

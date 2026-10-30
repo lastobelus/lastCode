@@ -3,7 +3,11 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
+import {
+  AuthFilesystemReadScope,
+  type EnvironmentId,
+  type ScopedThreadRef,
+} from "@t3tools/contracts";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 import { promptLinkAppPath } from "@t3tools/shared/promptLinks";
 import { readPairingAppLink, resolveRemotePairingTarget } from "@t3tools/shared/remote";
@@ -30,6 +34,7 @@ import { assetEnvironment } from "../../state/assets";
 import { useEnvironmentHttpBaseUrl, usePrimaryEnvironment } from "../../state/environments";
 import { previewEnvironment } from "../../state/preview";
 import { allReachableShellsLiveAtom } from "../../state/shell";
+import { readEnvironmentScope } from "../../state/session";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useAtomQueryRunner } from "../../state/use-atom-query-runner";
 import { stackedThreadToast, toastManager } from "../ui/toast";
@@ -195,6 +200,7 @@ export function DesktopWebLinkCoordinator() {
             threadRef,
             filePath: decodeURIComponent(new URL(url).pathname),
             workspaceRoot: undefined,
+            canReadFiles: readEnvironmentScope(threadRef.environmentId, AuthFilesystemReadScope),
             httpBaseUrl,
             createAssetUrl,
             openPreview,

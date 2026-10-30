@@ -38,6 +38,7 @@ import {
   PullRequestListFailedError,
   PullRequestNotOpenError,
   type PullRequestTargetInput,
+  type WatchPullRequestInput,
   PullRequestWatchFailedError,
   PullRequestWatchFromSubagentError,
   PullRequestThreadNotFoundError,
@@ -261,7 +262,7 @@ const make = Effect.gen(function* () {
         : Effect.fail(new Failure({ cause }));
 
   const setWatching = Effect.fn("PullRequestsToolkit.setWatching")(function* (
-    input: PullRequestTargetInput,
+    input: WatchPullRequestInput,
     watching: boolean,
   ) {
     const thread = yield* requireThread(PullRequestWatchFailedError, input.threadId);
@@ -271,7 +272,11 @@ const make = Effect.gen(function* () {
       threadPullRequestsOf(shell).find(
         (link) => link.source !== "stack-dismissed" && threadPullRequestKeysEqual(link, target),
       );
-    if (watching && thread.lineage.relationshipToParent === "subagent") {
+    if (
+      watching &&
+      thread.lineage.relationshipToParent === "subagent" &&
+      thread.lineage.independent !== true
+    ) {
       return yield* new PullRequestWatchFromSubagentError();
     }
     const before = watchedLink(thread);
@@ -287,6 +292,9 @@ const make = Effect.gen(function* () {
         repository: target.repository,
         number: target.number,
         watching,
+        ...(watching && input.quietTimeoutMinutes !== undefined
+          ? { quietTimeoutMinutes: input.quietTimeoutMinutes }
+          : {}),
         ...(watching ? { link: { url: target.url, source: "agent" as const } } : {}),
       })
       .pipe(Effect.catchCause(dispatchFailure(PullRequestWatchFailedError)));

@@ -23,6 +23,7 @@ import type { EnvironmentThreadSearchMatch } from "@t3tools/client-runtime/state
 import {
   formatWorkingDurationLabel,
   resolveThreadWorkingStartedAt,
+  threadRuntimeIsActive,
 } from "@t3tools/client-runtime/state/models";
 import { AuthOrchestrationOperateScope, type EnvironmentMachineKind } from "@t3tools/contracts";
 import type { SnoozePresetSetting } from "@t3tools/contracts/settings";
@@ -73,7 +74,6 @@ import { useSwipeRowDormant } from "../home/swipe-row-activation";
 import { ThreadSwipeable } from "../home/thread-swipe-actions";
 import { buildThreadTitleRegenerationMenuItems } from "./thread-title-regeneration-menu";
 import { canTurnThreadIntoProject, turnThreadIntoProject } from "./turnThreadIntoProject";
-import { threadCanArchive } from "../home/threadArchive";
 import {
   THREAD_LIST_V2_SETTLED_PAGE_COUNT,
   resolveThreadListV2CleanupActions,
@@ -1093,7 +1093,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
               id: "turn-into-project",
               title: "Turn into project",
               image: "folder.badge.plus",
-              attributes: { disabled: !threadCanArchive(thread.runtime) },
+              attributes: { disabled: threadRuntimeIsActive(thread.runtime) },
             } satisfies MenuAction,
           ]
         : []),

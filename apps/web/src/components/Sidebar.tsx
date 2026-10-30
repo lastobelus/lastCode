@@ -1,6 +1,8 @@
 import { attachSidebarTree, SIDEBAR_TREE_PROPS } from "../lib/sidebarTree";
 import { type EnvironmentId, type ScopedProjectRef } from "@t3tools/contracts";
 import { useSidebarProviderBadgePreferences } from "./sidebar/SidebarEnvironmentIcon";
+import { mergeWorktreeSuspensionMenuItems } from "./worktreeSuspensionMenu";
+import { getArchiveRecoveryRows } from "@t3tools/client-runtime/state/thread-archive";
 import type { EnvironmentServerConfig } from "@t3tools/client-runtime/connection";
 import { ThreadContextDragGhost } from "./chat/ThreadContextDragGhost";
 import {
@@ -44,7 +46,7 @@ import {
 import { foldSearchQuery, rankMessageMatches } from "@t3tools/shared/paletteSearch";
 import { findForMessageMatch, openThreadFindOnQuery } from "./chat/threadFindStore";
 import {
-  threadRuntimeCanArchive,
+  threadRuntimeIsActive,
   type EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/models";
 import {
@@ -65,6 +67,7 @@ import {
   CheckIcon,
   ChevronDownIcon,
   FolderIcon,
+  LayoutDashboardIcon,
   ListFilterIcon,
   PlusIcon,
   SettingsIcon,
@@ -130,6 +133,7 @@ import {
   canMarkThreadReadState,
   withThreadReadPermissions,
 } from "../hooks/threadReadActions";
+import { useWorktreeSuspensionActions } from "../hooks/useWorktreeSuspensionActions";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useSidebarProjectGroups } from "../hooks/useSidebarProjectGroups";
 import { useTerminalFocus } from "../hooks/useTerminalFocus";
@@ -238,6 +242,7 @@ import {
   type SidebarRouteReveal,
   useActiveRowReveal,
 } from "./sidebar/routeReveal";
+import { useStopThreadProcesses } from "../state/previewHosting";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { copyThreadReference } from "../lib/copyThreadReference";
 import { threadChipCopyTarget } from "@t3tools/client-runtime/thread-reference";
@@ -618,6 +623,7 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
   } = input;
   const preciseNow = new Date().toISOString();
   const visible = filterSidebarV2VisibleThreads(threads, scopedProjectKeys, delegatedUnderParent);
+  const archiveRecoveryRows = getArchiveRecoveryRows(threads);
   const inboxObservation = inboxReturns.observe(workingShelfEnabled ? threads : null);
   const pinned: EnvironmentThreadShell[] = [];
   const active: EnvironmentThreadShell[] = [];
@@ -633,7 +639,7 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
   const activeReorderable = new Set<string>();
   for (const thread of visible) {
     const configLoaded = serverConfigs.has(thread.environmentId);
-    if (thread.worktreeCleanup != null) {
+    if (thread.worktreeCleanup != null || archiveRecoveryRows.has(thread)) {
       active.push(thread);
       continue;
     }
@@ -892,6 +898,7 @@ function readRouteThreadKey(router: AnyRouter): string | null {
 }
 
 export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReveal }) {
+  const workspaceActions = useWorktreeSuspensionActions();
   const {
     projects,
     serverConfigs,
@@ -907,8 +914,6 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
-  const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
-  const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
   const handoffsMenuLimit = useClientSettings((s) => s.handoffsMenuLimit);
   const openHandoff = useOpenHandoff();
@@ -931,13 +936,17 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     markThreadUnread,
     markThreadRead,
     archiveThread,
-    deleteThread,
+    unarchiveThread,
+    confirmAndDeleteThread,
+    confirmThreadDeletion,
+    deleteThreads,
     setThreadPersistence,
   } = useThreadActions();
   const updateThreadMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
   const closeTerminal = useAtomCommand(terminalEnvironment.close, "cancel Project Action");
+  const stopThreadProcesses = useStopThreadProcesses();
   const { copyToClipboard: copyPathToClipboard } = useCopyToClipboard<{ path: string }>({
     onCopy: ({ path }) => {
       toastManager.add({
@@ -1217,6 +1226,13 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       });
     },
   );
+  const openProjectDashboard = useStableCallback((projectGroup: SidebarProjectSnapshot) => {
+    if (isMobile) setOpenMobile(false);
+    void router.navigate({
+      to: "/dashboard",
+      search: { environmentId: projectGroup.environmentId, projectId: projectGroup.id },
+    });
+  });
   const handleProjectSettings = useStableCallback(
     (
       event: ReactMouseEvent<HTMLElement> | ReactKeyboardEvent<HTMLInputElement>,
@@ -1242,6 +1258,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           api.contextMenu.show(
             [
               { id: "new-thread", label: "New thread" },
+              { id: "open-dashboard", label: "Open dashboard", icon: "layout-dashboard" },
               { id: "copy-path", label: "Copy path" },
               { id: "project-settings", label: "Project settings", icon: "settings" },
             ],
@@ -1250,6 +1267,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         );
         if (clicked._tag === "Failure") return;
         switch (clicked.value) {
+          case "open-dashboard":
+            openProjectDashboard(group);
+            return;
           case "new-thread":
             startThreadInProjectFolder(group);
             return;
@@ -1260,6 +1280,39 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             openProjectSettings(group);
             return;
         }
+      })();
+    },
+  );
+
+  const handleProjectContextMenu = useStableCallback(
+    (
+      event: ReactMouseEvent<HTMLElement> | ReactKeyboardEvent<HTMLInputElement>,
+      projectGroup: SidebarProjectSnapshot,
+    ) => {
+      event.preventDefault();
+      event.stopPropagation();
+      suppressNextScopeChangeRef.current = true;
+      dispatchProjectScopeMenu({ type: "project-settings-opened" });
+      const rect = event.currentTarget.getBoundingClientRect();
+      const position =
+        "clientX" in event
+          ? { x: event.clientX, y: event.clientY }
+          : { x: rect.left, y: rect.bottom };
+      void (async () => {
+        const api = readLocalApi();
+        if (!api) return;
+        const result = await settlePromise(() =>
+          api.contextMenu.show(
+            [
+              { id: "open-dashboard", label: "Open dashboard", icon: "layout-dashboard" },
+              { id: "project-settings", label: "Project settings", icon: "settings" },
+            ],
+            position,
+          ),
+        );
+        if (result._tag === "Failure") return;
+        if (result.value === "open-dashboard") openProjectDashboard(projectGroup);
+        if (result.value === "project-settings") openProjectSettings(projectGroup);
       })();
     },
   );
@@ -1316,6 +1369,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     keepEmptyFolders: scopedProjectGroups.length > 0,
   });
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- synchronizes the Electron background-process indicator with running Actions in local environments
   useEffect(() => {
     const bridge = window.desktopBridge;
     if (!bridge?.reportRunningActionCount) return;
@@ -2465,18 +2519,10 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       // Keep the handler safe if a platform context-menu implementation ever
       // returns a disabled item.
       if (hasPersistentThread) return;
-      if (confirmThreadDelete) {
-        const confirmed = await settlePromise(() =>
-          api.dialogs.confirm(
-            [
-              `Delete ${count} thread${count === 1 ? "" : "s"}?`,
-              "This permanently clears conversation history for these threads.",
-            ].join("\n"),
-            { variant: "destructive" },
-          ),
-        );
-        if (confirmed._tag === "Failure" || !confirmed.value) return;
-      }
+      const savedDataChoice = await confirmThreadDeletion(
+        actionTargets.map((thread) => scopeThreadRef(thread.environmentId, thread.id)),
+      );
+      if (savedDataChoice._tag !== "Success" || savedDataChoice.value === null) return;
       // The menu and confirmation dialog may stay open while another client
       // changes persistence. Rebuild from live shell state immediately before
       // the destructive batch so an ordinary thread cannot be deleted before
@@ -2492,23 +2538,15 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       if (!deleteEntries || !checkThreadOperations(deleteEntries.map(({ thread }) => thread)))
         return;
       if (deleteEntries.some(({ thread }) => thread.worktreeCleanup != null)) return;
-      // Grown as deletions actually land, never seeded with the whole batch:
-      // orphaned-worktree detection must only discount threads that are
-      // really gone, or the first delete would treat still-alive batch mates
-      // as deleted and remove a worktree they still point at.
-      const deletedThreadKeys = new Set<string>();
-      let firstError: unknown = null;
-      for (const { threadKey, thread } of deleteEntries) {
-        const result = await deleteThread(scopeThreadRef(thread.environmentId, thread.id), {
-          deletedThreadKeys,
-        });
-        if (result._tag === "Failure") {
-          if (isAtomCommandInterrupted(result)) break;
-          firstError ??= squashAtomCommandFailure(result);
-          continue;
-        }
-        deletedThreadKeys.add(threadKey);
-      }
+      const outcome = await deleteThreads(
+        deleteEntries.map(({ thread }) => scopeThreadRef(thread.environmentId, thread.id)),
+        savedDataChoice.value,
+      );
+      const deletedThreadKeys = outcome.deletedThreadKeys;
+      const firstError =
+        outcome.firstFailure?._tag === "Failure"
+          ? squashAtomCommandFailure(outcome.firstFailure)
+          : null;
       if (firstError !== null) {
         toastManager.add(
           stackedThreadToast({
@@ -2579,7 +2617,11 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   );
 
   const handleThreadContextMenu = useStableCallback(
-    (threadRef: ScopedThreadRef, position: { x: number; y: number }) => {
+    (
+      threadRef: ScopedThreadRef,
+      position: { x: number; y: number },
+      hasStoppableProcesses: boolean,
+    ) => {
       void (async () => {
         const api = readLocalApi();
         if (!api) return;
@@ -2623,47 +2665,50 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             [
               { id: "open-dashboard" as const, label: "Open dashboard", icon: "layout-dashboard" },
               ...withThreadReadPermissions(
-                buildThreadActionMenuItems({
-                  canOperate: readEnvironmentScope(
-                    threadRef.environmentId,
-                    AuthOrchestrationOperateScope,
-                  ),
-                  branch: thread.branch ?? null,
-                  projectFilter: threadProjectGroup
-                    ? {
-                        label: threadProjectGroup.displayName,
-                        isActive: projectScopeKeys.includes(threadProjectGroup.projectKey),
-                      }
-                    : null,
-                  isPinned,
-                  isPersistent: thread.persistent === true,
-                  archiveFailed: thread.archivePending?.status === "failed",
-                  isSettled,
-                  autoSettleEnabled: thread.autoSettleDisabledAt == null,
-                  isSnoozed,
-                  canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
-                  isRegeneratingTitle,
-                  isRunning: !threadRuntimeCanArchive(thread.runtime),
-                  canShareWithGuest: appAtomRegistry.get(
-                    canShareWithGuestAtom(threadRef.environmentId),
-                  ),
-                  canTurnIntoProject: canTurnThreadIntoProject(threadRef),
-                  hasRunningAction: thread.actionResume?.outcome === "running",
-                  hasStoppableProcesses,
-                  supports: {
-                    settlement: configLoaded,
-                    autoSettleOptOut: supportsAutoSettleOptOut,
-                    snooze: configLoaded,
-                    pinning: configLoaded,
-                    persistence:
-                      serverConfigs.get(thread.environmentId)?.environment.capabilities
-                        .threadPersistence === true,
-                    titleRegeneration: configLoaded,
-                  },
-                  snoozePresets,
-                  handoffs: handoffDescriptors,
-                  handoffsOverflow: handoffs.length > handoffDescriptors.length,
-                }),
+                mergeWorktreeSuspensionMenuItems(
+                  buildThreadActionMenuItems({
+                    canOperate: readEnvironmentScope(
+                      threadRef.environmentId,
+                      AuthOrchestrationOperateScope,
+                    ),
+                    branch: thread.branch ?? null,
+                    projectFilter: threadProjectGroup
+                      ? {
+                          label: threadProjectGroup.displayName,
+                          isActive: projectScopeKeys.includes(threadProjectGroup.projectKey),
+                        }
+                      : null,
+                    isPinned,
+                    isPersistent: thread.persistent === true,
+                    archiveFailed: thread.archivePending?.status === "failed",
+                    isSettled,
+                    autoSettleEnabled: thread.autoSettleDisabledAt == null,
+                    isSnoozed,
+                    canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
+                    isRegeneratingTitle,
+                    isRunning: threadRuntimeIsActive(thread.runtime),
+                    canShareWithGuest: appAtomRegistry.get(
+                      canShareWithGuestAtom(threadRef.environmentId),
+                    ),
+                    canTurnIntoProject: canTurnThreadIntoProject(threadRef),
+                    hasRunningAction: thread.actionResume?.outcome === "running",
+                    hasStoppableProcesses,
+                    supports: {
+                      settlement: configLoaded,
+                      autoSettleOptOut: supportsAutoSettleOptOut,
+                      snooze: configLoaded,
+                      pinning: configLoaded,
+                      persistence:
+                        serverConfigs.get(thread.environmentId)?.environment.capabilities
+                          .threadPersistence === true,
+                      titleRegeneration: configLoaded,
+                    },
+                    snoozePresets,
+                    handoffs: handoffDescriptors,
+                    handoffsOverflow: handoffs.length > handoffDescriptors.length,
+                  }),
+                  workspaceActions.menuItems(thread),
+                ),
                 [threadRef],
               ),
             ],
@@ -2671,6 +2716,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           ),
         );
         if (clicked._tag === "Failure" || clicked.value === null) return;
+        if (await workspaceActions.run(clicked.value, threadRef)) return;
         if (clicked.value === "handoff-show-all") {
           await router.navigate({
             to: "/$environmentId/$threadId",
@@ -2689,7 +2735,12 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           await openHandoff(threadRef, entry);
           return;
         }
-        if (threadActionRequiresOperate(clicked.value) && !checkThreadOperations([thread])) return;
+        if (
+          clicked.value !== "open-dashboard" &&
+          threadActionRequiresOperate(clicked.value) &&
+          !checkThreadOperations([thread])
+        )
+          return;
         if (clicked.value?.startsWith("snooze:")) {
           const preset =
             clicked.value === "snooze:custom"
@@ -2704,6 +2755,13 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           return;
         }
         switch (clicked.value) {
+          case "open-dashboard":
+            if (isMobile) setOpenMobile(false);
+            await router.navigate({
+              to: "/dashboard",
+              search: { environmentId: thread.environmentId, projectId: thread.projectId },
+            });
+            return;
           case "filter-by-project":
             if (threadProjectGroup) {
               setProjectScopeKeys(
@@ -2845,6 +2903,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             });
             return;
           }
+          case "stop-thread-processes":
+            await stopThreadProcesses(threadRef);
+            return;
           case "mark-read":
             markThreadRead(threadRef);
             return;
@@ -2875,15 +2936,33 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           case "copy-thread-id":
             copyThreadIdToClipboard(thread.id, { threadId: thread.id });
             return;
-          case "archive": {
-            if (confirmThreadArchive) {
-              const confirmed = await settlePromise(() =>
-                api.dialogs.confirm(`Archive thread "${thread.title}"?`),
+          case "dismiss-archive-failure": {
+            const pending = thread.archivePending;
+            if (pending?.status !== "failed") return;
+            const result = await unarchiveThread(
+              scopeThreadRef(thread.environmentId, pending.threadId),
+              { expectedArchiveCommandId: pending.commandId },
+            );
+            if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+              const error = squashAtomCommandFailure(result);
+              toastManager.add(
+                stackedThreadToast({
+                  type: "error",
+                  title: "Couldn't dismiss archive failure",
+                  description: error instanceof Error ? error.message : "An error occurred.",
+                }),
               );
-              if (confirmed._tag === "Failure" || !confirmed.value) return;
             }
+            return;
+          }
+          case "archive":
+          case "archive-discard": {
             let didArchive = false;
             const result = await archiveThread(threadRef, {
+              discardSavedWorkspace: clicked.value === "archive-discard",
+              ...(thread.archivePending?.status === "failed"
+                ? { expectedArchiveCommandId: thread.archivePending.commandId }
+                : {}),
               onArchived: () => {
                 didArchive = true;
               },
@@ -2904,19 +2983,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             return;
           }
           case "delete": {
-            if (confirmThreadDelete) {
-              const confirmed = await settlePromise(() =>
-                api.dialogs.confirm(
-                  [
-                    `Delete thread "${thread.title}"?`,
-                    "This permanently clears conversation history for this thread.",
-                  ].join("\n"),
-                  { variant: "destructive" },
-                ),
-              );
-              if (confirmed._tag === "Failure" || !confirmed.value) return;
-            }
-            const result = await deleteThread(threadRef);
+            const result = await confirmAndDeleteThread(threadRef);
             if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
               const error = squashAtomCommandFailure(result);
               toastManager.add(
@@ -3142,7 +3209,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                         ) {
                           return;
                         }
-                        if (project) handleProjectSettings(event, project);
+                        if (project) handleProjectContextMenu(event, project);
                       }}
                       onChange={(event) =>
                         dispatchProjectScopeMenu({
@@ -3167,7 +3234,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             // The icon badge marks selection; Base UI's single value would shade one row.
                             data-selected={undefined}
                             onContextMenu={(event) => {
-                              if (project) handleProjectSettings(event, project);
+                              if (project) handleProjectContextMenu(event, project);
                             }}
                           >
                             <ProjectScopeRowIcon isSelected={isSelected}>
@@ -3184,6 +3251,25 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                 primaryEnvironmentId={primaryEnvironmentId}
                                 machineByEnvironmentId={environmentMachineById}
                               />
+                            ) : null}
+                            {project ? (
+                              <Button
+                                size="icon-xs"
+                                variant="ghost-muted"
+                                tabIndex={-1}
+                                aria-hidden="true"
+                                title={`Open dashboard for ${project.displayName}`}
+                                onPointerDown={(event) => event.stopPropagation()}
+                                onClick={(event) => {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                  suppressNextScopeChangeRef.current = true;
+                                  dispatchProjectScopeMenu({ type: "project-settings-opened" });
+                                  openProjectDashboard(project);
+                                }}
+                              >
+                                <LayoutDashboardIcon className="size-3.5" />
+                              </Button>
                             ) : null}
                             {project ? (
                               <Button

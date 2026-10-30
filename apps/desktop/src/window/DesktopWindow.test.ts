@@ -71,7 +71,7 @@ function makeFakeBrowserWindow() {
     copyImageAt: vi.fn(),
     focus: vi.fn(),
     isDestroyed: vi.fn(() => false),
-    getURL: vi.fn(() => "t3code-dev://app/"),
+    getURL: vi.fn(() => "lastcode-dev://app/"),
     getZoomLevel: vi.fn(() => zoomLevel),
     getZoomFactor: vi.fn(() => 1.2 ** zoomLevel),
     setZoomLevel: vi.fn((level: number) => {
@@ -311,6 +311,7 @@ function layerTest(input: {
           popupTemplate: input.onPopupTemplate ?? (() => Effect.void),
         }),
         Layer.succeed(ElectronShell.ElectronShell, {
+          openPath: () => Effect.die("unexpected openPath"),
           openExternal: (url) =>
             Effect.sync(() => {
               input.openedExternalUrls?.push(url);
@@ -428,6 +429,7 @@ const makeSplashScenario = (createOutcomes: readonly (Electron.BrowserWindow | n
           layerElectronApp,
           layerElectronMenu,
           Layer.succeed(ElectronShell.ElectronShell, {
+            openPath: () => Effect.die("unexpected openPath"),
             openExternal: () => Effect.succeed(true),
             openSystemSettings: () => Effect.succeed(true),
             copyText: () => Effect.void,

@@ -590,10 +590,12 @@ export const make = Effect.gen(function* () {
         return yield* persist((settings) => setLocalEnvironmentEnabled(settings, enabled));
       },
     ),
-    setShowAndInstallLocalNightlies: Effect.fn("desktop.settings.setShowAndInstallLocalNightlies")(function* (enabled) {
-      yield* Effect.annotateCurrentSpan({ enabled });
-      return yield* persist((settings) => setShowAndInstallLocalNightlies(settings, enabled));
-    }),
+    setShowAndInstallLocalNightlies: Effect.fn("desktop.settings.setShowAndInstallLocalNightlies")(
+      function* (enabled) {
+        yield* Effect.annotateCurrentSpan({ enabled });
+        return yield* persist((settings) => setShowAndInstallLocalNightlies(settings, enabled));
+      },
+    ),
     applyWslWindowsFallback: persist(applyWslWindowsFallback).pipe(
       Effect.withSpan("desktop.settings.applyWslWindowsFallback"),
     ),
@@ -657,7 +659,9 @@ export const layerTest = (initialSettings: DesktopSettings = DEFAULT_DESKTOP_SET
             return update((settings) => setLocalEnvironmentEnabled(settings, enabled));
           },
         ),
-        setShowAndInstallLocalNightlies: Effect.fn("DesktopAppSettings.setShowAndInstallLocalNightlies")(function (enabled) {
+        setShowAndInstallLocalNightlies: Effect.fn(
+          "DesktopAppSettings.setShowAndInstallLocalNightlies",
+        )(function (enabled) {
           return update((settings) => setShowAndInstallLocalNightlies(settings, enabled));
         }),
         applyWslWindowsFallback: update(applyWslWindowsFallback),

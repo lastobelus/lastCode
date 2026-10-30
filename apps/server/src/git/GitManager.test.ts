@@ -14,6 +14,8 @@ import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as WorkspaceAcquisitionTestkit from "../workspace/WorkspaceAcquisition.testkit.ts";
+import * as SuspensionRegistryTestkit from "../workspace/WorktreeSuspensionRegistry.testkit.ts";
 import * as Option from "effect/Option";
 import * as PlatformError from "effect/PlatformError";
 import * as Result from "effect/Result";
@@ -269,6 +271,8 @@ function createTextGeneration(
   overrides: Partial<FakeGitTextGeneration> = {},
 ): TextGeneration.TextGeneration["Service"] {
   const implementation: FakeGitTextGeneration = {
+    generateIncomingMessageSummary: () =>
+      Effect.die("Preview generation is not used by GitManager"),
     generateCommitMessage: (input) =>
       Effect.succeed({
         subject: "Implement stacked git actions",
@@ -293,6 +297,8 @@ function createTextGeneration(
   };
 
   return {
+    generateIncomingMessageSummary: () =>
+      Effect.die("Preview generation is not used by GitManager"),
     generateCommitMessage: (input) =>
       implementation.generateCommitMessage(input).pipe(
         Effect.mapError(
@@ -721,7 +727,7 @@ function makeManager(input?: {
       yield* input.seed.pipe(Effect.provideContext(stores), Effect.orDie);
     }
     const manager = yield* GitManager.make.pipe(
-      Effect.provide(layerManager),
+      Effect.provide(Layer.merge(WorkspaceAcquisitionTestkit.layer, layerManager)),
       Effect.provideContext(stores),
     );
     return { manager, providerCalls };
@@ -764,6 +770,9 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           VcsStatusBroadcaster.layer.pipe(
             Layer.provide(
               GitWorkflowService.layer.pipe(
+                Layer.provide(
+                  Layer.merge(WorkspaceAcquisitionTestkit.layer, SuspensionRegistryTestkit.layer),
+                ),
                 Layer.provide(Layer.succeed(GitManager.GitManager, manager)),
                 Layer.provide(
                   VcsDriverRegistry.layer.pipe(
@@ -3990,6 +3999,9 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         const events: string[] = [];
         const workflows = yield* Effect.forEach([0, 1], () =>
           GitWorkflowService.make.pipe(
+            Effect.provide(
+              Layer.merge(WorkspaceAcquisitionTestkit.layer, SuspensionRegistryTestkit.layer),
+            ),
             // Cache the real filesystem result so startImmediately reaches lease acquisition.
             Effect.provideService(FileSystem.FileSystem, {
               ...fileSystem,

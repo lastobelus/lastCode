@@ -1,15 +1,25 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeBuffer from "node:buffer";
 import { it } from "@effect/vitest";
-import { type PreviewEvent, PreviewNativeCloseError, ThreadId } from "@t3tools/contracts";
+import {
+  type PreviewEvent,
+  PreviewNativeCloseError,
+  PreviewNativeCreateError,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as PubSub from "effect/PubSub";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
-import { expect } from "vite-plus/test";
+import * as PlatformError from "effect/PlatformError";
+import { expect, vi } from "vite-plus/test";
+import * as Preview from "@t3tools/shared/preview";
+import { setPreviewBootstrapTokenOnUrl } from "@t3tools/shared/remote";
 
 import * as ServerConfig from "../config.ts";
 import * as PreviewManager from "./Manager.ts";
@@ -40,7 +50,970 @@ const PreviewManagerTestLayer = PreviewManager.layer.pipe(
   Layer.provideMerge(NodeServices.layer),
 );
 
+const isolatedPersistenceConfig = Effect.fn("preview.test.isolatedPersistenceConfig")(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const config = yield* ServerConfig.ServerConfig;
+  const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-session-persistence-" });
+  return { ...config, stateDir: path.join(root, "state") };
+});
+
 it.layer(PreviewManagerTestLayer)("PreviewManager", (it) => {
+  it.effect("releases native rendering while preserving its destination and desktop identity", () =>
+    Effect.gen(function* () {
+      const manager = yield* PreviewManager.PreviewManager;
+      const threadId = freshThreadId();
+      let closes = 0;
+      const opened = yield* manager.open({
+        threadId,
+        url: "https://report.example/review?mode=logos#chart",
+        runtime: "server",
+        desktopHostId: "desktop-owner",
+        profileId: "profile-work",
+        automationOwner: "agent-owner",
+        desktopPopup: {
+          popupId: "native-popup",
+          close: () =>
+            Effect.sync(() => {
+              closes += 1;
+            }),
+        },
+      });
+      yield* manager.nativeDormantConfirmed({ threadId, tabId: opened.tabId });
+      const { sessions } = yield* manager.list({ threadId });
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0]).toMatchObject({
+        tabId: opened.tabId,
+        desktopHostId: "desktop-owner",
+        profileId: "profile-work",
+        automationOwner: "agent-owner",
+        backingPage: "desktop",
+        navStatus: { _tag: "Loading", url: "https://report.example/review?mode=logos#chart" },
+      });
+      expect(sessions[0]).not.toHaveProperty("desktopPopupId");
+      yield* manager.close({ threadId, tabId: opened.tabId });
+      expect(closes).toBe(0);
+      expect((yield* manager.list({ threadId })).sessions).toEqual([]);
+    }),
+  );
+
+  it.effect(
+    "retains dedicated root intent across dormancy and restart without native identities",
+    () =>
+      Effect.gen(function* () {
+        const config = yield* isolatedPersistenceConfig();
+        const create = PreviewManager.make.pipe(
+          Effect.provideService(ServerConfig.ServerConfig, config),
+        );
+        const first = yield* Effect.scoped(create);
+        const threadId = freshThreadId();
+        const opened = yield* first.open({
+          threadId,
+          runtime: "server",
+          desktopHostId: "host-a",
+          profileId: "work",
+          automationOwner: "agent-a",
+          url: "https://example.test/saved",
+          createDesktopRoot: () =>
+            Effect.succeed({
+              rootId: "obsolete-root",
+              publish: () => Effect.void,
+              close: () => Effect.void,
+            }),
+        });
+        const restarted = yield* Effect.scoped(create);
+        yield* first.nativeDormantConfirmed({ threadId, tabId: opened.tabId });
+        for (const manager of [first, restarted]) {
+          const { sessions } = yield* manager.list({ threadId });
+          expect(sessions).toEqual([
+            expect.objectContaining({
+              tabId: opened.tabId,
+              backingPage: "desktop-root",
+              desktopHostId: "host-a",
+              profileId: "work",
+              automationOwner: "agent-a",
+              navStatus: { _tag: "Loading", url: "https://example.test/saved", title: "" },
+            }),
+          ]);
+          expect(sessions[0]).not.toHaveProperty("desktopRootId");
+          yield* manager.close({ threadId, tabId: opened.tabId });
+          expect((yield* manager.list({ threadId })).sessions).toEqual([]);
+        }
+      }),
+  );
+
+  it.effect.each(["creation", "publication"] as const)(
+    "closing a dormant root during %s cannot orphan the replacement native root",
+    (stage) =>
+      Effect.gen(function* () {
+        const manager = yield* PreviewManager.PreviewManager;
+        const threadId = freshThreadId();
+        const opened = yield* manager.open({
+          threadId,
+          runtime: "server",
+          desktopHostId: "host-a",
+          profileId: "work",
+          automationOwner: "agent-a",
+          createDesktopRoot: () =>
+            Effect.succeed({
+              rootId: "old-root",
+              publish: () => Effect.void,
+              close: () => Effect.void,
+            }),
+        });
+        yield* manager.nativeDormantConfirmed({ threadId, tabId: opened.tabId });
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        let nativeCloses = 0;
+        let published = false;
+        let cancelClose = true;
+        const restoring = yield* manager
+          .restoreDesktopRoot({
+            threadId,
+            tabId: opened.tabId,
+            create: () =>
+              Effect.gen(function* () {
+                if (stage === "creation") {
+                  yield* Deferred.succeed(entered, undefined);
+                  yield* Deferred.await(release);
+                }
+                return {
+                  rootId: "fresh-root",
+                  publish: () =>
+                    Effect.gen(function* () {
+                      published = true;
+                      if (stage === "publication") {
+                        yield* Deferred.succeed(entered, undefined);
+                        yield* Deferred.await(release);
+                      }
+                    }),
+                  close: () =>
+                    Effect.suspend(() => {
+                      nativeCloses += 1;
+                      return published && cancelClose
+                        ? Effect.fail(
+                            new PreviewNativeCloseError({
+                              tabId: opened.tabId,
+                              reason: "canceled",
+                            }),
+                          )
+                        : Effect.void;
+                    }),
+                };
+              }),
+          })
+          .pipe(Effect.result, Effect.forkChild);
+        yield* Deferred.await(entered);
+        const closing = yield* manager
+          .close({ threadId, tabId: opened.tabId })
+          .pipe(Effect.result, Effect.forkChild);
+        if (stage === "creation") yield* Fiber.join(closing);
+        yield* Deferred.succeed(release, undefined);
+        const restored = yield* Fiber.join(restoring);
+        const closed = yield* Fiber.join(closing);
+        expect(nativeCloses).toBe(1);
+        if (stage === "creation") {
+          expect(restored).toMatchObject({
+            _tag: "Failure",
+            failure: { _tag: "PreviewSessionLookupError" },
+          });
+          expect(published).toBe(false);
+          expect((yield* manager.list({ threadId })).sessions).toEqual([]);
+        } else {
+          expect(closed).toMatchObject({ _tag: "Failure", failure: { reason: "canceled" } });
+          expect((yield* manager.list({ threadId })).sessions[0]?.desktopRootId).toBe("fresh-root");
+          cancelClose = false;
+          yield* manager.close({ threadId, tabId: opened.tabId });
+          expect(nativeCloses).toBe(2);
+          expect((yield* manager.list({ threadId })).sessions).toEqual([]);
+        }
+      }),
+  );
+
+  it.effect(
+    "retains credential-free hosted origins only for their session until actual close",
+    () =>
+      Effect.gen(function* () {
+        const config = yield* isolatedPersistenceConfig();
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const create = PreviewManager.make.pipe(
+          Effect.provideService(ServerConfig.ServerConfig, config),
+        );
+        const first = yield* Effect.scoped(create);
+        const threadId = freshThreadId();
+        const opened = yield* first.open({
+          threadId,
+          runtime: "server",
+          desktopHostId: "fixture-desktop",
+          automationOwner: "agent-owner",
+          createDesktopRoot: () =>
+            Effect.succeed({
+              rootId: "fixture-root",
+              publish: () => Effect.void,
+              close: () =>
+                Effect.fail(
+                  new PreviewNativeCloseError({ tabId: "fixture-tab", reason: "canceled" }),
+                ),
+            }),
+        });
+        const events = yield* first.subscribeEvents;
+        const origins = new Map([
+          ["http://environment.example.test:5173", "http://localhost:5173"],
+        ]);
+        yield* first.rememberHostedOrigin({
+          threadId,
+          tabId: opened.tabId,
+          browserUrl:
+            "http://browser-user:browser-password@environment.example.test:5173/private-path?credential=browser-token#browser-fragment",
+          localUrl:
+            "http://local-user:local-password@localhost:5173/private-path?credential=local-token#local-fragment",
+        });
+        expect(yield* first.getHostedOrigins({ threadId, tabId: opened.tabId })).toEqual(origins);
+        expect(
+          yield* first.getHostedOrigins({ threadId: freshThreadId(), tabId: opened.tabId }),
+        ).toEqual(new Map());
+        const sibling = yield* first.open({ threadId });
+        expect(yield* first.getHostedOrigins({ threadId, tabId: sibling.tabId })).toEqual(
+          new Map(),
+        );
+        const rejected = yield* first
+          .rememberHostedOrigin({
+            threadId: freshThreadId(),
+            tabId: opened.tabId,
+            browserUrl: "http://unknown.example.test:5173",
+            localUrl: "http://localhost:5173",
+          })
+          .pipe(Effect.flip);
+        expect(rejected._tag).toBe("PreviewSessionLookupError");
+        expect((yield* first.list({ threadId })).sessions[0]).not.toHaveProperty("hostedOrigins");
+        expect((yield* PubSub.takeUpTo(events, DRAIN_LIMIT)).map((event) => event.type)).toEqual([
+          "opened",
+        ]);
+        const canceled = yield* first.close({ threadId, tabId: opened.tabId }).pipe(Effect.flip);
+        expect(canceled._tag).toBe("PreviewNativeCloseError");
+        expect(yield* first.getHostedOrigins({ threadId, tabId: opened.tabId })).toEqual(origins);
+        yield* first.nativeDormantConfirmed({ threadId, tabId: opened.tabId });
+        const sessionsPath = path.join(config.stateDir, "preview-sessions.json");
+        const stored = yield* fs.readFileString(sessionsPath);
+        expect(
+          JSON.parse(stored).sessions.find(
+            (session: { tabId: string }) => session.tabId === opened.tabId,
+          ).hostedOrigins,
+        ).toEqual([...origins]);
+        for (const secret of [
+          "browser-user",
+          "browser-password",
+          "local-user",
+          "local-password",
+          "private-path",
+          "browser-token",
+          "local-token",
+          "browser-fragment",
+          "local-fragment",
+        ])
+          expect(stored).not.toContain(secret);
+        const restarted = yield* Effect.scoped(create);
+        expect(yield* restarted.getHostedOrigins({ threadId, tabId: opened.tabId })).toEqual(
+          origins,
+        );
+        yield* restarted.close({ threadId, tabId: opened.tabId });
+        expect(yield* restarted.getHostedOrigins({ threadId, tabId: opened.tabId })).toEqual(
+          new Map(),
+        );
+        expect(yield* fs.readFileString(sessionsPath)).not.toContain("hostedOrigins");
+        const reopened = yield* Effect.scoped(create);
+        expect(yield* reopened.getHostedOrigins({ threadId, tabId: opened.tabId })).toEqual(
+          new Map(),
+        );
+      }),
+  );
+
+  it.effect("restores canonical tab identities and settings without replaying opened events", () =>
+    Effect.gen(function* () {
+      const config = yield* isolatedPersistenceConfig();
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const create = PreviewManager.make.pipe(
+        Effect.provideService(ServerConfig.ServerConfig, config),
+      );
+      const first = yield* Effect.scoped(create);
+      const threadId = freshThreadId();
+      const destination = "http://127.0.0.1:5173/app/a%2Fb?token=application-code#section";
+      const navigation = setPreviewBootstrapTokenOnUrl(
+        new URL(destination),
+        "one-use-credential",
+      ).href;
+      const opened = yield* first.open({
+        threadId,
+        browserHost: "environment",
+        profileId: "incognito",
+        automationOwner: "agent-owner",
+        url: navigation,
+        reveal: true,
+      });
+      yield* first.reportStatus({
+        threadId,
+        tabId: opened.tabId,
+        serverControlled: true,
+        navStatus: { _tag: "Success", url: navigation, title: "Retained app" },
+        canGoBack: true,
+        canGoForward: true,
+      });
+      yield* first.resize({
+        threadId,
+        tabId: opened.tabId,
+        viewport: { _tag: "freeform", width: 900, height: 700 },
+      });
+      yield* first.adjust({ threadId, tabId: opened.tabId, colorScheme: "dark", zoomFactor: 1.25 });
+      yield* first.requestReveal({ threadId, tabId: opened.tabId, force: true });
+      const discarded = yield* first.open({ threadId, url: "https://example.com/discarded" });
+      yield* first.close({ threadId, tabId: discarded.tabId });
+      const before = yield* first.list({ threadId });
+      const restarted = yield* Effect.scoped(create);
+      const subscription = yield* restarted.subscribeEvents;
+      const after = yield* restarted.list({ threadId });
+      expect(after.serverEpoch).not.toBe(before.serverEpoch);
+      expect(after.sessions).toEqual([
+        expect.objectContaining({
+          threadId,
+          tabId: opened.tabId,
+          profileId: "incognito",
+          automationOwner: "agent-owner",
+          reveal: true,
+          runtime: "server",
+          backingPage: "server",
+          navStatus: { _tag: "Loading", url: destination, title: "Retained app" },
+          canGoBack: false,
+          canGoForward: false,
+          viewport: { _tag: "freeform", width: 900, height: 700 },
+          colorScheme: "dark",
+          zoomFactor: 1.25,
+        }),
+      ]);
+      expect(after.sessions[0]).not.toHaveProperty("revealRequest");
+      expect(yield* PubSub.takeUpTo(subscription, DRAIN_LIMIT)).toEqual([]);
+      const stored = yield* fs.readFileString(path.join(config.stateDir, "preview-sessions.json"));
+      expect(stored).not.toContain("one-use-credential");
+      expect(stored).toContain("token=application-code");
+      expect(
+        (yield* fs.stat(path.join(config.stateDir, "preview-sessions.json"))).mode & 0o777,
+      ).toBe(0o600);
+    }),
+  );
+
+  it.effect("preserves restored desktop tabs when a restarted process reuses its tab counter", () =>
+    Effect.gen(function* () {
+      using _tabIds = vi.spyOn(Preview, "newPreviewTabId").mockReturnValue("tab_1");
+      const config = yield* isolatedPersistenceConfig();
+      const create = PreviewManager.make.pipe(
+        Effect.provideService(ServerConfig.ServerConfig, config),
+      );
+      const first = yield* Effect.scoped(create);
+      const threadId = freshThreadId();
+      const saved = yield* first.open({
+        threadId,
+        runtime: "desktop",
+        profileId: "work-account",
+        url: "https://example.com/saved",
+      });
+      const restarted = yield* Effect.scoped(create);
+      expect((yield* restarted.list({ threadId })).sessions).toEqual([saved]);
+      const opened = yield* restarted.open({
+        threadId,
+        runtime: "desktop",
+        profileId: "incognito",
+        url: "https://example.com/new",
+      });
+      expect(opened.tabId).not.toBe(saved.tabId);
+      expect((yield* restarted.list({ threadId })).sessions).toEqual([saved, opened]);
+      yield* restarted.reportStatus({
+        threadId,
+        tabId: saved.tabId,
+        navStatus: { _tag: "Success", url: "https://example.com/saved/next", title: "" },
+        canGoBack: false,
+        canGoForward: false,
+      });
+      const selected = (yield* restarted.list({ threadId })).sessions.find(
+        (session) => session.tabId === saved.tabId,
+      )!;
+      expect(selected).toMatchObject({ tabId: saved.tabId, profileId: "work-account" });
+      const restoredAgain = yield* Effect.scoped(create);
+      expect((yield* restoredAgain.list({ threadId })).sessions).toEqual([
+        {
+          ...selected,
+          navStatus: { _tag: "Loading", url: "https://example.com/saved/next", title: "" },
+        },
+        opened,
+      ]);
+    }),
+  );
+
+  it.effect(
+    "restores native root and popup destinations pinned to their desktop without stale window identities",
+    () =>
+      Effect.gen(function* () {
+        const config = yield* isolatedPersistenceConfig();
+        const create = PreviewManager.make.pipe(
+          Effect.provideService(ServerConfig.ServerConfig, config),
+        );
+        const first = yield* Effect.scoped(create);
+        const threadId = freshThreadId();
+        const root = yield* first.open({
+          threadId,
+          runtime: "server",
+          desktopHostId: "selected-desktop",
+          profileId: "work-account",
+          automationOwner: "agent-owner",
+          url: "https://example.com/account",
+          createDesktopRoot: () =>
+            Effect.succeed({
+              rootId: "old-native-root",
+              publish: () => Effect.void,
+              close: () => Effect.void,
+            }),
+        });
+        const popup = yield* first.open({
+          threadId,
+          runtime: "server",
+          desktopHostId: "selected-desktop",
+          profileId: "work-account",
+          url: "https://example.com/popup",
+          desktopPopup: { popupId: "old-native-popup" },
+        });
+        const restarted = yield* Effect.scoped(create);
+        const restored = yield* restarted.list({ threadId });
+        expect(restored.sessions.map((tab) => tab.tabId)).toEqual([root.tabId, popup.tabId]);
+        for (const tab of restored.sessions) {
+          expect(tab).toMatchObject({
+            runtime: "server",
+            backingPage: tab.tabId === root.tabId ? "desktop-root" : "desktop",
+            desktopHostId: "selected-desktop",
+            profileId: "work-account",
+          });
+          expect(tab).not.toHaveProperty("desktopRootId");
+          expect(tab).not.toHaveProperty("desktopPopupId");
+        }
+        expect(restored.sessions[0]?.automationOwner).toBe("agent-owner");
+        yield* restarted.close({ threadId });
+        const closedRestart = yield* Effect.scoped(create);
+        expect((yield* closedRestart.list({ threadId })).sessions).toEqual([]);
+      }),
+  );
+
+  it.effect.each([
+    "unreadable",
+    "invalid",
+    "incompatible-version",
+    "incompatible-session",
+    "duplicate",
+    "oversized",
+    "unparseable-url",
+  ] as const)("backs up %s retained state and opens durable new previews", (kind) =>
+    Effect.gen(function* () {
+      const config = yield* isolatedPersistenceConfig();
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const create = PreviewManager.make.pipe(
+        Effect.provideService(ServerConfig.ServerConfig, config),
+      );
+      const first = yield* Effect.scoped(create);
+      const threadId = freshThreadId();
+      const original = yield* first.open({
+        threadId,
+        url: "https://example.com/retained",
+      });
+      const file = path.join(config.stateDir, "preview-sessions.json");
+      let broken: string;
+      switch (kind) {
+        case "unreadable":
+          broken = JSON.stringify({ version: 1, sessions: [original] });
+          break;
+        case "invalid":
+          broken = "not valid json";
+          break;
+        case "incompatible-version":
+          broken = JSON.stringify({ version: 2, sessions: [original] });
+          break;
+        case "incompatible-session":
+          broken = JSON.stringify({ version: 1, sessions: [original, { threadId }] });
+          break;
+        case "duplicate":
+          broken = JSON.stringify({ version: 1, sessions: [original, original] });
+          break;
+        case "oversized":
+          broken = "x".repeat(4 * 1024 * 1024 + 1);
+          break;
+        case "unparseable-url":
+          broken = JSON.stringify({
+            version: 1,
+            sessions: [
+              original,
+              {
+                ...original,
+                tabId: "unparseable-tab",
+                navStatus: { _tag: "Loading", url: "http://[invalid", title: "" },
+              },
+            ],
+          });
+          break;
+      }
+      yield* fs.writeFileString(file, broken);
+      const originalBytes = yield* fs.readFile(file);
+      let sessionWrites = 0;
+      const guarded = FileSystem.make({
+        ...fs,
+        readFile: (filePath) =>
+          kind === "unreadable" && filePath === file
+            ? Effect.fail(
+                PlatformError.systemError({
+                  _tag: "PermissionDenied",
+                  module: "FileSystem",
+                  method: "readFile",
+                }),
+              )
+            : fs.readFile(filePath),
+        rename: (from, to) => {
+          if (to === file) sessionWrites += 1;
+          return fs.rename(from, to);
+        },
+      });
+      const warnings: unknown[] = [];
+      const logger = Logger.make(({ logLevel, message }) => {
+        if (logLevel === "Warn") warnings.push(message);
+      });
+      const restarted = yield* Effect.scoped(create).pipe(
+        Effect.provideService(FileSystem.FileSystem, guarded),
+        Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+      );
+      const subscription = yield* restarted.subscribeEvents;
+      expect(yield* restarted.list({})).toMatchObject({ sessions: [], revision: 0 });
+      const backups = (yield* fs.readDirectory(config.stateDir)).filter((name) =>
+        name.startsWith("preview-sessions.json.unreadable-"),
+      );
+      expect(backups).toHaveLength(1);
+      const backupPath = path.join(config.stateDir, backups[0]!);
+      expect(NodeBuffer.Buffer.compare(yield* fs.readFile(backupPath), originalBytes)).toBe(0);
+      expect(yield* fs.exists(file)).toBe(false);
+      expect(sessionWrites).toBe(0);
+      expect(yield* PubSub.takeUpTo(subscription, DRAIN_LIMIT)).toEqual([]);
+      expect(warnings).toEqual([
+        expect.arrayContaining([
+          expect.objectContaining({
+            sessionsPath: file,
+            backupPath,
+            error: expect.stringContaining("left intact"),
+          }),
+        ]),
+      ]);
+      const opened = yield* restarted.open({ threadId, url: "https://example.com/new" });
+      expect((yield* restarted.list({ threadId })).sessions).toEqual([opened]);
+      expect(yield* PubSub.takeUpTo(subscription, DRAIN_LIMIT)).toEqual([
+        expect.objectContaining({ type: "opened", snapshot: opened }),
+      ]);
+      expect(sessionWrites).toBe(1);
+      const reloaded = yield* Effect.scoped(create);
+      expect((yield* reloaded.list({ threadId })).sessions).toEqual([opened]);
+      expect(NodeBuffer.Buffer.compare(yield* fs.readFile(backupPath), originalBytes)).toBe(0);
+      expect(
+        (yield* fs.readDirectory(config.stateDir)).filter((name) =>
+          name.startsWith("preview-sessions.json.unreadable-"),
+        ),
+      ).toEqual(backups);
+    }),
+  );
+
+  it.effect(
+    "preserves the original and blocks writes when backing up unreadable sessions fails",
+    () =>
+      Effect.gen(function* () {
+        const config = yield* isolatedPersistenceConfig();
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const file = path.join(config.stateDir, "preview-sessions.json");
+        yield* fs.makeDirectory(config.stateDir, { recursive: true });
+        yield* fs.writeFileString(file, "not valid json");
+        const originalBytes = yield* fs.readFile(file);
+        const renameFailure = PlatformError.systemError({
+          _tag: "PermissionDenied",
+          module: "FileSystem",
+          method: "rename",
+        });
+        let renameAttempts = 0;
+        const guarded = FileSystem.make({
+          ...fs,
+          rename: () => {
+            renameAttempts += 1;
+            return Effect.fail(renameFailure);
+          },
+        });
+        const warnings: unknown[] = [];
+        const logger = Logger.make(({ logLevel, message }) => {
+          if (logLevel === "Warn") warnings.push(message);
+        });
+        const restarted = yield* PreviewManager.make.pipe(
+          Effect.provideService(ServerConfig.ServerConfig, config),
+          Effect.provideService(FileSystem.FileSystem, guarded),
+          Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+        );
+        const subscription = yield* restarted.subscribeEvents;
+        const threadId = freshThreadId();
+        expect(yield* restarted.list({})).toMatchObject({ sessions: [], revision: 0 });
+        expect(warnings).toEqual([
+          expect.arrayContaining([
+            expect.objectContaining({
+              sessionsPath: file,
+              error: expect.stringContaining("left intact"),
+            }),
+          ]),
+        ]);
+        const failure = yield* restarted
+          .open({ threadId, url: "https://example.com/new" })
+          .pipe(Effect.flip);
+        expect(failure).toMatchObject({
+          _tag: "PreviewSessionStorageError",
+          cause: renameFailure,
+        });
+        let nativeCreates = 0;
+        expect(
+          yield* restarted
+            .open({
+              threadId,
+              runtime: "server",
+              desktopHostId: "selected-desktop",
+              automationOwner: "agent-owner",
+              createDesktopRoot: () => {
+                nativeCreates += 1;
+                return Effect.succeed({
+                  rootId: "unexpected-native-root",
+                  publish: () => Effect.void,
+                  close: () => Effect.void,
+                });
+              },
+            })
+            .pipe(Effect.flip),
+        ).toBe(failure);
+        yield* restarted.close({ threadId });
+        expect(yield* restarted.list({ threadId })).toMatchObject({ sessions: [], revision: 0 });
+        expect(yield* PubSub.takeUpTo(subscription, DRAIN_LIMIT)).toEqual([]);
+        expect(nativeCreates).toBe(0);
+        expect(renameAttempts).toBe(1);
+        expect(NodeBuffer.Buffer.compare(yield* fs.readFile(file), originalBytes)).toBe(0);
+        expect(yield* fs.readDirectory(config.stateDir)).toEqual(["preview-sessions.json"]);
+      }),
+  );
+
+  it.effect("keeps distinct byte-preserving backups across repeated startup recoveries", () =>
+    Effect.gen(function* () {
+      const config = yield* isolatedPersistenceConfig();
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const file = path.join(config.stateDir, "preview-sessions.json");
+      const create = PreviewManager.make.pipe(
+        Effect.provideService(ServerConfig.ServerConfig, config),
+      );
+      yield* fs.makeDirectory(config.stateDir, { recursive: true });
+      const firstBytes = new Uint8Array([0xff, 0x00, 0x7b]);
+      yield* fs.writeFile(file, firstBytes);
+      yield* Effect.scoped(create);
+      const [firstBackup] = yield* fs.readDirectory(config.stateDir);
+      expect(firstBackup).toMatch(/^preview-sessions\.json\.unreadable-/);
+      const secondBytes = new TextEncoder().encode('{"version":2,"sessions":[]}');
+      yield* fs.writeFile(file, secondBytes);
+      const restarted = yield* Effect.scoped(create);
+      const backups = yield* fs.readDirectory(config.stateDir);
+      expect(backups).toHaveLength(2);
+      const secondBackup = backups.find((name) => name !== firstBackup);
+      expect(secondBackup).toMatch(/^preview-sessions\.json\.unreadable-/);
+      expect(
+        NodeBuffer.Buffer.compare(
+          yield* fs.readFile(path.join(config.stateDir, firstBackup!)),
+          firstBytes,
+        ),
+      ).toBe(0);
+      expect(
+        NodeBuffer.Buffer.compare(
+          yield* fs.readFile(path.join(config.stateDir, secondBackup!)),
+          secondBytes,
+        ),
+      ).toBe(0);
+      const opened = yield* restarted.open({
+        threadId: freshThreadId(),
+        url: "https://example.com/new",
+      });
+      expect((yield* restarted.list({})).sessions).toEqual([opened]);
+    }),
+  );
+
+  it.effect.each(["open", "navigate", "close"] as const)(
+    "keeps durable and live state unchanged when an atomic %s save fails",
+    (operation) =>
+      Effect.gen(function* () {
+        const config = yield* isolatedPersistenceConfig();
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const file = path.join(config.stateDir, "preview-sessions.json");
+        let failWrite = false;
+        const guarded = FileSystem.make({
+          ...fs,
+          rename: (from, to) =>
+            failWrite && to === file
+              ? Effect.fail(
+                  PlatformError.systemError({
+                    _tag: "PermissionDenied",
+                    module: "FileSystem",
+                    method: "rename",
+                  }),
+                )
+              : fs.rename(from, to),
+        });
+        const manager = yield* PreviewManager.make.pipe(
+          Effect.provideService(ServerConfig.ServerConfig, config),
+          Effect.provideService(FileSystem.FileSystem, guarded),
+        );
+        const threadId = freshThreadId();
+        const original = yield* manager.open({ threadId, url: "https://example.com/original" });
+        const before = yield* fs.readFileString(file);
+        const subscription = yield* manager.subscribeEvents;
+        failWrite = true;
+        const change =
+          operation === "open"
+            ? manager.open({ threadId, url: "https://example.com/new" }).pipe(Effect.asVoid)
+            : operation === "navigate"
+              ? manager
+                  .reportStatus({
+                    threadId,
+                    tabId: original.tabId,
+                    navStatus: { _tag: "Success", url: "https://example.com/new", title: "" },
+                    canGoBack: false,
+                    canGoForward: false,
+                  })
+                  .pipe(Effect.asVoid)
+              : manager.close({ threadId, tabId: original.tabId });
+        expect(yield* change.pipe(Effect.flip)).toMatchObject({
+          _tag: "PreviewSessionStorageError",
+        });
+        expect((yield* manager.list({ threadId })).sessions).toEqual([original]);
+        expect(yield* fs.readFileString(file)).toBe(before);
+        expect(yield* PubSub.takeUpTo(subscription, DRAIN_LIMIT)).toEqual([]);
+      }),
+  );
+
+  it.effect("creates an immutable native root outside the lock before publishing its tab", () =>
+    Effect.gen(function* () {
+      const manager = yield* PreviewManager.PreviewManager;
+      const threadId = freshThreadId();
+      const events = yield* collectEvents;
+      const requested = yield* Deferred.make<void>();
+      const created = yield* Deferred.make<void>();
+      let canceled = true;
+      const opening = yield* manager
+        .open({
+          threadId,
+          runtime: "server",
+          desktopHostId: "host-a",
+          profileId: "work",
+          automationOwner: "agent-a",
+          url: "https://example.test/start",
+          createDesktopRoot: (snapshot) =>
+            Effect.gen(function* () {
+              expect(snapshot).toMatchObject({
+                backingPage: "desktop-root",
+                desktopHostId: "host-a",
+                profileId: "work",
+                automationOwner: "agent-a",
+              });
+              expect((yield* manager.list({ threadId })).sessions).toEqual([]);
+              yield* Deferred.succeed(requested, undefined);
+              yield* Deferred.await(created);
+              return {
+                rootId: "root-a",
+                publish: () => Effect.void,
+                close: () =>
+                  canceled
+                    ? Effect.fail(
+                        new PreviewNativeCloseError({ tabId: snapshot.tabId, reason: "canceled" }),
+                      )
+                    : Effect.void,
+              };
+            }),
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(requested);
+      expect(yield* events.drain).toEqual([]);
+      // An unrelated open proceeds while the native creation callback is waiting.
+      const ordinary = yield* manager.open({ threadId, runtime: "server" });
+      expect((yield* events.drain).map((event) => event.tabId)).toEqual([ordinary.tabId]);
+      yield* Deferred.succeed(created, undefined);
+      const root = yield* Fiber.join(opening);
+      expect(root).toMatchObject({ backingPage: "desktop-root", desktopRootId: "root-a" });
+      expect(yield* events.drain).toEqual([
+        expect.objectContaining({ type: "opened", snapshot: root }),
+      ]);
+      yield* manager.reportStatus({
+        threadId,
+        tabId: root.tabId,
+        serverControlled: true,
+        navStatus: { _tag: "Success", url: "https://example.test/next", title: "Next" },
+        canGoBack: true,
+        canGoForward: false,
+      });
+      yield* manager.resize({
+        threadId,
+        tabId: root.tabId,
+        viewport: { _tag: "freeform", width: 900, height: 600 },
+      });
+      yield* manager.requestReveal({ threadId, tabId: root.tabId, force: true });
+      expect(yield* manager.close({ threadId, tabId: root.tabId }).pipe(Effect.flip)).toMatchObject(
+        { reason: "canceled" },
+      );
+      expect(
+        (yield* manager.list({ threadId })).sessions.find(
+          (session) => session.tabId === root.tabId,
+        ),
+      ).toMatchObject({
+        backingPage: "desktop-root",
+        desktopRootId: "root-a",
+        desktopHostId: "host-a",
+        profileId: "work",
+        automationOwner: "agent-a",
+        navStatus: { title: "Next" },
+      });
+      canceled = false;
+      yield* manager.close({ threadId, tabId: root.tabId });
+      expect((yield* manager.list({ threadId })).sessions).toEqual([ordinary]);
+    }),
+  );
+
+  it.effect("abort during final publication retains the committed native tab without cleanup", () =>
+    Effect.gen(function* () {
+      const manager = yield* PreviewManager.PreviewManager;
+      const threadId = freshThreadId();
+      const events = yield* collectEvents;
+      const publishing = yield* Deferred.make<void>();
+      const finishPublishing = yield* Deferred.make<void>();
+      let closed = 0;
+      let prepared = false;
+      const opening = yield* manager
+        .open({
+          threadId,
+          runtime: "server",
+          desktopHostId: "host-a",
+          automationOwner: "agent-a",
+          beforePublish: () => {
+            prepared = true;
+          },
+          createDesktopRoot: () =>
+            Effect.succeed({
+              rootId: "committed-root",
+              close: () =>
+                Effect.sync(() => {
+                  closed++;
+                }),
+              publish: () =>
+                Effect.gen(function* () {
+                  expect(prepared).toBe(true);
+                  yield* Deferred.succeed(publishing, undefined);
+                  yield* Deferred.await(finishPublishing);
+                }),
+            }),
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(publishing);
+      const interruption = yield* Fiber.interrupt(opening).pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      yield* Deferred.succeed(finishPublishing, undefined);
+      yield* Fiber.join(interruption);
+      expect(closed).toBe(0);
+      expect((yield* manager.list({ threadId })).sessions).toEqual([
+        expect.objectContaining({ backingPage: "desktop-root", desktopRootId: "committed-root" }),
+      ]);
+      expect(yield* events.drain).toEqual([expect.objectContaining({ type: "opened" })]);
+    }),
+  );
+
+  it.effect("a failed pre-publication callback cancels the native attempt before publication", () =>
+    Effect.gen(function* () {
+      const manager = yield* PreviewManager.PreviewManager;
+      const threadId = freshThreadId();
+      const events = yield* collectEvents;
+      let canceled = 0;
+      let published = 0;
+      yield* manager
+        .open({
+          threadId,
+          runtime: "server",
+          desktopHostId: "host-a",
+          automationOwner: "agent-a",
+          beforePublish: () => {
+            throw new Error("registration failed");
+          },
+          createDesktopRoot: () =>
+            Effect.succeed({
+              rootId: "abandoned-root",
+              close: () =>
+                Effect.sync(() => {
+                  canceled++;
+                }),
+              publish: () =>
+                Effect.sync(() => {
+                  published++;
+                }),
+            }),
+        })
+        .pipe(Effect.exit);
+      expect(canceled).toBe(1);
+      expect(published).toBe(0);
+      expect((yield* manager.list({ threadId })).sessions).toEqual([]);
+      expect(yield* events.drain).toEqual([]);
+    }),
+  );
+
+  it.effect(
+    "failed native creation publishes no tab and shared opens keep their current backing",
+    () =>
+      Effect.gen(function* () {
+        const manager = yield* PreviewManager.PreviewManager;
+        const threadId = freshThreadId();
+        const events = yield* collectEvents;
+        const createDesktopRoot = (snapshot: { readonly tabId: string }) =>
+          Effect.fail(
+            new PreviewNativeCreateError({
+              tabId: snapshot.tabId,
+              cause: new Error("unavailable"),
+            }),
+          );
+        expect(
+          yield* manager
+            .open({
+              threadId,
+              runtime: "server",
+              desktopHostId: "host-a",
+              automationOwner: "agent-a",
+              createDesktopRoot,
+            })
+            .pipe(Effect.flip),
+        ).toMatchObject({ _tag: "PreviewNativeCreateError" });
+        expect((yield* manager.list({ threadId })).sessions).toEqual([]);
+        expect(yield* events.drain).toEqual([]);
+        const shared = yield* manager.open({
+          threadId,
+          runtime: "server",
+          desktopHostId: "host-a",
+          createDesktopRoot,
+        });
+        expect(shared.backingPage).toBe("desktop");
+        expect(shared.desktopRootId).toBeUndefined();
+        const headless = yield* manager.open({
+          threadId,
+          runtime: "server",
+          automationOwner: "agent-a",
+          createDesktopRoot,
+        });
+        expect(headless.backingPage).toBe("server");
+      }),
+  );
+
   it.effect(
     "bulk close removes ordinary and confirmed tabs while retaining failed native tabs",
     () =>
@@ -258,6 +1231,74 @@ it.layer(PreviewManagerTestLayer)("PreviewManager", (it) => {
       }),
   );
 
+  it.effect("an explicit environment choice remains headless with local native IPC available", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const manager = yield* PreviewManager.make.pipe(
+        Effect.provideService(ServerConfig.ServerConfig, {
+          ...config,
+          desktopBrowserFd: 4,
+          desktopBrowserControlFd: 5,
+        }),
+      );
+      const threadId = freshThreadId();
+      const opened = yield* manager.open({
+        threadId,
+        runtime: "server",
+        environmentHosted: true,
+        automationOwner: "agent-a",
+      });
+      expect(opened).toMatchObject({ backingPage: "server", automationOwner: "agent-a" });
+      expect(opened.desktopHostId).toBeUndefined();
+      expect((yield* manager.list({ threadId })).sessions).toEqual([opened]);
+    }),
+  );
+
+  it.effect(
+    "client environment selection publishes server backing despite native IPC and host defaults",
+    () =>
+      Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        const manager = yield* PreviewManager.make.pipe(
+          Effect.provideService(ServerConfig.ServerConfig, {
+            ...config,
+            desktopBrowserFd: 4,
+            desktopBrowserControlFd: 5,
+          }),
+        );
+        for (const profileId of ["default", "incognito"]) {
+          const opened = yield* manager.open({
+            threadId: freshThreadId(),
+            browserHost: "environment",
+            runtime: "desktop",
+            desktopHostId: "selected-desktop",
+            profileId,
+            url: "http://127.0.0.1:5173/app?run=1#section",
+          });
+          expect(opened).toMatchObject({
+            runtime: "server",
+            backingPage: "server",
+            profileId,
+            navStatus: { url: "http://127.0.0.1:5173/app?run=1#section" },
+          });
+          expect(opened.desktopHostId).toBeUndefined();
+        }
+        const threadId = freshThreadId();
+        const failure = yield* manager
+          .open({
+            threadId,
+            browserHost: "environment",
+            profileId: "work-account",
+          })
+          .pipe(Effect.flip);
+        expect(failure).toMatchObject({
+          _tag: "PreviewProfileHostError",
+          profileId: "work-account",
+        });
+        expect((yield* manager.list({ threadId })).sessions).toEqual([]);
+      }),
+  );
+
   it.effect("lists all environment tabs when the thread filter is omitted", () =>
     Effect.gen(function* () {
       const manager = yield* PreviewManager.PreviewManager;
@@ -452,7 +1493,13 @@ it.layer(PreviewManagerTestLayer)("PreviewManager", (it) => {
       expect(yield* collector.drain).toEqual([expect.objectContaining({ type: "opened", focus })]);
       expect(opened).not.toHaveProperty("focus");
       expect((yield* manager.list({ threadId })).sessions[0]).not.toHaveProperty("focus");
-      yield* manager.navigate({ threadId, tabId: opened.tabId, url: "https://example.test/" });
+      yield* manager.reportStatus({
+        threadId,
+        tabId: opened.tabId,
+        navStatus: { _tag: "Success", url: "https://example.test/", title: "" },
+        canGoBack: false,
+        canGoForward: false,
+      });
       expect((yield* collector.drain)[0]).not.toHaveProperty("focus");
     }),
   );

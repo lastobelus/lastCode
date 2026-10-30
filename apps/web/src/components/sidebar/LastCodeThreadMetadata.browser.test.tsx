@@ -1,6 +1,6 @@
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vite-plus/test";
+import { act, render } from "../../../test/render";
+
+import { describe, expect, it, vi } from "vite-plus/test";
 import { MessageId } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { makeThreadFixture } from "../../test-fixtures";
@@ -81,41 +81,18 @@ function Harness({ jump = null, active = true }: { jump?: string | null; active?
     </>
   );
 }
-let root: Root | null = null;
-let container: HTMLDivElement;
-const original = Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-beforeAll(() =>
-  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
-    configurable: true,
-    value: true,
-  }),
-);
-afterAll(() => {
-  if (original) Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", original);
-  else Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-});
-afterEach(async () => {
-  await act(() => root?.unmount());
-  container?.remove();
-  document.body.replaceChildren();
-  vi.clearAllMocks();
-  root = null;
-});
-async function render(jump: string | null, active = true) {
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-  await act(() => root?.render(<Harness jump={jump} active={active} />));
-}
-function trigger() {
+function trigger(container: HTMLElement) {
   return container.querySelector<HTMLButtonElement>('button[aria-label*="annotation"]')!;
 }
 describe("metadata annotation controls", () => {
   it.each([null, "⌘1"])(
     "opens the same annotation handle from %s without row navigation",
     async (jump) => {
-      await render(jump);
-      const button = trigger();
+      vi.clearAllMocks();
+      await using screen = await render(null);
+      const container = screen.container;
+      await screen.rerender(<Harness jump={jump} />);
+      const button = trigger(container);
       expect(button).not.toBeNull();
       await act(() => {
         button.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
@@ -133,7 +110,10 @@ describe("metadata annotation controls", () => {
     },
   );
   it("switches jump mode without remounting the archive control or leaving timestamp tracks", async () => {
-    await render(null, false);
+    vi.clearAllMocks();
+    await using screen = await render(null);
+    const container = screen.container;
+    await screen.rerender(<Harness jump={null} active={false} />);
     const archive = [...container.querySelectorAll("button")].find(
       (button) => button.textContent === "Archive",
     )!;
@@ -142,7 +122,7 @@ describe("metadata annotation controls", () => {
         '[data-thread-metadata-column="worktree"], [data-thread-metadata-column="environment"]',
       ),
     ).toHaveLength(2);
-    await act(() => root?.render(<Harness jump="⌘2" active={false} />));
+    await screen.rerender(<Harness jump="⌘2" active={false} />);
     expect(
       container.querySelectorAll(
         '[data-thread-metadata-column="worktree"], [data-thread-metadata-column="environment"]',
@@ -155,15 +135,18 @@ describe("metadata annotation controls", () => {
     expect(mocks.archive).toHaveBeenCalledOnce();
     expect(mocks.navigate).not.toHaveBeenCalled();
     expect(container.textContent).toContain("⌘2");
-    expect(trigger()).toBeNull();
+    expect(trigger(container)).toBeNull();
   });
   it.each([null, "⌘3"])(
     "resolves an existing annotation in %s mode without losing ordinary content",
     async (jump) => {
-      await render(jump);
-      const text = trigger().textContent;
-      await act(() => root?.render(<Harness jump={jump} active={false} />));
-      expect(trigger()).toBeNull();
+      vi.clearAllMocks();
+      await using screen = await render(null);
+      const container = screen.container;
+      await screen.rerender(<Harness jump={jump} />);
+      const text = trigger(container).textContent;
+      await screen.rerender(<Harness jump={jump} active={false} />);
+      expect(trigger(container)).toBeNull();
       expect(
         container.querySelector('[data-thread-metadata-column="timestamp"]')?.textContent,
       ).toBe(text);

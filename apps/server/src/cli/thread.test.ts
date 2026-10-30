@@ -900,15 +900,14 @@ it.effect("retains flag-based send timeout validation", () =>
   }),
 );
 
-it.effect.each([
-  { options: ["--steer-native"] },
-  { options: ["--timeout", "1 minute"] },
-])("rejects tracked-send options with the positional MCP send: %j", ({ options }) =>
-  Effect.gen(function* () {
-    const error = yield* runThreadCli(["send", "thread-1", "text", ...options]).pipe(Effect.flip);
-    assert.strictEqual(error._tag, "ThreadUsageError");
-    assert.strictEqual(error.message, "--steer-native and --timeout require --message <text>.");
-  }),
+it.effect.each([{ options: ["--steer-native"] }, { options: ["--timeout", "1 minute"] }])(
+  "rejects tracked-send options with the positional MCP send: %j",
+  ({ options }) =>
+    Effect.gen(function* () {
+      const error = yield* runThreadCli(["send", "thread-1", "text", ...options]).pipe(Effect.flip);
+      assert.strictEqual(error._tag, "ThreadUsageError");
+      assert.strictEqual(error.message, "--steer-native and --timeout require --message <text>.");
+    }),
 );
 
 it.effect("retains the upstream start and show subcommands", () =>
@@ -921,5 +920,224 @@ it.effect("retains the upstream start and show subcommands", () =>
     const showError = yield* runThreadCli(["show", "   "]).pipe(Effect.flip);
     assert.strictEqual(showError._tag, "ThreadUsageError");
     assert.include(showError.message, "is not a thread id");
+  }),
+);
+
+const presentationTime = DateTime.makeUnsafe("2026-01-02T00:00:00.000Z");
+const presentationItem = (id: string, fields: Record<string, unknown>) => ({
+  id,
+  type: "reasoning",
+  status: "completed",
+  runId: null,
+  updatedAt: presentationTime,
+  ...fields,
+});
+
+const readPresentation = (
+  turnItems: ReadonlyArray<Record<string, unknown>>,
+  runs: ReadonlyArray<{ id: string; ordinal: number }> = [],
+  messages: ReadonlyArray<Record<string, unknown>> = [],
+  turnLimit = 5,
+) => {
+  const { source } = runnerSource();
+  const fixtureSource: ThreadReadSource = {
+    ...source,
+    getThread: () =>
+      Effect.succeed({
+        thread: source.shell.threads[0],
+        turnItems,
+        runs,
+        messages,
+        providerThreads: [],
+        providerSessions: [],
+      } as never),
+  };
+  return readThreadOutput(fixtureSource, "thread-runner", turnLimit).pipe(
+    Effect.map((result) => {
+      assert.strictEqual(result.kind, "read");
+      if (result.kind !== "read") throw new Error("Expected read output");
+      return result;
+    }),
+  );
+};
+
+it.effect("presents activity variants with stable summary precedence and empty values", () =>
+  Effect.gen(function* () {
+    const cases = [
+      [{ type: "reasoning", text: "Thinking", message: "lower priority" }, "Thinking"],
+      [{ type: "reasoning", text: "", message: "must not replace empty text" }, ""],
+      [{ type: "system_notice", message: "Notice", summary: "lower priority" }, "Notice"],
+      [{ type: "compaction", summary: "Compacted", input: "lower priority" }, "Compacted"],
+      [
+        { type: "compaction", summary: undefined, title: "must not replace present field" },
+        "undefined",
+      ],
+      [{ type: "command_execution", input: "pwd", markdown: "lower priority" }, "pwd"],
+      [{ type: "dynamic_tool", input: { path: "example" } }, "[object Object]"],
+      [{ type: "dynamic_tool", input: null }, "null"],
+      [{ type: "proposed_plan", markdown: "# Plan", title: "lower priority" }, "# Plan"],
+      [{ type: "file_change", title: "Changed file" }, "Changed file"],
+      [{ type: "file_search", title: "" }, ""],
+      [{ type: "web_search" }, "web search"],
+      [{ type: "todo_list" }, "todo list"],
+      [{ type: "checkpoint" }, "checkpoint"],
+      [{ type: "run_interrupt_request", message: "Stop requested" }, "Stop requested"],
+      [{ type: "run_interrupt_result", message: "Stopped" }, "Stopped"],
+      [{ type: "error" }, "error"],
+      [{ type: "handoff", summary: "Handed off" }, "Handed off"],
+      [{ type: "fork" }, "fork"],
+      [{ type: "thread_created" }, "thread created"],
+      [{ type: "secret_request" }, "secret request"],
+      [{ type: "subagent", title: "Review" }, "Review"],
+      [{ type: "notification", message: "Notification" }, "Notification"],
+    ] as const;
+    const result = yield* readPresentation(
+      cases.map(([fields], index) => presentationItem(`item-${index}`, fields)),
+    );
+    assert.deepStrictEqual(
+      result.activities.map(({ id, kind, tone, summary, createdAt }) => ({
+        id,
+        kind,
+        tone,
+        summary,
+        createdAt,
+      })),
+      cases.map(([fields, summary], index) => ({
+        id: `item-${index}`,
+        kind: fields.type,
+        tone: "tool",
+        summary,
+        createdAt: "2026-01-02T00:00:00.000Z",
+      })),
+    );
+  }),
+);
+
+it.effect("presents pending and resolved requests and gives failures error tone", () =>
+  Effect.gen(function* () {
+    const result = yield* readPresentation([
+      presentationItem("approval-prompt", {
+        type: "approval_request",
+        status: "pending",
+        requestId: "a",
+        prompt: "Allow?",
+        title: "Title",
+      }),
+      presentationItem("approval-title", {
+        type: "approval_request",
+        status: "waiting",
+        requestId: "b",
+        title: "Title",
+      }),
+      presentationItem("approval-fallback", { type: "approval_request", requestId: "c" }),
+      presentationItem("approval-empty", {
+        type: "approval_request",
+        requestId: "d",
+        prompt: "",
+        title: "Title",
+      }),
+      presentationItem("input-pending", {
+        type: "user_input_request",
+        status: "waiting",
+        requestId: "e",
+        questions: [{ question: "First?" }, { question: "Second?" }],
+      }),
+      presentationItem("input-resolved", {
+        type: "user_input_request",
+        requestId: "f",
+        questions: [],
+      }),
+      presentationItem("approval-failed", {
+        type: "approval_request",
+        status: "failed",
+        requestId: "g",
+      }),
+      presentationItem("tool-pending", { status: "pending", text: "Working" }),
+      presentationItem("tool-failed", {
+        status: "failed",
+        text: "Failed",
+        startedAt: DateTime.makeUnsafe("2026-01-01T00:00:00.000Z"),
+      }),
+    ]);
+    assert.deepStrictEqual(
+      result.activities.map(({ kind, tone, summary }) => [kind, tone, summary]),
+      [
+        ["approval.requested", "approval", "Allow?"],
+        ["approval.requested", "approval", "Title"],
+        ["approval.resolved", "tool", "Approval requested"],
+        ["approval.resolved", "tool", ""],
+        ["user-input.requested", "approval", "First?\nSecond?"],
+        ["user-input.resolved", "tool", ""],
+        ["approval.resolved", "error", "Approval requested"],
+        ["reasoning", "tool", "Working"],
+        ["reasoning", "error", "Failed"],
+      ],
+    );
+    assert.strictEqual(result.activities.at(-1)?.createdAt, "2026-01-01T00:00:00.000Z");
+  }),
+);
+
+it.effect("keeps the newest run window and pins pending requests while clipping output", () =>
+  Effect.gen(function* () {
+    const result = yield* readPresentation(
+      [
+        presentationItem("old-run", { runId: "old", text: "Excluded" }),
+        presentationItem("message-item", {
+          type: "assistant_message",
+          runId: "new",
+          text: "Not activity",
+        }),
+        presentationItem("user-item", { type: "user_message", runId: "new", text: "Not activity" }),
+        presentationItem("pending", {
+          type: "approval_request",
+          requestId: "pending",
+          status: "waiting",
+          prompt: "Allow?",
+        }),
+        ...Array.from({ length: THREAD_ACTIVITY_MAX_RESULTS }, (_, index) =>
+          presentationItem(`recent-${index}`, { runId: "new", text: `Tool ${index}` }),
+        ),
+      ],
+      [
+        { id: "old", ordinal: 1 },
+        { id: "new", ordinal: 2 },
+      ],
+      [
+        {
+          id: "message",
+          role: "assistant",
+          text: "x".repeat(THREAD_TRANSCRIPT_MAX_CHARS + 10),
+          runId: "new",
+          streaming: false,
+          createdAt: presentationTime,
+          updatedAt: presentationTime,
+        },
+        {
+          id: "excluded",
+          role: "user",
+          text: "Old message",
+          runId: "old",
+          streaming: false,
+          createdAt: presentationTime,
+          updatedAt: presentationTime,
+        },
+      ],
+      1,
+    );
+    assert.deepStrictEqual(result.latestRun, { id: "new", ordinal: 2 });
+    assert.strictEqual(result.messages.length, 1);
+    assert.strictEqual(result.activities.length, THREAD_ACTIVITY_MAX_RESULTS);
+    assert.strictEqual(result.activities[0]?.id, "pending");
+    assert.strictEqual(result.activities[1]?.id, "recent-1");
+    assert.strictEqual(result.activities.at(-1)?.id, `recent-${THREAD_ACTIVITY_MAX_RESULTS - 1}`);
+    assert.strictEqual(result.activities[0]?.summary, "Allow?");
+    assert.isTrue(result.activitiesTruncated);
+    assert.isTrue(result.textTruncated);
+    const activityChars = result.activities.reduce((total, item) => total + item.summary.length, 0);
+    assert.strictEqual(
+      result.messages[0]?.text.length,
+      THREAD_TRANSCRIPT_MAX_CHARS - activityChars,
+    );
+    assert.strictEqual(result.originalActivityCount, THREAD_ACTIVITY_MAX_RESULTS + 1);
   }),
 );

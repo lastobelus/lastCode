@@ -328,6 +328,18 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     },
   },
   preview: {
+    onBrowserRendererRequest: (listener) => {
+      const wrappedListener = (
+        _event: Electron.IpcRendererEvent,
+        input: Parameters<typeof listener>[0],
+      ) => listener(input);
+      ipcRenderer.on(IpcChannels.DESKTOP_BROWSER_RENDERER_REQUEST_CHANNEL, wrappedListener);
+      return () =>
+        ipcRenderer.removeListener(
+          IpcChannels.DESKTOP_BROWSER_RENDERER_REQUEST_CHANNEL,
+          wrappedListener,
+        );
+    },
     browserSurfaceResponse: (response) =>
       ipcRenderer.invoke(IpcChannels.DESKTOP_BROWSER_SURFACE_RESPONSE_CHANNEL, response),
     browserPresentation: (input) =>
@@ -346,6 +358,8 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     },
     browserCommand: (input) =>
       ipcRenderer.invoke(IpcChannels.DESKTOP_BROWSER_COMMAND_CHANNEL, input),
+    bindBrowserEnvironment: (input) =>
+      ipcRenderer.invoke(IpcChannels.DESKTOP_BROWSER_ENVIRONMENT_CHANNEL, input),
     onBrowserEvent: (listener) => {
       const wrappedListener = (
         _event: Electron.IpcRendererEvent,

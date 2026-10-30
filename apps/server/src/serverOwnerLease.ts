@@ -2,24 +2,28 @@
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
+import { SERVER_EXIT_CODE_STATE_DIR_OWNED } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Runtime from "effect/Runtime";
 import * as Schema from "effect/Schema";
 
 const DARWIN_O_EXLOCK = 0x20;
 const DARWIN_O_NOFOLLOW = 0x100;
 
-export class ServerOwnerLeaseHeldError extends Schema.TaggedErrorClass<ServerOwnerLeaseHeldError>()(
+export class ServerOwnerLeaseHeldError extends Schema.TaggedError<ServerOwnerLeaseHeldError>()(
   "ServerOwnerLeaseHeldError",
   {
     stateDir: Schema.String,
   },
 ) {
+  override readonly [Runtime.errorExitCode] = SERVER_EXIT_CODE_STATE_DIR_OWNED;
+
   override get message() {
     return `Another T3 Code server already owns ${this.stateDir}. Stop that server or choose a different --base-dir.`;
   }
 }
 
-export class ServerOwnerLeaseUnavailableError extends Schema.TaggedErrorClass<ServerOwnerLeaseUnavailableError>()(
+export class ServerOwnerLeaseUnavailableError extends Schema.TaggedError<ServerOwnerLeaseUnavailableError>()(
   "ServerOwnerLeaseUnavailableError",
   {
     stateDir: Schema.String,

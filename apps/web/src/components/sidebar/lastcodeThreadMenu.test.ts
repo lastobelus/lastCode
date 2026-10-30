@@ -54,7 +54,7 @@ function menuInput(
 }
 
 describe("LastCode thread context menu", () => {
-  it("classifies every emitted static action across optional menu states", () => {
+  it("classifies every static action emitted by the base menu across optional states", () => {
     const emitted = new Set<string>();
     const permissions = [true, false].flatMap((canOperate) =>
       [true, false].map((persistent) => ({ canOperate, persistent })),
@@ -75,7 +75,12 @@ describe("LastCode thread context menu", () => {
           expect(item.disabled, item.id).toBe(true);
       }
     }
-    expect([...emitted].sort()).toEqual(Object.keys(LASTCODE_THREAD_ACTION_POLICY).sort());
+    expect([...emitted].sort()).toEqual(
+      Object.keys(LASTCODE_THREAD_ACTION_POLICY)
+        // The workspace menu extension adds this action after the base menu is built.
+        .filter((action) => action !== "archive-discard")
+        .sort(),
+    );
     for (const action of [null, "unknown", "constructor", "__proto__"]) {
       expect(isLastCodeThreadActionId(action)).toBe(false);
       expect(lastcodeThreadActionRequiresOperate(action)).toBe(false);
@@ -101,6 +106,7 @@ describe("LastCode thread context menu", () => {
       "stop-thread-processes",
       "dismiss-archive-failure",
       "delete",
+      "archive-discard",
     ]) {
       expect(lastcodeThreadActionRequiresOperate(action), action).toBe(true);
     }

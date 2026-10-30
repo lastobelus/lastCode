@@ -8,6 +8,7 @@ import * as Path from "effect/Path";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { migrationManifest, runMigrations } from "./Migrations.ts";
+import { lastcodeMigrationManifest } from "./LastCodeMigrations.ts";
 
 const v2Migrations = migrationManifest.filter(([id]) => id >= 55);
 const newerMigrationId = Math.max(...migrationManifest.map(([id]) => id)) + 1;
@@ -135,11 +136,18 @@ it.effect("registers every migration file", () =>
     const dir = path.join(import.meta.dirname, "Migrations");
     const files = (yield* fs.readDirectory(dir)).flatMap((name) => {
       const match = /^(\d+)_(\w+)\.ts$/.exec(name);
-      return match ? [[Number(match[1]), match[2]] as const] : [];
+      return match ? [[Number(match[1]), match[2]!] as const] : [];
     });
+    // Released LastCode filenames overlap upstream numbers; their independent ledger owns them.
+    const upstream = new Set(migrationManifest.map(([id, name]) => `${id}_${name}`));
+    const lastcode = new Set<string>(lastcodeMigrationManifest.map(([, name]) => name));
     assert.deepStrictEqual(
-      files.toSorted(([a], [b]) => a - b),
+      files.filter(([id, name]) => upstream.has(`${id}_${name}`)).toSorted(([a], [b]) => a - b),
       migrationManifest,
+    );
+    assert.deepStrictEqual(
+      files.filter(([id, name]) => !upstream.has(`${id}_${name}`) && !lastcode.has(name)),
+      [],
     );
   }).pipe(Effect.provide(NodeServices.layer)),
 );

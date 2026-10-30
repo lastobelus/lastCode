@@ -8,20 +8,31 @@ import {
   type ProjectSnapshot,
   type ProjectScript,
   type ThreadId,
+  type SavedWorkspaceDisposition,
+  WorktreeSuspensionRequestError,
 } from "@t3tools/contracts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 
 import { withCommandMetrics } from "../observability/Metrics.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
-import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import {
+  isGroupedCreatorThread,
+  releaseCreatorGrouping,
+} from "../orchestration-v2/CreatorGrouping.ts";
+import {
+  DispatchModeLimit,
+  exceededDispatchModeLimit,
+} from "../orchestration-v2/DispatchModeLimit.ts";
 import * as LegacyV1ThreadImporter from "../orchestration-v2/legacy/LegacyV1ThreadImporter.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import {
@@ -36,6 +47,9 @@ import { planThreadDeletion } from "../orchestration-v2/ThreadDeletion.ts";
 import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
 import { UpdateDrainAdmission } from "../updateDrain/UpdateDrainAdmission.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+import * as WorkspaceLifecycle from "../workspace/WorkspaceLifecycle.ts";
+
+const isWorktreeSuspensionRequestError = Schema.is(WorktreeSuspensionRequestError);
 
 export interface ProjectCreateInput extends ProjectCreatePayload {
   readonly commandId: CommandId;
@@ -53,6 +67,7 @@ export interface ProjectDeleteInput {
   readonly commandId: CommandId;
   readonly projectId: ProjectId;
   readonly force?: boolean;
+  readonly savedWorkspace?: SavedWorkspaceDisposition;
 }
 
 export class ProjectNotFoundError extends Schema.TaggedError<ProjectNotFoundError>()(
@@ -97,6 +112,7 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
       "delete-thread",
       "delete-project-settings",
       "dispatch-project-command",
+      "saved-workspace-lifecycle",
     ]),
     projectId: Schema.optional(ProjectId),
     workspaceRoot: Schema.optional(Schema.String),
@@ -104,6 +120,8 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
   },
 ) {
   override get message(): string {
+    if (this.operation === "saved-workspace-lifecycle")
+      return "Saved workspace data changed or is protected. Review the saved-data choice before deleting this project.";
     if (this.operation === "delete-project-settings")
       return `Project deletion committed, but settings cleanup failed${this.projectId === undefined ? "" : ` for ${this.projectId}`}. Retry using the original command ID to finish cleanup.`;
     return `Project operation '${this.operation}' failed${this.projectId === undefined ? "" : ` for ${this.projectId}`}.`;
@@ -177,6 +195,7 @@ export const make = Effect.gen(function* () {
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const legacyImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
   const threadCommands = yield* ThreadCommandExecutor.ThreadCommandExecutor;
+  const workspaceLifecycle = yield* Effect.serviceOption(WorkspaceLifecycle.WorkspaceLifecycle);
   // Commands for one project run in order. Commands that claim a workspace root
   // also hold that root, so two projects cannot both claim it.
   const projectLocks = yield* KeyedLock.make<ProjectId>();
@@ -430,49 +449,110 @@ export const make = Effect.gen(function* () {
     input: ProjectDeleteInput,
     threadId: ThreadId,
   ) {
-    yield* legacyImporter.ensureTranscript(threadId);
-    const projection = yield* threadProjections.getThreadRecords(threadId, [
-      "runs",
-      "attempts",
-      "nodes",
-      "runtimeRequests",
-      "subagents",
-      "providerSessions",
-    ]);
-    if (projection.thread.deletedAt !== null || projection.thread.projectId !== input.projectId) {
-      return;
-    }
-    const command = {
-      type: "thread.delete" as const,
-      commandId: CommandId.make(`${input.commandId}:delete-thread:${threadId}`),
-      threadId,
-    };
-    const now = yield* DateTime.now;
-    const plan = yield* planThreadDeletion({
-      command,
-      projection,
-      attachmentIds: yield* threadProjections.getThreadAttachmentIds(threadId),
-      now,
-      idAllocator,
-    });
-    const committed = yield* eventSink.commitCommand({
-      commandId: command.commandId,
-      commandType: command.type,
-      threadId,
-      acceptedAt: now,
-      events: plan.events,
-      effects: plan.effects,
-    });
-    if (
-      committed.receipt.threadId !== command.threadId ||
-      committed.receipt.commandType !== command.type
-    ) {
-      return yield* Effect.fail("The thread deletion command ID belongs to a different command.");
-    }
-    if (committed.receipt.status === "rejected") {
-      return yield* Effect.fail(
-        committed.receipt.error ?? "Thread deletion was previously rejected.",
+    // Project deletion already holds persistence. Take the creator and every
+    // ordinary grouped conversation in the same order as thread lifecycle commands.
+    while (true) {
+      const groupedIds = yield* threadProjections.getGroupedCreatorThreadIds([threadId]);
+      const ids = [...new Set([threadId, ...groupedIds])].toSorted();
+      const completed = yield* ids.reduceRight(
+        (effect, id) => threadCommands.withLock(id, effect),
+        Effect.gen(function* () {
+          yield* legacyImporter.ensureTranscript(threadId);
+          const projection = yield* threadProjections.getThreadRecords(threadId, [
+            "runs",
+            "attempts",
+            "nodes",
+            "runtimeRequests",
+            "subagents",
+            "providerSessions",
+            "providerThreads",
+          ]);
+          if (
+            projection.thread.deletedAt !== null ||
+            projection.thread.projectId !== input.projectId
+          )
+            return true;
+          const currentGroupedIds = yield* threadProjections.getGroupedCreatorThreadIds([threadId]);
+          // A creator-linked conversation can arrive while these locks are acquired.
+          // Release the locks and collect again before planning any changes.
+          if (currentGroupedIds.some((id) => !ids.includes(id))) return false;
+          const grouped = (yield* Effect.forEach(currentGroupedIds, (id) =>
+            threadProjections.getThread(id),
+          )).filter(
+            (thread) =>
+              thread.id !== threadId &&
+              thread.creatorThreadId === threadId &&
+              isGroupedCreatorThread(thread),
+          );
+          const limit = yield* DispatchModeLimit;
+          if (limit !== undefined) {
+            for (const thread of [projection.thread, ...grouped]) {
+              const mode = exceededDispatchModeLimit(limit, thread);
+              if (mode === undefined) continue;
+              if (limit.refused !== undefined)
+                yield* Ref.set(limit.refused, {
+                  threadId: thread.id,
+                  mode,
+                  runtimeMode: thread.runtimeMode,
+                  interactionMode: thread.interactionMode,
+                });
+              return yield* Effect.fail(
+                `Thread '${thread.id}' exceeds the permitted ${mode} mode for project deletion.`,
+              );
+            }
+          }
+          const command = {
+            type: "thread.delete" as const,
+            commandId: CommandId.make(`${input.commandId}:delete-thread:${threadId}`),
+            threadId,
+          };
+          const now = yield* DateTime.now;
+          const plan = yield* planThreadDeletion({
+            command,
+            projection,
+            attachmentIds: yield* threadProjections.getThreadAttachmentIds(threadId),
+            now,
+            idAllocator,
+          });
+          const releases = yield* Effect.forEach(grouped, (thread) =>
+            Effect.gen(function* () {
+              return {
+                id: yield* idAllocator.allocate.event({
+                  threadId: thread.id,
+                  commandId: command.commandId,
+                }),
+                type: "thread.metadata-updated" as const,
+                threadId: thread.id,
+                occurredAt: now,
+                payload: releaseCreatorGrouping(thread, now),
+              };
+            }),
+          );
+          const committed = yield* eventSink.commitCommand({
+            commandId: command.commandId,
+            commandType: command.type,
+            threadId,
+            acceptedAt: now,
+            events: [...plan.events, ...releases],
+            effects: plan.effects,
+          });
+          if (
+            committed.receipt.threadId !== command.threadId ||
+            committed.receipt.commandType !== command.type
+          ) {
+            return yield* Effect.fail(
+              "The thread deletion command ID belongs to a different command.",
+            );
+          }
+          if (committed.receipt.status === "rejected") {
+            return yield* Effect.fail(
+              committed.receipt.error ?? "Thread deletion was previously rejected.",
+            );
+          }
+          return true;
+        }),
       );
+      if (completed) return;
     }
   });
 
@@ -519,14 +599,11 @@ export const make = Effect.gen(function* () {
     yield* Effect.forEach(
       projectThreads,
       (thread) =>
-        threadCommands
-          .withLock(thread.id, deleteChildThread(input, thread.id))
-          .pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProjectOperationError({ operation: "delete-thread", projectId, cause }),
-            ),
+        deleteChildThread(input, thread.id).pipe(
+          Effect.mapError(
+            (cause) => new ProjectOperationError({ operation: "delete-thread", projectId, cause }),
           ),
+        ),
       { concurrency: 1, discard: true },
     );
   });
@@ -571,8 +648,45 @@ export const make = Effect.gen(function* () {
       // Completed receipt replay has no child cleanup to admit. Fresh cascades
       // take admission before persistence and child locks, just like thread.delete.
       const existing = yield* readRow(input.projectId, { includeDeleted: true });
-      if (Option.isSome(existing) && existing.value.deletedAt !== null) return yield* operation;
-      return yield* admission.admit("thread-delete", operation).pipe(
+      const lifecycleOperation = Option.isSome(workspaceLifecycle)
+        ? workspaceLifecycle.value
+            .run(
+              {
+                operation: "delete",
+                target: { kind: "project", projectId: input.projectId },
+                commandId: input.commandId,
+                ...(input.savedWorkspace === undefined
+                  ? {}
+                  : { savedWorkspace: input.savedWorkspace }),
+              },
+              operation,
+            )
+            .pipe(
+              Effect.mapError((cause) =>
+                isWorktreeSuspensionRequestError(cause)
+                  ? new ProjectOperationError({
+                      operation: "saved-workspace-lifecycle",
+                      projectId: input.projectId,
+                      cause,
+                    })
+                  : cause,
+              ),
+            )
+        : input.savedWorkspace?.mode === "discard"
+          ? Effect.fail(
+              new ProjectOperationError({
+                operation: "saved-workspace-lifecycle",
+                projectId: input.projectId,
+                cause: new WorktreeSuspensionRequestError({
+                  reason: "unavailable",
+                  message: "Saved workspace disposal is unavailable.",
+                }),
+              }),
+            )
+          : operation;
+      if (Option.isSome(existing) && existing.value.deletedAt !== null)
+        return yield* lifecycleOperation;
+      return yield* admission.admit("thread-delete", lifecycleOperation).pipe(
         Effect.catchTags({
           UpdateDrainAdmissionError: Effect.fn("ProjectService.deleteThread.admissionRefused")(
             function* (cause) {
@@ -580,7 +694,7 @@ export const make = Effect.gen(function* () {
               // behind it and the drain. Commit validates the replay under its locks.
               const recorded = yield* readRow(input.projectId, { includeDeleted: true });
               if (Option.isSome(recorded) && recorded.value.deletedAt !== null)
-                return yield* operation;
+                return yield* lifecycleOperation;
               return yield* cause;
             },
           ),
