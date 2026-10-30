@@ -1,5 +1,7 @@
 name: LastCode Intel artifact
 
+run-name: Build Intel package · ${{ inputs.installable_tag }} · ${{ inputs.request_token }}
+
 on:
   workflow_dispatch:
     inputs:
@@ -9,6 +11,10 @@ on:
         type: string
       installable_commit:
         description: Full commit SHA advertised for the installable tag
+        required: true
+        type: string
+      request_token:
+        description: Unique token used to correlate this dispatch to one workflow run
         required: true
         type: string
 
@@ -30,6 +36,7 @@ jobs:
     env:
       INSTALLABLE_TAG: ${{ inputs.installable_tag }}
       INSTALLABLE_COMMIT: ${{ inputs.installable_commit }}
+      REQUEST_TOKEN: ${{ inputs.request_token }}
     steps:
       - name: Checkout workflow automation
         uses: actions/checkout@v6
@@ -73,6 +80,10 @@ jobs:
           fi
           if [[ ! "$INSTALLABLE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
             echo "installable_commit must be a full lowercase commit SHA." >&2
+            exit 1
+          fi
+          if [[ ! "$REQUEST_TOKEN" =~ ^intel-[0-9a-f-]{36}$ ]]; then
+            echo "request_token must be an intel-prefixed UUID." >&2
             exit 1
           fi
 
