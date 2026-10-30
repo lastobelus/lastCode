@@ -89,6 +89,25 @@ export function goalCommandStopsActiveRun(
   }
 }
 
+/** Recovery receipts only block delivery to their exact still-active attempt. */
+export function runNeedsRecovery(
+  thread: OrchestrationV2ThreadProjection["thread"],
+  run: OrchestrationV2Run,
+): boolean {
+  const recovery = thread.recovery;
+  return (
+    recovery !== undefined &&
+    recovery.status !== "recovered" &&
+    recovery.runId === run.id &&
+    recovery.attemptId === run.activeAttemptId &&
+    (run.status === "preparing" ||
+      run.status === "starting" ||
+      run.status === "running" ||
+      run.status === "waiting")
+  );
+}
+
+/** Resolve client intent from the state serialized by the thread dispatch lock. */
 export function resolveMessageDispatchIntent(
   projection: OrchestrationV2ThreadProjection,
   requestedMode: MessageDispatchMode,
@@ -145,9 +164,22 @@ function resolveDeliveryIntent(
   requestedMode: MessageDispatchMode,
   deliveryIntent?: "auto" | "steer" | "restart",
 ): MessageDispatchMode {
-  if (deliveryIntent === undefined) return requestedMode;
-
+  // Strict steering must retain its target and safety requirements even when
+  // the caller also supplied an untargeted delivery intent.
+  if (requestedMode.type === "steer_active_native") return requestedMode;
   const activeRun = projection.runs.findLast(isActiveRun);
+  if (
+    activeRun !== undefined &&
+    runNeedsRecovery(projection.thread, activeRun) &&
+    (deliveryIntent === "auto" ||
+      deliveryIntent === "steer" ||
+      (deliveryIntent === undefined &&
+        requestedMode.type === "steer_active" &&
+        requestedMode.targetRunId === activeRun.id))
+  ) {
+    return { type: "queue_after_active" };
+  }
+  if (deliveryIntent === undefined) return requestedMode;
   if (activeRun === undefined) return { type: "start_immediately" };
   if (deliveryIntent === "steer") {
     return { type: "steer_active", targetRunId: activeRun.id };
@@ -194,6 +226,7 @@ export interface CommandPolicyV2Shape {
   readonly decideSteeringExecution: (
     input: CapabilityCheckInput & {
       readonly forceRestart?: boolean;
+      readonly nativeOnly?: boolean;
     },
   ) => Effect.Effect<SteeringExecutionPolicyV2, CommandPolicyV2Error>;
   readonly ensureInterrupt: (
@@ -252,6 +285,23 @@ const ensureQueuedMessages: CommandPolicyV2Shape["ensureQueuedMessages"] = (inpu
       );
 
 const decideSteeringExecution: CommandPolicyV2Shape["decideSteeringExecution"] = (input) => {
+  if (input.nativeOnly) {
+    if (
+      input.forceRestart ||
+      !input.capabilities.turns.supportsActiveSteering ||
+      input.capabilities.turns.supportsStrictActiveSteering !== true ||
+      input.capabilities.turns.activeSteeringInterruptsTools === true
+    ) {
+      return Effect.fail(
+        unsupported(
+          input,
+          "active_steering",
+          "Cooperative steering cannot interrupt or restart work.",
+        ),
+      );
+    }
+    return Effect.succeed("active_steering");
+  }
   if (!input.forceRestart && input.capabilities.turns.supportsActiveSteering) {
     return Effect.succeed("active_steering");
   }

@@ -47,6 +47,9 @@ vi.mock("./useUpdateEverything", () => ({
 function nightlyUpdate(releaseNotes: DesktopUpdateState["releaseNotes"]): DesktopUpdateState {
   return {
     enabled: true,
+    source: "hosted",
+    localBuildProgress: null,
+    localBuildFailure: null,
     status: "available",
     channel: "nightly",
     currentVersion: "0.0.50-nightly.1",
