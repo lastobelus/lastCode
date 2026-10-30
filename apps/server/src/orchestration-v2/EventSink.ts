@@ -274,7 +274,7 @@ const layerBase: Layer.Layer<
         // every subscriber must hear about it before this writer can exit.
         // Otherwise a failed child run can leave its parent's task running.
         return sql
-          .withTransaction(Effect.tap(restore(transaction), () => takeLane))
+          .withTransaction(restore(Effect.tap(transaction, () => takeLane)))
           .pipe(
             Effect.tap(publish),
             Effect.ensuring(

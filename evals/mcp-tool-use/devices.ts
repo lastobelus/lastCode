@@ -42,8 +42,12 @@ import type * as DeviceHost from "../../apps/server/src/device/DeviceHost.ts";
 import * as DeviceService from "../../apps/server/src/device/DeviceService.ts";
 import * as McpHttpServer from "../../apps/server/src/mcp/McpHttpServer.ts";
 import * as McpInvocationContext from "../../apps/server/src/mcp/McpInvocationContext.ts";
-import { liveThreadsLayer } from "../../apps/server/src/mcp/McpToolAccess.testkit.ts";
+import {
+  liveThreadProjectionsLayer,
+  liveThreadsLayer,
+} from "../../apps/server/src/mcp/McpToolAccess.testkit.ts";
 import { DeviceToolkit } from "../../apps/server/src/mcp/toolkits/device/tools.ts";
+import * as ProjectStore from "../../apps/server/src/orchestration-v2/ProjectStore.ts";
 import * as ProjectService from "../../apps/server/src/project/ProjectService.ts";
 import { ServerSettingsService } from "../../apps/server/src/serverSettings.ts";
 import { shellInvocations } from "./device-grading.ts";
@@ -638,7 +642,7 @@ const fakeHost = (
 };
 
 // Refs before and after T3 binds a launcher to each session run this same code. Optional
-// exports detect the newer API; makeWithHosts ignores a fifth argument it does not take.
+// exports detect the newer launcher API.
 type BoundTarget = { readonly session: string; readonly targetArgs: ReadonlyArray<string> };
 type Launchers = {
   readonly bind: (input: BoundTarget) => Effect.Effect<string, DeviceError>;
@@ -655,13 +659,7 @@ const launcherApi: {
   }) => Effect.Effect<void, never, FileSystem.FileSystem | Path.Path>;
 } = AgentDeviceShim;
 type MakeWithHosts = typeof DeviceService.makeWithHosts;
-const makeWithHosts: (
-  hosts: Parameters<MakeWithHosts>[0],
-  testHost: Parameters<MakeWithHosts>[1],
-  configureAgent: Parameters<MakeWithHosts>[2],
-  installTool: Parameters<MakeWithHosts>[3],
-  launchers?: Launchers,
-) => ReturnType<MakeWithHosts> = DeviceService.makeWithHosts;
+const makeWithHosts = DeviceService.makeWithHosts;
 
 /** T3's device tools for one sample. `cwd` names the home that T3's state lives under. */
 export const makeDeviceTools = Effect.fn("evaluateMcpToolUse.makeDeviceTools")(function* (
@@ -718,8 +716,8 @@ export const makeDeviceTools = Effect.fn("evaluateMcpToolUse.makeDeviceTools")(f
         hosts.set(id, fakeHost(world, id, label, agentEntry));
       }
       // As DeviceService.make, minus writing the config file the path names.
-      const configureAgent = (hostId: DeviceHostId, _endpoint: unknown, deviceId?: string) =>
-        agentDeviceConfigPath(stateDir, hostId, path, deviceId).pipe(
+      const configureAgent: Parameters<MakeWithHosts>[2] = (hostId, _endpoint, target) =>
+        agentDeviceConfigPath(stateDir, hostId, path, target).pipe(
           Effect.provideService(Crypto.Crypto, crypto),
           Effect.mapError(
             (cause) =>
@@ -755,7 +753,17 @@ export const makeDeviceTools = Effect.fn("evaluateMcpToolUse.makeDeviceTools")(f
               prune: (live) => withFiles(prune({ stateDir, live })),
             }
           : undefined;
-      const service = yield* makeWithHosts(hosts, undefined, configureAgent, undefined, launchers);
+      const service = yield* makeWithHosts(
+        hosts,
+        undefined,
+        configureAgent,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        launchers,
+      );
       return DeviceService.DeviceService.of({
         ...service,
         // Older refs install the CLI through agentCli; makeWithHosts has none to install.
@@ -780,6 +788,24 @@ export const makeDeviceTools = Effect.fn("evaluateMcpToolUse.makeDeviceTools")(f
       Layer.provideMerge(
         Layer.mergeAll(
           liveThreadsLayer,
+          liveThreadProjectionsLayer,
+          Layer.mock(ProjectStore.ProjectStoreV2)({
+            get: (projectId) =>
+              Effect.succeedSome({
+                projectId,
+                title: "Device eval project",
+                workspaceRoot: environment.cwd,
+                defaultModelSelection: null,
+                defaultThreadEnvMode: null,
+                autoPull: false,
+                faviconPath: null,
+                projectIcon: null,
+                scripts: [],
+                createdAt: "2026-01-01T00:00:00.000Z",
+                updatedAt: "2026-01-01T00:00:00.000Z",
+                deletedAt: null,
+              }),
+          }),
           Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
           ServerSettingsService.layerTest({
             enableDeviceSupport: true,

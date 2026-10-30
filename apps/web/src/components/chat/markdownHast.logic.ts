@@ -18,6 +18,12 @@ export function plainHastText(node: unknown): string | null {
   return parts.every((part) => part !== null) ? parts.join("") : null;
 }
 
+export function hastHasImage(node: unknown): boolean {
+  if (!node || typeof node !== "object") return false;
+  if ("tagName" in node && node.tagName === "img") return true;
+  return "children" in node && Array.isArray(node.children) && node.children.some(hastHasImage);
+}
+
 export function hastPlainTextDeep(node: unknown): string {
   if (!node || typeof node !== "object") return "";
   if ("type" in node && node.type === "text" && "value" in node && typeof node.value === "string") {
