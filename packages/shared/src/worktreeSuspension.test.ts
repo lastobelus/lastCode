@@ -9,7 +9,6 @@ import * as NodeZlib from "node:zlib";
 import { expect, it, vi } from "vite-plus/test";
 
 import { createWorktreeSuspensionStore } from "./worktreeSuspension.ts";
-import { fixtureMetadataExecFile } from "./__fixtures__/worktree-suspension-metadata.ts";
 import * as HostProcess from "./HostProcess.ts";
 
 vi.mock("node:fs/promises", { spy: true });
@@ -19,7 +18,7 @@ const execute = NodeUtil.promisify(NodeChildProcess.execFile);
 const git = async (cwd: string, ...args: ReadonlyArray<string>) =>
   (await execute("git", ["-c", "core.hooksPath=/dev/null", ...args], { cwd })).stdout.trim();
 
-const fixture = async (normalizeMetadata = true) => {
+const fixture = async () => {
   const temporary = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "worktree-suspension-"));
   const root = await NodeFSP.realpath(temporary);
   const repository = NodePath.join(root, "repository");
@@ -69,12 +68,6 @@ const fixture = async (normalizeMetadata = true) => {
   await git(repository, "config", "filter.sentinel.smudge", `printf filter >> '${sentinel}'; cat`);
   await NodeFSP.writeFile(NodePath.join(workspace, "filtered"), "RAW DIFFERENT\n");
   const store = createWorktreeSuspensionStore({ storeRoot: NodePath.join(root, "saved") });
-  const original = await vi.importActual<typeof NodeChildProcess>("node:child_process");
-  const metadata = normalizeMetadata
-    ? vi
-        .spyOn(NodeChildProcess, "execFile")
-        .mockImplementation(fixtureMetadataExecFile(root, original.execFile))
-    : undefined;
   return {
     root,
     repository,
@@ -83,7 +76,6 @@ const fixture = async (normalizeMetadata = true) => {
     sentinel,
     store,
     async [Symbol.asyncDispose]() {
-      metadata?.mockRestore();
       await NodeFSP.rm(root, { recursive: true, force: true });
     },
   };
@@ -202,7 +194,14 @@ it.runIf(HostProcess.Platform.defaultValue() === "darwin")(
 
 it
   .runIf(HostProcess.Platform.defaultValue() === "darwin")
-  .each(["", "tracked.txt", "notes", "../saved"])(
+  .each([
+    "",
+    "tracked.txt",
+    "notes",
+    "../saved",
+    "../repository/.git/worktrees/workspace",
+    "../repository/.git/worktrees/workspace/HEAD",
+  ])(
   "refuses unsupported xattrs at '%s' and retains source bytes and metadata",
   async (relative) => {
     await using test = await fixture();
@@ -220,14 +219,16 @@ it
         ownerBinding: "fixture-owner",
       }),
     ).rejects.toThrow("extended attributes are unsupported");
-    expect(
-      reads.mock.calls.filter(
-        ([name]) =>
-          typeof name === "string" &&
-          name.startsWith(`${test.workspace}/`) &&
-          !name.endsWith("/.git"),
-      ),
-    ).toEqual([]);
+    // Private Git inventory follows the workspace inventory.
+    if (!relative.startsWith("../repository/"))
+      expect(
+        reads.mock.calls.filter(
+          ([name]) =>
+            typeof name === "string" &&
+            name.startsWith(`${test.workspace}/`) &&
+            !name.endsWith("/.git"),
+        ),
+      ).toEqual([]);
     expect(await NodeFSP.readFile(indexPath)).toEqual(index);
     expect(await NodeFSP.readFile(NodePath.join(test.workspace, "tracked.txt"), "utf8")).toBe(
       "unstaged\n",
@@ -242,17 +243,93 @@ it
 );
 
 it.runIf(HostProcess.Platform.defaultValue() === "darwin")(
-  "still refuses provenance without fixture normalization",
+  "roundtrips OS-managed provenance without filtering native metadata",
   async () => {
-    await using test = await fixture(false);
-    await execute("/usr/bin/xattr", ["-sw", "com.apple.provenance", "fixture", test.workspace]);
+    await using test = await fixture();
+    const saved = NodePath.join(test.root, "saved");
+    const gitDirectory = NodePath.join(test.repository, ".git", "worktrees", "workspace");
+    await NodeFSP.mkdir(saved, { mode: 0o700 });
+    const paths = [
+      saved,
+      test.workspace,
+      NodePath.join(test.workspace, "tracked.txt"),
+      NodePath.join(test.workspace, ".git"),
+      gitDirectory,
+      NodePath.join(gitDirectory, "HEAD"),
+      NodePath.join(gitDirectory, "index"),
+    ];
+    const status = () =>
+      git(test.workspace, "-c", "filter.sentinel.clean=cat", "status", "--porcelain=v1", "-z");
+    const statusBefore = await status();
+    for (const path of paths)
+      await execute("/usr/bin/xattr", [
+        "-swx",
+        "com.apple.provenance",
+        "0102001122334455667788",
+        path,
+      ]);
+    const provenance = () =>
+      Promise.all(
+        paths.map(
+          async (path) =>
+            (await execute("/usr/bin/xattr", ["-spx", "com.apple.provenance", path])).stdout,
+        ),
+      );
+    const before = await provenance();
+    const snapshot = await test.store.capture({
+      sourcePath: test.workspace,
+      operationId: "provenance",
+      ownerBinding: "fixture-owner",
+    });
+    expect(snapshot.attributes?.some((item) => item.name === "com.apple.provenance")).not.toBe(
+      true,
+    );
+    await test.store.trialRestore(snapshot.id);
+    expect(await provenance()).toEqual(before);
+    await test.store.suspend(snapshot.id, {
+      quarantineParent: NodePath.join(test.root, "quarantine"),
+      guard: async () => {},
+    });
+    await test.store.restore(snapshot.id, { destinationPath: test.workspace });
+    expect(await status()).toBe(statusBefore);
+    expect(await git(test.workspace, "rev-parse", "HEAD")).toBe(test.head);
+    expect(await git(test.workspace, "show", ":tracked.txt")).toBe("staged");
+    expect(await NodeFSP.readFile(NodePath.join(test.workspace, "tracked.txt"), "utf8")).toBe(
+      "unstaged\n",
+    );
+    expect(await NodeFSP.readFile(NodePath.join(test.workspace, "notes", "private"), "utf8")).toBe(
+      "ignored note\n",
+    );
+  },
+);
+
+it.runIf(HostProcess.Platform.defaultValue() === "darwin").each(["outside", "malformed"])(
+  "rejects unverified provenance listing paths: %s",
+  async (kind) => {
+    await using test = await fixture();
+    const native = await vi.importActual<typeof NodeChildProcess>("node:child_process");
+    const listing =
+      kind === "outside"
+        ? `${NodePath.join(test.root, "outside")}: com.apple.provenance\n`
+        : "com.apple.provenance\n";
+    using _listing = vi.spyOn(NodeChildProcess, "execFile").mockImplementation(((
+      ...parameters: Parameters<typeof NodeChildProcess.execFile>
+    ) => {
+      if (
+        parameters[0] === "/usr/bin/xattr" &&
+        parameters[1]?.[0] === "-rs" &&
+        parameters[1][1] === test.workspace
+      )
+        return native.execFile("/usr/bin/printf", ["%s", listing], parameters[2], parameters[3]);
+      return native.execFile(...parameters);
+    }) as typeof NodeChildProcess.execFile);
     await expect(
       test.store.capture({
         sourcePath: test.workspace,
-        operationId: "provenance",
+        operationId: "unverified-provenance",
         ownerBinding: "fixture-owner",
       }),
-    ).rejects.toThrow("extended attributes are unsupported");
+    ).rejects.toThrow("extended attribute paths could not be verified");
     expect(await NodeFSP.readFile(NodePath.join(test.workspace, "tracked.txt"), "utf8")).toBe(
       "unstaged\n",
     );
@@ -429,7 +506,7 @@ it.runIf(HostProcess.Platform.defaultValue() === "darwin")(
       ownerBinding: "fixture-owner",
     });
     const native = await vi.importActual<typeof NodeChildProcess>("node:child_process");
-    const original = fixtureMetadataExecFile(test.root, native.execFile);
+    const original = native.execFile;
     using _failure = vi.spyOn(NodeChildProcess, "execFile").mockImplementation(((
       ...parameters: Parameters<typeof NodeChildProcess.execFile>
     ) => {
@@ -466,7 +543,7 @@ it.runIf(HostProcess.Platform.defaultValue() === "darwin")(
       }),
     ).rejects.toThrow("extended attributes exceed the byte limit");
     const native = await vi.importActual<typeof NodeChildProcess>("node:child_process");
-    const original = fixtureMetadataExecFile(test.root, native.execFile);
+    const original = native.execFile;
     using _failure = vi.spyOn(NodeChildProcess, "execFile").mockImplementation(((
       ...parameters: Parameters<typeof NodeChildProcess.execFile>
     ) => {
@@ -923,7 +1000,7 @@ it.each([1, 2])(
 
     // Inspect the actual trial checkout before Git removes it.
     const native = await vi.importActual<typeof NodeChildProcess>("node:child_process");
-    const original = fixtureMetadataExecFile(test.root, native.execFile);
+    const original = native.execFile;
     let trials = 0;
     using _trial = vi.spyOn(NodeChildProcess, "execFile").mockImplementation(((
       ...parameters: Parameters<typeof NodeChildProcess.execFile>

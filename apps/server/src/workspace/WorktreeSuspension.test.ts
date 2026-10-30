@@ -25,7 +25,7 @@ import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { expect, vi } from "vite-plus/test";
+import { expect } from "vite-plus/test";
 import { it } from "@effect/vitest";
 import { ChildProcessSpawner } from "effect/process";
 
@@ -47,9 +47,6 @@ import * as Registry from "./WorktreeSuspensionRegistry.ts";
 import * as Consumers from "./WorktreeConsumers.ts";
 import * as Mounts from "./DependencyMounts.ts";
 import { withWorkspaceLease, resolveWorkspaceLeaseRoot } from "./workspaceLease.ts";
-import { fixtureMetadataExecFile } from "../../../../packages/shared/src/__fixtures__/worktree-suspension-metadata.ts";
-
-vi.mock("node:child_process", { spy: true });
 
 const execute = NodeUtil.promisify(NodeChildProcess.execFile);
 const git = async (cwd: string, ...args: readonly string[]) =>
@@ -115,16 +112,11 @@ const fixture = async () => {
   await NodeFSP.writeFile(NodePath.join(workspace, "tracked"), "working\n");
   await NodeFSP.mkdir(NodePath.join(workspace, "notes"));
   await NodeFSP.writeFile(NodePath.join(workspace, "notes", "private"), "ignored note\n");
-  const original = await vi.importActual<typeof NodeChildProcess>("node:child_process");
-  const metadata = vi
-    .spyOn(NodeChildProcess, "execFile")
-    .mockImplementation(fixtureMetadataExecFile(root, original.execFile));
   return {
     root,
     repository,
     workspace,
     async [Symbol.asyncDispose]() {
-      metadata.mockRestore();
       await NodeFSP.rm(root, { recursive: true, force: true });
     },
   };
