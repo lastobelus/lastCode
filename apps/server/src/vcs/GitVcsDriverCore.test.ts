@@ -258,8 +258,13 @@ const initRepoWithCommit = (
   Effect.gen(function* () {
     const driver = yield* GitVcsDriver.GitVcsDriver;
     yield* driver.initRepo({ cwd });
-    yield* git(cwd, ["config", "user.email", "test@test.com"]);
-    yield* git(cwd, ["config", "user.name", "Test"]);
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    yield* fs.writeFileString(
+      path.join(cwd, ".git", "config"),
+      "\n[user]\n\temail = test@test.com\n\tname = Test\n",
+      { flag: "a" },
+    );
     yield* writeTextFile(cwd, "README.md", "# test\n");
     yield* git(cwd, ["add", "."]);
     yield* git(cwd, ["commit", "-m", "initial commit"]);

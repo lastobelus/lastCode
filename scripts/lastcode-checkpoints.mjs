@@ -750,7 +750,7 @@ function readCarryReplayPlan(worktree) {
 }
 
 export function renderLauncher(modulePath) {
-  return `#!/bin/sh\nexec mise exec node@24.13.1 -- node ${shellQuote(modulePath)} "$@"\n`;
+  return `#!/bin/sh\nexec env MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@24.13.1 -- node ${shellQuote(modulePath)} "$@"\n`;
 }
 
 function installCommand(repoRoot, home) {
