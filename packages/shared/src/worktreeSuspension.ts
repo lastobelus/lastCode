@@ -612,12 +612,19 @@ const metadataCheck = async (
       const name = recursive ? line.slice(separator + 2) : line;
       const path = NodePath.relative(root, absolute);
       if (
-        attributeLimits === undefined ||
         (recursive && separator < 0) ||
-        !paths.has(path) ||
-        !supportedAttribute(name)
+        !NodePath.isAbsolute(absolute) ||
+        NodePath.isAbsolute(path) ||
+        path === ".." ||
+        path.startsWith(`..${NodePath.sep}`)
       )
-        refuse("extended attributes are unsupported");
+        refuse("extended attribute paths could not be verified");
+      // macOS manages this application-identity tag, including on private Git
+      // and store files. Writes may succeed without changing it; leave it to
+      // the OS rather than replaying a saved application's provenance identity.
+      if (name === "com.apple.provenance") continue;
+      if (attributeLimits === undefined || !paths.has(path) || !supportedAttribute(name))
+        refuse(`extended attributes are unsupported (${name} at ${absolute})`);
       if (captured.length >= MAX_ATTRIBUTES) refuse("extended attributes exceed the record limit");
       const value = await command(
         "/usr/bin/xattr",
