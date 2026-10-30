@@ -394,6 +394,9 @@ export function showContextMenuFallback<T extends string>(
       menu.setAttribute("role", "menu");
       menu.setAttribute("aria-label", parentTrigger?.textContent ?? "Context menu");
       menu.tabIndex = -1;
+      // The detached menu owns presses, including SVG targets; row selection
+      // dismissal must not consume the press before the leaf action runs.
+      menu.addEventListener("mousedown", (event) => event.stopPropagation());
 
       const inner = document.createElement("div");
       inner.className =
