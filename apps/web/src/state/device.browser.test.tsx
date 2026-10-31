@@ -28,7 +28,8 @@ vi.mock(import("./presentation"), async (original) => ({
     connectedEnvironmentIdsAtom: Atom.make([EnvironmentId.make("device-loading")]),
   },
 }));
-vi.mock(import("../hooks/useSettings"), () => ({
+vi.mock(import("../hooks/useSettings"), async (original) => ({
+  ...(await original()),
   getClientSettings: (() => ({ browserAutoShowFloatingPreview: true })) as never,
   useClientSettings: ((
     select: (settings: { browserAutoShowFloatingPreview: boolean }) => unknown,

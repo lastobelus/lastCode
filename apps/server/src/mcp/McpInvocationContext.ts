@@ -13,6 +13,9 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
+import { currentThreadDeviceAccess } from "../device/DeviceAgentAccess.ts";
+
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 
 const ALL_MCP_CAPABILITIES = [
   "preview",
@@ -148,10 +151,10 @@ export type McpCapabilityError<C extends McpCapability> = C extends "preview"
   ? PreviewAutomationUnavailableError
   : McpCapabilityUnavailableError;
 
-const missingCapability = (
+const missingCapability = <C extends McpCapability>(
   invocation: McpInvocationScope,
-  capability: McpCapability,
-): PreviewAutomationUnavailableError | McpCapabilityUnavailableError => {
+  capability: C,
+): McpCapabilityError<C> => {
   const fields = {
     environmentId: invocation.environmentId,
     ...(invocation.thread === undefined
@@ -162,9 +165,11 @@ const missingCapability = (
           providerInstanceId: invocation.thread.providerInstanceId,
         }),
   };
-  return capability === "preview"
-    ? new PreviewAutomationUnavailableError({ capability, ...fields })
-    : new McpCapabilityUnavailableError({ capability, ...fields });
+  return (
+    capability === "preview"
+      ? new PreviewAutomationUnavailableError({ capability, ...fields })
+      : new McpCapabilityUnavailableError({ capability, ...fields })
+  ) as McpCapabilityError<C>;
 };
 
 export const requireMcpCapability = <const C extends McpCapability>(
@@ -189,6 +194,15 @@ export const requireThreadMcpCapability = <const C extends "preview" | "device">
     ),
     Effect.withSpan("mcp.requireCapability"),
   );
+
+/** A granted device credential still needs the calling project's current consent. */
+export const requireCurrentThreadDeviceAccess = Effect.gen(function* () {
+  const scope = yield* requireThreadMcpCapability("device");
+  const threads = yield* ProjectionStore.ProjectionStoreV2;
+  const allowed = yield* currentThreadDeviceAccess(threads.getThreadShell(scope.thread.threadId));
+  if (!allowed) return yield* missingCapability(scope, "device");
+  return scope;
+});
 
 const threadCallerRequired = (operation: string) =>
   new OrchestratorMcpFailure({

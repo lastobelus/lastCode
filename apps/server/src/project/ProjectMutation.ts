@@ -1,4 +1,4 @@
-import { type ProjectMutation } from "@t3tools/contracts";
+import { type ProjectId, type ProjectMutation } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
 import { type ProjectCloneTracker } from "./ProjectCloneTracker.ts";
@@ -9,6 +9,7 @@ type ProjectMutations = Pick<ProjectService["Service"], "create" | "delete" | "u
 export const projectMutationOperation = Effect.fn("projectMutationOperation")(function* (
   projects: ProjectMutations,
   mutation: ProjectMutation,
+  afterDelete?: (projectId: ProjectId) => Effect.Effect<void>,
 ) {
   switch (mutation.type) {
     case "project.create":
@@ -45,11 +46,14 @@ export const projectMutationOperation = Effect.fn("projectMutationOperation")(fu
       });
 
     case "project.delete":
-      return yield* projects.delete({
-        commandId: mutation.commandId,
-        projectId: mutation.projectId,
-        ...(mutation.force === undefined ? {} : { force: mutation.force }),
-      });
+      return yield* projects.delete(
+        {
+          commandId: mutation.commandId,
+          projectId: mutation.projectId,
+          ...(mutation.force === undefined ? {} : { force: mutation.force }),
+        },
+        afterDelete?.(mutation.projectId),
+      );
   }
 });
 

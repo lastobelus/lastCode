@@ -6,6 +6,7 @@ import {
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2ThreadStreamItem,
   type OrchestrationV2TurnItem,
+  type ScopedThreadRef,
   type ThreadId as ThreadIdType,
 } from "@t3tools/contracts";
 import { boundedSnapshotProjection } from "@t3tools/shared/orchestrationV2BoundedSnapshot";
@@ -254,6 +255,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   if (resumeCache?.owner === owner) resumeCache.snapshot = committed;
   const awaitingCompletion = yield* Ref.make(false);
   const applyLock = yield* Semaphore.make(1);
+  let retainSnapshot = true;
   // Save only completed data/cursor updates. A canceled scope must not cache
   // a cursor whose event has not reached the data yet.
   const announceRequests = makeThreadRequestsResolvedAnnouncer(environmentId, threadId);
@@ -275,7 +277,9 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
         committed.persisted &&
         matchesThreadSnapshot(committed, Option.getOrNull(current.data), sequence, current.history),
     };
-    if (resumeCache?.owner === owner) resumeCache.snapshot = committed;
+    if (resumeCache?.owner === owner) {
+      resumeCache.snapshot = retainSnapshot ? committed : undefined;
+    }
   });
   const persistence = yield* Queue.sliding<OrchestrationV2ThreadDetailSnapshot>(1);
   let queuedSnapshot = Option.getOrUndefined(cached);
@@ -997,6 +1001,8 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
               break;
             }
             case "missing": {
+              // A lookup can precede creation. Only a deletion event is a durable tombstone.
+              retainSnapshot = false;
               yield* setDeleted();
               return yield* Effect.never;
             }
@@ -1058,6 +1064,7 @@ export function createEnvironmentThreadStateAtoms<R, E>(
     | R,
     E
   >,
+  threadExistsAtom: (ref: ScopedThreadRef) => Atom.Atom<boolean>,
 ) {
   // Cache definitions must outlive collectible live-atom definitions. The
   // registry retains these nodes without retaining environment or RPC scopes.
@@ -1073,9 +1080,12 @@ export function createEnvironmentThreadStateAtoms<R, E>(
   const family = Atom.family((key: string) => {
     const { environmentId, threadId } = parseThreadKey(key);
     const resumeAtom = resumeFamily(key);
+    const existsAtom = threadExistsAtom({ environmentId, threadId });
     return runtime
       .atom(
         (get) => {
+          // Creation in the shell retries an earlier miss, without polling a nonexistent id.
+          get(existsAtom);
           get.mount(resumeAtom);
           const resume = get.once(resumeAtom);
           const live = threadStateChanges(environmentId, threadId, resume);

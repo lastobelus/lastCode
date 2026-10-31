@@ -21,6 +21,7 @@ import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/process";
 import type * as EffectAcpSchema from "effect-acp/compat";
@@ -40,6 +41,8 @@ import {
   makeAntigravityAcpAdapterFlavor,
   makeAntigravityAdapterV2,
 } from "./AntigravityAdapterV2.ts";
+
+const isAcpRequestError = Schema.is(EffectAcpErrors.AcpRequestError);
 
 const flavor = makeAntigravityAcpAdapterFlavor({
   instanceId: ProviderInstanceId.make("antigravity-test"),
@@ -327,6 +330,27 @@ describe("AntigravityAdapterV2 client file system", () => {
       const insidePath = path.join(workspace, "src", "inside.ts");
       yield* fileSystem.makeDirectory(path.dirname(insidePath), { recursive: true });
       yield* fileSystem.writeFileString(insidePath, "inside");
+      const workspaceAlias = path.join(outside, "workspace-alias");
+      yield* fileSystem.symlink(workspace, workspaceAlias);
+      const nestedPath = path.join(workspaceAlias, "new", "nested", "inside.ts");
+      const missingRead = yield* readTextFile(
+        { sessionId: "mock-session-1", path: nestedPath },
+        context("fs/read_text_file"),
+      ).pipe(Effect.flip);
+      assert.equal(
+        isAcpRequestError(missingRead) && missingRead.code,
+        EffectAcpErrors.AcpRequestError.resourceNotFound("missing").code,
+      );
+      yield* fileSystem.makeDirectory(path.join(workspace, "new", "nested"), { recursive: true });
+      yield* fileSystem.writeFileString(
+        path.join(workspace, "new", "nested", "inside.ts"),
+        "nested",
+      );
+      const nestedRead = yield* readTextFile(
+        { sessionId: "mock-session-1", path: nestedPath },
+        context("fs/read_text_file"),
+      );
+      assert.equal(nestedRead.content, "nested");
       const pasted = yield* readTextFile(
         { sessionId: "mock-session-1", path: attachment },
         context("fs/read_text_file"),

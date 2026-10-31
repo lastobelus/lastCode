@@ -15,6 +15,7 @@ import {
   DEFAULT_TAILSCALE_SERVE_PORT,
   ensureTailscaleServe,
   readTailscaleStatus,
+  type TailscaleServeError,
 } from "@t3tools/tailscale";
 import * as Config from "effect/Config";
 import * as Console from "effect/Console";
@@ -359,6 +360,7 @@ const awaitEnvironmentDescriptor = Effect.fn(function* (baseUrl: string) {
 const resolveTailscalePairingBase = Effect.fn("pair.resolveTailscalePairingBase")(
   function* (input: { readonly target: DiscoveredPairTarget; readonly servePort: number }) {
     const notes: Array<string> = [];
+    let replaceVerifiedHandler = false;
     const status = yield* readTailscaleStatus.pipe(
       Effect.mapError((cause) => new TailscaleUnavailableError({ cause })),
     );
@@ -385,6 +387,7 @@ const resolveTailscalePairingBase = Effect.fn("pair.resolveTailscalePairingBase"
       if (input.target.state.devUrl === undefined) {
         return { baseUrl, notes };
       }
+      replaceVerifiedHandler = true;
     }
     if (existing._tag === "not-a-t3-server") {
       return yield* new ServePortOccupiedError({ servePort: input.servePort });
@@ -397,10 +400,13 @@ const resolveTailscalePairingBase = Effect.fn("pair.resolveTailscalePairingBase"
     yield* ensureTailscaleServe({
       localPort: localTarget.localPort,
       servePort: input.servePort,
+      replaceVerifiedHandler,
       ...(localTarget.localHost !== undefined ? { localHost: localTarget.localHost } : {}),
     }).pipe(
-      Effect.mapError(
-        (cause) => new TailscaleServeFailedError({ servePort: input.servePort, cause }),
+      Effect.mapError((cause: TailscaleServeError) =>
+        cause._tag === "TailscaleServePortOccupiedError"
+          ? new ServePortOccupiedError({ servePort: input.servePort })
+          : new TailscaleServeFailedError({ servePort: input.servePort, cause }),
       ),
     );
     notes.push(

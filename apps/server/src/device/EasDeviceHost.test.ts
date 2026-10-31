@@ -602,18 +602,16 @@ describe("EAS Simulator host", () => {
         platform: "ios",
       });
       expect(opened.deviceId).toBe("session-1");
-      yield* service.open({
+      const secondOpened = yield* service.open({
         threadId: second,
         hostId: "eas",
         deviceId: opened.deviceId,
         platform: "ios",
       });
-      const sessionOf = (threadId: ThreadId) =>
-        service
-          .agentTarget({ threadId, hostId: "eas", deviceId: opened.deviceId })
-          .pipe(Effect.map((target) => target.args[3]));
-      const firstSession = yield* sessionOf(first);
-      const secondSession = yield* sessionOf(second);
+      const sessionOf = (openedSession: typeof opened) =>
+        service.agentTarget({ openedSession }).pipe(Effect.map((target) => target.args[3]));
+      const firstSession = yield* sessionOf(opened);
+      const secondSession = yield* sessionOf(secondOpened);
 
       yield* service.close({ threadId: first });
       expect(expo.releases).toEqual([firstSession]);

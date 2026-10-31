@@ -542,7 +542,9 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
 
   const forceStop = useForceStopThread(environmentId);
   const anyRunStop = useAtomValue(
-    threadDetailRef ? environmentThreadDetails.runStopAtom(threadDetailRef) : NO_RUN_STOP_ATOM,
+    activeThreadShell !== null && threadDetailRef !== null
+      ? environmentThreadDetails.runStopAtom(threadDetailRef)
+      : NO_RUN_STOP_ATOM,
   );
   // A background Stop matters only while that work is still pending.
   const runStop = anyRunStop?.background && activeBackgroundTasks.length === 0 ? null : anyRunStop;
