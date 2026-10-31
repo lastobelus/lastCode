@@ -474,6 +474,7 @@ export interface ProjectionStoreV2Shape {
     },
     ProjectionStoreV2Error
   >;
+  /** Unparseable history reserves IDs for its thread, so binding remains fail-closed. */
   readonly hasThreadReadAuthorization: (
     threadId: ThreadId,
     authorizationId: MessageId,
@@ -5582,14 +5583,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           const rows = yield* sql<{ present: number }>`
           SELECT (EXISTS (
             SELECT 1 FROM orchestration_v2_projection_runs
-            WHERE thread_id = ${threadId} AND json_extract(payload_json, '$.userMessageId') = ${authorizationId}
+            WHERE thread_id = ${threadId} AND CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.userMessageId') ELSE X'' END IN (${authorizationId}, X'')
           ) OR EXISTS (
             SELECT 1 FROM orchestration_v2_projection_runtime_requests
-            WHERE thread_id = ${threadId} AND json_extract(payload_json, '$.threadReadContext.authorizationId') = ${authorizationId}
+            WHERE thread_id = ${threadId} AND CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.threadReadContext.authorizationId') ELSE X'' END IN (${authorizationId}, X'')
           ) OR EXISTS (
             SELECT 1 FROM orchestration_v2_projection_messages
             WHERE thread_id = ${threadId} AND role = 'user'
-              AND json_extract(payload_json, '$.threadReadContext.authorizationId') = ${authorizationId}
+              AND CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.threadReadContext.authorizationId') ELSE X'' END IN (${authorizationId}, X'')
           )) AS present FROM orchestration_v2_projection_threads WHERE thread_id = ${threadId}
         `.pipe(Effect.mapError(controlReadError(threadId)));
           if (!rows[0]) return yield* new ProjectionStoreThreadNotFoundError({ threadId });

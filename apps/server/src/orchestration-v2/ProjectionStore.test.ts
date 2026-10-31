@@ -7043,7 +7043,12 @@ it.effect("finds used thread read authorizations without confusing threads or me
     const store = yield* ProjectionStore.ProjectionStoreV2;
     const threadId = ThreadId.make("authorization-thread");
     const otherThreadId = ThreadId.make("authorization-other-thread");
-    for (const id of [threadId, otherThreadId]) {
+    const corruptThreadIds = [
+      ThreadId.make("corrupt-run-thread"),
+      ThreadId.make("corrupt-request-thread"),
+      ThreadId.make("corrupt-message-thread"),
+    ] as const;
+    for (const id of [threadId, otherThreadId, ...corruptThreadIds]) {
       yield* sql`INSERT INTO orchestration_v2_projection_threads
         (thread_id, project_id, title, default_provider, runtime_mode, interaction_mode, created_at, updated_at, payload_json)
         VALUES (${id}, 'project', 'title', 'codex', 'full-access', 'default', 'now', 'now', '{}')`;
@@ -7059,11 +7064,26 @@ it.effect("finds used thread read authorizations without confusing threads or me
       VALUES ('message', ${threadId}, 'user', 0, 'now', 'now', '{"threadReadContext":{"authorizationId":"message-auth"}}'),
       ('assistant', ${threadId}, 'assistant', 0, 'now', 'now', '{"threadReadContext":{"authorizationId":"assistant-auth"}}'),
       ('other', ${otherThreadId}, 'user', 0, 'now', 'now', '{"threadReadContext":{"authorizationId":"other-auth"}}')`;
+    yield* sql`INSERT INTO orchestration_v2_projection_runs
+      (run_id, thread_id, ordinal, provider, status, requested_at, payload_json)
+      VALUES ('broken-run', ${corruptThreadIds[0]}, 1, 'codex', 'completed', 'now', '{broken')`;
+    yield* sql`INSERT INTO orchestration_v2_projection_runtime_requests
+      (runtime_request_id, thread_id, node_id, kind, status, created_at, payload_json)
+      VALUES ('broken-request', ${corruptThreadIds[1]}, 'node', 'user_input', 'resolved', 'now', '{broken')`;
+    yield* sql`INSERT INTO orchestration_v2_projection_messages
+      (message_id, thread_id, role, streaming, created_at, updated_at, payload_json)
+      VALUES ('broken-message', ${corruptThreadIds[2]}, 'user', 1, 'now', 'now', '{broken'),
+      ('broken-assistant', ${threadId}, 'assistant', 1, 'now', 'now', '{broken')`;
     for (const id of ["run-auth", "request-auth", "message-auth"]) {
       assert.isTrue(yield* store.hasThreadReadAuthorization(threadId, MessageId.make(id)));
     }
     for (const id of ["missing", "assistant-auth", "other-auth", "message"]) {
       assert.isFalse(yield* store.hasThreadReadAuthorization(threadId, MessageId.make(id)));
+    }
+    for (const id of corruptThreadIds) {
+      assert.isTrue(
+        yield* store.hasThreadReadAuthorization(id, MessageId.make("fresh-authorization")),
+      );
     }
     const missing = yield* Effect.flip(
       store.hasThreadReadAuthorization(ThreadId.make("missing-thread"), MessageId.make("missing")),
