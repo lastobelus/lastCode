@@ -487,12 +487,11 @@ it.effect("releases cross-project creator grouping while preserving ongoing ordi
           thread: {
             ...original.thread,
             creatorGrouping: "independent",
+            groupedUnderThreadId: null,
             pinnedAt: null,
             pinOrderKey: null,
             activeOrderKey: null,
-            updatedAt: now,
           },
-          updatedAt: now,
         });
       }
       assert.deepEqual(yield* readSurvivorEffects, effectsBefore);

@@ -662,6 +662,7 @@ it.layer(TestLayer)("creator grouping startup recovery", (it) => {
             thread: {
               ...original.thread,
               creatorGrouping: "independent",
+              groupedUnderThreadId: null,
               pinnedAt: null,
               pinOrderKey: null,
               activeOrderKey: null,
@@ -784,16 +785,19 @@ it.layer(TestLayer)("creator grouping startup recovery", (it) => {
         const original = yield* store.getThreadProjection(ordinaryId);
         const pendingEffects = yield* outbox.listByCommandId(requestId);
         const beforeSequence = yield* events.latestSequence();
-        for (const [index, extra] of [
-          { title: "Changed title" },
-          { worktreePath: "/workspace/other" },
-        ].entries()) {
+        for (const [index, extra] of (
+          [
+            { creatorGrouping: "independent", title: "Changed title" },
+            { creatorGrouping: "independent", worktreePath: "/workspace/other" },
+            { groupedUnderThreadId: null, title: "Changed title" },
+            { groupedUnderThreadId: null, worktreePath: "/workspace/other" },
+          ] as const
+        ).entries()) {
           const refused = yield* orchestrator
             .dispatch({
               type: "thread.metadata.update",
               commandId: CommandId.make(`pending-compound-placement:${result}:${index}`),
               threadId: ordinaryId,
-              creatorGrouping: "independent",
               ...extra,
             })
             .pipe(Effect.flip);
@@ -814,6 +818,7 @@ it.layer(TestLayer)("creator grouping startup recovery", (it) => {
                 thread: {
                   ...original.thread,
                   creatorGrouping: "independent",
+                  groupedUnderThreadId: null,
                   pinnedAt: null,
                   pinOrderKey: null,
                   activeOrderKey: null,

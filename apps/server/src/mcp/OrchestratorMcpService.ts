@@ -1,3 +1,7 @@
+import {
+  getArchiveFamilyParentThreadId,
+  getInteractiveThreadParentThreadId,
+} from "@t3tools/contracts";
 import { ThreadReadAuthorization } from "../orchestration-v2/ThreadReadAuthorization.ts";
 import {
   CommandId,
@@ -774,6 +778,9 @@ function listItemFromShell(
     creationSource: shell.creationSource,
     ...(shell.creatorThreadId === undefined ? {} : { creatorThreadId: shell.creatorThreadId }),
     ...(shell.creatorGrouping === undefined ? {} : { creatorGrouping: shell.creatorGrouping }),
+    ...(shell.groupedUnderThreadId === undefined
+      ? {}
+      : { groupedUnderThreadId: shell.groupedUnderThreadId }),
     status: shell.activityRunStatus ?? shell.status,
     latestRunId: shell.latestRunId,
     providerInstanceId: shell.modelSelection.instanceId,
@@ -786,6 +793,8 @@ function listItemFromShell(
     ...threadSnooze(shell, nowMs),
     parentThreadId: shell.lineage.parentThreadId,
     relationshipToParent: shell.lineage.relationshipToParent,
+    independent: shell.lineage.independent === true,
+    archived: shell.archivedAt !== null,
     itemCount: shell.visibleItemCount,
     createdAt: DateTime.formatIso(shell.createdAt),
     updatedAt: DateTime.formatIso(shell.updatedAt),
@@ -815,6 +824,9 @@ function threadDetail(
     ...(projection.thread.creatorGrouping === undefined
       ? {}
       : { creatorGrouping: projection.thread.creatorGrouping }),
+    ...(projection.thread.groupedUnderThreadId === undefined
+      ? {}
+      : { groupedUnderThreadId: projection.thread.groupedUnderThreadId }),
     status: active?.status ?? latest?.status ?? "idle",
     latestRunId: latest?.id ?? null,
     activeRunId: active?.id ?? null,
@@ -844,6 +856,7 @@ function threadDetail(
     worktreePath: projection.thread.worktreePath,
     parentThreadId: projection.thread.lineage.parentThreadId,
     relationshipToParent: projection.thread.lineage.relationshipToParent,
+    independent: projection.thread.lineage.independent === true,
     runCount: projection.runs.length,
     itemCount,
     pendingRequestCount: projection.runtimeRequests.filter(
@@ -2829,6 +2842,10 @@ const make = Effect.gen(function* () {
                 createdBy: "agent",
                 creationSource: "mcp",
                 creatorThreadId: scope.thread.threadId,
+                groupedUnderThreadId:
+                  request.groupedUnderThreadId === undefined
+                    ? parent.thread.id
+                    : request.groupedUnderThreadId,
                 commandId,
                 threadId,
                 projectId: parent.thread.projectId,
@@ -2930,6 +2947,9 @@ const make = Effect.gen(function* () {
                 ...(projection.thread.creatorGrouping === undefined
                   ? {}
                   : { creatorGrouping: projection.thread.creatorGrouping }),
+                ...(projection.thread.groupedUnderThreadId === undefined
+                  ? {}
+                  : { groupedUnderThreadId: projection.thread.groupedUnderThreadId }),
                 providerInstanceId: resolvedModelSelection.instanceId,
                 model: resolvedModelSelection.model,
               } satisfies OrchestratorMcpCreatedThread;
@@ -2948,6 +2968,7 @@ const make = Effect.gen(function* () {
         .listProjectThreads({
           projectId: projectId ?? undefined,
           includeSubagents: input.includeSubagents !== false,
+          archived: input.archived === true,
         })
         .pipe(
           Effect.mapError((error) =>
@@ -2957,7 +2978,31 @@ const make = Effect.gen(function* () {
       const nowMs = yield* Clock.currentTimeMillis;
       const statuses = input.statuses === undefined ? null : new Set(input.statuses);
       const titleContains = input.titleContains?.toLocaleLowerCase();
+      const parents = new Map(projectThreads.map((thread) => [thread.id, thread]));
+      if (input.underThreadId !== undefined) {
+        const root = yield* threadManagement
+          .getThreadShell(input.underThreadId)
+          .pipe(Effect.mapError(threadManagementFailure));
+        if (
+          root === null ||
+          root.deletedAt !== null ||
+          (projectId !== null && root.projectId !== projectId)
+        )
+          return yield* failure(
+            "thread_not_found",
+            "The parent thread was not found in this project.",
+          );
+        parents.set(root.id, root);
+      }
       const filtered = projectThreads
+        .filter(
+          (thread) =>
+            input.underThreadId === undefined ||
+            getArchiveFamilyParentThreadId(
+              thread,
+              parents.get(getInteractiveThreadParentThreadId(thread)!),
+            ) === input.underThreadId,
+        )
         .filter(
           (thread) => statuses === null || statuses.has(thread.activityRunStatus ?? thread.status),
         )

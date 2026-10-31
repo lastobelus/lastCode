@@ -85,6 +85,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         const scope = yield* McpInvocationContext.McpInvocationContext;
         const context = yield* readCaller();
         const { caller } = context;
+        yield* McpToolAccess.assertWritableThreads(context, [input.groupedUnderThreadId]);
         // A retry with the same key replays the first launch: the ids derive
         // from the caller and the key, and the launch service replays a
         // command it already accepted.
@@ -244,6 +245,12 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           // Kept only alongside linkOrigin: thread.create drops it otherwise.
           ...(input.delegatedFrom === undefined ? {} : { delegatedFrom: input.delegatedFrom }),
           ...(caller === undefined ? {} : { creatorThreadId: caller.id }),
+          groupedUnderThreadId:
+            input.groupedUnderThreadId === undefined
+              ? caller?.projectId === projectId
+                ? caller.id
+                : null
+              : input.groupedUnderThreadId,
         }).pipe(
           Effect.provideService(ThreadReadAuthorization, readAuthorization),
           Effect.mapError((error) => {

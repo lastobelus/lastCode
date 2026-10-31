@@ -12,10 +12,10 @@ function input(): Parameters<typeof buildLastCodeThreadMenu>[0] {
   return {
     thread: {
       branch: "feature",
-      creatorGrouping: "grouped",
       persistent: false,
       archivePending: null,
     },
+    parentThreadId: ThreadId.make("creator"),
     creator: { groupingEligible: true, canOpen: true },
     canAnnotate: true,
     supportsPersistence: true,
@@ -36,10 +36,10 @@ function menuInput(
   return {
     ...data,
     canOperate,
+    parentThreadId: grouped ? ThreadId.make("creator") : null,
     thread: {
       ...data.thread,
       persistent,
-      creatorGrouping: grouped ? "grouped" : "independent",
       archivePending: optional
         ? {
             status: "failed",
@@ -189,6 +189,7 @@ describe("LastCode thread context menu", () => {
       ...data,
       thread: { ...data.thread, branch: null },
       creator: { groupingEligible: false, canOpen: false },
+      parentThreadId: null,
       canAnnotate: false,
       supportsPersistence: false,
       hasStoppableProcesses: false,

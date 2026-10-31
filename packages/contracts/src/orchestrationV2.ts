@@ -521,6 +521,8 @@ export const OrchestrationV2AppThread = Schema.Struct({
   creatorThreadId: Schema.optional(ThreadId),
   /** Sidebar placement only; changing it never changes creator history or delegated ownership. */
   creatorGrouping: Schema.optional(Schema.Literals(["grouped", "independent"])),
+  /** Explicit organization; null is top level, absence preserves deployed creator grouping. */
+  groupedUnderThreadId: Schema.optional(Schema.NullOr(ThreadId)),
   id: ThreadId,
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
@@ -1935,6 +1937,13 @@ const OrchestrationV2EventBase = Schema.Struct({
 export const OrchestrationV2DomainEvent = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
+    type: Schema.Literal("thread.metadata-updated"),
+    payload: OrchestrationV2AppThread,
+    previousGroupedUnderThreadId: Schema.optional(Schema.NullOr(ThreadId)),
+  }),
+
+  Schema.Struct({
+    ...OrchestrationV2EventBase.fields,
     type: Schema.Literal("thread.created"),
     payload: OrchestrationV2AppThread,
   }),
@@ -1955,7 +1964,6 @@ export const OrchestrationV2DomainEvent = Schema.Union([
       "thread.active-reordered",
       "thread.visited",
       "thread.marked-unread",
-      "thread.metadata-updated",
       "thread.persistence-changed",
       "thread.annotation-upserted",
       "thread.annotation-resolved",
@@ -2153,6 +2161,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   ...OrchestrationV2CreationFields,
   creatorThreadId: Schema.optional(ThreadId),
   creatorGrouping: OrchestrationV2AppThread.fields.creatorGrouping,
+  groupedUnderThreadId: OrchestrationV2AppThread.fields.groupedUnderThreadId,
   id: ThreadId,
   projectId: ProjectId,
   title: Schema.String,
@@ -2861,6 +2870,13 @@ const OrchestrationV2JsonEventBaseFields = {
 export const OrchestrationV2DomainEventJson = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,
+    type: Schema.Literal("thread.metadata-updated"),
+    payload: OrchestrationV2AppThreadJson,
+    previousGroupedUnderThreadId: Schema.optional(Schema.NullOr(ThreadId)),
+  }),
+
+  Schema.Struct({
+    ...OrchestrationV2JsonEventBaseFields,
     type: Schema.Literal("thread.created"),
     payload: OrchestrationV2AppThreadJson,
   }),
@@ -2882,7 +2898,6 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
       "thread.visited",
       "thread.marked-unread",
       "thread.pull-request-synced",
-      "thread.metadata-updated",
       "thread.persistence-changed",
       "thread.annotation-upserted",
       "thread.annotation-resolved",
@@ -3011,6 +3026,18 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
 ]);
 export type OrchestrationV2DomainEventJson = typeof OrchestrationV2DomainEventJson.Type;
 
+export const OrchestrationV2ThreadPlacementResult = Schema.Struct({
+  threadId: ThreadId,
+  commandId: CommandId,
+  status: Schema.Literals(["moved", "rejected", "not_attempted"]),
+  previousGroupedUnderThreadId: Schema.optional(Schema.NullOr(ThreadId)),
+  groupedUnderThreadId: Schema.NullOr(ThreadId),
+  sequence: Schema.optional(NonNegativeInt),
+  replayed: Schema.optional(Schema.Boolean),
+  error: Schema.optional(Schema.String),
+});
+export type OrchestrationV2ThreadPlacementResult = typeof OrchestrationV2ThreadPlacementResult.Type;
+
 export const OrchestrationV2Command = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("thread.stop"),
@@ -3027,6 +3054,7 @@ export const OrchestrationV2Command = Schema.Union([
     type: Schema.Literal("thread.create"),
     ...OrchestrationV2CreationFields,
     creatorThreadId: Schema.optional(ThreadId),
+    groupedUnderThreadId: OrchestrationV2AppThread.fields.groupedUnderThreadId,
     commandId: CommandId,
     threadId: ThreadId,
     projectId: ProjectId,
@@ -3221,12 +3249,14 @@ export const OrchestrationV2Command = Schema.Union([
     worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
     expectedWorktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
     expectedBranch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+    expectedProjectId: Schema.optional(ProjectId),
     /** Reject unless no message or run has landed on this thread. */
     expectedEmpty: Schema.optional(Schema.Boolean),
     limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecoveryUpdate)),
     /** Link (object) or unlink (null) a pull request; absent leaves it unchanged. */
     linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
     creatorGrouping: OrchestrationV2AppThread.fields.creatorGrouping,
+    groupedUnderThreadId: OrchestrationV2AppThread.fields.groupedUnderThreadId,
   }),
   Schema.Struct({
     type: Schema.Literal("thread.pull-request.link"),

@@ -209,7 +209,7 @@ const RequestSecretTool = Tool.make("request_secret", {
 
 const CreateThreadsTool = Tool.make("create_threads", {
   description:
-    "Create new top-level threads in this checkout. Not delegation. One thread or its own worktree: `t3_thread_launch`. Project, branch, and worktree inherit.",
+    "Create interactive threads in this checkout; not delegation. Omit prompt for an empty parent (no model turn). groupedUnderThreadId defaults to your thread; null means top level. One thread or its own worktree: `t3_thread_launch`. Project, branch, and worktree inherit.",
   parameters: OrchestratorMcpCreateThreadsInput,
   success: OrchestratorMcpCreateThreadsResult,
   failure: OrchestratorMcpFailure,
@@ -222,7 +222,7 @@ const CreateThreadsTool = Tool.make("create_threads", {
 
 const ThreadListTool = Tool.make("t3_thread_list", {
   description:
-    "List threads newest first, in one project or with `allProjects`. Page with `cursor`. In your reply, name a thread as its `link` verbatim; it includes the owning environment.",
+    "List threads newest first, in one project or with `allProjects`. underThreadId lists direct children: grouped threads and delegated children it still owns, settled ones included unless you filter with settled. archived:true lists archived threads instead of live ones. groupedUnderThreadId is placement; creatorThreadId records origin. parentThreadId and relationshipToParent describe execution lineage; independent:true releases its ownership. Page with `cursor`. In your reply, name a thread as its `link` verbatim; it includes the owning environment.",
   parameters: OrchestratorMcpThreadListInput,
   success: OrchestratorMcpThreadListResult,
   failure: OrchestratorMcpFailure,

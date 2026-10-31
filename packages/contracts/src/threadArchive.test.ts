@@ -2,7 +2,54 @@ import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 import { ProjectId, ThreadId } from "./baseSchemas.ts";
 import { OrchestrationV2Command, ThreadArchiveOperation } from "./orchestrationV2.ts";
-import { getArchiveFamilyParentThreadId, getOwnedThreadFamily } from "./threadArchive.ts";
+import {
+  getArchiveFamilyParentThreadId,
+  getOwnedThreadFamily,
+  getInteractiveThreadParentThreadId,
+} from "./threadArchive.ts";
+
+it("uses explicit placement before legacy creator grouping, including null and released forks", () => {
+  const creator = thread("creator", null);
+  const destination = thread("destination", null);
+  const child = {
+    ...thread("child", null),
+    createdBy: "agent",
+    creatorThreadId: creator.id,
+    creatorGrouping: "grouped",
+    forkedFrom: null,
+  };
+  expect(getInteractiveThreadParentThreadId(child)).toBe(creator.id);
+  expect(getArchiveFamilyParentThreadId(child, creator)).toBe(creator.id);
+  expect(
+    getArchiveFamilyParentThreadId({ ...child, groupedUnderThreadId: null }, creator),
+  ).toBeNull();
+  const moved = { ...child, groupedUnderThreadId: destination.id };
+  expect(getArchiveFamilyParentThreadId(moved, creator)).toBeNull();
+  expect(getArchiveFamilyParentThreadId(moved, destination)).toBe(destination.id);
+  const released = {
+    ...moved,
+    lineage: { ...thread("child", "creator", { independent: true }).lineage },
+    forkedFrom: { type: "node" },
+  };
+  expect(getArchiveFamilyParentThreadId(released, destination)).toBe(destination.id);
+  expect(
+    getArchiveFamilyParentThreadId({ ...released, groupedUnderThreadId: null }, creator),
+  ).toBeNull();
+  const owned = { ...moved, lineage: thread("child", "creator").lineage };
+  expect(getInteractiveThreadParentThreadId(owned)).toBeNull();
+  expect(getArchiveFamilyParentThreadId(owned, destination)).toBe(creator.id);
+  const family = [
+    creator,
+    destination,
+    moved,
+    { ...thread("stage", null), groupedUnderThreadId: child.id },
+  ];
+  expect(getOwnedThreadFamily(family, creator.id).children).toEqual([]);
+  expect(getOwnedThreadFamily(family, destination.id).children.map((row) => row.id)).toEqual([
+    child.id,
+    ThreadId.make("stage"),
+  ]);
+});
 
 const thread = (
   id: string,

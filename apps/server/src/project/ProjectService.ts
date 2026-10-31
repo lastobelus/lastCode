@@ -1,3 +1,4 @@
+import { getInteractiveThreadParentThreadId } from "@t3tools/contracts";
 import {
   CommandId,
   type OrchestrationProjectShell,
@@ -481,7 +482,7 @@ export const make = Effect.gen(function* () {
           )).filter(
             (thread) =>
               thread.id !== threadId &&
-              thread.creatorThreadId === threadId &&
+              getInteractiveThreadParentThreadId(thread) === threadId &&
               isGroupedCreatorThread(thread),
           );
           const limit = yield* DispatchModeLimit;
@@ -524,7 +525,7 @@ export const make = Effect.gen(function* () {
                 type: "thread.metadata-updated" as const,
                 threadId: thread.id,
                 occurredAt: now,
-                payload: releaseCreatorGrouping(thread, now),
+                payload: releaseCreatorGrouping(thread),
               };
             }),
           );

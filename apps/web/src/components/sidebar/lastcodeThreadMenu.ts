@@ -1,4 +1,4 @@
-import type { ContextMenuItem } from "@t3tools/contracts";
+import type { ContextMenuItem, ThreadId } from "@t3tools/contracts";
 import type { SidebarThreadSummary } from "../../types";
 import {
   lastcodeThreadPersistenceAction,
@@ -50,10 +50,8 @@ export function parseLastCodeHandoffAction(action: string | null) {
 }
 
 interface ThreadMenuInput {
-  thread: Pick<
-    SidebarThreadSummary,
-    "branch" | "creatorGrouping" | "persistent" | "archivePending"
-  >;
+  thread: Pick<SidebarThreadSummary, "branch" | "persistent" | "archivePending">;
+  parentThreadId: ThreadId | null;
   creator: { groupingEligible: boolean; canOpen: boolean };
   canAnnotate: boolean;
   supportsPersistence: boolean;
@@ -72,8 +70,8 @@ function metadataItems(input: ThreadMenuInput): ContextMenuItem<string>[] {
   if (input.canAnnotate) items.push({ id: "annotate", label: "Annotate thread…" });
   items.push({ id: "mark-unread", label: "Mark unread" });
   items.push({ id: "mark-read", label: "Mark read" });
-  if (input.creator.groupingEligible) {
-    const grouped = input.thread.creatorGrouping === "grouped";
+  if (input.parentThreadId !== null || input.creator.groupingEligible) {
+    const grouped = input.parentThreadId !== null;
     items.push({
       id: grouped ? "creator-independent" : "creator-grouped",
       label: grouped ? "Move to top level" : "Group with creator thread",

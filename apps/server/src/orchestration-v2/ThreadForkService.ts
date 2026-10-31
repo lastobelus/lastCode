@@ -87,6 +87,7 @@ export const layer: Layer.Layer<ThreadForkServiceV2> = Layer.succeed(
       } = input.sourceProjection.thread;
       const targetThread: OrchestrationV2AppThread = {
         ...sourceThread,
+        groupedUnderThreadId: null,
         // PR context follows the conversation; watching remains the source thread's responsibility.
         pullRequests: input.sourceProjection.thread.pullRequests?.map(
           ({ watch: _watch, ...link }) => link,
