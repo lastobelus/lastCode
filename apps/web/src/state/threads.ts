@@ -33,14 +33,16 @@ export const threadEnvironment = createThreadEnvironmentAtoms(
   connectionAtomRuntime,
   threadFamilies.snapshotAtom,
 );
-const environmentThreads = createEnvironmentThreadStateAtoms(connectionAtomRuntime);
-export const environmentThreadDetails = createEnvironmentThreadDetailAtoms(
-  environmentThreads.stateAtom,
-);
 export const environmentThreadShells = createEnvironmentThreadShellAtoms({
   catalogValueAtom: environmentCatalog.catalogValueAtom,
   snapshotAtom: threadEnvironment.snapshotAtom,
 });
+const environmentThreads = createEnvironmentThreadStateAtoms(connectionAtomRuntime, (ref) =>
+  Atom.map(environmentThreadShells.threadShellAtom(ref), (thread) => thread !== null),
+);
+export const environmentThreadDetails = createEnvironmentThreadDetailAtoms(
+  environmentThreads.stateAtom,
+);
 
 /** Keeps the subagent tree under `rootThreadId` in the thread list while the caller shows it. */
 export function useThreadFamily(
