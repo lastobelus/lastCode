@@ -19,6 +19,7 @@ import GroupedCreatorThreadIndexMigration from "./Migrations/OrchestrationV2/Gro
 import ArchiveReadIndexMigration from "./Migrations/OrchestrationV2/ArchiveReadIndex.ts";
 import CommandHistoryIndexMigration from "./Migrations/OrchestrationV2/CommandHistoryIndex.ts";
 import ThreadReadAuthorizationIndexMigration from "./Migrations/OrchestrationV2/ThreadReadAuthorizationIndex.ts";
+import InteractiveThreadParentIndexMigration from "./Migrations/OrchestrationV2/InteractiveThreadParentIndex.ts";
 
 export const lastcodeMigrationEntries = [
   [1, "ProjectionThreadAnnotation", Migration0048],
@@ -38,6 +39,7 @@ export const lastcodeMigrationEntries = [
   [15, "OrchestrationV2ArchiveReadIndex", ArchiveReadIndexMigration],
   [16, "OrchestrationV2CommandHistoryIndex", CommandHistoryIndexMigration],
   [17, "OrchestrationV2ThreadReadAuthorizationIndex", ThreadReadAuthorizationIndexMigration],
+  [18, "OrchestrationV2InteractiveThreadParentIndex", InteractiveThreadParentIndexMigration],
 ] as const;
 
 export const lastcodeMigrationManifest = lastcodeMigrationEntries.map(
