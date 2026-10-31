@@ -9772,7 +9772,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         for (const run of projection.runs.filter(
           (run) =>
             sameRemoteDelegation(run.remoteDelegation, selector) &&
-            (isBlockingRun(run) || run.status === "queued"),
+            (isActiveRun(run) || run.status === "queued"),
         )) {
           if (run.status === "queued") {
             yield* dispatchQueuedRunCancel(
