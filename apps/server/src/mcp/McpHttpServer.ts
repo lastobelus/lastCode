@@ -1,3 +1,4 @@
+import { McpProviderSessions } from "@t3tools/provider-core/server/McpProviderSessions";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -217,6 +218,7 @@ const makeMcpAuthMiddleware = Effect.fn("McpHttpServer.makeAuthMiddleware")(func
 ) {
   const registry = yield* McpSessionRegistry.McpSessionRegistry;
   const clients = yield* Effect.serviceOption(McpClientAuthenticator);
+  const providerSessions = yield* Effect.serviceOption(McpProviderSessions);
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const linksEnabled = serverSettings.getSettings.pipe(
     Effect.map((settings) => settings.linkedEnvironmentsEnabled),
@@ -252,7 +254,31 @@ const makeMcpAuthMiddleware = Effect.fn("McpHttpServer.makeAuthMiddleware")(func
         offerOAuth: Option.isSome(clients) && !looksLikeProviderToken(token),
       });
     }
-    const limited = withModeLimit(invocation, request);
+    let attributed = invocation;
+    if (
+      invocation.thread !== undefined &&
+      request.method === "POST" &&
+      Option.isSome(providerSessions)
+    ) {
+      const body = yield* request.json.pipe(Effect.orElseSucceed(() => undefined));
+      const params =
+        typeof body === "object" && body !== null && "params" in body ? body.params : undefined;
+      const metadata =
+        typeof params === "object" && params !== null && "_meta" in params
+          ? params._meta
+          : undefined;
+      const execution = yield* providerSessions.value.resolveExecution({
+        threadId: invocation.thread.threadId,
+        providerSessionId: invocation.thread.providerSessionId,
+        authorizationHeader: authorization ?? "",
+        metadata,
+      });
+      attributed = {
+        ...invocation,
+        thread: { ...invocation.thread, ...(execution === undefined ? {} : { execution }) },
+      };
+    }
+    const limited = withModeLimit(attributed, request);
     if (limited === undefined) return invalidModeLimit;
     const linkedEnvironments = yield* linksEnabled;
     if (limited.client?.linked === true && !linkedEnvironments) return linkedEnvironmentsOff;

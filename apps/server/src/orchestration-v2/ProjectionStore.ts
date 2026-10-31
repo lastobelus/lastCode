@@ -563,6 +563,9 @@ export interface ProjectionStoreV2Shape {
   readonly getSettlementCandidates: (
     threadId?: ThreadId,
   ) => Effect.Effect<ReadonlyArray<ProjectionSettlementCandidate>, ProjectionStoreV2Error>;
+  readonly hasOutstandingOwnedWork: (
+    threadId: ThreadId,
+  ) => Effect.Effect<boolean, ProjectionStoreV2Error>;
   readonly getThreadsWithPullRequests: (
     threadId?: ThreadId,
   ) => Effect.Effect<ReadonlyArray<ProjectionThreadPullRequests>, ProjectionStoreV2Error>;
@@ -764,6 +767,9 @@ function preserveRunRecordedFields(
     ...next,
     ...(next.delegatedCompletion === undefined && current.delegatedCompletion !== undefined
       ? { delegatedCompletion: current.delegatedCompletion }
+      : {}),
+    ...(next.actionObligations === undefined && current.actionObligations !== undefined
+      ? { actionObligations: current.actionObligations }
       : {}),
     ...(next.restartCancelledBackgroundWork === undefined &&
     current.restartCancelledBackgroundWork !== undefined
@@ -1606,6 +1612,9 @@ export function threadShellFromProjection(
     ...(projection.thread.delegatedFrom === undefined
       ? {}
       : { delegatedFrom: projection.thread.delegatedFrom }),
+    ...(projection.thread.remoteDelegations === undefined
+      ? {}
+      : { remoteDelegations: projection.thread.remoteDelegations }),
     latestRunId: latestRun?.id ?? null,
     latestRunRequestedAt: latestRun?.requestedAt ?? null,
     latestRunStartedAt: latestRun?.startedAt ?? null,
@@ -1916,6 +1925,9 @@ function shellFromState(input: {
     ...(input.state.thread.delegatedFrom === undefined
       ? {}
       : { delegatedFrom: input.state.thread.delegatedFrom }),
+    ...(input.state.thread.remoteDelegations === undefined
+      ? {}
+      : { remoteDelegations: input.state.thread.remoteDelegations }),
     latestRunId: input.state.latestRunId,
     latestRunRequestedAt: input.state.latestRunRequestedAt,
     latestRunStartedAt: input.state.latestRunStartedAt,
@@ -2120,7 +2132,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 requested_at = excluded.requested_at,
                 completed_at = excluded.completed_at,
                 payload_json = ${keepRecordedRunField(
-                  keepRecordedRunField(sql`excluded.payload_json`, "$.delegatedCompletion"),
+                  keepRecordedRunField(
+                    keepRecordedRunField(sql`excluded.payload_json`, "$.delegatedCompletion"),
+                    "$.actionObligations",
+                  ),
                   "$.restartCancelledBackgroundWork",
                 )}
             `;
@@ -6579,6 +6594,36 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       return { providerThreadsByThreadId, pendingTurnItemsByThreadId };
     });
 
+    const outstandingOwnedWork = (thread: Statement.Fragment) => sql`
+      (EXISTS (
+        SELECT 1 FROM orchestration_v2_projection_subagents task
+        WHERE task.origin = 'app_owned'
+          AND json_extract(task.payload_json, '$.ownershipReleased') IS NOT 1
+          AND (
+            (task.thread_id = ${thread} AND (
+              json_type(task.payload_json, '$.result') = 'null'
+              OR json_extract(task.payload_json, '$.completionDelivery.state') IN ('pending', 'claimed')
+            ))
+            OR (task.child_thread_id = ${thread}
+              AND json_type(task.payload_json, '$.result') = 'null')
+          )
+      ) OR EXISTS (
+        SELECT 1 FROM orchestration_v2_projection_threads destination,
+          json_each(destination.payload_json, '$.remoteDelegations') association
+        WHERE destination.thread_id = ${thread}
+          AND json_extract(association.value, '$.stage') IN ('prepared', 'active')
+      ))
+    `;
+
+    const hasOutstandingOwnedWork: ProjectionStoreV2Shape["hasOutstandingOwnedWork"] = Effect.fn(
+      "ProjectionStore.hasOutstandingOwnedWork",
+    )(function* (threadId) {
+      const [row] = yield* sql<{ readonly outstanding: number }>`
+        SELECT ${outstandingOwnedWork(sql`${threadId}`)} AS outstanding
+      `.pipe(Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause })));
+      return row?.outstanding === 1;
+    });
+
     const getSettlementCandidates: ProjectionStoreV2Shape["getSettlementCandidates"] = (threadId) =>
       sql
         .withTransaction(
@@ -6619,6 +6664,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               AND json_extract(t.payload_json, '$.settledOverride') IS NULL
               AND json_extract(t.payload_json, '$.pinnedAt') IS NULL
               AND json_extract(t.payload_json, '$.autoSettleDisabledAt') IS NULL
+              AND NOT ${outstandingOwnedWork(sql`t.thread_id`)}
               AND NOT EXISTS (
                 SELECT 1 FROM json_each(t.payload_json, '$.dashboardItems') item
                 WHERE json_extract(item.value, '$.status') = 'open'
@@ -6712,12 +6758,19 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       SELECT thread_id, subagent_id FROM orchestration_v2_projection_subagents
       WHERE origin = 'app_owned'
         AND child_thread_id IS NULL
-        AND json_type(payload_json, '$.remoteChild') = 'object'
+        AND (
+          json_type(payload_json, '$.remoteChild') = 'object'
+          OR json_type(payload_json, '$.remoteLaunch') = 'object'
+        )
         AND (
           json_type(payload_json, '$.result') = 'null'
+          OR json_extract(payload_json, '$.remoteLaunch.stage') = 'preparing'
           OR (
+            json_type(payload_json, '$.remoteChild') = 'object'
+            AND (
             json_extract(payload_json, '$.status') IN ('cancelled', 'interrupted')
             AND json_type(payload_json, '$.remoteChild.stoppedThere') IS NOT 'true'
+            )
           )
           OR json_type(payload_json, '$.remoteChild.stoppedThere') = 'false'
         )
@@ -7384,6 +7437,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getPersistentThreads: getPersistentThreads.pipe(NodeSqliteClient.readOnly),
       getThread: readOnReader(getThread),
       getSettlementCandidates: readOnReader(getSettlementCandidates),
+      hasOutstandingOwnedWork: readOnReader(hasOutstandingOwnedWork),
       getThreadsWithPullRequests: readOnReader(getThreadsWithPullRequests),
       getThreadWorktreePaths: readOnReader(getThreadWorktreePaths),
       getOpenRemoteDelegatedTasks: getOpenRemoteDelegatedTasks.pipe(NodeSqliteClient.readOnly),

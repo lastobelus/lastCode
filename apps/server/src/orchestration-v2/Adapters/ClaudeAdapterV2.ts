@@ -1476,6 +1476,7 @@ export function makeClaudeQueryOptions(input: {
   readonly disallowedTools?: ReadonlyArray<string>;
   readonly permissionMode?: PermissionMode;
   readonly canUseTool?: CanUseTool;
+  readonly beforeMcpToolUse?: HookCallback;
   readonly onUserDialog?: ClaudeQueryOptions["onUserDialog"];
   readonly onElicitation?: ClaudeQueryOptions["onElicitation"];
   readonly supportedDialogKinds?: ClaudeQueryOptions["supportedDialogKinds"];
@@ -1600,8 +1601,24 @@ export function makeClaudeQueryOptions(input: {
         ...launchAppendSystemPrompt,
       ].join("\n\n"),
     },
-    ...(deviceInstructions
-      ? { hooks: { SubagentStart: [{ hooks: [subagentDeviceInstructions] }] } }
+    ...(deviceInstructions || input.beforeMcpToolUse !== undefined
+      ? {
+          hooks: {
+            ...(deviceInstructions
+              ? { SubagentStart: [{ hooks: [subagentDeviceInstructions] }] }
+              : {}),
+            ...(input.beforeMcpToolUse === undefined
+              ? {}
+              : {
+                  PreToolUse: [
+                    {
+                      matcher: "^mcp__t3-code__run_project_action_and_resume$",
+                      hooks: [input.beforeMcpToolUse],
+                    },
+                  ],
+                }),
+          },
+        }
       : {}),
     ...(Object.keys(extraArgs).length === 0 ? {} : { extraArgs }),
   };
@@ -4717,6 +4734,17 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               }),
           );
         const activeTurn = yield* Ref.make<ActiveClaudeTurnContext | null>(null);
+        let mcpFrameOwner: ActiveClaudeTurnContext | null = null;
+        const mcpToolFrames = new Map<string, Deferred.Deferred<void>>();
+        const toolFrameReady = Effect.fnUntraced(function* (toolUseId: string) {
+          let ready = mcpToolFrames.get(toolUseId);
+          if (ready === undefined) {
+            ready = yield* Deferred.make<void>();
+            if (mcpToolFrames.size >= 4096) return undefined;
+            mcpToolFrames.set(toolUseId, ready);
+          }
+          return ready;
+        });
         const taskOutputTails = new Map<
           string,
           { readonly fiber: Fiber.Fiber<void>; readonly stop: Deferred.Deferred<void> }
@@ -7413,6 +7441,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           readonly threadDisposition?: "reusable" | "broken";
           readonly result?: SDKResultMessage;
         }) {
+          yield* mcpSessions.endExecution(input.context.input.threadId, {
+            runId: input.context.input.runId,
+            attemptId: input.context.input.attemptId,
+          });
+          if (mcpFrameOwner === input.context) mcpFrameOwner = null;
           yield* reasoningDeltas.flushTurn(input.context.nativeTurnId);
           if (input.context.compaction?.status === "running") {
             const reason = input.result?.subtype === "success" ? input.result.result.trim() : "";
@@ -9539,6 +9572,38 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           const message = input.message;
           const context = yield* Ref.get(activeTurn);
           const liveQuery = yield* Ref.get(queryContext);
+          if (liveQuery?.query === input.query) {
+            const echoes = claudeEchoedPromptUuids(message);
+            if (echoes.length > 0 && parentToolUseIdFromSdkMessage(message) === null) {
+              mcpFrameOwner =
+                context?.promptUuid != null && echoes.includes(context.promptUuid) ? context : null;
+            }
+            if (message.type === "assistant") {
+              for (const tool of claudeToolUseBlocksFromAssistantMessage(message)) {
+                if (!tool.name.startsWith("mcp__t3-code__")) continue;
+                if (message.parent_tool_use_id === null && mcpFrameOwner !== null) {
+                  yield* mcpSessions.registerExecution(
+                    mcpFrameOwner.input.threadId,
+                    { provider: "claude", toolUseId: tool.id },
+                    { runId: mcpFrameOwner.input.runId, attemptId: mcpFrameOwner.input.attemptId },
+                  );
+                }
+                const ready = yield* toolFrameReady(tool.id);
+                if (ready !== undefined) yield* Deferred.succeed(ready, undefined);
+              }
+            }
+            // Native results end ownership even when the UI defers or buffers their frames.
+            if (message.type === "result") {
+              if (mcpFrameOwner !== null) {
+                yield* mcpSessions.endExecution(mcpFrameOwner.input.threadId, {
+                  runId: mcpFrameOwner.input.runId,
+                  attemptId: mcpFrameOwner.input.attemptId,
+                });
+              }
+              mcpFrameOwner = null;
+              mcpToolFrames.clear();
+            }
+          }
           if (
             context?.promptUuid === null &&
             liveQuery?.query === input.query &&
@@ -10304,6 +10369,24 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   allowDangerouslySkipPermissions: queryPolicy.allowDangerouslySkipPermissions,
                 }),
             canUseTool,
+            ...(turnInput.appThread.lineage.relationshipToParent === "subagent" ||
+            turnInput.appThread.remoteDelegations?.some(
+              (association) => association.stage === "active",
+            ) === true
+              ? {
+                  beforeMcpToolUse: (async (hook, _id, options) => {
+                    if (hook.hook_event_name !== "PreToolUse") return {};
+                    await runPromise(
+                      Effect.gen(function* () {
+                        const ready = yield* toolFrameReady(hook.tool_use_id);
+                        if (ready !== undefined) yield* Deferred.await(ready);
+                      }),
+                      { signal: options.signal },
+                    );
+                    return {};
+                  }) satisfies HookCallback,
+                }
+              : {}),
             onUserDialog,
             onElicitation,
             supportedDialogKinds: ["resume_return"],
