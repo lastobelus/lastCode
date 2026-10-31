@@ -18,8 +18,12 @@ import {
 import { resolveShortcutCommand, type ShortcutEventLike } from "./keybindings";
 
 export type ComposerTriggerKind = "path" | "pull-request" | "slash-command" | "skill";
-export type ComposerSlashCommand = "model" | "plan" | "default" | "side" | "btw";
+export type ComposerSlashCommand = "model" | "plan" | "default" | "side" | "btw" | "annotate";
 export type ComposerSubmissionIntent = "foreground" | "background" | "alternate";
+
+export type ThreadAnnotationSlashCommand =
+  | { readonly kind: "open-editor" }
+  | { readonly kind: "save"; readonly body: string };
 
 export interface ComposerTrigger {
   kind: ComposerTriggerKind;
@@ -326,7 +330,7 @@ export function parseSideChatCommand(text: string): { prompt: string } | null {
 
 export function parseStandaloneComposerSlashCommand(
   text: string,
-): Exclude<ComposerSlashCommand, "model" | "side" | "btw"> | null {
+): Extract<ComposerSlashCommand, "plan" | "default"> | null {
   const match = /^\/(plan|default)\s*$/i.exec(text.trim());
   if (!match) {
     return null;
@@ -349,6 +353,15 @@ export function extendReplacementRangeForTrailingSpace(
     return rangeEnd;
   }
   return text[rangeEnd] === " " ? rangeEnd + 1 : rangeEnd;
+}
+
+export function parseThreadAnnotationSlashCommand(
+  text: string,
+): ThreadAnnotationSlashCommand | null {
+  const match = /^\/annotate(?:\s+([\s\S]*))?$/i.exec(text.trim());
+  if (!match) return null;
+  const body = match[1]?.trim() ?? "";
+  return body ? { kind: "save", body } : { kind: "open-editor" };
 }
 
 export { replaceTextRange } from "@t3tools/shared/composerTrigger";

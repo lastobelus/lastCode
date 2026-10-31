@@ -309,7 +309,9 @@ describe("sidebar thread lineage helpers", () => {
       expect(
         filterSidebarV2VisibleThreads([owner, child, ordinaryChild], scope, new Set()),
       ).toEqual([child]);
-      expect(filterSidebarV2VisibleThreads([child, ordinaryChild], scope, new Set())).toEqual([child]);
+      expect(filterSidebarV2VisibleThreads([child, ordinaryChild], scope, new Set())).toEqual([
+        child,
+      ]);
       expect(
         filterSidebarV2VisibleThreads(
           [{ ...owner, archivedAt: null }, child, ordinaryChild],

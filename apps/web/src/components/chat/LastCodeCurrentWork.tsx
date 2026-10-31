@@ -91,9 +91,11 @@ export function LastCodeCurrentWork({
           <span className="ms-1.5 flex shrink-0 items-center gap-2.5">{inlineActions}</span>
         ) : null}
       </div>
+      {/* Text-only background lists can loop in the animated measuring viewport. */}
       <PopoverPopup
         aria-label="Current work"
         tooltipStyle
+        animated={false}
         side="top"
         className="max-w-[min(30rem,calc(100vw-2rem))] whitespace-normal wrap-anywhere [--inline-button-text-align:start] [--inline-button-white-space:normal] [&_[data-slot=inline-button]]:max-w-full"
       >
@@ -109,16 +111,7 @@ export function LastCodeCurrentWork({
                   {item.icon}
                 </span>
                 <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                  {action?.outcome === "running" ? (
-                    <div className="wrap-anywhere">{action.actionName}</div>
-                  ) : null}
-                  <div
-                    className={cn("wrap-anywhere", runningPresentation && secondaryTextClassName)}
-                  >
-                    {runningPresentation
-                      ? `${runningPresentation.label} ${runningPresentation.summary}`
-                      : item.title}
-                  </div>
+                  <div className="wrap-anywhere">{item.title}</div>
                   {item.description ? (
                     <div className={secondaryTextClassName}>{item.description}</div>
                   ) : null}

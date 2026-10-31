@@ -66,6 +66,7 @@ export function useComposerMenuItems({
   planModeUiEnabled,
   sideChatAvailable,
   sideChatDisabledReason,
+  threadAnnotationsSupported,
   compactSlashCommandAvailable,
   selectedProvider,
   selectedProviderSkills,
@@ -84,6 +85,7 @@ export function useComposerMenuItems({
   readonly planModeUiEnabled: boolean;
   readonly sideChatAvailable: boolean;
   readonly sideChatDisabledReason: string | null;
+  readonly threadAnnotationsSupported: boolean;
   readonly compactSlashCommandAvailable: boolean;
   readonly selectedProvider: ProviderDriverKind;
   readonly selectedProviderSkills: ServerProvider["skills"];
@@ -222,6 +224,17 @@ export function useComposerMenuItems({
           label: "/model",
           description: "Switch response model for this thread",
         },
+        ...(threadAnnotationsSupported
+          ? ([
+              {
+                id: "slash:annotate",
+                type: "slash-command",
+                command: "annotate",
+                label: "/annotate",
+                description: "Add or edit this thread's annotation",
+              },
+            ] as const)
+          : []),
         ...(planModeUiEnabled
           ? ([
               {

@@ -8,6 +8,7 @@ import {
 } from "./chatAttachment.ts";
 import { ProjectFaviconPath } from "./project.ts";
 import { ToolActivityNativeAppReference } from "./providerRuntime.ts";
+import { PreviewHostingLeaseId } from "./previewHosting.ts";
 
 const ASSET_PATH_MAX_LENGTH = 1024;
 
@@ -18,6 +19,16 @@ const ASSET_PATH_MAX_LENGTH = 1024;
 export const SOURCE_CONTROL_MEDIA_ASSET = "github-media" as const;
 
 export const AssetResource = Schema.Union([
+  Schema.TaggedStruct("preview-document", {
+    threadId: ThreadId,
+    url: TrimmedNonEmptyString.check(Schema.isMaxLength(4096)),
+    refresh: Schema.Boolean,
+  }),
+  Schema.TaggedStruct("managed-preview-resource", {
+    threadId: ThreadId,
+    leaseId: PreviewHostingLeaseId,
+    url: TrimmedNonEmptyString.check(Schema.isMaxLength(2048)),
+  }),
   Schema.TaggedStruct("workspace-file", {
     threadId: ThreadId,
     path: TrimmedNonEmptyString.check(Schema.isMaxLength(ASSET_PATH_MAX_LENGTH)),
@@ -26,6 +37,8 @@ export const AssetResource = Schema.Union([
     threadId: ThreadId,
     path: TrimmedNonEmptyString.check(Schema.isMaxLength(ASSET_PATH_MAX_LENGTH)),
     disposition: Schema.optionalKey(Schema.Literal("attachment")),
+    /** Restrict access to the exact file published by an assistant in this thread. */
+    linkedThreadFile: Schema.optionalKey(Schema.Boolean),
   }),
   Schema.TaggedStruct("draft-workspace-file", {
     cwd: TrimmedNonEmptyString.check(Schema.isMaxLength(ASSET_PATH_MAX_LENGTH)),
@@ -307,6 +320,24 @@ export class AssetSourceControlMediaUrlValidationError extends Schema.TaggedErro
   }
 }
 
+export class AssetManagedPreviewResourceError extends Schema.TaggedError<AssetManagedPreviewResourceError>()(
+  "AssetManagedPreviewResourceError",
+  { cause: Schema.optional(Schema.Defect()) },
+) {
+  override get message(): string {
+    return "The resource must belong to this thread's managed preview listener.";
+  }
+}
+
+export class AssetPreviewDocumentError extends Schema.TaggedError<AssetPreviewDocumentError>()(
+  "AssetPreviewDocumentError",
+  {},
+) {
+  override get message(): string {
+    return "The saved document URL is invalid or its file is no longer available.";
+  }
+}
+
 export const AssetAccessError = Schema.Union([
   AssetWorkspaceContextNotFoundError,
   AssetWorkspaceContextResolutionError,
@@ -321,6 +352,8 @@ export const AssetAccessError = Schema.Union([
   AssetProjectFaviconInspectionError,
   AssetProjectFaviconNotFoundError,
   AssetSourceControlMediaUrlValidationError,
+  AssetManagedPreviewResourceError,
+  AssetPreviewDocumentError,
   AssetSigningKeyLoadError,
 ]);
 export type AssetAccessError = typeof AssetAccessError.Type;

@@ -1,4 +1,7 @@
+import { configuredPreviewEnvironmentUrl } from "@t3tools/client-runtime/preview-hosting";
+import { environmentCatalog } from "../connection/catalog";
 import { useAtomValue } from "@effect/atom-react";
+import { createEnvironmentBootstrapQuery } from "@t3tools/client-runtime/state/bootstrap";
 import { createEnvironmentSessionAtoms } from "@t3tools/client-runtime/state/session";
 import {
   type AuthEnvironmentScope,
@@ -14,6 +17,7 @@ import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentAtomList, environmentIdsKey } from "./environmentAtomList";
 
 export const environmentSession = createEnvironmentSessionAtoms(connectionAtomRuntime);
+export const environmentBootstrap = createEnvironmentBootstrapQuery(connectionAtomRuntime);
 export const environmentSessionStatesAtom = environmentAtomList(
   "web-environment-session-states",
   environmentSession.sessionStateAtom,
@@ -98,4 +102,14 @@ export function useEnvironmentSessionState(environmentId: EnvironmentId) {
     hasError: result._tag === "Failure",
     isPending: result.waiting,
   };
+}
+
+export function readConfiguredPreviewEnvironmentUrl(environmentId: EnvironmentId) {
+  const connection = readPreparedConnection(environmentId);
+  return connection === null
+    ? null
+    : configuredPreviewEnvironmentUrl(
+        connection,
+        appAtomRegistry.get(environmentCatalog.catalogValueAtom).entries.get(environmentId),
+      );
 }

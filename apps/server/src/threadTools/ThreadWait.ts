@@ -125,7 +125,7 @@ const make = Effect.gen(function* () {
           turnItemTypes: ["assistant_message"],
         })
         .pipe(
-          Effect.catchTag("ProjectionStoreThreadNotFoundError", () => Effect.void),
+          Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.void }),
           Effect.mapError(internal),
         );
       if (projection === undefined || projection.thread.deletedAt !== null) return interrupted;

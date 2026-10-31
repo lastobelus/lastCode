@@ -1,3 +1,11 @@
+import {
+  groupThreadDeletionTargets,
+  useWorkspaceLifecycleConfirmation,
+} from "../hooks/useWorkspaceLifecycleConfirmation";
+import { useWorktreeSuspensionActions } from "../hooks/useWorktreeSuspensionActions";
+import { requestLastCodeProjectRemoval } from "./sidebar/lastcodeProjectRemoval";
+import type { SavedWorkspaceDisposition } from "@t3tools/contracts";
+import { AsyncResult } from "effect/reactivity";
 import { activateSidebarRowFromKeyboard } from "./sidebar/sidebarRowKeyboard";
 import { WorktreeCleanupFailureDialog } from "./WorktreeCleanupFailureDialog";
 import { ProjectSidebarDraftList } from "./sidebar/ProjectSidebarDraftList";
@@ -72,7 +80,6 @@ import {
   scopeProjectRef,
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
-import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
 import {
   isAtomCommandInterrupted,
   settlePromise,
@@ -102,6 +109,7 @@ import {
   readProject,
   readEnvironmentSupportsPersistence,
   useProjects,
+  useDelegatedUnderParent,
   useThreadShells,
   useThreadShellsForProjectRefs,
   waitForProjectRemoval,
@@ -206,7 +214,6 @@ import {
 import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
 import {
   buildMultiSelectThreadContextMenuItems,
-  deleteSelectedThreadEntries,
   filterSidebarV2VisibleThreads,
   getSidebarThreadIdsToPrewarm,
   resolveAdjacentThreadId,
@@ -224,10 +231,10 @@ import {
   useThreadJumpHintsVisible,
   ThreadStatusPill,
 } from "./Sidebar.logic";
-import { sortThreads } from "../lib/threadSort";
+import { sortThreads } from "@t3tools/client-runtime/state/thread-sort";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
-import { useIsMobile } from "~/hooks/useMediaQuery";
+import { useMediaQuery } from "~/hooks/useMediaQuery";
 import { CommandDialogTrigger } from "./ui/command";
 import { useClientSettings, updateClientSettings } from "~/hooks/useSettings";
 import { primaryServerKeybindingsAtom } from "../state/server";
@@ -236,10 +243,10 @@ import { canShareWithGuestAtom } from "./chat/guestShareAvailability";
 import { openGuestShareDialog } from "./chat/guestShareDialogState";
 import {
   derivePhysicalProjectKey,
-  deriveProjectGroupingOverrideKey,
+  derivePhysicalProjectKey as deriveProjectGroupingOverrideKey,
   getProjectOrderKey,
   selectProjectGroupingSettings,
-} from "../logicalProject";
+} from "@t3tools/client-runtime/state/project-grouping";
 import type { SidebarThreadSummary } from "../types";
 import {
   buildPhysicalToLogicalProjectKeyMap,
@@ -453,7 +460,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     environmentId: thread.environmentId,
     threadId: thread.id,
   });
-  const isMobile = useIsMobile();
+  const isMobile = useMediaQuery("(max-width: 767px)");
   const discoveredPorts = useThreadDiscoveredPorts({
     environmentId: thread.environmentId,
     threadId: thread.id,
@@ -1136,6 +1143,7 @@ interface SidebarProjectItemProps {
   handleNewThread: ReturnType<typeof useNewThreadHandler>;
   archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
   deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
+  deleteThreads: ReturnType<typeof useThreadActions>["deleteThreads"];
   markThreadUnread: ReturnType<typeof useThreadActions>["markThreadUnread"];
   markThreadRead: ReturnType<typeof useThreadActions>["markThreadRead"];
   unarchiveThread: ReturnType<typeof useThreadActions>["unarchiveThread"];
@@ -1172,6 +1180,7 @@ function useProjectThreads(project: SidebarProjectSnapshot) {
     (settings) => settings.sidebarThreadSortOrder,
   );
   const sidebarThreads = useThreadShellsForProjectRefs(project.memberProjectRefs);
+  const delegatedUnderParent = useDelegatedUnderParent();
   const threadLastVisitedAts = useUiStateStore(
     useShallow((state) =>
       sidebarThreads.map(
@@ -1216,7 +1225,7 @@ function useProjectThreads(project: SidebarProjectSnapshot) {
     ]),
   );
   const visibleProjectThreads = sortThreads(
-    filterSidebarV2VisibleThreads(sidebarThreads, null),
+    filterSidebarV2VisibleThreads(sidebarThreads, null, delegatedUnderParent),
     threadSortOrder,
   );
   const projectStatus = resolveProjectStatusIndicator(
@@ -1310,6 +1319,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     handleNewThread,
     archiveThread,
     deleteThread,
+    deleteThreads,
     markThreadUnread,
     markThreadRead,
     unarchiveThread,
@@ -1329,9 +1339,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     : project.allRemoteMembersAreDesktopLocal
       ? "laptop"
       : "cloud";
-  const appSettingsConfirmThreadDelete = useClientSettings<boolean>(
-    (settings) => settings.confirmThreadDelete,
-  );
+  const lifecycle = useWorkspaceLifecycleConfirmation();
+  const workspaceActions = useWorktreeSuspensionActions();
   const appSettingsConfirmThreadArchive = useClientSettings<boolean>(
     (settings) => settings.confirmThreadArchive,
   );
@@ -1519,7 +1528,10 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     );
   };
 
-  const removeProject = async (member: SidebarProjectGroupMember) => {
+  const removeProject = async (
+    member: SidebarProjectGroupMember,
+    savedWorkspace?: SavedWorkspaceDisposition,
+  ) => {
     const memberProjectRef = scopeProjectRef(member.environmentId, member.id);
     if (
       projectsContainPersistentThread({
@@ -1542,6 +1554,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       input: {
         projectId: member.id,
         force: true,
+        ...(savedWorkspace === undefined ? {} : { savedWorkspace }),
       },
     });
     if (result._tag === "Failure") {
@@ -1566,142 +1579,30 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     return result;
   };
 
-  const handleRemoveProject = async (member: SidebarProjectGroupMember) => {
-    if (!checkTaskPermission(member.environmentId)) return;
-    const api = readLocalApi();
-    if (!api) {
-      return;
-    }
-
-    const memberProjectRef = scopeProjectRef(member.environmentId, member.id);
-    const memberThreadCount =
-      (memberThreadCountByPhysicalKey.get(member.physicalProjectKey) ?? 0) +
-      readUnloadedThreadCount(
-        [{ environmentId: member.environmentId, id: member.id }],
-        sidebarThreads,
-      );
-    if (memberThreadCount > 0) {
-      const warningToastId = toastManager.add(
-        stackedThreadToast({
-          type: "warning",
-          title: "Project is not empty",
-          description: "Delete all threads in this project before removing it.",
-          actionVariant: "destructive",
-          actionProps: {
-            children: "Delete anyway",
-            onClick: () => {
-              void (async () => {
-                toastManager.close(warningToastId);
-                await new Promise<void>((resolve) => {
-                  window.setTimeout(resolve, 180);
-                });
-                if (!checkTaskPermission(member.environmentId)) return;
-
-                const latestProjectThreads = Array.from(readSidebarThreadByKey().values()).filter(
-                  (thread) =>
-                    thread.environmentId === memberProjectRef.environmentId &&
-                    thread.projectId === memberProjectRef.projectId,
-                );
-                const threadCount =
-                  latestProjectThreads.length +
-                  readUnloadedThreadCount(
-                    [{ environmentId: member.environmentId, id: member.id }],
-                    latestProjectThreads,
-                  );
-                const confirmed = await api.dialogs.confirm(
-                  threadCount > 0
-                    ? [
-                        `Remove project "${member.title}" and delete its ${threadCount} thread${
-                          threadCount === 1 ? "" : "s"
-                        }?`,
-                        `Path: ${member.workspaceRoot}`,
-                        ...(member.environmentLabel
-                          ? [`Environment: ${member.environmentLabel}`]
-                          : []),
-                        "This permanently clears conversation history for those threads and any archived threads.",
-                        "This removes only this project entry.",
-                        "This action cannot be undone.",
-                      ].join("\n")
-                    : [
-                        `Remove project "${member.title}"?`,
-                        `Path: ${member.workspaceRoot}`,
-                        ...(member.environmentLabel
-                          ? [`Environment: ${member.environmentLabel}`]
-                          : []),
-                        "This permanently clears any archived conversation history.",
-                        "This removes only this project entry.",
-                      ].join("\n"),
-                  { variant: "destructive" },
-                );
-                if (!confirmed) {
-                  return;
-                }
-
-                const result = await removeProject(member);
-                if (result?._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-                  const error = squashAtomCommandFailure(result);
-                  toastManager.add(
-                    stackedThreadToast({
-                      type: "error",
-                      title: `Failed to remove "${member.title}"`,
-                      description:
-                        error instanceof Error ? error.message : "Unknown error removing project.",
-                    }),
-                  );
-                }
-              })().catch((error) => {
-                const message =
-                  error instanceof Error ? error.message : "Unknown error removing project.";
-                console.error("Failed to remove project", {
-                  projectId: member.id,
-                  environmentId: member.environmentId,
-                  ...safeErrorLogAttributes(error),
-                });
-                toastManager.add(
-                  stackedThreadToast({
-                    type: "error",
-                    title: `Failed to remove "${member.title}"`,
-                    description: message,
-                  }),
-                );
-              });
+  const handleRemoveProject = (member: SidebarProjectGroupMember) =>
+    requestLastCodeProjectRemoval(member, {
+      canOperate: checkTaskPermission,
+      getApi: readLocalApi,
+      getThreads: () => Array.from(readSidebarThreadByKey().values()),
+      threadCount:
+        (memberThreadCountByPhysicalKey.get(member.physicalProjectKey) ?? 0) +
+        readUnloadedThreadCount([member], sidebarThreads),
+      removeProject: async (member, savedWorkspace) =>
+        (await removeProject(member, savedWorkspace)) ?? AsyncResult.success(undefined),
+      waitForWarning: () => new Promise<void>((resolve) => window.setTimeout(resolve, 180)),
+      confirmSavedData: async (member, description) => {
+        const result = await lifecycle.confirm(
+          [
+            {
+              environmentId: member.environmentId,
+              input: { operation: "delete", target: { kind: "project", projectId: member.id } },
             },
-          },
-        }),
-      );
-      return;
-    }
-
-    const message = [
-      `Remove project "${member.title}"?`,
-      `Path: ${member.workspaceRoot}`,
-      ...(member.environmentLabel ? [`Environment: ${member.environmentLabel}`] : []),
-      "This permanently clears any archived conversation history.",
-      "This removes only this project entry.",
-    ].join("\n");
-    const confirmed = await api.dialogs.confirm(message, { variant: "destructive" });
-    if (!confirmed) {
-      return;
-    }
-
-    const result = await removeProject(member);
-    if (result?._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-      const error = squashAtomCommandFailure(result);
-      const message = error instanceof Error ? error.message : "Unknown error removing project.";
-      console.error("Failed to remove project", {
-        projectId: member.id,
-        environmentId: member.environmentId,
-        ...safeErrorLogAttributes(error),
-      });
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: `Failed to remove "${member.title}"`,
-          description: message,
-        }),
-      );
-    }
-  };
+          ],
+          { title: `Remove project "${member.title}"?`, description },
+        );
+        return result === null ? null : (result.dispositions[0] ?? { mode: "retain" });
+      },
+    });
 
   const handleProjectButtonContextMenu = (event: React.MouseEvent<HTMLButtonElement>) => {
     event.preventDefault();
@@ -1985,26 +1886,25 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
     if (clicked !== "delete") return;
 
-    if (appSettingsConfirmThreadDelete) {
-      const confirmed = await api.dialogs.confirm(
-        [
-          `Delete ${count} thread${count === 1 ? "" : "s"}?`,
-          `This also deletes any of ${count === 1 ? "its" : "their"} subagents, including archived ones; unselected forks and independent threads are kept. This cannot be undone.`,
-        ].join("\n"),
-        { variant: "destructive" },
-      );
-      if (!confirmed) return;
-    }
+    const savedChoice = await lifecycle.confirm(
+      groupThreadDeletionTargets(selectedThreadEntries.map(({ threadRef }) => threadRef)),
+      {
+        title: `Delete ${count} threads?`,
+        description:
+          "This also deletes their subagents, including archived ones. Unselected forks and independent threads are kept. Conversation deletion cannot be undone.",
+      },
+    );
+    if (savedChoice === null) return;
     if (
       !selectedThreadEntries.every(({ threadRef }) => checkTaskPermission(threadRef.environmentId))
     ) {
       return;
     }
 
-    const { deletedThreadKeys, firstFailure } = await deleteSelectedThreadEntries({
-      entries: selectedThreadEntries,
-      delete: ({ threadRef }, deletedThreadKeys) => deleteThread(threadRef, { deletedThreadKeys }),
-    });
+    const { deletedThreadKeys, firstFailure } = await deleteThreads(
+      selectedThreadEntries.map(({ threadRef }) => threadRef),
+      savedChoice,
+    );
     if (firstFailure !== null) {
       const firstError = squashAtomCommandFailure(firstFailure);
       toastManager.add(
@@ -2316,6 +2216,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                   },
                 ]
               : []),
+            ...workspaceActions.menuItems(thread),
             {
               id: "delete",
               label: "Delete",
@@ -2429,22 +2330,44 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         copyThreadIdToClipboard(thread.id, { threadId: thread.id });
         return;
       }
+      if (await workspaceActions.run(clicked, threadRef)) return;
+      if (clicked === "archive-discard") {
+        const result = await archiveThread(threadRef, { discardSavedWorkspace: true });
+        if (result._tag === "Failure" && !isAtomCommandInterrupted(result))
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Failed to archive thread",
+              description: String(squashAtomCommandFailure(result)),
+            }),
+          );
+        return;
+      }
       if (clicked !== "delete" || readThreadShell(threadRef)?.persistent === true) return;
       if (!checkTaskPermission(threadRef.environmentId)) return;
-      if (appSettingsConfirmThreadDelete) {
-        const confirmed = await api.dialogs.confirm(
-          [
-            `Delete thread "${thread.title}"?`,
-            "This also deletes any of its subagents, including archived ones; other forks and independent threads are kept. This cannot be undone.",
-          ].join("\n"),
-          { variant: "destructive" },
-        );
-        if (!confirmed) {
-          return;
-        }
-      }
+      const savedChoice = await lifecycle.confirm(
+        [
+          {
+            environmentId: threadRef.environmentId,
+            input: {
+              operation: "delete",
+              target: { kind: "threads", threadIds: [threadRef.threadId] },
+            },
+          },
+        ],
+        {
+          title: `Delete thread "${thread.title}"?`,
+          description:
+            "This also deletes its subagents, including archived ones. Other forks and independent threads are kept. Conversation deletion cannot be undone.",
+        },
+      );
+      if (savedChoice === null) return;
+      const savedWorkspace = savedChoice.dispositions[0];
       if (!checkTaskPermission(threadRef.environmentId)) return;
-      const result = await deleteThread(threadRef);
+      const result = await deleteThread(
+        threadRef,
+        savedWorkspace === undefined ? {} : { savedWorkspace },
+      );
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
         toastManager.add(
@@ -2980,6 +2903,7 @@ interface SidebarProjectsContentProps {
   handleNewThread: ReturnType<typeof useNewThreadHandler>;
   archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
   deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
+  deleteThreads: ReturnType<typeof useThreadActions>["deleteThreads"];
   markThreadUnread: ReturnType<typeof useThreadActions>["markThreadUnread"];
   markThreadRead: ReturnType<typeof useThreadActions>["markThreadRead"];
   unarchiveThread: ReturnType<typeof useThreadActions>["unarchiveThread"];
@@ -3026,6 +2950,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     handleNewThread,
     archiveThread,
     deleteThread,
+    deleteThreads,
     markThreadUnread,
     markThreadRead,
     unarchiveThread,
@@ -3158,6 +3083,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                         handleNewThread={handleNewThread}
                         archiveThread={archiveThread}
                         deleteThread={deleteThread}
+                        deleteThreads={deleteThreads}
                         markThreadUnread={markThreadUnread}
                         markThreadRead={markThreadRead}
                         unarchiveThread={unarchiveThread}
@@ -3195,6 +3121,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                 handleNewThread={handleNewThread}
                 archiveThread={archiveThread}
                 deleteThread={deleteThread}
+                deleteThreads={deleteThreads}
                 markThreadUnread={markThreadUnread}
                 markThreadRead={markThreadRead}
                 unarchiveThread={unarchiveThread}
@@ -3317,6 +3244,7 @@ function useSortedLegacySidebarProjects(input: {
     sidebarProjectSortOrder,
   } = input;
   const sidebarThreads = useThreadShells();
+  const delegatedUnderParent = useDelegatedUnderParent();
   const sidebarProjectByKey = new Map(
     sidebarProjects.map((project) => [project.projectKey, project] as const),
   );
@@ -3324,7 +3252,11 @@ function useSortedLegacySidebarProjects(input: {
     ...project,
     id: project.projectKey,
   }));
-  const sortableThreads = filterSidebarV2VisibleThreads(sidebarThreads, null).map((thread) => {
+  const sortableThreads = filterSidebarV2VisibleThreads(
+    sidebarThreads,
+    null,
+    delegatedUnderParent,
+  ).map((thread) => {
     const physicalKey =
       projectPhysicalKeyByScopedRef.get(
         scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId)),
@@ -3367,6 +3299,7 @@ function useLegacySidebarThreads(input: {
     expandedThreadListsByProject,
   } = input;
   const sidebarThreads = useThreadShells();
+  const delegatedUnderParent = useDelegatedUnderParent();
   const projectExpandedById = useUiStateStore((store) => store.projectExpandedById);
   const sidebarThreadByKey = new Map(
     sidebarThreads.map(
@@ -3397,7 +3330,11 @@ function useLegacySidebarThreads(input: {
   }
   const visibleSidebarThreadKeys = sortedProjects.flatMap((project) => {
     const projectThreads = sortThreads(
-      filterSidebarV2VisibleThreads(threadsByProjectKey.get(project.projectKey) ?? [], null),
+      filterSidebarV2VisibleThreads(
+        threadsByProjectKey.get(project.projectKey) ?? [],
+        null,
+        delegatedUnderParent,
+      ),
       sidebarThreadSortOrder,
     );
     const projectExpanded = resolveProjectExpanded(
@@ -3480,6 +3417,7 @@ export default function LegacySidebar({ routeReveal }: { routeReveal: SidebarRou
   const {
     archiveThread,
     deleteThread,
+    deleteThreads,
     markThreadUnread,
     markThreadRead,
     unarchiveThread,
@@ -3697,6 +3635,7 @@ export default function LegacySidebar({ routeReveal }: { routeReveal: SidebarRou
     event.stopPropagation();
     navigateToThread(scopeThreadRef(targetThread.environmentId, targetThread.id));
   });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keeps the window keyboard listener attached for sidebar shortcuts
   useEffect(() => {
     const handleWindowKeyDown = (event: globalThis.KeyboardEvent) => onWindowKeyDown(event);
     window.addEventListener("keydown", handleWindowKeyDown);
@@ -3704,7 +3643,7 @@ export default function LegacySidebar({ routeReveal }: { routeReveal: SidebarRou
       window.removeEventListener("keydown", handleWindowKeyDown);
     };
   }, []);
-  // A window listener whose lifetime is the sidebar's: no element owns outside clicks.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keeps the window outside-click listener attached while the sidebar owns selection
   useEffect(() => {
     window.addEventListener("mousedown", clearThreadSelectionOnOutsideMouseDown);
     return () => window.removeEventListener("mousedown", clearThreadSelectionOnOutsideMouseDown);
@@ -3860,6 +3799,7 @@ export default function LegacySidebar({ routeReveal }: { routeReveal: SidebarRou
         handleNewThread={handleNewThread}
         archiveThread={archiveThread}
         deleteThread={deleteThread}
+        deleteThreads={deleteThreads}
         markThreadUnread={markThreadUnread}
         markThreadRead={markThreadRead}
         unarchiveThread={unarchiveThread}

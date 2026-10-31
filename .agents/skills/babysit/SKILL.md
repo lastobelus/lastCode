@@ -20,7 +20,9 @@ stopping point; this does not authorize creating or merging a PR.
 Read the repository `AGENTS.md`, `.agents/skills/lastcode-pr/SKILL.md`, and
 `.agents/skills/_references/external-review-mechanics.md` before acting. Those
 documents are authoritative for focused validation, review mechanics, Project
-Actions, and guarded merge requirements.
+Actions, and guarded merge requirements. In a delegated child task, the parent
+launches every Action and owns every PR watch in this skill; see
+[Parent-mediated Actions](../../../docs/internals/resumable-project-actions-setup.md#parent-mediated-actions-for-delegated-children).
 
 Resolve the requested PRs and stopping point. A LastCode PR must target
 `lastcode/main` or have a same-repository parent chain leading there. Do not use
@@ -175,10 +177,20 @@ actionable CI failure or finding immediately, even while another gate is still
 pending. When the check is still `pending` and nothing needs action, end the
 turn; the watch continues.
 
-The watch has no review timeout, so a review request that Codex never answers
-does not wake the thread. Requesting review before ending the turn keeps the
-normal wake path in place. When a later snapshot shows review still missing,
-treat it as a blocker to handle rather than waiting again. A CI run that never
+The watch also wakes once when the PR has been quiet for the deadline set in
+Settings → LastCode (45 minutes by default). Normal event wakes continue after
+that, and the deadline re-arms after meaningful news or when you call
+`watch_pull_request` after it has passed. A deadline wake ends one bounded
+wait. Run the gate check and act on actionable failures, findings, or `ready`
+as on any wake. If the check is still `pending`, report the expired wait and
+what is still pending as a blocker, then call `unwatch_pull_request` so the
+thread returns to the user's inbox. Ending the turn instead can wait forever:
+the deadline fires only once, and hung CI or review sends no news. Watch again
+only when the user asks you to keep waiting or new actionable work needs it. The check reports `review-stalled` attention once the newest exact-head
+review request is older than that deadline, even if Codex has reacted with
+eyes. Report a stalled review as a blocker. The timeout does not count as
+approval and does not permit merging, another review request, or substituting
+a different review for Codex's. A CI run that never
 registers cannot wake the watch either, so the check reports it as `pending`
 only while review is pending and as `ci-not-registered` attention otherwise. A
 base that moved without a push starts no run; otherwise check the workflow

@@ -445,7 +445,7 @@ export function ChangeRequestStatusIcon({
   return <presentation.Icon className={className} />;
 }
 
-function PrStatusTooltipContent({ status }: { status: PrStatusIndicator }) {
+export function PrStatusTooltipContent({ status }: { status: PrStatusIndicator }) {
   return (
     <span className="flex max-w-[min(34rem,calc(100vw-2rem))] items-stretch overflow-hidden whitespace-nowrap">
       <span className="shrink-0 pr-2 font-medium">{status.tooltipLead}</span>
@@ -605,12 +605,12 @@ export function ThreadWorktreeIndicator({
   );
 }
 
-function ThreadStatusLabel({
+export function ThreadStatusLabel({
   status,
   compact = false,
   icon,
 }: {
-  status: Pick<ThreadStatusPill, "colorClass" | "dotClass" | "pulse" | "description"> & {
+  status: Pick<ThreadStatusPill, "colorClass" | "dotClass" | "pulse" | "description" | "marker"> & {
     label: string;
   };
   compact?: boolean;
@@ -630,7 +630,15 @@ function ThreadStatusLabel({
             />
           }
         >
-          {icon ? (
+          {status.marker ? (
+            <span
+              aria-hidden
+              data-lastcode-sidebar-unscaled-content
+              className="shrink-0 font-semibold leading-none"
+            >
+              {status.marker}
+            </span>
+          ) : icon ? (
             <ThreadStatusGlyph icon={icon} dotClass={status.dotClass} pulse={status.pulse} />
           ) : (
             <span
@@ -659,7 +667,15 @@ function ThreadStatusLabel({
           />
         }
       >
-        {icon ? (
+        {status.marker ? (
+          <span
+            aria-hidden
+            data-lastcode-sidebar-unscaled-content
+            className="shrink-0 font-semibold leading-none"
+          >
+            {status.marker}
+          </span>
+        ) : icon ? (
           <ThreadStatusGlyph icon={icon} dotClass={status.dotClass} pulse={status.pulse} />
         ) : (
           <span

@@ -1,10 +1,15 @@
 import { EasDeviceHostConfigs, SimlockDeviceHostConfigs, SshDeviceHostConfigs } from "./device.ts";
 import {
+  DEFAULT_LASTCODE_PULL_REQUEST_WATCH_QUIET_MINUTES,
+  LastCodePullRequestWatchQuietMinutes,
+} from "./lastcodePullRequestWatchSettings.ts";
+import {
   AuthOrchestrationOperateScope,
   AuthSettingsWriteScope,
   AuthProvidersManageScope,
   type AuthEnvironmentScope,
 } from "./auth.ts";
+import { SAVED_WORKSPACE_DISCARD_SCOPES } from "./workspaceLifecycle.ts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Duration from "effect/Duration";
@@ -449,6 +454,7 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   chatWidth: ChatWidth.pipe(Schema.withDecodingDefault(Effect.succeed("comfortable" as const))),
   effortDisplay: EffortDisplay.pipe(Schema.withDecodingDefault(Effect.succeed("label" as const))),
+  expandThreadAnnotations: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   incomingMessageStyle: IncomingMessageStyle.pipe(
     Schema.withDecodingDefault(Effect.succeed("neutral" as const)),
   ),
@@ -608,6 +614,7 @@ export const ClientSettingsSchema = Schema.Struct({
   legacySidebarScale: LegacySidebarScale.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_LEGACY_SIDEBAR_SCALE)),
   ),
+  pageScrollOverlapEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   largerScrollbarsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   scrollbarWidth: ScrollbarWidth.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SCROLLBAR_WIDTH)),
@@ -1164,8 +1171,37 @@ export const WorktreeCleanup = Schema.NullOr(
 );
 export type WorktreeCleanup = typeof WorktreeCleanup.Type;
 
+export const MIN_WORKTREE_SUSPENSION_AFTER_DAYS = 1;
+export const MAX_WORKTREE_SUSPENSION_AFTER_DAYS = 3650;
+export const WorktreeSuspensionAfterDays = Schema.Int.check(
+  Schema.isBetween({
+    minimum: MIN_WORKTREE_SUSPENSION_AFTER_DAYS,
+    maximum: MAX_WORKTREE_SUSPENSION_AFTER_DAYS,
+  }),
+);
+export type WorktreeSuspensionAfterDays = typeof WorktreeSuspensionAfterDays.Type;
+
+export const WorktreeSuspensionScopes = Schema.Struct({
+  subagents: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  untouchedChildren: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  otherThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+});
+export type WorktreeSuspensionScopes = typeof WorktreeSuspensionScopes.Type;
+
+export const WorktreeSuspensionPolicy = Schema.Union([
+  Schema.Struct({ mode: Schema.Literal("off") }),
+  Schema.Struct({
+    mode: Schema.Literal("custom"),
+    afterDays: WorktreeSuspensionAfterDays,
+    scopes: WorktreeSuspensionScopes.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  }),
+]);
+export type WorktreeSuspensionPolicy = typeof WorktreeSuspensionPolicy.Type;
+const DEFAULT_WORKTREE_SUSPENSION_POLICY: WorktreeSuspensionPolicy = { mode: "off" };
+
 export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "worktreeCleanup",
+  "worktreeSuspension",
   "defaultModelSelection",
   "defaultRuntimeMode",
   "defaultThreadEnvMode",
@@ -1203,6 +1239,7 @@ export type ProjectProviderInstanceOverride = typeof ProjectProviderInstanceOver
  * providerInstances overrides fields per instance; other keys replace the whole setting. */
 export const ProjectSettingsOverrides = Schema.Struct({
   worktreeCleanup: Schema.optionalKey(WorktreeCleanup),
+  worktreeSuspension: Schema.optionalKey(WorktreeSuspensionPolicy),
   defaultModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   defaultRuntimeMode: Schema.optionalKey(RuntimeMode),
   defaultThreadEnvMode: Schema.optionalKey(ThreadEnvMode),
@@ -1352,10 +1389,16 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   environmentPauseEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  lastcodePullRequestWatchQuietMinutes: LastCodePullRequestWatchQuietMinutes.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_LASTCODE_PULL_REQUEST_WATCH_QUIET_MINUTES)),
+  ),
   lastcodeLocalCi: LastCodeLocalCiSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_LASTCODE_LOCAL_CI_SETTINGS)),
   ),
   worktreeCleanup: WorktreeCleanup.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  worktreeSuspension: WorktreeSuspensionPolicy.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_WORKTREE_SUSPENSION_POLICY)),
+  ),
   storageCleanup: StorageCleanupSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(StorageCleanupSettings)({}))),
   ),
@@ -1709,6 +1752,7 @@ export const ServerSettingsPatch = Schema.Struct({
     }),
   ),
   environmentPauseEnabled: Schema.optionalKey(Schema.Boolean),
+  lastcodePullRequestWatchQuietMinutes: Schema.optionalKey(LastCodePullRequestWatchQuietMinutes),
   lastcodeLocalCi: Schema.optionalKey(
     Schema.Struct({
       quickCiMode: Schema.optionalKey(LastCodeQuickCiMode),
@@ -1737,6 +1781,7 @@ export const ServerSettingsPatch = Schema.Struct({
       ]),
     ),
   ),
+  worktreeSuspension: Schema.optionalKey(WorktreeSuspensionPolicy),
   storageCleanup: Schema.optionalKey(
     Schema.Struct({
       worktreeKeepWhen: Schema.optionalKey(WorktreeKeepWhen),
@@ -1892,6 +1937,9 @@ export function requiredScopesForServerSettingsPatch(
 export function requiredScopesForProjectMutation(
   mutation: ProjectMutation,
 ): ReadonlyArray<AuthEnvironmentScope> {
+  if (mutation.type === "project.delete" && mutation.savedWorkspace?.mode === "discard") {
+    return SAVED_WORKSPACE_DISCARD_SCOPES;
+  }
   if (mutation.type === "project.delete" || mutation.scripts === undefined) {
     return [AuthOrchestrationOperateScope];
   }
@@ -1907,6 +1955,7 @@ export const ClientSettingsPatch = Schema.Struct({
   diffColorScheme: Schema.optionalKey(DiffColorScheme),
   chatWidth: Schema.optionalKey(ChatWidth),
   effortDisplay: Schema.optionalKey(EffortDisplay),
+  expandThreadAnnotations: Schema.optionalKey(Schema.Boolean),
   incomingMessageStyle: Schema.optionalKey(IncomingMessageStyle),
   incomingMessageFillColor: Schema.optionalKey(IncomingMessageFillColor),
   loadBalancingEnabled: Schema.optionalKey(Schema.Boolean),
@@ -1974,6 +2023,7 @@ export const ClientSettingsPatch = Schema.Struct({
   lastcodeSidebarEnabled: Schema.optionalKey(Schema.Boolean),
   sidebarWorkingShelfEnabled: Schema.optionalKey(Schema.Boolean),
   legacySidebarScale: Schema.optionalKey(LegacySidebarScale),
+  pageScrollOverlapEnabled: Schema.optionalKey(Schema.Boolean),
   largerScrollbarsEnabled: Schema.optionalKey(Schema.Boolean),
   scrollbarWidth: Schema.optionalKey(ScrollbarWidth),
   scrollbarMargin: Schema.optionalKey(ScrollbarMargin),

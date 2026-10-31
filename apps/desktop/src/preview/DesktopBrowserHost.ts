@@ -11,6 +11,9 @@ import {
   type DesktopBrowserSurfaceRequest,
   type DesktopBrowserSurfaceResponse,
   type DesktopBrowserEvent as DesktopBrowserEventType,
+  type DesktopBrowserPresentationInput,
+  type DesktopBrowserRendererRequest,
+  type PreviewViewportSetting,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Clock from "effect/Clock";
@@ -25,9 +28,15 @@ import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import { createNativeBrowserLifetime } from "./NativeBrowserLifetime.ts";
+import * as Semaphore from "effect/Semaphore";
 
 import * as DesktopClientSettings from "../settings/DesktopClientSettings.ts";
-import { DESKTOP_BROWSER_SURFACE_REQUEST_CHANNEL } from "../ipc/channels.ts";
+import type { resolvePartitionScope } from "./BrowserProfileScope.ts";
+import {
+  DESKTOP_BROWSER_SURFACE_REQUEST_CHANNEL,
+  DESKTOP_BROWSER_RENDERER_REQUEST_CHANNEL,
+} from "../ipc/channels.ts";
 
 import { createCdpRelayConnection, type CdpRelayConnection } from "./CdpRelay.ts";
 import { sendPageCommand } from "./GuestInput.ts";
@@ -96,6 +105,9 @@ interface AttachedTab {
     held: boolean;
   }>;
   presented: boolean;
+  rendering: boolean;
+  lifecycle: Promise<void>;
+  frozen: boolean | undefined;
   downloadDirectory: string | null;
   pendingDownloadGuid: string | null;
   agentInputAt: number;
@@ -128,12 +140,27 @@ interface AttachedTab {
 }
 
 interface NativePopup {
+  readonly kind: "popup" | "root";
+  readonly creation:
+    | {
+        readonly profileId: string;
+        readonly environmentId: string;
+        readonly serverEpoch: string;
+        readonly url: string;
+        readonly requestId: string;
+        // Cancellation ends when the server commits tab ownership; no page backing ever migrates.
+        stage: "created" | "accepted" | "published";
+      }
+    | undefined;
   readonly id: string;
   readonly source: DesktopBrowserTabKey;
   readonly window: Electron.BrowserWindow;
   readonly contents: Electron.WebContents;
   readonly release: () => void;
+  lifecycle: Promise<void>;
+  frozen: boolean | undefined;
   boundKey: DesktopBrowserTabKey | undefined;
+  closing: boolean;
   closeRequest: { readonly requestId: string; canceled: boolean } | undefined;
 }
 
@@ -150,18 +177,32 @@ export class DesktopBrowserHost extends Context.Service<
       readonly command: DesktopBrowserCommand;
     }) => Effect.Effect<void>;
     readonly handleCommandLine: (line: string) => Effect.Effect<void>;
+    readonly bindEnvironment: (
+      desktopHostId: string,
+      environmentId: string,
+      resolveProfile: (
+        profileId: string,
+      ) => Effect.Effect<ReturnType<typeof resolvePartitionScope>, DesktopBrowserTransportError>,
+    ) => Effect.Effect<void, DesktopBrowserTransportError>;
+    readonly setRootFactory: (
+      create: (input: {
+        readonly environmentId: string;
+        readonly profileId: string;
+        readonly partition: ReturnType<typeof resolvePartitionScope>;
+        readonly viewport?: PreviewViewportSetting;
+      }) => Effect.Effect<Electron.BrowserWindow, DesktopBrowserTransportError>,
+    ) => void;
     readonly attach: (
       key: DesktopBrowserTabKey,
       debuggee: DesktopBrowserTabDebugger,
       runtimeTabId: string,
     ) => void;
+    readonly reserveTab: (runtimeTabId: string, key: DesktopBrowserTabKey) => boolean;
+    readonly releaseReservation: (runtimeTabId: string) => void;
     /** Registers only the actual child window delivered by Electron's did-create-window. */
     readonly registerPopup: (source: DesktopBrowserTabKey, window: Electron.BrowserWindow) => void;
     readonly surfaceResponse: (response: DesktopBrowserSurfaceResponse, senderId: number) => void;
-    readonly setPresentation: (
-      input: { readonly runtimeTabId: string; readonly presented: boolean },
-      senderId: number,
-    ) => void;
+    readonly setPresentation: (input: DesktopBrowserPresentationInput, senderId: number) => void;
     readonly setMainWindow: (window: Electron.BrowserWindow) => void;
     readonly setPictureInPictureWindow: (
       runtimeTabId: string,
@@ -252,11 +293,122 @@ export const make = Effect.gen(function* () {
   /** Threads whose agent turn runs, by the server's account. */
   const agentTurns = new Map<string, Set<string>>();
   const popups = new Map<string, NativePopup>();
+  const environmentBindings = new Map<
+    string,
+    {
+      readonly environmentId: string;
+      readonly resolveProfile: Parameters<DesktopBrowserHost["Service"]["bindEnvironment"]>[2];
+    }
+  >();
+  let createRootWindow: Parameters<DesktopBrowserHost["Service"]["setRootFactory"]>[0] | undefined;
+  const rootCreationLock = yield* Semaphore.make(1);
+  const canceledCreations = new Set<string>();
+  const pendingRootCreations = new Map<
+    string,
+    DesktopBrowserTabKey & { readonly serverEpoch: string; readonly requestId: string }
+  >();
+  const creationKey = (key: DesktopBrowserTabKey, requestId: string, profileId: string) =>
+    JSON.stringify([keyOf(key), requestId, profileId]);
   const presentedSlots = new Map<string, number>();
+  const renderingSlots = new Map<string, number>();
   const emit = (event: DesktopBrowserEventType, desktopHostId = "local") =>
     runFork(PubSub.publish(outbox, { desktopHostId, event }));
   let mainWindow: Electron.BrowserWindow | null = null;
+  const sendRendererRequest = (key: DesktopBrowserTabKey, action: "wake" | "unload") => {
+    const desktopHostId = key.desktopHostId ?? "local";
+    const binding = environmentBindings.get(desktopHostId);
+    if (!binding || !mainWindow || mainWindow.isDestroyed()) return;
+    const request: DesktopBrowserRendererRequest = {
+      threadId: key.threadId,
+      tabId: key.tabId,
+      environmentId: binding.environmentId,
+      desktopHostId,
+      action,
+    };
+    mainWindow.webContents.send(DESKTOP_BROWSER_RENDERER_REQUEST_CHANNEL, request);
+  };
+  let residentIds: ReadonlySet<string> = new Set();
+  const pendingSlots = new Map<string, DesktopBrowserTabKey>();
+  const unboundPopups = new Map<string, NativePopup>();
+  const lifetime = createNativeBrowserLifetime({
+    now,
+    schedule: (delayMs, task) => {
+      const fiber = runFork(Effect.sleep(delayMs).pipe(Effect.andThen(Effect.sync(task))));
+      return () => {
+        runFork(Fiber.interrupt(fiber));
+      };
+    },
+    changed: (next) => {
+      const removed = [...residentIds].filter((id) => !next.has(id));
+      residentIds = next;
+      for (const id of removed) {
+        const tab = tabs.get(id);
+        if (!tab) {
+          const reservation = [...pendingSlots].find(([, key]) => keyOf(key) === id);
+          const popup = reservation ? unboundPopups.get(reservation[0]) : undefined;
+          if (popup) {
+            popups.delete(popup.id);
+            popup.release();
+            emit(
+              {
+                type: "dormant",
+                threadId: popup.source.threadId,
+                tabId: popup.source.tabId,
+                popupId: popup.id,
+              },
+              popup.source.desktopHostId,
+            );
+            if (!popup.window.isDestroyed()) popup.window.destroy();
+          }
+          continue;
+        }
+        const popup = tab.popup;
+        // Policy unloading retires Chromium, never the saved preview. Detach the
+        // destructive native-close listeners before destroying an owned window.
+        emit(
+          {
+            type: "dormant",
+            threadId: tab.key.threadId,
+            tabId: tab.key.tabId,
+            ...(popup?.kind === "root" ? { rootId: popup.id } : {}),
+            ...(popup?.kind === "popup" ? { popupId: popup.id } : {}),
+          },
+          tab.key.desktopHostId,
+        );
+        if (popup) {
+          popups.delete(popup.id);
+          popup.release();
+        } else sendRendererRequest(tab.key, "unload");
+        detach(tab.key);
+        if (popup && !popup.window.isDestroyed()) popup.window.destroy();
+      }
+    },
+  });
   let releaseMainWindow: (() => void) | undefined;
+  const makeAutomationLifetime = () => ({
+    closed: false,
+    windows: new Set<Electron.BrowserWindow>(),
+  });
+  let automationLifetime = makeAutomationLifetime();
+  const closeAutomationLifetime = (lifetime: ReturnType<typeof makeAutomationLifetime>) => {
+    lifetime.closed = true;
+    for (const window of lifetime.windows) {
+      if (!window.isDestroyed()) window.destroy();
+    }
+    lifetime.windows.clear();
+  };
+  const ownAutomationWindow = (
+    lifetime: ReturnType<typeof makeAutomationLifetime>,
+    window: Electron.BrowserWindow,
+  ) => {
+    if (lifetime.closed) {
+      if (!window.isDestroyed()) window.destroy();
+      return false;
+    }
+    lifetime.windows.add(window);
+    window.once("closed", () => lifetime.windows.delete(window));
+    return true;
+  };
   const pictureInPictureWindows = new Map<
     string,
     { window: Electron.BrowserWindow; release: () => void }
@@ -278,12 +430,100 @@ export const make = Effect.gen(function* () {
     const presented = tab.popup
       ? windowVisible(tab.popup.window)
       : nativePresented(tab.runtimeTabId, tab.debuggee.webContents.hostWebContents?.id);
-    if (tab.presented === presented) return;
+    if (tab.presented === presented) {
+      syncNativeLifetime();
+      return;
+    }
     tab.presented = presented;
     emit(
       { type: "presentation", threadId: tab.key.threadId, tabId: tab.key.tabId, presented },
       tab.key.desktopHostId,
     );
+    syncNativeLifetime();
+  };
+  const rendererRenderingActive = (tab: AttachedTab) =>
+    renderingSlots.get(tab.runtimeTabId) === tab.debuggee.webContents.hostWebContents?.id &&
+    renderingSlots.has(tab.runtimeTabId);
+  const renderingActive = (tab: AttachedTab) =>
+    tab.presented ||
+    tab.focusEmulated ||
+    tab.renderingLeases.size > 0 ||
+    rendererRenderingActive(tab) ||
+    (tab.popup?.creation !== undefined && tab.popup.creation.stage !== "published");
+  const syncNativeLifetime = () => {
+    const pendingIds = [...pendingSlots.values()].map(keyOf);
+    const demanded = new Set<string>(
+      [...pendingSlots]
+        .filter(
+          ([slot]) => !unboundPopups.has(slot) || windowVisible(unboundPopups.get(slot)?.window),
+        )
+        .map(([, key]) => keyOf(key)),
+    );
+    for (const [id, tab] of tabs) {
+      const active = renderingActive(tab);
+      // Server surface leases already protect their process through the server's activity owner.
+      const rendererActive = rendererRenderingActive(tab);
+      if (tab.rendering !== rendererActive) {
+        tab.rendering = rendererActive;
+        emit(
+          {
+            type: "rendering",
+            threadId: tab.key.threadId,
+            tabId: tab.key.tabId,
+            active: rendererActive,
+          },
+          tab.key.desktopHostId,
+        );
+      }
+      if (active) demanded.add(id);
+      const update = tab.lifecycle.then(async () => {
+        const frozen = !renderingActive(tab);
+        if (tabs.get(id) !== tab || tab.frozen === frozen || tab.debuggee.webContents.isDestroyed())
+          return;
+        await tab.debuggee.debugger.sendCommand("Page.setWebLifecycleState", {
+          state: frozen ? "frozen" : "active",
+        });
+        tab.frozen = frozen;
+      });
+      tab.lifecycle = update.catch(() => undefined);
+    }
+    for (const popup of unboundPopups.values()) {
+      popup.lifecycle = popup.lifecycle
+        .then(async () => {
+          const frozen = !windowVisible(popup.window);
+          if (popup.boundKey || popup.contents.isDestroyed() || popup.frozen === frozen) return;
+          await popup.contents.debugger.sendCommand("Page.setWebLifecycleState", {
+            state: frozen ? "frozen" : "active",
+          });
+          popup.frozen = frozen;
+        })
+        .catch(() => undefined);
+    }
+    // New attachments were created by actual viewer or automation demand.
+    // Admit them once even when their first presentation update is still in flight.
+    for (const id of tabs.keys()) if (!residentIds.has(id)) demanded.add(id);
+    lifetime.update(new Set([...tabs.keys(), ...pendingIds]), demanded);
+  };
+  const reserveTab = (runtimeTabId: string, key: DesktopBrowserTabKey) => {
+    syncNativeLifetime();
+    if (!lifetime.reserve(keyOf(key))) return false;
+    pendingSlots.set(runtimeTabId, key);
+    syncNativeLifetime();
+    return true;
+  };
+  const releaseReservation = (runtimeTabId: string) => {
+    pendingSlots.delete(runtimeTabId);
+    unboundPopups.delete(runtimeTabId);
+    scheduleNativeLifetime();
+  };
+  let syncQueued = false;
+  const scheduleNativeLifetime = () => {
+    if (syncQueued) return;
+    syncQueued = true;
+    queueMicrotask(() => {
+      syncQueued = false;
+      syncNativeLifetime();
+    });
   };
   const observeWindow = (window: Electron.BrowserWindow, changed: () => void) => {
     window.on("show", changed);
@@ -302,10 +542,13 @@ export const make = Effect.gen(function* () {
   yield* Effect.addFinalizer(() =>
     Effect.sync(() => {
       releaseMainWindow?.();
+      lifetime.dispose();
+      closeAutomationLifetime(automationLifetime);
       for (const entry of pictureInPictureWindows.values()) entry.release();
       for (const popup of popups.values()) {
         if (popup.boundKey) detach(popup.boundKey);
         popup.release();
+        if (popup.kind === "root" && !popup.window.isDestroyed()) popup.window.destroy();
       }
       popups.clear();
     }),
@@ -367,6 +610,7 @@ export const make = Effect.gen(function* () {
     tab.surfaceLeases.delete(leaseId);
     tab.renderingLeases.get(leaseId)?.();
     tab.renderingLeases.delete(leaseId);
+    scheduleNativeLifetime();
   };
   let nextSurfaceRequest = 0;
   const pendingSurfaces = new Map<
@@ -504,6 +748,7 @@ export const make = Effect.gen(function* () {
   const setFocusEmulation = (tab: AttachedTab, enabled: boolean) => {
     if (tab.focusEmulated === enabled) return;
     tab.focusEmulated = enabled;
+    syncNativeLifetime();
     // A guest that refuses it, or a debugger already gone, behaves as unfocused.
     const change: Promise<void> = tab.debuggee.debugger
       .sendCommand("Emulation.setFocusEmulationEnabled", { enabled })
@@ -536,7 +781,10 @@ export const make = Effect.gen(function* () {
           return;
         }
         // The agent pauses to think between steps; its tab stays focused until the turn ends.
-        if (tab.agentUsed && agentTurns.get(tab.key.desktopHostId ?? "local")?.has(tab.key.threadId))
+        if (
+          tab.agentUsed &&
+          agentTurns.get(tab.key.desktopHostId ?? "local")?.has(tab.key.threadId)
+        )
           return;
         tab.agentUsed = false;
         if (tabs.get(keyOf(tab.key)) === tab) setFocusEmulation(tab, false);
@@ -678,7 +926,7 @@ export const make = Effect.gen(function* () {
                   ? send(method, localParams, sessionId)
                   : Promise.reject(new Error("The page this screenshot was for has moved on."));
               };
-              return change === null ? run() : change.then(run);
+              return Promise.all([tab.lifecycle, change]).then(run);
             };
             return method === "Page.captureScreenshot"
               ? takeScreenshot(
@@ -692,7 +940,8 @@ export const make = Effect.gen(function* () {
               : method === "Page.startScreencast"
                 ? holdFocus(tab, method, owner, forward).catch((cause: unknown) => {
                     // A viewer can outlive a refused stream; nothing is streaming for it.
-                    if (sessionId === undefined && tab.relay === relay) tab.screencasts.delete(owner);
+                    if (sessionId === undefined && tab.relay === relay)
+                      tab.screencasts.delete(owner);
                     releaseFocusWhenIdle(tab);
                     syncPainting(tab);
                     throw cause;
@@ -757,65 +1006,63 @@ export const make = Effect.gen(function* () {
     return true;
   };
 
-  const transferDownload = (tab: AttachedTab, guid: unknown, relay: CdpRelayConnection | null) =>
-    Effect.gen(function* () {
-      const directory = tab.downloadDirectory;
-      if (!directory || typeof guid !== "string" || !/^[a-zA-Z0-9-]{1,128}$/.test(guid)) {
-        return yield* Effect.fail(
-          new DesktopBrowserTransportError({ reason: "download-transfer-failed" }),
-        );
-      }
-      const path = NodePath.join(directory, guid);
-      const file = yield* Effect.acquireRelease(
-        Effect.tryPromise(() => NodeFSP.open(path, "r")),
-        (file) => Effect.promise(() => file.close().catch(() => undefined)),
+  const transferDownload = Effect.fn("DesktopBrowserHost.transferDownload")(function* (
+    tab: AttachedTab,
+    guid: unknown,
+    relay: CdpRelayConnection | null,
+  ) {
+    const directory = tab.downloadDirectory;
+    if (!directory || typeof guid !== "string" || !/^[a-zA-Z0-9-]{1,128}$/.test(guid)) {
+      return yield* new DesktopBrowserTransportError({ reason: "download-transfer-failed" });
+    }
+    const path = NodePath.join(directory, guid);
+    const file = yield* Effect.acquireRelease(
+      Effect.tryPromise(() => NodeFSP.open(path, "r")),
+      (file) => Effect.promise(() => file.close().catch(() => undefined)),
+    );
+    const stat = yield* Effect.tryPromise(() => file.stat());
+    if (stat.size > DESKTOP_BROWSER_DOWNLOAD_MAX_BYTES)
+      return yield* new DesktopBrowserTransportError({ reason: "download-transfer-failed" });
+    const buffer = Buffer.alloc(DESKTOP_BROWSER_DOWNLOAD_CHUNK_BYTES);
+    let offset = 0;
+    do {
+      const { bytesRead } = yield* Effect.tryPromise(() =>
+        file.read(buffer, 0, buffer.length, offset),
       );
-      const stat = yield* Effect.tryPromise(() => file.stat());
-      if (stat.size > DESKTOP_BROWSER_DOWNLOAD_MAX_BYTES)
-        return yield* Effect.fail(
-          new DesktopBrowserTransportError({ reason: "download-transfer-failed" }),
-        );
-      const buffer = Buffer.alloc(DESKTOP_BROWSER_DOWNLOAD_CHUNK_BYTES);
-      let offset = 0;
-      do {
-        const { bytesRead } = yield* Effect.tryPromise(() =>
-          file.read(buffer, 0, buffer.length, offset),
-        );
-        if (
-          offset + bytesRead > DESKTOP_BROWSER_DOWNLOAD_MAX_BYTES ||
-          tabs.get(keyOf(tab.key)) !== tab ||
-          tab.relay !== relay ||
-          (bytesRead === 0 && offset < stat.size)
-        ) {
-          return yield* Effect.fail(
-            new DesktopBrowserTransportError({ reason: "download-transfer-failed" }),
-          );
-        }
-        yield* PubSub.publish(outbox, {
-          desktopHostId: tab.key.desktopHostId!,
-          event: {
-            type: "download",
-            threadId: tab.key.threadId,
-            tabId: tab.key.tabId,
-            guid,
-            offset,
-            data: buffer.subarray(0, bytesRead).toString("base64"),
-            done: offset + bytesRead >= stat.size,
-          },
-        });
-        offset += bytesRead;
-        if (bytesRead === 0) break;
-      } while (offset < stat.size);
-      yield* Effect.tryPromise(() => NodeFSP.rm(path, { force: true }));
-    }).pipe(Effect.scoped);
+      if (
+        offset + bytesRead > DESKTOP_BROWSER_DOWNLOAD_MAX_BYTES ||
+        tabs.get(keyOf(tab.key)) !== tab ||
+        tab.relay !== relay ||
+        (bytesRead === 0 && offset < stat.size)
+      ) {
+        return yield* new DesktopBrowserTransportError({ reason: "download-transfer-failed" });
+      }
+      yield* PubSub.publish(outbox, {
+        desktopHostId: tab.key.desktopHostId!,
+        event: {
+          type: "download",
+          threadId: tab.key.threadId,
+          tabId: tab.key.tabId,
+          guid,
+          offset,
+          data: buffer.subarray(0, bytesRead).toString("base64"),
+          done: offset + bytesRead >= stat.size,
+        },
+      });
+      offset += bytesRead;
+      if (bytesRead === 0) break;
+    } while (offset < stat.size);
+    yield* Effect.tryPromise(() => NodeFSP.rm(path, { force: true }));
+  }, Effect.scoped);
 
   const detach = (key: DesktopBrowserTabKey) => {
     const id = keyOf(key);
     const tab = tabs.get(id);
     if (!tab) return;
-    clearSurfaceLeases(tab);
     tabs.delete(id);
     tab.relay = null;
+    clearSurfaceLeases(tab);
+    scheduleNativeLifetime();
     if (tab.remoteDownloadDirectory) {
       void tab.remoteDownloadDirectory
         .then((directory) => NodeFSP.rm(directory, { recursive: true, force: true }))
@@ -834,7 +1081,9 @@ export const make = Effect.gen(function* () {
     popup?: NativePopup,
   ) => {
     const id = keyOf(key);
-    if (tabs.get(id)?.debuggee.webContents === debuggee.webContents) return;
+    const existing = tabs.get(id);
+    if (existing?.debuggee.webContents === debuggee.webContents) return;
+    if (existing?.popup?.kind === "root" && existing.popup !== popup) return;
     detach(key);
     const tab: AttachedTab = {
       key,
@@ -849,6 +1098,9 @@ export const make = Effect.gen(function* () {
       presented: popup
         ? windowVisible(popup.window)
         : nativePresented(runtimeTabId, debuggee.webContents.hostWebContents?.id),
+      rendering: false,
+      lifecycle: popup?.lifecycle ?? Promise.resolve(),
+      frozen: popup?.frozen,
       downloadDirectory: null,
       pendingDownloadGuid: null,
       agentInputAt: Number.NEGATIVE_INFINITY,
@@ -899,7 +1151,12 @@ export const make = Effect.gen(function* () {
         if (tab.screenshotTurn !== null) nextScreenshot(tab);
       },
     };
+    tab.rendering = rendererRenderingActive(tab);
     tabs.set(id, tab);
+    for (const [slot, pending] of pendingSlots)
+      if (keyOf(pending) === id) pendingSlots.delete(slot);
+    syncNativeLifetime();
+    scheduleNativeLifetime();
     debuggee.debugger.on("message", tab.onMessage);
     debuggee.webContents.on("did-navigate", tab.onNewDocument);
     emit(
@@ -909,13 +1166,18 @@ export const make = Effect.gen(function* () {
         tabId: key.tabId,
         supportsNativeSurface: true,
         ...(tab.presented ? { presented: true } : {}),
+        ...(tab.rendering ? { rendering: true } : {}),
       },
       key.desktopHostId,
     );
   };
 
-  const registerPopup = (source: DesktopBrowserTabKey, window: Electron.BrowserWindow) => {
-    if (!tabs.has(keyOf(source)) || window.isDestroyed()) return;
+  const registerNativePage = (
+    source: DesktopBrowserTabKey,
+    window: Electron.BrowserWindow,
+    creation?: NonNullable<NativePopup["creation"]>,
+  ) => {
+    if ((!creation && !tabs.has(keyOf(source))) || window.isDestroyed()) return;
     const contents = window.webContents;
     if (contents.isDestroyed()) return;
     if ([...popups.values()].some((popup) => popup.contents === contents)) return;
@@ -928,19 +1190,47 @@ export const make = Effect.gen(function* () {
       return;
     }
     const id = NodeCrypto.randomUUID();
+    if (!creation && !reserveTab(`popup:${id}`, { ...source, tabId: `popup:${id}` })) {
+      debuggee.detach();
+      if (!window.isDestroyed()) window.destroy();
+      return;
+    }
     const cleanup = () => {
       if (popups.get(id) !== popup) return;
+      const deliberate =
+        popup.closing || (popup.closeRequest !== undefined && !popup.closeRequest.canceled);
+      const retain =
+        !deliberate && (popup.kind === "popup" || popup.creation?.stage === "published");
       popups.delete(id);
+      if (popup.kind === "root") {
+        if (popup.boundKey) detach(popup.boundKey);
+        popup.release();
+        // A debugger detach can precede BrowserWindow's closed event. This hidden
+        // window belongs to automation, so confirm its destruction before acknowledging close.
+        if (!window.isDestroyed()) window.destroy();
+      }
       emit(
-        { type: "popupClosed", threadId: source.threadId, tabId: source.tabId, popupId: id },
+        retain
+          ? {
+              type: "dormant",
+              threadId: source.threadId,
+              tabId: source.tabId,
+              ...(popup.kind === "root" ? { rootId: id } : { popupId: id }),
+            }
+          : popup.kind === "root"
+            ? { type: "rootClosed", threadId: source.threadId, tabId: source.tabId, rootId: id }
+            : { type: "popupClosed", threadId: source.threadId, tabId: source.tabId, popupId: id },
         source.desktopHostId,
       );
-      if (popup.boundKey) detach(popup.boundKey);
-      popup.release();
+      if (popup.kind === "popup") {
+        if (popup.boundKey) detach(popup.boundKey);
+        popup.release();
+      }
     };
     const changed = () => {
       const tab = popup.boundKey ? tabs.get(keyOf(popup.boundKey)) : undefined;
       if (tab) updatePresentation(tab);
+      else syncNativeLifetime();
     };
     const canceled = (requestId: string | undefined) => {
       const request = popup.closeRequest;
@@ -952,39 +1242,61 @@ export const make = Effect.gen(function* () {
       )
         return;
       request.canceled = true;
+      popup.closing = false;
       emit(
-        {
-          type: "popupCloseCanceled",
-          threadId: source.threadId,
-          tabId: source.tabId,
-          popupId: id,
-          requestId: request.requestId,
-        },
+        popup.kind === "root"
+          ? {
+              type: "rootCloseCanceled",
+              threadId: source.threadId,
+              tabId: source.tabId,
+              rootId: id,
+              requestId: request.requestId,
+            }
+          : {
+              type: "popupCloseCanceled",
+              threadId: source.threadId,
+              tabId: source.tabId,
+              popupId: id,
+              requestId: request.requestId,
+            },
         source.desktopHostId,
       );
     };
     const windowClosing = (event: Electron.Event) => {
+      popup.closing = true;
       const requestId = popup.closeRequest?.requestId;
       queueMicrotask(() => {
-        if (event.defaultPrevented) canceled(requestId);
+        if (event.defaultPrevented) {
+          popup.closing = false;
+          canceled(requestId);
+        }
       });
     };
     const unloadPrevented = (event: Electron.Event) => {
       const requestId = popup.closeRequest?.requestId;
       queueMicrotask(() => {
         // Electron reverses preventDefault here: it permits the unload.
-        if (!event.defaultPrevented) canceled(requestId);
+        if (!event.defaultPrevented) {
+          popup.closing = false;
+          canceled(requestId);
+        }
       });
     };
     const stopObserving = observeWindow(window, changed);
     const popup: NativePopup = {
+      kind: creation ? "root" : "popup",
+      creation,
       id,
       source: { ...source },
       window,
       contents,
-      boundKey: undefined,
+      boundKey: creation ? source : undefined,
       closeRequest: undefined,
+      closing: false,
+      lifecycle: Promise.resolve(),
+      frozen: undefined,
       release: () => {
+        releaseReservation(`popup:${id}`);
         stopObserving();
         window.off("closed", cleanup);
         window.off("close", windowClosing);
@@ -995,22 +1307,222 @@ export const make = Effect.gen(function* () {
       },
     };
     popups.set(id, popup);
+    if (!creation) unboundPopups.set(`popup:${id}`, popup);
+    scheduleNativeLifetime();
     window.on("closed", cleanup);
     window.on("close", windowClosing);
     contents.on("destroyed", cleanup);
     contents.on("will-prevent-unload", unloadPrevented);
     debuggee.on("detach", cleanup);
-    emit(
-      {
-        type: "popupCreated",
-        threadId: source.threadId,
-        tabId: source.tabId,
-        popupId: id,
-        url: contents.getURL(),
-      },
-      source.desktopHostId,
-    );
+    if (!creation)
+      emit(
+        {
+          type: "popupCreated",
+          threadId: source.threadId,
+          tabId: source.tabId,
+          popupId: id,
+          url: contents.getURL(),
+        },
+        source.desktopHostId,
+      );
+    return popup;
   };
+  const registerPopup = (source: DesktopBrowserTabKey, window: Electron.BrowserWindow) => {
+    registerNativePage(source, window);
+  };
+  const discardNativePage = (page: NativePopup) => {
+    page.closing = true;
+    if (!page.window.isDestroyed()) page.window.destroy();
+  };
+
+  const configureAutomationPage = (
+    page: NativePopup,
+    lifetime: ReturnType<typeof makeAutomationLifetime>,
+  ) => {
+    page.contents.setWindowOpenHandler((details) => {
+      // Auth callers may obtain their URL after creating a blank child with an opener.
+      try {
+        if (
+          details.url === "" ||
+          details.url === "about:blank" ||
+          (["new-window", "foreground-tab", "background-tab"].includes(details.disposition) &&
+            ["https:", "http:"].includes(new URL(details.url).protocol))
+        )
+          return {
+            action: "allow",
+            overrideBrowserWindowOptions: {
+              show: false,
+              focusable: false,
+              skipTaskbar: true,
+              webPreferences: {
+                contextIsolation: true,
+                nodeIntegration: false,
+                sandbox: true,
+              },
+            },
+          };
+      } catch {
+        /* Invalid native navigation is rejected below. */
+      }
+      void page.contents.loadURL(details.url).catch(() => undefined);
+      return { action: "deny" };
+    });
+    page.contents.on("did-create-window", (child) => {
+      if (!ownAutomationWindow(lifetime, child)) return;
+      child.webContents.setIgnoreMenuShortcuts(true);
+      const registered = registerNativePage(page.boundKey ?? page.source, child);
+      if (registered) configureAutomationPage(registered, lifetime);
+      else child.destroy();
+    });
+  };
+
+  const createRoot = (
+    command: Extract<DesktopBrowserCommand, { type: "createRoot" }>,
+    desktopHostId: string,
+  ) =>
+    Effect.suspend(() => {
+      // Capture the owner before waiting on profile resolution or window creation.
+      // A replacement main window must not adopt an old owner's late result.
+      const lifetime = automationLifetime;
+      const key = { threadId: command.threadId, tabId: command.tabId, desktopHostId };
+      const attempt = creationKey(key, command.requestId, command.profileId);
+      pendingRootCreations.set(attempt, {
+        ...key,
+        serverEpoch: command.serverEpoch,
+        requestId: command.requestId,
+      });
+      return rootCreationLock
+        .withPermits(1)(
+          Effect.gen(function* () {
+            const binding = environmentBindings.get(desktopHostId);
+            const respond = (
+              rootId: string | null,
+              reason?: "guest-unavailable" | "profile-unavailable",
+            ) =>
+              emit(
+                {
+                  type: "rootCreated",
+                  ...key,
+                  requestId: command.requestId,
+                  profileId: command.profileId,
+                  rootId,
+                  ...(reason ? { reason } : {}),
+                },
+                desktopHostId,
+              );
+            if (canceledCreations.has(attempt)) return;
+            if (lifetime.closed || !binding || !createRootWindow) {
+              respond(null, "guest-unavailable");
+              return;
+            }
+            const { environmentId, resolveProfile } = binding;
+            const existing = tabs.get(keyOf(key));
+            if (existing) {
+              const root = existing.popup;
+              const matches =
+                root?.kind === "root" &&
+                root.creation?.environmentId === environmentId &&
+                root.creation.profileId === command.profileId &&
+                root.creation.serverEpoch === command.serverEpoch &&
+                root.creation.url === command.url &&
+                root.creation.requestId === command.requestId;
+              respond(matches ? root.id : null, matches ? undefined : "guest-unavailable");
+              return;
+            }
+            const settings = yield* clientSettings.get.pipe(Effect.option);
+            if (Option.isNone(settings)) {
+              respond(null, "profile-unavailable");
+              return;
+            }
+            const profiles = resolveBrowserProfiles(
+              Option.getOrUndefined(settings.value)?.browserProfiles ?? [],
+            );
+            if (!profiles.some((profile) => profile.id === command.profileId)) {
+              respond(null, "profile-unavailable");
+              return;
+            }
+            const partition = yield* resolveProfile(command.profileId).pipe(Effect.option);
+            if (Option.isNone(partition)) {
+              respond(null, "profile-unavailable");
+              return;
+            }
+            if (lifetime.closed) {
+              respond(null, "guest-unavailable");
+              return;
+            }
+            if (!reserveTab(`root-reservation:${attempt}`, key)) {
+              respond(null, "guest-unavailable");
+              return;
+            }
+            let window: Electron.BrowserWindow | undefined;
+            const created = yield* createRootWindow({
+              environmentId,
+              profileId: command.profileId,
+              partition: partition.value,
+              ...(command.viewport ? { viewport: command.viewport } : {}),
+            }).pipe(
+              Effect.flatMap((value) => {
+                window = value;
+                if (!ownAutomationWindow(lifetime, value))
+                  return Effect.fail(
+                    new DesktopBrowserTransportError({ reason: "host-unavailable" }),
+                  );
+                return Effect.tryPromise({
+                  try: () => value.loadURL("about:blank"),
+                  catch: () => new DesktopBrowserTransportError({ reason: "guest-unavailable" }),
+                });
+              }),
+              Effect.option,
+            );
+            if (Option.isNone(created) || canceledCreations.has(attempt) || lifetime.closed) {
+              if (window && !window.isDestroyed()) window.destroy();
+              if (!canceledCreations.has(attempt)) respond(null, "guest-unavailable");
+              return;
+            }
+            if (
+              !window ||
+              window.isDestroyed() ||
+              window.isVisible() ||
+              window.isFocused() ||
+              window.isFocusable()
+            ) {
+              if (window && !window.isDestroyed()) window.destroy();
+              respond(null, "guest-unavailable");
+              return;
+            }
+            const root = registerNativePage(key, window, {
+              environmentId,
+              serverEpoch: command.serverEpoch,
+              profileId: command.profileId,
+              url: command.url,
+              requestId: command.requestId,
+              stage: "created",
+            });
+            if (!root) {
+              window.destroy();
+              respond(null, "guest-unavailable");
+              return;
+            }
+            attach(
+              key,
+              { webContents: root.contents, debugger: root.contents.debugger },
+              `root:${root.id}`,
+              root,
+            );
+            configureAutomationPage(root, lifetime);
+            respond(root.id);
+          }),
+        )
+        .pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              pendingRootCreations.delete(attempt);
+              releaseReservation(`root-reservation:${attempt}`);
+              canceledCreations.delete(attempt);
+            }),
+          ),
+        );
+    });
 
   const handleCommand = (command: DesktopBrowserCommand, desktopHostId = "local") =>
     Effect.suspend(() => {
@@ -1022,10 +1534,128 @@ export const make = Effect.gen(function* () {
         } else endAgentTurn(command.threadId, desktopHostId);
         return Effect.void;
       }
+      if (command.type === "wake") {
+        sendRendererRequest({ ...command, desktopHostId }, "wake");
+        return Effect.void;
+      }
       if (command.type === "resolveUrl") return Effect.void;
+      if (command.type === "createRoot") {
+        // Register the attempt before the next serial command can cancel it.
+        // Completion is acknowledged by rootCreated, not by command dispatch.
+        runFork(createRoot(command, desktopHostId));
+        return Effect.void;
+      }
+      if (command.type === "acceptRoot" || command.type === "publishRoot") {
+        const key = { threadId: command.threadId, tabId: command.tabId, desktopHostId };
+        const root = tabs.get(keyOf(key))?.popup;
+        const matches =
+          root?.kind === "root" &&
+          root.id === command.rootId &&
+          root.creation?.requestId === command.requestId &&
+          root.creation.profileId === command.profileId &&
+          !canceledCreations.has(creationKey(key, command.requestId, command.profileId)) &&
+          !root.window.isDestroyed();
+        if (matches && root.creation) {
+          if (command.type === "acceptRoot" && root.creation.stage === "created")
+            root.creation.stage = "accepted";
+          if (command.type === "publishRoot" && root.creation.stage === "accepted")
+            root.creation.stage = "published";
+          scheduleNativeLifetime();
+        }
+        if (command.type === "acceptRoot")
+          emit(
+            {
+              type: "rootAccepted",
+              ...key,
+              rootId: command.rootId,
+              requestId: command.requestId,
+              profileId: command.profileId,
+              accepted: matches,
+            },
+            desktopHostId,
+          );
+        return Effect.void;
+      }
+      if (command.type === "cancelRootCreation") {
+        const key = { threadId: command.threadId, tabId: command.tabId, desktopHostId };
+        const root = tabs.get(keyOf(key))?.popup;
+        if (
+          root?.kind === "root" &&
+          root.creation?.requestId === command.requestId &&
+          root.creation.profileId === command.profileId &&
+          root.creation.stage === "published"
+        )
+          return Effect.void;
+        const attempt = creationKey(key, command.requestId, command.profileId);
+        // Only an in-flight creation can still return a window after this acknowledgment.
+        if (pendingRootCreations.has(attempt)) canceledCreations.add(attempt);
+        if (
+          root?.kind === "root" &&
+          root.creation?.requestId === command.requestId &&
+          root.creation.profileId === command.profileId &&
+          root.creation.stage !== "published" &&
+          !root.window.isDestroyed()
+        )
+          discardNativePage(root);
+        emit(
+          {
+            type: "rootCreated",
+            ...key,
+            requestId: command.requestId,
+            profileId: command.profileId,
+            rootId: null,
+            reason: "guest-unavailable",
+          },
+          desktopHostId,
+        );
+        return Effect.void;
+      }
+      if (command.type === "discardRoot") {
+        const key = { threadId: command.threadId, tabId: command.tabId, desktopHostId };
+        const root = popups.get(command.rootId);
+        if (
+          root?.kind === "root" &&
+          keyOf(root.source) === keyOf(key) &&
+          !root.window.isDestroyed()
+        )
+          discardNativePage(root);
+        else emit({ type: "rootClosed", ...key, rootId: command.rootId }, desktopHostId);
+        return Effect.void;
+      }
+      if (command.type === "reconcileRoots") {
+        const retained = new Set(command.retainedRootRequestIds);
+        for (const [attempt, key] of pendingRootCreations)
+          if (
+            (key.desktopHostId ?? "local") === desktopHostId &&
+            (key.serverEpoch !== command.serverEpoch || !retained.has(key.requestId))
+          )
+            canceledCreations.add(attempt);
+        for (const root of popups.values())
+          if (
+            root.kind === "root" &&
+            (root.source.desktopHostId ?? "local") === desktopHostId &&
+            (root.creation === undefined ||
+              root.creation.serverEpoch !== command.serverEpoch ||
+              !retained.has(root.creation.requestId)) &&
+            !root.window.isDestroyed()
+          )
+            discardNativePage(root);
+        return Effect.void;
+      }
       if (command.type === "announce") return announceAll(desktopHostId);
       if (command.type === "disconnect") {
         agentTurns.delete(desktopHostId);
+        for (const [attempt, key] of pendingRootCreations)
+          if ((key.desktopHostId ?? "local") === desktopHostId) canceledCreations.add(attempt);
+        for (const root of popups.values())
+          if (
+            root.kind === "root" &&
+            (root.source.desktopHostId ?? "local") === desktopHostId &&
+            root.creation?.stage === "created" &&
+            !root.window.isDestroyed()
+          ) {
+            discardNativePage(root);
+          }
         for (const tab of tabs.values()) {
           if ((tab.key.desktopHostId ?? "local") !== desktopHostId) continue;
           clearSurfaceLeases(tab);
@@ -1055,14 +1685,46 @@ export const make = Effect.gen(function* () {
             return { profiles, defaultProfileId };
           }),
           Effect.orElseSucceed(() => null),
+          // Read warnings may contain profile data. The marker executes after
+          // the read, outside its logging scope, and records availability only.
+          Effect.tap((profiles) =>
+            Effect.void.pipe(
+              Effect.withSpan("desktop.browser.readProfileSettings", {
+                attributes: { requestId, desktopHostId, available: profiles !== null },
+              }),
+            ),
+          ),
           Effect.flatMap((profiles) =>
             PubSub.publish(outbox, {
               desktopHostId,
-              event: { type: "profiles", requestId, profiles },
-            }),
+              event: { type: "profiles", requestId, profiles, supportsNativeRoots: true },
+            }).pipe(
+              Effect.withSpan("desktop.browser.publishProfiles", {
+                attributes: { requestId, desktopHostId, available: profiles !== null },
+              }),
+            ),
           ),
           Effect.asVoid,
         );
+      }
+      if (command.type === "probeRoot") {
+        const root = popups.get(command.rootId);
+        const source = { threadId: command.threadId, tabId: command.tabId, desktopHostId };
+        if (root && (root.kind !== "root" || keyOf(root.source) !== keyOf(source)))
+          return Effect.void;
+        emit(
+          {
+            type: "rootPresence",
+            threadId: command.threadId,
+            tabId: command.tabId,
+            rootId: command.rootId,
+            requestId: command.requestId,
+            present:
+              root !== undefined && !root.window.isDestroyed() && !root.contents.isDestroyed(),
+          },
+          desktopHostId,
+        );
+        return Effect.void;
       }
       if (command.type === "probePopup") {
         const popup = popups.get(command.popupId);
@@ -1085,46 +1747,67 @@ export const make = Effect.gen(function* () {
         );
         return Effect.void;
       }
-      if (command.type === "bindPopup" || command.type === "closePopup") {
-        const popup = popups.get(command.popupId);
+      if (
+        command.type === "bindPopup" ||
+        command.type === "closePopup" ||
+        command.type === "closeRoot"
+      ) {
+        const nativeId = command.type === "closeRoot" ? command.rootId : command.popupId;
+        const popup = popups.get(nativeId);
         const source = {
           threadId: command.threadId,
           tabId: command.type === "bindPopup" ? command.openerTabId : command.tabId,
           desktopHostId,
         };
-        if (!popup && command.type === "closePopup") {
+        if (!popup && command.type !== "bindPopup") {
           // A close acknowledgement can be lost while the owner is offline.
           // Repeated close confirms the registration is already withdrawn.
           emit(
-            {
-              type: "popupClosed",
-              threadId: source.threadId,
-              tabId: source.tabId,
-              popupId: command.popupId,
-            },
+            command.type === "closeRoot"
+              ? {
+                  type: "rootClosed",
+                  threadId: source.threadId,
+                  tabId: source.tabId,
+                  rootId: nativeId,
+                }
+              : {
+                  type: "popupClosed",
+                  threadId: source.threadId,
+                  tabId: source.tabId,
+                  popupId: nativeId,
+                },
             desktopHostId,
           );
           return Effect.void;
         }
         if (
           !popup ||
+          popup.kind !== (command.type === "closeRoot" ? "root" : "popup") ||
           keyOf(popup.source) !== keyOf(source) ||
           popup.window.isDestroyed() ||
           popup.contents.isDestroyed() ||
           !popup.contents.debugger.isAttached()
         )
           return Effect.void;
-        if (command.type === "closePopup") {
+        if (command.type !== "bindPopup") {
           if (popup.closeRequest?.requestId === command.requestId) {
             if (popup.closeRequest.canceled)
               emit(
-                {
-                  type: "popupCloseCanceled",
-                  threadId: source.threadId,
-                  tabId: source.tabId,
-                  popupId: popup.id,
-                  requestId: command.requestId,
-                },
+                command.type === "closeRoot"
+                  ? {
+                      type: "rootCloseCanceled",
+                      threadId: source.threadId,
+                      tabId: source.tabId,
+                      rootId: popup.id,
+                      requestId: command.requestId,
+                    }
+                  : {
+                      type: "popupCloseCanceled",
+                      threadId: source.threadId,
+                      tabId: source.tabId,
+                      popupId: popup.id,
+                      requestId: command.requestId,
+                    },
                 desktopHostId,
               );
             return Effect.void;
@@ -1138,13 +1821,21 @@ export const make = Effect.gen(function* () {
           } catch {
             request.canceled = true;
             emit(
-              {
-                type: "popupCloseCanceled",
-                threadId: source.threadId,
-                tabId: source.tabId,
-                popupId: popup.id,
-                requestId: command.requestId,
-              },
+              command.type === "closeRoot"
+                ? {
+                    type: "rootCloseCanceled",
+                    threadId: source.threadId,
+                    tabId: source.tabId,
+                    rootId: popup.id,
+                    requestId: command.requestId,
+                  }
+                : {
+                    type: "popupCloseCanceled",
+                    threadId: source.threadId,
+                    tabId: source.tabId,
+                    popupId: popup.id,
+                    requestId: command.requestId,
+                  },
               desktopHostId,
             );
           }
@@ -1155,6 +1846,9 @@ export const make = Effect.gen(function* () {
         if (popup.boundKey && keyOf(popup.boundKey) !== keyOf(key)) return Effect.void;
         const existing = tabs.get(keyOf(key));
         if (existing && existing.popup !== popup) return Effect.void;
+        releaseReservation(`popup:${popup.id}`);
+        syncNativeLifetime();
+        if (!reserveTab(`popup-bind:${popup.id}`, key)) return Effect.void;
         popup.boundKey = key;
         attach(
           key,
@@ -1206,66 +1900,97 @@ export const make = Effect.gen(function* () {
             command.leaseId,
             command.timeoutMs === undefined ? null : now() + command.timeoutMs,
           );
+          syncNativeLifetime();
         }
-        if (tab.popup) {
-          let viewport: DesktopBrowserSurfaceResponse["viewport"] = null;
-          try {
-            const [width, height] = tab.popup.window.getContentSize();
-            if (
-              !tab.popup.window.isDestroyed() &&
-              width !== undefined &&
-              height !== undefined &&
-              width > 0 &&
-              height > 0
-            )
-              viewport = { width, height };
-          } catch {
-            // The popup can close between the command and sampling its bounds.
-          }
-          if (viewport === null) releaseSurfaceLease(tab, command.leaseId);
-          emit(
-            {
-              type: "surfaceReady",
-              threadId: command.threadId,
-              tabId: command.tabId,
-              requestId: command.requestId,
-              viewport,
-              ...(viewport === null ? { reason: "guest-unavailable" as const } : {}),
-            },
-            desktopHostId,
-          );
-          return Effect.void;
-        }
-        // Renderer request IDs belong to this process, avoiding collisions between backends.
-        const requestId = `surface:${++nextSurfaceRequest}`;
-        const request = { ...command, requestId, runtimeTabId: tab.runtimeTabId };
-        const timer = runFork(
-          Effect.sleep(2500).pipe(
-            Effect.andThen(() =>
-              Effect.sync(() =>
+        return Effect.promise(() => tab.lifecycle).pipe(
+          Effect.andThen(
+            Effect.sync(() => {
+              if (command.action === "acquire" && tab.frozen !== false) {
+                releaseSurfaceLease(tab, command.leaseId);
+                emit(
+                  {
+                    type: "surfaceReady",
+                    threadId: command.threadId,
+                    tabId: command.tabId,
+                    requestId: command.requestId,
+                    viewport: null,
+                    reason: "guest-unavailable",
+                  },
+                  desktopHostId,
+                );
+                return;
+              }
+              if (tab.popup) {
+                let viewport: DesktopBrowserSurfaceResponse["viewport"] = null;
+                try {
+                  if (tab.popup.kind === "root" && command.action === "acquire") {
+                    const size =
+                      command.viewport && command.viewport._tag !== "fill"
+                        ? command.viewport
+                        : command.viewportSize;
+                    if (size) tab.popup.window.setContentSize(size.width, size.height);
+                    if (command.zoomFactor !== undefined)
+                      tab.popup.contents.setZoomFactor(command.zoomFactor);
+                  }
+                  const [width, height] = tab.popup.window.getContentSize();
+                  if (
+                    !tab.popup.window.isDestroyed() &&
+                    width !== undefined &&
+                    height !== undefined &&
+                    width > 0 &&
+                    height > 0
+                  )
+                    viewport = { width, height };
+                } catch {
+                  // The popup can close between the command and sampling its bounds.
+                }
+                if (viewport === null) releaseSurfaceLease(tab, command.leaseId);
+                emit(
+                  {
+                    type: "surfaceReady",
+                    threadId: command.threadId,
+                    tabId: command.tabId,
+                    requestId: command.requestId,
+                    viewport,
+                    ...(viewport === null ? { reason: "guest-unavailable" as const } : {}),
+                  },
+                  desktopHostId,
+                );
+                return;
+              }
+              // Renderer request IDs belong to this process, avoiding collisions between backends.
+              const requestId = `surface:${++nextSurfaceRequest}`;
+              const request = { ...command, requestId, runtimeTabId: tab.runtimeTabId };
+              const timer = runFork(
+                Effect.sleep(2500).pipe(
+                  Effect.andThen(() =>
+                    Effect.sync(() =>
+                      finishSurface(requestId, {
+                        requestId,
+                        viewport: null,
+                        reason: "layout-timeout",
+                      }),
+                    ),
+                  ),
+                ),
+              );
+              pendingSurfaces.set(requestId, {
+                tab,
+                request,
+                serverRequestId: command.requestId,
+                senderId: tab.debuggee.webContents.hostWebContents?.id ?? -1,
+                timer,
+              });
+              if (!sendSurface(tab, request))
                 finishSurface(requestId, {
                   requestId,
                   viewport: null,
-                  reason: "layout-timeout",
-                }),
-              ),
-            ),
+                  reason: "guest-unavailable",
+                });
+              return;
+            }),
           ),
         );
-        pendingSurfaces.set(requestId, {
-          tab,
-          request,
-          serverRequestId: command.requestId,
-          senderId: tab.debuggee.webContents.hostWebContents?.id ?? -1,
-          timer,
-        });
-        if (!sendSurface(tab, request))
-          finishSurface(requestId, {
-            requestId,
-            viewport: null,
-            reason: "guest-unavailable",
-          });
-        return Effect.void;
       }
       if (!tab) return Effect.void;
       if (command.type === "pointer") {
@@ -1278,7 +2003,9 @@ export const make = Effect.gen(function* () {
         dropRelay(tab);
         return Effect.void;
       }
-      if (AGENT_INPUT_COMMAND.test(command.message)) tab.agentInputAt = performance.now();
+      if (AGENT_INPUT_COMMAND.test(command.message))
+        tab.agentInputAt =
+          command.inputSource === "viewer" ? Number.NEGATIVE_INFINITY : performance.now();
       relayFor(tab).receive(command.message);
       return Effect.void;
     });
@@ -1305,13 +2032,15 @@ export const make = Effect.gen(function* () {
                 tabId: tab.key.tabId,
                 supportsNativeSurface: true,
                 ...(tab.presented ? { presented: true } : {}),
+                ...(tab.rendering ? { rendering: true } : {}),
               },
             });
           },
           { discard: true },
         );
         for (const popup of popups.values()) {
-          if ((popup.source.desktopHostId ?? "local") !== desktopHostId) continue;
+          if ((popup.source.desktopHostId ?? "local") !== desktopHostId || popup.kind === "root")
+            continue;
           yield* PubSub.publish(outbox, {
             desktopHostId,
             event: {
@@ -1330,6 +2059,19 @@ export const make = Effect.gen(function* () {
   return DesktopBrowserHost.of({
     pointers: Stream.fromPubSub(pointers),
     painting: Stream.fromPubSub(painting),
+    bindEnvironment: Effect.fn("DesktopBrowserHost.bindEnvironment")(
+      (desktopHostId, environmentId, resolveProfile) =>
+        Effect.suspend(() => {
+          const existing = environmentBindings.get(desktopHostId);
+          if (existing !== undefined && existing.environmentId !== environmentId)
+            return Effect.fail(new DesktopBrowserTransportError({ reason: "host-unavailable" }));
+          environmentBindings.set(desktopHostId, { environmentId, resolveProfile });
+          return Effect.void;
+        }),
+    ),
+    setRootFactory: (create) => {
+      createRootWindow = create;
+    },
     // Subscribes before announcing, so no attach falls between the two.
     events: Stream.unwrap(
       Effect.gen(function* () {
@@ -1339,18 +2081,45 @@ export const make = Effect.gen(function* () {
       }),
     ).pipe(
       Stream.filter((entry) => entry.desktopHostId === "local"),
+      Stream.tap(({ event }) =>
+        event.type === "profiles"
+          ? Effect.void.pipe(
+              Effect.withSpan("desktop.browser.dequeueProfiles", {
+                attributes: { requestId: event.requestId, desktopHostId: "local" },
+              }),
+            )
+          : Effect.void,
+      ),
       Stream.map(({ event }) => lineEncoder.encode(`${encodeEvent(event)}\n`)),
     ),
     remoteEvents: Stream.fromPubSub(outbox).pipe(
       Stream.filter((entry) => entry.desktopHostId !== "local"),
     ),
-    handleRemoteCommand: ({ desktopHostId, command }) =>
-      desktopHostId === "local" ? Effect.void : handleCommand(command, desktopHostId),
-    handleCommandLine: (line) => {
+    handleRemoteCommand: Effect.fn("DesktopBrowserHost.handleRemoteCommand")(
+      ({ desktopHostId, command }) =>
+        desktopHostId === "local" ? Effect.void : handleCommand(command, desktopHostId),
+    ),
+    handleCommandLine: Effect.fn("DesktopBrowserHost.handleCommandLine")((line) => {
       const decoded = decodeCommand(line);
-      return Option.isSome(decoded) ? handleCommand(decoded.value) : Effect.void;
-    },
+      if (Option.isNone(decoded))
+        return Effect.void.pipe(Effect.withSpan("desktop.browser.invalidCommand"));
+      const command = decoded.value;
+      return command.type === "profiles" || command.type === "reconcileRoots"
+        ? Effect.void.pipe(
+            Effect.withSpan("desktop.browser.commandReceived", {
+              attributes: {
+                commandType: command.type,
+                ...(command.type === "profiles" ? { requestId: command.requestId } : {}),
+                desktopHostId: "local",
+              },
+            }),
+            Effect.andThen(handleCommand(command)),
+          )
+        : handleCommand(command);
+    }),
     attach,
+    reserveTab,
+    releaseReservation,
     registerPopup,
     setPresentation: (input, senderId) => {
       const tab = [...tabs.values()].find((tab) => tab.runtimeTabId === input.runtimeTabId);
@@ -1360,17 +2129,32 @@ export const make = Effect.gen(function* () {
       if (input.presented) presentedSlots.set(input.runtimeTabId, senderId);
       else if (presentedSlots.get(input.runtimeTabId) === senderId)
         presentedSlots.delete(input.runtimeTabId);
+      if (input.rendering) renderingSlots.set(input.runtimeTabId, senderId);
+      else if (renderingSlots.get(input.runtimeTabId) === senderId)
+        renderingSlots.delete(input.runtimeTabId);
       if (!tab) return;
       updatePresentation(tab);
     },
     setMainWindow: (window) => {
       if (mainWindow === window) return;
       releaseMainWindow?.();
+      if (mainWindow !== null) {
+        closeAutomationLifetime(automationLifetime);
+        automationLifetime = makeAutomationLifetime();
+      }
       mainWindow = window;
+      const lifetime = automationLifetime;
       const changed = () => {
         for (const tab of tabs.values()) updatePresentation(tab);
       };
-      releaseMainWindow = observeWindow(window, changed);
+      const closed = () => closeAutomationLifetime(lifetime);
+      window.on("closed", closed);
+      const stopObserving = observeWindow(window, changed);
+      releaseMainWindow = () => {
+        stopObserving();
+        window.off("closed", closed);
+      };
+      if (window.isDestroyed()) closed();
       changed();
     },
     setPictureInPictureWindow: (runtimeTabId, window) => {

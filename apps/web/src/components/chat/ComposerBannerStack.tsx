@@ -16,6 +16,7 @@ export interface ComposerBannerStackItem {
   readonly id: string;
   readonly variant: ComposerBannerVariant;
   readonly group?: ComposerBannerGroup;
+  readonly role?: "alert" | "status";
   readonly icon: ReactNode;
   readonly title: ReactNode;
   readonly description?: ReactNode;
@@ -155,7 +156,9 @@ function NoticeCard({
 }) {
   return (
     <ComposerBanner.Root
-      role={item.variant === "error" || item.variant === "warning" ? "alert" : undefined}
+      role={
+        item.role ?? (item.variant === "error" || item.variant === "warning" ? "alert" : undefined)
+      }
       variant={item.variant}
       detached={detached}
       density="comfortable"

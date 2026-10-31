@@ -693,6 +693,11 @@ describe("DesktopBackendManager", () => {
         });
         yield* instance.start;
         yield* Deferred.await(firstExit);
+        const firstReport = yield* Queue.take(reports);
+        assert.equal(firstReport.exitCount, 1);
+        assert.equal(firstReport.failure.reason, "The server could not start (code=1).");
+        assert.isTrue(firstReport.failure.output.endsWith(message));
+        assert.isTrue(firstReport.failure.output.isWellFormed());
         yield* TestClock.adjust(Duration.minutes(1));
         const { exitCount: exitsWhenReported, failure } = yield* Queue.take(reports);
         assert.equal(exitsWhenReported, 3);
@@ -743,7 +748,7 @@ describe("DesktopBackendManager", () => {
   );
 
   it.effect(
-    "reports the first early exit after saving diagnostics and deduplicates restart failures",
+    "reports the first early exit after saving diagnostics and updates repeated failures",
     () =>
       Effect.scoped(
         Effect.gen(function* () {
@@ -789,16 +794,21 @@ describe("DesktopBackendManager", () => {
           assert.equal(yield* Queue.take(failures), "pid=123 code=1");
 
           yield* TestClock.adjust(Duration.millis(499));
+          assert.deepEqual(notifications, ["The server could not start (code=1)."]);
           assert.equal(yield* Queue.size(starts), 0);
           yield* TestClock.adjust(Duration.millis(1));
           assert.equal(yield* Queue.take(starts), 2);
 
           yield* TestClock.adjust(Duration.millis(999));
+          assert.deepEqual(notifications, ["The server could not start (code=1)."]);
           assert.equal(yield* Queue.size(starts), 0);
           yield* TestClock.adjust(Duration.millis(1));
           assert.equal(yield* Queue.take(starts), 3);
           yield* TestClock.adjust(Duration.millis(1));
-          assert.deepEqual(notifications, ["The server could not start (code=1)."]);
+          assert.deepEqual(notifications, [
+            "The server could not start (code=1).",
+            "The server could not start (code=1).",
+          ]);
         }).pipe(Effect.provide(TestClock.layer())),
       ),
   );

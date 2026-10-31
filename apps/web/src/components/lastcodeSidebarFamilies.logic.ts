@@ -1,4 +1,5 @@
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import type { ScopedThreadRef } from "@t3tools/contracts";
 import { threadShellIsVisible } from "@t3tools/client-runtime/state/models";
 import type { SidebarThreadSummary } from "../types";
 import {
@@ -248,6 +249,22 @@ function buildFamilyGraph(threads: readonly SidebarThreadSummary[]) {
   connectCreators(graph);
   detachFamilyCycles(graph);
   return { ...graph, ...orderFamilyChildren(graph) };
+}
+
+export function lastcodeSidebarThreadPath(
+  threads: readonly SidebarThreadSummary[],
+  senderRef: ScopedThreadRef,
+): readonly SidebarThreadSummary[] {
+  const { byKey, parentByKey } = buildFamilyGraph(threads);
+  const path: SidebarThreadSummary[] = [];
+  let cursor: string | undefined = scopedThreadKey(senderRef);
+  while (cursor !== undefined) {
+    const thread = byKey.get(cursor);
+    if (thread === undefined) break;
+    path.push(thread);
+    cursor = parentByKey.get(cursor);
+  }
+  return path.toReversed();
 }
 
 type FamilyProjectionInput = {
@@ -543,7 +560,9 @@ function applyCreatorHeadings(renderedRows: readonly LastCodeSidebarFamilyRow[])
  * Unavailable parents/creators and cycles leave the child reachable as an identified root.
  */
 export function projectLastCodeSidebarFamilies(input: FamilyProjectionInput) {
-  const graph = buildFamilyGraph(input.threads);
+  const graph = buildFamilyGraph(
+    input.threads.filter((thread) => thread.lineage.sideChat !== true),
+  );
   const selection = selectFamilyPath(graph, input.activeThreadKey);
   const allRows = buildFamilyRows(graph, selection, input);
   const rowByKey = new Map(allRows.map((row) => [row.key, row]));

@@ -19,6 +19,10 @@ import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 import { McpSchema, McpServer } from "effect/ai";
 
+import * as ActionResume from "../actionResume/ActionResume.ts";
+import * as ThreadReadBroker from "../mcp/ThreadReadBroker.ts";
+import * as ThreadRecovery from "../orchestration-v2/ThreadRecoveryService.ts";
+import * as ThreadRecoveryRepair from "../orchestration-v2/ThreadRecoveryRepairService.ts";
 import * as ServerConfig from "../config.ts";
 import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
@@ -36,7 +40,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as RemoteDelegation from "./RemoteDelegation.ts";
 import * as McpHttpServer from "../mcp/McpHttpServer.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
-import { liveThreadShell } from "../mcp/McpToolAccess.testkit.ts";
+import { idleThreadProjection, liveThreadShell } from "../mcp/McpToolAccess.testkit.ts";
 import * as PeerForwarding from "./PeerForwarding.ts";
 import * as PeerLinks from "./PeerLinks.ts";
 import * as PeerLinkRequests from "./PeerLinkRequests.ts";
@@ -208,36 +212,47 @@ const serveBox = (seen: Ref.Ref<Seen>, linkSession: Ref.Ref<string>) =>
       McpHttpServer.layerOrchestratorToolkit,
       McpHttpServer.layerProjectRegistration,
       McpHttpServer.layerThreadToolkit,
-    ).pipe(
-      Layer.provide(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
-      Layer.provide(NodeCrypto.layer),
-      Layer.provide(boxThreads(seen, linkSession)),
-      Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
-      Layer.provide(boxLaunches(seen)),
-      Layer.provide(
-        Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/projects" }),
-      ),
-      Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
-      Layer.provide(boxProjects(seen)),
-      Layer.provide(
-        ServerConfig.layerTest(process.cwd(), { prefix: "t3-peer-forwarding-box-" }).pipe(
-          Layer.provide(NodeServices.layer),
+    )
+      .pipe(
+        Layer.provide(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
+        Layer.provide(Layer.mock(ThreadRecovery.ThreadRecoveryService)({})),
+        Layer.provide(Layer.mock(ThreadRecoveryRepair.ThreadRecoveryRepairService)({})),
+        Layer.provide(
+          Layer.mock(ActionResume.ActionResume)({ readLatestSummary: () => Effect.succeed(null) }),
         ),
+        Layer.provide(ThreadReadBroker.layer),
+        Layer.provide(NodeCrypto.layer),
+        Layer.provide(boxThreads(seen, linkSession)),
+        Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
+        Layer.provide(boxLaunches(seen)),
+        Layer.provide(
+          Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+            namedProjectsRoot: "/projects",
+          }),
+        ),
+        Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+        Layer.provide(boxProjects(seen)),
+        Layer.provide(
+          ServerConfig.layerTest(process.cwd(), { prefix: "t3-peer-forwarding-box-" }).pipe(
+            Layer.provide(NodeServices.layer),
+          ),
+        ),
+        Layer.provide(NodeServices.layer),
+        Layer.provide(
+          Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+        ),
+        Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
+        Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
+      )
+      .pipe(
+        Layer.provide(Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({})),
+        Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
+        Layer.provide(ServerSettings.layerTest()),
+        Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
+        Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
+        Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
+        Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
       ),
-      Layer.provide(NodeServices.layer),
-      Layer.provide(
-        Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
-      ),
-      Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
-      Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
-      Layer.provide(Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({})),
-      Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
-      Layer.provide(ServerSettings.layerTest()),
-      Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
-      Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
-      Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
-      Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
-    ),
   );
 
 const mcpClient = McpSchema.McpServerClient.of({
@@ -265,6 +280,12 @@ const makeLaptop = Effect.gen(function* () {
     McpHttpServer.layerThreadToolkit,
   ).pipe(
     Layer.provide(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
+    Layer.provide(Layer.mock(ThreadRecovery.ThreadRecoveryService)({})),
+    Layer.provide(Layer.mock(ThreadRecoveryRepair.ThreadRecoveryRepairService)({})),
+    Layer.provide(
+      Layer.mock(ActionResume.ActionResume)({ readLatestSummary: () => Effect.succeed(null) }),
+    ),
+    Layer.provide(ThreadReadBroker.layer),
     Layer.provideMerge(McpServer.McpServer.layer),
     Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
     Layer.provide(Layer.mock(ThreadLaunch.ThreadLaunchService)({})),
@@ -284,6 +305,10 @@ const makeLaptop = Effect.gen(function* () {
     Layer.provide(NodeCrypto.layer),
     Layer.provideMerge(
       Layer.mock(ThreadManagement.ThreadManagementService)({
+        getThreadRecords: (threadId) =>
+          Effect.succeed(
+            idleThreadProjection(liveThreadShell(threadId, { runtimeMode: "full-access" })),
+          ),
         getThreadShell: (threadId) =>
           Effect.succeed(
             threadId === ThreadId.make("thread:laptop-from-desk")
@@ -635,7 +660,7 @@ it.effect("refuses what a linked environment cannot take before anything leaves"
         environmentId: EnvironmentId.make("environment-elsewhere"),
         threadId: boxThread,
       });
-      expect(failureOf(unknown)).toMatchObject({ code: "invalid_request" });
+      expect(failureOf(unknown)).toMatchObject({ code: "environment_unavailable" });
       expect(yield* Ref.get(b.bearers)).toEqual([]);
 
       // The box sees only the link's credential, so one that may not control
@@ -685,7 +710,9 @@ it.effect("refuses what a linked environment cannot take before anything leaves"
         ],
       ] as const) {
         const relayed = yield* a.call("thread:laptop-from-desk", name, args);
-        expect(failureOf(relayed), name).toMatchObject({ code: "capability_denied" });
+        expect(failureOf(relayed), name).toMatchObject({
+          code: name === "t3_thread_read" ? "environment_unavailable" : "capability_denied",
+        });
       }
       expect(yield* Ref.get(b.bearers)).toEqual([]);
     }),

@@ -1,6 +1,12 @@
 import { splitPromptIntoComposerSegments } from "./composer-editor-mentions";
 
+/**
+ * Shared source edits keep continuation and indentation identical in both composer modes.
+ * Shift+Enter continues or exits lists/quotes; Tab indents literal Markdown.
+ */
+
 export interface ComposerListEdit {
+  /** Expanded (plain string) offsets into the prompt. */
   start: number;
   end: number;
   replacement: string;
@@ -67,6 +73,16 @@ function contentColumn(indent: string, markerWidth: number, padding: string): nu
   return markerEnd + (space >= 1 && space <= 4 ? space : 1);
 }
 
+/** Keep every typed quote marker and its spacing, including nested prefixes. */
+function quotePrefix(line: string): string | null {
+  return /^ {0,3}(?:>[ \t]*)+/.exec(line)?.[0] ?? null;
+}
+
+/**
+ * The ordered marker that follows `3.` or `09)`: one higher, same delimiter,
+ * zero padding kept, and a number too large to count left as typed. Shared
+ * with the rich editor's native split so both modes count the same way.
+ */
 export function nextOrderedMarkerText(marker: string): string {
   const numberText = marker.slice(0, -1);
   const delimiter = marker.slice(-1);
@@ -103,6 +119,7 @@ function renumberFollowingItems(
   afterLineEnd: number,
   marker: Extract<ListMarker, { kind: "ordered" }>,
   tokens: ReturnType<typeof inlineTokenRanges>,
+  quote: string,
 ): { end: number; text: string } | null {
   const baseWidth = indentWidth(marker.indent);
   const parts: string[] = [];
@@ -123,7 +140,9 @@ function renumberFollowingItems(
     // A newline inside a chip does not start a list item.
     if (token && token.start < lineStart) continue;
 
-    const line = value.slice(lineStart, lineEnd);
+    const sourceLine = value.slice(lineStart, lineEnd);
+    if ((quotePrefix(sourceLine) ?? "") !== quote) break;
+    const line = sourceLine.slice(quote.length);
     const width = indentWidth(line);
     if (line.trim() === "" || width < baseWidth) break;
     if (width > baseWidth) continue;
@@ -131,7 +150,7 @@ function renumberFollowingItems(
     if (parsed?.marker.kind !== "ordered" || parsed.marker.delimiter !== marker.delimiter) break;
 
     const current = parsed.marker;
-    const numberStart = lineStart + current.indent.length;
+    const numberStart = lineStart + quote.length + current.indent.length;
     const numberEnd = numberStart + current.numberText.length;
     const replacement = current.numberText.startsWith("0")
       ? String(expected).padStart(current.numberText.length, "0")
@@ -174,6 +193,7 @@ function* listMarkersAbove(
   value: string,
   lineStart: number,
   tokens: ReturnType<typeof inlineTokenRanges>,
+  quote: string,
 ): Generator<ParsedListMarker> {
   let tokenIndex = tokens.length - 1;
   while (lineStart > 0) {
@@ -185,7 +205,9 @@ function* listMarkersAbove(
       else if (token.end > lineStart) lineStart = value.lastIndexOf("\n", token.start - 1) + 1;
       else break;
     }
-    const parsed = parseListMarker(value.slice(lineStart, lineEnd));
+    const sourceLine = value.slice(lineStart, lineEnd);
+    if ((quotePrefix(sourceLine) ?? "") !== quote) return;
+    const parsed = parseListMarker(sourceLine.slice(quote.length));
     if (!parsed) return;
     yield parsed;
   }
@@ -196,9 +218,10 @@ function parentMarker(
   lineStart: number,
   marker: ListMarker,
   tokens: ReturnType<typeof inlineTokenRanges>,
+  quote: string,
 ): ListMarker | null {
   const width = indentWidth(marker.indent);
-  for (const above of listMarkersAbove(value, lineStart, tokens)) {
+  for (const above of listMarkersAbove(value, lineStart, tokens, quote)) {
     if (indentWidth(above.marker.indent) < width) return above.marker;
   }
   return null;
@@ -219,37 +242,47 @@ function nestedNumber(
   };
 }
 
+/**
+ * Shift+Enter on a list or quote line: continue its marker, or remove the
+ * marker when the line is empty. Carets inside markers or inline chips and
+ * other lines fall through to a plain newline.
+ */
 export function listContinuationForEnter(value: string, cursor: number): ComposerListEdit | null {
   if (!Number.isInteger(cursor) || cursor < 0 || cursor > value.length) return null;
   const line = currentLine(value, cursor);
-  const parsed = parseListMarker(line.text);
-  if (!parsed || parsed.marker.space === "") return null;
-  const markerEnd = line.start + parsed.markerEnd;
+  const quote = quotePrefix(line.text) ?? "";
+  const parsed = parseListMarker(line.text.slice(quote.length));
+  if (quote === "" && (!parsed || parsed.marker.space === "")) return null;
+  const markerStart = line.start + quote.length;
+  const markerEnd = markerStart + (parsed?.markerEnd ?? 0);
   if (cursor < markerEnd) return null;
   const tokens = inlineTokenRanges(value);
   if (isInsideInlineToken(tokens, cursor)) return null;
   if (value.slice(markerEnd, line.end).trim() === "") {
-    const parent = parentMarker(value, line.start, parsed.marker, tokens);
+    const editStart = parsed ? markerStart : line.start;
+    const parent = parsed ? parentMarker(value, line.start, parsed.marker, tokens, quote) : null;
     const replacement = parent ? nextMarkerText(parent) : "";
-    const cursorAfter = line.start + replacement.length;
+    const cursorAfter = editStart + replacement.length;
     const end = Math.max(cursor, markerEnd);
     const renumbered =
-      parent?.kind === "ordered" ? renumberFollowingItems(value, line.end, parent, tokens) : null;
+      parent?.kind === "ordered"
+        ? renumberFollowingItems(value, line.end, parent, tokens, quote)
+        : null;
     if (renumbered) {
       return {
-        start: line.start,
+        start: editStart,
         end: renumbered.end,
         replacement: replacement + value.slice(end, line.end) + renumbered.text,
         cursorAfter,
       };
     }
-    return { start: line.start, end, replacement, cursorAfter };
+    return { start: editStart, end, replacement, cursorAfter };
   }
-  const insertion = `\n${nextMarkerText(parsed.marker)}`;
+  const insertion = `\n${quote}${parsed ? nextMarkerText(parsed.marker) : ""}`;
   const cursorAfter = cursor + insertion.length;
-  const { marker } = parsed;
-  if (marker.kind === "ordered") {
-    const renumbered = renumberFollowingItems(value, line.end, marker, tokens);
+  const marker = parsed?.marker;
+  if (marker?.kind === "ordered") {
+    const renumbered = renumberFollowingItems(value, line.end, marker, tokens, quote);
     if (renumbered) {
       return {
         start: cursor,
@@ -276,7 +309,7 @@ export function listIndentForTab(
   const { marker } = parsed;
   const width = indentWidth(marker.indent);
   let previousChild: ListMarker | undefined;
-  for (const above of listMarkersAbove(value, line.start, tokens)) {
+  for (const above of listMarkersAbove(value, line.start, tokens, "")) {
     const aboveWidth = indentWidth(above.marker.indent);
     if (aboveWidth < width) break;
     if (aboveWidth > width) {

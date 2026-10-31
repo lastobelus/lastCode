@@ -11,6 +11,10 @@
       "types": "./src/authScopeOptions.ts",
       "import": "./src/authScopeOptions.ts"
     },
+    "./userMessage": {
+      "types": "./src/userMessage.ts",
+      "import": "./src/userMessage.ts"
+    },
     "./threadAnnotation": {
       "types": "./src/threadAnnotation.ts",
       "import": "./src/threadAnnotation.ts"
@@ -487,6 +491,10 @@
       "types": "./src/markdownPipeline.ts",
       "import": "./src/markdownPipeline.ts"
     },
+    "./lastcodeMarkdownSourceRanges": {
+      "types": "./src/lastcodeMarkdownSourceRanges.ts",
+      "import": "./src/lastcodeMarkdownSourceRanges.ts"
+    },
     "./threadFindText": {
       "types": "./src/threadFindText.ts",
       "import": "./src/threadFindText.ts"
@@ -531,6 +539,18 @@
       "types": "./src/cloneUrl.ts",
       "import": "./src/cloneUrl.ts"
     },
+    "./markdownImages": {
+      "types": "./src/markdownImages.ts",
+      "import": "./src/markdownImages.ts"
+    },
+    "./assistantMarkdownFiles": {
+      "types": "./src/assistantMarkdownFiles.ts",
+      "import": "./src/assistantMarkdownFiles.ts"
+    },
+    "./workspaceBasenameLookup": {
+      "types": "./src/workspaceBasenameLookup.ts",
+      "import": "./src/workspaceBasenameLookup.ts"
+    },
     "./dependencyActivity": {
       "types": "./src/dependencyActivity.ts",
       "import": "./src/dependencyActivity.ts"
@@ -538,6 +558,14 @@
     "./generatedBuildOwnership": {
       "types": "./src/generatedBuildOwnership.ts",
       "import": "./src/generatedBuildOwnership.ts"
+    },
+    "./worktreeSuspension": {
+      "types": "./src/worktreeSuspension.ts",
+      "import": "./src/worktreeSuspension.ts"
+    },
+    "./worktreeSuspensionPolicy": {
+      "types": "./src/worktreeSuspensionPolicy.ts",
+      "import": "./src/worktreeSuspensionPolicy.ts"
     }
   },
   "scripts": {

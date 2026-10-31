@@ -4,7 +4,10 @@ import * as Effect from "effect/Effect";
 import { type ProjectCloneTracker } from "./ProjectCloneTracker.ts";
 import { type ProjectService } from "./ProjectService.ts";
 
-type ProjectMutations = Pick<ProjectService["Service"], "create" | "delete" | "update">;
+type ProjectMutations = Pick<
+  ProjectService["Service"],
+  "create" | "delete" | "update" | "reconcileScripts"
+>;
 
 export const projectMutationOperation = Effect.fn("projectMutationOperation")(function* (
   projects: ProjectMutations,
@@ -45,12 +48,23 @@ export const projectMutationOperation = Effect.fn("projectMutationOperation")(fu
         ...(mutation.scripts === undefined ? {} : { scripts: mutation.scripts }),
       });
 
+    case "project.scripts.reconcile":
+      return yield* projects.reconcileScripts({
+        commandId: mutation.commandId,
+        projectId: mutation.projectId,
+        expectedScripts: mutation.expectedScripts,
+        scripts: mutation.scripts,
+      });
+
     case "project.delete":
       return yield* projects.delete(
         {
           commandId: mutation.commandId,
           projectId: mutation.projectId,
           ...(mutation.force === undefined ? {} : { force: mutation.force }),
+          ...(mutation.savedWorkspace === undefined
+            ? {}
+            : { savedWorkspace: mutation.savedWorkspace }),
         },
         afterDelete?.(mutation.projectId),
       );

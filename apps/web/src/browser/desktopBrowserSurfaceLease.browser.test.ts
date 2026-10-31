@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { fakeTimers } from "../../test/render";
+import { describe, expect, it, vi } from "vite-plus/test";
 import type {
   DesktopBrowserSurfaceRequest,
   DesktopBrowserSurfaceResponse,
@@ -21,16 +22,19 @@ const request: DesktopBrowserSurfaceRequest = {
   viewport: { _tag: "freeform", width: 800, height: 600 },
 };
 
-beforeEach(() => useBrowserSurfaceStore.setState({ activityByTabId: {}, byTabId: {} }));
-afterEach(() => {
-  vi.restoreAllMocks();
-  vi.unstubAllGlobals();
-  vi.useRealTimers();
-  document.body.replaceChildren();
-});
+function setup() {
+  const previous = useBrowserSurfaceStore.getState();
+  useBrowserSurfaceStore.setState({ activityByTabId: {}, byTabId: {} });
+  return {
+    [Symbol.dispose]() {
+      useBrowserSurfaceStore.setState(previous);
+    },
+  };
+}
 
 describe("desktop browser surface leases", () => {
   it("scopes activity to the runtime tab, ignores released acquire replies, and cleans all leases on unmount", async () => {
+    using _store = setup();
     const responses: DesktopBrowserSurfaceResponse[] = [];
     const pending: Array<{
       resolve: (response: DesktopBrowserSurfaceResponse) => void;
@@ -46,6 +50,7 @@ describe("desktop browser surface leases", () => {
           pending.push({ resolve, signal });
         }),
     });
+    using _controller = { [Symbol.dispose]: () => controller.dispose() };
     controller.handle({ ...request, runtimeTabId: "other-runtime" });
     expect(pending).toHaveLength(0);
     controller.handle(request);
@@ -65,6 +70,7 @@ describe("desktop browser surface leases", () => {
   });
 
   it("releases a lease when readiness fails", async () => {
+    using _store = setup();
     const respond = vi.fn();
     const controller = createDesktopBrowserSurfaceLeaseController({
       runtimeTabId: request.runtimeTabId,
@@ -75,6 +81,7 @@ describe("desktop browser surface leases", () => {
         reason: "layout-timeout",
       }),
     });
+    using _controller = { [Symbol.dispose]: () => controller.dispose() };
     controller.handle(request);
     await Promise.resolve();
     expect(respond).toHaveBeenCalledWith({
@@ -94,48 +101,44 @@ function layoutFixture() {
   });
   wrapper.append(guest);
   document.body.append(wrapper);
-  vi.spyOn(wrapper, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 800, 600));
+  const bounds = vi
+    .spyOn(wrapper, "getBoundingClientRect")
+    .mockReturnValue(new DOMRect(0, 0, 800, 600));
   wrapper.dataset.previewRendering = "active";
   guest.dataset.previewViewportKey = "freeform:800:600:";
   guest.dataset.previewCssWidth = "800";
   guest.dataset.previewCssHeight = "600";
-  let frame: FrameRequestCallback | undefined;
-  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
-    frame = callback;
-    return 1;
-  });
-  vi.stubGlobal("cancelAnimationFrame", () => {
-    frame = undefined;
-  });
+  const abort = new AbortController();
   return {
     wrapper,
     guest,
-    nextFrame: async () => {
-      const callback = frame;
-      frame = undefined;
-      callback?.(0);
-      await Promise.resolve();
+    signal: abort.signal,
+    [Symbol.dispose]() {
+      abort.abort();
+      bounds.mockRestore();
+      wrapper.remove();
     },
   };
 }
 
 describe("desktop guest readiness", () => {
   it("waits for paintable React layout and two matching guest viewport frames", async () => {
-    const fixture = layoutFixture();
+    using _timers = fakeTimers();
+    using fixture = layoutFixture();
     fixture.wrapper.dataset.previewRendering = "suspended";
     const result = waitForDesktopBrowserSurface({
       request,
-      signal: new AbortController().signal,
+      signal: fixture.signal,
       wrapper: () => fixture.wrapper,
       guest: () => fixture.guest,
     });
-    await fixture.nextFrame();
+    await vi.advanceTimersByTimeAsync(16);
     expect(fixture.guest.executeJavaScript).not.toHaveBeenCalled();
     fixture.wrapper.dataset.previewRendering = "active";
     fixture.guest.executeJavaScript.mockResolvedValueOnce({ width: 1280, height: 800 });
-    await fixture.nextFrame();
-    await fixture.nextFrame();
-    await fixture.nextFrame();
+    await vi.advanceTimersByTimeAsync(16);
+    await vi.advanceTimersByTimeAsync(16);
+    await vi.advanceTimersByTimeAsync(16);
     expect(await result).toEqual({
       requestId: request.requestId,
       viewport: { width: 800, height: 600 },
@@ -143,16 +146,16 @@ describe("desktop guest readiness", () => {
   });
 
   it("bounds an unresponsive guest and cancels a pending layout request", async () => {
-    vi.useFakeTimers();
-    const fixture = layoutFixture();
+    using _timers = fakeTimers();
+    using fixture = layoutFixture();
     fixture.guest.executeJavaScript.mockImplementation(() => new Promise(() => undefined));
     const result = waitForDesktopBrowserSurface({
       request,
-      signal: new AbortController().signal,
+      signal: fixture.signal,
       wrapper: () => fixture.wrapper,
       guest: () => fixture.guest,
     });
-    await fixture.nextFrame();
+    await vi.advanceTimersByTimeAsync(16);
     await vi.advanceTimersByTimeAsync(2000);
     expect(await result).toEqual({
       requestId: request.requestId,

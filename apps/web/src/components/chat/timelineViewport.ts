@@ -1,5 +1,7 @@
 import { isInSideChatPane } from "../../lib/sideChatPane";
 import { registerCommands } from "../../shortcuts/dispatcher";
+import { getClientSettings } from "../../hooks/useSettings";
+import { getTimelinePageScrollDistancePx } from "./pageScrollController";
 import {
   eventPathContainsSelector,
   TYPE_TO_FOCUS_EDITABLE_SELECTOR,
@@ -139,6 +141,39 @@ export function attachTimelineViewport(scrollNode: HTMLElement): TimelineViewpor
   scrollNode.addEventListener("touchmove", handleTouchMove, { passive: true });
   scrollNode.addEventListener("pointerdown", handlePointerDown, { passive: true });
   const unregisterKeyDown = registerCommands({}, { observe: handleKeyDown });
+  const unregisterPageKey = registerCommands(
+    {},
+    {
+      fallback: true,
+      onKeyDown: (event) => {
+        if (
+          (event.key !== "PageUp" && event.key !== "PageDown") ||
+          event.defaultPrevented ||
+          event.isComposing ||
+          event.keyCode === 229 ||
+          event.altKey ||
+          event.ctrlKey ||
+          event.metaKey ||
+          event.shiftKey
+        )
+          return false;
+        const area = scrollNode.closest('[data-workspace-area="conversation"]');
+        if (!area || event.target !== area) return false;
+        emit({ source: "key", key: event.key, direction: event.key === "PageUp" ? "up" : "down" });
+        const distance = getTimelinePageScrollDistancePx(
+          scrollNode,
+          area.parentElement?.querySelector("[data-chat-composer-overlay]") ?? null,
+          getClientSettings().pageScrollOverlapEnabled,
+        );
+        event.preventDefault();
+        scrollNode.scrollBy({
+          top: (event.key === "PageUp" ? -1 : 1) * distance,
+          behavior: "instant",
+        });
+        return true;
+      },
+    },
+  );
   return {
     scrollNode,
     subscribe: (listener) => {
@@ -170,6 +205,7 @@ export function attachTimelineViewport(scrollNode: HTMLElement): TimelineViewpor
       scrollNode.removeEventListener("touchmove", handleTouchMove);
       scrollNode.removeEventListener("pointerdown", handlePointerDown);
       unregisterKeyDown();
+      unregisterPageKey();
     },
   };
 }

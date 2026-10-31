@@ -1,4 +1,5 @@
 import { useStableCallback } from "../../hooks/useStableCallback";
+import { getClientSettings } from "../../hooks/useSettings";
 import { type MessageId, type RunId } from "@t3tools/contracts";
 import { CHAT_LIST_ANCHOR_OFFSET } from "@t3tools/shared/chatList";
 import { Debouncer } from "@tanstack/react-pacer";
@@ -124,7 +125,11 @@ function createTimelineFollowStore() {
       composerOverlay = element;
     },
     readPageScrollDistancePx: (viewport: HTMLElement) =>
-      getTimelinePageScrollDistancePx(viewport, composerOverlay),
+      getTimelinePageScrollDistancePx(
+        viewport,
+        composerOverlay,
+        getClientSettings().pageScrollOverlapEnabled,
+      ),
     dispatch: (visit: TimelineFollowVisit, event: TimelineFollowEvent) => {
       const before = read(visit);
       const after = transitionTimelineFollow(before, event);

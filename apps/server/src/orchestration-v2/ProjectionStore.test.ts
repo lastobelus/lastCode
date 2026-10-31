@@ -39,6 +39,7 @@ import { projectThreadAwarenessV2 } from "@t3tools/shared/agentAwareness";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import { loadSubscriberShellSnapshot } from "./ShellStream.ts";
 import {
   buildBoundedThreadProjection,
   decodeThreadHistoryCursor,
@@ -214,6 +215,200 @@ const addRolledBackRecoveryCandidate = Effect.fn("addRolledBackRecoveryCandidate
 
   return threadId;
 });
+
+it.effect("command history uses its ordered partial index without losing completed errors", () =>
+  Effect.gen(function* () {
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const sql = yield* SqlClient.SqlClient;
+    const threadId = yield* addRolledBackRecoveryCandidate("command-history-index");
+    const initial = yield* store.getThreadProjection(threadId);
+    const source = initial.turnItems.find((item) => item.type === "command_execution")!;
+    const itemBase = {
+      ...source,
+      providerThreadId: source.providerThreadId ?? null,
+      providerTurnId: source.providerTurnId ?? null,
+      nativeItemRef: source.nativeItemRef ?? null,
+      parentItemId: source.parentItemId ?? null,
+    };
+    const now = yield* DateTime.now;
+    const ids = [
+      "history-user-old",
+      "history-error-completed",
+      "history-error-failed",
+      "history-user-new",
+    ];
+    const fixtures = [
+      { id: ids[0]!, ordinal: 2, type: "user_message", status: "completed" },
+      { id: ids[1]!, ordinal: 4, type: "error", status: "completed" },
+      { id: ids[2]!, ordinal: 4, type: "error", status: "failed" },
+      { id: ids[3]!, ordinal: 6, type: "user_message", status: "completed" },
+    ] as const;
+    for (const fixture of fixtures) {
+      const payload: OrchestrationV2TurnItem =
+        fixture.type === "user_message"
+          ? {
+              ...itemBase,
+              ...fixture,
+              id: TurnItemId.make(fixture.id),
+              runId: null,
+              type: "user_message",
+              createdBy: "user",
+              creationSource: "web",
+              messageId: MessageId.make(fixture.id),
+              inputIntent: "turn_start",
+              text: fixture.id,
+              attachments: [],
+              completedAt: now,
+              updatedAt: now,
+            }
+          : {
+              ...itemBase,
+              ...fixture,
+              id: TurnItemId.make(fixture.id),
+              type: "error",
+              completedAt: now,
+              updatedAt: now,
+              failure: {
+                class: "provider_error",
+                message: fixture.id,
+                code: null,
+                retryable: null,
+              },
+            };
+      yield* store.apply({
+        id: EventId.make("event:" + fixture.id),
+        type: "turn-item.updated",
+        threadId,
+        occurredAt: now,
+        payload,
+      });
+    }
+    const readIds = (filter: ProjectionStore.ProjectionRecordFilter) =>
+      store
+        .getThreadRecords(threadId, ["turnItems"], filter)
+        .pipe(Effect.map((records) => records.turnItems.map((item) => item.id)));
+    assert.deepEqual(yield* readIds({ turnItemTypes: ["error"] }), ids.slice(1, 3));
+    assert.deepEqual(yield* readIds({ turnItemTypes: [] }), []);
+    assert.deepEqual(
+      yield* readIds({ turnItemTypes: ["error", "user_message", "command_execution"] }),
+      [source.id, ...ids],
+    );
+    assert.deepEqual(
+      yield* readIds({ turnItemTypes: ["user_message", "error"], turnItemStatuses: ["failed"] }),
+      [ids[2]],
+    );
+    assert.deepEqual(
+      yield* readIds({ turnItemTypes: ["user_message", "error"], turnItemRunIds: [null] }),
+      [ids[0], ids[3]],
+    );
+    assert.deepEqual(
+      yield* readIds({
+        turnItemTypes: ["user_message", "error"],
+        turnItemMessageIds: [MessageId.make(ids[0]!)],
+      }),
+      [ids[0]],
+    );
+    for (const turnItemTypes of [
+      ["user_message", "error"],
+      ["error", "user_message"],
+    ] as const) {
+      const { statements, tracer } = traceSqlStatements();
+      assert.deepEqual(yield* readIds({ turnItemTypes }).pipe(Effect.withTracer(tracer)), ids);
+      const query = statements.find(
+        (statement) =>
+          statement.includes("FROM orchestration_v2_projection_turn_items") &&
+          statement.includes("ORDER BY ordinal ASC"),
+      );
+      assert.isDefined(query);
+      const plan = (yield* sql.unsafe<{ readonly detail: string }>(
+        "EXPLAIN QUERY PLAN " + query!,
+      )).map((row) => row.detail);
+      assert.isTrue(
+        plan.some((detail) =>
+          detail.includes("orchestration_v2_projection_turn_items_command_history_idx"),
+        ),
+        plan.join("\n"),
+      );
+      assert.isFalse(
+        plan.some((detail) => detail.includes("USE TEMP B-TREE")),
+        plan.join("\n"),
+      );
+    }
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
+  "indexed subscriber snapshots retain idle cleanup children and deleted archive recovery",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const sql = yield* SqlClient.SqlClient;
+      const parentId = yield* addRolledBackRecoveryCandidate("cleanup-index-parent");
+      const now = yield* DateTime.now;
+      const kept: Array<ThreadId> = [parentId];
+      for (const [suffix, deleted, cleanup] of [
+        ["active", false, true],
+        ["deleted", true, true],
+        ["idle", false, false],
+        ["removed", true, false],
+      ] as const) {
+        const threadId = yield* addRolledBackRecoveryCandidate("cleanup-index-" + suffix);
+        const projection = yield* store.getThreadProjection(threadId);
+        yield* store.apply({
+          id: EventId.make("event:cleanup-index:complete:" + suffix),
+          type: "turn-item.updated",
+          threadId,
+          occurredAt: now,
+          payload: { ...projection.turnItems[0]!, status: "completed", completedAt: now },
+        });
+        yield* store.apply({
+          id: EventId.make("event:cleanup-index:thread:" + suffix),
+          type: "thread.metadata-updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            ...projection.thread,
+            lineage: {
+              parentThreadId: parentId,
+              relationshipToParent: "subagent",
+              rootThreadId: parentId,
+            },
+            archivedAt: deleted ? now : null,
+            deletedAt: deleted ? now : null,
+            ...(cleanup
+              ? {
+                  worktreeCleanup: {
+                    status: "deleting" as const,
+                    repositoryRoot: "/example/repository",
+                    worktreePath: "/example/worktree",
+                    startedAt: DateTime.formatIso(now),
+                  },
+                }
+              : {}),
+          },
+        });
+        if (cleanup) kept.push(threadId);
+      }
+      yield* assertShellIndexCoversShells();
+      const { snapshot } = yield* loadSubscriberShellSnapshot({
+        sql,
+        listShellIndex: store.listActiveShellIndex(),
+        readThreads: (threadIds) =>
+          store.readShellSnapshot({
+            location: "active",
+            ...(threadIds === undefined ? {} : { threadIds }),
+          }),
+        listProjects: Effect.succeed([]),
+        latestSequence: Effect.succeed(0),
+        options: { omitIdleSubagents: true, omitOlderSettled: true },
+      });
+      assert.sameMembers(
+        snapshot.threads.map((thread) => thread.id),
+        kept,
+      );
+      assert.isNotNull(snapshot.threads.find((thread) => thread.deletedAt !== null)?.archivedAt);
+    }).pipe(Effect.provide(layerTest)),
+);
 
 it.effect("SQL queue readiness skips held runs without bypassing active work", () =>
   Effect.gen(function* () {

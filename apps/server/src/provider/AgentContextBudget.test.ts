@@ -1,3 +1,6 @@
+import { PreviewHosting } from "../preview/Hosting.ts";
+import { ProjectStoreV2 } from "../orchestration-v2/ProjectStore.ts";
+import { ProjectionStoreV2 } from "../orchestration-v2/ProjectionStore.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import { ProviderInstanceId } from "@t3tools/contracts";
@@ -6,6 +9,13 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { McpServer } from "effect/ai";
 
+import { ActionResume } from "../actionResume/ActionResume.ts";
+import { EnvironmentPause } from "../environment/EnvironmentPause.ts";
+import { ThreadReadBroker } from "../mcp/ThreadReadBroker.ts";
+import { ThreadRecoveryService } from "../orchestration-v2/ThreadRecoveryService.ts";
+import { ThreadRecoveryRepairService } from "../orchestration-v2/ThreadRecoveryRepairService.ts";
+import { PublishedDocumentPreview } from "../preview/PublishedDocumentPreview.ts";
+import { WorktreeSuspension } from "../workspace/WorktreeSuspension.ts";
 import { ServerSecretStore } from "../auth/ServerSecretStore.ts";
 import { ServerConfig } from "../config.ts";
 import { DeviceService } from "../device/DeviceService.ts";
@@ -46,6 +56,18 @@ import budget from "./agentContextBudget.json" with { type: "json" };
 
 // Registration only stores tool definitions, so the handlers' services are never called.
 const toolHandlerServices = Layer.mergeAll(
+  Layer.mock(PreviewHosting)({}),
+  Layer.mock(ProjectStoreV2)({}),
+  Layer.mock(ProjectionStoreV2)({}),
+  Layer.mock(ActionResume)({}),
+  Layer.mock(EnvironmentPause)({}),
+  Layer.mock(ThreadReadBroker)({
+    forSession: () => ({ authorize: () => Effect.die("Registration only") }),
+  }),
+  Layer.mock(ThreadRecoveryService)({}),
+  Layer.mock(ThreadRecoveryRepairService)({}),
+  Layer.mock(PublishedDocumentPreview)({}),
+  Layer.mock(WorktreeSuspension)({}),
   Layer.mock(DeviceService)({}),
   Layer.mock(DocumentText)({}),
   Layer.mock(GitVcsDriver)({}),

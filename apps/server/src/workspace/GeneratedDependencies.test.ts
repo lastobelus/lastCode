@@ -47,6 +47,7 @@ import * as DependencyMounts from "./DependencyMounts.ts";
 import * as WorktreeConsumers from "./WorktreeConsumers.ts";
 import * as WorktreeCleanup from "../orchestration-v2/WorktreeCleanupService.ts";
 import * as StorageCleanup from "../storageCleanup.ts";
+import * as SuspensionTestkit from "./WorktreeSuspension.testkit.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
@@ -2166,7 +2167,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     }),
   );
   const cleanupContext = yield* Layer.build(StorageCleanup.layer).pipe(
-    Effect.provide(dependencies),
+    Effect.provide(Layer.merge(SuspensionTestkit.layer, dependencies)),
     Effect.provideService(
       ServerActivation.ServerActivation,
       workerLifecycle ? Effect.void : Effect.never,
@@ -2205,11 +2206,8 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       yield* worker.drain;
     }).pipe(Effect.ensuring(Deferred.succeed(workerControl.releaseInitialInventory, undefined)));
     // Each sweep inventories dependency and build owners, then refreshes ownership for the audit.
-    assert.equal(reads, mode === "worker-ready-burst" ? 3 : 6);
-    assert.equal(
-      processReads,
-      mode === "worker-terminal-burst" ? 5 : mode === "worker-ready-burst" ? 3 : 4,
-    );
+    assert.equal(reads, mode === "worker-settings-burst" ? 6 : 3);
+    assert.equal(processReads, mode === "worker-settings-burst" ? 4 : 3);
     assert.equal(
       yield* f.fs.readFileString(f.path.join(f.input.worktreePath, "tmp/notes.md")),
       "private notes",

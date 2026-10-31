@@ -1,3 +1,10 @@
+import type { MenuAction } from "@react-native-menu/menu";
+import { threadRecoveryStatusLabel } from "@t3tools/client-runtime/state/thread-recovery";
+import {
+  getArchiveRecoveryRows,
+  presentThreadArchive,
+} from "@t3tools/client-runtime/state/thread-archive";
+import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import {
   canSnooze,
   effectiveSnoozed,
@@ -10,7 +17,11 @@ import {
 } from "@t3tools/client-runtime/state/thread-settled";
 import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
-import { resolveThreadProviderStack } from "@t3tools/client-runtime/state/models";
+import {
+  resolveThreadProviderStack,
+  threadShellIsCleanupRecovery,
+  threadShellIsVisible,
+} from "@t3tools/client-runtime/state/models";
 import {
   threadSearchMatchKey,
   threadSearchSubject,
@@ -62,9 +73,13 @@ export function resolveThreadListV2ProviderDrivers(
 }
 
 export type ThreadListV2Status =
+  | "archiving"
+  | "archive-failed"
   | "approval"
   | "input"
   | "request"
+  | "not-responding"
+  | "needs-repair"
   | "working"
   | "waiting"
   | "failed"
@@ -78,7 +93,7 @@ export type ThreadListV2SwipeAction = "archive" | "settle" | "unsettle" | "snooz
  * it would keep the times from the row's first render.
  */
 export function resolveThreadListV2SnoozePresets(input: {
-  readonly secondary: "snooze" | null;
+  readonly secondary: "snooze" | "archive" | null;
   readonly now: string;
   readonly presets: ReadonlyArray<SnoozePresetSetting> | undefined;
 }): ReadonlyArray<SnoozePreset> {
@@ -89,6 +104,15 @@ export function resolveThreadListV2SnoozePresets(input: {
 
 function presetOptions(presets: ReadonlyArray<SnoozePresetSetting> | undefined) {
   return presets ? { presets } : {};
+}
+
+export type ThreadListV2CleanupAction = "retry-worktree-cleanup" | "keep-worktree";
+
+/** Failed cleanup tombstones keep their recovery actions reachable. */
+export function resolveThreadListV2CleanupActions(
+  cleanup: EnvironmentThreadShell["worktreeCleanup"],
+): readonly ThreadListV2CleanupAction[] {
+  return cleanup?.status === "failed" ? ["retry-worktree-cleanup", "keep-worktree"] : [];
 }
 
 export function resolveThreadListV2SnoozeMenuSelection(input: {
@@ -110,18 +134,83 @@ export function resolveThreadListV2SnoozeMenuSelection(input: {
   return preset ? { _tag: "selected", preset } : { _tag: "expired" };
 }
 
+type ArchiveAttempt = Pick<
+  NonNullable<EnvironmentThreadShell["archivePending"]>,
+  "threadId" | "commandId" | "status"
+>;
+
+/** Bind a native menu selection to the failed attempt displayed when it opened. */
+export function threadListV2ArchiveFailureActionId(
+  attempt: ArchiveAttempt,
+  action: "dismiss" | "retry" = "dismiss",
+) {
+  return `${action}-archive-failure:${JSON.stringify([attempt.threadId, attempt.commandId])}`;
+}
+
+/** Archive stays available beside settlement; the handler reads the authoritative family. */
+export function withThreadListV2ArchiveAction(
+  actions: ReadonlyArray<MenuAction>,
+  input: {
+    readonly archiveFamiliesSupported: boolean;
+    readonly archivePending?: ArchiveAttempt | null;
+  },
+): MenuAction[] {
+  const archive: MenuAction = {
+    id:
+      input.archivePending?.status === "failed"
+        ? threadListV2ArchiveFailureActionId(input.archivePending, "retry")
+        : "archive",
+    title: !input.archiveFamiliesSupported
+      ? "Archive (update server first)"
+      : input.archivePending?.status === "failed"
+        ? "Retry archive"
+        : input.archivePending?.status === "stopping"
+          ? "Archiving…"
+          : "Archive",
+    image: "archivebox",
+    attributes: {
+      disabled: !input.archiveFamiliesSupported || input.archivePending?.status === "stopping",
+    },
+  };
+  const archiveActions = [
+    archive,
+    ...(input.archivePending?.status === "failed"
+      ? [
+          {
+            id: threadListV2ArchiveFailureActionId(input.archivePending),
+            title: "Dismiss archive failure",
+            image: "xmark.circle",
+            attributes: { disabled: !input.archiveFamiliesSupported },
+          },
+        ]
+      : []),
+  ];
+  if (actions.some((action) => action.id === "archive"))
+    return actions.flatMap((action) => (action.id === "archive" ? archiveActions : [action]));
+  const deleteIndex = actions.findIndex((action) => action.id === "delete");
+  const insertionIndex = deleteIndex < 0 ? actions.length : deleteIndex;
+  return [...actions.slice(0, insertionIndex), ...archiveActions, ...actions.slice(insertionIndex)];
+}
+
 export function resolveThreadListV2SwipeActions(input: {
   readonly variant: "card" | "slim";
   readonly settlementSupported: boolean;
+  readonly archiveFamiliesSupported: boolean;
+  readonly persistent: boolean;
+  readonly archivePendingStatus?: "stopping" | "failed";
   readonly snoozeSupported: boolean;
   readonly snoozable: boolean;
   readonly snoozed?: boolean;
 }): {
   readonly primary: Exclude<ThreadListV2SwipeAction, "snooze">;
-  readonly secondary: "snooze" | null;
+  readonly secondary: "snooze" | "archive" | null;
 } {
+  const canArchive =
+    input.archiveFamiliesSupported &&
+    !input.persistent &&
+    input.archivePendingStatus !== "stopping";
   if (input.snoozed === true) {
-    return { primary: "unsnooze", secondary: null };
+    return { primary: "unsnooze", secondary: canArchive ? "archive" : null };
   }
   const primary = input.settlementSupported
     ? input.variant === "slim"
@@ -130,7 +219,12 @@ export function resolveThreadListV2SwipeActions(input: {
     : "archive";
   return {
     primary,
-    secondary: input.snoozeSupported && input.snoozable ? "snooze" : null,
+    secondary:
+      input.snoozeSupported && input.snoozable
+        ? "snooze"
+        : primary !== "archive" && canArchive
+          ? "archive"
+          : null,
   };
 }
 
@@ -146,8 +240,12 @@ export function resolveThreadListV2SnoozeGateExpiryMs(
   >,
   options: { readonly now: string },
 ): number | null {
-  if (thread.hasPendingApprovals || thread.hasPendingUserInput) return null;
-  if (thread.pendingSubagentRequest != null) return null;
+  if (
+    thread.hasPendingApprovals ||
+    thread.hasPendingUserInput ||
+    thread.pendingSubagentRequest != null
+  )
+    return null;
   if (!hasQueuedTurnStart(thread, options)) return null;
   const messageAtMs = Date.parse(thread.latestUserMessageAt ?? "");
   if (Number.isNaN(messageAtMs)) return null;
@@ -201,14 +299,21 @@ export function resolveThreadListV2WokeAt(
 export function resolveThreadListV2Status(
   thread: Pick<
     EnvironmentThreadShell,
+    | "actionResume"
     | "hasPendingApprovals"
     | "hasPendingUserInput"
     | "pendingSubagentRequest"
     | "pendingGuestMessageCount"
     | "runtime"
+    | "recovery"
+    | "archivePending"
     | "blockedOnThreadWait"
   >,
 ): ThreadListV2Status {
+  const archive = presentThreadArchive(thread);
+  if (archive) return archive.status;
+  const recoveryLabel = threadRecoveryStatusLabel(thread.recovery);
+  if (recoveryLabel) return recoveryLabel === "Needs repair" ? "needs-repair" : "not-responding";
   if (thread.hasPendingApprovals || thread.pendingSubagentRequest === "approval") {
     return "approval";
   }
@@ -228,12 +333,13 @@ export function resolveThreadListV2Status(
   ) {
     return "working";
   }
-  if (thread.runtime?.status === "idle") {
-    return "waiting";
-  }
   if (thread.runtime?.status === "failed") {
     return thread.runtime.lastErrorClass === "usage_limit" ? "limited" : "failed";
   }
+  if (thread.actionResume?.outcome === "running") {
+    return actionRunningPresentation(thread.actionResume).state;
+  }
+  if (thread.runtime?.status === "idle") return "waiting";
   return "ready";
 }
 
@@ -264,8 +370,16 @@ export function getThreadListV2OrderedSection(input: {
   readonly queuedThreadKeys?: ReadonlySet<string>;
 }): EnvironmentThreadShell[] {
   const queuedThreadKeys = input.queuedThreadKeys?.size ? input.queuedThreadKeys : undefined;
+  const archiveRecoveryRows = getArchiveRecoveryRows(input.threads);
   const threads = input.threads.filter((thread) => {
-    if (thread.archivedAt !== null || !isListedThreadLineage(thread.lineage)) return false;
+    if (threadShellIsCleanupRecovery(thread)) return input.section === "active";
+    if (archiveRecoveryRows.has(thread)) return input.section === "active";
+    if (
+      !threadShellIsVisible(thread) ||
+      thread.lineage.sideChat === true ||
+      (!isListedThreadLineage(thread.lineage) && thread.lineage.independent !== true)
+    )
+      return false;
     if (
       (input.settlementEnvironmentIds?.has(thread.environmentId) ?? true) &&
       thread.settledOverride === "settled" &&
@@ -643,10 +757,14 @@ export function buildThreadListV2Items(input: {
   const snoozed: EnvironmentThreadShell[] = [];
   let nextSnoozeWakeAt: string | null = null;
   const queuedThreadKeys = input.queuedThreadKeys?.size ? input.queuedThreadKeys : undefined;
+  const archiveRecoveryRows = getArchiveRecoveryRows(input.threads);
   const listedThreads = input.threads.filter(
     (thread) =>
-      thread.archivedAt === null &&
-      isListedThreadLineage(thread.lineage) &&
+      threadShellIsVisible(thread) &&
+      (threadShellIsCleanupRecovery(thread) ||
+        archiveRecoveryRows.has(thread) ||
+        (thread.lineage.sideChat !== true &&
+          (isListedThreadLineage(thread.lineage) || thread.lineage.independent === true))) &&
       (input.environmentId === null || thread.environmentId === input.environmentId) &&
       (projectKeys === null || projectKeys.has(`${thread.environmentId}:${thread.projectId}`)),
   );
@@ -676,6 +794,12 @@ export function buildThreadListV2Items(input: {
     }
     const supportsSettlement = input.settlementEnvironmentIds?.has(thread.environmentId) ?? true;
     const supportsSnooze = input.snoozeEnvironmentIds?.has(thread.environmentId) ?? true;
+    // Unfinished cleanup and archive recovery stay reachable in the active block.
+    if (thread.worktreeCleanup != null || archiveRecoveryRows.has(thread)) {
+      active.push(thread);
+      continue;
+    }
+    // Snooze outranks settlement and pinning until the thread wakes.
     if (supportsSnooze && effectiveSnoozed(thread, { now })) {
       snoozed.push(thread);
       if (
