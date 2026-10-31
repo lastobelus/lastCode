@@ -1971,11 +1971,14 @@ const layerCoreWsRpc = (
                             "creationSource" in command ? command.creationSource : "web",
                         }),
                       )
-                  ).pipe(Effect.provide(intakeContext), (effect) =>
-                    (command.type === "message.dispatch"
-                      ? threadReadAuthorization.authorize(command.threadId, command.messageId)
-                      : Effect.void
-                    ).pipe(Effect.andThen(effect)),
+                  ).pipe(
+                    Effect.provide(intakeContext),
+                    Effect.provideService(ThreadReadAuthorization, threadReadAuthorization),
+                    (effect) =>
+                      (command.type === "message.dispatch"
+                        ? threadReadAuthorization.authorize(command.threadId, command.messageId)
+                        : Effect.void
+                      ).pipe(Effect.andThen(effect)),
                   ),
                 )
                 .pipe(
@@ -2072,6 +2075,7 @@ const layerCoreWsRpc = (
             request: input,
             search: threadSearch.search,
             searchOlderSettled: threadSearch.searchOlderSettled,
+            searchMentionCandidates: threadSearch.searchMentionCandidates,
             sql,
             readThreads: (threadIds) =>
               threadManagement.readShellSnapshot({ location: "active", threadIds }),
@@ -3655,7 +3659,7 @@ const layerCoreWsRpc = (
             const environmentId = yield* serverEnvironment.getEnvironmentId;
             // Without a calling thread, forwarded reads stay in this environment.
             return (input) =>
-              threadReads.readThread(
+              threadReads.readThreadLocal(
                 {
                   environmentId,
                   capabilities: new Set(["orchestration"]),

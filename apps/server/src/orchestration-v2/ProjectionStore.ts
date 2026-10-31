@@ -474,6 +474,11 @@ export interface ProjectionStoreV2Shape {
     },
     ProjectionStoreV2Error
   >;
+  /** Unparseable history reserves IDs for its thread, so binding remains fail-closed. */
+  readonly hasThreadReadAuthorization: (
+    threadId: ThreadId,
+    authorizationId: MessageId,
+  ) => Effect.Effect<boolean, ProjectionStoreV2Error>;
   readonly getMessageCount: (threadId: ThreadId) => Effect.Effect<number, ProjectionStoreV2Error>;
   readonly getSubagentCount: (threadId: ThreadId) => Effect.Effect<number, ProjectionStoreV2Error>;
   readonly getNextTurnItemOrdinal: (
@@ -5572,6 +5577,27 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         Effect.mapError(controlReadError(threadId)),
       );
 
+    const hasThreadReadAuthorization: ProjectionStoreV2Shape["hasThreadReadAuthorization"] =
+      Effect.fn("ProjectionStore.hasThreadReadAuthorization")(
+        function* (threadId, authorizationId) {
+          const rows = yield* sql<{ present: number }>`
+          SELECT (EXISTS (
+            SELECT 1 FROM orchestration_v2_projection_runs
+            WHERE thread_id = ${threadId} AND CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.userMessageId') ELSE X'' END IN (${authorizationId}, X'')
+          ) OR EXISTS (
+            SELECT 1 FROM orchestration_v2_projection_runtime_requests
+            WHERE thread_id = ${threadId} AND CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.threadReadContext.authorizationId') ELSE X'' END IN (${authorizationId}, X'')
+          ) OR EXISTS (
+            SELECT 1 FROM orchestration_v2_projection_messages
+            WHERE thread_id = ${threadId} AND role = 'user'
+              AND CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.threadReadContext.authorizationId') ELSE X'' END IN (${authorizationId}, X'')
+          )) AS present FROM orchestration_v2_projection_threads WHERE thread_id = ${threadId}
+        `.pipe(Effect.mapError(controlReadError(threadId)));
+          if (!rows[0]) return yield* new ProjectionStoreThreadNotFoundError({ threadId });
+          return rows[0].present === 1;
+        },
+      );
+
     const getMessageCount: ProjectionStoreV2Shape["getMessageCount"] = (threadId) =>
       sql<{
         count: number;
@@ -7404,6 +7430,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getPendingNativeUserInputs: readOnReader(getPendingNativeUserInputs),
       hasUnpairedRunInterruptRequest: readOnReader(hasUnpairedRunInterruptRequest),
       isNodeStored: readOnReader(isNodeStored),
+      hasThreadReadAuthorization: readOnReader(hasThreadReadAuthorization),
       getMessageCount: readOnReader(getMessageCount),
       getSubagentCount: readOnReader(getSubagentCount),
       getNextTurnItemOrdinal: readOnReader(getNextTurnItemOrdinal),

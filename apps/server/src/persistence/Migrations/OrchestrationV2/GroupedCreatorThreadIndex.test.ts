@@ -18,6 +18,7 @@ it.effect(
         [14, "OrchestrationV2GroupedCreatorThreadIndex"],
         [15, "OrchestrationV2ArchiveReadIndex"],
         [16, "OrchestrationV2CommandHistoryIndex"],
+        [17, "OrchestrationV2ThreadReadAuthorizationIndex"],
       ]);
       assert.deepEqual(yield* runDatabaseMigrations(), []);
       for (const recovery of [false, true]) {

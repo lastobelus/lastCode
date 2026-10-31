@@ -1,5 +1,19 @@
+import {
+  projectComposerContextForProvider,
+  replaceComposerContextReferences,
+} from "@t3tools/shared/composerContextReferences";
+import {
+  OrchestrationV2RuntimeRequest,
+  OrchestrationV2ConversationMessage,
+} from "@t3tools/contracts";
+import {
+  questionAnswerAuthorizationId,
+  queuedEditAuthorizationId,
+  referencedThreads,
+} from "./ThreadReadAuthorization.ts";
 import type {
   GuestShareId,
+  ThreadContextRecord,
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
   OrchestrationV2ThreadHistoryPage,
@@ -55,7 +69,6 @@ import {
   type OrchestrationV2ContextSourcePoint,
   type OrchestrationV2ContextTransfer,
   type OrchestrationV2ContextTransferResolution,
-  type OrchestrationV2ConversationMessage,
   type OrchestrationV2DelegatedCompletionCohort,
   type OrchestrationV2DelegatedCompletionDelivery,
   type OrchestrationV2DomainEvent,
@@ -210,6 +223,14 @@ import {
 } from "./CreatorGrouping.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ServerSettings from "../serverSettings.ts";
+
+const decodeThreadReadContext = Schema.decodeUnknownEffect(
+  OrchestrationV2RuntimeRequest.fields.threadReadContext,
+);
+
+const decodeMessageThreadReadContext = Schema.decodeUnknownEffect(
+  OrchestrationV2ConversationMessage.fields.threadReadContext,
+);
 
 const isMessageQuestionAnswer = Schema.is(
   Schema.Union([TrimmedNonEmptyString, Schema.NonEmptyArray(TrimmedNonEmptyString)]),
@@ -449,6 +470,10 @@ export interface OrchestratorV2Shape {
     options: ProjectionTimelinePageOptions,
   ) => Effect.Effect<ProjectionTimelinePage, OrchestratorProjectionError>;
   readonly getMessageCount: (threadId: ThreadId) => Effect.Effect<number, OrchestratorV2Error>;
+  readonly hasThreadReadAuthorization: (
+    threadId: ThreadId,
+    authorizationId: MessageId,
+  ) => Effect.Effect<boolean, OrchestratorV2Error>;
   readonly getTurnItem: (input: {
     readonly threadId: ThreadId;
     readonly itemId: TurnItemId;
@@ -5745,6 +5770,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly text: string;
     readonly attachments: ReadonlyArray<ChatAttachment>;
     readonly context?: import("@t3tools/contracts").OrchestrationMessageContext | undefined;
+    readonly threadReadContext?: OrchestrationV2ConversationMessage["threadReadContext"];
     readonly createdBy: OrchestrationV2ConversationMessage["createdBy"];
     readonly creationSource: OrchestrationV2ConversationMessage["creationSource"];
     readonly scheduledTaskId?: OrchestrationV2ConversationMessage["scheduledTaskId"];
@@ -5913,6 +5939,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         readonly providerThreadId: OrchestrationV2ProviderThread["id"];
         readonly providerInstanceId: ProviderInstanceId;
       }) {
+        const threadReadContext =
+          referencedThreads(input.text, input.context).length > 0
+            ? {
+                authorizationId: input.threadReadContext?.authorizationId ?? input.messageId,
+                capturedAt: DateTime.toEpochMillis(now),
+              }
+            : undefined;
         const message: OrchestrationV2ConversationMessage = {
           createdBy: input.createdBy,
           creationSource: input.creationSource,
@@ -5932,6 +5965,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           text: input.text,
           attachments: input.attachments,
           ...(input.context ? { context: input.context } : {}),
+          ...(threadReadContext === undefined ? {} : { threadReadContext }),
           streaming: false,
           createdAt: now,
           updatedAt: now,
@@ -6491,6 +6525,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     command: Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+    acceptedThreadReadContext?: OrchestrationV2ConversationMessage["threadReadContext"],
   ) {
     let projection = yield* getProjectionWithPendingEvents(command.threadId, events);
     if (command.manualContinuationOfRunId !== undefined) {
@@ -6984,6 +7019,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         messageId: command.messageId,
         text: dispatchText,
         ...(command.context ? { context: command.context } : {}),
+        ...(acceptedThreadReadContext === undefined
+          ? {}
+          : { threadReadContext: acceptedThreadReadContext }),
         attachments: command.attachments,
         createdBy: command.createdBy,
         creationSource: command.creationSource,
@@ -7251,6 +7289,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         updatedAt: now,
         ...(delegatedCompletion === undefined ? {} : { delegatedCompletion }),
         ...(command.notification === undefined ? {} : { notification: command.notification }),
+        ...(acceptedThreadReadContext === undefined
+          ? {}
+          : { threadReadContext: acceptedThreadReadContext }),
       };
       const emitEvent = emit(events, command);
       if (targetProviderThread === undefined) {
@@ -7598,6 +7639,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         updatedAt: now,
         ...(delegatedCompletion === undefined ? {} : { delegatedCompletion }),
         ...(command.notification === undefined ? {} : { notification: command.notification }),
+        ...(acceptedThreadReadContext === undefined
+          ? {}
+          : { threadReadContext: acceptedThreadReadContext }),
       };
       const turnItem: OrchestrationV2TurnItem = {
         createdBy: command.createdBy,
@@ -8349,6 +8393,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       updatedAt: now,
       ...(delegatedCompletion === undefined ? {} : { delegatedCompletion }),
       ...(command.notification === undefined ? {} : { notification: command.notification }),
+      ...(acceptedThreadReadContext === undefined
+        ? {}
+        : { threadReadContext: acceptedThreadReadContext }),
     };
     const turnItem: OrchestrationV2TurnItem = {
       createdBy: command.createdBy,
@@ -10229,6 +10276,60 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }
       }
 
+      const questionIds = new Set(
+        approvalTurnItem?.type === "user_input_request"
+          ? approvalTurnItem.questions.map((question) => question.id)
+          : [],
+      );
+      const questionContexts = new Map(
+        Object.entries(command.contextsByQuestionId ?? {}).filter(([questionId]) =>
+          questionIds.has(questionId),
+        ),
+      );
+      const referenceRecords =
+        resolvedNodeStatus === "completed" &&
+        runtimeRequest.kind === "user_input" &&
+        approvalTurnItem?.type === "user_input_request"
+          ? approvalTurnItem.questions.flatMap(
+              (question) =>
+                questionContexts
+                  .get(question.id)
+                  ?.records.filter(
+                    (record): record is ThreadContextRecord => record.kind === "thread",
+                  ) ?? [],
+            )
+          : [];
+      const threadReadContext =
+        referenceRecords.length > 0
+          ? yield* decodeThreadReadContext({
+              authorizationId: questionAnswerAuthorizationId(command.commandId),
+              records: [
+                ...new Map(referenceRecords.map((record) => [record.contextId, record])).values(),
+              ],
+            }).pipe(mapDispatchError(command))
+          : undefined;
+      const displayAnswers =
+        answers === undefined
+          ? undefined
+          : Object.fromEntries(
+              Object.entries(answers).map(([questionId, answer]) => {
+                const records = questionContexts.get(questionId)?.records ?? [];
+                return [
+                  questionId,
+                  typeof answer === "string"
+                    ? replaceComposerContextReferences(answer, (reference) =>
+                        reference.kind === "thread" &&
+                        records.some(
+                          (record) =>
+                            record.kind === "thread" && record.contextId === reference.contextId,
+                        )
+                          ? reference.label
+                          : reference.source,
+                      )
+                    : answer,
+                ];
+              }),
+            );
       const now = yield* DateTime.now;
       const resolvedRequest = {
         ...runtimeRequest,
@@ -10237,6 +10338,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.decision === undefined ? {} : { decision: command.decision }),
         ...(command.feedback === undefined ? {} : { feedback: command.feedback }),
         ...(answers === undefined ? {} : { answers }),
+        ...(threadReadContext === undefined ? {} : { threadReadContext }),
       };
       const emitEvent = emit(events, command);
       const requestNode = context.node;
@@ -10356,7 +10458,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               ? {
                   questionAnswer: {
                     requestId: command.requestId,
-                    answers,
+                    answers: displayAnswers ?? answers,
                     attachmentsByQuestionId: command.attachmentsByQuestionId ?? {},
                     questionTextById: Object.fromEntries(
                       approvalTurnItem.questions.map((question) => [
@@ -10414,15 +10516,44 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           threadId: command.threadId,
           messageId: MessageId.make(`async-answer:${command.requestId}`),
           text: replies.join("\n\n"),
+          ...(threadReadContext === undefined
+            ? {}
+            : { context: { version: 1 as const, records: threadReadContext.records } }),
           attachments: [],
           createdBy: "user" as const,
           creationSource: "server" as const,
           dispatchMode,
         };
-        yield* dispatchMessage(answer, events, effects);
+        yield* dispatchMessage(
+          answer,
+          events,
+          effects,
+          threadReadContext === undefined
+            ? undefined
+            : {
+                authorizationId: threadReadContext.authorizationId,
+                capturedAt: DateTime.toEpochMillis(now),
+              },
+        );
         return yield* recordSubagentFollowup(answer, events).pipe(mapDispatchError(answer));
       }
       if (providerSessionId === null) return;
+      const providerAnswers =
+        answers === undefined
+          ? undefined
+          : Object.fromEntries(
+              Object.entries(answers).map(([questionId, answer]) => [
+                questionId,
+                typeof answer === "string" &&
+                threadReadContext !== undefined &&
+                questionContexts.has(questionId)
+                  ? projectComposerContextForProvider({
+                      text: answer,
+                      records: questionContexts.get(questionId)?.records ?? [],
+                    })
+                  : answer,
+              ]),
+            );
       yield* Ref.update(effects, (existing) => [
         ...existing,
         {
@@ -10435,7 +10566,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             requestId: command.requestId,
             ...(command.decision === undefined ? {} : { decision: command.decision }),
             ...(command.feedback === undefined ? {} : { feedback: command.feedback }),
-            ...(answers === undefined ? {} : { answers }),
+            ...(providerAnswers === undefined ? {} : { answers: providerAnswers }),
           },
         } satisfies PendingOrchestrationEffectV2,
       ]);
@@ -10739,6 +10870,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       text: queuedMessage.text,
       attachments: queuedMessage.attachments,
       ...(queuedMessage.context ? { context: queuedMessage.context } : {}),
+      ...(queuedMessage.threadReadContext === undefined
+        ? {}
+        : { threadReadContext: queuedMessage.threadReadContext }),
       createdBy: queuedMessage.createdBy,
       creationSource: queuedMessage.creationSource,
       ...(queuedMessage.scheduledTaskId === undefined
@@ -11007,6 +11141,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     );
 
     const now = yield* DateTime.now;
+    const referenceRecords = referencedThreads(
+      command.text,
+      command.context ?? queuedMessage.context,
+    );
+    const threadReadContext =
+      referenceRecords.length > 0
+        ? yield* decodeMessageThreadReadContext({
+            authorizationId: queuedEditAuthorizationId(command.commandId),
+            capturedAt: DateTime.toEpochMillis(now),
+          }).pipe(mapDispatchError(command))
+        : undefined;
+    const { threadReadContext: _oldGrant, ...messageWithoutGrant } = queuedMessage;
     const emitEvent = emit(events, command);
     const editedAttachments =
       command.attachments === undefined ? {} : { attachments: command.attachments };
@@ -11018,7 +11164,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       providerInstanceId: queuedRun.providerInstanceId,
       occurredAt: now,
       payload: withoutGuestAttribution({
-        ...queuedMessage,
+        ...messageWithoutGrant,
+        ...(threadReadContext === undefined ? {} : { threadReadContext }),
         text: command.text,
         ...editedAttachments,
         ...(command.context ? { context: command.context } : {}),
@@ -17310,6 +17457,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         .getMessageCount(threadId)
         .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
     }),
+    hasThreadReadAuthorization: Effect.fn("OrchestratorV2.hasThreadReadAuthorization")(
+      function (threadId, authorizationId) {
+        return projectionStore
+          .hasThreadReadAuthorization(threadId, authorizationId)
+          .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
+      },
+    ),
     getTurnItem: Effect.fn("OrchestratorV2.getTurnItem")(function (input) {
       return projectionStore
         .getTurnItem(input)

@@ -13,7 +13,6 @@ import {
   decodeComposerContextFragment,
   encodeComposerContextFragment,
 } from "@t3tools/shared/composerContextClipboard";
-import { threadContextsOutsideEnvironment } from "@t3tools/shared/composerContextReferences";
 import { executeAtomQuery, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
 import * as Option from "effect/Option";
@@ -66,26 +65,15 @@ export async function importComposerContextClipboard(
   existingCount: number,
   signal: AbortSignal,
   existingContextCount = 0,
-  destinationEnvironmentId?: EnvironmentId,
-  /** The machines the destination links to, whose threads its agent can read too. */
-  linkedEnvironments: ReadonlyMap<EnvironmentId, string> = new Map(),
 ) {
   const fragment =
     decodeComposerContextFragment(input.fragment) ?? decodeComposerContextClipboardHtml(input.html);
   if (!fragment) return null;
   const selected = referencedComposerContext(input.text, { version: 1, records: fragment.records });
   const imported = reidentifyComposerContext(input.text, selected?.records ?? [], uuidv4);
-  const skippedThreads =
-    destinationEnvironmentId === undefined
-      ? []
-      : threadContextsOutsideEnvironment({
-          text: imported.text,
-          records: imported.context.records,
-          environmentId: destinationEnvironmentId,
-          linkedEnvironments,
-        });
-  const skippedIds = new Set(skippedThreads.map((record) => record.contextId));
-  const retained = imported.context.records.filter((record) => !skippedIds.has(record.contextId));
+  // Keep scoped thread references through clipboard import. A missing route is
+  // recoverable and must not silently erase the user's draft context.
+  const retained = imported.context.records;
   if (existingContextCount + retained.length > COMPOSER_CONTEXT_MAX_RECORDS)
     throw new Error("Remove some context items from the draft before pasting more.");
   const attachments: DraftComposerAttachment[] = [];
@@ -116,7 +104,7 @@ export async function importComposerContextClipboard(
       context: { version: 1 as const, records },
       attachments,
       failures,
-      skippedThreads: skippedThreads.map((record) => record.title),
+      skippedThreads: [],
     };
   } catch (error) {
     await Promise.all(

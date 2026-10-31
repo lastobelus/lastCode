@@ -1,5 +1,8 @@
 import {
   type EnvironmentId,
+  EnvironmentAuthorizationError,
+  OrchestratorMcpFailure,
+  type ThreadReadFailureReason,
   type OrchestratorMcpThreadReadInput,
   type OrchestratorMcpThreadReadResult,
   WS_METHODS,
@@ -7,11 +10,14 @@ import {
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
+import * as Schema from "effect/Schema";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 
 import type { ConnectionCatalogEntry } from "./catalog.ts";
 import * as EnvironmentRegistry from "./registry.ts";
-import { request, subscribe } from "../rpc/client.ts";
+import { getInitialServerConfig, request, subscribe } from "../rpc/client.ts";
+
+const isAuthorizationError = Schema.is(EnvironmentAuthorizationError);
 
 const isThreadNotFound = (error: unknown) =>
   typeof error === "object" &&
@@ -38,6 +44,7 @@ export const resolveThreadRead = Effect.fn("connection.resolveThreadRead")(funct
     )
     .map(([environmentId]) => environmentId);
   const unavailable = new Set<EnvironmentId>();
+  const failures = new Map<EnvironmentId, ThreadReadFailureReason>();
   // Start every destination within the same timeout window, and interrupt the
   // remaining requests as soon as one returns the requested history.
   const result =
@@ -54,7 +61,23 @@ export const resolveThreadRead = Effect.fn("connection.resolveThreadRead")(funct
               ),
               Effect.tapError((error) =>
                 Effect.sync(() => {
-                  if (!isThreadNotFound(error)) unavailable.add(environmentId);
+                  if (isThreadNotFound(error)) return;
+                  unavailable.add(environmentId);
+                  const denied =
+                    isAuthorizationError(error) ||
+                    (typeof error === "object" &&
+                      error !== null &&
+                      "code" in error &&
+                      error.code === "capability_denied");
+                  const unsupported =
+                    typeof error === "object" &&
+                    error !== null &&
+                    "threadReadReason" in error &&
+                    error.threadReadReason === "unsupported";
+                  failures.set(
+                    environmentId,
+                    denied ? "permission_denied" : unsupported ? "unsupported" : "unavailable",
+                  );
                 }),
               ),
             ),
@@ -67,7 +90,21 @@ export const resolveThreadRead = Effect.fn("connection.resolveThreadRead")(funct
   ) {
     unavailable.add(input.environmentId);
   }
-  return { result, unavailableEnvironmentIds: [...unavailable] };
+  const failure =
+    result === null && input.environmentId !== undefined && unavailable.has(input.environmentId)
+      ? {
+          environmentId: input.environmentId,
+          reason:
+            entries.get(input.environmentId)?.serverUpdateRequired === true
+              ? ("unsupported" as const)
+              : (failures.get(input.environmentId) ?? ("unavailable" as const)),
+        }
+      : undefined;
+  return {
+    result,
+    unavailableEnvironmentIds: [...unavailable].filter((id) => failure?.environmentId !== id),
+    ...(failure === undefined ? {} : { failure }),
+  };
 });
 
 /** Every client can broker reads using its existing authenticated environment connections. */
@@ -108,7 +145,25 @@ export const watchThreadReadRequests = Effect.fn("connection.watchThreadReadRequ
                         event.input,
                         destinations,
                         (destination, input) =>
-                          registry.run(destination, request(WS_METHODS.threadReadLocal, input)),
+                          registry.run(
+                            destination,
+                            Effect.gen(function* () {
+                              if (input.via === "client") {
+                                const config = yield* getInitialServerConfig();
+                                if (
+                                  config.environment.capabilities.universalThreadReferences !== true
+                                ) {
+                                  return yield* new OrchestratorMcpFailure({
+                                    code: "invalid_request",
+                                    threadReadReason: "unsupported",
+                                    message:
+                                      "The source environment needs a server update to read this thread reference. Report this to the user; do not use another route.",
+                                  });
+                                }
+                              }
+                              return yield* request(WS_METHODS.threadReadLocal, input);
+                            }),
+                          ),
                       );
                       yield* registry.run(
                         environmentId,

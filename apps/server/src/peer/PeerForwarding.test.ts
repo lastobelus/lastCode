@@ -91,10 +91,11 @@ const boxThreads = (seen: Ref.Ref<Seen>, linkSession: Ref.Ref<string>) => {
     threadId === boxThread ? linked : Effect.succeed(threadId === usersThread ? users : null);
   const projectionOf = (threadId: ThreadId) =>
     shellOf(threadId).pipe(
-      Effect.map((thread) => ({ thread, runs: [run("running")], runtimeRequests: [] }) as never),
+      Effect.map((thread) => ({ thread, runs: [], runtimeRequests: [] }) as never),
     );
   return Layer.mock(ThreadManagement.ThreadManagementService)({
     getThreadShell: shellOf,
+    getTimelinePage: () => Effect.succeed({ items: [], totalItems: 0, hasMore: false }),
     getProjectThreadRecords: (input) => projectionOf(input.threadId),
     getThreadRecords: (threadId) => projectionOf(threadId),
     listProjectThreads: () => linked.pipe(Effect.map((shell) => [shell] as never)),
@@ -645,6 +646,35 @@ it.effect("runs any tool that takes a linked environment there", () =>
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
+it.effect(
+  "reads through a peer without client authority and keeps client-route failure separate",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const seen = yield* Ref.make<Seen>(nothingSeen);
+        const linkSession = yield* Ref.make("");
+        const b = yield* serveBox(seen, linkSession);
+        const a = yield* makeLaptop;
+        yield* linkTo(a.links, b, "auto");
+        yield* Ref.set(linkSession, (yield* b.linkedSessions)[0]!.sessionId);
+        const peer = yield* a.call("thread:laptop-full", "t3_thread_read", {
+          environmentId: box.environmentId,
+          threadId: usersThread,
+        });
+        expect(peer, JSON.stringify(peer)).toMatchObject({ isError: false });
+        expect(peer.structuredContent).toMatchObject({ thread: { threadId: usersThread } });
+        yield* Ref.set(b.bearers, []);
+        const reference = yield* a.call("thread:laptop-full", "t3_thread_read", {
+          environmentId: box.environmentId,
+          threadId: usersThread,
+          via: "client",
+        });
+        expect(failureOf(reference)).toMatchObject({ code: "environment_unavailable" });
+        expect(yield* Ref.get(b.bearers)).toEqual([]);
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
 it.effect("refuses what a linked environment cannot take before anything leaves", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -660,7 +690,7 @@ it.effect("refuses what a linked environment cannot take before anything leaves"
         environmentId: EnvironmentId.make("environment-elsewhere"),
         threadId: boxThread,
       });
-      expect(failureOf(unknown)).toMatchObject({ code: "environment_unavailable" });
+      expect(failureOf(unknown)).toMatchObject({ code: "invalid_request" });
       expect(yield* Ref.get(b.bearers)).toEqual([]);
 
       // The box sees only the link's credential, so one that may not control
@@ -711,7 +741,7 @@ it.effect("refuses what a linked environment cannot take before anything leaves"
       ] as const) {
         const relayed = yield* a.call("thread:laptop-from-desk", name, args);
         expect(failureOf(relayed), name).toMatchObject({
-          code: name === "t3_thread_read" ? "environment_unavailable" : "capability_denied",
+          code: "capability_denied",
         });
       }
       expect(yield* Ref.get(b.bearers)).toEqual([]);

@@ -1,6 +1,4 @@
 import type { ThreadContextRecord, UserInputQuestion } from "@t3tools/contracts";
-import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
-import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import {
   buildPendingUserInputAnswers,
   normalizeSelectedOptionValues,
@@ -10,18 +8,6 @@ import {
 } from "@t3tools/client-runtime/state/pending-user-input";
 
 import { collectInlineContextIds } from "./lib/composerContextReferences";
-
-export function projectPendingUserInputAnswer(
-  answer: unknown,
-  threadContexts: ReadonlyArray<ThreadContextRecord>,
-) {
-  if (typeof answer !== "string" || threadContexts.length === 0) return answer;
-  const recordsById = new Map(threadContexts.map((record) => [record.contextId, record]));
-  return replaceComposerContextReferences(answer, (reference) => {
-    const record = reference.kind === "thread" ? recordsById.get(reference.contextId) : undefined;
-    return record ? formatThreadLink(record, reference.label) : reference.source;
-  });
-}
 
 // Question drafts retain deleted chip records for undo; only transfer referenced records.
 export function threadContextsReferencedByAnswer(

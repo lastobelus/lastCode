@@ -38,7 +38,10 @@ import type { ReviewCommentContext } from "~/reviewCommentContext";
 import { ComposerPendingTerminalContextChip } from "./chat/ComposerPendingTerminalContexts";
 import { EnvironmentContextChip } from "./EnvironmentContextChip";
 import { ThreadContextChip } from "./ThreadContextChip";
-import { useLinkedEnvironments } from "~/state/peerLinks";
+import { AuthOrchestrationReadScope } from "@t3tools/contracts";
+import { useEnvironments } from "~/state/environments";
+import { useEnvironmentsWithScope } from "~/state/session";
+import { threadReferenceUnavailableReason } from "@t3tools/shared/composerContextReferences";
 import {
   createContextPresentationRegistry,
   type ContextPresentationCapability,
@@ -346,17 +349,28 @@ function ComposerPreviewAnnotationDetails({
 
 function ComposerThreadContextChip(props: { record: ThreadContextRecord }) {
   const { environmentId } = use(ComposerContextActionsContext);
-  const linkedEnvironments = useLinkedEnvironments(environmentId);
-  return (
-    <ThreadContextChip
-      record={props.record}
-      unreadable={
-        environmentId !== null &&
-        props.record.environmentId !== environmentId &&
-        !linkedEnvironments.has(props.record.environmentId)
-      }
-    />
+  const { environments } = useEnvironments();
+  const readable = useEnvironmentsWithScope(environments, AuthOrchestrationReadScope);
+  const availability = new Map(
+    environments.map((item) => [
+      item.environmentId,
+      {
+        connected: item.connection.phase === "connected",
+        canRead: readable.has(item.environmentId),
+        supportsUniversalThreadReferences:
+          item.serverConfig?.environment.capabilities.universalThreadReferences === true,
+      },
+    ]),
   );
+  const reason =
+    environmentId === null
+      ? null
+      : threadReferenceUnavailableReason({
+          record: props.record,
+          destinationEnvironmentId: environmentId,
+          environments: availability,
+        });
+  return <ThreadContextChip record={props.record} unavailableReason={reason} />;
 }
 
 function UnresolvedContextChip(props: { label: string }) {

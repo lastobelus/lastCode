@@ -1,5 +1,7 @@
 import {
   AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
+  ComposerContextId,
   CommandId,
   EnvironmentId,
   MessageId,
@@ -42,7 +44,7 @@ const state = vi.hoisted(() => ({
   config: {
     shellThreadFamilies: false,
     providers: [{ instanceId: "codex", driver: "codex" }],
-    environment: { capabilities: {} },
+    environment: { capabilities: { universalThreadReferences: true } },
   },
 }));
 vi.mock("react-native", () => ({ Alert: { alert: vi.fn() } }));
@@ -54,10 +56,10 @@ vi.mock("@t3tools/client-runtime/state/runtime", async (importOriginal) => ({
 vi.mock("./session", async () => {
   const { Atom } = await import("effect/reactivity");
   const { appAtomRegistry } = await import("./atom-registry");
-  // A session's state is reduced to whether it grants the operate scope.
+  // A session's state is reduced to whether it grants read and operate scopes.
   const sessionStateAtom = Atom.family((_id: string) => Atom.make(false).pipe(Atom.keepAlive));
   const sessionHasScope = (granted: boolean, scope: string) =>
-    granted && scope === AuthOrchestrationOperateScope;
+    granted && (scope === AuthOrchestrationOperateScope || scope === AuthOrchestrationReadScope);
   return {
     environmentSession: { sessionStateAtom },
     sessionHasScope,
@@ -73,7 +75,10 @@ vi.mock("./workspace", async () => {
   const { Atom } = await import("effect/reactivity");
   return {
     workspaceConnections: {
-      environmentsAtom: Atom.make([{ environmentId: "secondary", connectionState: "connected" }]),
+      environmentsAtom: Atom.make([
+        { environmentId: "secondary", connectionState: "connected" },
+        { environmentId: "source", connectionState: "connected" },
+      ]),
     },
   };
 });
@@ -81,7 +86,12 @@ vi.mock("./server", async () => {
   const { Atom } = await import("effect/reactivity");
   return {
     serverEnvironment: { configValueAtom: Atom.family((_id: string) => Atom.make(state.config)) },
-    environmentServerConfigsAtom: Atom.make(new Map([["secondary", state.config]])),
+    environmentServerConfigsAtom: Atom.make(
+      new Map([
+        ["secondary", state.config],
+        ["source", state.config],
+      ]),
+    ),
   };
 });
 vi.mock("./threads", async () => {
@@ -319,6 +329,108 @@ describe("queued PR checkout", () => {
     await runDrain();
     expect(state.start).not.toHaveBeenCalled();
     expect(remaining()).toEqual([edited]);
+  });
+});
+
+describe("queued thread-reference delivery", () => {
+  it.each([false, true])(
+    "restores the reference when read access is lost during preparation (new task: %s)",
+    async (isCreation) => {
+      setOperateGrant("secondary", true);
+      setOperateGrant("source", true);
+      const queued = message({
+        text: "Compare with [Remote discussion](t3-context://v1/thread/thread_remote)",
+        context: {
+          version: 1,
+          records: [
+            {
+              version: 1,
+              kind: "thread",
+              contextId: ComposerContextId.make("thread_remote"),
+              label: "Remote discussion",
+              environmentId: EnvironmentId.make("source"),
+              threadId: ThreadId.make("remote-thread"),
+              title: "Remote discussion",
+            },
+          ],
+        },
+        ...(isCreation
+          ? {
+              threadId: ThreadId.make("new-pr-thread"),
+              modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+              creation: {
+                projectId: ProjectId.make("project"),
+                projectCwd: "/repo",
+                workspaceMode: "worktree" as const,
+                branch: "feature",
+                worktreePath: null,
+                pullRequestReference: "https://github.com/acme/repo/pull/123",
+              },
+            }
+          : {}),
+      });
+      await state.manager.enqueue(queued);
+      const started = Promise.withResolvers<void>();
+      const resume = Promise.withResolvers<void>();
+      if (isCreation) {
+        state.checkout.mockImplementationOnce(async () => {
+          started.resolve();
+          await resume.promise;
+          return AsyncResult.success({
+            branch: "pr-123",
+            worktreePath: "/repo/worktree",
+            isOnPullRequestHead: true,
+          });
+        });
+      } else {
+        state.prepare.mockImplementationOnce(async ({ attachments }) => {
+          started.resolve();
+          await resume.promise;
+          return {
+            status: "ready",
+            attachments: [],
+            draftAttachments: attachments,
+            pendingAttachmentIds: [],
+          };
+        });
+      }
+      const drained = runDrain();
+      await started.promise;
+      setOperateGrant("source", false);
+      resume.resolve();
+      await drained;
+      expect(state.start).not.toHaveBeenCalled();
+      expect(remaining()).toEqual([]);
+      expect(state.draftText).toContain(queued.text);
+    },
+  );
+  it("restores a queued message when its foreign source no longer grants read access", async () => {
+    setOperateGrant("secondary", true);
+    setOperateGrant("source", false);
+    const queued = message({
+      text: "Compare with [Remote discussion](t3-context://v1/thread/thread_remote)",
+      context: {
+        version: 1,
+        records: [
+          {
+            version: 1,
+            kind: "thread",
+            contextId: ComposerContextId.make("thread_remote"),
+            label: "Remote discussion",
+            environmentId: EnvironmentId.make("source"),
+            threadId: ThreadId.make("remote-thread"),
+            title: "Remote discussion",
+          },
+        ],
+      },
+    });
+    await state.manager.enqueue(queued);
+
+    await runDrain();
+
+    expect(state.start).not.toHaveBeenCalled();
+    expect(remaining()).toEqual([]);
+    expect(state.draftText).toContain(queued.text);
   });
 });
 afterEach(() => {

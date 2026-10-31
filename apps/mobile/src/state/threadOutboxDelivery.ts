@@ -13,6 +13,7 @@ import { threadFamilyRead, type ThreadFamilyRead } from "@t3tools/client-runtime
 import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
 import {
   AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
@@ -21,6 +22,7 @@ import {
   type MessageId,
 } from "@t3tools/contracts";
 import { buildTemporaryWorktreeBranchName } from "@t3tools/shared/git";
+import { threadContextsUnavailableForDestination } from "@t3tools/shared/composerContextReferences";
 import * as Cause from "effect/Cause";
 import { AsyncResult, Atom } from "effect/reactivity";
 
@@ -186,6 +188,45 @@ function findCreationProject(
 
 function settingsCommandId(message: QueuedThreadMessage, setting: string): CommandId {
   return CommandId.make(`${message.commandId}:${setting}`);
+}
+
+function unavailableThreadReference(message: QueuedThreadMessage) {
+  const connectedEnvironments = appAtomRegistry.get(workspaceConnections.environmentsAtom);
+  const serverConfigs = appAtomRegistry.get(environmentServerConfigsAtom);
+  const environments = new Map(
+    connectedEnvironments.map(
+      (environment) =>
+        [
+          environment.environmentId,
+          {
+            connected: environment.connectionState === "connected",
+            canRead: readEnvironmentScope(environment.environmentId, AuthOrchestrationReadScope),
+            supportsUniversalThreadReferences:
+              serverConfigs.get(environment.environmentId)?.environment.capabilities
+                .universalThreadReferences === true,
+          },
+        ] as const,
+    ),
+  );
+  return threadContextsUnavailableForDestination({
+    text: message.text,
+    records: message.context?.records ?? [],
+    destinationEnvironmentId: message.environmentId,
+    environments,
+  })[0];
+}
+
+function threadReferenceRecoveryMessage(
+  reason: "disconnected" | "permission-denied" | "unsupported",
+  owner: string,
+) {
+  const recovery =
+    reason === "permission-denied"
+      ? `Check that you have read access to ${owner} and to the machine you're sending to.`
+      : reason === "unsupported"
+        ? `Check for server updates on ${owner} and the machine you're sending to.`
+        : `Check the connections to ${owner} and the machine you're sending to before sending.`;
+  return `Attached thread unavailable. ${recovery} The reference is still in your draft.`;
 }
 
 export async function prepareQueuedMessageAttachments(queuedMessage: QueuedThreadMessage): Promise<
@@ -762,6 +803,22 @@ export function createThreadOutboxDelivery(): {
     return true;
   };
 
+  const restoreUnavailableReference = (
+    queuedMessage: QueuedThreadMessage,
+  ): Promise<boolean> | null => {
+    const unavailable = unavailableThreadReference(queuedMessage);
+    if (!unavailable) return null;
+    const owner =
+      appAtomRegistry
+        .get(workspaceConnections.environmentsAtom)
+        .find((environment) => environment.environmentId === unavailable.record.environmentId)
+        ?.environmentLabel ?? "its machine";
+    return restoreQueuedMessage(
+      queuedMessage,
+      threadReferenceRecoveryMessage(unavailable.reason, owner),
+    );
+  };
+
   const sendQueuedMessage = async (
     queuedMessage: QueuedThreadMessage,
     thread: EnvironmentThreadShell,
@@ -865,6 +922,8 @@ export function createThreadOutboxDelivery(): {
       currentConfig.providers,
     );
     if (!hasAccess()) return true;
+    const unavailableReference = restoreUnavailableReference(persistedMessage);
+    if (unavailableReference) return unavailableReference;
     const deliveryResult = await runDeliveryCommand(threadEnvironment.startTurn, {
       environmentId: queuedMessage.environmentId,
       input: {
@@ -1027,6 +1086,8 @@ export function createThreadOutboxDelivery(): {
         startFromOrigin: false,
       };
     }
+    const unavailableReference = restoreUnavailableReference(persistedMessage);
+    if (unavailableReference) return unavailableReference;
     const deliveryResult = await runDeliveryCommand(threadEnvironment.startTurn, {
       environmentId: queuedMessage.environmentId,
       input: buildProjectThreadStartTurnInput({
@@ -1243,6 +1304,28 @@ export function createThreadOutboxDelivery(): {
       if (deliveryAction === "send" && !operableEnvironments.has(nextQueuedMessage.environmentId)) {
         continue;
       }
+      const unavailableReference =
+        deliveryAction === "send" ? unavailableThreadReference(nextQueuedMessage) : undefined;
+      if (unavailableReference) {
+        const owner =
+          connectedEnvironments.find(
+            (environment) =>
+              environment.environmentId === unavailableReference.record.environmentId,
+          )?.environmentLabel ?? "its machine";
+        beginDispatchingQueuedMessage(messageId);
+        settle(
+          messageId,
+          confirmThreadOutboxMessageQueued(nextQueuedMessage).then((queued) =>
+            !queued || appAtomRegistry.get(editingQueuedMessageIdsAtom)[messageId]
+              ? true
+              : restoreQueuedMessage(
+                  nextQueuedMessage,
+                  threadReferenceRecoveryMessage(unavailableReference.reason, owner),
+                ),
+          ),
+        );
+        return;
+      }
       const dispatchStep = resolveThreadOutboxDispatchStep({
         deliveryAction,
         fileAttachments: nextQueuedMessage.attachments.filter(
@@ -1314,6 +1397,8 @@ export function createThreadOutboxDelivery(): {
           return true;
         }
         if (deliveryAction === "send") {
+          const unavailableReference = restoreUnavailableReference(nextQueuedMessage);
+          if (unavailableReference) return unavailableReference;
           const liveThread = findThread(
             appAtomRegistry.get(environmentThreadShells.threadShellsAtom),
             nextQueuedMessage,

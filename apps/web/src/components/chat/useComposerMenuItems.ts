@@ -13,6 +13,7 @@ import type {
   ThreadId,
   ThreadPullRequestLink,
 } from "@t3tools/contracts";
+import { AuthOrchestrationReadScope } from "@t3tools/contracts";
 import {
   composerPullRequestsFromLinks,
   filterComposerPullRequestMatches,
@@ -29,7 +30,12 @@ import {
 } from "@t3tools/client-runtime/providerSkills";
 import { searchProviderSkills } from "../../providerSkillSearch";
 import { useThreadShells } from "~/state/entities";
-import { useEnvironmentIdentities, useEnvironmentMachines } from "~/state/environments";
+import {
+  useEnvironmentIdentities,
+  useEnvironmentMachines,
+  useEnvironments,
+} from "~/state/environments";
+import { useEnvironmentsWithScope } from "~/state/session";
 import { offersLinkedEnvironmentsAtom } from "~/state/peerLinks";
 import {
   pullRequestEnvironment,
@@ -57,7 +63,6 @@ const EMPTY_PULL_REQUEST_LIST_TARGETS: ReadonlyArray<EnvironmentQueryTarget<Pull
 export function useComposerMenuItems({
   composerTrigger,
   environmentId,
-  linkedEnvironments,
   gitCwd,
   activeThreadId,
   pullRequestProjectId,
@@ -76,7 +81,6 @@ export function useComposerMenuItems({
 }: {
   readonly composerTrigger: ComposerTrigger | null;
   readonly environmentId: EnvironmentId;
-  readonly linkedEnvironments: ReadonlyMap<EnvironmentId, string>;
   readonly gitCwd: string | null;
   readonly activeThreadId: ThreadId | null;
   readonly pullRequestProjectId: ProjectId | null;
@@ -110,8 +114,51 @@ export function useComposerMenuItems({
     pullRequestTextQuery === debouncedPullRequestTextQuery ? pullRequestTextQuery : null;
   const isPathTrigger = composerTriggerKind === "path";
   const environmentThreadShells = useThreadShells(isPathTrigger);
-  // Mounts older settled threads matching the mention, which shells may leave out.
-  useThreadSearch(isPathTrigger ? [environmentId] : [], pathTriggerQuery, { titlesOnly: true });
+  const { environments } = useEnvironments();
+  const canReadEnvironment = useEnvironmentsWithScope(environments, AuthOrchestrationReadScope);
+  const destinationSupportsReferences = environments.some(
+    (environment) =>
+      environment.environmentId === environmentId &&
+      environment.connection.phase === "connected" &&
+      environment.serverConfig?.environment.capabilities.universalThreadReferences === true,
+  );
+  const mentionSources = environments.filter(
+    (environment) =>
+      environment.connection.phase === "connected" &&
+      canReadEnvironment.has(environment.environmentId) &&
+      environment.serverConfig?.environment.capabilities.universalThreadReferences === true &&
+      (environment.environmentId === environmentId || destinationSupportsReferences),
+  );
+  const allowedThreadEnvironments = new Set(
+    environments
+      .filter(
+        (environment) =>
+          environment.connection.phase === "connected" &&
+          canReadEnvironment.has(environment.environmentId) &&
+          (environment.environmentId === environmentId ||
+            (destinationSupportsReferences &&
+              environment.serverConfig?.environment.capabilities.universalThreadReferences ===
+                true)),
+      )
+      .map((environment) => environment.environmentId),
+  );
+  const environmentLabels = new Map(
+    environments.map((environment) => [environment.environmentId, environment.label] as const),
+  );
+  const mentionSearch = useThreadSearch(
+    isPathTrigger ? mentionSources.map(({ environmentId: id }) => id) : [],
+    pathTriggerQuery,
+    {
+      mode: "thread-mention",
+      titlesOnly: true,
+      environmentLabels: Object.fromEntries(environmentLabels),
+    },
+  );
+  const hasUnsearchedEnvironments = environments.some(
+    (environment) =>
+      environment.entry.enabled &&
+      !mentionSources.some((source) => source.environmentId === environment.environmentId),
+  );
   // The user's machines feed `@` machine matches; the catalog summary is cheap and stable.
   const environmentIdentities = useEnvironmentIdentities();
   const environmentMachines = useEnvironmentMachines();
@@ -191,8 +238,11 @@ export function useComposerMenuItems({
         ...matchComposerThreadItems({
           shells: environmentThreadShells,
           environmentId,
-          linkedEnvironments,
-          excludeThreadId: activeThreadId,
+          allowedEnvironmentIds: allowedThreadEnvironments,
+          environmentLabels,
+          excludeThread:
+            activeThreadId === null ? null : { environmentId, threadId: activeThreadId },
+          candidates: mentionSearch.mentionCandidates ?? [],
           query: composerTrigger.query,
           now,
         }),
@@ -385,6 +435,7 @@ export function useComposerMenuItems({
     return [];
   })();
   const isLoading =
+    (isPathTrigger && mentionSearch.isPending) ||
     (composerTriggerKind === "path" && pathTriggerQuery.length > 0 && workspaceEntries.isPending) ||
     (composerTriggerKind === "pull-request" &&
       pullRequestProjectId !== null &&
@@ -393,7 +444,18 @@ export function useComposerMenuItems({
         pullRequestTextQuery !== debouncedPullRequestTextQuery ||
         pullRequestTriggerNumber !== debouncedPullRequestNumber ||
         exactPullRequestLookup.isPending));
+  const searchStatus =
+    !isPathTrigger || pathTriggerQuery.length === 0
+      ? null
+      : pathTriggerQuery.trim().length < 2
+        ? "Type at least two characters to search more threads."
+        : hasUnsearchedEnvironments || (mentionSearch.mentionFailures?.length ?? 0) > 0
+          ? "Some environments could not be searched. Results may be incomplete."
+          : mentionSearch.mentionsTruncated
+            ? "More threads match than can be shown. Keep typing to narrow the results."
+            : null;
   const emptyState = (() => {
+    if (searchStatus !== null) return searchStatus;
     if (composerTriggerKind === "skill") {
       return "No skills found. Try / to browse provider commands.";
     }
@@ -416,5 +478,5 @@ export function useComposerMenuItems({
       : "No matching command.";
   })();
 
-  return { items, isLoading, emptyState };
+  return { items, isLoading, emptyState, searchStatus };
 }

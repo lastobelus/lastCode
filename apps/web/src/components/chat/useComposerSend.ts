@@ -1,3 +1,4 @@
+import { readUnavailableThreadReference } from "../../lib/composerThreadReferences";
 import type { useChatThreadAnnotation } from "../thread-annotation/useChatThreadAnnotation";
 import {
   mergeDirectPreviewAnnotation,
@@ -113,13 +114,9 @@ import {
 } from "../../lib/attachmentUploadQueue";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { fileAttachmentCapabilityBlockReason } from "./composerAttachmentFiles";
-import { useLinkedEnvironments } from "../../state/peerLinks";
 import { readEnvironmentScope } from "../../state/session";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
-import {
-  ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
-  threadContextsOutsideEnvironment,
-} from "@t3tools/shared/composerContextReferences";
+import { ATTACHMENT_ONLY_BOOTSTRAP_PROMPT } from "@t3tools/shared/composerContextReferences";
 import {
   draftSendState,
   type MultipleModelTarget,
@@ -344,7 +341,6 @@ export function useComposerSend(input: ComposerSendInput) {
     handleNewThreadInActiveProject,
     persistThreadSettingsForNextTurn,
   } = input;
-  const linkedEnvironments = useLinkedEnvironments(environmentId);
   const handleNewThread = useNewThreadHandler();
   const navigate = useNavigate();
   const clientSettingsHydrated = useClientSettingsHydrated();
@@ -470,10 +466,16 @@ export function useComposerSend(input: ComposerSendInput) {
         type: "warning",
         ...loadBalancingSendWarning({
           pending: loadBalancing.pending,
-          threadContexts: draft ? referencedThreadContexts(draft) : [],
-          candidateEnvironmentIds: logicalProjectEnvironments.map(
-            (candidate) => candidate.environmentId,
-          ),
+          hasReadableReferenceDestination:
+            !draft ||
+            logicalProjectEnvironments.some(
+              (candidate) =>
+                readUnavailableThreadReference(
+                  draft.prompt,
+                  referencedThreadContexts(draft),
+                  candidate.environmentId,
+                ) === undefined,
+            ),
         }),
       });
       return;
@@ -640,25 +642,35 @@ export function useComposerSend(input: ComposerSendInput) {
           previewAnnotationContextReference(directAnnotation.annotation),
         ])
       : promptRef.current;
-    const strandedThread = threadContextsOutsideEnvironment({
-      text: promptForSend,
-      records: composerThreadContexts,
-      environmentId,
-      linkedEnvironments,
-    })[0];
-    if (strandedThread) {
-      const owner =
-        readEnvironmentPresentation(strandedThread.environmentId)?.entry.target.label ??
-        "its machine";
-      toastManager.add(
-        stackedThreadToast({
-          type: "warning",
-          title: "Attached thread is on another machine",
-          description: `This machine's agent can't read "${strandedThread.title}". Remove it, or switch back to ${owner} to send.`,
-        }),
+    const referencesUnavailable = () => {
+      const unavailableThread = readUnavailableThreadReference(
+        promptForSend,
+        composerThreadContexts,
+        environmentId,
       );
-      return;
-    }
+      if (unavailableThread) {
+        const { record: strandedThread, reason } = unavailableThread;
+        const owner =
+          readEnvironmentPresentation(strandedThread.environmentId)?.entry.target.label ??
+          "its machine";
+        const recovery =
+          reason === "permission-denied"
+            ? `Check that you have read access to ${owner} and to the machine you're sending to.`
+            : reason === "unsupported"
+              ? `Check for server updates on ${owner} and the machine you're sending to.`
+              : `Check the connections to ${owner} and the machine you're sending to before sending.`;
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Attached thread is unavailable",
+            description: `${recovery} The reference is still in your draft.`,
+          }),
+        );
+        return true;
+      }
+      return false;
+    };
+    if (!queuedRunEdit.isEditing && referencesUnavailable()) return;
     if (queuedRunEdit.isEditing) {
       // Edit mode repurposes the composer: sending saves the queued message
       // in place instead of dispatching a new turn.
@@ -1041,6 +1053,11 @@ export function useComposerSend(input: ComposerSendInput) {
       await dockStarted;
     }
 
+    if (referencesUnavailable()) {
+      sendInFlightRef.current = false;
+      setDockedDraftHeroThreadKey((current) => (current === activeThreadKey ? null : current));
+      return;
+    }
     const attachmentCapabilitiesBeforeDispatch = readLiveAttachmentCapabilities();
     if (
       !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope) ||

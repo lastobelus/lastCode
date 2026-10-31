@@ -16,7 +16,8 @@ import {
   restoreAttachmentOnlyBootstrapPrompt,
   stripAttachmentOnlyBootstrapPrompt,
   threadContextRecord,
-  threadContextsOutsideEnvironment,
+  threadContextsUnavailableForDestination,
+  threadReferenceUnavailableReason,
   toComposerContextId,
   toKindScopedComposerContextId,
 } from "./composerContextReferences.ts";
@@ -323,8 +324,8 @@ describe("provider projection", () => {
   });
 });
 
-describe("threadContextsOutsideEnvironment", () => {
-  it("returns only referenced foreign threads, ignoring local and removed references", () => {
+describe("universal thread reference eligibility", () => {
+  it("checks only referenced threads against the final destination and keeps their recovery reason", () => {
     const local = {
       version: 1 as const,
       kind: "thread" as const,
@@ -348,51 +349,80 @@ describe("threadContextsOutsideEnvironment", () => {
     const records = [local, foreign, removed];
     const localReference = "[Local](t3-context://v1/thread/thread_local)";
 
+    const availability = new Map([
+      [
+        local.environmentId,
+        { connected: true, canRead: true, supportsUniversalThreadReferences: true },
+      ],
+      [
+        foreign.environmentId,
+        { connected: true, canRead: true, supportsUniversalThreadReferences: false },
+      ],
+    ]);
     expect(
-      threadContextsOutsideEnvironment({
+      threadContextsUnavailableForDestination({
         text: `${localReference} [Foreign](t3-context://v1/thread/thread_foreign)`,
         records,
-        environmentId: local.environmentId,
-        linkedEnvironments: new Map(),
+        destinationEnvironmentId: local.environmentId,
+        environments: availability,
       }),
-    ).toEqual([foreign]);
+    ).toEqual([{ record: foreign, reason: "unsupported" }]);
     expect(
-      threadContextsOutsideEnvironment({
+      threadContextsUnavailableForDestination({
         text: localReference,
         records,
-        environmentId: local.environmentId,
-        linkedEnvironments: new Map(),
+        destinationEnvironmentId: local.environmentId,
+        environments: availability,
       }),
     ).toEqual([]);
   });
 
-  it("lets a thread on a linked machine through, since the agent reads it there", () => {
-    const thread = {
+  it("distinguishes unavailable connection, read permission, and server support", () => {
+    const record = {
       version: 1 as const,
       kind: "thread" as const,
+      contextId: ctx("thread_foreign"),
       label: "Thread",
-      threadId: ThreadId.make("thread"),
+      environmentId: EnvironmentId.make("env-foreign"),
+      threadId: ThreadId.make("foreign"),
       title: "Thread",
     };
-    const linked = {
-      ...thread,
-      contextId: ctx("thread_linked"),
-      environmentId: EnvironmentId.make("env-linked"),
-    };
-    const unlinked = {
-      ...thread,
-      contextId: ctx("thread_unlinked"),
-      environmentId: EnvironmentId.make("env-unlinked"),
-    };
+    const destinationEnvironmentId = EnvironmentId.make("env-local");
+    const availability = (source: {
+      connected: boolean;
+      canRead: boolean;
+      supportsUniversalThreadReferences: boolean;
+    }) =>
+      new Map([
+        [
+          destinationEnvironmentId,
+          { connected: true, canRead: true, supportsUniversalThreadReferences: true },
+        ],
+        [record.environmentId, source],
+      ]);
 
     expect(
-      threadContextsOutsideEnvironment({
-        text: "[A](t3-context://v1/thread/thread_linked) [B](t3-context://v1/thread/thread_unlinked)",
-        records: [linked, unlinked],
-        environmentId: EnvironmentId.make("env-local"),
-        linkedEnvironments: new Map([[linked.environmentId, "VPS"]]),
+      threadReferenceUnavailableReason({
+        record,
+        destinationEnvironmentId,
+        environments: availability({
+          connected: false,
+          canRead: true,
+          supportsUniversalThreadReferences: true,
+        }),
       }),
-    ).toEqual([unlinked]);
+    ).toBe("disconnected");
+    expect(
+      threadReferenceUnavailableReason({
+        record,
+        destinationEnvironmentId,
+        environments: availability({
+          connected: true,
+          canRead: false,
+          supportsUniversalThreadReferences: true,
+        }),
+      }),
+    ).toBe("permission-denied");
   });
 });
 

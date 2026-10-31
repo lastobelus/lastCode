@@ -1,16 +1,54 @@
 import { describe, expect, it, vi } from "vite-plus/test";
-import { ProviderDriverKind } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProjectId,
+  ProviderDriverKind,
+  ThreadId,
+  type OrchestrationMessageContext,
+} from "@t3tools/contracts";
+import type { EnvironmentThreadMentionCandidate } from "@t3tools/client-runtime/state/thread-search";
+
+const selection = vi.hoisted(() => ({
+  candidates: [] as EnvironmentThreadMentionCandidate[],
+  text: "",
+  context: { version: 1, records: [] } as OrchestrationMessageContext,
+}));
+vi.mock("react", () => ({
+  useEffect: () => {},
+  useState: <A>(initial: A | (() => A)) => [
+    typeof initial === "function" ? (initial as () => A)() : initial,
+    vi.fn(),
+  ],
+}));
+vi.mock("@effect/atom-react", () => ({ useAtomRefresh: () => () => {} }));
 
 vi.mock("react-native", () => ({ Alert: { alert: vi.fn() } }));
+vi.mock("../../state/environments", () => ({
+  useEnvironments: () => ({
+    environments: ["local", "remote"].map((environmentId) => ({
+      environmentId,
+      label: environmentId,
+      entry: { enabled: true },
+      connection: { phase: "connected" },
+      serverConfig: { environment: { capabilities: { universalThreadReferences: true } } },
+    })),
+  }),
+}));
+vi.mock("../../state/session", () => ({
+  useEnvironmentsWithScope: () => new Set(["local", "remote"]),
+}));
 
 vi.mock("../../state/queries", () => ({
   useComposerPathSearch: () => ({ entries: [], isPending: false }),
   useComposerPullRequestSearch: () => ({ entries: [], isPending: false, error: null }),
+  useThreadSearch: () => ({ mentionCandidates: selection.candidates, isPending: false }),
 }));
 vi.mock("../../state/use-composer-drafts", () => ({
-  getComposerDraftSnapshot: vi.fn(),
-  setComposerDraftContext: vi.fn(),
-  useComposerDraftSelection: vi.fn(),
+  getComposerDraftSnapshot: () => ({ context: selection.context }),
+  setComposerDraftContext: (_key: string, context: OrchestrationMessageContext) => {
+    selection.context = context;
+  },
+  useComposerDraftSelection: () => null,
 }));
 vi.mock("../../lib/uuid", () => ({ uuidv4: () => "context-id" }));
 vi.mock("../../state/server", () => ({
@@ -24,7 +62,61 @@ import {
   buildComposerSlashCommandItems,
   resolveComposerCommandSelection,
   resolveComposerMenuSelection,
+  useComposerCommandMenu,
 } from "./use-composer-command-menu";
+
+it("selects an archived search-only thread into the draft without a cached shell", () => {
+  selection.text = "Look @arch";
+  selection.context = { version: 1, records: [] };
+  selection.candidates = [
+    {
+      environmentId: EnvironmentId.make("remote"),
+      id: ThreadId.make("archived"),
+      projectId: ProjectId.make("project"),
+      projectTitle: "Project",
+      title: "Archived conversation",
+      searchPullRequests: [],
+      branch: null,
+      opens: null,
+      createdAt: "2026-10-01T00:00:00Z",
+      updatedAt: "2026-10-01T00:00:00Z",
+      latestUserMessageAt: null,
+      archivedAt: "2026-10-02T00:00:00Z",
+      lineage: {
+        rootThreadId: ThreadId.make("archived"),
+        parentThreadId: null,
+        relationshipToParent: null,
+      },
+    },
+  ];
+  const menu = useComposerCommandMenu({
+    draftMessage: selection.text,
+    ownerKey: "draft",
+    environmentId: EnvironmentId.make("local"),
+    threadShells: [],
+    projectCwd: null,
+    selectedProviderStatus: null,
+    hasThread: true,
+    hasCompactableConversation: false,
+    onChangeDraftMessage: (text) => {
+      selection.text = text;
+    },
+  });
+  const item = menu.items.find((candidate) => candidate.type === "thread");
+  expect(item).toBeDefined();
+  if (!item) throw new Error("Expected the search-only candidate");
+  menu.onSelect(item);
+  expect(selection.context.records).toMatchObject([
+    {
+      kind: "thread",
+      environmentId: "remote",
+      threadId: "archived",
+      title: "Archived conversation",
+    },
+  ]);
+  expect(selection.text).toContain("t3-context://v1/thread/");
+  expect(selection.text).not.toContain("@arch");
+});
 
 describe("resolveComposerMenuSelection", () => {
   it("prefers the caret an insertion placed in the current draft text", () => {

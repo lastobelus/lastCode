@@ -11,7 +11,11 @@ import {
   ThreadWorktreeCleanup,
 } from "./threadMetadata.ts";
 export * from "./threadMetadata.ts";
-import { OrchestrationMessageContext } from "./composerContext.ts";
+import {
+  COMPOSER_CONTEXT_MAX_RECORDS,
+  OrchestrationMessageContext,
+  ThreadContextRecord,
+} from "./composerContext.ts";
 import { withRecordIdTable } from "./orchestrationV2IdTable.ts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -52,6 +56,7 @@ import {
   ScheduledTaskId,
   ThreadId,
   TrimmedNonEmptyString,
+  TrimmedString,
   TurnItemId,
 } from "./baseSchemas.ts";
 import { AuthMcpClientAccess } from "./auth.ts";
@@ -60,6 +65,7 @@ import { ThreadGuestShare } from "./guestShare.ts";
 import {
   OrchestrationSearchThreadsInput,
   OrchestrationSearchThreadsResult,
+  THREAD_SEARCH_QUERY_MAX_LENGTH,
 } from "./threadSearch.ts";
 import {
   OrchestrationGetFullThreadDiffInput,
@@ -1319,6 +1325,14 @@ export const OrchestrationV2RuntimeRequest = Schema.Struct({
   decision: Schema.optional(ProviderApprovalDecision),
   feedback: Schema.optional(Schema.String),
   answers: Schema.optional(ProviderUserInputAnswers),
+  threadReadContext: Schema.optional(
+    Schema.Struct({
+      authorizationId: MessageId,
+      records: Schema.Array(ThreadContextRecord).check(
+        Schema.isMaxLength(COMPOSER_CONTEXT_MAX_RECORDS),
+      ),
+    }),
+  ),
 });
 export type OrchestrationV2RuntimeRequest = typeof OrchestrationV2RuntimeRequest.Type;
 
@@ -1405,6 +1419,12 @@ export const OrchestrationV2ConversationMessage = Schema.Struct({
   role: Schema.Literals(["user", "assistant", "system"]),
   text: Schema.String,
   context: Schema.optional(OrchestrationMessageContext),
+  threadReadContext: Schema.optional(
+    Schema.Struct({
+      authorizationId: MessageId,
+      capturedAt: NonNegativeInt,
+    }),
+  ),
   attachments: Schema.Array(ChatAttachment),
   streaming: Schema.Boolean,
   createdAt: Schema.DateTimeUtc,
@@ -3480,6 +3500,9 @@ export const OrchestrationV2Command = Schema.Union([
     decision: Schema.optional(ProviderApprovalDecision),
     feedback: Schema.optional(Schema.String),
     answers: Schema.optional(ProviderUserInputAnswers),
+    contextsByQuestionId: Schema.optional(
+      Schema.Record(Schema.String, OrchestrationMessageContext),
+    ),
     attachmentsByQuestionId: Schema.optional(UserInputAttachments),
   }),
   Schema.Struct({
@@ -4006,19 +4029,62 @@ export type OrchestrationV2GetWorktreeThreadIdsInput =
  */
 export const OrchestrationV2SearchThreadsInput = Schema.Struct({
   ...OrchestrationSearchThreadsInput.fields,
+  query: TrimmedString.check(Schema.isMaxLength(THREAD_SEARCH_QUERY_MAX_LENGTH)),
+  /** Searches referenceable thread metadata independently of sidebar cutoffs. */
+  mode: Schema.optionalKey(Schema.Literal("thread-mention")),
+  /** Exact metadata lookup used to restore references whose shells are not loaded. */
+  threadIds: Schema.optionalKey(
+    Schema.Array(ThreadId).check(Schema.isMinLength(1), Schema.isMaxLength(20)),
+  ),
   olderSettledBefore: Schema.optionalKey(IsoDateTime),
   projectIds: Schema.optionalKey(Schema.Array(ProjectId)),
   /** The client's name for this environment, which its own ranking also matches. */
   environmentLabel: Schema.optionalKey(Schema.String),
   /** Skips message search, for pickers that match titles only. */
   titlesOnly: Schema.optionalKey(Schema.Boolean),
-});
+}).check(
+  Schema.makeFilter((input) => {
+    if (input.mode === "thread-mention") {
+      return (
+        (input.threadIds === undefined && input.query.length >= 2) ||
+        (input.threadIds !== undefined && input.query.length === 0)
+      );
+    }
+    return input.threadIds === undefined && input.query.length >= 2;
+  }),
+);
 export type OrchestrationV2SearchThreadsInput = typeof OrchestrationV2SearchThreadsInput.Type;
+
+/** Lightweight data needed to display and rank a thread reference candidate. */
+export const OrchestrationV2ThreadMentionCandidate = Schema.Struct({
+  id: ThreadId,
+  projectId: ProjectId,
+  projectTitle: Schema.String,
+  title: Schema.String,
+  branch: Schema.NullOr(TrimmedNonEmptyString),
+  searchPullRequests: Schema.Array(
+    Schema.Struct({
+      number: PositiveInt,
+      title: Schema.NullOr(Schema.String),
+      references: Schema.Array(Schema.String),
+    }),
+  ),
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+  latestUserMessageAt: Schema.NullOr(IsoDateTime),
+  opens: Schema.NullOr(OrchestrationV2ThreadOpens),
+  archivedAt: Schema.NullOr(IsoDateTime),
+  lineage: OrchestrationV2AppThreadLineage,
+});
+export type OrchestrationV2ThreadMentionCandidate =
+  typeof OrchestrationV2ThreadMentionCandidate.Type;
 
 export const OrchestrationV2SearchThreadsResult = Schema.Struct({
   ...OrchestrationSearchThreadsResult.fields,
   snapshotSequence: Schema.optionalKey(NonNegativeInt),
   threads: Schema.optionalKey(Schema.Array(OrchestrationV2ThreadShell)),
+  mentionCandidates: Schema.optionalKey(Schema.Array(OrchestrationV2ThreadMentionCandidate)),
+  mentionsTruncated: Schema.optionalKey(Schema.Boolean),
 });
 export type OrchestrationV2SearchThreadsResult = typeof OrchestrationV2SearchThreadsResult.Type;
 

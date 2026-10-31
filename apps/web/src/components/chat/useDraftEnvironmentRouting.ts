@@ -12,7 +12,10 @@ import {
   ProviderInstanceId,
   resolveProjectProviderInstanceEnabled,
   type ThreadContextRecord,
+  AuthOrchestrationReadScope,
 } from "@t3tools/contracts";
+import { threadReferenceUnavailableReason } from "@t3tools/shared/composerContextReferences";
+import { useEnvironmentsWithScope } from "../../state/session";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { toastManager } from "../ui/toast";
@@ -78,12 +81,32 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
   const allProjects = useProjects();
   const { openScratchProject } = useScratchProject();
   const needsLoadBalancing = automaticEnvironment && !draftThread?.loadBalancedEnvironmentId;
+  const readableEnvironments = useEnvironmentsWithScope(
+    [...environmentById.values()],
+    AuthOrchestrationReadScope,
+  );
+  const referenceAvailability = new Map(
+    [...environmentById].map(([id, environment]) => [
+      id,
+      {
+        connected: environment.connection.phase === "connected",
+        canRead: readableEnvironments.has(id),
+        supportsUniversalThreadReferences:
+          environment.serverConfig?.environment.capabilities.universalThreadReferences === true,
+      },
+    ]),
+  );
   const loadBalancingHosts = (() =>
     needsLoadBalancing
       ? logicalProjectEnvironments
           .filter((candidate) =>
             referencedThreadContexts.every(
-              (record) => record.environmentId === candidate.environmentId,
+              (record) =>
+                threadReferenceUnavailableReason({
+                  record,
+                  destinationEnvironmentId: candidate.environmentId,
+                  environments: referenceAvailability,
+                }) === null,
             ),
           )
           .map((candidate) => {
