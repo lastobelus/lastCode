@@ -4,12 +4,20 @@ import {
   type OrchestrationV2ServerCommand,
 } from "@t3tools/contracts";
 
-const releaseCommandFields = new Set(["type", "commandId", "threadId", "creatorGrouping"]);
+const releaseCommandFields = new Set([
+  "type",
+  "commandId",
+  "threadId",
+  "creatorGrouping",
+  "groupedUnderThreadId",
+]);
 
-export function isCreatorGroupingReleaseCommand(command: OrchestrationV2ServerCommand): boolean {
+export function isThreadPlacementReleaseCommand(command: OrchestrationV2ServerCommand): boolean {
   return (
     command.type === "thread.metadata.update" &&
-    command.creatorGrouping === "independent" &&
+    (command.creatorGrouping === "independent" || command.groupedUnderThreadId === null) &&
+    (command.creatorGrouping === undefined || command.creatorGrouping === "independent") &&
+    (command.groupedUnderThreadId === undefined || command.groupedUnderThreadId === null) &&
     Object.keys(command).every((key) => releaseCommandFields.has(key))
   );
 }

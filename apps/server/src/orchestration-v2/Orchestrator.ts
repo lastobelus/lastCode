@@ -199,7 +199,7 @@ import {
 } from "./ThreadForkService.ts";
 import { planThreadDeletion, threadTerminalSessionTargets } from "./ThreadDeletion.ts";
 import {
-  isCreatorGroupingReleaseCommand,
+  isThreadPlacementReleaseCommand,
   isGroupedCreatorThread,
   releaseCreatorGrouping,
 } from "./CreatorGrouping.ts";
@@ -3725,7 +3725,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         isOwnedSubagentThread(thread) ||
         isProviderNativeSubagentThread(thread) ||
         (thread.archivedAt !== null && command.groupedUnderThreadId !== null) ||
-        thread.archivePending != null
+        (thread.archivePending != null && !isThreadPlacementReleaseCommand(command))
       )
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
@@ -4360,7 +4360,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                     requestId: command.commandId,
                   };
           return {
-            ...thread,
+            ...(command.groupedUnderThreadId === null ? releaseCreatorGrouping(thread) : thread),
             ...placement,
             ...(command.actionResume === undefined ? {} : { actionResume: command.actionResume }),
             ...(command.workspaceUserAdopted === true ? { workspaceUserAdopted: true } : {}),
@@ -15077,7 +15077,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     });
 
     const allowedWhileArchiving =
-      isCreatorGroupingReleaseCommand(command) ||
+      isThreadPlacementReleaseCommand(command) ||
       command.type === "thread.stop" ||
       command.type === "thread.visit" ||
       command.type === "thread.archive.complete" ||
