@@ -367,9 +367,10 @@ const make = Effect.gen(function* () {
     input: ActionResumeState,
     outputTail?: string,
     publishShell = true,
+    taskOutcome?: "interrupted",
   ) {
     if (input.owner !== undefined && input.delivery === "disposed") {
-      yield* threads.disposeActionObligation(input.threadId, input.owner, input.runId);
+      yield* threads.disposeActionObligation(input.threadId, input.owner, input.runId, taskOutcome);
     }
     const previous = registry.getLatest(input.threadId);
     const state: ActionResumeState = {
@@ -914,10 +915,7 @@ const make = Effect.gen(function* () {
               child !== null &&
               child.lineage.independent !== true &&
               (child.lineage.relationshipToParent === "subagent" ||
-                child.remoteDelegations?.some(
-                  (association) =>
-                    association.stage === "prepared" || association.stage === "active",
-                ) === true);
+                (child.remoteDelegations?.length ?? 0) > 0);
             if (delegated && invocation.source === undefined) {
               return yield* new ActionResumeError({
                 reason: "internal_error",
@@ -1290,7 +1288,7 @@ const make = Effect.gen(function* () {
             message: "This thread has no interrupted Action follow-up to discard.",
           });
         }
-        yield* persistState({ ...current, delivery: "disposed" });
+        yield* persistState({ ...current, delivery: "disposed" }, undefined, true, "interrupted");
         outputCaptureByRunId.delete(current.runId);
         protocolCaptureByRunId.delete(current.runId);
       }),
