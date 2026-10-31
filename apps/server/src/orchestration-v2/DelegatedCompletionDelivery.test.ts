@@ -3705,7 +3705,7 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
         yield* Deferred.await(written);
         yield* sink.write({
           events: [
-            ...(round.endsWith("discard")
+            ...(round.endsWith("discard") || round.endsWith("stop-before")
               ? [
                   {
                     id: EventId.make(`action-wait-message-${round}`),
@@ -3875,6 +3875,18 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
           yield* actions.retryPendingFollowUps;
           const retained = yield* store.get(childThreadId, action.runId);
           assert.equal(retained._tag === "Some" ? retained.value.state.delivery : null, "disposed");
+          const stoppedTask = (yield* orchestrator.getThreadProjection(
+            parentThreadId,
+          )).subagents.find((task) => task.id === taskId)!;
+          assert.equal(stoppedTask.status, "interrupted");
+          assert.equal(stoppedTask.result, "Child task ended with status interrupted.");
+          if (round.startsWith("later"))
+            assert.equal(
+              (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+                (task) => task.id === first.id,
+              )?.status,
+              "completed",
+            );
           return;
         }
         const continuation = continued.runs.find(

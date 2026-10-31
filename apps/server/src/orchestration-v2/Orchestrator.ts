@@ -12326,6 +12326,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           occurredAt: input.now,
           payload: {
             ...run,
+            ...(delegatedTaskTerminalStatus(run.status) === null
+              ? {}
+              : { status: "interrupted" as const, completedAt: input.now }),
             actionObligations: run.actionObligations.map((row) =>
               row.state === "waiting" ? { ...row, state: "disposed" as const } : row,
             ),
