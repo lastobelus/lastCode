@@ -16114,7 +16114,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 .filter(
                   (event) =>
                     event.type !== "thread.metadata-updated" ||
-                    event.payload.creatorGrouping !== "independent",
+                    event.payload.groupedUnderThreadId !== null,
                 )
                 .map((event) => event.threadId),
             );
