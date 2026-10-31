@@ -355,8 +355,11 @@ const cleanupFixture = (
     const command = (cwd: string, args: string[]) =>
       git.execute({ operation: "cleanup-test", cwd, args });
     yield* command(repo, ["init", "-b", "main"]);
-    yield* command(repo, ["config", "user.email", "cleanup@example.test"]);
-    yield* command(repo, ["config", "user.name", "Cleanup test"]);
+    yield* fs.writeFileString(
+      `${repo}/.git/config`,
+      "\n[user]\n\temail = cleanup@example.test\n\tname = Cleanup test\n",
+      { flag: "a" },
+    );
     const globalExcludes = `${baseDir}/empty-global-excludes`;
     yield* fs.writeFileString(globalExcludes, "");
     yield* command(repo, ["config", "core.excludesFile", globalExcludes]);

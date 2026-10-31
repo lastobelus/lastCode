@@ -17,14 +17,11 @@ import {
   runGit,
 } from "./lastcode-local-ci.ts";
 import { type GithubCiEvidence, readGithubCi } from "./lastcode-github-ci.ts";
+import { readReviewData, validateReviewForMerge } from "./lastcode-pr-gates.ts";
 import { acquireMainWriteLock } from "./lastcode-main-write-lock.ts";
-import {
-  carrySquashBody,
-  preserveCarrySource,
-  shouldRetainCarrySources,
-  validateCarrySourceRange,
-  type CarryReplayManifest,
-} from "./lastcode-carry-delivery.ts";
+import { carrySquashBody, preserveCarrySource } from "./lastcode-carry-delivery.ts";
+
+import { validateCarryPullRequest } from "./lastcode-carry-ci.ts";
 
 const LASTCODE_GITHUB_REPOSITORY = process.env.LASTCODE_GITHUB_REPOSITORY ?? "lastobelus/lastCode";
 
@@ -39,11 +36,6 @@ export interface PullRequestForMerge {
   readonly baseRefOid: string;
   readonly mergeable: string;
   readonly mergeStateStatus: string;
-}
-
-function readCarryReplayManifest(repoRoot: string): CarryReplayManifest {
-  const path = NodePath.join(repoRoot, "scripts", "lastcode-carry-set.json");
-  return JSON.parse(NodeFS.readFileSync(path, "utf8")) as CarryReplayManifest;
 }
 
 function writeSquashBody(body: string): { readonly cleanup: () => void; readonly path: string } {
@@ -101,7 +93,7 @@ export function validateGithubCiForMerge(evidence: GithubCiEvidence): {
     throw new Error(`GitHub CI is not merge-ready: ${evidence.detail}`);
   }
   throw new Error(
-    `GitHub CI is not merge-ready (${evidence.state}/${evidence.reason}); run Wait for PR again.`,
+    `GitHub CI is not merge-ready (${evidence.state}/${evidence.reason}); check again with pnpm lastcode:pr-gates once CI settles.`,
   );
 }
 
@@ -226,6 +218,11 @@ function main(argv: ReadonlyArray<string>): void {
     <T>(args: ReadonlyArray<string>): T => runGhJson<T>(repoRoot, args),
   );
   const validatedGithubCi = validateGithubCiForMerge(githubCi);
+  validateReviewForMerge(
+    readReviewData(LASTCODE_GITHUB_REPOSITORY, pullRequest, <T>(args: ReadonlyArray<string>): T =>
+      runGhJson<T>(repoRoot, args),
+    ),
+  );
 
   runCommand(repoRoot, "git", ["fetch", LASTCODE_ORIGIN_REMOTE, LASTCODE_BASE_BRANCH]);
   assertMergeBaseUnchanged(repoRoot, baseCommit, "while validating GitHub CI");
@@ -236,9 +233,17 @@ function main(argv: ReadonlyArray<string>): void {
     );
   }
   validatePullRequestForMerge(confirmedPullRequest, commit, baseCommit);
-  const carrySource = shouldRetainCarrySources(readCarryReplayManifest(repoRoot))
-    ? validateCarrySourceRange(repoRoot, pullRequest.number, baseCommit, commit)
-    : undefined;
+  runCommand(repoRoot, "git", [
+    "fetch",
+    "--no-tags",
+    LASTCODE_ORIGIN_REMOTE,
+    "refs/lastcode/carry-sources/*:refs/lastcode/carry-sources/*",
+  ]);
+  const carrySource = validateCarryPullRequest(repoRoot, {
+    number: pullRequest.number,
+    base: baseCommit,
+    head: commit,
+  }).source;
 
   if (dryRun) {
     console.log(
@@ -260,6 +265,13 @@ function main(argv: ReadonlyArray<string>): void {
     validatePullRequestForMerge(lockedPullRequest, commit, baseCommit);
     validateGithubCiForMerge(
       readGithubCi(
+        LASTCODE_GITHUB_REPOSITORY,
+        lockedPullRequest,
+        <T>(args: ReadonlyArray<string>): T => runGhJson<T>(repoRoot, args),
+      ),
+    );
+    validateReviewForMerge(
+      readReviewData(
         LASTCODE_GITHUB_REPOSITORY,
         lockedPullRequest,
         <T>(args: ReadonlyArray<string>): T => runGhJson<T>(repoRoot, args),

@@ -248,7 +248,6 @@ describe("openUrlInPreview from a link", () => {
 
     expect(readThreadPreviewState(threadRef).activeTabId).toBe(snapshot.tabId);
   });
-
 });
 
 it.each(
