@@ -4,6 +4,7 @@ import {
   ModelSelection,
   TrimmedNonEmptyString,
   ThreadId,
+  RemoteDelegationSelector,
   RunId,
   OrchestrationV2DelegatedFrom,
   OrchestrationV2RunStatus,
@@ -150,12 +151,21 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
     /** Set by a linked environment launching its agent's delegated task here; ignored otherwise. */
     delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
+    remotePreparation: Schema.optional(
+      Schema.Struct({
+        parentEnvironmentId: RemoteDelegationSelector.fields.parentEnvironmentId,
+        parentThreadId: ThreadId,
+        sourceTaskId: RemoteDelegationSelector.fields.sourceTaskId,
+        existingThreadId: Schema.optional(ThreadId),
+      }),
+    ),
   }),
   success: Schema.Struct({
     threadId: ThreadId,
     link: Schema.optional(Schema.String),
     projectId: ProjectId,
     modelSelection: ModelSelection,
+    delegation: Schema.optional(RemoteDelegationSelector),
     runId: Schema.NullOr(RunId),
     status: Schema.NullOr(OrchestrationV2RunStatus),
   }),

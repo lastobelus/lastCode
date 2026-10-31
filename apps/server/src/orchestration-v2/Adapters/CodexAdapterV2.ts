@@ -1998,6 +1998,17 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             runningCompactionItemIds: new Set(),
           };
           const nativeThreadId = input.turnInput.providerThread.nativeThreadRef?.nativeId;
+          if (nativeThreadId != null) {
+            yield* mcpSessions.registerExecution(
+              input.turnInput.threadId,
+              {
+                provider: "codex",
+                nativeThreadId,
+                nativeTurnId: input.nativeTurnId,
+              },
+              { runId: input.turnInput.runId, attemptId: input.turnInput.attemptId },
+            );
+          }
           const continuation =
             nativeThreadId == null ? undefined : capacityContinuations.get(nativeThreadId);
           if (continuation !== undefined) {
@@ -5692,6 +5703,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   },
                 }
               : event;
+          yield* mcpSessions.endExecution(context.input.threadId, {
+            runId: context.input.runId,
+            attemptId: context.input.attemptId,
+          });
           yield* emitProviderEvent(current);
           const continued = continuedRuns.get(context.providerTurnId) ?? [context];
           if (current.status !== "completed") {
@@ -6547,15 +6562,18 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               else next.delete(threadId);
               return next;
             });
-            const started = yield* client.request("turn/start", turnStartParams);
-            // A turn/started notification may have registered and completed this turn already.
-            if ((yield* Ref.get(pendingRootTurns)).get(threadId) !== turnInput) return;
-            yield* registerRootTurn({
-              turnInput,
-              nativeTurnId: started.turn.id,
-              startedAt: codexTimestamp(started.turn.startedAt),
-              waitForNativeStart: started.turn.startedAt === null,
-            });
+            const releaseOrigin = yield* mcpSessions.beginCodexTurn(turnInput.threadId, threadId);
+            yield* Effect.gen(function* () {
+              const started = yield* client.request("turn/start", turnStartParams);
+              // A turn/started notification may have registered and completed this turn already.
+              if ((yield* Ref.get(pendingRootTurns)).get(threadId) !== turnInput) return;
+              yield* registerRootTurn({
+                turnInput,
+                nativeTurnId: started.turn.id,
+                startedAt: codexTimestamp(started.turn.startedAt),
+                waitForNativeStart: started.turn.startedAt === null,
+              });
+            }).pipe(Effect.ensuring(releaseOrigin));
           },
           (effect, turnInput) =>
             effect.pipe(

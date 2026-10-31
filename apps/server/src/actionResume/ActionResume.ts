@@ -4,6 +4,7 @@ import {
   ActionResumeError,
   ActionRunInspection,
   type ActionRunSummary,
+  type ActionResumeSource,
   CommandId,
   MessageId,
   type OrchestrationProjectShell,
@@ -46,6 +47,10 @@ import * as TerminalManager from "../terminal/Manager.ts";
 import * as ShellReadiness from "../terminal/shellReadiness.ts";
 import * as WorkspaceAcquisition from "../workspace/WorkspaceAcquisition.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
+import {
+  ActionContinuationAuthorization,
+  OrchestratorProjectionError,
+} from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as CommandReceipts from "../orchestration-v2/CommandReceiptStore.ts";
@@ -68,6 +73,7 @@ export interface ListedProjectAction {
 export interface ActionResumeInvocation {
   readonly threadId: ThreadId;
   readonly providerInstanceId: ProviderInstanceId;
+  readonly source?: ActionResumeSource;
 }
 
 interface FinishActionInput {
@@ -361,7 +367,11 @@ const make = Effect.gen(function* () {
     input: ActionResumeState,
     outputTail?: string,
     publishShell = true,
+    taskOutcome?: "interrupted",
   ) {
+    if (input.owner !== undefined && input.delivery === "disposed") {
+      yield* threads.disposeActionObligation(input.threadId, input.owner, input.runId, taskOutcome);
+    }
     const previous = registry.getLatest(input.threadId);
     const state: ActionResumeState = {
       ...input,
@@ -546,6 +556,44 @@ const make = Effect.gen(function* () {
       protocolCaptureByRunId.delete(state.runId);
       return;
     }
+    if (state.owner !== undefined) {
+      const owner = state.owner;
+      const child = yield* threads.getThreadRecords(threadId, ["runs"]);
+      const source = child.runs.find((run) => run.id === owner.sourceRunId);
+      const obligation = source?.actionObligations?.find((row) => row.actionRunId === state.runId);
+      let live = obligation?.state === "waiting";
+      if (owner.delegationId !== undefined) {
+        const selector = source?.remoteDelegation;
+        const association = child.thread.remoteDelegations?.find(
+          (entry) =>
+            entry.delegationId === owner.delegationId &&
+            entry.sourceTaskId === owner.taskId &&
+            entry.parentThreadId === owner.parentThreadId &&
+            entry.parentEnvironmentId === owner.parentEnvironmentId,
+        );
+        live =
+          live &&
+          selector?.delegationId === owner.delegationId &&
+          selector.sourceTaskId === owner.taskId &&
+          selector.parentThreadId === owner.parentThreadId &&
+          selector.parentEnvironmentId === owner.parentEnvironmentId &&
+          association?.stage === "active" &&
+          association.linkSessionId === child.thread.linkOrigin?.sessionId;
+      } else {
+        const parent = yield* threads.getThreadRecords(owner.parentThreadId, ["subagents"]);
+        const task = parent.subagents.find((row) => row.id === owner.taskId);
+        live =
+          live &&
+          task !== undefined &&
+          task.ownershipReleased !== true &&
+          task.result === null &&
+          !["completed", "failed", "cancelled", "interrupted"].includes(task.status);
+      }
+      if (!live) {
+        yield* persistState({ ...state, delivery: "disposed" });
+        return;
+      }
+    }
     const thread = yield* eligibleThreadForFollowUp(threadId);
     if (thread === null) return;
     const retained = yield* runs.get(threadId, state.runId);
@@ -567,18 +615,23 @@ const make = Effect.gen(function* () {
 
     const commandId = CommandId.make(`server:action-resume:${state.runId}:delivery`);
     const messageId = MessageId.make(`action-resume:${state.runId}:follow-up`);
-    yield* threads.dispatch({
-      type: "message.dispatch",
-      commandId,
-      threadId,
-      messageId,
-      text: followUpText(state, outputTail),
-      attachments: [],
-      createdBy: "system",
-      creationSource: "server",
-      // The orchestrator queues paused automatic wakes without starting a provider.
-      dispatchMode: { type: "queue_after_active" },
-    });
+    yield* threads
+      .dispatch({
+        type: "message.dispatch",
+        commandId,
+        threadId,
+        messageId,
+        text: followUpText(state, outputTail),
+        attachments: [],
+        createdBy: "system",
+        creationSource: "server",
+        ...(state.owner === undefined
+          ? {}
+          : { actionContinuation: { actionRunId: state.runId, owner: state.owner } }),
+        // The orchestrator queues paused automatic wakes without starting a provider.
+        dispatchMode: { type: "queue_after_active" },
+      })
+      .pipe(Effect.provideService(ActionContinuationAuthorization, state.runId));
     yield* persistState({ ...state, delivery: "delivered" });
     outputCaptureByRunId.delete(state.runId);
     protocolCaptureByRunId.delete(state.runId);
@@ -857,7 +910,20 @@ const make = Effect.gen(function* () {
             const terminalId = `action-${runId}`;
             const eventToken = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
             const startedAt = yield* nowIso;
-            const state: ActionResumeState = {
+            const child = yield* threads.getThreadShell(invocation.threadId);
+            const delegated =
+              child !== null &&
+              child.lineage.independent !== true &&
+              (child.lineage.relationshipToParent === "subagent" ||
+                (child.remoteDelegations?.length ?? 0) > 0);
+            if (delegated && invocation.source === undefined) {
+              return yield* new ActionResumeError({
+                reason: "internal_error",
+                message:
+                  "This Action call couldn't be matched to your current task turn, so the Action didn't start. End your turn with a handoff request so your parent can launch it.",
+              });
+            }
+            let state: ActionResumeState = {
               runId,
               threadId: invocation.threadId,
               projectId: project.id,
@@ -873,6 +939,30 @@ const make = Effect.gen(function* () {
               exitSignal: null,
               revision: 0,
             };
+            if (invocation.source !== undefined) {
+              const owner = yield* threads.reserveActionObligation({
+                threadId: invocation.threadId,
+                source: invocation.source,
+                actionRunId: runId,
+                persistOwner: (owner) =>
+                  runs
+                    .save({ ...state, owner })
+                    .pipe(
+                      Effect.mapError(
+                        (cause) =>
+                          new OrchestratorProjectionError({ threadId: invocation.threadId, cause }),
+                      ),
+                    ),
+              });
+              if (delegated && owner === undefined) {
+                return yield* new ActionResumeError({
+                  reason: "internal_error",
+                  message:
+                    "This task can't own an Action in this environment, so the Action didn't start. End your turn with a handoff request so your parent can launch it.",
+                });
+              }
+              if (owner !== undefined) state = { ...state, owner };
+            }
             const cwd = acquired.path;
             const env = projectScriptRuntimeEnv({
               project: { cwd: project.workspaceRoot },
@@ -925,19 +1015,26 @@ const make = Effect.gen(function* () {
               startups.delete(runId);
               stagedTerminals.delete(terminalId);
             };
+            const guardedStart = <A, E>(effect: Effect.Effect<A, E>) =>
+              state.owner === undefined
+                ? effect
+                : threads.withActionObligation(state.threadId, state.owner, state.runId, effect);
             const launch = Effect.gen(function* () {
-              const terminal = yield* terminals.open({
-                threadId: invocation.threadId,
-                terminalId,
-                cwd,
-                ...(script.terminalLinkProfileName === undefined
-                  ? {}
-                  : { terminalLinkProfileName: script.terminalLinkProfileName }),
-                worktreePath,
-                env,
-                cols: 120,
-                rows: 30,
-              });
+              if (state.owner !== undefined) yield* persistState(state);
+              const terminal = yield* guardedStart(
+                terminals.open({
+                  threadId: invocation.threadId,
+                  terminalId,
+                  cwd,
+                  ...(script.terminalLinkProfileName === undefined
+                    ? {}
+                    : { terminalLinkProfileName: script.terminalLinkProfileName }),
+                  worktreePath,
+                  env,
+                  cols: 120,
+                  rows: 30,
+                }),
+              );
               terminalPid = terminal.pid;
               if (terminal.status !== "running") {
                 return yield* Effect.die("Action terminal exited during launch.");
@@ -975,11 +1072,17 @@ const make = Effect.gen(function* () {
                             message: "The originating thread is archiving.",
                           });
                         startup.written = true;
-                        yield* terminals.write({
-                          threadId: state.threadId,
-                          terminalId,
-                          data: actionCommandForShell(script.command, terminal.shellFamily, runId),
-                        });
+                        yield* guardedStart(
+                          terminals.write({
+                            threadId: state.threadId,
+                            terminalId,
+                            data: actionCommandForShell(
+                              script.command,
+                              terminal.shellFamily,
+                              runId,
+                            ),
+                          }),
+                        );
                         return true;
                       }),
                     ),
@@ -1185,7 +1288,7 @@ const make = Effect.gen(function* () {
             message: "This thread has no interrupted Action follow-up to discard.",
           });
         }
-        yield* persistState({ ...current, delivery: "disposed" });
+        yield* persistState({ ...current, delivery: "disposed" }, undefined, true, "interrupted");
         outputCaptureByRunId.delete(current.runId);
         protocolCaptureByRunId.delete(current.runId);
       }),

@@ -16,6 +16,8 @@ import {
   ProviderInstanceId,
   ProviderInteractionMode,
   RuntimeMode,
+  RunId,
+  RunAttemptId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -1300,6 +1302,35 @@ it.effect("admits provider and OAuth client credentials and points only clients 
   Effect.scoped(
     Effect.gen(function* () {
       const providerToken = "providerTokenWithoutDots";
+      const sessions = yield* McpProviderSessions.McpProviderSessions;
+      yield* sessions.set({
+        environmentId,
+        threadId: ThreadId.make("thread-provider"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        providerSessionId: "provider-session",
+        endpoint: "http://localhost/mcp",
+        authorizationHeader: `Bearer ${providerToken}`,
+        browserToolsAvailable: true,
+      });
+      const origin = (id: string) => ({
+        provider: "codex" as const,
+        nativeThreadId: "native",
+        nativeTurnId: id,
+      });
+      const execution = (id: string) => ({
+        runId: RunId.make(id),
+        attemptId: RunAttemptId.make(id),
+      });
+      yield* sessions.registerExecution(
+        ThreadId.make("thread-provider"),
+        origin("a"),
+        execution("a"),
+      );
+      yield* sessions.registerExecution(
+        ThreadId.make("thread-provider"),
+        origin("b"),
+        execution("b"),
+      );
       const clientToken = "client-payload.client-signature";
       const providerScope: McpInvocationContext.McpInvocationScope = {
         environmentId,
@@ -1368,7 +1399,7 @@ it.effect("admits provider and OAuth client credentials and points only clients 
         Layer.build,
       );
       const httpClient = yield* HttpClient.HttpClient;
-      const call = (token: string | undefined) =>
+      const call = (token: string | undefined, metadata?: unknown) =>
         Effect.gen(function* () {
           const headers = {
             accept: "application/json, text/event-stream",
@@ -1389,7 +1420,12 @@ it.effect("admits provider and OAuth client credentials and points only clients 
               "mcp-protocol-version": "2025-06-18",
             },
             body: HttpBody.text(
-              `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"probe","arguments":{}}}`,
+              JSON.stringify({
+                jsonrpc: "2.0",
+                id: 2,
+                method: "tools/call",
+                params: { name: "probe", arguments: {}, _meta: metadata },
+              }),
               "application/json",
             ),
           });
@@ -1401,6 +1437,22 @@ it.effect("admits provider and OAuth client credentials and points only clients 
         "provider-session",
         "client:session-1",
       ]);
+
+      const meta = (turn: string) => ({
+        "x-codex-turn-metadata": { thread_id: "native", turn_id: turn },
+      });
+      for (const turn of ["b", "a", "unknown"]) {
+        expect((yield* call(providerToken, meta(turn))).status).toBe(200);
+      }
+      expect(seen.slice(2).map((scope) => scope.thread?.execution)).toEqual([
+        execution("b"),
+        execution("a"),
+        undefined,
+      ]);
+      yield* sessions.endExecution(ThreadId.make("thread-provider"), execution("a"));
+      expect((yield* call(providerToken, meta("a"))).status).toBe(200);
+      expect(seen.at(-1)?.thread?.execution).toBeUndefined();
+      expect(seen[3]?.thread?.execution).toEqual(execution("a"));
 
       const missing = yield* call(undefined);
       expect(missing.status).toBe(401);
@@ -1416,7 +1468,7 @@ it.effect("admits provider and OAuth client credentials and points only clients 
       expect(deadProvider.status).toBe(401);
       expect(deadProvider.headers["www-authenticate"]).toBe('Bearer error="invalid_token"');
     }),
-  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  ).pipe(Effect.provide(Layer.mergeAll(NodeHttpServer.layerTest, McpProviderSessions.layer))),
 );
 
 it.effect("hides tools for links and refuses another environment while the beta is off", () =>

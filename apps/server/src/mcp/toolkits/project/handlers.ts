@@ -24,9 +24,10 @@ import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as DateTime from "effect/DateTime";
 import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
-import { resolveRuntimeMode } from "../../delegatedTaskModes.ts";
+import { resolveInteractionMode, resolveRuntimeMode } from "../../delegatedTaskModes.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
+import { requireRemoteDelegationPeer } from "../../linkOrigin.ts";
 import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../threadAccess.ts";
 import { ProjectToolkit } from "./tools.ts";
 
@@ -84,6 +85,19 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
       Effect.gen(function* () {
         const scope = yield* McpInvocationContext.McpInvocationContext;
         const context = yield* readCaller();
+        const peer =
+          input.remotePreparation === undefined
+            ? undefined
+            : yield* requireRemoteDelegationPeer(scope);
+        if (
+          input.remotePreparation !== undefined &&
+          (input.message !== undefined || (input.attachments?.length ?? 0) > 0)
+        ) {
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "Remote preparation cannot start a provider or include an initial message.",
+          });
+        }
         const { caller } = context;
         // A retry with the same key replays the first launch: the ids derive
         // from the caller and the key, and the launch service replays a
@@ -92,6 +106,39 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           input.clientRequestId === undefined
             ? yield* newCommandId()
             : yield* launchCommandId(scope.requestNamespace, input.clientRequestId);
+        const delegation =
+          input.remotePreparation === undefined
+            ? undefined
+            : {
+                parentEnvironmentId: input.remotePreparation.parentEnvironmentId,
+                parentThreadId: input.remotePreparation.parentThreadId,
+                sourceTaskId: input.remotePreparation.sourceTaskId,
+                delegationId: `delegation:${commandId}`,
+              };
+        if (input.remotePreparation?.existingThreadId !== undefined) {
+          const target = yield* context.threads
+            .getThreadRecords(input.remotePreparation.existingThreadId, [])
+            .pipe(Effect.mapError(unavailable));
+          yield* requireRemoteDelegationPeer(scope, target.thread);
+          yield* resolveRuntimeMode(runtimeMode, target.thread.runtimeMode);
+          yield* resolveInteractionMode(interactionMode, target.thread.interactionMode);
+          yield* context.threads
+            .dispatch({
+              type: "remote_delegation.prepare",
+              commandId,
+              threadId: target.thread.id,
+              association: { ...delegation!, linkSessionId: peer!.sessionId, stage: "prepared" },
+            })
+            .pipe(Effect.mapError(unavailable));
+          return {
+            threadId: target.thread.id,
+            projectId: target.thread.projectId,
+            modelSelection: target.thread.modelSelection,
+            delegation,
+            runId: null,
+            status: null,
+          };
+        }
         const threadId = ThreadId.make(commandId);
         const messageId = MessageId.make(commandId);
         const attachments = input.attachments ?? [];
@@ -238,6 +285,15 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                   attachments,
                 },
               }),
+          ...(delegation === undefined
+            ? {}
+            : {
+                remoteDelegation: {
+                  ...delegation,
+                  linkSessionId: peer!.sessionId,
+                  stage: "prepared" as const,
+                },
+              }),
           createdBy: "agent",
           creationSource: "mcp",
           ...(linkOrigin === undefined ? {} : { linkOrigin }),
@@ -267,6 +323,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         return {
           threadId: thread.id,
           link: McpInvocationContext.threadLinkFor(scope, thread.id),
+          ...(delegation === undefined ? {} : { delegation }),
           projectId: thread.projectId,
           modelSelection: thread.modelSelection,
           runId: run?.id ?? null,

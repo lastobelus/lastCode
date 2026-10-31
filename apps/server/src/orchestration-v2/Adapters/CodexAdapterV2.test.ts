@@ -1331,6 +1331,79 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       ),
   );
 
+  it.effect(
+    "binds native MCP turn metadata before tools run and invalidates it at completion",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const scenario = "native-mcp-origin";
+          const nativeThreadId = "native-origin-thread";
+          const nativeTurnId = "native-origin-turn";
+          const sessions = yield* McpProviderSessions.McpProviderSessions;
+          const threadId = ThreadId.make(`thread-${scenario}`);
+          const config = {
+            environmentId: EnvironmentId.make("env-origin"),
+            threadId,
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            providerSessionId: "credential-origin",
+            endpoint: "http://localhost/mcp",
+            authorizationHeader: "Bearer test-origin",
+            browserToolsAvailable: true,
+          };
+          // Configure after ensureThread so this fixture's launch config stays independent of origin lookup.
+          const finish = yield* Deferred.make<void>();
+          const harness = yield* makeCodexReplayHarness(
+            makeCodexReplayTranscript({
+              scenario,
+              entries: [
+                ...codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "Origin" }),
+                {
+                  type: "emit_inbound",
+                  label: "finish-origin",
+                  frame: {
+                    method: "turn/completed",
+                    params: {
+                      threadId: nativeThreadId,
+                      turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+                    },
+                  },
+                },
+              ],
+            }),
+            () => Effect.void,
+            (method) => (method === "turn/start" ? sessions.set(config) : Effect.void),
+            undefined,
+            (entry) => (entry.label === "finish-origin" ? Deferred.await(finish) : Effect.void),
+          );
+          const turn = makeCodexTestTurnInput({
+            threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("origin-attempt"),
+            text: "Origin",
+          });
+          yield* harness.runtime.startTurn(turn);
+          const lookup = () =>
+            sessions.resolveExecution({
+              threadId,
+              providerSessionId: config.providerSessionId,
+              authorizationHeader: config.authorizationHeader,
+              metadata: {
+                "x-codex-turn-metadata": { thread_id: nativeThreadId, turn_id: nativeTurnId },
+              },
+            });
+          assert.deepEqual(yield* lookup(), { runId: turn.runId, attemptId: turn.attemptId });
+          yield* Deferred.succeed(finish, undefined);
+          yield* harness.awaitTerminal(1);
+          assert.isUndefined(yield* lookup());
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
+  );
+
   it.effect("adds the session MCP server without replacing launch-argument servers", () =>
     Effect.gen(function* () {
       const scenario = "launch-mcp-servers";

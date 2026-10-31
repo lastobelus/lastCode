@@ -1,6 +1,6 @@
 import * as ProjectionStore from "./ProjectionStore.ts";
 import { userFacingDispatchErrorMessage } from "./UserFacingErrors.ts";
-import type { DeleteThreadsInput, DeleteThreadsResult } from "@t3tools/contracts";
+import type { DeleteThreadsInput, DeleteThreadsResult, NodeId } from "@t3tools/contracts";
 import type {
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
@@ -134,6 +134,8 @@ function existingThreadIdsForCommand(
     case "delegated_task.completion-delivery.acknowledge":
     case "delegated_task.completion-delivery.dispose":
     case "delegated_task.remote.request":
+    case "delegated_task.remote.begin":
+    case "delegated_task.remote.stage":
     case "delegated_task.remote.complete":
     case "delegated_task.remote.stop":
       return [command.parentThreadId];
@@ -376,6 +378,9 @@ export type ThreadManagementError = typeof ThreadManagementError.Type;
 type ThreadManagementFailure = ThreadManagementError | Orchestrator.OrchestratorV2Error;
 
 export interface ThreadManagementServiceShape {
+  readonly withActionObligation: Orchestrator.OrchestratorV2Shape["withActionObligation"];
+  readonly reserveActionObligation: Orchestrator.OrchestratorV2Shape["reserveActionObligation"];
+  readonly disposeActionObligation: Orchestrator.OrchestratorV2Shape["disposeActionObligation"];
   readonly deleteMany: (
     input: DeleteThreadsInput,
   ) => Effect.Effect<DeleteThreadsResult, WorktreeSuspensionRequestError>;
@@ -540,6 +545,7 @@ export interface ThreadManagementServiceShape {
     readonly threadId: ThreadId;
     readonly commandId: CommandId;
     readonly reason?: string | undefined;
+    readonly taskIds?: ReadonlyArray<NodeId>;
   }) => Effect.Effect<
     void,
     Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError
@@ -1747,10 +1753,12 @@ const make = Effect.gen(function* () {
     const stoppedChildThreadIds = new Set<ThreadId>();
     for (const task of subagents) {
       if (task.origin !== "app_owned" || task.ownershipReleased === true) continue;
+      if (input.taskIds !== undefined && (!input.taskIds.includes(task.id) || task.result !== null))
+        continue;
       if (task.childThreadId === null) {
         // A task in a linked environment ends here; its follower then stops it there.
         // One with its result keeps it, but its thread there may run follow-up work.
-        if (task.remoteChild === undefined) continue;
+        if (task.remoteChild === undefined && task.remoteLaunch === undefined) continue;
         const commandId = CommandId.make(`${input.commandId}:stop:${task.id}`);
         yield* dispatch(
           task.result === null
@@ -1788,6 +1796,7 @@ const make = Effect.gen(function* () {
       // Follow-up tasks reuse a child thread; walk its subtree only once.
       if (stoppedChildThreadIds.has(threadId)) continue;
       stoppedChildThreadIds.add(threadId);
+      const { taskIds: _parentTaskIds, ...childInput } = input;
       yield* dispatch({
         type: "thread.stop",
         commandId: CommandId.make(`${input.commandId}:stop:${threadId}`),
@@ -1795,7 +1804,7 @@ const make = Effect.gen(function* () {
         stopDelegatedTasks: false,
         ...(input.reason === undefined ? {} : { reason: input.reason }),
       }).pipe(
-        Effect.andThen(stopDelegatedTasks({ ...input, threadId })),
+        Effect.andThen(stopDelegatedTasks({ ...childInput, threadId })),
         Effect.provideService(DelegatedTaskCancellation, [
           ...cancellationOwnership,
           { parentThreadId: input.threadId, taskId: task.id, childThreadId: threadId },
@@ -1825,6 +1834,9 @@ const make = Effect.gen(function* () {
         Effect.andThen(orchestrator.searchThread(input)),
       );
     }),
+    withActionObligation: orchestrator.withActionObligation,
+    reserveActionObligation: orchestrator.reserveActionObligation,
+    disposeActionObligation: orchestrator.disposeActionObligation,
     dispatch,
     upsertDashboardItem: Effect.fn("ThreadLifecycleService.upsertDashboardItem")((input) =>
       dispatch({ type: "thread.dashboard-item.upsert", ...input }).pipe(

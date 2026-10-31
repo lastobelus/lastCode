@@ -1,4 +1,4 @@
-import { ActionResumeState } from "./actionResume.ts";
+import { ActionResumeState, ActionResumeOwner, ActionResumeObligation } from "./actionResume.ts";
 import {
   WorktreeSuspensionSummary,
   WorktreeSuspensionTransitionInput,
@@ -514,6 +514,41 @@ export const OrchestrationV2ThreadRecovery = Schema.Struct({
 });
 export type OrchestrationV2ThreadRecovery = typeof OrchestrationV2ThreadRecovery.Type;
 
+export const RemoteDelegationSelector = Schema.Struct({
+  parentEnvironmentId: EnvironmentId,
+  parentThreadId: ThreadId,
+  sourceTaskId: NodeId,
+  delegationId: TrimmedNonEmptyString,
+});
+export type RemoteDelegationSelector = typeof RemoteDelegationSelector.Type;
+
+export const RemoteDelegationAssociation = Schema.Struct({
+  ...RemoteDelegationSelector.fields,
+  linkSessionId: TrimmedNonEmptyString,
+  stage: Schema.Literals(["prepared", "active", "disposed", "settled"]),
+  finalRun: Schema.optional(
+    Schema.Struct({
+      runId: RunId,
+      status: Schema.Literals(["completed", "failed", "cancelled", "interrupted", "rolled_back"]),
+    }),
+  ),
+});
+export type RemoteDelegationAssociation = typeof RemoteDelegationAssociation.Type;
+
+export const RemoteLaunchIntent = Schema.Struct({
+  environmentId: EnvironmentId,
+  projectId: ProjectId,
+  existingThreadId: Schema.optional(ThreadId),
+  requestNamespace: Schema.String,
+  requestKey: Schema.String,
+  title: Schema.String,
+  modelSelection: ModelSelection,
+  runtimeMode: Schema.optional(RuntimeMode),
+  interactionMode: Schema.optional(ProviderInteractionMode),
+  stage: Schema.Literals(["pending", "preparing", "prepared", "active"]),
+});
+export type RemoteLaunchIntent = typeof RemoteLaunchIntent.Type;
+
 export const OrchestrationV2AppThread = Schema.Struct({
   recovery: Schema.optional(OrchestrationV2ThreadRecovery),
   ...OrchestrationV2CreationFields,
@@ -538,6 +573,7 @@ export const OrchestrationV2AppThread = Schema.Struct({
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),
   linkOrigin: Schema.optional(OrchestrationV2LinkOrigin),
   delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
+  remoteDelegations: Schema.optional(Schema.Array(RemoteDelegationAssociation)),
   persistent: Schema.optional(Schema.Boolean),
   annotation: Schema.optional(Schema.NullOr(ThreadAnnotation)),
   dashboardItems: Schema.optional(ThreadDashboardItems),
@@ -779,6 +815,8 @@ export const OrchestrationV2Run = Schema.Struct({
   contextHandoffId: Schema.NullOr(ContextHandoffId),
   restartContinuationOfRunId: Schema.optional(RunId),
   delegatedTaskId: Schema.optional(NodeId),
+  remoteDelegation: Schema.optional(RemoteDelegationSelector),
+  actionObligations: Schema.optional(Schema.Array(ActionResumeObligation)),
   workStartedAt: Schema.optional(Schema.DateTimeUtc),
   restartCancelledBackgroundWork: Schema.optional(
     Schema.Array(OrchestrationV2RestartCancelledBackgroundWork),
@@ -934,6 +972,8 @@ export const OrchestrationV2RemoteTaskChild = Schema.Struct({
   label: Schema.String,
   /** The run there that carries the task; absent on tasks recorded before it was kept. */
   runId: Schema.optional(RunId),
+  delegation: Schema.optional(RemoteDelegationSelector),
+  activationMessageId: Schema.optional(MessageId),
   /**
    * Nothing is left to stop there: a stop reached it, was refused for good, or the thread
    * or link is gone. A run ending there by itself sets it too, unless the task here was
@@ -961,6 +1001,7 @@ export const OrchestrationV2Subagent = Schema.Struct({
   providerThreadId: Schema.NullOr(ProviderThreadId),
   childThreadId: Schema.NullOr(ThreadId),
   remoteChild: Schema.optional(OrchestrationV2RemoteTaskChild),
+  remoteLaunch: Schema.optional(RemoteLaunchIntent),
   nativeTaskRef: Schema.NullOr(OrchestrationV2ProviderRef),
   prompt: Schema.String,
   title: Schema.NullOr(Schema.String),
@@ -2171,6 +2212,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),
   linkOrigin: Schema.optional(OrchestrationV2LinkOrigin),
   delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
+  remoteDelegations: Schema.optional(Schema.Array(RemoteDelegationAssociation)),
   persistent: Schema.optional(Schema.Boolean),
   annotation: Schema.optional(Schema.NullOr(ThreadAnnotation)),
   dashboardItems: Schema.optional(ThreadDashboardItems),
@@ -3334,6 +3376,9 @@ export const OrchestrationV2Command = Schema.Union([
     modelSelection: Schema.optional(ModelSelection),
     sourcePlanRef: Schema.optional(Schema.Struct({ threadId: ThreadId, planId: PlanId })),
     restartContinuationOfRunId: Schema.optional(RunId),
+    actionContinuation: Schema.optional(
+      Schema.Struct({ actionRunId: TrimmedNonEmptyString, owner: ActionResumeOwner }),
+    ),
     usageLimitContinuationOfRunId: Schema.optional(RunId),
     manualContinuationOfRunId: Schema.optional(RunId),
     usageLimitRecoveryRequestId: Schema.optional(CommandId),
@@ -3698,7 +3743,8 @@ const OrchestrationV2InternalCommand = Schema.Union([
     title: Schema.optional(TrimmedNonEmptyString),
     driver: ProviderDriverKind,
     modelSelection: ModelSelection,
-    remoteChild: OrchestrationV2RemoteTaskChild,
+    remoteChild: Schema.optional(OrchestrationV2RemoteTaskChild),
+    remoteLaunch: Schema.optional(RemoteLaunchIntent),
     completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
   }),
   /**
@@ -3707,6 +3753,64 @@ const OrchestrationV2InternalCommand = Schema.Union([
    * task that already has a result keeps it; `stoppedThere` is still recorded,
    * and without it (a Stop or cancel here) the task owes a stop there instead.
    */
+  Schema.Struct({
+    type: Schema.Literal("remote_delegation.prepare"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    association: RemoteDelegationAssociation,
+    creation: Schema.optional(
+      Schema.Struct({
+        ...OrchestrationV2CreationFields,
+        projectId: ProjectId,
+        title: TrimmedNonEmptyString,
+        modelSelection: ModelSelection,
+        runtimeMode: RuntimeMode,
+        interactionMode: ProviderInteractionMode,
+        branch: Schema.NullOr(TrimmedNonEmptyString),
+        worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+        linkOrigin: OrchestrationV2LinkOrigin,
+        delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
+        creatorThreadId: Schema.optional(ThreadId),
+      }),
+    ),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("remote_delegation.activate"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    delegation: RemoteDelegationSelector,
+    linkSessionId: Schema.String,
+    messageId: MessageId,
+    text: Schema.String,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("remote_delegation.settle"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    delegation: RemoteDelegationSelector,
+    linkSessionId: Schema.String,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("remote_delegation.dispose"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    delegation: RemoteDelegationSelector,
+    linkSessionId: Schema.String,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("delegated_task.remote.begin"),
+    commandId: CommandId,
+    parentThreadId: ThreadId,
+    taskId: NodeId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("delegated_task.remote.stage"),
+    commandId: CommandId,
+    parentThreadId: ThreadId,
+    taskId: NodeId,
+    remoteChild: OrchestrationV2RemoteTaskChild,
+    stage: Schema.Literals(["prepared", "active"]),
+  }),
   Schema.Struct({
     type: Schema.Literal("delegated_task.remote.complete"),
     commandId: CommandId,

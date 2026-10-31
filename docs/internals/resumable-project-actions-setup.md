@@ -105,17 +105,35 @@ tool sequence, or an Action that is missing or disabled in the current environme
 
 ## Parent-mediated Actions for delegated children
 
-App-owned delegated child tasks do not yet complete reliably across an Action wait, so for now
-their parent owns every resumable Action they need, including dependency preparation, CI, build,
-and checkpoint waits. A child can technically call `run_project_action_and_resume`; the injected
-runtime instructions ask it not to. Child PR watches stay with the parent as well. Ordinary
-top-level threads launch and resume their own Actions directly; nothing in this section, including
-settlement protection, applies to them. Issue #482 tracks the work that removes this handoff.
+An app-owned delegated child launches its own resumable Actions only when its parent's brief says
+both of these hold for the child's environment:
 
-The injected instructions carry the sequence each side follows: the child ends its turn with a
-handoff request as its final response, and the parent waits for that recorded result, keeps
-itself from being settled away, verifies the target, launches, and queues the result back to the
-child with a `taskId` receipt. This section holds the setup detail they leave out.
+- `orchestrator_capabilities` reports `features.appOwnedActionContinuationVersion`. The flag
+  reports technical support only. Source availability, a version number, or the Action tools
+  being present do not imply it.
+- Issue #482, the rollout record, explicitly accepts the immutable installed checkpoint that
+  environment runs for child-owned Actions.
+
+Before that acceptance, only narrowly authorized isolated acceptance scenarios use child
+ownership. An owning child launches its Action, ends its turn saying the task is unfinished and
+what it waits on, and the runtime carries the same task through the Action and its continuation.
+The parent ends its turn and receives one final result when the whole task ends.
+This covers local and remote app-owned tasks on Codex and Claude, not provider-native subagents.
+The runtime refuses a delegated launch it cannot attribute to a specific child turn before the
+Action starts. Not every provider-generated wake can be attributed yet, so an Action requested
+from such a wake falls back to mediation.
+
+Every other child leaves resumable Actions to its parent, including dependency preparation, CI,
+build, and checkpoint waits. Requests already handed to a parent stay with it; nothing migrates
+them. Child PR watches stay with the parent as well. Ordinary top-level and independent threads
+launch and resume their own Actions directly; nothing in this section, including settlement
+protection, applies to them.
+
+For mediation, the injected instructions carry the sequence each side follows: the child ends its
+turn with a handoff request as its final response, and the parent waits for that recorded result,
+keeps itself from being settled away, verifies the target, launches, and queues the result back
+to the child with a `taskId` receipt. The rest of this section holds the setup detail they leave
+out.
 
 ### Choose the target
 
@@ -140,7 +158,8 @@ otherwise report the specific blocker before launch.
 ### Protect the parent from automatic settlement
 
 A parent whose linked PRs have merged can be settled automatically, and filed away, while it still
-owes a child its result. Protection keeps it visible until the relay is done. It does not enable
+owes a child its result. Protection keeps it visible until the relay is done. Child-owned Actions
+need none: the runtime keeps parent and child unsettled while the task or its result is owed. It does not enable
 anything: `run_project_action_and_resume` never checks it, and Actions launch and resume the same
 way with or without it. When asking the user, give the visibility reason. The parent thread's
 existing menu control disables automatic settlement for that thread; `t3_thread_read` reports the
@@ -167,14 +186,14 @@ A parent reads the bounded latest-Action summary through `t3_thread_read`: ident
 delivery, timing, exit, derived follow-up status, and an untrusted report summary. A mediated
 Action belongs to the parent's own thread; reading the child does not show that parent-owned run.
 The retained hold flag and raw output are available only through `inspect_action_run` in the
-thread that launched the run, which for mediated Actions is the parent.
+thread that launched the run, which for mediated Actions is the parent. A child-owned Action runs
+in the child's thread; its parent waits for the task's completion instead of reading progress.
 
 ### When the handoff ends
 
-The restriction lifts only after an installed checkpoint containing same-task Action support
-passes acceptance on that environment. A newer source tree or version number is not enough, and
-no capability flag reports it yet. Mediated work already in flight keeps its recorded owner until
-someone deliberately hands it over.
+Mediation ends per environment, once both conditions above hold for its installed checkpoint. The
+capability flag, a newer source tree, or a version number alone is not enough. Mediated work
+already in flight keeps its recorded owner until someone deliberately hands it over.
 
 ## Troubleshooting
 

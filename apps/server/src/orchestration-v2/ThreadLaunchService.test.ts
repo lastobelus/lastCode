@@ -13,6 +13,8 @@ import { assert, it, vi } from "@effect/vitest";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import {
   ChatAttachmentId,
+  EnvironmentId,
+  NodeId,
   ComposerContextId,
   type ChatAttachment,
   CommandId,
@@ -3423,6 +3425,49 @@ it.effect(
       assert.include(projection.messages[0]!.text, `Target run: ${incident.runId}`);
       assert.include(projection.messages[0]!.text, `Target attempt: ${incident.attemptId}`);
       assert.lengthOf(projection.runs, 1);
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
+
+it.effect(
+  "creates a prepared remote destination in the same durable receipt without starting a run",
+  () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+      const association = {
+        parentEnvironmentId: EnvironmentId.make("source-environment"),
+        parentThreadId: ThreadId.make("foreign-parent"),
+        sourceTaskId: NodeId.make("foreign-task"),
+        delegationId: "owned-launch",
+        linkSessionId: "peer-session",
+        stage: "prepared" as const,
+      };
+      const input = {
+        ...launchInput({ command: "atomic-remote-prepare", thread: "remote-prepared" }),
+        linkOrigin: { sessionId: "peer-session", label: "Peer", access: "full-access" as const },
+        remoteDelegation: association,
+      };
+      const launched = yield* launches.launch(input);
+      const replay = yield* launches.launch(input);
+      assert.equal(replay.threadId, launched.threadId);
+      assert.deepEqual(launched.projection.thread.remoteDelegations, [association]);
+      assert.deepEqual(launched.projection.runs, []);
+      const receipt = yield* receipts.getByCommandId(input.commandId);
+      assert.isTrue(Option.isSome(receipt));
+      const events = yield* threads
+        .streamStoredEventsFrom({ threadId: launched.threadId, afterSequence: 0 })
+        .pipe(Stream.take(2), Stream.runCollect);
+      assert.deepEqual(
+        events.map((stored) => stored.commandId),
+        [input.commandId, input.commandId],
+      );
+      assert.deepEqual(
+        events.map((stored) => stored.event.type),
+        ["thread.created", "thread.metadata-updated"],
+      );
     }).pipe(Effect.provide(harness.layer));
   },
 );

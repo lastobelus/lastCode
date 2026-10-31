@@ -1,3 +1,4 @@
+import { remoteDelegationMayStart } from "../peer/remoteOwnership.ts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
 import {
@@ -265,7 +266,11 @@ export const layer: Layer.Layer<
         projectionStore.getRuntimeRecoveryProjection(input.threadId).pipe(
           Effect.map((current) => {
             const run = current.runs.find((candidate) => candidate.id === input.runId);
-            return run?.activeAttemptId === input.attemptId && run.status === expectedStatus;
+            return (
+              run?.activeAttemptId === input.attemptId &&
+              run.status === expectedStatus &&
+              remoteDelegationMayStart(current.thread, run)
+            );
           }),
         );
       return {
@@ -386,7 +391,7 @@ export const layer: Layer.Layer<
       if (run === undefined) {
         return yield* new ProviderTurnStartError({ runId, cause: `Run ${runId} was not found.` });
       }
-      if (run.status !== "starting") {
+      if (run.status !== "starting" || !remoteDelegationMayStart(projection.thread, run)) {
         return;
       }
       nativeStart.observedStarting = true;

@@ -1,3 +1,4 @@
+import type { McpExecutionOrigin } from "@t3tools/provider-core/server/McpProviderSessions";
 import {
   type AuthMcpClientAccess,
   type EnvironmentId,
@@ -28,6 +29,7 @@ const ALL_MCP_CAPABILITIES = [
 export type McpCapability = (typeof ALL_MCP_CAPABILITIES)[number];
 
 export interface McpThreadCaller {
+  readonly execution?: McpExecutionOrigin;
   readonly threadId: ThreadId;
   readonly providerSessionId: string;
   readonly providerInstanceId: ProviderInstanceId;

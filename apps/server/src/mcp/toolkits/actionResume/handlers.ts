@@ -47,6 +47,9 @@ export const layer = McpToolAccess.toLayer(ActionResumeToolkit, {
         {
           threadId: invocation.thread.threadId,
           providerInstanceId: invocation.thread.providerInstanceId,
+          ...(invocation.thread.subagent !== true || invocation.thread.execution === undefined
+            ? {}
+            : { source: invocation.thread.execution }),
         },
         actionId,
       );

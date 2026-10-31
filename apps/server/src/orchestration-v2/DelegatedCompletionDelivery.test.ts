@@ -1,3 +1,14 @@
+import * as CommandReceipts from "./CommandReceiptStore.ts";
+import * as ActionResume from "../actionResume/ActionResume.ts";
+import * as ActionRunStore from "../actionResume/ActionRunStore.ts";
+import * as ThreadManagement from "./ThreadManagementService.ts";
+import * as ProjectStore from "./ProjectStore.ts";
+import * as TerminalManager from "../terminal/Manager.ts";
+import * as WorkspaceAcquisitionTestkit from "../workspace/WorkspaceAcquisition.testkit.ts";
+import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import { EnvironmentId, type TerminalEvent } from "@t3tools/contracts";
+import { ACTION_RUN_ID_ENV } from "@t3tools/shared/actionResumeProtocol";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as UpdateDrainAdmissionTestkit from "../updateDrain/UpdateDrainAdmission.testkit.ts";
@@ -16,6 +27,7 @@ import {
   ProviderInstanceId,
   ProviderThreadId,
   RunId,
+  RunAttemptId,
   RuntimeRequestId,
   ThreadId,
   TurnItemId,
@@ -112,6 +124,9 @@ const layerTestProviderInstanceRegistry = Layer.succeed(
 );
 
 const layerTest = Layer.mergeAll(
+  ActionRunStore.layer,
+  CommandReceipts.layer,
+  ProjectStore.layer,
   RuntimeLayer.layer,
   RuntimeLayer.layerEventSink,
   ThreadCommandExecutor.layer,
@@ -143,15 +158,20 @@ const layerTest = Layer.mergeAll(
       subscribeChanges: Effect.never,
     }),
   ),
+  Layer.provide(
+    Layer.succeed(ServerEnvironment.ServerEnvironmentIdentity, {
+      getEnvironmentId: Effect.succeed(EnvironmentId.make("local-test")),
+    }),
+  ),
   Layer.provide(McpSessionRegistryTestkit.layer),
   Layer.provide(McpProviderSessions.layer),
-  Layer.provide(UpdateDrainAdmissionTestkit.layerOpen),
+  Layer.provideMerge(UpdateDrainAdmissionTestkit.layerOpen),
   Layer.provide(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
-  Layer.provide(ServerSettings.layerTest()),
+  Layer.provideMerge(ServerSettings.layerTest()),
   Layer.provide(layerTestProviderInstanceRegistry),
-  Layer.provide(layerPlatformTest),
+  Layer.provideMerge(layerPlatformTest),
 );
 
 const seedParentWithTerminalTask = (input: {
@@ -1529,145 +1549,220 @@ it.layer(layerFollowups)("delegated background wakes", (it) => {
 it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
   "subagent follow-ups",
   (it) => {
-    it.effect("keeps a checkpoint completion committed between finalize's read and write", () =>
-      Effect.gen(function* () {
-        const orchestrator = yield* Orchestrator.OrchestratorV2;
-        const sink = yield* EventSink.EventSinkV2;
-        const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
-        const now = yield* DateTime.now;
-        const threadId = ThreadId.make("thread:completion-capture-race");
-        const projectId = ProjectId.make("project:completion-capture-race");
-        const runId = RunId.make("run:completion-capture-race");
-        const rootNodeId = NodeId.make("node:completion-capture-race");
-        const checkpointId = CheckpointId.make("checkpoint:completion-capture-race");
-        yield* seedParentWithTerminalTask({
-          threadId,
-          projectId,
-          runId,
-          rootNodeId,
-          taskId: NodeId.make("node:completion-capture-seed"),
-          deliveryState: "acknowledged",
-          now,
-        });
-        const parent = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
-        const waiting = { ...parent, status: "waiting" as const };
-        yield* sink.write({
-          events: [
-            {
-              id: EventId.make("event:completion-capture-waiting"),
-              type: "run.updated",
-              threadId,
-              runId,
-              occurredAt: now,
-              payload: waiting,
-            },
-          ],
-        });
-        const child = yield* seedRestartCancelledChild({
-          parentThreadId: threadId,
-          projectId,
-          parentRunId: runId,
-          rootNodeId,
-          name: "completion-capture-child",
-          completionWake: "always",
-          continuationPending: false,
-          runStatus: "completed",
-          now,
-        });
-        const write = sink.writeWithEffects;
-        let captured = false;
-        const committedParentRuns: Array<OrchestrationV2Run> = [];
-        yield* Effect.acquireUseRelease(
-          Effect.sync(() =>
-            vi.spyOn(sink, "writeWithEffects").mockImplementation((input) =>
-              Effect.gen(function* () {
-                if (
-                  !captured &&
-                  input.events.some(
-                    (event) =>
-                      event.type === "run.updated" &&
-                      event.payload.id === runId &&
-                      event.payload.delegatedCompletion?.delivery != null,
-                  )
-                ) {
-                  captured = true;
-                  // Commit capture after finalize planned its stale waiting snapshot.
-                  const { delegatedCompletion: _cohort, ...captureRun } = waiting;
-                  yield* sink.commitCommand({
-                    commandId: CommandId.make("command:completion-capture-race"),
-                    threadId,
-                    commandType: "checkpoint.capture",
-                    acceptedAt: now,
-                    effects: [],
-                    events: [
-                      {
-                        id: EventId.make("event:completion-capture-completed"),
-                        type: "run.updated",
-                        threadId,
-                        runId,
-                        occurredAt: now,
-                        payload: {
-                          ...captureRun,
-                          status: "completed",
-                          completedAt: now,
-                          checkpointId,
-                        },
-                      },
+    it.effect.each(["local", "remote", "remote-disposed"] as const)(
+      "keeps checkpoint completion and %s ownership through a nested wake",
+      (ownership) =>
+        Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const sink = yield* EventSink.EventSinkV2;
+          const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
+          const now = yield* DateTime.now;
+          const threadId = ThreadId.make(`thread:completion-capture-race-${ownership}`);
+          const projectId = ProjectId.make(`project:completion-capture-race-${ownership}`);
+          const runId = RunId.make(`run:completion-capture-race-${ownership}`);
+          const rootNodeId = NodeId.make(`node:completion-capture-race-${ownership}`);
+          const checkpointId = CheckpointId.make(`checkpoint:completion-capture-race-${ownership}`);
+          yield* seedParentWithTerminalTask({
+            threadId,
+            projectId,
+            runId,
+            rootNodeId,
+            taskId: NodeId.make(`node:completion-capture-seed-${ownership}`),
+            deliveryState: "acknowledged",
+            now,
+          });
+          const parent = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+          const selector = {
+            parentEnvironmentId: EnvironmentId.make("environment:remote-parent"),
+            parentThreadId: ThreadId.make("thread:remote-parent"),
+            sourceTaskId: NodeId.make(`remote-task-${ownership}`),
+            delegationId: `remote-delegation-${ownership}`,
+          };
+          const waiting = {
+            ...parent,
+            status: "waiting" as const,
+            ...(ownership === "local"
+              ? { delegatedTaskId: NodeId.make("outer-local-task") }
+              : { remoteDelegation: selector }),
+          };
+          if (ownership !== "local") {
+            const thread = (yield* orchestrator.getThreadProjection(threadId)).thread;
+            yield* sink.write({
+              events: [
+                {
+                  id: EventId.make(`remote-owner-${ownership}`),
+                  type: "thread.metadata-updated",
+                  threadId,
+                  occurredAt: now,
+                  payload: {
+                    ...thread,
+                    linkOrigin: { sessionId: "remote-session", label: "Peer" },
+                    remoteDelegations: [
+                      { ...selector, linkSessionId: "remote-session", stage: "active" },
                     ],
-                  });
-                }
-                const stored = yield* write(input);
-                for (const { event } of stored) {
-                  if (event.type === "run.updated" && event.payload.id === runId) {
-                    committedParentRuns.push(event.payload);
-                  }
-                }
-                return stored;
-              }),
-            ),
-          ),
-          () => orchestrator.recoverDelegatedTasks,
-          (spy) => Effect.sync(() => spy.mockRestore()),
-        );
-        assert.isTrue(captured);
-        assert.equal(committedParentRuns.length, 1);
-        const committedParentRun = committedParentRuns[0];
-        assert.equal(committedParentRun?.status, "completed");
-        assert.deepEqual(committedParentRun?.completedAt, now);
-        assert.equal(committedParentRun?.checkpointId, checkpointId);
-        assert.deepEqual(committedParentRun?.delegatedCompletion?.delivery?.taskIds, [
-          child.taskId,
-        ]);
-        const finished = yield* orchestrator.getThreadProjection(threadId);
-        const completed = finished.runs.find((run) => run.id === runId)!;
-        assert.equal(completed.status, "completed");
-        assert.deepEqual(completed.completedAt, now);
-        assert.equal(completed.checkpointId, checkpointId);
-        assert.deepEqual(completed.delegatedCompletion?.delivery?.taskIds, [child.taskId]);
-        const wake = yield* requests.take;
-        assert.equal(wake.delegatedCompletion?.parentRunId, runId);
-        const delivery = completed.delegatedCompletion!.delivery!;
-        yield* orchestrator.dispatch({
-          type: "message.dispatch",
-          createdBy: "agent",
-          creationSource: "server",
-          commandId: CommandId.make("command:completion-capture-delivery"),
-          threadId,
-          messageId: delivery.messageId,
-          text: "Child finished",
-          attachments: [],
-          delegatedCompletion: {
+                  },
+                },
+              ],
+            });
+          }
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make(`event:completion-capture-waiting-${ownership}`),
+                type: "run.updated",
+                threadId,
+                runId,
+                occurredAt: now,
+                payload: waiting,
+              },
+            ],
+          });
+          const child = yield* seedRestartCancelledChild({
+            parentThreadId: threadId,
+            projectId,
             parentRunId: runId,
-            generation: delivery.generation,
-            taskIds: delivery.taskIds,
-          },
-          dispatchMode: { type: "queue_after_active" },
-        });
-        const delivered = yield* orchestrator.getThreadProjection(threadId);
-        const deliveryRun = delivered.runs.find((run) => run.userMessageId === delivery.messageId);
-        assert.isDefined(deliveryRun);
-        assert.notEqual(deliveryRun?.status, "queued");
-      }),
+            rootNodeId,
+            name: `completion-capture-child-${ownership}`,
+            completionWake: "always",
+            continuationPending: false,
+            runStatus: "completed",
+            now,
+          });
+          const write = sink.writeWithEffects;
+          let captured = false;
+          const committedParentRuns: Array<OrchestrationV2Run> = [];
+          yield* Effect.acquireUseRelease(
+            Effect.sync(() =>
+              vi.spyOn(sink, "writeWithEffects").mockImplementation((input) =>
+                Effect.gen(function* () {
+                  if (
+                    !captured &&
+                    input.events.some(
+                      (event) =>
+                        event.type === "run.updated" &&
+                        event.payload.id === runId &&
+                        event.payload.delegatedCompletion?.delivery != null,
+                    )
+                  ) {
+                    captured = true;
+                    // Commit capture after finalize planned its stale waiting snapshot.
+                    const { delegatedCompletion: _cohort, ...captureRun } = waiting;
+                    yield* sink.commitCommand({
+                      commandId: CommandId.make(`command:completion-capture-race-${ownership}`),
+                      threadId,
+                      commandType: "checkpoint.capture",
+                      acceptedAt: now,
+                      effects: [],
+                      events: [
+                        {
+                          id: EventId.make(`event:completion-capture-completed-${ownership}`),
+                          type: "run.updated",
+                          threadId,
+                          runId,
+                          occurredAt: now,
+                          payload: {
+                            ...captureRun,
+                            status: "completed",
+                            completedAt: now,
+                            checkpointId,
+                          },
+                        },
+                      ],
+                    });
+                  }
+                  const stored = yield* write(input);
+                  for (const { event } of stored) {
+                    if (event.type === "run.updated" && event.payload.id === runId) {
+                      committedParentRuns.push(event.payload);
+                    }
+                  }
+                  return stored;
+                }),
+              ),
+            ),
+            () => orchestrator.recoverDelegatedTasks,
+            (spy) => Effect.sync(() => spy.mockRestore()),
+          );
+          assert.isTrue(captured);
+          assert.equal(committedParentRuns.length, 1);
+          const committedParentRun = committedParentRuns[0];
+          assert.equal(committedParentRun?.status, "completed");
+          assert.deepEqual(committedParentRun?.completedAt, now);
+          assert.equal(committedParentRun?.checkpointId, checkpointId);
+          assert.deepEqual(committedParentRun?.delegatedCompletion?.delivery?.taskIds, [
+            child.taskId,
+          ]);
+          const finished = yield* orchestrator.getThreadProjection(threadId);
+          const completed = finished.runs.find((run) => run.id === runId)!;
+          assert.equal(completed.status, "completed");
+          assert.deepEqual(completed.completedAt, now);
+          assert.equal(completed.checkpointId, checkpointId);
+          assert.deepEqual(completed.delegatedCompletion?.delivery?.taskIds, [child.taskId]);
+          let wake = yield* requests.take;
+          while (wake.delegatedCompletion?.parentRunId !== runId) wake = yield* requests.take;
+          assert.equal(wake.delegatedCompletion?.parentRunId, runId);
+          const delivery = completed.delegatedCompletion!.delivery!;
+          if (ownership === "remote-disposed") {
+            const thread = (yield* orchestrator.getThreadProjection(threadId)).thread;
+            yield* sink.write({
+              events: [
+                {
+                  id: EventId.make("dispose-nested-owner"),
+                  type: "thread.metadata-updated",
+                  threadId,
+                  occurredAt: now,
+                  payload: {
+                    ...thread,
+                    remoteDelegations: thread.remoteDelegations!.map((row) => ({
+                      ...row,
+                      stage: "disposed" as const,
+                    })),
+                  },
+                },
+              ],
+            });
+          }
+          const sent = yield* Effect.result(
+            orchestrator.dispatch({
+              type: "message.dispatch",
+              createdBy: "agent",
+              creationSource: "server",
+              commandId: CommandId.make(`command:completion-capture-delivery-${ownership}`),
+              threadId,
+              messageId: delivery.messageId,
+              text: "Child finished",
+              attachments: [],
+              delegatedCompletion: {
+                parentRunId: runId,
+                generation: delivery.generation,
+                taskIds: delivery.taskIds,
+              },
+              dispatchMode: { type: "queue_after_active" },
+            }),
+          );
+          if (ownership === "remote-disposed") {
+            assert.equal(sent._tag, "Failure");
+            assert.isFalse(
+              (yield* orchestrator.getThreadProjection(threadId)).runs.some(
+                (run) => run.userMessageId === delivery.messageId,
+              ),
+            );
+            return;
+          }
+          assert.equal(sent._tag, "Success");
+          const delivered = yield* orchestrator.getThreadProjection(threadId);
+          const deliveryRun = delivered.runs.find(
+            (run) => run.userMessageId === delivery.messageId,
+          );
+          assert.isDefined(deliveryRun);
+          assert.notEqual(deliveryRun?.status, "queued");
+          if (ownership === "local")
+            assert.equal(deliveryRun?.delegatedTaskId, waiting.delegatedTaskId);
+          else {
+            assert.deepEqual(deliveryRun?.remoteDelegation, selector);
+            assert.isUndefined(deliveryRun?.delegatedTaskId);
+          }
+        }),
     );
     it.effect("pauses queued follow-up cards and resumes them", () =>
       Effect.gen(function* () {
@@ -3208,6 +3303,770 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
         projection.runs.find((row) => row.id === runId)?.delegatedCompletion?.delivery?.taskIds,
         [child.taskId],
       );
+    }),
+  );
+
+  it.effect.each([
+    "original",
+    "later",
+    "original-stop-before",
+    "later-stop-before",
+    "original-stop-after",
+    "later-stop-after",
+    "original-stop-before-write",
+    "later-stop-before-write",
+    "original-reservation-failure",
+    "later-reservation-failure",
+    "remote",
+    "remote-reservation-failure",
+    "remote-disposed",
+    "remote-settled",
+    "remote-independent",
+    "original-discard",
+    "later-discard",
+    "remote-discard",
+    "original-provider-loss",
+    "later-provider-loss",
+    "original-held",
+    "later-held",
+    "original-nested",
+    "later-nested",
+  ] as const)("keeps the %s task open across a real Action launch and result", (round) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const store = yield* ActionRunStore.ActionRunStore;
+      const projects = yield* ProjectService.ProjectService;
+      const sink = yield* EventSink.EventSinkV2;
+      const now = yield* DateTime.now;
+      const parentThreadId = ThreadId.make(`action-parent-${round}`);
+      const projectId = ProjectId.make(`action-project-${round}`);
+      const parentRunId = RunId.make(`action-parent-run-${round}`);
+      const rootNodeId = NodeId.make(`action-root-${round}`);
+      yield* seedParentWithTerminalTask({
+        threadId: parentThreadId,
+        projectId,
+        runId: parentRunId,
+        rootNodeId,
+        taskId: NodeId.make(`action-seed-${round}`),
+        deliveryState: "acknowledged",
+        now,
+      });
+      yield* projects.update({
+        commandId: CommandId.make(`action-project-update-${round}`),
+        projectId,
+        scripts: [
+          {
+            id: "check",
+            name: "Check",
+            command: "true",
+            icon: "test",
+            runOnWorktreeCreate: false,
+            allowAgentResume: true,
+          },
+        ],
+      });
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make(`action-parent-node-${round}`),
+            type: "node.updated",
+            threadId: parentThreadId,
+            runId: parentRunId,
+            occurredAt: now,
+            payload: {
+              id: rootNodeId,
+              threadId: parentThreadId,
+              runId: parentRunId,
+              parentNodeId: null,
+              rootNodeId,
+              kind: "root_turn",
+              status: "running",
+              countsForRun: true,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              runtimeRequestId: null,
+              checkpointScopeId: null,
+              startedAt: now,
+              completedAt: null,
+            },
+          },
+        ],
+      });
+      yield* orchestrator.dispatch({
+        type: "delegated_task.request",
+        createdBy: "agent",
+        creationSource: "mcp",
+        commandId: CommandId.make(`action-delegate-${round}`),
+        parentThreadId,
+        parentRunId,
+        parentNodeId: rootNodeId,
+        task: "Perform the check",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        completionWake: "always",
+      });
+      const first = (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+        (task) => task.childThreadId !== null,
+      )!;
+      const childThreadId = first.childThreadId!;
+      let child = yield* orchestrator.getThreadProjection(childThreadId);
+      if (round.startsWith("later")) {
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make(`action-first-end-${round}`),
+              type: "run.updated",
+              threadId: childThreadId,
+              runId: child.runs[0]!.id,
+              occurredAt: now,
+              payload: { ...child.runs[0]!, status: "completed", completedAt: now },
+            },
+          ],
+        });
+        yield* orchestrator.recoverDelegatedTasks;
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`action-later-${round}`),
+          threadId: childThreadId,
+          senderThreadId: parentThreadId,
+          messageId: MessageId.make(`action-later-${round}`),
+          text: "Check again",
+          attachments: [],
+          createdBy: "agent",
+          creationSource: "mcp",
+          dispatchMode: { type: "start_immediately" },
+        });
+        child = yield* orchestrator.getThreadProjection(childThreadId);
+      }
+      const remote = round.startsWith("remote");
+      const selector = {
+        parentEnvironmentId: EnvironmentId.make("foreign-environment"),
+        parentThreadId: ThreadId.make(`foreign-parent-${round}`),
+        sourceTaskId: NodeId.make(`foreign-task-${round}`),
+        delegationId: `delegation-${round}`,
+      };
+      if (remote) {
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make(`remote-child-${round}`),
+              type: "thread.metadata-updated",
+              threadId: childThreadId,
+              occurredAt: now,
+              payload: {
+                ...child.thread,
+                lineage: {
+                  parentThreadId: null,
+                  relationshipToParent: null,
+                  rootThreadId: childThreadId,
+                  ...(round === "remote-independent" ? { independent: true } : {}),
+                },
+                linkOrigin: { sessionId: "test-peer", label: "test peer", access: "full-access" },
+                remoteDelegations: [
+                  {
+                    ...selector,
+                    linkSessionId: "test-peer",
+                    stage:
+                      round === "remote-disposed"
+                        ? "disposed"
+                        : round === "remote-settled"
+                          ? "settled"
+                          : "active",
+                  },
+                ],
+              },
+            },
+            {
+              id: EventId.make(`local-owner-release-${round}`),
+              type: "subagent.updated",
+              threadId: parentThreadId,
+              occurredAt: now,
+              payload: { ...first, ownershipReleased: true },
+            },
+          ],
+        });
+        child = yield* orchestrator.getThreadProjection(childThreadId);
+      }
+      const source = {
+        ...child.runs.toSorted((a, b) => b.ordinal - a.ordinal)[0]!,
+        ...(remote ? { delegatedTaskId: undefined, remoteDelegation: selector } : {}),
+        status: "running" as const,
+        startedAt: now,
+      };
+      const attempt = child.attempts.find((row) => row.id === source.activeAttemptId)!;
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make(`action-source-start-${round}`),
+            type: "run.updated",
+            threadId: childThreadId,
+            runId: source.id,
+            occurredAt: now,
+            payload: source,
+          },
+          {
+            id: EventId.make(`action-attempt-start-${round}`),
+            type: "run-attempt.updated",
+            threadId: childThreadId,
+            runId: source.id,
+            occurredAt: now,
+            payload: { ...attempt, status: "running", startedAt: now },
+          },
+        ],
+      });
+      const taskId = remote ? selector.sourceTaskId : source.delegatedTaskId!;
+      const listeners = new Set<(event: TerminalEvent) => Effect.Effect<void>>();
+      const emitTerminal = (event: TerminalEvent) =>
+        Effect.forEach([...listeners], (listener) => listener(event), { discard: true });
+      const written = yield* Deferred.make<void>();
+      const terminalClosed = yield* Deferred.make<void>();
+      let commandWritten = false;
+      let actionRunId = "";
+      let reservationRunId = "";
+      const dependencies = Layer.mergeAll(
+        Layer.mock(ThreadManagement.ThreadManagementService)({
+          getThreadShell: orchestrator.getThreadShell,
+          getThreadRecords: orchestrator.getThreadRecords,
+          ensureLegacyTranscript: () => Effect.void,
+          dispatch: orchestrator.dispatch,
+          streamDomainEvents: orchestrator.streamDomainEvents,
+          withActionObligation: orchestrator.withActionObligation,
+          reserveActionObligation: (input) =>
+            orchestrator.reserveActionObligation({
+              ...input,
+              persistOwner: (owner) => {
+                reservationRunId = input.actionRunId;
+                return input.persistOwner(owner).pipe(
+                  Effect.andThen(
+                    round.endsWith("reservation-failure")
+                      ? Effect.fail(
+                          new Orchestrator.OrchestratorProjectionError({
+                            threadId: childThreadId,
+                            cause: "Interrupted reservation after retaining its owner.",
+                          }),
+                        )
+                      : Effect.void,
+                  ),
+                );
+              },
+            }),
+          disposeActionObligation: orchestrator.disposeActionObligation,
+        }),
+        Layer.mock(TerminalManager.TerminalManager)({
+          subscribe: (listener) =>
+            Effect.sync(() => {
+              listeners.add(listener);
+              return () => listeners.delete(listener);
+            }),
+          open: (input) =>
+            Effect.gen(function* () {
+              actionRunId = input.env![ACTION_RUN_ID_ENV]!;
+              const persisted = yield* orchestrator.getThreadProjection(childThreadId);
+              if (
+                round !== "remote-disposed" &&
+                round !== "remote-settled" &&
+                round !== "remote-independent"
+              )
+                assert.isTrue(
+                  persisted.runs
+                    .find((run) => run.id === source.id)
+                    ?.actionObligations?.some(
+                      (row) => row.actionRunId === actionRunId && row.state === "waiting",
+                    ),
+                );
+              if (
+                round !== "remote-disposed" &&
+                round !== "remote-settled" &&
+                round !== "remote-independent"
+              )
+                assert.equal((yield* store.get(childThreadId, actionRunId))._tag, "Some");
+              if (!round.endsWith("stop-before-write"))
+                yield* emitTerminal({
+                  type: "output",
+                  threadId: childThreadId,
+                  terminalId: input.terminalId!,
+                  data: "\x1b[?2004h",
+                });
+              return {
+                status: "running",
+                shellFamily: "posix",
+                pid: 100,
+                history: "",
+              } as TerminalManager.OpenTerminalSessionSnapshot;
+            }).pipe(Effect.orDie),
+          write: (input) =>
+            Effect.gen(function* () {
+              commandWritten = true;
+              yield* emitTerminal({
+                type: "output",
+                threadId: childThreadId,
+                terminalId: input.terminalId!,
+                data: ActionResume.actionOutputMarker(actionRunId, "start"),
+              }).pipe(Effect.andThen(Deferred.succeed(written, undefined)));
+            }),
+          hasForegroundSubprocess: () => Effect.succeed(true),
+          history: () => Effect.succeed(""),
+          close: () => Deferred.succeed(terminalClosed, undefined).pipe(Effect.asVoid),
+        }),
+        WorkspaceAcquisitionTestkit.layer,
+        ProviderRegistryMock.layer([{ instanceId: modelSelection.instanceId, driver } as never]),
+      );
+      yield* Effect.gen(function* () {
+        const actions = yield* ActionResume.ActionResume;
+        if (round === "remote-independent") {
+          const independent = yield* actions.runProjectActionAndResume(
+            {
+              threadId: childThreadId,
+              providerInstanceId: modelSelection.instanceId,
+              source: { runId: source.id, attemptId: source.activeAttemptId! },
+            },
+            "check",
+          );
+          assert.isUndefined(independent.owner);
+          yield* Deferred.await(written);
+          return;
+        }
+        assert.equal(
+          (yield* Effect.result(
+            actions.runProjectActionAndResume(
+              { threadId: childThreadId, providerInstanceId: modelSelection.instanceId },
+              "check",
+            ),
+          ))._tag,
+          "Failure",
+        );
+        assert.equal(
+          (yield* Effect.result(
+            actions.runProjectActionAndResume(
+              {
+                threadId: childThreadId,
+                providerInstanceId: modelSelection.instanceId,
+                source: { runId: source.id, attemptId: RunAttemptId.make("stale-attempt") },
+              },
+              "check",
+            ),
+          ))._tag,
+          "Failure",
+        );
+        assert.equal(actionRunId, "");
+
+        const launch = actions.runProjectActionAndResume(
+          {
+            threadId: childThreadId,
+            providerInstanceId: modelSelection.instanceId,
+            source: { runId: source.id, attemptId: source.activeAttemptId! },
+          },
+          "check",
+        );
+        if (round.endsWith("reservation-failure")) {
+          yield* launch.pipe(Effect.flip);
+          assert.equal((yield* store.get(childThreadId, reservationRunId))._tag, "None");
+          assert.equal(actionRunId, "");
+          assert.deepEqual(
+            (yield* orchestrator.getThreadProjection(childThreadId)).runs.find(
+              (run) => run.id === source.id,
+            )?.actionObligations ?? [],
+            [],
+          );
+          return;
+        }
+        if (round === "remote-disposed" || round === "remote-settled") {
+          yield* launch.pipe(Effect.flip);
+          assert.equal(actionRunId, "");
+          return;
+        }
+        const action = yield* launch;
+        assert.equal(action.owner?.taskId, taskId);
+        if (round.endsWith("stop-before-write")) {
+          yield* orchestrator.dispatch({
+            type: "thread.stop",
+            commandId: CommandId.make(`action-stop-${round}`),
+            threadId: childThreadId,
+          });
+          yield* emitTerminal({
+            type: "output",
+            threadId: childThreadId,
+            terminalId: action.terminalId,
+            data: "\x1b[?2004h",
+          });
+          yield* Deferred.await(terminalClosed);
+          assert.isFalse(commandWritten);
+          yield* actions.retryPendingFollowUps;
+          assert.equal(
+            (yield* orchestrator.getThreadProjection(childThreadId)).runs.find(
+              (run) => run.id === source.id,
+            )?.actionObligations?.[0]?.state,
+            "disposed",
+          );
+          return;
+        }
+        yield* Deferred.await(written);
+        yield* sink.write({
+          events: [
+            ...(round.endsWith("discard") || round.endsWith("stop-before")
+              ? [
+                  {
+                    id: EventId.make(`action-wait-message-${round}`),
+                    type: "message.updated" as const,
+                    threadId: childThreadId,
+                    runId: source.id,
+                    occurredAt: now,
+                    payload: {
+                      id: MessageId.make(`action-wait-message-${round}`),
+                      threadId: childThreadId,
+                      runId: source.id,
+                      nodeId: null,
+                      role: "assistant" as const,
+                      text: "Waiting for the Action",
+                      attachments: [],
+                      streaming: false,
+                      createdBy: "agent" as const,
+                      creationSource: "server" as const,
+                      createdAt: now,
+                      updatedAt: now,
+                    },
+                  },
+                ]
+              : []),
+            {
+              id: EventId.make(`action-intermediate-end-${round}`),
+              type: "run.updated",
+              threadId: childThreadId,
+              runId: source.id,
+              occurredAt: now,
+              payload: {
+                ...(yield* orchestrator.getThreadProjection(childThreadId)).runs.find(
+                  (run) => run.id === source.id,
+                )!,
+                status: round.endsWith("provider-loss") ? "cancelled" : "completed",
+                completedAt: now,
+              },
+            },
+          ],
+        });
+        yield* orchestrator.recoverDelegatedTasks;
+        if (remote) {
+          yield* orchestrator.dispatch({
+            type: "remote_delegation.settle",
+            commandId: CommandId.make(`remote-wait-${round}`),
+            threadId: childThreadId,
+            delegation: selector,
+            linkSessionId: "test-peer",
+          });
+          assert.equal(
+            (yield* orchestrator.getThreadProjection(childThreadId)).thread.remoteDelegations?.[0]
+              ?.stage,
+            "active",
+          );
+        } else {
+          assert.isTrue(yield* orchestrator.delegatedTaskResultPending(childThreadId, taskId));
+          assert.isNull(
+            (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+              (task) => task.id === taskId,
+            )!.result,
+          );
+        }
+        if (round.endsWith("discard")) {
+          const afterSequence = yield* sink.latestSequence();
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const recovered = yield* ActionResume.ActionResume;
+              yield* sink.stream({ afterSequence, eventType: "thread.metadata-updated" }).pipe(
+                Stream.filter(
+                  (stored) =>
+                    stored.event.type === "thread.metadata-updated" &&
+                    stored.event.threadId === childThreadId &&
+                    stored.event.payload.actionResume?.delivery === "available",
+                ),
+                Stream.take(1),
+                Stream.runDrain,
+              );
+              yield* recovered.discardInterrupted(childThreadId);
+              yield* recovered.discardInterrupted(childThreadId).pipe(Effect.flip);
+            }).pipe(
+              Effect.provide(Layer.fresh(ActionResume.layer).pipe(Layer.provide(dependencies))),
+            ),
+          );
+          yield* orchestrator.recoverDelegatedTasks;
+          if (remote) {
+            yield* orchestrator.dispatch({
+              type: "remote_delegation.settle",
+              commandId: CommandId.make(`discard-settle-${round}`),
+              threadId: childThreadId,
+              delegation: selector,
+              linkSessionId: "test-peer",
+            });
+            const association = (yield* orchestrator.getThreadProjection(childThreadId)).thread
+              .remoteDelegations?.[0];
+            assert.equal(association?.stage, "settled");
+            assert.equal(association?.finalRun?.status, "interrupted");
+          } else {
+            const task = (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+              (row) => row.id === taskId,
+            )!;
+            assert.equal(task.status, "interrupted");
+            assert.equal(task.result, "Child task ended with status interrupted.");
+            if (round.startsWith("later"))
+              assert.equal(
+                (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+                  (row) => row.id === first.id,
+                )?.status,
+                "completed",
+              );
+          }
+          assert.equal(
+            (yield* orchestrator.getThreadProjection(childThreadId)).runs.find(
+              (row) => row.id === source.id,
+            )?.status,
+            "interrupted",
+          );
+          yield* actions.retryPendingFollowUps;
+          assert.isFalse(
+            (yield* orchestrator.getThreadProjection(childThreadId)).runs.some(
+              (row) =>
+                row.userMessageId === MessageId.make(`action-resume:${action.runId}:follow-up`),
+            ),
+          );
+          return;
+        }
+        if (round.endsWith("stop-before")) {
+          yield* orchestrator.dispatch({
+            type: "thread.stop",
+            commandId: CommandId.make(`action-stop-${round}`),
+            threadId: childThreadId,
+          });
+        }
+        if (round.endsWith("stop-after") || round.endsWith("held")) {
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(`action-blocker-${round}`),
+            threadId: childThreadId,
+            messageId: MessageId.make(`action-blocker-${round}`),
+            text: "Unrelated work",
+            attachments: [],
+            createdBy: "system",
+            creationSource: "server",
+            dispatchMode: { type: "start_immediately" },
+          });
+        }
+        yield* emitTerminal({
+          type: "exited",
+          threadId: childThreadId,
+          terminalId: action.terminalId,
+          exitCode: 0,
+          exitSignal: null,
+        });
+        yield* actions.retryPendingFollowUps;
+        const continued = yield* orchestrator.getThreadProjection(childThreadId);
+        if (round.endsWith("stop-before")) {
+          assert.isFalse(
+            continued.runs.some(
+              (run) =>
+                run.userMessageId === MessageId.make(`action-resume:${action.runId}:follow-up`),
+            ),
+          );
+          assert.equal(
+            continued.runs.find((run) => run.id === source.id)?.actionObligations?.[0]?.state,
+            "disposed",
+          );
+          yield* orchestrator.recoverDelegatedTasks;
+          yield* actions.retryPendingFollowUps;
+          const retained = yield* store.get(childThreadId, action.runId);
+          assert.equal(retained._tag === "Some" ? retained.value.state.delivery : null, "disposed");
+          const stoppedTask = (yield* orchestrator.getThreadProjection(
+            parentThreadId,
+          )).subagents.find((task) => task.id === taskId)!;
+          assert.equal(stoppedTask.status, "interrupted");
+          assert.equal(stoppedTask.result, "Child task ended with status interrupted.");
+          if (round.startsWith("later"))
+            assert.equal(
+              (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+                (task) => task.id === first.id,
+              )?.status,
+              "completed",
+            );
+          return;
+        }
+        const continuation = continued.runs.find(
+          (run) => run.userMessageId === MessageId.make(`action-resume:${action.runId}:follow-up`),
+        )!;
+        if (remote) {
+          assert.deepEqual(continuation.remoteDelegation, selector);
+          assert.isUndefined(continuation.delegatedTaskId);
+        } else assert.equal(continuation.delegatedTaskId, taskId);
+        assert.equal(
+          continued.runs.find((run) => run.id === source.id)?.actionObligations?.[0]
+            ?.continuationRunId,
+          continuation.id,
+        );
+        yield* actions.retryPendingFollowUps;
+        assert.lengthOf(
+          (yield* orchestrator.getThreadProjection(childThreadId)).runs,
+          continued.runs.length,
+        );
+        if (round.endsWith("held")) {
+          const afterSequence = yield* sink.latestSequence();
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make(`owned-held-${round}`),
+                type: "run.updated",
+                threadId: childThreadId,
+                runId: continuation.id,
+                occurredAt: now,
+                payload: { ...continuation, queueHeld: true },
+              },
+            ],
+          });
+          const update = yield* sink.stream({ afterSequence, eventType: "subagent.updated" }).pipe(
+            Stream.filter(
+              (stored) =>
+                stored.event.type === "subagent.updated" &&
+                stored.event.payload.id === taskId &&
+                ["idle", "waiting"].includes(stored.event.payload.status),
+            ),
+            Stream.take(1),
+            Stream.runCollect,
+          );
+          assert.equal(
+            update[0]?.event.type === "subagent.updated" ? update[0].event.payload.status : null,
+            "waiting",
+          );
+          assert.isTrue(yield* orchestrator.delegatedTaskResultPending(childThreadId, taskId));
+          return;
+        }
+        if (round.endsWith("stop-after")) {
+          assert.equal(continuation.status, "queued");
+          yield* orchestrator.dispatch({
+            type: "thread.stop",
+            commandId: CommandId.make(`action-stop-${round}`),
+            threadId: childThreadId,
+          });
+          yield* actions.retryPendingFollowUps;
+          yield* orchestrator.dispatch({
+            type: "queue.resume",
+            commandId: CommandId.make(`action-resume-queue-${round}`),
+            threadId: childThreadId,
+          });
+          yield* orchestrator.recoverDelegatedTasks;
+          assert.equal(
+            (yield* orchestrator.getThreadProjection(childThreadId)).runs.find(
+              (run) => run.id === continuation.id,
+            )?.status,
+            "cancelled",
+          );
+          return;
+        }
+        const nested = {
+          ...first,
+          id: NodeId.make(`nested-after-action-${round}`),
+          threadId: childThreadId,
+          runId: continuation.id,
+          parentNodeId: continuation.rootNodeId!,
+          origin: "provider_native" as const,
+          childThreadId: null,
+          status: "running" as const,
+          result: null,
+          completedAt: null,
+        };
+        if (round.endsWith("nested"))
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make(`nested-start-${round}`),
+                type: "subagent.updated",
+                threadId: childThreadId,
+                runId: continuation.id,
+                nodeId: nested.id,
+                occurredAt: now,
+                payload: nested,
+              },
+            ],
+          });
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make(`action-final-end-${round}`),
+              type: "run.updated",
+              threadId: childThreadId,
+              runId: continuation.id,
+              occurredAt: now,
+              payload: { ...continuation, status: "completed", startedAt: now, completedAt: now },
+            },
+          ],
+        });
+        if (round.endsWith("nested")) {
+          yield* orchestrator.recoverDelegatedTasks;
+          assert.isTrue(yield* orchestrator.delegatedTaskResultPending(childThreadId, taskId));
+          assert.isNull(
+            (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+              (task) => task.id === taskId,
+            )!.result,
+          );
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make(`nested-end-${round}`),
+                type: "subagent.updated",
+                threadId: childThreadId,
+                runId: continuation.id,
+                nodeId: nested.id,
+                occurredAt: now,
+                payload: {
+                  ...nested,
+                  status: "completed",
+                  result: "Nested work finished",
+                  completedAt: now,
+                },
+              },
+            ],
+          });
+        }
+        if (remote) {
+          yield* orchestrator.dispatch({
+            type: "remote_delegation.settle",
+            commandId: CommandId.make(`remote-final-${round}`),
+            threadId: childThreadId,
+            delegation: selector,
+            linkSessionId: "test-peer",
+          });
+          const association = (yield* orchestrator.getThreadProjection(childThreadId)).thread
+            .remoteDelegations?.[0];
+          assert.equal(association?.stage, "settled");
+          assert.equal(association?.finalRun?.runId, continuation.id);
+          return;
+        }
+        yield* orchestrator.recoverDelegatedTasks;
+        assert.equal(
+          (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+            (task) => task.id === taskId,
+          )?.status,
+          "completed",
+        );
+        const finalized = yield* orchestrator.getThreadProjection(parentThreadId);
+        assert.lengthOf(
+          finalized.contextTransfers.filter(
+            (transfer) =>
+              transfer.type === "subagent_result" && transfer.sourcePoint.runId === continuation.id,
+          ),
+          1,
+        );
+        yield* orchestrator.recoverDelegatedTasks;
+        const recovered = yield* orchestrator.getThreadProjection(parentThreadId);
+        assert.deepEqual(
+          recovered.subagents.find((task) => task.id === taskId),
+          finalized.subagents.find((task) => task.id === taskId),
+        );
+        assert.lengthOf(
+          recovered.contextTransfers.filter(
+            (transfer) =>
+              transfer.type === "subagent_result" && transfer.sourcePoint.runId === continuation.id,
+          ),
+          1,
+        );
+      }).pipe(Effect.provide(ActionResume.layer.pipe(Layer.provide(dependencies))));
     }),
   );
 

@@ -1,6 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  EnvironmentId,
   type ModelSelection,
   NodeId,
   RunId,
@@ -470,6 +471,28 @@ it("waits for nested work and retains the report across monitor acknowledgements
   });
   assert.equal(held.state, "result_available");
   assert.equal(held.resultRun?.id, cancelled.id);
+  const obligation = {
+    actionRunId: "owned-action",
+    messageId: pending.userMessageId,
+    owner: {
+      parentEnvironmentId: EnvironmentId.make("parent-environment"),
+      parentThreadId,
+      taskId: NodeId.make("owned-task"),
+      sourceRunId: run.id,
+    },
+    state: "transferred" as const,
+    continuationRunId: pending.id,
+  };
+  assert.equal(
+    delegatedTaskProgress({
+      ...projection,
+      runs: [
+        { ...run, actionObligations: [obligation] },
+        { ...pending, queueHeld: true },
+      ],
+    }).state,
+    "working",
+  );
   const report = { ...pending, status: "completed" as const, startedAt: parentCreatedAt };
   const monitor = { ...report, id: RunId.make("monitor"), ordinal: 3 };
   const artifacts = makeSubagentConversationArtifacts({
@@ -575,6 +598,31 @@ it("orders a task's assistant messages by turn item, not by timestamps", () => {
   assert.equal(result.text, "All steps passed.");
   assert.equal(result.messageId, report.message.id);
   assert.equal(result.turnItemId, report.turnItem.id);
+  const discarded = subagentResultForRun(
+    { ...projection, messages: [progress.message], turnItems: [progress.turnItem] },
+    {
+      ...run,
+      status: "interrupted",
+      actionObligations: [
+        {
+          actionRunId: "discarded",
+          messageId: MessageId.make("discarded"),
+          owner: {
+            parentEnvironmentId: EnvironmentId.make("parent"),
+            parentThreadId,
+            taskId: NodeId.make("task"),
+            sourceRunId: run.id,
+          },
+          state: "disposed",
+        },
+      ],
+    },
+  );
+  assert.deepEqual(discarded, {
+    text: "Child task ended with status interrupted.",
+    messageId: null,
+    turnItemId: null,
+  });
 });
 
 it.effect("ends an orphaned native subagent's node when only its record already ended", () =>
