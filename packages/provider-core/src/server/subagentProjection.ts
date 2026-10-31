@@ -308,6 +308,28 @@ export function delegatedTaskProgress(projection: {
   };
 }
 
+export function delegatedTaskRoundProgress(
+  projection: Pick<
+    OrchestrationV2ThreadProjection,
+    "runs" | "messages" | "subagents" | "providerThreads"
+  >,
+  taskId: NodeId,
+) {
+  const runs = projection.runs.filter((run) => run.delegatedTaskId === taskId);
+  const runIds = new Set(runs.map((run) => run.id));
+  const providerThreadIds = new Set(runs.map((run) => run.providerThreadId));
+  return delegatedTaskProgress({
+    runs,
+    messages: projection.messages.filter(
+      (message) => message.runId !== null && runIds.has(message.runId),
+    ),
+    subagents: projection.subagents.filter((task) => task.runId !== null && runIds.has(task.runId)),
+    providerThreads: projection.providerThreads.filter((thread) =>
+      providerThreadIds.has(thread.id),
+    ),
+  });
+}
+
 function writtenIds(
   emitted: ReadonlyArray<OrchestrationV2DomainEvent>,
   type: "subagent.updated" | "node.updated" | "turn-item.updated" | "provider-turn.updated",

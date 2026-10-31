@@ -195,6 +195,7 @@ import {
   makeSubagentChildThread,
   subagentResultForRun,
   delegatedTaskProgress,
+  delegatedTaskRoundProgress,
   subagentThreadTitle,
 } from "@t3tools/provider-core/server/subagentProjection";
 import {
@@ -632,28 +633,6 @@ function remoteActionOwnerSource(
     projection.thread.archivePending == null
     ? source
     : undefined;
-}
-
-function delegatedTaskRoundProgress(
-  projection: Pick<
-    OrchestrationV2ThreadProjection,
-    "runs" | "messages" | "subagents" | "providerThreads"
-  >,
-  taskId: NodeId,
-) {
-  const runs = projection.runs.filter((run) => run.delegatedTaskId === taskId);
-  const runIds = new Set(runs.map((run) => run.id));
-  const providerThreadIds = new Set(runs.map((run) => run.providerThreadId));
-  return delegatedTaskProgress({
-    runs,
-    messages: projection.messages.filter(
-      (message) => message.runId !== null && runIds.has(message.runId),
-    ),
-    subagents: projection.subagents.filter((task) => task.runId !== null && runIds.has(task.runId)),
-    providerThreads: projection.providerThreads.filter((thread) =>
-      providerThreadIds.has(thread.id),
-    ),
-  });
 }
 
 function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {

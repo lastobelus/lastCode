@@ -1449,9 +1449,13 @@ it.effect("the same key from another provider session is another task", () =>
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
-it.effect.each([null, "Working before the provider failed."])(
-  "reports the failed remote run's error instead of its earlier reply (%s)",
-  (reply) =>
+it.effect.each([
+  { status: "failed" as const, reply: null },
+  { status: "failed" as const, reply: "Working before the provider failed." },
+  { status: "interrupted" as const, reply: "Waiting for the interrupted Action to resume." },
+])(
+  "reports the terminal remote outcome instead of its earlier reply ($status/$reply)",
+  ({ status, reply }) =>
     Effect.scoped(
       Effect.gen(function* () {
         const thread = yield* makeBoxThread;
@@ -1467,17 +1471,19 @@ it.effect.each([null, "Working before the provider failed."])(
         yield* Ref.set(thread.reply, reply);
         const error = "Provider failed: authentication expired on the destination.";
         yield* Ref.set(thread.error, error);
-        yield* SubscriptionRef.set(thread.status, "failed");
+        yield* SubscriptionRef.set(thread.status, status);
         yield* Deferred.succeed(thread.finished, undefined);
+        const expected =
+          status === "interrupted" ? "Child task ended with status interrupted." : error;
         expect(yield* taskResult(a, delegated.taskId)).toMatchObject({
-          status: "failed",
-          result: error,
+          status,
+          result: expected,
         });
-        const status = yield* a.call("task_status", { taskId: delegated.taskId });
-        expect(status.structuredContent).toMatchObject({
-          status: "failed",
-          summary: error,
-          latestTerminalSummary: error,
+        const observed = yield* a.call("task_status", { taskId: delegated.taskId });
+        expect(observed.structuredContent).toMatchObject({
+          status,
+          summary: expected,
+          latestTerminalSummary: expected,
         });
         const offered = yield* SubscriptionRef.changes(offers).pipe(
           Stream.filter((seen) => seen.some((offer) => offer.threadId === parentThreadId)),

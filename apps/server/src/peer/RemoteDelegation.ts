@@ -806,7 +806,10 @@ const make = Effect.gen(function* () {
       runId: remote.runId ?? waited.runId,
       status: waited.status,
     };
-    const result = yield* lastReply(scope, remote, resultRun.runId, resultRun.status === "failed");
+    const result =
+      resultRun.status === "interrupted"
+        ? `Child task ended with status ${resultRun.status}.`
+        : yield* lastReply(scope, remote, resultRun.runId, resultRun.status === "failed");
     yield* complete(
       parentThreadId,
       taskId,
