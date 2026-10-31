@@ -542,6 +542,13 @@ it("readThread and sendToThread reach threads in other projects", async () => {
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
+          hasThreadReadAuthorization: (threadId, authorizationId) =>
+            Effect.sync(() =>
+              (threadId === parentThreadId
+                ? parentProjection
+                : foreignProjection(threadId)
+              ).runs.some((run) => run.userMessageId === authorizationId),
+            ),
           getThreadRecords: (threadId) => {
             if (threadId === parentThreadId) {
               const loaded = { ...parentProjection };

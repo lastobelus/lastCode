@@ -93,24 +93,12 @@ const make = Effect.gen(function* () {
 
   const bind = Effect.fn("ThreadReadBroker.bind")(
     function* (threadId: ThreadId, messageId: MessageId, sessionId: string) {
-      const { runs, runtimeRequests, messages } = yield* threads.getThreadRecords(
-        threadId,
-        ["runs", "runtimeRequests", "messages"],
-        { messageRoles: ["user"] },
-      );
+      const used = yield* threads.hasThreadReadAuthorization(threadId, messageId);
       const now = yield* pruneBindings;
       const key = bindingKey(threadId, messageId);
       // A replay cannot claim an existing execution, including after eviction,
       // or replace its original requester while the binding remains present.
-      if (
-        runs.some((run) => run.userMessageId === messageId) ||
-        runtimeRequests.some(
-          (request) => request.threadReadContext?.authorizationId === messageId,
-        ) ||
-        messages.some((message) => message.threadReadContext?.authorizationId === messageId) ||
-        bindings.has(key)
-      )
-        return;
+      if (used || bindings.has(key)) return;
       if (bindings.size >= maxBindings) {
         const oldest = bindings.keys().next().value;
         if (oldest !== undefined) bindings.delete(oldest);

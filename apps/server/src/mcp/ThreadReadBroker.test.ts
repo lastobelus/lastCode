@@ -108,6 +108,17 @@ const makeHarness = Effect.gen(function* () {
         Layer.provide(NodeCrypto.layer),
         Layer.provide(
           Layer.mock(ThreadManagementService.ThreadManagementService)({
+            hasThreadReadAuthorization: (id, authorizationId) =>
+              Effect.sync(
+                () =>
+                  (runs.get(id) ?? []).some((run) => run.userMessageId === authorizationId) ||
+                  (requests.get(id) ?? []).some(
+                    (request) => request.threadReadContext?.authorizationId === authorizationId,
+                  ) ||
+                  (messages.get(id) ?? []).some(
+                    (message) => message.threadReadContext?.authorizationId === authorizationId,
+                  ),
+              ),
             getThreadRecords: (id) =>
               Effect.sync(
                 () =>

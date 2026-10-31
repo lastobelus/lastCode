@@ -60,6 +60,10 @@ it.effect(
       let advanceAfterCallerLoads = false;
       const threads = Layer.mock(ThreadManagement.ThreadManagementService)({
         getThreadShell: () => Effect.succeed(caller),
+        hasThreadReadAuthorization: (threadId, authorizationId) =>
+          Effect.sync(() =>
+            (runs.get(threadId) ?? []).some((run) => run.userMessageId === authorizationId),
+          ),
         getThreadRecords: (threadId) =>
           Effect.gen(function* () {
             if (threadId === sourceThreadId && advanceAfterCallerLoads) {
