@@ -2037,6 +2037,168 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
     return { requestId, nodeId, itemId };
   });
 
+  it.effect.each(["steer", "promote"] as const)(
+    "preserves scoped answer authority when an earlier question joins an active run (%s)",
+    (delivery) =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const eventSink = yield* EventSink.EventSinkV2;
+        const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const threadId = ThreadId.make(`runtime-steered-answer-${delivery}`);
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`${threadId}:create`),
+          createdBy: "user",
+          creationSource: "web",
+          threadId,
+          projectId: ProjectId.make(`${threadId}:project`),
+          title: "Resumed answer",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: process.cwd(),
+        });
+        const { requestId } = yield* seedPendingQuestion(threadId, null, { type: "message" });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`${threadId}:start`),
+          threadId,
+          messageId: MessageId.make(`${threadId}:start`),
+          text: "Continue other work while the earlier question is pending.",
+          attachments: [],
+          createdBy: "user",
+          creationSource: "web",
+          dispatchMode: { type: "start_immediately" },
+        });
+        const initial = yield* orchestrator.getThreadProjection(threadId);
+        const run = initial.runs[0]!;
+        const providerThread = initial.providerThreads[0]!;
+        const now = yield* DateTime.now;
+        const providerSession = {
+          id: providerThread.providerSessionId!,
+          driver,
+          providerInstanceId: modelSelection.instanceId,
+          status: "running" as const,
+          cwd: process.cwd(),
+          model: modelSelection.model,
+          capabilities: CodexProviderCapabilitiesV2,
+          createdAt: now,
+          updatedAt: now,
+          lastError: null,
+        };
+        yield* eventSink.write({
+          events: [
+            {
+              id: EventId.make(`${threadId}:running`),
+              type: "run.updated",
+              threadId,
+              runId: run.id,
+              occurredAt: now,
+              payload: { ...run, status: "running", startedAt: now },
+            },
+            {
+              id: EventId.make(`${threadId}:session`),
+              type: "provider-session.attached",
+              threadId,
+              occurredAt: now,
+              payload: providerSession,
+            },
+            {
+              id: EventId.make(`${threadId}:turn`),
+              type: "provider-turn.updated",
+              threadId,
+              runId: run.id,
+              occurredAt: now,
+              payload: {
+                id: ProviderTurnId.make(`${threadId}:turn`),
+                providerThreadId: providerThread.id,
+                nodeId: run.rootNodeId!,
+                runAttemptId: run.activeAttemptId,
+                nativeTurnRef: null,
+                ordinal: 1,
+                status: "running",
+                startedAt: now,
+                completedAt: null,
+              },
+            },
+          ],
+        });
+        const sessionSpy = vi.spyOn(sessions, "get").mockReturnValue(
+          Effect.succeedSome({
+            providerSession: {
+              ...providerSession,
+              capabilities: {
+                ...CodexProviderCapabilitiesV2,
+                turns: {
+                  ...CodexProviderCapabilitiesV2.turns,
+                  supportsActiveSteering: delivery === "steer",
+                },
+              },
+            },
+          } as ProviderAdapter.ProviderAdapterV2SessionRuntime),
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(() => sessionSpy.mockRestore()));
+        const commandId = CommandId.make(`${threadId}:answer`);
+        const reference = {
+          version: 1 as const,
+          contextId: ComposerContextId.make("answer-reference"),
+          kind: "thread" as const,
+          label: "Reference",
+          title: "Reference",
+          environmentId: EnvironmentId.make("source-environment"),
+          threadId: ThreadId.make("source-thread"),
+        };
+        yield* orchestrator.dispatch({
+          type: "runtime-request.respond",
+          commandId,
+          threadId,
+          requestId,
+          answers: {
+            color: "Blue [Reference](t3-context://v1/thread/answer-reference)",
+            sizes: ["Small"],
+          },
+          contextsByQuestionId: { color: { version: 1, records: [reference] } },
+        });
+        const answerId = MessageId.make(`async-answer:${requestId}`);
+        const answered = yield* orchestrator.getThreadProjection(threadId);
+        const answer = answered.messages.find((message) => message.id === answerId)!;
+        assert.deepEqual(answer.threadReadContext, {
+          authorizationId: MessageId.make(`answer-context:${commandId}`),
+          capturedAt: DateTime.toEpochMillis(now),
+        });
+        assert.deepEqual(answer.context?.records, [reference]);
+        if (delivery === "steer") {
+          assert.equal(answer.runId, run.id);
+          assert.lengthOf(answered.runs, 1);
+        } else {
+          const queued = answered.runs.find((candidate) => candidate.userMessageId === answerId)!;
+          assert.equal(queued.status, "queued");
+          sessionSpy.mockReturnValue(
+            Effect.succeedSome({
+              providerSession,
+            } as ProviderAdapter.ProviderAdapterV2SessionRuntime),
+          );
+          yield* TestClock.adjust("1 millis");
+          yield* orchestrator.dispatch({
+            type: "queued-message.promote-to-steer",
+            commandId: CommandId.make(`${threadId}:promote`),
+            threadId,
+            queuedRunId: queued.id,
+            targetRunId: run.id,
+          });
+          const promoted = (yield* orchestrator.getThreadProjection(threadId)).messages.find(
+            (message) => message.id === answerId,
+          )!;
+          assert.equal(promoted.runId, run.id);
+          assert.deepEqual(promoted.threadReadContext, {
+            authorizationId: answer.threadReadContext!.authorizationId,
+            capturedAt: DateTime.toEpochMillis(yield* DateTime.now),
+          });
+        }
+      }),
+  );
+
   it.effect.each([
     { trigger: "startup", scope: "run" },
     { trigger: "shutdown", scope: "session" },

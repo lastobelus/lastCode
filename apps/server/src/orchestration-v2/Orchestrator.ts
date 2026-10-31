@@ -6521,6 +6521,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     command: Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+    acceptedThreadReadContext?: OrchestrationV2ConversationMessage["threadReadContext"],
   ) {
     let projection = yield* getProjectionWithPendingEvents(command.threadId, events);
     if (command.manualContinuationOfRunId !== undefined) {
@@ -7014,6 +7015,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         messageId: command.messageId,
         text: dispatchText,
         ...(command.context ? { context: command.context } : {}),
+        ...(acceptedThreadReadContext === undefined
+          ? {}
+          : { threadReadContext: acceptedThreadReadContext }),
         attachments: command.attachments,
         createdBy: command.createdBy,
         creationSource: command.creationSource,
@@ -7281,6 +7285,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         updatedAt: now,
         ...(delegatedCompletion === undefined ? {} : { delegatedCompletion }),
         ...(command.notification === undefined ? {} : { notification: command.notification }),
+        ...(acceptedThreadReadContext === undefined
+          ? {}
+          : { threadReadContext: acceptedThreadReadContext }),
       };
       const emitEvent = emit(events, command);
       if (targetProviderThread === undefined) {
@@ -7628,6 +7635,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         updatedAt: now,
         ...(delegatedCompletion === undefined ? {} : { delegatedCompletion }),
         ...(command.notification === undefined ? {} : { notification: command.notification }),
+        ...(acceptedThreadReadContext === undefined
+          ? {}
+          : { threadReadContext: acceptedThreadReadContext }),
       };
       const turnItem: OrchestrationV2TurnItem = {
         createdBy: command.createdBy,
@@ -8379,6 +8389,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       updatedAt: now,
       ...(delegatedCompletion === undefined ? {} : { delegatedCompletion }),
       ...(command.notification === undefined ? {} : { notification: command.notification }),
+      ...(acceptedThreadReadContext === undefined
+        ? {}
+        : { threadReadContext: acceptedThreadReadContext }),
     };
     const turnItem: OrchestrationV2TurnItem = {
       createdBy: command.createdBy,
@@ -10507,7 +10520,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           creationSource: "server" as const,
           dispatchMode,
         };
-        yield* dispatchMessage(answer, events, effects);
+        yield* dispatchMessage(
+          answer,
+          events,
+          effects,
+          threadReadContext === undefined
+            ? undefined
+            : {
+                authorizationId: threadReadContext.authorizationId,
+                capturedAt: DateTime.toEpochMillis(now),
+              },
+        );
         return yield* recordSubagentFollowup(answer, events).pipe(mapDispatchError(answer));
       }
       if (providerSessionId === null) return;
