@@ -10,6 +10,7 @@ import {
   CommandId,
   ContextTransferId,
   EnvironmentId,
+  MessageId,
   NodeId,
   type OrchestrationV2Run,
   ProjectId,
@@ -100,6 +101,12 @@ const layerLaunches = Layer.effect(
             worktreePath: null,
             ...(input.linkOrigin === undefined ? {} : { linkOrigin: input.linkOrigin }),
             ...(input.delegatedFrom === undefined ? {} : { delegatedFrom: input.delegatedFrom }),
+            ...(input.creatorThreadId === undefined
+              ? {}
+              : { creatorThreadId: input.creatorThreadId }),
+            ...(input.groupedUnderThreadId === undefined
+              ? {}
+              : { groupedUnderThreadId: input.groupedUnderThreadId }),
             createdBy: input.createdBy,
             creationSource: input.creationSource,
           })
@@ -133,11 +140,27 @@ const layerTools = Layer.mergeAll(
     Layer.provide(layerLaunches),
     Layer.provide(NodeCrypto.layer),
     Layer.provide(
-      Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+      Layer.mock(ProviderRegistry.ProviderRegistry)({
+        getProviders: Effect.succeed([
+          {
+            instanceId,
+            driver: ProviderDriverKind.make("codex"),
+            enabled: true,
+            installed: true,
+            version: "test",
+            status: "ready",
+            auth: { status: "authenticated" },
+            checkedAt: "2026-10-01T00:00:00.000Z",
+            models: [{ slug: "gpt-5", name: "Test model", isCustom: false, capabilities: null }],
+            slashCommands: [],
+            skills: [],
+          },
+        ]),
+      }),
     ),
     Layer.provide(
       Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
-        list: () => Effect.succeed([]),
+        list: () => Effect.succeed([instanceId]),
       }),
     ),
     Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
@@ -391,6 +414,101 @@ it.layer(Layer.provideMerge(layerTools, layerOrchestration))("work a link starts
       // Reads are not fenced.
       const read = yield* call(laptop, "t3_thread_read", { threadId: users });
       assert.equal(read.isError, false);
+
+      // Choosing a parent changes that parent's family just like moving a thread.
+      // Exercise both an outside linked client and a thread that link started.
+      const otherLaunch = yield* launch(desk, "Another link's parent");
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const createFrom = Effect.fn("test.createFrom")(function* (
+        source: McpInvocationContext.McpInvocationScope,
+        parent: ThreadId | null | undefined,
+        key: string,
+        tool: "t3_thread_launch" | "create_threads",
+      ) {
+        const placement = parent === undefined ? {} : { groupedUnderThreadId: parent };
+        return yield* call(source, tool, {
+          clientRequestId: key,
+          ...(tool === "t3_thread_launch"
+            ? {
+                projectId,
+                title: key,
+                modelSelection: { instanceId, model: "gpt-5" },
+                ...placement,
+              }
+            : { threads: [{ title: key, ...placement }] }),
+        });
+      });
+      const startCaller = Effect.fn("test.startCaller")(function* (threadId: ThreadId) {
+        yield* threads.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`start:${threadId}`),
+          threadId,
+          messageId: MessageId.make(`message:${threadId}`),
+          text: "Organize work",
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        return {
+          ...laptop,
+          requestNamespace: `provider:${threadId}`,
+          client: undefined,
+          thread: {
+            threadId,
+            providerSessionId: `provider:${threadId}`,
+            providerInstanceId: instanceId,
+          },
+        } satisfies McpInvocationContext.McpInvocationScope;
+      });
+      const threadScope = yield* startCaller(ownLaunch);
+      for (const [tool, source] of [
+        ["t3_thread_launch", laptop],
+        ["t3_thread_launch", threadScope],
+        ["create_threads", threadScope],
+      ] as const) {
+        const prefix = `${tool}:${source.requestNamespace}`;
+        for (const parent of [users, otherLaunch]) {
+          const count = yield* projections.countThreads();
+          assert.equal(
+            failureCode(yield* createFrom(source, parent, `${prefix}:${parent}`, tool)),
+            "capability_denied",
+          );
+          assert.equal(yield* projections.countThreads(), count);
+        }
+        for (const parent of [ownLaunch, null, undefined]) {
+          const result = yield* createFrom(source, parent, `${prefix}:${parent}`, tool);
+          assert.equal(result.isError, false, JSON.stringify(result.content));
+          const id = result.structuredContent as {
+            threadId: ThreadId;
+            threads: [{ threadId: ThreadId }];
+          };
+          assert.equal(
+            (yield* projections.getThreadShell(
+              tool === "t3_thread_launch" ? id.threadId : id.threads[0].threadId,
+            ))?.groupedUnderThreadId,
+            parent === undefined ? (source.thread?.threadId ?? null) : parent,
+          );
+        }
+      }
+      for (const source of [trusted, claudeCode]) {
+        const id = yield* launch(source, "Authorized explicit parent", {
+          groupedUnderThreadId: users,
+        });
+        assert.equal((yield* projections.getThreadShell(id))?.groupedUnderThreadId, users);
+        const result = yield* createFrom(
+          yield* startCaller(id),
+          users,
+          `authorized:${id}`,
+          "create_threads",
+        );
+        assert.equal(result.isError, false, JSON.stringify(result.content));
+        const created = result.structuredContent as { threads: [{ threadId: ThreadId }] };
+        assert.equal(
+          (yield* projections.getThreadShell(created.threads[0].threadId))?.groupedUnderThreadId,
+          users,
+        );
+      }
     }),
   );
 
