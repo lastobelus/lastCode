@@ -26,6 +26,8 @@ import {
   RunId,
   NonNegativeInt,
   ProjectId,
+  OrchestratorMcpClientRequestId,
+  OrchestrationV2ThreadPlacementResult,
 } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Schema from "effect/Schema";
@@ -85,6 +87,26 @@ const commandTool = {
     Crypto.Crypto,
   ],
 };
+const ThreadGroupTool = Tool.make("t3_thread_group", {
+  ...commandTool,
+  description:
+    "Move existing interactive threads under another thread, or to top level with groupedUnderThreadId:null. A moved thread's descendants move with it. Thread and parent must share this environment and project. Delegated children their task still owns, and provider-native children, cannot move. Moving changes organization only, never task ownership or result routing. Up to 200 distinct threads, applied in order; the first rejection stops the batch and leaves later items not_attempted. Use a new clientRequestId per request and reuse it only to retry: accepted items return their original result instead of moving again. Each result gives previous and new placement, so you can move it back. List direct children with t3_thread_list underThreadId. For an empty parent, use t3_thread_launch without message or create_threads without prompt.",
+  parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
+    projectId: Schema.optional(ProjectId),
+    clientRequestId: OrchestratorMcpClientRequestId,
+    items: Schema.Array(
+      Schema.Struct({
+        threadId: ThreadId,
+        groupedUnderThreadId: Schema.NullOr(ThreadId),
+      }),
+    ).check(Schema.isMinLength(1), Schema.isMaxLength(200)),
+  }),
+  success: Schema.Struct({
+    items: Schema.Array(OrchestrationV2ThreadPlacementResult),
+    atomic: Schema.Literal(false),
+  }),
+}).annotate(Tool.Destructive, true);
 const queueEntry = Schema.Struct({
   queuedRunId: RunId,
   text: Schema.String,
@@ -158,7 +180,7 @@ const PendingRequestTool = Tool.make("t3_pending_request", {
 const ThreadArchiveFamilyTool = Tool.make("t3_thread_archive_family", {
   ...commandTool,
   description:
-    "Inspect a thread's recursive archive family IDs and working/unread members. This may repair saved activity when the provider proves that the exact turn has ended; unknown work remains active. Omit threadId for this thread. Includes grouped interactive conversations, nested subagents and native subagents; excludes forks and independent branches. Use t3_thread_read for individual thread details. To archive with t3_thread_organize, choose childDisposition and pass the returned childThreadIds as expectedChildThreadIds. The server rechecks them on submission; if the family changes, inspect it again before choosing.",
+    "Inspect a thread's recursive archive family IDs and working/unread members. This may repair saved activity when the provider proves that the exact turn has ended; unknown work remains active. Omit threadId for this thread. Includes current organizational descendants and still-owned app/native subagents. Fork or released lineage alone does not add membership. Use t3_thread_read for individual thread details. To archive with t3_thread_organize, choose childDisposition and pass the returned childThreadIds as expectedChildThreadIds. The server rechecks them on submission; if the family changes, inspect it again before choosing.",
   parameters: Schema.Struct({ threadId: Schema.optional(ThreadId) }),
   success: OrchestrationV2ThreadArchiveFamily.mapFields(Struct.omit(["threads"])),
 })
@@ -298,6 +320,7 @@ const ThreadRepairTool = Tool.make("t3_thread_repair", {
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
 export const ThreadToolkit = Toolkit.make(
+  ThreadGroupTool,
   ThreadRecoverTool,
   ThreadRepairTool,
   ScheduledTaskRunTool,

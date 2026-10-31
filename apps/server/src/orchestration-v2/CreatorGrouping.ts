@@ -1,5 +1,8 @@
-import type { OrchestrationV2AppThread, OrchestrationV2ServerCommand } from "@t3tools/contracts";
-import type * as DateTime from "effect/DateTime";
+import {
+  getInteractiveThreadParentThreadId,
+  type OrchestrationV2AppThread,
+  type OrchestrationV2ServerCommand,
+} from "@t3tools/contracts";
 
 const releaseCommandFields = new Set(["type", "commandId", "threadId", "creatorGrouping"]);
 
@@ -12,25 +15,17 @@ export function isCreatorGroupingReleaseCommand(command: OrchestrationV2ServerCo
 }
 
 export function isGroupedCreatorThread(thread: OrchestrationV2AppThread): boolean {
-  return (
-    thread.deletedAt === null &&
-    thread.createdBy === "agent" &&
-    thread.creatorThreadId !== undefined &&
-    thread.creatorGrouping === "grouped" &&
-    thread.lineage.parentThreadId === null &&
-    thread.lineage.relationshipToParent === null &&
-    thread.forkedFrom === null
-  );
+  return getInteractiveThreadParentThreadId(thread) !== null;
 }
 
 /** Creator history is provenance; releasing placement never stops ordinary work. */
-export function releaseCreatorGrouping(thread: OrchestrationV2AppThread, now: DateTime.Utc) {
+export function releaseCreatorGrouping(thread: OrchestrationV2AppThread) {
   return {
     ...thread,
-    creatorGrouping: "independent" as const,
+    ...(thread.creatorGrouping === undefined ? {} : { creatorGrouping: "independent" as const }),
+    groupedUnderThreadId: null,
     pinnedAt: null,
     pinOrderKey: null,
     activeOrderKey: null,
-    updatedAt: now,
   };
 }

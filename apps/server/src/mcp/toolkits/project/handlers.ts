@@ -244,6 +244,12 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           // Kept only alongside linkOrigin: thread.create drops it otherwise.
           ...(input.delegatedFrom === undefined ? {} : { delegatedFrom: input.delegatedFrom }),
           ...(caller === undefined ? {} : { creatorThreadId: caller.id }),
+          groupedUnderThreadId:
+            input.groupedUnderThreadId === undefined
+              ? caller?.projectId === projectId
+                ? caller.id
+                : null
+              : input.groupedUnderThreadId,
         }).pipe(
           Effect.provideService(ThreadReadAuthorization, readAuthorization),
           Effect.mapError((error) => {

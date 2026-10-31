@@ -1542,6 +1542,9 @@ export function threadShellFromProjection(
     ...(projection.thread.creatorGrouping === undefined
       ? {}
       : { creatorGrouping: projection.thread.creatorGrouping }),
+    ...(projection.thread.groupedUnderThreadId === undefined
+      ? {}
+      : { groupedUnderThreadId: projection.thread.groupedUnderThreadId }),
     id: projection.thread.id,
     projectId: projection.thread.projectId,
     title: projection.thread.title,
@@ -1853,6 +1856,9 @@ function shellFromState(input: {
     ...(input.state.thread.creatorGrouping === undefined
       ? {}
       : { creatorGrouping: input.state.thread.creatorGrouping }),
+    ...(input.state.thread.groupedUnderThreadId === undefined
+      ? {}
+      : { groupedUnderThreadId: input.state.thread.groupedUnderThreadId }),
     id: input.state.thread.id,
     projectId: input.state.thread.projectId,
     title: input.state.thread.title,
@@ -4005,6 +4011,27 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
     );
 
+    // SQL counterpart of getInteractiveThreadParentThreadId. json_type distinguishes
+    // deployed field absence from an explicit JSON null (a durable detach).
+    const interactiveParentSql = (alias: string) => {
+      const payload = sql.literal(`${alias}.payload_json`);
+      return sql`CASE
+        WHEN json_extract(${payload}, '$.deletedAt') IS NOT NULL THEN NULL
+        WHEN json_extract(${payload}, '$.lineage.relationshipToParent') = 'subagent'
+          AND (json_extract(${payload}, '$.lineage.independent') IS NOT 1
+            OR json_extract(${payload}, '$.creationSource') = 'provider') THEN NULL
+        WHEN json_type(${payload}, '$.groupedUnderThreadId') IS NOT NULL
+          THEN CAST(json_extract(${payload}, '$.groupedUnderThreadId') AS TEXT)
+        WHEN json_extract(${payload}, '$.createdBy') = 'agent'
+          AND json_extract(${payload}, '$.creatorGrouping') = 'grouped'
+          AND json_extract(${payload}, '$.lineage.parentThreadId') IS NULL
+          AND json_extract(${payload}, '$.lineage.relationshipToParent') IS NULL
+          AND json_extract(${payload}, '$.lineage.independent') IS NOT 1
+          AND json_extract(${payload}, '$.forkedFrom') IS NULL
+          THEN CAST(json_extract(${payload}, '$.creatorThreadId') AS TEXT)
+        ELSE NULL END`;
+    };
+
     const getRecoveryThreadIds = Effect.fn("ProjectionStore.getRecoveryThreadIds")(
       function* (kind: ProjectionRecoveryKind) {
         const candidates = (() => {
@@ -4013,16 +4040,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               return sql`
                 SELECT child.thread_id
                 FROM orchestration_v2_projection_threads AS child
-                LEFT JOIN orchestration_v2_projection_threads AS creator
-                  ON creator.thread_id = CAST(json_extract(child.payload_json, '$.creatorThreadId') AS TEXT)
+                LEFT JOIN orchestration_v2_projection_threads AS parent
+                  ON parent.thread_id = ${interactiveParentSql("child")}
                 WHERE child.deleted_at IS NULL
-                  AND json_extract(child.payload_json, '$.createdBy') = 'agent'
-                  AND json_extract(child.payload_json, '$.creatorThreadId') IS NOT NULL
-                  AND json_extract(child.payload_json, '$.creatorGrouping') = 'grouped'
-                  AND json_extract(child.payload_json, '$.lineage.parentThreadId') IS NULL
-                  AND json_extract(child.payload_json, '$.lineage.relationshipToParent') IS NULL
-                  AND json_extract(child.payload_json, '$.forkedFrom') IS NULL
-                  AND (creator.thread_id IS NULL OR creator.deleted_at IS NOT NULL)
+                  AND ${interactiveParentSql("child")} IS NOT NULL
+                  AND (parent.thread_id IS NULL OR parent.deleted_at IS NOT NULL)
               `;
             case "thread-families":
               return sql`
@@ -4035,20 +4057,13 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   AND child.deleted_at IS NULL
                   AND (parent.deleted_at IS NOT NULL OR (parent.archived_at IS NOT NULL AND child.archived_at IS NULL))
                 UNION
-                SELECT DISTINCT creator.thread_id
-                FROM orchestration_v2_projection_threads AS creator
+                SELECT DISTINCT parent.thread_id
+                FROM orchestration_v2_projection_threads AS parent
                 JOIN orchestration_v2_projection_threads AS child
-                  ON creator.thread_id = CAST(json_extract(child.payload_json, '$.creatorThreadId') AS TEXT)
-                WHERE creator.deleted_at IS NULL AND creator.archived_at IS NOT NULL
+                  ON parent.thread_id = ${interactiveParentSql("child")}
+                WHERE parent.deleted_at IS NULL AND parent.archived_at IS NOT NULL
                   AND child.deleted_at IS NULL AND child.archived_at IS NULL
-                  AND child.project_id = creator.project_id
-                  AND json_extract(child.payload_json, '$.createdBy') = 'agent'
-                  AND json_extract(child.payload_json, '$.creatorThreadId') IS NOT NULL
-                  AND json_extract(child.payload_json, '$.creatorGrouping') = 'grouped'
-                  AND json_extract(child.payload_json, '$.lineage.parentThreadId') IS NULL
-                  AND json_extract(child.payload_json, '$.lineage.relationshipToParent') IS NULL
-                  AND json_extract(child.payload_json, '$.lineage.independent') IS NOT 1
-                  AND json_extract(child.payload_json, '$.forkedFrom') IS NULL
+                  AND child.project_id = parent.project_id
               `;
             case "subagent-promotions":
               return sql`
@@ -4856,17 +4871,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             AND json_extract(child.payload_json, '$.lineage.independent') IS NOT 1
           UNION
           SELECT child.thread_id FROM orchestration_v2_projection_threads AS child
-          JOIN family ON CAST(json_extract(child.payload_json, '$.creatorThreadId') AS TEXT) = family.thread_id
-          JOIN orchestration_v2_projection_threads AS creator ON creator.thread_id = family.thread_id
-          WHERE child.deleted_at IS NULL
-            AND child.project_id = creator.project_id
-            AND json_extract(child.payload_json, '$.createdBy') = 'agent'
-            AND json_extract(child.payload_json, '$.creatorThreadId') IS NOT NULL
-            AND json_extract(child.payload_json, '$.creatorGrouping') = 'grouped'
-            AND json_extract(child.payload_json, '$.lineage.parentThreadId') IS NULL
-            AND json_extract(child.payload_json, '$.lineage.relationshipToParent') IS NULL
-            AND json_extract(child.payload_json, '$.lineage.independent') IS NOT 1
-            AND json_extract(child.payload_json, '$.forkedFrom') IS NULL
+          JOIN family ON ${interactiveParentSql("child")} = family.thread_id
+          JOIN orchestration_v2_projection_threads AS parent ON parent.thread_id = family.thread_id
+          WHERE child.deleted_at IS NULL AND child.project_id = parent.project_id
         )
         SELECT thread_id FROM family
       `.pipe(
@@ -4878,15 +4885,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       function* (creatorThreadIds: ReadonlyArray<ThreadId>) {
         if (creatorThreadIds.length === 0) return [];
         const rows = yield* sql<{ readonly thread_id: string }>`
-          SELECT thread_id FROM orchestration_v2_projection_threads
-          WHERE CAST(json_extract(payload_json, '$.creatorThreadId') AS TEXT) IN ${sql.in(creatorThreadIds)}
-            AND deleted_at IS NULL
-            AND json_extract(payload_json, '$.createdBy') = 'agent'
-            AND json_extract(payload_json, '$.creatorThreadId') IS NOT NULL
-            AND json_extract(payload_json, '$.creatorGrouping') = 'grouped'
-            AND json_extract(payload_json, '$.lineage.parentThreadId') IS NULL
-            AND json_extract(payload_json, '$.lineage.relationshipToParent') IS NULL
-            AND json_extract(payload_json, '$.forkedFrom') IS NULL
+          SELECT child.thread_id FROM orchestration_v2_projection_threads AS child
+          WHERE ${interactiveParentSql("child")} IN ${sql.in(creatorThreadIds)}
+            AND child.deleted_at IS NULL
           ORDER BY thread_id ASC
         `;
         return rows.map((row) => ThreadId.make(row.thread_id));

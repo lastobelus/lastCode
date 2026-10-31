@@ -53,6 +53,41 @@ function project(
 const keys = (projection: ReturnType<typeof project>) =>
   projection.renderedRows.map((row) => row.thread.id);
 
+it("follows explicit arbitrary-depth placement and keeps detached creator children reachable", () => {
+  const origin = thread("origin");
+  const destination = thread("destination");
+  const item = thread("item", undefined, {
+    creatorThreadId: origin.id,
+    creatorGrouping: "grouped",
+    groupedUnderThreadId: destination.id,
+  });
+  const stages = Array.from({ length: 12 }, (_, index) =>
+    thread(`stage-${index}`, undefined, {
+      groupedUnderThreadId: ThreadId.make(index === 0 ? "item" : `stage-${index - 1}`),
+    }),
+  );
+  const shells = [origin, destination, item, ...stages];
+  const nested = project(shells, { previewCount: 100 });
+  expect(nested.allRows.find((row) => row.thread.id === origin.id)?.descendantCount).toBe(0);
+  expect(nested.allRows.find((row) => row.thread.id === destination.id)?.descendantCount).toBe(13);
+  expect(
+    lastcodeSidebarThreadPath(
+      shells,
+      scopeThreadRef(stages[11]!.environmentId, stages[11]!.id),
+    ).map((row) => row.id),
+  ).toEqual([destination.id, item.id, ...stages.map((stage) => stage.id)]);
+  expect(
+    project([{ ...item, groupedUnderThreadId: null }, origin]).allRows.find(
+      (row) => row.thread.id === item.id,
+    )?.parentKey,
+  ).toBeNull();
+  const collapsed = project(shells, {
+    previewCount: 100,
+    collapsedByKey: { [lastcodeSidebarThreadKey(destination)]: true },
+  });
+  expect(keys(collapsed)).toEqual([origin.id, destination.id]);
+});
+
 describe("legacy sidebar subagent families", () => {
   it("keeps rendered and keyboard order identical across preview, expansion and status inputs", () => {
     const parent = thread("parent");
@@ -361,7 +396,7 @@ describe("legacy sidebar subagent families", () => {
     expect(result.renderedItems.map((item) => item.type)).toEqual(["thread"]);
     expect(result.renderedRows[0]?.descendantsStatus?.label).toBe("Failed");
     expect(lastcodeSidebarFamilySummary(result.renderedRows[0]!)).toBe(
-      "1 created thread (1 failed)",
+      "1 grouped thread (1 failed)",
     );
     expect(resolveThreadStatusPill({ thread: parent })).toBeNull();
   });
@@ -702,7 +737,7 @@ describe("legacy sidebar creator grouping", () => {
     expect(keys(typed)).toEqual(expected);
     expect(typed.renderedRows.map((row) => row.groupHeading)).toEqual([
       null,
-      "Created by this thread",
+      "Grouped under this thread",
       null,
       null,
       null,
@@ -720,7 +755,7 @@ describe("legacy sidebar creator grouping", () => {
     });
     expect(keys(result)).toEqual(["creator"]);
     expect(lastcodeSidebarFamilySummary(result.renderedRows[0]!)).toBe(
-      "1 subagent (1 idle) · 1 created thread (1 idle)",
+      "1 subagent (1 idle) · 1 grouped thread (1 idle)",
     );
     expect(result.renderedRows[0]?.descendantCount).toBe(2);
   });

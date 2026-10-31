@@ -33,6 +33,7 @@ import {
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2ThreadTranscript,
   type OrchestrationV2ThreadShell,
+  type OrchestrationV2ThreadPlacementResult,
   type OrchestrationV2TurnItem,
   ProjectId,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
@@ -87,6 +88,15 @@ export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart" | 
 export interface ThreadManagementProvenance {
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
+}
+
+export interface ThreadPlacementInput {
+  readonly projectId: ProjectId;
+  readonly items: ReadonlyArray<{
+    readonly commandId: CommandId;
+    readonly threadId: ThreadId;
+    readonly groupedUnderThreadId: ThreadId | null;
+  }>;
 }
 
 export function withCreationProvenance(
@@ -478,10 +488,14 @@ export interface ThreadManagementServiceShape {
   >;
   readonly getThreadShell: Orchestrator.OrchestratorV2["Service"]["getThreadShell"];
   readonly getThreadArchiveFamily: Orchestrator.OrchestratorV2["Service"]["getThreadArchiveFamily"];
+  readonly setThreadParents: (
+    input: ThreadPlacementInput,
+  ) => Effect.Effect<ReadonlyArray<OrchestrationV2ThreadPlacementResult>>;
   /** Omit `projectId` to list every project's threads. */
   readonly listProjectThreads: (input: {
     readonly projectId?: ProjectId | undefined;
     readonly includeSubagents: boolean;
+    readonly archived?: boolean;
   }) => Effect.Effect<ReadonlyArray<OrchestrationV2ThreadShell>, ThreadManagementError>;
   readonly sendToThread: (
     input: ThreadManagementSendInput,
@@ -1094,7 +1108,7 @@ const make = Effect.gen(function* () {
   const listProjectThreads: ThreadManagementServiceShape["listProjectThreads"] = (input) =>
     orchestrator
       .getShellSnapshot({
-        location: "active",
+        location: input.archived === true ? "archive" : "active",
         ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
       })
       .pipe(
@@ -1106,7 +1120,7 @@ const make = Effect.gen(function* () {
             }),
         ),
         Effect.map((snapshot) =>
-          snapshot.threads
+          (input.archived === true ? snapshot.archivedThreads : snapshot.threads)
             .filter(
               (thread) =>
                 input.includeSubagents ||
@@ -1120,6 +1134,83 @@ const make = Effect.gen(function* () {
             ),
         ),
       );
+
+  const setThreadParents = Effect.fn("ThreadManagementService.setThreadParents")(function* (
+    input: ThreadPlacementInput,
+  ) {
+    const results: OrchestrationV2ThreadPlacementResult[] = [];
+    let stopped = false;
+    const validSize = input.items.length > 0 && input.items.length <= 200;
+    const unique =
+      new Set(input.items.map((item) => item.threadId)).size === input.items.length &&
+      new Set(input.items.map((item) => item.commandId)).size === input.items.length;
+    for (const item of input.items) {
+      if (!validSize || !unique) {
+        results.push({
+          ...item,
+          status: "rejected",
+          error: "Send 1–200 threads, each listed once.",
+        });
+        continue;
+      }
+      if (stopped) {
+        results.push({ ...item, status: "not_attempted" });
+        continue;
+      }
+      const result = yield* Effect.gen(function* () {
+        const shell = yield* orchestrator.getThreadShell(item.threadId);
+        if (shell === null || shell.projectId !== input.projectId)
+          return yield* new ThreadManagementThreadNotFoundError({
+            projectId: input.projectId,
+            threadId: item.threadId,
+          });
+        const dispatched = yield* dispatchAccepted({
+          type: "thread.metadata.update",
+          ...item,
+          expectedProjectId: input.projectId,
+        });
+        const event = dispatched.storedEvents.find(
+          (stored) =>
+            stored.event.type === "thread.metadata-updated" &&
+            stored.event.threadId === item.threadId,
+        )?.event;
+        if (
+          event?.type !== "thread.metadata-updated" ||
+          event.previousGroupedUnderThreadId === undefined
+        )
+          return yield* new Orchestrator.OrchestratorDispatchError({
+            commandId: item.commandId,
+            commandType: "thread.metadata.update",
+            cause: "This clientRequestId was already used for a different request. Use a new one.",
+          });
+        // Accepted retries describe their original placement, not a later move.
+        if (event.payload.groupedUnderThreadId !== item.groupedUnderThreadId)
+          return yield* new Orchestrator.OrchestratorDispatchError({
+            commandId: item.commandId,
+            commandType: "thread.metadata.update",
+            cause:
+              "This clientRequestId already moved this thread to a different parent. Use a new clientRequestId for a new move.",
+          });
+        return {
+          ...item,
+          status: "moved" as const,
+          previousGroupedUnderThreadId: event.previousGroupedUnderThreadId,
+          sequence: dispatched.sequence,
+          replayed: dispatched.replayed === true,
+        };
+      }).pipe(Effect.result);
+      if (result._tag === "Success") results.push(result.success);
+      else {
+        stopped = true;
+        results.push({
+          ...item,
+          status: "rejected",
+          error: userFacingDispatchErrorMessage(result.failure) ?? "Thread placement was rejected.",
+        });
+      }
+    }
+    return results;
+  });
 
   const sendToThread: ThreadManagementServiceShape["sendToThread"] = Effect.fn(
     "ThreadManagementService.sendToThread",
@@ -1873,6 +1964,7 @@ const make = Effect.gen(function* () {
       );
     }),
     getThreadRecords,
+    setThreadParents,
     getThreadProjection,
     getCheckpointContext,
     getThreadSnapshot,

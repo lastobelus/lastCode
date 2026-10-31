@@ -4,17 +4,21 @@ import {
   NodeId,
   ProjectId,
   ProviderInstanceId,
+  OrchestrationV2AppThreadJson,
   ThreadId,
   type OrchestrationV2AppThread,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 
 const sqlLayer = ProjectionStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory));
+const encodeAppThread = Schema.encodeEffect(OrchestrationV2AppThreadJson);
+const decodeAppThread = Schema.decodeEffect(OrchestrationV2AppThreadJson);
 
 const seedThread = Effect.fn("ownership.seedThread")(function* (
   id: string,
@@ -245,6 +249,47 @@ it.effect.each(storageCases)(
         overrides: { forkedFrom: { type: "node", nodeId: NodeId.make("source:node") } },
       });
       yield* seedThread("excluded:unknown-creator");
+      // These persisted creation payloads predate explicit organization, rather
+      // than passing through today's thread.create defaults.
+      for (const [id, grouping] of [
+        ["grouped:active", "grouped"],
+        ["excluded:independent", "independent"],
+      ] as const) {
+        const persisted = yield* projections.getThread(ThreadId.make(id));
+        assert.isFalse(Object.hasOwn(persisted, "groupedUnderThreadId"));
+        const encoded = yield* encodeAppThread(persisted);
+        assert.isFalse(Object.hasOwn(encoded, "groupedUnderThreadId"));
+        const decoded = yield* decodeAppThread(encoded);
+        assert.isFalse(Object.hasOwn(decoded, "groupedUnderThreadId"));
+        assert.equal(decoded.creatorGrouping, grouping);
+        assert.isFalse(
+          Object.hasOwn((yield* projections.getThreadShell(decoded.id))!, "groupedUnderThreadId"),
+        );
+      }
+      const former = yield* seedThread("placement:former");
+      const current = yield* seedThread("placement:current");
+      const moved = yield* seedThread("placement:moved", { creatorId: former.id });
+      yield* projections.apply({
+        id: EventId.make("placement:move-before-recovery"),
+        type: "thread.metadata-updated",
+        threadId: moved.id,
+        occurredAt: moved.updatedAt,
+        payload: { ...moved, groupedUnderThreadId: current.id },
+      });
+      yield* projections.apply({
+        id: EventId.make("placement:former-lost"),
+        type: "thread.deleted",
+        threadId: former.id,
+        occurredAt: former.updatedAt,
+        payload: { ...former, deletedAt: former.updatedAt },
+      });
+      assert.notInclude(yield* projections.getRecoveryThreadIds("creator-grouping"), moved.id);
+      assert.deepEqual(yield* projections.getGroupedCreatorThreadIds([former.id]), []);
+      assert.deepEqual(yield* projections.getGroupedCreatorThreadIds([current.id]), [moved.id]);
+      assert.sameMembers(
+        [...(yield* projections.getArchiveFamilyThreadIds(current.id))],
+        [current.id, moved.id],
+      );
       assert.deepEqual(yield* projections.getGroupedCreatorThreadIds([]), []);
       assert.deepEqual(
         yield* projections.getGroupedCreatorThreadIds([
@@ -266,10 +311,16 @@ it.effect.each(storageCases)(
         type: "thread.metadata-updated",
         threadId: thread.id,
         occurredAt: thread.updatedAt,
-        payload: { ...thread, creatorGrouping: "independent" },
+        payload: { ...thread, groupedUnderThreadId: null },
       });
       assert.notInclude(yield* projections.getRecoveryThreadIds("creator-grouping"), thread.id);
       assert.equal((yield* projections.getThread(thread.id)).creatorThreadId, "creator:missing");
+      assert.equal((yield* projections.getThread(thread.id)).creatorGrouping, "grouped");
+      assert.isNull((yield* projections.getThreadShell(thread.id))?.groupedUnderThreadId);
+      const restoredParent = yield* seedThread("creator:missing");
+      assert.deepEqual(yield* projections.getArchiveFamilyThreadIds(restoredParent.id), [
+        restoredParent.id,
+      ]);
     }).pipe(Effect.provide(layer)),
 );
 

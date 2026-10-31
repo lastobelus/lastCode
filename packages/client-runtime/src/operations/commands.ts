@@ -150,6 +150,7 @@ export type MarkThreadUnreadInput = ThreadCommandInput;
 
 export interface UpdateThreadMetadataInput extends ThreadCommandInput {
   readonly creatorGrouping?: "grouped" | "independent";
+  readonly groupedUnderThreadId?: ThreadId | null;
   readonly limitRecovery?: import("@t3tools/contracts").OrchestrationV2LimitRecoveryUpdate | null;
   readonly title?: string;
   readonly modelSelection?: ModelSelection;
@@ -712,6 +713,7 @@ export const updateThreadMetadata = Effect.fn("EnvironmentCommands.updateThreadM
       input.regenerateTitle !== undefined ||
       input.linkedPullRequest !== undefined ||
       input.creatorGrouping !== undefined ||
+      input.groupedUnderThreadId !== undefined ||
       input.limitRecovery !== undefined
     ) {
       result = yield* dispatch({
@@ -720,6 +722,9 @@ export const updateThreadMetadata = Effect.fn("EnvironmentCommands.updateThreadM
         commandId,
         threadId: input.threadId,
         ...(input.creatorGrouping === undefined ? {} : { creatorGrouping: input.creatorGrouping }),
+        ...(input.groupedUnderThreadId === undefined
+          ? {}
+          : { groupedUnderThreadId: input.groupedUnderThreadId }),
         ...(input.title === undefined ? {} : { title: input.title }),
         ...(input.branch === undefined ? {} : { branch: input.branch }),
         ...(input.worktreePath === undefined ? {} : { worktreePath: input.worktreePath }),

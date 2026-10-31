@@ -129,6 +129,7 @@ function threadRunStatusIsActive(status: ThreadRuntimeSummary["status"]): boolea
 export interface EnvironmentThreadShell {
   readonly creatorThreadId?: ThreadId;
   readonly creatorGrouping?: "grouped" | "independent";
+  readonly groupedUnderThreadId?: ThreadId | null;
   readonly environmentId: EnvironmentId;
   readonly id: ThreadId;
   readonly projectId: ProjectId;
@@ -309,6 +310,9 @@ export function presentThreadShell(
   return {
     ...(thread.creatorThreadId === undefined ? {} : { creatorThreadId: thread.creatorThreadId }),
     ...(thread.creatorGrouping === undefined ? {} : { creatorGrouping: thread.creatorGrouping }),
+    ...(thread.groupedUnderThreadId === undefined
+      ? {}
+      : { groupedUnderThreadId: thread.groupedUnderThreadId }),
     environmentId,
     id: thread.id,
     projectId: thread.projectId,

@@ -103,6 +103,20 @@ items remain visible after their thread settles, and settled or snoozed contexts
 remain available under **Parked contexts**. A disconnected environment shows its
 last known state until it reconnects.
 
+## Organize related threads
+
+Ask an agent to create empty parent threads and move existing conversations under them.
+Parents can nest to any depth, and moving a parent brings its children along. A thread
+and its parent must be in the same project and environment.
+
+Organizing changes only where a thread sits. It doesn't change who created the thread,
+stop or move running work, or change who receives a delegated task's result. A delegated
+child that its task still owns can't move until it is released or promoted.
+
+Archiving a parent archives the threads under it now, not ones moved elsewhere. To see a
+group, ask the agent to list a parent's children. To undo a move, ask it to put the thread
+back under its previous parent or at top level.
+
 ## Pin and reorder threads
 
 Pin a thread from its menu to keep it above your active work.

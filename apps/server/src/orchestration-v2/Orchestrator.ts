@@ -1,5 +1,6 @@
 import type {
   GuestShareId,
+  ProjectId,
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
   OrchestrationV2ThreadHistoryPage,
@@ -38,6 +39,8 @@ import {
   isActionableDashboardItem,
   THREAD_DASHBOARD_MAX_ITEMS,
   isProviderNativeSubagentThread,
+  isOwnedSubagentThread,
+  getInteractiveThreadParentThreadId,
   getOwnedThreadFamily,
   getArchiveFamilyParentThreadId,
   getThreadArchivePlan,
@@ -683,7 +686,10 @@ function changesWorktreeMembership(command: OrchestrationV2ServerCommand): boole
     command.type === "thread.workspace.complete" ||
     command.type === "thread.worktree-suspension.transition" ||
     (command.type === "thread.metadata.update" &&
-      (command.worktreePath !== undefined || command.branch !== undefined))
+      (command.worktreePath !== undefined ||
+        command.branch !== undefined ||
+        command.groupedUnderThreadId !== undefined ||
+        command.creatorGrouping !== undefined))
   );
 }
 
@@ -3058,6 +3064,49 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     return result;
   });
 
+  const validateThreadPlacement = Effect.fn("Orchestrator.validateThreadPlacement")(function* (
+    command: Extract<
+      OrchestrationV2Command,
+      { readonly type: "thread.create" | "thread.metadata.update" }
+    >,
+    projectId: ProjectId,
+    parentId: ThreadId | null,
+  ) {
+    if (parentId === null) return;
+    const seen = new Set<ThreadId>([command.threadId]);
+    let next: ThreadId | null = parentId;
+    while (next !== null) {
+      if (seen.has(next))
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "The parent cannot be this thread or one of its descendants.",
+        });
+      seen.add(next);
+      const parent: OrchestrationV2ThreadShell | null = yield* projectionStore
+        .getThreadShell(next)
+        .pipe(mapDispatchError(command));
+      if (
+        parent === null ||
+        parent.projectId !== projectId ||
+        parent.archivedAt !== null ||
+        parent.deletedAt !== null ||
+        parent.archivePending != null ||
+        isProviderNativeSubagentThread(parent)
+      )
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause:
+            "The parent and each of its ancestors must be an interactive thread in this project that is not archived, being archived, or deleted.",
+        });
+      if (next === parentId) yield* refuseAboveDispatchModeLimit(command, parent.id, parent);
+      const organizationalParent = getInteractiveThreadParentThreadId(parent);
+      // Execution lineage remains part of the tree for an owned delegated destination.
+      next = isOwnedSubagentThread(parent) ? parent.lineage.parentThreadId : organizationalParent;
+    }
+  });
+
   const dispatchThreadCreate = Effect.fn("orchestrationV2.dispatch.threadCreate")(function* (
     command: Extract<OrchestrationV2Command, { readonly type: "thread.create" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
@@ -3083,6 +3132,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
     let creatorGrouping: OrchestrationV2AppThread["creatorGrouping"];
+    let defaultParentId: ThreadId | null = null;
     if (command.creatorThreadId !== undefined) {
       const creatorThreadId = command.creatorThreadId;
       if (command.createdBy !== "agent" || command.creatorThreadId === command.threadId) {
@@ -3106,13 +3156,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         creator.archivePending?.status === "stopping"
           ? "independent"
           : "grouped";
+      if (creatorGrouping === "grouped" && creator.projectId === command.projectId)
+        defaultParentId = creatorThreadId;
     }
+    const groupedUnderThreadId =
+      command.groupedUnderThreadId === undefined ? defaultParentId : command.groupedUnderThreadId;
+    yield* validateThreadPlacement(command, command.projectId, groupedUnderThreadId);
     const now = yield* DateTime.now;
     const emitEvent = emit(events, command);
     const thread: OrchestrationV2AppThread = {
       createdBy: command.createdBy,
       workspaceUserAdopted: command.createdBy === "user",
       creationSource: command.creationSource,
+      groupedUnderThreadId,
       ...(command.creatorThreadId === undefined
         ? {}
         : { creatorThreadId: command.creatorThreadId, creatorGrouping }),
@@ -3654,6 +3710,46 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         commandType: command.type,
         cause: `Thread ${command.threadId} is deleted.`,
       });
+    }
+    if (
+      command.type === "thread.metadata.update" &&
+      (command.groupedUnderThreadId !== undefined || command.creatorGrouping !== undefined)
+    ) {
+      if (command.expectedProjectId !== undefined && command.expectedProjectId !== thread.projectId)
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "The thread is no longer in the requested project.",
+        });
+      if (
+        isOwnedSubagentThread(thread) ||
+        isProviderNativeSubagentThread(thread) ||
+        (thread.archivedAt !== null && command.groupedUnderThreadId !== null) ||
+        thread.archivePending != null
+      )
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause:
+            "This thread cannot move: it is still owned by a delegated task, is provider-native, is being archived, or is archived (archived threads can only move to top level). Moving never transfers task ownership.",
+        });
+      const parentId =
+        command.groupedUnderThreadId !== undefined
+          ? command.groupedUnderThreadId
+          : command.creatorGrouping === "grouped"
+            ? (thread.creatorThreadId ?? null)
+            : null;
+      if (
+        command.groupedUnderThreadId !== undefined &&
+        command.creatorGrouping !== undefined &&
+        parentId !== (command.creatorGrouping === "grouped" ? thread.creatorThreadId : null)
+      )
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Explicit placement and creator grouping must name the same parent.",
+        });
+      yield* validateThreadPlacement(command, thread.projectId, parentId);
     }
     if (
       command.type === "thread.metadata.update" &&
@@ -4226,6 +4322,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           };
         }
         case "thread.metadata.update": {
+          const arrangementFields = new Set([
+            "type",
+            "commandId",
+            "threadId",
+            "groupedUnderThreadId",
+            "creatorGrouping",
+            "expectedProjectId",
+          ]);
+          const arrangementOnly = Object.entries(command).every(
+            ([key, value]) => value === undefined || arrangementFields.has(key),
+          );
+          const placement =
+            command.groupedUnderThreadId !== undefined
+              ? { groupedUnderThreadId: command.groupedUnderThreadId }
+              : command.creatorGrouping === undefined
+                ? {}
+                : {
+                    groupedUnderThreadId:
+                      command.creatorGrouping === "grouped" ? thread.creatorThreadId! : null,
+                  };
           const previousRecovery =
             thread.limitRecovery?.runId === command.limitRecovery?.runId &&
             thread.limitRecovery?.resetAt === command.limitRecovery?.resetAt
@@ -4245,6 +4361,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   };
           return {
             ...thread,
+            ...placement,
             ...(command.actionResume === undefined ? {} : { actionResume: command.actionResume }),
             ...(command.workspaceUserAdopted === true ? { workspaceUserAdopted: true } : {}),
             ...(command.title === undefined ? {} : { title: command.title }),
@@ -4305,7 +4422,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             thread.creatorGrouping !== "independent"
               ? { pinnedAt: null, pinOrderKey: null, activeOrderKey: null }
               : {}),
-            updatedAt: now,
+            updatedAt: arrangementOnly ? thread.updatedAt : now,
           };
         }
         case "thread.pull-request.link":
@@ -4647,6 +4764,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       providerInstanceId: updatedThread.providerInstanceId,
       occurredAt: now,
       payload: updatedThread,
+      ...(command.type === "thread.metadata.update" &&
+      (command.groupedUnderThreadId !== undefined || command.creatorGrouping !== undefined)
+        ? { previousGroupedUnderThreadId: getInteractiveThreadParentThreadId(thread) }
+        : {}),
     });
     // Archiving ends the guest share, so its waiting files go too.
     yield* releaseGuestAttachments(command, thread.guestShare, updatedThread.guestShare, effects);
@@ -5110,6 +5231,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           creationSource: promotion.creationSource,
           activeProviderThreadId: command.providerThread.id,
           subagentPromotion: null,
+          groupedUnderThreadId: null,
           lineage: {
             parentThreadId: source.id,
             relationshipToParent: "fork",
@@ -13992,10 +14114,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     thread: OrchestrationV2ThreadShell | OrchestrationV2AppThread,
   ) {
     const ownedParentId = getArchiveFamilyParentThreadId(thread);
-    if (ownedParentId !== null || thread.creatorThreadId === undefined) return ownedParentId;
-    const creator = yield* projectionStore
-      .getThreadShell(thread.creatorThreadId)
-      .pipe(mapDispatchError(command));
+    const parentId = getInteractiveThreadParentThreadId(thread);
+    if (ownedParentId !== null || parentId === null) return ownedParentId;
+    const creator = yield* projectionStore.getThreadShell(parentId).pipe(mapDispatchError(command));
     return getArchiveFamilyParentThreadId(thread, creator ?? undefined);
   });
 
@@ -14060,7 +14181,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const parentOf = (thread: OrchestrationV2AppThread) =>
       getArchiveFamilyParentThreadId(
         thread,
-        thread.creatorThreadId === undefined ? undefined : family.get(thread.creatorThreadId),
+        family.get(getInteractiveThreadParentThreadId(thread)!),
       );
     let ancestorId = parentOf(thread);
     while (ancestorId !== null && ancestorId !== owner.threadId && !visited.has(ancestorId)) {
@@ -14722,6 +14843,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           payload: {
             ...thread,
             lineage: { ...thread.lineage, independent: true },
+            groupedUnderThreadId: null,
             // Independent roots must not reuse their former parent's sidebar slot.
             pinnedAt: null,
             pinOrderKey: null,
@@ -14909,6 +15031,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         occurredAt: restored.updatedAt,
         payload: {
           ...restored,
+          groupedUnderThreadId: null,
           ...(restored.creatorGrouping === "grouped"
             ? { creatorGrouping: "independent" as const }
             : { lineage: { ...restored.lineage, independent: true } }),
@@ -15962,7 +16085,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   type: "thread.metadata-updated",
                   threadId: id,
                   occurredAt: now,
-                  payload: releaseCreatorGrouping(thread, now),
+                  payload: releaseCreatorGrouping(thread),
                 }),
               );
             }
@@ -16399,8 +16522,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       );
     }
     if (
-      (command.type === "thread.create" && command.creatorThreadId !== undefined) ||
-      (command.type === "thread.metadata.update" && command.creatorGrouping !== undefined)
+      (command.type === "thread.create" &&
+        (command.creatorThreadId !== undefined || command.groupedUnderThreadId != null)) ||
+      (command.type === "thread.metadata.update" &&
+        (command.creatorGrouping !== undefined || command.groupedUnderThreadId !== undefined))
     ) {
       const operation = withWorktreeMembershipLock(
         command,
@@ -16412,7 +16537,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   .getThreadShell(command.threadId)
                   .pipe(mapDispatchError(command)))?.creatorThreadId;
           const ids = [
-            ...new Set([command.threadId, ...(creatorId === undefined ? [] : [creatorId])]),
+            ...new Set([
+              command.threadId,
+              ...(creatorId === undefined ? [] : [creatorId]),
+              ...(command.groupedUnderThreadId == null ? [] : [command.groupedUnderThreadId]),
+            ]),
           ].toSorted();
           return yield* ids.reduceRight(
             (effect, id) => threadDispatch.withLock(id, effect),
@@ -16537,6 +16666,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     if (claim.type === "thread.create" && claim.creatorThreadId !== undefined) {
       threadIds.add(claim.creatorThreadId);
     }
+    if (claim.groupedUnderThreadId != null) threadIds.add(claim.groupedUnderThreadId);
     if (initialMessage.senderThreadId !== undefined) threadIds.add(initialMessage.senderThreadId);
     if (
       claim.type === "thread.metadata.update" &&
@@ -16806,15 +16936,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       .pipe(Effect.orDie);
     for (const threadId of groupedOrphans) {
       const shell = yield* projectionStore.getThreadShell(threadId).pipe(Effect.orDie);
-      if (shell?.creatorThreadId === undefined) continue;
-      const creatorId = shell.creatorThreadId;
+      if (shell === null) continue;
+      const creatorId = getInteractiveThreadParentThreadId(shell);
+      if (creatorId === null) continue;
       const command = {
         type: "thread.metadata.update" as const,
         commandId: CommandId.make(
           `repair-creator-grouping:${threadId}:${DateTime.formatIso(repairTime)}`,
         ),
         threadId,
-        creatorGrouping: "independent" as const,
+        groupedUnderThreadId: null,
       };
       yield* [threadId, creatorId]
         .toSorted()
@@ -16824,7 +16955,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             const thread = yield* projectionStore
               .getThread(threadId)
               .pipe(mapDispatchError(command));
-            if (!isGroupedCreatorThread(thread) || thread.creatorThreadId !== creatorId) return;
+            if (getInteractiveThreadParentThreadId(thread) !== creatorId) return;
             const creator = yield* projectionStore
               .getThreadShell(creatorId)
               .pipe(mapDispatchError(command));

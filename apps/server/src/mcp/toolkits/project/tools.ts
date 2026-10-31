@@ -121,10 +121,11 @@ const ProjectCloneTool = Tool.make("t3_project_clone", {
 const ThreadLaunchTool = Tool.make("t3_thread_launch", {
   ...shared,
   description:
-    "Create one new top-level thread, bound to its workspace before the agent starts. Task in `message`. Omit `projectId`, model and modes to inherit yours (outside a thread, pass `projectId` or `scratch`); modes cannot exceed yours. After an error or lost reply, retry with the same `clientRequestId`. Follow it with `t3_thread_read` or `t3_thread_wait`. To mention it, paste the `link` that `t3_thread_read` returns, exactly; it includes the owning environment.",
+    "Create one interactive thread, bound to its workspace before the agent starts. Task in `message`; omit message and attachments for an empty parent (no model turn). groupedUnderThreadId defaults to your thread when it shares the project; null means top level. Omit `projectId`, model and modes to inherit yours (outside a thread, pass `projectId` or `scratch`); modes cannot exceed yours. After an error or lost reply, retry with the same `clientRequestId`. Follow it with `t3_thread_read` or `t3_thread_wait`. To mention it, paste the `link` that `t3_thread_read` returns, exactly; it includes the owning environment.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     projectId: Schema.optional(ProjectId),
+    groupedUnderThreadId: Schema.optional(Schema.NullOr(ThreadId)),
     scratch: Schema.optional(
       Schema.Boolean.annotate({
         description:
