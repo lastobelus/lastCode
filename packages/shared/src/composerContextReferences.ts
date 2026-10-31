@@ -307,7 +307,7 @@ function formatComposerContextProviderPayload(record: KnownComposerContextRecord
       return [
         `label: ${record.label}`,
         `environmentId: ${record.environmentId}`,
-        "The user means this machine. Not linked here yet: call t3_environment_link with this environmentId. Linked: pass it as environmentId (t3_thread_read omits via), or target.environmentId for delegate_task.",
+        "The user means this machine. Not linked here yet: call t3_environment_link with this environmentId. Linked: pass it as environmentId, or target.environmentId for delegate_task. For t3_thread_read, pass this environmentId and the threadId; omit via. A foreign machine mention selects peer routing, not captured-client authority.",
       ].join("\n");
   }
 }
