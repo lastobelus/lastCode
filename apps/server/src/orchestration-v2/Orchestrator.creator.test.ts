@@ -861,45 +861,75 @@ it.effect(
     }).pipe(Effect.provide(testLayer)),
 );
 
-it.effect("archiving a creator waits for its grouped child's own pending archive", () =>
-  Effect.gen(function* () {
-    const orchestrator = yield* Orchestrator.OrchestratorV2;
-    const store = yield* ProjectionStore.ProjectionStoreV2;
-    const project = ProjectId.make("creator:project");
-    const creator = ThreadId.make("creator:origin");
-    const child = ThreadId.make("creator:interactive");
-    yield* orchestrator.dispatch(create(creator, project));
-    yield* createOrdinary(child, creator, project);
-    yield* attachIdleProvider(child);
-    const request = {
-      type: "thread.archive" as const,
-      commandId: CommandId.make("child-own-archive"),
-      threadId: child,
-    };
-    yield* orchestrator.dispatch(request);
-    const pending = (yield* store.getThread(child)).archivePending;
-    assert.equal(pending?.status, "stopping");
-    const refused = yield* orchestrator
-      .dispatch({
-        type: "thread.archive",
-        commandId: CommandId.make("creator-archive"),
+it.effect.each(["attributed-agent", "user", "unattributed-agent"] as const)(
+  "parent archive respects a %s child's pending archive while parent deletion only releases placement",
+  (creation) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const project = ProjectId.make("creator:project");
+      const creator = ThreadId.make("creator:origin");
+      const child = ThreadId.make("creator:interactive");
+      yield* orchestrator.dispatch(create(creator, project));
+      if (creation === "attributed-agent") yield* createOrdinary(child, creator, project);
+      else
+        yield* orchestrator.dispatch({
+          ...create(child, project),
+          createdBy: creation === "user" ? "user" : "agent",
+          creationSource: creation === "user" ? "web" : "mcp",
+          groupedUnderThreadId: creator,
+        });
+      yield* attachIdleProvider(child);
+      const request = {
+        type: "thread.archive" as const,
+        commandId: CommandId.make("child-own-archive"),
+        threadId: child,
+      };
+      yield* orchestrator.dispatch(request);
+      const before = yield* store.getThreadProjection(child);
+      const pending = before.thread.archivePending;
+      const pendingEffects = yield* outbox.listByCommandId(request.commandId);
+      assert.equal(pending?.status, "stopping");
+      const refused = yield* orchestrator
+        .dispatch({
+          type: "thread.archive",
+          commandId: CommandId.make("creator-archive"),
+          threadId: creator,
+          childDisposition: "stop_and_archive",
+          expectedChildThreadIds: [child],
+        })
+        .pipe(Effect.flip);
+      assert.equal(refused._tag, "OrchestratorDispatchError");
+      assert.equal((yield* store.getThread(child)).groupedUnderThreadId, creator);
+      assert.deepEqual((yield* store.getThread(child)).archivePending, pending);
+      yield* orchestrator.dispatch({
+        type: "thread.delete",
+        commandId: CommandId.make("delete-parent-during-child-archive"),
         threadId: creator,
-        childDisposition: "stop_and_archive",
-        expectedChildThreadIds: [child],
-      })
-      .pipe(Effect.flip);
-    assert.equal(refused._tag, "OrchestratorDispatchError");
-    assert.equal((yield* store.getThread(child)).creatorGrouping, "grouped");
-    assert.deepEqual((yield* store.getThread(child)).archivePending, pending);
-    yield* orchestrator.dispatch({
-      type: "thread.archive.complete",
-      commandId: CommandId.make("child-own-archive-complete"),
-      threadId: child,
-      requestId: request.commandId,
-    });
-    assert.equal((yield* store.getThread(child)).creatorGrouping, "grouped");
-    assert.isNotNull((yield* store.getThread(child)).archivedAt);
-  }).pipe(Effect.provide(testLayer)),
+      });
+      const released = yield* store.getThreadProjection(child);
+      assert.isNotNull((yield* store.getThread(creator)).deletedAt);
+      assert.isNull(released.thread.groupedUnderThreadId);
+      assert.equal(
+        released.thread.creatorGrouping,
+        creation === "attributed-agent" ? "independent" : undefined,
+      );
+      assert.equal(released.thread.creatorThreadId, before.thread.creatorThreadId);
+      assert.deepEqual(released.thread.archivePending, pending);
+      assert.deepEqual(released.thread.lineage, before.thread.lineage);
+      assert.deepEqual(released.messages, before.messages);
+      assert.deepEqual(released.runs, before.runs);
+      assert.deepEqual(yield* outbox.listByCommandId(request.commandId), pendingEffects);
+      yield* orchestrator.dispatch({
+        type: "thread.archive.complete",
+        commandId: CommandId.make("child-own-archive-complete"),
+        threadId: child,
+        requestId: request.commandId,
+      });
+      assert.isNull((yield* store.getThread(child)).groupedUnderThreadId);
+      assert.isNotNull((yield* store.getThread(child)).archivedAt);
+    }).pipe(Effect.provide(testLayer)),
 );
 
 it.effect(
