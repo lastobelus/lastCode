@@ -31,6 +31,7 @@ import { useImplementPlanInNewThread } from "./chat/useProposedPlanSend";
 import { ThreadFind, ThreadFindCanvas } from "./chat/ThreadFindProvider";
 import { closeThreadFind, openThreadFind, useThreadFindOpen } from "./chat/threadFindStore";
 import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
+import { useActionResumeBanners } from "./chat/useActionResumeBanners";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
 import { resolveDraftHeroState } from "./ChatView.logic";
 import { useQueuedRunEdit } from "./chat/useQueuedRunEdit";
@@ -205,7 +206,11 @@ import { usePanelAnimationSettings, usePanelPresence } from "../panelAnimations"
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useOpenPanelPullRequestUrl } from "../hooks/useOpenPanelPullRequestUrl";
 import { isPreviewFocused } from "../lib/previewFocus";
-import { focusTerminalOnThreadEnter, getTerminalFocusOwner } from "../lib/terminalFocus";
+import {
+  focusTerminal,
+  focusTerminalOnThreadEnter,
+  getTerminalFocusOwner,
+} from "../lib/terminalFocus";
 import {
   deriveLogicalProjectKeyFromSettings,
   selectProjectGroupingSettings,
@@ -2451,6 +2456,19 @@ export default function ChatView(props: ChatViewProps) {
     scrollToEnd,
     persistThreadSettingsForNextTurn,
   });
+  const {
+    runningBanner: runningResumableActionBannerItem,
+    interruptedBanner: interruptedActionBannerItem,
+    heldBanner: heldActionBannerItem,
+  } = useActionResumeBanners({
+    routeThreadRef,
+    threadRef: activeThreadRef,
+    action: activeThreadShell?.actionResume ?? null,
+    onRequestTerminalFocus: (terminalId) => {
+      if (activeThreadRef) focusTerminal(activeThreadRef, terminalId);
+    },
+    onThreadError: setThreadError,
+  });
   const activeThreadHasCompactableConversation = serverVisibleTurnItems.some(
     ({ item }) =>
       item.type === "user_message" &&
@@ -2616,6 +2634,11 @@ export default function ChatView(props: ChatViewProps) {
           ]
         : [];
     const limitRecoveryItems = limitRecoveryBanner === null ? [] : [limitRecoveryBanner];
+    const interruptedActionItems =
+      interruptedActionBannerItem === null ? [] : [interruptedActionBannerItem];
+    const heldActionItems = heldActionBannerItem === null ? [] : [heldActionBannerItem];
+    const runningActionItems =
+      runningResumableActionBannerItem === null ? [] : [runningResumableActionBannerItem];
     const usageLimitsItems = usageLimitsBanner === null ? [] : [usageLimitsBanner];
     const projectCloneItems = projectCloneBannerItem === null ? [] : [projectCloneBannerItem];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
@@ -2626,6 +2649,9 @@ export default function ChatView(props: ChatViewProps) {
         ...usageLimitsItems,
         ...projectCloneItems,
         ...systemComposerBannerItems,
+        ...interruptedActionItems,
+        ...heldActionItems,
+        ...runningActionItems,
       ];
     }
     return [
@@ -2635,6 +2661,9 @@ export default function ChatView(props: ChatViewProps) {
       ...usageLimitsItems,
       ...projectCloneItems,
       ...systemComposerBannerItems,
+      ...interruptedActionItems,
+      ...heldActionItems,
+      ...runningActionItems,
       branchMismatchBannerItem({
         mismatchKey: activeBranchMismatchKey,
         mismatch: localCheckoutBranchMismatch,

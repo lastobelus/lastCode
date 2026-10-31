@@ -279,6 +279,17 @@ const layerThreadManagementProvided = ThreadManagementService.layerWithLegacyImp
     ),
   ),
 );
+const layerActionResumeProvided = ActionResume.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      layerThreadManagementProvided,
+      ProjectStore.layer,
+      layerCommandReceiptStoreProvided,
+      ActionRunStore.layer,
+    ),
+  ),
+  Layer.provide(layerUpdateDrainAdmission),
+);
 const layerWorktreeCleanupProvided = WorktreeCleanupService.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
