@@ -2539,6 +2539,10 @@ export const layerWsRpc = (
           }),
         [WS_METHODS.serverRunStorageCleanup]: () => storageCleanup.runNow,
         [WS_METHODS.serverGetStorageCleanupReport]: () => storageCleanup.reports,
+        [WS_METHODS.serverGetBuildReviewTargets]: (input) =>
+          storageCleanup.buildReviewTargets(input),
+        [WS_METHODS.serverPreviewBuildReview]: (input) => storageCleanup.previewBuildReview(input),
+        [WS_METHODS.serverSelectBuildReview]: (input) => storageCleanup.selectBuildReview(input),
         [WS_METHODS.serverGetDatabaseStorage]: () => databaseStorage.status,
         [WS_METHODS.peerLinksList]: (_input) =>
           peerLinks.list.pipe(Effect.map((links) => ({ links }))),

@@ -57,6 +57,7 @@ class FakePtyProcess implements PtyAdapter.PtyProcess {
   readonly pid: number;
   writeFailure: unknown | undefined;
   resizeFailure: unknown | undefined;
+  killFailure: unknown | undefined;
   private readonly dataListeners = new Set<(data: string) => void>();
   private readonly exitListeners = new Set<(event: PtyAdapter.PtyExitEvent) => void>();
   killed = false;
@@ -85,6 +86,9 @@ class FakePtyProcess implements PtyAdapter.PtyProcess {
     this.killed = true;
     this.killSignals.push(signal);
     this.onKill?.(signal);
+    if (this.killFailure !== undefined) {
+      throw this.killFailure;
+    }
   }
 
   onData(callback: (data: string) => void): () => void {
@@ -432,6 +436,22 @@ it.layer(
       assert.equal(second.threadId, "thread-1");
       assert.equal(third.threadId, "thread-1");
       expect(ptyAdapter.spawnInputs).toHaveLength(1);
+    }),
+  );
+
+  it.effect("refuses to create a missing terminal for read-only attach", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager();
+      const result = yield* manager
+        .attachStream(openInput(), () => Effect.void, undefined, undefined, false)
+        .pipe(Effect.result);
+
+      assert.equal(result._tag, "Failure");
+      assert.equal(
+        result._tag === "Failure" ? result.failure._tag : null,
+        "TerminalSessionLookupError",
+      );
+      expect(ptyAdapter.spawnInputs).toHaveLength(0);
     }),
   );
 
@@ -4800,6 +4820,55 @@ it.layer(
       expect(yield* fs.readFileString(oldPath)).toBe("preserve me\n");
       expect(yield* fs.readDirectory(logsDir)).toHaveLength(1);
       expect((yield* manager.open(openInput({ threadId }))).history).toBe("preserve me\n");
+    }),
+  );
+
+  it.effect("keeps a closing terminal in blocker metadata until kill escalation finishes", () =>
+    Effect.gen(function* () {
+      const { manager } = yield* createManager(5, { processKillGraceMs: 10 });
+      yield* manager.open(openInput());
+
+      const closeFiber = yield* manager.close({ threadId: "thread-1" }).pipe(Effect.forkScoped);
+      yield* Effect.yieldNow;
+
+      expect(yield* manager.refreshMetadata).toEqual([
+        expect.objectContaining({
+          threadId: "thread-1",
+          terminalId: DEFAULT_TERMINAL_ID,
+          status: "running",
+          hasRunningSubprocess: true,
+        }),
+      ]);
+
+      yield* TestClock.adjust("10 millis");
+      yield* Fiber.join(closeFiber);
+      yield* Effect.yieldNow;
+
+      expect(yield* manager.metadata).toEqual([]);
+      expect(yield* manager.refreshMetadata).toEqual([]);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("keeps a closing terminal blocked when process signaling fails", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager();
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0];
+      expect(process).toBeDefined();
+      if (!process) return;
+      process.killFailure = new Error("simulated signal failure");
+
+      yield* manager.close({ threadId: "thread-1" });
+
+      expect(process.killSignals).toEqual(["SIGTERM"]);
+      expect(yield* manager.refreshMetadata).toEqual([
+        expect.objectContaining({
+          threadId: "thread-1",
+          terminalId: DEFAULT_TERMINAL_ID,
+          status: "running",
+          hasRunningSubprocess: true,
+        }),
+      ]);
     }),
   );
 

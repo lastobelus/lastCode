@@ -81,6 +81,7 @@ const isProviderAdapterEventStreamError = Schema.is(
   ProviderAdapter.ProviderAdapterEventStreamError,
 );
 const encodeUnknownJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
+const isProviderAdapterSteerRunError = Schema.is(ProviderAdapter.ProviderAdapterSteerRunError);
 
 describe("CodexAdapterV2 context usage", () => {
   it("uses the current context rather than cumulative processed tokens", () => {
@@ -1692,6 +1693,119 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
       ),
     ),
+  );
+
+  it.effect.each([
+    {
+      name: "late native turn",
+      error: { code: -32600, message: "No active turn to steer" },
+      deliveryRejected: undefined,
+    },
+    ...(["review", "compact"] as const).map((turnKind) => ({
+      name: `${turnKind} turn`,
+      error: {
+        code: -32600,
+        message: `cannot steer a ${turnKind} turn`,
+        data: {
+          message: `cannot steer a ${turnKind} turn`,
+          codexErrorInfo: { activeTurnNotSteerable: { turnKind } },
+          additionalDetails: null,
+        },
+      },
+      deliveryRejected: true,
+    })),
+    {
+      name: "transient request failure",
+      error: { code: -32603, message: "Temporarily unavailable" },
+      deliveryRejected: undefined,
+    },
+    {
+      name: "unstructured review error",
+      error: { code: -32600, message: "cannot steer a review turn" },
+      deliveryRejected: undefined,
+    },
+    {
+      name: "unknown turn kind",
+      error: {
+        code: -32600,
+        message: "cannot steer this turn",
+        data: {
+          message: "cannot steer this turn",
+          codexErrorInfo: { activeTurnNotSteerable: { turnKind: "unknown" } },
+        },
+      },
+      deliveryRejected: undefined,
+    },
+  ])("classifies $name steering failure without starting or interrupting", (rejection) =>
+    Effect.gen(function* () {
+      const nativeThreadId = "strict-steer-thread";
+      const nativeTurnId = "strict-steer-turn";
+      const prompt = "Run a command.";
+      const transcript = makeCodexReplayTranscript({
+        scenario: "strict-steer-completion-race",
+        entries: [
+          ...codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt }),
+          {
+            type: "expect_outbound",
+            label: "turn/steer",
+            frame: {
+              id: 4,
+              method: "turn/steer",
+              params: {
+                expectedTurnId: nativeTurnId,
+                input: [{ type: "text", text: "Pause after the current tool." }],
+                threadId: nativeThreadId,
+              },
+            },
+          },
+          {
+            type: "emit_inbound",
+            label: "turn/steer/rejected",
+            frame: {
+              id: 4,
+              error: rejection.error,
+            },
+          },
+        ],
+      });
+      const sentMethods: string[] = [];
+      const harness = yield* makeCodexReplayHarness(
+        transcript,
+        () => Effect.void,
+        (method) => Effect.sync(() => void sentMethods.push(method)),
+      );
+      const turnInput = makeCodexTestTurnInput({
+        threadId: harness.threadId,
+        providerThread: harness.providerThread,
+        now: yield* DateTime.now,
+        attemptId: RunAttemptId.make("strict-steer-attempt"),
+        text: prompt,
+      });
+      yield* harness.runtime.startTurn(turnInput);
+      sentMethods.length = 0;
+      const error = yield* harness.runtime
+        .steerTurn({
+          threadId: harness.threadId,
+          runId: turnInput.runId,
+          providerThread: harness.providerThread,
+          providerTurnId: (yield* IdAllocator.IdAllocatorV2).derive.providerTurn({
+            driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+            nativeTurnId,
+          }),
+          message: {
+            ...turnInput.message,
+            messageId: MessageId.make("strict-steer-message"),
+            text: "Pause after the current tool.",
+          },
+        })
+        .pipe(Effect.flip);
+      assert.instanceOf(error, ProviderAdapter.ProviderAdapterSteerRunError);
+      assert.equal(
+        isProviderAdapterSteerRunError(error) ? error.deliveryRejected : undefined,
+        rejection.deliveryRejected,
+      );
+      assert.deepEqual(sentMethods, ["turn/steer"]);
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer))),
   );
 
   const assistantMessages = (events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>) =>
@@ -4178,7 +4292,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     );
   });
 
-  it.effect("Stop ends a background command no Codex process tracks any more", () =>
+  it.effect("process exit clears background commands and rejects Stop for the completed run", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
@@ -4231,6 +4345,16 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             createdBy: "user",
             creationSource: "web",
           });
+          const released = yield* orchestrator.streamDomainEvents.pipe(
+            Stream.filter(
+              (event) =>
+                event.type === "turn-item.updated" &&
+                event.payload.type === "command_execution" &&
+                event.payload.status === "interrupted",
+            ),
+            Stream.runHead,
+            Effect.forkChild({ startImmediately: true }),
+          );
           const settled = yield* orchestrator.streamDomainEvents.pipe(
             Stream.filter(
               (event) =>
@@ -4253,21 +4377,28 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           });
           yield* worker.drain();
           yield* Fiber.join(settled);
+          yield* Fiber.join(released);
           yield* worker.drain();
           const before = yield* orchestrator.getThreadShell(threadId);
           assert.deepEqual(
             before?.pendingBackgroundTasks?.map((task) => task.kind),
-            ["command"],
-            "the thread still shows the command the gone process never finished",
+            [],
+            "process exit already retired the background command before Stop",
           );
           const run = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)!;
-          yield* orchestrator.dispatch({
-            type: "run.interrupt",
-            commandId: CommandId.make("stop-background-untracked"),
-            threadId,
-            runId: run.id,
-            holdQueue: true,
-          });
+          const stop = yield* Effect.exit(
+            orchestrator.dispatch({
+              type: "run.interrupt",
+              commandId: CommandId.make("stop-background-untracked"),
+              threadId,
+              runId: run.id,
+              holdQueue: true,
+            }),
+          );
+          assert.isTrue(Exit.isFailure(stop));
+          if (Exit.isFailure(stop)) {
+            assert.include(Cause.pretty(stop.cause), "is not interruptible");
+          }
           yield* worker.drain();
           const projection = yield* orchestrator.getThreadProjection(threadId);
           assert.deepEqual(
