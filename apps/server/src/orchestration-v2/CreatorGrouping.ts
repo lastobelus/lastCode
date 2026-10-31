@@ -10,6 +10,7 @@ const releaseCommandFields = new Set([
   "threadId",
   "creatorGrouping",
   "groupedUnderThreadId",
+  "expectedProjectId",
 ]);
 
 export function isThreadPlacementReleaseCommand(command: OrchestrationV2ServerCommand): boolean {

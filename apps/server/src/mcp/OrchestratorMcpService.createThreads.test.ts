@@ -3,6 +3,7 @@ import { assert, it, vi } from "@effect/vitest";
 import {
   CommandId,
   EnvironmentId,
+  EventId,
   MessageId,
   ProjectId,
   ProviderDriverKind,
@@ -244,6 +245,55 @@ it.effect(
         (yield* service.listThreads(scope, { underThreadId: b, settled: false, limit: 100 })).total,
         119,
       );
+      const sink = yield* EventSink.EventSinkV2;
+      for (const [index, status] of (["stopping", "failed"] as const).entries()) {
+        const threadId = members[index + 3]!;
+        const original = yield* threads.getThreadProjection(threadId);
+        const archivePending = {
+          threadId,
+          commandId: CommandId.make(`organization:pending-archive:${status}`),
+          status,
+          childDisposition: "stop_and_archive" as const,
+          childThreadIds: [],
+          archiveThreadIds: [threadId],
+          promoteThreadIds: [],
+        };
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make(`organization:pending-archive:${status}`),
+              type: "thread.metadata-updated",
+              threadId,
+              occurredAt: original.thread.updatedAt,
+              payload: { ...original.thread, archivePending },
+            },
+          ],
+        });
+        const item = {
+          threadId,
+          commandId: CommandId.make(`organization:release-pending:${status}`),
+          groupedUnderThreadId: null,
+        };
+        const refused = yield* threads.setThreadParents({
+          projectId: ProjectId.make("organization:wrong-project"),
+          items: [item],
+        });
+        assert.equal(refused[0]?.status, "rejected");
+        assert.equal((yield* threads.getThreadShell(threadId))?.groupedUnderThreadId, b);
+        const released = yield* threads.setThreadParents({ projectId, items: [item] });
+        assert.equal(released[0]?.status, "moved", status);
+        assert.equal(released[0]?.previousGroupedUnderThreadId, b);
+        const after = yield* threads.getThreadProjection(threadId);
+        assert.isNull(after.thread.groupedUnderThreadId);
+        assert.deepEqual(after.thread.archivePending, archivePending);
+        assert.deepEqual(after.thread.lineage, original.thread.lineage);
+        assert.equal(after.thread.creatorThreadId, original.thread.creatorThreadId);
+        assert.deepEqual(after.messages, original.messages);
+        assert.deepEqual(after.runs, original.runs);
+        const retried = yield* threads.setThreadParents({ projectId, items: [item] });
+        assert.isTrue(retried[0]?.replayed);
+        assert.equal(retried[0]?.sequence, released[0]?.sequence);
+      }
     }).pipe(Effect.provide(layer)),
 );
 
