@@ -9312,6 +9312,165 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  it.effect.each(["local", "remote"] as const)(
+    "binds $0 MCP tool IDs only after an explicit prompt echo and ends them at the native result",
+    (ownership) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeWakeHarness;
+          const sessions = yield* McpProviderSessions.McpProviderSessions;
+          const config = {
+            environmentId: EnvironmentId.make("env-origin"),
+            threadId: harness.threadId,
+            providerInstanceId: ProviderInstanceId.make("claude"),
+            providerSessionId: "credential-origin",
+            endpoint: "http://localhost/mcp",
+            authorizationHeader: "Bearer test-origin",
+            browserToolsAvailable: true,
+          };
+          yield* sessions.set(config);
+          const lookup = (id: string) =>
+            sessions.resolveExecution({
+              threadId: harness.threadId,
+              providerSessionId: config.providerSessionId,
+              authorizationHeader: config.authorizationHeader,
+              metadata: { "claudecode/toolUseId": id },
+            });
+          const frame = (id: string, promptUuid?: string) =>
+            claudeSdkFrame({
+              type: "assistant",
+              message: {
+                model: "claude-sonnet-4-6",
+                id: `msg_${id}`,
+                type: "message",
+                role: "assistant",
+                content: [
+                  {
+                    type: "tool_use",
+                    id,
+                    name: "mcp__t3-code__run_project_action_and_resume",
+                    input: { actionId: "test" },
+                  },
+                ],
+              },
+              parent_tool_use_id: null,
+              uuid: "00000000-0000-4000-8000-000000000791",
+              session_id: WAKE_NATIVE_SESSION,
+              ...(promptUuid === undefined ? {} : { user_message_uuid: promptUuid }),
+            });
+          const first = makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("origin-a"),
+            text: "First",
+            attachments: [],
+          });
+          yield* harness.runtime.startTurn({
+            ...first,
+            appThread: {
+              ...first.appThread,
+              ...(ownership === "local"
+                ? {
+                    lineage: {
+                      rootThreadId: ThreadId.make("parent"),
+                      parentThreadId: ThreadId.make("parent"),
+                      relationshipToParent: "subagent" as const,
+                    },
+                  }
+                : {
+                    remoteDelegations: [
+                      {
+                        parentEnvironmentId: EnvironmentId.make("remote-parent"),
+                        parentThreadId: ThreadId.make("parent"),
+                        sourceTaskId: NodeId.make("remote-task"),
+                        delegationId: "remote-delegation",
+                        linkSessionId: "remote-link",
+                        stage: "active" as const,
+                      },
+                    ],
+                  }),
+            },
+          });
+          yield* harness.offerAndWait(frame("unknown"));
+          assert.isUndefined(yield* lookup("unknown"));
+          const hook = harness.getOpenedOptions()?.hooks?.PreToolUse?.[0]?.hooks[0];
+          if (hook === undefined)
+            throw new Error("Child Actions require a pre-dispatch frame barrier");
+          const hookStarted = yield* Deferred.make<void>();
+          const permission = yield* Effect.gen(function* () {
+            yield* Deferred.succeed(hookStarted, undefined);
+            return yield* Effect.promise(() =>
+              hook(
+                {
+                  hook_event_name: "PreToolUse",
+                  session_id: WAKE_NATIVE_SESSION,
+                  transcript_path: "/transcript.jsonl",
+                  cwd: "/workspace",
+                  tool_name: "mcp__t3-code__run_project_action_and_resume",
+                  tool_input: { actionId: "test" },
+                  tool_use_id: "a",
+                },
+                undefined,
+                { signal: new AbortController().signal },
+              ),
+            );
+          }).pipe(Effect.forkScoped);
+          yield* Deferred.await(hookStarted);
+          yield* harness.offerAndWait(frame("a", harness.promptUuid(0)));
+          yield* Fiber.join(permission);
+          assert.deepEqual(yield* lookup("a"), { runId: first.runId, attemptId: first.attemptId });
+          yield* harness.offerAndWait(frame("a-later"));
+          assert.deepEqual(yield* lookup("a-later"), {
+            runId: first.runId,
+            attemptId: first.attemptId,
+          });
+          yield* harness.offerAndWait(
+            claudeSdkFrame({
+              ...makeResultFrame({ uuid: "00000000-0000-4000-8000-000000000792", result: "Done" }),
+              user_message_uuid: harness.promptUuid(0),
+            }),
+          );
+          yield* harness.awaitTerminal(1);
+          assert.isUndefined(yield* lookup("a"));
+          const second = makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("origin-b"),
+            text: "Second",
+            attachments: [],
+            providerTurnOrdinal: 2,
+          });
+          yield* harness.runtime.startTurn(second);
+          yield* harness.offerAndWait(frame("wake"));
+          assert.isUndefined(yield* lookup("wake"));
+          yield* harness.offerAndWait(frame("b", harness.promptUuid(1)));
+          assert.deepEqual(yield* lookup("b"), {
+            runId: second.runId,
+            attemptId: second.attemptId,
+          });
+          yield* harness.offerAndWait(frame("foreign", "00000000-0000-4000-8000-000000000799"));
+          assert.isUndefined(yield* lookup("foreign"));
+          yield* harness.offerAndWait(frame("foreign-next"));
+          assert.isUndefined(yield* lookup("foreign-next"));
+          assert.isUndefined(yield* lookup("a"));
+          yield* harness.offerAndWait(
+            claudeSdkFrame({
+              ...makeResultFrame({ uuid: "00000000-0000-4000-8000-000000000793", result: "Done" }),
+              user_message_uuid: harness.promptUuid(1),
+            }),
+          );
+          yield* harness.awaitTerminal(2);
+          assert.isUndefined(yield* lookup("b"));
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
+  );
+
   it.effect("releases output held for a prompt echo when the stream ends", () =>
     Effect.scoped(
       Effect.gen(function* () {

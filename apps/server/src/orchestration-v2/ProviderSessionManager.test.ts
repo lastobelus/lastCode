@@ -2588,11 +2588,14 @@ it.effect(
 );
 
 it.effect.each([
-  { relationshipToParent: null, subagent: false },
-  { relationshipToParent: "subagent", subagent: true },
+  { relationshipToParent: null, remoteStage: null, subagent: false },
+  { relationshipToParent: "subagent", remoteStage: null, subagent: true },
+  { relationshipToParent: null, remoteStage: "prepared", subagent: true },
+  { relationshipToParent: null, remoteStage: "active", subagent: true },
+  { relationshipToParent: null, remoteStage: "disposed", subagent: false },
 ] as const)(
-  "ProviderSessionManagerV2 marks MCP credentials of delegated children ($relationshipToParent)",
-  ({ relationshipToParent, subagent }) =>
+  "ProviderSessionManagerV2 marks MCP credentials of delegated children ($relationshipToParent/$remoteStage)",
+  ({ relationshipToParent, remoteStage, subagent }) =>
     Effect.gen(function* () {
       const state = yield* Ref.make(emptyState);
       const mcpConfigs = yield* Ref.make<
@@ -2621,6 +2624,20 @@ it.effect.each([
                   relationshipToParent === null
                     ? created.payload.lineage
                     : { parentThreadId, relationshipToParent, rootThreadId: parentThreadId },
+                ...(remoteStage === null
+                  ? {}
+                  : {
+                      remoteDelegations: [
+                        {
+                          parentEnvironmentId: EnvironmentId.make("remote-parent"),
+                          parentThreadId,
+                          sourceTaskId: NodeId.make("remote-task"),
+                          delegationId: "remote-delegation",
+                          linkSessionId: "remote-link",
+                          stage: remoteStage,
+                        },
+                      ],
+                    }),
               },
             },
           ],

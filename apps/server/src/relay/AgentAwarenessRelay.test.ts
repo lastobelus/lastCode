@@ -180,6 +180,9 @@ const makeTestRelay = Effect.fnUntraced(function* (
   const shellReads: ThreadId[] = [];
   const catchUp = { shellSnapshotReads: 0 };
   const threads = ThreadManagementService.ThreadManagementService.of({
+    withActionObligation: unused,
+    reserveActionObligation: unused,
+    disposeActionObligation: unused,
     executeArchive: unused,
     getThreadArchiveFamily: unused,
     getThreadShell: (threadId) =>

@@ -1,5 +1,10 @@
 import * as Schema from "effect/Schema";
 import {
+  EnvironmentId,
+  NodeId,
+  RunId,
+  RunAttemptId,
+  MessageId,
   IsoDateTime,
   NonNegativeInt,
   PositiveInt,
@@ -7,6 +12,30 @@ import {
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
+
+export const ActionResumeSource = Schema.Struct({
+  runId: RunId,
+  attemptId: RunAttemptId,
+});
+export type ActionResumeSource = typeof ActionResumeSource.Type;
+
+export const ActionResumeOwner = Schema.Struct({
+  parentEnvironmentId: EnvironmentId,
+  parentThreadId: ThreadId,
+  taskId: NodeId,
+  sourceRunId: RunId,
+  delegationId: Schema.optional(TrimmedNonEmptyString),
+});
+export type ActionResumeOwner = typeof ActionResumeOwner.Type;
+
+export const ActionResumeObligation = Schema.Struct({
+  actionRunId: TrimmedNonEmptyString,
+  messageId: MessageId,
+  owner: ActionResumeOwner,
+  state: Schema.Literals(["waiting", "transferred", "disposed"]),
+  continuationRunId: Schema.optional(RunId),
+});
+export type ActionResumeObligation = typeof ActionResumeObligation.Type;
 
 export const ActionResumeOutcome = Schema.Literals([
   "running",
@@ -159,6 +188,7 @@ export type ActionProtocolEvent = typeof ActionProtocolEvent.Type;
  */
 export const ActionResumeState = Schema.Struct({
   runId: TrimmedNonEmptyString,
+  owner: Schema.optional(ActionResumeOwner),
   threadId: ThreadId,
   projectId: ProjectId,
   actionId: TrimmedNonEmptyString,

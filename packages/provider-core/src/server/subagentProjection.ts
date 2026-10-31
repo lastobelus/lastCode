@@ -257,8 +257,21 @@ export function delegatedTaskProgress(projection: {
   const workRuns = projection.runs.filter(
     (run) => !monitorRuns.has(run.id) && run.status !== "rolled_back",
   );
+  const actionContinuations = new Set(
+    workRuns.flatMap(
+      (run) =>
+        run.actionObligations?.flatMap((obligation) =>
+          obligation.state === "transferred" && obligation.continuationRunId !== undefined
+            ? [obligation.continuationRunId]
+            : [],
+        ) ?? [],
+    ),
+  );
   const active = workRuns.some(
-    (run) => !terminal(run.status) && !(run.status === "queued" && run.queueHeld === true),
+    (run) =>
+      (!terminal(run.status) &&
+        (run.status !== "queued" || run.queueHeld !== true || actionContinuations.has(run.id))) ||
+      run.actionObligations?.some((row) => row.state === "waiting") === true,
   );
   const children =
     projection.subagents.some(

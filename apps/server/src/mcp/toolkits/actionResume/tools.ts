@@ -27,7 +27,7 @@ const ListedProjectAction = Schema.Struct({
 
 const ListProjectActionsTool = Tool.make("list_project_actions", {
   description:
-    "List every saved Project Action for this thread's project, including its stable id, name, whether it is opted in for agent-triggered one-shot resume, and a safe reason when it is disabled. Call this before run_project_action_and_resume; never guess an Action id. A delegated child task may list Actions to name one in its handoff request, but its parent launches it.",
+    "List every saved Project Action for this thread's project, including its stable id, name, whether it is opted in for agent-triggered one-shot resume, and a safe reason when it is disabled. Call this before run_project_action_and_resume; never guess an Action id. A delegated child lists Actions to name one in its handoff request, or to launch one when its brief says it owns its Actions.",
   parameters: Schema.Record(Schema.String, Schema.Never),
   success: Schema.Struct({ actions: Schema.Array(ListedProjectAction) }),
   failure: ActionResumeToolError,
@@ -40,7 +40,7 @@ const ListProjectActionsTool = Tool.make("list_project_actions", {
 
 const RunProjectActionAndResumeTool = Tool.make("run_project_action_and_resume", {
   description:
-    "Launch one opted-in Project Action in a terminal, arm one same-thread automated follow-up, and return immediately. It may run indefinitely; do not poll it. The user can cancel it from LastCode. Use only an eligible id returned by list_project_actions. For now, a child ends its turn with a handoff request instead of launching; the parent verifies the target, launches it in its own thread, and queues the result to the child. Eligibility is independent of automatic-settlement settings.",
+    "Launch one opted-in Project Action in a terminal, arm one same-thread automated follow-up, and return immediately. It may run indefinitely; do not poll it. The user can cancel it from LastCode. Use only an eligible id returned by list_project_actions. A delegated child launches only when its brief says its parent verified features.appOwnedActionContinuationVersion and installed acceptance, or authorized an isolated acceptance scenario; its task stays unfinished across the wait and continues in the follow-up. A delegated call without a verified execution source is refused before launch. Otherwise, or after a refusal, the child ends its turn with a handoff request; the parent verifies the target, launches it in its own thread, and queues the result to the child. Eligibility is independent of automatic-settlement settings.",
   parameters: Schema.Struct({ actionId: Schema.String }),
   success: ActionResumeState,
   failure: ActionResumeToolError,

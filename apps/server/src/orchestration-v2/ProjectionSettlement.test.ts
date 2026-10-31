@@ -1,10 +1,13 @@
 import { assert, it } from "@effect/vitest";
 import {
+  EnvironmentId,
   EventId,
   MessageId,
   NodeId,
   type OrchestrationV2AppThread,
   type OrchestrationV2Run,
+  type OrchestrationV2Subagent,
+  type RemoteDelegationAssociation,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -288,6 +291,88 @@ it.effect(
         (yield* store.getThread(ThreadId.make("missing")).pipe(Effect.flip))._tag,
         "ProjectionStoreThreadNotFoundError",
       );
+
+      const parent = yield* createThread("parent-owes-child-result");
+      const child = yield* createThread("child-awaits-action", {
+        lineage: { parentThreadId: parent, relationshipToParent: "subagent", rootThreadId: parent },
+      });
+      yield* createRun(parent);
+      yield* createRun(child);
+      const task: OrchestrationV2Subagent = {
+        id: NodeId.make("task:settlement:action-wait"),
+        threadId: parent,
+        runId: null,
+        parentNodeId: NodeId.make("node:settlement:parent"),
+        origin: "app_owned",
+        createdBy: "agent",
+        driver: ProviderDriverKind.make("codex"),
+        providerInstanceId,
+        providerThreadId: null,
+        childThreadId: child,
+        nativeTaskRef: null,
+        prompt: "Finish the delegated work after its Action returns.",
+        title: "Action wait",
+        model: "test-model",
+        status: "waiting",
+        result: null,
+        startedAt: old,
+        completedAt: null,
+        updatedAt: old,
+      };
+      const updateTask = (payload: OrchestrationV2Subagent, suffix: string) =>
+        store.apply({
+          id: EventId.make(`event:settlement:action-wait:${suffix}`),
+          type: "subagent.updated",
+          threadId: parent,
+          occurredAt: now,
+          payload,
+        });
+      yield* updateTask(task, "waiting");
+      assert.deepEqual(yield* store.getSettlementCandidates(parent), []);
+      assert.deepEqual(yield* store.getSettlementCandidates(child), []);
+      assert.isTrue(yield* store.hasOutstandingOwnedWork(parent));
+      assert.isTrue(yield* store.hasOutstandingOwnedWork(child));
+      yield* updateTask({ ...task, ownershipReleased: true }, "released");
+      assert.isFalse(yield* store.hasOutstandingOwnedWork(parent));
+      assert.isFalse(yield* store.hasOutstandingOwnedWork(child));
+
+      for (const stage of ["prepared", "active", "disposed", "settled"] as const) {
+        const remote = yield* createThread(`remote-${stage}`, {
+          remoteDelegations: [
+            {
+              parentEnvironmentId: EnvironmentId.make("environment:remote-parent"),
+              parentThreadId: ThreadId.make("thread:remote-parent"),
+              sourceTaskId: NodeId.make("task:remote-parent"),
+              delegationId: "delegation:remote-parent",
+              linkSessionId: "link:remote-parent",
+              stage,
+            } satisfies RemoteDelegationAssociation,
+          ],
+        });
+        yield* createRun(remote);
+        const unfinished = stage === "prepared" || stage === "active";
+        assert.equal(yield* store.hasOutstandingOwnedWork(remote), unfinished);
+        assert.equal((yield* store.getSettlementCandidates(remote)).length, unfinished ? 0 : 1);
+      }
+
+      const finished: OrchestrationV2Subagent = {
+        ...task,
+        status: "completed",
+        result: "The actual delegated work is finished.",
+        completedAt: now,
+        completionDelivery: { state: "pending", observedByRunId: null },
+      };
+      yield* updateTask(finished, "pending-delivery");
+      assert.deepEqual(yield* store.getSettlementCandidates(parent), []);
+      assert.isTrue(yield* store.hasOutstandingOwnedWork(parent));
+      yield* updateTask(
+        { ...finished, completionDelivery: { state: "delivered", observedByRunId: null } },
+        "delivered",
+      );
+      assert.equal((yield* store.getSettlementCandidates(parent)).length, 1);
+      assert.equal((yield* store.getSettlementCandidates(child)).length, 1);
+      assert.isFalse(yield* store.hasOutstandingOwnedWork(parent));
+      assert.isFalse(yield* store.hasOutstandingOwnedWork(child));
     }).pipe(Effect.provide(layerSql)),
 );
 

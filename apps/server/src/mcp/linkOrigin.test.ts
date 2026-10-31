@@ -1,3 +1,4 @@
+import { requireRemoteDelegationPeer } from "./linkOrigin.ts";
 import * as ActionResume from "../actionResume/ActionResume.ts";
 import * as ThreadReadBroker from "./ThreadReadBroker.ts";
 import * as ThreadRecoveryService from "../orchestration-v2/ThreadRecoveryService.ts";
@@ -421,3 +422,50 @@ it.layer(Layer.provideMerge(layerTools, layerOrchestration))("work a link starts
     }),
   );
 });
+
+it.effect(
+  "refuses remote ownership from provider callers and a different peer even with full access",
+  () =>
+    Effect.gen(function* () {
+      const scope: McpInvocationContext.McpInvocationScope = {
+        environmentId: EnvironmentId.make("destination"),
+        requestNamespace: "peer",
+        capabilities: new Set(["orchestration"]),
+        issuedAt: 0,
+        thread: undefined,
+        client: { sessionId: "peer-a", label: "Peer", access: "full-access", linked: true },
+      };
+      const target = {
+        linkOrigin: { sessionId: "peer-a", label: "Peer", access: "full-access" as const },
+      };
+      assert.equal((yield* requireRemoteDelegationPeer(scope, target)).sessionId, "peer-a");
+      assert.equal(
+        (yield* requireRemoteDelegationPeer(
+          { ...scope, client: { ...scope.client!, sessionId: "peer-b" } },
+          target,
+        ).pipe(Effect.flip)).code,
+        "capability_denied",
+      );
+      assert.equal(
+        (yield* requireRemoteDelegationPeer(
+          {
+            ...scope,
+            thread: {
+              threadId: ThreadId.make("local-agent"),
+              providerSessionId: "provider",
+              providerInstanceId: instanceId,
+            },
+          },
+          target,
+        ).pipe(Effect.flip)).code,
+        "capability_denied",
+      );
+      assert.equal(
+        (yield* requireRemoteDelegationPeer(
+          { ...scope, client: { ...scope.client!, linked: false } },
+          target,
+        ).pipe(Effect.flip)).code,
+        "capability_denied",
+      );
+    }),
+);

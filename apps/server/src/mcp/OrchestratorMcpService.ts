@@ -1,7 +1,9 @@
+import { assertRemoteDelegation } from "./linkOrigin.ts";
 import { ThreadReadAuthorization } from "../orchestration-v2/ThreadReadAuthorization.ts";
 import {
   CommandId,
   type RunId,
+  type EnvironmentId,
   isProviderAvailable,
   MessageId,
   type ModelSelection,
@@ -205,6 +207,11 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     input: OrchestratorMcpThreadReadInput,
   ) => Effect.Effect<OrchestratorMcpThreadReadResult, OrchestratorMcpFailure>;
+  readonly sendToRemoteThread: (
+    scope: McpInvocationScope,
+    environmentId: EnvironmentId,
+    input: OrchestratorMcpThreadSendInput,
+  ) => Effect.Effect<OrchestratorMcpThreadSendResult | undefined, OrchestratorMcpFailure>;
   readonly sendToThread: (
     scope: McpInvocationScope,
     input: OrchestratorMcpThreadSendInput,
@@ -1445,7 +1452,12 @@ const make = Effect.gen(function* () {
         candidate.origin === "app_owned" &&
         candidate.threadId === scope.thread.threadId,
     );
-    if (task === undefined || (task.childThreadId === null && task.remoteChild === undefined)) {
+    if (
+      task === undefined ||
+      (task.childThreadId === null &&
+        task.remoteChild === undefined &&
+        task.remoteLaunch === undefined)
+    ) {
       return yield* failure(
         "task_not_found",
         `Delegated task ${taskId} does not belong to thread ${scope.thread.threadId}.`,
@@ -2309,6 +2321,8 @@ const make = Effect.gen(function* () {
         }),
         features: {
           appOwnedSubagents: true,
+          appOwnedActionContinuationVersion: 1,
+          remoteOwnedContinuationVersion: 1,
           asyncPolling: true,
           cancellation: true,
           batchThreadCreation: true,
@@ -2542,7 +2556,7 @@ const make = Effect.gen(function* () {
           (task) =>
             task.id === input.taskId &&
             task.origin === "app_owned" &&
-            task.remoteChild !== undefined,
+            (task.remoteChild !== undefined || task.remoteLaunch !== undefined),
         );
         if (remoteTask === undefined) {
           return yield* failure(
@@ -2999,12 +3013,143 @@ const make = Effect.gen(function* () {
         ),
       );
     }),
+    sendToRemoteThread: Effect.fn("OrchestratorMcpService.sendToRemoteThread")(
+      function* (scope, environmentId, input) {
+        if (scope.thread === undefined || input.delegation !== undefined) return undefined;
+        const records = yield* threadManagement
+          .getThreadRecords(scope.thread.threadId, ["subagents"])
+          .pipe(Effect.mapError(threadManagementFailure));
+        const tracked = records.subagents.find(
+          (task) =>
+            task.origin === "app_owned" &&
+            task.remoteChild?.delegation !== undefined &&
+            task.ownershipReleased !== true &&
+            task.remoteChild?.environmentId === environmentId &&
+            task.remoteChild?.threadId === input.threadId,
+        );
+        if (tracked === undefined) return undefined;
+        if (input.mode === "steer" || input.mode === "restart")
+          return yield* failure(
+            "invalid_request",
+            "A new remote delegated task round must be queued.",
+          );
+        const caller = yield* requireThreadScope(scope, "t3_thread_send");
+        const afterSequence = yield* threadManagement
+          .getThreadEventSequence(caller.thread.threadId)
+          .pipe(Effect.mapError(threadManagementFailure));
+        const { taskId } = yield* remoteDelegation.delegate(
+          caller,
+          {
+            task: input.message,
+            mode: "async",
+            target: {
+              environmentId,
+              ...(tracked.remoteLaunch === undefined
+                ? {}
+                : { projectId: tracked.remoteLaunch.projectId }),
+              providerInstanceId: tracked.providerInstanceId,
+              ...(tracked.model === null ? {} : { model: tracked.model }),
+            },
+            ...(input.clientRequestId === undefined
+              ? {}
+              : { clientRequestId: input.clientRequestId }),
+          },
+          input.threadId,
+        );
+        const read = () =>
+          threadManagement
+            .getThreadRecords(caller.thread.threadId, ["subagents"], { subagentIds: [taskId] })
+            .pipe(
+              Effect.mapError(threadManagementFailure),
+              Effect.map((records) => records.subagents[0]),
+            );
+        let task = yield* read();
+        if (task?.remoteLaunch?.stage !== "active" && task?.result === null) {
+          yield* threadManagement
+            .streamStoredEventsFrom({
+              threadId: caller.thread.threadId,
+              afterSequence,
+              eventType: "subagent.updated",
+            })
+            .pipe(
+              Stream.filter(
+                (stored) =>
+                  stored.event.type === "subagent.updated" &&
+                  stored.event.payload.id === taskId &&
+                  (stored.event.payload.remoteLaunch?.stage === "active" ||
+                    stored.event.payload.result !== null),
+              ),
+              Stream.runHead,
+              Effect.mapError(threadManagementFailure),
+            );
+          task = yield* read();
+        }
+        const remote = task?.remoteChild;
+        if (
+          remote?.runId === undefined ||
+          remote.delegation === undefined ||
+          remote.activationMessageId === undefined
+        )
+          return yield* failure(
+            "orchestration_error",
+            "Remote task round ended before activation.",
+          );
+        return {
+          threadId: remote.threadId,
+          link: formatThreadLink(remote),
+          messageId: remote.activationMessageId,
+          runId: remote.runId,
+          taskId,
+          status: "queued" as const,
+          delivery: "queued" as const,
+        };
+      },
+    ),
     sendToThread: Effect.fn("OrchestratorMcpService.sendToThread")(function* (scope, input) {
       const { parent, limits, target } = yield* loadScopedThread(scope, input.threadId);
       yield* assertLiveCallerForOtherThread(scope, parent, target);
       yield* resolveRuntimeMode(limits.runtimeMode, target.thread.runtimeMode);
       yield* resolveInteractionMode(limits.interactionMode, target.thread.interactionMode);
 
+      if (input.delegation !== undefined) {
+        yield* assertRemoteDelegation(scope, target.thread, input.delegation);
+        if (input.mode !== undefined && input.mode !== "queue")
+          return yield* failure("invalid_request", "Remote activation must use queue mode.");
+        const key = yield* requestKey(input.clientRequestId);
+        const commandId = stableCommandId({ scope, requestKey: key, operation: "remote-activate" });
+        const messageId = stableOperationMessageId({
+          scope,
+          requestKey: key,
+          operation: "remote-activate",
+        });
+        yield* threadManagement
+          .dispatch({
+            type: "remote_delegation.activate",
+            commandId,
+            threadId: input.threadId,
+            delegation: input.delegation,
+            linkSessionId: scope.client!.sessionId,
+            messageId,
+            text: input.message,
+          })
+          .pipe(Effect.mapError(threadManagementFailure));
+        const records = yield* threadManagement
+          .getThreadRecords(input.threadId, ["runs"])
+          .pipe(Effect.mapError(threadManagementFailure));
+        const run = records.runs.find((run) => run.userMessageId === messageId);
+        if (run === undefined)
+          return yield* failure(
+            "orchestration_error",
+            "Remote activation has no owned run receipt.",
+          );
+        return {
+          threadId: input.threadId,
+          messageId,
+          runId: run.id,
+          status: run.status,
+          delivery: "queued" as const,
+        };
+      }
       const mode = input.mode ?? "auto";
       const key = yield* requestKey(input.clientRequestId);
       const messageId = stableOperationMessageId({
@@ -3056,6 +3201,87 @@ const make = Effect.gen(function* () {
     }),
     waitForThread: Effect.fn("OrchestratorMcpService.waitForThread")(function* (scope, input) {
       const { parent, target } = yield* loadScopedThread(scope, input.threadId);
+      if (input.delegation !== undefined) {
+        const selector = input.delegation;
+        yield* assertRemoteDelegation(scope, target.thread, selector);
+        const afterSequence = yield* threadManagement
+          .getThreadEventSequence(input.threadId)
+          .pipe(Effect.mapError(threadManagementFailure));
+        const readAssociation = Effect.gen(function* () {
+          const records = yield* threadManagement
+            .getThreadRecords(input.threadId, [])
+            .pipe(Effect.mapError(threadManagementFailure));
+          return yield* assertRemoteDelegation(scope, records.thread, selector);
+        });
+        const evaluate = Effect.gen(function* () {
+          const current = yield* readAssociation;
+          if (current.stage === "disposed" || current.stage === "settled") return current;
+          yield* threadManagement
+            .dispatch({
+              type: "remote_delegation.settle",
+              commandId: CommandId.make(
+                `remote-settle:${yield* crypto.randomUUIDv4().pipe(Effect.orDie)}`,
+              ),
+              threadId: input.threadId,
+              delegation: selector,
+              linkSessionId: scope.client!.sessionId,
+            })
+            .pipe(
+              Effect.mapError(threadManagementFailure),
+              Effect.catch((error) =>
+                readAssociation.pipe(
+                  Effect.flatMap((latest) =>
+                    latest.stage === "disposed" || latest.stage === "settled"
+                      ? Effect.void
+                      : Effect.fail(error),
+                  ),
+                ),
+              ),
+            );
+          return yield* readAssociation;
+        });
+        let association = yield* evaluate;
+        if (association.stage === "prepared" || association.stage === "active") {
+          const settled = yield* threadManagement
+            .streamStoredEventsFrom({ threadId: input.threadId, afterSequence })
+            .pipe(
+              Stream.mapEffect(() => evaluate),
+              Stream.filter((entry) => entry.stage === "settled" || entry.stage === "disposed"),
+              Stream.runHead,
+              Effect.timeoutOption(
+                Duration.millis(
+                  Math.min(
+                    MAX_WAIT_TIMEOUT_MS,
+                    Math.max(1, input.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS),
+                  ),
+                ),
+              ),
+              Effect.mapError(threadManagementFailure),
+            );
+          if (Option.isSome(settled) && Option.isSome(settled.value))
+            association = settled.value.value;
+          else association = yield* evaluate;
+        }
+        const pending = association.stage === "prepared" || association.stage === "active";
+        return {
+          threadId: input.threadId,
+          delegation: selector,
+          delegationOutcome: pending
+            ? ("pending" as const)
+            : association.stage === "disposed"
+              ? ("disposed" as const)
+              : ("settled" as const),
+          runId: association.finalRun?.runId ?? null,
+          status: pending
+            ? ("running" as const)
+            : association.stage === "disposed"
+              ? ("cancelled" as const)
+              : association.finalRun!.status,
+          timedOut: pending,
+          ...(association.finalRun === undefined ? {} : { resultRun: association.finalRun }),
+        };
+      }
+
       const result = yield* threadManagement
         .waitForThread({
           projectId: target.thread.projectId,
@@ -3107,6 +3333,22 @@ const make = Effect.gen(function* () {
       yield* assertLiveCallerForOtherThread(scope, parent, target);
       yield* resolveRuntimeMode(limits.runtimeMode, target.thread.runtimeMode);
       yield* resolveInteractionMode(limits.interactionMode, target.thread.interactionMode);
+      if (input.delegation !== undefined) {
+        const association = yield* assertRemoteDelegation(scope, target.thread, input.delegation);
+        if (association.stage === "disposed")
+          return { threadId: input.threadId, runId: null, status: "no_active_run" as const };
+        const key = yield* requestKey(input.clientRequestId);
+        yield* threadManagement
+          .dispatch({
+            type: "remote_delegation.dispose",
+            commandId: stableCommandId({ scope, requestKey: key, operation: "remote-dispose" }),
+            threadId: input.threadId,
+            delegation: input.delegation,
+            linkSessionId: scope.client!.sessionId,
+          })
+          .pipe(Effect.mapError(threadManagementFailure));
+        return { threadId: input.threadId, runId: null, status: "interrupt_requested" as const };
+      }
       const key = yield* requestKey(input.clientRequestId);
       // A peer from before `stop` drops it when decoding, so it interrupts
       // the run instead, as this call did then.

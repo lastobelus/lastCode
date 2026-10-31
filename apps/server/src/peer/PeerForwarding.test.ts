@@ -1,9 +1,13 @@
+import * as PeerMcpClient from "./PeerMcpClient.ts";
+import * as Schema from "effect/Schema";
 import * as DocumentText from "../provider/DocumentText.ts";
 import { NodeHttpServer } from "@effect/platform-node";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   EnvironmentId,
+  NodeId,
+  OrchestratorMcpThreadWaitResult,
   type OrchestrationV2Run,
   type OrchestrationV2ThreadShell,
   type SourceControlCloneRepositoryInput,
@@ -712,4 +716,63 @@ it.effect("refuses what a linked environment cannot take before anything leaves"
       expect(yield* Ref.get(b.bearers)).toEqual([]);
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+const decodePeerWaitResult = Schema.decodeEffect(OrchestratorMcpThreadWaitResult);
+
+it.effect("preserves the exact delegation selector in every forwarded wait chunk", () =>
+  Effect.gen(function* () {
+    const seen: Array<Record<string, unknown>> = [];
+    const selector = {
+      parentEnvironmentId: laptop.environmentId,
+      parentThreadId: ThreadId.make("source-parent"),
+      sourceTaskId: NodeId.make("source-task"),
+      delegationId: "destination-owned-round",
+    };
+    const scope: McpInvocationContext.McpInvocationScope = {
+      environmentId: laptop.environmentId,
+      requestNamespace: "source",
+      thread: undefined,
+      client: { sessionId: "local-client", label: "Client", access: "full-access" },
+      capabilities: new Set(["orchestration"]),
+      issuedAt: 0,
+    };
+    const layer = PeerForwarding.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(PeerMcpClient.PeerMcpClient)({
+            call: (input) => {
+              seen.push(input.arguments);
+              return decodePeerWaitResult({
+                threadId: boxThread,
+                runId: boxRun,
+                status: seen.length < 3 ? "running" : "completed",
+                timedOut: seen.length < 3,
+                delegation: selector,
+                delegationOutcome: seen.length < 3 ? "pending" : "settled",
+                ...(seen.length < 3 ? {} : { resultRun: { runId: boxRun, status: "completed" } }),
+              }).pipe(Effect.orDie);
+            },
+          }),
+          Layer.mock(PeerLinks.PeerLinks)({}),
+          Layer.mock(ThreadManagement.ThreadManagementService)({}),
+          NodeCrypto.layer,
+        ),
+      ),
+    );
+    const result = yield* PeerForwarding.PeerForwarding.pipe(
+      Effect.flatMap((forwarding) =>
+        forwarding.waitForThread(scope, box.environmentId, {
+          threadId: boxThread,
+          delegation: selector,
+          timeoutMs: 150_000,
+        }),
+      ),
+      Effect.provide(layer),
+    );
+    expect(result.delegationOutcome).toBe("settled");
+    expect(seen).toHaveLength(3);
+    expect(seen.map((args) => args.delegation)).toEqual([selector, selector, selector]);
+    expect(seen.map((args) => args.runId)).toEqual([undefined, undefined, undefined]);
+  }),
 );

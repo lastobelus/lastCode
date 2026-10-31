@@ -3,6 +3,7 @@ import { expect, it, vi } from "vite-plus/test";
 import { it as effectIt } from "@effect/vitest";
 import {
   CheckpointScopeId,
+  EnvironmentId,
   ContextHandoffId,
   GitCommandError,
   MessageId,
@@ -1893,3 +1894,43 @@ for (const previousMessages of [[], ["/compact", " /COMPACT "]]) {
       }),
   );
 }
+
+effectIt.effect("refuses disposed remote ownership at the final provider-start check", () =>
+  Effect.gen(function* () {
+    const harness = makeLocalCommandHarness({
+      text: "Continue",
+      previousTurn: { runStatus: "completed", turnStatus: "completed" },
+    });
+    const initial = harness.projection();
+    const selector = {
+      parentEnvironmentId: EnvironmentId.make("source-environment"),
+      parentThreadId: ThreadId.make("foreign-parent"),
+      sourceTaskId: NodeId.make("foreign-task"),
+      delegationId: "remote-start",
+    };
+    harness.setProjection({
+      ...initial,
+      thread: {
+        ...initial.thread,
+        linkOrigin: { sessionId: "peer-a", label: "Peer", access: "full-access" },
+        remoteDelegations: [{ ...selector, linkSessionId: "peer-a", stage: "active" }],
+      },
+      runs: initial.runs.map((run) => ({ ...run, remoteDelegation: selector })),
+    });
+    yield* harness.start;
+    const controls = harness.startRootRun.mock.calls[0]?.[0];
+    expect(controls).toBeDefined();
+    if (controls === undefined) return;
+    expect(yield* controls.shouldStartProviderTurn!()).toBe(true);
+    const running = harness.projection();
+    harness.setProjection({
+      ...running,
+      thread: {
+        ...running.thread,
+        remoteDelegations: [{ ...selector, linkSessionId: "peer-a", stage: "disposed" }],
+      },
+    });
+    expect(yield* controls.shouldStartProviderTurn!()).toBe(false);
+    expect(harness.projection().runs.at(-1)?.status).toBe("running");
+  }),
+);

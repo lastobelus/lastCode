@@ -11,6 +11,7 @@ import {
   type OrchestrationV2CreationSource,
   type OrchestrationV2DelegatedFrom,
   type OrchestrationV2LinkOrigin,
+  type RemoteDelegationAssociation,
   type OrchestrationV2ProviderThreadNativeMetadata,
   type OrchestrationV2ThreadProjection,
   type ProviderDriverKind,
@@ -105,6 +106,7 @@ export interface ThreadLaunchInput {
   /** The parent there, when that environment's agent delegated this as a task. */
   readonly delegatedFrom?: OrchestrationV2DelegatedFrom;
   readonly creatorThreadId?: ThreadId;
+  readonly remoteDelegation?: RemoteDelegationAssociation;
 }
 
 type PreparationInput = Pick<
@@ -853,6 +855,18 @@ const make = Effect.gen(function* () {
         )("Reusing an existing thread requires a thread id.");
       }
 
+      if (
+        input.remoteDelegation !== undefined &&
+        (input.initialMessage !== undefined ||
+          input.reuseExistingThread === true ||
+          input.linkOrigin?.sessionId !== input.remoteDelegation.linkSessionId ||
+          input.remoteDelegation.stage !== "prepared")
+      ) {
+        return yield* mapError(
+          input,
+          "create-thread",
+        )("Remote preparation requires an idle new thread and the authenticated link origin.");
+      }
       const launchReceipt = yield* readReceipt(input, input.commandId);
       yield* threads.assertProviderInstanceEnabled({
         projectId: input.projectId,
@@ -870,7 +884,8 @@ const make = Effect.gen(function* () {
           input.threadId === undefined &&
           Option.isSome(launchReceipt) &&
           launchReceipt.value.status === "accepted" &&
-          launchReceipt.value.commandType === "thread.create"
+          (launchReceipt.value.commandType === "thread.create" ||
+            launchReceipt.value.commandType === "remote_delegation.prepare")
             ? launchReceipt.value
             : undefined;
         const candidateThreadId =
@@ -1042,7 +1057,29 @@ const make = Effect.gen(function* () {
           dispatched = result.initialMessage;
         } else {
           claimed = yield* threads
-            .dispatch(claim)
+            .dispatch(
+              input.remoteDelegation === undefined
+                ? claim
+                : {
+                    type: "remote_delegation.prepare",
+                    commandId: input.commandId,
+                    threadId: candidateThreadId,
+                    association: input.remoteDelegation,
+                    creation: {
+                      ...claim,
+                      projectId: input.projectId,
+                      title: input.title,
+                      modelSelection: input.modelSelection,
+                      runtimeMode: input.runtimeMode,
+                      interactionMode: input.interactionMode,
+                      branch: initialBranch,
+                      worktreePath: initialWorktreePath,
+                      linkOrigin: input.linkOrigin!,
+                      createdBy: input.createdBy,
+                      creationSource: input.creationSource,
+                    },
+                  },
+            )
             .pipe(Effect.mapError(mapError(input, claimOperation, candidateThreadId)));
         }
         const threadId =

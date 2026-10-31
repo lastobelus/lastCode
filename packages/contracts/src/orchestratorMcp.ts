@@ -36,6 +36,7 @@ import {
 import { hasOnlyPairedSurrogates } from "./threadMetadataMcp.ts";
 import { ThreadTitleRegeneration } from "./threadTitle.ts";
 import {
+  RemoteDelegationSelector,
   OrchestrationV2Actor,
   OrchestrationV2AppThread,
   OrchestrationV2ThreadRecovery,
@@ -534,6 +535,7 @@ export const ThreadReadResponse = Schema.Struct({
 export type ThreadReadResponse = typeof ThreadReadResponse.Type;
 
 export const OrchestratorMcpThreadSendInput = Schema.Struct({
+  delegation: Schema.optional(RemoteDelegationSelector),
   environmentId: OrchestratorMcpEnvironmentTarget,
   threadId: ThreadId,
   message: OrchestratorMcpPrompt,
@@ -554,6 +556,7 @@ export const OrchestratorMcpThreadSendResult = Schema.Struct({
 export type OrchestratorMcpThreadSendResult = typeof OrchestratorMcpThreadSendResult.Type;
 
 export const OrchestratorMcpThreadWaitInput = Schema.Struct({
+  delegation: Schema.optional(RemoteDelegationSelector),
   environmentId: OrchestratorMcpEnvironmentTarget,
   threadId: ThreadId,
   runId: Schema.optional(RunId),
@@ -568,6 +571,8 @@ export const OrchestratorMcpThreadWaitInput = Schema.Struct({
 export type OrchestratorMcpThreadWaitInput = typeof OrchestratorMcpThreadWaitInput.Type;
 
 export const OrchestratorMcpThreadWaitResult = Schema.Struct({
+  delegation: Schema.optional(RemoteDelegationSelector),
+  delegationOutcome: Schema.optional(Schema.Literals(["pending", "settled", "disposed"])),
   threadId: ThreadId,
   runId: Schema.NullOr(RunId),
   status: OrchestratorMcpThreadStatus,
@@ -579,6 +584,7 @@ export const OrchestratorMcpThreadWaitResult = Schema.Struct({
 export type OrchestratorMcpThreadWaitResult = typeof OrchestratorMcpThreadWaitResult.Type;
 
 export const OrchestratorMcpThreadInterruptInput = Schema.Struct({
+  delegation: Schema.optional(RemoteDelegationSelector),
   environmentId: OrchestratorMcpEnvironmentTarget,
   threadId: ThreadId,
   runId: Schema.optional(RunId),
@@ -673,6 +679,8 @@ export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
   providers: Schema.Array(OrchestratorMcpProviderCapability),
   features: Schema.Struct({
     appOwnedSubagents: Schema.Boolean,
+    appOwnedActionContinuationVersion: Schema.optional(Schema.Literal(1)),
+    remoteOwnedContinuationVersion: Schema.optional(Schema.Literal(1)),
     asyncPolling: Schema.Boolean,
     cancellation: Schema.Boolean,
     batchThreadCreation: Schema.Boolean,
