@@ -3319,6 +3319,12 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
     "later-reservation-failure",
     "remote",
     "remote-reservation-failure",
+    "remote-disposed",
+    "remote-settled",
+    "remote-independent",
+    "original-discard",
+    "later-discard",
+    "remote-discard",
     "original-provider-loss",
     "later-provider-loss",
     "original-held",
@@ -3455,9 +3461,21 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
                   parentThreadId: null,
                   relationshipToParent: null,
                   rootThreadId: childThreadId,
+                  ...(round === "remote-independent" ? { independent: true } : {}),
                 },
                 linkOrigin: { sessionId: "test-peer", label: "test peer", access: "full-access" },
-                remoteDelegations: [{ ...selector, linkSessionId: "test-peer", stage: "active" }],
+                remoteDelegations: [
+                  {
+                    ...selector,
+                    linkSessionId: "test-peer",
+                    stage:
+                      round === "remote-disposed"
+                        ? "disposed"
+                        : round === "remote-settled"
+                          ? "settled"
+                          : "active",
+                  },
+                ],
               },
             },
             {
@@ -3546,14 +3564,24 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
             Effect.gen(function* () {
               actionRunId = input.env![ACTION_RUN_ID_ENV]!;
               const persisted = yield* orchestrator.getThreadProjection(childThreadId);
-              assert.isTrue(
-                persisted.runs
-                  .find((run) => run.id === source.id)
-                  ?.actionObligations?.some(
-                    (row) => row.actionRunId === actionRunId && row.state === "waiting",
-                  ),
-              );
-              assert.equal((yield* store.get(childThreadId, actionRunId))._tag, "Some");
+              if (
+                round !== "remote-disposed" &&
+                round !== "remote-settled" &&
+                round !== "remote-independent"
+              )
+                assert.isTrue(
+                  persisted.runs
+                    .find((run) => run.id === source.id)
+                    ?.actionObligations?.some(
+                      (row) => row.actionRunId === actionRunId && row.state === "waiting",
+                    ),
+                );
+              if (
+                round !== "remote-disposed" &&
+                round !== "remote-settled" &&
+                round !== "remote-independent"
+              )
+                assert.equal((yield* store.get(childThreadId, actionRunId))._tag, "Some");
               if (!round.endsWith("stop-before-write"))
                 yield* emitTerminal({
                   type: "output",
@@ -3587,6 +3615,19 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
       );
       yield* Effect.gen(function* () {
         const actions = yield* ActionResume.ActionResume;
+        if (round === "remote-independent") {
+          const independent = yield* actions.runProjectActionAndResume(
+            {
+              threadId: childThreadId,
+              providerInstanceId: modelSelection.instanceId,
+              source: { runId: source.id, attemptId: source.activeAttemptId! },
+            },
+            "check",
+          );
+          assert.isUndefined(independent.owner);
+          yield* Deferred.await(written);
+          return;
+        }
         assert.equal(
           (yield* Effect.result(
             actions.runProjectActionAndResume(
@@ -3631,6 +3672,11 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
           );
           return;
         }
+        if (round === "remote-disposed" || round === "remote-settled") {
+          yield* launch.pipe(Effect.flip);
+          assert.equal(actionRunId, "");
+          return;
+        }
         const action = yield* launch;
         assert.equal(action.owner?.taskId, taskId);
         if (round.endsWith("stop-before-write")) {
@@ -3659,6 +3705,31 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
         yield* Deferred.await(written);
         yield* sink.write({
           events: [
+            ...(round.endsWith("discard")
+              ? [
+                  {
+                    id: EventId.make(`action-wait-message-${round}`),
+                    type: "message.updated" as const,
+                    threadId: childThreadId,
+                    runId: source.id,
+                    occurredAt: now,
+                    payload: {
+                      id: MessageId.make(`action-wait-message-${round}`),
+                      threadId: childThreadId,
+                      runId: source.id,
+                      nodeId: null,
+                      role: "assistant" as const,
+                      text: "Waiting for the Action",
+                      attachments: [],
+                      streaming: false,
+                      createdBy: "agent" as const,
+                      creationSource: "server" as const,
+                      createdAt: now,
+                      updatedAt: now,
+                    },
+                  },
+                ]
+              : []),
             {
               id: EventId.make(`action-intermediate-end-${round}`),
               type: "run.updated",
@@ -3696,6 +3767,69 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
               (task) => task.id === taskId,
             )!.result,
           );
+        }
+        if (round.endsWith("discard")) {
+          const afterSequence = yield* sink.latestSequence();
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const recovered = yield* ActionResume.ActionResume;
+              yield* sink.stream({ afterSequence, eventType: "thread.metadata-updated" }).pipe(
+                Stream.filter(
+                  (stored) =>
+                    stored.event.type === "thread.metadata-updated" &&
+                    stored.event.threadId === childThreadId &&
+                    stored.event.payload.actionResume?.delivery === "available",
+                ),
+                Stream.take(1),
+                Stream.runDrain,
+              );
+              yield* recovered.discardInterrupted(childThreadId);
+              yield* recovered.discardInterrupted(childThreadId).pipe(Effect.flip);
+            }).pipe(
+              Effect.provide(Layer.fresh(ActionResume.layer).pipe(Layer.provide(dependencies))),
+            ),
+          );
+          yield* orchestrator.recoverDelegatedTasks;
+          if (remote) {
+            yield* orchestrator.dispatch({
+              type: "remote_delegation.settle",
+              commandId: CommandId.make(`discard-settle-${round}`),
+              threadId: childThreadId,
+              delegation: selector,
+              linkSessionId: "test-peer",
+            });
+            const association = (yield* orchestrator.getThreadProjection(childThreadId)).thread
+              .remoteDelegations?.[0];
+            assert.equal(association?.stage, "settled");
+            assert.equal(association?.finalRun?.status, "interrupted");
+          } else {
+            const task = (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+              (row) => row.id === taskId,
+            )!;
+            assert.equal(task.status, "interrupted");
+            assert.equal(task.result, "Child task ended with status interrupted.");
+            if (round.startsWith("later"))
+              assert.equal(
+                (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+                  (row) => row.id === first.id,
+                )?.status,
+                "completed",
+              );
+          }
+          assert.equal(
+            (yield* orchestrator.getThreadProjection(childThreadId)).runs.find(
+              (row) => row.id === source.id,
+            )?.status,
+            "interrupted",
+          );
+          yield* actions.retryPendingFollowUps;
+          assert.isFalse(
+            (yield* orchestrator.getThreadProjection(childThreadId)).runs.some(
+              (row) =>
+                row.userMessageId === MessageId.make(`action-resume:${action.runId}:follow-up`),
+            ),
+          );
+          return;
         }
         if (round.endsWith("stop-before")) {
           yield* orchestrator.dispatch({

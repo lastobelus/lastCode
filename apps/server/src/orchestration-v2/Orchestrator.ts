@@ -424,6 +424,7 @@ export interface OrchestratorV2Shape {
     threadId: ThreadId,
     owner: ActionResumeOwner,
     actionRunId: string,
+    taskOutcome?: "interrupted",
   ) => Effect.Effect<void, OrchestratorV2Error>;
   readonly resumeQueuedRuns: Effect.Effect<number, OrchestratorV2Error>;
   readonly recoverDelegatedTasks: Effect.Effect<void>;
@@ -17710,6 +17711,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           (cause) => new OrchestratorProjectionError({ threadId: input.threadId, cause }),
         ),
       );
+    if (initial.thread.lineage.independent === true) return undefined;
     if (initial.runs[0]?.remoteDelegation !== undefined) {
       return yield* threadDispatch
         .withLock(
@@ -17957,33 +17959,73 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
   const disposeActionObligation: OrchestratorV2Shape["disposeActionObligation"] = Effect.fn(
     "Orchestrator.disposeActionObligation",
-  )(function* (threadId, owner, actionRunId) {
+  )(function* (threadId, owner, actionRunId, taskOutcome) {
     yield* withThreadDispatchLocks(
       new Set(owner.delegationId === undefined ? [threadId, owner.parentThreadId] : [threadId]),
       Effect.gen(function* () {
-        const child = yield* projectionStore.getThreadRecords(threadId, ["runs"]);
+        const child = yield* projectionStore.getThreadRecords(threadId, ["runs", "subagents"]);
         const source = child.runs.find((run) => run.id === owner.sourceRunId);
         if (
           source === undefined ||
           !source.actionObligations?.some(
-            (row) => row.actionRunId === actionRunId && row.state === "waiting",
+            (row) =>
+              row.actionRunId === actionRunId &&
+              row.state === "waiting" &&
+              row.owner.taskId === owner.taskId &&
+              row.owner.sourceRunId === owner.sourceRunId,
           )
         )
           return;
-        yield* writeSystemEvents([
-          {
-            type: "run.updated",
-            threadId,
-            runId: source.id,
-            occurredAt: yield* DateTime.now,
-            payload: {
-              ...source,
-              actionObligations: source.actionObligations.map((row) =>
-                row.actionRunId === actionRunId ? { ...row, state: "disposed" as const } : row,
-              ),
+        const now = yield* DateTime.now;
+        const ownedRunIds = new Set(
+          child.runs
+            .filter((run) =>
+              owner.delegationId === undefined
+                ? run.delegatedTaskId === owner.taskId
+                : source.remoteDelegation !== undefined &&
+                  sameRemoteDelegation(run.remoteDelegation, source.remoteDelegation),
+            )
+            .map((run) => run.id),
+        );
+        const taskIds =
+          taskOutcome === undefined
+            ? []
+            : child.subagents
+                .filter(
+                  (task) =>
+                    task.origin === "app_owned" &&
+                    task.result === null &&
+                    task.ownershipReleased !== true &&
+                    task.runId !== null &&
+                    ownedRunIds.has(task.runId),
+                )
+                .map((task) => task.id);
+        yield* writeSystemEvents(
+          [
+            {
+              type: "run.updated",
+              threadId,
+              runId: source.id,
+              occurredAt: now,
+              payload: {
+                ...source,
+                ...(taskOutcome === undefined ? {} : { status: taskOutcome, completedAt: now }),
+                actionObligations: source.actionObligations.map((row) =>
+                  row.actionRunId === actionRunId ? { ...row, state: "disposed" as const } : row,
+                ),
+              },
             },
-          },
-        ]);
+          ],
+          taskIds.length === 0
+            ? []
+            : [
+                delegatedTasksStopEffect({
+                  commandId: CommandId.make(`action-discard:${actionRunId}`),
+                  threadId,
+                  taskIds,
+                }),
+              ],
+        );
       }),
     ).pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
   });

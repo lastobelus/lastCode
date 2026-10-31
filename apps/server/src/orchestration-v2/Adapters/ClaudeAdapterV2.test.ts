@@ -9312,7 +9312,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
-  it.effect.each(["local", "remote"] as const)(
+  it.effect.each(["local", "remote", "remote-disposed", "remote-settled"] as const)(
     "binds $0 MCP tool IDs only after an explicit prompt echo and ends them at the native result",
     (ownership) =>
       Effect.scoped(
@@ -9386,7 +9386,12 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                         sourceTaskId: NodeId.make("remote-task"),
                         delegationId: "remote-delegation",
                         linkSessionId: "remote-link",
-                        stage: "active" as const,
+                        stage:
+                          ownership === "remote-disposed"
+                            ? ("disposed" as const)
+                            : ownership === "remote-settled"
+                              ? ("settled" as const)
+                              : ("active" as const),
                       },
                     ],
                   }),

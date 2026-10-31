@@ -186,6 +186,15 @@ export function subagentResultForRun(
   readonly messageId: OrchestrationV2ConversationMessage["id"] | null;
   readonly turnItemId: OrchestrationV2TurnItem["id"] | null;
 } {
+  if (
+    run.status === "interrupted" &&
+    run.actionObligations?.some((row) => row.state === "disposed")
+  )
+    return {
+      text: `Child task ended with status ${run.status}.`,
+      messageId: null,
+      turnItemId: null,
+    };
   const turnItem =
     projection.turnItems
       .filter(

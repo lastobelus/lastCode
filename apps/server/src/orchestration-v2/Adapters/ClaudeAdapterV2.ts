@@ -10120,10 +10120,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   allowDangerouslySkipPermissions: queryPolicy.allowDangerouslySkipPermissions,
                 }),
             canUseTool,
-            ...(turnInput.appThread.lineage.relationshipToParent === "subagent" ||
-            turnInput.appThread.remoteDelegations?.some(
-              (association) => association.stage === "active",
-            ) === true
+            ...(turnInput.appThread.lineage.independent !== true &&
+            (turnInput.appThread.lineage.relationshipToParent === "subagent" ||
+              (turnInput.appThread.remoteDelegations?.length ?? 0) > 0)
               ? {
                   beforeMcpToolUse: (async (hook, _id, options) => {
                     if (hook.hook_event_name !== "PreToolUse") return {};

@@ -598,6 +598,31 @@ it("orders a task's assistant messages by turn item, not by timestamps", () => {
   assert.equal(result.text, "All steps passed.");
   assert.equal(result.messageId, report.message.id);
   assert.equal(result.turnItemId, report.turnItem.id);
+  const discarded = subagentResultForRun(
+    { ...projection, messages: [progress.message], turnItems: [progress.turnItem] },
+    {
+      ...run,
+      status: "interrupted",
+      actionObligations: [
+        {
+          actionRunId: "discarded",
+          messageId: MessageId.make("discarded"),
+          owner: {
+            parentEnvironmentId: EnvironmentId.make("parent"),
+            parentThreadId,
+            taskId: NodeId.make("task"),
+            sourceRunId: run.id,
+          },
+          state: "disposed",
+        },
+      ],
+    },
+  );
+  assert.deepEqual(discarded, {
+    text: "Child task ended with status interrupted.",
+    messageId: null,
+    turnItemId: null,
+  });
 });
 
 it.effect("ends an orphaned native subagent's node when only its record already ended", () =>
