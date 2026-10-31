@@ -105,10 +105,14 @@ export function useLastCodeThreadMenu(
     if (lastcodeThreadActionRequiresOperate(clicked) && !checkTaskPermission(ref.environmentId))
       return;
     const setCreatorGrouping = async (mode: "grouped" | "independent") => {
-      if (!target.creator.groupingEligible) return;
+      if (mode === "grouped" && (!target.creator.groupingEligible || !target.creator.ref)) return;
+      if (mode === "independent" && target.parentThreadId === null) return;
       const result = await updateMetadata({
         environmentId: ref.environmentId,
-        input: { threadId: ref.threadId, creatorGrouping: mode },
+        input: {
+          threadId: ref.threadId,
+          groupedUnderThreadId: mode === "grouped" ? target.creator.ref!.threadId : null,
+        },
       });
       reportThreadOperationFailure(result, "Failed to update creator grouping");
     };

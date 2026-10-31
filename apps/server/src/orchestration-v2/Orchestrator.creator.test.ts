@@ -195,6 +195,233 @@ it.effect(
     }).pipe(Effect.provide(testLayer)),
 );
 
+it.effect(
+  "moves interactive subtrees without activity or creator changes, and replays explicit detach",
+  () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+      const project = ProjectId.make("organization:project");
+      const origin = ThreadId.make("organization:origin");
+      const destination = ThreadId.make("organization:destination");
+      const item = ThreadId.make("organization:item");
+      const stage = ThreadId.make("organization:stage");
+      for (const id of [origin, destination]) yield* orchestrator.dispatch(create(id, project));
+      yield* createOrdinary(item, origin, project);
+      yield* createOrdinary(stage, item, project);
+      const before = yield* store.getThreadProjection(item);
+      const move = {
+        type: "thread.metadata.update" as const,
+        commandId: CommandId.make("organization:move-item"),
+        threadId: item,
+        groupedUnderThreadId: destination,
+      };
+      const accepted = yield* orchestrator.dispatch(move);
+      const after = yield* store.getThreadProjection(item);
+      assert.equal(after.thread.groupedUnderThreadId, destination);
+      assert.equal(after.thread.creatorThreadId, origin);
+      assert.equal(
+        DateTime.toEpochMillis(after.thread.updatedAt),
+        DateTime.toEpochMillis(before.thread.updatedAt),
+      );
+      assert.deepEqual(after.runs, before.runs);
+      assert.deepEqual(after.messages, before.messages);
+      assert.deepEqual(after.thread.lineage, before.thread.lineage);
+      assert.deepEqual(after.thread.lastVisitedAt, before.thread.lastVisitedAt);
+      assert.deepEqual(new Set(yield* store.getArchiveFamilyThreadIds(origin)), new Set([origin]));
+      assert.deepEqual(
+        new Set(yield* store.getArchiveFamilyThreadIds(destination)),
+        new Set([destination, item, stage]),
+      );
+      const retry = yield* orchestrator.dispatch(move);
+      assert.equal(retry.sequence, accepted.sequence);
+      const cycle = yield* orchestrator
+        .dispatch({
+          ...move,
+          commandId: CommandId.make("organization:cycle"),
+          threadId: destination,
+          groupedUnderThreadId: stage,
+        })
+        .pipe(Effect.flip);
+      assert.equal(cycle._tag, "OrchestratorDispatchError");
+      yield* orchestrator.dispatch({
+        type: "thread.delete",
+        commandId: CommandId.make("organization:delete-origin"),
+        threadId: origin,
+      });
+      assert.equal((yield* store.getThread(item)).groupedUnderThreadId, destination);
+      yield* orchestrator.dispatch({
+        ...move,
+        commandId: CommandId.make("organization:detach"),
+        groupedUnderThreadId: null,
+      });
+      assert.isTrue((yield* maintenance.rebuild).valid);
+      assert.isNull((yield* store.getThread(item)).groupedUnderThreadId);
+      assert.isNull((yield* store.getThreadShell(item))?.groupedUnderThreadId);
+      assert.deepEqual(
+        new Set(yield* store.getArchiveFamilyThreadIds(destination)),
+        new Set([destination]),
+      );
+      assert.equal((yield* store.getThread(stage)).groupedUnderThreadId, item);
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect(
+  "serializes inverse organization moves and rejects unavailable or cross-project destinations",
+  () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const project = ProjectId.make("organization:project");
+      const a = ThreadId.make("organization:a");
+      const b = ThreadId.make("organization:b");
+      const other = ThreadId.make("organization:other-project");
+      for (const id of [a, b]) yield* orchestrator.dispatch(create(id, project));
+      yield* orchestrator.dispatch(create(other, ProjectId.make("organization:other")));
+      const results = yield* Effect.forEach(
+        [a, b],
+        (id, index) =>
+          orchestrator
+            .dispatch({
+              type: "thread.metadata.update",
+              commandId: CommandId.make(`organization:inverse:${index}`),
+              threadId: id,
+              groupedUnderThreadId: index === 0 ? b : a,
+            })
+            .pipe(Effect.exit),
+        { concurrency: "unbounded" },
+      );
+      assert.equal(results.filter((result) => result._tag === "Success").length, 1);
+      assert.equal(results.filter((result) => result._tag === "Failure").length, 1);
+      for (const target of [a, other, ThreadId.make("organization:missing")]) {
+        const rejected = yield* orchestrator
+          .dispatch({
+            type: "thread.metadata.update",
+            commandId: CommandId.make(`organization:invalid:${target}`),
+            threadId: a,
+            groupedUnderThreadId: target,
+          })
+          .pipe(Effect.flip);
+        assert.equal(rejected._tag, "OrchestratorDispatchError");
+      }
+      yield* orchestrator.dispatch({
+        type: "thread.archive",
+        commandId: CommandId.make("organization:archive-other"),
+        threadId: other,
+      });
+      const rejected = yield* orchestrator
+        .dispatch({
+          ...create(ThreadId.make("organization:new"), ProjectId.make("organization:other")),
+          groupedUnderThreadId: other,
+        })
+        .pipe(Effect.flip);
+      assert.equal(rejected._tag, "OrchestratorDispatchError");
+      assert.isNull((yield* store.getThread(a)).archivedAt);
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each(["archived", "deleted"] as const)(
+  "recovers a %s former creator without replacing an explicit move or historical independence",
+  (state) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+      const project = ProjectId.make("legacy-placement:project");
+      const former = ThreadId.make("legacy-placement:former");
+      const current = ThreadId.make("legacy-placement:current");
+      for (const id of [former, current]) yield* orchestrator.dispatch(create(id, project));
+      const { groupedUnderThreadId: _placement, ...historicalBase } =
+        yield* projections.getThread(former);
+      const historical = (["grouped", "independent", "moved"] as const).map((kind) => {
+        const id = ThreadId.make(`legacy-placement:${kind}`);
+        return {
+          ...historicalBase,
+          id,
+          createdBy: "agent" as const,
+          creationSource: "mcp" as const,
+          creatorThreadId: former,
+          creatorGrouping: kind === "independent" ? ("independent" as const) : ("grouped" as const),
+          lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: id },
+        };
+      });
+      yield* sink.write({
+        events: historical.map((thread) => ({
+          id: EventId.make(`legacy-created:${thread.id}`),
+          type: "thread.created" as const,
+          threadId: thread.id,
+          occurredAt: thread.createdAt,
+          payload: thread,
+        })),
+      });
+      for (const thread of historical) {
+        const encoded = yield* encodeAppThreadJson(yield* projections.getThread(thread.id));
+        const decoded = yield* decodeAppThreadJson(encoded);
+        assert.isFalse(Object.hasOwn(encoded, "groupedUnderThreadId"));
+        assert.isFalse(Object.hasOwn(decoded, "groupedUnderThreadId"));
+      }
+      const grouped = historical[0]!;
+      const independent = historical[1]!;
+      const moved = historical[2]!;
+      const move = {
+        type: "thread.metadata.update" as const,
+        commandId: CommandId.make("legacy-placement:move"),
+        threadId: moved.id,
+        groupedUnderThreadId: current,
+      };
+      yield* orchestrator.dispatch(move);
+      const parent = yield* projections.getThread(former);
+      const now = yield* DateTime.now;
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make(`legacy-placement:former-${state}`),
+            type: state === "archived" ? "thread.archived" : "thread.deleted",
+            threadId: former,
+            occurredAt: now,
+            payload: {
+              ...parent,
+              ...(state === "archived" ? { archivedAt: now } : { deletedAt: now }),
+            },
+          },
+        ],
+      });
+      yield* orchestrator.recoverDelegatedTasks;
+      assert.equal((yield* projections.getThread(moved.id)).groupedUnderThreadId, current);
+      assert.equal((yield* projections.getThread(moved.id)).creatorThreadId, former);
+      assert.isNull((yield* projections.getThread(moved.id)).archivedAt);
+      assert.isNull((yield* projections.getThread(independent.id)).archivedAt);
+      assert.isFalse(
+        Object.hasOwn(yield* projections.getThread(independent.id), "groupedUnderThreadId"),
+      );
+      if (state === "archived")
+        assert.isNotNull((yield* projections.getThread(grouped.id)).archivedAt);
+      else assert.isNull((yield* projections.getThread(grouped.id)).groupedUnderThreadId);
+      const actualParent = yield* projections.getThread(current);
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("legacy-placement:actual-parent-lost"),
+            type: "thread.deleted",
+            threadId: current,
+            occurredAt: now,
+            payload: { ...actualParent, deletedAt: now },
+          },
+        ],
+      });
+      yield* orchestrator.recoverDelegatedTasks;
+      assert.isNull((yield* projections.getThread(moved.id)).groupedUnderThreadId);
+      assert.isTrue((yield* maintenance.rebuild).valid);
+      assert.isNull((yield* projections.getThreadShell(moved.id))?.groupedUnderThreadId);
+      assert.isFalse(
+        Object.hasOwn((yield* projections.getThreadShell(independent.id))!, "groupedUnderThreadId"),
+      );
+      assert.equal((yield* projections.getThread(moved.id)).creatorThreadId, former);
+    }).pipe(Effect.provide(testLayer)),
+);
+
 it.effect("does not infer historical creators and rejects invalid attribution or placement", () =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -265,7 +492,118 @@ it.effect("does not infer historical creators and rejects invalid attribution or
       })
       .pipe(Effect.flip);
     assert.equal(childPlacement._tag, "OrchestratorDispatchError");
+    for (const [name, source, relationship, independent, allowed] of [
+      ["owned-app", "mcp", "subagent", false, false],
+      ["released-app", "mcp", "subagent", true, true],
+      ["native", "provider", "subagent", false, false],
+      ["released-native", "provider", "subagent", true, false],
+      ["fork", "mcp", "fork", false, true],
+      ["promoted-fork", "provider", "fork", true, true],
+    ] as const) {
+      const id = ThreadId.make(`creator:eligibility:${name}`);
+      yield* projections.apply({
+        id: EventId.make(`creator:eligibility:${name}`),
+        type: "thread.created",
+        threadId: id,
+        occurredAt: now,
+        payload: {
+          ...thread,
+          id,
+          creationSource: source,
+          lineage: {
+            parentThreadId: historical,
+            relationshipToParent: relationship,
+            rootThreadId: historical,
+            independent,
+          },
+        },
+      });
+      const result = yield* orchestrator
+        .dispatch({
+          type: "thread.metadata.update",
+          commandId: CommandId.make(`creator:move:${name}`),
+          threadId: id,
+          groupedUnderThreadId: historical,
+        })
+        .pipe(Effect.exit);
+      assert.equal(result._tag, allowed ? "Success" : "Failure", name);
+      assert.deepEqual((yield* projections.getThread(id)).lineage, {
+        parentThreadId: historical,
+        relationshipToParent: relationship,
+        rootThreadId: historical,
+        independent,
+      });
+    }
+    const ordinary = ThreadId.make("creator:destination-check");
+    yield* orchestrator.dispatch(create(ordinary, project));
+    yield* orchestrator.dispatch({
+      type: "thread.metadata.update",
+      commandId: CommandId.make("creator:owned-destination"),
+      threadId: ordinary,
+      groupedUnderThreadId: child,
+    });
+    for (const [id, parent] of [
+      [historical, child],
+      [ordinary, ThreadId.make("creator:eligibility:native")],
+    ] as const) {
+      const rejected = yield* orchestrator
+        .dispatch({
+          type: "thread.metadata.update",
+          commandId: CommandId.make(`creator:invalid-destination:${id}`),
+          threadId: id,
+          groupedUnderThreadId: parent,
+        })
+        .pipe(Effect.flip);
+      assert.equal(rejected._tag, "OrchestratorDispatchError");
+    }
   }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each([false, true])(
+  "serializes moving a subtree against archiving its former parent (archive first: %s)",
+  (archiveFirst) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const project = ProjectId.make("organization:concurrent-project");
+      const origin = ThreadId.make("organization:concurrent-origin");
+      const destination = ThreadId.make("organization:concurrent-destination");
+      const item = ThreadId.make("organization:concurrent-item");
+      const stage = ThreadId.make("organization:concurrent-stage");
+      for (const id of [origin, destination]) yield* orchestrator.dispatch(create(id, project));
+      yield* createOrdinary(item, origin, project);
+      yield* createOrdinary(stage, item, project);
+      const move = orchestrator
+        .dispatch({
+          type: "thread.metadata.update",
+          commandId: CommandId.make("organization:concurrent-move"),
+          threadId: item,
+          groupedUnderThreadId: destination,
+        })
+        .pipe(Effect.exit);
+      const archive = orchestrator
+        .dispatch({
+          type: "thread.archive",
+          commandId: CommandId.make("organization:concurrent-archive"),
+          threadId: origin,
+        })
+        .pipe(Effect.exit);
+      const results = yield* Effect.all(archiveFirst ? [archive, move] : [move, archive], {
+        concurrency: "unbounded",
+      });
+      assert.equal(results[archiveFirst ? 1 : 0]?._tag, "Success");
+      const root = yield* store.getThread(origin);
+      assert.equal(
+        results[archiveFirst ? 0 : 1]?._tag,
+        root.archivedAt === null ? "Failure" : "Success",
+      );
+      const moved = yield* store.getThread(item);
+      assert.equal(moved.groupedUnderThreadId, destination);
+      assert.equal(moved.creatorThreadId, origin);
+      assert.isNull(moved.archivedAt);
+      assert.equal((yield* store.getThread(stage)).groupedUnderThreadId, item);
+      assert.deepEqual(new Set(yield* store.getArchiveFamilyThreadIds(origin)), new Set([origin]));
+    }).pipe(Effect.provide(testLayer)),
 );
 
 it.effect.each(["thread.delete"] as const)(

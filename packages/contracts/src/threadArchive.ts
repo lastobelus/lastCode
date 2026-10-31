@@ -32,28 +32,42 @@ interface FamilyThread {
   readonly createdBy?: string | undefined;
   readonly creatorThreadId?: ThreadId | undefined;
   readonly creatorGrouping?: string | undefined;
+  readonly groupedUnderThreadId?: ThreadId | null | undefined;
   readonly forkedFrom?: unknown | null;
 }
 
-/** Creator grouping needs the creator row to enforce the sidebar's project boundary. */
-export function getArchiveFamilyParentThreadId(
-  thread: FamilyThread,
-  creator?: Pick<FamilyThread, "id" | "projectId">,
-): ThreadId | null {
-  if (thread.lineage.independent === true) return null;
-  if (thread.lineage.relationshipToParent === "subagent") return thread.lineage.parentThreadId;
+/** Active delegated lineage is execution ownership, even after its run finishes. */
+export function isOwnedSubagentThread(thread: Pick<FamilyThread, "lineage">): boolean {
+  return thread.lineage.relationshipToParent === "subagent" && thread.lineage.independent !== true;
+}
+
+/** Deployed creator groups remain readable until explicit placement (including null) is written. */
+export function getInteractiveThreadParentThreadId(thread: FamilyThread): ThreadId | null {
   if (
-    thread.deletedAt == null &&
-    thread.createdBy === "agent" &&
+    thread.deletedAt != null ||
+    isOwnedSubagentThread(thread) ||
+    (thread.creationSource === "provider" && thread.lineage.relationshipToParent === "subagent")
+  )
+    return null;
+  if (thread.groupedUnderThreadId !== undefined) return thread.groupedUnderThreadId;
+  return thread.createdBy === "agent" &&
     thread.creatorGrouping === "grouped" &&
     thread.lineage.parentThreadId === null &&
     thread.lineage.relationshipToParent === null &&
     thread.forkedFrom == null &&
-    creator?.id === thread.creatorThreadId &&
-    creator?.projectId === thread.projectId
-  )
-    return thread.creatorThreadId ?? null;
-  return null;
+    thread.lineage.independent !== true
+    ? (thread.creatorThreadId ?? null)
+    : null;
+}
+
+/** Interactive placement needs the parent row to enforce the project boundary. */
+export function getArchiveFamilyParentThreadId(
+  thread: FamilyThread,
+  creator?: Pick<FamilyThread, "id" | "projectId">,
+): ThreadId | null {
+  if (isOwnedSubagentThread(thread)) return thread.lineage.parentThreadId;
+  const parentId = getInteractiveThreadParentThreadId(thread);
+  return creator?.id === parentId && creator.projectId === thread.projectId ? parentId : null;
 }
 
 /** Forks and explicitly independent branches retain provenance without archive membership. */
@@ -63,10 +77,7 @@ export function getOwnedThreadFamily<T extends FamilyThread>(
 ) {
   const byId = new Map(threads.map((thread) => [thread.id, thread]));
   const parentOf = (thread: T) =>
-    getArchiveFamilyParentThreadId(
-      thread,
-      thread.creatorThreadId === undefined ? undefined : byId.get(thread.creatorThreadId),
-    );
+    getArchiveFamilyParentThreadId(thread, byId.get(getInteractiveThreadParentThreadId(thread)!));
   const byParent = new Map<ThreadId, T[]>();
   for (const thread of threads) {
     const parent = parentOf(thread);

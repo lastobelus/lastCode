@@ -263,6 +263,7 @@ export const OrchestratorMcpTaskCancelResult = Schema.Struct({
 export type OrchestratorMcpTaskCancelResult = typeof OrchestratorMcpTaskCancelResult.Type;
 
 export const OrchestratorMcpCreateThreadRequest = Schema.Struct({
+  groupedUnderThreadId: OrchestrationV2AppThread.fields.groupedUnderThreadId,
   prompt: Schema.optional(OrchestratorMcpPrompt),
   title: Schema.optional(OrchestratorMcpTitle),
   target: Schema.optional(OrchestratorMcpTarget),
@@ -299,6 +300,7 @@ export const OrchestratorMcpCreatedThread = Schema.Struct({
   creationSource: OrchestrationV2CreationSource,
   creatorThreadId: Schema.optional(ThreadId),
   creatorGrouping: OrchestrationV2AppThread.fields.creatorGrouping,
+  groupedUnderThreadId: OrchestrationV2AppThread.fields.groupedUnderThreadId,
   providerInstanceId: ProviderInstanceId,
   model: Schema.String,
 });
@@ -337,6 +339,8 @@ export const OrchestratorMcpThreadListInput = Schema.Struct({
   environmentId: OrchestratorMcpEnvironmentTarget,
   projectId: OrchestratorMcpProjectTarget,
   allProjects: Schema.optional(Schema.Boolean),
+  underThreadId: Schema.optional(ThreadId),
+  archived: Schema.optional(Schema.Boolean),
   statuses: Schema.optional(
     Schema.Array(OrchestratorMcpThreadStatus).check(Schema.isMaxLength(10)),
   ),
@@ -368,6 +372,7 @@ export const OrchestratorMcpThreadListItem = Schema.Struct({
   creationSource: OrchestrationV2CreationSource,
   creatorThreadId: Schema.optional(ThreadId),
   creatorGrouping: OrchestrationV2AppThread.fields.creatorGrouping,
+  groupedUnderThreadId: OrchestrationV2AppThread.fields.groupedUnderThreadId,
   status: OrchestratorMcpThreadStatus,
   latestRunId: Schema.NullOr(RunId),
   providerInstanceId: ProviderInstanceId,
@@ -382,6 +387,8 @@ export const OrchestratorMcpThreadListItem = Schema.Struct({
   snoozedUntil: Schema.NullOr(IsoDateTime),
   parentThreadId: Schema.NullOr(ThreadId),
   relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent"])),
+  independent: Schema.optional(Schema.Boolean),
+  archived: Schema.optional(Schema.Boolean),
   itemCount: NonNegativeInt,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -447,6 +454,7 @@ export const OrchestratorMcpThreadDetail = Schema.Struct({
   creationSource: OrchestrationV2CreationSource,
   creatorThreadId: Schema.optional(ThreadId),
   creatorGrouping: OrchestrationV2AppThread.fields.creatorGrouping,
+  groupedUnderThreadId: OrchestrationV2AppThread.fields.groupedUnderThreadId,
   status: OrchestratorMcpThreadStatus,
   latestRunId: Schema.NullOr(RunId),
   activeRunId: Schema.NullOr(RunId),
@@ -466,6 +474,7 @@ export const OrchestratorMcpThreadDetail = Schema.Struct({
   worktreePath: Schema.NullOr(Schema.String),
   parentThreadId: Schema.NullOr(ThreadId),
   relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent"])),
+  independent: Schema.optional(Schema.Boolean),
   runCount: NonNegativeInt,
   itemCount: NonNegativeInt,
   pendingRequestCount: NonNegativeInt,
