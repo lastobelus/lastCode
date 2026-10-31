@@ -803,6 +803,22 @@ export function createThreadOutboxDelivery(): {
     return true;
   };
 
+  const restoreUnavailableReference = (
+    queuedMessage: QueuedThreadMessage,
+  ): Promise<boolean> | null => {
+    const unavailable = unavailableThreadReference(queuedMessage);
+    if (!unavailable) return null;
+    const owner =
+      appAtomRegistry
+        .get(workspaceConnections.environmentsAtom)
+        .find((environment) => environment.environmentId === unavailable.record.environmentId)
+        ?.environmentLabel ?? "its machine";
+    return restoreQueuedMessage(
+      queuedMessage,
+      threadReferenceRecoveryMessage(unavailable.reason, owner),
+    );
+  };
+
   const sendQueuedMessage = async (
     queuedMessage: QueuedThreadMessage,
     thread: EnvironmentThreadShell,
@@ -906,6 +922,8 @@ export function createThreadOutboxDelivery(): {
       currentConfig.providers,
     );
     if (!hasAccess()) return true;
+    const unavailableReference = restoreUnavailableReference(persistedMessage);
+    if (unavailableReference) return unavailableReference;
     const deliveryResult = await runDeliveryCommand(threadEnvironment.startTurn, {
       environmentId: queuedMessage.environmentId,
       input: {
@@ -1068,6 +1086,8 @@ export function createThreadOutboxDelivery(): {
         startFromOrigin: false,
       };
     }
+    const unavailableReference = restoreUnavailableReference(persistedMessage);
+    if (unavailableReference) return unavailableReference;
     const deliveryResult = await runDeliveryCommand(threadEnvironment.startTurn, {
       environmentId: queuedMessage.environmentId,
       input: buildProjectThreadStartTurnInput({
@@ -1377,20 +1397,8 @@ export function createThreadOutboxDelivery(): {
           return true;
         }
         if (deliveryAction === "send") {
-          const liveUnavailableReference = unavailableThreadReference(nextQueuedMessage);
-          if (liveUnavailableReference) {
-            const owner =
-              appAtomRegistry
-                .get(workspaceConnections.environmentsAtom)
-                .find(
-                  (environment) =>
-                    environment.environmentId === liveUnavailableReference.record.environmentId,
-                )?.environmentLabel ?? "its machine";
-            return restoreQueuedMessage(
-              nextQueuedMessage,
-              threadReferenceRecoveryMessage(liveUnavailableReference.reason, owner),
-            );
-          }
+          const unavailableReference = restoreUnavailableReference(nextQueuedMessage);
+          if (unavailableReference) return unavailableReference;
           const liveThread = findThread(
             appAtomRegistry.get(environmentThreadShells.threadShellsAtom),
             nextQueuedMessage,
