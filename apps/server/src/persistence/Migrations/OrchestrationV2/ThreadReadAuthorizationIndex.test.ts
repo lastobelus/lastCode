@@ -18,6 +18,8 @@ it.effect("upgrades existing databases with indexed thread read authorization lo
     yield* sql`INSERT INTO orchestration_v2_projection_runtime_requests
       (runtime_request_id, thread_id, node_id, kind, status, created_at, payload_json)
       VALUES ('corrupt-request', 'corrupt-thread', 'node', 'user_input', 'resolved', 'now', '{broken')`;
+    // Search parses message JSON; isolate this corruption fixture from its insert trigger.
+    yield* sql`DROP TRIGGER IF EXISTS orchestration_v2_message_search_insert`;
     yield* sql`INSERT INTO orchestration_v2_projection_messages
       (message_id, thread_id, role, streaming, created_at, updated_at, payload_json)
       VALUES ('corrupt-message', 'corrupt-thread', 'user', 1, 'now', 'now', '{broken')`;
