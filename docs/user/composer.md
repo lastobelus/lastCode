@@ -20,25 +20,29 @@ the command palette, or press **Ctrl+.**, which you can change in
 **Settings → Keyboard shortcuts**. On mobile, open **Common Prompts** from the
 plus menu. The prompt goes in at the cursor and waits for you to edit or send it.
 
-Open the picker immediately after a letter to search with the word at the cursor.
-Choosing a prompt replaces that word; cancelling leaves it unchanged. Hold **Cmd**
-on Mac, or **Ctrl** elsewhere, to reveal shortcuts for the first five results.
-Press **Cmd+1–5** or **Ctrl+1–5** to insert one. In the editor, the same shortcuts
-select a prompt without saving or closing it.
+If the cursor is right after a letter, the search starts with the word you were
+typing. Choosing a prompt replaces that word; cancelling leaves your draft as it
+was. After a space, punctuation, or a digit, the search starts empty.
+
+On web and desktop, hold **Cmd** on Mac, or **Ctrl** elsewhere, to number the
+first five results, then press **1** to **5** to insert one. Nothing is sent
+until you send it.
 
 Your environment builds the list from your conversations once a day, using the
 model configured for thread titles, so you don't need to maintain it. Close
 rewordings of one instruction merge into a single entry, while prompts that
-differ in a detail stay separate. **Find new prompts** runs discovery now. The
-miner keeps your shorthand instead of expanding it. The picker remembers what
-you typed before choosing a prompt and ranks that prompt
-higher when you type it again.
+differ in a detail stay separate. **Find new prompts** runs discovery now.
+Discovery keeps your shorthand instead of expanding it. The picker remembers
+what you typed before choosing a prompt and ranks that prompt higher when you
+type it again.
 
 Choose **Edit prompts** or press **Ctrl+,** to open the editor. Search the list,
-select a prompt, and save changes to its title or text. Use **New prompt** to add
-your own. Saved edits keep their learned searches and are left unchanged by
-daily discovery. **Search prompts** returns to the picker with the same selection.
-On mobile, switch between **Search** and **Edit** at the bottom of the sheet.
+select a prompt, and save changes to its title or text. **Cmd+1** to **5** or
+**Ctrl+1** to **5** selects a result here instead of inserting it. Use **New
+prompt** to add your own. Saved edits keep their learned searches and are left
+unchanged by daily discovery. **Search prompts** returns to the picker, keeping
+your selection and any unsaved edits. On mobile, switch between **Search** and
+**Edit** at the bottom of the sheet.
 
 Dismiss a prompt you don't want and discovery
 won't add it back; choose **Undo** right away to restore it with its history.
