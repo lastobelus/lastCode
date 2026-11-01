@@ -133,6 +133,7 @@ const harness = (
     settings?: SettingsValue;
     adoptOnCaptured?: boolean;
     pauseCaptured?: { entered: Deferred.Deferred<void>; release: Deferred.Deferred<void> };
+    pauseCaptureIntent?: { entered: Deferred.Deferred<void>; release: Deferred.Deferred<void> };
     pauseRestored?: { entered: Deferred.Deferred<void>; release: Deferred.Deferred<void> };
     unreadableCatalog?: boolean;
     failDiscardPrepareAt?: number;
@@ -168,6 +169,7 @@ const harness = (
     };
     let failedPublication = false;
     let pausedCapture = false;
+    let pausedCaptureIntent = false;
     let discardPreparations = 0;
     let occupiedRestore = false;
     let pausedRestore = false;
@@ -232,6 +234,16 @@ const harness = (
             }),
           ),
           Effect.tap(() => {
+            if (
+              options.pauseCaptureIntent !== undefined &&
+              !pausedCaptureIntent &&
+              next.operation?.kind === "capture"
+            ) {
+              pausedCaptureIntent = true;
+              return Deferred.succeed(options.pauseCaptureIntent.entered, undefined).pipe(
+                Effect.andThen(Deferred.await(options.pauseCaptureIntent.release)),
+              );
+            }
             if (
               options.pauseRestored !== undefined &&
               !pausedRestore &&
@@ -1682,6 +1694,225 @@ it.live.each(["manual", "activity"] as const)(
         expect(saved.blockedReason).toBeNull();
       }),
     ),
+);
+
+it.live.each([
+  "empty",
+  "legacy-empty",
+  "empty-retry-allowed",
+  "missing",
+  "nonempty",
+  "file",
+  "symlink",
+  "dangling-symlink",
+  "permissive",
+  "known-receipt",
+  "changed-source",
+  "changed-git",
+  "changed-owner",
+] as const)("reconciles only verified empty journal-less capture failures: %s", (kind) =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, { cleanupThreads: true, settings: automaticSettings });
+      untouchedOwners(h.threads);
+      yield* h.service.previewSuspend({ threadId: firstId });
+      const initial = (yield* h.registry.list)[0]!;
+      const id = "536a52d2-212a-4d5a-9ae2-121a331448e5";
+      const directory = NodePath.join(h.registry.root, "snapshots", id);
+      yield* Effect.promise(async () => {
+        await NodeFSP.mkdir(NodePath.dirname(directory), { recursive: true, mode: 0o700 });
+        if (kind === "symlink" || kind === "dangling-symlink") {
+          const elsewhere = NodePath.join(f.root, "redirected");
+          if (kind === "symlink") await NodeFSP.mkdir(elsewhere, { mode: 0o700 });
+          await NodeFSP.symlink(elsewhere, directory);
+        } else if (kind === "file") {
+          await NodeFSP.writeFile(directory, "unrelated file", { mode: 0o600 });
+        } else if (kind !== "missing") {
+          await NodeFSP.mkdir(directory, { mode: 0o700 });
+          if (kind === "nonempty")
+            await NodeFSP.writeFile(NodePath.join(directory, "unrelated-note"), "retain me");
+          if (kind === "permissive") await NodeFSP.chmod(directory, 0o770);
+        }
+        if (kind === "changed-source") {
+          await NodeFSP.rename(f.workspace, `${f.workspace}-original`);
+          await NodeFSP.mkdir(f.workspace);
+          await NodeFSP.copyFile(
+            NodePath.join(`${f.workspace}-original`, ".git"),
+            NodePath.join(f.workspace, ".git"),
+          );
+        }
+        if (kind === "changed-git") {
+          const other = NodePath.join(f.root, "other-workspace");
+          await git(f.repository, "worktree", "add", "-b", "other", other, "HEAD");
+          await NodeFSP.copyFile(NodePath.join(other, ".git"), NodePath.join(f.workspace, ".git"));
+        }
+      });
+      const summary = {
+        ...initial.summary,
+        state: "capturing" as const,
+        snapshotId: id,
+        generation: initial.summary.generation + 1,
+      };
+      const reason = "Workspace kept: the snapshot identity already exists.";
+      const interrupted = {
+        ...initial,
+        summary,
+        owners: initial.owners.map((owner) => ({ ...owner, generation: summary.generation })),
+        operation: {
+          id,
+          kind: "capture" as const,
+          snapshotIds: [id],
+          manual: true,
+          acceptedAt: DateTime.formatIso(at),
+        },
+        ...(kind === "known-receipt" ? { history: [id] } : {}),
+        ...(kind === "legacy-empty"
+          ? {}
+          : {
+              captureFailure: {
+                operationId: id,
+                reason,
+                ...(kind === "empty-retry-allowed" ? { retryOnce: true as const } : {}),
+              },
+            }),
+        blockedReason: reason,
+      };
+      yield* h.registry.put(interrupted, initial);
+      for (const [key, thread] of h.threads)
+        h.threads.set(key, {
+          ...thread,
+          worktreeSuspension: summary,
+          ...(kind === "changed-owner" && key === firstId ? { worktreePath: f.repository } : {}),
+        });
+      yield* h.service.sweep;
+      const recovered = (yield* h.registry.list)[0]!;
+      if (!["empty", "legacy-empty", "empty-retry-allowed", "missing"].includes(kind)) {
+        expect(recovered.summary.state).toBe("capturing");
+        expect(recovered.operation?.id).toBe(id);
+        expect(yield* Effect.promise(() => NodeFSP.lstat(directory))).toBeDefined();
+        const catalogPath = NodePath.join(h.registry.root, "authority.json");
+        const before = yield* Effect.promise(() => NodeFSP.readFile(catalogPath));
+        yield* h.service.sweep;
+        expect(yield* Effect.promise(() => NodeFSP.readFile(catalogPath))).toEqual(before);
+        return;
+      }
+      expect(recovered.summary.state).toBe("active");
+      expect(recovered.summary.snapshotId).toBeNull();
+      expect(recovered.operation).toBeUndefined();
+      expect(recovered.captureFailure?.operationId).toBe(id);
+      expect(recovered.captureFailure?.retryOnce).toBeUndefined();
+      expect(yield* h.registry.automaticProtection(f.workspace)).not.toBeNull();
+      yield* Effect.promise(async () => {
+        if (kind !== "missing") expect(await NodeFSP.readdir(directory)).toEqual([]);
+        expect(await NodeFSP.readFile(NodePath.join(f.workspace, "tracked"), "utf8")).toBe(
+          "working\n",
+        );
+        expect(await git(f.workspace, "show", ":tracked")).toBe("staged");
+      });
+      const catalogPath = NodePath.join(h.registry.root, "authority.json");
+      const before = yield* Effect.promise(() => NodeFSP.readFile(catalogPath));
+      yield* h.service.sweep;
+      yield* h.service.sweep;
+      expect(yield* Effect.promise(() => NodeFSP.readFile(catalogPath))).toEqual(before);
+      expect(
+        yield* h.acquisition.acquire({ path: f.workspace, purpose: "git", threadId: firstId }),
+      ).toMatchObject({ restored: false });
+      yield* Queue.takeAll(h.updates);
+      const saved = yield* h.suspend;
+      expect(saved.summary.state).toBe("suspended");
+      expect(saved.summary.snapshotId).not.toBe(id);
+      expect(saved.captureFailure).toBeUndefined();
+      if (kind !== "missing")
+        expect(yield* Effect.promise(() => NodeFSP.readdir(directory))).toEqual([]);
+    }),
+  ),
+);
+
+it.live("allows its own automatic eligibility cancellation to resume after policy admission", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const h = yield* harness(f, {
+        cleanupThreads: true,
+        settings: automaticSettings,
+        pauseCaptureIntent: { entered, release },
+      });
+      untouchedOwners(h.threads);
+      const sweep = yield* h.service.sweep.pipe(Effect.forkChild);
+      yield* Deferred.await(entered);
+      h.threads.set(firstId, { ...h.threads.get(firstId)!, workspaceUserAdopted: true });
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(sweep);
+      const cancelled = (yield* h.registry.list)[0]!;
+      expect(cancelled.summary.state).toBe("active");
+      expect(cancelled.operation).toBeUndefined();
+      expect(cancelled.captureFailure?.retryOnce).toBe(true);
+      expect(cancelled.blockedReason).not.toContain("Finish the current workspace operation");
+      expect(
+        yield* Effect.promise(() =>
+          h.store.inspectUnstartedCapture(cancelled.captureFailure!.operationId),
+        ),
+      ).toBe("missing");
+      h.threads.set(firstId, { ...h.threads.get(firstId)!, workspaceUserAdopted: false });
+      yield* h.service.sweep;
+      const saved = (yield* h.registry.list)[0]!;
+      expect(saved.summary.state).toBe("suspended");
+      expect(saved.captureFailure).toBeUndefined();
+      expect(saved.summary.snapshotId).not.toBe(cancelled.captureFailure!.operationId);
+    }),
+  ),
+);
+
+it.live("retains a queued capture until its failed job can settle an empty directory", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f);
+      const operation = yield* withWorkspaceLease(
+        f.workspace,
+        Effect.gen(function* () {
+          const preview = yield* h.service.previewSuspend({ threadId: firstId });
+          const accepted = yield* h.service.suspend({
+            threadId: firstId,
+            previewToken: preview.token,
+          });
+          const listed = yield* h.service.list({});
+          expect(listed.entries.some((entry) => entry.snapshotId === accepted.operationId)).toBe(
+            true,
+          );
+          const directory = NodePath.join(h.registry.root, "snapshots", accepted.operationId);
+          yield* Effect.promise(async () => {
+            await expect(NodeFSP.lstat(directory)).rejects.toMatchObject({ code: "ENOENT" });
+            await NodeFSP.mkdir(directory, { recursive: true, mode: 0o700 });
+          });
+          expect(
+            (yield* h.service.previewSuspend({ threadId: firstId }).pipe(Effect.flip)).reason,
+          ).toBe("busy");
+          expect((yield* h.registry.list)[0]!.operation?.id).toBe(accepted.operationId);
+          return accepted;
+        }),
+      );
+      const failed = yield* Stream.fromQueue(h.updates).pipe(
+        Stream.filter(
+          (record) =>
+            record.checkoutId === operation.checkoutId &&
+            record.captureFailure?.operationId === operation.operationId,
+        ),
+        Stream.take(1),
+        Stream.runHead,
+        Effect.map(Option.getOrThrow),
+      );
+      expect(failed.captureFailure?.reason).toContain("snapshot identity already exists");
+      expect(
+        yield* h.acquisition.acquire({ path: f.workspace, purpose: "git", threadId: firstId }),
+      ).toMatchObject({ restored: false });
+      const settled = (yield* h.registry.list)[0]!;
+      expect(settled.operation).toBeUndefined();
+      expect(settled.summary.state).toBe("active");
+      expect(settled.captureFailure?.operationId).toBe(operation.operationId);
+      expect(settled.captureFailure?.retryOnce).toBeUndefined();
+    }),
+  ),
 );
 
 it.live.each([false, true])(

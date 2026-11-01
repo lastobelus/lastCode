@@ -560,15 +560,8 @@ const noLinkedAncestors = async (name: string) => {
   }
 };
 
-const privateDirectory = async (name: string) => {
-  const parent = NodePath.dirname(name);
-  await noLinkedAncestors(parent);
-  try {
-    await NodeFSP.mkdir(name, { mode: 0o700 });
-    await syncDirectory(parent);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-  }
+const verifyPrivateDirectory = async (name: string) => {
+  await noLinkedAncestors(NodePath.dirname(name));
   const stat = await NodeFSP.lstat(name);
   if (
     !stat.isDirectory() ||
@@ -578,6 +571,19 @@ const privateDirectory = async (name: string) => {
   )
     refuse("the private store is not owned and private");
   await metadataCheck(name, [], false);
+  return stat;
+};
+
+const privateDirectory = async (name: string) => {
+  const parent = NodePath.dirname(name);
+  await noLinkedAncestors(parent);
+  try {
+    await NodeFSP.mkdir(name, { mode: 0o700 });
+    await syncDirectory(parent);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+  await verifyPrivateDirectory(name);
 };
 
 const atomicJson = async (name: string, value: unknown) => {
@@ -1321,9 +1327,23 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
   const snapshotPath = (id: string) => NodePath.join(snapshotDirectory(id), "manifest.json");
   const journalPath = (id: string) => NodePath.join(snapshotDirectory(id), "journal.json");
   const objectsPath = (id: string) => NodePath.join(snapshotDirectory(id), "objects");
+  const inspectUnstartedCapture = async (id: string) => {
+    const directory = snapshotDirectory(id);
+    await noLinkedAncestors(NodePath.dirname(storeRoot));
+    if (!(await exists(storeRoot))) return "missing" as const;
+    await verifyPrivateDirectory(storeRoot);
+    if (!(await exists(directory))) return "missing" as const;
+    const before = await verifyPrivateDirectory(directory);
+    if ((await NodeFSP.readdir(directory)).length !== 0)
+      refuse("the incomplete preservation directory is not empty");
+    const after = await verifyPrivateDirectory(directory);
+    if (!sameIdentity(identity(before), identity(after)))
+      refuse("the incomplete preservation directory changed");
+    return "empty" as const;
+  };
   const readJournal = async (id: string): Promise<WorktreeSuspensionJournal> => {
-    await initialize();
-    await privateDirectory(snapshotDirectory(id));
+    await verifyPrivateDirectory(storeRoot);
+    await verifyPrivateDirectory(snapshotDirectory(id));
     const file = await NodeFSP.open(
       journalPath(id),
       NodeFS.constants.O_RDONLY | NodeFS.constants.O_NOFOLLOW,
@@ -3255,6 +3275,7 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     createFresh,
     read,
     readJournal,
+    inspectUnstartedCapture,
     verify,
     trialRestore,
     isolate,

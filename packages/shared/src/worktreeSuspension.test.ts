@@ -81,6 +81,27 @@ const fixture = async () => {
   };
 };
 
+it.each(["read", "readJournal"] as const)(
+  "keeps a missing snapshot read-only through %s before capture",
+  async (method) => {
+    await using test = await fixture();
+    const root = NodePath.join(test.root, "saved");
+    await expect(test.store[method]("pending")).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(NodeFSP.lstat(root)).rejects.toMatchObject({ code: "ENOENT" });
+    await NodeFSP.mkdir(root, { mode: 0o700 });
+    await expect(test.store[method]("pending")).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await NodeFSP.readdir(root)).toEqual([]);
+    const snapshot = await test.store.capture({
+      sourcePath: test.workspace,
+      snapshotId: "pending",
+      operationId: "pending-operation",
+      ownerBinding: "fixture-owner",
+    });
+    expect(snapshot.id).toBe("pending");
+    expect((await test.store.readJournal(snapshot.id)).phase).toBe("verifying");
+  },
+);
+
 it.runIf(HostProcess.Platform.defaultValue() === "darwin")(
   "preserves hidden flags on actual Finder-style workspace entries",
   async () => {

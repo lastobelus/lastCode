@@ -179,7 +179,11 @@ export const make = Effect.gen(function* () {
   >();
   const liveOperations = new Map<
     string,
-    { readonly completed: Deferred.Deferred<void>; started: boolean; cancelled: boolean }
+    {
+      readonly completed: Deferred.Deferred<void>;
+      started: boolean;
+      cancelled: boolean;
+    }
   >();
   const native = <A>(run: () => Promise<A>) => Effect.tryPromise({ try: run, catch: safeFailure });
   const now = DateTime.now.pipe(Effect.map(DateTime.formatIso));
@@ -829,17 +833,22 @@ export const make = Effect.gen(function* () {
     const record = yield* requireRecord(checkoutId);
     const message =
       reason?.message ??
+      record.captureFailure?.reason ??
+      record.blockedReason ??
       "The operation stopped. Recovery data is retained; retry recovery before starting workspace commands.";
-    yield* registry.put(
-      {
-        ...record,
-        blockedReason: message,
-        ...(record.operation?.kind === "capture"
-          ? { captureFailure: { operationId: record.operation.id, reason: message } }
-          : {}),
-      },
-      record,
-    );
+    const next = {
+      ...record,
+      blockedReason: message,
+      ...(record.operation?.kind === "capture"
+        ? {
+            captureFailure:
+              reason === undefined && record.captureFailure?.operationId === record.operation.id
+                ? record.captureFailure
+                : { operationId: record.operation.id, reason: message },
+          }
+        : {}),
+    };
+    if (!sameAuthority(record, next)) yield* registry.put(next, record);
   });
   const assertFresh = Effect.fn("WorktreeSuspension.assertFresh")(function* (
     expected: CheckoutAuthority,
@@ -1490,6 +1499,7 @@ export const make = Effect.gen(function* () {
   });
   const reconcile = Effect.fn("WorktreeSuspension.reconcile")(function* (
     initial: CheckoutAuthority,
+    stoppedCaptureId?: string,
   ) {
     let record =
       initial.pendingProjection === undefined
@@ -1510,17 +1520,19 @@ export const make = Effect.gen(function* () {
     if (record.operation?.kind !== "capture") return yield* refreshActiveOwners(record);
     // Legacy intents get one attempt with the current capture implementation.
     // Keep cleanup protection even while that attempt is waiting for the sweep.
-    const settledCapture = (current: CheckoutAuthority): CheckoutAuthority => {
+    const settledCapture = (current: CheckoutAuthority, legacyRetry = true): CheckoutAuthority => {
       const reason =
         current.blockedReason ??
         "Saving didn't finish, so the worktree was kept as it was. You can keep using it as usual, or try suspending it again.";
       return {
         ...clearOperation(current),
-        captureFailure: current.captureFailure ?? {
-          operationId: current.operation!.id,
-          reason,
-          retryOnce: true as const,
-        },
+        captureFailure: legacyRetry
+          ? (current.captureFailure ?? {
+              operationId: current.operation!.id,
+              reason,
+              retryOnce: true as const,
+            })
+          : { operationId: current.operation!.id, reason },
         blockedReason: reason,
       };
     };
@@ -1531,13 +1543,23 @@ export const make = Effect.gen(function* () {
       path.join(registry.root, "snapshots", id, "journal.json"),
     );
     if (!journalExists) {
-      if (yield* fs.exists(path.join(registry.root, "snapshots", id)))
+      const job = liveOperations.get(record.checkoutId);
+      if (
+        job !== undefined &&
+        !(job.cancelled && !job.started) &&
+        stoppedCaptureId !== record.operation.id
+      )
+        return yield* failure("busy", "Finish the current workspace operation first.");
+      yield* assertFresh(record);
+      if (record.history.includes(id) || record.snapshots?.some((saved) => saved.snapshotId === id))
         return yield* failure(
           "protected",
           "The incomplete preservation directory has no verified journal. Its recovery authority has been retained.",
         );
+      const directory = yield* native(() => store.inspectUnstartedCapture(id));
       yield* originalStillOwned(record);
-      const active = yield* publish(record, settledCapture(record), {
+      yield* assertFresh(record);
+      const active = yield* publish(record, settledCapture(record, directory === "missing"), {
         ...record.summary,
         state: "active",
         snapshotId: null,
@@ -1630,7 +1652,7 @@ export const make = Effect.gen(function* () {
             return yield* failure("changed", "The durable save intent is missing.");
           yield* guard(record);
           if (automatic && !(yield* automaticallyEligible(record))) {
-            yield* reconcile(record);
+            yield* reconcile(record, record.operation.id);
             return;
           }
           return yield* Effect.acquireUseRelease(
@@ -1704,7 +1726,7 @@ export const make = Effect.gen(function* () {
           safeFailure(Option.getOrUndefined(Cause.findErrorOption(cause))),
         );
         if (current.operation?.kind === "capture")
-          yield* reconcile(yield* requireRecord(record.checkoutId));
+          yield* reconcile(yield* requireRecord(record.checkoutId), record.operation!.id);
       },
       (effect) => effect.pipe(Effect.ignore),
     );
