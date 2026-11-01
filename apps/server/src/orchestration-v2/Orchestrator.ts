@@ -17446,7 +17446,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         return yield* withThreadDispatchLocks(threadIds, dispatchAccepted());
       }),
     );
-    if (command.type === "message.dispatch" || command.type === "delegated_task.request")
+    if (
+      command.type === "message.dispatch" ||
+      command.type === "delegated_task.request" ||
+      command.type === "remote_delegation.activate"
+    )
       return admitNewExecution(command, "thread-turn", dispatch);
     const operation = command.type.startsWith("thread.worktree-cleanup.")
       ? threadDispatch.withPersistenceLock(dispatch)

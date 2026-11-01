@@ -36,6 +36,7 @@ import * as DateTime from "effect/DateTime";
 import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts";
 import { makePausedEnvironment } from "./EnvironmentAutomation.testkit.ts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -3443,6 +3444,9 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
     "original-discard",
     "later-discard",
     "remote-discard",
+    "original-shutdown",
+    "later-shutdown",
+    "remote-shutdown",
     "original-provider-loss",
     "later-provider-loss",
     "original-held",
@@ -3823,7 +3827,9 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
         yield* Deferred.await(written);
         yield* sink.write({
           events: [
-            ...(round.endsWith("discard") || round.endsWith("stop-before")
+            ...(round.endsWith("discard") ||
+            round.endsWith("stop-before") ||
+            round.endsWith("shutdown")
               ? [
                   {
                     id: EventId.make(`action-wait-message-${round}`),
@@ -3886,6 +3892,7 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
             )!.result,
           );
         }
+        if (round.endsWith("shutdown")) return;
         if (round.endsWith("discard")) {
           const afterSequence = yield* sink.latestSequence();
           yield* Effect.scoped(
@@ -4184,7 +4191,43 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
           ),
           1,
         );
-      }).pipe(Effect.provide(ActionResume.layer.pipe(Layer.provide(dependencies))));
+      }).pipe(Effect.provide(ActionResume.layer.pipe(Layer.provide(dependencies))), Effect.scoped);
+      if (round.endsWith("shutdown")) {
+        const retained = Option.getOrThrow(yield* store.get(childThreadId, actionRunId)).state;
+        assert.equal(retained.outcome, "cancelled_by_shutdown");
+        assert.equal(retained.delivery, "disposed");
+        yield* orchestrator.recoverDelegatedTasks;
+        if (remote) {
+          yield* orchestrator.dispatch({
+            type: "remote_delegation.settle",
+            commandId: CommandId.make(`shutdown-settle-${round}`),
+            threadId: childThreadId,
+            delegation: selector,
+            linkSessionId: "test-peer",
+          });
+          assert.equal(
+            (yield* orchestrator.getThreadProjection(childThreadId)).thread.remoteDelegations?.[0]
+              ?.finalRun?.status,
+            "interrupted",
+          );
+        } else {
+          const parent = yield* orchestrator.getThreadProjection(parentThreadId);
+          const task = parent.subagents.find((row) => row.id === taskId)!;
+          assert.equal(task.status, "interrupted");
+          assert.equal(task.result, "Child task ended with status interrupted.");
+          if (round.startsWith("later"))
+            assert.equal(parent.subagents.find((row) => row.id === first.id)?.status, "completed");
+        }
+        const ended = yield* orchestrator.getThreadProjection(childThreadId);
+        const sourceRun = ended.runs.find((run) => run.id === source.id)!;
+        assert.equal(sourceRun.status, "interrupted");
+        assert.equal(sourceRun.actionObligations?.[0]?.state, "disposed");
+        assert.isFalse(
+          ended.runs.some(
+            (run) => run.userMessageId === MessageId.make(`action-resume:${actionRunId}:follow-up`),
+          ),
+        );
+      }
     }),
   );
 

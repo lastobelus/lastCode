@@ -696,7 +696,12 @@ const make = Effect.gen(function* () {
       input.outputTail ??
       (capture === undefined ? undefined : finishActionOutputCapture(capture)) ??
       startups.get(current.runId)?.output;
-    yield* persistState(next, outputTail, input.publishShell);
+    yield* persistState(
+      next,
+      outputTail,
+      input.publishShell,
+      input.outcome === "cancelled_by_shutdown" ? "interrupted" : undefined,
+    );
     const startup = startups.get(current.runId);
     if (startup) yield* Deferred.succeed(startup.stopped, undefined);
     if (next.delivery === "disposed") {
