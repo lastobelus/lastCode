@@ -15,6 +15,7 @@ import type {
   ProviderInstanceId,
   ProviderThreadId,
   ProviderTurnId,
+  RunId,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
@@ -187,6 +188,15 @@ export function subagentResultForRun(
   readonly messageId: OrchestrationV2ConversationMessage["id"] | null;
   readonly turnItemId: OrchestrationV2TurnItem["id"] | null;
 } {
+  if (
+    run.status === "interrupted" &&
+    run.actionObligations?.some((row) => row.state === "disposed")
+  )
+    return {
+      text: `Child task ended with status ${run.status}.`,
+      messageId: null,
+      turnItemId: null,
+    };
   const turnItem =
     projection.turnItems
       .filter(
@@ -233,21 +243,24 @@ export function subagentResultForRun(
   };
 }
 
-export function delegatedTaskProgress(projection: {
-  readonly runs: OrchestrationV2ThreadProjection["runs"];
-  readonly messages: ReadonlyArray<
-    Pick<OrchestrationV2ConversationMessage, "runId" | "notification">
-  >;
-  readonly subagents: ReadonlyArray<
-    Pick<
-      OrchestrationV2ThreadProjection["subagents"][number],
-      "status" | "completionDelivery" | "ownershipReleased"
-    >
-  >;
-  readonly providerThreads: ReadonlyArray<
-    Pick<OrchestrationV2ThreadProjection["providerThreads"][number], "pendingBackgroundTasks">
-  >;
-}) {
+export function delegatedTaskProgress(
+  projection: {
+    readonly runs: OrchestrationV2ThreadProjection["runs"];
+    readonly messages: ReadonlyArray<
+      Pick<OrchestrationV2ConversationMessage, "runId" | "notification">
+    >;
+    readonly subagents: ReadonlyArray<
+      Pick<
+        OrchestrationV2ThreadProjection["subagents"][number],
+        "status" | "completionDelivery" | "ownershipReleased"
+      >
+    >;
+    readonly providerThreads: ReadonlyArray<
+      Pick<OrchestrationV2ThreadProjection["providerThreads"][number], "pendingBackgroundTasks">
+    >;
+  },
+  ownedRunIds?: ReadonlySet<RunId>,
+) {
   const terminal = (status: string) =>
     ["completed", "failed", "cancelled", "interrupted", "rolled_back"].includes(status);
   const monitorRuns = new Set(
@@ -258,8 +271,21 @@ export function delegatedTaskProgress(projection: {
   const workRuns = projection.runs.filter(
     (run) => !monitorRuns.has(run.id) && run.status !== "rolled_back",
   );
+  const actionContinuations = new Set(
+    workRuns.flatMap(
+      (run) =>
+        run.actionObligations?.flatMap((obligation) =>
+          obligation.state === "transferred" && obligation.continuationRunId !== undefined
+            ? [obligation.continuationRunId]
+            : [],
+        ) ?? [],
+    ),
+  );
   const active = workRuns.some(
-    (run) => !terminal(run.status) && !(run.status === "queued" && run.queueHeld === true),
+    (run) =>
+      (!terminal(run.status) &&
+        (run.status !== "queued" || run.queueHeld !== true || actionContinuations.has(run.id))) ||
+      run.actionObligations?.some((row) => row.state === "waiting") === true,
   );
   const children =
     projection.subagents.some(
@@ -274,7 +300,11 @@ export function delegatedTaskProgress(projection: {
     ) ||
     projection.providerThreads.some((thread) => (thread.pendingBackgroundTasks?.length ?? 0) > 0);
   const resultRun = workRuns
-    .filter((run) => terminal(run.status) && (run.startedAt !== null || run.ordinal === 1))
+    .filter(
+      (run) =>
+        terminal(run.status) &&
+        (run.startedAt !== null || run.ordinal === 1 || ownedRunIds?.has(run.id) === true),
+    )
     .toSorted((a, b) => (runRanAfter(a, b) ? -1 : runRanAfter(b, a) ? 1 : 0))[0];
   return {
     state:
@@ -285,6 +315,36 @@ export function delegatedTaskProgress(projection: {
           : ("result_available" as const),
     resultRun,
   };
+}
+
+export function delegatedTaskRoundProgress(
+  projection: Pick<
+    OrchestrationV2ThreadProjection,
+    "runs" | "messages" | "subagents" | "providerThreads"
+  >,
+  taskId: NodeId,
+) {
+  const runs = projection.runs.filter((run) => run.delegatedTaskId === taskId);
+  const runIds = new Set(runs.map((run) => run.id));
+  // An unstarted round cannot own a shared provider thread's background work.
+  const providerThreadIds = new Set(
+    runs.filter((run) => run.startedAt !== null).map((run) => run.providerThreadId),
+  );
+  return delegatedTaskProgress(
+    {
+      runs,
+      messages: projection.messages.filter(
+        (message) => message.runId !== null && runIds.has(message.runId),
+      ),
+      subagents: projection.subagents.filter(
+        (task) => task.runId !== null && runIds.has(task.runId),
+      ),
+      providerThreads: projection.providerThreads.filter((thread) =>
+        providerThreadIds.has(thread.id),
+      ),
+    },
+    runIds,
+  );
 }
 
 function writtenIds(

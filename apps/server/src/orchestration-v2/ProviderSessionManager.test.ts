@@ -2588,11 +2588,16 @@ it.effect(
 );
 
 it.effect.each([
-  { relationshipToParent: null, subagent: false },
-  { relationshipToParent: "subagent", subagent: true },
+  { relationshipToParent: null, remoteStage: null, subagent: false, independent: false },
+  { relationshipToParent: "subagent", remoteStage: null, subagent: true, independent: false },
+  { relationshipToParent: null, remoteStage: "prepared", subagent: true, independent: false },
+  { relationshipToParent: null, remoteStage: "active", subagent: true, independent: false },
+  { relationshipToParent: null, remoteStage: "disposed", subagent: true, independent: false },
+  { relationshipToParent: null, remoteStage: "settled", subagent: true, independent: false },
+  { relationshipToParent: null, remoteStage: "disposed", subagent: false, independent: true },
 ] as const)(
-  "ProviderSessionManagerV2 marks MCP credentials of delegated children ($relationshipToParent)",
-  ({ relationshipToParent, subagent }) =>
+  "ProviderSessionManagerV2 marks MCP credentials of delegated children ($relationshipToParent/$remoteStage)",
+  ({ relationshipToParent, remoteStage, subagent, independent }) =>
     Effect.gen(function* () {
       const state = yield* Ref.make(emptyState);
       const mcpConfigs = yield* Ref.make<
@@ -2619,8 +2624,22 @@ it.effect.each([
                 ...created.payload,
                 lineage:
                   relationshipToParent === null
-                    ? created.payload.lineage
+                    ? { ...created.payload.lineage, independent }
                     : { parentThreadId, relationshipToParent, rootThreadId: parentThreadId },
+                ...(remoteStage === null
+                  ? {}
+                  : {
+                      remoteDelegations: [
+                        {
+                          parentEnvironmentId: EnvironmentId.make("remote-parent"),
+                          parentThreadId,
+                          sourceTaskId: NodeId.make("remote-task"),
+                          delegationId: "remote-delegation",
+                          linkSessionId: "remote-link",
+                          stage: remoteStage,
+                        },
+                      ],
+                    }),
               },
             },
           ],

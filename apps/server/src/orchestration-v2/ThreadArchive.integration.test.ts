@@ -649,7 +649,7 @@ const settleArchiveResults = Effect.fnUntraced(function* (command: ReturnType<ty
   const orchestrator = yield* Orchestrator.OrchestratorV2;
   // Publish nested completion results before their owners, using the real
   // service under its locks rather than racing its terminal-event subscriber.
-  for (const id of command.expectedChildThreadIds.toReversed()) {
+  for (const id of [...command.expectedChildThreadIds.toReversed(), command.threadId]) {
     const run = (yield* orchestrator.getThreadProjection(id)).runs.at(-1);
     if (run !== undefined) yield* orchestrator.recoverDelegatedTask(id, run.id);
   }
@@ -2022,6 +2022,7 @@ it.effect("rejects deleting an ancestor while a descendant archive is stopping",
     const { parent, child, grandchild } = yield* family;
     const command = archive(child, [grandchild]);
     yield* orchestrator.dispatch(command);
+    yield* settleArchiveResults(command);
     const sequence = (yield* orchestrator.getShellSnapshot()).snapshotSequence;
     const rejection = yield* orchestrator
       .dispatch({

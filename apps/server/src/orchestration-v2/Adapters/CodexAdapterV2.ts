@@ -2059,6 +2059,17 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             runningCompactionItemIds: new Set(),
           };
           const nativeThreadId = input.turnInput.providerThread.nativeThreadRef?.nativeId;
+          if (nativeThreadId != null) {
+            yield* mcpSessions.registerExecution(
+              input.turnInput.threadId,
+              {
+                provider: "codex",
+                nativeThreadId,
+                nativeTurnId: input.nativeTurnId,
+              },
+              { runId: input.turnInput.runId, attemptId: input.turnInput.attemptId },
+            );
+          }
           const continuation =
             nativeThreadId == null ? undefined : capacityContinuations.get(nativeThreadId);
           if (continuation !== undefined) {
@@ -5788,6 +5799,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   },
                 }
               : event;
+          yield* mcpSessions.endExecution(context.input.threadId, {
+            runId: context.input.runId,
+            attemptId: context.input.attemptId,
+          });
           yield* emitProviderEvent(current);
           const continued = continuedRuns.get(context.providerTurnId) ?? [context];
           if (current.status !== "completed") {
@@ -6686,33 +6701,36 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               else next.delete(threadId);
               return next;
             });
-            // Completion can remove the old context while turn/start is in flight.
-            const previousTurns = new Map([
-              ...(yield* Ref.get(settledTurns)),
-              ...(yield* Ref.get(activeTurns)),
-            ]);
-            const started = yield* client.request("turn/start", turnStartParams);
-            const previousTurn =
-              previousTurns.get(started.turn.id) ??
-              (yield* Ref.get(activeTurns)).get(started.turn.id);
-            if (
-              previousTurn !== undefined &&
-              previousTurn.input.attemptId !== turnInput.attemptId
-            ) {
-              return yield* new ProviderAdapter.ProviderAdapterProtocolError({
-                driver: CODEX_PROVIDER,
-                detail:
-                  "Codex returned a turn belonging to an earlier run. Stop the existing turn before retrying this message.",
+            const releaseOrigin = yield* mcpSessions.beginCodexTurn(turnInput.threadId, threadId);
+            yield* Effect.gen(function* () {
+              // Completion can remove the old context while turn/start is in flight.
+              const previousTurns = new Map([
+                ...(yield* Ref.get(settledTurns)),
+                ...(yield* Ref.get(activeTurns)),
+              ]);
+              const started = yield* client.request("turn/start", turnStartParams);
+              const previousTurn =
+                previousTurns.get(started.turn.id) ??
+                (yield* Ref.get(activeTurns)).get(started.turn.id);
+              if (
+                previousTurn !== undefined &&
+                previousTurn.input.attemptId !== turnInput.attemptId
+              ) {
+                return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: CODEX_PROVIDER,
+                  detail:
+                    "Codex returned a turn belonging to an earlier run. Stop the existing turn before retrying this message.",
+                });
+              }
+              // A turn/started notification may have registered and completed this turn already.
+              if ((yield* Ref.get(pendingRootTurns)).get(threadId) !== turnInput) return;
+              yield* registerRootTurn({
+                turnInput,
+                nativeTurnId: started.turn.id,
+                startedAt: codexTimestamp(started.turn.startedAt),
+                waitForNativeStart: started.turn.startedAt === null,
               });
-            }
-            // A turn/started notification may have registered and completed this turn already.
-            if ((yield* Ref.get(pendingRootTurns)).get(threadId) !== turnInput) return;
-            yield* registerRootTurn({
-              turnInput,
-              nativeTurnId: started.turn.id,
-              startedAt: codexTimestamp(started.turn.startedAt),
-              waitForNativeStart: started.turn.startedAt === null,
-            });
+            }).pipe(Effect.ensuring(releaseOrigin));
           },
           (effect, turnInput) =>
             effect.pipe(

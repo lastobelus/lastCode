@@ -3751,6 +3751,19 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         completedAt: null,
         checkpointId: null,
         contextHandoffId: null,
+        actionObligations: [
+          {
+            actionRunId: "action-owned",
+            messageId: MessageId.make("action-resume:action-owned:follow-up"),
+            owner: {
+              parentEnvironmentId: EnvironmentId.make("environment:parent"),
+              parentThreadId: ThreadId.make("thread:parent"),
+              taskId,
+              sourceRunId: runId,
+            },
+            state: "waiting" as const,
+          },
+        ],
         delegatedCompletion: {
           disposition: "stopped" as const,
           nextGeneration: 2,
@@ -3813,7 +3826,11 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         payload: task,
       });
 
-      const { delegatedCompletion: _delegatedCompletion, ...staleRun } = run;
+      const {
+        delegatedCompletion: _delegatedCompletion,
+        actionObligations: _actionObligations,
+        ...staleRun
+      } = run;
       const { completionDelivery: _completionDelivery, ...staleTask } = task;
       yield* projectionStore.apply({
         id: EventId.make("event:projection-delegated-completion:stale-run"),
@@ -3844,6 +3861,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
 
       const projection = yield* projectionStore.getThreadProjection(threadId);
       assert.deepEqual(projection.runs[0]?.delegatedCompletion, run.delegatedCompletion);
+      assert.deepEqual(projection.runs[0]?.actionObligations, run.actionObligations);
       assert.deepEqual(projection.subagents[0]?.completionDelivery, task.completionDelivery);
       assert.deepEqual(
         (yield* projectionStore.getThreadRecords(threadId, ["subagents"], {
