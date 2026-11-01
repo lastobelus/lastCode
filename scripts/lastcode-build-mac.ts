@@ -98,6 +98,7 @@ export function resolveBuildEnvironment(
 ): NodeJS.ProcessEnv {
   return {
     ...environment,
+    LASTCODE_PUBLIC_CONNECT_DEFAULTS: environment.LASTCODE_PUBLIC_CONNECT_DEFAULTS ?? "1",
     PATH: `${NodePath.dirname(cargoPath)}${NodePath.delimiter}${environment.PATH ?? ""}`,
     T3CODE_DESKTOP_UPDATE_REPOSITORY:
       environment.LASTCODE_GITHUB_REPOSITORY ?? "lastobelus/lastCode",
