@@ -370,6 +370,58 @@ it.effect.each([
     }).pipe(Effect.provide(testLayer)),
 );
 
+it.effect("requires dismissing a failed family archive before detaching its subtree", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const project = ProjectId.make("failed-placement:project");
+    const owner = ThreadId.make("failed-placement:owner");
+    const child = ThreadId.make("failed-placement:child");
+    const stage = ThreadId.make("failed-placement:stage");
+    yield* orchestrator.dispatch(create(owner, project));
+    yield* orchestrator.dispatch({ ...create(child, project), groupedUnderThreadId: owner });
+    yield* orchestrator.dispatch({ ...create(stage, project), groupedUnderThreadId: child });
+    const requestId = CommandId.make("failed-placement:archive");
+    yield* orchestrator.dispatch({
+      type: "thread.archive",
+      commandId: requestId,
+      threadId: owner,
+      childDisposition: "archive_if_idle",
+      expectedChildThreadIds: [child, stage],
+    });
+    yield* orchestrator.dispatch({
+      type: "thread.archive.fail",
+      commandId: CommandId.make("failed-placement:fail"),
+      threadId: owner,
+      requestId,
+      error: "Test archive failure",
+    });
+    const detach = {
+      type: "thread.metadata.update" as const,
+      commandId: CommandId.make("failed-placement:detach"),
+      threadId: child,
+      groupedUnderThreadId: null,
+    };
+    const refused = yield* orchestrator.dispatch(detach).pipe(Effect.exit);
+    assert.equal(refused._tag, "Failure");
+    assert.equal((yield* store.getThread(child)).groupedUnderThreadId, owner);
+    yield* orchestrator.dispatch({
+      type: "thread.unarchive",
+      commandId: CommandId.make("failed-placement:dismiss"),
+      threadId: owner,
+      expectedArchiveCommandId: requestId,
+    });
+    for (const id of [owner, child, stage])
+      assert.isNull((yield* store.getThread(id)).archivePending);
+    yield* orchestrator.dispatch({
+      ...detach,
+      commandId: CommandId.make("failed-placement:detach-after-dismiss"),
+    });
+    assert.isNull((yield* store.getThread(child)).groupedUnderThreadId);
+    assert.equal((yield* store.getThread(stage)).groupedUnderThreadId, child);
+  }).pipe(Effect.provide(testLayer)),
+);
+
 it.effect(
   "serializes inverse organization moves and rejects unavailable or cross-project destinations",
   () =>
