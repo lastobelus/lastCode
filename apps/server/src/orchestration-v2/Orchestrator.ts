@@ -9773,6 +9773,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         let backgroundRunId: RunId | undefined;
         if (
           latestRun !== undefined &&
+          latestRun.startedAt !== null &&
           sameRemoteDelegation(latestRun.remoteDelegation, selector) &&
           !isActiveRun(latestRun)
         ) {

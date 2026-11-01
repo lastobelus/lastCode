@@ -662,7 +662,13 @@ it.effect.each([false, true])(
         threadId,
         runId: ownedRun.id,
         occurredAt: now,
-        payload: { ...ownedRun, remoteDelegation: selector, status: "completed", completedAt: now },
+        payload: {
+          ...ownedRun,
+          remoteDelegation: selector,
+          status: "completed",
+          startedAt: now,
+          completedAt: now,
+        },
       });
       const providerTurnId = ProviderTurnId.make("turn:remote-owned-background");
       yield* projections.apply({

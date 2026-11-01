@@ -22,15 +22,20 @@ export function remoteDelegationProgress(
     sameRemoteDelegation(run.remoteDelegation, selector),
   );
   const ids = new Set(runs.map((run) => run.id));
-  const providerIds = new Set(runs.map((run) => run.providerThreadId));
-  const progress = delegatedTaskProgress({
-    runs,
-    messages: projection.messages.filter(
-      (message) => message.runId !== null && ids.has(message.runId),
-    ),
-    subagents: projection.subagents.filter((task) => task.runId !== null && ids.has(task.runId)),
-    providerThreads: projection.providerThreads.filter((thread) => providerIds.has(thread.id)),
-  });
+  const providerIds = new Set(
+    runs.filter((run) => run.startedAt !== null).map((run) => run.providerThreadId),
+  );
+  const progress = delegatedTaskProgress(
+    {
+      runs,
+      messages: projection.messages.filter(
+        (message) => message.runId !== null && ids.has(message.runId),
+      ),
+      subagents: projection.subagents.filter((task) => task.runId !== null && ids.has(task.runId)),
+      providerThreads: projection.providerThreads.filter((thread) => providerIds.has(thread.id)),
+    },
+    ids,
+  );
   // A held continuation is still work owed by this association.
   return runs.some((run) => run.status === "queued")
     ? { ...progress, state: "working" as const }

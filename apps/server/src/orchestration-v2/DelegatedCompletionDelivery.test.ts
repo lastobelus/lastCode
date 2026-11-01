@@ -2086,6 +2086,7 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
       "restarted",
       "stopped",
       "overlapping",
+      "cancelled-before-start",
     ] as const;
     it.effect.each(outcomes)(
       "delivers a %s follow-up independently of the original task",
@@ -2150,6 +2151,19 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
             ],
           });
           const messageId = MessageId.make(`message:followup-${outcome}`);
+          if (outcome === "cancelled-before-start") {
+            yield* orchestrator.dispatch({
+              type: "message.dispatch",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make("command:followup-unrelated-active"),
+              threadId: child.childThreadId,
+              messageId: MessageId.make("message:followup-unrelated-active"),
+              text: "Unrelated active work.",
+              attachments: [],
+              dispatchMode: { type: "start_immediately" },
+            });
+          }
           yield* orchestrator.dispatch({
             type: "message.dispatch",
             createdBy: outcome === "failed" ? "user" : "agent",
@@ -2160,7 +2174,10 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
             messageId,
             text: "Check the same work again.",
             attachments: [],
-            dispatchMode: { type: "start_immediately" },
+            dispatchMode: {
+              type:
+                outcome === "cancelled-before-start" ? "queue_after_active" : "start_immediately",
+            },
           });
           const childProjection = yield* orchestrator.getThreadProjection(child.childThreadId);
           let run = childProjection.runs.find((row) => row.userMessageId === messageId)!;
@@ -2239,29 +2256,61 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
               commandId: CommandId.make(`command:followup-stop-${outcome}`),
             });
           }
-          yield* eventSink.write({
-            commandId: reconcileCommandId(`followup-finish-${outcome}`),
-            events: [
-              {
-                id: EventId.make(`event:followup-finish-${outcome}`),
-                type: "run.updated",
-                threadId: child.childThreadId,
-                runId: run.id,
-                occurredAt: now,
-                payload: {
-                  ...run,
-                  status:
-                    outcome === "stopped"
-                      ? "interrupted"
-                      : outcome === "restarted" || outcome === "overlapping"
-                        ? "completed"
-                        : outcome,
-                  startedAt: now,
-                  completedAt: now,
+          if (outcome === "cancelled-before-start") {
+            assert.equal(run.status, "queued");
+            assert.isNull(run.startedAt);
+            const providerThread = childProjection.providerThreads.find(
+              (thread) => thread.id === run.providerThreadId,
+            )!;
+            yield* eventSink.write({
+              events: [
+                {
+                  id: EventId.make("event:followup-unrelated-background"),
+                  type: "provider-thread.updated",
+                  threadId: child.childThreadId,
+                  occurredAt: now,
+                  payload: {
+                    ...providerThread,
+                    pendingBackgroundTasks: [{ taskId: "unrelated-background", kind: "command" }],
+                  },
                 },
-              },
-            ],
-          });
+              ],
+            });
+            yield* orchestrator.dispatch({
+              type: "queued-run.cancel",
+              commandId: CommandId.make("command:followup-cancel-queued"),
+              threadId: child.childThreadId,
+              runId: run.id,
+            });
+            assert.isNull(
+              (yield* orchestrator.getThreadProjection(child.childThreadId)).runs.find(
+                (row) => row.id === run.id,
+              )?.startedAt,
+            );
+          } else
+            yield* eventSink.write({
+              commandId: reconcileCommandId(`followup-finish-${outcome}`),
+              events: [
+                {
+                  id: EventId.make(`event:followup-finish-${outcome}`),
+                  type: "run.updated",
+                  threadId: child.childThreadId,
+                  runId: run.id,
+                  occurredAt: now,
+                  payload: {
+                    ...run,
+                    status:
+                      outcome === "stopped"
+                        ? "interrupted"
+                        : outcome === "restarted" || outcome === "overlapping"
+                          ? "completed"
+                          : outcome,
+                    startedAt: now,
+                    completedAt: now,
+                  },
+                },
+              ],
+            });
           yield* orchestrator.recoverDelegatedTasks;
           const finished = yield* orchestrator.getThreadProjection(parentThreadId);
           assert.deepEqual(
@@ -2269,6 +2318,14 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
             original,
           );
           const followup = finished.subagents.find((task) => task.id === run.delegatedTaskId)!;
+          if (outcome === "cancelled-before-start") {
+            assert.deepEqual(
+              (yield* orchestrator.getThreadProjection(child.childThreadId)).providerThreads.find(
+                (thread) => thread.id === run.providerThreadId,
+              )?.pendingBackgroundTasks,
+              [{ taskId: "unrelated-background", kind: "command" }],
+            );
+          }
           if (outcome === "overlapping") {
             const later = finished.subagents.find(
               (task) =>
@@ -2281,11 +2338,13 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
           }
           assert.equal(
             followup.status,
-            outcome === "stopped"
-              ? "interrupted"
-              : outcome === "restarted" || outcome === "overlapping"
-                ? "completed"
-                : outcome,
+            outcome === "cancelled-before-start"
+              ? "cancelled"
+              : outcome === "stopped"
+                ? "interrupted"
+                : outcome === "restarted" || outcome === "overlapping"
+                  ? "completed"
+                  : outcome,
           );
           assert.equal(
             followup.completionDelivery?.state,

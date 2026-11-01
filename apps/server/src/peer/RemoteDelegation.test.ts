@@ -2355,6 +2355,51 @@ it.effect(
           )?.stage,
         ).toBe("disposed");
         yield* writeRun("next-held", { ...nextRun, status: "queued", queueHeld: true });
+        const providerThread = (yield* a.threads.getThreadRecords(threadId, [
+          "providerThreads",
+        ])).providerThreads.find((thread) => thread.id === nextRun.providerThreadId)!;
+        yield* a.sink.write({
+          events: [
+            {
+              id: EventId.make("unrelated-provider-background"),
+              type: "provider-thread.updated",
+              threadId,
+              occurredAt: now,
+              payload: {
+                ...providerThread,
+                pendingBackgroundTasks: [{ taskId: "unrelated-background", kind: "command" }],
+              },
+            },
+          ],
+        });
+        yield* a.orchestrator.dispatch({
+          type: "queued-run.cancel",
+          commandId: CommandId.make("cancel-next-before-start"),
+          threadId,
+          runId: nextRun.id,
+        });
+        expect(
+          (yield* a.threads.getThreadRecords(threadId, ["runs"])).runs.find(
+            (run) => run.id === nextRun.id,
+          )?.startedAt,
+        ).toBeNull();
+        yield* a.orchestrator.dispatch({
+          type: "remote_delegation.settle",
+          commandId: CommandId.make("settle-cancelled-next"),
+          threadId,
+          delegation: nextSelector,
+          linkSessionId: "link-a",
+        });
+        expect(
+          (yield* a.threads.getThreadRecords(threadId, [])).thread.remoteDelegations?.find(
+            (entry) => entry.delegationId === nextSelector.delegationId,
+          ),
+        ).toMatchObject({ stage: "settled", finalRun: { runId: nextRun.id, status: "cancelled" } });
+        expect(
+          (yield* a.threads.getThreadRecords(threadId, ["providerThreads"])).providerThreads.find(
+            (thread) => thread.id === nextRun.providerThreadId,
+          )?.pendingBackgroundTasks,
+        ).toEqual([{ taskId: "unrelated-background", kind: "command" }]);
         yield* a.orchestrator.dispatch({
           type: "remote_delegation.dispose",
           commandId: CommandId.make("stop-next"),
