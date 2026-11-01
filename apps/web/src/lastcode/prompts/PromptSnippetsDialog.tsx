@@ -126,6 +126,8 @@ export function PromptSnippetsDialog(props: {
 }
 
 type Draft = { title: string; text: string; savedTitle: string; savedText: string };
+const hasDraftChanges = (draft: Draft) =>
+  draft.title !== draft.savedTitle || draft.text !== draft.savedText;
 
 export function PromptSnippetsPicker(props: {
   readonly snippets: ReadonlyArray<PromptSnippet>;
@@ -168,25 +170,33 @@ export function PromptSnippetsPicker(props: {
     if (mode !== "pick" || selectedId === null) return;
     contentRef.current?.querySelector('[data-active="true"]')?.scrollIntoView({ block: "nearest" });
   }, [mode, selectedId]);
+  const pendingCreated = created.filter(
+    (entry) =>
+      entry.id === "new" ||
+      !props.snippets.some(
+        (snippet) =>
+          snippet.id === entry.id && snippet.title === entry.title && snippet.text === entry.text,
+      ),
+  );
+  if (pendingCreated.length !== created.length) setCreated(pendingCreated);
   const snippets = [
     ...props.snippets.map((snippet) => {
-      const saved = created.find((entry) => entry.id === snippet.id);
+      const saved = pendingCreated.find((entry) => entry.id === snippet.id);
       return saved
         ? { ...snippet, title: saved.title, text: saved.text, userEdited: true as const }
         : snippet;
     }),
-    ...created.filter((entry) => !props.snippets.some((saved) => saved.id === entry.id)),
+    ...pendingCreated.filter((entry) => !props.snippets.some((saved) => saved.id === entry.id)),
   ];
   const results = searchPromptSnippets(snippets, query);
   const selected = snippets.find((snippet) => snippet.id === selectedId) ?? results[0];
-  const draft = selected ? drafts[selected.id] : undefined;
+  const storedDraft = selected ? drafts[selected.id] : undefined;
+  const draft = storedDraft && hasDraftChanges(storedDraft) ? storedDraft : undefined;
   const displayed =
     selected && draft ? { ...selected, title: draft.title, text: draft.text } : selected;
   const hasChanges =
-    created.some((entry) => entry.id === "new") ||
-    Object.values(drafts).some(
-      (entry) => entry.title !== entry.savedTitle || entry.text !== entry.savedText,
-    );
+    pendingCreated.some((entry) => entry.id === "new") ||
+    Object.values(drafts).some(hasDraftChanges);
   const confirm = useStableCallback((action: () => void) => {
     if (hasChanges) setPendingAction(() => action);
     else action();
@@ -207,18 +217,23 @@ export function PromptSnippetsPicker(props: {
   });
   const changeDraft = (field: "title" | "text", value: string) => {
     if (!selected) return;
-    setDrafts((current) => ({
-      ...current,
-      [selected.id]: {
-        ...(current[selected.id] ?? {
-          title: selected.title,
-          text: selected.text,
-          savedTitle: selected.title,
-          savedText: selected.text,
-        }),
-        [field]: value,
-      },
-    }));
+    setDrafts((current) => {
+      const previous = current[selected.id];
+      return {
+        ...current,
+        [selected.id]: {
+          ...(previous && hasDraftChanges(previous)
+            ? previous
+            : {
+                title: selected.title,
+                text: selected.text,
+                savedTitle: selected.title,
+                savedText: selected.text,
+              }),
+          [field]: value,
+        },
+      };
+    });
   };
   const save = async () => {
     if (!displayed || !props.onSave || saving) return;
@@ -234,12 +249,6 @@ export function PromptSnippetsPicker(props: {
     setDrafts((current) => {
       const next = { ...current };
       delete next[displayed.id];
-      next[result.id] = {
-        title: result.title,
-        text: result.text,
-        savedTitle: result.title,
-        savedText: result.text,
-      };
       return next;
     });
     setCreated((current) => [

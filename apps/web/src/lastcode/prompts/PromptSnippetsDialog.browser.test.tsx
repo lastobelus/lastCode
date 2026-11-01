@@ -123,21 +123,19 @@ it("keeps the selected prompt and unsaved text when switching modes, then insert
     id: input.snippetId!,
     userEdited: true as const,
   }));
+  const props = {
+    snippets,
+    keybindings: DEFAULT_RESOLVED_KEYBINDINGS,
+    loading: false,
+    discovering: false,
+    error: null,
+    onClose: vi.fn(),
+    onReturnFocus: vi.fn(),
+    onSelect,
+    onSave,
+  };
   // router: false because this feature-owned modal has no routes.
-  await using _screen = await render(
-    <PromptSnippetsPicker
-      snippets={snippets}
-      keybindings={DEFAULT_RESOLVED_KEYBINDINGS}
-      loading={false}
-      discovering={false}
-      error={null}
-      onClose={vi.fn()}
-      onReturnFocus={vi.fn()}
-      onSelect={onSelect}
-      onSave={onSave}
-    />,
-    { router: false },
-  );
+  await using screen = await render(<PromptSnippetsPicker {...props} />, { router: false });
   await userEvent.keyboard("{ArrowDown}");
   await page.getByRole("button", { name: "Edit prompts", exact: true }).click();
   await expect
@@ -174,6 +172,32 @@ it("keeps the selected prompt and unsaved text when switching modes, then insert
     expect.objectContaining({ id: "review", text: "review; don't merge\n" }),
     "review",
   );
+
+  const saved = { ...snippets[0]!, text: "review; don't merge\n", userEdited: true as const };
+  await screen.rerender(<PromptSnippetsPicker {...props} snippets={[saved, snippets[1]!]} />);
+  await page.getByRole("button", { name: "Edit prompts", exact: true }).click();
+  const remote = { ...saved, text: "Review the updated instructions from another client." };
+  await screen.rerender(<PromptSnippetsPicker {...props} snippets={[remote, snippets[1]!]} />);
+  await expect.element(page.getByRole("textbox", { name: "Prompt text" })).toHaveValue(remote.text);
+
+  await page.getByRole("textbox", { name: "Prompt text" }).fill("My unsaved review instructions.");
+  const updated = { ...remote, text: "Review again using the latest saved instructions." };
+  await screen.rerender(<PromptSnippetsPicker {...props} snippets={[updated, snippets[1]!]} />);
+  await expect
+    .element(page.getByRole("textbox", { name: "Prompt text" }))
+    .toHaveValue("My unsaved review instructions.");
+  await page.getByRole("textbox", { name: "Prompt text" }).fill(remote.text);
+  await expect
+    .element(page.getByRole("textbox", { name: "Prompt text" }))
+    .toHaveValue(updated.text);
+  await page.getByRole("button", { name: "Search prompts", exact: true }).click();
+  await userEvent.keyboard("{Enter}");
+  expect(onSelect).toHaveBeenLastCalledWith(updated, "review");
+
+  await screen.rerender(<PromptSnippetsPicker {...props} snippets={[snippets[1]!]} />);
+  await expect
+    .element(page.getByRole("option", { name: updated.text, exact: true }))
+    .not.toBeInTheDocument();
 });
 
 it("retains failed saves and asks before discarding edits on close", async () => {
