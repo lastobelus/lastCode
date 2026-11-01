@@ -54,7 +54,7 @@ function Harness({
   displayedThread?: typeof thread;
 }) {
   const { archiveTarget, capabilities } = useLastCodeThreadEditing();
-  const lifetime = useLastCodeThreadDetails(ref, capabilities);
+  const lifetime = useLastCodeThreadDetails(ref, capabilities, false);
   return (
     <li
       onMouseLeave={lifetime.handleMouseLeave}

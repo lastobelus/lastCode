@@ -74,6 +74,7 @@ function Harness({
   const lifetime = useLastCodeThreadDetails(
     { environmentId: thread.environmentId, threadId: thread.id },
     editing,
+    active,
   );
   const { annotationPopoverHandle: handle } = lifetime;
   const { fileDropHandlers } = useLastCodeThreadFileDrop(
@@ -203,7 +204,7 @@ describe("row details composition", () => {
     await screen.rerender(<Harness withChildren active={false} />);
     expect(row().getAttribute("aria-label")).not.toContain("1 subagent");
   });
-  it("keeps the lease on the li and cancels confirmation when an unannotated row loses hover", async () => {
+  it("keeps the focused details and row lease while cancelling confirmation on pointer exit", async () => {
     setup();
     await using screen = await render(<Harness jump={null} active={false} />);
     const container = screen.container;
@@ -215,7 +216,7 @@ describe("row details composition", () => {
     await act(() =>
       li.dispatchEvent(new MouseEvent("mouseout", { bubbles: true, relatedTarget: null })),
     );
-    expect(container.querySelector("output")?.textContent).toBe("false");
+    expect(container.querySelector("output")?.textContent).toBe("true");
     expect(editing.cancelArchiveConfirmation).toHaveBeenCalledWith({
       environmentId: thread.environmentId,
       threadId: thread.id,
@@ -324,5 +325,26 @@ describe("row details composition", () => {
     expect(document.querySelector('[data-slot="popover-popup"]')).toBeNull();
     expect(action("Archive")).toBe(archive);
     expect(trigger(container)).toBeNull();
+  });
+
+  it("does not reopen stale ordinary details after an annotation arrives and resolves", async () => {
+    setup();
+    await using screen = await render(<Harness active={false} />);
+    const row = screen.container.querySelector<HTMLElement>(
+      `[data-testid="thread-row-${thread.id}"]`,
+    )!;
+    await act(() => row.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })));
+    expect(screen.container.querySelector("output")?.textContent).toBe("true");
+    await screen.rerender(<Harness active />);
+    await act(() =>
+      row.dispatchEvent(
+        new MouseEvent("mouseout", { bubbles: true, relatedTarget: document.body }),
+      ),
+    );
+    await screen.rerender(<Harness active={false} />);
+    expect(screen.container.querySelector("output")?.textContent).toBe("false");
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-slot="popover-popup"]')).toBeNull(),
+    );
   });
 });

@@ -22,7 +22,10 @@ import {
   useLastCodeThreadProcesses,
   type LastCodeThreadProcessSnapshot,
 } from "./useLastCodeThreadProcesses";
-import { LastCodeThreadSourceControl } from "./LastCodeThreadSourceControl";
+import {
+  LastCodeThreadSourceControl,
+  useThreadPullRequestClick,
+} from "./LastCodeThreadSourceControl";
 import { LastCodeThreadProcesses } from "./LastCodeThreadProcesses";
 const mocks = vi.hoisted(() => ({
   project: vi.fn(),
@@ -133,12 +136,14 @@ function Harness({
   active = false,
   panel = true,
   fallback = "/representative-project",
+  hoverUrl,
 }: {
   value?: SidebarThreadSummary;
   live?: boolean;
   active?: boolean;
   panel?: boolean;
   fallback?: string | null;
+  hoverUrl?: string;
 }) {
   const querySource = useLastCodeThreadSourceControl(value, live, fallback);
   const target = scopeThreadRef(value.environmentId, value.id);
@@ -165,6 +170,14 @@ function Harness({
           isActive={active}
           navigateToThread={mocks.navigation}
         />
+        {hoverUrl ? (
+          <HoverPullRequest
+            thread={value}
+            sourceControl={querySource}
+            active={active}
+            url={hoverUrl}
+          />
+        ) : null}
         <LastCodeThreadProcesses
           threadRef={target}
           processes={queryProcesses}
@@ -173,6 +186,24 @@ function Harness({
         />
       </div>
     </LastCodeSidebarPresentationProvider>
+  );
+}
+function HoverPullRequest({
+  thread,
+  sourceControl,
+  active,
+  url,
+}: {
+  thread: SidebarThreadSummary;
+  sourceControl: LastCodeThreadSourceControlSnapshot;
+  active: boolean;
+  url: string;
+}) {
+  const onOpen = useThreadPullRequestClick(thread, sourceControl, active, mocks.navigation);
+  return (
+    <a href={url} data-hover-pr onClick={(event) => onOpen(event, url)}>
+      Hovered PR
+    </a>
   );
 }
 function setup() {
@@ -428,6 +459,18 @@ describe("row-owned query and control seams", () => {
     await screen.rerender(<Harness {...{ value }} />);
     await click(container!.querySelector("a")!);
     expect(mocks.navigation).not.toHaveBeenCalled();
+    const hoverUrl = "https://github.com/example/other-project/pull/42";
+    mocks.bubble.mockClear();
+    mocks.openPr.mockImplementation((event: React.MouseEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      return true;
+    });
+    await screen.rerender(<Harness value={value} panel={false} hoverUrl={hoverUrl} />);
+    await click(container.querySelector("[data-hover-pr]")!);
+    expect(mocks.openPr).toHaveBeenLastCalledWith(expect.anything(), hoverUrl, ref);
+    expect(mocks.navigation).toHaveBeenCalledExactlyOnceWith(ref);
+    expect(mocks.bubble).not.toHaveBeenCalled();
   });
   it("leaves pending PR display disabled when the environment lacks multiple-PR capability", async () => {
     setup();

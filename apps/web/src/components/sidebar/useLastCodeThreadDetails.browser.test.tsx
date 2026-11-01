@@ -13,7 +13,7 @@ const editing = {
 const observe = vi.fn<(value: ReturnType<typeof useLastCodeThreadDetails>) => void>();
 const ref = scopeThreadRef(EnvironmentId.make("environment-one"), ThreadId.make("same-id"));
 function Harness({ revision = 0 }: { revision?: number }) {
-  const value = useLastCodeThreadDetails(ref, editing);
+  const value = useLastCodeThreadDetails(ref, editing, false);
   useEffect(() => observe(value), [value]);
   const {
     handleMouseLeave,
@@ -69,7 +69,7 @@ describe("row details lifetime", () => {
     expect(after.threadNavigationRef.current).toBe(anchor);
     expect(container.querySelector("output")?.textContent).toBe("true");
   });
-  it("cancels the exact row archive confirmation and deactivates on pointer exit", async () => {
+  it("cancels the exact row archive confirmation and dismisses on pointer exit", async () => {
     vi.clearAllMocks();
     const frames: FrameRequestCallback[] = [];
     using _frames = stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
