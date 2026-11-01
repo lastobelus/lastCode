@@ -1,4 +1,5 @@
 import { attachSidebarTree, SIDEBAR_TREE_PROPS } from "../lib/sidebarTree";
+import { focusSidebarSearchResultDetails } from "./sidebar/SidebarThreadHover";
 import { type EnvironmentId, type ScopedProjectRef } from "@t3tools/contracts";
 import { useSidebarProviderBadgePreferences } from "./sidebar/SidebarEnvironmentIcon";
 import { mergeWorktreeSuspensionMenuItems } from "./worktreeSuspensionMenu";
@@ -1546,6 +1547,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       return;
     }
     if (threadSearchResults.length === 0) return;
+    if (focusSidebarSearchResultDetails(event)) return;
     if (event.key === "ArrowDown") {
       event.preventDefault();
       moveSearchHighlight(1);

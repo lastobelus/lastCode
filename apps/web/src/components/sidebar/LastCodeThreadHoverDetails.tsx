@@ -22,6 +22,7 @@ export function LastCodeThreadHoverDetails({
   projectCwdFallback,
   cleanupBlockerTitle,
   hasActiveAnnotation,
+  onOpenPullRequest,
 }: {
   thread: SidebarThreadSummary;
   threadStatus?: ThreadStatusPill | null | undefined;
@@ -32,6 +33,7 @@ export function LastCodeThreadHoverDetails({
   projectCwdFallback: string | null;
   cleanupBlockerTitle: string | null;
   hasActiveAnnotation: boolean;
+  onOpenPullRequest?: ComponentProps<typeof SidebarThreadHoverContent>["onOpenPullRequest"];
 }) {
   return (
     <>
@@ -59,6 +61,7 @@ export function LastCodeThreadHoverDetails({
         threadStatus={threadStatus}
         cleanupBlockerTitle={cleanupBlockerTitle}
         showCleanup={!hasActiveAnnotation}
+        onOpenPullRequest={onOpenPullRequest}
       />
     </>
   );
@@ -75,6 +78,7 @@ export function createLastCodeThreadHoverContents(
     | "identity"
     | "familyPresentation"
     | "projectCwdFallback"
+    | "onOpenPullRequest"
   >,
 ) {
   const { thread } = input;

@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { MouseEvent, ReactNode } from "react";
 import { ArrowRightLeftIcon, CircleAlertIcon, GitBranchIcon, TerminalIcon } from "lucide-react";
 import type { ProjectIconOverride } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
@@ -21,6 +21,7 @@ import { MiddleTruncate } from "../ui/middle-truncate";
 import { useKnownTerminalSessions } from "../../state/terminalSessions";
 import { useThreadPreviewLeases } from "../../state/previewHosting";
 import { threadTerminalProcessLabels } from "./threadTerminalPresentation";
+import { bindThreadHoverScrollKeys } from "./threadHoverScrollKeys";
 
 type SidebarHoverProviderEntry = Pick<
   ProviderInstanceEntry,
@@ -51,6 +52,7 @@ export interface SidebarThreadHoverContentProps {
   terminalProcessCount: number;
   cleanupBlockerTitle?: string | null;
   showCleanup?: boolean;
+  onOpenPullRequest?: ((event: MouseEvent<HTMLAnchorElement>, url: string) => void) | undefined;
 }
 
 function terminalProcessLabel(count: number): string {
@@ -88,18 +90,33 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
     props.thread.actionResume?.outcome === "running"
       ? actionRunningPresentation(props.thread.actionResume)
       : null;
+  const hasPullRequests = supportsMultiplePullRequests && props.thread.pullRequests.length > 0;
 
   return (
-    <div className="flex min-w-0 max-w-80 flex-col gap-2 p-(--floating-content-inset)">
-      <div className="min-w-0 truncate text-xs leading-tight font-medium text-foreground">
-        {props.thread.title}
-      </div>
-      {props.thread.persistent ? (
-        <div className="text-xs text-muted-foreground">
-          Persistent thread · protected from archive and deletion
+    <div
+      className={cn(
+        "grid min-h-0 min-w-0 max-h-(--available-height) max-w-80 gap-2 p-(--floating-content-inset)",
+        hasPullRequests
+          ? "grid-rows-[auto_minmax(0,auto)_minmax(3rem,1fr)]"
+          : "grid-rows-[auto_minmax(0,1fr)]",
+      )}
+    >
+      <div className="flex min-w-0 flex-col gap-2">
+        <div className="min-w-0 truncate text-xs leading-tight font-medium text-foreground">
+          {props.thread.title}
         </div>
-      ) : null}
-      <div className="grid gap-1.5 pl-0.5 text-xs text-muted-foreground">
+        {props.thread.persistent ? (
+          <div className="text-xs text-muted-foreground">
+            Persistent thread · protected from archive and deletion
+          </div>
+        ) : null}
+      </div>
+      <div
+        role="region"
+        aria-label="Thread metadata"
+        tabIndex={0}
+        className="grid min-h-0 gap-1.5 overflow-y-auto overscroll-contain pl-0.5 text-xs text-muted-foreground"
+      >
         {projectDisplayName ? (
           <div className="flex min-w-0 items-center gap-2">
             <ProjectFavicon
@@ -240,9 +257,16 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
           </div>
         ) : null}
       </div>
-      {supportsMultiplePullRequests && props.thread.pullRequests.length > 0 ? (
-        <div className="border-t border-border/60 pt-2 pl-0.5 text-xs text-muted-foreground">
-          <ThreadPullRequestsMiniList pullRequests={props.thread.pullRequests} />
+      {hasPullRequests ? (
+        <div
+          ref={bindThreadHoverScrollKeys}
+          className="min-h-0 overflow-y-auto overscroll-contain border-t border-border/60 pt-2 pl-0.5 text-xs text-muted-foreground"
+        >
+          <ThreadPullRequestsMiniList
+            pullRequests={props.thread.pullRequests}
+            onOpenPullRequest={props.onOpenPullRequest}
+            plain
+          />
         </div>
       ) : null}
       {props.showCleanup === false ? null : (
@@ -267,7 +291,7 @@ export function SidebarThreadCleanupHoverContent(props: {
     <div
       className={cn(
         !props.standalone && "-mx-(--floating-content-inset) -mb-(--floating-content-inset)",
-        "border-t border-warning/25 bg-warning px-(--floating-content-inset) py-2 text-xs text-warning-foreground",
+        "shrink-0 border-t border-warning/25 bg-warning px-(--floating-content-inset) py-2 text-xs text-warning-foreground",
       )}
     >
       {cleanup.status === "deleting" ? (
