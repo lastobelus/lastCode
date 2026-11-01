@@ -21,7 +21,6 @@ import { Italic, starInputRegex, starPasteRegex } from "@tiptap/extension-italic
 import {
   type Command,
   type Editor,
-  Extension,
   InputRule,
   markInputRule,
   markPasteRule,
@@ -30,7 +29,6 @@ import {
 import { BulletList, ListItem, OrderedList } from "@tiptap/extension-list";
 import { Strike, inputRegex as strikeInputRegex } from "@tiptap/extension-strike";
 import { TaskItem } from "@tiptap/extension-task-item";
-import { TaskList } from "@tiptap/extension-task-list";
 import {
   type EditorState,
   Plugin,
@@ -224,20 +222,6 @@ export const ComposerStrikeExtension = Strike.extend({
 });
 
 /**
- * Mod+B bolds selected text only. Without a selection Tiptap would toggle bold
- * for the next typed text, which users hit by accident when they mean the
- * sidebar toggle. Runs ahead of the Bold extension and swallows the chord.
- */
-export const ComposerBoldSelectionOnlyExtension = Extension.create({
-  name: "composerBoldSelectionOnly",
-  priority: 1000,
-  addKeyboardShortcuts() {
-    const ignoreWithoutSelection = () => this.editor.state.selection.empty;
-    return { "Mod-b": ignoreWithoutSelection, "Mod-B": ignoreWithoutSelection };
-  },
-});
-
-/**
  * Tiptap's block chords can nest blocks inside quotes that the serializer cannot write,
  * silently dropping their text from stored drafts.
  */
@@ -252,13 +236,6 @@ function withoutBlockChords<Shortcuts extends Record<string, unknown>>(
 
 // Markdown supports one paragraph followed by nested lists per item.
 const LIST_ITEM_CONTENT = "paragraph list*";
-
-/** Task lists come from `- [ ]` alone; Mod-Shift-9 would nest one in a quote. */
-export const ComposerTaskListExtension = TaskList.extend({
-  addKeyboardShortcuts() {
-    return withoutBlockChords(this.parent?.(), ["Mod-Shift-9"]);
-  },
-});
 
 /** Tiptap's nesting shortcuts leave indent unchanged, so rebuilding the draft undoes them. */
 const LIST_NESTING_KEYS = ["Tab", "Shift-Tab"];
@@ -466,7 +443,7 @@ function parseTaskPrefix(head: string): { prefix: TaskLinePrefix; markerLength: 
   };
 }
 
-export function parseOpeningFence(line: string): { fence: string; language: string } | null {
+function parseOpeningFence(line: string): { fence: string; language: string } | null {
   // Unlike `.`, `[^\n]` accepts the stored \r in CRLF lines.
   const match = /^(`{3,}|~{3,})([^\n]*)$/.exec(line);
   if (!match) return null;
@@ -476,7 +453,7 @@ export function parseOpeningFence(line: string): { fence: string; language: stri
   return { fence, language };
 }
 
-export function isClosingFence(line: string, fence: string): boolean {
+function isClosingFence(line: string, fence: string): boolean {
   const match = /^(`{3,}|~{3,})[ \t]*\r?$/.exec(line);
   if (!match) return false;
   const run = match[1]!;
@@ -1128,59 +1105,6 @@ function renumberFollowingItems(
     }
     pos += child.nodeSize;
   });
-}
-
-export function splitOrLiftListItem(editor: Editor): boolean {
-  const $from = editor.state.selection.$from;
-  const itemType = listItemTypeAt($from);
-  if (!itemType) return false;
-  const empty = $from.parent.content.size === 0;
-  const move: Command = ({ commands, tr }) => {
-    const moved =
-      commands.splitListItem(
-        itemType,
-        itemType === "taskItem" ? { checked: false } : { space: " " },
-      ) ||
-      (empty && commands.liftListItem(itemType));
-    if (moved) alignListItemWithSiblings(tr, itemType);
-    return moved;
-  };
-  return editor.can().command(move) && editor.chain().command(move).run();
-}
-
-export function convertBulletItemToTask(
-  tr: Transaction,
-  from: number,
-  to: number,
-  checked: boolean,
-): void {
-  tr.delete(from, to);
-  const $pos = tr.doc.resolve(from);
-  const item = $pos.node(-1);
-  const list = $pos.node(-2);
-  const index = $pos.index(-2);
-  const { schema } = tr.doc.type;
-  const before: ProseMirrorNode[] = [];
-  const after: ProseMirrorNode[] = [];
-  list.forEach((child, _, childIndex) => {
-    if (childIndex < index) before.push(child);
-    else if (childIndex > index) after.push(child);
-  });
-  const markerSpace =
-    typeof item.attrs.space === "string" && item.attrs.space ? item.attrs.space : " ";
-  const task = schema.nodes.taskItem!.create(
-    { checked, indent: item.attrs.indent, markerSpace },
-    item.content,
-  );
-  const lists = [
-    ...(before.length > 0 ? [list.copy(Fragment.from(before))] : []),
-    schema.nodes.taskList!.create(null, task),
-    ...(after.length > 0 ? [list.copy(Fragment.from(after))] : []),
-  ];
-  const listStart = $pos.before(-2);
-  tr.replaceWith(listStart, listStart + list.nodeSize, lists);
-  const caret = listStart + (before.length > 0 ? lists[0]!.nodeSize : 0) + 3;
-  tr.setSelection(TextSelection.create(tr.doc, caret));
 }
 
 function listItemTypeAt($pos: ResolvedPos): "listItem" | "taskItem" | null {
