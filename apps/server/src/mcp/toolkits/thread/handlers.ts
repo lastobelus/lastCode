@@ -1,7 +1,7 @@
 import * as ThreadRecovery from "../../../orchestration-v2/ThreadRecoveryService.ts";
 import * as ThreadRecoveryRepair from "../../../orchestration-v2/ThreadRecoveryRepairService.ts";
 import {
-  type CommandId,
+  CommandId,
   type RuntimeRequestId,
   ThreadId,
   type OrchestrationV2ThreadProjection,
@@ -22,6 +22,7 @@ import {
   readCaller,
   readThread,
   unavailable,
+  resolveProjectId,
 } from "../../threadAccess.ts";
 import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ScheduledTasks from "../../../scheduledTasks/ScheduledTaskService.ts";
@@ -109,6 +110,29 @@ const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A,
 ) => McpToolAccess.writesThreads((params: P) => [params.threadId], handle);
 
 export const layer = McpToolAccess.toLayer(ThreadToolkit, {
+  t3_thread_group: McpToolAccess.writesThreads(
+    (input) =>
+      input.items.flatMap((item) => [
+        item.threadId,
+        ...(item.groupedUnderThreadId === null ? [] : [item.groupedUnderThreadId]),
+      ]),
+    (input) =>
+      Effect.gen(function* () {
+        const caller = yield* readCaller();
+        const projectId = yield* resolveProjectId(caller, input.projectId);
+        const namespace = caller.scope.requestNamespace;
+        const items = input.items.map((item) => ({
+          ...item,
+          commandId: CommandId.make(
+            `mcp:group:${encodeURIComponent(namespace)}:${encodeURIComponent(input.clientRequestId)}:${encodeURIComponent(item.threadId)}`,
+          ),
+        }));
+        return {
+          items: yield* caller.threads.setThreadParents({ projectId, items }),
+          atomic: false as const,
+        };
+      }),
+  ),
   t3_thread_recover: writesThread((input) =>
     Effect.gen(function* () {
       yield* readThread(input.threadId);

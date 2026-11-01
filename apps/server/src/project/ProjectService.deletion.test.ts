@@ -175,6 +175,83 @@ function creatorGroupedThreadCreated(
   };
 }
 
+it.effect.each(["stopping", "failed"] as const)(
+  "refuses project deletion before changing a family with a %s archive",
+  (status) =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make("project:unresolved-archive");
+      yield* seedProject(projectId);
+      yield* Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const sink = yield* EventSink.EventSinkV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const service = yield* ProjectService.make;
+        const owner = ThreadId.make("thread:archive-owner");
+        const child = ThreadId.make("thread:archive-child");
+        const stage = ThreadId.make("thread:archive-stage");
+        const unrelated = ThreadId.make("thread:archive-unrelated");
+        const pending = {
+          threadId: owner,
+          commandId: CommandId.make("command:family-archive"),
+          status,
+        };
+        const threads = [owner, child, stage, unrelated].map((id, index) => {
+          const event = nativeThreadCreated(projectId, id);
+          return {
+            ...event,
+            payload: {
+              ...event.payload,
+              groupedUnderThreadId: index === 1 ? owner : index === 2 ? child : null,
+              archivePending:
+                index === 3
+                  ? null
+                  : index === 0
+                    ? {
+                        ...pending,
+                        familyVersion: 1 as const,
+                        childDisposition: "archive_if_idle" as const,
+                        childThreadIds: [child, stage],
+                        archiveThreadIds: [owner, child, stage],
+                        promoteThreadIds: [],
+                      }
+                    : pending,
+            },
+          };
+        });
+        yield* sink.write({ events: threads });
+        const input = {
+          commandId: CommandId.make("command:delete-unresolved-project"),
+          projectId,
+          force: true,
+        };
+        const result = yield* service.delete(input).pipe(Effect.exit);
+        assert.equal(result._tag, "Failure");
+        assert.isTrue(Option.isSome(yield* service.getById(projectId)));
+        for (const event of threads) {
+          const thread = yield* projections.getThread(event.threadId);
+          assert.isNull(thread.deletedAt);
+          assert.deepEqual(thread.archivePending, event.payload.archivePending);
+          assert.equal(thread.groupedUnderThreadId, event.payload.groupedUnderThreadId);
+        }
+        assert.deepEqual(
+          yield* sql`SELECT sequence FROM orchestration_events
+            WHERE event_type IN ('thread.deleted', 'project.deleted')`,
+          [],
+        );
+        yield* sink.write({
+          events: threads.map((event) => ({
+            ...event,
+            id: EventId.make(`archive-resolved:${event.threadId}`),
+            type: "thread.metadata-updated" as const,
+            payload: { ...event.payload, archivePending: null },
+          })),
+        });
+        yield* service.delete(input);
+        assert.isTrue(Option.isNone(yield* service.getById(projectId)));
+      }).pipe(Effect.provide(layerServices));
+    }).pipe(Effect.provide(layerDatabase)),
+);
+
 it.effect("retries a partial project deletion without repeating child events or cleanup", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
@@ -487,12 +564,11 @@ it.effect("releases cross-project creator grouping while preserving ongoing ordi
           thread: {
             ...original.thread,
             creatorGrouping: "independent",
+            groupedUnderThreadId: null,
             pinnedAt: null,
             pinOrderKey: null,
             activeOrderKey: null,
-            updatedAt: now,
           },
-          updatedAt: now,
         });
       }
       assert.deepEqual(yield* readSurvivorEffects, effectsBefore);

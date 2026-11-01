@@ -299,21 +299,43 @@ describe("thread menu binding and scoped targets", () => {
     await select(screen.container, "handoff-show-all");
     expect(mocks.openPanel).toHaveBeenCalledWith(ref, "handoffs");
   });
-  it("dispatches creator direction and navigation to the exact scoped creator", async () => {
+  it("uses explicit placement for the existing grouping control and retains the scoped creator", async () => {
     setup();
     // Navigation is mocked; this hook does not need a router provider.
     await using screen = await render(null, { router: false });
 
     await show(screen);
-    await select(screen.container, "creator-independent");
-    expect(mocks.metadata).toHaveBeenCalledWith({
-      environmentId: env,
-      input: { threadId: thread.id, creatorGrouping: "independent" },
-    });
+    for (const placement of [
+      {},
+      {
+        creatorGrouping: "independent" as const,
+        groupedUnderThreadId: ThreadId.make("destination-c"),
+      },
+    ]) {
+      fixture.currentThread = { ...thread, ...placement };
+      await select(screen.container, "creator-independent");
+      const items = mocks.menu.mock.lastCall![0];
+      expect(items.find((item) => item.id === "creator-independent")?.label).toBe(
+        "Move to top level",
+      );
+      expect(items.some((item) => item.id === "creator-grouped")).toBe(false);
+      expect(mocks.metadata).toHaveBeenLastCalledWith({
+        environmentId: env,
+        input: { threadId: thread.id, groupedUnderThreadId: null },
+      });
+      expect(fixture.currentThread.creatorThreadId).toBe(thread.creatorThreadId);
+    }
+    fixture.currentThread = { ...thread, groupedUnderThreadId: null };
     await select(screen.container, "creator-grouped");
-    expect(mocks.metadata).toHaveBeenCalledWith({
+    expect(mocks.menu.mock.lastCall![0].find((item) => item.id === "creator-grouped")?.label).toBe(
+      "Group with creator thread",
+    );
+    expect(mocks.menu.mock.lastCall![0].some((item) => item.id === "creator-independent")).toBe(
+      false,
+    );
+    expect(mocks.metadata).toHaveBeenLastCalledWith({
       environmentId: env,
-      input: { threadId: thread.id, creatorGrouping: "grouped" },
+      input: { threadId: thread.id, groupedUnderThreadId: ThreadId.make("creator") },
     });
     await select(screen.container, "open-creator");
     expect(mocks.navigateThread).toHaveBeenCalledWith(

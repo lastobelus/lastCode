@@ -3,6 +3,7 @@ import { assert, it, vi } from "@effect/vitest";
 import {
   CommandId,
   EnvironmentId,
+  EventId,
   MessageId,
   ProjectId,
   ProviderDriverKind,
@@ -146,6 +147,178 @@ const createParent = Effect.gen(function* () {
     creationSource: "web",
   });
 });
+
+it.effect(
+  "creates empty containers, moves a large family through the service and discovers paged children",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      yield* createParent;
+      const created = yield* service.createThreads(scope, {
+        clientRequestId: "organization-roots",
+        threads: [
+          { title: "Container A", groupedUnderThreadId: null },
+          { title: "Container B", groupedUnderThreadId: null },
+          { title: "Empty container" },
+        ],
+      });
+      const a = created.threads[0]!.threadId;
+      const b = created.threads[1]!.threadId;
+      assert.equal(created.threads[2]!.groupedUnderThreadId, parentThreadId);
+      for (const row of created.threads) {
+        const projection = yield* threads.getThreadProjection(row.threadId);
+        assert.isEmpty(projection.runs);
+        assert.isEmpty(projection.messages);
+        assert.equal(projection.thread.creatorThreadId, parentThreadId);
+      }
+      const members: ThreadId[] = [];
+      for (let batch = 0; batch < 6; batch++) {
+        const children = yield* service.createThreads(scope, {
+          clientRequestId: `organization-items:${batch}`,
+          threads: Array.from({ length: 20 }, (_, index) => ({
+            title: `Item ${batch * 20 + index}`,
+            groupedUnderThreadId: a,
+          })),
+        });
+        members.push(...children.threads.map((row) => row.threadId));
+      }
+      const stage = (yield* service.createThreads(scope, {
+        clientRequestId: "organization-stage",
+        threads: [{ title: "Stage", groupedUnderThreadId: members[0]! }],
+      })).threads[0]!.threadId;
+      const firstPage = yield* service.listThreads(scope, { underThreadId: a, limit: 100 });
+      const secondPage = yield* service.listThreads(scope, {
+        underThreadId: a,
+        limit: 100,
+        cursor: firstPage.nextCursor!,
+      });
+      assert.equal(firstPage.total, 120);
+      assert.lengthOf(firstPage.threads, 100);
+      assert.lengthOf(secondPage.threads, 20);
+      assert.isNull(secondPage.nextCursor);
+      const items = members.map((threadId) => ({
+        commandId: CommandId.make(`organization:move:${threadId}`),
+        threadId,
+        groupedUnderThreadId: b,
+      }));
+      const moved = yield* threads.setThreadParents({ projectId, items });
+      assert.isTrue(
+        moved.every((item) => item.status === "moved" && item.previousGroupedUnderThreadId === a),
+      );
+      assert.equal((yield* threads.getThreadShell(stage))?.groupedUnderThreadId, members[0]);
+      const retried = yield* threads.setThreadParents({ projectId, items });
+      assert.isTrue(
+        retried.every((item, index) => item.replayed && item.sequence === moved[index]!.sequence),
+      );
+      const partial = yield* threads.setThreadParents({
+        projectId,
+        items: [
+          {
+            commandId: CommandId.make("organization:detach"),
+            threadId: members[0]!,
+            groupedUnderThreadId: null,
+          },
+          {
+            commandId: CommandId.make("organization:cycle"),
+            threadId: b,
+            groupedUnderThreadId: members[1]!,
+          },
+          {
+            commandId: CommandId.make("organization:untouched"),
+            threadId: members[2]!,
+            groupedUnderThreadId: null,
+          },
+        ],
+      });
+      assert.deepEqual(
+        partial.map((item) => item.status),
+        ["moved", "rejected", "not_attempted"],
+      );
+      const retryDetach = yield* threads.setThreadParents({ projectId, items: [items[0]!] });
+      assert.equal(retryDetach[0]?.previousGroupedUnderThreadId, a);
+      assert.isNull((yield* threads.getThreadShell(members[0]!))?.groupedUnderThreadId);
+      assert.isEmpty((yield* threads.getThreadArchiveFamily(a)).childThreadIds);
+      yield* threads.dispatch({
+        type: "thread.archive",
+        commandId: CommandId.make("organization:archive-former"),
+        threadId: a,
+      });
+      assert.isNull((yield* threads.getThreadShell(members[1]!))?.archivedAt);
+      assert.equal(
+        (yield* service.listThreads(scope, { underThreadId: b, settled: false, limit: 100 })).total,
+        119,
+      );
+      const sink = yield* EventSink.EventSinkV2;
+      for (const [index, status] of (["stopping", "failed"] as const).entries()) {
+        const threadId = members[index + 3]!;
+        const original = yield* threads.getThreadProjection(threadId);
+        const archivePending = {
+          threadId,
+          commandId: CommandId.make(`organization:pending-archive:${status}`),
+          status,
+          childDisposition: "stop_and_archive" as const,
+          childThreadIds: [],
+          archiveThreadIds: [threadId],
+          promoteThreadIds: [],
+        };
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make(`organization:pending-archive:${status}`),
+              type: "thread.metadata-updated",
+              threadId,
+              occurredAt: original.thread.updatedAt,
+              payload: { ...original.thread, archivePending },
+            },
+          ],
+        });
+        const item = {
+          threadId,
+          commandId: CommandId.make(`organization:release-pending:${status}`),
+          groupedUnderThreadId: null,
+        };
+        const refused = yield* threads.setThreadParents({
+          projectId: ProjectId.make("organization:wrong-project"),
+          items: [item],
+        });
+        assert.equal(refused[0]?.status, "rejected");
+        assert.equal((yield* threads.getThreadShell(threadId))?.groupedUnderThreadId, b);
+        const released = yield* threads.setThreadParents({ projectId, items: [item] });
+        assert.equal(released[0]?.status, "moved", status);
+        assert.equal(released[0]?.previousGroupedUnderThreadId, b);
+        const after = yield* threads.getThreadProjection(threadId);
+        assert.isNull(after.thread.groupedUnderThreadId);
+        assert.deepEqual(after.thread.archivePending, archivePending);
+        assert.deepEqual(after.thread.lineage, original.thread.lineage);
+        assert.equal(after.thread.creatorThreadId, original.thread.creatorThreadId);
+        assert.deepEqual(after.messages, original.messages);
+        assert.deepEqual(after.runs, original.runs);
+        const retried = yield* threads.setThreadParents({ projectId, items: [item] });
+        assert.isTrue(retried[0]?.replayed);
+        assert.equal(retried[0]?.sequence, released[0]?.sequence);
+      }
+      const deleted = members[2]!;
+      yield* threads.dispatch({
+        type: "thread.delete",
+        commandId: CommandId.make("organization:delete-moved"),
+        threadId: deleted,
+      });
+      assert.isNull(yield* threads.getThreadShell(deleted));
+      const afterDelete = yield* threads.setThreadParents({ projectId, items });
+      assert.isTrue(
+        afterDelete.every(
+          (item, index) =>
+            item.status === "moved" && item.replayed && item.sequence === moved[index]!.sequence,
+        ),
+      );
+      const wrongProject = yield* threads.setThreadParents({
+        projectId: ProjectId.make("wrong-project"),
+        items,
+      });
+      assert.equal(wrongProject[0]?.status, "rejected");
+    }).pipe(Effect.provide(layer)),
+);
 
 it.effect("retries an interrupted MCP create with a prompt after reopening its target", () =>
   Effect.gen(function* () {
@@ -310,5 +483,53 @@ it.effect("creates and replays an idle MCP thread without a prompt", () =>
     const projection = yield* threads.getThreadProjection(result.threadId);
     assert.isEmpty(projection.messages);
     assert.isEmpty(projection.runs);
+    const sink = yield* EventSink.EventSinkV2;
+    const parent = yield* threads.getThreadProjection(parentThreadId);
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make("failed-parent-archive"),
+          type: "thread.metadata-updated",
+          threadId: parentThreadId,
+          occurredAt: parent.thread.updatedAt,
+          payload: {
+            ...parent.thread,
+            archivePending: {
+              threadId: parentThreadId,
+              commandId: CommandId.make("failed-parent-archive"),
+              status: "failed",
+              childDisposition: "stop_and_archive",
+              childThreadIds: [],
+              archiveThreadIds: [parentThreadId],
+              promoteThreadIds: [],
+            },
+          },
+        },
+      ],
+    });
+    const fromFailedParent = yield* service.createThreads(scope, {
+      clientRequestId: "failed-parent-create",
+      threads: [{ title: "Continue work" }],
+    });
+    assert.equal(fromFailedParent.threads[0]?.groupedUnderThreadId, parentThreadId);
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make("side-chat-parent"),
+          type: "thread.metadata-updated",
+          threadId: parentThreadId,
+          occurredAt: parent.thread.updatedAt,
+          payload: {
+            ...parent.thread,
+            lineage: { ...parent.thread.lineage, relationshipToParent: "fork", sideChat: true },
+          },
+        },
+      ],
+    });
+    const fromSideChat = yield* service.createThreads(scope, {
+      clientRequestId: "side-chat-create",
+      threads: [{ title: "Visible notes" }],
+    });
+    assert.isNull(fromSideChat.threads[0]?.groupedUnderThreadId);
   }).pipe(Effect.provide(layer)),
 );

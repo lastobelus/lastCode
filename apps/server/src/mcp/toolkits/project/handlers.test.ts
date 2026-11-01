@@ -94,7 +94,7 @@ it.effect(
           ]);
         });
       yield* submit("requester-session", sourceThreadId, "active-run");
-      const caller = {
+      let caller = {
         id: sourceThreadId,
         projectId,
         providerInstanceId,
@@ -102,6 +102,7 @@ it.effect(
         runtimeMode: "full-access",
         interactionMode: "default",
         activeRunId: "active-run",
+        lineage: { rootThreadId: sourceThreadId, parentThreadId: null, relationshipToParent: null },
         archivedAt: null,
         deletedAt: null,
       } as OrchestrationV2ThreadShell;
@@ -198,11 +199,21 @@ it.effect(
           .pipe(Effect.flip),
       ).toMatchObject({ code: "thread_not_found" });
       const unprompted = { title: "Independent notes", creatorThreadId: "untrusted-creator" };
+      caller = {
+        ...caller,
+        lineage: {
+          rootThreadId: sourceThreadId,
+          parentThreadId: null,
+          relationshipToParent: "fork",
+          sideChat: true,
+        },
+      };
       yield* toolkit
         .handle("t3_thread_launch", unprompted)
         .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
       expect(launched[1]?.initialMessage).toBeUndefined();
       expect(launched[1]?.creatorThreadId).toBe(sourceThreadId);
+      expect(launched[1]?.groupedUnderThreadId).toBeNull();
     }).pipe(Effect.scoped),
 );
 

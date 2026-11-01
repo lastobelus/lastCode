@@ -760,14 +760,28 @@ describe("V2 environment commands", () => {
             creatorGrouping,
           }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
         }
-        expect(commands).toEqual(
-          ["independent", "grouped"].map((creatorGrouping) => ({
+        const placements = [ThreadId.make("organization:parent"), null];
+        for (const [index, groupedUnderThreadId] of placements.entries()) {
+          yield* updateThreadMetadata({
+            commandId: CommandId.make(`explicit-placement:${index}`),
+            threadId: v2ThreadId,
+            groupedUnderThreadId,
+          }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+        }
+        expect(commands).toEqual([
+          ...["independent", "grouped"].map((creatorGrouping) => ({
             type: "thread.metadata.update",
             commandId: `creator-placement:${creatorGrouping}`,
             threadId: v2ThreadId,
             creatorGrouping,
           })),
-        );
+          ...placements.map((groupedUnderThreadId, index) => ({
+            type: "thread.metadata.update",
+            commandId: `explicit-placement:${index}`,
+            threadId: v2ThreadId,
+            groupedUnderThreadId,
+          })),
+        ]);
         expect(projectionRequests).toEqual([]);
       }).pipe(Effect.provide(layerTestCrypto)),
   );

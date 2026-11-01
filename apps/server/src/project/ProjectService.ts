@@ -1,3 +1,4 @@
+import { getInteractiveThreadParentThreadId } from "@t3tools/contracts";
 import {
   CommandId,
   type OrchestrationProjectShell,
@@ -481,7 +482,7 @@ export const make = Effect.gen(function* () {
           )).filter(
             (thread) =>
               thread.id !== threadId &&
-              thread.creatorThreadId === threadId &&
+              getInteractiveThreadParentThreadId(thread) === threadId &&
               isGroupedCreatorThread(thread),
           );
           const limit = yield* DispatchModeLimit;
@@ -524,7 +525,7 @@ export const make = Effect.gen(function* () {
                 type: "thread.metadata-updated" as const,
                 threadId: thread.id,
                 occurredAt: now,
-                payload: releaseCreatorGrouping(thread, now),
+                payload: releaseCreatorGrouping(thread),
               };
             }),
           );
@@ -583,6 +584,16 @@ export const make = Effect.gen(function* () {
         operation: "delete-thread",
         projectId,
         cause: `Persistent thread '${persistent.id}' must be released before deleting its project.`,
+      });
+    const unresolvedArchive = projectThreads.find((thread) => thread.archivePending != null);
+    if (unresolvedArchive !== undefined)
+      return yield* new ProjectOperationError({
+        operation: "delete-thread",
+        projectId,
+        cause:
+          unresolvedArchive.archivePending?.status === "failed"
+            ? "This thread is part of a failed archive, so retry or dismiss that archive before deleting the thread."
+            : "A conversation in this family is still stopping before archive. Wait for its archive to finish.",
       });
     const unfinishedCleanup = (yield* threadProjections.getWorktreeCleanupThreads.pipe(
       Effect.mapError(

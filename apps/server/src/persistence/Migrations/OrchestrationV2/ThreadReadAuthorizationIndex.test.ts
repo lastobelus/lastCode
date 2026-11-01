@@ -25,6 +25,7 @@ it.effect("upgrades existing databases with indexed thread read authorization lo
       VALUES ('corrupt-message', 'corrupt-thread', 'user', 1, 'now', 'now', '{broken')`;
     assert.deepEqual(yield* runDatabaseMigrations(), [
       [17, "OrchestrationV2ThreadReadAuthorizationIndex"],
+      [18, "OrchestrationV2InteractiveThreadParentIndex"],
     ]);
     const plans = [
       yield* sql<{
