@@ -346,7 +346,7 @@ describe("thread hover dismissal", () => {
     await expect.element(page.getByText("Thread details", { exact: true })).toBeVisible();
   });
 
-  it("keeps a keyboard-focused popup link mounted during ancestor scrolling", async () => {
+  it("preserves popup link focus during ancestor scrolling and returns to the row on Escape", async () => {
     await using screen = await render(<Harness />);
     await userEvent.tab();
     const link = page.getByRole("link", { name: "PR details" });
@@ -359,6 +359,10 @@ describe("thread hover dismissal", () => {
     });
     expect(link.element()).toBe(document.activeElement);
     expect(screen.container.querySelector("[data-details-active]")?.textContent).toBe("true");
+    await userEvent.keyboard("{Escape}");
+    await expect.element(link).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(screen.getByTestId(`thread-row-${thread.id}`).element());
+    expect(document.querySelectorAll("[data-base-ui-focus-guard]")).toHaveLength(0);
   });
 
   it("keeps details open when pressing an already-focused control inside the row", async () => {

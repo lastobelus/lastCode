@@ -90,6 +90,9 @@ export function useLastCodeThreadDetails(
       eventDetails.cancel();
       return;
     }
+    if (!open && eventDetails.reason === "escape-key") {
+      threadNavigationRef.current?.focus();
+    }
     setThreadRowActive(open);
   };
   const handleBlurCapture = (event: FocusEvent<HTMLLIElement>) => {
