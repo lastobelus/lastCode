@@ -183,7 +183,6 @@ export const make = Effect.gen(function* () {
       readonly completed: Deferred.Deferred<void>;
       started: boolean;
       cancelled: boolean;
-      failed: boolean;
     }
   >();
   const native = <A>(run: () => Promise<A>) => Effect.tryPromise({ try: run, catch: safeFailure });
@@ -1500,6 +1499,7 @@ export const make = Effect.gen(function* () {
   });
   const reconcile = Effect.fn("WorktreeSuspension.reconcile")(function* (
     initial: CheckoutAuthority,
+    stoppedCaptureId?: string,
   ) {
     let record =
       initial.pendingProjection === undefined
@@ -1544,7 +1544,11 @@ export const make = Effect.gen(function* () {
     );
     if (!journalExists) {
       const job = liveOperations.get(record.checkoutId);
-      if (job !== undefined && !job.failed && !(job.cancelled && !job.started))
+      if (
+        job !== undefined &&
+        !(job.cancelled && !job.started) &&
+        stoppedCaptureId !== record.operation.id
+      )
         return yield* failure("busy", "Finish the current workspace operation first.");
       yield* assertFresh(record);
       if (record.history.includes(id) || record.snapshots?.some((saved) => saved.snapshotId === id))
@@ -1648,7 +1652,7 @@ export const make = Effect.gen(function* () {
             return yield* failure("changed", "The durable save intent is missing.");
           yield* guard(record);
           if (automatic && !(yield* automaticallyEligible(record))) {
-            yield* reconcile(record);
+            yield* reconcile(record, record.operation.id);
             return;
           }
           return yield* Effect.acquireUseRelease(
@@ -1704,7 +1708,7 @@ export const make = Effect.gen(function* () {
         "A saved-workspace operation is already running or has no durable intent.",
       );
     const completed = yield* Deferred.make<void>();
-    const job = { completed, started: false, cancelled: false, failed: false };
+    const job = { completed, started: false, cancelled: false };
     liveOperations.set(record.checkoutId, job);
     const settleFailure = Effect.fn("WorktreeSuspension.settleFailure")(
       function* (cause: Cause.Cause<E>) {
@@ -1717,13 +1721,12 @@ export const make = Effect.gen(function* () {
           )
         )
           return;
-        job.failed = true;
         yield* markBlocked(
           record.checkoutId,
           safeFailure(Option.getOrUndefined(Cause.findErrorOption(cause))),
         );
         if (current.operation?.kind === "capture")
-          yield* reconcile(yield* requireRecord(record.checkoutId));
+          yield* reconcile(yield* requireRecord(record.checkoutId), record.operation!.id);
       },
       (effect) => effect.pipe(Effect.ignore),
     );

@@ -133,6 +133,7 @@ const harness = (
     settings?: SettingsValue;
     adoptOnCaptured?: boolean;
     pauseCaptured?: { entered: Deferred.Deferred<void>; release: Deferred.Deferred<void> };
+    pauseCaptureIntent?: { entered: Deferred.Deferred<void>; release: Deferred.Deferred<void> };
     pauseRestored?: { entered: Deferred.Deferred<void>; release: Deferred.Deferred<void> };
     unreadableCatalog?: boolean;
     failDiscardPrepareAt?: number;
@@ -168,6 +169,7 @@ const harness = (
     };
     let failedPublication = false;
     let pausedCapture = false;
+    let pausedCaptureIntent = false;
     let discardPreparations = 0;
     let occupiedRestore = false;
     let pausedRestore = false;
@@ -232,6 +234,16 @@ const harness = (
             }),
           ),
           Effect.tap(() => {
+            if (
+              options.pauseCaptureIntent !== undefined &&
+              !pausedCaptureIntent &&
+              next.operation?.kind === "capture"
+            ) {
+              pausedCaptureIntent = true;
+              return Deferred.succeed(options.pauseCaptureIntent.entered, undefined).pipe(
+                Effect.andThen(Deferred.await(options.pauseCaptureIntent.release)),
+              );
+            }
             if (
               options.pauseRestored !== undefined &&
               !pausedRestore &&
@@ -1812,6 +1824,42 @@ it.live.each([
       expect(saved.captureFailure).toBeUndefined();
       if (kind !== "missing")
         expect(yield* Effect.promise(() => NodeFSP.readdir(directory))).toEqual([]);
+    }),
+  ),
+);
+
+it.live("allows its own automatic eligibility cancellation to resume after policy admission", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const h = yield* harness(f, {
+        cleanupThreads: true,
+        settings: automaticSettings,
+        pauseCaptureIntent: { entered, release },
+      });
+      untouchedOwners(h.threads);
+      const sweep = yield* h.service.sweep.pipe(Effect.forkChild);
+      yield* Deferred.await(entered);
+      h.threads.set(firstId, { ...h.threads.get(firstId)!, workspaceUserAdopted: true });
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(sweep);
+      const cancelled = (yield* h.registry.list)[0]!;
+      expect(cancelled.summary.state).toBe("active");
+      expect(cancelled.operation).toBeUndefined();
+      expect(cancelled.captureFailure?.retryOnce).toBe(true);
+      expect(cancelled.blockedReason).not.toContain("Finish the current workspace operation");
+      expect(
+        yield* Effect.promise(() =>
+          h.store.inspectUnstartedCapture(cancelled.captureFailure!.operationId),
+        ),
+      ).toBe("missing");
+      h.threads.set(firstId, { ...h.threads.get(firstId)!, workspaceUserAdopted: false });
+      yield* h.service.sweep;
+      const saved = (yield* h.registry.list)[0]!;
+      expect(saved.summary.state).toBe("suspended");
+      expect(saved.captureFailure).toBeUndefined();
+      expect(saved.summary.snapshotId).not.toBe(cancelled.captureFailure!.operationId);
     }),
   ),
 );
