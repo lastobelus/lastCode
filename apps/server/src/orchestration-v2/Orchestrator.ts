@@ -17243,7 +17243,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 return yield* new OrchestratorDispatchError({
                   commandId: command.commandId,
                   commandType: command.type,
-                  cause: "Resolve the failed archive before deleting this thread.",
+                  cause:
+                    "This thread is part of a failed archive, so retry or dismiss that archive before deleting the thread.",
                 });
               if (
                 command.type !== "thread.archive.complete" &&

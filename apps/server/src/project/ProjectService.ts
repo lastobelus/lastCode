@@ -585,6 +585,16 @@ export const make = Effect.gen(function* () {
         projectId,
         cause: `Persistent thread '${persistent.id}' must be released before deleting its project.`,
       });
+    const unresolvedArchive = projectThreads.find((thread) => thread.archivePending != null);
+    if (unresolvedArchive !== undefined)
+      return yield* new ProjectOperationError({
+        operation: "delete-thread",
+        projectId,
+        cause:
+          unresolvedArchive.archivePending?.status === "failed"
+            ? "This thread is part of a failed archive, so retry or dismiss that archive before deleting the thread."
+            : "A conversation in this family is still stopping before archive. Wait for its archive to finish.",
+      });
     const unfinishedCleanup = (yield* threadProjections.getWorktreeCleanupThreads.pipe(
       Effect.mapError(
         (cause) => new ProjectOperationError({ operation: "list-threads", projectId, cause }),
