@@ -159,6 +159,14 @@ function expectInside(element: Element, viewport: Element) {
   expect(rect.bottom).toBeLessThanOrEqual(bounds.bottom + 1);
 }
 
+async function finishScroll(element: Element, input: () => Promise<void>) {
+  const finished = new Promise<void>((resolve) =>
+    element.addEventListener("scrollend", () => resolve(), { once: true }),
+  );
+  await input();
+  await finished;
+}
+
 it.each(
   [false, true].flatMap((annotated) =>
     [640, 240].flatMap((availableHeight) =>
@@ -198,19 +206,18 @@ it.each(
       expect(metadata.scrollHeight).toBeGreaterThan(metadata.clientHeight);
       expectInside(metadata, viewport);
       await userEvent.hover(page.elementLocator(metadata));
-      await commands.wheel(200);
+      await finishScroll(metadata, () => commands.wheel(200));
       await vi.waitFor(() => expect(metadata.scrollTop).toBeGreaterThan(0));
-      await act(() => {
-        metadata.scrollTop = 0;
-        metadata.focus();
-      });
+      await act(() => metadata.focus());
       expect(document.activeElement).toBe(metadata);
-      await userEvent.keyboard("{PageDown}");
-      await vi.waitFor(() => expect(metadata.scrollTop).toBeGreaterThan(0));
-      await userEvent.keyboard("{End}");
-      await vi.waitFor(() =>
-        expectInside(page.getByText(lastMetadataLabel, { exact: true }).element(), metadata),
-      );
+      const beforePageDown = metadata.scrollTop;
+      await finishScroll(metadata, () => userEvent.keyboard("{PageDown}"));
+      await vi.waitFor(() => expect(metadata.scrollTop).toBeGreaterThan(beforePageDown));
+      await finishScroll(metadata, () => userEvent.keyboard("{End}"));
+      await vi.waitFor(() => {
+        expect(document.activeElement).toBe(metadata);
+        expectInside(page.getByText(lastMetadataLabel, { exact: true }).element(), metadata);
+      });
     }
     await act(() => {
       metadata.scrollTop = metadata.scrollHeight;
