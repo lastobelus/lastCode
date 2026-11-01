@@ -1,6 +1,6 @@
 import * as HostProcess from "@t3tools/shared/HostProcess";
 // @effect-diagnostics nodeBuiltinImport:off - Process links, maps, and lstat are native safety boundaries.
-import * as NodeFSP from "node:fs/promises";
+import { promises as NodeFSP } from "@t3tools/shared/nativeFileSystem";
 import * as NodePath from "node:path";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeBuffer from "node:buffer";

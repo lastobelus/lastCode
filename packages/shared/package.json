@@ -570,6 +570,10 @@
     "./worktreeSuspensionPolicy": {
       "types": "./src/worktreeSuspensionPolicy.ts",
       "import": "./src/worktreeSuspensionPolicy.ts"
+    },
+    "./nativeFileSystem": {
+      "types": "./src/nativeFileSystem.ts",
+      "import": "./src/nativeFileSystem.ts"
     }
   },
   "scripts": {
