@@ -2916,7 +2916,9 @@ const make = Effect.gen(function* () {
                 creatorThreadId: scope.thread.threadId,
                 groupedUnderThreadId:
                   request.groupedUnderThreadId === undefined
-                    ? parent.thread.id
+                    ? parent.thread.lineage.sideChat === true
+                      ? null
+                      : parent.thread.id
                     : request.groupedUnderThreadId,
                 commandId,
                 threadId,

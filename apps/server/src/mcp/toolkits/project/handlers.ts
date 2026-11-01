@@ -314,7 +314,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           ...(caller === undefined ? {} : { creatorThreadId: caller.id }),
           groupedUnderThreadId:
             input.groupedUnderThreadId === undefined
-              ? caller?.projectId === projectId
+              ? caller?.projectId === projectId && caller.lineage.sideChat !== true
                 ? caller.id
                 : null
               : input.groupedUnderThreadId,

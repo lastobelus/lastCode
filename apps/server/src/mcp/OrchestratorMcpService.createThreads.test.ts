@@ -298,6 +298,25 @@ it.effect(
         assert.isTrue(retried[0]?.replayed);
         assert.equal(retried[0]?.sequence, released[0]?.sequence);
       }
+      const deleted = members[2]!;
+      yield* threads.dispatch({
+        type: "thread.delete",
+        commandId: CommandId.make("organization:delete-moved"),
+        threadId: deleted,
+      });
+      assert.isNull(yield* threads.getThreadShell(deleted));
+      const afterDelete = yield* threads.setThreadParents({ projectId, items });
+      assert.isTrue(
+        afterDelete.every(
+          (item, index) =>
+            item.status === "moved" && item.replayed && item.sequence === moved[index]!.sequence,
+        ),
+      );
+      const wrongProject = yield* threads.setThreadParents({
+        projectId: ProjectId.make("wrong-project"),
+        items,
+      });
+      assert.equal(wrongProject[0]?.status, "rejected");
     }).pipe(Effect.provide(layer)),
 );
 
@@ -464,5 +483,26 @@ it.effect("creates and replays an idle MCP thread without a prompt", () =>
     const projection = yield* threads.getThreadProjection(result.threadId);
     assert.isEmpty(projection.messages);
     assert.isEmpty(projection.runs);
+    const sink = yield* EventSink.EventSinkV2;
+    const parent = yield* threads.getThreadProjection(parentThreadId);
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make("side-chat-parent"),
+          type: "thread.metadata-updated",
+          threadId: parentThreadId,
+          occurredAt: parent.thread.updatedAt,
+          payload: {
+            ...parent.thread,
+            lineage: { ...parent.thread.lineage, relationshipToParent: "fork", sideChat: true },
+          },
+        },
+      ],
+    });
+    const fromSideChat = yield* service.createThreads(scope, {
+      clientRequestId: "side-chat-create",
+      threads: [{ title: "Visible notes" }],
+    });
+    assert.isNull(fromSideChat.threads[0]?.groupedUnderThreadId);
   }).pipe(Effect.provide(layer)),
 );

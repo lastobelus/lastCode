@@ -1,6 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  EnvironmentId,
   EventId,
   MessageId,
   OrchestrationV2AppThreadJson,
@@ -492,15 +493,25 @@ it.effect("does not infer historical creators and rejects invalid attribution or
       })
       .pipe(Effect.flip);
     assert.equal(childPlacement._tag, "OrchestratorDispatchError");
-    for (const [name, source, relationship, independent, allowed] of [
-      ["owned-app", "mcp", "subagent", false, false],
-      ["released-app", "mcp", "subagent", true, true],
-      ["native", "provider", "subagent", false, false],
-      ["released-native", "provider", "subagent", true, false],
-      ["fork", "mcp", "fork", false, true],
-      ["promoted-fork", "provider", "fork", true, true],
+    for (const [name, source, relationship, independent, allowed, remote, sideChat] of [
+      ["owned-app", "mcp", "subagent", false, false, false, false],
+      ["released-app", "mcp", "subagent", true, true, false, false],
+      ["native", "provider", "subagent", false, false, false, false],
+      ["released-native", "provider", "subagent", true, false, false, false],
+      ["fork", "mcp", "fork", false, true, false, false],
+      ["promoted-fork", "provider", "fork", true, true, false, false],
+      ["owned-remote", "mcp", null, false, false, true, false],
+      ["remote-fork", "mcp", "fork", false, true, true, false],
+      ["side-chat", "mcp", "fork", false, false, false, true],
     ] as const) {
       const id = ThreadId.make(`creator:eligibility:${name}`);
+      const lineage = {
+        parentThreadId: relationship === null ? null : historical,
+        relationshipToParent: relationship,
+        rootThreadId: relationship === null ? id : historical,
+        independent,
+        ...(sideChat ? { sideChat: true } : {}),
+      };
       yield* projections.apply({
         id: EventId.make(`creator:eligibility:${name}`),
         type: "thread.created",
@@ -510,12 +521,16 @@ it.effect("does not infer historical creators and rejects invalid attribution or
           ...thread,
           id,
           creationSource: source,
-          lineage: {
-            parentThreadId: historical,
-            relationshipToParent: relationship,
-            rootThreadId: historical,
-            independent,
-          },
+          ...(remote
+            ? {
+                delegatedFrom: {
+                  environmentId: EnvironmentId.make("remote"),
+                  threadId: historical,
+                  title: "Remote parent",
+                },
+              }
+            : {}),
+          lineage,
         },
       });
       const result = yield* orchestrator
@@ -527,12 +542,7 @@ it.effect("does not infer historical creators and rejects invalid attribution or
         })
         .pipe(Effect.exit);
       assert.equal(result._tag, allowed ? "Success" : "Failure", name);
-      assert.deepEqual((yield* projections.getThread(id)).lineage, {
-        parentThreadId: historical,
-        relationshipToParent: relationship,
-        rootThreadId: historical,
-        independent,
-      });
+      assert.deepEqual((yield* projections.getThread(id)).lineage, lineage);
     }
     const ordinary = ThreadId.make("creator:destination-check");
     yield* orchestrator.dispatch(create(ordinary, project));
@@ -545,17 +555,34 @@ it.effect("does not infer historical creators and rejects invalid attribution or
     for (const [id, parent] of [
       [historical, child],
       [ordinary, ThreadId.make("creator:eligibility:native")],
+      [ordinary, ThreadId.make("creator:eligibility:side-chat")],
     ] as const) {
       const rejected = yield* orchestrator
         .dispatch({
           type: "thread.metadata.update",
-          commandId: CommandId.make(`creator:invalid-destination:${id}`),
+          commandId: CommandId.make(`creator:invalid-destination:${id}:${parent}`),
           threadId: id,
           groupedUnderThreadId: parent,
         })
         .pipe(Effect.flip);
       assert.equal(rejected._tag, "OrchestratorDispatchError");
     }
+    const sideChatChild = ThreadId.make("creator:side-chat-child");
+    yield* createOrdinary(sideChatChild, ThreadId.make("creator:eligibility:side-chat"), project);
+    assert.isNull((yield* projections.getThread(sideChatChild)).groupedUnderThreadId);
+    const remoteCreation = yield* orchestrator
+      .dispatch({
+        ...create(ThreadId.make("creator:grouped-remote"), project),
+        linkOrigin: { sessionId: "remote-link", label: "Remote", access: "auto" },
+        delegatedFrom: {
+          environmentId: EnvironmentId.make("remote"),
+          threadId: historical,
+          title: "Remote parent",
+        },
+        groupedUnderThreadId: historical,
+      })
+      .pipe(Effect.exit);
+    assert.equal(remoteCreation._tag, "Failure");
   }).pipe(Effect.provide(testLayer)),
 );
 

@@ -3248,6 +3248,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         parent.archivedAt !== null ||
         parent.deletedAt !== null ||
         parent.archivePending != null ||
+        parent.lineage.sideChat === true ||
         isProviderNativeSubagentThread(parent)
       )
         return yield* new OrchestratorDispatchError({
@@ -3312,11 +3313,25 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         creator.archivePending?.status === "stopping"
           ? "independent"
           : "grouped";
-      if (creatorGrouping === "grouped" && creator.projectId === command.projectId)
+      if (
+        creatorGrouping === "grouped" &&
+        creator.projectId === command.projectId &&
+        creator.lineage.sideChat !== true
+      )
         defaultParentId = creatorThreadId;
     }
     const groupedUnderThreadId =
       command.groupedUnderThreadId === undefined ? defaultParentId : command.groupedUnderThreadId;
+    if (
+      command.linkOrigin !== undefined &&
+      command.delegatedFrom !== undefined &&
+      groupedUnderThreadId !== null
+    )
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "This thread cannot move: it is still owned by a delegated task.",
+      });
     yield* validateThreadPlacement(command, command.projectId, groupedUnderThreadId);
     const now = yield* DateTime.now;
     const emitEvent = emit(events, command);
@@ -3880,6 +3895,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (
         isOwnedSubagentThread(thread) ||
         isProviderNativeSubagentThread(thread) ||
+        thread.lineage.sideChat === true ||
+        (thread.delegatedFrom !== undefined &&
+          thread.lineage.relationshipToParent !== "fork" &&
+          thread.lineage.independent !== true) ||
         (thread.archivedAt !== null && command.groupedUnderThreadId !== null) ||
         (thread.archivePending != null && !isThreadPlacementReleaseCommand(command))
       )
@@ -3887,7 +3906,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           commandId: command.commandId,
           commandType: command.type,
           cause:
-            "This thread cannot move: it is still owned by a delegated task, is provider-native, is being archived, or is archived (archived threads can only move to top level). Moving never transfers task ownership.",
+            "This thread cannot move: it is still owned by a delegated task, is provider-native, is a side chat, is being archived, or is archived (archived threads can only move to top level). Moving never transfers task ownership.",
         });
       const parentId =
         command.groupedUnderThreadId !== undefined

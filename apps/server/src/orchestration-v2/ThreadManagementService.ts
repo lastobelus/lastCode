@@ -1183,12 +1183,15 @@ const make = Effect.gen(function* () {
         continue;
       }
       const result = yield* Effect.gen(function* () {
-        const shell = yield* orchestrator.getThreadShell(item.threadId);
-        if (shell === null || shell.projectId !== input.projectId)
-          return yield* new ThreadManagementThreadNotFoundError({
-            projectId: input.projectId,
-            threadId: item.threadId,
-          });
+        const receipt = yield* receipts.getByCommandId(item.commandId);
+        if (Option.isNone(receipt) || receipt.value.status !== "accepted") {
+          const shell = yield* orchestrator.getThreadShell(item.threadId);
+          if (shell === null || shell.projectId !== input.projectId)
+            return yield* new ThreadManagementThreadNotFoundError({
+              projectId: input.projectId,
+              threadId: item.threadId,
+            });
+        }
         const dispatched = yield* dispatchAccepted({
           type: "thread.metadata.update",
           ...item,
@@ -1201,6 +1204,7 @@ const make = Effect.gen(function* () {
         )?.event;
         if (
           event?.type !== "thread.metadata-updated" ||
+          event.payload.projectId !== input.projectId ||
           event.previousGroupedUnderThreadId === undefined
         )
           return yield* new Orchestrator.OrchestratorDispatchError({
