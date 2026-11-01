@@ -612,9 +612,9 @@ it.effect.each(["run.interrupt", "thread.stop"] as const)(
     }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect(
-  "remote disposal stops nested work from terminal owned runs without stopping a later round",
-  () =>
+it.effect.each([false, true])(
+  "remote disposal stops terminal owned work without stopping a later round (later=%s)",
+  (laterRound) =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const projections = yield* ProjectionStore.ProjectionStoreV2;
@@ -664,9 +664,57 @@ it.effect(
         occurredAt: now,
         payload: { ...ownedRun, remoteDelegation: selector, status: "completed", completedAt: now },
       });
-      yield* send(threadId, "unrelated later run", "start_immediately");
-      const unrelated = yield* delegate(threadId, "unrelated nested task");
-      const before = yield* threadState(unrelated);
+      const providerTurnId = ProviderTurnId.make("turn:remote-owned-background");
+      yield* projections.apply({
+        id: EventId.make("remote-owned-provider-turn"),
+        type: "provider-turn.updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: providerTurnId,
+          providerThreadId: ownedRun.providerThreadId!,
+          nodeId: ownedRun.rootNodeId!,
+          runAttemptId: ownedRun.activeAttemptId!,
+          nativeTurnRef: null,
+          ordinal: 1,
+          status: "completed",
+          startedAt: now,
+          completedAt: now,
+        },
+      });
+      const backgroundId = TurnItemId.make("item:remote-owned-background");
+      yield* projections.apply({
+        id: EventId.make("remote-owned-background"),
+        type: "turn-item.updated",
+        threadId,
+        runId: ownedRun.id,
+        occurredAt: now,
+        payload: {
+          id: backgroundId,
+          threadId,
+          runId: ownedRun.id,
+          nodeId: ownedRun.rootNodeId,
+          providerThreadId: ownedRun.providerThreadId,
+          providerTurnId,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 10,
+          type: "command_execution",
+          status: "running",
+          title: "Owned background command",
+          input: "node job.js",
+          startedAt: now,
+          completedAt: null,
+          updatedAt: now,
+        },
+      });
+      const unrelated = laterRound
+        ? yield* Effect.gen(function* () {
+            yield* send(threadId, "unrelated later run", "start_immediately");
+            return yield* delegate(threadId, "unrelated nested task");
+          })
+        : undefined;
+      const before = unrelated === undefined ? undefined : yield* threadState(unrelated);
       const commandId = CommandId.make("dispose-remote-nested");
       yield* orchestrator.dispatch({
         type: "remote_delegation.dispose",
@@ -686,7 +734,18 @@ it.effect(
       yield* threads.stopDelegatedTasks({ threadId, commandId, taskIds: request.taskIds! });
       assert.deepEqual((yield* threadState(child)).runs, ["interrupted"]);
       assert.deepEqual((yield* threadState(grandchild)).runs, ["interrupted"]);
-      assert.deepEqual(yield* threadState(unrelated), before);
+      if (unrelated !== undefined) assert.deepEqual(yield* threadState(unrelated), before);
+      const stopped = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(
+        stopped.turnItems.find((item) => item.id === backgroundId)?.status,
+        laterRound ? "running" : "interrupted",
+      );
+      assert.equal(
+        stopped.turnItems.some(
+          (item) => item.type === "run_interrupt_request" && item.runId === ownedRun.id,
+        ),
+        !laterRound,
+      );
     }).pipe(Effect.provide(layerTest)),
 );
 

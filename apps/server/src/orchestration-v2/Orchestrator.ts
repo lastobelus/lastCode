@@ -9769,10 +9769,36 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
       // Disposal is durable before invoking the ordinary per-run interrupt effects. Foreign task IDs never enter local task lookup.
       if (command.type === "remote_delegation.dispose") {
+        const latestRun = projection.runs.findLast((run) => run.status !== "queued");
+        let backgroundRunId: RunId | undefined;
+        if (
+          latestRun !== undefined &&
+          sameRemoteDelegation(latestRun.remoteDelegation, selector) &&
+          !isActiveRun(latestRun)
+        ) {
+          const background = yield* projectionStore
+            .getThreadRecords(thread.id, ["turnItems"], {
+              turnItemTypes: ["command_execution", "dynamic_tool", "subagent"],
+              turnItemStatuses: ["pending", "running", "waiting"],
+            })
+            .pipe(mapDispatchError(command));
+          if (
+            derivePendingBackgroundWork({
+              latestRun,
+              providerThreads: projection.providerThreads,
+              turnItems: background.turnItems.filter(
+                (item) => item.type !== "subagent" || item.origin !== "app_owned",
+              ),
+              activeProviderThreadId: projection.thread.activeProviderThreadId,
+              runs: projection.runs,
+            }).length > 0
+          )
+            backgroundRunId = latestRun.id;
+        }
         for (const run of projection.runs.filter(
           (run) =>
             sameRemoteDelegation(run.remoteDelegation, selector) &&
-            (isActiveRun(run) || run.status === "queued"),
+            (isActiveRun(run) || run.status === "queued" || run.id === backgroundRunId),
         )) {
           if (run.status === "queued") {
             yield* dispatchQueuedRunCancel(
