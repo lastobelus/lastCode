@@ -4792,6 +4792,44 @@ it.effect.each([
   ).pipe(Effect.provide(layer)),
 );
 
+it.live("maps Cmd+Backspace without changing key events or Linux Ctrl+Backspace", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { browser, tabId } = yield* ready;
+      const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
+      yield* viewer.input({ type: "takeControl" });
+      const session = contexts[0]!.sessions.at(-1)!;
+      session.send.mockClear();
+      for (const modifiers of [4, 2, 0, 5, 6]) {
+        for (const action of ["down", "up"] as const) {
+          yield* viewer.input({
+            type: "key",
+            action,
+            key: "Backspace",
+            code: "Backspace",
+            keyCode: 8,
+            modifiers,
+          });
+        }
+      }
+      const keys = session.send.mock.calls.flatMap(([method, params]) =>
+        method === "Input.dispatchKeyEvent" ? [params] : [],
+      );
+      expect(keys).toHaveLength(10);
+      expect(keys[0]).toEqual({
+        type: "rawKeyDown",
+        key: "Backspace",
+        code: "Backspace",
+        windowsVirtualKeyCode: 8,
+        modifiers: 4,
+        commands: ["deleteToBeginningOfLine"],
+      });
+      expect(keys[1]).toEqual({ type: "keyUp", key: "Backspace", code: "Backspace", modifiers: 4 });
+      for (const key of keys.slice(2)) expect(key).not.toHaveProperty("commands");
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live("only the controlling viewer's copy and cut keys reach its clipboard", () =>
   Effect.scoped(
     Effect.gen(function* () {
