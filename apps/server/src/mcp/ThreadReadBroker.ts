@@ -8,6 +8,7 @@ import {
   type ThreadReadRequest,
   type ThreadReadResponse,
   type ThreadReadFailureReason,
+  type OrchestrationV2Run,
 } from "@t3tools/contracts";
 import type * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
@@ -73,6 +74,21 @@ const unavailable = () =>
 
 const bindingIdleMillis = 7 * 24 * 60 * 60 * 1000;
 const maxBindings = 10_000;
+
+// An Action wake is a new run, not a new client grant; follow only its recorded source.
+const actionContinuationSource = (
+  runs: ReadonlyArray<OrchestrationV2Run>,
+  run: OrchestrationV2Run,
+) =>
+  runs.find((source) =>
+    source.actionObligations?.some(
+      (obligation) =>
+        obligation.state === "transferred" &&
+        obligation.owner.sourceRunId === source.id &&
+        obligation.continuationRunId === run.id &&
+        obligation.messageId === run.userMessageId,
+    ),
+  );
 
 const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
@@ -194,6 +210,10 @@ const make = Effect.gen(function* () {
     if (latest !== undefined) {
       return { sessionId: yield* bindingSession(threadId, latest.authorizationId) };
     }
+    const actionSource = actionContinuationSource(source.runs, run);
+    if (actionSource !== undefined) {
+      return yield* referenceSession(threadId, actionSource.id, input, visited, before);
+    }
     const spawn = source.contextTransfers.find(
       (transfer) => transfer.type === "subagent_spawn" && transfer.targetRunId === runId,
     );
@@ -220,6 +240,10 @@ const make = Effect.gen(function* () {
     const source = yield* threads.getThreadRecords(threadId, ["runs", "contextTransfers"]);
     const run = source.runs.find((candidate) => candidate.id === runId);
     if (run === undefined) return undefined;
+    const actionSource = actionContinuationSource(source.runs, run);
+    if (actionSource !== undefined) {
+      return yield* runSession(threadId, actionSource.id, visited);
+    }
     const sessionId = yield* bindingSession(threadId, run.userMessageId);
     if (sessionId !== undefined) return sessionId;
     const spawn = source.contextTransfers.find(
