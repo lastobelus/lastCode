@@ -15971,13 +15971,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: "Restore the parent thread to reopen this family",
         });
     }
-    let releaseOwnership = false;
+    let restoreAsRoot = false;
     if (cohort !== undefined && cohort !== null && cohort.threadId !== root.id) {
       const parent = yield* projectionStore
         .getThreadShell(cohort.threadId)
         .pipe(mapDispatchError(command));
-      releaseOwnership = parent === null || parent.deletedAt !== null;
-      if (!releaseOwnership && parent?.archivedAt != null)
+      // A detached interactive branch restores by current placement, not its old archive owner.
+      restoreAsRoot =
+        parent === null ||
+        parent.deletedAt !== null ||
+        (familyParentId === null && !isOwnedSubagentThread(root));
+      if (!restoreAsRoot && parent?.archivedAt != null)
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
@@ -16010,9 +16014,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
     }
-    if (cohort == null || (!releaseOwnership && cohort.threadId !== root.id)) return;
+    if (cohort == null || (!restoreAsRoot && cohort.threadId !== root.id)) return;
     const shells = yield* archiveFamilyShells(command);
-    const survivingBranch = releaseOwnership
+    const survivingBranch = restoreAsRoot
       ? new Set(
           getOwnedThreadFamily(
             shells
@@ -16026,7 +16030,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ).children.map((thread) => thread.id),
         )
       : null;
-    if (releaseOwnership) {
+    if (restoreAsRoot) {
       const restored = (yield* getProjectionWithPendingEvents(root.id, events)).thread;
       yield* emit(
         events,
@@ -16040,7 +16044,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           groupedUnderThreadId: null,
           ...(restored.creatorGrouping === "grouped"
             ? { creatorGrouping: "independent" as const }
-            : { lineage: { ...restored.lineage, independent: true } }),
+            : {}),
+          ...(isOwnedSubagentThread(restored)
+            ? { lineage: { ...restored.lineage, independent: true } }
+            : {}),
           pinnedAt: null,
           pinOrderKey: null,
           activeOrderKey: null,

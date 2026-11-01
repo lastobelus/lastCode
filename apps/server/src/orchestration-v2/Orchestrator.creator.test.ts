@@ -287,6 +287,89 @@ it.effect(
     }).pipe(Effect.provide(testLayer)),
 );
 
+it.effect.each([
+  ["ordinary", "detach"],
+  ["ordinary", "delete-owner"],
+  ["attributed", "delete-owner"],
+  ["fork", "delete-owner"],
+] as const)(
+  "restores an archived %s subtree after %s without changing execution lineage",
+  ([kind, action]) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const project = ProjectId.make("restore-placement:project");
+      const owner = ThreadId.make("restore-placement:owner");
+      const child = ThreadId.make("restore-placement:child");
+      const stage = ThreadId.make("restore-placement:stage");
+      yield* orchestrator.dispatch(create(owner, project));
+      if (kind === "attributed") yield* createOrdinary(child, owner, project);
+      else yield* orchestrator.dispatch({ ...create(child, project), groupedUnderThreadId: owner });
+      if (kind === "fork") {
+        const thread = yield* store.getThread(child);
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("restore-placement:fork"),
+              type: "thread.metadata-updated",
+              threadId: child,
+              occurredAt: thread.updatedAt,
+              payload: {
+                ...thread,
+                lineage: {
+                  parentThreadId: owner,
+                  relationshipToParent: "fork",
+                  rootThreadId: owner,
+                },
+              },
+            },
+          ],
+        });
+      }
+      yield* orchestrator.dispatch({ ...create(stage, project), groupedUnderThreadId: child });
+      const before = yield* store.getThread(child);
+      yield* orchestrator.dispatch({
+        type: "thread.archive",
+        commandId: CommandId.make("restore-placement:archive"),
+        threadId: owner,
+        childDisposition: "archive_if_idle",
+        expectedChildThreadIds: [child, stage],
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.archive.complete",
+        commandId: CommandId.make("restore-placement:archive-complete"),
+        threadId: owner,
+        requestId: CommandId.make("restore-placement:archive"),
+      });
+      assert.isNotNull((yield* store.getThread(child)).archivedAt);
+      if (action === "detach")
+        yield* orchestrator.dispatch({
+          type: "thread.metadata.update",
+          commandId: CommandId.make("restore-placement:detach"),
+          threadId: child,
+          groupedUnderThreadId: null,
+        });
+      else
+        yield* orchestrator.dispatch({
+          type: "thread.delete",
+          commandId: CommandId.make("restore-placement:delete"),
+          threadId: owner,
+        });
+      yield* orchestrator.dispatch({
+        type: "thread.unarchive",
+        commandId: CommandId.make("restore-placement:restore"),
+        threadId: child,
+      });
+      const restored = yield* store.getThread(child);
+      assert.isNull(restored.archivedAt);
+      assert.isNull(restored.groupedUnderThreadId);
+      assert.deepEqual(restored.lineage, before.lineage);
+      assert.isNull((yield* store.getThread(stage)).archivedAt);
+      if (action === "detach") assert.isNotNull((yield* store.getThread(owner)).archivedAt);
+    }).pipe(Effect.provide(testLayer)),
+);
+
 it.effect(
   "serializes inverse organization moves and rejects unavailable or cross-project destinations",
   () =>
