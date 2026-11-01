@@ -17236,6 +17236,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 !effectOwners.has(threadId) &&
                 !otherMutationOwners.has(threadId);
               if (
+                command.type === "thread.delete" &&
+                thread.archivePending?.status === "failed" &&
+                !releasesPlacementOnly
+              )
+                return yield* new OrchestratorDispatchError({
+                  commandId: command.commandId,
+                  commandType: command.type,
+                  cause: "Resolve the failed archive before deleting this thread.",
+                });
+              if (
                 command.type !== "thread.archive.complete" &&
                 thread.archivePending?.status === "stopping" &&
                 !releasesPlacementOnly

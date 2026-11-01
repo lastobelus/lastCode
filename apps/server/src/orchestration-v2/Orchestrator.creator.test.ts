@@ -422,6 +422,71 @@ it.effect("requires dismissing a failed family archive before detaching its subt
   }).pipe(Effect.provide(testLayer)),
 );
 
+it.effect.each(["intermediate", "owner", "outside"] as const)(
+  "keeps a failed archive dismissible when deleting its %s parent",
+  (target) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const project = ProjectId.make("failed-delete:project");
+      const outside = ThreadId.make("failed-delete:outside");
+      const owner = ThreadId.make("failed-delete:owner");
+      const child = ThreadId.make("failed-delete:child");
+      const stage = ThreadId.make("failed-delete:stage");
+      yield* orchestrator.dispatch(create(outside, project));
+      yield* orchestrator.dispatch({ ...create(owner, project), groupedUnderThreadId: outside });
+      yield* orchestrator.dispatch({ ...create(child, project), groupedUnderThreadId: owner });
+      yield* orchestrator.dispatch({ ...create(stage, project), groupedUnderThreadId: child });
+      const requestId = CommandId.make("failed-delete:archive");
+      yield* orchestrator.dispatch({
+        type: "thread.archive",
+        commandId: requestId,
+        threadId: owner,
+        childDisposition: "archive_if_idle",
+        expectedChildThreadIds: [child, stage],
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.archive.fail",
+        commandId: CommandId.make("failed-delete:fail"),
+        threadId: owner,
+        requestId,
+        error: "Test archive failure",
+      });
+      const deletion = yield* orchestrator
+        .dispatch({
+          type: "thread.delete",
+          commandId: CommandId.make("failed-delete:delete"),
+          threadId: target === "outside" ? outside : target === "owner" ? owner : child,
+        })
+        .pipe(Effect.exit);
+      assert.equal(deletion._tag, target === "outside" ? "Success" : "Failure");
+      for (const id of [owner, child, stage]) {
+        const thread = yield* store.getThread(id);
+        assert.isNull(thread.deletedAt);
+        assert.equal(thread.archivePending?.threadId, owner);
+      }
+      assert.equal((yield* store.getThread(child)).groupedUnderThreadId, owner);
+      assert.equal((yield* store.getThread(stage)).groupedUnderThreadId, child);
+      if (target === "outside") assert.isNull((yield* store.getThread(owner)).groupedUnderThreadId);
+      yield* orchestrator.dispatch({
+        type: "thread.unarchive",
+        commandId: CommandId.make("failed-delete:dismiss"),
+        threadId: owner,
+        expectedArchiveCommandId: requestId,
+      });
+      for (const id of [owner, child, stage])
+        assert.isNull((yield* store.getThread(id)).archivePending);
+      yield* orchestrator.dispatch({
+        type: "thread.delete",
+        commandId: CommandId.make("failed-delete:delete-after-dismiss"),
+        threadId: child,
+      });
+      assert.isNotNull((yield* store.getThread(child)).deletedAt);
+      assert.isNull((yield* store.getThread(stage)).groupedUnderThreadId);
+      assert.isNull((yield* store.getThread(stage)).archivePending);
+    }).pipe(Effect.provide(testLayer)),
+);
+
 it.effect(
   "serializes inverse organization moves and rejects unavailable or cross-project destinations",
   () =>
