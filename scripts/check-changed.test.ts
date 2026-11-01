@@ -17,7 +17,7 @@ import * as TestClock from "effect/testing/TestClock";
 import {
   comparisonBase,
   defaultConcurrency,
-  docReaderTests,
+  crossFileTests,
   gitLines,
   runSteps,
   type Step,
@@ -40,10 +40,24 @@ describe("check:changed", () => {
     assert.isTrue(
       decide(["docs/user/t3-connect-troubleshooting.md"], packages, false).outputs.test_server,
     );
-    assert.deepStrictEqual(docReaderTests(["docs/user/t3-connect-troubleshooting.md"]), [
+    assert.deepStrictEqual(crossFileTests(["docs/user/t3-connect-troubleshooting.md"]), [
       "apps/server/src/cloud/ConnectReachability.test.ts",
     ]);
     assert.deepStrictEqual(decide(["docs/user/install.md"], packages, false).affected, []);
+  });
+
+  it("selects checkpoint fixture tests for shared build ownership dependencies", () => {
+    const expected = [
+      "scripts/lastcode-checkpoint-lifecycle.test.ts",
+      "scripts/lastcode-checkpoint-publication.test.ts",
+    ];
+    for (const file of [
+      "packages/shared/src/generatedBuildOwnership.ts",
+      "packages/shared/src/nativeFileSystem.ts",
+    ]) {
+      assert.deepStrictEqual(crossFileTests([file]), expected);
+    }
+    assert.deepStrictEqual(crossFileTests(["packages/shared/src/String.ts"]), []);
   });
 
   it.effect(
