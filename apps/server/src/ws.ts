@@ -2805,6 +2805,7 @@ const layerCoreWsRpc = (
         [WS_METHODS.peerLinksList]: (_input) =>
           peerLinks.list.pipe(Effect.map((links) => ({ links }))),
         [WS_METHODS.peerLinksLink]: (input) => peerLinks.link(input),
+        [WS_METHODS.peerLinksPreflight]: (input) => peerLinks.preflight(input),
         [WS_METHODS.peerLinksUnlink]: ({ environmentId }) =>
           peerLinks.unlink(environmentId).pipe(Effect.map((removed) => ({ removed }))),
         [WS_METHODS.peerLinksAnswerRequest]: (input) =>
@@ -3931,7 +3932,7 @@ const makeRoutes: Effect.Effect<
         () =>
           Effect.raceFirst(
             rpcWebSocketHttpEffect,
-            sessions.awaitInvalidation(session.sessionId).pipe(
+            sessions.awaitInvalidation(session.sessionId, session.proofKeyThumbprint).pipe(
               Effect.as(HttpServerResponse.empty()),
               Effect.catchTags({
                 SessionCredentialVerificationError: (error) =>

@@ -44,6 +44,7 @@ it("allocates monotonically increasing build tags per checkpoint", () => {
 it("forces updater metadata generation for local LastCode builds", () => {
   expect(resolveBuildEnvironment("/opt/rust/bin/cargo", { PATH: "/usr/bin" })).toMatchObject({
     PATH: "/opt/rust/bin:/usr/bin",
+    LASTCODE_PUBLIC_CONNECT_DEFAULTS: "1",
     T3CODE_DESKTOP_UPDATE_REPOSITORY: "lastobelus/lastCode",
   });
   expect(
@@ -51,4 +52,12 @@ it("forces updater metadata generation for local LastCode builds", () => {
       LASTCODE_GITHUB_REPOSITORY: "example/fork",
     }).T3CODE_DESKTOP_UPDATE_REPOSITORY,
   ).toBe("example/fork");
+});
+
+it("preserves an explicit opt-out of production Connect defaults", () => {
+  expect(
+    resolveBuildEnvironment("/opt/rust/bin/cargo", {
+      LASTCODE_PUBLIC_CONNECT_DEFAULTS: "0",
+    }).LASTCODE_PUBLIC_CONNECT_DEFAULTS,
+  ).toBe("0");
 });

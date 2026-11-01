@@ -27,6 +27,8 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import * as PeerForwarding from "../peer/PeerForwarding.ts";
+import * as PeerLinks from "../peer/PeerLinks.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
@@ -39,6 +41,8 @@ import { liveThreadShell } from "./McpToolAccess.testkit.ts";
 import { actionResumeStatus, actionResumeSummary } from "@t3tools/shared/actionResume";
 
 const layerOrchestratorServiceBase = OrchestratorMcpService.layer.pipe(
+  Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
+  Layer.provide(Layer.mock(PeerLinks.PeerLinks)({ get: () => Effect.succeedNone })),
   Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
   Layer.provide(ThreadReadBroker.layer),
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
@@ -529,6 +533,23 @@ it("readThread and sendToThread reach threads in other projects", async () => {
             updatedAt: now,
           },
         },
+        {
+          position: 1,
+          visibility: "local",
+          sourceThreadId: threadId,
+          sourceItemId: "failed-link",
+          item: {
+            id: "failed-link",
+            type: "link_request",
+            status: "failed",
+            title: "Link a machine",
+            label: "Box",
+            reason: "Inspect Box",
+            linkStatus: "failed",
+            failure: "Workstation could not reach Box at its loopback address.",
+            updatedAt: now,
+          },
+        },
       ],
       runtimeRequests: [],
       messages: [],
@@ -568,7 +589,7 @@ it("readThread and sendToThread reach threads in other projects", async () => {
           getTimelinePage: (threadId) =>
             Effect.succeed({
               items: foreignProjection(threadId).visibleTurnItems,
-              totalItems: 1,
+              totalItems: 2,
               hasMore: false,
             }),
           getProjectThreadRecords: (input) =>
@@ -632,7 +653,10 @@ it("readThread and sendToThread reach threads in other projects", async () => {
     const foreign = yield* service.readThread(makeScope(), { threadId: foreignThreadId });
     expect(foreign.thread.threadId).toBe(foreignThreadId);
     expect(foreign.thread.projectId).toBe(foreignProjectId);
-    expect(foreign.items.map((item) => item.text)).toEqual(["Foreign thread said hello"]);
+    expect(foreign.items.map((item) => item.text)).toEqual([
+      "Foreign thread said hello",
+      "Could not link Box: Workstation could not reach Box at its loopback address.",
+    ]);
 
     let unrelatedForwarded = 0;
     yield* (yield* broker.connect("other-client-session")).pipe(
@@ -658,7 +682,12 @@ it("readThread and sendToThread reach threads in other projects", async () => {
         link: "[Remote](t3-thread://v2/remote-read-environment/remote-read-environment/thread-remote-read-example)",
       },
     };
-    const remoteInput = { threadId: remoteThreadId, afterPosition: 5, maxCharsPerItem: 30 };
+    const remoteInput = {
+      environmentId: remoteEnvironmentId,
+      threadId: remoteThreadId,
+      afterPosition: 5,
+      maxCharsPerItem: 30,
+    };
     let forwarded = 0;
     yield* (yield* broker.connect("client-session")).pipe(
       Stream.runForEach((request) => {
