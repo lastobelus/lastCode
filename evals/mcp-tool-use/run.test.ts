@@ -11,6 +11,7 @@ import { projectComposerContextForProvider } from "@t3tools/shared/composerConte
 import {
   buildBase,
   buildMessages,
+  answerToolCall,
   failedEarly,
   executeCodex,
   gradeSample,
@@ -320,6 +321,62 @@ it("lists link tools only while a case turns the beta on, and sends chips as T3 
   );
   assert.include(prompt?.text, "environmentId: environment-vps");
 });
+
+it.effect.each([
+  ["MENTION-THREAD-01", 80],
+  ["MENTION-THREAD-02", 64],
+] as const)("returns distinct page and item replies for %s", ([id, textOffset]) =>
+  Effect.gen(function* () {
+    const testCase = NodeFS.readFileSync(
+      new URL("./cases/universal-thread-mentions.ndjson", import.meta.url),
+      "utf8",
+    )
+      .trim()
+      .split("\n")
+      .map((line) => decodeMcpToolUseCase(JSON.parse(line)))
+      .find((testCase) => testCase.id === id)!;
+    const base = buildBase(template, { model: "claude-sonnet-5-5", keepUserInstructions: false });
+    const sample = makeSample(testCase, base);
+    sample.tools.push(...base.t3);
+    const config = {
+      apiKey: "",
+      model: "claude-sonnet-5-5",
+      effort: "high",
+      maxSteps: 1,
+      shellModel: "claude-haiku-5-5",
+    } as const;
+    const read = (input: Record<string, unknown>) =>
+      answerToolCall(sample, config, {
+        type: "tool_use",
+        id: "read",
+        name: "mcp__t3-code__t3_thread_read",
+        input: {
+          environmentId: "environment-remote-01",
+          threadId: "thread-review-api",
+          via: "client",
+          limit: 20,
+          ...input,
+        },
+      }).pipe(
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make(() => Effect.die("Fixture replies must not call a model")),
+        ),
+        Effect.map((result) => JSON.parse(String(result.content))),
+      );
+    const page = yield* read({ afterPosition: 12 });
+    const chunk = yield* read({ itemId: "item-review-11", textOffset });
+    assert.equal(page.items[0].itemId, "item-review-13");
+    assert.equal(chunk.items[0].itemId, "item-review-11");
+    assert.include(chunk.items[0].text, "retry race");
+    for (const result of [page, chunk]) {
+      assert.equal(result.thread.environmentId, "environment-remote-01");
+      assert.include(result.thread.link, "/environment-remote-01/");
+      assert.equal(result.readVia, "client");
+      assert.isFalse(result.hasMore);
+    }
+  }),
+);
 
 it("replays earlier capability results with the model under test as the caller", () => {
   const base = buildBase(template, { model: "claude-opus-5-5", keepUserInstructions: false });

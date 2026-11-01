@@ -127,7 +127,6 @@ import {
 import { isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
-import * as PeerLinks from "../peer/PeerLinks.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
@@ -1030,7 +1029,6 @@ const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const threadReadBroker = yield* ThreadReadBroker.ThreadReadBroker;
   const peerForwarding = yield* PeerForwarding.PeerForwarding;
-  const peerLinks = yield* PeerLinks.PeerLinks;
   const actionResume = yield* ActionResume.ActionResume;
   const threadManagement = yield* ThreadManagementService.ThreadManagementService;
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
@@ -3064,25 +3062,36 @@ const make = Effect.gen(function* () {
     }),
     readThreadLocal,
     readThread: Effect.fn("OrchestratorMcpService.readThread")(function* (scope, input) {
+      if (input.via === "client" && input.environmentId === undefined) {
+        return yield* failure("invalid_request", "A client-routed read requires environmentId.");
+      }
       // Validate the caller before allowing a miss to leave this environment.
       const { parent } = yield* loadCaller(scope, false);
+      if (input.environmentId === scope.environmentId) return yield* readThreadLocal(scope, input);
+      const clientAuthority =
+        parent !== undefined &&
+        scope.client === undefined &&
+        parent.thread.linkOrigin === undefined;
+      if (input.via === "client" && !clientAuthority) {
+        return yield* new OrchestratorMcpFailure({
+          code: "capability_denied",
+          threadReadReason: "permission_denied",
+          message:
+            "This caller has no authority to read through the initiating client. Setting via does not grant that authority.",
+        });
+      }
+      if (input.via === "client" && parent !== undefined) {
+        return yield* threadReadBroker.read(parent.thread.id, callerRunId(parent), input);
+      }
       const remote = PeerForwarding.remoteTarget(scope, input.environmentId);
       if (remote !== undefined) {
-        const link = yield* peerLinks
-          .get(remote)
-          .pipe(Effect.mapError((error) => failure("orchestration_error", error.message)));
-        if (Option.isSome(link)) {
-          // Peer refusals are final; client authority must not bypass the link.
-          return yield* peerForwarding.readThread(scope, remote, input);
-        }
+        return yield* peerForwarding.readThread(scope, remote, input);
       }
       return yield* readThreadLocal(scope, input).pipe(
         Effect.catchIf(
           (error) => error.code === "thread_not_found",
-          // For unlinked targets, only a T3 thread's run carries client authority.
-          // OAuth clients and reads forwarded from a client stay in this environment.
           (error) =>
-            parent === undefined
+            !clientAuthority || parent === undefined || input.environmentId !== undefined
               ? Effect.fail(error)
               : threadReadBroker.read(parent.thread.id, callerRunId(parent), input),
         ),
@@ -3517,7 +3526,6 @@ export const layer: Layer.Layer<
   | ActionResume.ActionResume
   | ThreadReadBroker.ThreadReadBroker
   | PeerForwarding.PeerForwarding
-  | PeerLinks.PeerLinks
   | ThreadManagementService.ThreadManagementService
   | ThreadLaunchService.ThreadLaunchService
   | GitVcsDriver.GitVcsDriver

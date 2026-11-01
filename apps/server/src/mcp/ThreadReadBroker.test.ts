@@ -1,9 +1,13 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
+  ComposerContextId,
   MessageId,
+  NodeId,
+  RuntimeRequestId,
   ProjectId,
   ProviderInstanceId,
+  ProviderSessionId,
   RunId,
   ThreadId,
   TurnItemId,
@@ -11,8 +15,10 @@ import {
   type OrchestratorMcpThreadReadInput,
   type OrchestratorMcpThreadReadResult,
   type ThreadReadRequest,
+  type OrchestrationMessageContext,
 } from "@t3tools/contracts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -26,6 +32,7 @@ const threadId = ThreadId.make("thread-remote-example");
 const sourceThreadId = ThreadId.make("source-thread");
 const environmentId = EnvironmentId.make("remote-environment");
 const result: OrchestratorMcpThreadReadResult = {
+  readVia: "client",
   thread: {
     threadId,
     environmentId,
@@ -64,9 +71,16 @@ const result: OrchestratorMcpThreadReadResult = {
   hasMore: true,
 };
 
-type Run = { id: RunId; userMessageId: MessageId; status: string; ordinal: number };
+type Run = {
+  id: RunId;
+  userMessageId: MessageId;
+  status: string;
+  ordinal: number;
+  actionObligations?: OrchestrationV2ThreadProjection["runs"][number]["actionObligations"];
+};
 type Spawn = {
   type: "subagent_spawn";
+  createdAt?: DateTime.Utc;
   targetRunId: RunId;
   sourceThreadId: ThreadId;
   sourcePoint: { threadId: ThreadId; runId: RunId };
@@ -79,12 +93,38 @@ const sourceRunId = runId(MessageId.make("source-message"));
 const makeHarness = Effect.gen(function* () {
   const runs = new Map<ThreadId, Array<Run>>();
   const transfers = new Map<ThreadId, Array<Spawn>>();
+  const requests = new Map<ThreadId, OrchestrationV2ThreadProjection["runtimeRequests"]>();
+  const nodes = new Map<ThreadId, Array<{ id: string; runId: RunId }>>();
+  const messages = new Map<
+    ThreadId,
+    Array<{
+      id: MessageId;
+      text: string;
+      runId?: RunId;
+      context?: OrchestrationMessageContext;
+      threadReadContext?: {
+        authorizationId: MessageId;
+        capturedAt: number;
+      };
+    }>
+  >();
   const broker = yield* ThreadReadBroker.ThreadReadBroker.pipe(
     Effect.provide(
       ThreadReadBroker.layer.pipe(
         Layer.provide(NodeCrypto.layer),
         Layer.provide(
           Layer.mock(ThreadManagementService.ThreadManagementService)({
+            hasThreadReadAuthorization: (id, authorizationId) =>
+              Effect.sync(
+                () =>
+                  (runs.get(id) ?? []).some((run) => run.userMessageId === authorizationId) ||
+                  (requests.get(id) ?? []).some(
+                    (request) => request.threadReadContext?.authorizationId === authorizationId,
+                  ) ||
+                  (messages.get(id) ?? []).some(
+                    (message) => message.threadReadContext?.authorizationId === authorizationId,
+                  ),
+              ),
             getThreadRecords: (id) =>
               Effect.sync(
                 () =>
@@ -92,6 +132,9 @@ const makeHarness = Effect.gen(function* () {
                     thread: { id },
                     runs: runs.get(id) ?? [],
                     contextTransfers: transfers.get(id) ?? [],
+                    runtimeRequests: requests.get(id) ?? [],
+                    nodes: nodes.get(id) ?? [],
+                    messages: messages.get(id) ?? [],
                   }) as unknown as OrchestrationV2ThreadProjection,
               ),
           }),
@@ -111,6 +154,27 @@ const makeHarness = Effect.gen(function* () {
     });
     runs.set(thread, existing);
   };
+  const continueAction = (thread: ThreadId, source: RunId, actionRunId: string) => {
+    const messageId = MessageId.make(`action-resume:${actionRunId}:follow-up`);
+    start(thread, messageId);
+    const sourceRun = runs.get(thread)!.find((run) => run.id === source)!;
+    sourceRun.actionObligations = [
+      ...(sourceRun.actionObligations ?? []),
+      {
+        actionRunId,
+        messageId,
+        owner: {
+          parentEnvironmentId: EnvironmentId.make("parent-environment"),
+          parentThreadId: sourceThreadId,
+          taskId: NodeId.make(`task:${thread}`),
+          sourceRunId: source,
+        },
+        state: "transferred",
+        continuationRunId: runId(messageId),
+      },
+    ];
+    return runId(messageId);
+  };
   /** A client submits an input: bind it, then commit its run. */
   const send = (sessionId: string, thread: ThreadId, messageId: MessageId, status = "running") =>
     broker
@@ -121,7 +185,10 @@ const makeHarness = Effect.gen(function* () {
   /** Connects a client of `sessionId` that answers every forwarded request. */
   const answer = (
     sessionId: string,
-    reply: OrchestratorMcpThreadReadResult | null = result,
+    reply:
+      | OrchestratorMcpThreadReadResult
+      | null
+      | ((request: ThreadReadRequest) => OrchestratorMcpThreadReadResult | null) = result,
     unavailableEnvironmentIds: () => ReadonlyArray<EnvironmentId> = () => [],
   ) =>
     Effect.flatMap(broker.connect(sessionId), (requests) =>
@@ -131,7 +198,7 @@ const makeHarness = Effect.gen(function* () {
           return broker.respond(sessionId, {
             connectionId: request.connectionId,
             requestId: request.requestId,
-            result: reply,
+            result: typeof reply === "function" ? reply(request) : reply,
             unavailableEnvironmentIds: unavailableEnvironmentIds(),
           });
         }),
@@ -146,14 +213,32 @@ const makeHarness = Effect.gen(function* () {
     )?.id;
   };
   /** The session a read acting from `run` of `source` reached, or the failure code. */
-  const readFrom = (source: ThreadId, run: RunId | undefined) =>
-    broker.read(source, run, { threadId }).pipe(
+  const readFrom = (
+    source: ThreadId,
+    run: RunId | undefined,
+    input: OrchestratorMcpThreadReadInput = { threadId },
+  ) =>
+    broker.read(source, run, input).pipe(
       Effect.map(() => answered.at(-1)),
       Effect.catch((error) => Effect.succeed(error.code)),
     );
   const reader = (source: ThreadId) => readFrom(source, callerRun(source));
   yield* send("client-session", sourceThreadId, MessageId.make("source-message"));
-  return { broker, runs, transfers, start, send, answer, callerRun, readFrom, reader };
+  return {
+    broker,
+    runs,
+    transfers,
+    requests,
+    nodes,
+    messages,
+    start,
+    continueAction,
+    send,
+    answer,
+    callerRun,
+    readFrom,
+    reader,
+  };
 });
 
 const respondTo = (
@@ -170,6 +255,376 @@ const respondTo = (
   });
 
 describe("ThreadReadBroker", () => {
+  it.effect(
+    "scopes question reference authority to the answering client across live and resumed runs",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const h = yield* makeHarness;
+          const authorizationId = MessageId.make("answer-context:answer-command");
+          const requestId = RuntimeRequestId.make("question-request");
+          const nodeId = NodeId.make("question-node");
+          const now = yield* DateTime.now;
+          yield* h.broker.forSession("answering-client").authorize(sourceThreadId, authorizationId);
+          h.requests.set(sourceThreadId, [
+            {
+              id: requestId,
+              nodeId,
+              providerTurnId: null,
+              nativeRequestRef: null,
+              kind: "user_input",
+              status: "resolved",
+              responseCapability: { type: "message" },
+              createdAt: now,
+              resolvedAt: now,
+              threadReadContext: {
+                authorizationId,
+                records: [
+                  {
+                    version: 1,
+                    contextId: ComposerContextId.make("answer-reference"),
+                    kind: "thread",
+                    label: "Reference",
+                    title: "Reference",
+                    environmentId,
+                    threadId,
+                  },
+                ],
+              },
+            },
+          ]);
+          h.nodes.set(sourceThreadId, [{ id: nodeId, runId: sourceRunId }]);
+          const otherEnvironment = EnvironmentId.make("other-environment");
+          yield* h.answer("client-session", (request) => ({
+            ...result,
+            thread: {
+              ...result.thread,
+              threadId: request.input.threadId,
+              environmentId: request.input.environmentId ?? otherEnvironment,
+            },
+          }));
+          yield* h.answer("answering-client");
+          const exact = { threadId, environmentId, via: "client" as const };
+          expect(yield* h.readFrom(sourceThreadId, sourceRunId, exact)).toBe("answering-client");
+          expect(
+            yield* h.readFrom(sourceThreadId, sourceRunId, {
+              threadId,
+              environmentId: otherEnvironment,
+              via: "client",
+            }),
+          ).toBe("client-session");
+          expect(
+            yield* h.readFrom(sourceThreadId, sourceRunId, {
+              threadId: ThreadId.make("unmentioned-thread"),
+              environmentId,
+              via: "client",
+            }),
+          ).toBe("client-session");
+          const earlyChild = ThreadId.make("child-before-answer");
+          const earlyMessage = MessageId.make("child-before-answer-message");
+          h.start(earlyChild, earlyMessage);
+          h.transfers.set(earlyChild, [
+            {
+              type: "subagent_spawn",
+              createdAt: now,
+              targetRunId: runId(earlyMessage),
+              sourceThreadId,
+              sourcePoint: { threadId: sourceThreadId, runId: sourceRunId },
+            },
+          ]);
+          expect(yield* h.readFrom(earlyChild, runId(earlyMessage), exact)).toBe("client-session");
+          yield* TestClock.adjust("1 millis");
+          const lateChild = ThreadId.make("child-after-answer");
+          const lateMessage = MessageId.make("child-after-answer-message");
+          h.start(lateChild, lateMessage);
+          h.transfers.set(lateChild, [
+            {
+              type: "subagent_spawn",
+              createdAt: yield* DateTime.now,
+              targetRunId: runId(lateMessage),
+              sourceThreadId,
+              sourcePoint: { threadId: sourceThreadId, runId: sourceRunId },
+            },
+          ]);
+          expect(yield* h.readFrom(lateChild, runId(lateMessage), exact)).toBe("answering-client");
+          const earlyContinuation = h.continueAction(
+            earlyChild,
+            runId(earlyMessage),
+            "early-child-action",
+          );
+          expect(yield* h.readFrom(earlyChild, earlyContinuation, exact)).toBe("client-session");
+          const firstContinuation = h.continueAction(
+            lateChild,
+            runId(lateMessage),
+            "late-child-action",
+          );
+          const continuation = h.continueAction(
+            lateChild,
+            firstContinuation,
+            "second-child-action",
+          );
+          expect(yield* h.readFrom(lateChild, continuation, exact)).toBe("answering-client");
+          const descendant = ThreadId.make("child-after-action");
+          const descendantMessage = MessageId.make("child-after-action-message");
+          h.start(descendant, descendantMessage);
+          h.transfers.set(descendant, [
+            {
+              type: "subagent_spawn",
+              createdAt: yield* DateTime.now,
+              targetRunId: runId(descendantMessage),
+              sourceThreadId: lateChild,
+              sourcePoint: { threadId: lateChild, runId: continuation },
+            },
+          ]);
+          expect(yield* h.readFrom(descendant, runId(descendantMessage), exact)).toBe(
+            "answering-client",
+          );
+          const answerMessageId = MessageId.make(`async-answer:${requestId}`);
+          h.start(sourceThreadId, answerMessageId);
+          const messageRequest = h.requests.get(sourceThreadId)![0]!;
+          h.requests.set(sourceThreadId, [
+            {
+              ...messageRequest,
+              responseCapability: {
+                type: "live",
+                providerSessionId: ProviderSessionId.make("live-provider"),
+              },
+            },
+          ]);
+          expect(yield* h.readFrom(sourceThreadId, runId(answerMessageId), exact)).toBe(
+            "environment_unavailable",
+          );
+          h.requests.set(sourceThreadId, [messageRequest]);
+          expect(yield* h.readFrom(sourceThreadId, runId(answerMessageId), exact)).toBe(
+            "answering-client",
+          );
+          expect(
+            yield* h.readFrom(sourceThreadId, runId(answerMessageId), {
+              threadId: ThreadId.make("unmentioned-thread"),
+              environmentId,
+              via: "client",
+            }),
+          ).toBe("environment_unavailable");
+          yield* TestClock.adjust("6 days");
+          expect(
+            yield* h.readFrom(sourceThreadId, sourceRunId, {
+              threadId,
+              environmentId: otherEnvironment,
+              via: "client",
+            }),
+          ).toBe("client-session");
+          yield* TestClock.adjust("2 days");
+          yield* h.broker.forSession("replay-client").authorize(sourceThreadId, authorizationId);
+          yield* h.answer("replay-client");
+          expect(yield* h.readFrom(sourceThreadId, runId(answerMessageId), exact)).toBe(
+            "environment_unavailable",
+          );
+          expect(yield* h.readFrom(sourceThreadId, sourceRunId, exact)).toBe(
+            "environment_unavailable",
+          );
+          expect(yield* h.readFrom(lateChild, runId(lateMessage), exact)).toBe(
+            "environment_unavailable",
+          );
+          expect(yield* h.readFrom(lateChild, continuation, exact)).toBe("environment_unavailable");
+          expect(yield* h.readFrom(descendant, runId(descendantMessage), exact)).toBe(
+            "environment_unavailable",
+          );
+          expect(
+            yield* h.readFrom(sourceThreadId, sourceRunId, {
+              threadId,
+              environmentId: otherEnvironment,
+              via: "client",
+            }),
+          ).toBe("client-session");
+        }),
+      ),
+  );
+
+  it.effect(
+    "scopes edited queued references to their editing client without replacing run authority",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const h = yield* makeHarness;
+          const messageId = MessageId.make("edited-queue-message");
+          const authorizationId = MessageId.make("queued-edit-context:edit-command");
+          yield* h.send("client-session", sourceThreadId, messageId, "queued");
+          yield* h.broker.forSession("editing-client").authorize(sourceThreadId, authorizationId);
+          const capturedAt = DateTime.toEpochMillis(yield* DateTime.now);
+          h.messages.set(sourceThreadId, [
+            {
+              id: messageId,
+              text: "[Reference](t3-context://v1/thread/edited-reference)",
+              context: {
+                version: 1,
+                records: [
+                  {
+                    version: 1,
+                    contextId: ComposerContextId.make("edited-reference"),
+                    kind: "thread",
+                    label: "Reference",
+                    title: "Reference",
+                    environmentId,
+                    threadId,
+                  },
+                ],
+              },
+              threadReadContext: { authorizationId, capturedAt },
+            },
+          ]);
+          yield* h.answer("editing-client");
+          yield* h.answer("client-session", (request) => ({
+            ...result,
+            thread: {
+              ...result.thread,
+              threadId: request.input.threadId,
+              environmentId: request.input.environmentId ?? environmentId,
+            },
+          }));
+          const exact = { threadId, environmentId, via: "client" as const };
+          expect(yield* h.readFrom(sourceThreadId, runId(messageId), exact)).toBe("editing-client");
+          const unrelated = { ...exact, threadId: ThreadId.make("unmentioned-reference") };
+          expect(yield* h.readFrom(sourceThreadId, runId(messageId), unrelated)).toBe(
+            "client-session",
+          );
+          expect(yield* h.readFrom(sourceThreadId, runId(messageId), { threadId })).toBe(
+            "client-session",
+          );
+          const childThread = ThreadId.make("edited-queue-child");
+          const childMessage = MessageId.make("edited-queue-child-message");
+          h.start(childThread, childMessage);
+          yield* TestClock.adjust("1 millis");
+          h.transfers.set(childThread, [
+            {
+              type: "subagent_spawn",
+              createdAt: yield* DateTime.now,
+              targetRunId: runId(childMessage),
+              sourceThreadId,
+              sourcePoint: { threadId: sourceThreadId, runId: runId(messageId) },
+            },
+          ]);
+          expect(yield* h.readFrom(childThread, runId(childMessage), exact)).toBe("editing-client");
+          yield* TestClock.adjust("6 days");
+          expect(yield* h.readFrom(sourceThreadId, runId(messageId), unrelated)).toBe(
+            "client-session",
+          );
+          yield* TestClock.adjust("2 days");
+          yield* h.broker.forSession("replay-client").authorize(sourceThreadId, authorizationId);
+          yield* h.answer("replay-client");
+          expect(yield* h.readFrom(sourceThreadId, runId(messageId), exact)).toBe(
+            "environment_unavailable",
+          );
+          expect(yield* h.readFrom(childThread, runId(childMessage), exact)).toBe(
+            "environment_unavailable",
+          );
+          h.messages.set(sourceThreadId, [{ id: messageId, text: "Reference removed" }]);
+          expect(yield* h.readFrom(sourceThreadId, runId(messageId), exact)).toBe("client-session");
+        }),
+      ),
+  );
+
+  it.effect("uses the sending client for exact references steered into an existing run", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* makeHarness;
+        const priorAuthorization = MessageId.make("answer-context:prior-question");
+        const questionNode = NodeId.make("prior-question-node");
+        const priorQuestion = {
+          id: RuntimeRequestId.make("prior-question"),
+          nodeId: questionNode,
+          providerTurnId: null,
+          nativeRequestRef: null,
+          kind: "user_input" as const,
+          status: "resolved" as const,
+          responseCapability: { type: "message" as const },
+          createdAt: yield* DateTime.now,
+          resolvedAt: yield* DateTime.now,
+          threadReadContext: {
+            authorizationId: priorAuthorization,
+            records: [
+              {
+                version: 1 as const,
+                contextId: ComposerContextId.make("question-reference"),
+                kind: "thread" as const,
+                title: "Reference",
+                label: "Reference",
+                environmentId,
+                threadId,
+              },
+            ],
+          },
+        };
+        yield* h.broker
+          .forSession("answering-client")
+          .authorize(sourceThreadId, priorAuthorization);
+        h.requests.set(sourceThreadId, [priorQuestion]);
+        h.nodes.set(sourceThreadId, [{ id: questionNode, runId: sourceRunId }]);
+        yield* h.answer("answering-client");
+        yield* TestClock.adjust("1 millis");
+        const messageId = MessageId.make("steered-reference-message");
+        yield* h.broker.forSession("steering-client").authorize(sourceThreadId, messageId);
+        h.messages.set(sourceThreadId, [
+          {
+            id: messageId,
+            runId: sourceRunId,
+            text: "[Reference](t3-context://v1/thread/steered-reference)",
+            context: {
+              version: 1,
+              records: [
+                {
+                  version: 1,
+                  contextId: ComposerContextId.make("steered-reference"),
+                  kind: "thread",
+                  label: "Reference",
+                  title: "Reference",
+                  environmentId,
+                  threadId,
+                },
+              ],
+            },
+            threadReadContext: {
+              authorizationId: messageId,
+              capturedAt: DateTime.toEpochMillis(yield* DateTime.now),
+            },
+          },
+        ]);
+        yield* h.answer("steering-client");
+        yield* h.answer("client-session", (request) => ({
+          ...result,
+          thread: {
+            ...result.thread,
+            threadId: request.input.threadId,
+            environmentId: request.input.environmentId ?? environmentId,
+          },
+        }));
+        expect(
+          yield* h.readFrom(sourceThreadId, sourceRunId, {
+            threadId,
+            environmentId,
+            via: "client",
+          }),
+        ).toBe("steering-client");
+        expect(
+          yield* h.readFrom(sourceThreadId, sourceRunId, {
+            threadId: ThreadId.make("unmentioned"),
+            environmentId,
+            via: "client",
+          }),
+        ).toBe("client-session");
+        expect(yield* h.readFrom(sourceThreadId, sourceRunId, { threadId })).toBe("client-session");
+        yield* TestClock.adjust("1 millis");
+        h.requests.set(sourceThreadId, [{ ...priorQuestion, resolvedAt: yield* DateTime.now }]);
+        expect(
+          yield* h.readFrom(sourceThreadId, sourceRunId, {
+            threadId,
+            environmentId,
+            via: "client",
+          }),
+        ).toBe("answering-client");
+      }),
+    ),
+  );
+
   it.effect("keeps running and queued inputs bound to their own authenticated clients", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -297,7 +752,18 @@ describe("ThreadReadBroker", () => {
     () =>
       Effect.scoped(
         Effect.gen(function* () {
-          const { broker, start, send, answer, callerRun, reader, transfers } = yield* makeHarness;
+          const {
+            broker,
+            start,
+            continueAction,
+            send,
+            answer,
+            callerRun,
+            readFrom,
+            reader,
+            transfers,
+            runs,
+          } = yield* makeHarness;
           const spawned = (child: ThreadId, parent: ThreadId, parentRunId: RunId) => {
             const message = MessageId.make(`${child}-message`);
             start(child, message);
@@ -317,6 +783,9 @@ describe("ThreadReadBroker", () => {
           yield* answer("client-session");
           yield* answer("other-session");
           expect(yield* reader(childThreadId)).toBe("client-session");
+          const originalRun = runs.get(childThreadId)![0]!;
+          const continuation = continueAction(childThreadId, originalRun.id, "delegated-action");
+          expect(yield* reader(childThreadId)).toBe("client-session");
 
           // Threads launched by the child inherit the same requester.
           const launchedThreadId = ThreadId.make("launched-thread");
@@ -327,12 +796,30 @@ describe("ThreadReadBroker", () => {
           );
           start(launchedThreadId, launched);
           expect(yield* reader(launchedThreadId)).toBe("client-session");
+          const obligation = originalRun.actionObligations![0]!;
+          for (const state of ["waiting", "disposed"] as const) {
+            originalRun.actionObligations = [{ ...obligation, state }];
+            expect(yield* readFrom(childThreadId, continuation)).toBe("environment_unavailable");
+          }
+          originalRun.actionObligations = [
+            { ...obligation, messageId: MessageId.make("unrelated-message") },
+          ];
+          expect(yield* readFrom(childThreadId, continuation)).toBe("environment_unavailable");
+          originalRun.actionObligations = [
+            {
+              ...obligation,
+              owner: { ...obligation.owner, sourceRunId: RunId.make("unrelated-run") },
+            },
+          ];
+          expect(yield* readFrom(childThreadId, continuation)).toBe("environment_unavailable");
+          originalRun.actionObligations = [obligation];
 
           const orphanThreadId = ThreadId.make("orphan-child");
           spawned(orphanThreadId, sourceThreadId, RunId.make("missing-run"));
           expect(yield* reader(orphanThreadId)).toBe("environment_unavailable");
           const cyclicThreadId = ThreadId.make("cyclic-child");
           spawned(cyclicThreadId, cyclicThreadId, runId(MessageId.make("cyclic-child-message")));
+          continueAction(cyclicThreadId, callerRun(cyclicThreadId)!, "cyclic-action");
           expect(yield* reader(cyclicThreadId)).toBe("environment_unavailable");
         }),
       ),
@@ -354,6 +841,7 @@ describe("ThreadReadBroker", () => {
         const input: OrchestratorMcpThreadReadInput = {
           threadId,
           environmentId,
+          via: "client",
           itemId: TurnItemId.make("example-item"),
           textOffset: 5000,
           afterPosition: 40,
@@ -447,8 +935,65 @@ describe("ThreadReadBroker", () => {
         expect(
           yield* respondTo(broker, "client-session", request, wrongEnvironment).pipe(Effect.flip),
         ).toMatchObject({ code: "invalid_request" });
+        expect(
+          yield* broker
+            .respond("client-session", {
+              connectionId: request.connectionId,
+              requestId: request.requestId,
+              result: null,
+              unavailableEnvironmentIds: [],
+              failure: {
+                environmentId: wrongEnvironment.thread.environmentId,
+                reason: "permission_denied",
+              },
+            })
+            .pipe(Effect.flip),
+        ).toMatchObject({ code: "invalid_request" });
         yield* respondTo(broker, "client-session", request);
         expect(yield* Fiber.join(reading)).toEqual(result);
+      }),
+    ),
+  );
+
+  it.effect("preserves revocation on the exact client route without changing authority", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { broker } = yield* makeHarness;
+        yield* (yield* broker.connect("client-session")).pipe(
+          Stream.runForEach((request) =>
+            broker.respond("client-session", {
+              connectionId: request.connectionId,
+              requestId: request.requestId,
+              result: null,
+              unavailableEnvironmentIds: [environmentId],
+            }),
+          ),
+          Effect.forkScoped,
+        );
+        yield* (yield* broker.connect("client-session")).pipe(
+          Stream.runForEach((request) =>
+            broker.respond("client-session", {
+              connectionId: request.connectionId,
+              requestId: request.requestId,
+              result: null,
+              unavailableEnvironmentIds: [],
+              failure: { environmentId, reason: "permission_denied" },
+            }),
+          ),
+          Effect.forkScoped,
+        );
+        expect(
+          yield* broker
+            .read(sourceThreadId, sourceRunId, {
+              threadId,
+              environmentId,
+              via: "client",
+            })
+            .pipe(Effect.flip),
+        ).toMatchObject({
+          code: "capability_denied",
+          threadReadReason: "permission_denied",
+        });
       }),
     ),
   );
@@ -469,6 +1014,35 @@ describe("ThreadReadBroker", () => {
         yield* TestClock.adjust("15 seconds");
         expect(yield* Fiber.join(reading)).toMatchObject({ code: "environment_unavailable" });
         yield* respondTo(broker, "client-session", request);
+
+        const denied = yield* Deferred.make<void>();
+        yield* (yield* broker.connect("client-session")).pipe(
+          Stream.runForEach((next) =>
+            broker
+              .respond("client-session", {
+                connectionId: next.connectionId,
+                requestId: next.requestId,
+                result: null,
+                unavailableEnvironmentIds: [],
+                failure: { environmentId, reason: "permission_denied" },
+              })
+              .pipe(Effect.andThen(Deferred.succeed(denied, undefined))),
+          ),
+          Effect.forkScoped,
+        );
+        const revoked = yield* broker
+          .read(sourceThreadId, sourceRunId, {
+            threadId,
+            environmentId,
+            via: "client",
+          })
+          .pipe(Effect.flip, Effect.forkScoped);
+        yield* Deferred.await(denied);
+        yield* TestClock.adjust("15 seconds");
+        expect(yield* Fiber.join(revoked)).toMatchObject({
+          code: "capability_denied",
+          threadReadReason: "permission_denied",
+        });
       }),
     ),
   );

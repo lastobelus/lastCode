@@ -563,6 +563,13 @@ it("readThread and sendToThread reach threads in other projects", async () => {
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
+          hasThreadReadAuthorization: (threadId, authorizationId) =>
+            Effect.sync(() =>
+              (threadId === parentThreadId
+                ? parentProjection
+                : foreignProjection(threadId)
+              ).runs.some((run) => run.userMessageId === authorizationId),
+            ),
           getThreadRecords: (threadId) => {
             if (threadId === parentThreadId) {
               const loaded = { ...parentProjection };
@@ -675,6 +682,7 @@ it("readThread and sendToThread reach threads in other projects", async () => {
     const remoteEnvironmentId = EnvironmentId.make("remote-read-environment");
     const remote = {
       ...foreign,
+      readVia: "client" as const,
       thread: {
         ...foreign.thread,
         threadId: remoteThreadId,
@@ -682,12 +690,35 @@ it("readThread and sendToThread reach threads in other projects", async () => {
         link: "[Remote](t3-thread://v2/remote-read-environment/remote-read-environment/thread-remote-read-example)",
       },
     };
-    const remoteInput = {
-      environmentId: remoteEnvironmentId,
-      threadId: remoteThreadId,
-      afterPosition: 5,
-      maxCharsPerItem: 30,
-    };
+    const remoteInput = { threadId: remoteThreadId, afterPosition: 5, maxCharsPerItem: 30 };
+    expect(
+      yield* service
+        .readThread(makeScope(), {
+          threadId: remoteThreadId,
+          environmentId,
+        })
+        .pipe(Effect.flip),
+    ).toMatchObject({ code: "thread_not_found" });
+    expect(
+      yield* service
+        .readThread(makeScope(), {
+          threadId: remoteThreadId,
+          via: "client",
+        })
+        .pipe(Effect.flip),
+    ).toMatchObject({ code: "invalid_request" });
+    expect(
+      yield* service
+        .readThread(
+          { ...makeScope(), thread: undefined },
+          {
+            threadId: remoteThreadId,
+            environmentId: remoteEnvironmentId,
+            via: "client",
+          },
+        )
+        .pipe(Effect.flip),
+    ).toMatchObject({ code: "capability_denied" });
     let forwarded = 0;
     yield* (yield* broker.connect("client-session")).pipe(
       Stream.runForEach((request) => {

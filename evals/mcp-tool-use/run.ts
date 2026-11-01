@@ -251,6 +251,10 @@ export const McpToolUseCase = Schema.Struct({
      * device tool, a T3 `DeviceError` (`{"_tag": ..., "cause": null}`) fails it inside T3.
      */
     mocks: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+    /** First matching partial input wins over a tool's fixed reply. */
+    toolMocks: Schema.optional(
+      Schema.Array(Schema.Struct({ ...McpToolUseCall.fields, result: Schema.Unknown })),
+    ),
     /** Regexes on one part of a shell command. A match wins over the shell simulator. */
     shellMocks: Schema.optional(
       Schema.Array(
@@ -1072,7 +1076,10 @@ const withProductFields = (name: string, value: unknown, child: boolean): unknow
       ? {
           ...thread,
           link: formatThreadLink({
-            environmentId: EVAL_ENVIRONMENT_ID,
+            environmentId:
+              typeof thread.environmentId === "string"
+                ? EnvironmentId.make(thread.environmentId)
+                : EVAL_ENVIRONMENT_ID,
             threadId: ThreadId.make(id),
           }),
         }
@@ -1273,7 +1280,7 @@ export const simulate = Effect.fn("evaluateMcpToolUse.simulate")(function* (
 });
 
 /** The result for one tool call. */
-const answerToolCall = Effect.fn("evaluateMcpToolUse.answerToolCall")(function* (
+export const answerToolCall = Effect.fn("evaluateMcpToolUse.answerToolCall")(function* (
   sample: Sample,
   config: Config,
   call: typeof ToolUse.Type,
@@ -1302,7 +1309,10 @@ const answerToolCall = Effect.fn("evaluateMcpToolUse.answerToolCall")(function* 
     if (found.length === 0) return toolResult(call.id, "No matching deferred tools found");
     return loadTools(tools, call.id, found);
   }
-  const mock = testCase.setup.mocks?.[name];
+  const inputMock = testCase.setup.toolMocks?.find(
+    (mock) => mock.tool === name && matches(mock.args ?? {}, input),
+  );
+  const mock = inputMock === undefined ? testCase.setup.mocks?.[name] : inputMock.result;
   // T3 answers device calls from the world. A mock that is a T3 device error fails inside T3.
   const failure = deviceFailure(mock);
   const fromWorld = mock === undefined || mock === "default" || failure !== undefined;

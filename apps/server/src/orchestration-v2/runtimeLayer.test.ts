@@ -12,8 +12,10 @@ import {
   CheckpointId,
   CheckpointRef,
   CommandId,
+  ComposerContextId,
   ContextTransferId,
   EventId,
+  EnvironmentId,
   MessageId,
   NodeId,
   RuntimeRequestId,
@@ -1692,6 +1694,15 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
 
       const steerCommandId = CommandId.make("runtime-delivery-intent-auto");
       const steerMessageId = MessageId.make("runtime-delivery-intent-auto");
+      const reference = {
+        version: 1 as const,
+        contextId: ComposerContextId.make("steering-reference"),
+        kind: "thread" as const,
+        label: "Reference",
+        title: "Reference",
+        environmentId: EnvironmentId.make("source-environment"),
+        threadId: ThreadId.make("source-thread"),
+      };
       yield* orchestrator.dispatch({
         type: "message.dispatch",
         createdBy: "user",
@@ -1699,13 +1710,18 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
         commandId: steerCommandId,
         threadId,
         messageId: steerMessageId,
-        text: "Include this in the active work.",
+        text: "Read [Reference](t3-context://v1/thread/steering-reference).",
+        context: { version: 1, records: [reference] },
         attachments: [],
         dispatchMode: { type: "start_immediately" },
         deliveryIntent: "auto",
       });
       const steered = yield* orchestrator.getThreadProjection(threadId);
       assert.lengthOf(steered.runs, 1);
+      assert.deepEqual(
+        steered.messages.find((message) => message.id === steerMessageId)?.threadReadContext,
+        { authorizationId: steerMessageId, capturedAt: DateTime.toEpochMillis(now) },
+      );
       assert.equal(
         steered.messages.find((message) => message.id === steerMessageId)?.runId,
         run.id,
@@ -1749,6 +1765,44 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
           },
         ],
       );
+      const queuedMessageId = MessageId.make("runtime-steer-promoted-message");
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-steer-queued"),
+        threadId,
+        messageId: queuedMessageId,
+        text: "Queued work",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "queue_after_active" },
+      });
+      const queued = yield* orchestrator.getThreadProjection(threadId);
+      const queuedRun = queued.runs.find((row) => row.userMessageId === queuedMessageId)!;
+      yield* orchestrator.dispatch({
+        type: "queued-run.edit",
+        commandId: CommandId.make("runtime-steer-edited"),
+        threadId,
+        runId: queuedRun.id,
+        text: "Read [Reference](t3-context://v1/thread/steering-reference).",
+        context: { version: 1, records: [reference] },
+      });
+      yield* TestClock.adjust("1 millis");
+      yield* orchestrator.dispatch({
+        type: "queued-message.promote-to-steer",
+        commandId: CommandId.make("runtime-steer-promote"),
+        threadId,
+        queuedRunId: queuedRun.id,
+        targetRunId: run.id,
+      });
+      const promoted = yield* orchestrator.getThreadProjection(threadId);
+      const promotedMessage = promoted.messages.find((row) => row.id === queuedMessageId)!;
+      assert.equal(promotedMessage.runId, run.id);
+      assert.deepEqual(promotedMessage.threadReadContext, {
+        authorizationId: MessageId.make("queued-edit-context:runtime-steer-edited"),
+        capturedAt: DateTime.toEpochMillis(yield* DateTime.now),
+      });
       for (const variant of ["selection", "interrupting", "unsupported", "stale"] as const) {
         const commandId = CommandId.make(`runtime-native-rejected-${variant}`);
         if (variant === "interrupting" || variant === "unsupported") {
@@ -1854,7 +1908,7 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
         .pipe(Effect.flip);
       assert.equal(yield* orchestrator.getThreadEventSequence(threadId), completedSequence);
       assert.deepEqual(yield* outbox.listByCommandId(completedNativeId), []);
-      assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, 1);
+      assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, 2);
 
       const nextCommandId = CommandId.make("runtime-delivery-intent-next");
       yield* orchestrator.dispatch({
@@ -1872,7 +1926,7 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
       const restarted = yield* orchestrator.getThreadProjection(threadId);
       assert.deepEqual(
         restarted.runs.map((candidate) => candidate.status),
-        ["completed", "starting"],
+        ["completed", "cancelled", "starting"],
       );
       assert.deepEqual(
         (yield* outbox.listByCommandId(nextCommandId)).map((effect) => effect.request.type),
@@ -1982,6 +2036,168 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
     });
     return { requestId, nodeId, itemId };
   });
+
+  it.effect.each(["steer", "promote"] as const)(
+    "preserves scoped answer authority when an earlier question joins an active run (%s)",
+    (delivery) =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const eventSink = yield* EventSink.EventSinkV2;
+        const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const threadId = ThreadId.make(`runtime-steered-answer-${delivery}`);
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`${threadId}:create`),
+          createdBy: "user",
+          creationSource: "web",
+          threadId,
+          projectId: ProjectId.make(`${threadId}:project`),
+          title: "Resumed answer",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: process.cwd(),
+        });
+        const { requestId } = yield* seedPendingQuestion(threadId, null, { type: "message" });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`${threadId}:start`),
+          threadId,
+          messageId: MessageId.make(`${threadId}:start`),
+          text: "Continue other work while the earlier question is pending.",
+          attachments: [],
+          createdBy: "user",
+          creationSource: "web",
+          dispatchMode: { type: "start_immediately" },
+        });
+        const initial = yield* orchestrator.getThreadProjection(threadId);
+        const run = initial.runs[0]!;
+        const providerThread = initial.providerThreads[0]!;
+        const now = yield* DateTime.now;
+        const providerSession = {
+          id: providerThread.providerSessionId!,
+          driver,
+          providerInstanceId: modelSelection.instanceId,
+          status: "running" as const,
+          cwd: process.cwd(),
+          model: modelSelection.model,
+          capabilities: CodexProviderCapabilitiesV2,
+          createdAt: now,
+          updatedAt: now,
+          lastError: null,
+        };
+        yield* eventSink.write({
+          events: [
+            {
+              id: EventId.make(`${threadId}:running`),
+              type: "run.updated",
+              threadId,
+              runId: run.id,
+              occurredAt: now,
+              payload: { ...run, status: "running", startedAt: now },
+            },
+            {
+              id: EventId.make(`${threadId}:session`),
+              type: "provider-session.attached",
+              threadId,
+              occurredAt: now,
+              payload: providerSession,
+            },
+            {
+              id: EventId.make(`${threadId}:turn`),
+              type: "provider-turn.updated",
+              threadId,
+              runId: run.id,
+              occurredAt: now,
+              payload: {
+                id: ProviderTurnId.make(`${threadId}:turn`),
+                providerThreadId: providerThread.id,
+                nodeId: run.rootNodeId!,
+                runAttemptId: run.activeAttemptId,
+                nativeTurnRef: null,
+                ordinal: 1,
+                status: "running",
+                startedAt: now,
+                completedAt: null,
+              },
+            },
+          ],
+        });
+        const sessionSpy = vi.spyOn(sessions, "get").mockReturnValue(
+          Effect.succeedSome({
+            providerSession: {
+              ...providerSession,
+              capabilities: {
+                ...CodexProviderCapabilitiesV2,
+                turns: {
+                  ...CodexProviderCapabilitiesV2.turns,
+                  supportsActiveSteering: delivery === "steer",
+                },
+              },
+            },
+          } as ProviderAdapter.ProviderAdapterV2SessionRuntime),
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(() => sessionSpy.mockRestore()));
+        const commandId = CommandId.make(`${threadId}:answer`);
+        const reference = {
+          version: 1 as const,
+          contextId: ComposerContextId.make("answer-reference"),
+          kind: "thread" as const,
+          label: "Reference",
+          title: "Reference",
+          environmentId: EnvironmentId.make("source-environment"),
+          threadId: ThreadId.make("source-thread"),
+        };
+        yield* orchestrator.dispatch({
+          type: "runtime-request.respond",
+          commandId,
+          threadId,
+          requestId,
+          answers: {
+            color: "Blue [Reference](t3-context://v1/thread/answer-reference)",
+            sizes: ["Small"],
+          },
+          contextsByQuestionId: { color: { version: 1, records: [reference] } },
+        });
+        const answerId = MessageId.make(`async-answer:${requestId}`);
+        const answered = yield* orchestrator.getThreadProjection(threadId);
+        const answer = answered.messages.find((message) => message.id === answerId)!;
+        assert.deepEqual(answer.threadReadContext, {
+          authorizationId: MessageId.make(`answer-context:${commandId}`),
+          capturedAt: DateTime.toEpochMillis(now),
+        });
+        assert.deepEqual(answer.context?.records, [reference]);
+        if (delivery === "steer") {
+          assert.equal(answer.runId, run.id);
+          assert.lengthOf(answered.runs, 1);
+        } else {
+          const queued = answered.runs.find((candidate) => candidate.userMessageId === answerId)!;
+          assert.equal(queued.status, "queued");
+          sessionSpy.mockReturnValue(
+            Effect.succeedSome({
+              providerSession,
+            } as ProviderAdapter.ProviderAdapterV2SessionRuntime),
+          );
+          yield* TestClock.adjust("1 millis");
+          yield* orchestrator.dispatch({
+            type: "queued-message.promote-to-steer",
+            commandId: CommandId.make(`${threadId}:promote`),
+            threadId,
+            queuedRunId: queued.id,
+            targetRunId: run.id,
+          });
+          const promoted = (yield* orchestrator.getThreadProjection(threadId)).messages.find(
+            (message) => message.id === answerId,
+          )!;
+          assert.equal(promoted.runId, run.id);
+          assert.deepEqual(promoted.threadReadContext, {
+            authorizationId: answer.threadReadContext!.authorizationId,
+            capturedAt: DateTime.toEpochMillis(yield* DateTime.now),
+          });
+        }
+      }),
+  );
 
   it.effect.each([
     { trigger: "startup", scope: "run" },
@@ -2134,12 +2350,52 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
           commandId: CommandId.make(`recovery-answer-${trigger}-${scope}`),
           threadId,
           requestId,
-          answers: { color: "Blue", sizes: ["Small", "Large"] },
+          answers: {
+            color: "Blue [Reference](t3-context://v1/thread/answer-reference)",
+            sizes: ["Small", "Large"],
+          },
+          contextsByQuestionId: {
+            color: {
+              version: 1,
+              records: [
+                {
+                  version: 1,
+                  contextId: ComposerContextId.make("answer-reference"),
+                  kind: "thread",
+                  label: "Reference",
+                  title: "Reference",
+                  environmentId: EnvironmentId.make("source-environment"),
+                  threadId: ThreadId.make("source-thread"),
+                },
+              ],
+            },
+          },
         });
         const answered = yield* orchestrator.getThreadProjection(threadId);
         assert.equal(
           answered.runtimeRequests.find((row) => row.id === requestId)?.status,
           "resolved",
+        );
+        assert.deepEqual(
+          answered.runtimeRequests.find((row) => row.id === requestId)?.threadReadContext,
+          {
+            authorizationId: MessageId.make(`answer-context:recovery-answer-${trigger}-${scope}`),
+            records: [
+              {
+                version: 1,
+                contextId: ComposerContextId.make("answer-reference"),
+                kind: "thread",
+                label: "Reference",
+                title: "Reference",
+                environmentId: EnvironmentId.make("source-environment"),
+                threadId: ThreadId.make("source-thread"),
+              },
+            ],
+          },
+        );
+        assert.equal(
+          answered.runs.at(-1)?.userMessageId,
+          MessageId.make(`async-answer:${requestId}`),
         );
         assert.equal(answered.nodes.find((row) => row.id === nodeId)?.status, "completed");
         assert.equal(answered.turnItems.find((row) => row.id === itemId)?.status, "completed");
@@ -2147,8 +2403,20 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
         assert.equal(answered.messages.at(-1)?.runId, answered.runs.at(-1)?.id);
         assert.equal(
           answered.messages.at(-1)?.text,
-          "Which color?\nBlue\n\nWhich sizes?\nSmall, Large",
+          "Which color?\nBlue [Reference](t3-context://v1/thread/answer-reference)\n\nWhich sizes?\nSmall, Large",
         );
+        assert.deepEqual(
+          answered.messages.at(-1)?.context?.records,
+          answered.runtimeRequests.find((row) => row.id === requestId)?.threadReadContext?.records,
+        );
+        const answeredItem = answered.turnItems.find((row) => row.id === itemId);
+        assert.equal(
+          answeredItem?.type === "user_input_request"
+            ? answeredItem.questionAnswer?.answers.color
+            : undefined,
+          "Blue Reference",
+        );
+
         assert.deepEqual(
           (yield* (yield* EffectOutbox.EffectOutboxV2).listByCommandId(
             CommandId.make(`recovery-answer-${trigger}-${scope}`),
@@ -2581,14 +2849,61 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
           },
         ],
       });
+      yield* eventSink.write({
+        commandId: CommandId.make("runtime-lost-answer-question"),
+        events: [
+          {
+            id: EventId.make("runtime-lost-answer-question-event"),
+            type: "turn-item.updated",
+            threadId,
+            nodeId,
+            occurredAt: now,
+            payload: {
+              id: TurnItemId.make("runtime-lost-answer-item"),
+              type: "user_input_request",
+              threadId,
+              runId: null,
+              nodeId,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal: 1,
+              status: "waiting",
+              title: null,
+              startedAt: now,
+              completedAt: null,
+              updatedAt: now,
+              requestId,
+              questions: [{ id: "color", header: "Color", question: "Which color?", options: [] }],
+            },
+          },
+        ],
+      });
       const commandId = CommandId.make("runtime-lost-answer-answer");
-      const answers = { color: "Blue" };
+      const answers = { color: "Blue [Reference](t3-context://v1/thread/answer-reference)" };
       yield* orchestrator.dispatch({
         type: "runtime-request.respond",
         commandId,
         threadId,
         requestId,
         answers,
+        contextsByQuestionId: {
+          color: {
+            version: 1,
+            records: [
+              {
+                version: 1,
+                contextId: ComposerContextId.make("answer-reference"),
+                kind: "thread",
+                label: "Reference",
+                title: "Reference",
+                environmentId: EnvironmentId.make("source-environment"),
+                threadId: ThreadId.make("source-thread"),
+              },
+            ],
+          },
+        },
       });
       const errors = orchestrator
         .getThreadProjection(threadId)
@@ -2606,6 +2921,10 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
 
       const [deliveryEffect] = yield* outbox.listByCommandId(commandId);
       assert.equal(deliveryEffect?.request.type, "runtime-request.respond");
+      if (deliveryEffect?.request.type === "runtime-request.respond") {
+        assert.include(String(deliveryEffect.request.answers?.color), '"via":"client"');
+        assert.include(String(deliveryEffect.request.answers?.color), "source-thread");
+      }
       assert.equal(deliveryEffect?.status, "failed");
       const failed = yield* orchestrator.getThreadProjection(threadId);
       const reported = failed.turnItems.filter((item) => item.type === "error");
@@ -2616,6 +2935,15 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
       const request = failed.runtimeRequests.find((row) => row.id === requestId);
       assert.equal(request?.status, "resolved");
       assert.deepEqual(request?.answers, answers);
+      const answerItem = failed.turnItems.find(
+        (item) => item.id === TurnItemId.make("runtime-lost-answer-item"),
+      );
+      assert.equal(
+        answerItem?.type === "user_input_request"
+          ? answerItem.questionAnswer?.answers.color
+          : undefined,
+        "Blue Reference",
+      );
     }),
   );
 
@@ -7457,19 +7785,42 @@ it.layer(layerTest)("RuntimeLayer.layer lifecycle", (it) => {
       const queuedRun = before.runs.find((run) => run.status === "queued");
       assert.isDefined(queuedRun);
 
+      const reference = {
+        version: 1 as const,
+        contextId: ComposerContextId.make("queued-reference"),
+        kind: "thread" as const,
+        label: "Reference",
+        title: "Reference",
+        environmentId: EnvironmentId.make("source-environment"),
+        threadId: ThreadId.make("source-thread"),
+      };
+      const stale = {
+        ...reference,
+        contextId: ComposerContextId.make("unused-reference"),
+        threadId: ThreadId.make("unused-thread"),
+      };
       yield* orchestrator.dispatch({
         type: "queued-run.edit",
         commandId: CommandId.make("runtime-layer-queued-edit-edit"),
         threadId,
         runId: queuedRun.id,
-        text: "Updated queued text.",
+        text: "Updated [Reference](t3-context://v1/thread/queued-reference).",
+        context: { version: 1, records: [reference, stale] },
       });
 
       const afterEdit = yield* orchestrator.getThreadProjection(threadId);
       assert.equal(
         afterEdit.messages.find((message) => message.id === queuedRun.userMessageId)?.text,
-        "Updated queued text.",
+        "Updated [Reference](t3-context://v1/thread/queued-reference).",
       );
+      const editedMessage = afterEdit.messages.find(
+        (message) => message.id === queuedRun.userMessageId,
+      )!;
+      assert.deepEqual(editedMessage.threadReadContext, {
+        authorizationId: MessageId.make("queued-edit-context:runtime-layer-queued-edit-edit"),
+        capturedAt: DateTime.toEpochMillis(editedMessage.updatedAt),
+      });
+      assert.deepEqual(editedMessage.context?.records, [reference, stale]);
       const editedItem = afterEdit.turnItems.find(
         (item) => item.type === "user_message" && item.messageId === queuedRun.userMessageId,
       );
@@ -7492,6 +7843,15 @@ it.layer(layerTest)("RuntimeLayer.layer lifecycle", (it) => {
         ],
       });
       const afterAttachmentEdit = yield* orchestrator.getThreadProjection(threadId);
+      assert.isUndefined(
+        afterAttachmentEdit.messages.find((message) => message.id === queuedRun.userMessageId)
+          ?.threadReadContext,
+        "removing references clears scoped edit authority without changing the run identity",
+      );
+      assert.equal(
+        afterAttachmentEdit.runs.find((run) => run.id === queuedRun.id)?.userMessageId,
+        queuedRun.userMessageId,
+      );
       assert.deepEqual(
         afterAttachmentEdit.messages
           .find((message) => message.id === queuedRun.userMessageId)

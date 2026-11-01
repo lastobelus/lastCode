@@ -1,10 +1,12 @@
 import {
   EnvironmentId,
-  OrchestrationSearchThreadsInput,
+  THREAD_SEARCH_QUERY_MAX_LENGTH,
   ProjectId,
+  ThreadId,
   type OrchestrationThreadSearchMatch,
   type OrchestrationV2SearchThreadsInput,
   type OrchestrationV2SearchThreadsResult,
+  type OrchestrationV2ThreadMentionCandidate,
   type OrchestrationV2ThreadFamily,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
@@ -55,6 +57,16 @@ export interface ThreadSearchResultsState {
     readonly environmentId: EnvironmentId;
     readonly read: OrchestrationV2ThreadFamily;
   }>;
+  /** Scoped lightweight candidates from universal thread-reference searches. */
+  readonly mentionCandidates?: ReadonlyArray<EnvironmentThreadMentionCandidate>;
+  readonly mentionFailures?: ReadonlyArray<EnvironmentId>;
+  /** Environments that completed the mention request, including an exact-ID miss. */
+  readonly mentionResolvedEnvironments?: ReadonlyArray<EnvironmentId>;
+  readonly mentionsTruncated?: boolean;
+}
+
+export interface EnvironmentThreadMentionCandidate extends OrchestrationV2ThreadMentionCandidate {
+  readonly environmentId: EnvironmentId;
 }
 
 /**
@@ -66,17 +78,15 @@ export const ThreadSearchScope = Schema.Struct({
   projectIds: Schema.optionalKey(Schema.Array(ProjectId)),
   environmentLabels: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
   titlesOnly: Schema.optionalKey(Schema.Boolean),
+  mode: Schema.optionalKey(Schema.Literal("thread-mention")),
+  threadIds: Schema.optionalKey(Schema.Array(ThreadId)),
 });
 export type ThreadSearchScope = typeof ThreadSearchScope.Type;
 
 const ThreadSearchKey = Schema.fromJsonString(
   Schema.Union([
-    Schema.Tuple([Schema.Array(EnvironmentId), OrchestrationSearchThreadsInput.fields.query]),
-    Schema.Tuple([
-      Schema.Array(EnvironmentId),
-      OrchestrationSearchThreadsInput.fields.query,
-      ThreadSearchScope,
-    ]),
+    Schema.Tuple([Schema.Array(EnvironmentId), Schema.String]),
+    Schema.Tuple([Schema.Array(EnvironmentId), Schema.String, ThreadSearchScope]),
   ]),
 );
 const decodeThreadSearchKey = Schema.decodeUnknownOption(ThreadSearchKey);
@@ -123,10 +133,18 @@ export function createThreadSearchResultsAtomFamily<E>(options: {
       }
 
       const [environmentIds, query, scope = {}] = parsedKey.value;
+      if (query.length > THREAD_SEARCH_QUERY_MAX_LENGTH) {
+        return { matches: [], isLoading: false, rows: EMPTY_SEARCH_ROWS };
+      }
       // The server needs a word of three or more letters to match messages.
       const searchMessages =
         scope.titlesOnly !== true && messageSearchTokens(query).long.length > 0;
+      const mentionMode = scope.mode === "thread-mention";
       const matches: EnvironmentThreadSearchMatch[] = [];
+      const mentionCandidates: EnvironmentThreadMentionCandidate[] = [];
+      const mentionFailures: EnvironmentId[] = [];
+      const mentionResolvedEnvironments: EnvironmentId[] = [];
+      let mentionsTruncated = false;
       const rows: Array<ThreadSearchResultsState["rows"][number]> = [];
       let isLoading = false;
 
@@ -134,17 +152,19 @@ export function createThreadSearchResultsAtomFamily<E>(options: {
         const before = options.olderSettledBefore
           ? get(options.olderSettledBefore(environmentId))
           : null;
-        if (!searchMessages && before === null) continue;
+        if (!mentionMode && !searchMessages && before === null) continue;
         const label = scope.environmentLabels?.[environmentId];
         const result = get(
           options.getSearchAtom(environmentId, {
             query,
-            ...(before === null
+            ...(mentionMode ? { mode: "thread-mention" as const } : {}),
+            ...(scope.threadIds === undefined ? {} : { threadIds: scope.threadIds }),
+            ...(label === undefined ? {} : { environmentLabel: label }),
+            ...(mentionMode || before === null
               ? {}
               : {
                   olderSettledBefore: before,
                   ...(scope.projectIds === undefined ? {} : { projectIds: scope.projectIds }),
-                  ...(label === undefined ? {} : { environmentLabel: label }),
                   ...(searchMessages ? {} : { titlesOnly: true }),
                 }),
           }),
@@ -152,7 +172,15 @@ export function createThreadSearchResultsAtomFamily<E>(options: {
         isLoading ||= result.waiting;
         const value = AsyncResult.getOrElse(result, () => null);
         if (value !== null) {
+          if (mentionMode && result._tag === "Success" && !result.waiting)
+            mentionResolvedEnvironments.push(environmentId);
           matches.push(...value.matches.map((match) => ({ ...match, environmentId })));
+          if (value.mentionCandidates !== undefined) {
+            mentionCandidates.push(
+              ...value.mentionCandidates.map((candidate) => ({ ...candidate, environmentId })),
+            );
+          }
+          mentionsTruncated ||= value.mentionsTruncated === true;
           if (value.threads !== undefined && value.threads.length > 0) {
             rows.push({
               environmentId,
@@ -160,9 +188,17 @@ export function createThreadSearchResultsAtomFamily<E>(options: {
             });
           }
         }
+        if (mentionMode && result._tag === "Failure") mentionFailures.push(environmentId);
       }
 
-      return { matches, isLoading, rows: rows.length === 0 ? EMPTY_SEARCH_ROWS : rows };
+      return {
+        matches,
+        isLoading,
+        rows: rows.length === 0 ? EMPTY_SEARCH_ROWS : rows,
+        ...(mentionMode
+          ? { mentionCandidates, mentionFailures, mentionResolvedEnvironments, mentionsTruncated }
+          : {}),
+      };
     }).pipe(Atom.withLabel(`${options.labelPrefix}:${key}`)),
   );
   const rowsAtom = Atom.family((rowsKey: string) => {
@@ -198,7 +234,11 @@ export type ThreadSearchShell = Pick<
   | "latestUserAuthoredMessageAt"
   | "opens"
 > &
-  Partial<Pick<EnvironmentThreadShell, "pullRequests" | "linkedPullRequest" | "branchPullRequest">>;
+  Partial<
+    Pick<EnvironmentThreadShell, "pullRequests" | "linkedPullRequest" | "branchPullRequest">
+  > & {
+    readonly searchPullRequests?: OrchestrationV2ThreadMentionCandidate["searchPullRequests"];
+  };
 
 /**
  * What the web and mobile palettes rank a thread shell by. Pass the
@@ -224,7 +264,7 @@ export function threadSearchSubject(
     branch: thread.branch,
     projectTitle: projectTitle ?? null,
     environmentLabel: environmentLabel ?? null,
-    pullRequests: threadSearchPullRequests(thread),
+    pullRequests: thread.searchPullRequests ?? threadSearchPullRequests(thread),
     activityAt: Number.isFinite(activityAt) ? activityAt : null,
     // This client's own latest open counts too: the server merged it, or has
     // no record yet (an older server ignores opens).
