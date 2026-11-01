@@ -90,11 +90,10 @@ const boxThreads = (seen: Ref.Ref<Seen>, linkSession: Ref.Ref<string>) => {
   const shellOf = (threadId: ThreadId): Effect.Effect<OrchestrationV2ThreadShell | null> =>
     threadId === boxThread ? linked : Effect.succeed(threadId === usersThread ? users : null);
   const projectionOf = (threadId: ThreadId) =>
-    shellOf(threadId).pipe(
-      Effect.map((thread) => ({ thread, runs: [run("running")], runtimeRequests: [] }) as never),
-    );
+    shellOf(threadId).pipe(Effect.map((thread) => idleThreadProjection(thread!)));
   return Layer.mock(ThreadManagement.ThreadManagementService)({
     getThreadShell: shellOf,
+    getTimelinePage: () => Effect.succeed({ items: [], totalItems: 0, hasMore: false }),
     getProjectThreadRecords: (input) => projectionOf(input.threadId),
     getThreadRecords: (threadId) => projectionOf(threadId),
     listProjectThreads: () => linked.pipe(Effect.map((shell) => [shell] as never)),
@@ -377,7 +376,11 @@ const makeLaptop = Effect.gen(function* () {
         ),
         Effect.provideService(McpSchema.McpServerClient, mcpClient),
       );
-  return { links: Context.get(linking, PeerLinks.PeerLinks), call };
+  return {
+    links: Context.get(linking, PeerLinks.PeerLinks),
+    settings: Context.get(linking, ServerSettings.ServerSettingsService),
+    call,
+  };
 });
 
 const failureOf = (result: McpSchema.CallToolResult) => {
@@ -411,6 +414,18 @@ it.effect("an agent here works on a linked environment's threads within its own 
       expect(threads.structuredContent).toMatchObject({
         projectId: boxProject,
         threads: [{ threadId: boxThread, runtimeMode: "auto" }],
+      });
+
+      const read = yield* a.call("thread:laptop-full", "t3_thread_read", {
+        environmentId: box.environmentId,
+        threadId: boxThread,
+        afterPosition: 5,
+        limit: 2,
+      });
+      expect(read.isError, JSON.stringify(read)).toBe(false);
+      expect(read.structuredContent).toMatchObject({
+        thread: { environmentId: box.environmentId, threadId: boxThread },
+        items: [],
       });
 
       // A full-access agent here is held to the link's `auto` there, which
@@ -453,6 +468,47 @@ it.effect("an agent here works on a linked environment's threads within its own 
       ]);
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect(
+  "reads through a read-only link without a client and preserves peer refusals and destination Labs gates",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const seen = yield* Ref.make<Seen>(nothingSeen);
+        const b = yield* serveBox(seen, yield* Ref.make(""));
+        const a = yield* makeLaptop;
+        yield* linkTo(a.links, b, "read-only");
+        const read = (threadId = usersThread) =>
+          a.call("thread:laptop-full", "t3_thread_read", {
+            environmentId: box.environmentId,
+            threadId,
+          });
+        // Reads are not fenced to threads created by this link.
+        const result = yield* read();
+        expect(result.isError, JSON.stringify(result)).toBe(false);
+        expect(result.structuredContent).toMatchObject({
+          thread: { environmentId: box.environmentId, threadId: usersThread },
+        });
+        const missing = yield* read(ThreadId.make("thread:missing"));
+        expect(failureOf(missing)).toMatchObject({ code: "thread_not_found" });
+
+        yield* a.settings.updateSettings({ linkedEnvironmentsEnabled: false });
+        // Disabling new linked work must not prevent following existing work.
+        const continued = yield* read();
+        expect(continued.isError, JSON.stringify(continued)).toBe(false);
+        expect(continued.structuredContent).toMatchObject({
+          thread: { environmentId: box.environmentId, threadId: usersThread },
+        });
+        yield* a.settings.updateSettings({ linkedEnvironmentsEnabled: true });
+        yield* b.settings.updateSettings({ linkedEnvironmentsEnabled: false });
+        expect(failureOf(yield* read())).toMatchObject({ code: "orchestration_error" });
+        yield* b.settings.updateSettings({ linkedEnvironmentsEnabled: true });
+        const session = (yield* b.linkedSessions)[0]!;
+        yield* b.auth.revokeSession(session.sessionId);
+        expect(failureOf(yield* read())).toMatchObject({ code: "capability_denied" });
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
 it.effect("keeps a forwarded wait short and its retries scoped to the caller", () =>
@@ -711,7 +767,7 @@ it.effect("refuses what a linked environment cannot take before anything leaves"
       ] as const) {
         const relayed = yield* a.call("thread:laptop-from-desk", name, args);
         expect(failureOf(relayed), name).toMatchObject({
-          code: name === "t3_thread_read" ? "environment_unavailable" : "capability_denied",
+          code: "capability_denied",
         });
       }
       expect(yield* Ref.get(b.bearers)).toEqual([]);

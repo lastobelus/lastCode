@@ -181,6 +181,11 @@ function LinkEnvironmentAction({ environmentId }: { readonly environmentId: Envi
   const inFlight = useRef(false);
   const formId = useId();
   const link = useAtomCommand(peerLinkEnvironment.link, { label: "link environment" });
+  const preflight = useAtomCommand(peerLinkEnvironment.preflight, {
+    label: "check link address",
+    reportFailure: false,
+    reportDefect: false,
+  });
   const selected = choice ?? (machines.length === 0 ? ANOTHER_ADDRESS : null);
   const machine = machines.find((candidate) => candidate.environmentId === selected) ?? null;
   // This client can mint a code there when it is connected to that
@@ -220,6 +225,27 @@ function LinkEnvironmentAction({ environmentId }: { readonly environmentId: Envi
     if (inFlight.current || !ready || url === undefined) return;
     inFlight.current = true;
     setBusy(true);
+    const checked = await preflight({
+      environmentId,
+      input: {
+        url,
+        ...(alternateUrls.length > 0 ? { alternateUrls } : {}),
+        ...(machine === null
+          ? {}
+          : { expectedEnvironmentId: machine.environmentId, expectedLabel: machine.label }),
+      },
+    });
+    if (checked._tag === "Failure") {
+      inFlight.current = false;
+      setBusy(false);
+      if (!isAtomCommandInterrupted(checked)) {
+        failureToast(
+          "Could not link the environment",
+          linkRequestFailureMessage(squashAtomCommandFailure(checked)),
+        );
+      }
+      return;
+    }
     const code = await resolvePairingCode();
     const result =
       code === null

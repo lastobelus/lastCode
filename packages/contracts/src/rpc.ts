@@ -47,6 +47,8 @@ import {
 import {
   PeerLink,
   PeerLinkCreateInput,
+  PeerLinkPreflightInput,
+  PeerLinkPreflightResult,
   PeerLinkError,
   PeerLinkRemoveInput,
   PeerLinkRemoveResult,
@@ -607,6 +609,7 @@ export const WS_METHODS = {
   serverSelectBuildReview: "server.selectBuildReview",
   serverGetDatabaseStorage: "server.getDatabaseStorage",
   peerLinksList: "peerLinks.list",
+  peerLinksPreflight: "peerLinks.preflight",
   peerLinksLink: "peerLinks.link",
   peerLinksUnlink: "peerLinks.unlink",
   peerLinksAnswerRequest: "peerLinks.answerRequest",
@@ -1004,6 +1007,12 @@ const WsPeerLinksListRpc = Rpc.make(WS_METHODS.peerLinksList, {
 const WsPeerLinksLinkRpc = Rpc.make(WS_METHODS.peerLinksLink, {
   payload: PeerLinkCreateInput,
   success: PeerLink,
+  error: Schema.Union([PeerLinkError, EnvironmentAuthorizationError]),
+});
+
+const WsPeerLinksPreflightRpc = Rpc.make(WS_METHODS.peerLinksPreflight, {
+  payload: PeerLinkPreflightInput,
+  success: PeerLinkPreflightResult,
   error: Schema.Union([PeerLinkError, EnvironmentAuthorizationError]),
 });
 
@@ -2354,6 +2363,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsResumeEnvironmentRpc,
   WsServerUpdateSettingsRpc,
   WsPeerLinksListRpc,
+  WsPeerLinksPreflightRpc,
   WsPeerLinksLinkRpc,
   WsPeerLinksUnlinkRpc,
   WsPeerLinksAnswerRequestRpc,
