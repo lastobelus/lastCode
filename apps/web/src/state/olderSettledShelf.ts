@@ -26,13 +26,16 @@ export function useOlderSettledShelf(input: {
   readonly expanded: boolean;
   /** Rows the shelf shows; pages are read until it lists that many. */
   readonly visibleCount: number;
+  readonly initialPages?: number;
 }) {
   const scopeKey = JSON.stringify(input.scopes);
   const [requested, setRequested] = useState({ scopeKey, pages: NO_PAGES });
   const pages = requested.scopeKey === scopeKey && input.expanded ? requested.pages : NO_PAGES;
   const shelfScopes = input.scopes.map((scope) => ({
     scope,
-    pages: pages.get(scope.environmentId) ?? 0,
+    pages: input.expanded
+      ? Math.max(pages.get(scope.environmentId) ?? 0, input.initialPages ?? 0)
+      : 0,
   }));
   const shelfKey = JSON.stringify(shelfScopes);
   const shelf = useAtomValue(olderSettledThreads.shelfAtom(shelfScopes));
@@ -64,6 +67,17 @@ export function useOlderSettledShelf(input: {
     visibleCount: input.expanded ? input.visibleCount : 0,
     pages,
     grow: (next: ReadonlyMap<EnvironmentId, number>) => setRequested({ scopeKey, pages: next }),
+    hasMore: loaded.some(({ scope }) => pagesOf(scope.environmentId)?.frontier != null),
+    loadMore: () => {
+      const next = new Map(pages);
+      for (const { scope, pages: count } of shelfScopes) {
+        const current = pagesOf(scope.environmentId);
+        if (current?.status === "ready" && current.frontier !== null) {
+          next.set(scope.environmentId, count + 1);
+        }
+      }
+      setRequested({ scopeKey, pages: next });
+    },
     isListed: (thread: EnvironmentThreadShell) => isListedSettledThread(thread.source, frontier),
     /** Older settled threads in scope that are not local; add it to the local Settled rows. */
     unloadedCount: (threads: ReadonlyArray<EnvironmentThreadShell>) =>
