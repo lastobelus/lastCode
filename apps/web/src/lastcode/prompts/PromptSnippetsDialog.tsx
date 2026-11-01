@@ -1,6 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId, PromptSnippet, ResolvedKeybindingsConfig } from "@t3tools/contracts";
 import { searchPromptSnippets } from "@t3tools/shared/promptSnippetSearch";
+import { isMacPlatform } from "@t3tools/shared/keybindings";
 import { MessageSquareTextIcon } from "lucide-react";
 import { useLayoutEffect, useRef, useState } from "react";
 import { AsyncResult } from "effect/reactivity";
@@ -15,6 +16,8 @@ import type { CommandPaletteActionItem } from "~/components/CommandPalette.logic
 import { CommandPaletteResults } from "~/components/CommandPaletteResults";
 import { CommandDialog, CommandDialogPopup, CommandFooterAction } from "~/components/ui/command";
 import { Button } from "~/components/ui/button";
+import { Kbd } from "~/components/ui/kbd";
+import { useShortcutModifierState } from "~/shortcutModifierState";
 import {
   AlertDialog,
   AlertDialogPopup,
@@ -30,6 +33,7 @@ export type PromptSnippetsMode = "pick" | "edit";
 export function PromptSnippetsDialog(props: {
   readonly environmentId: EnvironmentId;
   readonly initialMode?: PromptSnippetsMode;
+  readonly initialQuery?: string;
   readonly keybindings: ResolvedKeybindingsConfig;
   readonly onClose: () => void;
   readonly onInsert: (text: string) => boolean;
@@ -130,6 +134,7 @@ export function PromptSnippetsPicker(props: {
   readonly discovering: boolean;
   readonly error: string | null;
   readonly initialMode?: PromptSnippetsMode;
+  readonly initialQuery?: string;
   readonly onClose: () => void;
   readonly onSelect: (snippet: PromptSnippet, query: string) => boolean | void;
   readonly onSave?:
@@ -143,7 +148,7 @@ export function PromptSnippetsPicker(props: {
   readonly onDismiss?: ((snippet: PromptSnippet) => Promise<boolean>) | undefined;
   readonly onReturnFocus: () => void;
 }) {
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(props.initialQuery ?? "");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [mode, setMode] = useState<PromptSnippetsMode>(props.initialMode ?? "pick");
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
@@ -152,6 +157,12 @@ export function PromptSnippetsPicker(props: {
   const [pendingAction, setPendingAction] = useState<(() => void) | null>(null);
   const returnFocusOnCloseRef = useRef(true);
   const contentRef = useRef<HTMLDivElement>(null);
+  const modifiers = useShortcutModifierState();
+  const mac = isMacPlatform(navigator.platform);
+  const showNumberHints =
+    (mac ? modifiers.metaKey && !modifiers.ctrlKey : modifiers.ctrlKey && !modifiers.metaKey) &&
+    !modifiers.altKey &&
+    !modifiers.shiftKey;
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keeps the picker's scroll viewport aligned with its selection when returning from the wider editor.
   useLayoutEffect(() => {
     if (mode !== "pick" || selectedId === null) return;
@@ -248,7 +259,7 @@ export function PromptSnippetsPicker(props: {
     });
     setSelectedId(null);
   };
-  const items: CommandPaletteActionItem[] = results.map((snippet) => ({
+  const items: CommandPaletteActionItem[] = results.map((snippet, index) => ({
     kind: "action",
     value: snippet.id,
     title:
@@ -263,7 +274,20 @@ export function PromptSnippetsPicker(props: {
         }
       : {}),
     searchTerms: [],
-    icon: <MessageSquareTextIcon className="size-4" />,
+    icon: (
+      <span aria-hidden className="flex w-4 shrink-0 flex-col items-center gap-0.5">
+        <MessageSquareTextIcon className="size-4 shrink-0" />
+        <span className="text-3xs font-light leading-3 tabular-nums text-muted-foreground/70">
+          {snippet.useCount}
+        </span>
+      </span>
+    ),
+    titleTrailingContent:
+      showNumberHints && index < 5 ? (
+        <span aria-hidden className="shrink-0">
+          <Kbd>{`${mac ? "⌘" : "Ctrl+"}${index + 1}`}</Kbd>
+        </span>
+      ) : undefined,
     run: async () => (mode === "edit" ? setSelectedId(snippet.id) : selectSnippet(snippet)),
   }));
   return (
@@ -284,6 +308,18 @@ export function PromptSnippetsPicker(props: {
         }
         finalFocus={returnFocus}
         onBackdropPointerDown={close}
+        onKeyDownCapture={(event) => {
+          const modifier = mac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
+          if (!modifier || event.altKey || event.shiftKey || !/^[1-9]$/u.test(event.key)) return;
+          event.preventDefault();
+          event.stopPropagation();
+          if (event.repeat || event.nativeEvent.isComposing || saving || pendingAction) return;
+          const index = Number(event.key) - 1;
+          const snippet = index < 5 ? results[index] : undefined;
+          if (!snippet) return;
+          if (mode === "edit") setSelectedId(snippet.id);
+          else selectSnippet(snippet);
+        }}
       >
         <div ref={contentRef} className="contents">
           <CommandPaletteContent
@@ -312,13 +348,8 @@ export function PromptSnippetsPicker(props: {
               if (mode === "pick") setSelectedId(null);
             }}
             onItemHighlighted={(value, details) => {
-              if (
-                saving ||
-                (details.reason === "none" &&
-                  selectedId !== null &&
-                  results.some((entry) => entry.id === selectedId))
-              )
-                return;
+              // Automatic highlight events can still name the old first row after a query reorders it.
+              if (saving || details.reason === "none") return;
               if (typeof value === "string" && (mode === "pick" || details.reason === "keyboard"))
                 setSelectedId(value);
             }}

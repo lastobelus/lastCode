@@ -4,6 +4,7 @@ import type {
   ResolvedKeybindingsConfig,
 } from "@t3tools/contracts";
 import { MessageSquareTextIcon } from "lucide-react";
+import { promptSnippetWordAtCursor } from "@t3tools/shared/promptSnippetSearch";
 import { useRef, useState } from "react";
 import { ComposerControl } from "~/components/chat/ComposerControl";
 import { useStableCallback } from "~/hooks/useStableCallback";
@@ -22,14 +23,22 @@ export function useComposerPromptSnippets(input: {
   const [session, setSession] = useState<{
     target: string;
     cursor: number;
+    value: string;
+    word: ReturnType<typeof promptSnippetWordAtCursor>;
     mode: PromptSnippetsMode;
   } | null>(null);
   const returnCursor = useRef(0);
   const open = useStableCallback((mode: PromptSnippetsMode) => {
     if (!input.available || input.disabled) return;
-    const cursor = input.readSnapshot().expandedCursor;
+    const { value, expandedCursor: cursor } = input.readSnapshot();
     returnCursor.current = cursor;
-    setSession({ target: input.target, cursor, mode });
+    setSession({
+      target: input.target,
+      cursor,
+      value,
+      word: promptSnippetWordAtCursor(value, cursor),
+      mode,
+    });
   });
   const openControl = useStableCallback((command: KeybindingCommand) => {
     if (command !== "composer.promptSnippets" && command !== "composer.editPromptSnippets")
@@ -62,14 +71,20 @@ export function useComposerPromptSnippets(input: {
           environmentId={input.environmentId}
           keybindings={input.keybindings}
           initialMode={session.mode}
+          initialQuery={session.word?.query ?? ""}
           onClose={() => setSession(null)}
           onInsert={(text) => {
             if (!input.available || input.disabled) return false;
             const snapshot = input.readSnapshot();
             const cursor = Math.min(session.cursor, snapshot.value.length);
-            const insertion = `${cursor > 0 && !/\s/u.test(snapshot.value[cursor - 1] ?? "") ? " " : ""}${text}\n`;
-            const inserted = input.insert(cursor, cursor, insertion);
-            if (inserted) returnCursor.current = cursor + insertion.length;
+            const word = snapshot.value === session.value ? session.word : null;
+            const start = word?.start ?? cursor;
+            const end = word?.end ?? cursor;
+            const insertion = word
+              ? text
+              : `${start > 0 && !/\s/u.test(snapshot.value[start - 1] ?? "") ? " " : ""}${text}\n`;
+            const inserted = input.insert(start, end, insertion);
+            if (inserted) returnCursor.current = start + insertion.length;
             return inserted;
           }}
           onReturnFocus={() => input.focusAt(returnCursor.current)}

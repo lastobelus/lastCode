@@ -78,8 +78,45 @@ it("uses learned abbreviations for keyboard selection without submitting the com
   expect(onReturnFocus).not.toHaveBeenCalled();
 });
 
+it("starts with the caret word and owns numbered shortcuts while open", async () => {
+  const onSelect = vi.fn();
+  const onGlobalShortcut = vi.fn();
+  using _platform = vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
+  // router: false because the modal must consume the chord before global thread navigation.
+  await using _screen = await render(
+    <PromptSnippetsPicker
+      snippets={snippets}
+      initialQuery="rv"
+      keybindings={DEFAULT_RESOLVED_KEYBINDINGS}
+      loading={false}
+      discovering={false}
+      error={null}
+      onClose={vi.fn()}
+      onReturnFocus={vi.fn()}
+      onSelect={onSelect}
+    />,
+    { router: false },
+  );
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (event.metaKey && /^[1-9]$/u.test(event.key)) onGlobalShortcut();
+  };
+  window.addEventListener("keydown", onKeyDown);
+  using _listener = {
+    [Symbol.dispose]: () => window.removeEventListener("keydown", onKeyDown),
+  };
+  await expect
+    .element(page.getByRole("combobox", { name: "Search common prompts" }))
+    .toHaveValue("rv");
+  await userEvent.keyboard("{Meta>}9{/Meta}");
+  expect(onSelect).not.toHaveBeenCalled();
+  await userEvent.keyboard("{Meta>}1{/Meta}");
+  expect(onSelect).toHaveBeenCalledWith(snippets[1], "rv");
+  expect(onGlobalShortcut).not.toHaveBeenCalled();
+});
+
 it("keeps the selected prompt and unsaved text when switching modes, then inserts the saved edit", async () => {
   const onSelect = vi.fn();
+  using _platform = vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
   const onSave = vi.fn(async (input: { snippetId?: string; title: string; text: string }) => ({
     ...snippets[0]!,
     ...input,
@@ -111,6 +148,15 @@ it("keeps the selected prompt and unsaved text when switching modes, then insert
   expect(onSelect).not.toHaveBeenCalled();
   await page.getByRole("button", { name: "Search prompts", exact: true }).click();
   await page.getByRole("button", { name: "Edit prompts", exact: true }).click();
+  await expect
+    .element(page.getByRole("textbox", { name: "Prompt text" }))
+    .toHaveValue("review; don't merge\n");
+  await userEvent.keyboard("{Meta>}1{/Meta}");
+  await expect
+    .element(page.getByRole("textbox", { name: "Prompt title" }))
+    .toHaveValue("Merge when ready");
+  expect(onSelect).not.toHaveBeenCalled();
+  await userEvent.keyboard("{Meta>}2{/Meta}");
   await expect
     .element(page.getByRole("textbox", { name: "Prompt text" }))
     .toHaveValue("review; don't merge\n");

@@ -20,6 +20,12 @@ the command palette, or press **Ctrl+.**, which you can change in
 **Settings → Keyboard shortcuts**. On mobile, open **Common Prompts** from the
 plus menu. The prompt goes in at the cursor and waits for you to edit or send it.
 
+Open the picker immediately after a letter to search with the word at the cursor.
+Choosing a prompt replaces that word; cancelling leaves it unchanged. Hold **Cmd**
+on Mac, or **Ctrl** elsewhere, to reveal shortcuts for the first five results.
+Press **Cmd+1–5** or **Ctrl+1–5** to insert one. In the editor, the same shortcuts
+select a prompt without saving or closing it.
+
 Your environment builds the list from your conversations once a day, using the
 model configured for thread titles, so you don't need to maintain it. Close
 rewordings of one instruction merge into a single entry, while prompts that

@@ -49,3 +49,18 @@ export function searchPromptSnippets(
     .slice(0, Math.max(0, limit))
     .map(({ snippet }) => snippet);
 }
+
+export function promptSnippetWordAtCursor(
+  value: string,
+  cursor: number,
+): { query: string; start: number; end: number } | null {
+  if (!Number.isInteger(cursor) || cursor <= 0 || cursor > value.length) return null;
+  if (!/\p{L}$/u.test(value.slice(0, cursor))) return null;
+  const left = /[\p{L}\p{M}\p{N}_]+$/u.exec(value.slice(0, cursor))!;
+  const right = /^[\p{L}\p{M}\p{N}_]*/u.exec(value.slice(cursor))!;
+  return {
+    query: left[0] + right[0],
+    start: cursor - left[0].length,
+    end: cursor + right[0].length,
+  };
+}

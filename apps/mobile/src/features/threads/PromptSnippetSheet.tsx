@@ -23,10 +23,11 @@ import { useAtomCommand } from "../../state/use-atom-command";
 
 export function PromptSnippetSheet(props: {
   readonly environmentId: EnvironmentId;
+  readonly initialQuery?: string;
   readonly onClose: () => void;
-  readonly onSelect: (snippet: PromptSnippet) => void;
+  readonly onSelect: (snippet: PromptSnippet) => boolean | void;
 }) {
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(props.initialQuery ?? "");
   const [mode, setMode] = useState<"search" | "edit">("search");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<
@@ -208,7 +209,7 @@ export function PromptSnippetSheet(props: {
                       );
                       return;
                     }
-                    props.onSelect(snippet);
+                    if (props.onSelect(snippet) === false) return;
                     if (canLearn)
                       void recordUse({
                         environmentId: props.environmentId,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import type { PromptSnippet } from "@t3tools/contracts";
-import { searchPromptSnippets } from "./promptSnippetSearch.ts";
+import { promptSnippetWordAtCursor, searchPromptSnippets } from "./promptSnippetSearch.ts";
 
 function snippet(id: string, text: string, overrides: Partial<PromptSnippet> = {}): PromptSnippet {
   return { id, title: text, text, useCount: 0, lastUsedAt: null, queryUses: [], ...overrides };
@@ -36,5 +36,46 @@ describe("common prompt ranking", () => {
     expect(searchPromptSnippets(entries, "ship").map((entry) => entry.id)).toEqual(["merge"]);
     expect(searchPromptSnippets(entries, "", 1).map((entry) => entry.id)).toEqual(["merge"]);
     expect(searchPromptSnippets(entries, "", 0)).toEqual([]);
+  });
+});
+
+describe("promptSnippetWordAtCursor", () => {
+  it("returns the entire word and UTF-16 replacement span around the caret", () => {
+    for (const [value, cursor, query, start, end] of [
+      ["review", 1, "review", 0, 6],
+      ["review", 6, "review", 0, 6],
+      ["go review now", 5, "review", 3, 9],
+      ["éclair_42", 2, "éclair_42", 0, 9],
+      ["📝 𐐀é_42!", 5, "𐐀é_42", 3, 10],
+    ] as const) {
+      const word = promptSnippetWordAtCursor(value, cursor);
+      expect(word).toEqual({ query, start, end });
+      expect(value.slice(word!.start, word!.end)).toBe(query);
+    }
+  });
+
+  it("preserves surrounding Unicode text when replacing the returned span", () => {
+    const value = "📝 𐐀é_42! next";
+    const word = promptSnippetWordAtCursor(value, 5)!;
+    expect(value.slice(0, word.start) + "chosen" + value.slice(word.end)).toBe("📝 chosen! next");
+  });
+
+  it("requires a letter immediately left of a valid caret", () => {
+    for (const [value, cursor] of [
+      ["", 0],
+      ["word", 0],
+      ["word ", 5],
+      ["word.", 5],
+      ["word2", 5],
+      ["word_", 5],
+      ["é", 2],
+      ["𐐀", 1],
+      ["word", -1],
+      ["word", 5],
+      ["word", 1.5],
+      ["word", NaN],
+    ] as const) {
+      expect(promptSnippetWordAtCursor(value, cursor)).toBeNull();
+    }
   });
 });
