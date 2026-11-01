@@ -21,6 +21,7 @@ interface Fixture {
   readonly upstream: string;
 }
 
+// The synthetic repositories need the runners' shared runtime imports too.
 const FIXTURE_RUNTIME_PATHS = [
   ".gitignore",
   "package.json",
@@ -28,6 +29,7 @@ const FIXTURE_RUNTIME_PATHS = [
   "packages/shared/src/desktopDistribution.ts",
   "packages/shared/src/dependencyActivity.ts",
   "packages/shared/src/generatedBuildOwnership.ts",
+  "packages/shared/src/nativeFileSystem.ts",
   "scripts/lastcode-local-ci.ts",
   "scripts/lib/lastcode-action-kit.ts",
   "scripts/lib/lastcode-ci-admission-lock.ts",

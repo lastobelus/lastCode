@@ -1,5 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Also used by dependency-free build runners.
-import * as NodeFS from "node:fs";
+import { fs as NodeFS } from "./nativeFileSystem.ts";
 import * as NodePath from "node:path";
 import * as NodeCrypto from "node:crypto";
 import {
@@ -18,9 +18,10 @@ type BuildRecord = {
 };
 const MAX_FILES = 50_000;
 const MAX_RECORD_BYTES = 16 * 1024 * 1024;
-const signature = (stat: NodeFS.Stats) =>
+const signature = (stat: import("node:fs").Stats) =>
   JSON.stringify([stat.dev, stat.ino, stat.birthtimeMs, stat.mtimeMs, stat.ctimeMs, stat.size]);
-const allocation = (stat: NodeFS.Stats) => JSON.stringify([stat.dev, stat.ino, stat.birthtimeMs]);
+const allocation = (stat: import("node:fs").Stats) =>
+  JSON.stringify([stat.dev, stat.ino, stat.birthtimeMs]);
 const missing = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT";
 const allowedRoot = (root: string) =>
   /^apps\/[a-zA-Z0-9_-]+\/dist$/.test(root) || root === "native/resource-monitor/target/debug";

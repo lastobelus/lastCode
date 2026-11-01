@@ -1,8 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off globalDate:off -- This Node-only durable store is called by the server Effect service and owns native file descriptors.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
-import * as NodeFS from "node:fs";
-import * as NodeFSP from "node:fs/promises";
+import { fs as NodeFS } from "./nativeFileSystem.ts";
+import { promises as NodeFSP } from "./nativeFileSystem.ts";
 import * as NodePath from "node:path";
 import * as NodeStream from "node:stream";
 import * as NodeStreamPromises from "node:stream/promises";

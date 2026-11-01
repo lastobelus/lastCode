@@ -5,6 +5,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
+import * as NodeURL from "node:url";
 import * as NodeZlib from "node:zlib";
 import { expect, it, vi } from "vite-plus/test";
 
@@ -80,6 +81,12 @@ const fixture = async () => {
     },
   };
 };
+
+it("round-trips physical asar files and directories in a linked worktree", async () => {
+  await execute(process.execPath, [
+    NodeURL.fileURLToPath(new URL("./__fixtures__/worktree-suspension-asar.ts", import.meta.url)),
+  ]);
+});
 
 it.each(["read", "readJournal"] as const)(
   "keeps a missing snapshot read-only through %s before capture",

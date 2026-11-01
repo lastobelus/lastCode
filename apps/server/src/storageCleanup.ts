@@ -74,6 +74,7 @@ import { isNetworkPath } from "@t3tools/shared/path";
 import * as GeneratedDependencies from "./workspace/GeneratedDependencies.ts";
 import * as GeneratedBuilds from "./workspace/GeneratedBuilds.ts";
 import * as WorktreeConsumers from "./workspace/WorktreeConsumers.ts";
+import { physicalCleanupFileSystem } from "./workspace/physicalCleanupFileSystem.ts";
 import { WorktreeSuspension } from "./workspace/WorktreeSuspension.ts";
 import { WorktreeSuspensionRegistry } from "./workspace/WorktreeSuspensionRegistry.ts";
 
@@ -356,7 +357,7 @@ const make = Effect.gen(function* () {
   const gitManager = yield* GitManager.GitManager;
   const terminals = yield* TerminalManager.TerminalManager;
   const previewHosting = yield* PreviewHosting.PreviewHosting;
-  const fs = yield* FileSystem.FileSystem;
+  const fs = physicalCleanupFileSystem(yield* FileSystem.FileSystem);
   const path = yield* Path.Path;
   const auditPath = path.join(config.logsDir, "storage-cleanup.audit.ndjson");
   const auditFileLimit = 512 * 1024;
