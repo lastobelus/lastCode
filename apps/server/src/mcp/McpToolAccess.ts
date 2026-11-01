@@ -391,14 +391,11 @@ const routed = Effect.fn("McpToolAccess.routed")(function* <Tools extends Record
     handlers[name] = ({ environmentId, ...params }: { readonly environmentId?: EnvironmentId }) =>
       Effect.gen(function* () {
         const scope = yield* McpInvocationContext.McpInvocationContext;
-        const target = PeerForwarding.remoteTarget(scope, environmentId);
-        if (
-          name === "t3_thread_read" &&
-          (target === undefined ||
-            (Predicate.hasProperty(params, "via") && params.via === "client"))
-        ) {
+        // The read service selects client authority or an existing peer link.
+        if (name === "t3_thread_read") {
           return yield* here({ ...params, environmentId });
         }
+        const target = PeerForwarding.remoteTarget(scope, environmentId);
         if (target === undefined) return yield* here(params);
         if (scope.linkedEnvironments === false) return yield* PeerForwarding.linkedEnvironmentsOff;
         yield* (remote as RemoteCheck<typeof params>)(params);

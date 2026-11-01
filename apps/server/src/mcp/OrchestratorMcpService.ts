@@ -127,7 +127,6 @@ import {
 import { isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
-import * as PeerLinks from "../peer/PeerLinks.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
@@ -1030,7 +1029,6 @@ const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const threadReadBroker = yield* ThreadReadBroker.ThreadReadBroker;
   const peerForwarding = yield* PeerForwarding.PeerForwarding;
-  const peerLinks = yield* PeerLinks.PeerLinks;
   const actionResume = yield* ActionResume.ActionResume;
   const threadManagement = yield* ThreadManagementService.ThreadManagementService;
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
@@ -3087,13 +3085,7 @@ const make = Effect.gen(function* () {
       }
       const remote = PeerForwarding.remoteTarget(scope, input.environmentId);
       if (remote !== undefined) {
-        const link = yield* peerLinks
-          .get(remote)
-          .pipe(Effect.mapError((error) => failure("orchestration_error", error.message)));
-        if (Option.isSome(link)) {
-          // Peer refusals are final; client authority must not bypass the link.
-          return yield* peerForwarding.readThread(scope, remote, input);
-        }
+        return yield* peerForwarding.readThread(scope, remote, input);
       }
       return yield* readThreadLocal(scope, input).pipe(
         Effect.catchIf(
@@ -3534,7 +3526,6 @@ export const layer: Layer.Layer<
   | ActionResume.ActionResume
   | ThreadReadBroker.ThreadReadBroker
   | PeerForwarding.PeerForwarding
-  | PeerLinks.PeerLinks
   | ThreadManagementService.ThreadManagementService
   | ThreadLaunchService.ThreadLaunchService
   | GitVcsDriver.GitVcsDriver
