@@ -20,6 +20,11 @@ import { Toast } from "../../components/ui/Toast";
 import { promptSnippetsEnvironment } from "../../state/promptSnippets";
 import { useEnvironmentQuery } from "../../state/query";
 import { useAtomCommand } from "../../state/use-atom-command";
+import {
+  hasPromptSnippetDraftChanges,
+  resolvePromptSnippetDraft,
+  type PromptSnippetDraft,
+} from "./promptSnippetDraft";
 
 export function PromptSnippetSheet(props: {
   readonly environmentId: EnvironmentId;
@@ -30,17 +35,7 @@ export function PromptSnippetSheet(props: {
   const [query, setQuery] = useState(props.initialQuery ?? "");
   const [mode, setMode] = useState<"search" | "edit">("search");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [drafts, setDrafts] = useState<
-    Record<
-      string,
-      {
-        title: string;
-        text: string;
-        originalTitle: string;
-        originalText: string;
-      }
-    >
-  >({});
+  const [drafts, setDrafts] = useState<Record<string, PromptSnippetDraft>>({});
   const [saving, setSaving] = useState(false);
   const [sheetVersion, setSheetVersion] = useState(0);
   const [wide, setWide] = useState(false);
@@ -72,22 +67,18 @@ export function PromptSnippetSheet(props: {
   const results = searchPromptSnippets(state.data?.snippets ?? [], query);
 
   const selected = state.data?.snippets.find((snippet) => snippet.id === selectedId);
-  const draft = selectedId === null ? undefined : drafts[selectedId];
-  const title = draft?.title ?? selected?.title ?? "";
-  const text = draft?.text ?? selected?.text ?? "";
-  const dirty = Object.values(drafts).some(
-    (entry) => entry.title !== entry.originalTitle || entry.text !== entry.originalText,
+  const draft = resolvePromptSnippetDraft(
+    selected,
+    selectedId === null ? undefined : drafts[selectedId],
   );
+  const { title, text } = draft;
+  const dirty = Object.values(drafts).some(hasPromptSnippetDraftChanges);
   const updateDraft = (change: { title?: string; text?: string }) => {
     if (selectedId === null) return;
     setDrafts((current) => ({
       ...current,
       [selectedId]: {
-        title,
-        text,
-        originalTitle: selected?.title ?? "",
-        originalText: selected?.text ?? "",
-        ...current[selectedId],
+        ...resolvePromptSnippetDraft(selected, current[selectedId]),
         ...change,
       },
     }));
@@ -231,11 +222,7 @@ export function PromptSnippetSheet(props: {
                     disabled={saving}
                     onPress={() => {
                       const pending = drafts[snippet.id];
-                      if (
-                        pending &&
-                        (pending.title !== pending.originalTitle ||
-                          pending.text !== pending.originalText)
-                      ) {
+                      if (pending && hasPromptSnippetDraftChanges(pending)) {
                         Alert.alert("Unsaved changes", "Save this prompt before dismissing it.");
                         return;
                       }
@@ -292,8 +279,7 @@ export function PromptSnippetSheet(props: {
                       !canSave ||
                       !title.trim() ||
                       !text.trim() ||
-                      !draft ||
-                      (draft.title === draft.originalTitle && draft.text === draft.originalText)
+                      !hasPromptSnippetDraftChanges(draft)
                     }
                     onPress={() => {
                       if (!canSave || saving || selectedId === null) return;
