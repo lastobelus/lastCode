@@ -3247,7 +3247,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         parent.projectId !== projectId ||
         parent.archivedAt !== null ||
         parent.deletedAt !== null ||
-        parent.archivePending != null ||
+        parent.archivePending?.status === "stopping" ||
         parent.lineage.sideChat === true ||
         isProviderNativeSubagentThread(parent)
       )
@@ -3899,6 +3899,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         (thread.delegatedFrom !== undefined &&
           thread.lineage.relationshipToParent !== "fork" &&
           thread.lineage.independent !== true) ||
+        (thread.archivePending?.status === "stopping" &&
+          thread.archivePending.threadId !== thread.id) ||
         (thread.archivedAt !== null && command.groupedUnderThreadId !== null) ||
         (thread.archivePending != null && !isThreadPlacementReleaseCommand(command))
       )
@@ -4535,7 +4537,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                     requestId: command.commandId,
                   };
           return {
-            ...(command.groupedUnderThreadId === null ? releaseCreatorGrouping(thread) : thread),
+            ...(command.groupedUnderThreadId === null &&
+            getInteractiveThreadParentThreadId(thread) !== null
+              ? releaseCreatorGrouping(thread)
+              : thread),
             ...placement,
             ...(command.actionResume === undefined ? {} : { actionResume: command.actionResume }),
             ...(command.workspaceUserAdopted === true ? { workspaceUserAdopted: true } : {}),

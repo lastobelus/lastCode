@@ -488,6 +488,33 @@ it.effect("creates and replays an idle MCP thread without a prompt", () =>
     yield* sink.write({
       events: [
         {
+          id: EventId.make("failed-parent-archive"),
+          type: "thread.metadata-updated",
+          threadId: parentThreadId,
+          occurredAt: parent.thread.updatedAt,
+          payload: {
+            ...parent.thread,
+            archivePending: {
+              threadId: parentThreadId,
+              commandId: CommandId.make("failed-parent-archive"),
+              status: "failed",
+              childDisposition: "stop_and_archive",
+              childThreadIds: [],
+              archiveThreadIds: [parentThreadId],
+              promoteThreadIds: [],
+            },
+          },
+        },
+      ],
+    });
+    const fromFailedParent = yield* service.createThreads(scope, {
+      clientRequestId: "failed-parent-create",
+      threads: [{ title: "Continue work" }],
+    });
+    assert.equal(fromFailedParent.threads[0]?.groupedUnderThreadId, parentThreadId);
+    yield* sink.write({
+      events: [
+        {
           id: EventId.make("side-chat-parent"),
           type: "thread.metadata-updated",
           threadId: parentThreadId,

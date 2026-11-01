@@ -2,6 +2,7 @@ import { assert, it } from "@effect/vitest";
 import {
   CommandId,
   EnvironmentId,
+  getThreadArchivePlan,
   EventId,
   MessageId,
   OrchestrationV2AppThreadJson,
@@ -209,6 +210,24 @@ it.effect(
       const item = ThreadId.make("organization:item");
       const stage = ThreadId.make("organization:stage");
       for (const id of [origin, destination]) yield* orchestrator.dispatch(create(id, project));
+      yield* orchestrator.dispatch({
+        type: "thread.pin",
+        threadId: origin,
+        commandId: CommandId.make("organization:pin-root"),
+        orderKey: "kept",
+      });
+      const pinned = yield* store.getThread(origin);
+      yield* orchestrator.dispatch({
+        type: "thread.metadata.update",
+        threadId: origin,
+        commandId: CommandId.make("organization:root-noop"),
+        groupedUnderThreadId: null,
+      });
+      const stillPinned = yield* store.getThread(origin);
+      assert.deepEqual(
+        [stillPinned.pinnedAt, stillPinned.pinOrderKey, stillPinned.activeOrderKey],
+        [pinned.pinnedAt, pinned.pinOrderKey, pinned.activeOrderKey],
+      );
       yield* createOrdinary(item, origin, project);
       yield* createOrdinary(stage, item, project);
       const before = yield* store.getThreadProjection(item);
@@ -867,6 +886,20 @@ it.effect(
         }),
       );
       const existing = yield* store.getThread(child);
+      const detach = yield* orchestrator
+        .dispatch({
+          type: "thread.metadata.update",
+          commandId: CommandId.make("limited-archive-detach-participant"),
+          threadId: child,
+          groupedUnderThreadId: null,
+        })
+        .pipe(Effect.exit);
+      assert.equal(detach._tag, "Failure");
+      assert.equal((yield* store.getThread(child)).groupedUnderThreadId, creator);
+      assert.deepEqual(
+        getThreadArchivePlan((yield* store.getThread(creator)).archivePending)?.childThreadIds,
+        [child],
+      );
       yield* store.apply({
         type: "thread.metadata-updated",
         id: EventId.make("raise-interactive-mode"),
