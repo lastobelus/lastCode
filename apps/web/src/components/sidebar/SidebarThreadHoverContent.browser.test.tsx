@@ -136,7 +136,12 @@ it("scrolls to and opens PRs at the end of a long list while keeping thread deta
   container.style.setProperty("--available-height", "600px");
   await using screen = await render(
     <>
-      <textarea aria-label="Composer" onKeyDown={(event) => onComposerKey(event.key)} />
+      <textarea
+        aria-label="Composer"
+        data-lastcode-source-composer="true"
+        onKeyDown={(event) => onComposerKey(event.key)}
+      />
+      <input aria-label="Find in thread" onKeyDown={(event) => onComposerKey(event.key)} />
       <div role="dialog">
         <input aria-label="Other dialog field" onKeyDown={(event) => onComposerKey(event.key)} />
       </div>
@@ -191,6 +196,16 @@ it("scrolls to and opens PRs at the end of a long list while keeping thread deta
   expect(onComposerKey).not.toHaveBeenCalled();
   await userEvent.keyboard("{Control>}{ArrowDown}{/Control}");
   expect(onComposerKey).toHaveBeenCalledWith("ArrowDown");
+  onComposerKey.mockClear();
+  await act(() =>
+    (screen.getByRole("textbox", { name: "Find in thread" }).element() as HTMLElement).focus(),
+  );
+  const beforeFindKeys = scroller.scrollTop;
+  for (const key of ["PageDown", "PageUp", "ArrowDown", "ArrowUp"]) {
+    await userEvent.keyboard(`{${key}}`);
+    expect(onComposerKey).toHaveBeenLastCalledWith(key);
+    expect(scroller.scrollTop).toBe(beforeFindKeys);
+  }
   onComposerKey.mockClear();
   await act(() =>
     (screen.getByRole("textbox", { name: "Other dialog field" }).element() as HTMLElement).focus(),

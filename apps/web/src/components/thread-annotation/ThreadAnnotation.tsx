@@ -427,16 +427,16 @@ export function ThreadAnnotationHoverPopover(props: {
       >
         <div className="flex min-h-0 min-w-0 w-80 max-h-(--available-height) max-w-80 flex-col">
           <div className="flex min-h-0 flex-col">{props.threadDetails}</div>
-          <div className="shrink-0 border-t border-border/70 bg-warning/10 p-(--floating-content-inset) text-warning-foreground">
+          <div className="flex min-h-0 max-h-[calc(var(--available-height)/3)] flex-col border-t border-border/70 bg-warning/10 p-(--floating-content-inset) text-warning-foreground">
             <ThreadAnnotationBody
               annotation={props.annotation}
-              className="max-h-64 overflow-y-auto"
+              className="min-h-0 max-h-64 overflow-y-auto overscroll-contain"
               compact
               cwd={props.cwd}
               onBodyChange={props.onBodyChange}
               threadRef={props.threadRef}
             />
-            <div className="mt-2">
+            <div className="mt-2 shrink-0">
               <ThreadAnnotationActions
                 annotation={props.annotation}
                 onEdit={() => {

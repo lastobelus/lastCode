@@ -90,18 +90,33 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
     props.thread.actionResume?.outcome === "running"
       ? actionRunningPresentation(props.thread.actionResume)
       : null;
+  const hasPullRequests = supportsMultiplePullRequests && props.thread.pullRequests.length > 0;
 
   return (
-    <div className="flex min-h-0 min-w-0 max-h-(--available-height) max-w-80 flex-col gap-2 p-(--floating-content-inset)">
-      <div className="min-w-0 shrink-0 truncate text-xs leading-tight font-medium text-foreground">
-        {props.thread.title}
-      </div>
-      {props.thread.persistent ? (
-        <div className="shrink-0 text-xs text-muted-foreground">
-          Persistent thread · protected from archive and deletion
+    <div
+      className={cn(
+        "grid min-h-0 min-w-0 max-h-(--available-height) max-w-80 gap-2 p-(--floating-content-inset)",
+        hasPullRequests
+          ? "grid-rows-[auto_minmax(0,auto)_minmax(3rem,1fr)]"
+          : "grid-rows-[auto_minmax(0,1fr)]",
+      )}
+    >
+      <div className="flex min-w-0 flex-col gap-2">
+        <div className="min-w-0 truncate text-xs leading-tight font-medium text-foreground">
+          {props.thread.title}
         </div>
-      ) : null}
-      <div className="grid shrink-0 gap-1.5 pl-0.5 text-xs text-muted-foreground">
+        {props.thread.persistent ? (
+          <div className="text-xs text-muted-foreground">
+            Persistent thread · protected from archive and deletion
+          </div>
+        ) : null}
+      </div>
+      <div
+        role="region"
+        aria-label="Thread metadata"
+        tabIndex={0}
+        className="grid min-h-0 gap-1.5 overflow-y-auto overscroll-contain pl-0.5 text-xs text-muted-foreground"
+      >
         {projectDisplayName ? (
           <div className="flex min-w-0 items-center gap-2">
             <ProjectFavicon
@@ -242,7 +257,7 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
           </div>
         ) : null}
       </div>
-      {supportsMultiplePullRequests && props.thread.pullRequests.length > 0 ? (
+      {hasPullRequests ? (
         <div
           ref={bindThreadHoverScrollKeys}
           className="min-h-0 overflow-y-auto overscroll-contain border-t border-border/60 pt-2 pl-0.5 text-xs text-muted-foreground"

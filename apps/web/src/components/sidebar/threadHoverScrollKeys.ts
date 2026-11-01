@@ -25,11 +25,8 @@ export function bindThreadHoverScrollKeys(scrollArea: HTMLDivElement | null) {
     );
     if (floatingLayer && !floatingLayer.contains(scrollArea)) return;
     if (target?.closest("[aria-activedescendant],[role='combobox'][aria-expanded='true']")) return;
-    if (
-      target?.closest("input,textarea,select,[contenteditable],[role='textbox']") &&
-      (focusedInside || floatingLayer || target.closest("[data-slot='sidebar']"))
-    )
-      return;
+    const editor = target?.closest("input,textarea,select,[contenteditable],[role='textbox']");
+    if (editor && !editor.matches("[data-lastcode-source-composer='true']")) return;
 
     event.preventDefault();
     event.stopPropagation();
