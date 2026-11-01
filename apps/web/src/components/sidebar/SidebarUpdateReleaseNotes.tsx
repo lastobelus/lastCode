@@ -1,4 +1,8 @@
-import type { DesktopBridge, DesktopUpdateState } from "@t3tools/contracts";
+import type {
+  DesktopBridge,
+  DesktopUpdateReleaseNote,
+  DesktopUpdateState,
+} from "@t3tools/contracts";
 import { ExternalLinkIcon } from "lucide-react";
 
 import {
@@ -29,6 +33,25 @@ function formatReleaseAge(releasedAt: string): string {
     (today - Date.UTC(Number(day[1]), Number(day[2]) - 1, Number(day[3]))) / 86_400_000,
   );
   return days <= 0 ? "today" : `${days}d ago`;
+}
+
+export function resolveReleaseNoteHeading(
+  releaseNote: DesktopUpdateReleaseNote,
+  index: number,
+): string {
+  return (
+    releaseNote.heading ?? (index === 0 ? "What's changed" : `Changes in ${releaseNote.version}`)
+  );
+}
+
+export function keyReleaseNoteGroups(releaseNotes: ReadonlyArray<DesktopUpdateReleaseNote>) {
+  const occurrences = new Map<string, number>();
+  return releaseNotes.map((releaseNote) => {
+    const identity = JSON.stringify([releaseNote.version, releaseNote.heading ?? null]);
+    const occurrence = occurrences.get(identity) ?? 0;
+    occurrences.set(identity, occurrence + 1);
+    return { releaseNote, key: JSON.stringify([identity, occurrence]) };
+  });
 }
 
 function ReleaseLink({
@@ -77,7 +100,9 @@ export function SidebarUpdateReleaseNotes({
         {state.status === "available" ? (
           <div>
             <div className="whitespace-nowrap text-sm leading-5 font-medium">
-              Update ready to download
+              {state.source === "lastcode-local"
+                ? "Local nightly ready to build"
+                : "Update ready to download"}
             </div>
             {state.availableVersion ? (
               <div className="mt-0.5 text-xs leading-4 text-muted-foreground">
@@ -92,7 +117,7 @@ export function SidebarUpdateReleaseNotes({
         )}
       </div>
       <div className="min-h-0 max-h-[min(28rem,calc(100vh-6rem))] overflow-y-auto px-1 pt-3 pb-1">
-        {state.releaseNotes.map((releaseNote, index) => {
+        {keyReleaseNoteGroups(state.releaseNotes).map(({ releaseNote, key }, index) => {
           const releaseUrl = getDesktopUpdateReleaseUrl(releaseNote.version);
           const omittedItemCount = Math.max(0, releaseNote.totalItems - releaseNote.items.length);
           const linkLabel =
@@ -103,7 +128,7 @@ export function SidebarUpdateReleaseNotes({
 
           if (releaseNote.intro !== undefined) {
             return (
-              <section className={index > 0 ? "mt-4" : undefined} key={releaseNote.version}>
+              <section className={index > 0 ? "mt-4" : undefined} key={key}>
                 {releaseNote.version !== state.availableVersion ? (
                   <h3 className="mb-1 text-xs leading-4 font-medium text-muted-foreground">
                     {releaseNote.releasedAt
@@ -124,10 +149,10 @@ export function SidebarUpdateReleaseNotes({
           }
 
           return (
-            <div className={index > 0 ? "mt-4" : undefined} key={releaseNote.version}>
+            <div className={index > 0 ? "mt-4" : undefined} key={key}>
               <section>
                 <h3 className="text-foreground text-xs leading-4 font-semibold">
-                  {index === 0 ? "What's changed" : `Changes in ${releaseNote.version}`}
+                  {resolveReleaseNoteHeading(releaseNote, index)}
                 </h3>
                 <ul className="mt-2 space-y-1.5 pl-4 text-xs leading-5 text-popover-foreground/90">
                   {keyReleaseNoteItems(releaseNote.items).map(({ item, key }) => (
@@ -136,6 +161,17 @@ export function SidebarUpdateReleaseNotes({
                     </li>
                   ))}
                 </ul>
+                {releaseNote.summaries && releaseNote.summaries.length > 0 ? (
+                  <div className="mt-2 space-y-1 text-xs leading-5 text-popover-foreground/70">
+                    {keyReleaseNoteItems(releaseNote.summaries).map(
+                      ({ item: summary, key: summaryKey }) => (
+                        <p className="break-words" key={summaryKey}>
+                          {summary}
+                        </p>
+                      ),
+                    )}
+                  </div>
+                ) : null}
                 {releaseUrl ? (
                   <ReleaseLink releaseUrl={releaseUrl} shell={shell}>
                     {linkLabel}

@@ -29,6 +29,7 @@ import { ListChoiceRow as SettingsChoiceRow } from "../../components/ui/ListChoi
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 import { SourceControlSignInSection } from "./components/SourceControlSignInSection";
+import { LocalCiSettingsSection } from "./components/LocalCiSettingsSection";
 import { SettingsProjectOverridesSection } from "./components/SettingsProjectOverridesSection";
 import { useSettingsEnvironmentFilter } from "./settings-environment-filter";
 import { useSettingsWriter } from "./useSettingsWriter";
@@ -299,6 +300,11 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
     });
   };
   const disabled = !canWriteSettings || pendingWrites > 0 || !hasConnectedSelection;
+  const supportsLocalCi =
+    hasConnectedSelection &&
+    targets.every(
+      (target) => target.environment.serverConfig.environment.capabilities.lastcodeLocalCi === true,
+    );
   const disabledFor = (key: string) =>
     disabled ||
     (projectSelected &&

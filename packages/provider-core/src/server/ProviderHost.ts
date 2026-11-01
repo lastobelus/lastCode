@@ -16,6 +16,9 @@ export interface ProviderHostPaths {
   readonly cwd: string;
   readonly baseDir: string;
   readonly stateDir: string;
+  /** Settings file used by provider shells running local CI for this server. */
+  readonly settingsPath: string;
+  /** Scratch space for provider probes and generated helper files. */
   readonly providerStatusCacheDir: string;
   /** Where chat attachments are stored; agents that sandbox file reads must be granted it. */
   readonly attachmentsDir: string;

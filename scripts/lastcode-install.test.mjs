@@ -49,7 +49,7 @@ function temporaryDirectory() {
 }
 
 // oxlint-disable-next-line t3code/no-global-process-runtime -- This integration test exercises a macOS-only kernel lock.
-const itMacOnly = process.platform === "darwin" ? it : it.skip;
+const itMacOnly = it.runIf(process.platform === "darwin");
 
 describe("LastCode userland install command", () => {
   function mountWarning(path, device = "1234") {
@@ -855,7 +855,7 @@ describe("LastCode userland install command", () => {
 
   it("launches with the repository's pinned Node runtime", () => {
     expect(renderLauncher("/tmp/Last Code/lastcode-install.mjs")).toContain(
-      "mise exec node@24.13.1 -- node '/tmp/Last Code/lastcode-install.mjs' \"$@\"",
+      "env MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@24.13.1 -- node '/tmp/Last Code/lastcode-install.mjs' \"$@\"",
     );
   });
 

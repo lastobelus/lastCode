@@ -1,8 +1,37 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { cliArchiveTarCommand, newestCliReleaseVersion, parseChecksums } from "./cliRelease.ts";
+import {
+  acceptsTrackSwitchRelease,
+  cliArchiveTarCommand,
+  cliReleaseChannelOf,
+  crossesReleaseTrack,
+  desktopUpdateChannelOf,
+  newestCliReleaseVersion,
+  parseChecksums,
+} from "./cliRelease.ts";
 
 describe("cliRelease", () => {
+  it.each(["", ".1"])("keeps nightly revision %s on its guarded release track", (revision) => {
+    const nightly = `1.2.4-nightly.20261030.3917${revision}`;
+    const older = "1.2.4-nightly.20261030.3916.9";
+    const preview = `1.2.4-preview.20261030.3917${revision}`;
+
+    expect(cliReleaseChannelOf(nightly)).toBe("nightly");
+    expect(desktopUpdateChannelOf(nightly)).toBe("nightly");
+    expect(cliReleaseChannelOf(preview)).toBe("preview");
+    expect(desktopUpdateChannelOf(preview)).toBe("latest");
+    expect(crossesReleaseTrack("1.2.3", nightly)).toBe(true);
+    expect(crossesReleaseTrack(nightly, "1.2.4")).toBe(true);
+    expect(crossesReleaseTrack(older, nightly)).toBe(false);
+    expect(crossesReleaseTrack(preview, nightly)).toBe(false);
+    expect(acceptsTrackSwitchRelease(nightly, "nightly", nightly)).toBe(true);
+    expect(acceptsTrackSwitchRelease(older, "nightly", nightly)).toBe(false);
+    expect(acceptsTrackSwitchRelease(nightly, "latest", "1.2.3")).toBe(false);
+    expect(acceptsTrackSwitchRelease("1.2.4", "nightly", nightly)).toBe(false);
+    expect(acceptsTrackSwitchRelease(preview, "nightly", nightly)).toBe(false);
+    expect(newestCliReleaseVersion([{ tag_name: `v${nightly}` }], "nightly")).toBe(nightly);
+  });
+
   it("parses sha256sum output including binary-mode markers", () => {
     const checksums = parseChecksums(
       [

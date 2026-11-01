@@ -103,6 +103,7 @@ jobs:
     name: Preflight
     needs: [resolve_commit]
     if: |
+      github.repository == 'pingdotgg/t3code' &&
       needs.resolve_commit.result == 'success' &&
       (github.event_name != 'schedule' || needs.resolve_commit.outputs.has_changes == 'true')
     runs-on: blacksmith-8vcpu-ubuntu-2404
@@ -290,7 +291,7 @@ jobs:
       - name: Install browser secret helper build libraries
         run: |
           sudo sed -i 's|http://|https://|g' /etc/apt/blacksmith-ubuntu-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources
-          sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config build-essential
+          sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config build-essential attr acl e2fsprogs
 
       - name: Test
         run: vp run --parallel --concurrency-limit 4 --filter '!t3' --filter '!@t3tools/monorepo' --filter '!@t3tools/web' test
@@ -371,6 +372,14 @@ jobs:
             !/.repos/
           sparse-checkout-cone-mode: false
 
+      - uses: ./.github/actions/setup-apt-mirrors
+
+      - name: Install workspace metadata inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends attr acl e2fsprogs
+          command -v getfattr getfacl lsattr
+
       - name: Setup dependencies
         uses: ./.github/actions/setup-ci-deps
         with:
@@ -391,6 +400,7 @@ jobs:
     # runs alongside preflight instead of after it. The condition mirrors preflight's.
     needs: [resolve_commit]
     if: |
+      github.repository == 'pingdotgg/t3code' &&
       needs.resolve_commit.result == 'success' &&
       (github.event_name != 'schedule' || needs.resolve_commit.outputs.has_changes == 'true')
     runs-on: blacksmith-8vcpu-ubuntu-2404

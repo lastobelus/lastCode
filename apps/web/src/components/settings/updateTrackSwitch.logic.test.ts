@@ -10,6 +10,9 @@ function fakeBridge(offer: string | null | Error) {
   const saved: DesktopUpdateChannel[] = [];
   const base: DesktopUpdateState = {
     enabled: true,
+    source: "hosted",
+    localBuildProgress: null,
+    localBuildFailure: null,
     status: "up-to-date",
     channel: "nightly",
     currentVersion: "0.1.4-nightly.20261027.3796",

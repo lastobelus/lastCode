@@ -2404,6 +2404,8 @@ describe("UsageService", () => {
             legacy,
           );
         }).pipe(
+          // Finish service cache writes before the layer removes its state directory.
+          Effect.scoped,
           Effect.provide(
             layerService({
               prefix: "usage-service-cache-upgrade-test",
@@ -2639,6 +2641,7 @@ describe("UsageService", () => {
 
   it.live("reports saved usage of a removed directory only for windows it reaches", () =>
     Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse("2026-08-12T12:00:00Z"));
       const { transcript, settings, home } = yield* setup;
       yield* Effect.promise(async () => {
         await NodeFSP.writeFile(transcript, claudeLine(1, 5));
@@ -2665,7 +2668,7 @@ describe("UsageService", () => {
       assert.deepStrictEqual(later.buckets, []);
       assert.strictEqual(later.sources[0]?.status, "missing");
       assert.strictEqual(later.sources[0]?.scannedFiles, 0);
-    }).pipe(Effect.scoped),
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
 
   it.live("does not share an in-flight scan after custom prices change", () =>
