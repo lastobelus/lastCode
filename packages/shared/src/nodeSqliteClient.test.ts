@@ -63,6 +63,60 @@ const countEntries = (sql: SqlClient.SqlClient) =>
     (rows) => rows[0]?.count,
   );
 
+it.effect.each([
+  "SELECT sqlite_version() AS version",
+  "PRAGMA wal_checkpoint(NOOP)",
+  "PRAGMA journal_size_limit",
+])("keeps writer checkpoints when the optional probe fails: %s", (failedSql) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-checkpoint-probe-" });
+    const filename = path.join(directory, "state.sqlite");
+    const nativePrepare = NodeSqlite.DatabaseSync.prototype.prepare;
+    const workersBefore = startedWorkers.length;
+    let probedWriter: NodeSqlite.DatabaseSync | undefined;
+    let failedProbes = 0;
+    yield* Effect.acquireRelease(
+      Effect.sync(() =>
+        vi.spyOn(NodeSqlite.DatabaseSync.prototype, "prepare").mockImplementation(function (
+          this: NodeSqlite.DatabaseSync,
+          sql,
+        ) {
+          if (sql === failedSql) {
+            probedWriter = this;
+            failedProbes++;
+            throw Object.assign(new Error("database is locked"), {
+              code: "ERR_SQLITE_ERROR",
+              errcode: 261,
+              errstr: "database is locked",
+            });
+          }
+          return nativePrepare.call(this, sql);
+        }),
+      ),
+      (prepare) => Effect.sync(() => prepare.mockRestore()),
+    );
+
+    yield* Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`PRAGMA journal_mode = WAL`;
+      yield* sql`CREATE TABLE entries(name TEXT NOT NULL)`;
+      yield* sql`INSERT INTO entries VALUES ('kept')`;
+      assert.equal(yield* countEntries(sql), 1);
+      const automatic = yield* sql<{ wal_autocheckpoint: number }>`PRAGMA wal_autocheckpoint`;
+      assert.isAbove(automatic[0]!.wal_autocheckpoint, 0);
+      const error = yield* sql`SELECT missing_column FROM entries`.pipe(Effect.flip);
+      assert.equal(error._tag, "SqlError");
+      assert.equal(error.reason.operation, "prepare");
+    }).pipe(Effect.provide(SqliteClient.layer({ filename, checkpointWorker: true })));
+
+    assert.equal(failedProbes, 1);
+    assert.equal(startedWorkers.length, workersBefore);
+    assert.equal(probedWriter?.isOpen, false);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
 const layer = it.layer(SqliteClient.layer({ filename: ":memory:" }));
 
 layer("NodeSqliteClient", (it) => {

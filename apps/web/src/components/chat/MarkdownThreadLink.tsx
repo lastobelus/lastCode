@@ -1,39 +1,60 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId } from "@t3tools/contracts";
 import {
   formatThreadLink,
+  resolveThreadLinkReference,
   guessThreadLinkRef,
-  percentDecodedThreadLinkId,
-  type ThreadLink,
   unknownThreadLinkLabel,
+  type ThreadLinkReference,
 } from "@t3tools/shared/threadLinks";
+import { Atom } from "effect/reactivity";
 
-import { useThreadRefs, useThreadShell } from "../../state/entities";
+import { environmentThreadShells } from "../../state/threads";
 import { UnresolvedChip } from "../contextChipParts";
 import { ThreadContextChip } from "../ThreadContextChip";
 
-/** `label` is the link's written text; an autolink has none. */
 export function MarkdownThreadLink(props: {
   readonly environmentId: EnvironmentId;
-  readonly link: ThreadLink;
+  readonly reference: ThreadLinkReference;
+  readonly messageEnvironmentId?: EnvironmentId | undefined;
   readonly label: string | null;
 }) {
-  const environmentId = props.link.environmentId ?? props.environmentId;
-  const decodedId = percentDecodedThreadLinkId(props.link.threadId);
-  const written = useThreadShell(scopeThreadRef(environmentId, props.link.threadId));
-  const decoded = useThreadShell(
-    written === null && decodedId !== null ? scopeThreadRef(environmentId, decodedId) : null,
-  );
-  const local = written ?? decoded;
-  const guess = local === null && props.link.environmentId === null;
-  const refs = useThreadRefs(guess);
-  const remote = useThreadShell(guess ? guessThreadLinkRef(props.link, refs) : null);
-  const thread = local ?? remote;
-  if (thread === null) {
-    const unknown = unknownThreadLinkLabel(props.link, props.environmentId);
+  const {
+    threadId: linkedThreadId,
+    environmentId: linkedEnvironmentId,
+    version,
+    legacyThreadId,
+  } = props.reference;
+  const messageEnvironmentId = props.messageEnvironmentId ?? props.environmentId;
+  const resolvedAtom = Atom.make((get) => {
+    const resolved = resolveThreadLinkReference(
+      { threadId: linkedThreadId, environmentId: linkedEnvironmentId, version, legacyThreadId },
+      (threadId, environmentId) => {
+        const owner = environmentId ?? messageEnvironmentId;
+        return get(environmentThreadShells.threadShellAtom(scopeThreadRef(owner, threadId))) ?? undefined;
+      },
+    );
+    if (resolved.value !== undefined || version === 2) return resolved;
+    const target = guessThreadLinkRef(
+      { environmentId: linkedEnvironmentId ?? null, threadId: linkedThreadId, version, legacyThreadId },
+      get(environmentThreadShells.threadRefsAtom),
+    );
+    return target === null
+      ? resolved
+      : { ...target, value: get(environmentThreadShells.threadShellAtom(target)) ?? undefined };
+  });
+  const resolved = useAtomValue(resolvedAtom);
+  const thread = resolved.value;
+  const environmentId = resolved.environmentId ?? messageEnvironmentId;
+  if (thread === undefined) {
+    const unknown = unknownThreadLinkLabel(
+      { environmentId: resolved.environmentId ?? null, threadId: resolved.threadId },
+      messageEnvironmentId,
+    );
     return <UnresolvedChip label={props.label ?? unknown} tooltip={unknown} />;
   }
-  const ref = { environmentId: thread.environmentId, threadId: thread.id };
+  const ref = { environmentId, threadId: thread.id };
   const title = thread.title.trim() || props.label || "Untitled thread";
   return (
     <ThreadContextChip record={{ ...ref, title }} copyMarkdown={formatThreadLink(ref, title)} />

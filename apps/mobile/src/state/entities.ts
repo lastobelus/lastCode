@@ -202,6 +202,7 @@ export function useSideChats(ref: ScopedThreadRef) {
   return useAtomValue(environmentThreadShells.sideChatsAtom(ref));
 }
 
+/** Labels links with current titles from their owning environment. */
 export function useLiveThreadLinkLabels(markdown: string, environmentId: EnvironmentId): string {
   const titles = useAtomValue(
     hasThreadLinks(markdown)
@@ -221,6 +222,12 @@ export function resolveThreadLink(
     (ref) => read(threadTitleAtom(threadKey(ref))) !== null,
   );
   if (known) return known;
+  if (link.legacyThreadId !== undefined) {
+    return (
+      guessThreadLinkRef(link, read(environmentThreadShells.threadRefsAtom)) ??
+      scopeThreadRef(messageEnvironmentId, link.legacyThreadId)
+    );
+  }
   return link.environmentId === null
     ? guessThreadLinkRef(link, read(environmentThreadShells.threadRefsAtom))
     : null;

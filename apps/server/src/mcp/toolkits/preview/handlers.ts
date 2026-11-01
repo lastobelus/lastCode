@@ -208,8 +208,12 @@ const handlers = {
     invokeTargeted<PreviewAutomationSetColorSchemeResult>("setColorScheme", input),
   ),
   preview_snapshot: McpToolAccess.readsAsCaller((input) => {
-    const { includeImage: _includeImage, save: _save, ...operationInput } = input ?? {};
-    return invokeTargeted<PreviewAutomationSnapshot>("snapshot", operationInput);
+    const { includeImage, save, ...operationInput } = input ?? {};
+    return invokeTargeted<PreviewAutomationSnapshot>("snapshot", {
+      ...operationInput,
+      // Saving still needs a capture even when the response contains only its path.
+      ...(includeImage !== true && save !== true ? { includeImage: false } : {}),
+    });
   }),
   preview_act: McpToolAccess.actsAsCaller(({ action, ...input }) =>
     decodeActInput[action](input).pipe(
