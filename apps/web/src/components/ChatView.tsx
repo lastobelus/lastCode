@@ -371,6 +371,7 @@ import { ChatRightPanel } from "./chat/ChatRightPanel";
 import { useDraftEnvironmentRouting } from "./chat/useDraftEnvironmentRouting";
 import { branchMismatchBannerItem } from "./chat/ThreadActivityBanners";
 import { LastCodeThreadNow } from "./chat/LastCodeThreadNow";
+import { LastCodeCurrentWork } from "./chat/LastCodeCurrentWork";
 import type { ThreadStructure } from "@t3tools/client-runtime/state/shell";
 import { useDelayedStatus } from "../hooks/useDelayedStatus";
 import { useTimelineFollow } from "./chat/useTimelineFollow";
@@ -3170,8 +3171,6 @@ export default function ChatView(props: ChatViewProps) {
     attentionNow !== null ||
     workNow !== null ||
     runningResumableActionBannerItem !== null ||
-    interruptedActionBannerItem !== null ||
-    pendingActionBannerItem !== null ||
     goalNow !== null ||
     shownThreadSyncPhase !== null;
   const queuedRunCount = serverProjection ? getUserQueuedThreadRuns(serverProjection).length : 0;
@@ -3212,11 +3211,7 @@ export default function ChatView(props: ChatViewProps) {
           attention={attentionNow}
           work={workNow}
           action={activeThreadShell?.actionResume ?? null}
-          actionItems={[
-            interruptedActionBannerItem,
-            pendingActionBannerItem,
-            runningResumableActionBannerItem,
-          ]}
+          actionItems={[runningResumableActionBannerItem]}
           tasks={pendingBackgroundTasks}
           turnItems={serverProjection?.turnItems ?? EMPTY_TURN_ITEMS}
           onOpenThread={onOpenRelatedThreadStable}
@@ -3613,6 +3608,19 @@ export default function ChatView(props: ChatViewProps) {
                   data-chat-composer-stack="true"
                   className="group/composer-stack pointer-events-auto relative z-10 mx-auto w-full max-w-(--chat-content-max-width)"
                 >
+                  {interruptedActionBannerItem !== null || pendingActionBannerItem !== null ? (
+                    <div className="mb-2 rounded-lg border border-border bg-background px-2 pt-2">
+                      <LastCodeCurrentWork
+                        key={routeThreadKey}
+                        work={null}
+                        action={activeThreadShell?.actionResume ?? null}
+                        actionItems={[interruptedActionBannerItem, pendingActionBannerItem]}
+                        tasks={[]}
+                        turnItems={EMPTY_TURN_ITEMS}
+                        onOpenThread={onOpenRelatedThreadStable}
+                      />
+                    </div>
+                  ) : null}
                   {isDraftHeroState ? (
                     <div className="absolute inset-x-0 bottom-full">
                       <div
