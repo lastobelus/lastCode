@@ -11,8 +11,8 @@ export function createPromptSnippetsEnvironmentAtoms<R, E>(
     label: "prompt-snippets:list",
     tag: WS_METHODS.promptSnippetsList,
     staleTimeMs: 0,
+    idleTtlMs: 0,
     refreshIntervalMs: 2_000,
-    isFinal: (state) => !state.discovering,
   });
   return {
     list,
