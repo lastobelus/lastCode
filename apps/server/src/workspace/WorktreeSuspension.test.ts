@@ -100,8 +100,10 @@ const fixture = async () => {
   await NodeFSP.mkdir(repository);
   await NodeFSP.mkdir(NodePath.dirname(workspace), { recursive: true });
   await git(repository, "init", "--initial-branch=main");
-  await git(repository, "config", "user.email", "fixture@example.invalid");
-  await git(repository, "config", "user.name", "Fixture");
+  await NodeFSP.appendFile(
+    NodePath.join(repository, ".git", "config"),
+    "\n[user]\n\temail = fixture@example.invalid\n\tname = Fixture\n",
+  );
   await NodeFSP.writeFile(NodePath.join(repository, "tracked"), "base\n");
   await NodeFSP.writeFile(NodePath.join(repository, ".gitignore"), "notes/\n");
   await git(repository, "add", ".");
