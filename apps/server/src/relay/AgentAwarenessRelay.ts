@@ -128,6 +128,12 @@ function shouldPublishAgentAwarenessEvent(
     case "turn-item.updated":
       return isTurnItemPayload(event.payload) && turnItemUpdateCanEndBackgroundWork(event.payload);
     case "message.updated":
+    case "thread.persistence-changed":
+    case "thread.annotation-upserted":
+    case "thread.annotation-resolved":
+    case "thread.annotation-reopened":
+    case "thread.attention-set":
+    case "thread.attention-cleared":
     case "plan.updated":
     case "checkpoint-scope.created":
     case "checkpoint.captured":

@@ -8,7 +8,7 @@ import {
 import { threadShellIsVisible } from "@t3tools/client-runtime/state/models";
 import type { Project, SidebarThreadSummary } from "../../types";
 import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
-import { derivePhysicalProjectKey } from "../../logicalProject";
+import { derivePhysicalProjectKey } from "@t3tools/client-runtime/state/project-grouping";
 import { sortProjectsForSidebar } from "../Sidebar.logic";
 /** Pre-resolve known scoped projects once; retain physical-key fallback for missing project records. */
 export function createLastCodeSidebarProjectLookup(

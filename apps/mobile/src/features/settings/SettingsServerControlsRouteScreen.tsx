@@ -26,6 +26,8 @@ import {
 import { BranchNamingSettings } from "./components/BranchNamingSettings";
 import { DatabaseStorageNotice } from "./components/DatabaseStorageNotice";
 import { ListChoiceRow as SettingsChoiceRow } from "../../components/ui/ListChoiceRow";
+import { ListRowLayout } from "../../components/ui/ListRowLayout";
+import { RetentionDaysField } from "./components/RetentionDaysField";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 import { SourceControlSignInSection } from "./components/SourceControlSignInSection";
@@ -43,6 +45,12 @@ import {
 import { PullRequestGlyph } from "../pull-requests/pullRequestGlyphs";
 import { AutoSettleSettingsRows } from "./ThreadSettingsSections";
 import { supportsSharedSettingsSync } from "@t3tools/client-runtime/state/shared-settings";
+import {
+  DEFAULT_MOBILE_DEPENDENCY_RETENTION_DAYS,
+  planMobileWorktreeDependencyCleanup,
+  resolveMobileWorktreeDependencySettings,
+  supportsMobileWorktreeDependencyCleanup,
+} from "./settings-worktree-dependencies";
 
 type SettingsPage = "threads" | "source-control" | "worktrees" | "maintenance";
 
@@ -70,8 +78,26 @@ const PAGE_PROJECT_KEYS: Record<SettingsPage, readonly ProjectScopedServerSettin
     "branchNamePrefix",
     "branchNameInstructions",
   ],
-  maintenance: ["continueThreadsAfterServerUpdate"],
+  maintenance: ["continueThreadsAfterServerUpdate", "worktreeCleanup"],
 };
+
+const WORKTREE_CLEANUP_CHOICES = [
+  {
+    mode: "inherit",
+    label: "Inherit",
+    description: "Use each environment's automatic cleanup rules.",
+  },
+  {
+    mode: "off",
+    label: "Off",
+    description: "Disable all automatic worktree and dependency cleanup for this project.",
+  },
+  {
+    mode: "custom",
+    label: "Custom",
+    description: "Use this project's automatic cleanup rules.",
+  },
+] as const;
 
 const SUBMODULE_CHOICES: ReadonlyArray<{
   readonly mode: WorktreeSubmodules | null;
@@ -83,13 +109,21 @@ const SUBMODULE_CHOICES: ReadonlyArray<{
     label: "Inherit",
     description: "Use the repository's t3.json, or initialize recursively.",
   },
-  { mode: "recursive", label: "Recursive", description: "Initialize nested submodules too." },
+  {
+    mode: "recursive",
+    label: "Recursive",
+    description: "Initialize nested submodules too.",
+  },
   {
     mode: "top-level",
     label: "Top level only",
     description: "Skip submodules declared inside other submodules.",
   },
-  { mode: "none", label: "Skip", description: "Leave submodules empty for a setup script." },
+  {
+    mode: "none",
+    label: "Skip",
+    description: "Leave submodules empty for a setup script.",
+  },
 ];
 
 const WORKSPACE_CHOICES: ReadonlyArray<{
@@ -246,6 +280,35 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
     (key) => key !== "worktreeCleanup" || supportsDependencies,
   );
   const dependencySettings = resolveMobileWorktreeDependencySettings(displayTargets);
+  const persistWrites = (
+    writes: ReturnType<typeof planMobileScopedSettingsPatch>,
+    patch?: ServerSettingsPatch,
+  ) => {
+    if (
+      writeInFlight.current ||
+      !hasConnectedSelection ||
+      !targets.every((target) =>
+        readEnvironmentScope(target.environment.environmentId, AuthSettingsWriteScope),
+      ) ||
+      writes.length === 0
+    )
+      return;
+    writeInFlight.current = true;
+    setPendingTargets(targets);
+    setPendingWrites((count) => count + 1);
+    void writeSettings(targets, writes).finally(() => {
+      writeInFlight.current = false;
+      setPendingTargets(null);
+      setPendingWrites((count) => count - 1);
+      const queued = queuedPatch.current;
+      queuedPatch.current = null;
+      // Project overrides are replaced whole, so retain the patch that just completed.
+      // Clear and cleanup writes cannot replay drafts over their changed overrides.
+      if (patch !== undefined && queued?.key === targetsKey) {
+        write({ ...patch, ...queued.patch });
+      }
+    });
+  };
   const write = (patch: ServerSettingsPatch) => {
     if (writeInFlight.current) {
       const queued = queuedPatch.current;
@@ -255,49 +318,10 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
       };
       return;
     }
-    if (
-      !hasConnectedSelection ||
-      !targets.every((target) =>
-        readEnvironmentScope(target.environment.environmentId, AuthSettingsWriteScope),
-      )
-    )
-      return;
-    const writes = planServerSettingsWrites(targets, projectSelected, patch);
-    if (writes.length === 0) return;
-    writeInFlight.current = true;
-    setPendingTargets(targets);
-    setPendingWrites((count) => count + 1);
-    void writeSettings(targets, writes).finally(() => {
-      writeInFlight.current = false;
-      setPendingTargets(null);
-      setPendingWrites((count) => count - 1);
-      const queued = queuedPatch.current;
-      queuedPatch.current = null;
-      // These targets may not show this write yet, so send it again with the
-      // queued patch; project overrides are replaced whole.
-      if (queued?.key === targetsKey) write({ ...patch, ...queued.patch });
-    });
+    persistWrites(planServerSettingsWrites(targets, projectSelected, patch), patch);
   };
   const clearProjectOverrides = () => {
-    if (
-      writeInFlight.current ||
-      !targets.every((target) =>
-        readEnvironmentScope(target.environment.environmentId, AuthSettingsWriteScope),
-      )
-    )
-      return;
-    const writes = planMobileScopedSettingsClear(targets, PAGE_PROJECT_KEYS[props.page]);
-    if (writes.length === 0) return;
-    writeInFlight.current = true;
-    setPendingTargets(targets);
-    setPendingWrites((count) => count + 1);
-    void writeSettings(targets, writes).finally(() => {
-      writeInFlight.current = false;
-      // Resending a draft over these pre-clear targets would undo the clear.
-      queuedPatch.current = null;
-      setPendingTargets(null);
-      setPendingWrites((count) => count - 1);
-    });
+    persistWrites(planMobileScopedSettingsClear(targets, pageProjectKeys));
   };
   const disabled = !canWriteSettings || pendingWrites > 0 || !hasConnectedSelection;
   const supportsLocalCi =
@@ -311,6 +335,17 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
       !PROJECT_SCOPED_SERVER_SETTING_KEYS.includes(
         key as (typeof PROJECT_SCOPED_SERVER_SETTING_KEYS)[number],
       ));
+  const dependenciesDisabled =
+    disabled || !supportsDependencies || (projectSelected && dependencySettings.mode !== "custom");
+  const updateDependencyDays = (value: number | null) => {
+    if (dependenciesDisabled) return;
+    persistWrites(
+      planMobileWorktreeDependencyCleanup(targets, projectSelected, {
+        kind: "days",
+        value,
+      }),
+    );
+  };
 
   return (
     <>
@@ -321,10 +356,13 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
       >
         <ScrollView
           contentInsetAdjustmentBehavior="automatic"
+          keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
           className="flex-1"
           contentContainerClassName="gap-6 px-5 pt-4"
-          contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 18) + 18 }}
+          contentContainerStyle={{
+            paddingBottom: Math.max(insets.bottom, 18) + 18,
+          }}
         >
           {!hasConnectedSelection || reference === null ? (
             <Text className="px-2 text-base text-foreground-muted">
@@ -338,7 +376,7 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                 <SettingsProjectOverridesSection
                   projectLabel={selectedProject?.label ?? "Unavailable project"}
                   hasOverrides={targets.some((target) =>
-                    PAGE_PROJECT_KEYS[props.page].some((key) => target.sources[key] === "project"),
+                    pageProjectKeys.some((key) => target.sources[key] === "project"),
                   )}
                   pending={pendingWrites > 0}
                   disabled={!canWriteSettings}

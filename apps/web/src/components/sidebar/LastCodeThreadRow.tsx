@@ -26,6 +26,7 @@ import { useLastCodeThreadDetails } from "./useLastCodeThreadDetails";
 import { useLastCodeThreadFamily } from "./useLastCodeThreadFamily";
 import { LastCodeThreadFamilyDisclosure } from "./LastCodeThreadFamily";
 import { useLastCodeThreadSourceControl } from "./useLastCodeThreadSourceControl";
+import { useThreadPullRequestClick } from "./LastCodeThreadSourceControl";
 import { useLastCodeThreadProcesses } from "./useLastCodeThreadProcesses";
 import { LastCodeThreadProcesses } from "./LastCodeThreadProcesses";
 import { LastCodeThreadLeadingControls } from "./LastCodeThreadTitle";
@@ -72,6 +73,12 @@ function LastCodeThreadRow(props: LastCodeThreadRowProps) {
     providerBadgePreferences,
   );
   const sourceControl = useLastCodeThreadSourceControl(thread, leaseLiveStatus, props.projectCwd);
+  const onOpenPullRequest = useThreadPullRequestClick(
+    thread,
+    sourceControl,
+    isActive,
+    navigation.navigateToThread,
+  );
   const threadStatus = useLastCodeThreadStatus(thread);
   const canArchive = canOperateThread && !thread.persistent && cleanup === null;
   const familyPresentation = useLastCodeThreadFamily(props.familyRow, threadStatus);
@@ -84,8 +91,13 @@ function LastCodeThreadRow(props: LastCodeThreadRowProps) {
       identity,
       familyPresentation,
       projectCwdFallback: props.projectCwd,
+      onOpenPullRequest,
     });
-  const detailsLifetime = useLastCodeThreadDetails(threadRef, editing);
+  const detailsLifetime = useLastCodeThreadDetails(
+    threadRef,
+    editing,
+    thread.annotation?.resolvedAt === null,
+  );
   const gestures = useLastCodeThreadRowGestures(
     thread,
     navigation,

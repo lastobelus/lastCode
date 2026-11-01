@@ -1,3 +1,4 @@
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as UpdateDrainAdmissionTestkit from "../updateDrain/UpdateDrainAdmission.testkit.ts";
 import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
 import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
@@ -20,7 +21,6 @@ import {
   type OrchestrationV2AppThread,
   type ProjectId,
 } from "@t3tools/contracts";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as NetService from "@t3tools/shared/Net";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -35,6 +35,7 @@ import { FetchHttpClient } from "effect/http";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import { ProjectLiveServerRequestError } from "./project.ts";
 import { cli } from "../binCli.ts";
 import * as ServerConfig from "../config.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
@@ -63,7 +64,7 @@ const isUpdateDrainAdmissionError = Schema.is(UpdateDrainAdmissionError);
 const layerCliRuntime = Layer.mergeAll(
   NodeServices.layer,
   NetService.layer,
-  Layer.succeed(HostProcessPlatform, HostProcessPlatform.defaultValue()),
+  Layer.succeed(HostProcess.Platform, HostProcess.Platform.defaultValue()),
 );
 const runCli = (args: ReadonlyArray<string>) =>
   Command.runWith(cli, { version: "0.0.0" })(args).pipe(Effect.provide(layerCliRuntime));
@@ -201,7 +202,7 @@ it.effect("adds, renames, and removes projects through the V2 project CLI domain
     assert.equal((yield* readProjects(baseDir)).projects[0]?.title, "Beta");
 
     const remove = runCli(["project", "remove", added?.id ?? "", "--base-dir", baseDir]);
-    if ((yield* HostProcessPlatform) !== "darwin") {
+    if ((yield* HostProcess.Platform) !== "darwin") {
       assert.include((yield* remove.pipe(Effect.flip)).message, "exclusive server ownership");
       assert.equal((yield* readProjects(baseDir)).projects[0]?.title, "Beta");
     } else {
@@ -398,7 +399,7 @@ it.layer(NodeServices.layer)("project deletion with native V2 threads", (it) => 
 
       assert.include(
         error.message,
-        (yield* HostProcessPlatform) === "darwin" ? "not empty" : "exclusive server ownership",
+        (yield* HostProcess.Platform) === "darwin" ? "not empty" : "exclusive server ownership",
       );
       assert.deepEqual(
         (yield* readProjects(baseDir)).projects.map((entry) => entry.id),
@@ -443,7 +444,7 @@ it.layer(NodeServices.layer)("project deletion with native V2 threads", (it) => 
           "--base-dir",
           baseDir,
         ]);
-        if ((yield* HostProcessPlatform) !== "darwin") {
+        if ((yield* HostProcess.Platform) !== "darwin") {
           assert.include((yield* removal.pipe(Effect.flip)).message, "exclusive server ownership");
           for (const id of [activeId, archivedId])
             assert.isNull((yield* readNativeThreadState(baseDir, id)).thread.deletedAt);
@@ -485,7 +486,7 @@ it.layer(NodeServices.layer)("project lookup with unavailable workspaces", (it) 
           "--base-dir",
           baseDir,
         ]);
-        if ((yield* HostProcessPlatform) === "darwin") {
+        if ((yield* HostProcess.Platform) === "darwin") {
           yield* removal;
           assert.deepEqual((yield* readProjects(baseDir)).projects, []);
         } else {
@@ -571,7 +572,7 @@ it.layer(NodeServices.layer)("project lookup with unavailable workspaces", (it) 
         "--base-dir",
         baseDir,
       ]);
-      if ((yield* HostProcessPlatform) === "darwin") {
+      if ((yield* HostProcess.Platform) === "darwin") {
         yield* removal;
         assert.deepEqual(
           (yield* readProjects(baseDir)).projects.map((entry) => entry.id),
@@ -642,7 +643,7 @@ it.layer(NodeServices.layer)("offline ownership and drain admission", (it) => {
     "holds kernel ownership before constructing the offline database and releases after commit",
     () =>
       Effect.gen(function* () {
-        if ((yield* HostProcessPlatform) !== "darwin") return;
+        if ((yield* HostProcess.Platform) !== "darwin") return;
         const fs = yield* FileSystem.FileSystem;
         const root = yield* fs.makeTempDirectoryScoped({ prefix: "project-offline-lease-" });
         const config = yield* makeConfig(NodePath.join(root, "state"));
@@ -718,7 +719,7 @@ it.layer(NodeServices.layer)("offline ownership and drain admission", (it) => {
           "--base-dir",
           baseDir,
         ]).pipe(Effect.flip);
-        if ((yield* HostProcessPlatform) === "darwin") {
+        if ((yield* HostProcess.Platform) === "darwin") {
           assert.isTrue(isProjectOperationError(error));
           if (isProjectOperationError(error))
             assert.isTrue(isUpdateDrainAdmissionError(error.cause));

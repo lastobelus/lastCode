@@ -2346,7 +2346,7 @@ it("toggles a Mermaid attachment between diagram and source through the lazy pre
 });
 
 it("keeps a workspace PDF open across URL renewals and reloads it when the file changes", async () => {
-  const { WorkspaceBrowserPreview } = await import("./FilePreviewPanel");
+  const { WorkspaceBrowserPreview } = await import("./WorkspaceBrowserPreview");
   using _native = vi.spyOn(navigator, "pdfViewerEnabled", "get").mockReturnValue(true);
   const original = URL.createObjectURL(new Blob(["%PDF-1.4"], { type: "application/pdf" }));
   const edited = URL.createObjectURL(new Blob(["%PDF-1.4 edited"], { type: "application/pdf" }));
@@ -2358,6 +2358,7 @@ it("keeps a workspace PDF open across URL renewals and reloads it when the file 
       workspaceRoot="/repo"
       absolutePath="/repo/planning.pdf"
       title="Planning PDF"
+      revision={0}
       workspaceMutationId={mutation}
     />
   );
@@ -2446,7 +2447,7 @@ function planningPdf(
 
 async function workspacePdfPreview() {
   assetUrlState.mockReset();
-  const { WorkspaceBrowserPreview } = await import("./FilePreviewPanel");
+  const { WorkspaceBrowserPreview } = await import("./WorkspaceBrowserPreview");
   const native = vi.spyOn(navigator, "pdfViewerEnabled", "get").mockReturnValue(false);
   const urls = (() => {
     const original = URL.createObjectURL(planningPdf());
@@ -2483,6 +2484,7 @@ async function workspacePdfPreview() {
           absolutePath={path}
           workspaceRoot="/repo"
           title="Planning PDF"
+          revision={0}
           workspaceMutationId={mutation}
         />
       </div>

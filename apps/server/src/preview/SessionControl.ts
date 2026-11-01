@@ -29,6 +29,7 @@ export class SessionControl {
   private pending: Promise<void> = Promise.resolve();
   private readonly handoff = new Set<Promise<void>>();
   private owner: string | null = null;
+  private readyOwner: string | null = null;
   private epoch = 0;
   private closed = false;
 
@@ -43,6 +44,10 @@ export class SessionControl {
 
   get generation() {
     return this.epoch;
+  }
+
+  get controllerReady() {
+    return this.owner === this.readyOwner;
   }
 
   private enqueue<A>(run: () => Promise<A>): Promise<A> {
@@ -75,6 +80,7 @@ export class SessionControl {
   private changeOwner(owner: string | null) {
     this.latestHuman = null;
     this.owner = owner;
+    this.readyOwner = null;
     this.epoch++;
     this.onGenerationChange();
   }
@@ -176,7 +182,9 @@ export class SessionControl {
       throw new BrowserControlInterrupted("Another viewer controls this browser tab.");
     }
     if (this.owner !== viewerId) this.changeOwner(viewerId);
-    return this.human(viewerId, async () => {});
+    return this.human(viewerId, async () => {
+      this.readyOwner = viewerId;
+    });
   }
 
   async release(viewerId: string, afterDrain: () => Promise<void> = async () => {}) {

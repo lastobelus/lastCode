@@ -26,6 +26,7 @@ export const mergeProviderInstanceEnvironment = Effect.fn(function* (
   // Provider shells run CI for this server, including servers with a custom home.
   if (localCiSettingsPath !== undefined) {
     next.T3CODE_LOCAL_CI_SETTINGS_PATH = localCiSettingsPath;
+    next.T3CODE_PR_WATCH_SETTINGS_PATH = localCiSettingsPath;
   }
   return next;
 });

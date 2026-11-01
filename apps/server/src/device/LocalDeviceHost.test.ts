@@ -11,6 +11,11 @@ import * as PlatformError from "effect/PlatformError";
 import * as Ref from "effect/Ref";
 import * as FileSystem from "effect/FileSystem";
 
+import {
+  agentDeviceStateDir,
+  DEVICE_HUB_VERSION,
+  AGENT_DEVICE_VERSION,
+} from "./DeviceToolchain.ts";
 import * as LocalDeviceHost from "./LocalDeviceHost.ts";
 import {
   agentDeviceConfigPath,
@@ -24,11 +29,6 @@ import { HttpClient, HttpClientResponse } from "effect/http";
 import * as NetService from "@t3tools/shared/Net";
 import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
-import {
-  AGENT_DEVICE_VERSION,
-  DEVICE_HUB_VERSION,
-  agentDeviceStateDir,
-} from "./DeviceToolchain.ts";
 
 const processOutput = (code: number, stdout = "", stderr = "", timedOut = false) => ({
   code: ChildProcessSpawner.ExitCode(code),
@@ -726,7 +726,8 @@ it.effect.each([true, false, "activation"] as const)(
       const first = yield* host.ensureAgentReady(() => Effect.void);
       const reused = yield* host.ensureAgentReady(() => Effect.void);
       expect(rawCredentialAccepted).toBe(false);
-      expect(first.agentDevice.token).toBe("current-raw-token");
+      expect(first.agentDevice).not.toBeNull();
+      expect(first.agentDevice?.token).toBe("current-raw-token");
       expect(reused.agentDevice).toEqual(first.agentDevice);
       expect(commands).toEqual(["stop", "devices"]);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
@@ -854,7 +855,6 @@ it.effect.each([
       yield* writeAgentDeviceConfig(legacyFile, {
         baseUrl: "http://127.0.0.1:1234",
         token: "recovered-raw-token",
-        entryPath: "unused",
       });
       const result = yield* retireLegacyAgentDeviceConfig(config.stateDir, host).pipe(
         Effect.result,

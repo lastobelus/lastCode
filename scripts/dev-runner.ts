@@ -925,10 +925,8 @@ export const runDevRunnerWithInput = Effect.fn("dev-runner.runDevRunnerWithInput
     env,
     extendEnv: false,
     shell: spawnCommand.shell,
-    // Keep Vite+ in the same process group so terminal signals (Ctrl+C)
-    // reach it directly. Effect defaults to detached: true on non-Windows,
-    // which would put the runner in a new group and require manual forwarding.
-    detached: false,
+    // Own the whole child group so scoped shutdown also stops watchers and servers.
+    detached: true,
     forceKillAfter: "1500 millis",
   }).pipe(
     Effect.mapError(
@@ -1041,6 +1039,15 @@ const cliRuntimeLayer = Layer.mergeAll(
 
 if (import.meta.main) {
   Command.run(devRunnerCli, { version: "0.0.0" }).pipe(
+    Effect.raceFirst(
+      Effect.callback<never>((resume) => {
+        // Closing an interactive terminal hangs up its foreground job; NodeRuntime
+        // handles SIGINT/SIGTERM, so SIGHUP must enter the same scoped cleanup path.
+        const hangup = () => resume(Effect.interrupt);
+        process.once("SIGHUP", hangup);
+        return Effect.sync(() => process.removeListener("SIGHUP", hangup));
+      }),
+    ),
     Effect.scoped,
     Effect.provide(cliRuntimeLayer),
     NodeRuntime.runMain,

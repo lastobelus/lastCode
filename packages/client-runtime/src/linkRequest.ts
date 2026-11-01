@@ -4,11 +4,13 @@ import {
   type EnvironmentMachineKind,
   type OrchestrationV2TurnItem,
   type PeerLinkRequestAnswerInput,
+  type PeerLinkPreflightInput,
   type PeerLinkSummary,
   resolveEnvironmentMachineKind,
   type ServerConfig,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
+import { isLocalLoopbackHost } from "@t3tools/shared/hostClassification";
 
 import type { EnvironmentPresentation } from "./connection/presentation.ts";
 import { connectionRoutes, routeHttpBaseUrl } from "./connection/routes.ts";
@@ -73,6 +75,12 @@ export interface LinkableMachine {
   readonly urls: ReadonlyArray<string>;
 }
 
+// These addresses leave the client and are resolved by the thread's server.
+const isPeerAddress = (url: string): boolean => {
+  const parsed = URL.parse(url);
+  return parsed !== null && !isLocalLoopbackHost(parsed.hostname);
+};
+
 /**
  * The catalog's machines other than the thread's own, in catalog order, then those only T3
  * Connect knows. `links` are the thread environment's; an expired one no longer counts as
@@ -114,7 +122,7 @@ export function linkableMachines(input: {
             ...routes,
             ...(connect === undefined ? [] : [connect.httpBaseUrl]),
           ]),
-        ],
+        ].filter(isPeerAddress),
       };
     });
   const savedIds = new Set<string>(saved.map((machine) => machine.environmentId));
@@ -135,7 +143,7 @@ export function linkableMachines(input: {
         connected: false,
         connectOnly: true,
         linked: linkedIds.has(environment.environmentId),
-        urls: [environment.endpoint.httpBaseUrl],
+        urls: [environment.endpoint.httpBaseUrl].filter(isPeerAddress),
       };
     });
   return [...saved, ...connectOnly];
@@ -285,11 +293,26 @@ export function linkRequestAnswerInput(
   };
 }
 
+export function linkRequestPreflightInput(
+  target: Pick<LinkableMachine, "environmentId" | "label" | "urls"> | { readonly url: string },
+): PeerLinkPreflightInput | null {
+  const [url, ...alternateUrls] = "url" in target ? [target.url.trim()] : target.urls;
+  if (!url) return null;
+  return {
+    url,
+    ...(alternateUrls.length === 0 ? {} : { alternateUrls }),
+    ...("url" in target
+      ? {}
+      : { expectedEnvironmentId: target.environmentId, expectedLabel: target.label }),
+  };
+}
+
 /** Failures whose message is written for the user and never echoes the request payload. */
 const USER_FACING_FAILURE_TAGS = new Set([
   "PeerLinkRequestError",
   "EnvironmentAuthorizationError",
   "PeerPairingCodeError",
+  "PeerLinkError",
 ]);
 
 /**

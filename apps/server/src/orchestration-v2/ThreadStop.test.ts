@@ -3,6 +3,7 @@ import {
   CommandId,
   ContextTransferId,
   EventId,
+  EnvironmentId,
   MessageId,
   NodeId,
   type OrchestrationV2DomainEvent,
@@ -71,6 +72,9 @@ const layerTest = ThreadManagementService.layer.pipe(
 );
 
 const encodeEffectRequest = Schema.encodeSync(Schema.fromJsonString(OrchestrationEffectRequestV2));
+const decodeEffectRequest = Schema.decodeUnknownSync(
+  Schema.fromJsonString(OrchestrationEffectRequestV2),
+);
 
 const pullRequest = (number: number) => ({
   host: "github.com",
@@ -277,7 +281,8 @@ it.effect.each([
           status: "running",
         },
       });
-      const runAtStart = child.runs[0]!;
+      // Legacy attempts predate the explicit original-task binding.
+      const { delegatedTaskId: _originalTaskId, ...runAtStart } = child.runs[0]!;
       const childRunStatus =
         childState === "running" || childState === "queued" || childState === "waiting"
           ? childState
@@ -603,6 +608,149 @@ it.effect.each(["run.interrupt", "thread.stop"] as const)(
       assert.deepEqual(
         walks.map((row) => row.command_id),
         [stopCommandId],
+      );
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect.each([false, true])(
+  "remote disposal stops terminal owned work without stopping a later round (later=%s)",
+  (laterRound) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("thread:remote-nested-stop");
+      const now = yield* DateTime.now;
+      yield* createWatchingThread(threadId, 601);
+      const thread = (yield* orchestrator.getThreadProjection(threadId)).thread;
+      const selector = {
+        parentEnvironmentId: EnvironmentId.make("environment:parent"),
+        parentThreadId: ThreadId.make("foreign-parent"),
+        sourceTaskId: NodeId.make("foreign-task"),
+        delegationId: "remote-owned-round",
+      };
+      yield* projections.apply({
+        id: EventId.make("remote-nested-association"),
+        type: "thread.metadata-updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          ...thread,
+          linkOrigin: { sessionId: "peer-session", label: "Peer" },
+          remoteDelegations: [{ ...selector, linkSessionId: "peer-session", stage: "active" }],
+        },
+      });
+      yield* send(threadId, "old run", "start_immediately");
+      const ownedRun = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)!;
+      yield* projections.apply({
+        id: EventId.make("remote-run-owner"),
+        type: "run.updated",
+        threadId,
+        runId: ownedRun.id,
+        occurredAt: now,
+        payload: { ...ownedRun, remoteDelegation: selector },
+      });
+      const child = yield* delegate(threadId, "old owned nested task");
+      const grandchild = yield* delegate(child, "owned grandchild");
+      const ownedTask = (yield* orchestrator.getThreadProjection(threadId)).subagents.find(
+        (task) => task.childThreadId === child,
+      )!;
+      yield* projections.apply({
+        id: EventId.make("remote-run-ended"),
+        type: "run.updated",
+        threadId,
+        runId: ownedRun.id,
+        occurredAt: now,
+        payload: {
+          ...ownedRun,
+          remoteDelegation: selector,
+          status: "completed",
+          startedAt: now,
+          completedAt: now,
+        },
+      });
+      const providerTurnId = ProviderTurnId.make("turn:remote-owned-background");
+      yield* projections.apply({
+        id: EventId.make("remote-owned-provider-turn"),
+        type: "provider-turn.updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: providerTurnId,
+          providerThreadId: ownedRun.providerThreadId!,
+          nodeId: ownedRun.rootNodeId!,
+          runAttemptId: ownedRun.activeAttemptId!,
+          nativeTurnRef: null,
+          ordinal: 1,
+          status: "completed",
+          startedAt: now,
+          completedAt: now,
+        },
+      });
+      const backgroundId = TurnItemId.make("item:remote-owned-background");
+      yield* projections.apply({
+        id: EventId.make("remote-owned-background"),
+        type: "turn-item.updated",
+        threadId,
+        runId: ownedRun.id,
+        occurredAt: now,
+        payload: {
+          id: backgroundId,
+          threadId,
+          runId: ownedRun.id,
+          nodeId: ownedRun.rootNodeId,
+          providerThreadId: ownedRun.providerThreadId,
+          providerTurnId,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 10,
+          type: "command_execution",
+          status: "running",
+          title: "Owned background command",
+          input: "node job.js",
+          startedAt: now,
+          completedAt: null,
+          updatedAt: now,
+        },
+      });
+      const unrelated = laterRound
+        ? yield* Effect.gen(function* () {
+            yield* send(threadId, "unrelated later run", "start_immediately");
+            return yield* delegate(threadId, "unrelated nested task");
+          })
+        : undefined;
+      const before = unrelated === undefined ? undefined : yield* threadState(unrelated);
+      const commandId = CommandId.make("dispose-remote-nested");
+      yield* orchestrator.dispatch({
+        type: "remote_delegation.dispose",
+        commandId,
+        threadId,
+        delegation: selector,
+        linkSessionId: "peer-session",
+      });
+      const effects = yield* sql<{
+        readonly request_json: string;
+      }>`SELECT payload_json AS request_json FROM orchestration_v2_effect_outbox WHERE command_id=${commandId} AND effect_type='delegated-tasks.stop'`;
+      assert.lengthOf(effects, 1);
+      const request = decodeEffectRequest(effects[0]!.request_json);
+      assert.equal(request.type, "delegated-tasks.stop");
+      if (request.type !== "delegated-tasks.stop") return;
+      assert.deepEqual(request.taskIds, [ownedTask.id]);
+      yield* threads.stopDelegatedTasks({ threadId, commandId, taskIds: request.taskIds! });
+      assert.deepEqual((yield* threadState(child)).runs, ["interrupted"]);
+      assert.deepEqual((yield* threadState(grandchild)).runs, ["interrupted"]);
+      if (unrelated !== undefined) assert.deepEqual(yield* threadState(unrelated), before);
+      const stopped = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(
+        stopped.turnItems.find((item) => item.id === backgroundId)?.status,
+        laterRound ? "running" : "interrupted",
+      );
+      assert.equal(
+        stopped.turnItems.some(
+          (item) => item.type === "run_interrupt_request" && item.runId === ownedRun.id,
+        ),
+        !laterRound,
       );
     }).pipe(Effect.provide(layerTest)),
 );

@@ -397,7 +397,7 @@ const outcomeNotice = (
     }
     case "failed":
       return {
-        text: `Linking ${target} failed: ${outcome.failure ?? "the other environment refused"}. Call t3_environment_link again if the user still wants it.`,
+        text: `Linking ${target} failed: ${outcome.failure ?? "the other environment refused"}. Correct the reported problem before asking the user to link again.`,
         notification: {
           source: { kind: "background_task" },
           outcome: "failed",

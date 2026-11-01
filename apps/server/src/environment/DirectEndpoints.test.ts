@@ -1,5 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it as effectIt } from "@effect/vitest";
+import { EnvironmentId } from "@t3tools/contracts";
 import type * as NodeOS from "node:os";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -12,6 +13,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import * as ServerConfig from "../config.ts";
 import * as DirectEndpoints from "./DirectEndpoints.ts";
+import * as ServerEnvironment from "./ServerEnvironment.ts";
 import { resolveBoundEndpoints } from "./DirectEndpoints.ts";
 
 const INTERFACES: ReturnType<typeof NodeOS.networkInterfaces> = {
@@ -247,11 +249,24 @@ const layerTailscaleUp = Layer.succeed(
   ),
 );
 
-const layerServeProbe = (status: number) =>
+const environmentId = EnvironmentId.make("environment-direct-endpoints");
+const descriptor = {
+  environmentId,
+  label: "Workstation",
+  platform: { os: "linux" as const, arch: "x64" as const },
+  serverVersion: "0.0.0-test",
+  capabilities: { repositoryIdentity: true },
+};
+const layerServeProbe = (status: number, peerId: string) =>
   Layer.succeed(
     HttpClient.HttpClient,
     HttpClient.make((request) =>
-      Effect.succeed(HttpClientResponse.fromWeb(request, new Response(null, { status }))),
+      Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          Response.json({ ...descriptor, environmentId: peerId }, { status }),
+        ),
+      ),
     ),
   );
 
@@ -268,12 +283,20 @@ const layerServeConfig = Layer.effect(
   Layer.provide(NodeServices.layer),
 );
 
-const resolveWithServe = (probeStatus: number) =>
+const resolveWithServe = (probeStatus: number, peerId: string = environmentId) =>
   Effect.flatMap(DirectEndpoints.DirectEndpoints, (service) => service.resolve()).pipe(
     Effect.provide(
       DirectEndpoints.layer.pipe(
         Layer.provide(
-          Layer.mergeAll(layerServeConfig, layerTailscaleUp, layerServeProbe(probeStatus)),
+          Layer.mergeAll(
+            layerServeConfig,
+            layerTailscaleUp,
+            layerServeProbe(probeStatus, peerId),
+            Layer.succeed(ServerEnvironment.ServerEnvironment, {
+              getEnvironmentId: Effect.succeed(environmentId),
+              getDescriptor: Effect.succeed(descriptor),
+            }),
+          ),
         ),
       ),
     ),
@@ -288,9 +311,12 @@ describe("DirectEndpoints Tailscale Serve", () => {
     }),
   );
 
-  effectIt.effect("leaves the tailnet name out when Serve is not forwarding", () =>
+  effectIt.effect.each([
+    { status: 502, peerId: environmentId },
+    { status: 200, peerId: "environment-other" },
+  ])("leaves the tailnet name out for $status and $peerId", ({ status, peerId }) =>
     Effect.gen(function* () {
-      expect(yield* resolveWithServe(502)).toEqual([]);
+      expect(yield* resolveWithServe(status, peerId)).toEqual([]);
     }),
   );
 });

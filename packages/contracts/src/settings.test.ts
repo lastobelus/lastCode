@@ -107,6 +107,23 @@ describe("storage cleanup report wire format", () => {
   });
 });
 
+describe("ServerSettings PR watch deadline", () => {
+  it("defaults to 45 minutes and validates saved and patched deadlines", () => {
+    expect(decodeServerSettings({}).lastcodePullRequestWatchQuietMinutes).toBe(45);
+    const input = { lastcodePullRequestWatchQuietMinutes: 90 };
+    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+    expect(decodeServerSettingsPatch(input)).toEqual(input);
+    for (const minutes of [0, -1, 1.5, 1441, "45", null]) {
+      expect(() =>
+        decodeServerSettings({ lastcodePullRequestWatchQuietMinutes: minutes }),
+      ).toThrow();
+      expect(() =>
+        decodeServerSettingsPatch({ lastcodePullRequestWatchQuietMinutes: minutes }),
+      ).toThrow();
+    }
+  });
+});
+
 describe("ServerSettings local CI limits", () => {
   it("uses responsive defaults and fills omitted persisted limits", () => {
     expect(decodeServerSettings({}).lastcodeLocalCi).toEqual({
@@ -308,6 +325,71 @@ describe("ClientSettings LastCode status icons", () => {
   ])("rejects invalid overrides: %j", (lastcodeStatusIcons) => {
     expect(() => decodeClientSettings({ lastcodeStatusIcons })).toThrow();
     expect(() => decodeClientSettingsPatch({ lastcodeStatusIcons })).toThrow();
+  });
+});
+
+describe("worktree suspension settings", () => {
+  it("starts Off without changing existing cleanup settings", () => {
+    expect(decodeServerSettings({}).worktreeSuspension).toEqual({ mode: "off" });
+    expect(decodeServerSettings({}).projectSettingsOverrides).toEqual({});
+    expect(decodeServerSettingsPatch({ worktreeSuspension: { mode: "off" } })).toEqual({
+      worktreeSuspension: { mode: "off" },
+    });
+  });
+
+  it.each([1, 3, 14, 3650])(
+    "requires a configured delay and leaves scopes disabled at %s days",
+    (afterDays) => {
+      const policy = {
+        mode: "custom",
+        afterDays,
+        scopes: { subagents: false, untouchedChildren: false, otherThreads: false },
+      };
+      expect(
+        decodeServerSettings({ worktreeSuspension: { mode: "custom", afterDays } })
+          .worktreeSuspension,
+      ).toEqual(policy);
+      expect(
+        decodeServerSettingsPatch({ worktreeSuspension: { mode: "custom", afterDays } }),
+      ).toEqual({ worktreeSuspension: policy });
+    },
+  );
+
+  it("round-trips explicit scopes in environment and project settings", () => {
+    const policy = {
+      mode: "custom",
+      afterDays: 14,
+      scopes: { subagents: true, untouchedChildren: false, otherThreads: true },
+    };
+    const input = {
+      worktreeSuspension: policy,
+      projectSettingsOverrides: { project: { worktreeSuspension: policy } },
+    };
+    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+    expect(decodeServerSettingsPatch(input)).toEqual(input);
+  });
+
+  it.each([0, -1, 1.5, 3651, null, "3", undefined])(
+    "rejects an invalid suspension delay: %s",
+    (afterDays) => {
+      const input = { worktreeSuspension: { mode: "custom", afterDays } };
+      expect(() => decodeServerSettings(input)).toThrow();
+      expect(() => decodeServerSettingsPatch(input)).toThrow();
+      expect(() =>
+        decodeServerSettings({ projectSettingsOverrides: { project: input } }),
+      ).toThrow();
+    },
+  );
+
+  it("rejects unsupported policies and non-boolean scopes", () => {
+    for (const worktreeSuspension of [
+      { mode: "inherit" },
+      { mode: "custom", afterDays: 3, scopes: { subagents: "true" } },
+      null,
+    ]) {
+      expect(() => decodeServerSettings({ worktreeSuspension })).toThrow();
+      expect(() => decodeServerSettingsPatch({ worktreeSuspension })).toThrow();
+    }
   });
 });
 
@@ -672,6 +754,29 @@ describe("resolveProjectProviderInstanceEnabled", () => {
 });
 
 describe("requiredScopesForProjectMutation", () => {
+  it("requires destructive grants only for explicit saved-data disposal", () => {
+    const input = {
+      type: "project.delete" as const,
+      commandId: "delete" as CommandId,
+      projectId: "project" as ProjectId,
+    };
+    expect(requiredScopesForProjectMutation(input)).toEqual(["orchestration:operate"]);
+    expect(
+      requiredScopesForProjectMutation({ ...input, savedWorkspace: { mode: "retain" } }),
+    ).toEqual(["orchestration:operate"]);
+    expect(
+      requiredScopesForProjectMutation({
+        ...input,
+        savedWorkspace: { mode: "discard", previewToken: "exact-preview" },
+      }),
+    ).toEqual([
+      "environment:maintain",
+      "filesystem:read",
+      "filesystem:write",
+      "source-control:write",
+      "orchestration:operate",
+    ]);
+  });
   it("adds the settings scope only when a mutation carries scripts", () => {
     const projectId = "project-1" as ProjectId;
     const commandId = "command-1" as CommandId;
@@ -869,6 +974,18 @@ describe("ClientSettings LastCode sidebar preferences", () => {
   });
 });
 
+describe("ClientSettings annotation expansion", () => {
+  it("defaults annotations to expanded and preserves an explicit preference", () => {
+    expect(decodeClientSettings({}).expandThreadAnnotations).toBe(true);
+    expect(decodeClientSettingsPatch({})).not.toHaveProperty("expandThreadAnnotations");
+    for (const expandThreadAnnotations of [true, false]) {
+      const preference = { expandThreadAnnotations };
+      expect(encodeClientSettings(decodeClientSettings(preference))).toMatchObject(preference);
+      expect(decodeClientSettingsPatch(preference)).toEqual(preference);
+    }
+  });
+});
+
 describe("ClientSettings incoming message appearance", () => {
   it("uses neutral theme fill when existing settings have no appearance choice", () => {
     expect(decodeClientSettings({ timestampFormat: "12-hour" })).toMatchObject({
@@ -908,6 +1025,20 @@ describe("ClientSettings incoming message appearance", () => {
       expect(() => decodeClientSettingsPatch({ incomingMessageFillColor })).toThrow();
     },
   );
+});
+
+describe("ClientSettings page scroll overlap", () => {
+  it("defaults to enabled and leaves omitted patches unchanged", () => {
+    expect(decodeClientSettings({}).pageScrollOverlapEnabled).toBe(true);
+    expect(decodeClientSettingsPatch({})).not.toHaveProperty("pageScrollOverlapEnabled");
+  });
+
+  it.each([false, true])("preserves and patches an explicit %s preference", (enabled) => {
+    const preference = { pageScrollOverlapEnabled: enabled };
+    expect(decodeClientSettings(preference)).toMatchObject(preference);
+    expect(encodeClientSettings(decodeClientSettings(preference))).toMatchObject(preference);
+    expect(decodeClientSettingsPatch(preference)).toEqual(preference);
+  });
 });
 
 describe("ClientSettings larger scrollbars", () => {

@@ -26,6 +26,7 @@ const success = (finished = finishedAt): SupervisorState => ({
   startedAt,
   finishedAt: finished,
   supervisorPid: 42,
+  launchdPid: 42,
 });
 
 function harness(
@@ -61,6 +62,43 @@ function stateFixture(value: unknown): string {
 }
 
 describe("wait for checkpoint", () => {
+  it("matches daily success and failure to the scheduler, not its child", async () => {
+    for (const status of ["success", "failed"] as const) {
+      const terminal = {
+        ...success(),
+        supervisorPid: 43,
+        launchdPid: 42,
+        status,
+        phase: status === "success" ? "complete" : "checkpoint",
+      };
+      await expect(
+        waitForCheckpoint(
+          harness(
+            [terminal],
+            [
+              { state: "running", pid: 42, runs: 3 },
+              { state: "idle", runs: 3 },
+            ],
+          ).deps,
+        ),
+      ).resolves.toEqual(terminal);
+    }
+  });
+
+  it("rejects stale daily state even when its child PID matches the current scheduler", async () => {
+    await expect(
+      waitForCheckpoint(
+        harness(
+          [{ ...success(), launchdPid: 41 }],
+          [
+            { state: "running", pid: 42, runs: 3 },
+            { state: "idle", runs: 3 },
+          ],
+        ).deps,
+      ),
+    ).rejects.toThrow("matching terminal state");
+  });
+
   it("parses launchd state, pid, run count, malformed output, and probe failure", () => {
     expect(parseDaemonStatus("state = running\npid = 42\nruns = 3\nlast exit code = 0")).toEqual({
       state: "running",
@@ -83,6 +121,9 @@ describe("wait for checkpoint", () => {
       { ...success(), startedAt: newerFinishedAt, finishedAt },
       { ...success(), supervisorPid: undefined },
       { ...success(), supervisorPid: "42" },
+      { ...success(), launchdPid: undefined },
+      { ...success(), launchdPid: "42" },
+      { ...success(), launchdPid: 0 },
     ])
       expect(readSupervisorState(stateFixture(value))).toBeNull();
   });
@@ -119,7 +160,7 @@ describe("wait for checkpoint", () => {
     await expect(
       waitForCheckpoint(
         harness(
-          [success(), { ...success(newerFinishedAt), supervisorPid: 41 }],
+          [success(), { ...success(newerFinishedAt), supervisorPid: 41, launchdPid: 41 }],
           [{ state: "running", pid: 42 }, { state: "idle" }],
         ).deps,
         30_000,
@@ -145,7 +186,7 @@ describe("wait for checkpoint", () => {
     await expect(
       waitForCheckpoint(
         harness(
-          [success(), { ...success(), supervisorPid: 41 }],
+          [success(), { ...success(), supervisorPid: 41, launchdPid: 41 }],
           [{ state: "running", pid: 42 }, { state: "idle" }],
         ).deps,
         30_000,

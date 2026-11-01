@@ -23,6 +23,10 @@ import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import * as PreviewControlsHandlers from "./handlers.ts";
 import { PreviewControlsToolkit } from "./tools.ts";
 
+const PreviewDependencies = ServerConfig.layerTest(process.cwd(), {
+  prefix: "t3-preview-controls-",
+}).pipe(Layer.provideMerge(NodeServices.layer));
+
 it.effect.each([
   { name: "project opt-in", globalAccess: false, projectAccess: true },
   { name: "project opt-out", globalAccess: true, projectAccess: false },
@@ -99,5 +103,5 @@ it.effect.each([
         expect((yield* manager.list({ threadId })).sessions).toEqual([tab]);
       }
     }),
-  ),
+  ).pipe(Effect.provide(PreviewDependencies)),
 );

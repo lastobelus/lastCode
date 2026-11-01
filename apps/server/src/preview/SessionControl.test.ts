@@ -334,6 +334,7 @@ describe("SessionControl", () => {
       control.agent("agent", async () => events.push("stale agent action")),
     ).rejects.toThrow(BrowserControlInterrupted);
     const takeover = control.take("viewer");
+    expect(control.controllerReady).toBe(false);
     const typing = control.human("viewer", async () => events.push("human typed"));
     await expect(control.agent("agent", async () => "late action")).rejects.toThrow(
       BrowserControlInterrupted,
@@ -341,6 +342,7 @@ describe("SessionControl", () => {
     expect(events).toEqual(["agent started"]);
     finish.resolve();
     await Promise.all([running, queued, takeover, typing]);
+    expect(control.controllerReady).toBe(true);
     expect(events).toEqual(["agent started", "agent finished", "human typed"]);
   });
 
