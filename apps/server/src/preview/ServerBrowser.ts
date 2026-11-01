@@ -432,9 +432,6 @@ const modifiersOf = (message: Record<string, unknown>) => {
 
 // Linux/headless Chromium needs commands for Cmd editing shortcuts and Ctrl copy/cut.
 const editingCommand = (key: string, modifiers: number) => {
-  if (key === "Backspace" && modifiers === 4) {
-    return { commands: ["deleteToBeginningOfLine"] };
-  }
   const modifier = modifiers & 0b0111;
   if (modifier !== 2 && modifier !== 4) return null;
   const lower = key.toLowerCase();

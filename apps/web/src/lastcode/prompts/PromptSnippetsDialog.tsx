@@ -286,7 +286,7 @@ export function PromptSnippetsPicker(props: {
     icon: (
       <span aria-hidden className="flex w-4 shrink-0 flex-col items-center gap-0.5">
         <MessageSquareTextIcon className="size-4 shrink-0" />
-        <span className="text-3xs font-light leading-3 tabular-nums text-muted-foreground/70">
+        <span className="text-4xs font-light leading-3 tabular-nums text-muted-foreground/70">
           {snippet.useCount}
         </span>
       </span>
@@ -338,8 +338,28 @@ export function PromptSnippetsPicker(props: {
               "aria-label": "Search common prompts",
               disabled: saving,
               onKeyDown: (event) => {
-                if (event.key !== "Enter" || event.nativeEvent.isComposing || event.keyCode === 229)
+                if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+                if (
+                  mac &&
+                  event.metaKey &&
+                  !event.ctrlKey &&
+                  !event.altKey &&
+                  !event.shiftKey &&
+                  event.key === "Backspace"
+                ) {
+                  (
+                    event as typeof event & { preventBaseUIHandler?: () => void }
+                  ).preventBaseUIHandler?.();
+                  event.preventDefault();
+                  event.stopPropagation();
+                  const input = event.currentTarget;
+                  if (input.selectionStart === input.selectionEnd)
+                    input.setSelectionRange(0, input.selectionStart ?? 0);
+                  // Native editing preserves undo even when a streamed key has no host command.
+                  input.ownerDocument.execCommand("delete");
                   return;
+                }
+                if (event.key !== "Enter") return;
                 (
                   event as typeof event & { preventBaseUIHandler?: () => void }
                 ).preventBaseUIHandler?.();
