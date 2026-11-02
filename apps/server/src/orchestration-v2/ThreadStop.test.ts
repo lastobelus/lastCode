@@ -760,6 +760,8 @@ it.effect.each([
   "waiting",
   "transferred-active",
   "transferred-ended",
+  "transferred-waiting-command",
+  "transferred-waiting-native",
   "waiting-runtime-limit",
   "waiting-interaction-limit",
 ] as const)(
@@ -807,6 +809,9 @@ it.effect.each([
         },
       });
       const ownedChildren = [sourceChild, grandchild];
+      const hasBackground =
+        state === "transferred-waiting-command" || state === "transferred-waiting-native";
+      const backgroundId = TurnItemId.make("item:action-continuation-background");
       if (state.startsWith("transferred")) {
         yield* send(threadId, "Action continuation", "start_immediately");
         const continuation = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)!;
@@ -834,7 +839,63 @@ it.effect.each([
           payload: { ...continuation, delegatedTaskId: task.id },
         });
         ownedChildren.push(yield* delegate(threadId, "continuation nested task"));
-        if (state === "transferred-ended") {
+        if (hasBackground) {
+          const providerTurnId = ProviderTurnId.make("turn:action-continuation-background");
+          yield* projections.apply({
+            id: EventId.make("action-continuation-background-turn"),
+            type: "provider-turn.updated",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: providerTurnId,
+              providerThreadId: continuation.providerThreadId!,
+              nodeId: continuation.rootNodeId!,
+              runAttemptId: continuation.activeAttemptId!,
+              nativeTurnRef: null,
+              ordinal: 1,
+              status: "completed",
+              startedAt: now,
+              completedAt: now,
+            },
+          });
+          const item =
+            state === "transferred-waiting-native"
+              ? (yield* orchestrator.getThreadProjection(threadId)).turnItems.find(
+                  (row) => row.type === "subagent" && row.runId === continuation.id,
+                )!
+              : undefined;
+          yield* projections.apply({
+            id: EventId.make("action-continuation-background-item"),
+            type: "turn-item.updated",
+            threadId,
+            runId: continuation.id,
+            occurredAt: now,
+            payload: {
+              ...(item?.type === "subagent"
+                ? {
+                    ...item,
+                    origin: "provider_native" as const,
+                    subagentId: NodeId.make("native-background-task"),
+                    childThreadId: null,
+                  }
+                : { type: "command_execution" as const, input: "node task.js", ordinal: 50 }),
+              id: backgroundId,
+              threadId,
+              runId: continuation.id,
+              nodeId: continuation.rootNodeId,
+              providerThreadId: continuation.providerThreadId,
+              providerTurnId,
+              nativeItemRef: null,
+              parentItemId: null,
+              status: "running",
+              title: "Owned background work",
+              startedAt: now,
+              completedAt: null,
+              updatedAt: now,
+            },
+          });
+        }
+        if (state === "transferred-ended" || hasBackground) {
           yield* projections.apply({
             id: EventId.make("action-cancel-continuation-ended"),
             type: "run.updated",
@@ -844,19 +905,21 @@ it.effect.each([
             payload: {
               ...continuation,
               delegatedTaskId: task.id,
-              status: "completed",
-              completedAt: now,
+              status: hasBackground ? "waiting" : "completed",
+              startedAt: now,
+              completedAt: hasBackground ? null : now,
             },
           });
         }
       }
       const unrelated =
-        state === "transferred-active"
+        state === "transferred-active" || hasBackground
           ? undefined
           : yield* Effect.gen(function* () {
               yield* send(threadId, "unrelated round", "start_immediately");
               return yield* delegate(threadId, "unrelated nested task");
             });
+      if (hasBackground) yield* send(threadId, "unrelated queued round", "queue_after_active");
       const before = yield* orchestrator.getThreadProjection(threadId);
       const unrelatedBefore = unrelated === undefined ? undefined : yield* threadState(unrelated);
       const ownedRunIds = new Set(
@@ -934,6 +997,12 @@ it.effect.each([
       if (unrelated !== undefined) {
         assert.deepEqual(yield* threadState(unrelated), unrelatedBefore);
         const after = yield* orchestrator.getThreadProjection(threadId);
+        assert.deepEqual(after.runs.at(-1), before.runs.at(-1));
+      }
+      if (hasBackground) {
+        const after = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(after.turnItems.find((row) => row.id === backgroundId)?.status, "interrupted");
+        assert.equal(before.runs.at(-1)?.status, "queued");
         assert.deepEqual(after.runs.at(-1), before.runs.at(-1));
       }
       assert.equal(

@@ -13223,40 +13223,55 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             },
           });
         }
-        const continuationIds = new Set(
-          waitingSources.flatMap(
-            (source) =>
-              source.actionObligations?.flatMap((row) =>
-                ownsObligation(source, row) &&
-                row.state === "transferred" &&
-                row.continuationRunId !== undefined
-                  ? [row.continuationRunId]
+        for (const ownedRun of child.runs) {
+          if (ownedRun.delegatedTaskId !== subagent.id) continue;
+          let interrupt = isLiveRun(ownedRun);
+          if (!interrupt && ownedRun.status !== "queued") {
+            const background = yield* projectionStore
+              .getThreadRecords(childThreadId, ["providerThreads", "turnItems"], {
+                turnItemTypes: ["command_execution", "dynamic_tool", "subagent"],
+                turnItemStatuses: ["pending", "running", "waiting"],
+                turnItemRunIds: [ownedRun.id],
+              })
+              .pipe(mapDispatchError(command));
+            // A reused provider's roster may belong to a newer unrelated run.
+            const ownsRoster = !child.runs.some(
+              (row) =>
+                row.providerThreadId === ownedRun.providerThreadId &&
+                row.ordinal > ownedRun.ordinal &&
+                row.status !== "queued",
+            );
+            interrupt =
+              derivePendingBackgroundWork({
+                latestRun: ownedRun,
+                runs: [ownedRun],
+                providerThreads: ownsRoster
+                  ? background.providerThreads.filter((row) => row.id === ownedRun.providerThreadId)
                   : [],
-              ) ?? [],
-          ),
-        );
-        for (const continuation of child.runs) {
-          if (!continuationIds.has(continuation.id) || continuation.delegatedTaskId !== subagent.id)
-            continue;
-          const interrupt = {
+                activeProviderThreadId: ownedRun.providerThreadId,
+                turnItems: background.turnItems.filter(
+                  (item) => item.type !== "subagent" || item.origin !== "app_owned",
+                ),
+              }).length > 0;
+          }
+          if (!interrupt && ownedRun.status !== "queued") continue;
+          const stop = {
             type: "run.interrupt" as const,
             commandId: command.commandId,
             threadId: childThreadId,
-            runId: continuation.id,
+            runId: ownedRun.id,
           };
           yield* markStoppedRun({
-            command: interrupt,
+            command: stop,
             events,
             thread: child.thread,
-            run: continuation,
+            run: ownedRun,
             now,
           });
-          if (continuation.status === "queued") {
-            yield* dispatchQueuedRunCancel({ ...interrupt, type: "queued-run.cancel" }, events);
-          } else if (isLiveRun(continuation)) {
-            // Cancellation targets this continuation only. Its pending start also
-            // checks the run status before launching a provider turn.
-            yield* dispatchRunInterrupt(interrupt, events, effects, true);
+          if (ownedRun.status === "queued") {
+            yield* dispatchQueuedRunCancel({ ...stop, type: "queued-run.cancel" }, events);
+          } else {
+            yield* dispatchRunInterrupt(stop, events, effects, true);
           }
         }
         const ownedRunIds = new Set(
