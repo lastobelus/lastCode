@@ -3460,6 +3460,8 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
     "original-discard",
     "later-discard",
     "remote-discard",
+    "original-archive",
+    "later-archive",
     "original-shutdown",
     "later-shutdown",
     "remote-shutdown",
@@ -3477,6 +3479,7 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
       const sink = yield* EventSink.EventSinkV2;
       const now = yield* DateTime.now;
       const parentThreadId = ThreadId.make(`action-parent-${round}`);
+      const threads = yield* ThreadManagement.ThreadManagementService;
       const projectId = ProjectId.make(`action-project-${round}`);
       const parentRunId = RunId.make(`action-parent-run-${round}`);
       const rootNodeId = NodeId.make(`action-root-${round}`);
@@ -3846,7 +3849,8 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
             ...(round.endsWith("task-cancel") ||
             round.endsWith("discard") ||
             round.endsWith("stop-before") ||
-            round.endsWith("shutdown")
+            round.endsWith("shutdown") ||
+            round.endsWith("archive")
               ? [
                   {
                     id: EventId.make(`action-wait-message-${round}`),
@@ -4088,6 +4092,59 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
           assert.equal(
             Option.getOrThrow(yield* store.get(childThreadId, action.runId)).state.delivery,
             race ? "delivered" : "disposed",
+          );
+          return;
+        }
+        if (round.endsWith("archive")) {
+          yield* orchestrator.dispatch({
+            type: "thread.archive",
+            commandId: CommandId.make(`action-archive-${round}`),
+            threadId: childThreadId,
+            childDisposition: "stop_and_archive",
+            expectedChildThreadIds: [],
+          });
+          yield* threads.executeArchive({
+            threadId: childThreadId,
+            requestId: CommandId.make(`action-archive-${round}`),
+          });
+          yield* Deferred.await(terminalClosed);
+          const archived = yield* orchestrator.getThreadProjection(childThreadId);
+          assert.isNotNull(archived.thread.archivedAt);
+          const retained = Option.getOrThrow(yield* store.get(childThreadId, action.runId)).state;
+          assert.equal(retained.outcome, "cancelled_by_archive");
+          assert.equal(retained.delivery, "disposed");
+          yield* orchestrator.recoverDelegatedTasks;
+          const parent = yield* orchestrator.getThreadProjection(parentThreadId);
+          const task = parent.subagents.find((row) => row.id === taskId)!;
+          assert.equal(task.status, "interrupted");
+          assert.equal(task.result, "Child task ended with status interrupted.");
+          assert.equal(archived.runs.find((run) => run.id === source.id)?.status, "interrupted");
+          assert.equal(
+            archived.runs.find((run) => run.id === source.id)?.actionObligations?.[0]?.state,
+            "disposed",
+          );
+          if (round.startsWith("later"))
+            assert.equal(parent.subagents.find((row) => row.id === first.id)?.status, "completed");
+          yield* emitTerminal({
+            type: "exited",
+            threadId: childThreadId,
+            terminalId: action.terminalId,
+            exitCode: 0,
+            exitSignal: null,
+          });
+          yield* actions.retryPendingFollowUps;
+          yield* orchestrator.recoverDelegatedTasks;
+          assert.deepEqual(
+            (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+              (row) => row.id === taskId,
+            ),
+            task,
+          );
+          assert.isFalse(
+            (yield* orchestrator.getThreadProjection(childThreadId)).runs.some(
+              (run) =>
+                run.userMessageId === MessageId.make(`action-resume:${action.runId}:follow-up`),
+            ),
           );
           return;
         }
