@@ -1073,13 +1073,30 @@ const gitIdentity = async (source: string, purpose: "capture" | "activity" = "ca
   await noLinkedAncestors(source);
   const dotGit = await NodeFSP.lstat(NodePath.join(source, ".git"));
   if (!dotGit.isFile() || dotGit.nlink !== 1) refuse("only linked Git worktrees are supported");
-  const root = await gitText(source, ["rev-parse", "--show-toplevel"]);
+  const locations = (
+    await gitText(source, [
+      "rev-parse",
+      "--show-toplevel",
+      "--absolute-git-dir",
+      "--path-format=absolute",
+      "--git-common-dir",
+    ])
+  ).split("\n");
+  // Git leaves newlines in metadata paths unquoted; resolve ambiguous output separately.
+  const singleLinePaths = locations.length === 3;
+  const root = singleLinePaths
+    ? locations[0]!.trim()
+    : await gitText(source, ["rev-parse", "--show-toplevel"]);
   if (root !== source) refuse("the Git root does not match the workspace");
   const gitDirectory = await NodeFSP.realpath(
-    await gitText(source, ["rev-parse", "--absolute-git-dir"]),
+    singleLinePaths
+      ? locations[1]!.trim()
+      : await gitText(source, ["rev-parse", "--absolute-git-dir"]),
   );
   const commonDirectory = await NodeFSP.realpath(
-    await gitText(source, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+    singleLinePaths
+      ? locations[2]!.trim()
+      : await gitText(source, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
   );
   if (gitDirectory === commonDirectory) refuse("the main checkout cannot be suspended");
   await noLinkedAncestors(gitDirectory);
