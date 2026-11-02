@@ -13159,6 +13159,113 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           (cause) => new OrchestratorProjectionError({ threadId: childThreadId, cause }),
         ),
       );
+      const ownsObligation = (
+        source: OrchestrationV2Run,
+        row: NonNullable<OrchestrationV2Run["actionObligations"]>[number],
+      ) =>
+        source.delegatedTaskId === subagent.id &&
+        ["completed", "failed", "cancelled", "interrupted"].includes(source.status) &&
+        (row.state === "waiting" || row.state === "transferred") &&
+        row.owner.taskId === subagent.id &&
+        row.owner.sourceRunId === source.id &&
+        row.owner.parentThreadId === command.threadId &&
+        row.owner.delegationId === undefined;
+      const waitingSources =
+        child?.runs.filter((source) =>
+          source.actionObligations?.some((row) => ownsObligation(source, row)),
+        ) ?? [];
+      if (isOrchestrationV2WorkActive(subagent.status) && waitingSources.length > 0) {
+        if (
+          subagent.ownershipReleased === true ||
+          child?.thread.lineage.independent === true ||
+          child?.thread.lineage.parentThreadId !== command.threadId ||
+          child.thread.lineage.relationshipToParent !== "subagent"
+        ) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "This task no longer owns its child Action.",
+          });
+        }
+        yield* refuseAboveDispatchModeLimit(command, childThreadId, child.thread);
+        const now = yield* DateTime.now;
+        for (const source of waitingSources) {
+          yield* emit(
+            events,
+            command,
+          )({
+            type: "run.updated",
+            threadId: childThreadId,
+            runId: source.id,
+            occurredAt: now,
+            payload: {
+              ...source,
+              status: "cancelled",
+              completedAt: now,
+              actionObligations: source.actionObligations?.map((row) =>
+                ownsObligation(source, row) ? { ...row, state: "disposed" as const } : row,
+              ),
+            },
+          });
+        }
+        const continuationIds = new Set(
+          waitingSources.flatMap(
+            (source) =>
+              source.actionObligations?.flatMap((row) =>
+                ownsObligation(source, row) &&
+                row.state === "transferred" &&
+                row.continuationRunId !== undefined
+                  ? [row.continuationRunId]
+                  : [],
+              ) ?? [],
+          ),
+        );
+        for (const continuation of child.runs) {
+          if (!continuationIds.has(continuation.id) || continuation.delegatedTaskId !== subagent.id)
+            continue;
+          const interrupt = {
+            type: "run.interrupt" as const,
+            commandId: command.commandId,
+            threadId: childThreadId,
+            runId: continuation.id,
+          };
+          yield* markStoppedRun({
+            command: interrupt,
+            events,
+            thread: child.thread,
+            run: continuation,
+            now,
+          });
+          if (continuation.status === "queued") {
+            yield* dispatchQueuedRunCancel({ ...interrupt, type: "queued-run.cancel" }, events);
+          } else if (isLiveRun(continuation)) {
+            // Cancellation targets this continuation only. Its pending start also
+            // checks the run status before launching a provider turn.
+            yield* dispatchRunInterrupt(interrupt, events, effects, true);
+          }
+        }
+        const records = yield* loadProjectionForCommand(command, ["nodes", "turnItems"], {
+          turnItemTypes: ["subagent"],
+          turnItemRunIds: [subagent.runId],
+          omitSettledLeafNodes: true,
+        });
+        const task = {
+          ...cancelledAppOwnedTask(subagent, now),
+          result: "Child task ended with status cancelled.",
+        };
+        return yield* writeAppOwnedTask({
+          command,
+          events,
+          task,
+          nodes: records.nodes,
+          turnItems: records.turnItems.map((item) =>
+            item.type === "subagent" && item.subagentId === task.id
+              ? { ...item, result: task.result }
+              : item,
+          ),
+          now,
+        });
+      }
       const active = isOrchestrationV2WorkActive(subagent.status);
       if (
         active &&
@@ -13253,8 +13360,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     command: Extract<OrchestrationV2Command, { readonly type: "run.interrupt" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+    onlyTargetRun = false,
   ) {
-    const projection = yield* loadProjectionForCommand(
+    const records = yield* loadProjectionForCommand(
       command,
       [
         "runs",
@@ -13280,6 +13388,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         turnItemStatuses: ["pending", "running", "waiting"],
       },
     );
+    const projection = onlyTargetRun
+      ? {
+          ...records,
+          runs: records.runs.filter((run) => run.id === command.runId),
+          turnItems: records.turnItems.filter((item) => item.runId === command.runId),
+          subagents: records.subagents.filter((task) => task.runId === command.runId),
+          runtimeRequests: records.runtimeRequests.filter((request) =>
+            records.nodes.some(
+              (node) => node.id === request.nodeId && node.runId === command.runId,
+            ),
+          ),
+        }
+      : records;
     const run = projection.runs.find((candidate) => candidate.id === command.runId);
     const rootNode =
       run?.rootNodeId === null
@@ -17754,6 +17875,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       Effect.gen(function* () {
         // Sending, follow-up intake, and Stop serialize every participant once.
         const threadIds = new Set([commandThreadId(command)]);
+        if (command.type === "subagent.stop") {
+          const parent = yield* projectionStore
+            .getThreadRecords(command.threadId, ["subagents"])
+            .pipe(mapDispatchError(command));
+          const task = parent.subagents.find(
+            (row) => row.id === command.subagentId && row.runId === command.runId,
+          );
+          if (task?.origin === "app_owned" && task.childThreadId !== null)
+            threadIds.add(task.childThreadId);
+        }
         if (command.type === "message.dispatch" && command.senderThreadId !== undefined) {
           threadIds.add(command.senderThreadId);
         }

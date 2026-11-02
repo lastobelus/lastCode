@@ -1,3 +1,13 @@
+import * as OrchestratorMcp from "../mcp/OrchestratorMcpService.ts";
+import * as ThreadReadBroker from "../mcp/ThreadReadBroker.ts";
+import * as PeerForwarding from "../peer/PeerForwarding.ts";
+import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
+import * as ThreadLaunch from "./ThreadLaunchService.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
+import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
+import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as CommandReceipts from "./CommandReceiptStore.ts";
 import * as ActionResume from "../actionResume/ActionResume.ts";
 import * as ActionRunStore from "../actionResume/ActionRunStore.ts";
@@ -3428,6 +3438,10 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
   it.effect.each([
     "original",
     "later",
+    "original-race-queued-task-cancel",
+    "original-race-starting-task-cancel",
+    "original-task-cancel",
+    "later-task-cancel",
     "original-stop-before",
     "later-stop-before",
     "original-stop-after",
@@ -3827,7 +3841,8 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
         yield* Deferred.await(written);
         yield* sink.write({
           events: [
-            ...(round.endsWith("discard") ||
+            ...(round.endsWith("task-cancel") ||
+            round.endsWith("discard") ||
             round.endsWith("stop-before") ||
             round.endsWith("shutdown")
               ? [
@@ -3891,6 +3906,168 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
               (task) => task.id === taskId,
             )!.result,
           );
+        }
+        if (round.endsWith("task-cancel")) {
+          const unrelatedId = RunId.make(`unrelated-${round}`);
+          const race = round.includes("race-");
+          const seedUnrelated = sink.write({
+            events: [
+              runEvent({
+                threadId: childThreadId,
+                runId: unrelatedId,
+                ordinal: source.ordinal + 10,
+                status: "running",
+                now,
+                providerThreadId: source.providerThreadId!,
+              }),
+            ],
+          });
+          if (!race) yield* seedUnrelated;
+          let before = yield* orchestrator.getThreadProjection(childThreadId);
+          const parentBefore = yield* orchestrator.getThreadProjection(parentThreadId);
+          const stop = {
+            type: "subagent.stop" as const,
+            commandId: CommandId.make(`task-cancel-${round}`),
+            threadId: parentThreadId,
+            runId: parentRunId,
+            subagentId: taskId,
+          };
+          if (race) {
+            const mcpThreads = Layer.mock(ThreadManagement.ThreadManagementService)({
+              getThreadShell: orchestrator.getThreadShell,
+              getThreadRecords: orchestrator.getThreadRecords,
+              delegatedTaskResultPending: orchestrator.delegatedTaskResultPending,
+              dispatch: (command) =>
+                Effect.gen(function* () {
+                  if (command.type === "subagent.stop") {
+                    assert.equal(
+                      (yield* orchestrator.getThreadProjection(childThreadId)).runs.find(
+                        (run) => run.id === source.id,
+                      )?.actionObligations?.[0]?.state,
+                      "waiting",
+                    );
+                    if (round.includes("queued")) yield* seedUnrelated;
+                    yield* emitTerminal({
+                      type: "exited",
+                      threadId: childThreadId,
+                      terminalId: action.terminalId,
+                      exitCode: 0,
+                      exitSignal: null,
+                    });
+                    yield* actions.retryPendingFollowUps;
+                    const transferred = yield* orchestrator.getThreadProjection(childThreadId);
+                    const continuation = transferred.runs.find(
+                      (run) =>
+                        run.userMessageId ===
+                        MessageId.make(`action-resume:${action.runId}:follow-up`),
+                    )!;
+                    assert.equal(
+                      continuation.status,
+                      round.includes("queued") ? "queued" : "starting",
+                    );
+                    assert.equal(continuation.delegatedTaskId, taskId);
+                    if (round.includes("starting")) yield* seedUnrelated;
+                    before = yield* orchestrator.getThreadProjection(childThreadId);
+                  }
+                  return yield* orchestrator.dispatch(command);
+                }).pipe(Effect.orDie),
+            });
+            yield* Effect.gen(function* () {
+              const mcp = yield* OrchestratorMcp.OrchestratorMcpService;
+              const result = yield* mcp.cancelTask(
+                {
+                  environmentId: EnvironmentId.make("test-environment"),
+                  requestNamespace: `cancel-${round}`,
+                  thread: {
+                    threadId: parentThreadId,
+                    providerSessionId: "test-session",
+                    providerInstanceId: modelSelection.instanceId,
+                  },
+                  client: undefined,
+                  capabilities: new Set(["orchestration"]),
+                  issuedAt: 1,
+                },
+                { taskId, clientRequestId: `cancel-${round}` },
+              );
+              assert.equal(result.status, "cancel_requested");
+            }).pipe(
+              Effect.provide(
+                OrchestratorMcp.layer.pipe(
+                  Layer.provide(
+                    Layer.mergeAll(
+                      mcpThreads,
+                      Layer.succeed(ActionResume.ActionResume, actions),
+                      Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+                        forSession: () => ({ authorize: () => Effect.void }),
+                      }),
+                      Layer.mock(PeerForwarding.PeerForwarding)({}),
+                      Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+                      Layer.mock(ThreadLaunch.ThreadLaunchService)({}),
+                      Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+                      Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+                      Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({}),
+                      Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+                      Layer.mock(SecretRequests.SecretRequests)({}),
+                    ),
+                  ),
+                ),
+              ),
+            );
+          } else yield* orchestrator.dispatch(stop);
+          const cancelled = yield* orchestrator.getThreadProjection(parentThreadId);
+          const task = cancelled.subagents.find((row) => row.id === taskId)!;
+          assert.equal(task.status, "cancelled");
+          assert.equal(task.result, "Child task ended with status cancelled.");
+          assert.equal(task.completionDelivery?.state, "disposed");
+          const ended = yield* orchestrator.getThreadProjection(childThreadId);
+          assert.equal(
+            ended.runs.find((run) => run.id === source.id)?.actionObligations?.[0]?.state,
+            "disposed",
+          );
+          assert.equal(ended.runs.find((run) => run.id === source.id)?.status, "cancelled");
+          assert.deepEqual(
+            ended.runs.find((run) => run.id === unrelatedId),
+            before.runs.find((run) => run.id === unrelatedId),
+          );
+          if (round.startsWith("later")) {
+            assert.deepEqual(
+              cancelled.subagents.find((row) => row.id === first.id),
+              parentBefore.subagents.find((row) => row.id === first.id),
+            );
+          }
+          yield* emitTerminal({
+            type: "exited",
+            threadId: childThreadId,
+            terminalId: action.terminalId,
+            exitCode: 0,
+            exitSignal: null,
+          });
+          yield* actions.retryPendingFollowUps;
+          yield* orchestrator.recoverDelegatedTasks;
+          const recovered = yield* orchestrator.getThreadProjection(parentThreadId);
+          assert.deepEqual(
+            recovered.subagents.find((row) => row.id === taskId),
+            task,
+          );
+          assert.equal(
+            (yield* orchestrator.getThreadProjection(childThreadId)).runs.some(
+              (run) =>
+                run.userMessageId === MessageId.make(`action-resume:${action.runId}:follow-up`),
+            ),
+            race,
+          );
+          if (race) {
+            const continuation = ended.runs.find(
+              (run) =>
+                run.userMessageId === MessageId.make(`action-resume:${action.runId}:follow-up`),
+            )!;
+            assert.include(["cancelled", "interrupted"], continuation.status);
+          }
+          assert.equal(
+            Option.getOrThrow(yield* store.get(childThreadId, action.runId)).state.delivery,
+            race ? "delivered" : "disposed",
+          );
+          return;
         }
         if (round.endsWith("shutdown")) return;
         if (round.endsWith("discard")) {
