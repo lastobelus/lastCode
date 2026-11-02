@@ -126,14 +126,12 @@ from such a wake falls back to mediation.
 Every other child leaves resumable Actions to its parent, including dependency preparation, CI,
 build, and checkpoint waits. Requests already handed to a parent stay with it; nothing migrates
 them. Child PR watches stay with the parent as well. Ordinary top-level and independent threads
-launch and resume their own Actions directly; nothing in this section, including settlement
-protection, applies to them.
+launch and resume their own Actions directly; mediation does not apply to them.
 
 For mediation, the injected instructions carry the sequence each side follows: the child ends its
 turn with a handoff request as its final response, and the parent waits for that recorded result,
-keeps itself from being settled away, verifies the target, launches, and queues the result back
-to the child with a `taskId` receipt. The rest of this section holds the setup detail they leave
-out.
+verifies the target, launches, and queues the result back to the child with a `taskId` receipt.
+The rest of this section holds the setup detail they leave out.
 
 ### Choose the target
 
@@ -155,30 +153,17 @@ reading its definition does not itself need a UI visit.
 If a correctly targeted Action cannot be prepared, use the shared checkout when that is safe, and
 otherwise report the specific blocker before launch.
 
-### Protect the parent from automatic settlement
+### Automatic settlement
 
-A parent whose linked PRs have merged can be settled automatically, and filed away, while it still
-owes a child its result. Protection keeps it visible until the relay is done. Child-owned Actions
-need none: the runtime keeps parent and child unsettled while the task or its result is owed. It does not enable
-anything: `run_project_action_and_resume` never checks it, and Actions launch and resume the same
-way with or without it. When asking the user, give the visibility reason. The parent thread's
-existing menu control disables automatic settlement for that thread; `t3_thread_read` reports the
-current value as `autoSettleDisabledAt`, and no MCP tool changes it.
+Ordinary own Actions and mediated Actions need no automatic-settlement setting change.
+`run_project_action_and_resume` never checks automatic settlement, so Actions launch and resume
+the same way under any setting.
 
-Set protection up once per mediated workflow, then reuse its record for later Action requests.
-
-1. Read and record the current value. If it is already set, keep that timestamp as the receipt,
-   skip setup, and restore nothing you did not change.
-2. If it is unset, ask the user to disable automatic settlement from the parent thread's menu, or
-   use the collaborative browser if the user has already authorized that setup under the machine
-   interaction policy. Read the value again and record the timestamp as the receipt.
-3. Before later requests, confirm protection still matches that receipt. If it changed, respect
-   the user's choice and report the blocker rather than changing it back.
-
-If setup is needed and neither route is available, report that blocker. After the workflow
-finishes, restore only a setting changed for this workflow, through the same authorized route,
-and only if the current timestamp still equals the receipt and later user choices permit it.
-Otherwise leave it and explain why. An explicit Stop or Settle from the user always stands.
+The runtime keeps a thread from being settled automatically while its Action is unfinished or
+recoverable, and while that Action's exact retained or queued follow-up is outstanding. Child-owned
+Actions also keep parent and child unsettled while the task or its result is owed. This protection
+covers the Action continuation, not other work the thread still intends to do. An explicit Stop,
+Settle, or other lifecycle choice from the user stands.
 
 ### Observe progress
 

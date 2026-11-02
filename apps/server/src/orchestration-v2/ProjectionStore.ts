@@ -6661,6 +6661,37 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       return { providerThreadsByThreadId, pendingTurnItemsByThreadId };
     });
 
+    const outstandingAction = (state: Statement.Fragment, thread: Statement.Fragment) => sql`
+      json_extract(${state}, '$.threadId') = ${thread}
+      AND (
+        json_extract(${state}, '$.delivery') IN ('armed', 'pending', 'available')
+        OR (json_extract(${state}, '$.delivery') = 'delivered' AND NOT EXISTS (
+          SELECT 1 FROM orchestration_v2_projection_messages message
+          JOIN orchestration_v2_projection_runs continuation ON continuation.run_id = message.run_id
+          WHERE message.thread_id = ${thread} AND continuation.thread_id = ${thread}
+            AND message.message_id = 'action-resume:' || json_extract(${state}, '$.runId') || ':follow-up'
+            AND continuation.status IN ('completed', 'failed', 'interrupted', 'cancelled', 'rolled_back')
+        ) AND NOT EXISTS (
+          -- V1 imports keep message IDs without V2 run IDs; their exact correlations survive cutover.
+          SELECT 1 FROM projection_turn_request_correlations legacy
+          WHERE legacy.thread_id = ${thread}
+            AND legacy.message_id = 'action-resume:' || json_extract(${state}, '$.runId') || ':follow-up'
+            AND NOT EXISTS (
+              SELECT 1 FROM orchestration_v2_projection_runs native
+              WHERE native.thread_id = ${thread}
+                AND CASE WHEN json_valid(native.payload_json)
+                  THEN json_extract(native.payload_json, '$.userMessageId') ELSE X'' END = legacy.message_id
+            )
+            AND (legacy.state IN ('error', 'interrupted') OR (
+              legacy.state = 'started' AND EXISTS (
+                SELECT 1 FROM projection_turn_assistant_finalizations ended
+                WHERE ended.thread_id = legacy.thread_id AND ended.turn_id = legacy.turn_id
+              )
+            ))
+        ))
+      )
+    `;
+
     const outstandingOwnedWork = (thread: Statement.Fragment) => sql`
       (EXISTS (
         SELECT 1 FROM orchestration_v2_projection_subagents task
@@ -6679,6 +6710,20 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           json_each(destination.payload_json, '$.remoteDelegations') association
         WHERE destination.thread_id = ${thread}
           AND json_extract(association.value, '$.stage') IN ('prepared', 'active')
+      ) OR EXISTS (
+        SELECT 1 FROM action_resume_runs action
+        WHERE action.thread_id = ${thread}
+          AND ${outstandingAction(sql`action.state_json`, thread)}
+      ) OR EXISTS (
+        SELECT 1 FROM orchestration_v2_projection_threads owner
+        WHERE owner.thread_id = ${thread}
+          AND ${outstandingAction(sql`json_extract(owner.payload_json, '$.actionResume')`, thread)}
+          -- The ledger commits before shell publication, including disposal and completion.
+          AND NOT EXISTS (
+            SELECT 1 FROM action_resume_runs recorded
+            WHERE recorded.thread_id = owner.thread_id
+              AND recorded.run_id = json_extract(owner.payload_json, '$.actionResume.runId')
+          )
       ))
     `;
 

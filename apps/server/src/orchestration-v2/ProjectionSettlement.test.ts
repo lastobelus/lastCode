@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import {
+  type ActionResumeState,
   EnvironmentId,
   EventId,
   MessageId,
@@ -20,12 +21,16 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as ActionRunStore from "../actionResume/ActionRunStore.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import { isAutoSettlementCandidate, resolveAutoSettlementAt } from "./ThreadSettlementService.ts";
 
-const layerSql = ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory));
+const layerSql = Layer.mergeAll(ProjectionStore.layer, ActionRunStore.layer).pipe(
+  Layer.provideMerge(SqlitePersistence.layerMemory),
+);
 const now = DateTime.makeUnsafe("2026-09-04T12:00:00Z");
 const old = DateTime.subtract(now, { days: 10 });
 const providerInstanceId = ProviderInstanceId.make("codex");
@@ -75,6 +80,7 @@ const createRun = Effect.fn(function* (
   threadId: ThreadId,
   status: OrchestrationV2Run["status"] = "completed",
   ordinal = 1,
+  overrides: Partial<OrchestrationV2Run> = {},
 ) {
   const store = yield* ProjectionStore.ProjectionStoreV2;
   const runId = RunId.make(`run:${threadId}:${ordinal}`);
@@ -99,6 +105,7 @@ const createRun = Effect.fn(function* (
       completedAt: ["completed", "rolled_back", "failed"].includes(status) ? old : null,
       checkpointId: null,
       contextHandoffId: null,
+      ...overrides,
     },
   });
   return runId;
@@ -335,6 +342,218 @@ it.effect(
       yield* updateTask({ ...task, ownershipReleased: true }, "released");
       assert.isFalse(yield* store.hasOutstandingOwnedWork(parent));
       assert.isFalse(yield* store.hasOutstandingOwnedWork(child));
+
+      const actionRuns = yield* ActionRunStore.ActionRunStore;
+      const actionState = (
+        threadId: ThreadId,
+        runId: string,
+        delivery: ActionResumeState["delivery"],
+      ): ActionResumeState => ({
+        runId,
+        threadId,
+        projectId: ProjectId.make("project:settlement"),
+        actionId: "qa",
+        actionName: "QA",
+        terminalId: `action-${runId}`,
+        outcome: delivery === "armed" ? "running" : "succeeded",
+        delivery,
+        startedAt: DateTime.formatIso(old),
+        finishedAt: delivery === "armed" ? null : DateTime.formatIso(old),
+        exitCode: delivery === "armed" ? null : 0,
+        exitSignal: null,
+      });
+      const publishAction = Effect.fn("test.publishAction")(function* (state: ActionResumeState) {
+        const thread = yield* store.getThread(state.threadId);
+        yield* store.apply({
+          id: EventId.make(`event:action:${state.runId}`),
+          type: "thread.metadata-updated",
+          threadId: state.threadId,
+          occurredAt: old,
+          payload: { ...thread, actionResume: state },
+        });
+      });
+      for (const source of ["shell", "ledger", "stale-shell"] as const) {
+        for (const delivery of [
+          "armed",
+          "pending",
+          "available",
+          "delivered",
+          "disposed",
+        ] as const) {
+          const threadId = yield* createThread(`ordinary-action-${source}-${delivery}`);
+          yield* createRun(threadId);
+          const state = actionState(threadId, `${source}-${delivery}`, delivery);
+          if (source !== "ledger") {
+            yield* publishAction(
+              source === "stale-shell"
+                ? { ...state, delivery: delivery === "disposed" ? "armed" : "disposed" }
+                : state,
+            );
+          }
+          if (source !== "shell") yield* actionRuns.save(state);
+          const held = delivery !== "disposed";
+          assert.equal(
+            yield* store.hasOutstandingOwnedWork(threadId),
+            held,
+            `${source}:${delivery}`,
+          );
+          assert.equal((yield* store.getSettlementCandidates(threadId)).length, held ? 0 : 1);
+        }
+      }
+      const copied = yield* createThread("copied-action", {
+        actionResume: actionState(parent, "parent-action", "armed"),
+      });
+      assert.isFalse(yield* store.hasOutstandingOwnedWork(copied));
+      assert.equal((yield* store.getSettlementCandidates(copied)).length, 1);
+
+      for (const status of [
+        "queued",
+        "preparing",
+        "starting",
+        "running",
+        "waiting",
+        "completed",
+        "failed",
+        "interrupted",
+        "cancelled",
+        "rolled_back",
+      ] as const) {
+        const threadId = yield* createThread(`retained-action-${status}`);
+        const state = actionState(threadId, `retained-${status}`, "delivered");
+        yield* actionRuns.save(state);
+        const messageId = MessageId.make(`action-resume:${state.runId}:follow-up`);
+        const runId = yield* createRun(threadId, status, 1, {
+          userMessageId: messageId,
+          queueHeld: true,
+        });
+        yield* store.apply({
+          id: EventId.make(`event:${messageId}`),
+          type: "message.updated",
+          threadId,
+          occurredAt: old,
+          payload: {
+            id: messageId,
+            threadId,
+            runId,
+            nodeId: null,
+            role: "user",
+            text: "Action result",
+            attachments: [],
+            streaming: false,
+            createdBy: "system",
+            creationSource: "server",
+            createdAt: old,
+            updatedAt: old,
+          },
+        });
+        yield* createRun(threadId, "completed", 2);
+        const newer = actionState(threadId, `newer-${status}`, "disposed");
+        yield* actionRuns.save(newer);
+        yield* publishAction(newer);
+        const held = ["queued", "preparing", "starting", "running", "waiting"].includes(status);
+        assert.equal(yield* store.hasOutstandingOwnedWork(threadId), held, `retained:${status}`);
+        assert.equal((yield* store.getSettlementCandidates(threadId)).length, held ? 0 : 1);
+        if (status === "queued") {
+          yield* actionRuns.save({ ...state, delivery: "disposed", revision: 1 });
+          assert.isFalse(yield* store.hasOutstandingOwnedWork(threadId));
+          assert.equal((yield* store.getSettlementCandidates(threadId)).length, 1);
+        }
+      }
+
+      const sql = yield* SqlClient.SqlClient;
+      for (const legacyState of [
+        "unknown",
+        "pending",
+        "started",
+        "completed",
+        "error",
+        "interrupted",
+      ] as const) {
+        const threadId = yield* createThread(`legacy-action-${legacyState}`);
+        const state = actionState(threadId, `legacy-${legacyState}`, "delivered");
+        yield* actionRuns.save(state);
+        const messageId = MessageId.make(`action-resume:${state.runId}:follow-up`);
+        // Imported V1 messages retain their IDs but have no V2 run association.
+        yield* store.apply({
+          id: EventId.make(`event:${messageId}`),
+          type: "message.updated",
+          threadId,
+          occurredAt: old,
+          payload: {
+            id: messageId,
+            threadId,
+            runId: null,
+            nodeId: null,
+            role: "user",
+            text: "Imported Action result",
+            attachments: [],
+            streaming: false,
+            createdBy: "system",
+            creationSource: "server",
+            createdAt: old,
+            updatedAt: old,
+          },
+        });
+        yield* createRun(threadId, "completed", 2);
+        const newer = actionState(threadId, `newer-legacy-${legacyState}`, "disposed");
+        yield* actionRuns.save(newer);
+        yield* publishAction(newer);
+        assert.isTrue(yield* store.hasOutstandingOwnedWork(threadId));
+        if (legacyState !== "unknown") {
+          yield* sql`
+            INSERT INTO projection_turn_request_correlations
+              (thread_id, message_id, turn_id, state, requested_at, resolved_at)
+            VALUES (${threadId}, ${messageId}, 'legacy-turn',
+              ${legacyState === "completed" ? "started" : legacyState},
+              ${DateTime.formatIso(old)}, ${legacyState === "pending" ? null : DateTime.formatIso(old)})
+          `;
+        }
+        if (legacyState === "completed") {
+          yield* sql`
+            INSERT INTO projection_turn_assistant_finalizations (thread_id, turn_id, finalized_at)
+            VALUES ('unrelated-thread', 'legacy-turn', ${DateTime.formatIso(old)}),
+              (${threadId}, 'unrelated-turn', ${DateTime.formatIso(old)})
+          `;
+          assert.isTrue(yield* store.hasOutstandingOwnedWork(threadId));
+          yield* sql`
+            INSERT INTO projection_turn_assistant_finalizations (thread_id, turn_id, finalized_at)
+            VALUES (${threadId}, 'legacy-turn', ${DateTime.formatIso(old)})
+          `;
+        }
+        const held = ["unknown", "pending", "started"].includes(legacyState);
+        assert.equal(yield* store.hasOutstandingOwnedWork(threadId), held, `legacy:${legacyState}`);
+        assert.equal((yield* store.getSettlementCandidates(threadId)).length, held ? 0 : 1);
+        if (legacyState === "completed") {
+          // A new native continuation takes precedence over historical completion evidence.
+          const runId = yield* createRun(threadId, "queued", 3, {
+            userMessageId: messageId,
+            queueHeld: true,
+          });
+          assert.isTrue(yield* store.hasOutstandingOwnedWork(threadId));
+          yield* store.apply({
+            id: EventId.make(`event:native:${messageId}`),
+            type: "message.updated",
+            threadId,
+            occurredAt: old,
+            payload: {
+              id: messageId,
+              threadId,
+              runId,
+              nodeId: null,
+              role: "user",
+              text: "Retained Action result",
+              attachments: [],
+              streaming: false,
+              createdBy: "system",
+              creationSource: "server",
+              createdAt: old,
+              updatedAt: old,
+            },
+          });
+          assert.isTrue(yield* store.hasOutstandingOwnedWork(threadId));
+          assert.equal((yield* store.getSettlementCandidates(threadId)).length, 0);
+        }
+      }
 
       for (const stage of ["prepared", "active", "disposed", "settled"] as const) {
         const remote = yield* createThread(`remote-${stage}`, {
