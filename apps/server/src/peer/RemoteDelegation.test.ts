@@ -2540,11 +2540,23 @@ it.effect.each([
     label: "awaited command",
     background: { taskId: "native-command", kind: "command", awaited: true },
   },
+  {
+    label: "cancelled queued wake",
+    background: { taskId: "native-command", kind: "command", awaited: true },
+  },
+  {
+    label: "mixed report text wakes",
+    background: { taskId: "native-command", kind: "command", awaited: true },
+  },
+  {
+    label: "awaited monitor",
+    background: { taskId: "native-monitor", kind: "monitor", awaited: true },
+  },
   { label: "unawaited command", background: { taskId: "native-command", kind: "command" } },
   { label: "unawaited monitor", background: { taskId: "native-monitor", kind: "monitor" } },
 ] as const)(
   "prepares without a run and keeps one exact destination result across Action fences and later work ($label)",
-  ({ background }) =>
+  ({ background, label }) =>
     Effect.scoped(
       Effect.gen(function* () {
         const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
@@ -2684,7 +2696,12 @@ it.effect.each([
                   pendingBackgroundTasks: pending && background !== undefined ? [background] : [],
                   owedBackgroundResults:
                     background !== undefined && "awaited" in background && background.awaited
-                      ? [{ taskId: background.taskId, originRunId: continuationId }]
+                      ? [
+                          { taskId: background.taskId, originRunId: continuationId },
+                          ...(label === "mixed report text wakes"
+                            ? [{ taskId: "other-origin-task", originRunId: run.id }]
+                            : []),
+                        ]
                       : [],
                 },
               },
@@ -2725,12 +2742,42 @@ it.effect.each([
             threadId,
             messageId: MessageId.make("background-result-message"),
             text: "Background command completed",
+            ...(background.kind === "monitor"
+              ? {
+                  notification: {
+                    source: { kind: "monitor" as const },
+                    outcome: "completed" as const,
+                    summary: "Monitor finished",
+                  },
+                }
+              : {}),
             attachments: [],
             dispatchMode: { type: "queue_after_active" as const },
             createdBy: "agent" as const,
             creationSource: "provider" as const,
             backgroundResultContinuation,
           };
+          if (label !== "cancelled queued wake") {
+            const forged = yield* a.orchestrator
+              .dispatch({
+                ...wake,
+                createdBy: "user",
+                commandId: CommandId.make("forged-user-wake"),
+                messageId: MessageId.make("forged-user-wake"),
+              })
+              .pipe(Effect.exit);
+            expect(Exit.isFailure(forged)).toBe(true);
+          } else {
+            yield* writeRun("unrelated-active", {
+              ...run,
+              remoteDelegation: undefined,
+              id: RunId.make("unrelated-active"),
+              ordinal: run.ordinal + 2,
+              status: "running",
+              startedAt: now,
+              completedAt: null,
+            });
+          }
           const mismatched = yield* a.orchestrator
             .dispatch({
               ...wake,
@@ -2742,16 +2789,117 @@ it.effect.each([
             })
             .pipe(Effect.exit);
           expect(Exit.isFailure(mismatched)).toBe(true);
-          yield* a.orchestrator.dispatch(wake);
+          let otherWakeRun: OrchestrationV2Run | undefined;
+          if (label === "mixed report text wakes") {
+            yield* a.orchestrator.dispatch({
+              ...wake,
+              commandId: CommandId.make("other-origin-text-wake"),
+              messageId: MessageId.make("other-origin-text-wake"),
+              creationSource: "server",
+              backgroundResultContinuation: {
+                ...backgroundResultContinuation,
+                originRunId: run.id,
+                taskIds: ["other-origin-task"],
+              },
+            });
+            otherWakeRun = (yield* a.threads.getThreadRecords(threadId, ["runs"])).runs.find(
+              (entry) => entry.userMessageId === MessageId.make("other-origin-text-wake"),
+            )!;
+            expect(otherWakeRun.remoteDelegation).toEqual(selector);
+          }
+          yield* a.orchestrator.dispatch(
+            label === "mixed report text wakes" ? { ...wake, creationSource: "server" } : wake,
+          );
           const wakeRun = (yield* a.threads.getThreadRecords(threadId, ["runs"])).runs.find(
             (entry) => entry.userMessageId === wake.messageId,
           )!;
           expect(wakeRun.remoteDelegation).toEqual(selector);
           expect(wakeRun.backgroundResultContinuation).toEqual(backgroundResultContinuation);
+          if (label === "cancelled queued wake") {
+            expect(wakeRun.status).toBe("queued");
+            const laterSelector = {
+              ...selector,
+              delegationId: "later-cancel-independent",
+              sourceTaskId: NodeId.make("later-cancel-independent"),
+            };
+            yield* a.orchestrator.dispatch({
+              type: "remote_delegation.prepare",
+              commandId: CommandId.make("prepare-later-cancel-independent"),
+              threadId,
+              association: { ...laterSelector, linkSessionId: "link-a", stage: "prepared" },
+            });
+            yield* a.orchestrator.dispatch({
+              ...activation,
+              commandId: CommandId.make("activate-later-cancel-independent"),
+              delegation: laterSelector,
+              messageId: MessageId.make("later-cancel-independent"),
+            });
+            const laterRun = (yield* a.threads.getThreadRecords(threadId, ["runs"])).runs.find(
+              (entry) => entry.remoteDelegation?.delegationId === laterSelector.delegationId,
+            )!;
+            yield* a.orchestrator.dispatch({
+              type: "queued-run.cancel",
+              commandId: CommandId.make("cancel-result-wake"),
+              threadId,
+              runId: wakeRun.id,
+            });
+            // The originating run's checkpoint can finish after its queued result is cancelled.
+            yield* writeRun("late-origin-finalization", {
+              ...run,
+              id: continuationId,
+              ordinal: run.ordinal + 1,
+              status: "completed",
+              startedAt: now,
+              completedAt: DateTime.add(now, { seconds: 1 }),
+            });
+            yield* settle("settle-cancelled-result-wake");
+            const cancelled = yield* a.threads.getThreadRecords(threadId, ["runs"]);
+            expect(
+              cancelled.thread.remoteDelegations?.find(
+                (entry) => entry.delegationId === selector.delegationId,
+              )?.finalRun,
+            ).toEqual({
+              runId: wakeRun.id,
+              status: "cancelled",
+            });
+            expect(
+              cancelled.runs.find((entry) => entry.id === RunId.make("unrelated-active"))?.status,
+            ).toBe("running");
+            expect(cancelled.runs.find((entry) => entry.id === laterRun.id)?.status).toBe(
+              laterRun.status,
+            );
+            expect(
+              cancelled.thread.remoteDelegations?.find(
+                (entry) => entry.delegationId === laterSelector.delegationId,
+              )?.stage,
+            ).toBe("active");
+            const replacement = yield* a.orchestrator
+              .dispatch({
+                ...wake,
+                commandId: CommandId.make("replacement-after-cancel"),
+                messageId: MessageId.make("replacement-after-cancel"),
+              })
+              .pipe(Effect.exit);
+            expect(Exit.isFailure(replacement)).toBe(true);
+            return;
+          }
           yield* settle("settle-wake-running");
           expect(
             (yield* a.threads.getThreadRecords(threadId, [])).thread.remoteDelegations?.[0]?.stage,
           ).toBe("active");
+          if (otherWakeRun !== undefined) {
+            yield* writeRun("other-origin-final", {
+              ...otherWakeRun,
+              status: "completed",
+              startedAt: now,
+              completedAt: now,
+            });
+            yield* settle("settle-one-of-two-results");
+            expect(
+              (yield* a.threads.getThreadRecords(threadId, [])).thread.remoteDelegations?.[0]
+                ?.stage,
+            ).toBe("active");
+          }
           yield* writeRun("background-final", {
             ...wakeRun,
             status: "completed",
@@ -2786,7 +2934,7 @@ it.effect.each([
           ...run,
           remoteDelegation: undefined,
           id: RunId.make("unrelated"),
-          ordinal: run.ordinal + 3,
+          ordinal: run.ordinal + 5,
           status: "completed",
           startedAt: now,
           completedAt: now,

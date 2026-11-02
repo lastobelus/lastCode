@@ -8232,6 +8232,44 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             detail,
             ...(notification === null ? {} : { notification }),
           });
+          if (matchedResults.length > 0 && backgroundResultContinuation === undefined) {
+            // A single native wake can report work from separate runs. Drain its
+            // combined output once, then prompt each owner with only its reports.
+            const origins = new Set(matchedResults.map((entry) => entry.originRunId));
+            for (const originRunId of origins) {
+              const taskIds = matchedResults
+                .filter((entry) => entry.originRunId === originRunId)
+                .map((entry) => entry.taskId);
+              const ownedReports = taskIds.map((taskId) => ({
+                taskId,
+                ...reports!.get(taskId)!.report,
+              }));
+              const ownedNotification = backgroundWorkNotification(ownedReports);
+              yield* continuationRequests.offer({
+                threadId: route.threadId,
+                providerThreadId: route.providerThreadId,
+                driver: CLAUDE_PROVIDER,
+                delivery: "message_text",
+                detail: encodeClaudeJson(
+                  ownedReports.map((report) => ({
+                    ...report,
+                    notification: buffered?.messages.find(
+                      (entry) =>
+                        entry.type === "system" &&
+                        entry.subtype === "task_notification" &&
+                        entry.task_id === report.taskId,
+                    ),
+                  })),
+                ),
+                ...(ownedNotification === null ? {} : { notification: ownedNotification }),
+                backgroundResultContinuation: {
+                  providerThreadId: route.providerThreadId,
+                  originRunId,
+                  taskIds,
+                },
+              });
+            }
+          }
         });
 
         // Untraced like the roster message handling: it runs for every streamed roster change.
@@ -11590,7 +11628,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               );
               const matched = [...new Set(taskIds)].filter(
                 (taskId) =>
-                  roster.has(taskId) ||
+                  (roster.has(taskId) &&
+                    (!awaited || backgroundTaskOrigins.get(nativeThreadId)?.get(taskId) != null)) ||
                   (!awaited && owedBackgroundResults.get(nativeThreadId)?.has(taskId)),
               );
               if (matched.length === 0) return { matched };

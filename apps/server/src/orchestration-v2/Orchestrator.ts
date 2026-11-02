@@ -7119,7 +7119,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         (thread) => thread.id === background.providerThreadId,
       );
       if (
-        command.creationSource !== "provider" ||
+        command.createdBy !== "agent" ||
+        (command.creationSource !== "provider" && command.creationSource !== "server") ||
         projection.thread.archivePending != null ||
         projection.thread.lineage.independent === true ||
         backgroundSource === undefined ||
