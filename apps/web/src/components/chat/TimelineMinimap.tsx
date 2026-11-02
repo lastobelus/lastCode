@@ -177,8 +177,17 @@ export function TimelineMinimap({
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const wheelTargetRef = (node: HTMLDivElement | null) => {
     if (!node) return;
-    node.addEventListener("wheel", onWheel, { passive: false });
-    return () => node.removeEventListener("wheel", onWheel);
+    const forwardWheel = (event: WheelEvent) => {
+      const row =
+        event.target instanceof Element
+          ? event.target.closest<HTMLElement>("[data-thread-annotation-row]")
+          : null;
+      if (row && row.scrollWidth > row.clientWidth && (event.deltaX !== 0 || event.shiftKey))
+        return;
+      onWheel(event);
+    };
+    node.addEventListener("wheel", forwardWheel, { passive: false });
+    return () => node.removeEventListener("wheel", forwardWheel);
   };
 
   const pressedOnStripRef = useRef(false);
@@ -201,25 +210,28 @@ export function TimelineMinimap({
   const navigationInteractive =
     resolveTimelineMinimapNavigationInteractive(hitStripWidth) && !passThrough;
   const itemIndices = new Map(items.map((item, index) => [item.messageId, index]));
-  const slotPositions: number[] = [];
-  const annotationMarkers = threadAnnotationEntries(annotation)
-    .map((entry, index) => ({
-      annotation: entry,
-      id: threadAnnotationId(entry),
-      itemIndex: itemIndices.get(entry.anchorMessageId) ?? -1,
-      index,
-    }))
-    .toSorted((a, b) => a.itemIndex - b.itemIndex)
-    .map((marker) => {
-      if (marker.itemIndex < 0) return { ...marker, slot: 0 };
-      const position =
-        (resolveTimelineMinimapTopPercent(marker.itemIndex, items.length) * railHeight) / 100;
-      // Nearby anchors can overlap when a long conversation compresses the rail.
-      const available = slotPositions.findIndex((previous) => position - previous >= 8);
-      const slot = available < 0 ? slotPositions.length : available;
-      slotPositions[slot] = position;
-      return { ...marker, slot };
-    });
+  const annotationMarkers = threadAnnotationEntries(annotation).map((entry, index) => ({
+    annotation: entry,
+    id: threadAnnotationId(entry),
+    itemIndex: itemIndices.get(entry.anchorMessageId) ?? -1,
+    index,
+  }));
+  const markerRows = new Map<number, typeof annotationMarkers>();
+  for (const marker of annotationMarkers) {
+    // Share nearby six-pixel dots in a bounded, scrollable row so crowded
+    // history stays within the map. Earlier notes get their own row above it.
+    const position =
+      marker.itemIndex < 0
+        ? -24
+        : Math.round(
+            (resolveTimelineMinimapTopPercent(marker.itemIndex, items.length) * railHeight) /
+              100 /
+              12,
+          ) * 12;
+    const row = markerRows.get(position) ?? [];
+    row.push(marker);
+    markerRows.set(position, row);
+  }
   const annotationPopoverOpen = annotationMarkers.some((marker) => marker.id === openAnnotationId);
   const hasActiveAnnotation = annotationMarkers.some((marker) => !marker.annotation.resolvedAt);
   const renderAnnotationPopover = (marker: (typeof annotationMarkers)[number]) => {
@@ -236,7 +248,7 @@ export function TimelineMinimap({
         threadRef={threadRef}
         triggerClassName={cn(
           "pointer-events-auto size-1.5 rounded-full ring-1 ring-background/70",
-          !earlier && "absolute left-full top-1/2 ml-1 -translate-y-1/2",
+          "shrink-0",
           marker.annotation.resolvedAt ? "bg-warning/40" : "bg-warning",
         )}
         onActivate={() => {
@@ -491,20 +503,22 @@ export function TimelineMinimap({
               </span>
             ) : null}
           </button>
-          {annotationMarkers
-            .filter((marker) => marker.itemIndex >= 0)
-            .map((marker) => (
-              <span
-                className="pointer-events-none absolute h-0.5 w-2 -translate-y-1/2"
-                key={marker.id}
-                style={{
-                  left: marker.slot * 10,
-                  top: `${resolveTimelineMinimapTopPercent(marker.itemIndex, items.length)}%`,
-                }}
-              >
-                {renderAnnotationPopover(marker)}
-              </span>
-            ))}
+          {[...markerRows].map(([position, markers]) => (
+            <div
+              className="pointer-events-auto absolute left-3 flex h-3 max-w-12 gap-1 overflow-x-auto overflow-y-hidden [scrollbar-width:thin] [&::-webkit-scrollbar]:h-1"
+              key={position}
+              data-thread-annotation-overflow={position < 0 ? "" : undefined}
+              data-thread-annotation-row
+              style={{ top: position - 3 }}
+              title={markers.length > 5 ? "Scroll for more annotations" : undefined}
+            >
+              {markers.map((marker) => (
+                <span className="contents" key={marker.id}>
+                  {renderAnnotationPopover(marker)}
+                </span>
+              ))}
+            </div>
+          ))}
           <TimelineMinimapNavigationButton
             direction="next"
             disabled={nextItem === null}
@@ -514,24 +528,6 @@ export function TimelineMinimap({
             }}
           />
         </div>
-        {annotationMarkers.some((marker) => marker.itemIndex === -1) && threadRef ? (
-          <div
-            className="pointer-events-auto absolute left-3 flex gap-1"
-            data-thread-annotation-overflow
-            style={{
-              top: "50%",
-              transform: `translateY(calc(-50% - ${resolveTimelineMinimapHeightStyle(items.length)} / 2))`,
-            }}
-          >
-            {annotationMarkers
-              .filter((marker) => marker.itemIndex === -1)
-              .map((marker) => (
-                <span className="inline-flex" key={marker.id}>
-                  {renderAnnotationPopover(marker)}
-                </span>
-              ))}
-          </div>
-        ) : null}
       </div>
     </div>
   );

@@ -357,6 +357,7 @@ export function ThreadAnnotationHoverPopover(props: {
   navigationTriggerId: string;
   threadDetails: ReactNode;
   trailingContent?: ReactNode;
+  readOnly?: boolean;
   onEdit: () => void;
   onResolve: () => void;
   onBodyChange: (body: string) => Promise<boolean>;
@@ -445,24 +446,26 @@ export function ThreadAnnotationHoverPopover(props: {
               className="min-h-0 max-h-64 overflow-y-auto overscroll-contain"
               compact
               cwd={props.cwd}
-              onBodyChange={props.onBodyChange}
+              onBodyChange={props.readOnly ? undefined : props.onBodyChange}
               threadRef={props.threadRef}
             />
-            <div className="mt-2 shrink-0">
-              <ThreadAnnotationActions
-                annotation={props.annotation}
-                onEdit={() => {
-                  props.handle.close();
-                  props.onEdit();
-                }}
-                onReopen={() => undefined}
-                onResolve={() => {
-                  props.handle.close();
-                  props.onResolve();
-                }}
-                pending={bodyChangePending}
-              />
-            </div>
+            {!props.readOnly ? (
+              <div className="mt-2 shrink-0">
+                <ThreadAnnotationActions
+                  annotation={props.annotation}
+                  onEdit={() => {
+                    props.handle.close();
+                    props.onEdit();
+                  }}
+                  onReopen={() => undefined}
+                  onResolve={() => {
+                    props.handle.close();
+                    props.onResolve();
+                  }}
+                  pending={bodyChangePending}
+                />
+              </div>
+            ) : null}
           </div>
           {props.trailingContent}
         </div>

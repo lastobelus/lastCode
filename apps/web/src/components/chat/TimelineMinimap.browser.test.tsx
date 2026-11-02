@@ -93,6 +93,17 @@ describe("TimelineMinimap annotations", () => {
     expect(earlier.getBoundingClientRect().right).toBeLessThanOrEqual(
       legacy.getBoundingClientRect().left,
     );
+    for (const loaded of [current, resolved]) {
+      for (const old of [earlier, legacy]) {
+        const box = old.getBoundingClientRect();
+        expect(
+          loaded.right <= box.left ||
+            box.right <= loaded.left ||
+            loaded.bottom <= box.top ||
+            box.bottom <= loaded.top,
+        ).toBe(true);
+      }
+    }
     const longItems = Array.from({ length: 1_000 }, (_, index) => ({
       ...props.items[0]!,
       id: `message-${index}`,
@@ -124,6 +135,46 @@ describe("TimelineMinimap annotations", () => {
         }
       }
     });
+  });
+
+  it("keeps crowded history reachable inside the map with keyboard focus", async () => {
+    const { notes, props } = setup();
+    const crowded = Array.from({ length: 100 }, (_, index) => ({
+      ...notes[1]!,
+      id: `history-${index}`,
+      body: `History ${index}`,
+    }));
+    await using screen = await render(
+      <TimelineMinimap
+        {...props}
+        annotation={{ ...crowded[0]!, otherAnnotations: crowded.slice(1) }}
+      />,
+    );
+    for (const anchorMessageId of [MessageId.make("loaded"), MessageId.make("unloaded")]) {
+      await screen.rerender(
+        <TimelineMinimap
+          {...props}
+          annotation={{
+            ...crowded[0]!,
+            anchorMessageId,
+            otherAnnotations: crowded.slice(1).map((note) => ({ ...note, anchorMessageId })),
+          }}
+        />,
+      );
+      const last = marker("history-99");
+      await act(() => last.focus());
+      const bounds = document
+        .querySelector('[data-testid="timeline-minimap"]')!
+        .getBoundingClientRect();
+      await vi.waitFor(() => {
+        const box = last.getBoundingClientRect();
+        expect(box.left).toBeGreaterThanOrEqual(bounds.left);
+        expect(box.right).toBeLessThanOrEqual(bounds.right);
+      });
+      await act(() => last.click());
+      await expect.element(page.getByText("History 99", { exact: true })).toBeVisible();
+      await act(() => last.click());
+    }
   });
 
   it("moves only the resolved note to its new anchor and preserves edit and reopen anchors", async () => {

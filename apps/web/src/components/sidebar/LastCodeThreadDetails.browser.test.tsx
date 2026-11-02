@@ -28,6 +28,11 @@ const mocks = vi.hoisted(() => ({
   resolve: vi.fn(),
   save: vi.fn(async () => true),
   permission: vi.fn(() => true),
+  annotationsSupported: true,
+}));
+vi.mock(import("../../state/entities"), async (original) => ({
+  ...(await original()),
+  readEnvironmentSupportsThreadAnnotations: () => mocks.annotationsSupported,
 }));
 vi.mock("./lastcodeSidebarPermission", () => ({ checkTaskPermission: mocks.permission }));
 const editing = {
@@ -188,6 +193,7 @@ function setup() {
   mocks.permission.mockReturnValue(true);
   mocks.subheaders = true;
   mocks.worktrees = true;
+  mocks.annotationsSupported = true;
 }
 
 describe("row details composition", () => {
@@ -314,6 +320,17 @@ describe("row details composition", () => {
     mocks.permission.mockReturnValue(true);
     await act(() => action("Edit").click());
     expect(mocks.edit).toHaveBeenCalledExactlyOnceWith(thread);
+  });
+  it("keeps an older server's note readable without offering mutations", async () => {
+    setup();
+    mocks.annotationsSupported = false;
+    await using screen = await render(<Harness active />);
+    await open(screen.container);
+    expect(document.querySelector('[data-slot="popover-popup"]')?.textContent).toContain(
+      "Follow up here",
+    );
+    expect(action("Edit")).toBeUndefined();
+    expect(action("Resolve")).toBeUndefined();
   });
   it("unmounts a resolved annotation popup and keeps the archive control mounted", async () => {
     setup();

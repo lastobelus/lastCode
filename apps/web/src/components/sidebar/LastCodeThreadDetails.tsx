@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, type ReactNode } from "react";
 import type { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { SidebarThreadSummary } from "../../types";
+import { readEnvironmentSupportsThreadAnnotations } from "../../state/entities";
 import { ThreadAnnotationHoverPopover } from "../thread-annotation/ThreadAnnotation";
 import { ThreadHoverCardPopup } from "../ThreadHoverCard";
 import { Tooltip, TooltipTrigger } from "../ui/tooltip";
@@ -75,6 +76,7 @@ export function LastCodeThreadDetails({
           cwd={gitCwd ?? undefined}
           handle={annotationPopoverHandle}
           navigationTriggerId={annotationTriggerId}
+          readOnly={!readEnvironmentSupportsThreadAnnotations(thread.environmentId)}
           onBodyChange={(body) => annotations.onSaveAnnotationBody(thread, body)}
           onEdit={() => {
             if (checkTaskPermission(thread.environmentId)) annotations.onEditAnnotation(thread);
