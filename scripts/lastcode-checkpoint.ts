@@ -2961,7 +2961,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       pendingCheckpointTag = checkpointTag;
       if (options.pushTags) {
         run(
-          repoRoot,
+          carryWorktreePrepared ? automationWorktree() : repoRoot,
           "git",
           installableTagPushArgs(
             repoRoot,
@@ -3100,7 +3100,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         );
         if (options.pushTags) {
           run(
-            repoRoot,
+            worktree,
             "git",
             installableTagPushArgs(
               repoRoot,

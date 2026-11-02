@@ -904,6 +904,30 @@ done
     ]);
     checkout(repo, "lastcode-source", mainWithPr);
 
+    const revisionHookHead = NodePath.join(fixture.root, "revision-pre-push-head.txt");
+    const revisionHooks = NodePath.join(fixture.root, "revision-hooks");
+    NodeFS.mkdirSync(revisionHooks);
+    NodeFS.writeFileSync(
+      NodePath.join(revisionHooks, "pre-push"),
+      `#!/bin/sh\ngit rev-parse HEAD > ${JSON.stringify(revisionHookHead)}\necho fixture revision publication failure >&2\nexit 1\n`,
+      { mode: 0o755 },
+    );
+    git(repo, ["config", "core.hooksPath", revisionHooks]);
+    const rejectedRevision = checkpoint(fixture, ["--push-tags", "--no-smoke"]);
+    assert.notEqual(rejectedRevision.status, 0);
+    assert.match(rejectedRevision.stderr, /fixture revision publication failure/u);
+    const retainedRevision = recoveryWorktree(repo);
+    assert.equal(
+      NodeFS.readFileSync(revisionHookHead, "utf8").trim(),
+      git(retainedRevision, ["rev-parse", "HEAD"]),
+    );
+    assert.notEqual(git(retainedRevision, ["rev-parse", "HEAD"]), mainWithPr);
+    assert.equal(remoteMissing(fixture.origin, `refs/tags/lastcode/revision/${NIGHTLY_C}.1`), true);
+    const rejectedBranch = git(retainedRevision, ["symbolic-ref", "--short", "HEAD"]);
+    git(repo, ["config", "core.hooksPath", "/dev/null"]);
+    git(repo, ["worktree", "remove", retainedRevision]);
+    git(repo, ["update-ref", "-d", `refs/heads/${rejectedBranch}`]);
+
     const folded = checkpoint(fixture, ["--push-tags"]);
     assert.equal(folded.status, 0, folded.stderr || folded.stdout);
     const revisionC = `lastcode/revision/${NIGHTLY_C}.1`;
@@ -1562,11 +1586,12 @@ describe("checkpoint carry lifecycle validation", () => {
       assert.equal(remoteMissing(freshRepo, bootstrapRef), true);
 
       const bootstrapRetained = recoveryWorktree(freshRepo);
+      const hookHead = NodePath.join(fixture.root, "pre-push-head.txt");
       const hooks = NodePath.join(fixture.root, "hooks");
       NodeFS.mkdirSync(hooks);
       NodeFS.writeFileSync(
         NodePath.join(hooks, "pre-push"),
-        `#!/bin/sh\necho cleanup-blocker >> ${JSON.stringify(NodePath.join(bootstrapRetained, "remote-only-bootstrap.txt"))}\necho fixture publication failure >&2\nexit 1\n`,
+        `#!/bin/sh\ngit rev-parse HEAD > ${JSON.stringify(hookHead)}\necho cleanup-blocker >> ${JSON.stringify(NodePath.join(bootstrapRetained, "remote-only-bootstrap.txt"))}\necho fixture publication failure >&2\nexit 1\n`,
         { mode: 0o755 },
       );
       git(freshRepo, ["config", "core.hooksPath", hooks]);
@@ -1575,6 +1600,10 @@ describe("checkpoint carry lifecycle validation", () => {
       assert.match(failedBootstrap.stderr, /fixture publication failure/u);
       assert.match(failedBootstrap.stderr, /Could not clean failed carry bootstrap/u);
       assert.equal(NodeFS.existsSync(bootstrapRetained), true);
+      assert.equal(
+        NodeFS.readFileSync(hookHead, "utf8").trim(),
+        git(bootstrapRetained, ["rev-parse", "HEAD"]),
+      );
       const failedRun = JSON.parse(
         NodeFS.readFileSync(
           NodePath.join(fixture.home, ".lastcode", "automation", "checkpoint-runs.jsonl"),
