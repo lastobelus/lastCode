@@ -258,7 +258,10 @@ export function delegatedTaskProgress(
       >
     >;
     readonly providerThreads: ReadonlyArray<
-      Pick<OrchestrationV2ThreadProjection["providerThreads"][number], "pendingBackgroundTasks">
+      Pick<
+        OrchestrationV2ThreadProjection["providerThreads"][number],
+        "pendingBackgroundTasks" | "owedBackgroundResults"
+      >
     >;
   },
   ownedRunIds?: ReadonlySet<RunId>,
@@ -300,8 +303,23 @@ export function delegatedTaskProgress(
             (task.completionDelivery?.state === "pending" ||
               task.completionDelivery?.state === "claimed"))),
     ) ||
-    projection.providerThreads.some((thread) =>
-      backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? []),
+    projection.providerThreads.some(
+      (thread) =>
+        backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? []) ||
+        thread.owedBackgroundResults?.some(
+          (owed) =>
+            workRuns.some(
+              (run) =>
+                run.id === owed.originRunId &&
+                !["cancelled", "interrupted", "failed", "rolled_back"].includes(run.status),
+            ) &&
+            !projection.runs.some(
+              (run) =>
+                run.backgroundResultContinuation !== undefined &&
+                run.backgroundResultContinuation.originRunId === owed.originRunId &&
+                run.backgroundResultContinuation.taskIds.includes(owed.taskId),
+            ),
+        ) === true,
     );
   const resultRun = workRuns
     .filter(

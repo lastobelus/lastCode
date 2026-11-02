@@ -29,6 +29,7 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
@@ -2533,9 +2534,17 @@ it.effect("records a remote launch intent before a destination exists", () =>
   ),
 );
 
-it.effect(
-  "prepares without a run and keeps one exact destination result across Action fences and later work",
-  () =>
+it.effect.each([
+  { label: "no background work", background: undefined },
+  {
+    label: "awaited command",
+    background: { taskId: "native-command", kind: "command", awaited: true },
+  },
+  { label: "unawaited command", background: { taskId: "native-command", kind: "command" } },
+  { label: "unawaited monitor", background: { taskId: "native-monitor", kind: "monitor" } },
+] as const)(
+  "prepares without a run and keeps one exact destination result across Action fences and later work ($label)",
+  ({ background }) =>
     Effect.scoped(
       Effect.gen(function* () {
         const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
@@ -2659,6 +2668,29 @@ it.effect(
         expect(
           (yield* a.threads.getThreadRecords(threadId, [])).thread.remoteDelegations?.[0]?.stage,
         ).toBe("active");
+        const continuationProviderThread = (yield* a.threads.getThreadRecords(threadId, [
+          "providerThreads",
+        ])).providerThreads.find((thread) => thread.id === run.providerThreadId)!;
+        const writeBackgroundRoster = (pending: boolean) =>
+          a.sink.write({
+            events: [
+              {
+                id: EventId.make(`action-background-roster:${pending}`),
+                type: "provider-thread.updated",
+                threadId,
+                occurredAt: now,
+                payload: {
+                  ...continuationProviderThread,
+                  pendingBackgroundTasks: pending && background !== undefined ? [background] : [],
+                  owedBackgroundResults:
+                    background !== undefined && "awaited" in background && background.awaited
+                      ? [{ taskId: background.taskId, originRunId: continuationId }]
+                      : [],
+                },
+              },
+            ],
+          });
+        if (background !== undefined) yield* writeBackgroundRoster(true);
         yield* writeRun("final", {
           ...run,
           id: continuationId,
@@ -2668,15 +2700,93 @@ it.effect(
           completedAt: now,
         });
         yield* settle("settle-final");
+        let finalResultId = continuationId;
+        if (background !== undefined && "awaited" in background && background.awaited) {
+          const waiting = (yield* a.threads.getThreadRecords(threadId, [])).thread
+            .remoteDelegations?.[0];
+          expect(waiting?.stage).toBe("active");
+          expect(waiting?.finalRun).toBeUndefined();
+          // The native roster clears before the result wake is admitted.
+          // The Action continuation's terminal waiting response is not the result.
+          yield* writeBackgroundRoster(false);
+          yield* settle("settle-before-background-wake");
+          const beforeWake = (yield* a.threads.getThreadRecords(threadId, [])).thread
+            .remoteDelegations?.[0];
+          expect(beforeWake?.stage).toBe("active");
+          expect(beforeWake?.finalRun).toBeUndefined();
+          const backgroundResultContinuation = {
+            providerThreadId: continuationProviderThread.id,
+            originRunId: continuationId,
+            taskIds: [background.taskId],
+          };
+          const wake = {
+            type: "message.dispatch" as const,
+            commandId: CommandId.make("matching-background-wake"),
+            threadId,
+            messageId: MessageId.make("background-result-message"),
+            text: "Background command completed",
+            attachments: [],
+            dispatchMode: { type: "queue_after_active" as const },
+            createdBy: "agent" as const,
+            creationSource: "provider" as const,
+            backgroundResultContinuation,
+          };
+          const mismatched = yield* a.orchestrator
+            .dispatch({
+              ...wake,
+              commandId: CommandId.make("mismatched-wake"),
+              backgroundResultContinuation: {
+                ...backgroundResultContinuation,
+                originRunId: run.id,
+              },
+            })
+            .pipe(Effect.exit);
+          expect(Exit.isFailure(mismatched)).toBe(true);
+          yield* a.orchestrator.dispatch(wake);
+          const wakeRun = (yield* a.threads.getThreadRecords(threadId, ["runs"])).runs.find(
+            (entry) => entry.userMessageId === wake.messageId,
+          )!;
+          expect(wakeRun.remoteDelegation).toEqual(selector);
+          expect(wakeRun.backgroundResultContinuation).toEqual(backgroundResultContinuation);
+          yield* settle("settle-wake-running");
+          expect(
+            (yield* a.threads.getThreadRecords(threadId, [])).thread.remoteDelegations?.[0]?.stage,
+          ).toBe("active");
+          yield* writeRun("background-final", {
+            ...wakeRun,
+            status: "completed",
+            startedAt: now,
+            completedAt: DateTime.add(now, { seconds: 1 }),
+          });
+          yield* settle("settle-background-final");
+          const final = (yield* a.threads.getThreadRecords(threadId, [])).thread
+            .remoteDelegations?.[0];
+          expect(final?.stage).toBe("settled");
+          expect(final?.finalRun?.runId).toBe(wakeRun.id);
+          const duplicate = yield* a.orchestrator
+            .dispatch({
+              ...wake,
+              commandId: CommandId.make("duplicate-wake"),
+              messageId: MessageId.make("duplicate-wake"),
+            })
+            .pipe(Effect.exit);
+          expect(Exit.isFailure(duplicate)).toBe(true);
+          yield* settle("settle-background-again");
+          expect(
+            (yield* a.threads.getThreadRecords(threadId, [])).thread.remoteDelegations?.[0]
+              ?.finalRun?.runId,
+          ).toBe(wakeRun.id);
+          finalResultId = wakeRun.id;
+        }
         expect(
           (yield* a.threads.getThreadRecords(threadId, [])).thread.remoteDelegations?.[0]?.finalRun
             ?.runId,
-        ).toBe(continuationId);
+        ).toBe(finalResultId);
         yield* writeRun("unrelated", {
           ...run,
           remoteDelegation: undefined,
           id: RunId.make("unrelated"),
-          ordinal: run.ordinal + 2,
+          ordinal: run.ordinal + 3,
           status: "completed",
           startedAt: now,
           completedAt: now,
@@ -2685,7 +2795,7 @@ it.effect(
         expect(
           (yield* a.threads.getThreadRecords(threadId, [])).thread.remoteDelegations?.[0]?.finalRun
             ?.runId,
-        ).toBe(continuationId);
+        ).toBe(finalResultId);
         const nextSelector = {
           ...selector,
           sourceTaskId: NodeId.make("foreign-task-next"),
@@ -2743,10 +2853,32 @@ it.effect(
               payload: {
                 ...providerThread,
                 pendingBackgroundTasks: [{ taskId: "unrelated-background", kind: "command" }],
+                owedBackgroundResults: [
+                  { taskId: "late-disposed-result", originRunId: continuationId },
+                ],
               },
             },
           ],
         });
+        const lateDisposed = yield* a.orchestrator
+          .dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make("late-disposed-wake"),
+            threadId,
+            messageId: MessageId.make("late-disposed-wake"),
+            text: "Late native result",
+            attachments: [],
+            dispatchMode: { type: "queue_after_active" },
+            createdBy: "agent",
+            creationSource: "provider",
+            backgroundResultContinuation: {
+              providerThreadId: providerThread.id,
+              originRunId: continuationId,
+              taskIds: ["late-disposed-result"],
+            },
+          })
+          .pipe(Effect.exit);
+        expect(Exit.isFailure(lateDisposed)).toBe(true);
         yield* a.orchestrator.dispatch({
           type: "queued-run.cancel",
           commandId: CommandId.make("cancel-next-before-start"),

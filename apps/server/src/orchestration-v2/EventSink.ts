@@ -482,6 +482,7 @@ const layerBase: Layer.Layer<
                 ...sourceThread,
                 status: event.payload.status,
                 pendingBackgroundTasks: [],
+                owedBackgroundResults: [],
                 updatedAt: event.occurredAt,
               },
             });

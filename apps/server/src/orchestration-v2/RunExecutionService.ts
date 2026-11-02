@@ -747,7 +747,9 @@ export const layer: Layer.Layer<
         const finalizedProviderThread: OrchestrationV2ProviderThread = {
           ...input.providerThread,
           status: finalProviderThreadStatus(input.terminal.threadDisposition),
-          ...(input.clearPendingBackgroundTasks ? { pendingBackgroundTasks: [] } : {}),
+          ...(input.clearPendingBackgroundTasks
+            ? { pendingBackgroundTasks: [], owedBackgroundResults: [] }
+            : {}),
           updatedAt: completedAt,
         };
         const runEventId = yield* allocateEventId();
@@ -1369,7 +1371,11 @@ export const layer: Layer.Layer<
             if (!runtimeReleased && !drainConfirmed) return;
             const events = yield* makeBackgroundSettlement;
             const providerThread = yield* Ref.get(latestProviderThread);
-            if (events.length === 0 && (providerThread.pendingBackgroundTasks?.length ?? 0) === 0) {
+            if (
+              events.length === 0 &&
+              (providerThread.pendingBackgroundTasks?.length ?? 0) === 0 &&
+              (providerThread.owedBackgroundResults?.length ?? 0) === 0
+            ) {
               yield* forgetSettledBackground;
               return;
             }
@@ -1377,6 +1383,7 @@ export const layer: Layer.Layer<
             const clearedProviderThread = {
               ...providerThread,
               pendingBackgroundTasks: [],
+              owedBackgroundResults: [],
               updatedAt: now,
             };
             const rosterEventId = yield* idAllocator.allocate.event({
@@ -1492,6 +1499,7 @@ export const layer: Layer.Layer<
               yield* Ref.update(latestProviderThread, (thread) => ({
                 ...thread,
                 pendingBackgroundTasks: [],
+                owedBackgroundResults: [],
               }));
               yield* forgetSettledBackground;
             }

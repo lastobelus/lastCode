@@ -8939,6 +8939,16 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           roster(["dev-server"], "00000000-0000-4000-8000-000000000303"),
         );
         yield* nextRoster((tasks) => tasks.length === 1);
+        const abandoned = yield* awaitBackgroundTasks({
+          providerThread: harness.providerThread,
+          taskIds: [WAKE_TASK_ID],
+          awaited: false,
+        });
+        assert.deepStrictEqual(abandoned.matched, [WAKE_TASK_ID]);
+        const { providerThread: releasedThread } = yield* Queue.take(
+          harness.providerThreadReceipts,
+        );
+        assert.deepStrictEqual(releasedThread.owedBackgroundResults, []);
         yield* Queue.offer(
           harness.sdkMessages,
           roster(["dev-server", WAKE_TASK_ID], "00000000-0000-4000-8000-000000000304"),
@@ -11009,50 +11019,93 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
-  it.effect("buffers wake output and requests a single continuation run", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const harness = yield* makeWakeHarness;
-        const now = yield* DateTime.now;
+  it.effect.each([false, true])(
+    "buffers wake output and requests a single continuation run (awaited: %s)",
+    (awaited) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeWakeHarness;
+          const now = yield* DateTime.now;
 
-        yield* harness.runtime.startTurn(
-          makeClaudeTestTurnInput({
+          const turnInput = makeClaudeTestTurnInput({
             threadId: harness.threadId,
             providerThread: harness.providerThread,
             now,
             attemptId: RunAttemptId.make("attempt-claude-wake-1"),
             text: "Run the build in the background.",
             attachments: [],
-          }),
-        );
-        yield* Queue.offer(harness.sdkMessages, wakeTaskStarted);
-        yield* Queue.offer(harness.sdkMessages, turnOneResult);
-        yield* harness.awaitTerminal(1);
-        assert.equal(harness.terminalEvents()[0]?.status, "completed");
-        assert.isTrue(yield* harness.hasPendingBackgroundWork);
-        assert.lengthOf(harness.continuationRequests, 0);
+          });
+          yield* harness.runtime.startTurn(turnInput);
+          yield* harness.offerAndWait(wakeTaskStarted);
+          if (awaited)
+            yield* harness.runtime.awaitBackgroundTasks!({
+              providerThread: harness.providerThread,
+              taskIds: [WAKE_TASK_ID],
+              awaited: true,
+            });
+          yield* Queue.offer(harness.sdkMessages, turnOneResult);
+          yield* harness.awaitTerminal(1);
+          assert.equal(harness.terminalEvents()[0]?.status, "completed");
+          assert.isTrue(yield* harness.hasPendingBackgroundWork);
+          assert.lengthOf(harness.continuationRequests, 0);
 
-        yield* harness.offerAndWait(wakeNotification);
-        assert.lengthOf(harness.continuationRequests, 0);
-        assert.isFalse(yield* harness.hasPendingBackgroundWork);
+          if (awaited) {
+            yield* harness.offerAndWait(
+              claudeSdkFrame({
+                type: "system",
+                subtype: "background_tasks_changed",
+                tasks: [],
+                uuid: "00000000-0000-4000-8000-000000000579",
+                session_id: WAKE_NATIVE_SESSION,
+              }),
+            );
+            while (true) {
+              const { providerThread } = yield* Queue.take(harness.providerThreadReceipts);
+              if (
+                (providerThread.pendingBackgroundTasks?.length ?? 0) !== 0 ||
+                providerThread.owedBackgroundResults === undefined
+              )
+                continue;
+              assert.deepStrictEqual(providerThread.owedBackgroundResults, [
+                { taskId: WAKE_TASK_ID, originRunId: turnInput.runId },
+              ]);
+              break;
+            }
+          }
+          yield* harness.offerAndWait(wakeNotification);
+          assert.lengthOf(harness.continuationRequests, 0);
+          assert.isFalse(yield* harness.hasPendingBackgroundWork);
 
-        yield* Queue.offer(harness.sdkMessages, wakeAssistant);
-        yield* harness.awaitContinuation(1);
-        assert.equal(harness.continuationRequests[0]?.threadId, harness.threadId);
-        assert.equal(harness.continuationRequests[0]?.providerThreadId, harness.providerThread.id);
-        assert.equal(harness.continuationRequests[0]?.driver, ClaudeAdapterV2.CLAUDE_PROVIDER);
-        assert.equal(harness.continuationRequests[0]?.detail, WAKE_SUMMARY);
+          yield* Queue.offer(harness.sdkMessages, wakeAssistant);
+          yield* harness.awaitContinuation(1);
+          assert.equal(harness.continuationRequests[0]?.threadId, harness.threadId);
+          assert.equal(
+            harness.continuationRequests[0]?.providerThreadId,
+            harness.providerThread.id,
+          );
+          assert.equal(harness.continuationRequests[0]?.driver, ClaudeAdapterV2.CLAUDE_PROVIDER);
+          assert.equal(harness.continuationRequests[0]?.detail, WAKE_SUMMARY);
+          assert.deepStrictEqual(
+            harness.continuationRequests[0]?.backgroundResultContinuation,
+            awaited
+              ? {
+                  providerThreadId: harness.providerThread.id,
+                  originRunId: turnInput.runId,
+                  taskIds: [WAKE_TASK_ID],
+                }
+              : undefined,
+          );
 
-        yield* harness.offerAndWait(wakeResult);
-        assert.lengthOf(harness.continuationRequests, 1);
-        assert.lengthOf(harness.terminalEvents(), 1);
-        assert.isTrue(yield* harness.hasPendingBackgroundWork);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          yield* harness.offerAndWait(wakeResult);
+          assert.lengthOf(harness.continuationRequests, 1);
+          assert.lengthOf(harness.terminalEvents(), 1);
+          assert.isTrue(yield* harness.hasPendingBackgroundWork);
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
         ),
       ),
-    ),
   );
 
   it.effect("starts the wake run when Claude opens the wake turn, before its output", () =>
