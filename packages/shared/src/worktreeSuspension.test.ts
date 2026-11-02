@@ -19,11 +19,17 @@ const execute = NodeUtil.promisify(NodeChildProcess.execFile);
 const git = async (cwd: string, ...args: ReadonlyArray<string>) =>
   (await execute("git", ["-c", "core.hooksPath=/dev/null", ...args], { cwd })).stdout.trim();
 
-const fixture = async () => {
+const fixture = async ({
+  repositoryName = "repository",
+  workspaceName = "workspace",
+}: {
+  repositoryName?: string;
+  workspaceName?: string;
+} = {}) => {
   const temporary = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "worktree-suspension-"));
   const root = await NodeFSP.realpath(temporary);
-  const repository = NodePath.join(root, "repository");
-  const workspace = NodePath.join(root, "workspace");
+  const repository = NodePath.join(root, repositoryName);
+  const workspace = NodePath.join(root, workspaceName);
   await NodeFSP.mkdir(repository);
   await git(repository, "init", "--initial-branch=main");
   await git(repository, "config", "user.email", "fixture@example.invalid");
@@ -81,6 +87,23 @@ const fixture = async () => {
     },
   };
 };
+
+it.each([
+  ["ordinary names", "repository", "workspace"],
+  ["spaces", "repository space", "workspace space"],
+  ["a workspace newline", "repository", "workspace\nline"],
+  ["a repository newline", "repository\nline", "workspace"],
+] as const)("inspects linked Git paths with %s", async (_, repositoryName, workspaceName) => {
+  await using test = await fixture({ repositoryName, workspaceName });
+  const active = await test.store.inspectActiveSource(test.workspace);
+  expect(active).toMatchObject({
+    gitDirectory: await git(test.workspace, "rev-parse", "--absolute-git-dir"),
+    commonDirectory: NodePath.join(test.repository, ".git"),
+    head: test.head,
+    branch: "refs/heads/task",
+  });
+  expect(await test.store.inspectSource(test.workspace)).toEqual(active);
+});
 
 it("round-trips physical asar files and directories in a linked worktree", async () => {
   await execute(process.execPath, [
