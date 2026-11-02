@@ -510,7 +510,8 @@ export function TimelineMinimap({
               data-thread-annotation-overflow={position < 0 ? "" : undefined}
               data-thread-annotation-row
               style={{ top: position - 3 }}
-              title={markers.length > 5 ? "Scroll for more annotations" : undefined}
+              role="group"
+              aria-label={markers.length > 5 ? "Scroll for more annotations" : "Annotation markers"}
             >
               {markers.map((marker) => (
                 <span className="contents" key={marker.id}>
