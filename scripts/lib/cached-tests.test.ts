@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
+import * as NodeNet from "node:net";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 
@@ -105,6 +106,152 @@ process.kill(process.pid, ${JSON.stringify(signal)});`,
         expect(interrupted.signal).toBe(signal);
         isolateAdvisoryCache(isolated)();
       }
+      const staleWorker = NodeChildProcess.spawnSync(
+        process.execPath,
+        [
+          NodePath.join(import.meta.dirname, "cached-tests.ts"),
+          isolated,
+          release.token,
+          "--version",
+        ],
+        { encoding: "utf8", env: { ...process.env, NODE_OPTIONS: "" } },
+      );
+      expect(staleWorker.status).toBe(1);
+      expect(staleWorker.stderr).toContain("Advisory worker belongs to a superseded run");
+      // Drive the real CLI with a held test, then kill only its launcher.
+      const root = NodePath.resolve(import.meta.dirname, "../..");
+      const checkout = NodePath.join(directory, "checkout");
+      await NodeFSP.mkdir(NodePath.join(checkout, "scripts/lib"), { recursive: true });
+      await NodeFSP.mkdir(NodePath.join(checkout, "apps/server"), { recursive: true });
+      await NodeFSP.mkdir(NodePath.join(checkout, "node_modules/.bin"), { recursive: true });
+      for (const file of [
+        "test-cached.ts",
+        "lib/cached-tests.ts",
+        "lib/sharded-tests.ts",
+        "lastcode-lock.mjs",
+      ]) {
+        await NodeFSP.copyFile(
+          NodePath.join(root, "scripts", file),
+          NodePath.join(checkout, "scripts", file),
+        );
+      }
+      await NodeFSP.symlink(
+        NodePath.join(root, "node_modules/vite-plus"),
+        NodePath.join(checkout, "node_modules/vite-plus"),
+        "dir",
+      );
+      await NodeFSP.symlink(
+        NodePath.join(root, "node_modules/vite-plus/bin/vp"),
+        NodePath.join(checkout, "node_modules/.bin/vp"),
+      );
+      await NodeFSP.writeFile(NodePath.join(checkout, "package.json"), '{"type":"module"}');
+      await NodeFSP.writeFile(
+        NodePath.join(checkout, "vite.config.ts"),
+        'import {cachedTestTasks} from "./scripts/lib/cached-tests.ts"; export default {run:{tasks:cachedTestTasks(process.env.T3_CACHED_TESTS, import.meta.dirname)},test:{include:["apps/server/*.test.ts"]}};',
+      );
+      await NodeFSP.writeFile(
+        NodePath.join(checkout, "apps/server/held.test.ts"),
+        'import {test} from "vite-plus/test";import net from "node:net";test("held",()=>new Promise((resolve,reject)=>{const s=net.connect(Number(process.env.ADVISORY_TEST_PORT),"127.0.0.1",()=>s.write(JSON.stringify({pid:process.pid,worker:process.ppid})));s.on("error",reject);s.on("data",()=>{s.end();resolve()})}));',
+      );
+      for (const args of [
+        ["init", "--quiet"],
+        [
+          "-c",
+          "user.name=Test",
+          "-c",
+          "user.email=test@example.invalid",
+          "-c",
+          "core.hooksPath=/dev/null",
+          "commit",
+          "--quiet",
+          "--allow-empty",
+          "-m",
+          "fixture",
+        ],
+      ]) {
+        expect(NodeChildProcess.spawnSync("git", args, { cwd: checkout }).status).toBe(0);
+      }
+      const server = NodeNet.createServer();
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("Expected a TCP listener");
+      const connected = new Promise<NodeNet.Socket>((resolve) =>
+        server.once("connection", resolve),
+      );
+      const launcher = NodeChildProcess.spawn(
+        process.execPath,
+        [
+          NodePath.join(checkout, "scripts/test-cached.ts"),
+          "--advisory",
+          "--report",
+          NodePath.join(directory, "receipt.json"),
+          "apps/server/held.test.ts",
+        ],
+        {
+          cwd: checkout,
+          env: {
+            ...process.env,
+            NODE_OPTIONS: "",
+            VP_REMOTE_CACHE: "off",
+            ADVISORY_TEST_PORT: String(address.port),
+            PATH: `${NodePath.join(checkout, "node_modules/.bin")}${NodePath.delimiter}${process.env.PATH}`,
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      let output = "";
+      launcher.stdout.on("data", (chunk) => {
+        output += chunk;
+      });
+      launcher.stderr.on("data", (chunk) => {
+        output += chunk;
+      });
+      const exited = new Promise<void>((resolve, reject) => {
+        launcher.once("error", reject);
+        launcher.once("exit", () => resolve());
+      });
+      const closed = new Promise<void>((resolve) => launcher.once("close", () => resolve()));
+      let socket: NodeNet.Socket | undefined;
+      let overlapping: (() => void) | undefined;
+      try {
+        socket = await Promise.race([
+          connected,
+          exited.then(() => {
+            throw new Error(output);
+          }),
+        ]);
+        const message = await new Promise<Buffer>((resolve) => socket!.once("data", resolve));
+        const owner: { pid: number; worker: number } = JSON.parse(String(message));
+        expect(owner.worker).not.toBe(launcher.pid);
+        expect(launcher.kill("SIGKILL")).toBe(true);
+        await exited;
+        expect(() => process.kill(owner.worker, 0)).not.toThrow();
+        const namespace = NodePath.join(checkout, "node_modules/.vite/advisory-test-cache");
+        const workerOwner = JSON.parse(
+          await NodeFSP.readFile(NodePath.join(namespace, "advisory-worker.lock"), "utf8").catch(
+            () =>
+              NodeFSP.readFile(
+                NodePath.join(namespace, "advisory-worker.lock.d/owner.json"),
+                "utf8",
+              ),
+          ),
+        );
+        expect(workerOwner.pid).not.toBe(launcher.pid);
+        expect(() => process.kill(workerOwner.pid, 0)).not.toThrow();
+        expect(() => {
+          overlapping = isolateAdvisoryCache(namespace);
+        }).toThrow();
+      } finally {
+        overlapping?.();
+        if (socket) socket.write("release");
+        else launcher.kill("SIGKILL");
+        await closed;
+        socket?.destroy();
+        await new Promise<void>((resolve, reject) =>
+          server.close((error) => (error ? reject(error) : resolve())),
+        );
+      }
+      isolateAdvisoryCache(NodePath.join(checkout, "node_modules/.vite/advisory-test-cache"))();
     } finally {
       await NodeFSP.rm(directory, { recursive: true, force: true });
     }

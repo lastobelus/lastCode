@@ -29,15 +29,41 @@ export function cacheSummaryPaths(cacheRoot: string) {
 }
 
 export function isolateAdvisoryCache(cacheRoot: string) {
-  // This namespace belongs only to serial advisory invocations, including hit audits.
+  // Keep the launcher lease through receipt generation and worker leases through summary writes.
   const release = acquirePortableLock(cacheRoot, "advisory.lock", "advisory cache");
   try {
-    for (const file of cacheSummaryPaths(cacheRoot)) NodeFS.unlinkSync(file);
+    const releaseWorker = acquirePortableLock(
+      cacheRoot,
+      "advisory-worker.lock",
+      "advisory cache worker",
+    );
+    try {
+      const token = NodeCrypto.randomUUID();
+      NodeFS.writeFileSync(NodePath.join(cacheRoot, "advisory-run.json"), JSON.stringify(token));
+      for (const file of cacheSummaryPaths(cacheRoot)) NodeFS.unlinkSync(file);
+      return Object.assign(release, { token });
+    } finally {
+      releaseWorker();
+    }
   } catch (error) {
     release();
     throw error;
   }
-  return release;
+}
+
+if (import.meta.main) {
+  const [cacheRoot, token] = process.argv.slice(2);
+  if (!cacheRoot || !token) throw new Error("Missing advisory worker lease");
+  const release = acquirePortableLock(cacheRoot, "advisory-worker.lock", "advisory cache worker");
+  process.on("exit", release);
+  if (
+    JSON.parse(NodeFS.readFileSync(NodePath.join(cacheRoot, "advisory-run.json"), "utf8")) !== token
+  ) {
+    throw new Error("Advisory worker belongs to a superseded run");
+  }
+  process.argv.splice(2, 2);
+  // Load Vite+ in this process: spawning another wrapper would leave the writer unprotected.
+  await import("vite-plus/bin");
 }
 
 export function advisoryRuntimeIdentity(versions = process.versions) {

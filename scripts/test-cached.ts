@@ -95,10 +95,8 @@ if (
 const cacheRoot = values.advisory
   ? NodePath.join(root, "node_modules/.vite/advisory-test-cache")
   : process.env.VITE_CACHE_PATH || NodePath.join(root, "node_modules/.vite/task-cache");
-if (values.advisory) {
-  const release = isolateAdvisoryCache(cacheRoot);
-  process.on("exit", release);
-}
+const lease = values.advisory ? isolateAdvisoryCache(cacheRoot) : undefined;
+if (lease) process.on("exit", lease);
 console.log(
   `Cached tests: ${files.length} files, ${groupSize} per task, concurrency ${concurrency}`,
 );
@@ -117,6 +115,14 @@ const env = {
     ...(values.advisory ? { advisoryRuntime: advisoryRuntimeIdentity() } : {}),
   }),
 };
+const runTask = (args: Array<string>) =>
+  NodeChildProcess.spawnSync(
+    lease ? process.execPath : NodePath.join(root, "node_modules/.bin/vp"),
+    lease
+      ? [NodePath.join(root, "scripts/lib/cached-tests.ts"), cacheRoot, lease.token, ...args]
+      : args,
+    { cwd: root, env, stdio: "inherit" },
+  );
 const started = performance.now();
 const candidate = values.advisory
   ? NodeChildProcess.execFileSync("git", ["rev-parse", "HEAD"], {
@@ -124,15 +130,7 @@ const candidate = values.advisory
       encoding: "utf8",
     }).trim()
   : undefined;
-const result = NodeChildProcess.spawnSync(
-  NodePath.join(root, "node_modules/.bin/vp"),
-  ["run", "--concurrency-limit", String(concurrency), "test-cache"],
-  {
-    cwd: root,
-    env,
-    stdio: "inherit",
-  },
-);
+const result = runTask(["run", "--concurrency-limit", String(concurrency), "test-cache"]);
 if (result.error) throw result.error;
 const cacheRunMs = performance.now() - started;
 process.exitCode = result.status ?? 1;
@@ -164,11 +162,7 @@ if (values.report || verifyHits > 0) {
     for (const task of verify) {
       console.log(`Verifying cached result without cache: ${task.task_name}`);
       const start = performance.now();
-      const audit = NodeChildProcess.spawnSync(
-        NodePath.join(root, "node_modules/.bin/vp"),
-        ["run", "--no-cache", "--remote-cache", "off", task.task_name],
-        { cwd: root, env, stdio: "inherit" },
-      );
+      const audit = runTask(["run", "--no-cache", "--remote-cache", "off", task.task_name]);
       if (audit.error) throw audit.error;
       verification.push({
         task: task.task_name,
