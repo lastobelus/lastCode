@@ -80,7 +80,7 @@ const reopenBlockedReason = () =>
 describe("TimelineMinimap annotations", () => {
   it("exposes every loaded and earlier note separately without overlapping shared anchors", async () => {
     const { notes, props } = setup();
-    await using _screen = await render(<TimelineMinimap {...props} />);
+    await using screen = await render(<TimelineMinimap {...props} />);
     expect(markers()).toHaveLength(4);
     const current = marker(threadAnnotationId(notes[0]!)).getBoundingClientRect();
     const resolved = marker(threadAnnotationId(notes[1]!)).getBoundingClientRect();
@@ -93,6 +93,37 @@ describe("TimelineMinimap annotations", () => {
     expect(earlier.getBoundingClientRect().right).toBeLessThanOrEqual(
       legacy.getBoundingClientRect().left,
     );
+    const longItems = Array.from({ length: 1_000 }, (_, index) => ({
+      ...props.items[0]!,
+      id: `message-${index}`,
+      messageId: MessageId.make(`message-${index}`),
+      rowIndex: index,
+    }));
+    const nearbyNotes = notes.map((note, index) => ({
+      ...note,
+      anchorMessageId: longItems[index]!.messageId,
+    }));
+    await screen.rerender(
+      <TimelineMinimap
+        {...props}
+        items={longItems}
+        annotation={{ ...nearbyNotes[0]!, otherAnnotations: nearbyNotes.slice(1) }}
+      />,
+    );
+    await vi.waitFor(() => {
+      const boxes = nearbyNotes.map((note) =>
+        marker(threadAnnotationId(note)).getBoundingClientRect(),
+      );
+      for (let first = 0; first < boxes.length; first++) {
+        for (let second = first + 1; second < boxes.length; second++) {
+          const a = boxes[first]!,
+            b = boxes[second]!;
+          expect(
+            a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top,
+          ).toBe(true);
+        }
+      }
+    });
   });
 
   it("moves only the resolved note to its new anchor and preserves edit and reopen anchors", async () => {

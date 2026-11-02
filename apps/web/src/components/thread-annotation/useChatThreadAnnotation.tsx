@@ -99,7 +99,6 @@ function useAnnotationMutations(
 function useAnnotationBanner(input: {
   routeThreadRef: ScopedThreadRef;
   annotation: ThreadAnnotation | null;
-  canOperate: boolean;
   canAnnotate: boolean;
   cwd: string | null;
   pending: boolean;
@@ -107,17 +106,8 @@ function useAnnotationBanner(input: {
   onSave: (body: string) => Promise<boolean>;
   onResolve: () => void;
 }) {
-  const {
-    routeThreadRef,
-    annotation,
-    canOperate,
-    canAnnotate,
-    cwd,
-    pending,
-    onEdit,
-    onSave,
-    onResolve,
-  } = input;
+  const { routeThreadRef, annotation, canAnnotate, cwd, pending, onEdit, onSave, onResolve } =
+    input;
   const key = scopedThreadKey(routeThreadRef);
   const expandByDefault = useClientSettings((settings) => settings.expandThreadAnnotations);
   const savedExpansion = useUiStateStore((store) => store.threadAnnotationExpansionById[key]);
@@ -146,7 +136,7 @@ function useAnnotationBanner(input: {
       onBodyChange: canAnnotate ? onSave : undefined,
       threadRef: routeThreadRef,
     }),
-    actions: canOperate ? (
+    actions: canAnnotate ? (
       <ThreadAnnotationActions
         annotation={annotation}
         onEdit={onEdit}
@@ -219,7 +209,6 @@ export function useChatThreadAnnotation(input: {
   const banner = useAnnotationBanner({
     routeThreadRef,
     annotation,
-    canOperate,
     canAnnotate,
     cwd,
     pending: mutations.pending,

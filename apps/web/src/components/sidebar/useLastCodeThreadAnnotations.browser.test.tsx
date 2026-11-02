@@ -14,6 +14,11 @@ const mocks = vi.hoisted(() => ({
   upsert: vi.fn<(value: unknown) => Promise<AtomCommandResult<unknown, unknown>>>(),
   resolve: vi.fn<(value: unknown) => Promise<AtomCommandResult<unknown, unknown>>>(),
   toast: vi.fn(),
+  supported: true,
+}));
+vi.mock(import("../../state/entities"), async (original) => ({
+  ...(await original()),
+  readEnvironmentSupportsThreadAnnotations: () => mocks.supported,
 }));
 vi.mock("../../state/threads", () => ({
   environmentThreadDetails: {},
@@ -117,6 +122,7 @@ function deferred<T>() {
 }
 function setup() {
   vi.clearAllMocks();
+  mocks.supported = true;
   mocks.upsert.mockResolvedValue(AsyncResult.success(undefined));
   mocks.resolve.mockResolvedValue(AsyncResult.success(undefined));
   let actions!: ReturnType<typeof useLastCodeThreadAnnotations>["actions"];
@@ -144,6 +150,19 @@ describe("project-owned thread annotation editor", () => {
       input: { threadId: first.id, body: "Next follow-up", createNew: true },
     });
     await vi.waitFor(() => expect(textarea()).toBeNull());
+  });
+  it("preserves a retained draft without sending it to an older server", async () => {
+    const fixture = setup();
+    await using _screen = await render(fixture.view());
+    await click("Annotate new");
+    await enter("Keep this new note draft");
+    mocks.supported = false;
+    await click("Add annotation");
+    expect(mocks.upsert).not.toHaveBeenCalled();
+    expect(textarea()?.value).toBe("Keep this new note draft");
+    expect(mocks.toast).toHaveBeenLastCalledWith(
+      expect.objectContaining({ title: "Annotations unavailable" }),
+    );
   });
   it("keeps row actions stable while the project editor changes targets and saves the exact hover destination", async () => {
     const fixture = setup();

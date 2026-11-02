@@ -5,10 +5,24 @@ import { reportThreadOperationFailure } from "./lastcodeThreadOperationResult";
 import type { SidebarThreadSummary } from "../../types";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { threadEnvironment } from "../../state/threads";
+import { readEnvironmentSupportsThreadAnnotations } from "../../state/entities";
+import { stackedThreadToast, toastManager } from "../ui/toast";
 import {
   runThreadAnnotationBodySave,
   ThreadAnnotationEditorDialog,
 } from "../thread-annotation/ThreadAnnotation";
+
+function checkAnnotationSupport(target: SidebarThreadSummary): boolean {
+  if (readEnvironmentSupportsThreadAnnotations(target.environmentId)) return true;
+  toastManager.add(
+    stackedThreadToast({
+      type: "warning",
+      title: "Annotations unavailable",
+      description: "This environment needs a newer LastCode server to annotate threads.",
+    }),
+  );
+  return false;
+}
 
 export function useLastCodeThreadAnnotations() {
   const upsertThreadAnnotation = useOrchestrationCommand(threadEnvironment.upsertAnnotation, {
@@ -25,6 +39,7 @@ export function useLastCodeThreadAnnotations() {
     body: string,
     createNew = false,
   ): Promise<boolean> => {
+    if (!checkAnnotationSupport(target)) return false;
     return runThreadAnnotationBodySave(
       scopeThreadRef(target.environmentId, target.id),
       async () => {
@@ -57,6 +72,7 @@ export function useLastCodeThreadAnnotations() {
   };
 
   const resolveAnnotation = async (thread: SidebarThreadSummary) => {
+    if (!checkAnnotationSupport(thread)) return;
     const result = await resolveThreadAnnotation({
       environmentId: thread.environmentId,
       input: {
@@ -68,7 +84,9 @@ export function useLastCodeThreadAnnotations() {
   };
 
   const actions = {
-    onEditAnnotation: setAnnotationEditorTarget,
+    onEditAnnotation: (thread: SidebarThreadSummary) => {
+      if (checkAnnotationSupport(thread)) setAnnotationEditorTarget(thread);
+    },
     onSaveAnnotationBody: saveAnnotationBody,
     onResolveAnnotation: (thread: SidebarThreadSummary) => void resolveAnnotation(thread),
   };

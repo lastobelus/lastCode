@@ -2617,7 +2617,7 @@ export default function ChatView(props: ChatViewProps) {
     routeThreadRef,
     threadRef: isServerThread ? activeThreadRef : null,
     annotation: activeThreadShell?.annotation ?? null,
-    supported: serverConfig?.environment.capabilities.threadAnnotations === true,
+    supported: serverConfig?.environment.capabilities.threadAnnotationHistory === true,
     hasUserMessage: () =>
       serverProjection?.messages.some((message) => message.role === "user") === true,
     cwd: gitCwd,

@@ -285,6 +285,7 @@ export const make = Effect.gen(function* () {
       oneTimeSchedules: true,
       npmReleaseLookup: true,
       threadAnnotations: true,
+      threadAnnotationHistory: true,
       threadWorktreeCleanup: true,
       ...(serverSelfUpdate === null ? {} : { serverSelfUpdate }),
       ...(serverInstallation === null ? {} : { serverInstallation }),

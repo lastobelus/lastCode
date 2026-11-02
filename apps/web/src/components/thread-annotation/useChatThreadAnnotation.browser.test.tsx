@@ -338,16 +338,21 @@ describe("chat annotation ownership", () => {
     await click("Expand annotation");
     expect(button("Collapse annotation")).toBeDefined();
   });
-  it("preserves banner actions on an older server while blocking editing", async () => {
+  it("keeps older-server notes readable without offering unsupported mutations", async () => {
     await using fixture = await setup();
     const { render, button, click, editor, submit } = fixture;
 
     await render({ supported: false });
-    expect(button("Edit")).toBeDefined();
-    await click("Edit");
+    const actionLabels = [...fixture.container.querySelectorAll("button")].map(
+      (button) => button.textContent,
+    );
+    expect(actionLabels).not.toContain("Edit");
+    expect(actionLabels).not.toContain("Resolve");
     expect(editor()).toBeNull();
-    await click("Resolve");
     expect(state.resolve).not.toHaveBeenCalled();
+    await click("Collapse annotation");
+    await click("Expand annotation");
+    expect(button("Collapse annotation")).toBeDefined();
     await submit("/annotate note");
     expect(state.toast).toHaveBeenLastCalledWith(
       expect.objectContaining({ title: "Annotations unavailable" }),

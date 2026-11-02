@@ -25,6 +25,7 @@ import {
 } from "./MessagesTimeline.logic";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { cn } from "~/lib/utils";
+import { observeResize } from "../../lib/observeResize";
 
 function timelineMinimapEventTargetsPreview(target: EventTarget): boolean {
   return target instanceof Element && target.closest("[data-minimap-preview]") !== null;
@@ -73,9 +74,9 @@ function TimelineAnnotationPopover({
   triggerClassName: string;
   onActivate?: () => void;
   onAnnotationBodyChange: ((body: string) => Promise<boolean>) | undefined;
-  onAnnotationEdit: () => void;
-  onAnnotationResolve: () => void;
-  onAnnotationReopen: () => void;
+  onAnnotationEdit: (() => void) | undefined;
+  onAnnotationResolve: (() => void) | undefined;
+  onAnnotationReopen: (() => void) | undefined;
   onOpenChange: (open: boolean) => void;
 }) {
   const annotationBodyPending = useThreadAnnotationBodyPending(threadRef);
@@ -124,16 +125,18 @@ function TimelineAnnotationPopover({
             onBodyChange={onAnnotationBodyChange}
             threadRef={threadRef}
           />
-          <div className="mt-2">
-            <ThreadAnnotationActions
-              annotation={annotation}
-              onEdit={onAnnotationEdit}
-              onReopen={onAnnotationReopen}
-              onResolve={onAnnotationResolve}
-              pending={annotationBodyPending}
-              reopenBlocked={reopenBlocked}
-            />
-          </div>
+          {onAnnotationEdit && onAnnotationResolve && onAnnotationReopen ? (
+            <div className="mt-2">
+              <ThreadAnnotationActions
+                annotation={annotation}
+                onEdit={onAnnotationEdit}
+                onReopen={onAnnotationReopen}
+                onResolve={onAnnotationResolve}
+                pending={annotationBodyPending}
+                reopenBlocked={reopenBlocked}
+              />
+            </div>
+          ) : null}
         </div>
       </PopoverPopup>
     </Popover>
@@ -165,10 +168,10 @@ export function TimelineMinimap({
   stripMap: Map<string, HTMLSpanElement>;
   onWheel: (event: WheelEvent) => void;
   threadRef: ScopedThreadRef | null;
-  onAnnotationEdit: (annotationId?: string) => void;
+  onAnnotationEdit: ((annotationId?: string) => void) | undefined;
   onAnnotationBodyChange: ((body: string, annotationId?: string) => Promise<boolean>) | undefined;
-  onAnnotationResolve: (annotationId?: string) => void;
-  onAnnotationReopen: (annotationId?: string) => void;
+  onAnnotationResolve: ((annotationId?: string) => void) | undefined;
+  onAnnotationReopen: ((annotationId?: string) => void) | undefined;
   onSelect: (item: TimelineMinimapItem) => void;
 }) {
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
@@ -182,6 +185,13 @@ export function TimelineMinimap({
   const [passThrough, setPassThrough] = useState(false);
 
   const [openAnnotationId, setOpenAnnotationId] = useState<string | null>(null);
+  const [railHeight, setRailHeight] = useState(0);
+  const observeRail = (node: HTMLDivElement | null) => {
+    if (!node) return;
+    const measure = () => setRailHeight(node.getBoundingClientRect().height);
+    measure();
+    return observeResize(node, measure);
+  };
 
   const resolvedActiveIndex =
     activeIndex !== null && activeIndex < items.length ? activeIndex : null;
@@ -191,13 +201,25 @@ export function TimelineMinimap({
   const navigationInteractive =
     resolveTimelineMinimapNavigationInteractive(hitStripWidth) && !passThrough;
   const itemIndices = new Map(items.map((item, index) => [item.messageId, index]));
-  const anchorSlots = new Map<number, number>();
-  const annotationMarkers = threadAnnotationEntries(annotation).map((entry, index) => {
-    const itemIndex = itemIndices.get(entry.anchorMessageId) ?? -1;
-    const slot = anchorSlots.get(itemIndex) ?? 0;
-    anchorSlots.set(itemIndex, slot + 1);
-    return { annotation: entry, id: threadAnnotationId(entry), itemIndex, slot, index };
-  });
+  const slotPositions: number[] = [];
+  const annotationMarkers = threadAnnotationEntries(annotation)
+    .map((entry, index) => ({
+      annotation: entry,
+      id: threadAnnotationId(entry),
+      itemIndex: itemIndices.get(entry.anchorMessageId) ?? -1,
+      index,
+    }))
+    .toSorted((a, b) => a.itemIndex - b.itemIndex)
+    .map((marker) => {
+      if (marker.itemIndex < 0) return { ...marker, slot: 0 };
+      const position =
+        (resolveTimelineMinimapTopPercent(marker.itemIndex, items.length) * railHeight) / 100;
+      // Nearby anchors can overlap when a long conversation compresses the rail.
+      const available = slotPositions.findIndex((previous) => position - previous >= 8);
+      const slot = available < 0 ? slotPositions.length : available;
+      slotPositions[slot] = position;
+      return { ...marker, slot };
+    });
   const annotationPopoverOpen = annotationMarkers.some((marker) => marker.id === openAnnotationId);
   const hasActiveAnnotation = annotationMarkers.some((marker) => !marker.annotation.resolvedAt);
   const renderAnnotationPopover = (marker: (typeof annotationMarkers)[number]) => {
@@ -223,9 +245,9 @@ export function TimelineMinimap({
         onAnnotationBodyChange={
           onAnnotationBodyChange ? (body) => onAnnotationBodyChange(body, marker.id) : undefined
         }
-        onAnnotationEdit={() => onAnnotationEdit(marker.id)}
-        onAnnotationReopen={() => onAnnotationReopen(marker.id)}
-        onAnnotationResolve={() => onAnnotationResolve(marker.id)}
+        onAnnotationEdit={onAnnotationEdit ? () => onAnnotationEdit(marker.id) : undefined}
+        onAnnotationReopen={onAnnotationReopen ? () => onAnnotationReopen(marker.id) : undefined}
+        onAnnotationResolve={onAnnotationResolve ? () => onAnnotationResolve(marker.id) : undefined}
         onOpenChange={(open) => {
           setOpenAnnotationId((current) =>
             open ? marker.id : current === marker.id ? null : current,
@@ -294,6 +316,7 @@ export function TimelineMinimap({
     >
       <div className="relative h-full w-full select-none">
         <div
+          ref={observeRail}
           className={cn(
             "absolute top-1/2 left-3 -translate-y-1/2",
             (hitStripWidth > 0 || annotation !== null) && !passThrough
