@@ -1394,7 +1394,7 @@ it.effect("queues a plain send behind the stopped queue and releases its hold", 
           runId: started[0]!.runId,
           holdQueue: true,
         });
-        // The provider has not stopped yet, so a plain send still resolves to a steer.
+        // Stop has not reached the provider yet; plain send must queue instead of steering.
         yield* send("sent", "auto");
         // Once the stop settles, the run-update reactor promotes the queue on
         // its own fiber, so read the queue while the provider is still stopping.

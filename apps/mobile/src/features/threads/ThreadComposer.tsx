@@ -67,7 +67,6 @@ import { appAtomRegistry } from "../../state/atom-registry";
 import type { ComposerDocumentAttachment } from "../../lib/composerContext";
 import { useProject, useVisibleThreadShells } from "../../state/entities";
 import { useMentionableEnvironments } from "../../state/environments";
-import { useLinkedEnvironments } from "../../state/peerLinks";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 
 import { AppText as Text } from "../../components/ui/AppText";
@@ -231,6 +230,8 @@ export interface ThreadComposerProps {
   readonly followUpBehavior: FollowUpBehavior;
   readonly canSteerActiveTurn: boolean;
   readonly hidden: boolean;
+  /** Recovery requires new follow-ups to wait even if the runtime looks idle. */
+  readonly forceQueue: boolean;
   readonly editorRef?: RefObject<ComposerEditorHandle | null>;
   readonly onChangeDraftMessage: (value: string) => void;
   readonly onPickDraftMedia: () => Promise<void>;
@@ -479,6 +480,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
     editingQueuedMessage: queuedEdit !== null,
     running: props.activeThreadBusy,
     canSteer: props.canSteerActiveTurn,
+    forceQueue: props.forceQueue,
     followUpBehavior: props.followUpBehavior,
     deliveryDeferred:
       props.connectionState !== "connected" || props.queueCount > 0 || attachmentsUploading,
@@ -543,7 +545,6 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
     environments: offersLinkedEnvironments(props.serverConfig)
       ? mentionableEnvironments
       : NO_MACHINES,
-    linkedEnvironments: useLinkedEnvironments(props.environmentId),
     currentThreadId: props.selectedThread.id,
     projectCwd: props.projectCwd,
     pullRequestProjectId: props.serverConfig ? (project?.id ?? null) : null,

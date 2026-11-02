@@ -1,3 +1,4 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -215,3 +216,20 @@ export const make = Effect.fn("resourceTelemetry.resourceMonitorBinary.make")(fu
 });
 
 export const layer = Layer.effect(ResourceMonitorBinary, make());
+
+/** Resolve the same bundled/overridden binary without requiring the telemetry layer. */
+export class ProcessCaptureBinary extends Context.Reference<Effect.Effect<string | null>>(
+  "t3/resourceTelemetry/ProcessCaptureBinary",
+  {
+    defaultValue: Effect.fn("ResourceMonitorBinary.processCapture")(function* () {
+      const config = yield* Effect.serviceOption(ServerConfig.ServerConfig);
+      if (Option.isNone(config)) return null;
+      return yield* make().pipe(
+        Effect.flatMap((binary) => binary.resolve),
+        Effect.provideService(ServerConfig.ServerConfig, config.value),
+        Effect.provide(NodeServices.layer),
+        Effect.orElseSucceed(() => null),
+      );
+    }),
+  },
+) {}

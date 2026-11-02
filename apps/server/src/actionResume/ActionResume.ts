@@ -3,6 +3,8 @@ import {
   ActionResumeState,
   ActionResumeError,
   ActionRunInspection,
+  type ActionRunSummary,
+  type ActionResumeSource,
   CommandId,
   MessageId,
   type OrchestrationProjectShell,
@@ -11,9 +13,14 @@ import {
   type ProviderInstanceId,
   type ProjectScript,
   type ThreadId,
+  type TerminalEvent,
 } from "@t3tools/contracts";
 import { projectScriptRuntimeEnv, resolveProjectScripts } from "@t3tools/shared/projectScripts";
-import { formatActionResumeFollowUp } from "@t3tools/shared/actionResume";
+import {
+  actionResumeStatus,
+  actionResumeSummary,
+  formatActionResumeFollowUp,
+} from "@t3tools/shared/actionResume";
 import {
   ACTION_EVENT_TOKEN_ENV,
   ACTION_RUN_ID_ENV,
@@ -26,6 +33,7 @@ import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -33,14 +41,22 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import { forkParked } from "../serverActivation.ts";
+import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
+import * as ShellReadiness from "../terminal/shellReadiness.ts";
+import * as WorkspaceAcquisition from "../workspace/WorkspaceAcquisition.ts";
+import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
+import {
+  ActionContinuationAuthorization,
+  OrchestratorProjectionError,
+} from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as CommandReceipts from "../orchestration-v2/CommandReceiptStore.ts";
 import * as ActionRunStore from "./ActionRunStore.ts";
 import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
-import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
+import { ProviderRegistry } from "../provider/ProviderRegistry.ts";
 
 const ACTION_RESUME_PROVIDER_DRIVERS = new Set([
   ProviderDriverKind.make("codex"),
@@ -57,6 +73,7 @@ export interface ListedProjectAction {
 export interface ActionResumeInvocation {
   readonly threadId: ThreadId;
   readonly providerInstanceId: ProviderInstanceId;
+  readonly source?: ActionResumeSource;
 }
 
 interface FinishActionInput {
@@ -67,6 +84,7 @@ interface FinishActionInput {
   readonly exitSignal?: number | null;
   readonly deliver?: boolean;
   readonly publishShell?: boolean;
+  readonly outputTail?: string;
 }
 
 interface ActionProtocolCapture {
@@ -79,6 +97,16 @@ interface ActionProtocolCapture {
   progressFlushGeneration: number;
   progressFlushScheduled?: boolean;
   progressLimitWarned?: boolean;
+}
+
+interface ActionStartup {
+  readonly started: Deferred.Deferred<void>;
+  readonly stopped: Deferred.Deferred<void>;
+  rawPending: string;
+  output: string;
+  written: boolean;
+  acknowledged: boolean;
+  replaced: boolean;
 }
 
 const progressEquals = (left: ActionProgress | undefined, right: ActionProgress) =>
@@ -105,6 +133,9 @@ export class ActionResume extends Context.Service<
       invocation: ActionResumeInvocation,
       runId: string,
     ) => Effect.Effect<ActionRunInspection, ActionResumeError>;
+    readonly readLatestSummary: (
+      threadId: ThreadId,
+    ) => Effect.Effect<ActionRunSummary | null, ActionResumeError>;
     readonly cancelByUser: (threadId: ThreadId) => Effect.Effect<void>;
     readonly cancelByArchive: (threadId: ThreadId) => Effect.Effect<void>;
     readonly resumeInterrupted: (threadId: ThreadId) => Effect.Effect<void, ActionResumeError>;
@@ -272,6 +303,13 @@ const mapActionResumeError =
     );
 
 const make = Effect.gen(function* () {
+  const workspaceAcquisition = yield* WorkspaceAcquisition.WorkspaceAcquisition;
+  const pauseStore = yield* Effect.serviceOption(EnvironmentPauseStore.EnvironmentPauseStore);
+  const automationPaused = Option.isSome(pauseStore)
+    ? pauseStore.value.get.pipe(
+        Effect.map((session) => session !== null && session.phase !== "resuming"),
+      )
+    : Effect.succeed(false);
   const serviceScope = yield* Effect.scope;
   const clock = yield* Clock.Clock;
   const crypto = yield* Crypto.Crypto;
@@ -295,9 +333,12 @@ const make = Effect.gen(function* () {
       [...latestByThreadId.values()].filter((state) => state.outcome === "running").length,
   };
   const terminals = yield* TerminalManager.TerminalManager;
+  const shellReadiness = yield* ShellReadiness.make;
   const providers = yield* ProviderRegistry;
   const mutex = yield* Semaphore.make(1);
   const outputCaptureByRunId = new Map<string, ActionOutputCapture>();
+  const startups = new Map<string, ActionStartup>();
+  const stagedTerminals = new Set<string>();
   const protocolCaptureByRunId = new Map<string, ActionProtocolCapture>();
 
   const providerSupportsActionResume = Effect.fn("ActionResume.providerSupportsActionResume")(
@@ -326,7 +367,11 @@ const make = Effect.gen(function* () {
     input: ActionResumeState,
     outputTail?: string,
     publishShell = true,
+    taskOutcome?: "interrupted",
   ) {
+    if (input.owner !== undefined && input.delivery === "disposed") {
+      yield* threads.disposeActionObligation(input.threadId, input.owner, input.runId, taskOutcome);
+    }
     const previous = registry.getLatest(input.threadId);
     const state: ActionResumeState = {
       ...input,
@@ -511,6 +556,44 @@ const make = Effect.gen(function* () {
       protocolCaptureByRunId.delete(state.runId);
       return;
     }
+    if (state.owner !== undefined) {
+      const owner = state.owner;
+      const child = yield* threads.getThreadRecords(threadId, ["runs"]);
+      const source = child.runs.find((run) => run.id === owner.sourceRunId);
+      const obligation = source?.actionObligations?.find((row) => row.actionRunId === state.runId);
+      let live = obligation?.state === "waiting";
+      if (owner.delegationId !== undefined) {
+        const selector = source?.remoteDelegation;
+        const association = child.thread.remoteDelegations?.find(
+          (entry) =>
+            entry.delegationId === owner.delegationId &&
+            entry.sourceTaskId === owner.taskId &&
+            entry.parentThreadId === owner.parentThreadId &&
+            entry.parentEnvironmentId === owner.parentEnvironmentId,
+        );
+        live =
+          live &&
+          selector?.delegationId === owner.delegationId &&
+          selector.sourceTaskId === owner.taskId &&
+          selector.parentThreadId === owner.parentThreadId &&
+          selector.parentEnvironmentId === owner.parentEnvironmentId &&
+          association?.stage === "active" &&
+          association.linkSessionId === child.thread.linkOrigin?.sessionId;
+      } else {
+        const parent = yield* threads.getThreadRecords(owner.parentThreadId, ["subagents"]);
+        const task = parent.subagents.find((row) => row.id === owner.taskId);
+        live =
+          live &&
+          task !== undefined &&
+          task.ownershipReleased !== true &&
+          task.result === null &&
+          !["completed", "failed", "cancelled", "interrupted"].includes(task.status);
+      }
+      if (!live) {
+        yield* persistState({ ...state, delivery: "disposed" });
+        return;
+      }
+    }
     const thread = yield* eligibleThreadForFollowUp(threadId);
     if (thread === null) return;
     const retained = yield* runs.get(threadId, state.runId);
@@ -526,24 +609,29 @@ const make = Effect.gen(function* () {
               Effect.map((history) =>
                 actionOutputFromTranscript(history, state.runId, state.outcome === "process_lost"),
               ),
-              Effect.catchCause(() => Effect.succeed(undefined)),
+              Effect.catchCause(() => Effect.as(Effect.void, undefined)),
             )));
     if (outputTail !== undefined) yield* runs.save(state, outputTail);
 
     const commandId = CommandId.make(`server:action-resume:${state.runId}:delivery`);
     const messageId = MessageId.make(`action-resume:${state.runId}:follow-up`);
-    yield* threads.dispatch({
-      type: "message.dispatch",
-      commandId,
-      threadId,
-      messageId,
-      text: followUpText(state, outputTail),
-      attachments: [],
-      createdBy: "system",
-      creationSource: "server",
-      // Serialized V2 admission queues a raced user turn rather than steering it.
-      dispatchMode: { type: "queue_after_active" },
-    });
+    yield* threads
+      .dispatch({
+        type: "message.dispatch",
+        commandId,
+        threadId,
+        messageId,
+        text: followUpText(state, outputTail),
+        attachments: [],
+        createdBy: "system",
+        creationSource: "server",
+        ...(state.owner === undefined
+          ? {}
+          : { actionContinuation: { actionRunId: state.runId, owner: state.owner } }),
+        // The orchestrator queues paused automatic wakes without starting a provider.
+        dispatchMode: { type: "queue_after_active" },
+      })
+      .pipe(Effect.provideService(ActionContinuationAuthorization, state.runId));
     yield* persistState({ ...state, delivery: "delivered" });
     outputCaptureByRunId.delete(state.runId);
     protocolCaptureByRunId.delete(state.runId);
@@ -604,8 +692,20 @@ const make = Effect.gen(function* () {
     const capture = outputCaptureByRunId.get(current.runId);
     if (capture !== undefined && protocol !== undefined)
       consumeActionTerminalOutput(capture, protocol.decoder.finish());
-    const outputTail = capture === undefined ? undefined : finishActionOutputCapture(capture);
-    yield* persistState(next, outputTail, input.publishShell);
+    const outputTail =
+      input.outputTail ??
+      (capture === undefined ? undefined : finishActionOutputCapture(capture)) ??
+      startups.get(current.runId)?.output;
+    yield* persistState(
+      next,
+      outputTail,
+      input.publishShell,
+      input.outcome === "cancelled_by_shutdown" || input.outcome === "cancelled_by_archive"
+        ? "interrupted"
+        : undefined,
+    );
+    const startup = startups.get(current.runId);
+    if (startup) yield* Deferred.succeed(startup.stopped, undefined);
     if (next.delivery === "disposed") {
       outputCaptureByRunId.delete(next.runId);
       protocolCaptureByRunId.delete(next.runId);
@@ -626,8 +726,8 @@ const make = Effect.gen(function* () {
         ),
       );
 
-  const cancel = (threadId: ThreadId, outcome: "cancelled_by_user" | "cancelled_by_archive") =>
-    Effect.gen(function* () {
+  const cancel = Effect.fn("ActionResume.cancel")(
+    function* (threadId: ThreadId, outcome: "cancelled_by_user" | "cancelled_by_archive") {
       const current = registry.getLatest(threadId);
       if (current === null) return;
       if (current.outcome === "running") {
@@ -648,22 +748,30 @@ const make = Effect.gen(function* () {
               latest !== null &&
               (latest.delivery === "pending" || latest.delivery === "available")
             ) {
-              yield* persistState({ ...latest, delivery: "disposed" });
+              yield* persistState(
+                { ...latest, delivery: "disposed" },
+                undefined,
+                true,
+                "interrupted",
+              );
               outputCaptureByRunId.delete(latest.runId);
               protocolCaptureByRunId.delete(latest.runId);
             }
           }),
         );
       }
-    }).pipe(
-      Effect.catchCause((cause) =>
-        Effect.logError("Failed to cancel or dispose Project Action state", {
-          threadId,
-          outcome,
-          cause: Cause.pretty(cause),
-        }),
+    },
+    (effect, threadId, outcome) =>
+      effect.pipe(
+        Effect.catchCause((cause) =>
+          Effect.logError("Failed to cancel or dispose Project Action state", {
+            threadId,
+            outcome,
+            cause: Cause.pretty(cause),
+          }),
+        ),
       ),
-    );
+  );
 
   const disposeDeleted = Effect.fn("ActionResume.disposeDeleted")(function* (threadId: ThreadId) {
     yield* mutex.withPermits(1)(
@@ -731,6 +839,7 @@ const make = Effect.gen(function* () {
     const providerSupported = yield* providerSupportsActionResume(invocation.providerInstanceId);
     const { project } = yield* resolveProjectContext(invocation.threadId);
     const scripts = yield* resolveActions(project);
+    yield* deliverPending(invocation.threadId);
     const launchBlocked = actionBlocksNewLaunch(registry.getLatest(invocation.threadId));
     return scripts.map((script) => {
       const disabledReason = !providerSupported
@@ -749,6 +858,31 @@ const make = Effect.gen(function* () {
     });
   });
 
+  const failStartup = Effect.fn("ActionResume.failStartup")(function* (
+    state: ActionResumeState,
+    startup: ActionStartup,
+    message: string,
+  ) {
+    const failed = yield* mutex.withPermits(1)(
+      Effect.gen(function* () {
+        const current = registry.getLatest(state.threadId);
+        if (current?.runId !== state.runId || current.outcome !== "running") return false;
+        yield* finishUnlocked({
+          threadId: state.threadId,
+          runId: state.runId,
+          outcome: "failed",
+          outputTail: `${startup.output}\n${message}\n`.slice(-MAX_ACTION_OUTPUT_CHARS),
+        });
+        return true;
+      }),
+    );
+    if (!failed) return;
+    yield* terminals
+      .close({ threadId: state.threadId, terminalId: state.terminalId })
+      .pipe(Effect.ignoreCause({ log: true }));
+    yield* deliverPending(state.threadId);
+  });
+
   const launchActionUnlocked = Effect.fn("ActionResume.launchActionUnlocked")(function* (
     invocation: ActionResumeInvocation,
     script: ProjectScript,
@@ -761,78 +895,256 @@ const make = Effect.gen(function* () {
       });
     }
     const { thread, project } = yield* resolveProjectContext(invocation.threadId);
-    const runId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
-    const terminalId = `action-${runId}`;
-    const eventToken = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
-    const startedAt = yield* nowIso;
-    const state: ActionResumeState = {
-      runId,
-      threadId: invocation.threadId,
-      projectId: project.id,
-      actionId: script.id,
-      actionName: script.name,
-      command: script.command,
-      terminalId,
-      outcome: "running",
-      delivery: "armed",
-      startedAt,
-      finishedAt: null,
-      exitCode: null,
-      exitSignal: null,
-      revision: 0,
-    };
-    const cwd = thread.worktreePath ?? project.workspaceRoot;
-    const env = projectScriptRuntimeEnv({
-      project: { cwd: project.workspaceRoot },
-      worktreePath: thread.worktreePath,
-      extraEnv: {
-        [ACTION_RUN_ID_ENV]: runId,
-        [ACTION_EVENT_TOKEN_ENV]: eventToken,
-      },
-    });
-    const launch = Effect.gen(function* () {
-      const terminal = yield* terminals.open({
-        threadId: invocation.threadId,
-        terminalId,
-        cwd,
-        worktreePath: thread.worktreePath,
-        env,
-        cols: 120,
-        rows: 30,
-      });
-      if (terminal.status !== "running") {
-        return yield* Effect.die("Action terminal exited during launch.");
-      }
-      yield* persistState(state);
-      outputCaptureByRunId.set(runId, createActionOutputCapture(runId));
-      protocolCaptureByRunId.set(runId, {
-        decoder: createActionProtocolDecoder({ runId, token: eventToken }),
-        acceptedProgressCount: 0,
-        progressFlushGeneration: 0,
-      });
-      yield* terminals.write({
-        threadId: invocation.threadId,
-        terminalId,
-        data: actionCommandForShell(script.command, terminal.shellFamily, runId),
-      });
-    });
-    const launched = yield* Effect.exit(launch);
-    if (launched._tag === "Failure") {
-      yield* finishUnlocked({
-        threadId: invocation.threadId,
-        runId,
-        outcome: "failed",
-        deliver: false,
-      }).pipe(Effect.ignoreCause({ log: true }));
-      yield* terminals
-        .close({ threadId: invocation.threadId, terminalId, deleteHistory: true })
-        .pipe(Effect.ignoreCause({ log: true }));
-      return yield* new ActionResumeError({
-        reason: "launch_failed",
-        message: `Failed to launch Action "${script.name}".`,
-      });
-    }
-    return state;
+    return yield* withWorkspaceLease(
+      thread.worktreePath ?? project.workspaceRoot,
+      Effect.gen(function* () {
+        const acquired = yield* workspaceAcquisition
+          .acquire({
+            path: thread.worktreePath ?? project.workspaceRoot,
+            threadId: invocation.threadId,
+            purpose: "action",
+          })
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new ActionResumeError({
+                  reason: "launch_failed",
+                  message: "The workspace must be restored before this Action can run.",
+                  cause,
+                }),
+            ),
+          );
+        return yield* withWorkspaceLease(
+          acquired.path,
+          Effect.gen(function* () {
+            const worktreePath = thread.worktreePath === null ? null : acquired.path;
+            const runId = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
+            const terminalId = `action-${runId}`;
+            const eventToken = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
+            const startedAt = yield* nowIso;
+            const child = yield* threads.getThreadShell(invocation.threadId);
+            const delegated =
+              child !== null &&
+              child.lineage.independent !== true &&
+              (child.lineage.relationshipToParent === "subagent" ||
+                (child.remoteDelegations?.length ?? 0) > 0);
+            if (delegated && invocation.source === undefined) {
+              return yield* new ActionResumeError({
+                reason: "internal_error",
+                message:
+                  "This Action call couldn't be matched to your current task turn, so the Action didn't start. End your turn with a handoff request so your parent can launch it.",
+              });
+            }
+            let state: ActionResumeState = {
+              runId,
+              threadId: invocation.threadId,
+              projectId: project.id,
+              actionId: script.id,
+              actionName: script.name,
+              command: script.command,
+              terminalId,
+              outcome: "running",
+              delivery: "armed",
+              startedAt,
+              finishedAt: null,
+              exitCode: null,
+              exitSignal: null,
+              revision: 0,
+            };
+            if (invocation.source !== undefined) {
+              const owner = yield* threads.reserveActionObligation({
+                threadId: invocation.threadId,
+                source: invocation.source,
+                actionRunId: runId,
+                persistOwner: (owner) =>
+                  runs
+                    .save({ ...state, owner })
+                    .pipe(
+                      Effect.mapError(
+                        (cause) =>
+                          new OrchestratorProjectionError({ threadId: invocation.threadId, cause }),
+                      ),
+                    ),
+              });
+              if (delegated && owner === undefined) {
+                return yield* new ActionResumeError({
+                  reason: "internal_error",
+                  message:
+                    "This task can't own an Action in this environment, so the Action didn't start. End your turn with a handoff request so your parent can launch it.",
+                });
+              }
+              if (owner !== undefined) state = { ...state, owner };
+            }
+            const cwd = acquired.path;
+            const env = projectScriptRuntimeEnv({
+              project: { cwd: project.workspaceRoot },
+              worktreePath,
+              extraEnv: {
+                [ACTION_RUN_ID_ENV]: runId,
+                [ACTION_EVENT_TOKEN_ENV]: eventToken,
+              },
+            });
+            const startup: ActionStartup = {
+              started: yield* Deferred.make<void>(),
+              stopped: yield* Deferred.make<void>(),
+              rawPending: "",
+              output: "",
+              written: false,
+              acknowledged: false,
+              replaced: false,
+            };
+            startups.set(runId, startup);
+            stagedTerminals.add(terminalId);
+            const events = yield* shellReadiness.stageTerminalEvents({
+              threadId: state.threadId,
+              terminalId,
+            });
+            const readiness = yield* shellReadiness.watchShellReadiness({
+              threadId: state.threadId,
+              terminalId,
+              subscribe: events.subscribe,
+              onStartupPrompt: Effect.void,
+            });
+            let activated = false;
+            let terminalPid: number | null = null;
+            const unsubscribe = yield* events.subscribe((event) =>
+              Effect.gen(function* () {
+                if (
+                  (event.type === "started" || event.type === "restarted") &&
+                  (activated || event.snapshot.pid !== terminalPid)
+                ) {
+                  startup.replaced = true;
+                  yield* Deferred.succeed(startup.stopped, undefined);
+                  return;
+                }
+                yield* handleTerminalEvent(event);
+              }),
+            );
+            const cleanup = () => {
+              readiness.unsubscribe();
+              unsubscribe();
+              events.unsubscribe();
+              startups.delete(runId);
+              stagedTerminals.delete(terminalId);
+            };
+            const guardedStart = <A, E>(effect: Effect.Effect<A, E>) =>
+              state.owner === undefined
+                ? effect
+                : threads.withActionObligation(state.threadId, state.owner, state.runId, effect);
+            const launch = Effect.gen(function* () {
+              if (state.owner !== undefined) yield* persistState(state);
+              const terminal = yield* guardedStart(
+                terminals.open({
+                  threadId: invocation.threadId,
+                  terminalId,
+                  cwd,
+                  ...(script.terminalLinkProfileName === undefined
+                    ? {}
+                    : { terminalLinkProfileName: script.terminalLinkProfileName }),
+                  worktreePath,
+                  env,
+                  cols: 120,
+                  rows: 30,
+                }),
+              );
+              terminalPid = terminal.pid;
+              if (terminal.status !== "running") {
+                return yield* Effect.die("Action terminal exited during launch.");
+              }
+              yield* persistState(state);
+              outputCaptureByRunId.set(runId, createActionOutputCapture(runId));
+              protocolCaptureByRunId.set(runId, {
+                decoder: createActionProtocolDecoder({ runId, token: eventToken }),
+                acceptedProgressCount: 0,
+                progressFlushGeneration: 0,
+              });
+              const start = Effect.gen(function* () {
+                const waiting = Effect.gen(function* () {
+                  yield* events.activate;
+                  activated = true;
+                  const posix =
+                    terminal.shellFamily !== "powershell" && terminal.shellFamily !== "cmd";
+                  const ready = posix ? yield* readiness.wait : "ready";
+                  if (ready !== "ready") return yield* Deferred.await(startup.stopped);
+                  const written = yield* mutex.withPermits(1)(
+                    admission.admit(
+                      "action-resume",
+                      Effect.gen(function* () {
+                        const current = registry.getLatest(state.threadId);
+                        if (
+                          current?.runId !== runId ||
+                          current.outcome !== "running" ||
+                          startup.replaced
+                        )
+                          return false;
+                        const { thread } = yield* resolveProjectContext(state.threadId);
+                        if (thread.archivePending?.status === "stopping")
+                          return yield* new ActionResumeError({
+                            reason: "launch_failed",
+                            message: "The originating thread is archiving.",
+                          });
+                        startup.written = true;
+                        yield* guardedStart(
+                          terminals.write({
+                            threadId: state.threadId,
+                            terminalId,
+                            data: actionCommandForShell(
+                              script.command,
+                              terminal.shellFamily,
+                              runId,
+                            ),
+                          }),
+                        );
+                        return true;
+                      }),
+                    ),
+                  );
+                  if (written && posix) yield* Deferred.await(startup.started);
+                }).pipe(
+                  Effect.raceFirst(Deferred.await(startup.stopped)),
+                  Effect.timeoutOption("30 seconds"),
+                );
+                const result = yield* Effect.exit(waiting);
+                const message = startup.replaced
+                  ? "Action launch stopped because its terminal was replaced; the command may not have been sent."
+                  : result._tag === "Failure"
+                    ? "Action command could not be written to the terminal; launch stopped."
+                    : Option.isNone(result.value)
+                      ? startup.written
+                        ? "Action command was sent, but it did not start within 30 seconds; it was not resent."
+                        : "Action shell was not ready within 30 seconds; the command was not sent."
+                      : null;
+                if (message !== null) yield* failStartup(state, startup, message);
+              }).pipe(
+                Effect.catchCause((cause) =>
+                  Effect.logError("Could not settle Action startup", { runId, cause }),
+                ),
+                Effect.ensuring(Effect.sync(cleanup)),
+              );
+              return { state, start };
+            });
+            const launched = yield* Effect.exit(launch);
+            if (launched._tag === "Failure") {
+              cleanup();
+              yield* finishUnlocked({
+                threadId: invocation.threadId,
+                runId,
+                outcome: "failed",
+                deliver: false,
+              }).pipe(Effect.ignoreCause({ log: true }));
+              yield* terminals
+                .close({ threadId: invocation.threadId, terminalId, deleteHistory: true })
+                .pipe(Effect.ignoreCause({ log: true }));
+              return yield* new ActionResumeError({
+                reason: "launch_failed",
+                message: `Failed to launch Action "${script.name}".`,
+              });
+            }
+            return launched.value;
+          }),
+        );
+      }),
+    );
   });
 
   const runProjectActionAndResumeImpl = Effect.fn("ActionResume.runProjectActionAndResume")(
@@ -858,7 +1170,8 @@ const make = Effect.gen(function* () {
           message: `Project Action "${script.name}" is not opted in for agent-triggered resume.`,
         });
       }
-      return yield* mutex.withPermits(1)(
+      yield* deliverPending(invocation.threadId);
+      const launched = yield* mutex.withPermits(1)(
         admission.admit("action-resume", launchActionUnlocked(invocation, script)).pipe(
           Effect.catchTags({
             UpdateDrainAdmissionError: (error) =>
@@ -872,8 +1185,36 @@ const make = Effect.gen(function* () {
           }),
         ),
       );
+      yield* Effect.forkIn(launched.start, serviceScope, { startImmediately: true });
+      return launched.state;
     },
   );
+
+  const readStatus = Effect.fn("ActionResume.readStatus")(function* (state: ActionResumeState) {
+    const messageId = MessageId.make(`action-resume:${state.runId}:follow-up`);
+    const { messages } = yield* threads.getThreadRecords(state.threadId, ["messages"], {
+      messageIds: [messageId],
+    });
+    const followUpRunId = messages.find((message) => message.id === messageId)?.runId;
+    const { runs: followUpRuns, runtimeRequests } = yield* threads.getThreadRecords(
+      state.threadId,
+      ["runs", "runtimeRequests"],
+      { runIds: followUpRunId == null ? [] : [followUpRunId] },
+    );
+    return actionResumeStatus({
+      action: state,
+      environmentPaused: yield* automationPaused,
+      followUp: followUpRuns.find((run) => run.id === followUpRunId),
+      hasPendingRequest: runtimeRequests.some((request) => request.status === "pending"),
+    });
+  });
+
+  const readLatestSummaryImpl = Effect.fn("ActionResume.readLatestSummary")(function* (
+    threadId: ThreadId,
+  ) {
+    const state = registry.getLatest(threadId);
+    return state === null ? null : actionResumeSummary(state, yield* readStatus(state));
+  });
 
   const inspectActionRunImpl = Effect.fn("ActionResume.inspectActionRun")(function* (
     invocation: ActionResumeInvocation,
@@ -902,6 +1243,11 @@ const make = Effect.gen(function* () {
       runId: state.runId,
       actionName: state.actionName,
       lifecycleOutcome: state.outcome,
+      delivery: state.delivery,
+      ...(state.heldByEnvironmentPause === undefined
+        ? {}
+        : { heldByEnvironmentPause: state.heldByEnvironmentPause }),
+      status: yield* readStatus(state),
       exitCode: state.exitCode,
       exitSignal: state.exitSignal,
       outputTail,
@@ -954,20 +1300,32 @@ const make = Effect.gen(function* () {
             message: "This thread has no interrupted Action follow-up to discard.",
           });
         }
-        yield* persistState({ ...current, delivery: "disposed" });
+        yield* persistState({ ...current, delivery: "disposed" }, undefined, true, "interrupted");
         outputCaptureByRunId.delete(current.runId);
         protocolCaptureByRunId.delete(current.runId);
       }),
     );
   });
 
-  const unsubscribeTerminal = yield* terminals.subscribe((event) => {
+  // Terminal chunks share the enclosing launch/event span.
+  const handleTerminalEvent = Effect.fnUntraced(function* (event: TerminalEvent) {
     const state = registry.getLatest(event.threadId);
     if (state === null || state.outcome !== "running" || state.terminalId !== event.terminalId) {
-      return Effect.void;
+      return;
     }
     if (event.type === "output") {
-      return Effect.gen(function* () {
+      return yield* Effect.gen(function* () {
+        const startup = startups.get(state.runId);
+        if (startup) {
+          startup.output = `${startup.output}${event.data}`.slice(-MAX_ACTION_OUTPUT_CHARS);
+          const marker = actionOutputMarker(state.runId, "start");
+          const raw = startup.rawPending + event.data;
+          if (startup.written && raw.includes(marker)) {
+            startup.acknowledged = true;
+            yield* Deferred.succeed(startup.started, undefined);
+          }
+          startup.rawPending = raw.slice(-(marker.length - 1));
+        }
         const capture =
           outputCaptureByRunId.get(state.runId) ?? createActionOutputCapture(state.runId);
         outputCaptureByRunId.set(state.runId, capture);
@@ -1017,10 +1375,13 @@ const make = Effect.gen(function* () {
         if (protocol) consumeActionTerminalOutput(capture, protocol.decoder.finish());
         finishActionOutputCapture(capture);
       }
-      return finish({
+      return yield* finish({
         threadId: state.threadId,
         runId: state.runId,
-        outcome: event.exitCode === 0 ? "succeeded" : "failed",
+        outcome:
+          event.exitCode === 0 && (startups.get(state.runId)?.acknowledged ?? true)
+            ? "succeeded"
+            : "failed",
         exitCode: event.exitCode,
         exitSignal: event.exitSignal,
       });
@@ -1032,7 +1393,7 @@ const make = Effect.gen(function* () {
         if (protocol) consumeActionTerminalOutput(capture, protocol.decoder.finish());
         finishActionOutputCapture(capture);
       }
-      return finish({
+      return yield* finish({
         threadId: state.threadId,
         runId: state.runId,
         outcome: "cancelled_by_user",
@@ -1046,10 +1407,13 @@ const make = Effect.gen(function* () {
         if (protocol) consumeActionTerminalOutput(capture, protocol.decoder.finish());
         finishActionOutputCapture(capture);
       }
-      return finish({ threadId: state.threadId, runId: state.runId, outcome: "failed" });
+      return yield* finish({ threadId: state.threadId, runId: state.runId, outcome: "failed" });
     }
-    return Effect.void;
+    return;
   });
+  const unsubscribeTerminal = yield* terminals.subscribe((event) =>
+    stagedTerminals.has(event.terminalId) ? Effect.void : handleTerminalEvent(event),
+  );
   yield* Effect.addFinalizer(() => Effect.sync(unsubscribeTerminal));
 
   const hydrate = Effect.fn("ActionResume.hydrate")(function* () {
@@ -1120,11 +1484,16 @@ const make = Effect.gen(function* () {
           return;
         }
         if (shell.archivedAt !== null) {
-          yield* persistState({
-            ...state,
-            outcome: state.outcome === "running" ? "cancelled_by_archive" : state.outcome,
-            delivery: "disposed",
-          });
+          yield* persistState(
+            {
+              ...state,
+              outcome: state.outcome === "running" ? "cancelled_by_archive" : state.outcome,
+              delivery: "disposed",
+            },
+            undefined,
+            true,
+            "interrupted",
+          );
         } else if (
           (state.delivery === "pending" ||
             state.delivery === "available" ||
@@ -1140,9 +1509,6 @@ const make = Effect.gen(function* () {
             delivery: "available",
             finishedAt,
           });
-        } else if (state.delivery === "pending" && shell.archivePending?.status !== "stopping") {
-          // A stopping archive keeps the completed result's delivery intent across restart.
-          yield* persistState({ ...state, delivery: "available" });
         } else if (
           shell.actionResume?.runId !== state.runId ||
           shell.actionResume.revision !== state.revision
@@ -1163,6 +1529,7 @@ const make = Effect.gen(function* () {
   yield* forkParked(
     Effect.gen(function* () {
       yield* mutex.withPermits(1)(reconcile(initialStates));
+      yield* retryPendingFollowUps;
       yield* Stream.runForEach(Stream.fromQueue(domainEvents), (event) => {
         const threadId = event.threadId;
         if (event.type === "thread.archived") return cancel(threadId, "cancelled_by_archive");
@@ -1204,20 +1571,33 @@ const make = Effect.gen(function* () {
   );
 
   return ActionResume.of({
-    listProjectActions: (invocation) =>
+    listProjectActions: Effect.fn("ActionResume.listProjectActions")((invocation) =>
       listProjectActionsImpl(invocation).pipe(mapActionResumeError("list Project Actions")),
-    runProjectActionAndResume: (invocation, actionId) =>
-      runProjectActionAndResumeImpl(invocation, actionId).pipe(
-        mapActionResumeError("run the Project Action"),
-      ),
-    inspectActionRun: (invocation, runId) =>
+    ),
+    runProjectActionAndResume: Effect.fn("ActionResume.runProjectActionAndResume")(
+      (invocation, actionId) =>
+        runProjectActionAndResumeImpl(invocation, actionId).pipe(
+          mapActionResumeError("run the Project Action"),
+        ),
+    ),
+    inspectActionRun: Effect.fn("ActionResume.inspectActionRun")((invocation, runId) =>
       inspectActionRunImpl(invocation, runId).pipe(mapActionResumeError("inspect the Action run")),
-    cancelByUser: (threadId) => cancel(threadId, "cancelled_by_user"),
-    cancelByArchive: (threadId) => cancel(threadId, "cancelled_by_archive"),
-    resumeInterrupted: (threadId) =>
+    ),
+    readLatestSummary: Effect.fn("ActionResume.readLatestSummary")((threadId) =>
+      readLatestSummaryImpl(threadId).pipe(mapActionResumeError("read the latest Action summary")),
+    ),
+    cancelByUser: Effect.fn("ActionResume.cancelByUser")((threadId) =>
+      cancel(threadId, "cancelled_by_user"),
+    ),
+    cancelByArchive: Effect.fn("ActionResume.cancelByArchive")((threadId) =>
+      cancel(threadId, "cancelled_by_archive"),
+    ),
+    resumeInterrupted: Effect.fn("ActionResume.resumeInterrupted")((threadId) =>
       resumeInterruptedImpl(threadId).pipe(mapActionResumeError("resume the interrupted Action")),
-    discardInterrupted: (threadId) =>
+    ),
+    discardInterrupted: Effect.fn("ActionResume.discardInterrupted")((threadId) =>
       discardInterruptedImpl(threadId).pipe(mapActionResumeError("discard the interrupted Action")),
+    ),
     retryPendingFollowUps,
     countRunning: Effect.sync(() => registry.countRunning()),
   });

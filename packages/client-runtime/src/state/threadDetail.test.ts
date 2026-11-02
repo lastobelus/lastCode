@@ -2,6 +2,8 @@ import {
   EnvironmentId,
   EventId,
   MessageId,
+  NodeId,
+  RuntimeRequestId,
   RunId,
   TurnItemId,
   type OrchestrationV2ThreadProjection,
@@ -348,4 +350,114 @@ it("matches full structure comparisons across streamed, batched, and reordered u
     [reasoning.id, 0],
     [assistant.id, 1],
   ]);
+});
+
+describe("actionResumeContextAtom", () => {
+  it("holds identity through streaming and visits, and refreshes for Action, run and request changes", () => {
+    const action: NonNullable<OrchestrationV2ThreadProjection["thread"]["actionResume"]> = {
+      runId: "action-1",
+      threadId: v2ThreadId,
+      projectId: v2Projection.thread.projectId,
+      actionId: "check",
+      actionName: "Check",
+      terminalId: "terminal-1",
+      outcome: "succeeded",
+      delivery: "delivered",
+      startedAt: "2026-06-20T00:00:00.000Z",
+      finishedAt: "2026-06-20T00:00:01.000Z",
+      exitCode: 0,
+      exitSignal: null,
+    };
+    const run: OrchestrationV2ThreadProjection["runs"][number] = {
+      id: RunId.make("follow-up"),
+      threadId: v2ThreadId,
+      ordinal: 1,
+      providerInstanceId: v2Projection.thread.providerInstanceId,
+      modelSelection: v2Projection.thread.modelSelection,
+      providerThreadId: null,
+      userMessageId: MessageId.make("action-resume:action-1:follow-up"),
+      rootNodeId: null,
+      activeAttemptId: null,
+      status: "queued",
+      requestedAt: v2Now,
+      startedAt: null,
+      completedAt: null,
+      checkpointId: null,
+      contextHandoffId: null,
+    };
+    let projection: OrchestrationV2ThreadProjection = {
+      ...withItem(assistant),
+      thread: { ...v2Projection.thread, actionResume: action },
+      runs: [run],
+    };
+    const state = Atom.make(
+      AsyncResult.success({
+        ...EMPTY_ENVIRONMENT_THREAD_STATE,
+        data: Option.some(projection),
+      }),
+    );
+    const ref = { environmentId: EnvironmentId.make("env"), threadId: v2ThreadId };
+    const atom = createEnvironmentThreadDetailAtoms(() => state).actionResumeContextAtom(ref);
+    const registry = AtomRegistry.make();
+    registry.mount(atom);
+    const push = (next: OrchestrationV2ThreadProjection | null) =>
+      registry.set(
+        state,
+        AsyncResult.success({
+          ...EMPTY_ENVIRONMENT_THREAD_STATE,
+          data: Option.fromNullishOr(next),
+        }),
+      );
+    try {
+      const first = registry.get(atom);
+      projection = {
+        ...projection,
+        turnItems: [{ ...assistant, text: "Hello", updatedAt: later }],
+        thread: { ...projection.thread, updatedAt: later, lastVisitedAt: later },
+      };
+      push(projection);
+      expect(registry.get(atom)).toBe(first);
+      projection = { ...projection, runs: [{ ...run, queueHeld: true }] };
+      push(projection);
+      const held = registry.get(atom);
+      expect(held).not.toBe(first);
+      expect(held?.followUp?.queueHeld).toBe(true);
+      projection = {
+        ...projection,
+        runtimeRequests: [
+          {
+            id: RuntimeRequestId.make("request"),
+            nodeId: NodeId.make("node"),
+            providerTurnId: null,
+            nativeRequestRef: null,
+            kind: "user_input",
+            status: "pending",
+            responseCapability: { type: "message" },
+            createdAt: v2Now,
+            resolvedAt: null,
+          },
+        ],
+      };
+      push(projection);
+      const waiting = registry.get(atom);
+      expect(waiting).not.toBe(held);
+      expect(waiting?.hasPendingRequest).toBe(true);
+      projection = {
+        ...projection,
+        thread: {
+          ...projection.thread,
+          actionResume: { ...action, delivery: "disposed" },
+        },
+      };
+      push(projection);
+      expect(registry.get(atom)).not.toBe(waiting);
+      expect(registry.get(atom)?.action.delivery).toBe("disposed");
+      push(null);
+      expect(registry.get(atom)).toBeNull();
+      push(projection);
+      expect(registry.get(atom)?.action.delivery).toBe("disposed");
+    } finally {
+      registry.dispose();
+    }
+  });
 });

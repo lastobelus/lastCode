@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { createPreviewStreamClient, type PreviewStreamControl } from "./serverBrowserStream.ts";
+import {
+  createPreviewStreamClient,
+  previewStreamControlLabel,
+  type PreviewStreamControl,
+} from "./serverBrowserStream.ts";
 
 class FakeSocket extends EventTarget {
   static readonly OPEN = 1;
@@ -105,6 +109,22 @@ describe("preview stream control", () => {
     socket.control({ ...agent, generation: 2 });
     expect(client.send({ type: "text", text: "late input" })).toBe(false);
     expect(client.send({ type: "dialog", accept: false })).toBe(false);
+    client.stop();
+  });
+
+  it("waits for takeover readiness while allowing cancellation and dialog replies", () => {
+    const { client, socket, onControl } = connect();
+    const pending: PreviewStreamControl = { ...agent, controller: "taking-control" };
+    socket.control(pending);
+    expect(onControl).toHaveBeenLastCalledWith(pending);
+    expect(previewStreamControlLabel(pending)).toBe("Taking control…");
+    expect(client.send({ type: "takeControl" })).toBe(false);
+    expect(client.send({ type: "text", text: "too early" })).toBe(false);
+    expect(client.send({ type: "resize", width: 390, height: 844 })).toBe(false);
+    expect(client.send({ type: "dialog", accept: true })).toBe(true);
+    expect(client.send({ type: "releaseControl" })).toBe(true);
+    socket.control({ ...pending, controller: "you" });
+    expect(client.send({ type: "text", text: "ready" })).toBe(true);
     client.stop();
   });
 });

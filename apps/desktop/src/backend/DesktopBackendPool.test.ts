@@ -6,12 +6,13 @@ import * as Sink from "effect/Sink";
 import * as Path from "effect/Path";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
-import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as SubscriptionRef from "effect/SubscriptionRef";
+import * as Fiber from "effect/Fiber";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -31,31 +32,9 @@ import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as DesktopWslEnvironment from "../wsl/DesktopWslEnvironment.ts";
 import * as DesktopBackendConfiguration from "./DesktopBackendConfiguration.ts";
 import * as DesktopBackendPool from "./DesktopBackendPool.ts";
-import type { DesktopBackendSnapshot, DesktopBackendStartConfig } from "./DesktopBackendManager.ts";
+import type { DesktopBackendStartConfig } from "./DesktopBackendManager.ts";
 
 const decodeBrowserEvent = Schema.decodeEffect(Schema.fromJsonString(DesktopBrowserEvent));
-
-function makeStubInstance(
-  id: DesktopBackendPool.BackendInstanceId,
-  label: string,
-): DesktopBackendPool.DesktopBackendInstance {
-  const snapshot: DesktopBackendSnapshot = {
-    desiredRunning: false,
-    ready: false,
-    activePid: Option.none(),
-    restartAttempt: 0,
-    restartScheduled: false,
-  };
-  return {
-    id,
-    label: Effect.succeed(label),
-    start: Effect.void,
-    stop: () => Effect.void,
-    currentConfig: Effect.succeed(Option.none<DesktopBackendStartConfig>()),
-    snapshot: Effect.succeed(snapshot),
-    waitForReady: (_timeout: Duration.Duration) => Effect.succeed(false),
-  };
-}
 
 function makeHiddenBrowserRoot() {
   let destroyed = false;
@@ -105,7 +84,11 @@ function layerPool(
     readonly persistFailure: Effect.Effect<void>;
     readonly readFileString?: FileSystem.FileSystem["readFileString"];
   },
-): Layer.Layer<DesktopBackendPool.DesktopBackendPool | DesktopBrowserHost.DesktopBrowserHost> {
+): Layer.Layer<
+  | DesktopBackendPool.DesktopBackendPool
+  | DesktopBrowserHost.DesktopBrowserHost
+  | DesktopState.DesktopState
+> {
   return DesktopBackendPool.layer.pipe(
     Layer.provideMerge(
       Layer.mergeAll(
@@ -388,73 +371,77 @@ describe("DesktopBackendPool", () => {
     ),
   );
 
-  it.effect("shows the saved diagnostic log when the primary exits before readiness", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const label = yield* Ref.make("Local");
-        const notification = yield* Deferred.make<{ title: string; content: string }>();
-        let persisted = false;
-        const poolLayer = layerPool(label, {
-          config: {
-            executablePath: "/electron",
-            args: ["/server/bin.mjs"],
-            entryPath: "/server/bin.mjs",
-            cwd: "/server",
-            env: {},
-            extendEnv: true,
-            captureOutput: true,
-            httpBaseUrl: new URL("http://127.0.0.1:3773"),
-            preflightFailure: Option.none(),
-            bootstrapDelivery: "fd3",
-            bootstrap: {
-              mode: "desktop",
-              noBrowser: true,
-              port: 3773,
-              t3Home: "/home/example/.lastcode",
-              host: "127.0.0.1",
-              desktopBootstrapToken: "test-token",
-              tailscaleServeEnabled: false,
-              tailscaleServePort: 443,
+  it.effect(
+    "publishes saved startup diagnostics to recovery when the primary exits before readiness",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const label = yield* Ref.make("Local");
+          let persisted = false;
+          const poolLayer = layerPool(label, {
+            config: {
+              executablePath: "/electron",
+              args: ["/server/bin.mjs"],
+              entryPath: "/server/bin.mjs",
+              cwd: "/server",
+              env: {},
+              extendEnv: true,
+              captureOutput: true,
+              httpBaseUrl: new URL("http://127.0.0.1:3773"),
+              preflightFailure: Option.none(),
+              bootstrapDelivery: "fd3",
+              bootstrap: {
+                mode: "desktop",
+                noBrowser: true,
+                port: 3773,
+                t3Home: "/home/example/.lastcode",
+                host: "127.0.0.1",
+                desktopBootstrapToken: "test-token",
+                tailscaleServeEnabled: false,
+                tailscaleServePort: 443,
+              },
             },
-          },
-          spawn: ChildProcessSpawner.make(() =>
-            Effect.succeed(
-              ChildProcessSpawner.makeHandle({
-                pid: ChildProcessSpawner.ProcessId(123),
-                stdout: Stream.empty,
-                stderr: Stream.empty,
-                all: Stream.empty,
-                exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(1)),
-                isRunning: Effect.succeed(false),
-                kill: () => Effect.void,
-                stdin: Sink.drain,
-                getInputFd: () => Sink.drain,
-                getOutputFd: () => Stream.empty,
-                unref: Effect.succeed(Effect.void),
-              }),
+            spawn: ChildProcessSpawner.make(() =>
+              Effect.succeed(
+                ChildProcessSpawner.makeHandle({
+                  pid: ChildProcessSpawner.ProcessId(123),
+                  stdout: Stream.empty,
+                  stderr: Stream.encodeText(Stream.make("saved startup diagnostic\n")),
+                  all: Stream.empty,
+                  exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(1)),
+                  isRunning: Effect.succeed(false),
+                  kill: () => Effect.void,
+                  stdin: Sink.drain,
+                  getInputFd: () => Sink.drain,
+                  getOutputFd: () => Stream.empty,
+                  unref: Effect.succeed(Effect.void),
+                }),
+              ),
             ),
-          ),
-          persistFailure: Effect.sync(() => {
-            persisted = true;
-          }),
-          showErrorBox: (title, content) =>
-            Effect.gen(function* () {
-              assert.isTrue(persisted);
-              yield* Deferred.succeed(notification, { title, content });
+            persistFailure: Effect.sync(() => {
+              persisted = true;
             }),
-        });
-        yield* Effect.gen(function* () {
-          const pool = yield* DesktopBackendPool.DesktopBackendPool;
-          const primary = yield* pool.primary;
-          yield* primary.start;
-          const dialog = yield* Deferred.await(notification);
-          assert.include(dialog.title, "could not start");
-          assert.include(dialog.content, "code=1");
-          assert.include(dialog.content, "server-child.log");
-          assert.include(dialog.content, "/home/example/");
-          assert.include(dialog.content, "quit and reopen");
-        }).pipe(Effect.provide(poolLayer));
-      }),
-    ),
+            showErrorBox: () => Effect.die("Unexpected duplicate startup dialog"),
+          });
+          yield* Effect.gen(function* () {
+            const pool = yield* DesktopBackendPool.DesktopBackendPool;
+            const primary = yield* pool.primary;
+            const { primaryBackendStartup } = yield* DesktopState.DesktopState;
+            const observing = yield* SubscriptionRef.changes(primaryBackendStartup).pipe(
+              Stream.filter((state) => state._tag === "Failing"),
+              Stream.runHead,
+              Effect.map(Option.getOrThrow),
+              Effect.forkScoped({ startImmediately: true }),
+            );
+            yield* primary.start;
+            const failure = yield* Fiber.join(observing);
+            assert.isTrue(persisted);
+            assert.include(failure.reason, "code=1");
+            assert.include(failure.output, "saved startup diagnostic");
+            assert.equal(failure._tag, "Failing");
+            assert.isFalse((yield* primary.snapshot).ready);
+          }).pipe(Effect.provide(poolLayer));
+        }),
+      ),
   );
 });

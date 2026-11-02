@@ -36,17 +36,13 @@ import type {
   ThreadId,
 } from "@t3tools/contracts";
 import {
-  EnvironmentRequestInvalidError,
   AuthOrchestrationOperateScope,
   clampManagedRuntimeMode,
   managedRuntimeModeDenial,
   ProviderDriverKind,
   ProviderInstanceId,
-  PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
 } from "@t3tools/contracts";
 import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
-import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
-import * as Schema from "effect/Schema";
 import { isPasteAsTextShortcut } from "@t3tools/client-runtime/text-paste";
 import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
 import { folderDropTarget, resolveDroppedFolderPath } from "./folderDrop";
@@ -57,7 +53,6 @@ import {
   memo,
   use,
   useEffect,
-  useEffectEvent,
   useId,
   useImperativeHandle,
   useLayoutEffect,
@@ -66,14 +61,11 @@ import {
 } from "react";
 import { flushSync } from "react-dom";
 import {
-  clampCollapsedComposerCursor,
   type ComposerTrigger,
   type ComposerSubmissionIntent,
   collapseExpandedComposerCursor,
   composerRequiresModifier,
-  composerStateAtPromptEnd,
   detectComposerTrigger,
-  expandCollapsedComposerCursor,
   formatAssistantCitationForComposer,
   isPathSuggestionCurrent,
   extendReplacementRangeForTrailingSpace,
@@ -184,10 +176,8 @@ import {
 import { rememberCopiedComposerAttachments } from "~/lib/copiedComposerAttachments";
 import { useThreadContextDrop, threadContextDropTargetProps } from "./threadContextDrag";
 import { readThreadShell } from "~/state/entities";
-import { useLinkedEnvironments } from "~/state/peerLinks";
 import { encodeComposerContextFragment } from "@t3tools/shared/composerContextClipboard";
 import type { ComposerContextRecord, ThreadPullRequestLink } from "@t3tools/contracts";
-import { threadContextAttachment } from "~/lib/threadContextAttachment";
 import {
   type ComposerCommandItem,
   ComposerCommandMenu,
@@ -227,10 +217,8 @@ import {
 } from "./composerSubmission";
 import { ComposerPromptLengthValidation } from "./ComposerPromptLengthValidation";
 import { pendingDraftWork } from "./pendingDraftWork";
-import { importComposerThreadAttachment } from "./composerThreadImport";
 import { observeResize } from "~/lib/observeResize";
 
-const isEnvironmentRequestInvalidError = Schema.is(EnvironmentRequestInvalidError);
 import { toastManager } from "../ui/toast";
 import { BuildingIcon, PlayIcon } from "lucide-react";
 import { Button } from "../ui/button";
@@ -371,6 +359,7 @@ export interface ChatComposerProps {
   projectSelectionRequired: boolean;
 
   phase: SessionPhase;
+  forceQueue?: boolean;
   canInterrupt: boolean;
   isSendBusy: boolean;
   canResume: boolean;
@@ -446,6 +435,7 @@ export interface ChatComposerProps {
   onComposerOverlayHeightChange: (height: number) => void;
   /** The new-thread strip names the permissions, so the controls row hides its chip. */
   permissionsShownInStrip: boolean;
+  threadAnnotationsSupported: boolean;
 
   promptRef: React.RefObject<string>;
   composerImagesRef: React.RefObject<ComposerImageAttachment[]>;
@@ -499,6 +489,7 @@ export interface ChatComposerProps {
   setThreadError: (threadId: ThreadId | null, error: string | null) => void;
   onExpandImage: (preview: ExpandedImagePreview) => void;
   onFileOpen: (attachment: ChatFileAttachment) => void;
+  onOpenThreadAnnotation: () => void;
 }
 
 const NO_PROVIDER_SKILLS: ServerProvider["skills"] = [];
@@ -525,6 +516,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     forceExpandedOnMobile,
     projectSelectionRequired,
     phase,
+    forceQueue = false,
     canInterrupt,
     isSendBusy,
     canResume,
@@ -569,6 +561,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     pullRequestRepository,
     threadPullRequests,
     onComposerOverlayHeightChange,
+    threadAnnotationsSupported,
     promptRef,
     composerRef,
     composerImagesRef,
@@ -598,6 +591,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     setThreadError,
     onExpandImage,
     onFileOpen,
+    onOpenThreadAnnotation,
     editingQueuedAttachments,
     onRemoveEditingQueuedAttachment,
   } = props;
@@ -1008,7 +1002,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   const [composerCursor, setComposerCursor] = useState(() => {
     const value = isLiteralPendingAnswer ? (activePendingProgress?.customAnswer ?? prompt) : prompt;
-    return collapseExpandedComposerCursor(value, value.length, isLiteralPendingAnswer);
+    return value.length;
   });
   const {
     trigger: composerTrigger,
@@ -1138,15 +1132,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     composerTerminalContexts.length === 0 &&
     composerPreviewAnnotations.length === 0 &&
     composerReviewComments.length === 0;
-  const linkedEnvironments = useLinkedEnvironments(environmentId);
   const {
     items: composerMenuItems,
     isLoading: isComposerMenuLoading,
     emptyState: composerMenuEmptyState,
+    searchStatus: composerMenuSearchStatus,
   } = useComposerMenuItems({
     composerTrigger,
     environmentId,
-    linkedEnvironments,
     gitCwd,
     activeThreadId,
     pullRequestProjectId,
@@ -1155,6 +1148,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     planModeUiEnabled,
     sideChatAvailable: props.sideChatAvailable === true,
     sideChatDisabledReason: props.sideChatDisabledReason ?? null,
+    threadAnnotationsSupported,
     compactSlashCommandAvailable,
     selectedProvider,
     selectedProviderSkills,
@@ -1218,8 +1212,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     }
     promptRef.current = nextPrompt;
     setComposerDraftPrompt(composerDraftTarget, nextPrompt);
-    const nextCursor = collapseExpandedComposerCursor(nextPrompt, nextPrompt.length);
-    setComposerCursor(nextCursor);
+    setComposerCursor(nextPrompt.length);
     setComposerTrigger(detectComposerTrigger(nextPrompt, nextPrompt.length));
     scheduleComposerFocus();
   };
@@ -1371,15 +1364,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   };
   const buildContextClipboardFragmentStable = useStableCallback(buildContextClipboardFragment);
   const {
-    loadThreadTranscript,
     countReservedAttachments,
-    countReservedAttachmentsStable,
     importContextRecords,
     importContextFragment,
     importContextFragmentStable,
   } = useComposerContextImport({
     environmentId,
-    linkedEnvironments,
     activeThread,
     activeThreadId,
     composerDraftTarget,
@@ -1408,7 +1398,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   ) {
     setCursorClampedFor({ prompt, isLiteralPendingAnswer });
     if (!isLiteralPendingAnswer) {
-      setComposerCursor((existing) => clampCollapsedComposerCursor(prompt, existing));
+      setComposerCursor((existing) => Math.max(0, Math.min(prompt.length, existing)));
     }
   }
 
@@ -1469,9 +1459,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     if (typeof nextCustomAnswer !== "string") {
       if (lastSyncedPendingInputRef.current !== null) {
         promptRef.current = prompt;
-        const { cursor, trigger } = composerStateAtPromptEnd(prompt);
-        setComposerCursor(cursor);
-        resetComposerTrigger(trigger);
+        setComposerCursor(prompt.length);
+        resetComposerTrigger(detectComposerTrigger(prompt, prompt.length));
       }
       lastSyncedPendingInputRef.current = null;
       return;
@@ -1494,9 +1483,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     }
 
     promptRef.current = nextCustomAnswer;
-    const { cursor, trigger } = composerStateAtPromptEnd(nextCustomAnswer, isLiteralPendingAnswer);
-    setComposerCursor(cursor);
-    resetComposerTrigger(trigger);
+    setComposerCursor(nextCustomAnswer.length);
+    resetComposerTrigger(
+      isLiteralPendingAnswer
+        ? null
+        : detectComposerTrigger(nextCustomAnswer, nextCustomAnswer.length),
+    );
     setComposerHighlightedItemId(null);
   }, [
     activePendingProgress?.customAnswer,
@@ -1517,12 +1509,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     setComposerSubmissionError(null);
     setProviderInputSubmissionError(null);
     const pendingAnswer = activePendingProgress?.customAnswer;
-    const { cursor, trigger } = composerStateAtPromptEnd(
-      typeof pendingAnswer === "string" ? pendingAnswer : prompt,
-      isLiteralPendingAnswer,
+    const nextPrompt = typeof pendingAnswer === "string" ? pendingAnswer : prompt;
+    setComposerCursor(nextPrompt.length);
+    resetComposerTrigger(
+      isLiteralPendingAnswer ? null : detectComposerTrigger(nextPrompt, nextPrompt.length),
     );
-    setComposerCursor(cursor);
-    resetComposerTrigger(trigger);
     setIsDragOverComposer(false);
   }
 
@@ -1603,7 +1594,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     refreshWorkspaceSnapshotOnTyping();
     if (activePendingProgress?.activeQuestion && pendingUserInputs.length > 0) {
       if (activePendingProgress.activeQuestion.allowCustomAnswer === false) return;
-      setComposerCursor(nextCursor);
+      setComposerCursor(expandedCursor);
       setComposerTrigger(
         cursorAdjacentToMention ? null : detectComposerTrigger(nextPrompt, expandedCursor),
       );
@@ -1726,7 +1717,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     if (attachmentChanges.filesToRestore.length > 0) {
       addComposerDraftFiles(attachmentDraftTarget, attachmentChanges.filesToRestore);
     }
-    setComposerCursor(nextCursor);
+    setComposerCursor(expandedCursor);
     setComposerTrigger(
       cursorAdjacentToMention ? null : detectComposerTrigger(nextPrompt, expandedCursor),
     );
@@ -1764,14 +1755,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       return false;
     }
     const next = replaceTextRange(promptRef.current, rangeStart, rangeEnd, replacement);
+    const requestedCursor = options?.expandedCursorAfterReplace ?? next.cursor;
+    const nextExpandedCursor = Math.max(0, Math.min(next.text.length, requestedCursor));
+    // Pending-answer metadata keeps its collapsed cursor; positioning uses source offsets.
     const nextCursor = collapseExpandedComposerCursor(
       next.text,
-      options?.expandedCursorAfterReplace ?? next.cursor,
-      isLiteralPendingAnswer,
-    );
-    const nextExpandedCursor = expandCollapsedComposerCursor(
-      next.text,
-      nextCursor,
+      nextExpandedCursor,
       isLiteralPendingAnswer,
     );
     if (options?.citationComment) {
@@ -1797,14 +1786,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       setPrompt(next.text);
       onTypingGuardDraftChange();
     }
-    setComposerCursor(nextCursor);
+    setComposerCursor(nextExpandedCursor);
     setComposerTrigger(
       isLiteralPendingAnswer ? null : detectComposerTrigger(next.text, nextExpandedCursor),
     );
     if (options?.focusEditorAfterReplace !== false) {
       window.requestAnimationFrame(() => {
         if (promptRef.current !== next.text) return;
-        composerEditorRef.current?.focusAt(nextCursor);
+        composerEditorRef.current?.focusAt(nextExpandedCursor);
       });
     }
     return true;
@@ -1823,12 +1812,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     }
     return {
       value: promptRef.current,
-      cursor: composerCursor,
-      expandedCursor: expandCollapsedComposerCursor(
+      cursor: collapseExpandedComposerCursor(
         promptRef.current,
         composerCursor,
         isLiteralPendingAnswer,
       ),
+      expandedCursor: composerCursor,
       contextIds: isLiteralPendingAnswer ? [] : collectInlineContextIds(promptRef.current),
     };
   };
@@ -1893,6 +1882,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           { expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd) },
         );
         if (applied) setComposerHighlightedItemId(null);
+        return;
+      }
+      if (item.command === "annotate") {
+        if (!readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)) return;
+        const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
+          expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
+          focusEditorAfterReplace: false,
+        });
+        if (applied) {
+          setComposerHighlightedItemId(null);
+          onOpenThreadAnnotation();
+        }
         return;
       }
       if (!planModeUiEnabled) return;
@@ -1975,9 +1976,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     }
     if (item.type === "thread") {
       if (trigger.kind !== "path") return;
-      const shell = readThreadShell(item.thread);
-      if (!shell) return;
-      const record = threadContextRecord(item.thread, shell.title);
+      const record = threadContextRecord(item.thread, item.label);
       const replacement = `${formatInlineContextReference(threadContextReference(record))} `;
       const replacementRangeEnd = extendReplacementRangeForTrailingSpace(
         snapshot.value,
@@ -2115,6 +2114,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               alternateModifier: false,
               activeTurnDefault: followUpBehavior,
               canSteer: !isCompacting,
+              forceQueue,
             }),
           submissionIntent,
         );
@@ -2138,6 +2138,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         alternateModifier: event.metaKey || event.ctrlKey,
         activeTurnDefault: followUpBehavior,
         canSteer: !isCompacting,
+        forceQueue,
       }),
     );
   };
@@ -2150,6 +2151,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         alternateModifier: false,
         activeTurnDefault: followUpBehavior,
         canSteer: !isCompacting,
+        forceQueue,
       }),
     );
   };
@@ -2208,6 +2210,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       sendShortcut: settings.sendShortcut,
       routeKind,
       phase,
+      forceQueue,
       isCompacting,
       followUpBehavior,
       isSoftwareKeyboardOpen,
@@ -2628,74 +2631,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     },
   });
 
-  const attachDroppedThreadFile = useEffectEvent((file: File) => addComposerAttachments([file]));
-  const importDroppedThread = useEffectEvent(
-    async (ref: ScopedThreadRef, isActive: () => boolean) => {
-      const targetKey = attachmentTargetKey;
-      pendingDraftWork.begin(targetKey);
-      const loadingToast = toastManager.add({
-        type: "loading",
-        title: "Loading thread context…",
-        timeout: 0,
-        data: { threadRef: routeThreadRef, hideCopyButton: true },
-      });
-      const importResult = await settlePromise(() =>
-        importComposerThreadAttachment({
-          targetKey,
-          pendingImports: pendingThreadImportsRef.current,
-          countReservedAttachments: countReservedAttachmentsStable,
-          load: async () => {
-            const result = await loadThreadTranscript({
-              environmentId: ref.environmentId,
-              input: { threadId: ref.threadId },
-            });
-            if (result._tag !== "Success") {
-              throw squashAtomCommandFailure(result);
-            }
-            return threadContextAttachment(ref.environmentId, result.value);
-          },
-          isActive,
-          attach: attachDroppedThreadFile,
-          onLimitReached: () => {
-            if (activeThreadId) {
-              setThreadError(
-                activeThreadId,
-                `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} files per message.`,
-              );
-            }
-          },
-        }),
-      );
-      if (importResult._tag === "Failure" && isActive()) {
-        const error = squashAtomCommandFailure(importResult);
-        toastManager.add({
-          type: "error",
-          title: "Unable to read the dropped thread",
-          description:
-            isEnvironmentRequestInvalidError(error) &&
-            error.reason === "thread_transcript_too_large"
-              ? "This thread exceeds the attachment size limit. Try a shorter thread."
-              : "Check that its environment is connected and up to date, then try again.",
-        });
-      }
-      toastManager.close(loadingToast);
-      pendingDraftWork.end(targetKey);
-    },
-  );
-
-  useThreadContextDrop(composerFormRef, environmentId, attachmentTargetKey, (refs, isActive) => {
+  useThreadContextDrop(composerFormRef, environmentId, attachmentTargetKey, (refs) => {
     const records = refs.flatMap((ref) => {
-      // The agent reads a linked machine's thread itself, like the `@` picker's; any other
-      // machine's comes in as its transcript.
-      if (ref.environmentId !== environmentId && !linkedEnvironments.has(ref.environmentId)) {
-        void importDroppedThread(
-          ref,
-          () => isActive() && attachmentTargetKeyRef.current === attachmentTargetKey,
-        );
-        return [];
-      }
       const shell = readThreadShell(ref);
-      return shell ? [threadContextRecord(ref, shell.title)] : [];
+      return [threadContextRecord(ref, shell?.title ?? ref.threadId)];
     });
     if (records.length === 0) return;
     if (questionAttachmentTarget !== null) {
@@ -2940,19 +2879,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         detectTrigger?: boolean;
       }) => {
         const promptForState = options?.prompt ?? promptRef.current;
-        const cursor = clampCollapsedComposerCursor(
-          promptForState,
-          options?.cursor ?? 0,
-          isLiteralPendingAnswer,
+        const requestedCursor = options?.cursor ?? 0;
+        const cursor = Math.max(
+          0,
+          Math.min(
+            promptForState.length,
+            Number.isFinite(requestedCursor) ? Math.floor(requestedCursor) : promptForState.length,
+          ),
         );
         setComposerHighlightedItemId(null);
         setComposerCursor(cursor);
         resetComposerTrigger(
           options?.detectTrigger && !isLiteralPendingAnswer
-            ? detectComposerTrigger(
-                promptForState,
-                expandCollapsedComposerCursor(promptForState, cursor),
-              )
+            ? detectComposerTrigger(promptForState, cursor)
             : null,
         );
       },
@@ -2970,10 +2909,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           snapshot.expandedCursor,
           terminalContextReference(context),
         );
-        const nextCollapsedCursor = collapseExpandedComposerCursor(
-          insertion.prompt,
-          insertion.cursor,
-        );
         const inserted = insertComposerDraftTerminalContext(
           composerDraftTarget,
           insertion.prompt,
@@ -2982,10 +2917,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         );
         if (!inserted) return;
         promptRef.current = insertion.prompt;
-        setComposerCursor(nextCollapsedCursor);
+        setComposerCursor(insertion.cursor);
         setComposerTrigger(detectComposerTrigger(insertion.prompt, insertion.cursor));
         window.requestAnimationFrame(() => {
-          composerEditorRef.current?.focusAt(nextCollapsedCursor);
+          composerEditorRef.current?.focusAt(insertion.cursor);
         });
       },
       getSendContext: () => ({
@@ -3353,6 +3288,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     isLoading={isComposerMenuLoading}
                     triggerKind={composerTriggerKind}
                     emptyStateText={composerMenuEmptyState}
+                    searchStatus={composerMenuSearchStatus}
                     activeItemId={activeComposerMenuItem?.id ?? null}
                     onHighlightedItemChange={onComposerMenuItemHighlightedStable}
                     onSelect={onSelectComposerItemStable}
@@ -3449,6 +3385,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       canOperateThread={canOperateThread}
                       pendingAction={pendingPrimaryAction}
                       isRunning={false}
+                      forceQueue={forceQueue}
                       canInterrupt={false}
                       showPlanFollowUpPrompt={false}
                       promptHasText={false}
@@ -3514,6 +3451,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     canInterrupt={canInterrupt}
                     followUpBehavior={followUpBehavior}
                     canSteer={!isCompacting}
+                    forceQueue={forceQueue}
                     alternateShortcutLabel={shortcutLabelForCommand(
                       keybindings,
                       "composer.sendAlternate",

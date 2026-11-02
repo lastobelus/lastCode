@@ -1,11 +1,12 @@
 import { useComposerAttachmentActions } from "./use-composer-attachment-actions";
 import * as Dialog from "../components/ui/Dialog";
-import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
+import { AuthOrchestrationOperateScope, AuthOrchestrationReadScope } from "@t3tools/contracts";
 import { readEnvironmentScope } from "./session";
 import { useAtomValue } from "@effect/atom-react";
 import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/shell";
 import type { ThreadCheckpointSummary } from "@t3tools/client-runtime/state/thread-checkpoints";
 import { resolvePendingHandoff } from "@t3tools/client-runtime/handoff";
+import { recoveryQueuesFollowUps } from "@t3tools/client-runtime/state/thread-recovery";
 import {
   deriveProviderSubagentStatus,
   deriveResumableRunId,
@@ -21,6 +22,7 @@ import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   MessageId,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
+  type ComposerContextRecord,
   type EnvironmentId,
   type ModelSelection,
   type ProviderInteractionMode,
@@ -45,6 +47,9 @@ import {
   isModelSelectionUnavailable,
 } from "../lib/modelOptions";
 import { resolveProviderInteractionMode } from "./legacy-plan-mode";
+import { environmentServerConfigsAtom } from "./server";
+import { workspaceConnections } from "./workspace";
+import { threadContextsUnavailableForDestination } from "@t3tools/shared/composerContextReferences";
 
 import type { DraftComposerImageAttachment } from "../lib/composerImages";
 import { scopedThreadKey } from "../lib/scopedEntities";
@@ -151,6 +156,48 @@ function activeComposerDraftKey(thread: {
   const threadKey = scopedThreadKey(thread.environmentId, thread.id);
   const edit = getQueuedRunEdit(threadKey);
   return edit === null ? threadKey : queuedEditDraftKey(threadKey, edit.runId);
+}
+
+function unavailableComposerThreadReference(input: {
+  readonly text: string;
+  readonly records: ReadonlyArray<ComposerContextRecord>;
+  readonly destinationEnvironmentId: EnvironmentId;
+}): string | null {
+  const connectedEnvironments = appAtomRegistry.get(workspaceConnections.environmentsAtom);
+  const serverConfigs = appAtomRegistry.get(environmentServerConfigsAtom);
+  const environments = new Map(
+    connectedEnvironments.map(
+      (environment) =>
+        [
+          environment.environmentId,
+          {
+            connected: environment.connectionState === "connected",
+            canRead: readEnvironmentScope(environment.environmentId, AuthOrchestrationReadScope),
+            supportsUniversalThreadReferences:
+              serverConfigs.get(environment.environmentId)?.environment.capabilities
+                .universalThreadReferences === true,
+          },
+        ] as const,
+    ),
+  );
+  const unavailable = threadContextsUnavailableForDestination({
+    text: input.text,
+    records: input.records,
+    destinationEnvironmentId: input.destinationEnvironmentId,
+    environments,
+  })[0];
+  if (!unavailable) return null;
+  const owner =
+    connectedEnvironments.find(
+      (environment) => environment.environmentId === unavailable.record.environmentId,
+    )?.environmentLabel ?? "its machine";
+  const recovery =
+    unavailable.reason === "permission-denied"
+      ? `Check that you have read access to ${owner} and to the machine you're sending to.`
+      : unavailable.reason === "unsupported"
+        ? `Check for server updates on ${owner} and the machine you're sending to.`
+        : `Check the connections to ${owner} and the machine you're sending to before sending.`;
+  return `${recovery} The reference is still in your draft.`;
 }
 
 export function useThreadDraftForThread(input: {
@@ -317,6 +364,10 @@ export function useThreadComposerState() {
   const selectedThreadRuntime = selectedThreadProjection
     ? deriveThreadRuntime(selectedThreadProjection.projection)
     : (selectedThreadShell?.runtime ?? null);
+  const forceQueue = recoveryQueuesFollowUps(
+    selectedThreadShell?.recovery,
+    selectedThreadRuntime?.activeRunId,
+  );
   const selectedThreadActivityRun = selectedThreadProjection
     ? deriveThreadActivityRun(selectedThreadProjection.projection)
     : (selectedThreadShell?.latestRun ?? null);
@@ -358,7 +409,8 @@ export function useThreadComposerState() {
     );
   })();
   // A compacting turn cannot take steering input, so follow-ups queue meanwhile.
-  const canSteerActiveTurn = queueWorkflow?.canPromoteToSteer === true && !isCompacting;
+  const canSteerActiveTurn =
+    !forceQueue && queueWorkflow?.canPromoteToSteer === true && !isCompacting;
   // A stop or a restart holds the queue, completion wakes included, until it
   // is resumed; the queue sheet lists only the user's own messages.
   const queueHeld = queueWorkflow?.isHeld === true;
@@ -556,6 +608,16 @@ export function useThreadComposerState() {
       return null;
     }
 
+    const unavailableThread = unavailableComposerThreadReference({
+      text,
+      records: draft.context?.records ?? [],
+      destinationEnvironmentId: selectedThreadShell.environmentId,
+    });
+    if (unavailableThread) {
+      Dialog.alert("Attached thread unavailable", unavailableThread);
+      return null;
+    }
+
     const modelSelection = draft.modelSelection ?? thread.modelSelection;
     const serverConfig = selectedEnvironmentRuntime?.serverConfig;
     if (
@@ -647,6 +709,7 @@ export function useThreadComposerState() {
       running: activeThreadBusy && canSteerActiveTurn,
       alternateModifier: followUpOverride !== undefined && followUpOverride !== activeTurnDefault,
       activeTurnDefault,
+      forceQueue,
     });
     const setupRunning = [selectedThreadActivityRun?.status, selectedThreadRuntime?.status].some(
       (status) => status === "preparing" || status === "starting",
@@ -689,7 +752,9 @@ export function useThreadComposerState() {
           context: draft.context,
           attachments: [],
         });
-        appendComposerDraftAttachments(threadKey, attachments, { allowOverflow: true });
+        appendComposerDraftAttachments(threadKey, attachments, {
+          allowOverflow: true,
+        });
         setThreadComposerError(
           threadKey,
           error instanceof Error ? error.message : "Failed to save the queued message.",
@@ -754,6 +819,7 @@ export function useThreadComposerState() {
     canSteerActiveTurn,
     queueHeld,
     resumableRunId,
+    forceQueue,
     queuedRunEdit,
     isSavingQueuedEdit,
     cancelQueuedRunEdit,

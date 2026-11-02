@@ -16,6 +16,8 @@ import {
   HttpServerRequest,
   HttpServerResponse,
 } from "effect/http";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- A real loopback receiver verifies redirects without forwarding credentials.
+import * as NodeHttp from "node:http";
 import { describe } from "vite-plus/test";
 
 import * as ServerConfig from "../config.ts";
@@ -176,7 +178,10 @@ describe("OtlpEndpointCheck", () => {
         assert.deepStrictEqual(result, { _tag: "Rejected", status: 307 });
         assert.deepStrictEqual(requests, [{ url: "/v1/traces", apiKey: "secret" }]);
       }),
-    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    ).pipe(
+      // Bind the same address the client uses; IPv4 and IPv6 can share a port.
+      Effect.provide(NodeHttpServer.layer(NodeHttp.createServer, { host: "127.0.0.1", port: 0 })),
+    ),
   );
 
   it.effect("keeps OTEL endpoint credentials off other endpoints", () => {

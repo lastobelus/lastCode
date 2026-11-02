@@ -68,6 +68,7 @@ import {
   MessageSquareIcon,
   PaletteIcon,
   RotateCcwIcon,
+  ScaleIcon,
   SettingsIcon,
   MonitorIcon,
   PinIcon,
@@ -75,6 +76,7 @@ import {
   SquarePenIcon,
   TextSearchIcon,
   UserPlusIcon,
+  LayoutDashboardIcon,
 } from "lucide-react";
 import { openThreadFind } from "./chat/threadFindStore";
 import {
@@ -255,7 +257,10 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { ComposerHandleContext, useComposerHandleContext } from "../composerHandleContext";
 import type { ChatComposerHandle } from "./chat/ChatComposer";
 import { pickableProjectGroups } from "@t3tools/client-runtime/state/project-grouping";
-import { buildSidebarProjectPickerEntries } from "../sidebarProjectGrouping";
+import {
+  buildSidebarProjectPickerEntries,
+  orderProjectMembersForPicker,
+} from "../sidebarProjectGrouping";
 import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
 import { readPullRequestListPreferences } from "~/components/pullRequest/pullRequestListPreferences";
 import { useThreadRouteTarget } from "../hooks/useThreadRouteTarget";
@@ -431,6 +436,7 @@ function OpenCommandPaletteDialog(props: {
     setHighlightedItemValue(null);
   }
   const clientSettings = useClientSettings(selectCommandPaletteClientSettings);
+  const loadBalancingEnabled = useClientSettings((settings) => settings.loadBalancingEnabled);
   const createProject = useAtomCommand(projectEnvironment.create, {
     reportFailure: false,
   });
@@ -532,6 +538,11 @@ function OpenCommandPaletteDialog(props: {
     groups: pickableProjectGroups(projectGroups),
     preferredProjectRef: contextualProjectRef,
   });
+  const isEnvironmentReachable = (environmentId: EnvironmentId) =>
+    environments.some(
+      (environment) =>
+        environment.environmentId === environmentId && environment.connection.phase === "connected",
+    );
   const pickerProjects = projectPickerEntries.map(({ group, targetProject }) => ({
     ...targetProject,
     displayName: group.displayName,
@@ -545,8 +556,9 @@ function OpenCommandPaletteDialog(props: {
   const { canPinProjectGroup, toggleProjectGroupPin } = useProjectPin();
   // A row's target record can change when another machine's copy loads, so the kept
   // order follows the project group instead.
-  const rowOrderKey = (prefix: string) => (item: CommandPaletteActionItem) =>
-    projectGroupByTargetKey.get(item.value.slice(prefix.length + 1))?.projectKey ?? item.value;
+  const rowOrderKey =
+    (prefix: string) => (item: CommandPaletteActionItem | CommandPaletteSubmenuItem) =>
+      projectGroupByTargetKey.get(item.value.slice(prefix.length + 1))?.projectKey ?? item.value;
   const projectPin = (project: CommandPaletteProject) => {
     const group = projectGroupByTargetKey.get(`${project.environmentId}:${project.id}`);
     return group && canPinProjectGroup(group)
@@ -814,8 +826,9 @@ function OpenCommandPaletteDialog(props: {
     (() => {
       const isScratch = (project: CommandPaletteProject) =>
         isScratchProject(project, scratchWorkspaceRootFor(project.environmentId));
+      const ordinaryProjects = pickerProjects.filter((project) => !isScratch(project));
       const projectItems = buildNewThreadInProjectItems({
-        projects: pickerProjects.filter((project) => !isScratch(project)),
+        projects: ordinaryProjects,
         projectGroupByTargetKey,
         locationByEnvironmentId: projectEnvironmentLocationById,
         pin: projectPin,
@@ -832,8 +845,80 @@ function OpenCommandPaletteDialog(props: {
             contextualRefBelongsToGroup
               ? contextualProjectRef
               : scopeProjectRef(project.environmentId, project.id),
+            { environmentSelection: "manual" },
           );
         },
+      }).map((item, index) => {
+        const project = ordinaryProjects[index]!;
+        const group = projectGroupByTargetKey.get(`${project.environmentId}:${project.id}`);
+        const availableItem = {
+          ...item,
+          disabled: !(group?.memberProjects ?? [project]).some((member) =>
+            isEnvironmentReachable(member.environmentId),
+          ),
+        };
+        if (!group || group.memberProjects.length === 1) return availableItem;
+        const { run: _run, ...projectItem } = availableItem;
+        const canAutoBalance =
+          loadBalancingEnabled &&
+          new Set(group.memberProjects.map((member) => member.environmentId)).size > 1;
+        return {
+          ...projectItem,
+          kind: "submenu" as const,
+          addonIcon: <ChevronRightIcon className={ADDON_ICON_CLASS} />,
+          groups: [
+            {
+              value: `${item.value}:hosts`,
+              label: "Run on",
+              items: [
+                ...(canAutoBalance
+                  ? [
+                      {
+                        kind: "action" as const,
+                        value: `${item.value}:auto`,
+                        title: "Auto balance",
+                        searchTerms: ["auto balance", "automatic"],
+                        icon: <ScaleIcon className={ITEM_ICON_CLASS} />,
+                        run: async () => {
+                          await handleNewThread(
+                            scopeProjectRef(project.environmentId, project.id),
+                            {
+                              environmentSelection: "auto",
+                            },
+                          );
+                        },
+                      },
+                    ]
+                  : []),
+                ...orderProjectMembersForPicker(group.memberProjects, project).map((member) => {
+                  const location = projectEnvironmentLocationById.get(member.environmentId);
+                  const hostLabel = environmentLabelById.get(member.environmentId) ?? "Remote";
+                  return {
+                    kind: "action" as const,
+                    value: `${item.value}:${member.physicalProjectKey}`,
+                    title: hostLabel,
+                    description: isEnvironmentReachable(member.environmentId)
+                      ? member.workspaceRoot
+                      : `${member.workspaceRoot} · Unavailable`,
+                    disabled: !isEnvironmentReachable(member.environmentId),
+                    searchTerms: [member.workspaceRoot, hostLabel],
+                    icon: (
+                      <EnvironmentMachineIcon
+                        kind={location?.machine ?? "server"}
+                        className={ITEM_ICON_CLASS}
+                      />
+                    ),
+                    run: async () => {
+                      await handleNewThread(scopeProjectRef(member.environmentId, member.id), {
+                        environmentSelection: "manual",
+                      });
+                    },
+                  };
+                }),
+              ],
+            },
+          ],
+        };
       });
       if (scratchTargetEnvironmentId === null) return projectItems;
 
@@ -1634,6 +1719,24 @@ function OpenCommandPaletteDialog(props: {
   }
   const contextualProjectGroup = currentProjectGroup ?? projectGroups[0] ?? null;
   if (contextualProjectGroup) {
+    actionItems.push({
+      kind: "action",
+      value: "action:project-dashboard",
+      searchTerms: ["dashboard", "project", "attention", "questions", "reviews", "qa", "progress"],
+      title: "Open project dashboard",
+      description: contextualProjectGroup.displayName,
+      icon: <LayoutDashboardIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        await navigate({
+          to: "/dashboard",
+          search: {
+            environmentId:
+              contextualProjectRef?.environmentId ?? contextualProjectGroup.environmentId,
+            projectId: contextualProjectRef?.projectId ?? contextualProjectGroup.id,
+          },
+        });
+      },
+    });
     actionItems.push({
       kind: "action",
       value: "action:project-settings",

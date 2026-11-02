@@ -205,6 +205,7 @@ it.effect("fails before the server can construct persistence or listen", () => {
             Layer.mock(DesktopBrowserChannel.DesktopBrowserChannel)({
               available: false,
               isPresented: () => false,
+              isRendering: () => false,
             }),
           ),
         ),

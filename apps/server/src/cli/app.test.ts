@@ -22,6 +22,7 @@ import type { CliError } from "effect/cli/CliError";
 import { describe, expect } from "vite-plus/test";
 
 import { makeCli } from "../binCli.ts";
+import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import { PersistedServerRuntimeState } from "../serverRuntimeState.ts";
 
 const liveProcess = Effect.acquireRelease(
@@ -49,7 +50,10 @@ const runCommand: (
   void,
   Exclude<Command.Error<typeof testCli>, QuitError> | CliError,
   NodeServices.NodeServices | NetService.NetService
-> = Command.runWith(testCli, { version: "0.0.0" });
+> = (args) =>
+  Command.runWith(testCli, { version: "0.0.0" })(args).pipe(
+    Effect.provide(ManagedPolicy.layerTest()),
+  );
 const runCli = (
   args: ReadonlyArray<string>,
   env: Record<string, string> = {},

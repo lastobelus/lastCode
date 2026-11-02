@@ -93,6 +93,7 @@ export function ThreadAnnotationEditorDialog(props: {
   const canSaveRef = useRef(false);
   const wasOpenRef = useRef(false);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- initializes the uncontrolled textarea DOM value and its save eligibility when the annotation dialog opens
   useEffect(() => {
     const justOpened = props.open && !wasOpenRef.current;
     wasOpenRef.current = props.open;
@@ -352,6 +353,7 @@ export function ThreadAnnotationHoverPopover(props: {
   const popupRef = useRef<HTMLDivElement | null>(null);
   const actionsRef = useRef<PopoverPrimitive.Root.Actions | null>(null);
   const openedByHover = useRef(false);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- releases the detached popover handle and its imperative mounted content when the annotation row unmounts
   useEffect(() => {
     // The detached row outlives annotations removed or resolved by another client.
     const actions = actionsRef.current;
@@ -377,9 +379,9 @@ export function ThreadAnnotationHoverPopover(props: {
         if (
           !open &&
           details.reason === "trigger-hover" &&
-          (popupRef.current?.contains(activeElement) ||
-            (navigationTrigger?.contains(activeElement) &&
-              activeElement?.matches(":focus-visible")))
+          activeElement !== popupRef.current &&
+          activeElement?.matches(":focus-visible") &&
+          (popupRef.current?.contains(activeElement) || navigationTrigger?.contains(activeElement))
         ) {
           details.cancel();
         }
@@ -400,7 +402,13 @@ export function ThreadAnnotationHoverPopover(props: {
         onFocusCapture={(event) => {
           if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
           // Keyboard interaction needs the popover's focus-out/Escape handling, unlike hover.
-          if (openedByHover.current) props.handle.open(props.navigationTriggerId);
+          if (
+            openedByHover.current &&
+            event.target !== event.currentTarget &&
+            event.target.matches(":focus-visible")
+          ) {
+            props.handle.open(props.navigationTriggerId);
+          }
         }}
         onBlurCapture={(event) => {
           const nextFocus = event.relatedTarget as Node | null;
@@ -417,18 +425,18 @@ export function ThreadAnnotationHoverPopover(props: {
           props.handle.close();
         }}
       >
-        <div className="flex min-w-0 w-80 max-w-80 flex-col">
-          {props.threadDetails}
-          <div className="border-t border-border/70 bg-warning/10 p-(--floating-content-inset) text-warning-foreground">
+        <div className="flex min-h-0 min-w-0 w-80 max-h-(--available-height) max-w-80 flex-col">
+          <div className="flex min-h-0 flex-col">{props.threadDetails}</div>
+          <div className="flex min-h-0 max-h-[calc(var(--available-height)/3)] flex-col border-t border-border/70 bg-warning/10 p-(--floating-content-inset) text-warning-foreground">
             <ThreadAnnotationBody
               annotation={props.annotation}
-              className="max-h-64 overflow-y-auto"
+              className="min-h-0 max-h-64 overflow-y-auto overscroll-contain"
               compact
               cwd={props.cwd}
               onBodyChange={props.onBodyChange}
               threadRef={props.threadRef}
             />
-            <div className="mt-2">
+            <div className="mt-2 shrink-0">
               <ThreadAnnotationActions
                 annotation={props.annotation}
                 onEdit={() => {

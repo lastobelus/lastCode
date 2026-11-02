@@ -1,14 +1,19 @@
 import type { ContextMenuItem } from "@t3tools/contracts";
 import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled";
+import type { HandoffMenuDescriptor } from "../handoffs/handoffMenu";
+import type { WorktreeSuspensionActionId } from "./worktreeSuspensionMenu";
 
 export type ThreadActionMenuId =
   | "find"
+  | WorktreeSuspensionActionId
   | "new-thread-on-branch"
   | "filter-by-project"
   | "turn-into-project"
   | "project-settings"
   | "pin"
   | "unpin"
+  | "mark-persistent"
+  | "disable-persistence"
   | "settle"
   | "unsettle"
   | "auto-settle"
@@ -20,6 +25,7 @@ export type ThreadActionMenuId =
   | "rename"
   | "regenerate-title"
   | "cancel-action"
+  | "stop-thread-processes"
   | "mark-unread"
   | "share-guest"
   | "mark-read"
@@ -28,7 +34,13 @@ export type ThreadActionMenuId =
   | "copy-branch"
   | "copy-thread"
   | "copy-thread-id"
+  | `handoff:${string}`
+  | "handoff-show-all"
+  | "handoffs-heading"
+  | "handoffs-empty"
   | "archive"
+  | "archive-discard"
+  | "dismiss-archive-failure"
   | "delete";
 
 export type DraftActionMenuId =
@@ -78,19 +90,22 @@ export interface ThreadActionMenuState {
     readonly isActive: boolean;
   } | null;
   readonly isPinned: boolean;
+  readonly isPersistent: boolean;
+  readonly archiveFailed?: boolean;
   readonly isSettled: boolean;
   readonly autoSettleEnabled: boolean;
   readonly isSnoozed: boolean;
   readonly canSnoozeNow: boolean;
   readonly isRegeneratingTitle: boolean;
-  /** Archive rejects attached providers, so disable it while running. */
   readonly isRunning: boolean;
   readonly hasRunningAction: boolean;
+  readonly hasStoppableProcesses: boolean;
   readonly supports: {
     readonly settlement: boolean;
     readonly autoSettleOptOut: boolean;
     readonly snooze: boolean;
     readonly pinning: boolean;
+    readonly persistence: boolean;
     readonly titleRegeneration: boolean;
   };
   readonly snoozePresets: ReadonlyArray<SnoozePreset>;
@@ -98,14 +113,47 @@ export interface ThreadActionMenuState {
   readonly canShareWithGuest?: boolean;
   /** A No project thread with its own folder, on a server that can promote it. */
   readonly canTurnIntoProject?: boolean;
+  readonly handoffs?: ReadonlyArray<HandoffMenuDescriptor>;
+  readonly handoffsOverflow?: boolean;
+}
+
+export function buildStopThreadProcessesMenuItem(hasStoppableProcesses: boolean) {
+  return hasStoppableProcesses
+    ? {
+        id: "stop-thread-processes" as const,
+        label: "Stop all previews & processes",
+        destructive: true,
+      }
+    : null;
+}
+
+/** The native bridge expresses each group divider on the following command. */
+export function withThreadActionMenuDividers<A extends string>(
+  items: ReadonlyArray<ContextMenuItem<A>>,
+): ReadonlyArray<ContextMenuItem<A>> {
+  return items.map((item, index) => {
+    const previousId = items[index - 1]?.id;
+    const startsGroup =
+      previousId === "new-thread-on-branch" ||
+      previousId === "annotate" ||
+      previousId === "stop-thread-processes" ||
+      ((previousId === "mark-persistent" || previousId === "disable-persistence") &&
+        item.id !== "stop-thread-processes");
+    return startsGroup ? { ...item, separatorBefore: true } : item;
+  });
 }
 
 /** Local actions need no operate grant; synced read markers are gated by their destination. */
 export function threadActionRequiresOperate(action: ThreadActionMenuId): boolean {
+  if (action.startsWith("handoff:")) return false;
   return ![
     "find",
     "new-thread-on-branch",
     "project-settings",
+    "filter-by-project",
+    "handoff-show-all",
+    "handoffs-heading",
+    "handoffs-empty",
     "mark-unread",
     "share-guest",
     "mark-read",
@@ -120,6 +168,7 @@ export function threadActionRequiresOperate(action: ThreadActionMenuId): boolean
 export function buildThreadActionMenuItems(
   state: ThreadActionMenuState,
 ): ReadonlyArray<ContextMenuItem<ThreadActionMenuId>> {
+  const stopProcesses = buildStopThreadProcessesMenuItem(state.hasStoppableProcesses);
   const items: ReadonlyArray<ContextMenuItem<ThreadActionMenuId>> = [
     ...(state.canFind
       ? [{ id: "find" as const, label: "Find in thread", icon: "text-search" }]
@@ -140,6 +189,25 @@ export function buildThreadActionMenuItems(
             : { id: "pin" as const, label: "Pin thread", icon: "pin" },
         ]
       : []),
+    ...(state.supports.persistence
+      ? [
+          state.isPersistent
+            ? {
+                id: "disable-persistence" as const,
+                label: "Disable persistent thread",
+                icon: "message-square-lock",
+              }
+            : {
+                id: "mark-persistent" as const,
+                label: "Mark as persistent thread",
+                icon: "message-square-lock",
+              },
+        ]
+      : []),
+    ...(stopProcesses ? [stopProcesses] : []),
+    // Both lifecycle actions stay available on pinned threads: settling
+    // clears the pin ("done" beats "keep on top"), and snoozing hides the
+    // card until wake with the pin intact.
     ...(state.supports.settlement
       ? [
           state.isSettled
@@ -246,31 +314,50 @@ export function buildThreadActionMenuItems(
       ],
     },
     { id: "project-settings", label: "Project settings", icon: "settings" },
+    { id: "handoffs-heading", label: "Handoffs", disabled: true, separatorBefore: true },
+    ...(state.handoffs?.length
+      ? state.handoffs.map(({ entry, label }) => ({
+          id: `handoff:${entry.id}` as const,
+          label,
+          icon: "external-link",
+        }))
+      : [{ id: "handoffs-empty" as const, label: "No handoffs yet", disabled: true }]),
+    ...(state.handoffsOverflow
+      ? [{ id: "handoff-show-all" as const, label: "Show all…", icon: "list" }]
+      : []),
+    // Archive hides the thread but keeps its history in Settings; it is less destructive than Delete.
+    // Eligibility is checked after the handler reads the owned family.
     {
       id: "archive",
-      label: "Archive thread",
+      label: state.isPersistent ? "Archive thread (disable persistence first)" : "Archive thread",
       icon: "archive",
-      disabled: state.isRunning,
+      disabled: state.isPersistent,
       separatorBefore: true,
     },
+    ...(state.archiveFailed
+      ? [{ id: "dismiss-archive-failure" as const, label: "Dismiss archive failure" }]
+      : []),
     {
       id: "delete",
-      label: "Delete",
+      label: state.isPersistent ? "Delete (disable persistence first)" : "Delete",
       destructive: true,
       icon: "trash",
+      disabled: state.isPersistent,
     },
   ];
-  return state.canOperate
-    ? items
-    : items.map((item) =>
-        threadActionRequiresOperate(item.id)
-          ? {
-              ...item,
-              disabled: true,
-              ...(item.children
-                ? { children: item.children.map((child) => ({ ...child, disabled: true })) }
-                : {}),
-            }
-          : item,
-      );
+  return withThreadActionMenuDividers(
+    state.canOperate
+      ? items
+      : items.map((item) =>
+          threadActionRequiresOperate(item.id)
+            ? {
+                ...item,
+                disabled: true,
+                ...(item.children
+                  ? { children: item.children.map((child) => ({ ...child, disabled: true })) }
+                  : {}),
+              }
+            : item,
+        ),
+  );
 }

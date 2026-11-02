@@ -99,9 +99,11 @@ it.effect("preview_open navigates the opened tab to a dev server in one tool cal
         issuedAt: 1,
       }),
       Effect.provide(
-        Layer.mergeAll(PreviewAutomationBroker.layer, McpToolAccessTestkit.liveThreadsLayer).pipe(
-          Layer.provide(NodeServices.layer),
-        ),
+        Layer.mergeAll(
+          PreviewAutomationBroker.layer,
+          McpToolAccessTestkit.liveThreadsLayer,
+          Layer.mock(PublishedDocumentPreview.PublishedDocumentPreview)({}),
+        ).pipe(Layer.provide(NodeServices.layer)),
       ),
     ),
   ),

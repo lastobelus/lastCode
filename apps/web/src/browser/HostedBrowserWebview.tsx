@@ -34,6 +34,10 @@ import {
   planWebviewCrashRecovery,
   type WebviewCrashRecoveryState,
 } from "./webviewCrashRecovery";
+import {
+  markDesktopBrowserTabReady,
+  markDesktopBrowserTabUnavailable,
+} from "./desktopBrowserDemand";
 
 interface ElectronWebview extends HTMLElement {
   src: string;
@@ -61,6 +65,7 @@ export function HostedBrowserWebview(props: {
   readonly profileId: string | undefined;
   readonly zoomFactor: number;
   readonly serverDriven?: boolean;
+  readonly desktopHostId?: string | undefined;
   readonly serverRendering?: {
     readonly colorScheme: DesktopPreviewColorScheme;
     readonly zoomFactor: number;
@@ -76,12 +81,14 @@ export function HostedBrowserWebview(props: {
     zoomFactor,
     profileId,
     serverDriven = false,
+    desktopHostId,
     serverRendering,
   } = props;
   const clientSettingsHydrated = useClientSettingsHydrated();
   const config = usePreviewWebviewConfig(threadRef.environmentId, profileId);
   const [initialSrc] = useState(() => initialUrl ?? "about:blank");
   const tabLeaseRef = useRef<AcquiredDesktopTab | null>(null);
+  const [tabReady, setTabReady] = useState(false);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const webviewRef = useRef<ElectronWebview | null>(null);
   const crashRecoveryRef = useRef<WebviewCrashRecoveryState>(INITIAL_WEBVIEW_CRASH_RECOVERY_STATE);
@@ -113,16 +120,28 @@ export function HostedBrowserWebview(props: {
   useEffect(() => {
     if (!clientSettingsHydrated) return;
     crashRecoveryRef.current = INITIAL_WEBVIEW_CRASH_RECOVERY_STATE;
-    const lease = acquireDesktopTab(
-      runtimeTabId,
-      serverDriven ? { threadId: threadRef.threadId, tabId } : undefined,
-    );
+    const lease = acquireDesktopTab(runtimeTabId, {
+      threadId: threadRef.threadId,
+      tabId,
+      desktopHostId,
+    });
     tabLeaseRef.current = lease;
+    let disposed = false;
+    void lease.ready.then(
+      () => {
+        if (!disposed) setTabReady(true);
+      },
+      (cause) => {
+        if (!disposed) markDesktopBrowserTabUnavailable(runtimeTabId, cause);
+      },
+    );
     return () => {
+      disposed = true;
+      markDesktopBrowserTabUnavailable(runtimeTabId);
       if (tabLeaseRef.current === lease) tabLeaseRef.current = null;
       lease.release();
     };
-  }, [clientSettingsHydrated, runtimeTabId, serverDriven, tabId, threadRef.threadId]);
+  }, [clientSettingsHydrated, runtimeTabId, tabId, threadRef.threadId, desktopHostId]);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- applies the server color scheme to the desktop preview tab through the desktop bridge
   useEffect(() => {
@@ -144,6 +163,7 @@ export function HostedBrowserWebview(props: {
     setWebviewGeneration((generation) => generation + 1);
   });
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Registers native surface lease requests for this guest and releases leases when the guest is replaced or unmounted.
   useEffect(() => {
     const bridge = window.desktopBridge?.preview;
     if (!bridge || !serverDriven) return;
@@ -176,7 +196,7 @@ export function HostedBrowserWebview(props: {
   useEffect(() => {
     const webview = webviewRef.current;
     const bridge = previewBridge;
-    if (!clientSettingsHydrated || !webview || !config || !bridge) return;
+    if (!clientSettingsHydrated || !tabReady || !webview || !config || !bridge) return;
     let disposed = false;
     let recoveryTimeout: ReturnType<typeof setTimeout> | null = null;
     const register = () => {
@@ -190,12 +210,15 @@ export function HostedBrowserWebview(props: {
           const webContentsId = webview.getWebContentsId();
           if (Number.isInteger(webContentsId) && webContentsId > 0) {
             await bridge.registerWebview(runtimeTabId, webContentsId);
+            if (!disposed && webviewRef.current === webview)
+              markDesktopBrowserTabReady(runtimeTabId);
           }
         } catch {}
       })();
     };
     const recoverGuest = () => {
       if (disposed || recoveryTimeout !== null) return;
+      markDesktopBrowserTabUnavailable(runtimeTabId);
       const recovery = planWebviewCrashRecovery(crashRecoveryRef.current, Date.now());
       if (!recovery) return;
       crashRecoveryRef.current = recovery.state;
@@ -223,25 +246,24 @@ export function HostedBrowserWebview(props: {
       webview.removeEventListener("render-process-gone", recoverGuest);
       webview.removeEventListener("focus", dismissHostPopups);
     };
-  }, [
-    clientSettingsHydrated,
-    config,
-    runtimeTabId,
-    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- A crash recovery remounts the webview under a new key, so the listeners attach to the new element.
-    webviewGeneration,
-  ]);
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- A crash replaces the DOM guest without changing settings or the stable ref object.
+  }, [clientSettingsHydrated, tabReady, config, runtimeTabId, webviewGeneration]);
 
   const active = presentation.visible && presentation.rect !== null;
+  const backgroundRendering = backgroundActivity || pictureInPicture || recordingActive;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Keeps native browser presentation and background rendering in step with this mounted surface and clears presentation on unmount.
   useEffect(() => {
     const bridge = window.desktopBridge?.preview;
-    if (!serverDriven || !clientSettingsHydrated || !config || !bridge) return;
+    if (!clientSettingsHydrated || !config || !bridge) return;
     // Main owns actual window visibility, including picture-in-picture.
     // The renderer only identifies the selected Browser slot.
-    void bridge.browserPresentation({ runtimeTabId, presented: active }).catch(() => undefined);
+    void bridge
+      .browserPresentation({ runtimeTabId, presented: active, rendering: backgroundRendering })
+      .catch(() => undefined);
     return () => {
       void bridge.browserPresentation({ runtimeTabId, presented: false }).catch(() => undefined);
     };
-  }, [active, clientSettingsHydrated, config, runtimeTabId, serverDriven]);
+  }, [active, backgroundRendering, clientSettingsHydrated, config, runtimeTabId]);
   const lastRect = presentation.rect;
   const layoutZoomFactor = useBrowserLayoutZoomFactor(zoomFactor);
   const viewportWidth = viewport._tag === "fill" ? null : viewport.width;
@@ -327,7 +349,7 @@ export function HostedBrowserWebview(props: {
     viewportWidth,
   ]);
 
-  if (!clientSettingsHydrated || !config) return null;
+  if (!clientSettingsHydrated || !config || !tabReady) return null;
 
   const renderingActive = active || backgroundActivity || pictureInPicture || recordingActive;
   const wrapperStyle = resolveHostedBrowserWebviewWrapperStyle({
