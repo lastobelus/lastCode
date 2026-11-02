@@ -167,12 +167,15 @@ process.kill(process.pid, ${JSON.stringify(signal)});`,
         NodePath.join(directory, "a.test.ts"),
         'import {test,expect} from "vite-plus/test"; import {readFileSync} from "node:fs"; import {value} from "./source.ts"; test("fixture",()=>{expect(value).toBe(1);expect(process.env.CACHE_PILOT_ENV).toMatch(/first|second/);expect(readFileSync(readFileSync("selector.txt","utf8"),"utf8")).toMatch(/^hello/)});',
       );
+      // Model a discovery probe so adding a sibling input invalidates b on every platform.
       await NodeFSP.writeFile(
         NodePath.join(directory, "b.test.ts"),
-        'import {test,expect} from "vite-plus/test"; test("independent",()=>expect(1).toBe(1));',
+        'import {test,expect} from "vite-plus/test"; import {existsSync} from "node:fs"; existsSync("other.txt"); test("independent",()=>expect(1).toBe(1));',
       );
       await NodeFSP.writeFile(NodePath.join(directory, "fixture.txt"), "hello");
       await NodeFSP.writeFile(NodePath.join(directory, "source.ts"), "export const value = 1;");
+      // Create every fixture before warming the cache; later checks change only their contents.
+      await NodeFSP.writeFile(NodePath.join(directory, "other.txt"), "broken");
       await NodeFSP.writeFile(NodePath.join(directory, "selector.txt"), "fixture.txt");
       expect(await run()).toBe(0);
       expect(await run()).toBe(0);
@@ -195,12 +198,12 @@ process.kill(process.pid, ${JSON.stringify(signal)});`,
       expect(await run()).toBe(0);
       expect(await run()).toBe(0);
       expect(await summary()).toBe(2);
+      // Keep b's warm entry across the failing source and dynamic-input selections.
       await NodeFSP.writeFile(NodePath.join(directory, "source.ts"), "export const value = 2;");
-      expect(await run()).toBe(1);
+      expect(await run(["a.test.ts"])).toBe(1);
       await NodeFSP.writeFile(NodePath.join(directory, "source.ts"), "export const value = 1;");
-      await NodeFSP.writeFile(NodePath.join(directory, "other.txt"), "broken");
       await NodeFSP.writeFile(NodePath.join(directory, "selector.txt"), "other.txt");
-      expect(await run()).toBe(1);
+      expect(await run(["a.test.ts"])).toBe(1);
       await NodeFSP.writeFile(NodePath.join(directory, "selector.txt"), "fixture.txt");
       await NodeFSP.writeFile(NodePath.join(directory, "fixture.txt"), "hello changed");
       expect(await run()).toBe(0);
