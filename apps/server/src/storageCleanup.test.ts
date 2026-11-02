@@ -10,6 +10,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
+import type * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -57,7 +58,7 @@ import * as GeneratedDependencies from "./workspace/GeneratedDependencies.ts";
 import * as DependencyMounts from "./workspace/DependencyMounts.ts";
 import * as WorktreeConsumers from "./workspace/WorktreeConsumers.ts";
 import * as SuspensionTestkit from "./workspace/WorktreeSuspension.testkit.ts";
-import { SuspensionRegistryError } from "./workspace/WorktreeSuspensionRegistry.ts";
+import * as SuspensionRegistry from "./workspace/WorktreeSuspensionRegistry.ts";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const original = await importOriginal<typeof NodeFSP>();
@@ -404,6 +405,7 @@ const cleanupFixture = (
   },
   eventSql?: SqlClient.SqlClient,
   logsDir?: string,
+  registry?: SuspensionRegistry.WorktreeSuspensionRegistry["Service"],
 ) =>
   Effect.gen(function* () {
     const fixtureNow = yield* Clock.currentTimeMillis;
@@ -519,16 +521,22 @@ const cleanupFixture = (
       Effect.provide(
         Layer.merge(
           SuspensionTestkit.layerWith(
-            (workspacePath) =>
+            (workspacePath, resource) =>
               Effect.suspend(() => {
                 const reason = savedWorkspaceProtection.get(workspacePath);
                 return reason === "unavailable"
-                  ? Effect.fail(new SuspensionRegistryError({ operation: "read" }))
-                  : Effect.succeed(reason ?? null);
+                  ? Effect.fail(
+                      new SuspensionRegistry.SuspensionRegistryError({ operation: "read" }),
+                    )
+                  : reason !== undefined
+                    ? Effect.succeed(reason)
+                    : (registry?.automaticProtection(workspacePath, resource) ??
+                      Effect.succeed(null));
               }),
             Effect.sync(() => {
               suspensionSweeps++;
             }),
+            registry,
           ),
           Layer.mock(WorktreeCleanup.WorktreeCleanupService)({
             historicalWorktreeOwners: Effect.suspend(() =>
@@ -1228,6 +1236,7 @@ const runCleanupTest = <A, E>(
     A,
     E,
     | FileSystem.FileSystem
+    | Crypto.Crypto
     | ServerConfig.ServerConfig
     | GitVcsDriver.GitVcsDriver
     | Path.Path
@@ -3207,6 +3216,109 @@ const disposableEntries = (report: import("@t3tools/contracts").StorageCleanupRe
   );
 
 describe("saved workspace retention across cleanup resources", () => {
+  it.live.each(["removed", "recent", "failed"] as const)(
+    "permits an automatic capture retry only after dependencies are %s",
+    (outcome) =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const registry = yield* SuspensionRegistry.WorktreeSuspensionRegistry.pipe(
+            Effect.provide(SuspensionRegistry.layer),
+          );
+          const fixture = yield* cleanupFixture(undefined, undefined, undefined, registry);
+          yield* fixture.enableDependencies;
+          fixture.setDependencyRetention(3);
+          yield* seedCompilerOutput(fixture, "apps/web/dist", fixture.now - 4 * DAY_MS);
+          const failed: SuspensionRegistry.CheckoutAuthority = {
+            checkoutId: "failed-checkout",
+            repositoryRoot: fixture.repo,
+            path: fixture.worktree,
+            aliases: [fixture.worktree],
+            owners: [
+              {
+                threadId: ThreadId.make("thread-1"),
+                projectId: ProjectId.make("project-1"),
+                worktreePath: fixture.worktree,
+                branch: "feature",
+                generation: null,
+              },
+            ],
+            summary: {
+              checkoutId: "failed-checkout",
+              generation: 0,
+              state: "active",
+              snapshotId: null,
+              lastRestoredAt: null,
+              keepWorkspace: false,
+            },
+            history: [],
+            blockedReason: "Workspace kept: a file exceeds the preservation limit.",
+            captureFailure: {
+              operationId: "failed-capture",
+              reason: "Workspace kept: a file exceeds the preservation limit.",
+            },
+            lastWorkspaceUseAt: DateTime.formatIso(fixture.at(-30 * DAY_MS)),
+          };
+          yield* registry.put(failed, null);
+          if (outcome === "recent") {
+            const location = yield* fixture.command(fixture.worktree, [
+              "rev-parse",
+              "--absolute-git-dir",
+            ]);
+            yield* Effect.sync(() =>
+              observeDependencyActivity(
+                location.stdout.trim(),
+                fixture.worktree,
+                fixture.now,
+                true,
+              ),
+            );
+          }
+          using _removalFailure =
+            outcome === "failed"
+              ? vi.spyOn(NodeFSP, "rm").mockRejectedValueOnce(new Error("fixture removal failed"))
+              : undefined;
+          const report = yield* fixture.service.runNow;
+          expect(disposableEntries(report)).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                worktreeResource: "dependencies",
+                outcome:
+                  outcome === "removed" ? "removed" : outcome === "recent" ? "kept" : "failed",
+              }),
+              expect.objectContaining({
+                worktreeResource: "generated-builds",
+                outcome: "kept",
+                reason: expect.stringContaining(failed.captureFailure!.reason),
+              }),
+            ]),
+          );
+          expect(yield* fixture.fs.exists(`${fixture.worktree}/node_modules`)).toBe(
+            outcome !== "removed",
+          );
+          expect(yield* fixture.fs.readFileString(`${fixture.worktree}/tracked.txt`)).toBe(
+            "original\n",
+          );
+          expect(
+            yield* fixture.fs.readFileString(
+              `${fixture.worktree}/apps/web/dist/assets/emitted.bin`,
+            ),
+          ).toBe("compiler-emitted bytes\n");
+          expect(yield* registry.list).toEqual([
+            {
+              ...failed,
+              captureFailure: {
+                ...failed.captureFailure!,
+                ...(outcome === "removed" ? { retryOnce: true } : {}),
+              },
+            },
+          ]);
+          expect(yield* registry.automaticProtection(fixture.worktree)).toBe(
+            failed.captureFailure!.reason,
+          );
+        }),
+      ),
+  );
+
   it.live.each([
     ["held", "owned"],
     ["saved operation", "ownerless"],

@@ -1,4 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { CommandId, ThreadId } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -38,6 +39,9 @@ it.effect("persists authority privately and rejects a stale generation write", (
     yield* registry.put(record, null);
     const restored = yield* registry.list;
     assert.deepStrictEqual(restored, [record]);
+    yield* registry.dependenciesRemoved("/managed/feature");
+    yield* registry.dependenciesRemoved("/unknown");
+    assert.deepStrictEqual(yield* registry.list, [record]);
     assert.strictEqual((yield* fs.stat(registry.root)).mode & 0o077, 0);
     assert.strictEqual(
       (yield* fs.stat(path.join(registry.root, "authority.json"))).mode & 0o077,
@@ -55,6 +59,16 @@ it.effect("persists authority privately and rejects a stale generation write", (
     };
     yield* registry.put(failed, next);
     assert.deepStrictEqual(yield* registry.list, [failed]);
+    assert.strictEqual(
+      yield* registry.automaticProtection("/managed/feature", "dependencies"),
+      null,
+    );
+    for (const target of ["/managed", "/managed/feature/node_modules"]) {
+      assert.strictEqual(
+        yield* registry.automaticProtection(target, "dependencies"),
+        "Unsupported capture",
+      );
+    }
     for (const target of [
       "/managed/feature",
       "/managed/feature/node_modules",
@@ -63,15 +77,90 @@ it.effect("persists authority privately and rejects a stale generation write", (
     ]) {
       assert.strictEqual(yield* registry.automaticProtection(target), "Unsupported capture");
     }
+    yield* registry.dependenciesRemoved("/managed");
+    assert.deepStrictEqual(yield* registry.list, [failed]);
+    yield* registry.dependenciesRemoved("/managed/feature");
     const legacy = {
       ...failed,
       captureFailure: { ...failed.captureFailure, retryOnce: true as const },
     };
-    yield* registry.put(legacy, failed);
+    assert.deepStrictEqual(yield* registry.list, [legacy]);
     assert.strictEqual(
       yield* registry.automaticProtection("/managed/feature"),
       "Unsupported capture",
     );
+    yield* registry.dependenciesRemoved("/managed/feature");
+    assert.deepStrictEqual(yield* registry.list, [legacy]);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("only permits dependency cleanup for a settled exact failure", () =>
+  Effect.gen(function* () {
+    const registry = yield* Registry.WorktreeSuspensionRegistry;
+    const failed: Registry.CheckoutAuthority = {
+      ...record,
+      aliases: ["/alias/feature"],
+      history: ["retained-history"],
+      blockedReason: "retained block",
+      lastWorkspaceUseAt: "2026-01-01T00:00:00.000Z",
+      captureFailure: { operationId: "failed-capture", reason: "Unsupported capture" },
+    };
+    yield* registry.put(failed, null);
+    assert.strictEqual(yield* registry.automaticProtection("/alias/feature", "dependencies"), null);
+    const operation = {
+      id: "operation",
+      kind: "capture" as const,
+      snapshotIds: [],
+      manual: false,
+      acceptedAt: "2026-01-01T00:00:00.000Z",
+    };
+    const pending = {
+      commandId: CommandId.make("command"),
+      threadId: ThreadId.make("thread"),
+      checkoutId: record.checkoutId,
+      aliases: [],
+      expectedOwners: [],
+      expected: record.summary,
+      next: record.summary,
+    } satisfies NonNullable<Registry.CheckoutAuthority["pendingProjection"]>;
+    const protectedRecords: Registry.CheckoutAuthority[] = [
+      { ...failed, summary: { ...failed.summary, keepWorkspace: true } },
+      ...(["capture", "restore", "discard"] as const).map((kind) => ({
+        ...failed,
+        operation: { ...operation, kind },
+      })),
+      { ...failed, pendingProjection: pending },
+      { ...failed, summary: { ...failed.summary, state: "blocked" } },
+    ];
+    let current = failed;
+    for (const protectedRecord of protectedRecords) {
+      yield* registry.put(protectedRecord, current);
+      assert.strictEqual(
+        yield* registry.automaticProtection("/managed/feature", "dependencies"),
+        "Unsupported capture",
+      );
+      yield* registry.dependenciesRemoved("/managed/feature");
+      assert.deepStrictEqual(yield* registry.list, [protectedRecord]);
+      current = protectedRecord;
+    }
+    yield* registry.put(failed, current);
+    const overlap = {
+      ...failed,
+      checkoutId: "overlap",
+      path: "/managed",
+      aliases: [],
+      summary: { ...failed.summary, checkoutId: "overlap" },
+    };
+    yield* registry.put(overlap, null);
+    assert.strictEqual(
+      yield* registry.automaticProtection("/managed/feature", "dependencies"),
+      "Unsupported capture",
+    );
+    yield* registry.dependenciesRemoved("/alias/feature");
+    assert.deepStrictEqual(yield* registry.list, [
+      overlap,
+      { ...failed, captureFailure: { ...failed.captureFailure!, retryOnce: true } },
+    ]);
   }).pipe(Effect.provide(layer)),
 );
 

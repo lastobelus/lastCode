@@ -695,7 +695,6 @@ const make = Effect.gen(function* () {
             catch: (cause) =>
               new GeneratedDependenciesError({ path: inspection.dependencyPath, cause }),
           }).pipe(
-            Effect.uninterruptible,
             Effect.tap((removed) =>
               decide(
                 inspection,
@@ -705,6 +704,8 @@ const make = Effect.gen(function* () {
                   : "Dependency install removed",
               ),
             ),
+            // Record successful deletion before releasing leases on cancellation.
+            Effect.uninterruptible,
           );
         }).pipe(
           Effect.catch((error) =>

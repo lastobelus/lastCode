@@ -336,14 +336,25 @@ const make = Effect.gen(function* () {
   const savedWorkspaces = yield* WorktreeSuspension;
   const suspensionRegistry = yield* WorktreeSuspensionRegistry;
   const savedWorkspaceProtection = Effect.fn("StorageCleanup.savedWorkspaceProtection")(
-    (workspacePath: string) =>
+    (workspacePath: string, resource: "worktree" | "dependencies" = "worktree") =>
       suspensionRegistry
-        .automaticProtection(workspacePath)
+        .automaticProtection(workspacePath, resource)
         .pipe(
           Effect.orElseSucceed(
             () => "Saved workspace authority could not be verified; files were retained.",
           ),
         ),
+  );
+  const dependenciesRemoved = Effect.fn("StorageCleanup.dependenciesRemoved")(
+    (workspacePath: string) =>
+      suspensionRegistry.dependenciesRemoved(workspacePath).pipe(
+        Effect.catchTags({
+          SuspensionRegistryError: (error) =>
+            Effect.logWarning("Dependency cleanup could not enable a saved-workspace retry.", {
+              operation: error.operation,
+            }),
+        }),
+      ),
   );
   const config = yield* ServerConfig.ServerConfig;
   const settingsService = yield* Settings.ServerSettingsService;
@@ -1218,6 +1229,7 @@ const make = Effect.gen(function* () {
     automaticWork?: AutomaticOutputWork,
   ) {
     const generatedBuilds = resource === "generated-builds";
+    const protectionResource = generatedBuilds ? "worktree" : "dependencies";
     const outputPath = (cwd: string) => (generatedBuilds ? cwd : path.join(cwd, "node_modules"));
     const outputExists = (cwd: string) =>
       generatedBuilds ? builds.hasOutputs(cwd) : fs.exists(outputPath(cwd));
@@ -1235,7 +1247,7 @@ const make = Effect.gen(function* () {
       used = false,
       persist = true,
     ) {
-      if (yield* savedWorkspaceProtection(input.worktreePath)) return null;
+      if (yield* savedWorkspaceProtection(input.worktreePath, protectionResource)) return null;
       if (generatedBuilds)
         return yield* builds.observe(
           buildInput(input),
@@ -1823,7 +1835,7 @@ const make = Effect.gen(function* () {
         files: null,
       };
       entries.push(entry);
-      const savedProtection = yield* savedWorkspaceProtection(cwd);
+      const savedProtection = yield* savedWorkspaceProtection(cwd, protectionResource);
       if (savedProtection !== null) {
         entry.reason = savedProtection;
         continue;
@@ -1903,7 +1915,7 @@ const make = Effect.gen(function* () {
       };
       const cleanOwnerless = Effect.gen(function* () {
         const consumerReason = Effect.fnUntraced(function* () {
-          const savedProtection = yield* savedWorkspaceProtection(cwd);
+          const savedProtection = yield* savedWorkspaceProtection(cwd, protectionResource);
           if (savedProtection !== null) return savedProtection;
           if (processCwds === null) return "Could not check running processes safely";
           if (processCwds.some((processCwd) => processCwd === cwd || inside(cwd, processCwd)))
@@ -2024,7 +2036,11 @@ const make = Effect.gen(function* () {
                 reason: genericRefusal ? entry.reason : decision.reason,
                 bytes: decision.outcome === "removed" ? inspection.estimatedReclaimedBytes : null,
               });
-            }),
+            }).pipe(
+              Effect.andThen(
+                decision.outcome === "removed" ? dependenciesRemoved(cwd) : Effect.void,
+              ),
+            ),
         );
         if (removed.length > 0) {
           entry.outcome = "removed";
@@ -2065,7 +2081,10 @@ const make = Effect.gen(function* () {
           serverSettings,
           thread.projectId,
         ).worktreeDependenciesAfterDays;
-        const savedProtection = yield* savedWorkspaceProtection(thread.cleanupPath);
+        const savedProtection = yield* savedWorkspaceProtection(
+          thread.cleanupPath,
+          protectionResource,
+        );
         if (savedProtection !== null) {
           if (yield* outputExists(thread.cleanupPath))
             noteCandidate(
@@ -2358,7 +2377,10 @@ const make = Effect.gen(function* () {
               });
               const candidateStillIdle = Effect.fn("StorageCleanup.dependencyCandidateStillIdle")(
                 function* () {
-                  const savedProtection = yield* savedWorkspaceProtection(worktreePath);
+                  const savedProtection = yield* savedWorkspaceProtection(
+                    worktreePath,
+                    protectionResource,
+                  );
                   if (savedProtection !== null) return keep(savedProtection);
                   if (!archived) {
                     const dependencyActivity = yield* observe(
@@ -2599,7 +2621,13 @@ const make = Effect.gen(function* () {
                   : decision.reason,
               bytes: decision.outcome === "removed" ? inspection.estimatedReclaimedBytes : null,
             });
-          }),
+          }).pipe(
+            Effect.andThen(
+              decision.outcome === "removed"
+                ? dependenciesRemoved(inspection.worktreePath)
+                : Effect.void,
+            ),
+          ),
         );
         for (const removed of removedEntries) {
           Object.assign(reports.get(removed.worktreePath)!, {

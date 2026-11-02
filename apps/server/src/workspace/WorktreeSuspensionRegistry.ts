@@ -137,7 +137,12 @@ export class WorktreeSuspensionRegistry extends Context.Service<
     readonly list: Effect.Effect<ReadonlyArray<CheckoutAuthority>, SuspensionRegistryError>;
     readonly automaticProtection: (
       workspacePath: string,
+      resource?: "worktree" | "dependencies",
     ) => Effect.Effect<string | null, SuspensionRegistryError>;
+    /** Called after verified dependency removal while the checkout lease is held. */
+    readonly dependenciesRemoved: (
+      workspacePath: string,
+    ) => Effect.Effect<void, SuspensionRegistryError>;
     readonly put: (
       next: CheckoutAuthority,
       expected: CheckoutAuthority | null,
@@ -253,8 +258,17 @@ const make = Effect.gen(function* () {
       isRegistryError(cause) ? cause : new SuspensionRegistryError({ operation: "write", cause }),
     ),
   );
+  const settledActive = (entry: CheckoutAuthority) =>
+    !entry.detached &&
+    entry.summary.state === "active" &&
+    !entry.summary.keepWorkspace &&
+    entry.operation === undefined &&
+    entry.pendingProjection === undefined;
+  const exactMatch = (entry: CheckoutAuthority, candidate: string) =>
+    [entry.path, ...entry.aliases].some((alias) => path.resolve(alias) === candidate);
+
   const automaticProtection = Effect.fn("WorktreeSuspensionRegistry.automaticProtection")(
-    function* (workspacePath: string) {
+    function* (workspacePath: string, resource: "worktree" | "dependencies" = "worktree") {
       const candidate = path.resolve(workspacePath);
       const overlaps = (other: string) => {
         const relative = path.relative(candidate, other);
@@ -267,7 +281,13 @@ const make = Effect.gen(function* () {
       for (const entry of yield* list) {
         if (entry.detached) continue;
         if (!entry.aliases.some(overlaps) && !overlaps(entry.path)) continue;
-        if (entry.captureFailure !== undefined) return entry.captureFailure.reason;
+        // A settled failed save protects source, but cannot veto an independent
+        // dependency policy whose recognition, inactivity and consumer guards pass.
+        if (
+          entry.captureFailure !== undefined &&
+          !(resource === "dependencies" && exactMatch(entry, candidate) && settledActive(entry))
+        )
+          return entry.captureFailure.reason;
         if (entry.summary.keepWorkspace) return "Keep workspace is enabled.";
         if (
           entry.pendingProjection !== undefined ||
@@ -280,7 +300,31 @@ const make = Effect.gen(function* () {
       return null;
     },
   );
-  return WorktreeSuspensionRegistry.of({ root, list, put, automaticProtection });
+  const dependenciesRemoved = Effect.fn("WorktreeSuspensionRegistry.dependenciesRemoved")(
+    function* (workspacePath: string) {
+      const candidate = path.resolve(workspacePath);
+      for (const entry of yield* list) {
+        if (
+          !exactMatch(entry, candidate) ||
+          !settledActive(entry) ||
+          entry.captureFailure === undefined ||
+          entry.captureFailure.retryOnce
+        )
+          continue;
+        yield* put(
+          { ...entry, captureFailure: { ...entry.captureFailure, retryOnce: true } },
+          entry,
+        );
+      }
+    },
+  );
+  return WorktreeSuspensionRegistry.of({
+    root,
+    list,
+    put,
+    automaticProtection,
+    dependenciesRemoved,
+  });
 });
 
 export const layer = Layer.effect(WorktreeSuspensionRegistry, make);
