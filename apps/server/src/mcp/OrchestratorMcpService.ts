@@ -2779,7 +2779,7 @@ const make = Effect.gen(function* () {
                 ),
               );
       const child = yield* loadProjection(childThreadId);
-      const ownsWaitingAction =
+      const ownsActionContinuation =
         parentTask?.runId != null &&
         isOrchestrationV2WorkActive(parentTask.status) &&
         child.runs.some(
@@ -2788,14 +2788,14 @@ const make = Effect.gen(function* () {
             ["completed", "failed", "cancelled", "interrupted"].includes(run.status) &&
             run.actionObligations?.some(
               (row) =>
-                row.state === "waiting" &&
+                (row.state === "waiting" || row.state === "transferred") &&
                 row.owner.taskId === input.taskId &&
                 row.owner.sourceRunId === run.id &&
                 row.owner.parentThreadId === scope.thread.threadId,
             ),
         );
       const stopChild = Effect.gen(function* () {
-        if (ownsWaitingAction && parentTask?.runId != null) {
+        if (ownsActionContinuation && parentTask?.runId != null) {
           // The source provider turn has ended. Cancel its logical task under
           // the parent's lock rather than stopping another round in this child.
           yield* threadManagement
@@ -2920,7 +2920,7 @@ const make = Effect.gen(function* () {
         );
         return subagents.some((task) => task.id === input.taskId && task.status === "cancelled");
       }).pipe(Effect.mapError(threadManagementFailure));
-      if (ownsWaitingAction) {
+      if (ownsActionContinuation) {
         yield* stopWithinLimit;
         yield* disposeCompletionDelivery;
         return { taskId: input.taskId, status: "cancel_requested" };

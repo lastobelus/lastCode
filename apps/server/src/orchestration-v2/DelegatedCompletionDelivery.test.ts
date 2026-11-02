@@ -3440,6 +3440,8 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
     "later",
     "original-race-queued-task-cancel",
     "original-race-starting-task-cancel",
+    "original-before-read-queued-task-cancel",
+    "original-before-read-starting-task-cancel",
     "original-task-cancel",
     "later-task-cancel",
     "original-stop-before",
@@ -3909,7 +3911,8 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
         }
         if (round.endsWith("task-cancel")) {
           const unrelatedId = RunId.make(`unrelated-${round}`);
-          const race = round.includes("race-");
+          const beforeRead = round.includes("before-read-");
+          const race = round.includes("race-") || beforeRead;
           const seedUnrelated = sink.write({
             events: [
               runEvent({
@@ -3933,42 +3936,45 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
             subagentId: taskId,
           };
           if (race) {
+            const transfer = Effect.gen(function* () {
+              assert.equal(
+                (yield* orchestrator.getThreadProjection(childThreadId)).runs.find(
+                  (run) => run.id === source.id,
+                )?.actionObligations?.[0]?.state,
+                "waiting",
+              );
+              if (round.includes("queued")) yield* seedUnrelated;
+              yield* emitTerminal({
+                type: "exited",
+                threadId: childThreadId,
+                terminalId: action.terminalId,
+                exitCode: 0,
+                exitSignal: null,
+              });
+              yield* actions.retryPendingFollowUps;
+              const transferred = yield* orchestrator.getThreadProjection(childThreadId);
+              const continuation = transferred.runs.find(
+                (run) =>
+                  run.userMessageId === MessageId.make(`action-resume:${action.runId}:follow-up`),
+              )!;
+              assert.equal(continuation.status, round.includes("queued") ? "queued" : "starting");
+              assert.equal(continuation.delegatedTaskId, taskId);
+              if (round.includes("starting")) yield* seedUnrelated;
+              before = yield* orchestrator.getThreadProjection(childThreadId);
+            });
+            if (beforeRead) yield* transfer;
             const mcpThreads = Layer.mock(ThreadManagement.ThreadManagementService)({
               getThreadShell: orchestrator.getThreadShell,
               getThreadRecords: orchestrator.getThreadRecords,
               delegatedTaskResultPending: orchestrator.delegatedTaskResultPending,
               dispatch: (command) =>
                 Effect.gen(function* () {
-                  if (command.type === "subagent.stop") {
-                    assert.equal(
-                      (yield* orchestrator.getThreadProjection(childThreadId)).runs.find(
-                        (run) => run.id === source.id,
-                      )?.actionObligations?.[0]?.state,
-                      "waiting",
-                    );
-                    if (round.includes("queued")) yield* seedUnrelated;
-                    yield* emitTerminal({
-                      type: "exited",
-                      threadId: childThreadId,
-                      terminalId: action.terminalId,
-                      exitCode: 0,
-                      exitSignal: null,
-                    });
-                    yield* actions.retryPendingFollowUps;
-                    const transferred = yield* orchestrator.getThreadProjection(childThreadId);
-                    const continuation = transferred.runs.find(
-                      (run) =>
-                        run.userMessageId ===
-                        MessageId.make(`action-resume:${action.runId}:follow-up`),
-                    )!;
-                    assert.equal(
-                      continuation.status,
-                      round.includes("queued") ? "queued" : "starting",
-                    );
-                    assert.equal(continuation.delegatedTaskId, taskId);
-                    if (round.includes("starting")) yield* seedUnrelated;
-                    before = yield* orchestrator.getThreadProjection(childThreadId);
-                  }
+                  assert.notEqual(
+                    command.type,
+                    "thread.stop",
+                    "Task-specific cancellation must not stop the whole child.",
+                  );
+                  if (command.type === "subagent.stop" && !beforeRead) yield* transfer;
                   return yield* orchestrator.dispatch(command);
                 }).pipe(Effect.orDie),
             });
