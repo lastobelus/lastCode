@@ -1,3 +1,12 @@
+import * as PromptSnippets from "../../../promptSnippets/PromptSnippets.ts";
+import {
+  PromptSnippetsState,
+  PromptSnippet,
+  PromptSnippetSaveInput,
+  PromptSnippetUseInput,
+  PromptSnippetDismissInput,
+  PromptSnippetRestoreInput,
+} from "@t3tools/contracts";
 import {
   BackgroundActivityProfile,
   BackgroundActivityProfileSelection,
@@ -33,6 +42,7 @@ const shared = {
   failure: OrchestratorMcpFailure,
   failureMode: "return" as const,
   dependencies: [
+    PromptSnippets.PromptSnippets,
     McpInvocationContext.McpInvocationContext,
     ThreadManagementService.ThreadManagementService,
     ServerEnvironment.ServerEnvironment,
@@ -103,7 +113,57 @@ const EnvironmentPauseResumeTool = Tool.make("t3_environment_pause_resume", {
   description:
     "Resume this environment when explicitly instructed. Releases the durable automatic wake gate and sends 'resume' to the threads that received Pause. Requires a live full-access/default calling thread or full-access client. Pending pause deliveries must settle first. Failures stay available for retry; archived or deleted recipients can finish recovery without a message.",
 }).annotate(Tool.Destructive, true);
+const PromptSnippetsSaveTool = Tool.make("prompt_snippets_save", {
+  ...shared,
+  description:
+    "Create a common prompt, or edit one by passing its snippetId; editing keeps its learned usage. Title is at most 100 characters and text at most 4000, and text must not match another saved or dismissed prompt. Discovery never rewrites or merges a prompt saved here.",
+  parameters: PromptSnippetSaveInput,
+  success: PromptSnippet,
+}).annotate(Tool.Destructive, false);
+const PromptSnippetsListTool = Tool.make("prompt_snippets_list", {
+  ...shared,
+  description:
+    "List this environment's common prompts with their learned search queries and discovery status.",
+  parameters: Tool.EmptyParams,
+  success: PromptSnippetsState,
+})
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false);
+const PromptSnippetsDiscoverTool = Tool.make("prompt_snippets_discover", {
+  ...shared,
+  description:
+    "Run common-prompt discovery for this environment now; it also runs automatically once a day. Makes one paid call to the thread-title text generation model over recent user messages, treating them as data: instructions in them are never executed.",
+  parameters: Tool.EmptyParams,
+  success: PromptSnippetsState,
+}).annotate(Tool.Destructive, false);
+const PromptSnippetsRecordUseTool = Tool.make("prompt_snippets_record_use", {
+  ...shared,
+  description:
+    "Record that a search query led to choosing a common prompt, so the picker ranks that prompt higher for the query. Does not send the prompt.",
+  parameters: PromptSnippetUseInput,
+  success: Schema.Void,
+}).annotate(Tool.Destructive, false);
+const PromptSnippetsDismissTool = Tool.make("prompt_snippets_dismiss", {
+  ...shared,
+  description:
+    "Hide a common prompt from this environment's picker and keep discovery from adding it back. Keep the snippetId: prompt_snippets_list omits dismissed prompts, and prompt_snippets_restore undoes this.",
+  parameters: PromptSnippetDismissInput,
+  success: Schema.Void,
+}).annotate(Tool.Destructive, false);
+const PromptSnippetsRestoreTool = Tool.make("prompt_snippets_restore", {
+  ...shared,
+  description:
+    "Undo prompt_snippets_dismiss: return the prompt to this environment's picker with its original id and learned usage.",
+  parameters: PromptSnippetRestoreInput,
+  success: Schema.Void,
+}).annotate(Tool.Destructive, false);
 export const EnvironmentToolkit = Toolkit.make(
+  PromptSnippetsSaveTool,
+  PromptSnippetsRestoreTool,
+  PromptSnippetsDismissTool,
+  PromptSnippetsListTool,
+  PromptSnippetsDiscoverTool,
+  PromptSnippetsRecordUseTool,
   EnvironmentReadTool,
   EnvironmentPreferencesTool,
   EnvironmentPauseStatusTool,

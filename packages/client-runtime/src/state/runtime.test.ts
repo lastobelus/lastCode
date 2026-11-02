@@ -1,6 +1,8 @@
 import { describe, expect, it } from "@effect/vitest";
+import { vi } from "vite-plus/test";
 import {
   EnvironmentId,
+  type PromptSnippetsState,
   type PreviewEvent,
   type TerminalAttachInput,
   type TerminalAttachStreamEvent,
@@ -34,6 +36,7 @@ import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import { EnvironmentRpcUnavailableError } from "../rpc/client.ts";
 import type * as RpcSession from "../rpc/session.ts";
 import { createPreviewEnvironmentAtoms } from "./preview.ts";
+import { createPromptSnippetsEnvironmentAtoms } from "./promptSnippets.ts";
 import type { QueryPersistence } from "./queryPersistence.ts";
 import { createTerminalEnvironmentAtoms } from "./terminal.ts";
 import {
@@ -955,6 +958,77 @@ describe("environment query lifecycle", () => {
         expect(executions).toBe(2);
 
         expect(yield* read).toBe(3);
+      }),
+    ),
+  );
+
+  it.effect("keeps an open prompt library current after discovery stops", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* Effect.acquireRelease(
+          Effect.sync(() => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })),
+          () => Effect.sync(() => vi.useRealTimers()),
+        );
+        let state: PromptSnippetsState = {
+          snippets: [],
+          discovering: true,
+          lastDiscoveryAt: null,
+          lastError: null,
+        };
+        let requests = 0;
+        const harness = yield* makeEnvironmentQueryHarness(Effect.void, {
+          rpcSession: {
+            client: {
+              [WS_METHODS.promptSnippetsList]: () =>
+                Effect.sync(() => {
+                  requests += 1;
+                  return state;
+                }),
+            },
+          } as unknown as RpcSession.RpcSession,
+        });
+        const atom = createPromptSnippetsEnvironmentAtoms(harness.runtime).list({
+          environmentId: QUERY_ENVIRONMENT.environmentId,
+          input: {},
+        });
+        const registry = AtomRegistry.make();
+        const unmount = registry.mount(atom);
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            unmount();
+            registry.dispose();
+          }),
+        );
+        expect(yield* readEnvironmentQuery(registry, atom)).toEqual(state);
+
+        state = { ...state, discovering: false };
+        yield* Effect.promise(() => vi.advanceTimersByTimeAsync(2_000));
+        expect(yield* readEnvironmentQuery(registry, atom)).toEqual(state);
+
+        state = {
+          ...state,
+          snippets: [
+            {
+              id: "remote-prompt",
+              title: "Review",
+              text: "pr/review/babysit/merge",
+              useCount: 3,
+              lastUsedAt: null,
+              queryUses: [],
+            },
+          ],
+        };
+        yield* Effect.promise(() => vi.advanceTimersByTimeAsync(2_000));
+        expect(yield* readEnvironmentQuery(registry, atom)).toEqual(state);
+
+        state = { ...state, snippets: [] };
+        yield* Effect.promise(() => vi.advanceTimersByTimeAsync(2_000));
+        expect(yield* readEnvironmentQuery(registry, atom)).toEqual(state);
+
+        unmount();
+        const requestsWhenClosed = requests;
+        yield* Effect.promise(() => vi.advanceTimersByTimeAsync(10_000));
+        expect(requests).toBe(requestsWhenClosed);
       }),
     ),
   );

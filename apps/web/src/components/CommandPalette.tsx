@@ -1,3 +1,4 @@
+import { promptSnippetActions } from "~/lastcode/prompts/commandPaletteActions";
 import { threadPullRequestLinkMode } from "@t3tools/client-runtime/thread-pull-request-compatibility";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 
@@ -360,6 +361,7 @@ function CommandPaletteDialog(props: {
       data-palette-mode={props.mode}
       data-testid="command-palette"
       finalFocus={() => {
+        if (document.querySelector("[data-prompt-snippets]")) return false;
         if (restoreWorkspaceFocusFromPalette()) return false;
         const returnFocus = getCommandPaletteReturnFocus();
         if (returnFocus === false) return false;
@@ -399,7 +401,14 @@ function OpenCommandPaletteDialog(props: {
   ) => void;
   readonly initialContext: CommandPaletteReturnContext | undefined;
 }) {
+  const composerHandleRef = useComposerHandleContext();
   const navigate = useNavigate();
+  const [commonPromptsAvailable] = useState(
+    () =>
+      document.querySelector(
+        'button[data-composer-shortcut~="composer.promptSnippets"]:not(:disabled)',
+      ) !== null,
+  );
   const pathname = useLocation({ select: (location) => location.pathname });
   const { openChildSearch, setOpen } = props;
   // Keyed by palette session: the intent and restored search only seed this
@@ -1309,6 +1318,13 @@ function OpenCommandPaletteDialog(props: {
   };
 
   const actionItems: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> = [];
+
+  actionItems.push(
+    ...promptSnippetActions(
+      composerHandleRef,
+      Boolean((activeThread || activeDraftThread) && commonPromptsAvailable),
+    ),
+  );
 
   if (projects.length > 0) {
     const activeProjectTitle =

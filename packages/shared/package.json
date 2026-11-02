@@ -578,6 +578,10 @@
     "./nativeFileSystem": {
       "types": "./src/nativeFileSystem.ts",
       "import": "./src/nativeFileSystem.ts"
+    },
+    "./promptSnippetSearch": {
+      "types": "./src/promptSnippetSearch.ts",
+      "import": "./src/promptSnippetSearch.ts"
     }
   },
   "scripts": {

@@ -1,3 +1,4 @@
+import { promptSnippetWordAtCursor } from "@t3tools/shared/promptSnippetSearch";
 import { useSidebarWorkspaceTabs } from "../workspace/useSystemWorkspaceTabBar";
 import { Button } from "../../components/ui/Button";
 import * as Dialog from "../../components/ui/Dialog";
@@ -70,6 +71,7 @@ import { useMentionableEnvironments } from "../../state/environments";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 
 import { AppText as Text } from "../../components/ui/AppText";
+import { PromptSnippetSheet } from "./PromptSnippetSheet";
 import { ComposerAttachmentButton } from "./ComposerAttachmentButton";
 import {
   ComposerAttachmentStrip,
@@ -418,6 +420,12 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
   const bodyText = useScaledTextRole("body");
   const fallbackInputRef = useRef<ComposerEditorHandle>(null);
   const inputRef = props.editorRef ?? fallbackInputRef;
+  const [promptSnippetSession, setPromptSnippetSession] = useState<{
+    ownerKey: string;
+    text: string;
+    cursor: number;
+    word: ReturnType<typeof promptSnippetWordAtCursor>;
+  } | null>(null);
   const [isFocused, setIsFocused] = useState(false);
   const pendingPastedTextAttachmentCountRef = useRef(0);
   const pendingNativeImagePasteCountRef = useRef(0);
@@ -829,6 +837,38 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
         className="relative w-full self-center"
         style={{ maxWidth: props.contentMaxWidth }}
       >
+        {promptSnippetSession?.ownerKey === composerOwnerKey &&
+        !isSubmissionLocked &&
+        !props.hidden ? (
+          <PromptSnippetSheet
+            key={composerOwnerKey}
+            environmentId={props.environmentId}
+            initialQuery={promptSnippetSession.word?.query ?? ""}
+            onClose={() => setPromptSnippetSession(null)}
+            onSelect={(snippet) => {
+              if (isSubmissionLocked) return false;
+              const draft = getComposerDraftSnapshot(composerDraftKey);
+              if (draft.text !== promptSnippetSession.text) {
+                setPromptSnippetSession(null);
+                inputRef.current?.focus();
+                return false;
+              }
+              const cursor = promptSnippetSession.cursor;
+              const word = promptSnippetSession.word;
+              const insertion = replaceTextSelection({
+                value: draft.text,
+                selection: word ?? { start: cursor, end: cursor },
+                text: word
+                  ? snippet.text
+                  : `${cursor > 0 && !/\s/u.test(draft.text[cursor - 1] ?? "") ? " " : ""}${snippet.text}\n`,
+              });
+              props.onChangeDraftMessage(insertion.value);
+              composerMenu.onSelectionChange({ start: insertion.cursor, end: insertion.cursor });
+              setPromptSnippetSession(null);
+              inputRef.current?.focus();
+            }}
+          />
+        ) : null}
         {props.draftControls}
         {!isSubmissionLocked &&
         composerMenu.trigger &&
@@ -898,6 +938,16 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
                 size={usesLargeControls ? "large" : "regular"}
                 disabled={isSubmissionLocked}
                 supportsFiles={props.serverConfig !== null}
+                onPickPromptSnippet={() => {
+                  const draft = getComposerDraftSnapshot(composerDraftKey);
+                  const cursor = Math.min(composerMenu.selection.end, draft.text.length);
+                  setPromptSnippetSession({
+                    ownerKey: composerOwnerKey,
+                    text: draft.text,
+                    cursor,
+                    word: promptSnippetWordAtCursor(draft.text, cursor),
+                  });
+                }}
                 onPickMedia={props.onPickDraftMedia}
                 onPickFiles={props.onPickDraftFiles}
               />

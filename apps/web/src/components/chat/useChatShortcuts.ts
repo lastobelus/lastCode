@@ -65,7 +65,13 @@ export function useChatShortcuts(input: ChatShortcutsInput) {
       event.stopPropagation();
       return;
     }
-    if (!input.enabled || isCommandPaletteOpen() || isInSideChatPane(event.target)) return;
+    if (
+      !input.enabled ||
+      isCommandPaletteOpen() ||
+      isInSideChatPane(event.target) ||
+      document.querySelector("[data-prompt-snippets]")
+    )
+      return;
     const terminalFocusOwner = getTerminalFocusOwner();
     if (event.defaultPrevented && terminalFocusOwner === null) return;
     const shortcutContext = input.getShortcutContext(event.target);
