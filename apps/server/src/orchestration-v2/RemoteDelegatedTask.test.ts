@@ -311,6 +311,23 @@ it.layer(layerTest)("a delegated task in a linked environment", (it) => {
         );
         yield* orchestrator.dispatch({
           type: "delegated_task.remote.interaction",
+          commandId: CommandId.make(`command:approval:question:${parentKind}`),
+          parentThreadId: parent.threadId,
+          taskId: task.id,
+          interaction: {
+            pendingApproval,
+            hasPendingQuestion: true,
+            pendingQuestionIds: [RuntimeRequestId.make("question:with-approval")],
+          },
+        });
+        const changed = yield* orchestrator.getThreadProjection(parent.threadId);
+        assert.equal(
+          changed.messages.filter((message) => message.text.includes("waiting for approval"))
+            .length,
+          2,
+        );
+        yield* orchestrator.dispatch({
+          type: "delegated_task.remote.interaction",
           commandId: CommandId.make(`command:approval:clear:${parentKind}`),
           parentThreadId: parent.threadId,
           taskId: task.id,
@@ -320,7 +337,7 @@ it.layer(layerTest)("a delegated task in a linked environment", (it) => {
         assert.equal(cleared.subagents[0]?.remoteChild?.interaction?.pendingApproval, null);
         assert.equal(cleared.subagents[0]?.result, null);
         assert.equal(cleared.subagents[0]?.status, "running");
-        assert.equal(cleared.messages.length, blocked.messages.length);
+        assert.equal(cleared.messages.length, changed.messages.length);
         assert.equal(cleared.runs.find((run) => run.id === notice.id)?.status, "cancelled");
         yield* orchestrator.dispatch({
           type: "delegated_task.remote.interaction",

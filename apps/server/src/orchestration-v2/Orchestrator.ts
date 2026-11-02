@@ -10229,9 +10229,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           type: "message.dispatch",
           commandId: command.commandId,
           threadId: command.parentThreadId,
-          messageId: MessageId.make(
-            `remote-interaction:${task.id}:${approval?.requestId ?? command.commandId}`,
-          ),
+          messageId: MessageId.make(`remote-interaction:${task.id}:${command.commandId}`),
           text,
           attachments: [],
           createdBy: "agent",
