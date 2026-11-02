@@ -6,7 +6,13 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 
-import { cachedTestTasks, matchesTestPath } from "./cached-tests.ts";
+import {
+  advisoryRuntimeIdentity,
+  cacheSummaryPaths,
+  cachedTestTasks,
+  isolateAdvisoryCache,
+  matchesTestPath,
+} from "./cached-tests.ts";
 
 describe("cachedTestTasks", () => {
   it("selects every test for a checkout-root path", () => {
@@ -59,10 +65,43 @@ describe("cachedTestTasks", () => {
     expect(cachedTestTasks(undefined)).toEqual({});
   });
 
+  it("isolates advisory summaries and refuses overlapping ownership", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "advisory-summary-"));
+    try {
+      const shared = NodePath.join(directory, "shared/v18");
+      const isolated = NodePath.join(directory, "advisory");
+      await NodeFSP.mkdir(shared, { recursive: true });
+      await NodeFSP.mkdir(NodePath.join(isolated, "v18"), { recursive: true });
+      await NodeFSP.writeFile(NodePath.join(shared, "last-summary.json"), "unrelated");
+      await NodeFSP.writeFile(NodePath.join(isolated, "v18/last-summary.json"), "stale");
+      const release = isolateAdvisoryCache(isolated);
+      try {
+        expect(cacheSummaryPaths(isolated)).toEqual([]);
+        expect(() => isolateAdvisoryCache(isolated)).toThrow();
+        const receipt = NodePath.join(isolated, "v18/last-summary.json");
+        await NodeFSP.writeFile(receipt, "current");
+        expect(cacheSummaryPaths(isolated)).toEqual([receipt]);
+        expect(await NodeFSP.readFile(NodePath.join(shared, "last-summary.json"), "utf8")).toBe(
+          "unrelated",
+        );
+      } finally {
+        release();
+      }
+      isolateAdvisoryCache(isolated)();
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("reuses individual results, invalidates filesystem inputs, and never caches failures", async () => {
     const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "cached-tests-"));
     const root = NodePath.resolve(import.meta.dirname, "../..");
-    const run = (files = ["a.test.ts", "b.test.ts"], uncached: Array<string> = []) =>
+    const run = (
+      files = ["a.test.ts", "b.test.ts"],
+      uncached: Array<string> = [],
+      environment = "first",
+      runtime = advisoryRuntimeIdentity(),
+    ) =>
       new Promise<number | null>((resolve, reject) => {
         const child = NodeChildProcess.spawn(
           process.execPath,
@@ -73,7 +112,13 @@ describe("cachedTestTasks", () => {
               ...process.env,
               NODE_OPTIONS: "",
               VP_REMOTE_CACHE: "off",
-              T3_CACHED_TESTS: JSON.stringify({ files, groupSize: 1, uncached }),
+              CACHE_PILOT_ENV: environment,
+              T3_CACHED_TESTS: JSON.stringify({
+                files,
+                groupSize: 1,
+                uncached,
+                advisoryRuntime: runtime,
+              }),
               VITE_CACHE_PATH: NodePath.join(directory, "cache"),
               PATH: `${NodePath.join(root, "node_modules/.bin")}${NodePath.delimiter}${process.env.PATH}`,
             },
@@ -103,13 +148,15 @@ describe("cachedTestTasks", () => {
       );
       await NodeFSP.writeFile(
         NodePath.join(directory, "a.test.ts"),
-        'import {test,expect} from "vite-plus/test"; import {readFileSync} from "node:fs"; test("fixture",()=>expect(readFileSync("fixture.txt","utf8")).toMatch(/^hello/));',
+        'import {test,expect} from "vite-plus/test"; import {readFileSync} from "node:fs"; import {value} from "./source.ts"; test("fixture",()=>{expect(value).toBe(1);expect(process.env.CACHE_PILOT_ENV).toMatch(/first|second/);expect(readFileSync(readFileSync("selector.txt","utf8"),"utf8")).toMatch(/^hello/)});',
       );
       await NodeFSP.writeFile(
         NodePath.join(directory, "b.test.ts"),
         'import {test,expect} from "vite-plus/test"; test("independent",()=>expect(1).toBe(1));',
       );
       await NodeFSP.writeFile(NodePath.join(directory, "fixture.txt"), "hello");
+      await NodeFSP.writeFile(NodePath.join(directory, "source.ts"), "export const value = 1;");
+      await NodeFSP.writeFile(NodePath.join(directory, "selector.txt"), "fixture.txt");
       expect(await run()).toBe(0);
       expect(await run()).toBe(0);
       expect(await summary()).toBe(2);
@@ -117,6 +164,27 @@ describe("cachedTestTasks", () => {
       expect(await summary()).toBe(1);
       expect(await run()).toBe(0);
       expect(await summary()).toBe(2);
+      expect(await run(undefined, [], "second")).toBe(0);
+      expect(await summary()).toBe(0);
+      expect(
+        await run(
+          undefined,
+          [],
+          "first",
+          advisoryRuntimeIdentity({ ...process.versions, node: "changed" }),
+        ),
+      ).toBe(0);
+      expect(await summary()).toBe(0);
+      expect(await run()).toBe(0);
+      expect(await run()).toBe(0);
+      expect(await summary()).toBe(2);
+      await NodeFSP.writeFile(NodePath.join(directory, "source.ts"), "export const value = 2;");
+      expect(await run()).toBe(1);
+      await NodeFSP.writeFile(NodePath.join(directory, "source.ts"), "export const value = 1;");
+      await NodeFSP.writeFile(NodePath.join(directory, "other.txt"), "broken");
+      await NodeFSP.writeFile(NodePath.join(directory, "selector.txt"), "other.txt");
+      expect(await run()).toBe(1);
+      await NodeFSP.writeFile(NodePath.join(directory, "selector.txt"), "fixture.txt");
       await NodeFSP.writeFile(NodePath.join(directory, "fixture.txt"), "hello changed");
       expect(await run()).toBe(0);
       expect(await summary()).toBe(1);

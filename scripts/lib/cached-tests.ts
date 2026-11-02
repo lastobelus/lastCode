@@ -1,3 +1,4 @@
+/* oxlint-disable t3code/no-global-process-runtime -- Vite loads task definitions before an Effect runtime exists. */
 // @effect-diagnostics nodeBuiltinImport:off - Vite loads this before dependency installation and service initialization.
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
@@ -11,8 +12,40 @@ interface CachedTestTask {
     | false
     | {
         input: Array<string | { auto: true }>;
+        env?: Array<string>;
         output: Array<string>;
       };
+}
+
+export function cacheSummaryPaths(cacheRoot: string) {
+  return NodeFS.existsSync(cacheRoot)
+    ? NodeFS.readdirSync(cacheRoot, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => NodePath.join(cacheRoot, entry.name, "last-summary.json"))
+        .filter((file) => NodeFS.existsSync(file))
+    : [];
+}
+
+export function isolateAdvisoryCache(cacheRoot: string) {
+  NodeFS.mkdirSync(cacheRoot, { recursive: true });
+  const lock = NodePath.join(cacheRoot, "advisory.lock");
+  // This namespace belongs only to serial advisory invocations, including hit audits.
+  const descriptor = NodeFS.openSync(lock, "wx");
+  NodeFS.closeSync(descriptor);
+  const release = () => NodeFS.rmSync(lock, { force: true });
+  try {
+    for (const file of cacheSummaryPaths(cacheRoot)) NodeFS.unlinkSync(file);
+  } catch (error) {
+    release();
+    throw error;
+  }
+  return release;
+}
+
+export function advisoryRuntimeIdentity(versions = process.versions) {
+  return NodeCrypto.createHash("sha256")
+    .update(JSON.stringify([process.platform, process.arch, process.execPath, versions]))
+    .digest("hex");
 }
 
 export function matchesTestPath(file: string, filters: Array<string>) {
@@ -39,6 +72,13 @@ export function cachedTestTasks(
     request.groupSize < 1
   ) {
     throw new Error("Invalid cached test request");
+  }
+  const advisoryRuntime = "advisoryRuntime" in request ? request.advisoryRuntime : undefined;
+  if (
+    advisoryRuntime !== undefined &&
+    (typeof advisoryRuntime !== "string" || !/^[a-f0-9]{64}$/.test(advisoryRuntime))
+  ) {
+    throw new Error("Invalid advisory runtime identity");
   }
   const uncached = "uncached" in request ? request.uncached : [];
   if (!Array.isArray(uncached) || !uncached.every((file) => typeof file === "string")) {
@@ -95,11 +135,12 @@ export function cachedTestTasks(
     for (const group of groups) {
       const key = NodeCrypto.createHash("sha256").update(group.join("\0")).digest("hex");
       tasks[`test-cache:${key}`] = {
-        command: `${command} ${group.map((file) => `'${NodePath.relative(directory, NodePath.join(root, file)).replaceAll("'", "'\"'\"'")}'`).join(" ")}`,
+        command: `${advisoryRuntime ? `env T3_ADVISORY_RUNTIME=${advisoryRuntime} ` : ""}${command} ${group.map((file) => `'${NodePath.relative(directory, NodePath.join(root, file)).replaceAll("'", "'\"'\"'")}'`).join(" ")}`,
         ...(directory === root ? {} : { cwd: NodePath.relative(root, directory) }),
         cache: uncached.includes(group[0]!)
           ? false
           : {
+              ...(advisoryRuntime ? { env: ["*", "!T3_CACHED_TESTS"] } : {}),
               // Vitest reads and rewrites these caches while running otherwise unchanged tests.
               input: [
                 { auto: true },
