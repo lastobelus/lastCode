@@ -23,6 +23,7 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import {
   hasPromptSnippetDraftChanges,
   resolvePromptSnippetDraft,
+  resolvePromptSnippetLibrary,
   type PromptSnippetDraft,
 } from "./promptSnippetDraft";
 
@@ -36,6 +37,7 @@ export function PromptSnippetSheet(props: {
   const [mode, setMode] = useState<"search" | "edit">("search");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, PromptSnippetDraft>>({});
+  const [saved, setSaved] = useState<ReadonlyArray<PromptSnippet>>([]);
   const [saving, setSaving] = useState(false);
   const [sheetVersion, setSheetVersion] = useState(0);
   const [wide, setWide] = useState(false);
@@ -64,9 +66,11 @@ export function PromptSnippetSheet(props: {
     promptSnippetsEnvironment.discover.permissionAtom(props.environmentId),
   );
   const [refreshing, setRefreshing] = useState(false);
-  const results = searchPromptSnippets(state.data?.snippets ?? [], query);
+  const { snippets, pendingSaves } = resolvePromptSnippetLibrary(state.data?.snippets ?? [], saved);
+  if (pendingSaves.length !== saved.length) setSaved(pendingSaves);
+  const results = searchPromptSnippets(snippets, query);
 
-  const selected = state.data?.snippets.find((snippet) => snippet.id === selectedId);
+  const selected = snippets.find((snippet) => snippet.id === selectedId);
   const draft = resolvePromptSnippetDraft(
     selected,
     selectedId === null ? undefined : drafts[selectedId],
@@ -230,7 +234,9 @@ export function PromptSnippetSheet(props: {
                         environmentId: props.environmentId,
                         input: { snippetId: snippet.id },
                       }).then((result) => {
-                        if (AsyncResult.isSuccess(result)) setDismissed(snippet.id);
+                        if (!AsyncResult.isSuccess(result)) return;
+                        setSaved((current) => current.filter((entry) => entry.id !== snippet.id));
+                        setDismissed(snippet.id);
                       });
                     }}
                   />
@@ -295,6 +301,10 @@ export function PromptSnippetSheet(props: {
                       })
                         .then((result) => {
                           if (!AsyncResult.isSuccess(result)) return;
+                          setSaved((current) => [
+                            ...current.filter((entry) => entry.id !== result.value.id),
+                            result.value,
+                          ]);
                           setDrafts((current) => {
                             const next = { ...current };
                             delete next[id];
