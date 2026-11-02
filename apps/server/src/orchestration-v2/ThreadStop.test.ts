@@ -755,6 +755,144 @@ it.effect.each([false, true])(
     }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect.each(["waiting", "transferred-active", "transferred-ended"] as const)(
+  "owned Action cancellation stops exact descendants without stopping another round (%s)",
+  (state) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const sql = yield* SqlClient.SqlClient;
+      const now = yield* DateTime.now;
+      const parentThreadId = ThreadId.make("thread:action-cancel-parent");
+      yield* createWatchingThread(parentThreadId, 602);
+      yield* send(parentThreadId, "parent", "start_immediately");
+      const threadId = yield* delegate(parentThreadId, "owned Action task");
+      const task = (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+        (row) => row.childThreadId === threadId,
+      )!;
+      const source = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+      const sourceChild = yield* delegate(threadId, "source nested task");
+      const grandchild = yield* delegate(sourceChild, "owned grandchild");
+      const owner = {
+        parentEnvironmentId: EnvironmentId.make("environment:local"),
+        parentThreadId,
+        taskId: task.id,
+        sourceRunId: source.id,
+      };
+      const obligation = {
+        actionRunId: "action:owned-cancellation",
+        messageId: MessageId.make("action-resume:owned-cancellation:follow-up"),
+        owner,
+        state: "waiting" as const,
+      };
+      yield* projections.apply({
+        id: EventId.make("action-cancel-source-ended"),
+        type: "run.updated",
+        threadId,
+        runId: source.id,
+        occurredAt: now,
+        payload: {
+          ...source,
+          status: "completed",
+          completedAt: now,
+          actionObligations: [obligation],
+        },
+      });
+      const ownedChildren = [sourceChild, grandchild];
+      if (state !== "waiting") {
+        yield* send(threadId, "Action continuation", "start_immediately");
+        const continuation = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)!;
+        yield* projections.apply({
+          id: EventId.make("action-cancel-source-transferred"),
+          type: "run.updated",
+          threadId,
+          runId: source.id,
+          occurredAt: now,
+          payload: {
+            ...source,
+            status: "completed",
+            completedAt: now,
+            actionObligations: [
+              { ...obligation, state: "transferred", continuationRunId: continuation.id },
+            ],
+          },
+        });
+        yield* projections.apply({
+          id: EventId.make("action-cancel-continuation-owner"),
+          type: "run.updated",
+          threadId,
+          runId: continuation.id,
+          occurredAt: now,
+          payload: { ...continuation, delegatedTaskId: task.id },
+        });
+        ownedChildren.push(yield* delegate(threadId, "continuation nested task"));
+        if (state === "transferred-ended") {
+          yield* projections.apply({
+            id: EventId.make("action-cancel-continuation-ended"),
+            type: "run.updated",
+            threadId,
+            runId: continuation.id,
+            occurredAt: now,
+            payload: {
+              ...continuation,
+              delegatedTaskId: task.id,
+              status: "completed",
+              completedAt: now,
+            },
+          });
+        }
+      }
+      const unrelated =
+        state === "transferred-active"
+          ? undefined
+          : yield* Effect.gen(function* () {
+              yield* send(threadId, "unrelated round", "start_immediately");
+              return yield* delegate(threadId, "unrelated nested task");
+            });
+      const before = yield* orchestrator.getThreadProjection(threadId);
+      const unrelatedBefore = unrelated === undefined ? undefined : yield* threadState(unrelated);
+      const ownedRunIds = new Set(
+        before.runs.filter((run) => run.delegatedTaskId === task.id).map((run) => run.id),
+      );
+      const expectedTaskIds = before.subagents
+        .filter((nested) => nested.runId !== null && ownedRunIds.has(nested.runId))
+        .map((nested) => nested.id);
+      const commandId = CommandId.make("cancel-owned-action-descendants");
+      yield* orchestrator.dispatch({
+        type: "subagent.stop",
+        commandId,
+        threadId: parentThreadId,
+        runId: task.runId!,
+        subagentId: task.id,
+      });
+      const effects = yield* sql<{ readonly request_json: string }>`
+        SELECT payload_json AS request_json FROM orchestration_v2_effect_outbox
+        WHERE command_id=${commandId} AND effect_type='delegated-tasks.stop'
+      `;
+      assert.lengthOf(effects, 1);
+      const request = decodeEffectRequest(effects[0]!.request_json);
+      assert.equal(request.type, "delegated-tasks.stop");
+      if (request.type !== "delegated-tasks.stop") return;
+      assert.deepEqual(request.taskIds, expectedTaskIds);
+      yield* threads.stopDelegatedTasks({ threadId, commandId, taskIds: request.taskIds! });
+      for (const childThreadId of ownedChildren) {
+        assert.deepEqual((yield* threadState(childThreadId)).runs, ["interrupted"]);
+      }
+      if (unrelated !== undefined) {
+        assert.deepEqual(yield* threadState(unrelated), unrelatedBefore);
+        const after = yield* orchestrator.getThreadProjection(threadId);
+        assert.deepEqual(after.runs.at(-1), before.runs.at(-1));
+      }
+      assert.equal(
+        (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+          (row) => row.id === task.id,
+        )?.status,
+        "cancelled",
+      );
+    }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("a repeated Stop that changes nothing still stops the delegated tasks", () =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;

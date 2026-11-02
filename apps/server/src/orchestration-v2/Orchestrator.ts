@@ -13153,12 +13153,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       subagent.runId === command.runId
     ) {
       const childThreadId = subagent.childThreadId;
-      const child = yield* projectionStore.getThreadRecords(childThreadId, ["runs"]).pipe(
-        Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.succeed(null) }),
-        Effect.mapError(
-          (cause) => new OrchestratorProjectionError({ threadId: childThreadId, cause }),
-        ),
-      );
+      const child = yield* projectionStore
+        .getThreadRecords(childThreadId, ["runs", "subagents"])
+        .pipe(
+          Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.succeed(null) }),
+          Effect.mapError(
+            (cause) => new OrchestratorProjectionError({ threadId: childThreadId, cause }),
+          ),
+        );
       const ownsObligation = (
         source: OrchestrationV2Run,
         row: NonNullable<OrchestrationV2Run["actionObligations"]>[number],
@@ -13244,6 +13246,28 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             yield* dispatchRunInterrupt(interrupt, events, effects, true);
           }
         }
+        const ownedRunIds = new Set(
+          child.runs.filter((row) => row.delegatedTaskId === subagent.id).map((row) => row.id),
+        );
+        const taskIds = child.subagents
+          .filter(
+            (task) =>
+              task.origin === "app_owned" &&
+              task.result === null &&
+              task.ownershipReleased !== true &&
+              task.runId !== null &&
+              ownedRunIds.has(task.runId),
+          )
+          .map((task) => task.id);
+        if (taskIds.length > 0)
+          yield* Ref.update(effects, (existing) => [
+            ...existing,
+            delegatedTasksStopEffect({
+              commandId: command.commandId,
+              threadId: childThreadId,
+              taskIds,
+            }),
+          ]);
         const records = yield* loadProjectionForCommand(command, ["nodes", "turnItems"], {
           turnItemTypes: ["subagent"],
           turnItemRunIds: [subagent.runId],
