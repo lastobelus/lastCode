@@ -342,6 +342,7 @@ function launcherFixture() {
     import path from 'node:path';
     const args = process.argv.slice(2);
     fs.writeFileSync(path.join(process.env.RECORDS, process.pid + '.json'), JSON.stringify({ args, cwd: process.cwd() }));
+    if (process.env.FAIL_STEP === 'mutate' && args[0] === 'lint') fs.appendFileSync(args[1], '// concurrent edit\\n');
     console.log('fixture stdout: ' + args[0]);
     console.error('fixture stderr: ' + args[0]);
     process.exit(args[0] === process.env.FAIL_STEP ? 23 : 0);
@@ -387,8 +388,12 @@ function launcherFixture() {
     root,
     source,
     write,
-    run(failStep = "") {
-      return NodeChildProcess.spawnSync(process.execPath, ["scripts/check-changed.ts", "HEAD"], {
+    git: (...args: Array<string>) =>
+      git(...args)
+        .toString()
+        .trim(),
+    run(failStep = "", args = ["HEAD"]) {
+      return NodeChildProcess.spawnSync(process.execPath, ["scripts/check-changed.ts", ...args], {
         cwd: root,
         encoding: "utf8",
         env: { ...env, TEMP: NodeOS.tmpdir(), RECORDS: records, FAIL_STEP: failStep },
@@ -441,6 +446,110 @@ it.each(["install", "lint"])("reports a failing %s step with its output", (step)
   expect(result.stdout + result.stderr).toContain(`fixture stderr: ${step}`);
   expect(result.stdout).toContain(step === "install" ? "FAIL  unused patches" : "FAIL  lint");
   if (step === "lint") expect(result.stdout).toContain("pass  unused patches");
+  expect(
+    NodeFS.existsSync(NodePath.join(project.root, "node_modules/.cache/check-changed.json")),
+  ).toBe(false);
+});
+
+it("checks every integrated repair against a pinned snapshot across rewritten carry history", () => {
+  using project = launcherFixture();
+  const baseline = project.git("rev-parse", "HEAD");
+  const rewritten = project.git("commit-tree", "HEAD^{tree}", "-m", "compiled carry snapshot");
+  project.git("checkout", "-B", "compiled", rewritten);
+  project.write(project.source, "export const value = 2;\n");
+  project.git("add", ".");
+  project.git("commit", "-m", "first integrated repair");
+  project.git("checkout", "-b", "delegated-repair");
+  const delegated = "packages/example/delegated.ts";
+  project.write(delegated, "export const repaired = true;\n");
+  project.git("add", ".");
+  project.git("commit", "-m", "delegated repair");
+  project.git("checkout", "compiled");
+  const final = "packages/example/final.ts";
+  project.write(final, "export const finalRepair = true;\n");
+  project.git("add", ".");
+  project.git("commit", "-m", "last child repair");
+  project.git("merge", "--no-ff", "delegated-repair", "-m", "integrate repair batch");
+  const candidate = project.git("rev-parse", "HEAD");
+  // A last-patch check omits the earlier repair; these endpoints have no merge base.
+  expect(project.git("diff", "--name-only", "HEAD^", "HEAD")).not.toContain(project.source);
+  const result = project.run("", ["--baseline", baseline, "--candidate", candidate]);
+  expect(result.status, result.stdout + result.stderr).toBe(0);
+  expect(result.stdout).toContain(baseline);
+  expect(result.stdout).toContain(candidate);
+  const calls = project.calls();
+  expect(calls.find(({ args }) => args[0] === "lint")?.args).toEqual([
+    "lint",
+    delegated,
+    final,
+    project.source,
+  ]);
+  expect(calls.find(({ args }) => args[0] === "fmt")?.args).toEqual([
+    "fmt",
+    "--check",
+    "--no-error-on-unmatched-pattern",
+    delegated,
+    final,
+    project.source,
+  ]);
+  expect(calls.some(({ args }) => args.includes("typecheck") && args.includes("example"))).toBe(
+    true,
+  );
+});
+
+it.each([
+  ["missing candidate", ["--baseline", "HEAD"], "use --baseline and --candidate together"],
+  ["missing baseline", ["--candidate", "HEAD"], "use --baseline and --candidate together"],
+  [
+    "positional ref",
+    ["HEAD", "--baseline", "HEAD", "--candidate", "HEAD"],
+    "without a positional ref",
+  ],
+  ["invalid baseline", ["--baseline", "missing-commit", "--candidate", "HEAD"], "git rev-parse"],
+  ["invalid candidate", ["--baseline", "HEAD", "--candidate", "missing-commit"], "git rev-parse"],
+])("rejects %s before running checks", (_name, args, message) => {
+  using project = launcherFixture();
+  const result = project.run("", args);
+  expect(result.status, result.stdout + result.stderr).toBe(1);
+  expect(result.stdout + result.stderr).toContain(message);
+  expect(project.calls()).toEqual([]);
+});
+
+it.each(["tracked", "untracked", "wrong HEAD", "rebase", "merge"])(
+  "rejects an incomplete candidate: %s",
+  (kind) => {
+    using project = launcherFixture();
+    const candidate = project.git("rev-parse", "HEAD");
+    if (kind === "tracked") project.write(project.source, "export const value = 2;\n");
+    if (kind === "untracked") project.write("unfinished.ts", "unfinished\n");
+    if (kind === "wrong HEAD") {
+      project.git("commit", "--allow-empty", "-m", "another candidate");
+    }
+    if (kind === "rebase") project.write(".git/rebase-merge/head-name", "refs/heads/compiled");
+    if (kind === "merge") project.write(".git/MERGE_HEAD", candidate + "\n");
+    const result = project.run("", ["--baseline", candidate, "--candidate", candidate]);
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    expect(result.stdout + result.stderr).toContain(
+      kind === "wrong HEAD"
+        ? "is not checkout HEAD"
+        : kind === "rebase" || kind === "merge"
+          ? "finish the pending Git operation"
+          : "requires a clean checkout",
+    );
+    expect(project.calls()).toEqual([]);
+  },
+);
+
+it("rejects a candidate changed while the checks run", () => {
+  using project = launcherFixture();
+  const baseline = project.git("rev-parse", "HEAD");
+  project.write(project.source, "export const value = 2;\n");
+  project.git("add", ".");
+  project.git("commit", "-m", "integrated repair");
+  const candidate = project.git("rev-parse", "HEAD");
+  const result = project.run("mutate", ["--baseline", baseline, "--candidate", candidate]);
+  expect(result.status, result.stdout + result.stderr).toBe(1);
+  expect(result.stdout + result.stderr).toContain("requires a clean checkout");
   expect(
     NodeFS.existsSync(NodePath.join(project.root, "node_modules/.cache/check-changed.json")),
   ).toBe(false);
