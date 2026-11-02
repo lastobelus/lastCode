@@ -1,0 +1,4 @@
+interface:
+  display_name: "User Report"
+  short_description: "Context-rich reports for persistent coordinators"
+  default_prompt: "Use $user-report to rewrite the last report so it identifies the work, the people or tools involved, the outcome, and any action I need to take."
