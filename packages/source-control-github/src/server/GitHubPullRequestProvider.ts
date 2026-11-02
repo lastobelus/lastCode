@@ -528,19 +528,21 @@ export const make = Effect.gen(function* () {
             commits: (reviewThreads.commits.length > 0
               ? reviewThreads.commits
               : pullRequest.commits
-            ).map((commit) => ({
-              ...commit,
-              ...commitStats.get(commit.oid),
-              authors: commit.authors?.map(
-                (author) =>
-                  withAvatar(
-                    author,
-                    reviewThreads.avatarsByLogin,
-                    input.host,
-                    reviewThreads.botLogins,
-                  ) ?? author,
-              ),
-            })),
+            ).map((commit) => {
+              return {
+                ...commit,
+                ...commitStats.get(commit.oid),
+                authors: commit.authors?.map(
+                  (author) =>
+                    withAvatar(
+                      author,
+                      reviewThreads.avatarsByLogin,
+                      input.host,
+                      reviewThreads.botLogins,
+                    ) ?? author,
+                ),
+              };
+            }),
             comments: [...pullRequest.comments, ...reviewThreads.comments]
               .map((comment) => ({
                 ...comment,
@@ -561,8 +563,8 @@ export const make = Effect.gen(function* () {
                 editedAt: reviewThreads.editedAtById.get(comment.id) ?? comment.editedAt ?? null,
               }))
               .toSorted((left, right) => left.createdAt.localeCompare(right.createdAt)),
-            commentCount: pullRequest.comments.length + reviewThreads.commentCount,
-            commentsTruncated: reviewThreads.truncated,
+            commentCount: pullRequest.commentCount + reviewThreads.commentCount,
+            commentsTruncated: pullRequest.truncated || reviewThreads.truncated,
             reviewThreadsTruncated: reviewThreads.reviewThreadsTruncated,
             reviewThreads: reviewThreads.reviewThreads.map((thread) => ({
               ...thread,
