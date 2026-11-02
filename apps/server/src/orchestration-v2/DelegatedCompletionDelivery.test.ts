@@ -3996,6 +3996,22 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
                 { taskId, clientRequestId: `cancel-${round}` },
               );
               assert.equal(result.status, "cancel_requested");
+              const repeated = yield* mcp.cancelTask(
+                {
+                  environmentId: EnvironmentId.make("test-environment"),
+                  requestNamespace: `cancel-${round}`,
+                  thread: {
+                    threadId: parentThreadId,
+                    providerSessionId: "test-session",
+                    providerInstanceId: modelSelection.instanceId,
+                  },
+                  client: undefined,
+                  capabilities: new Set(["orchestration"]),
+                  issuedAt: 1,
+                },
+                { taskId, clientRequestId: `cancel-${round}` },
+              );
+              assert.equal(repeated.status, "cancelled");
             }).pipe(
               Effect.provide(
                 OrchestratorMcp.layer.pipe(

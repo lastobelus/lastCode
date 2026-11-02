@@ -2778,6 +2778,17 @@ const make = Effect.gen(function* () {
                   ),
                 ),
               );
+      // A terminal logical task is not authority to stop another round in its child.
+      if (
+        parentTask !== undefined &&
+        (parentTask.status === "completed" ||
+          parentTask.status === "failed" ||
+          parentTask.status === "cancelled" ||
+          parentTask.status === "interrupted")
+      ) {
+        yield* disposeCompletionDelivery;
+        return { taskId: input.taskId, status: parentTask.status };
+      }
       const child = yield* loadProjection(childThreadId);
       const ownsActionContinuation =
         parentTask?.runId != null &&
