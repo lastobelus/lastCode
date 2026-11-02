@@ -175,6 +175,12 @@ describe("searchSettings", () => {
       hasThreadAutoSettlement: false,
     });
 
+    expect(SETTINGS_NAV_GROUPS.flatMap((group) => group.paths)).toContain("/settings/connect");
+    expect(searchSettings("connect account sign in", available)).toContainEqual(
+      expect.objectContaining({ id: "connect-account", to: "/settings/connect" }),
+    );
+    expect(getSettingsSearchTargetScope("connect-account")?.scope).toBeNull();
+
     const gatedIds = new Set<string>([
       "follow-change-request-templates",
       "git-fetch-interval",

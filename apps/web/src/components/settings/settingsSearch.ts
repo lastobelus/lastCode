@@ -31,6 +31,7 @@ export type SettingsPath =
   | "/settings/scheduled-tasks"
   | "/settings/source-control"
   | "/settings/worktrees"
+  | "/settings/connect"
   | "/settings/connections"
   | "/settings/access"
   | "/settings/secrets"
@@ -102,6 +103,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/scheduled-tasks": "Scheduled tasks",
   "/settings/source-control": "Source control",
   "/settings/worktrees": "Worktrees",
+  "/settings/connect": "T3 Connect",
   "/settings/connections": "Environments",
   "/settings/access": "Sharing & access",
   "/settings/secrets": "Secrets",
@@ -145,6 +147,7 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<{
   {
     heading: "Connections",
     paths: [
+      "/settings/connect",
       "/settings/connections",
       "/settings/access",
       ...(isSecretsFeatureEnabled ? (["/settings/secrets"] as const) : []),
@@ -224,6 +227,12 @@ const SOURCE_CONTROL_HOST_TERMS = sourceControlClients.definitions
   .join(" ");
 
 export const SETTINGS_SEARCH_ITEMS = [
+  {
+    id: "connect-account",
+    title: "T3 Connect account",
+    to: "/settings/connect",
+    searchTerms: ["account sign in login log in sign out logout manage profile authentication"],
+  },
   {
     id: "storage-suspension-policy",
     targetId: "storage-suspension",
@@ -1428,6 +1437,7 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   "/settings/devices": null,
   "/settings/source-control": "environment-defaults",
   "/settings/worktrees": "project-defaults",
+  "/settings/connect": null,
   "/settings/connections": "connections",
   "/settings/access": "connections",
   "/settings/secrets": null,
