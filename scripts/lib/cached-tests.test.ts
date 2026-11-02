@@ -88,6 +88,23 @@ describe("cachedTestTasks", () => {
         release();
       }
       isolateAdvisoryCache(isolated)();
+      for (const signal of ["SIGTERM", "SIGKILL"] as const) {
+        const interrupted = NodeChildProcess.spawnSync(
+          process.execPath,
+          [
+            "--input-type=module",
+            "-e",
+            `import { isolateAdvisoryCache } from ${JSON.stringify(NodeURL.pathToFileURL(NodePath.join(import.meta.dirname, "cached-tests.ts")).href)};
+const release = isolateAdvisoryCache(${JSON.stringify(isolated)});
+process.on("exit", release);
+process.kill(process.pid, ${JSON.stringify(signal)});`,
+          ],
+          { encoding: "utf8", env: { ...process.env, NODE_OPTIONS: "" } },
+        );
+        expect(interrupted.error).toBeUndefined();
+        expect(interrupted.signal).toBe(signal);
+        isolateAdvisoryCache(isolated)();
+      }
     } finally {
       await NodeFSP.rm(directory, { recursive: true, force: true });
     }

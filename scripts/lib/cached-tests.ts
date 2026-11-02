@@ -4,6 +4,8 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
+import { acquirePortableLock } from "../lastcode-lock.mjs";
+
 interface CachedTestTask {
   command: string;
   cwd?: string;
@@ -27,12 +29,8 @@ export function cacheSummaryPaths(cacheRoot: string) {
 }
 
 export function isolateAdvisoryCache(cacheRoot: string) {
-  NodeFS.mkdirSync(cacheRoot, { recursive: true });
-  const lock = NodePath.join(cacheRoot, "advisory.lock");
   // This namespace belongs only to serial advisory invocations, including hit audits.
-  const descriptor = NodeFS.openSync(lock, "wx");
-  NodeFS.closeSync(descriptor);
-  const release = () => NodeFS.rmSync(lock, { force: true });
+  const release = acquirePortableLock(cacheRoot, "advisory.lock", "advisory cache");
   try {
     for (const file of cacheSummaryPaths(cacheRoot)) NodeFS.unlinkSync(file);
   } catch (error) {
