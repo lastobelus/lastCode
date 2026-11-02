@@ -993,6 +993,15 @@ export type OrchestrationV2SubagentWorkflow = typeof OrchestrationV2SubagentWork
  */
 const DedupedBodyMarker = Schema.optionalKey(Schema.Literal(true));
 
+export const RemoteTaskInteraction = Schema.Struct({
+  hasPendingQuestion: Schema.Boolean,
+  pendingQuestionIds: Schema.optional(Schema.Array(RuntimeRequestId)),
+  pendingApproval: Schema.NullOr(
+    Schema.Struct({ requestId: RuntimeRequestId, kind: ProviderRequestKind, runId: RunId }),
+  ),
+});
+export type RemoteTaskInteraction = typeof RemoteTaskInteraction.Type;
+
 /**
  * Where an app-owned task runs when it runs in a linked environment instead
  * of in a child thread here: that environment and the ordinary thread it runs
@@ -1006,6 +1015,7 @@ export const OrchestrationV2RemoteTaskChild = Schema.Struct({
   runId: Schema.optional(RunId),
   delegation: Schema.optional(RemoteDelegationSelector),
   activationMessageId: Schema.optional(MessageId),
+  interaction: Schema.optional(RemoteTaskInteraction),
   /**
    * Nothing is left to stop there: a stop reached it, was refused for good, or the thread
    * or link is gone. A run ending there by itself sets it too, unless the task here was
@@ -3890,6 +3900,13 @@ const OrchestrationV2InternalCommand = Schema.Union([
     taskId: NodeId,
     remoteChild: OrchestrationV2RemoteTaskChild,
     stage: Schema.Literals(["prepared", "active"]),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("delegated_task.remote.interaction"),
+    commandId: CommandId,
+    parentThreadId: ThreadId,
+    taskId: NodeId,
+    interaction: RemoteTaskInteraction,
   }),
   Schema.Struct({
     type: Schema.Literal("delegated_task.remote.complete"),

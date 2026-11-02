@@ -47,10 +47,10 @@ export function linkedEnvironmentNames(input: {
   );
 }
 
-/** The access a request opens with: the agent's suggestion, else supervised. */
+/** The access a request opens with: the agent's suggestion, else full access. */
 export const linkRequestDefaultAccess = (
   item: Pick<LinkRequestItem, "requestedAccess">,
-): AuthMcpClientAccess => item.requestedAccess ?? "approval-required";
+): AuthMcpClientAccess => item.requestedAccess ?? "full-access";
 
 /** What the card calls the other environment: its own name, else the address asked for. */
 export const linkRequestTargetName = (item: Pick<LinkRequestItem, "label" | "url">): string =>

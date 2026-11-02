@@ -750,6 +750,7 @@ const make = Effect.gen(function* () {
         threadId: remote.threadId,
         ...(remote.runId === undefined ? {} : { runId: remote.runId }),
         ...(remote.delegation === undefined ? {} : { delegation: remote.delegation }),
+        ...(remote.interaction === undefined ? {} : { observedInteraction: remote.interaction }),
         timeoutMs: FOLLOW_WAIT_MS,
         // A thread there whose run ended may still be waiting on its own
         // tasks to wake it for the answer, which a task here waits for too.
@@ -773,6 +774,17 @@ const make = Effect.gen(function* () {
         return yield* new OrchestratorMcpFailure({
           code: "capability_denied",
           message: "Peer did not acknowledge the exact delegation wait.",
+        });
+      }
+      if (waited.interaction !== undefined) {
+        yield* threads.dispatch({
+          type: "delegated_task.remote.interaction",
+          commandId: CommandId.make(
+            `remote-interaction:${taskId}:${yield* crypto.randomUUIDv4().pipe(Effect.orDie)}`,
+          ),
+          parentThreadId,
+          taskId,
+          interaction: waited.interaction,
         });
       }
       if (waited.delegationOutcome === "pending") return false;

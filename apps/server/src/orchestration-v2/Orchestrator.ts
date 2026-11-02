@@ -4,6 +4,7 @@ import {
   remoteDelegationMayStart,
 } from "../peer/remoteOwnership.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import {
   projectComposerContextForProvider,
   replaceComposerContextReferences,
@@ -53,6 +54,7 @@ import {
   type ActionResumeOwner,
   type ChatAttachment,
   CommandId,
+  RemoteTaskInteraction,
   type GuestMessageId,
   isCompactionCommandMessage,
   isOrchestrationV2WorkActive,
@@ -760,6 +762,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
       return command.threadId;
     case "delegated_task.request":
     case "delegated_task.remote.begin":
+    case "delegated_task.remote.interaction":
     case "delegated_task.remote.stage":
     case "delegated_task.remote.request":
     case "delegated_task.remote.complete":
@@ -6782,6 +6785,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
     acceptedThreadReadContext?: OrchestrationV2ConversationMessage["threadReadContext"],
+    continuationSource?: OrchestrationV2Run,
   ) {
     let projection = yield* getProjectionWithPendingEvents(command.threadId, events);
     if (command.manualContinuationOfRunId !== undefined) {
@@ -6962,11 +6966,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     );
     let continuedTaskId =
       (action?.owner.delegationId === undefined ? action?.owner.taskId : undefined) ??
-      restartSource?.delegatedTaskId;
+      restartSource?.delegatedTaskId ??
+      continuationSource?.delegatedTaskId;
     let continuedRemoteDelegation =
-      action?.owner.delegationId === undefined
+      (action?.owner.delegationId === undefined
         ? restartSource?.remoteDelegation
-        : actionSource?.remoteDelegation;
+        : actionSource?.remoteDelegation) ?? continuationSource?.remoteDelegation;
 
     if (projection.thread.archivedAt !== null || projection.thread.deletedAt !== null) {
       return yield* new OrchestratorDispatchError({
@@ -10134,6 +10139,112 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     });
   });
 
+  const cancelQueuedRemoteInteractionNotices = Effect.fn(
+    "orchestrationV2.cancelQueuedRemoteInteractionNotices",
+  )(function* (
+    command: Extract<
+      OrchestrationV2InternalCommand,
+      { readonly type: "delegated_task.remote.interaction" | "delegated_task.remote.complete" }
+    >,
+    runs: ReadonlyArray<OrchestrationV2Run>,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) {
+    for (const run of runs) {
+      if (
+        run.status === "queued" &&
+        run.userMessageId.startsWith(`remote-interaction:${command.taskId}:`)
+      )
+        yield* dispatchQueuedRunCancel(
+          {
+            type: "queued-run.cancel",
+            commandId: command.commandId,
+            threadId: command.parentThreadId,
+            runId: run.id,
+          },
+          events,
+        );
+    }
+  });
+
+  const dispatchRemoteTaskInteraction = Effect.fn("orchestrationV2.dispatch.remoteTaskInteraction")(
+    function* (
+      command: Extract<
+        OrchestrationV2InternalCommand,
+        { readonly type: "delegated_task.remote.interaction" }
+      >,
+      events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+      effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+    ) {
+      const projection = yield* projectionStore
+        .getThreadRecords(command.parentThreadId, ["subagents", "runs"])
+        .pipe(mapDispatchError(command));
+      const task = projection.subagents.find((task) => task.id === command.taskId);
+      if (task?.remoteChild === undefined || task.result !== null || task.origin !== "app_owned")
+        return;
+      if (
+        task.remoteChild.interaction !== undefined &&
+        Schema.toEquivalence(RemoteTaskInteraction)(
+          task.remoteChild.interaction,
+          command.interaction,
+        )
+      )
+        return;
+      yield* cancelQueuedRemoteInteractionNotices(command, projection.runs, events);
+      const now = yield* DateTime.now;
+      const waiting =
+        command.interaction.pendingApproval !== null || command.interaction.hasPendingQuestion;
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "subagent.updated",
+        threadId: command.parentThreadId,
+        nodeId: task.id,
+        ...(task.runId === null ? {} : { runId: task.runId }),
+        occurredAt: now,
+        payload: {
+          ...task,
+          status: waiting ? "waiting" : "running",
+          remoteChild: { ...task.remoteChild, interaction: command.interaction },
+          updatedAt: now,
+        },
+      });
+      const approval = command.interaction.pendingApproval;
+      if (
+        (approval === null && !command.interaction.hasPendingQuestion) ||
+        projection.thread.archivedAt !== null ||
+        projection.thread.deletedAt !== null
+      )
+        return;
+      const sourceRun = projection.runs.find((run) => run.id === task.runId);
+      if (sourceRun !== undefined && !remoteDelegationMayStart(projection.thread, sourceRun))
+        return;
+      const target = formatThreadLink(task.remoteChild, task.title ?? "Remote task");
+      const text =
+        approval === null
+          ? `A delegated task is waiting for an answer in ${target}.`
+          : `A delegated task is waiting for approval in ${target}.`;
+      yield* dispatchMessage(
+        {
+          type: "message.dispatch",
+          commandId: command.commandId,
+          threadId: command.parentThreadId,
+          messageId: MessageId.make(`remote-interaction:${task.id}:${command.commandId}`),
+          text,
+          attachments: [],
+          createdBy: "agent",
+          creationSource: "server",
+          notification: { source: { kind: "subagent" }, outcome: "updated", summary: text },
+          dispatchMode: { type: "queue_after_active" },
+        },
+        events,
+        effects,
+        undefined,
+        sourceRun,
+      );
+    },
+  );
+
   const dispatchRemoteDelegatedTaskComplete = Effect.fn(
     "orchestrationV2.dispatch.remoteDelegatedTaskComplete",
   )(function* (
@@ -10180,6 +10291,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       (command.stopCount ?? 0) !== (task.remoteChild?.stopCount ?? 0)
     )
       return;
+    yield* cancelQueuedRemoteInteractionNotices(command, parentProjection.runs, events);
     const remoteChild =
       command.stoppedThere === undefined
         ? task.remoteChild
@@ -17044,6 +17156,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
         break;
       }
+      case "delegated_task.remote.interaction":
+        yield* dispatchRemoteTaskInteraction(command, events, effects);
+        break;
       case "delegated_task.remote.stage":
         yield* dispatchRemoteDelegatedTaskStage(command, events);
         break;
@@ -17459,6 +17574,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             planned.events.length > 0 ||
             command.type === "remote_delegation.settle" ||
             command.type === "remote_delegation.prepare" ||
+            command.type === "delegated_task.remote.interaction" ||
             command.type === "delegated_task.remote.stage" ||
             command.type === "delegated_task.remote.begin" ||
             command.type === "thread.background-work.settle" ||

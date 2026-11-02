@@ -4,6 +4,7 @@ import { expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
   MessageId,
+  NodeId,
   ProjectId,
   ProviderInstanceId,
   ProviderDriverKind,
@@ -219,6 +220,7 @@ it.effect(
 
 const clientLaunchHarness = (input: {
   readonly runtimeModeCeiling: RuntimeMode;
+  readonly linked?: boolean;
   readonly defaultRuntimeMode?: RuntimeMode;
   readonly fallbackModel?: ModelSelection;
   readonly providers?: readonly ServerProvider[];
@@ -265,6 +267,7 @@ const clientLaunchHarness = (input: {
         sessionId: "session-1",
         label: "Claude Code",
         access: input.runtimeModeCeiling,
+        ...(input.linked === undefined ? {} : { linked: input.linked }),
         webOrigin: input.webOrigin,
       },
       issuedAt: 0,
@@ -347,13 +350,15 @@ it.effect(
           readonly targeted?: false;
           readonly overrideModel?: ModelSelection;
           readonly webOrigin?: string;
+          readonly delegated?: true;
         },
       ) {
-        const { targeted, overrideModel, webOrigin, ...input } = params;
+        const { targeted, overrideModel, webOrigin, delegated, ...input } = params;
         const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
         const { projectId, modelSelection, dependencies } = clientLaunchHarness({
           runtimeModeCeiling,
           defaultRuntimeMode,
+          ...(delegated === undefined ? {} : { linked: delegated }),
           launched,
           ...(overrideModel === undefined ? {} : { overrideModel }),
           ...(webOrigin === undefined ? {} : { webOrigin }),
@@ -366,7 +371,19 @@ it.effect(
           ),
         );
         const result = yield* toolkit
-          .handle("t3_thread_launch", targeted === false ? input : { ...input, projectId })
+          .handle("t3_thread_launch", {
+            ...input,
+            ...(targeted === false ? {} : { projectId }),
+            ...(delegated === true
+              ? {
+                  remotePreparation: {
+                    parentEnvironmentId: EnvironmentId.make("parent-environment"),
+                    parentThreadId: ThreadId.make("parent-thread"),
+                    sourceTaskId: NodeId.make("source-task"),
+                  },
+                }
+              : {}),
+          })
           .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
         return { result: result.at(-1)?.result, launched, projectId, modelSelection };
       });
@@ -382,6 +399,18 @@ it.effect(
       });
       expect(belowCeiling.launched[0]?.runtimeMode).toBe("approval-required");
       expect(belowCeiling.launched[0]?.initialMessage?.senderThreadId).toBeUndefined();
+
+      const delegated = yield* launchWith("full-access", "approval-required", {
+        title: "Delegated task",
+        delegated: true,
+      });
+      expect(delegated.launched[0]?.runtimeMode).toBe("full-access");
+
+      const cappedDelegation = yield* launchWith("auto-accept-edits", "approval-required", {
+        title: "Restricted delegated task",
+        delegated: true,
+      });
+      expect(cappedDelegation.launched[0]?.runtimeMode).toBe("auto-accept-edits");
 
       const aboveCeiling = yield* launchWith("auto-accept-edits", "full-access", {
         title: "Fix",

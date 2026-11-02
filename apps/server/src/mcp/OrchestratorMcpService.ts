@@ -6,6 +6,7 @@ import {
 import { ThreadReadAuthorization } from "../orchestration-v2/ThreadReadAuthorization.ts";
 import {
   CommandId,
+  RemoteTaskInteraction,
   type RunId,
   type EnvironmentId,
   isProviderAvailable,
@@ -523,6 +524,15 @@ function pendingTaskApproval(
       )
       .map((run) => run.id),
   );
+  return pendingApprovalForRuns(child, taskRunIds);
+}
+
+function pendingApprovalForRuns(
+  child: Pick<OrchestrationV2ThreadProjection, "nodes" | "runtimeRequests">,
+  taskRunIds: ReadonlySet<RunId>,
+) {
+  if (child.runtimeRequests.length === 0) return null;
+  const nodeRunIds = new Map(child.nodes.map((node) => [node.id, node.runId]));
   let approval: OrchestratorMcpDelegateTaskResult["pendingApproval"] = null;
   let oldestCreatedAt = Infinity;
   for (const request of child.runtimeRequests) {
@@ -533,7 +543,7 @@ function pendingTaskApproval(
     ) {
       continue;
     }
-    const runId = child.nodes.find((node) => node.id === request.nodeId)?.runId;
+    const runId = nodeRunIds.get(request.nodeId);
     if (runId === undefined || runId === null || !taskRunIds.has(runId)) continue;
     const createdAt = DateTime.toEpochMillis(request.createdAt);
     if (createdAt < oldestCreatedAt) {
@@ -1726,7 +1736,7 @@ const make = Effect.gen(function* () {
       Math.max(1, requestedTimeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS),
     );
     const waited = yield* waitForTask(scope, taskId, timeoutMs);
-    if (Option.isSome(waited)) return waited.value;
+    if (Option.isSome(waited) && isTerminalTaskStatus(waited.value.status)) return waited.value;
     // As for a local task: once the blocking wait ends, a later result wakes the parent.
     yield* threadManagement
       .dispatch({
@@ -1741,7 +1751,7 @@ const make = Effect.gen(function* () {
         completionWake: "always",
       })
       .pipe(Effect.ignoreCause({ log: true }));
-    return yield* readTask(scope, taskId, true, true);
+    return yield* readTask(scope, taskId, Option.isNone(waited), true);
   });
 
   /**
@@ -1756,7 +1766,10 @@ const make = Effect.gen(function* () {
   ): Effect.fn.Return<OrchestratorMcpDelegateTaskResult, OrchestratorMcpFailure> {
     const status: OrchestratorMcpDelegateTaskResult["status"] =
       task.result === null
-        ? "running"
+        ? task.remoteChild?.interaction?.pendingApproval != null ||
+          task.remoteChild?.interaction?.hasPendingQuestion
+          ? "waiting"
+          : "running"
         : task.status === "completed" ||
             task.status === "failed" ||
             task.status === "cancelled" ||
@@ -1827,9 +1840,8 @@ const make = Effect.gen(function* () {
         : null,
       latestTerminalSummary: terminal ? task.result : null,
       latestTerminalResultContextTransferId: null,
-      // Its questions and approvals are answered in the environment it runs in.
-      hasPendingQuestion: false,
-      pendingApproval: null,
+      hasPendingQuestion: !terminal && (task.remoteChild?.interaction?.hasPendingQuestion ?? false),
+      pendingApproval: terminal ? null : (task.remoteChild?.interaction?.pendingApproval ?? null),
       waitTimedOut,
     } satisfies OrchestratorMcpDelegateTaskResult;
   });
@@ -3504,13 +3516,73 @@ const make = Effect.gen(function* () {
             );
           return yield* readAssociation;
         });
+        const readInteraction = Effect.gen(function* () {
+          const records = yield* threadManagement
+            .getThreadRecords(input.threadId, ["runs", "nodes", "runtimeRequests"])
+            .pipe(Effect.mapError(threadManagementFailure));
+          const ownedRuns = records.runs.filter(
+            (run) =>
+              run.remoteDelegation?.delegationId === selector.delegationId &&
+              !ThreadManagementService.isTerminalRunStatus(run.status),
+          );
+          const runIds = new Set(ownedRuns.map((run) => run.id));
+          const nodeRunIds = new Map(records.nodes.map((node) => [node.id, node.runId]));
+          const pendingQuestionIds = records.runtimeRequests
+            .filter((request) => {
+              const runId = nodeRunIds.get(request.nodeId);
+              return (
+                request.kind === "user_input" &&
+                request.status === "pending" &&
+                request.responseCapability.type === "live" &&
+                runId !== undefined &&
+                runId !== null &&
+                runIds.has(runId)
+              );
+            })
+            .map((request) => request.id)
+            .sort();
+          return {
+            hasPendingQuestion: pendingQuestionIds.length > 0,
+            pendingQuestionIds,
+            pendingApproval: pendingApprovalForRuns(records, runIds),
+          };
+        });
+        const changedInteraction = (interaction: RemoteTaskInteraction) =>
+          input.observedInteraction === undefined
+            ? interaction.pendingApproval !== null || interaction.hasPendingQuestion
+            : !Schema.toEquivalence(RemoteTaskInteraction)(interaction, input.observedInteraction);
         let association = yield* evaluate;
-        if (association.stage === "prepared" || association.stage === "active") {
+        let interaction = yield* readInteraction;
+        if (
+          (association.stage === "prepared" || association.stage === "active") &&
+          !changedInteraction(interaction)
+        ) {
           const settled = yield* threadManagement
             .streamStoredEventsFrom({ threadId: input.threadId, afterSequence })
             .pipe(
-              Stream.mapEffect(() => evaluate),
-              Stream.filter((entry) => entry.stage === "settled" || entry.stage === "disposed"),
+              Stream.filter(
+                ({ event }) =>
+                  event.type === "run.created" ||
+                  event.type === "run.updated" ||
+                  event.type === "run.background-work-cancelled" ||
+                  event.type === "runtime-request.updated" ||
+                  event.type === "subagent.updated" ||
+                  event.type === "provider-thread.updated" ||
+                  (event.type === "message.updated" &&
+                    event.payload.notification?.source.kind === "monitor") ||
+                  event.type === "thread.metadata-updated" ||
+                  event.type === "thread.archived" ||
+                  event.type === "thread.deleted",
+              ),
+              Stream.mapEffect(() =>
+                Effect.all({ association: evaluate, interaction: readInteraction }),
+              ),
+              Stream.filter(
+                (entry) =>
+                  entry.association.stage === "settled" ||
+                  entry.association.stage === "disposed" ||
+                  changedInteraction(entry.interaction),
+              ),
               Stream.runHead,
               Effect.timeoutOption(
                 Duration.millis(
@@ -3522,9 +3594,13 @@ const make = Effect.gen(function* () {
               ),
               Effect.mapError(threadManagementFailure),
             );
-          if (Option.isSome(settled) && Option.isSome(settled.value))
-            association = settled.value.value;
-          else association = yield* evaluate;
+          if (Option.isSome(settled) && Option.isSome(settled.value)) {
+            association = settled.value.value.association;
+            interaction = settled.value.value.interaction;
+          } else {
+            association = yield* evaluate;
+            interaction = yield* readInteraction;
+          }
         }
         const pending = association.stage === "prepared" || association.stage === "active";
         return {
@@ -3537,11 +3613,14 @@ const make = Effect.gen(function* () {
               : ("settled" as const),
           runId: association.finalRun?.runId ?? null,
           status: pending
-            ? ("running" as const)
+            ? interaction.pendingApproval !== null || interaction.hasPendingQuestion
+              ? ("waiting" as const)
+              : ("running" as const)
             : association.stage === "disposed"
               ? ("cancelled" as const)
               : association.finalRun!.status,
-          timedOut: pending,
+          interaction,
+          timedOut: pending && !changedInteraction(interaction),
           ...(association.finalRun === undefined ? {} : { resultRun: association.finalRun }),
         };
       }

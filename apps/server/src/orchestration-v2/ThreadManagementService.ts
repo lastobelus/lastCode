@@ -146,6 +146,7 @@ function existingThreadIdsForCommand(
     case "delegated_task.completion-delivery.dispose":
     case "delegated_task.remote.request":
     case "delegated_task.remote.begin":
+    case "delegated_task.remote.interaction":
     case "delegated_task.remote.stage":
     case "delegated_task.remote.complete":
     case "delegated_task.remote.stop":
