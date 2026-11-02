@@ -700,7 +700,9 @@ const make = Effect.gen(function* () {
       next,
       outputTail,
       input.publishShell,
-      input.outcome === "cancelled_by_shutdown" ? "interrupted" : undefined,
+      input.outcome === "cancelled_by_shutdown" || input.outcome === "cancelled_by_archive"
+        ? "interrupted"
+        : undefined,
     );
     const startup = startups.get(current.runId);
     if (startup) yield* Deferred.succeed(startup.stopped, undefined);
@@ -746,7 +748,12 @@ const make = Effect.gen(function* () {
               latest !== null &&
               (latest.delivery === "pending" || latest.delivery === "available")
             ) {
-              yield* persistState({ ...latest, delivery: "disposed" });
+              yield* persistState(
+                { ...latest, delivery: "disposed" },
+                undefined,
+                true,
+                "interrupted",
+              );
               outputCaptureByRunId.delete(latest.runId);
               protocolCaptureByRunId.delete(latest.runId);
             }
@@ -1477,11 +1484,16 @@ const make = Effect.gen(function* () {
           return;
         }
         if (shell.archivedAt !== null) {
-          yield* persistState({
-            ...state,
-            outcome: state.outcome === "running" ? "cancelled_by_archive" : state.outcome,
-            delivery: "disposed",
-          });
+          yield* persistState(
+            {
+              ...state,
+              outcome: state.outcome === "running" ? "cancelled_by_archive" : state.outcome,
+              delivery: "disposed",
+            },
+            undefined,
+            true,
+            "interrupted",
+          );
         } else if (
           (state.delivery === "pending" ||
             state.delivery === "available" ||
