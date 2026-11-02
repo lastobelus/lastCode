@@ -339,26 +339,6 @@ export function PromptSnippetsPicker(props: {
               disabled: saving,
               onKeyDown: (event) => {
                 if (event.nativeEvent.isComposing || event.keyCode === 229) return;
-                if (
-                  mac &&
-                  event.metaKey &&
-                  !event.ctrlKey &&
-                  !event.altKey &&
-                  !event.shiftKey &&
-                  event.key === "Backspace"
-                ) {
-                  (
-                    event as typeof event & { preventBaseUIHandler?: () => void }
-                  ).preventBaseUIHandler?.();
-                  event.preventDefault();
-                  event.stopPropagation();
-                  const input = event.currentTarget;
-                  if (input.selectionStart === input.selectionEnd)
-                    input.setSelectionRange(0, input.selectionStart ?? 0);
-                  // Native editing preserves undo even when a streamed key has no host command.
-                  input.ownerDocument.execCommand("delete");
-                  return;
-                }
                 if (event.key !== "Enter") return;
                 (
                   event as typeof event & { preventBaseUIHandler?: () => void }

@@ -5,7 +5,7 @@ import { page, userEvent } from "vite-plus/test/browser";
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
 import type { PromptSnippet } from "@t3tools/contracts";
 
-import { act, render } from "../../../test/render";
+import { render } from "../../../test/render";
 import { PromptSnippetsPicker } from "./PromptSnippetsDialog";
 
 const snippets: PromptSnippet[] = [
@@ -107,51 +107,6 @@ it("starts with the caret word and owns numbered shortcuts while open", async ()
   await expect
     .element(page.getByRole("combobox", { name: "Search common prompts" }))
     .toHaveValue("rv");
-  const search = page.getByRole("combobox", { name: "Search common prompts" });
-  const input = search.element() as HTMLInputElement;
-  await search.fill("prefix review suffix");
-  // Raw streamed key events can arrive without the host's native editing command.
-  await act(async () => {
-    input.setSelectionRange(7, 7);
-    input.dispatchEvent(
-      new KeyboardEvent("keydown", {
-        key: "Backspace",
-        code: "Backspace",
-        metaKey: true,
-        bubbles: true,
-        cancelable: true,
-      }),
-    );
-  });
-  await expect.element(search).toHaveValue("review suffix");
-  await act(async () => {
-    document.execCommand("undo");
-  });
-  await expect.element(search).toHaveValue("prefix review suffix");
-  await act(async () => {
-    input.setSelectionRange(7, 13);
-    input.dispatchEvent(
-      new KeyboardEvent("keydown", {
-        key: "Backspace",
-        code: "Backspace",
-        metaKey: true,
-        bubbles: true,
-        cancelable: true,
-      }),
-    );
-  });
-  await expect.element(search).toHaveValue("prefix  suffix");
-  const optionBackspace = new KeyboardEvent("keydown", {
-    key: "Backspace",
-    altKey: true,
-    bubbles: true,
-    cancelable: true,
-  });
-  await act(async () => {
-    input.dispatchEvent(optionBackspace);
-  });
-  expect(optionBackspace.defaultPrevented).toBe(false);
-  await search.fill("rv");
   await userEvent.keyboard("{Meta>}9{/Meta}");
   expect(onSelect).not.toHaveBeenCalled();
   await userEvent.keyboard("{Meta>}1{/Meta}");
