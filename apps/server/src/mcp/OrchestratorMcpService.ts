@@ -531,6 +531,8 @@ function pendingApprovalForRuns(
   child: Pick<OrchestrationV2ThreadProjection, "nodes" | "runtimeRequests">,
   taskRunIds: ReadonlySet<RunId>,
 ) {
+  if (child.runtimeRequests.length === 0) return null;
+  const nodeRunIds = new Map(child.nodes.map((node) => [node.id, node.runId]));
   let approval: OrchestratorMcpDelegateTaskResult["pendingApproval"] = null;
   let oldestCreatedAt = Infinity;
   for (const request of child.runtimeRequests) {
@@ -541,7 +543,7 @@ function pendingApprovalForRuns(
     ) {
       continue;
     }
-    const runId = child.nodes.find((node) => node.id === request.nodeId)?.runId;
+    const runId = nodeRunIds.get(request.nodeId);
     if (runId === undefined || runId === null || !taskRunIds.has(runId)) continue;
     const createdAt = DateTime.toEpochMillis(request.createdAt);
     if (createdAt < oldestCreatedAt) {
@@ -1734,7 +1736,7 @@ const make = Effect.gen(function* () {
       Math.max(1, requestedTimeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS),
     );
     const waited = yield* waitForTask(scope, taskId, timeoutMs);
-    if (Option.isSome(waited)) return waited.value;
+    if (Option.isSome(waited) && isTerminalTaskStatus(waited.value.status)) return waited.value;
     // As for a local task: once the blocking wait ends, a later result wakes the parent.
     yield* threadManagement
       .dispatch({
@@ -1749,7 +1751,7 @@ const make = Effect.gen(function* () {
         completionWake: "always",
       })
       .pipe(Effect.ignoreCause({ log: true }));
-    return yield* readTask(scope, taskId, true, true);
+    return yield* readTask(scope, taskId, Option.isNone(waited), true);
   });
 
   /**
@@ -3524,17 +3526,24 @@ const make = Effect.gen(function* () {
               !ThreadManagementService.isTerminalRunStatus(run.status),
           );
           const runIds = new Set(ownedRuns.map((run) => run.id));
-          const requests = records.runtimeRequests.filter(
-            (request) =>
-              request.status === "pending" &&
-              request.responseCapability.type === "live" &&
-              records.nodes.some(
-                (node) =>
-                  node.id === request.nodeId && node.runId !== null && runIds.has(node.runId),
-              ),
-          );
+          const nodeRunIds = new Map(records.nodes.map((node) => [node.id, node.runId]));
+          const pendingQuestionIds = records.runtimeRequests
+            .filter((request) => {
+              const runId = nodeRunIds.get(request.nodeId);
+              return (
+                request.kind === "user_input" &&
+                request.status === "pending" &&
+                request.responseCapability.type === "live" &&
+                runId !== undefined &&
+                runId !== null &&
+                runIds.has(runId)
+              );
+            })
+            .map((request) => request.id)
+            .sort();
           return {
-            hasPendingQuestion: requests.some((request) => request.kind === "user_input"),
+            hasPendingQuestion: pendingQuestionIds.length > 0,
+            pendingQuestionIds,
             pendingApproval: pendingApprovalForRuns(records, runIds),
           };
         });
@@ -3551,6 +3560,20 @@ const make = Effect.gen(function* () {
           const settled = yield* threadManagement
             .streamStoredEventsFrom({ threadId: input.threadId, afterSequence })
             .pipe(
+              Stream.filter(
+                ({ event }) =>
+                  event.type === "run.created" ||
+                  event.type === "run.updated" ||
+                  event.type === "run.background-work-cancelled" ||
+                  event.type === "runtime-request.updated" ||
+                  event.type === "subagent.updated" ||
+                  event.type === "provider-thread.updated" ||
+                  (event.type === "message.updated" &&
+                    event.payload.notification?.source.kind === "monitor") ||
+                  event.type === "thread.metadata-updated" ||
+                  event.type === "thread.archived" ||
+                  event.type === "thread.deleted",
+              ),
               Stream.mapEffect(() =>
                 Effect.all({ association: evaluate, interaction: readInteraction }),
               ),

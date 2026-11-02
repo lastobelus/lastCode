@@ -6785,6 +6785,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
     acceptedThreadReadContext?: OrchestrationV2ConversationMessage["threadReadContext"],
+    continuationSource?: OrchestrationV2Run,
   ) {
     let projection = yield* getProjectionWithPendingEvents(command.threadId, events);
     if (command.manualContinuationOfRunId !== undefined) {
@@ -6965,11 +6966,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     );
     let continuedTaskId =
       (action?.owner.delegationId === undefined ? action?.owner.taskId : undefined) ??
-      restartSource?.delegatedTaskId;
+      restartSource?.delegatedTaskId ??
+      continuationSource?.delegatedTaskId;
     let continuedRemoteDelegation =
-      action?.owner.delegationId === undefined
+      (action?.owner.delegationId === undefined
         ? restartSource?.remoteDelegation
-        : actionSource?.remoteDelegation;
+        : actionSource?.remoteDelegation) ?? continuationSource?.remoteDelegation;
 
     if (projection.thread.archivedAt !== null || projection.thread.deletedAt !== null) {
       return yield* new OrchestratorDispatchError({
@@ -10137,6 +10139,33 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     });
   });
 
+  const cancelQueuedRemoteInteractionNotices = Effect.fn(
+    "orchestrationV2.cancelQueuedRemoteInteractionNotices",
+  )(function* (
+    command: Extract<
+      OrchestrationV2InternalCommand,
+      { readonly type: "delegated_task.remote.interaction" | "delegated_task.remote.complete" }
+    >,
+    runs: ReadonlyArray<OrchestrationV2Run>,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) {
+    for (const run of runs) {
+      if (
+        run.status === "queued" &&
+        run.userMessageId.startsWith(`remote-interaction:${command.taskId}:`)
+      )
+        yield* dispatchQueuedRunCancel(
+          {
+            type: "queued-run.cancel",
+            commandId: command.commandId,
+            threadId: command.parentThreadId,
+            runId: run.id,
+          },
+          events,
+        );
+    }
+  });
+
   const dispatchRemoteTaskInteraction = Effect.fn("orchestrationV2.dispatch.remoteTaskInteraction")(
     function* (
       command: Extract<
@@ -10147,7 +10176,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
     ) {
       const projection = yield* projectionStore
-        .getThreadRecords(command.parentThreadId, ["subagents"])
+        .getThreadRecords(command.parentThreadId, ["subagents", "runs"])
         .pipe(mapDispatchError(command));
       const task = projection.subagents.find((task) => task.id === command.taskId);
       if (task?.remoteChild === undefined || task.result !== null || task.origin !== "app_owned")
@@ -10160,6 +10189,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         )
       )
         return;
+      yield* cancelQueuedRemoteInteractionNotices(command, projection.runs, events);
       const now = yield* DateTime.now;
       const waiting =
         command.interaction.pendingApproval !== null || command.interaction.hasPendingQuestion;
@@ -10186,6 +10216,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         projection.thread.deletedAt !== null
       )
         return;
+      const sourceRun = projection.runs.find((run) => run.id === task.runId);
+      if (sourceRun !== undefined && !remoteDelegationMayStart(projection.thread, sourceRun))
+        return;
       const target = formatThreadLink(task.remoteChild, task.title ?? "Remote task");
       const text =
         approval === null
@@ -10208,6 +10241,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         },
         events,
         effects,
+        undefined,
+        sourceRun,
       );
     },
   );
@@ -10258,6 +10293,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       (command.stopCount ?? 0) !== (task.remoteChild?.stopCount ?? 0)
     )
       return;
+    yield* cancelQueuedRemoteInteractionNotices(command, parentProjection.runs, events);
     const remoteChild =
       command.stoppedThere === undefined
         ? task.remoteChild

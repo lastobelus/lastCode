@@ -995,6 +995,7 @@ const DedupedBodyMarker = Schema.optionalKey(Schema.Literal(true));
 
 export const RemoteTaskInteraction = Schema.Struct({
   hasPendingQuestion: Schema.Boolean,
+  pendingQuestionIds: Schema.optional(Schema.Array(RuntimeRequestId)),
   pendingApproval: Schema.NullOr(
     Schema.Struct({ requestId: RuntimeRequestId, kind: ProviderRequestKind, runId: RunId }),
   ),

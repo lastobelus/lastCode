@@ -117,8 +117,13 @@ interface BoxThread {
   readonly nestedWaiting: Deferred.Deferred<void>;
   /** That task settled and the run it woke answered, with `laterReply`. */
   readonly nestedSettled: Deferred.Deferred<void>;
-  /** Waiting there fails with this, as a thread deleted there does. */
+  readonly question: Ref.Ref<string | null>;
+  readonly emitProviderOutput: Ref.Ref<boolean>;
+  readonly outputBurst: Deferred.Deferred<void>;
+  readonly interactionReads: Ref.Ref<number>;
+  readonly outputReadCounts: Ref.Ref<ReadonlyArray<number>>;
   readonly approval: Ref.Ref<boolean>;
+  /** Waiting there fails with this, as a thread deleted there does. */
   readonly gone: Ref.Ref<boolean>;
   readonly interrupted: Ref.Ref<number>;
   /** What each interrupt or stop there did, once per command id. */
@@ -163,6 +168,11 @@ const makeBoxThread = Effect.gen(function* () {
     nested: yield* Ref.make(false),
     nestedWaiting: yield* Deferred.make<void>(),
     nestedSettled: yield* Deferred.make<void>(),
+    question: yield* Ref.make<string | null>(null),
+    emitProviderOutput: yield* Ref.make(false),
+    outputBurst: yield* Deferred.make<void>(),
+    interactionReads: yield* Ref.make(0),
+    outputReadCounts: yield* Ref.make<ReadonlyArray<number>>([]),
     approval: yield* Ref.make(false),
     gone: yield* Ref.make(false),
     interrupted: yield* Ref.make(0),
@@ -267,18 +277,30 @@ const boxToolkitLayer = (thread: BoxThread, owned: boolean) => {
             ...idleThreadProjection(shell),
             runs: [...activations.values()].map((run) => ({ ...run, status })),
             nodes: [{ id: NodeId.make("node:box-approval"), runId: boxRunId }] as never,
-            runtimeRequests: (yield* Ref.get(thread.approval))
-              ? ([
-                  {
-                    id: "request:box-approval",
-                    nodeId: "node:box-approval",
-                    kind: "command",
-                    status: "pending",
-                    responseCapability: { type: "live", providerSessionId: "session:box" },
-                    createdAt: DateTime.makeUnsafe(0),
-                  },
-                ] as never)
-              : [],
+            runtimeRequests:
+              (yield* Ref.get(thread.question)) !== null
+                ? ([
+                    {
+                      id: yield* Ref.get(thread.question),
+                      nodeId: "node:box-approval",
+                      kind: "user_input",
+                      status: "pending",
+                      responseCapability: { type: "live", providerSessionId: "session:box" },
+                      createdAt: DateTime.makeUnsafe(0),
+                    },
+                  ] as never)
+                : (yield* Ref.get(thread.approval))
+                  ? ([
+                      {
+                        id: "request:box-approval",
+                        nodeId: "node:box-approval",
+                        kind: "command",
+                        status: "pending",
+                        responseCapability: { type: "live", providerSessionId: "session:box" },
+                        createdAt: DateTime.makeUnsafe(0),
+                      },
+                    ] as never)
+                  : [],
             subagents: [],
           };
     });
@@ -321,10 +343,39 @@ const boxToolkitLayer = (thread: BoxThread, owned: boolean) => {
             } as never;
           }),
         ),
+        Stream.flatMap((event) =>
+          Stream.unwrap(
+            Effect.gen(function* () {
+              if (!(yield* Ref.get(thread.emitProviderOutput))) return Stream.succeed(event);
+              const before = yield* Ref.get(thread.interactionReads);
+              return Stream.concat(
+                Stream.fromIterable(
+                  Array.from(
+                    { length: 8 },
+                    () => ({ event: { type: "turn-item.updated" } }) as never,
+                  ),
+                ),
+                Stream.fromEffect(
+                  Ref.get(thread.interactionReads).pipe(
+                    Effect.flatMap((count) =>
+                      Ref.update(thread.outputReadCounts, (seen) => [...seen, count - before]),
+                    ),
+                    Effect.tap(() => Deferred.succeed(thread.outputBurst, undefined)),
+                    Effect.as(event),
+                  ),
+                ),
+              );
+            }),
+          ),
+        ),
       ),
     getThreadShell: shellOf,
     getProjectThreadRecords: (input) => projectionOf(input.threadId),
-    getThreadRecords: (threadId) => projectionOf(threadId),
+    getThreadRecords: (threadId, includes) =>
+      (includes.some((field) => field === "runtimeRequests")
+        ? Ref.update(thread.interactionReads, (count) => count + 1)
+        : Effect.void
+      ).pipe(Effect.andThen(projectionOf(threadId))),
     waitForThread: (input) =>
       Effect.gen(function* () {
         yield* Ref.update(thread.waitedFor, (seen) => [...seen, input.runId]);
@@ -1349,7 +1400,17 @@ it.effect("remote approvals release task waits, clear after an answer, and keep 
       const a = yield* makeLaptop(database, offers);
       yield* linkTo(a.links, b, "full-access");
       yield* seedParent(a);
-      const delegated = yield* delegateToBox(a);
+      const firstWait = yield* a.call("delegate_task", {
+        task: "Run the full suite on the box.",
+        target: {
+          environmentId: box.environmentId,
+          providerInstanceId: instanceId,
+          model: "gpt-5.4",
+        },
+        mode: "wait",
+        clientRequestId: "suite-on-box",
+      });
+      const delegated = firstWait.structuredContent as { taskId: NodeId };
       yield* a.orchestrator
         .streamStoredEventsFrom({
           threadId: parentThreadId,
@@ -1385,6 +1446,11 @@ it.effect("remote approvals release task waits, clear after an answer, and keep 
         waitTimedOut: false,
         pendingApproval: { requestId: "request:box-approval", kind: "command", runId: boxRunId },
       });
+      expect(
+        (yield* a.orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+          (task) => task.id === delegated.taskId,
+        )?.completionWake,
+      ).toBe("always");
       const again = yield* a.call("task_status", { taskId: delegated.taskId });
       expect(again.structuredContent).toMatchObject({
         pendingApproval: { requestId: "request:box-approval" },
@@ -1424,6 +1490,70 @@ it.effect("remote approvals release task waits, clear after an answer, and keep 
       });
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect.each(["question identity", "provider output reads"] as const)(
+  "remote waits preserve %s across consecutive pending questions",
+  (check) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const thread = yield* makeBoxThread;
+        yield* Ref.set(thread.question, "question:first");
+        yield* Ref.set(thread.emitProviderOutput, check === "provider output reads");
+        const b = yield* serveBox(thread);
+        const offers = yield* SubscriptionRef.make<
+          ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+        >([]);
+        const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+        const a = yield* makeLaptop(database, offers);
+        yield* linkTo(a.links, b, "full-access");
+        yield* seedParent(a);
+        const delegated = yield* delegateToBox(a);
+        const waitForQuestion = (id?: string) =>
+          a.orchestrator
+            .streamStoredEventsFrom({
+              threadId: parentThreadId,
+              afterSequence: 0,
+              eventType: "subagent.updated",
+            })
+            .pipe(
+              Stream.filter(
+                ({ event }) =>
+                  event.type === "subagent.updated" &&
+                  event.payload.id === delegated.taskId &&
+                  event.payload.remoteChild?.interaction?.hasPendingQuestion === true &&
+                  (id === undefined ||
+                    event.payload.remoteChild.interaction.pendingQuestionIds?.some(
+                      (questionId) => questionId === id,
+                    ) === true),
+              ),
+              Stream.runHead,
+            );
+        const first = yield* waitForQuestion();
+        if (check === "question identity") {
+          expect(Option.getOrThrow(first).event.payload).toMatchObject({
+            remoteChild: { interaction: { pendingQuestionIds: ["question:first"] } },
+          });
+          // No empty state is published between these two questions.
+          yield* Ref.set(thread.question, "question:second");
+          yield* SubscriptionRef.set(thread.status, "running");
+          const second = yield* waitForQuestion("question:second");
+          expect(Option.getOrThrow(second).event.payload).toMatchObject({
+            remoteChild: { interaction: { pendingQuestionIds: ["question:second"] } },
+          });
+        } else {
+          // The stream's initial output burst must not trigger interaction history reads.
+          yield* Deferred.await(thread.outputBurst);
+          const counts = yield* Ref.get(thread.outputReadCounts);
+          expect(counts.length).toBeGreaterThan(0);
+          expect(counts[0]).toBe(0);
+        }
+        yield* Ref.set(thread.question, null);
+        yield* SubscriptionRef.set(thread.status, "completed");
+        yield* Deferred.succeed(thread.finished, undefined);
+        expect(yield* taskResult(a, delegated.taskId)).toMatchObject({ status: "completed" });
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
 it.effect("a task named only by environment inherits the parent's model, within the link", () =>
