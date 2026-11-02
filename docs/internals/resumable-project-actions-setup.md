@@ -123,15 +123,17 @@ The runtime refuses a delegated launch it cannot attribute to a specific child t
 Action starts. Not every provider-generated wake can be attributed yet, so an Action requested
 from such a wake falls back to mediation.
 
-Every other child leaves resumable Actions to its parent, including dependency preparation, CI,
-build, and checkpoint waits. Requests already handed to a parent stay with it; nothing migrates
-them. Child PR watches stay with the parent as well. Ordinary top-level and independent threads
-launch and resume their own Actions directly; mediation does not apply to them.
+Every other child, including one whose launch was refused, must not launch or wait on a resumable
+Action, whatever else its brief says. That covers dependency preparation, CI, build, and checkpoint
+waits. Requests already handed to a parent stay with it; nothing migrates them. Child PR watches
+stay with the parent as well. Ordinary top-level and independent threads launch and resume their
+own Actions directly; mediation does not apply to them.
 
 For mediation, the injected instructions carry the sequence each side follows: the child ends its
-turn with a handoff request as its final response, and the parent waits for that recorded result,
-verifies the target, launches, and queues the result back to the child with a `taskId` receipt.
-The rest of this section holds the setup detail they leave out.
+turn with a final response that marks the work unfinished and requests the exact Action, and the
+parent waits for that recorded result, verifies the target, launches, and queues the result back to
+the same child with a `taskId` receipt. The rest of this section holds the setup detail they leave
+out.
 
 ### Choose the target
 
@@ -155,9 +157,9 @@ otherwise report the specific blocker before launch.
 
 ### Automatic settlement
 
-Ordinary own Actions and mediated Actions need no automatic-settlement setting change.
-`run_project_action_and_resume` never checks automatic settlement, so Actions launch and resume
-the same way under any setting.
+A top-level thread's own Actions and the Actions a parent launches through mediation need no
+automatic-settlement setting change. `run_project_action_and_resume` never checks automatic
+settlement, so Actions launch and resume the same way under any setting.
 
 The runtime keeps a thread from being settled automatically while its Action is unfinished or
 recoverable, and while that Action's exact retained or queued follow-up is outstanding. Child-owned
