@@ -30,6 +30,7 @@ import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
 import * as IncomingMessageSummaryService from "./IncomingMessageSummaryService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
+import { DispatchModeLimit } from "./DispatchModeLimit.ts";
 import { AcceptedSteeringContinuation } from "./Orchestrator.ts";
 import * as SubagentPromotionService from "./SubagentPromotionService.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -754,6 +755,7 @@ export const layerExecutor: Layer.Layer<
                   : { taskIds: effect.request.taskIds }),
               })
               .pipe(
+                Effect.provideService(DispatchModeLimit, effect.request.modeLimit),
                 Effect.mapError(
                   (cause) =>
                     new OrchestrationEffectExecutionError({

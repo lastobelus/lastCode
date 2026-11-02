@@ -187,7 +187,11 @@ import { withCommandMetrics } from "../observability/Metrics.ts";
 import type { OrchestrationEffectRequestV2, PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
-import { DispatchModeLimit, exceededDispatchModeLimit } from "./DispatchModeLimit.ts";
+import {
+  DispatchModeLimit,
+  exceededDispatchModeLimit,
+  type DispatchModes,
+} from "./DispatchModeLimit.ts";
 import { DelegatedTaskCancellation } from "./DelegatedTaskCancellation.ts";
 import {
   applyToProjection,
@@ -823,6 +827,7 @@ function delegatedTasksStopEffect(command: {
   readonly threadId: ThreadId;
   readonly reason?: string | undefined;
   readonly taskIds?: ReadonlyArray<NodeId>;
+  readonly modeLimit?: DispatchModes | undefined;
 }): PendingOrchestrationEffectV2 {
   return {
     id: `effect:${command.commandId}:delegated-tasks.stop`,
@@ -832,6 +837,14 @@ function delegatedTasksStopEffect(command: {
       type: "delegated-tasks.stop",
       ...(command.reason === undefined ? {} : { reason: command.reason }),
       ...(command.taskIds === undefined ? {} : { taskIds: command.taskIds }),
+      ...(command.modeLimit === undefined
+        ? {}
+        : {
+            modeLimit: {
+              runtimeMode: command.modeLimit.runtimeMode,
+              interactionMode: command.modeLimit.interactionMode,
+            },
+          }),
     },
   };
 }
@@ -13259,15 +13272,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               ownedRunIds.has(task.runId),
           )
           .map((task) => task.id);
-        if (taskIds.length > 0)
+        if (taskIds.length > 0) {
+          const modeLimit = yield* DispatchModeLimit;
           yield* Ref.update(effects, (existing) => [
             ...existing,
             delegatedTasksStopEffect({
               commandId: command.commandId,
               threadId: childThreadId,
               taskIds,
+              modeLimit,
             }),
           ]);
+        }
         const records = yield* loadProjectionForCommand(command, ["nodes", "turnItems"], {
           turnItemTypes: ["subagent"],
           turnItemRunIds: [subagent.runId],

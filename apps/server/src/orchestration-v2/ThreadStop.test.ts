@@ -38,6 +38,7 @@ import * as Orchestrator from "./Orchestrator.ts";
 import * as EffectWorker from "./EffectWorker.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import { DispatchModeLimit } from "./DispatchModeLimit.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
@@ -755,7 +756,13 @@ it.effect.each([false, true])(
     }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect.each(["waiting", "transferred-active", "transferred-ended"] as const)(
+it.effect.each([
+  "waiting",
+  "transferred-active",
+  "transferred-ended",
+  "waiting-runtime-limit",
+  "waiting-interaction-limit",
+] as const)(
   "owned Action cancellation stops exact descendants without stopping another round (%s)",
   (state) =>
     Effect.gen(function* () {
@@ -800,7 +807,7 @@ it.effect.each(["waiting", "transferred-active", "transferred-ended"] as const)(
         },
       });
       const ownedChildren = [sourceChild, grandchild];
-      if (state !== "waiting") {
+      if (state.startsWith("transferred")) {
         yield* send(threadId, "Action continuation", "start_immediately");
         const continuation = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)!;
         yield* projections.apply({
@@ -859,13 +866,33 @@ it.effect.each(["waiting", "transferred-active", "transferred-ended"] as const)(
         .filter((nested) => nested.runId !== null && ownedRunIds.has(nested.runId))
         .map((nested) => nested.id);
       const commandId = CommandId.make("cancel-owned-action-descendants");
-      yield* orchestrator.dispatch({
-        type: "subagent.stop",
-        commandId,
-        threadId: parentThreadId,
-        runId: task.runId!,
-        subagentId: task.id,
-      });
+      const limit =
+        state === "waiting-runtime-limit"
+          ? { runtimeMode: "approval-required" as const, interactionMode: "default" as const }
+          : state === "waiting-interaction-limit"
+            ? { runtimeMode: "full-access" as const, interactionMode: "plan" as const }
+            : undefined;
+      if (limit !== undefined) {
+        for (const target of [parentThreadId, threadId, ...ownedChildren]) {
+          const thread = (yield* orchestrator.getThreadProjection(target)).thread;
+          yield* projections.apply({
+            id: EventId.make(`action-cancel-modes:${target}`),
+            type: "thread.metadata-updated",
+            threadId: target,
+            occurredAt: now,
+            payload: { ...thread, ...limit },
+          });
+        }
+      }
+      yield* orchestrator
+        .dispatch({
+          type: "subagent.stop",
+          commandId,
+          threadId: parentThreadId,
+          runId: task.runId!,
+          subagentId: task.id,
+        })
+        .pipe(Effect.provideService(DispatchModeLimit, limit));
       const effects = yield* sql<{ readonly request_json: string }>`
         SELECT payload_json AS request_json FROM orchestration_v2_effect_outbox
         WHERE command_id=${commandId} AND effect_type='delegated-tasks.stop'
@@ -875,9 +902,34 @@ it.effect.each(["waiting", "transferred-active", "transferred-ended"] as const)(
       assert.equal(request.type, "delegated-tasks.stop");
       if (request.type !== "delegated-tasks.stop") return;
       assert.deepEqual(request.taskIds, expectedTaskIds);
-      yield* threads.stopDelegatedTasks({ threadId, commandId, taskIds: request.taskIds! });
-      for (const childThreadId of ownedChildren) {
-        assert.deepEqual((yield* threadState(childThreadId)).runs, ["interrupted"]);
+      assert.deepEqual(request.modeLimit, limit);
+      if (limit === undefined) {
+        yield* threads.stopDelegatedTasks({ threadId, commandId, taskIds: request.taskIds! });
+        for (const childThreadId of ownedChildren) {
+          assert.deepEqual((yield* threadState(childThreadId)).runs, ["interrupted"]);
+        }
+      } else {
+        const childBefore = yield* threadState(sourceChild);
+        const grandchildBefore = yield* threadState(grandchild);
+        const raised = (yield* orchestrator.getThreadProjection(sourceChild)).thread;
+        yield* projections.apply({
+          id: EventId.make("action-cancel-descendant-raised"),
+          type: "thread.metadata-updated",
+          threadId: sourceChild,
+          occurredAt: now,
+          payload: {
+            ...raised,
+            ...(state === "waiting-runtime-limit"
+              ? { runtimeMode: "full-access" as const }
+              : { interactionMode: "default" as const }),
+          },
+        });
+        // Execute the persisted cancellation alone, without starting fixture providers.
+        yield* sql`DELETE FROM orchestration_v2_effect_outbox WHERE command_id <> ${commandId}`;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        yield* worker.drain(1);
+        assert.deepEqual(yield* threadState(sourceChild), childBefore);
+        assert.deepEqual(yield* threadState(grandchild), grandchildBefore);
       }
       if (unrelated !== undefined) {
         assert.deepEqual(yield* threadState(unrelated), unrelatedBefore);
