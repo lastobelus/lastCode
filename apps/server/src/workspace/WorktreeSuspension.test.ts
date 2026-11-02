@@ -1631,6 +1631,86 @@ const untouchedOwners = (threads: Map<ThreadId, OrchestrationV2ThreadShell>) => 
     });
 };
 
+it.live(
+  "automatically saves retained source after an oversized dependency install is removed",
+  () =>
+    realGit((f) =>
+      Effect.gen(function* () {
+        const h = yield* harness(f, { cleanupThreads: true, settings: automaticSettings });
+        untouchedOwners(h.threads);
+        const dependencyPath = NodePath.join(f.workspace, "node_modules");
+        yield* Effect.promise(async () => {
+          await NodeFSP.mkdir(dependencyPath);
+          await using large = await NodeFSP.open(
+            NodePath.join(dependencyPath, "large-binary"),
+            "w",
+          );
+          await large.truncate(64 * 1024 * 1024 + 1);
+        });
+        yield* h.service.previewSuspend({ threadId: firstId });
+        const initial = (yield* h.registry.list)[0]!;
+        yield* h.registry.put({ ...initial, lastWorkspaceUseAt: DateTime.formatIso(at) }, initial);
+        yield* h.service.sweep;
+        const failed = (yield* h.registry.list)[0]!;
+        expect(failed.summary.state).toBe("active");
+        expect(failed.operation).toBeUndefined();
+        expect(failed.captureFailure?.reason).toContain("a file exceeds the preservation limit");
+        expect(failed.captureFailure?.retryOnce).toBeUndefined();
+        const journals = yield* Effect.promise(() =>
+          NodeFSP.readdir(NodePath.join(h.registry.root, "snapshots")),
+        );
+        yield* h.service.sweep;
+        expect(
+          yield* Effect.promise(() => NodeFSP.readdir(NodePath.join(h.registry.root, "snapshots"))),
+        ).toEqual(journals);
+        // The cleanup integration proves removal eligibility separately; this
+        // service test verifies the resulting automatic save and recovery.
+        yield* withWorkspaceLease(
+          f.workspace,
+          Effect.gen(function* () {
+            yield* Effect.promise(() => NodeFSP.rm(dependencyPath, { recursive: true }));
+            yield* h.registry.dependenciesRemoved(f.workspace);
+          }),
+        );
+        expect((yield* h.registry.list)[0]).toEqual({
+          ...failed,
+          captureFailure: { ...failed.captureFailure!, retryOnce: true },
+        });
+        expect(yield* h.registry.automaticProtection(f.workspace)).not.toBeNull();
+        yield* h.service.sweep;
+        const saved = (yield* h.registry.list)[0]!;
+        expect(saved.summary.state).toBe("suspended");
+        expect(saved.operation).toBeUndefined();
+        expect(saved.captureFailure).toBeUndefined();
+        expect(
+          (yield* Effect.promise(() => h.store.readJournal(saved.summary.snapshotId!))).phase,
+        ).toBe("suspended");
+        expect(
+          yield* Effect.promise(() =>
+            NodeFSP.stat(f.workspace).then(
+              () => true,
+              () => false,
+            ),
+          ),
+        ).toBe(false);
+        yield* h.acquisition.acquire({
+          path: f.workspace,
+          purpose: "file-write",
+          threadId: firstId,
+        });
+        yield* Effect.promise(async () => {
+          expect(await NodeFSP.readFile(NodePath.join(f.workspace, "tracked"), "utf8")).toBe(
+            "working\n",
+          );
+          expect(await git(f.workspace, "show", ":tracked")).toBe("staged");
+          expect(
+            await NodeFSP.readFile(NodePath.join(f.workspace, "notes", "private"), "utf8"),
+          ).toBe("ignored note\n");
+        });
+      }),
+    ),
+);
+
 it.live.each(["manual", "activity"] as const)(
   "settles unsupported captures and allows %s retry after restart",
   (retry) =>

@@ -1056,6 +1056,55 @@ it.effect(
     }).pipe(Effect.scoped, Effect.provide(testLayer())),
 );
 
+it.effect("records a completed dependency deletion even when cancelled during removal", () =>
+  Effect.gen(function* () {
+    const f = yield* inspectedBatchFixture();
+    const entered = yield* Deferred.make<void>();
+    const release = Promise.withResolvers<void>();
+    const rm = vi.mocked(NodeFSP.rm);
+    const original = rm.getMockImplementation()!;
+    let recorded = false;
+    yield* Effect.acquireRelease(
+      Effect.sync(() => {
+        rm.mockImplementation(async (...args) => {
+          if (args[0] === f.dependencyPath) {
+            Deferred.doneUnsafe(entered, Effect.void);
+            await release.promise;
+          }
+          await original(...args);
+        });
+      }),
+      () => Effect.sync(() => rm.mockImplementation(original)),
+    );
+    yield* Effect.gen(function* () {
+      const removal = yield* f.cleanup
+        .removeBatch(
+          [
+            {
+              inspection: f.inspection,
+              canRemove: Effect.succeed(true),
+              isStillEligible: Effect.succeed(true),
+            },
+          ],
+          (_inspection, decision) =>
+            Effect.sync(() => {
+              if (decision.outcome === "removed") recorded = true;
+            }),
+        )
+        .pipe(Effect.forkScoped);
+      yield* Deferred.await(entered);
+      yield* Effect.sync(() => {
+        removal.interruptUnsafe();
+        release.resolve();
+      });
+      yield* Fiber.await(removal);
+      assert.isFalse(yield* f.fs.exists(f.dependencyPath));
+      assert.isTrue(recorded);
+      yield* assertBatchWorkspacePreserved(f);
+    }).pipe(Effect.ensuring(Effect.sync(() => release.resolve())));
+  }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
 it.effect("one dependency removal error leaves its sibling eligible for deletion", () =>
   Effect.gen(function* () {
     const first = yield* inspectedBatchFixture();

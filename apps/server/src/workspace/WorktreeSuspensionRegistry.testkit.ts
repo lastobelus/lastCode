@@ -7,4 +7,5 @@ export const layer = Layer.mock(WorktreeSuspensionRegistry)({
   root: "/test/saved-workspaces",
   list: Effect.succeed([]),
   automaticProtection: () => Effect.succeed(null),
+  dependenciesRemoved: () => Effect.void,
 });
