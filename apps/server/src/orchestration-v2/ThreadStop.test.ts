@@ -38,6 +38,7 @@ import * as Orchestrator from "./Orchestrator.ts";
 import * as EffectWorker from "./EffectWorker.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import { DispatchModeLimit } from "./DispatchModeLimit.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
@@ -751,6 +752,264 @@ it.effect.each([false, true])(
           (item) => item.type === "run_interrupt_request" && item.runId === ownedRun.id,
         ),
         !laterRound,
+      );
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect.each([
+  "waiting",
+  "transferred-active",
+  "transferred-ended",
+  "transferred-waiting-command",
+  "transferred-waiting-native",
+  "waiting-runtime-limit",
+  "waiting-interaction-limit",
+] as const)(
+  "owned Action cancellation stops exact descendants without stopping another round (%s)",
+  (state) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const sql = yield* SqlClient.SqlClient;
+      const now = yield* DateTime.now;
+      const parentThreadId = ThreadId.make("thread:action-cancel-parent");
+      yield* createWatchingThread(parentThreadId, 602);
+      yield* send(parentThreadId, "parent", "start_immediately");
+      const threadId = yield* delegate(parentThreadId, "owned Action task");
+      const task = (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+        (row) => row.childThreadId === threadId,
+      )!;
+      const source = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+      const sourceChild = yield* delegate(threadId, "source nested task");
+      const grandchild = yield* delegate(sourceChild, "owned grandchild");
+      const owner = {
+        parentEnvironmentId: EnvironmentId.make("environment:local"),
+        parentThreadId,
+        taskId: task.id,
+        sourceRunId: source.id,
+      };
+      const obligation = {
+        actionRunId: "action:owned-cancellation",
+        messageId: MessageId.make("action-resume:owned-cancellation:follow-up"),
+        owner,
+        state: "waiting" as const,
+      };
+      yield* projections.apply({
+        id: EventId.make("action-cancel-source-ended"),
+        type: "run.updated",
+        threadId,
+        runId: source.id,
+        occurredAt: now,
+        payload: {
+          ...source,
+          status: "completed",
+          completedAt: now,
+          actionObligations: [obligation],
+        },
+      });
+      const ownedChildren = [sourceChild, grandchild];
+      const hasBackground =
+        state === "transferred-waiting-command" || state === "transferred-waiting-native";
+      const backgroundId = TurnItemId.make("item:action-continuation-background");
+      if (state.startsWith("transferred")) {
+        yield* send(threadId, "Action continuation", "start_immediately");
+        const continuation = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)!;
+        yield* projections.apply({
+          id: EventId.make("action-cancel-source-transferred"),
+          type: "run.updated",
+          threadId,
+          runId: source.id,
+          occurredAt: now,
+          payload: {
+            ...source,
+            status: "completed",
+            completedAt: now,
+            actionObligations: [
+              { ...obligation, state: "transferred", continuationRunId: continuation.id },
+            ],
+          },
+        });
+        yield* projections.apply({
+          id: EventId.make("action-cancel-continuation-owner"),
+          type: "run.updated",
+          threadId,
+          runId: continuation.id,
+          occurredAt: now,
+          payload: { ...continuation, delegatedTaskId: task.id },
+        });
+        ownedChildren.push(yield* delegate(threadId, "continuation nested task"));
+        if (hasBackground) {
+          const providerTurnId = ProviderTurnId.make("turn:action-continuation-background");
+          yield* projections.apply({
+            id: EventId.make("action-continuation-background-turn"),
+            type: "provider-turn.updated",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: providerTurnId,
+              providerThreadId: continuation.providerThreadId!,
+              nodeId: continuation.rootNodeId!,
+              runAttemptId: continuation.activeAttemptId!,
+              nativeTurnRef: null,
+              ordinal: 1,
+              status: "completed",
+              startedAt: now,
+              completedAt: now,
+            },
+          });
+          const item =
+            state === "transferred-waiting-native"
+              ? (yield* orchestrator.getThreadProjection(threadId)).turnItems.find(
+                  (row) => row.type === "subagent" && row.runId === continuation.id,
+                )!
+              : undefined;
+          yield* projections.apply({
+            id: EventId.make("action-continuation-background-item"),
+            type: "turn-item.updated",
+            threadId,
+            runId: continuation.id,
+            occurredAt: now,
+            payload: {
+              ...(item?.type === "subagent"
+                ? {
+                    ...item,
+                    origin: "provider_native" as const,
+                    subagentId: NodeId.make("native-background-task"),
+                    childThreadId: null,
+                  }
+                : { type: "command_execution" as const, input: "node task.js", ordinal: 50 }),
+              id: backgroundId,
+              threadId,
+              runId: continuation.id,
+              nodeId: continuation.rootNodeId,
+              providerThreadId: continuation.providerThreadId,
+              providerTurnId,
+              nativeItemRef: null,
+              parentItemId: null,
+              status: "running",
+              title: "Owned background work",
+              startedAt: now,
+              completedAt: null,
+              updatedAt: now,
+            },
+          });
+        }
+        if (state === "transferred-ended" || hasBackground) {
+          yield* projections.apply({
+            id: EventId.make("action-cancel-continuation-ended"),
+            type: "run.updated",
+            threadId,
+            runId: continuation.id,
+            occurredAt: now,
+            payload: {
+              ...continuation,
+              delegatedTaskId: task.id,
+              status: hasBackground ? "waiting" : "completed",
+              startedAt: now,
+              completedAt: hasBackground ? null : now,
+            },
+          });
+        }
+      }
+      const unrelated =
+        state === "transferred-active" || hasBackground
+          ? undefined
+          : yield* Effect.gen(function* () {
+              yield* send(threadId, "unrelated round", "start_immediately");
+              return yield* delegate(threadId, "unrelated nested task");
+            });
+      if (hasBackground) yield* send(threadId, "unrelated queued round", "queue_after_active");
+      const before = yield* orchestrator.getThreadProjection(threadId);
+      const unrelatedBefore = unrelated === undefined ? undefined : yield* threadState(unrelated);
+      const ownedRunIds = new Set(
+        before.runs.filter((run) => run.delegatedTaskId === task.id).map((run) => run.id),
+      );
+      const expectedTaskIds = before.subagents
+        .filter((nested) => nested.runId !== null && ownedRunIds.has(nested.runId))
+        .map((nested) => nested.id);
+      const commandId = CommandId.make("cancel-owned-action-descendants");
+      const limit =
+        state === "waiting-runtime-limit"
+          ? { runtimeMode: "approval-required" as const, interactionMode: "default" as const }
+          : state === "waiting-interaction-limit"
+            ? { runtimeMode: "full-access" as const, interactionMode: "plan" as const }
+            : undefined;
+      if (limit !== undefined) {
+        for (const target of [parentThreadId, threadId, ...ownedChildren]) {
+          const thread = (yield* orchestrator.getThreadProjection(target)).thread;
+          yield* projections.apply({
+            id: EventId.make(`action-cancel-modes:${target}`),
+            type: "thread.metadata-updated",
+            threadId: target,
+            occurredAt: now,
+            payload: { ...thread, ...limit },
+          });
+        }
+      }
+      yield* orchestrator
+        .dispatch({
+          type: "subagent.stop",
+          commandId,
+          threadId: parentThreadId,
+          runId: task.runId!,
+          subagentId: task.id,
+        })
+        .pipe(Effect.provideService(DispatchModeLimit, limit));
+      const effects = yield* sql<{ readonly request_json: string }>`
+        SELECT payload_json AS request_json FROM orchestration_v2_effect_outbox
+        WHERE command_id=${commandId} AND effect_type='delegated-tasks.stop'
+      `;
+      assert.lengthOf(effects, 1);
+      const request = decodeEffectRequest(effects[0]!.request_json);
+      assert.equal(request.type, "delegated-tasks.stop");
+      if (request.type !== "delegated-tasks.stop") return;
+      assert.deepEqual(request.taskIds, expectedTaskIds);
+      assert.deepEqual(request.modeLimit, limit);
+      if (limit === undefined) {
+        yield* threads.stopDelegatedTasks({ threadId, commandId, taskIds: request.taskIds! });
+        for (const childThreadId of ownedChildren) {
+          assert.deepEqual((yield* threadState(childThreadId)).runs, ["interrupted"]);
+        }
+      } else {
+        const childBefore = yield* threadState(sourceChild);
+        const grandchildBefore = yield* threadState(grandchild);
+        const raised = (yield* orchestrator.getThreadProjection(sourceChild)).thread;
+        yield* projections.apply({
+          id: EventId.make("action-cancel-descendant-raised"),
+          type: "thread.metadata-updated",
+          threadId: sourceChild,
+          occurredAt: now,
+          payload: {
+            ...raised,
+            ...(state === "waiting-runtime-limit"
+              ? { runtimeMode: "full-access" as const }
+              : { interactionMode: "default" as const }),
+          },
+        });
+        // Execute the persisted cancellation alone, without starting fixture providers.
+        yield* sql`DELETE FROM orchestration_v2_effect_outbox WHERE command_id <> ${commandId}`;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        yield* worker.drain(1);
+        assert.deepEqual(yield* threadState(sourceChild), childBefore);
+        assert.deepEqual(yield* threadState(grandchild), grandchildBefore);
+      }
+      if (unrelated !== undefined) {
+        assert.deepEqual(yield* threadState(unrelated), unrelatedBefore);
+        const after = yield* orchestrator.getThreadProjection(threadId);
+        assert.deepEqual(after.runs.at(-1), before.runs.at(-1));
+      }
+      if (hasBackground) {
+        const after = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(after.turnItems.find((row) => row.id === backgroundId)?.status, "interrupted");
+        assert.equal(before.runs.at(-1)?.status, "queued");
+        assert.deepEqual(after.runs.at(-1), before.runs.at(-1));
+      }
+      assert.equal(
+        (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+          (row) => row.id === task.id,
+        )?.status,
+        "cancelled",
       );
     }).pipe(Effect.provide(layerTest)),
 );

@@ -7,11 +7,13 @@ import {
   ProviderSessionId,
   RunAttemptId,
   ProviderApprovalDecision,
+  ProviderInteractionMode,
   ProviderUserInputAnswers,
   ProviderThreadId,
   ProviderTurnId,
   RunId,
   RuntimeRequestId,
+  RuntimeMode,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -138,6 +140,9 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
     type: Schema.Literal("delegated-tasks.stop"),
     reason: Schema.optional(Schema.String),
     taskIds: Schema.optional(Schema.Array(NodeId)),
+    modeLimit: Schema.optional(
+      Schema.Struct({ runtimeMode: RuntimeMode, interactionMode: ProviderInteractionMode }),
+    ),
   }),
 ]);
 export type OrchestrationEffectRequestV2 = typeof OrchestrationEffectRequestV2.Type;

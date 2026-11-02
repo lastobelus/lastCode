@@ -172,7 +172,7 @@ import {
   isUndeliveredMailboxSteer,
 } from "./NotificationMailbox.ts";
 import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts";
-import { activeThread as activePauseRecipient } from "../environment/EnvironmentPauseActivity.ts";
+import { pauseActivity } from "../environment/EnvironmentPauseActivity.ts";
 import { EventSinkV2 } from "./EventSink.ts";
 import {
   decideGuestMessageSend,
@@ -187,7 +187,11 @@ import { withCommandMetrics } from "../observability/Metrics.ts";
 import type { OrchestrationEffectRequestV2, PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
-import { DispatchModeLimit, exceededDispatchModeLimit } from "./DispatchModeLimit.ts";
+import {
+  DispatchModeLimit,
+  exceededDispatchModeLimit,
+  type DispatchModes,
+} from "./DispatchModeLimit.ts";
 import { DelegatedTaskCancellation } from "./DelegatedTaskCancellation.ts";
 import {
   applyToProjection,
@@ -823,6 +827,7 @@ function delegatedTasksStopEffect(command: {
   readonly threadId: ThreadId;
   readonly reason?: string | undefined;
   readonly taskIds?: ReadonlyArray<NodeId>;
+  readonly modeLimit?: DispatchModes | undefined;
 }): PendingOrchestrationEffectV2 {
   return {
     id: `effect:${command.commandId}:delegated-tasks.stop`,
@@ -832,6 +837,14 @@ function delegatedTasksStopEffect(command: {
       type: "delegated-tasks.stop",
       ...(command.reason === undefined ? {} : { reason: command.reason }),
       ...(command.taskIds === undefined ? {} : { taskIds: command.taskIds }),
+      ...(command.modeLimit === undefined
+        ? {}
+        : {
+            modeLimit: {
+              runtimeMode: command.modeLimit.runtimeMode,
+              interactionMode: command.modeLimit.interactionMode,
+            },
+          }),
     },
   };
 }
@@ -13153,12 +13166,161 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       subagent.runId === command.runId
     ) {
       const childThreadId = subagent.childThreadId;
-      const child = yield* projectionStore.getThreadRecords(childThreadId, ["runs"]).pipe(
-        Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.succeed(null) }),
-        Effect.mapError(
-          (cause) => new OrchestratorProjectionError({ threadId: childThreadId, cause }),
-        ),
-      );
+      const child = yield* projectionStore
+        .getThreadRecords(childThreadId, ["runs", "subagents"])
+        .pipe(
+          Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.succeed(null) }),
+          Effect.mapError(
+            (cause) => new OrchestratorProjectionError({ threadId: childThreadId, cause }),
+          ),
+        );
+      const ownsObligation = (
+        source: OrchestrationV2Run,
+        row: NonNullable<OrchestrationV2Run["actionObligations"]>[number],
+      ) =>
+        source.delegatedTaskId === subagent.id &&
+        ["completed", "failed", "cancelled", "interrupted"].includes(source.status) &&
+        (row.state === "waiting" || row.state === "transferred") &&
+        row.owner.taskId === subagent.id &&
+        row.owner.sourceRunId === source.id &&
+        row.owner.parentThreadId === command.threadId &&
+        row.owner.delegationId === undefined;
+      const waitingSources =
+        child?.runs.filter((source) =>
+          source.actionObligations?.some((row) => ownsObligation(source, row)),
+        ) ?? [];
+      if (isOrchestrationV2WorkActive(subagent.status) && waitingSources.length > 0) {
+        if (
+          subagent.ownershipReleased === true ||
+          child?.thread.lineage.independent === true ||
+          child?.thread.lineage.parentThreadId !== command.threadId ||
+          child.thread.lineage.relationshipToParent !== "subagent"
+        ) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "This task no longer owns its child Action.",
+          });
+        }
+        yield* refuseAboveDispatchModeLimit(command, childThreadId, child.thread);
+        const now = yield* DateTime.now;
+        for (const source of waitingSources) {
+          yield* emit(
+            events,
+            command,
+          )({
+            type: "run.updated",
+            threadId: childThreadId,
+            runId: source.id,
+            occurredAt: now,
+            payload: {
+              ...source,
+              status: "cancelled",
+              completedAt: now,
+              actionObligations: source.actionObligations?.map((row) =>
+                ownsObligation(source, row) ? { ...row, state: "disposed" as const } : row,
+              ),
+            },
+          });
+        }
+        for (const ownedRun of child.runs) {
+          if (ownedRun.delegatedTaskId !== subagent.id) continue;
+          let interrupt = isLiveRun(ownedRun);
+          if (!interrupt && ownedRun.status !== "queued") {
+            const background = yield* projectionStore
+              .getThreadRecords(childThreadId, ["providerThreads", "turnItems"], {
+                turnItemTypes: ["command_execution", "dynamic_tool", "subagent"],
+                turnItemStatuses: ["pending", "running", "waiting"],
+                turnItemRunIds: [ownedRun.id],
+              })
+              .pipe(mapDispatchError(command));
+            // A reused provider's roster may belong to a newer unrelated run.
+            const ownsRoster = !child.runs.some(
+              (row) =>
+                row.providerThreadId === ownedRun.providerThreadId &&
+                row.ordinal > ownedRun.ordinal &&
+                row.status !== "queued",
+            );
+            interrupt =
+              derivePendingBackgroundWork({
+                latestRun: ownedRun,
+                runs: [ownedRun],
+                providerThreads: ownsRoster
+                  ? background.providerThreads.filter((row) => row.id === ownedRun.providerThreadId)
+                  : [],
+                activeProviderThreadId: ownedRun.providerThreadId,
+                turnItems: background.turnItems.filter(
+                  (item) => item.type !== "subagent" || item.origin !== "app_owned",
+                ),
+              }).length > 0;
+          }
+          if (!interrupt && ownedRun.status !== "queued") continue;
+          const stop = {
+            type: "run.interrupt" as const,
+            commandId: command.commandId,
+            threadId: childThreadId,
+            runId: ownedRun.id,
+          };
+          yield* markStoppedRun({
+            command: stop,
+            events,
+            thread: child.thread,
+            run: ownedRun,
+            now,
+          });
+          if (ownedRun.status === "queued") {
+            yield* dispatchQueuedRunCancel({ ...stop, type: "queued-run.cancel" }, events);
+          } else {
+            yield* dispatchRunInterrupt(stop, events, effects, true);
+          }
+        }
+        const ownedRunIds = new Set(
+          child.runs.filter((row) => row.delegatedTaskId === subagent.id).map((row) => row.id),
+        );
+        const taskIds = child.subagents
+          .filter(
+            (task) =>
+              task.origin === "app_owned" &&
+              task.result === null &&
+              task.ownershipReleased !== true &&
+              task.runId !== null &&
+              ownedRunIds.has(task.runId),
+          )
+          .map((task) => task.id);
+        if (taskIds.length > 0) {
+          const modeLimit = yield* DispatchModeLimit;
+          yield* Ref.update(effects, (existing) => [
+            ...existing,
+            delegatedTasksStopEffect({
+              commandId: command.commandId,
+              threadId: childThreadId,
+              taskIds,
+              modeLimit,
+            }),
+          ]);
+        }
+        const records = yield* loadProjectionForCommand(command, ["nodes", "turnItems"], {
+          turnItemTypes: ["subagent"],
+          turnItemRunIds: [subagent.runId],
+          omitSettledLeafNodes: true,
+        });
+        const task = {
+          ...cancelledAppOwnedTask(subagent, now),
+          result: "Child task ended with status cancelled.",
+        };
+        return yield* writeAppOwnedTask({
+          command,
+          events,
+          task,
+          nodes: records.nodes,
+          turnItems: records.turnItems.map((item) =>
+            item.type === "subagent" && item.subagentId === task.id
+              ? { ...item, result: task.result }
+              : item,
+          ),
+          now,
+        });
+      }
       const active = isOrchestrationV2WorkActive(subagent.status);
       if (
         active &&
@@ -13253,8 +13415,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     command: Extract<OrchestrationV2Command, { readonly type: "run.interrupt" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+    onlyTargetRun = false,
   ) {
-    const projection = yield* loadProjectionForCommand(
+    const records = yield* loadProjectionForCommand(
       command,
       [
         "runs",
@@ -13280,6 +13443,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         turnItemStatuses: ["pending", "running", "waiting"],
       },
     );
+    const projection = onlyTargetRun
+      ? {
+          ...records,
+          runs: records.runs.filter((run) => run.id === command.runId),
+          turnItems: records.turnItems.filter((item) => item.runId === command.runId),
+          subagents: records.subagents.filter((task) => task.runId === command.runId),
+          runtimeRequests: records.runtimeRequests.filter((request) =>
+            records.nodes.some(
+              (node) => node.id === request.nodeId && node.runId === command.runId,
+            ),
+          ),
+        }
+      : records;
     const run = projection.runs.find((candidate) => candidate.id === command.runId);
     const rootNode =
       run?.rootNodeId === null
@@ -16529,17 +16705,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           });
         }
         if (yield* PauseRecipientMustBeActive) {
-          const shell = yield* projectionStore
-            .getThreadShell(command.threadId)
+          const snapshot = yield* projectionStore
+            .getShellSnapshot()
             .pipe(mapDispatchError(command));
-          if (shell === null)
+          const shells = [...snapshot.threads, ...snapshot.archivedThreads];
+          const shell = shells.find((thread) => thread.id === command.threadId);
+          if (shell === undefined)
             return yield* new OrchestratorProjectionError({ threadId: command.threadId });
           const deferred = yield* effectOutbox.deferredAutomaticExecution.pipe(
             mapDispatchError(command),
           );
           const pending = yield* effectOutbox.pendingExecution.pipe(mapDispatchError(command));
           if (
-            !activePauseRecipient(shell, deferred, yield* automationPaused) &&
+            !pauseActivity(shells, deferred, yield* automationPaused).activeThread(shell) &&
             !pending.some((work) => work.threadId === command.threadId && work.providerMessage)
           )
             return yield* new OrchestratorPauseRecipientInactiveError({
@@ -17752,6 +17930,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       Effect.gen(function* () {
         // Sending, follow-up intake, and Stop serialize every participant once.
         const threadIds = new Set([commandThreadId(command)]);
+        if (command.type === "subagent.stop") {
+          const parent = yield* projectionStore
+            .getThreadRecords(command.threadId, ["subagents"])
+            .pipe(mapDispatchError(command));
+          const task = parent.subagents.find(
+            (row) => row.id === command.subagentId && row.runId === command.runId,
+          );
+          if (task?.origin === "app_owned" && task.childThreadId !== null)
+            threadIds.add(task.childThreadId);
+        }
         if (command.type === "message.dispatch" && command.senderThreadId !== undefined) {
           threadIds.add(command.senderThreadId);
         }

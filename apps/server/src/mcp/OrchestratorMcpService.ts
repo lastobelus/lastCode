@@ -2778,7 +2778,52 @@ const make = Effect.gen(function* () {
                   ),
                 ),
               );
+      // A terminal logical task is not authority to stop another round in its child.
+      if (
+        parentTask !== undefined &&
+        (parentTask.status === "completed" ||
+          parentTask.status === "failed" ||
+          parentTask.status === "cancelled" ||
+          parentTask.status === "interrupted")
+      ) {
+        yield* disposeCompletionDelivery;
+        return { taskId: input.taskId, status: parentTask.status };
+      }
+      const child = yield* loadProjection(childThreadId);
+      const ownsActionContinuation =
+        parentTask?.runId != null &&
+        isOrchestrationV2WorkActive(parentTask.status) &&
+        child.runs.some(
+          (run) =>
+            run.delegatedTaskId === input.taskId &&
+            ["completed", "failed", "cancelled", "interrupted"].includes(run.status) &&
+            run.actionObligations?.some(
+              (row) =>
+                (row.state === "waiting" || row.state === "transferred") &&
+                row.owner.taskId === input.taskId &&
+                row.owner.sourceRunId === run.id &&
+                row.owner.parentThreadId === scope.thread.threadId,
+            ),
+        );
       const stopChild = Effect.gen(function* () {
+        if (ownsActionContinuation && parentTask?.runId != null) {
+          // The source provider turn has ended. Cancel its logical task under
+          // the parent's lock rather than stopping another round in this child.
+          yield* threadManagement
+            .dispatch({
+              type: "subagent.stop",
+              commandId: stableCommandId({
+                scope,
+                requestKey: key,
+                operation: "cancel-task-action",
+              }),
+              threadId: scope.thread.threadId,
+              runId: parentTask.runId,
+              subagentId: input.taskId,
+            })
+            .pipe(Effect.mapError(threadManagementFailure));
+          return;
+        }
         const commandId = stableCommandId({ scope, requestKey: key, operation: "cancel-task" });
         const reason = agentStopReason(input.reason);
         yield* threadManagement
@@ -2886,6 +2931,11 @@ const make = Effect.gen(function* () {
         );
         return subagents.some((task) => task.id === input.taskId && task.status === "cancelled");
       }).pipe(Effect.mapError(threadManagementFailure));
+      if (ownsActionContinuation) {
+        yield* stopWithinLimit;
+        yield* disposeCompletionDelivery;
+        return { taskId: input.taskId, status: "cancel_requested" };
+      }
       if (isTerminalTaskStatus(current.status)) {
         // The child can still run work for another turn, so it is stopped either way.
         yield* stopWithinLimit;
@@ -2896,7 +2946,6 @@ const make = Effect.gen(function* () {
           status: cancelled ? "cancelled" : current.status,
         } satisfies OrchestratorMcpTaskCancelResult;
       }
-      const child = yield* loadProjection(childThreadId);
       if (
         current.workState !== "waiting_for_children" &&
         ThreadManagementService.latestActiveRun(child) === undefined &&

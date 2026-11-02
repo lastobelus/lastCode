@@ -21,11 +21,7 @@ import { TerminalManager } from "../terminal/Manager.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { currentExecutionBlockers } from "../updateDrain/UpdateDrainAdmission.ts";
 import * as Store from "./EnvironmentPauseStore.ts";
-import {
-  activeThread,
-  activeBackgroundWork,
-  deferredActivity,
-} from "./EnvironmentPauseActivity.ts";
+import { pauseActivity, deferredActivity } from "./EnvironmentPauseActivity.ts";
 
 export class EnvironmentPause extends Context.Service<
   EnvironmentPause,
@@ -80,6 +76,11 @@ const make = Effect.gen(function* () {
     const pendingIds = new Set(
       pending.filter(({ providerMessage }) => providerMessage).map(({ threadId }) => threadId),
     );
+    const activity = pauseActivity(
+      [...shell.threads, ...shell.archivedThreads],
+      deferred,
+      automationPaused,
+    );
     // Archived work still blocks quiet in status, but cannot accept messages.
     return {
       deferred,
@@ -88,7 +89,7 @@ const make = Effect.gen(function* () {
           thread.archivedAt == null &&
           thread.deletedAt == null &&
           !isProviderNativeSubagentThread(thread) &&
-          (activeThread(thread, deferred, automationPaused) || pendingIds.has(thread.id)),
+          (activity.activeThread(thread) || pendingIds.has(thread.id)),
       ),
     };
   });
@@ -494,6 +495,7 @@ const make = Effect.gen(function* () {
     const shellThreads =
       shell._tag === "Success" ? [...shell.success.threads, ...shell.success.archivedThreads] : [];
     const deferredRuns = deferred._tag === "Success" ? deferred.success : [];
+    const activity = pauseActivity(shellThreads, deferredRuns, automationPaused);
     const blockers =
       execution._tag === "Success"
         ? execution.success.filter((blocker) => {
@@ -502,7 +504,7 @@ const make = Effect.gen(function* () {
                 (thread) =>
                   thread.id === blocker.threadId &&
                   (thread.pendingBackgroundTasks?.length ?? 0) > 0 &&
-                  !activeBackgroundWork(thread, true),
+                  !activity.activeBackgroundWork(thread),
               );
             return (
               blocker.type !== "thread-turn" ||
@@ -524,9 +526,7 @@ const make = Effect.gen(function* () {
           blockers.push({ type: "thread-turn", threadId, turnId: null, status: "starting" });
       }
     const activeIds = new Set<ThreadId>(
-      shellThreads
-        .filter((thread) => activeThread(thread, deferredRuns, automationPaused))
-        .map((thread) => thread.id),
+      shellThreads.filter((thread) => activity.activeThread(thread)).map((thread) => thread.id),
     );
     for (const blocker of blockers) if ("threadId" in blocker) activeIds.add(blocker.threadId);
     const quiet =
