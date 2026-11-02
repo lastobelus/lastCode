@@ -159,6 +159,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   /** Server understands thread annotation create/edit/resolve/reopen commands
       and exposes annotation state in thread shell/detail snapshots. */
   threadAnnotations: Schema.optionalKey(Schema.Boolean),
+  /** Server preserves annotation history and enforces one active note. */
+  threadAnnotationHistory: Schema.optionalKey(Schema.Boolean),
   /** Server durably owns thread worktree cleanup after deletion and understands
       deleteWorktree plus cleanup retry/abandon commands. */
   threadWorktreeCleanup: Schema.optionalKey(Schema.Boolean),

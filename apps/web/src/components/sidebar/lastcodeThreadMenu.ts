@@ -14,6 +14,7 @@ export const LASTCODE_THREAD_ACTION_POLICY = {
   "new-thread-on-branch": false,
   rename: true,
   annotate: true,
+  "resolve-annotation": true,
   "mark-unread": false,
   "mark-read": false,
   "creator-independent": true,
@@ -54,6 +55,7 @@ interface ThreadMenuInput {
   parentThreadId: ThreadId | null;
   creator: { groupingEligible: boolean; canOpen: boolean };
   canAnnotate: boolean;
+  hasActiveAnnotation: boolean;
   supportsPersistence: boolean;
   hasStoppableProcesses: boolean;
   projectSettingsKey: string | null;
@@ -67,7 +69,14 @@ function metadataItems(input: ThreadMenuInput): ContextMenuItem<string>[] {
     items.push({ id: "new-thread-on-branch", label: `New thread on ${input.thread.branch}` });
   }
   items.push({ id: "rename", label: "Rename thread" });
-  if (input.canAnnotate) items.push({ id: "annotate", label: "Annotate thread…" });
+  if (input.canAnnotate) {
+    items.push({
+      id: "annotate",
+      label: input.hasActiveAnnotation ? "Edit Annotation…" : "Annotate thread…",
+    });
+    if (input.hasActiveAnnotation)
+      items.push({ id: "resolve-annotation", label: "Resolve Annotation…" });
+  }
   items.push({ id: "mark-unread", label: "Mark unread" });
   items.push({ id: "mark-read", label: "Mark read" });
   if (input.parentThreadId !== null || input.creator.groupingEligible) {

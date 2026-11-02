@@ -14,6 +14,7 @@ import {
   UpdateDrainRequestId,
   UpdateDrainTargetVersion,
 } from "@t3tools/contracts";
+import { threadAnnotationEntries, threadAnnotationId } from "@t3tools/shared/threadAnnotation";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -28,6 +29,8 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EventSink from "./EventSink.ts";
+import * as EventStore from "./EventStore.ts";
+import * as ProjectionMaintenance from "./ProjectionMaintenance.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import type { ProviderAdapterV2 } from "@t3tools/provider-core/server/ProviderAdapter";
@@ -51,6 +54,13 @@ const testLayer = Layer.mergeAll(
     { name: "lastcode-metadata" },
     ProviderAdapterRegistry.layerFromAdapters([adapter]),
     { databaseLayer: database, runEffectWorker: false },
+  ),
+);
+
+const annotationTestLayer = Layer.mergeAll(
+  testLayer,
+  ProjectionMaintenance.layer.pipe(
+    Layer.provide(Layer.mergeAll(testLayer, EventStore.layer.pipe(Layer.provide(database)))),
   ),
 );
 
@@ -445,18 +455,207 @@ it.effect("retains note anchors and resolution through edits and settlement", ()
       (yield* projections.getThread(threadId)).annotation?.resolvedAt,
       resolved?.resolvedAt,
     );
+    yield* addMessage("note:third", DateTime.add(firstAt, { seconds: 2 }));
+    yield* orchestrator.dispatch({
+      type: "thread.annotation.upsert",
+      commandId: CommandId.make("note:anchored-edit"),
+      threadId,
+      body: "Resolved edit stays at its anchor",
+    });
+    const old = (yield* projections.getThread(threadId)).annotation!;
+    assert.equal(old.anchorMessageId, "note:second");
+    assert.isDefined(old.id);
+    yield* TestClock.adjust("1 second");
+    yield* orchestrator.dispatch(
+      decodeCommand({
+        type: "thread.annotation.upsert",
+        commandId: "note:new",
+        threadId,
+        body: "New note",
+        createNew: true,
+      }),
+    );
+    const fresh = (yield* projections.getThread(threadId)).annotation!;
+    assert.isNull(fresh.resolvedAt);
+    assert.equal(fresh.anchorMessageId, "note:third");
+    assert.notEqual(fresh.id, old.id);
+    assert.notEqual(fresh.createdAt, old.createdAt);
+    assert.equal(fresh.createdAt, fresh.updatedAt);
+    assert.deepEqual(fresh.otherAnnotations, [old]);
+    assert.equal(
+      (yield* Effect.exit(
+        orchestrator.dispatch(
+          decodeCommand({
+            type: "thread.annotation.reopen",
+            commandId: "note:reopen-old",
+            threadId,
+            annotationId: old.id,
+          }),
+        ),
+      ))._tag,
+      "Failure",
+    );
+    assert.deepEqual((yield* projections.getThread(threadId)).annotation, fresh);
+    assert.equal(
+      (yield* Effect.exit(
+        orchestrator.dispatch(
+          decodeCommand({
+            type: "thread.annotation.upsert",
+            commandId: "note:stale-new",
+            threadId,
+            body: "Must not replace the active note",
+            createNew: true,
+          }),
+        ),
+      ))._tag,
+      "Failure",
+    );
+    assert.deepEqual((yield* projections.getThread(threadId)).annotation, fresh);
+    yield* orchestrator.dispatch({
+      type: "thread.annotation.resolve",
+      commandId: CommandId.make("note:resolve-fresh"),
+      threadId,
+      annotationId: fresh.id,
+    });
     yield* orchestrator.dispatch({
       type: "thread.annotation.reopen",
-      commandId: CommandId.make("note:reopen"),
+      commandId: CommandId.make("note:reopen-old-after-resolve"),
       threadId,
+      annotationId: old.id,
     });
+    let state = (yield* projections.getThread(threadId)).annotation!;
+    assert.equal(state.id, old.id);
+    assert.isNull(state.resolvedAt);
+    assert.isNotNull(state.otherAnnotations![0]!.resolvedAt);
+    assert.equal(state.anchorMessageId, "note:second");
+    yield* addMessage("note:fourth", DateTime.add(firstAt, { seconds: 3 }));
+    yield* orchestrator.dispatch(
+      decodeCommand({
+        type: "thread.annotation.resolve",
+        commandId: "note:resolve-old",
+        threadId,
+        annotationId: old.id,
+      }),
+    );
+    state = (yield* projections.getThread(threadId)).annotation!;
+    assert.equal(state.anchorMessageId, "note:fourth");
+    assert.isNotNull(state.resolvedAt);
+    assert.equal(state.otherAnnotations![0]!.anchorMessageId, "note:third");
+    const resolvedOld = state;
+    yield* addMessage("note:fifth", DateTime.add(firstAt, { seconds: 4 }));
+    yield* orchestrator.dispatch(
+      decodeCommand({
+        type: "thread.annotation.upsert",
+        commandId: "note:edit-old",
+        threadId,
+        annotationId: old.id,
+        body: "Edited old note",
+      }),
+    );
+    state = (yield* projections.getThread(threadId)).annotation!;
+    assert.equal(state.anchorMessageId, "note:fourth");
+    assert.equal(state.resolvedAt, resolvedOld.resolvedAt);
+    assert.equal(state.createdAt, old.createdAt);
+    assert.equal(state.body, "Edited old note");
+    assert.equal(state.otherAnnotations![0]!.body, fresh.body);
+    // Starting another note preserves both resolved entries.
+    yield* orchestrator.dispatch(
+      decodeCommand({
+        type: "thread.annotation.upsert",
+        commandId: "note:third-note",
+        threadId,
+        body: "Third note",
+        createNew: true,
+      }),
+    );
+    const expected = (yield* projections.getThread(threadId)).annotation!;
+    const { otherAnnotations: _others, ...oldEntry } = state;
+    assert.deepEqual(expected.otherAnnotations, [oldEntry, state.otherAnnotations![0]!]);
+    assert.equal(
+      (yield* Effect.exit(
+        orchestrator.dispatch(
+          decodeCommand({
+            type: "thread.annotation.resolve",
+            commandId: "note:unknown",
+            threadId,
+            annotationId: "missing-note",
+          }),
+        ),
+      ))._tag,
+      "Failure",
+    );
+    assert.deepEqual((yield* projections.getThread(threadId)).annotation, expected);
+    assert.deepEqual((yield* projections.getThreadShell(threadId))?.annotation, expected);
+    const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+    yield* maintenance.compactEventStore();
+    yield* maintenance.rebuild;
+    assert.deepEqual((yield* projections.getThread(threadId)).annotation, expected);
+    assert.deepEqual((yield* projections.getThreadShell(threadId))?.annotation, expected);
+    const sql = yield* SqlClient.SqlClient;
+    const rows = yield* sql<{ payload_json: string }>`SELECT payload_json
+      FROM orchestration_v2_projection_threads WHERE thread_id = ${threadId}`;
+    assert.deepEqual((yield* decodeStoredThread(rows[0]!.payload_json)).annotation, expected);
+    const reloaded = yield* Effect.gen(function* () {
+      const freshProjections = yield* ProjectionStore.ProjectionStoreV2;
+      return yield* freshProjections.getThread(threadId);
+    }).pipe(Effect.provide(ProjectionStore.layer), Effect.provideService(SqlClient.SqlClient, sql));
+    assert.deepEqual(reloaded.annotation, expected);
+  }).pipe(Effect.provide(annotationTestLayer)),
+);
+
+it.effect("keeps legacy singleton IDs stable through targeted edits and replay", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const sink = yield* EventSink.EventSinkV2;
+    const threadId = ThreadId.make("notes:legacy");
+    yield* orchestrator.dispatch(create(threadId, ProjectId.make("notes:project")));
+    const thread = yield* projections.getThread(threadId);
+    const now = yield* DateTime.now;
+    const timestamp = DateTime.formatIso(now);
+    const legacy = {
+      body: "Legacy note",
+      anchorMessageId: MessageId.make("legacy:anchor"),
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      resolvedAt: timestamp,
+    };
+    const event = yield* decodeEventJson({
+      id: "legacy:event",
+      type: "thread.metadata-updated",
+      threadId,
+      occurredAt: timestamp,
+      payload: { ...(yield* encodeThreadJson(thread)), annotation: legacy },
+    });
+    yield* sink.write({ events: [event] });
+    const id = threadAnnotationId(legacy);
+    assert.equal(threadAnnotationId((yield* projections.getThread(threadId)).annotation!), id);
     yield* orchestrator.dispatch({
-      type: "thread.settle",
-      commandId: CommandId.make("note:settle"),
+      type: "thread.annotation.upsert",
+      commandId: CommandId.make("legacy:edit"),
       threadId,
+      annotationId: id,
+      body: "Edited legacy note",
     });
-    assert.isNull((yield* projections.getThread(threadId)).annotation?.resolvedAt);
-  }).pipe(Effect.provide(testLayer)),
+    const saved = (yield* projections.getThread(threadId)).annotation!;
+    assert.equal(saved.id, id);
+    assert.equal(saved.anchorMessageId, legacy.anchorMessageId);
+    yield* orchestrator.dispatch({
+      type: "thread.annotation.reopen",
+      commandId: CommandId.make("legacy:reopen"),
+      threadId,
+      annotationId: id,
+    });
+    const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+    yield* maintenance.compactEventStore();
+    yield* maintenance.rebuild;
+    const entries = threadAnnotationEntries((yield* projections.getThread(threadId)).annotation!);
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0]!.id, id);
+    assert.equal(entries[0]!.body, "Edited legacy note");
+    assert.equal(entries[0]!.anchorMessageId, legacy.anchorMessageId);
+    assert.isNull(entries[0]!.resolvedAt);
+  }).pipe(Effect.provide(annotationTestLayer)),
 );
 
 it.effect("starts child notes independently of historical copied and resolved parent notes", () =>
@@ -497,6 +696,16 @@ it.effect("starts child notes independently of historical copied and resolved pa
                 createdAt: copiedAt,
                 updatedAt: copiedAt,
                 resolvedAt: copiedAt,
+                otherAnnotations: [
+                  {
+                    id: "copied:other-note",
+                    body: "Copied active parent note",
+                    anchorMessageId: MessageId.make("notes:parent-message"),
+                    createdAt: copiedAt,
+                    updatedAt: copiedAt,
+                    resolvedAt: null,
+                  },
+                ],
               },
             },
           },
@@ -535,12 +744,14 @@ it.effect("starts child notes independently of historical copied and resolved pa
         commandId: CommandId.make(`notes:${kind}:create`),
         threadId,
         body: "Own child note",
+        createNew: true,
       });
       const independent = (yield* projections.getThread(threadId)).annotation;
       assert.equal(independent?.body, "Own child note");
       assert.equal(independent?.anchorMessageId, `notes:${kind}:message`);
       assert.equal(independent?.createdAt, DateTime.formatIso(now));
       assert.isNull(independent?.resolvedAt);
+      assert.isUndefined(independent?.otherAnnotations);
       yield* orchestrator.dispatch({
         type: "thread.annotation.resolve",
         commandId: CommandId.make(`notes:${kind}:resolve`),

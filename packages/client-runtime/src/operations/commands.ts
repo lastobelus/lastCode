@@ -96,8 +96,8 @@ export interface DeleteThreadInput extends ThreadCommandInput {
 }
 export type RetryThreadWorktreeCleanupInput = ThreadCommandInput;
 export type AbandonThreadWorktreeCleanupInput = ThreadCommandInput;
-export type ResolveThreadAnnotationInput = ThreadCommandInput;
-export type ReopenThreadAnnotationInput = ThreadCommandInput;
+export type ResolveThreadAnnotationInput = ThreadCommandInput & { readonly annotationId?: string };
+export type ReopenThreadAnnotationInput = ResolveThreadAnnotationInput;
 
 export interface SetThreadPersistenceInput extends ThreadCommandInput {
   readonly persistent: boolean;
@@ -105,6 +105,8 @@ export interface SetThreadPersistenceInput extends ThreadCommandInput {
 
 export interface UpsertThreadAnnotationInput extends ThreadCommandInput {
   readonly body: string;
+  readonly createNew?: boolean;
+  readonly annotationId?: string;
 }
 
 export interface ArchiveThreadInput extends ThreadCommandInput {
@@ -538,13 +540,23 @@ export const abandonThreadWorktreeCleanup = Effect.fn(
 
 export const resolveThreadAnnotation = Effect.fn("EnvironmentCommands.resolveThreadAnnotation")(
   function* (input: ResolveThreadAnnotationInput) {
-    return yield* simpleThreadCommand("thread.annotation.resolve", input);
+    return yield* dispatch({
+      type: "thread.annotation.resolve",
+      commandId: yield* allocateCommandId(input),
+      threadId: input.threadId,
+      ...(input.annotationId === undefined ? {} : { annotationId: input.annotationId }),
+    });
   },
 );
 
 export const reopenThreadAnnotation = Effect.fn("EnvironmentCommands.reopenThreadAnnotation")(
   function* (input: ReopenThreadAnnotationInput) {
-    return yield* simpleThreadCommand("thread.annotation.reopen", input);
+    return yield* dispatch({
+      type: "thread.annotation.reopen",
+      commandId: yield* allocateCommandId(input),
+      threadId: input.threadId,
+      ...(input.annotationId === undefined ? {} : { annotationId: input.annotationId }),
+    });
   },
 );
 
@@ -566,6 +578,8 @@ export const upsertThreadAnnotation = Effect.fn("EnvironmentCommands.upsertThrea
       commandId: yield* allocateCommandId(input),
       threadId: input.threadId,
       body: input.body,
+      ...(input.createNew === undefined ? {} : { createNew: input.createNew }),
+      ...(input.annotationId === undefined ? {} : { annotationId: input.annotationId }),
     });
   },
 );

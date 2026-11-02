@@ -1,6 +1,7 @@
 import { mergeWorktreeSuspensionMenuItems } from "../worktreeSuspensionMenu";
 import { withThreadReadPermissions } from "../../hooks/threadReadActions";
 import type { ScopedThreadRef } from "@t3tools/contracts";
+import { threadAnnotationId } from "@t3tools/shared/threadAnnotation";
 import {
   scopedProjectKey,
   scopedThreadKey,
@@ -58,6 +59,9 @@ export function useLastCodeThreadMenu(
     markThreadRead,
   } = useLastCodeThreadActions();
   const updateMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
+    reportFailure: false,
+  });
+  const resolveAnnotation = useOrchestrationCommand(threadEnvironment.resolveAnnotation, {
     reportFailure: false,
   });
   const stopProcesses = useStopThreadProcesses();
@@ -176,6 +180,14 @@ export function useLastCodeThreadMenu(
       },
       rename: () => startRename(scopedThreadKey(ref), thread.title),
       annotate: () => editAnnotation(thread),
+      "resolve-annotation": async () => {
+        if (thread.annotation?.resolvedAt !== null) return;
+        const result = await resolveAnnotation({
+          environmentId: thread.environmentId,
+          input: { threadId: thread.id, annotationId: threadAnnotationId(thread.annotation) },
+        });
+        reportThreadOperationFailure(result, "Failed to resolve annotation");
+      },
       "mark-unread": () => {
         markThreadUnread(ref);
       },

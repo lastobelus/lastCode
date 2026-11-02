@@ -384,12 +384,11 @@ export function readEnvironmentSupportsArchiveFamilies(environmentId: Environmen
   );
 }
 
-/** Whether the environment supports persistent thread annotations. Missing is
-    unsupported so clients do not send annotation commands to older servers. */
+/** History-aware clients must not overwrite singleton notes on older servers. */
 export function readEnvironmentSupportsThreadAnnotations(environmentId: EnvironmentId): boolean {
   return (
     appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
-      .threadAnnotations === true
+      .threadAnnotationHistory === true
   );
 }
 

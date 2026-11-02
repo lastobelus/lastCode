@@ -4,6 +4,7 @@ import {
   type ThreadAnnotation,
 } from "@t3tools/contracts";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
+import { threadAnnotationEntries, threadAnnotationId } from "@t3tools/shared/threadAnnotation";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -60,18 +61,23 @@ function useAnnotationMutations(
   });
   const [resolution, setResolution] = useState<{ key: string } | null>(null);
   const bodyPending = useThreadAnnotationBodyPending(threadRef);
-  const save = async (body: string): Promise<boolean> => {
+  const save = async (body: string, annotationId?: string, createNew = false): Promise<boolean> => {
     if (threadRef === null || !canAnnotate) return false;
     return runThreadAnnotationBodySave(threadRef, async () => {
       const result = await upsert({
         environmentId: threadRef.environmentId,
-        input: { threadId: threadRef.threadId, body },
+        input: {
+          threadId: threadRef.threadId,
+          body,
+          ...(annotationId !== undefined ? { annotationId } : {}),
+          ...(createNew ? { createNew: true } : {}),
+        },
       });
       reportAnnotationFailure("save", result);
       return result._tag === "Success";
     });
   };
-  const changeResolution = async (next: "resolve" | "reopen") => {
+  const changeResolution = async (next: "resolve" | "reopen", annotationId?: string) => {
     if (threadRef === null || !canAnnotate) return;
     const operation = { key: routeKey };
     setResolution(operation);
@@ -79,7 +85,10 @@ function useAnnotationMutations(
     await (async () => {
       const result = await command({
         environmentId: threadRef.environmentId,
-        input: { threadId: threadRef.threadId },
+        input: {
+          threadId: threadRef.threadId,
+          ...(annotationId !== undefined ? { annotationId } : {}),
+        },
       });
       reportAnnotationFailure(next, result);
     })().finally(() => setResolution((current) => (current === operation ? null : current)));
@@ -90,7 +99,6 @@ function useAnnotationMutations(
 function useAnnotationBanner(input: {
   routeThreadRef: ScopedThreadRef;
   annotation: ThreadAnnotation | null;
-  canOperate: boolean;
   canAnnotate: boolean;
   cwd: string | null;
   pending: boolean;
@@ -98,17 +106,8 @@ function useAnnotationBanner(input: {
   onSave: (body: string) => Promise<boolean>;
   onResolve: () => void;
 }) {
-  const {
-    routeThreadRef,
-    annotation,
-    canOperate,
-    canAnnotate,
-    cwd,
-    pending,
-    onEdit,
-    onSave,
-    onResolve,
-  } = input;
+  const { routeThreadRef, annotation, canAnnotate, cwd, pending, onEdit, onSave, onResolve } =
+    input;
   const key = scopedThreadKey(routeThreadRef);
   const expandByDefault = useClientSettings((settings) => settings.expandThreadAnnotations);
   const savedExpansion = useUiStateStore((store) => store.threadAnnotationExpansionById[key]);
@@ -137,7 +136,7 @@ function useAnnotationBanner(input: {
       onBodyChange: canAnnotate ? onSave : undefined,
       threadRef: routeThreadRef,
     }),
-    actions: canOperate ? (
+    actions: canAnnotate ? (
       <ThreadAnnotationActions
         annotation={annotation}
         onEdit={onEdit}
@@ -181,24 +180,41 @@ export function useChatThreadAnnotation(input: {
   const canAnnotate =
     canOperate && threadRef !== null && supported && (annotation !== null || hasUserMessage());
   const mutations = useAnnotationMutations(threadRef, canAnnotate, routeKey);
-  const [editor, setEditor] = useState<{ route: string } | null>(null);
+  const [editor, setEditor] = useState<{
+    route: string;
+    createNew: boolean;
+    annotationId: string | undefined;
+  } | null>(null);
   if (editor !== null && editor.route !== routeKey) setEditor(null);
-  const openEditor = () => setEditor({ route: routeKey });
+  const openEditor = () =>
+    setEditor({
+      route: routeKey,
+      createNew: annotation?.resolvedAt !== null,
+      annotationId: annotation?.resolvedAt === null ? threadAnnotationId(annotation) : undefined,
+    });
+  const editAnnotation = (annotationId?: string) =>
+    setEditor({
+      route: routeKey,
+      createNew: false,
+      annotationId: annotationId ?? (annotation ? threadAnnotationId(annotation) : undefined),
+    });
+  const currentId = annotation ? threadAnnotationId(annotation) : undefined;
+  const saveCurrent = (body: string) => mutations.save(body, currentId);
   const onOpenChange = (open: boolean) => {
     if (open) openEditor();
     else setEditor((current) => (current === editor ? null : current));
   };
-  const onResolve = () => void mutations.changeResolution("resolve");
+  const onResolve = (annotationId?: string) =>
+    void mutations.changeResolution("resolve", annotationId ?? currentId);
   const banner = useAnnotationBanner({
     routeThreadRef,
     annotation,
-    canOperate,
     canAnnotate,
     cwd,
     pending: mutations.pending,
-    onEdit: openEditor,
-    onSave: mutations.save,
-    onResolve,
+    onEdit: () => editAnnotation(),
+    onSave: saveCurrent,
+    onResolve: () => onResolve(),
   });
 
   const interceptSubmission = (submission: {
@@ -233,7 +249,12 @@ export function useChatThreadAnnotation(input: {
     return saveThreadAnnotationSubmission({
       target: submission.target,
       draft,
-      save: () => mutations.save(command.body),
+      save: () =>
+        mutations.save(
+          command.body,
+          annotation?.resolvedAt === null ? currentId : undefined,
+          annotation?.resolvedAt !== null,
+        ),
       onDraftConsumed: submission.onDraftConsumed,
     }).then(() => true);
   };
@@ -245,20 +266,28 @@ export function useChatThreadAnnotation(input: {
     editor: (
       <ThreadAnnotationEditorDialog
         key={routeKey}
-        annotation={annotation}
+        annotation={
+          editor?.createNew
+            ? null
+            : (threadAnnotationEntries(annotation).find(
+                (entry) => threadAnnotationId(entry) === editor?.annotationId,
+              ) ?? null)
+        }
         open={editor !== null && editor.route === routeKey && canAnnotate}
         onOpenChange={onOpenChange}
-        onSave={mutations.save}
+        onSave={(body) => mutations.save(body, editor?.annotationId, editor?.createNew)}
       />
     ),
     timeline: {
       annotation,
       ...(canAnnotate
         ? {
-            onAnnotationBodyChange: mutations.save,
-            onAnnotationEdit: openEditor,
+            onAnnotationBodyChange: (body: string, annotationId?: string) =>
+              mutations.save(body, annotationId ?? currentId),
+            onAnnotationEdit: editAnnotation,
             onAnnotationResolve: onResolve,
-            onAnnotationReopen: () => void mutations.changeResolution("reopen"),
+            onAnnotationReopen: (annotationId?: string) =>
+              void mutations.changeResolution("reopen", annotationId ?? currentId),
           }
         : {}),
     },

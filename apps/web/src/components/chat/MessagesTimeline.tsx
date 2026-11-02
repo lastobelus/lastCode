@@ -221,10 +221,10 @@ interface MessagesTimelineProps {
   canOperateThread?: boolean;
   onRespondToApproval?: TimelineRowSharedState["onRespondToApproval"];
   annotation?: ThreadAnnotation | null;
-  onAnnotationEdit?: () => void;
-  onAnnotationBodyChange?: (body: string) => Promise<boolean>;
-  onAnnotationResolve?: () => void;
-  onAnnotationReopen?: () => void;
+  onAnnotationEdit?: (annotationId?: string) => void;
+  onAnnotationBodyChange?: (body: string, annotationId?: string) => Promise<boolean>;
+  onAnnotationResolve?: (annotationId?: string) => void;
+  onAnnotationReopen?: (annotationId?: string) => void;
   citationRequest?: AssistantCitationRequest | null;
   citationHistory?: CitedHistory;
   onCiteAssistantText?: (
@@ -342,10 +342,10 @@ const ConversationTimeline = memo(function ConversationTimeline({
   canOperateThread = false,
   onRespondToApproval,
   annotation = null,
-  onAnnotationEdit = () => {},
+  onAnnotationEdit,
   onAnnotationBodyChange,
-  onAnnotationResolve = () => {},
-  onAnnotationReopen = () => {},
+  onAnnotationResolve,
+  onAnnotationReopen,
   citationRequest = null,
   citationHistory = CITED_HISTORY_LOADING,
   onCiteAssistantText,

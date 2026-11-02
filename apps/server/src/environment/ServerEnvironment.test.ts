@@ -249,6 +249,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
       expect(second.capabilities.threadActiveReorder).toBe(true);
       expect(second.capabilities.threadArchiveFamilies).toBe(true);
       expect(second.capabilities.threadArchiveFamiliesV2).toBe(true);
+      expect(second.capabilities.threadAnnotationHistory).toBe(true);
       expect(second.capabilities.threadTitleRegeneration).toBe(true);
       expect(second.capabilities.threadPullRequests).toBe(true);
       expect(second.capabilities.threadPullRequestLinking).toBe(true);

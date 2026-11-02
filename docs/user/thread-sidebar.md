@@ -328,19 +328,25 @@ to show the family status and child count in the parent row while keeping the ch
 
 ## Thread annotations in LastCode
 
-A thread can have one Markdown annotation for notes, headings, lists, task lists, and tags. In the
-LastCode sidebar, open a thread's context menu and choose **Annotate thread…**. An active annotation
-adds a short dotted yellow underline to the thread timestamp; hover it to read, edit, or resolve
-the note without opening the thread.
+A thread has one current Markdown annotation at a time, for notes, headings, lists, task lists, and
+tags. In the LastCode sidebar, open a thread's context menu and choose **Annotate thread…**. Once a
+note is current, the menu offers **Edit Annotation…** and **Resolve Annotation…** instead. The
+current annotation adds a short dotted yellow underline to the thread timestamp; hover it to read,
+edit, or resolve the note without opening the thread.
 
 Opening an annotated thread shows a compact yellow note above the composer, with its first line
 and edit timestamp. Expand it to read the full Markdown; your expanded or collapsed choice is
 remembered for that thread across navigation and reloads. Choose **Edit** to open the existing
-Markdown in the editor. You can dismiss the note for the current visit without deleting or resolving it. The
-conversation minimap marks the message that was newest when the annotation was created or last
-changed. Editing, resolving, or reopening the annotation moves that marker to the newest message.
-Resolved annotations disappear from the sidebar and composer but remain available from their
-yellow minimap marker, where they can be edited or reopened.
+Markdown in the editor. You can dismiss the note for the current visit without deleting or resolving it.
+
+The conversation minimap has a yellow marker for each annotation: solid for the current note, faded
+for resolved notes. A new note's marker sits on the newest message. It moves only when you resolve
+the note, to the message that is newest at that moment; editing or reopening leaves it in place.
+
+Resolved annotations disappear from the sidebar and composer but keep their minimap markers. Choose
+**Annotate thread…** to start a new note; your resolved notes stay as they are. Hover a resolved
+note's marker to edit it or reopen it. Only one note can be current, so to reopen an older note,
+resolve the current one first or copy what you need into it.
 
 ## Resumable Project Actions in LastCode
 
