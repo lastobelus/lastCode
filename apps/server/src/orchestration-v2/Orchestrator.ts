@@ -172,7 +172,7 @@ import {
   isUndeliveredMailboxSteer,
 } from "./NotificationMailbox.ts";
 import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts";
-import { activeThread as activePauseRecipient } from "../environment/EnvironmentPauseActivity.ts";
+import { pauseActivity } from "../environment/EnvironmentPauseActivity.ts";
 import { EventSinkV2 } from "./EventSink.ts";
 import {
   decideGuestMessageSend,
@@ -16529,17 +16529,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           });
         }
         if (yield* PauseRecipientMustBeActive) {
-          const shell = yield* projectionStore
-            .getThreadShell(command.threadId)
+          const snapshot = yield* projectionStore
+            .getShellSnapshot()
             .pipe(mapDispatchError(command));
-          if (shell === null)
+          const shells = [...snapshot.threads, ...snapshot.archivedThreads];
+          const shell = shells.find((thread) => thread.id === command.threadId);
+          if (shell === undefined)
             return yield* new OrchestratorProjectionError({ threadId: command.threadId });
           const deferred = yield* effectOutbox.deferredAutomaticExecution.pipe(
             mapDispatchError(command),
           );
           const pending = yield* effectOutbox.pendingExecution.pipe(mapDispatchError(command));
           if (
-            !activePauseRecipient(shell, deferred, yield* automationPaused) &&
+            !pauseActivity(shells, deferred, yield* automationPaused).activeThread(shell) &&
             !pending.some((work) => work.threadId === command.threadId && work.providerMessage)
           )
             return yield* new OrchestratorPauseRecipientInactiveError({

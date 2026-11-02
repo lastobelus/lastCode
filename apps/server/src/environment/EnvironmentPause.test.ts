@@ -1066,7 +1066,7 @@ it.effect("can pause again while released automatic work waits for a thread", ()
   }).pipe(Effect.provide(testLayer)),
 );
 
-it.effect("closes the gate before scanning and excludes deferred automatic turns from quiet", () =>
+it.effect("excludes deferred automatic turns and their waiting parents from quiet", () =>
   Effect.gen(function* () {
     const h = yield* harness;
     const queuedRun = RunId.make("automatic-queued-example");
@@ -1074,12 +1074,22 @@ it.effect("closes the gate before scanning and excludes deferred automatic turns
     yield* Ref.set(
       h.snapshot,
       shell([
-        { ...thread(a, "queued"), latestRunId: queuedRun },
+        {
+          ...thread(a, "queued"),
+          latestRunId: queuedRun,
+          lineage: { parentThreadId: b, relationshipToParent: "subagent", rootThreadId: c },
+        },
         {
           ...thread(b, "starting"),
           activeRunId: startingRun,
           activityRunStatus: "starting",
           latestRunId: startingRun,
+          lineage: { parentThreadId: c, relationshipToParent: "subagent", rootThreadId: c },
+          pendingBackgroundTasks: [{ taskId: "nested-child", kind: "subagent", childThreadId: a }],
+        },
+        {
+          ...thread(c, "idle"),
+          pendingBackgroundTasks: [{ taskId: "child", kind: "subagent", childThreadId: b }],
         },
       ]),
     );
@@ -1095,9 +1105,70 @@ it.effect("closes the gate before scanning and excludes deferred automatic turns
     assert.deepEqual(yield* Ref.get(h.gateObservations), ["pausing", "pausing"]);
     const resumed = yield* h.pause.resume;
     assert.strictEqual(resumed.session?.phase, "resuming");
-    assert.strictEqual(resumed.activeThreadCount, 2);
+    assert.strictEqual(resumed.activeThreadCount, 3);
     yield* Ref.set(h.deferred, []);
+    yield* Ref.set(h.snapshot, shell([thread(a, "idle"), thread(b, "idle"), thread(c, "idle")]));
     assert.isNull((yield* h.pause.status).session);
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each([
+  "running",
+  "request",
+  "command",
+  "user-queue",
+  "missing",
+  "unrelated",
+  "native",
+  "cycle",
+])("keeps a waiting parent active when its child has unresolved work: %s", (scenario) =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    const queuedRun = RunId.make("held-child-continuation");
+    const parent: OrchestrationV2ThreadShell = {
+      ...thread(a, "idle"),
+      lineage: {
+        parentThreadId: scenario === "cycle" ? b : null,
+        relationshipToParent: scenario === "cycle" ? "subagent" : null,
+        rootThreadId: a,
+      },
+      pendingBackgroundTasks: [{ taskId: "child", kind: "subagent", childThreadId: b }],
+    };
+    const child: OrchestrationV2ThreadShell = {
+      ...thread(b, scenario === "running" ? "running" : "queued"),
+      creationSource: scenario === "native" ? "provider" : "mcp",
+      latestRunId: queuedRun,
+      lineage: {
+        parentThreadId: scenario === "unrelated" ? c : a,
+        relationshipToParent: "subagent",
+        rootThreadId: a,
+      },
+      ...(scenario === "request"
+        ? {
+            pendingRuntimeRequest: {
+              id: RuntimeRequestId.make("input"),
+              kind: "permission" as const,
+              createdAt: now,
+            },
+          }
+        : {}),
+      pendingBackgroundTasks:
+        scenario === "command"
+          ? [{ taskId: "still-running", kind: "command" }]
+          : scenario === "cycle"
+            ? [{ taskId: "cyclic", kind: "subagent", childThreadId: a }]
+            : [],
+    };
+    yield* Ref.set(h.snapshot, shell(scenario === "missing" ? [parent] : [parent, child]));
+    if (scenario !== "user-queue") yield* Ref.set(h.deferred, [{ threadId: b, runId: queuedRun }]);
+    const paused = yield* h.pause.start;
+    assert.isFalse(paused.quiet);
+    assert.isTrue(paused.session?.targets.some((target) => target.threadId === a));
+    assert.isTrue(
+      paused.blockers.some(
+        (blocker) => blocker.type === "thread-background" && blocker.threadId === a,
+      ),
+    );
   }).pipe(Effect.provide(testLayer)),
 );
 
