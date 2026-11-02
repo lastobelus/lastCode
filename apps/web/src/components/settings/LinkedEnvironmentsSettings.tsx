@@ -1,5 +1,8 @@
 import { useAtomValue } from "@effect/atom-react";
-import { linkRequestFailureMessage } from "@t3tools/client-runtime/link-request";
+import {
+  linkRequestDefaultAccess,
+  linkRequestFailureMessage,
+} from "@t3tools/client-runtime/link-request";
 import {
   AuthAccessWriteScope,
   type AuthMcpClientAccess,
@@ -173,7 +176,7 @@ function LinkEnvironmentAction({ environmentId }: { readonly environmentId: Envi
   const [choice, setChoice] = useState<string | null>(null);
   const [address, setAddress] = useState("");
   const [pairingCode, setPairingCode] = useState("");
-  const [access, setAccess] = useState<AuthMcpClientAccess>("approval-required");
+  const [access, setAccess] = useState<AuthMcpClientAccess>(() => linkRequestDefaultAccess({}));
   const [busy, setBusy] = useState(false);
   // Machines whose minting already failed, so the dialog asks for a code instead.
   const [mintFailed, setMintFailed] = useState<ReadonlySet<EnvironmentId>>(new Set());
@@ -206,7 +209,7 @@ function LinkEnvironmentAction({ environmentId }: { readonly environmentId: Envi
       setChoice(null);
       setAddress("");
       setPairingCode("");
-      setAccess("approval-required");
+      setAccess(linkRequestDefaultAccess({}));
       setMintFailed(new Set());
     }
   };

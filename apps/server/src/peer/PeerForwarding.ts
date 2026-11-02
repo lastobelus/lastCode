@@ -237,6 +237,9 @@ const make = Effect.gen(function* () {
           threadId: input.threadId,
           ...(runId === undefined ? {} : { runId }),
           ...(input.delegation === undefined ? {} : { delegation: input.delegation }),
+          ...(input.observedInteraction === undefined
+            ? {}
+            : { observedInteraction: input.observedInteraction }),
           timeoutMs: chunk,
           ...(input.untilDelegatedWorkSettled === undefined
             ? {}

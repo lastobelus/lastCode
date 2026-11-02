@@ -10,6 +10,7 @@ import {
   ProviderInstanceId,
   ProviderThreadId,
   RunId,
+  RuntimeRequestId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -222,6 +223,62 @@ it.layer(layerTest)("a delegated task in a linked environment", (it) => {
       assert.deepEqual(item?.type === "subagent" ? item.remoteChild : undefined, remoteChild);
       // No thread was created here for the child.
       assert.equal(yield* orchestrator.getThreadShell(remoteChild.threadId), null);
+    }),
+  );
+
+  it.effect("reports a remote approval once, clears it, and preserves the running task", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const parent = yield* seedLiveParent("approval");
+      yield* orchestrator.dispatch({
+        type: "delegated_task.remote.request",
+        commandId: CommandId.make("command:delegate:approval"),
+        parentThreadId: parent.threadId,
+        parentRunId: parent.runId,
+        parentNodeId: parent.rootNodeId,
+        task: "Run a check.",
+        driver,
+        modelSelection,
+        remoteChild,
+      });
+      const task = (yield* orchestrator.getThreadProjection(parent.threadId)).subagents[0]!;
+      const pendingApproval = {
+        requestId: RuntimeRequestId.make("request:remote-approval"),
+        kind: "command" as const,
+        runId: RunId.make("run:remote"),
+      };
+      for (const attempt of [1, 2]) {
+        yield* orchestrator.dispatch({
+          type: "delegated_task.remote.interaction",
+          commandId: CommandId.make(`command:approval:${attempt}`),
+          parentThreadId: parent.threadId,
+          taskId: task.id,
+          interaction: { pendingApproval, hasPendingQuestion: false },
+        });
+      }
+      const blocked = yield* orchestrator.getThreadProjection(parent.threadId);
+      assert.deepEqual(
+        blocked.subagents[0]?.remoteChild?.interaction?.pendingApproval,
+        pendingApproval,
+      );
+      assert.equal(blocked.subagents[0]?.result, null);
+      assert.equal(blocked.subagents[0]?.status, "waiting");
+      assert.equal(
+        blocked.messages.filter((message) => message.text.includes("waiting for approval")).length,
+        1,
+      );
+      yield* orchestrator.dispatch({
+        type: "delegated_task.remote.interaction",
+        commandId: CommandId.make("command:approval:clear"),
+        parentThreadId: parent.threadId,
+        taskId: task.id,
+        interaction: { pendingApproval: null, hasPendingQuestion: false },
+      });
+      const cleared = yield* orchestrator.getThreadProjection(parent.threadId);
+      assert.equal(cleared.subagents[0]?.remoteChild?.interaction?.pendingApproval, null);
+      assert.equal(cleared.subagents[0]?.result, null);
+      assert.equal(cleared.subagents[0]?.status, "running");
+      assert.equal(cleared.messages.length, blocked.messages.length);
     }),
   );
 

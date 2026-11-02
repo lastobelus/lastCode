@@ -118,6 +118,7 @@ interface BoxThread {
   /** That task settled and the run it woke answered, with `laterReply`. */
   readonly nestedSettled: Deferred.Deferred<void>;
   /** Waiting there fails with this, as a thread deleted there does. */
+  readonly approval: Ref.Ref<boolean>;
   readonly gone: Ref.Ref<boolean>;
   readonly interrupted: Ref.Ref<number>;
   /** What each interrupt or stop there did, once per command id. */
@@ -162,6 +163,7 @@ const makeBoxThread = Effect.gen(function* () {
     nested: yield* Ref.make(false),
     nestedWaiting: yield* Deferred.make<void>(),
     nestedSettled: yield* Deferred.make<void>(),
+    approval: yield* Ref.make(false),
     gone: yield* Ref.make(false),
     interrupted: yield* Ref.make(0),
     stops: yield* Ref.make<ReadonlyArray<"interrupt" | "thread.stop" | "delegated-tasks">>([]),
@@ -264,7 +266,19 @@ const boxToolkitLayer = (thread: BoxThread, owned: boolean) => {
         : {
             ...idleThreadProjection(shell),
             runs: [...activations.values()].map((run) => ({ ...run, status })),
-            runtimeRequests: [],
+            nodes: [{ id: NodeId.make("node:box-approval"), runId: boxRunId }] as never,
+            runtimeRequests: (yield* Ref.get(thread.approval))
+              ? ([
+                  {
+                    id: "request:box-approval",
+                    nodeId: "node:box-approval",
+                    kind: "command",
+                    status: "pending",
+                    responseCapability: { type: "live", providerSessionId: "session:box" },
+                    createdAt: DateTime.makeUnsafe(0),
+                  },
+                ] as never)
+              : [],
             subagents: [],
           };
     });
@@ -1320,6 +1334,96 @@ it.effect(
         });
       }),
     ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("remote approvals release task waits, clear after an answer, and keep following", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const thread = yield* makeBoxThread;
+      yield* Ref.set(thread.approval, true);
+      const b = yield* serveBox(thread);
+      const offers = yield* SubscriptionRef.make<
+        ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+      >([]);
+      const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+      const a = yield* makeLaptop(database, offers);
+      yield* linkTo(a.links, b, "full-access");
+      yield* seedParent(a);
+      const delegated = yield* delegateToBox(a);
+      yield* a.orchestrator
+        .streamStoredEventsFrom({
+          threadId: parentThreadId,
+          afterSequence: 0,
+          eventType: "subagent.updated",
+        })
+        .pipe(
+          Stream.filter(
+            ({ event }) =>
+              event.type === "subagent.updated" &&
+              event.payload.id === delegated.taskId &&
+              event.payload.remoteChild?.interaction?.pendingApproval != null,
+          ),
+          Stream.runHead,
+        );
+      const initial = yield* a.call("task_status", { taskId: delegated.taskId });
+      expect(initial.structuredContent).toMatchObject({
+        pendingApproval: { requestId: "request:box-approval" },
+      });
+      const blocked = yield* a.call("delegate_task", {
+        task: "Run the full suite on the box.",
+        target: {
+          environmentId: box.environmentId,
+          providerInstanceId: instanceId,
+          model: "gpt-5.4",
+        },
+        mode: "wait",
+        clientRequestId: "suite-on-box",
+      });
+      expect(blocked.isError, JSON.stringify(blocked.content)).toBe(false);
+      expect(blocked.structuredContent).toMatchObject({
+        status: "waiting",
+        waitTimedOut: false,
+        pendingApproval: { requestId: "request:box-approval", kind: "command", runId: boxRunId },
+      });
+      const again = yield* a.call("task_status", { taskId: delegated.taskId });
+      expect(again.structuredContent).toMatchObject({
+        pendingApproval: { requestId: "request:box-approval" },
+      });
+      yield* Ref.set(thread.approval, false);
+      yield* SubscriptionRef.set(thread.status, "running");
+      yield* a.orchestrator
+        .streamStoredEventsFrom({
+          threadId: parentThreadId,
+          afterSequence: 0,
+          eventType: "subagent.updated",
+        })
+        .pipe(
+          Stream.filter(
+            ({ event }) =>
+              event.type === "subagent.updated" &&
+              event.payload.id === delegated.taskId &&
+              event.payload.remoteChild?.interaction?.pendingApproval === null,
+          ),
+          Stream.runHead,
+        );
+      const answered = yield* a.call("task_status", { taskId: delegated.taskId });
+      expect(answered.structuredContent).toMatchObject({
+        status: "running",
+        pendingApproval: null,
+      });
+      const projection = yield* a.orchestrator.getThreadProjection(parentThreadId);
+      expect(
+        projection.messages.filter((message) => message.notification?.outcome === "updated"),
+      ).toHaveLength(1);
+      yield* Ref.set(thread.reply, "Approved work finished.");
+      yield* SubscriptionRef.set(thread.status, "completed");
+      yield* Deferred.succeed(thread.finished, undefined);
+      expect(yield* taskResult(a, delegated.taskId)).toMatchObject({
+        status: "completed",
+        result: "Approved work finished.",
+      });
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
 it.effect("a task named only by environment inherits the parent's model, within the link", () =>

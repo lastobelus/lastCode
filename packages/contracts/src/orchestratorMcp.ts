@@ -37,6 +37,7 @@ import { hasOnlyPairedSurrogates } from "./threadMetadataMcp.ts";
 import { ThreadTitleRegeneration } from "./threadTitle.ts";
 import {
   RemoteDelegationSelector,
+  RemoteTaskInteraction,
   OrchestrationV2Actor,
   OrchestrationV2AppThread,
   OrchestrationV2ThreadRecovery,
@@ -585,6 +586,7 @@ export type OrchestratorMcpThreadSendResult = typeof OrchestratorMcpThreadSendRe
 
 export const OrchestratorMcpThreadWaitInput = Schema.Struct({
   delegation: Schema.optional(RemoteDelegationSelector),
+  observedInteraction: Schema.optional(RemoteTaskInteraction),
   environmentId: OrchestratorMcpEnvironmentTarget,
   threadId: ThreadId,
   runId: Schema.optional(RunId),
@@ -600,6 +602,7 @@ export type OrchestratorMcpThreadWaitInput = typeof OrchestratorMcpThreadWaitInp
 
 export const OrchestratorMcpThreadWaitResult = Schema.Struct({
   delegation: Schema.optional(RemoteDelegationSelector),
+  interaction: Schema.optional(RemoteTaskInteraction),
   delegationOutcome: Schema.optional(Schema.Literals(["pending", "settled", "disposed"])),
   threadId: ThreadId,
   runId: Schema.NullOr(RunId),
@@ -856,7 +859,7 @@ export const OrchestratorMcpEnvironmentLinkInput = Schema.Struct({
     description: "One sentence for the card.",
   }),
   requestedAccess: Schema.optional(AuthMcpClientAccess).annotate({
-    description: "Suggested access. The user picks; default approval-required.",
+    description: "Suggested access. The user picks; default full-access.",
   }),
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
 });
