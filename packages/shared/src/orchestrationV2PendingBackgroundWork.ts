@@ -231,6 +231,8 @@ export function derivePendingBackgroundWork(input: {
   readonly turnItems: ReadonlyArray<PendingBackgroundWorkTurnItem>;
   readonly activeProviderThreadId?: string | null;
   readonly hasActiveRun?: boolean;
+  /** Presentation can list ongoing work without treating the active agent as waiting. */
+  readonly includeWhileActive?: boolean;
   /** Excludes rolled-back runs; optional only when the caller already filtered them, as SQL shell reads do. */
   readonly runs?: ReadonlyArray<PendingBackgroundWorkRun>;
   readonly pullRequests?: ReadonlyArray<PendingBackgroundWorkPullRequest> | undefined;
@@ -241,13 +243,16 @@ export function derivePendingBackgroundWork(input: {
       (run) => run.status === "preparing" || run.status === "starting" || run.status === "running",
     ) ??
     false;
-  if (hasActiveRun) {
+  if (hasActiveRun && input.includeWhileActive !== true) {
     return [];
   }
   if (input.latestRun == null) {
     return pullRequestWatchTasks(input.pullRequests);
   }
-  if (!isLatestRunSettledForBackgroundWait(input.latestRun)) {
+  if (
+    !isLatestRunSettledForBackgroundWait(input.latestRun) &&
+    (input.includeWhileActive !== true || input.latestRun.status === "rolled_back")
+  ) {
     return [];
   }
 
@@ -275,7 +280,14 @@ export function derivePendingBackgroundWork(input: {
     }
   }
 
-  for (const item of pendingBackgroundTurnItems(input)) {
+  const turnItems =
+    input.includeWhileActive === true && !isLatestRunSettledForBackgroundWait(input.latestRun)
+      ? input.turnItems.filter(
+          (item) =>
+            item.type === "subagent" || item.monitor === true || item.runId !== input.latestRun?.id,
+        )
+      : input.turnItems;
+  for (const item of pendingBackgroundTurnItems({ ...input, turnItems })) {
     const taskId = nativeTaskIdFromTurnItem(item);
     if (byTaskId.has(taskId)) {
       continue;

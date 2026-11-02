@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { settleProjectScript, setupProjectScript } from "@t3tools/shared/projectScripts";
 
 import {
+  buildProjectScript,
   commandForProjectScript,
   projectScriptIdFromCommand,
   nextProjectScriptId,
@@ -11,6 +12,22 @@ import {
 } from "./projectScripts";
 
 describe("projectScripts helpers", () => {
+  it.each([false, true])("records agent resume only when enabled: %s", (allowAgentResume) => {
+    const script = buildProjectScript("check", {
+      name: "Check project",
+      command: "pnpm test",
+      icon: "test",
+      runOnWorktreeCreate: false,
+      waitForSetup: false,
+      runOnSettle: false,
+      previewUrl: null,
+      autoOpenPreview: false,
+      allowAgentResume,
+    });
+    if (allowAgentResume) expect(script.allowAgentResume).toBe(true);
+    else expect(script).not.toHaveProperty("allowAgentResume");
+  });
+
   it("builds and parses script run commands", () => {
     const command = commandForProjectScript("lint");
     expect(command).toBe("script.lint.run");
