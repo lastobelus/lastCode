@@ -259,43 +259,55 @@ export function ThreadAnnotationActions(props: {
   onResolve: () => void;
   onReopen: () => void;
   pending?: boolean | undefined;
+  /** A different note is active, so a resolved note cannot reopen. Never affects Resolve. */
+  reopenBlocked?: boolean | undefined;
   expanded?: boolean | undefined;
   onToggleExpanded?: (() => void) | undefined;
   trailing?: ReactNode;
 }) {
+  const reopenBlockedReasonId = useId();
+  const reopenBlocked = props.reopenBlocked === true && Boolean(props.annotation.resolvedAt);
   return (
-    <div className="flex items-center gap-3 text-xs">
-      <button
-        className="font-medium text-warning-foreground underline-offset-2 hover:underline disabled:opacity-50"
-        disabled={props.pending}
-        type="button"
-        onClick={props.onEdit}
-      >
-        Edit
-      </button>
-      <button
-        className="font-medium text-warning-foreground underline-offset-2 hover:underline disabled:opacity-50"
-        disabled={props.pending}
-        type="button"
-        onClick={props.annotation.resolvedAt ? props.onReopen : props.onResolve}
-      >
-        {props.annotation.resolvedAt ? "Reopen" : "Resolve"}
-      </button>
-      {props.onToggleExpanded ? (
-        <Button
-          aria-expanded={props.expanded === true}
-          aria-label={props.expanded ? "Collapse annotation" : "Expand annotation"}
+    <>
+      <div className="flex items-center gap-3 text-xs">
+        <button
+          className="font-medium text-warning-foreground underline-offset-2 hover:underline disabled:opacity-50"
           disabled={props.pending}
-          size="icon-xs"
           type="button"
-          variant="ghost-warning"
-          onClick={props.onToggleExpanded}
+          onClick={props.onEdit}
         >
-          <ChevronDownIcon className={props.expanded ? "size-3.5" : "size-3.5 -rotate-90"} />
-        </Button>
+          Edit
+        </button>
+        <button
+          aria-describedby={reopenBlocked ? reopenBlockedReasonId : undefined}
+          className="font-medium text-warning-foreground underline-offset-2 hover:underline disabled:opacity-50 disabled:hover:no-underline"
+          disabled={props.pending || reopenBlocked}
+          type="button"
+          onClick={props.annotation.resolvedAt ? props.onReopen : props.onResolve}
+        >
+          {props.annotation.resolvedAt ? "Reopen" : "Resolve"}
+        </button>
+        {props.onToggleExpanded ? (
+          <Button
+            aria-expanded={props.expanded === true}
+            aria-label={props.expanded ? "Collapse annotation" : "Expand annotation"}
+            disabled={props.pending}
+            size="icon-xs"
+            type="button"
+            variant="ghost-warning"
+            onClick={props.onToggleExpanded}
+          >
+            <ChevronDownIcon className={props.expanded ? "size-3.5" : "size-3.5 -rotate-90"} />
+          </Button>
+        ) : null}
+        {props.trailing}
+      </div>
+      {reopenBlocked ? (
+        <p className="mt-1.5 text-2xs text-warning-foreground" id={reopenBlockedReasonId}>
+          Resolve the current annotation to reopen this one, or copy what you need into it.
+        </p>
       ) : null}
-      {props.trailing}
-    </div>
+    </>
   );
 }
 

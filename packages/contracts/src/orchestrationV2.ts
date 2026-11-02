@@ -3202,11 +3202,14 @@ export const OrchestrationV2Command = Schema.Union([
     commandId: CommandId,
     threadId: ThreadId,
     body: ThreadAnnotation.fields.body,
+    createNew: Schema.optional(Schema.Boolean),
+    annotationId: Schema.optional(TrimmedNonEmptyString),
   }),
   Schema.Struct({
     type: Schema.Literals(["thread.annotation.resolve", "thread.annotation.reopen"]),
     commandId: CommandId,
     threadId: ThreadId,
+    annotationId: Schema.optional(TrimmedNonEmptyString),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.dashboard-item.upsert"),

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { threadAnnotationId } from "@t3tools/shared/threadAnnotation";
 import { reportThreadOperationFailure } from "./lastcodeThreadOperationResult";
 import type { SidebarThreadSummary } from "../../types";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
@@ -22,13 +23,22 @@ export function useLastCodeThreadAnnotations() {
   const saveAnnotationBody = async (
     target: SidebarThreadSummary,
     body: string,
+    createNew = false,
   ): Promise<boolean> => {
     return runThreadAnnotationBodySave(
       scopeThreadRef(target.environmentId, target.id),
       async () => {
         const result = await upsertThreadAnnotation({
           environmentId: target.environmentId,
-          input: { threadId: target.id, body },
+          input: {
+            threadId: target.id,
+            body,
+            ...(createNew
+              ? { createNew: true }
+              : target.annotation
+                ? { annotationId: threadAnnotationId(target.annotation) }
+                : {}),
+          },
         });
         if (result._tag === "Success") return true;
         reportThreadOperationFailure(result, "Failed to save annotation");
@@ -39,13 +49,20 @@ export function useLastCodeThreadAnnotations() {
 
   const saveAnnotation = async (body: string): Promise<boolean> => {
     if (!annotationEditorTarget) return false;
-    return saveAnnotationBody(annotationEditorTarget, body);
+    return saveAnnotationBody(
+      annotationEditorTarget,
+      body,
+      annotationEditorTarget.annotation?.resolvedAt !== null,
+    );
   };
 
   const resolveAnnotation = async (thread: SidebarThreadSummary) => {
     const result = await resolveThreadAnnotation({
       environmentId: thread.environmentId,
-      input: { threadId: thread.id },
+      input: {
+        threadId: thread.id,
+        ...(thread.annotation ? { annotationId: threadAnnotationId(thread.annotation) } : {}),
+      },
     });
     reportThreadOperationFailure(result, "Failed to resolve annotation");
   };
@@ -59,7 +76,11 @@ export function useLastCodeThreadAnnotations() {
     actions,
     editor: (
       <ThreadAnnotationEditorDialog
-        annotation={annotationEditorTarget?.annotation ?? null}
+        annotation={
+          annotationEditorTarget?.annotation?.resolvedAt == null
+            ? (annotationEditorTarget?.annotation ?? null)
+            : null
+        }
         open={annotationEditorTarget !== null}
         onOpenChange={(open) => {
           if (!open) setAnnotationEditorTarget(null);

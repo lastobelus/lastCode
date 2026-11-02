@@ -2,6 +2,7 @@ import { act, render } from "../../../test/render";
 import { useEffect, useState } from "react";
 
 import { describe, expect, it, vi } from "vite-plus/test";
+import { userEvent } from "vite-plus/test/browser";
 import { EnvironmentId, MessageId, ThreadId } from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
 import * as Cause from "effect/Cause";
@@ -30,6 +31,7 @@ vi.mock("../ui/toast", () => ({
   stackedThreadToast: (value: unknown) => value,
 }));
 const annotation = {
+  id: "sidebar-note",
   anchorMessageId: MessageId.make("anchor"),
   body: "Original",
   createdAt: "2026-01-01T00:00:00Z",
@@ -64,6 +66,21 @@ function Harness({
         <>
           <button onClick={() => annotations.actions.onEditAnnotation(first)}>Edit first</button>
           <button onClick={() => annotations.actions.onEditAnnotation(second)}>Edit second</button>
+          <button
+            onClick={() => annotations.actions.onEditAnnotation({ ...first, annotation: null })}
+          >
+            Annotate new
+          </button>
+          <button
+            onClick={() =>
+              annotations.actions.onEditAnnotation({
+                ...first,
+                annotation: { ...annotation, resolvedAt: annotation.updatedAt },
+              })
+            }
+          >
+            Annotate resolved
+          </button>
         </>
       )}
       <button onClick={() => void annotations.actions.onSaveAnnotationBody(first, "Hover first")}>
@@ -89,10 +106,7 @@ async function click(label: string) {
 const textarea = () =>
   document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Thread annotation"]');
 async function enter(value: string) {
-  await act(() => {
-    textarea()!.value = value;
-    textarea()!.dispatchEvent(new Event("input", { bubbles: true }));
-  });
+  await userEvent.fill(textarea()!, value);
 }
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -118,6 +132,19 @@ function setup() {
 }
 
 describe("project-owned thread annotation editor", () => {
+  it.each(["resolved", "new"])("starts a new annotation for a %s target", async (kind) => {
+    const fixture = setup();
+    await using _screen = await render(fixture.view());
+    await click(`Annotate ${kind}`);
+    expect(textarea()?.value).toBe("");
+    await enter("Next follow-up");
+    await click("Add annotation");
+    expect(mocks.upsert).toHaveBeenCalledExactlyOnceWith({
+      environmentId: first.environmentId,
+      input: { threadId: first.id, body: "Next follow-up", createNew: true },
+    });
+    await vi.waitFor(() => expect(textarea()).toBeNull());
+  });
   it("keeps row actions stable while the project editor changes targets and saves the exact hover destination", async () => {
     const fixture = setup();
     await using _screen = await render(fixture.view());
@@ -130,7 +157,7 @@ describe("project-owned thread annotation editor", () => {
     await click("Hover first");
     expect(mocks.upsert).toHaveBeenLastCalledWith({
       environmentId: first.environmentId,
-      input: { threadId: first.id, body: "Hover first" },
+      input: { threadId: first.id, body: "Hover first", annotationId: annotation.id },
     });
     expect(textarea()).not.toBeNull();
   });
@@ -168,7 +195,7 @@ describe("project-owned thread annotation editor", () => {
     await expect.poll(textarea).toBeNull();
     expect(mocks.upsert).toHaveBeenCalledWith({
       environmentId: second.environmentId,
-      input: { threadId: second.id, body: "New body" },
+      input: { threadId: second.id, body: "New body", annotationId: annotation.id },
     });
   });
   it("serializes hover/editor saves for one scoped thread while allowing the same ID in another environment", async () => {
@@ -201,7 +228,7 @@ describe("project-owned thread annotation editor", () => {
     await click("Resolve second");
     expect(mocks.resolve).toHaveBeenCalledWith({
       environmentId: second.environmentId,
-      input: { threadId: second.id },
+      input: { threadId: second.id, annotationId: annotation.id },
     });
     expect(mocks.toast).toHaveBeenCalledWith(
       expect.objectContaining({ title: "Failed to resolve annotation" }),

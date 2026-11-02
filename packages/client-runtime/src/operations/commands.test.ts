@@ -266,18 +266,38 @@ describe("V2 environment commands", () => {
       const supervisor = yield* makeSupervisor({ commands, projects: [], projectionRequests });
       yield* Effect.all([
         setThreadPersistence({ threadId: v2ThreadId, persistent: true }),
-        upsertThreadAnnotation({ threadId: v2ThreadId, body: "Keep this review open" }),
-        resolveThreadAnnotation({ threadId: v2ThreadId }),
-        reopenThreadAnnotation({ threadId: v2ThreadId }),
+        upsertThreadAnnotation({
+          threadId: v2ThreadId,
+          body: "Keep this review open",
+          createNew: true,
+        }),
+        upsertThreadAnnotation({
+          threadId: v2ThreadId,
+          body: "Edit old note",
+          annotationId: "note-1",
+        }),
+        resolveThreadAnnotation({ threadId: v2ThreadId, annotationId: "note-1" }),
+        reopenThreadAnnotation({ threadId: v2ThreadId, annotationId: "note-1" }),
         deleteThread({ threadId: v2ThreadId, deleteWorktree: true, repositoryKey: "repository-1" }),
         retryThreadWorktreeCleanup({ threadId: v2ThreadId }),
         abandonThreadWorktreeCleanup({ threadId: v2ThreadId }),
       ]).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
       expect(commands.map(({ commandId: _id, ...command }) => command)).toEqual([
         { type: "thread.persistence.set", threadId: v2ThreadId, persistent: true },
-        { type: "thread.annotation.upsert", threadId: v2ThreadId, body: "Keep this review open" },
-        { type: "thread.annotation.resolve", threadId: v2ThreadId },
-        { type: "thread.annotation.reopen", threadId: v2ThreadId },
+        {
+          type: "thread.annotation.upsert",
+          threadId: v2ThreadId,
+          body: "Keep this review open",
+          createNew: true,
+        },
+        {
+          type: "thread.annotation.upsert",
+          threadId: v2ThreadId,
+          body: "Edit old note",
+          annotationId: "note-1",
+        },
+        { type: "thread.annotation.resolve", threadId: v2ThreadId, annotationId: "note-1" },
+        { type: "thread.annotation.reopen", threadId: v2ThreadId, annotationId: "note-1" },
         {
           type: "thread.delete",
           threadId: v2ThreadId,

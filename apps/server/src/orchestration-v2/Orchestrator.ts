@@ -128,7 +128,7 @@ import {
   derivePendingBackgroundWork,
   pendingBackgroundTurnItems,
 } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
-import { threadAnnotationOf } from "@t3tools/shared/threadAnnotation";
+import { threadAnnotationById, threadAnnotationsOf } from "@t3tools/shared/threadAnnotation";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -3659,30 +3659,66 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         DateTime.toEpochMillis(b.createdAt) - DateTime.toEpochMillis(a.createdAt) ||
         String(b.id).localeCompare(String(a.id)),
     )[0];
-    const previousAnnotation = threadAnnotationOf(thread);
-    const anchorMessageId = latestUser?.id ?? previousAnnotation?.anchorMessageId;
+    const notes = threadAnnotationsOf(thread);
+    const previousAnnotation = threadAnnotationById(thread, command.annotationId);
+    const createNew = command.type === "thread.annotation.upsert" && command.createNew === true;
     if (
-      anchorMessageId === undefined ||
-      (command.type !== "thread.annotation.upsert" && previousAnnotation === null)
+      !createNew &&
+      previousAnnotation === null &&
+      (command.annotationId !== undefined || command.type !== "thread.annotation.upsert")
     ) {
       return yield* new OrchestratorDispatchError({
         commandId: command.commandId,
         commandType: command.type,
-        cause: `Thread ${command.threadId} has no annotation or user message to anchor a note.`,
+        cause: `Thread ${command.threadId} has no matching annotation.`,
       });
     }
-    const annotation = {
+    const creating = createNew || previousAnnotation === null;
+    if (
+      notes.some(
+        (entry) =>
+          entry.resolvedAt === null &&
+          (creating ||
+            (command.type === "thread.annotation.reopen" && entry.id !== previousAnnotation?.id)),
+      )
+    ) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "This thread already has an active annotation.",
+      });
+    }
+    const anchorMessageId =
+      creating || command.type === "thread.annotation.resolve"
+        ? (latestUser?.id ?? previousAnnotation?.anchorMessageId)
+        : previousAnnotation.anchorMessageId;
+    if (anchorMessageId === undefined) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: `Thread ${command.threadId} has no user message to anchor a note.`,
+      });
+    }
+    const note = {
+      id: creating ? String(command.commandId) : previousAnnotation.id,
       body: command.type === "thread.annotation.upsert" ? command.body : previousAnnotation!.body,
       anchorMessageId,
-      createdAt: previousAnnotation?.createdAt ?? nowIso,
+      createdAt: creating ? nowIso : previousAnnotation.createdAt,
       updatedAt: nowIso,
       resolvedAt:
         command.type === "thread.annotation.resolve"
           ? nowIso
-          : command.type === "thread.annotation.reopen"
+          : command.type === "thread.annotation.reopen" || creating
             ? null
-            : (previousAnnotation?.resolvedAt ?? null),
+            : previousAnnotation.resolvedAt,
     };
+    const updated = [note, ...notes.filter((entry) => entry.id !== note.id)].toSorted(
+      (a, b) =>
+        Number(a.resolvedAt !== null) - Number(b.resolvedAt !== null) ||
+        Date.parse(b.updatedAt) - Date.parse(a.updatedAt),
+    );
+    const [head, ...others] = updated;
+    const annotation = { ...head!, ...(others.length === 0 ? {} : { otherAnnotations: others }) };
     yield* emitThread(
       command.type === "thread.annotation.upsert"
         ? "thread.annotation-upserted"

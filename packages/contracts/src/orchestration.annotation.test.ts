@@ -21,6 +21,13 @@ it.effect("decodes Markdown annotations and rejects empty or oversized bodies", 
       resolvedAt: null,
     });
     assert.match(annotation.body, /#tag/);
+    const withHistory = yield* decodeAnnotation({
+      ...annotation,
+      otherAnnotations: [{ ...annotation, resolvedAt: annotation.updatedAt }],
+    });
+    assert.deepEqual(withHistory.otherAnnotations, [
+      { ...annotation, resolvedAt: annotation.updatedAt },
+    ]);
 
     assert.strictEqual(
       (yield* Effect.exit(decodeAnnotation({ ...annotation, body: "   " })))._tag,
@@ -42,12 +49,24 @@ it.effect("decodes annotation client commands and domain events", () =>
       commandId: "command-1",
       threadId: "thread-1",
       body: "Note",
+      createNew: true,
+      annotationId: "note-1",
     });
     assert.strictEqual(upsert.type, "thread.annotation.upsert");
+    if (upsert.type === "thread.annotation.upsert") {
+      assert.isTrue(upsert.createNew);
+      assert.equal(upsert.annotationId, "note-1");
+    }
 
     for (const type of ["thread.annotation.resolve", "thread.annotation.reopen"]) {
-      const command = yield* decodeCommand({ type, commandId: "command-2", threadId: "thread-1" });
+      const command = yield* decodeCommand({
+        type,
+        commandId: "command-2",
+        threadId: "thread-1",
+        annotationId: "note-1",
+      });
       assert.strictEqual(command.type, type);
+      assert.equal("annotationId" in command ? command.annotationId : undefined, "note-1");
     }
   }),
 );

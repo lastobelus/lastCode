@@ -1,4 +1,5 @@
 import type { ScopedThreadRef, ThreadAnnotation } from "@t3tools/contracts";
+import { threadAnnotationEntries, threadAnnotationId } from "@t3tools/shared/threadAnnotation";
 import {
   ThreadAnnotationBody,
   ThreadAnnotationActions,
@@ -52,6 +53,7 @@ function TimelineAnnotationPopover({
   earlier,
   markdownCwd,
   open,
+  reopenBlocked,
   threadRef,
   triggerClassName,
   onActivate,
@@ -66,6 +68,7 @@ function TimelineAnnotationPopover({
   earlier: boolean;
   markdownCwd: string | undefined;
   open: boolean;
+  reopenBlocked: boolean;
   threadRef: ScopedThreadRef;
   triggerClassName: string;
   onActivate?: () => void;
@@ -88,6 +91,7 @@ function TimelineAnnotationPopover({
             aria-label={ariaLabel}
             className={triggerClassName}
             data-thread-annotation-marker={earlier ? undefined : ""}
+            data-annotation-id={threadAnnotationId(annotation)}
             type="button"
           />
         }
@@ -127,6 +131,7 @@ function TimelineAnnotationPopover({
               onReopen={onAnnotationReopen}
               onResolve={onAnnotationResolve}
               pending={annotationBodyPending}
+              reopenBlocked={reopenBlocked}
             />
           </div>
         </div>
@@ -160,10 +165,10 @@ export function TimelineMinimap({
   stripMap: Map<string, HTMLSpanElement>;
   onWheel: (event: WheelEvent) => void;
   threadRef: ScopedThreadRef | null;
-  onAnnotationEdit: () => void;
-  onAnnotationBodyChange: ((body: string) => Promise<boolean>) | undefined;
-  onAnnotationResolve: () => void;
-  onAnnotationReopen: () => void;
+  onAnnotationEdit: (annotationId?: string) => void;
+  onAnnotationBodyChange: ((body: string, annotationId?: string) => Promise<boolean>) | undefined;
+  onAnnotationResolve: (annotationId?: string) => void;
+  onAnnotationReopen: (annotationId?: string) => void;
   onSelect: (item: TimelineMinimapItem) => void;
 }) {
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
@@ -176,7 +181,7 @@ export function TimelineMinimap({
   const pressedOnStripRef = useRef(false);
   const [passThrough, setPassThrough] = useState(false);
 
-  const [annotationPopoverOpen, setAnnotationPopoverOpen] = useState(false);
+  const [openAnnotationId, setOpenAnnotationId] = useState<string | null>(null);
 
   const resolvedActiveIndex =
     activeIndex !== null && activeIndex < items.length ? activeIndex : null;
@@ -185,10 +190,50 @@ export function TimelineMinimap({
   );
   const navigationInteractive =
     resolveTimelineMinimapNavigationInteractive(hitStripWidth) && !passThrough;
-  const annotationItemIndex = annotation
-    ? items.findIndex((item) => item.messageId === annotation.anchorMessageId)
-    : -1;
-  const annotationIsEarlier = annotation !== null && annotationItemIndex === -1;
+  const itemIndices = new Map(items.map((item, index) => [item.messageId, index]));
+  const anchorSlots = new Map<number, number>();
+  const annotationMarkers = threadAnnotationEntries(annotation).map((entry, index) => {
+    const itemIndex = itemIndices.get(entry.anchorMessageId) ?? -1;
+    const slot = anchorSlots.get(itemIndex) ?? 0;
+    anchorSlots.set(itemIndex, slot + 1);
+    return { annotation: entry, id: threadAnnotationId(entry), itemIndex, slot, index };
+  });
+  const annotationPopoverOpen = annotationMarkers.some((marker) => marker.id === openAnnotationId);
+  const hasActiveAnnotation = annotationMarkers.some((marker) => !marker.annotation.resolvedAt);
+  const renderAnnotationPopover = (marker: (typeof annotationMarkers)[number]) => {
+    if (!threadRef) return null;
+    const earlier = marker.itemIndex === -1;
+    return (
+      <TimelineAnnotationPopover
+        annotation={marker.annotation}
+        ariaLabel={`${earlier ? "Earlier annotation" : "Thread annotation"} ${marker.index + 1}`}
+        earlier={earlier}
+        markdownCwd={markdownCwd}
+        open={openAnnotationId === marker.id}
+        reopenBlocked={hasActiveAnnotation}
+        threadRef={threadRef}
+        triggerClassName={cn(
+          "pointer-events-auto size-1.5 rounded-full ring-1 ring-background/70",
+          !earlier && "absolute left-full top-1/2 ml-1 -translate-y-1/2",
+          marker.annotation.resolvedAt ? "bg-warning/40" : "bg-warning",
+        )}
+        onActivate={() => {
+          if (!earlier) setActiveIndex(marker.itemIndex);
+        }}
+        onAnnotationBodyChange={
+          onAnnotationBodyChange ? (body) => onAnnotationBodyChange(body, marker.id) : undefined
+        }
+        onAnnotationEdit={() => onAnnotationEdit(marker.id)}
+        onAnnotationReopen={() => onAnnotationReopen(marker.id)}
+        onAnnotationResolve={() => onAnnotationResolve(marker.id)}
+        onOpenChange={(open) => {
+          setOpenAnnotationId((current) =>
+            open ? marker.id : current === marker.id ? null : current,
+          );
+        }}
+      />
+    );
+  };
   const activeTopPercent =
     resolvedActiveIndex === null
       ? 0
@@ -423,30 +468,20 @@ export function TimelineMinimap({
               </span>
             ) : null}
           </button>
-          {annotationItemIndex >= 0 && annotation && threadRef ? (
-            <span
-              className="pointer-events-none absolute left-0 h-0.5 w-2 -translate-y-1/2"
-              style={{
-                top: `${resolveTimelineMinimapTopPercent(annotationItemIndex, items.length)}%`,
-              }}
-            >
-              <TimelineAnnotationPopover
-                annotation={annotation}
-                ariaLabel="Thread annotation"
-                earlier={false}
-                markdownCwd={markdownCwd}
-                open={annotationPopoverOpen}
-                threadRef={threadRef}
-                triggerClassName="pointer-events-auto absolute left-full top-1/2 ml-1 size-1.5 -translate-y-1/2 rounded-full bg-warning ring-1 ring-background/70"
-                onActivate={() => setActiveIndex(annotationItemIndex)}
-                onAnnotationBodyChange={onAnnotationBodyChange}
-                onAnnotationEdit={onAnnotationEdit}
-                onAnnotationReopen={onAnnotationReopen}
-                onAnnotationResolve={onAnnotationResolve}
-                onOpenChange={setAnnotationPopoverOpen}
-              />
-            </span>
-          ) : null}
+          {annotationMarkers
+            .filter((marker) => marker.itemIndex >= 0)
+            .map((marker) => (
+              <span
+                className="pointer-events-none absolute h-0.5 w-2 -translate-y-1/2"
+                key={marker.id}
+                style={{
+                  left: marker.slot * 10,
+                  top: `${resolveTimelineMinimapTopPercent(marker.itemIndex, items.length)}%`,
+                }}
+              >
+                {renderAnnotationPopover(marker)}
+              </span>
+            ))}
           <TimelineMinimapNavigationButton
             direction="next"
             disabled={nextItem === null}
@@ -456,29 +491,22 @@ export function TimelineMinimap({
             }}
           />
         </div>
-        {annotationIsEarlier && annotation && threadRef ? (
+        {annotationMarkers.some((marker) => marker.itemIndex === -1) && threadRef ? (
           <div
-            className="pointer-events-auto absolute left-3"
+            className="pointer-events-auto absolute left-3 flex gap-1"
             data-thread-annotation-overflow
             style={{
               top: "50%",
               transform: `translateY(calc(-50% - ${resolveTimelineMinimapHeightStyle(items.length)} / 2))`,
             }}
           >
-            <TimelineAnnotationPopover
-              annotation={annotation}
-              ariaLabel="Annotation attached to an earlier message"
-              earlier
-              markdownCwd={markdownCwd}
-              open={annotationPopoverOpen}
-              threadRef={threadRef}
-              triggerClassName="size-1.5 rounded-full bg-warning ring-1 ring-background/70"
-              onAnnotationBodyChange={onAnnotationBodyChange}
-              onAnnotationEdit={onAnnotationEdit}
-              onAnnotationReopen={onAnnotationReopen}
-              onAnnotationResolve={onAnnotationResolve}
-              onOpenChange={setAnnotationPopoverOpen}
-            />
+            {annotationMarkers
+              .filter((marker) => marker.itemIndex === -1)
+              .map((marker) => (
+                <span className="inline-flex" key={marker.id}>
+                  {renderAnnotationPopover(marker)}
+                </span>
+              ))}
           </div>
         ) : null}
       </div>

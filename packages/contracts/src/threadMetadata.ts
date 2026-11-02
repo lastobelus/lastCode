@@ -4,8 +4,9 @@ import { IsoDateTime, MessageId, ThreadId, TrimmedNonEmptyString } from "./baseS
 
 export const THREAD_ANNOTATION_MAX_BODY_CHARS = 20_000;
 
-/** A note keeps its message anchor until the user changes or resolves it. */
-export const ThreadAnnotation = Schema.Struct({
+/** A note keeps its message anchor until the user resolves it. */
+const ThreadAnnotationEntry = Schema.Struct({
+  id: Schema.optional(TrimmedNonEmptyString),
   body: Schema.String.check(
     Schema.isMaxLength(THREAD_ANNOTATION_MAX_BODY_CHARS),
     Schema.makeFilter((value) => value.trim().length > 0 || "annotation body cannot be empty"),
@@ -14,6 +15,10 @@ export const ThreadAnnotation = Schema.Struct({
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   resolvedAt: Schema.NullOr(IsoDateTime),
+});
+export const ThreadAnnotation = Schema.Struct({
+  ...ThreadAnnotationEntry.fields,
+  otherAnnotations: Schema.optional(Schema.Array(ThreadAnnotationEntry)),
 });
 export type ThreadAnnotation = typeof ThreadAnnotation.Type;
 

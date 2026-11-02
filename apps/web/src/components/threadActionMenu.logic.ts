@@ -135,7 +135,8 @@ export function withThreadActionMenuDividers<A extends string>(
     const previousId = items[index - 1]?.id;
     const startsGroup =
       previousId === "new-thread-on-branch" ||
-      previousId === "annotate" ||
+      (previousId === "annotate" && item.id !== "resolve-annotation") ||
+      previousId === "resolve-annotation" ||
       previousId === "stop-thread-processes" ||
       ((previousId === "mark-persistent" || previousId === "disable-persistence") &&
         item.id !== "stop-thread-processes");

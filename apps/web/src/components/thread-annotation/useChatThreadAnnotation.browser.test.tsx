@@ -13,6 +13,7 @@ import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { useLayoutEffect } from "react";
 import { describe, expect, it, vi } from "vite-plus/test";
+import { userEvent } from "vite-plus/test/browser";
 
 const state = vi.hoisted(() => ({
   scopes: new Map<string, boolean>(),
@@ -73,6 +74,7 @@ const b: ScopedThreadRef = {
   threadId: ThreadId.make("annotation-thread-b"),
 };
 const note: ThreadAnnotation = {
+  id: "chat-note",
   anchorMessageId: MessageId.make("anchor"),
   body: "# Follow up\n\n- [ ] Confirm the fix",
   createdAt: "2026-09-03T00:00:00.000Z",
@@ -148,12 +150,9 @@ async function setup() {
     return document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Thread annotation"]');
   }
   async function enter(value: string) {
-    await act(async () => {
-      const textarea = editor();
-      if (!textarea) throw new Error("Missing editor");
-      textarea.value = value;
-      textarea.dispatchEvent(new Event("input", { bubbles: true }));
-    });
+    const textarea = editor();
+    if (!textarea) throw new Error("Missing editor");
+    await userEvent.fill(textarea, value);
   }
   async function submit(
     prompt: string,
@@ -229,7 +228,7 @@ describe("chat annotation ownership", () => {
     await click("Save");
     expect(state.save).toHaveBeenCalledExactlyOnceWith({
       environmentId: a.environmentId,
-      input: { threadId: a.threadId, body: "New note" },
+      input: { threadId: a.threadId, body: "New note", annotationId: note.id },
     });
     await expect.poll(editor).toBeNull();
   });
@@ -245,7 +244,64 @@ describe("chat annotation ownership", () => {
     await act(async () => fixture.controls.timeline.onAnnotationReopen?.());
     expect(state.reopen).toHaveBeenCalledExactlyOnceWith({
       environmentId: a.environmentId,
-      input: { threadId: a.threadId },
+      input: { threadId: a.threadId, annotationId: note.id },
+    });
+  });
+  it("separates new annotations from explicit edits of the resolved note", async () => {
+    await using fixture = await setup();
+    const { render, click, editor, enter, submit } = fixture;
+    await render({ annotation: { ...note, resolvedAt: note.updatedAt } });
+    await click("Open annotation");
+    expect(editor()?.value).toBe("");
+    await enter("Next follow-up");
+    await click("Add annotation");
+    expect(state.save).toHaveBeenLastCalledWith({
+      environmentId: a.environmentId,
+      input: { threadId: a.threadId, body: "Next follow-up", createNew: true },
+    });
+
+    await act(() => fixture.controls.timeline.onAnnotationEdit?.());
+    expect(editor()?.value).toBe(note.body);
+    await enter("Corrected resolved note");
+    await click("Save");
+    expect(state.save).toHaveBeenLastCalledWith({
+      environmentId: a.environmentId,
+      input: { threadId: a.threadId, body: "Corrected resolved note", annotationId: note.id },
+    });
+
+    useComposerDraftStore.getState().setPrompt(a, "/annotate Another follow-up");
+    expect(await submit("/annotate Another follow-up")).toBe(true);
+    expect(state.save).toHaveBeenLastCalledWith({
+      environmentId: a.environmentId,
+      input: { threadId: a.threadId, body: "Another follow-up", createNew: true },
+    });
+  });
+  it("targets an older map annotation while another note is unresolved", async () => {
+    await using fixture = await setup();
+    const older = {
+      ...note,
+      id: "older-note",
+      body: "Original resolved note",
+      resolvedAt: note.updatedAt,
+    };
+    await fixture.render({ annotation: { ...note, otherAnnotations: [older] } });
+    await act(() => fixture.controls.timeline.onAnnotationEdit?.(older.id));
+    expect(fixture.editor()?.value).toBe(older.body);
+    await fixture.enter("Corrected old note");
+    await fixture.click("Save");
+    expect(state.save).toHaveBeenLastCalledWith({
+      environmentId: a.environmentId,
+      input: { threadId: a.threadId, body: "Corrected old note", annotationId: older.id },
+    });
+    await act(() => fixture.controls.timeline.onAnnotationReopen?.(older.id));
+    expect(state.reopen).toHaveBeenLastCalledWith({
+      environmentId: a.environmentId,
+      input: { threadId: a.threadId, annotationId: older.id },
+    });
+    await act(() => fixture.controls.timeline.onAnnotationResolve?.(older.id));
+    expect(state.resolve).toHaveBeenLastCalledWith({
+      environmentId: a.environmentId,
+      input: { threadId: a.threadId, annotationId: older.id },
     });
   });
   it("dismisses only the current version and resets on navigation", async () => {
@@ -435,7 +491,7 @@ describe("chat annotation ownership", () => {
     expect(editor()?.value).toBe("B unsaved");
     expect(state.save.mock.calls[0]?.[0]).toEqual({
       environmentId: a.environmentId,
-      input: { threadId: a.threadId, body: note.body },
+      input: { threadId: a.threadId, body: note.body, annotationId: note.id },
     });
   });
   it("keeps a newer editor session on A after cancel/reopen during a save", async () => {
@@ -482,7 +538,11 @@ describe("chat annotation ownership", () => {
     await act(async () => checkbox?.click());
     expect(state.save).toHaveBeenCalledExactlyOnceWith({
       environmentId: a.environmentId,
-      input: { threadId: a.threadId, body: "# Follow up\n\n- [x] Confirm the fix" },
+      input: {
+        threadId: a.threadId,
+        body: "# Follow up\n\n- [x] Confirm the fix",
+        annotationId: note.id,
+      },
     });
   });
 });

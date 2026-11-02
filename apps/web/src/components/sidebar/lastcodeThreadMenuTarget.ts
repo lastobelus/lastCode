@@ -81,6 +81,7 @@ export function readLastCodeThreadMenuTarget(
     canAnnotate:
       readEnvironmentSupportsThreadAnnotations(thread.environmentId) &&
       thread.latestUserMessageAt !== null,
+    hasActiveAnnotation: thread.annotation?.resolvedAt === null,
     supportsPersistence: readEnvironmentSupportsPersistence(thread.environmentId),
     hasStoppableProcesses,
     projectSettingsKey,
