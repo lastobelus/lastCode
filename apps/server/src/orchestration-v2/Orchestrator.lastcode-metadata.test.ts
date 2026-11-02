@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import {
+  type ActionResumeState,
   CommandId,
   EventId,
   MessageId,
@@ -26,6 +27,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as ActionRunStore from "../actionResume/ActionRunStore.ts";
 import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EventSink from "./EventSink.ts";
@@ -50,6 +52,7 @@ const database = SqlitePersistence.layerMemory;
 const testLayer = Layer.mergeAll(
   database,
   ProjectionStore.layer.pipe(Layer.provide(database)),
+  ActionRunStore.layer.pipe(Layer.provide(database)),
   ProviderReplayHarness.layerWithRegistry(
     { name: "lastcode-metadata" },
     ProviderAdapterRegistry.layerFromAdapters([adapter]),
@@ -83,6 +86,79 @@ const decodeCommand = Schema.decodeUnknownSync(OrchestrationV2Command);
 const decodeEventJson = Schema.decodeUnknownEffect(OrchestrationV2DomainEventJson);
 const encodeThreadJson = Schema.encodeEffect(OrchestrationV2AppThreadJson);
 const decodeStoredThread = Schema.decodeEffect(Schema.fromJsonString(OrchestrationV2AppThreadJson));
+
+it.effect(
+  "holds automatic settlement for a ledger-only Action and preserves explicit settlement",
+  () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const actions = yield* ActionRunStore.ActionRunStore;
+      const threadId = ThreadId.make("action-settlement:ledger");
+      const projectId = ProjectId.make("action-settlement:project");
+      yield* orchestrator.dispatch(create(threadId, projectId));
+      const snapshotAt = (yield* projections.getThread(threadId)).updatedAt;
+      const state: ActionResumeState = {
+        runId: "action-settlement:run",
+        threadId,
+        projectId,
+        actionId: "qa",
+        actionName: "QA",
+        terminalId: "action-settlement:terminal",
+        outcome: "succeeded",
+        delivery: "pending",
+        startedAt: DateTime.formatIso(snapshotAt),
+        finishedAt: DateTime.formatIso(snapshotAt),
+        exitCode: 0,
+        exitSignal: null,
+      };
+      // The ledger commits before shell publication, so the sweep's timestamp is still current.
+      yield* actions.save(state);
+      assert.isNull((yield* projections.getThread(threadId)).actionResume ?? null);
+      assert.equal(
+        (yield* Effect.exit(
+          orchestrator.dispatch({
+            type: "thread.auto-settle",
+            commandId: CommandId.make("action-settlement:auto-held"),
+            threadId,
+            snapshotAt,
+          }),
+        ))._tag,
+        "Failure",
+      );
+      assert.isNull((yield* projections.getThread(threadId)).settledOverride);
+      yield* actions.save({ ...state, delivery: "disposed", revision: 1 });
+      yield* orchestrator.dispatch({
+        type: "thread.auto-settle",
+        commandId: CommandId.make("action-settlement:auto-released"),
+        threadId,
+        snapshotAt,
+      });
+      assert.equal((yield* projections.getThread(threadId)).settledOverride, "settled");
+
+      for (const delivery of ["pending", "delivered"] as const) {
+        const manualId = ThreadId.make(`action-settlement:manual:${delivery}`);
+        yield* orchestrator.dispatch(create(manualId, projectId));
+        yield* orchestrator.dispatch({
+          type: "thread.metadata.update",
+          commandId: CommandId.make(`action-settlement:publish:${delivery}`),
+          threadId: manualId,
+          actionResume: {
+            ...state,
+            runId: `action-settlement:manual-run:${delivery}`,
+            threadId: manualId,
+            delivery,
+          },
+        });
+        yield* orchestrator.dispatch({
+          type: "thread.settle",
+          commandId: CommandId.make(`action-settlement:manual-settle:${delivery}`),
+          threadId: manualId,
+        });
+        assert.equal((yield* projections.getThread(manualId)).settledOverride, "settled");
+      }
+    }).pipe(Effect.provide(testLayer)),
+);
 
 it.effect(
   "reads retired attention history without restoring question state or blocking settlement",
