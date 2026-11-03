@@ -90,7 +90,11 @@ export function TagSidebarResults({ tag }: { readonly tag: string }) {
   const select = useTagFilterStore((state) => state.select);
   const setArchived = useTagFilterStore((state) => state.setArchived);
   const environmentIds = useTagEnvironmentIds();
-  const [cursor, setCursor] = useState(0);
+  const scopeKey = JSON.stringify({ environmentIds, tag, archived });
+  const [pagination, setPagination] = useState({ scopeKey, cursor: 0 });
+  const cursor = pagination.scopeKey === scopeKey ? pagination.cursor : 0;
+  if (pagination.scopeKey !== scopeKey) setPagination({ scopeKey, cursor: 0 });
+  const setCursor = (cursor: number) => setPagination({ scopeKey, cursor });
   const projects = useProjects();
   const { isMobile, setOpenMobile } = useSidebar();
   const key = JSON.stringify({ environmentIds, tag, archived, cursor });
@@ -115,14 +119,7 @@ export function TagSidebarResults({ tag }: { readonly tag: string }) {
             </div>
             <label className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
               Archived only
-              <Switch
-                size="sm"
-                checked={archived}
-                onCheckedChange={(value) => {
-                  setArchived(value);
-                  setCursor(0);
-                }}
-              />
+              <Switch size="sm" checked={archived} onCheckedChange={setArchived} />
             </label>
           </SidebarGroup>
         }
