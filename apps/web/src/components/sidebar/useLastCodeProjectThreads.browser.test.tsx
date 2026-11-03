@@ -1,3 +1,6 @@
+import { RegistryContext } from "@effect/atom-react";
+import { Atom, AtomRegistry } from "effect/reactivity";
+import { environmentThreadShells } from "../../state/threads";
 import { act, render } from "../../../test/render";
 import { useEffect } from "react";
 import { describe, expect, it, vi } from "vite-plus/test";
@@ -48,6 +51,7 @@ vi.mock("../../state/threads", async () => {
     ),
   );
   return {
+    environmentThreadShells: { hiddenThreadKeysAtom: Atom.make(new Set<string>()) },
     olderSettledThreads: {
       shelfAtom: (scopes: unknown) => shelf(JSON.stringify(scopes)),
       rowsKey: (scope: unknown, pages: number) => JSON.stringify({ scope, pages }),
@@ -218,6 +222,10 @@ describe("project-local thread projection", () => {
   });
   it("preserves rendering/navigation parity for every expansion, grouping and selected-path input", async () => {
     setup();
+    const registry = AtomRegistry.make();
+    const hidden = environmentThreadShells.hiddenThreadKeysAtom as Atom.Writable<
+      ReadonlySet<string>
+    >;
     await using screen = await render(null);
 
     for (const grouping of ["minimal", "typed-groups"] as const) {
@@ -226,7 +234,11 @@ describe("project-local thread projection", () => {
         for (const list of [false, true])
           for (const active of [null, key(child)]) {
             await act(() =>
-              screen.rerender(<Harness expanded={expanded} list={list} active={active} />),
+              screen.rerender(
+                <RegistryContext.Provider value={registry}>
+                  <Harness expanded={expanded} list={list} active={active} />
+                </RegistryContext.Provider>,
+              ),
             );
             const rendering = latest();
             const { familyProjection: navigation } = projectLastCodeProjectThreads(
@@ -251,6 +263,12 @@ describe("project-local thread projection", () => {
             expect(rendering.threadsByKey.get(key(archived))).toBe(archived);
           }
     }
+    await act(() => registry.set(hidden, new Set([key(parent), key(child)])));
+    expect(latest().familyProjection.orderedThreadKeys).not.toContain(key(parent));
+    expect(latest().threadsByKey.has(key(parent))).toBe(false);
+    expect(threads).toContain(parent);
+    await act(() => registry.set(hidden, new Set<string>()));
+    expect(latest().familyProjection.orderedThreadKeys).toContain(key(parent));
   });
   it("ignores foreign collapse/visit updates and reacts to its own family and subagent keys", async () => {
     setup();
