@@ -1,3 +1,4 @@
+import * as ServerSettings from "../serverSettings.ts";
 import { assert, it } from "@effect/vitest";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -70,6 +71,7 @@ const layer = (baseDir: string, options?: HarnessOptions) =>
           ),
     ),
     Layer.provideMerge(RuntimeLayer.layerProjectService),
+    Layer.provideMerge(ServerSettings.layerTest()),
     Layer.provideMerge(layerEnrichment),
     Layer.provideMerge(WorkspacePaths.layer),
     Layer.provideMerge(layerGitWorkflow(options?.vcsProcess)),

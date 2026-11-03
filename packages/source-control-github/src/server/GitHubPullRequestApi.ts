@@ -954,8 +954,7 @@ export const make = Effect.gen(function* () {
                     decodeRoutingIdentity(response.body).pipe(Effect.mapError(unavailable)),
                   ),
                   Effect.catchTags({
-                    // The enclosing operation owns the span for this inline handler.
-                    GitHubApiResponseError: Effect.fnUntraced(function* (error) {
+                    GitHubApiResponseError: Effect.fn("GitHubApiResponseError")(function* (error) {
                       if (error.status !== 403) return yield* error;
                       const { viewer } = yield* client.RoutingIdentityViewer({}).pipe(
                         GitHubGraphQlClient.call({
@@ -1595,7 +1594,7 @@ export const make = Effect.gen(function* () {
           ),
           listActionRequiredRuns(input).pipe(
             Effect.filterOrFail(
-              (runs) => !(runs.length > workflowApprovalLimit),
+              (runs) => runs.length <= workflowApprovalLimit,
               (runs) =>
                 new GitHubWorkflowApprovalRefusedError({
                   cwd: input.cwd,
@@ -1724,11 +1723,11 @@ export const make = Effect.gen(function* () {
     withVerifiedCredential,
     revalidateChecks,
     getRoutingIdentity,
-    getViewerLogin: Effect.fn("GitHubPullRequestApi.getViewerLogin")(function (input) {
-      return getRoutingIdentity(input).pipe(Effect.map((identity) => identity.viewer));
-    }),
+    getViewerLogin: Effect.fn("GitHubPullRequestApi.getViewerLogin")((input) =>
+      getRoutingIdentity(input).pipe(Effect.map((identity) => identity.viewer)),
+    ),
 
-    listPullRequests: Effect.fn("GitHubPullRequestApi.listPullRequests")(function (input) {
+    listPullRequests: Effect.fn("GitHubPullRequestApi.listPullRequests")((input) => {
       const fallbackMaxRows = Math.max(input.limit + 1, PULL_REQUEST_FALLBACK_MAX_ROWS);
       const { owner, name } = parseRepositorySelector(input.repository);
       const query = searchQuery({ ...input, repositories: [input.repository] });
@@ -1907,36 +1906,40 @@ export const make = Effect.gen(function* () {
       );
     }),
 
-    searchPullRequests: Effect.fn("GitHubPullRequestApi.searchPullRequests")(function* (input) {
-      const query = searchQuery(input);
-      if (query === null) {
-        return yield* new GitHubRepositorySelectorError({
-          cwd: input.cwd,
-          operation: "searchPullRequests",
-        });
-      }
-      const rows = Math.min(input.limit + 1, PULL_REQUEST_SEARCH_MAX_ROWS);
-      return yield* client
-        .PullRequestSearch({
-          q: query,
-          first: rows,
-          stacks: input.host.toLowerCase() === "github.com",
-          stats: false,
-        })
-        .pipe(
-          graphql({ ...input, operation: "searchPullRequests" }),
-          Effect.map(({ search }) => {
-            const page = toPullRequestRows(search);
-            const items = page.rows.flatMap(({ item, repository }) =>
-              repository === null ? [] : [{ ...item, repository }],
-            );
-            return {
-              items: items.slice(0, input.limit),
-              truncated: page.rawCount > input.limit || page.hasNextPage,
-            };
-          }),
-        );
-    }),
+    searchPullRequests: Effect.fn("GitHubPullRequestApi.searchPullRequests")(
+      (input): Effect.Effect<GitHubPullRequestSearchBatch, GitHubPullRequestApiError> => {
+        const query = searchQuery(input);
+        if (query === null) {
+          return Effect.fail(
+            new GitHubRepositorySelectorError({
+              cwd: input.cwd,
+              operation: "searchPullRequests",
+            }),
+          );
+        }
+        const rows = Math.min(input.limit + 1, PULL_REQUEST_SEARCH_MAX_ROWS);
+        return client
+          .PullRequestSearch({
+            q: query,
+            first: rows,
+            stacks: input.host.toLowerCase() === "github.com",
+            stats: false,
+          })
+          .pipe(
+            graphql({ ...input, operation: "searchPullRequests" }),
+            Effect.map(({ search }) => {
+              const page = toPullRequestRows(search);
+              const items = page.rows.flatMap(({ item, repository }) =>
+                repository === null ? [] : [{ ...item, repository }],
+              );
+              return {
+                items: items.slice(0, input.limit),
+                truncated: page.rawCount > input.limit || page.hasNextPage,
+              };
+            }),
+          );
+      },
+    ),
 
     listPullRequestStats: Effect.fn("GitHubPullRequestApi.listPullRequestStats")(
       function* (input) {
@@ -1976,22 +1979,20 @@ export const make = Effect.gen(function* () {
     getPullRequestWatchFingerprint,
 
     getPullRequestDetail,
-    getPullRequestPreview: Effect.fn("GitHubPullRequestApi.getPullRequestPreview")(
-      function (input) {
-        const { owner, name } = parseRepositorySelector(input.repository);
-        const operation = "getPullRequestPreview";
-        return client
-          .PullRequestPreview({ owner, name, number: input.number })
-          .pipe(
-            graphql({ ...input, operation }),
-            Effect.map(toPullRequestPreview),
-            Effect.flatMap(found({ ...input, operation })),
-          );
-      },
-    ),
+    getPullRequestPreview: Effect.fn("GitHubPullRequestApi.getPullRequestPreview")((input) => {
+      const { owner, name } = parseRepositorySelector(input.repository);
+      const operation = "getPullRequestPreview";
+      return client
+        .PullRequestPreview({ owner, name, number: input.number })
+        .pipe(
+          graphql({ ...input, operation }),
+          Effect.map(toPullRequestPreview),
+          Effect.flatMap(found({ ...input, operation })),
+        );
+    }),
     listWorkflowRunsRequiringApproval,
 
-    getPullRequestStack: Effect.fn("GitHubPullRequestApi.getPullRequestStack")(function (input) {
+    getPullRequestStack: Effect.fn("GitHubPullRequestApi.getPullRequestStack")((input) => {
       const { owner, name } = parseRepositorySelector(input.repository);
       // Polled by the pull request sync for every linked pull request, so revalidate it.
       return revalidatedRestRead({
@@ -2026,6 +2027,8 @@ export const make = Effect.gen(function* () {
         let commits: ReadonlyArray<PullRequestCommit> = [];
         let nonMergeCommitIds: ReadonlyArray<string> = [];
         const remarks: PullRequestComment[] = [];
+        let totalCount = 0;
+        let rawCount = 0;
         let commentsAfter: string | null = null;
         let reviewsAfter: string | null = null;
         let withComments = true;
@@ -2052,8 +2055,10 @@ export const make = Effect.gen(function* () {
             author = read.author ?? null;
             commits = read.commits ?? [];
             nonMergeCommitIds = read.nonMergeCommitIds;
+            totalCount = read.totalCount;
           }
           remarks.push(...read.remarks);
+          rawCount += read.rawCount;
           commentsAfter = read.nextCommentsCursor;
           reviewsAfter = read.nextReviewsCursor;
           withComments = withComments && commentsAfter !== null;
@@ -2073,12 +2078,14 @@ export const make = Effect.gen(function* () {
           comments: remarks.toSorted((left, right) =>
             left.createdAt.localeCompare(right.createdAt),
           ),
+          commentCount: remarks.length + Math.max(0, totalCount - rawCount),
+          truncated: withComments || withReviews,
           commits: commits.map((commit) => ({ ...commit, ...commitStats.get(commit.oid) })),
         } satisfies GitHubPullRequestActivity;
       },
     ),
 
-    getPullRequestDiff: Effect.fn("GitHubPullRequestApi.getPullRequestDiff")(function (input) {
+    getPullRequestDiff: Effect.fn("GitHubPullRequestApi.getPullRequestDiff")((input) => {
       const filesPage = (page: number) =>
         diffFilesPage({
           cwd: input.cwd,
@@ -2125,33 +2132,31 @@ export const make = Effect.gen(function* () {
 
     getPullRequestDiffFileContents,
 
-    getReviewThreadComments: Effect.fn("GitHubPullRequestApi.getReviewThreadComments")(
-      function (input) {
-        const { owner, name } = parseRepositorySelector(input.repository);
-        return client
-          .ReviewThreadComments({
-            owner,
-            name,
-            number: input.number,
-            threadId: input.threadId,
-            after: input.cursor,
-          })
-          .pipe(
-            graphql({ ...input, operation: "getReviewThreadComments" }),
-            Effect.map(toReviewThreadCommentsPage),
-            Effect.flatMap(({ belongsToPullRequest, comments, nextCursor }) =>
-              belongsToPullRequest
-                ? Effect.succeed({ comments, nextCursor })
-                : Effect.fail(
-                    new GitHubSubjectScopeError({
-                      cwd: input.cwd,
-                      operation: "getReviewThreadComments",
-                    }),
-                  ),
-            ),
-          );
-      },
-    ),
+    getReviewThreadComments: Effect.fn("GitHubPullRequestApi.getReviewThreadComments")((input) => {
+      const { owner, name } = parseRepositorySelector(input.repository);
+      return client
+        .ReviewThreadComments({
+          owner,
+          name,
+          number: input.number,
+          threadId: input.threadId,
+          after: input.cursor,
+        })
+        .pipe(
+          graphql({ ...input, operation: "getReviewThreadComments" }),
+          Effect.map(toReviewThreadCommentsPage),
+          Effect.flatMap(({ belongsToPullRequest, comments, nextCursor }) =>
+            belongsToPullRequest
+              ? Effect.succeed({ comments, nextCursor })
+              : Effect.fail(
+                  new GitHubSubjectScopeError({
+                    cwd: input.cwd,
+                    operation: "getReviewThreadComments",
+                  }),
+                ),
+          ),
+        );
+    }),
 
     listReviewThreadComments: Effect.fn("GitHubPullRequestApi.listReviewThreadComments")(
       function* (input) {
@@ -2263,7 +2268,7 @@ export const make = Effect.gen(function* () {
       },
     ),
 
-    getViewerAccess: Effect.fn("GitHubPullRequestApi.getViewerAccess")(function (input) {
+    getViewerAccess: Effect.fn("GitHubPullRequestApi.getViewerAccess")((input) => {
       const { owner, name } = parseRepositorySelector(input.repository);
       const operation = "getViewerAccess";
       return client
@@ -2275,21 +2280,19 @@ export const make = Effect.gen(function* () {
         );
     }),
 
-    listReviewerCandidates: Effect.fn("GitHubPullRequestApi.listReviewerCandidates")(
-      function (input) {
-        const { owner, name } = parseRepositorySelector(input.repository);
-        const operation = "listReviewerCandidates";
-        return client
-          .ReviewerCandidates({ owner, name, number: input.number })
-          .pipe(
-            graphql({ ...input, operation, allowReserve: true }),
-            Effect.map(toReviewerCandidates),
-            Effect.flatMap(found({ ...input, operation })),
-          );
-      },
-    ),
+    listReviewerCandidates: Effect.fn("GitHubPullRequestApi.listReviewerCandidates")((input) => {
+      const { owner, name } = parseRepositorySelector(input.repository);
+      const operation = "listReviewerCandidates";
+      return client
+        .ReviewerCandidates({ owner, name, number: input.number })
+        .pipe(
+          graphql({ ...input, operation, allowReserve: true }),
+          Effect.map(toReviewerCandidates),
+          Effect.flatMap(found({ ...input, operation })),
+        );
+    }),
 
-    setReviewerRequest: Effect.fn("GitHubPullRequestApi.setReviewerRequest")(function (input) {
+    setReviewerRequest: Effect.fn("GitHubPullRequestApi.setReviewerRequest")((input) => {
       const { owner, name } = parseRepositorySelector(input.repository);
       return api
         .rest({
@@ -2302,7 +2305,7 @@ export const make = Effect.gen(function* () {
         .pipe(Effect.asVoid);
     }),
 
-    listLabelCandidates: Effect.fn("GitHubPullRequestApi.listLabelCandidates")(function (input) {
+    listLabelCandidates: Effect.fn("GitHubPullRequestApi.listLabelCandidates")((input) => {
       const { owner, name } = parseRepositorySelector(input.repository);
       const operation = "listLabelCandidates";
       return client
@@ -2314,7 +2317,7 @@ export const make = Effect.gen(function* () {
         );
     }),
 
-    listRepositoryLabels: Effect.fn("GitHubPullRequestApi.listRepositoryLabels")(function (input) {
+    listRepositoryLabels: Effect.fn("GitHubPullRequestApi.listRepositoryLabels")((input) => {
       const { owner, name } = parseRepositorySelector(input.repository);
       const operation = "listRepositoryLabels";
       return client
@@ -2326,21 +2329,19 @@ export const make = Effect.gen(function* () {
         );
     }),
 
-    searchRepositoryAuthors: Effect.fn("GitHubPullRequestApi.searchRepositoryAuthors")(
-      function (input) {
-        const { owner, name } = parseRepositorySelector(input.repository);
-        const operation = "searchRepositoryAuthors";
-        return client
-          .RepositoryAuthors({ owner, name, query: input.query ?? null })
-          .pipe(
-            graphql({ ...input, operation, allowReserve: true }),
-            Effect.map(toRepositoryAuthors),
-            Effect.flatMap(found({ ...input, operation })),
-          );
-      },
-    ),
+    searchRepositoryAuthors: Effect.fn("GitHubPullRequestApi.searchRepositoryAuthors")((input) => {
+      const { owner, name } = parseRepositorySelector(input.repository);
+      const operation = "searchRepositoryAuthors";
+      return client
+        .RepositoryAuthors({ owner, name, query: input.query ?? null })
+        .pipe(
+          graphql({ ...input, operation, allowReserve: true }),
+          Effect.map(toRepositoryAuthors),
+          Effect.flatMap(found({ ...input, operation })),
+        );
+    }),
 
-    setLabels: Effect.fn("GitHubPullRequestApi.setLabels")(function (input) {
+    setLabels: Effect.fn("GitHubPullRequestApi.setLabels")((input) => {
       const { owner, name } = parseRepositorySelector(input.repository);
       const issue = `repos/${owner}/${name}/issues/${input.number}/labels`;
       if (input.applied) {
@@ -2367,7 +2368,7 @@ export const make = Effect.gen(function* () {
       );
     }),
 
-    runPullRequestAction: Effect.fn("GitHubPullRequestApi.runPullRequestAction")(function (input) {
+    runPullRequestAction: Effect.fn("GitHubPullRequestApi.runPullRequestAction")((input) => {
       if (input.action === "delete-branch") {
         return Effect.gen(function* () {
           if (input.stackNumber !== undefined) {
@@ -2624,18 +2625,18 @@ export const make = Effect.gen(function* () {
       });
     }),
 
-    commentOnPullRequest: Effect.fn("GitHubPullRequestApi.commentOnPullRequest")(function (input) {
-      return pullRequestNodeId({ ...input, operation: "commentOnPullRequest" }).pipe(
+    commentOnPullRequest: Effect.fn("GitHubPullRequestApi.commentOnPullRequest")((input) =>
+      pullRequestNodeId({ ...input, operation: "commentOnPullRequest" }).pipe(
         Effect.flatMap((subjectId) =>
           client
             .AddComment({ subjectId, body: input.body })
             .pipe(graphql({ ...input, operation: "commentOnPullRequest" })),
         ),
         Effect.asVoid,
-      );
-    }),
+      ),
+    ),
 
-    submitReview: Effect.fn("GitHubPullRequestApi.submitReview")(function (input) {
+    submitReview: Effect.fn("GitHubPullRequestApi.submitReview")((input) => {
       const { owner, name } = parseRepositorySelector(input.repository);
       return api
         .rest({
@@ -2652,14 +2653,14 @@ export const make = Effect.gen(function* () {
         .pipe(Effect.asVoid);
     }),
 
-    replyToReviewThread: Effect.fn("GitHubPullRequestApi.replyToReviewThread")(function (input) {
-      return client
+    replyToReviewThread: Effect.fn("GitHubPullRequestApi.replyToReviewThread")((input) =>
+      client
         .AddReviewThreadReply({ threadId: input.threadId, body: input.body })
-        .pipe(graphql({ ...input, operation: "replyToReviewThread" }), Effect.asVoid);
-    }),
+        .pipe(graphql({ ...input, operation: "replyToReviewThread" }), Effect.asVoid),
+    ),
 
     getPullRequestFilesViewed: Effect.fn("GitHubPullRequestApi.getPullRequestFilesViewed")(
-      function (input) {
+      (input) => {
         const { owner, name } = parseRepositorySelector(input.repository);
         const target = { ...input, operation: "getPullRequestFilesViewed" };
         return readPages(
@@ -2688,38 +2689,36 @@ export const make = Effect.gen(function* () {
       },
     ),
 
-    getPullRequestFileStats: Effect.fn("GitHubPullRequestApi.getPullRequestFileStats")(
-      function (input) {
-        const { owner, name } = parseRepositorySelector(input.repository);
-        const target = { ...input, operation: "getPullRequestFileStats" };
-        return readPages(
-          GraphQLClient.pages(client.PullRequestFileStats, {
-            variables: { owner, name, number: input.number },
-            connection: (result) => {
-              const page = toPullRequestFileStatsPage(result);
-              return {
-                ...page,
-                pageInfo: { hasNextPage: page.nextCursor !== null, endCursor: page.nextCursor },
-              };
-            },
-          }),
-          {
-            ...target,
-            maxPages: FILES_VIEWED_MAX_PAGES,
-            hasNextPage: (page) => page.nextCursor !== null,
+    getPullRequestFileStats: Effect.fn("GitHubPullRequestApi.getPullRequestFileStats")((input) => {
+      const { owner, name } = parseRepositorySelector(input.repository);
+      const target = { ...input, operation: "getPullRequestFileStats" };
+      return readPages(
+        GraphQLClient.pages(client.PullRequestFileStats, {
+          variables: { owner, name, number: input.number },
+          connection: (result) => {
+            const page = toPullRequestFileStatsPage(result);
+            return {
+              ...page,
+              pageInfo: { hasNextPage: page.nextCursor !== null, endCursor: page.nextCursor },
+            };
           },
-        ).pipe(
-          graphql(target),
-          Effect.map(({ pages, truncated }) => ({
-            files: pages.flatMap((page) => page.files),
-            truncated,
-          })),
-        );
-      },
-    ),
+        }),
+        {
+          ...target,
+          maxPages: FILES_VIEWED_MAX_PAGES,
+          hasNextPage: (page) => page.nextCursor !== null,
+        },
+      ).pipe(
+        graphql(target),
+        Effect.map(({ pages, truncated }) => ({
+          files: pages.flatMap((page) => page.files),
+          truncated,
+        })),
+      );
+    }),
 
     setPullRequestFilesViewed: Effect.fn("GitHubPullRequestApi.setPullRequestFilesViewed")(
-      function (input) {
+      (input) => {
         if (input.files.length === 0) return Effect.void;
         const target = { ...input, operation: "setPullRequestFilesViewed" };
         return pullRequestNodeId(target).pipe(
@@ -2741,16 +2740,14 @@ export const make = Effect.gen(function* () {
     ),
 
     setReviewThreadResolution: Effect.fn("GitHubPullRequestApi.setReviewThreadResolution")(
-      function (input) {
-        return (
-          input.resolved
-            ? client.ResolveReviewThread({ threadId: input.threadId }).pipe(Effect.asVoid)
-            : client.UnresolveReviewThread({ threadId: input.threadId }).pipe(Effect.asVoid)
-        ).pipe(graphql({ ...input, operation: "setReviewThreadResolution" }));
-      },
+      (input) =>
+        (input.resolved
+          ? client.ResolveReviewThread({ threadId: input.threadId }).pipe(Effect.asVoid)
+          : client.UnresolveReviewThread({ threadId: input.threadId }).pipe(Effect.asVoid)
+        ).pipe(graphql({ ...input, operation: "setReviewThreadResolution" })),
     ),
 
-    setReaction: Effect.fn("GitHubPullRequestApi.setReaction")(function (input) {
+    setReaction: Effect.fn("GitHubPullRequestApi.setReaction")((input) => {
       const givenSubjectId = input.subjectId;
       const subjectId =
         givenSubjectId === undefined
@@ -2783,8 +2780,8 @@ export const make = Effect.gen(function* () {
       );
     }),
 
-    updatePullRequest: Effect.fn("GitHubPullRequestApi.updatePullRequest")(function (input) {
-      return pullRequestNodeId({ ...input, operation: "updatePullRequest" }).pipe(
+    updatePullRequest: Effect.fn("GitHubPullRequestApi.updatePullRequest")((input) =>
+      pullRequestNodeId({ ...input, operation: "updatePullRequest" }).pipe(
         Effect.flatMap((pullRequestId) =>
           client
             .UpdatePullRequest({
@@ -2798,11 +2795,11 @@ export const make = Effect.gen(function* () {
             .pipe(graphql({ ...input, operation: "updatePullRequest" })),
         ),
         Effect.asVoid,
-      );
-    }),
+      ),
+    ),
 
-    updateComment: Effect.fn("GitHubPullRequestApi.updateComment")(function (input) {
-      return subjectBelongsToPullRequest({
+    updateComment: Effect.fn("GitHubPullRequestApi.updateComment")((input) =>
+      subjectBelongsToPullRequest({
         cwd: input.cwd,
         repository: input.repository,
         host: input.host,
@@ -2828,8 +2825,8 @@ export const make = Effect.gen(function* () {
               : client.UpdateReviewComment(variables).pipe(Effect.asVoid)
           ).pipe(graphql({ ...input, operation: "updateComment" }));
         }),
-      );
-    }),
+      ),
+    ),
   });
 });
 

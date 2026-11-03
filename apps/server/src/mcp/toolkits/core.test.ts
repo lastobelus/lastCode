@@ -51,6 +51,7 @@ import * as RemoteDelegation from "../../peer/RemoteDelegation.ts";
 import * as ScheduledTaskService from "../../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as McpHttpServer from "../McpHttpServer.ts";
+import * as ThreadReadBroker from "../ThreadReadBroker.ts";
 import * as McpInvocationContext from "../McpInvocationContext.ts";
 import * as McpToolAccessTestkit from "../McpToolAccess.testkit.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
@@ -647,6 +648,7 @@ it.effect("refuses act-as-caller tools to a client caller", () =>
     Effect.provide(
       layerOrchestratorToolkit.pipe(
         Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
+        Layer.provide(ThreadReadBroker.layer),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
         Layer.provide(ServerSettings.layerTest()),
@@ -692,6 +694,7 @@ it.effect("a caller cannot rewrite a scheduled task that runs above its own mode
     Effect.provide(
       layerOrchestratorToolkit.pipe(
         Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
+        Layer.provide(ThreadReadBroker.layer),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
         Layer.provide(ServerSettings.layerTest()),
@@ -939,6 +942,7 @@ it.effect("discovers workflow stop targets and requires orchestration capability
     Effect.provide(
       layerOrchestratorToolkit.pipe(
         Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
+        Layer.provide(ThreadReadBroker.layer),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(
           Layer.mock(ThreadManagement.ThreadManagementService)({
@@ -1058,6 +1062,7 @@ it.effect(
       Effect.provide(
         layerOrchestratorToolkit.pipe(
           Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
+          Layer.provide(ThreadReadBroker.layer),
           Layer.provide(NodeCrypto.layer),
           Layer.provide(
             Layer.mock(ThreadManagement.ThreadManagementService)({
