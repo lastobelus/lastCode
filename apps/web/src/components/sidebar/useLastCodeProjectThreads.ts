@@ -22,7 +22,8 @@ export function useLastCodeProjectThreads(
   listExpanded: boolean,
 ) {
   const hidden = useAtomValue(environmentThreadShells.hiddenThreadKeysAtom);
-  const threads = useThreadShellsForProjectRefs(project.memberProjectRefs).filter(
+  const loadedThreads = useThreadShellsForProjectRefs(project.memberProjectRefs);
+  const threads = loadedThreads.filter(
     (thread) => !hidden.has(scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))),
   );
   const scopes: OlderSettledScope[] = [
@@ -40,7 +41,7 @@ export function useLastCodeProjectThreads(
     visibleCount: 0,
   });
   const olderSettled = {
-    hasMore: shelf.hasMore || shelf.unloadedCount(threads) > 0,
+    hasMore: shelf.hasMore || shelf.unloadedCount(loadedThreads) > 0,
     loading: shelf.loading,
     failed: shelf.failed,
     loadMore: shelf.loadMore,
