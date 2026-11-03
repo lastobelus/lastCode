@@ -1,3 +1,8 @@
+import { requireRemoteDelegationPeer } from "./linkOrigin.ts";
+import * as ActionResume from "../actionResume/ActionResume.ts";
+import * as ThreadReadBroker from "./ThreadReadBroker.ts";
+import * as ThreadRecoveryService from "../orchestration-v2/ThreadRecoveryService.ts";
+import * as ThreadRecoveryRepairService from "../orchestration-v2/ThreadRecoveryRepairService.ts";
 import * as DocumentText from "../provider/DocumentText.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -6,6 +11,7 @@ import {
   CommandId,
   ContextTransferId,
   EnvironmentId,
+  MessageId,
   NodeId,
   type OrchestrationV2Run,
   ProjectId,
@@ -97,6 +103,12 @@ const layerLaunches = Layer.effect(
             worktreePath: null,
             ...(input.linkOrigin === undefined ? {} : { linkOrigin: input.linkOrigin }),
             ...(input.delegatedFrom === undefined ? {} : { delegatedFrom: input.delegatedFrom }),
+            ...(input.creatorThreadId === undefined
+              ? {}
+              : { creatorThreadId: input.creatorThreadId }),
+            ...(input.groupedUnderThreadId === undefined
+              ? {}
+              : { groupedUnderThreadId: input.groupedUnderThreadId }),
             createdBy: input.createdBy,
             creationSource: input.creationSource,
           })
@@ -117,75 +129,104 @@ const layerTools = Layer.mergeAll(
   McpHttpServer.layerOrchestratorToolkit,
   McpHttpServer.layerThreadToolkit,
   McpHttpServer.layerProjectRegistration,
-).pipe(
-  Layer.provide(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
-  Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
-  Layer.provide(layerLaunches),
-  Layer.provide(NodeCrypto.layer),
-  Layer.provide(
-    Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
-  ),
-  Layer.provide(
-    Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
-      list: () => Effect.succeed([]),
-    }),
-  ),
-  Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
-  Layer.provide(
-    Layer.mock(ProjectService.ProjectService)({
-      getById: () => Effect.succeedNone,
-      create: (input) =>
-        Effect.succeed({
-          id: input.projectId,
-          title: input.title,
-          workspaceRoot: input.workspaceRoot,
-          defaultModelSelection: null,
-          scripts: [],
-          createdAt: "2026-10-18T00:00:00.000Z",
-          updatedAt: "2026-10-18T00:00:00.000Z",
-          deletedAt: null,
-        }),
-      update: (input) =>
-        Effect.succeed({
-          id: input.projectId,
-          title: input.title ?? "Untitled",
-          workspaceRoot: "/p/t3code",
-          defaultModelSelection: null,
-          scripts: [],
-          createdAt: "2026-10-18T00:00:00.000Z",
-          updatedAt: "2026-10-18T00:00:00.000Z",
-          deletedAt: null,
-        }),
-    }),
-  ),
-  Layer.provide(Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({})),
-  Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
-  Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
-  Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
-  Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
-  Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
-  Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
-  Layer.provide(
-    Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/p" }),
-  ),
-  Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
-  Layer.provide(
-    Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({
-      cloneRepository: (input) =>
-        Effect.succeed({
-          cwd: input.destinationPath,
-          remoteUrl: "https://github.com/pingdotgg/t3code.git",
-          repository: null,
-        }),
-    }),
-  ),
-  Layer.provide(
-    ServerConfig.layerTest(process.cwd(), { prefix: "t3-link-origin-" }).pipe(
-      Layer.provide(NodeServices.layer),
+)
+  .pipe(
+    Layer.provide(ThreadReadBroker.layer),
+    Layer.provide(
+      Layer.mock(ActionResume.ActionResume)({ readLatestSummary: () => Effect.succeed(null) }),
     ),
-  ),
-  Layer.provide(NodeServices.layer),
-);
+    Layer.provide(Layer.mock(ThreadRecoveryService.ThreadRecoveryService)({})),
+    Layer.provide(Layer.mock(ThreadRecoveryRepairService.ThreadRecoveryRepairService)({})),
+    Layer.provide(
+      DocumentText.layer.pipe(
+        Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+      ),
+    ),
+    Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
+    Layer.provide(layerLaunches),
+    Layer.provide(NodeCrypto.layer),
+    Layer.provide(
+      Layer.mock(ProviderRegistry.ProviderRegistry)({
+        getProviders: Effect.succeed([
+          {
+            instanceId,
+            driver: ProviderDriverKind.make("codex"),
+            enabled: true,
+            installed: true,
+            version: "test",
+            status: "ready",
+            auth: { status: "authenticated" },
+            checkedAt: "2026-10-01T00:00:00.000Z",
+            models: [{ slug: "gpt-5", name: "Test model", isCustom: false, capabilities: null }],
+            slashCommands: [],
+            skills: [],
+          },
+        ]),
+      }),
+    ),
+    Layer.provide(
+      Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+        list: () => Effect.succeed([instanceId]),
+      }),
+    ),
+    Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
+  )
+  .pipe(
+    Layer.provide(
+      Layer.mock(ProjectService.ProjectService)({
+        getById: () => Effect.succeedNone,
+        create: (input) =>
+          Effect.succeed({
+            id: input.projectId,
+            title: input.title,
+            workspaceRoot: input.workspaceRoot,
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: "2026-10-18T00:00:00.000Z",
+            updatedAt: "2026-10-18T00:00:00.000Z",
+            deletedAt: null,
+          }),
+        update: (input) =>
+          Effect.succeed({
+            id: input.projectId,
+            title: input.title ?? "Untitled",
+            workspaceRoot: "/p/t3code",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: "2026-10-18T00:00:00.000Z",
+            updatedAt: "2026-10-18T00:00:00.000Z",
+            deletedAt: null,
+          }),
+      }),
+    ),
+    Layer.provide(Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({})),
+    Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
+    Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
+    Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
+    Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
+    Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
+    Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
+    Layer.provide(
+      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/p" }),
+    ),
+    Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+    Layer.provide(
+      Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({
+        cloneRepository: (input) =>
+          Effect.succeed({
+            cwd: input.destinationPath,
+            remoteUrl: "https://github.com/pingdotgg/t3code.git",
+            repository: null,
+          }),
+      }),
+    ),
+    Layer.provide(
+      ServerConfig.layerTest(process.cwd(), { prefix: "t3-link-origin-" }).pipe(
+        Layer.provide(NodeServices.layer),
+      ),
+    ),
+    Layer.provide(NodeServices.layer),
+  );
 
 const mcpClient = McpSchema.McpServerClient.of({
   clientId: 1,
@@ -380,6 +421,101 @@ it.layer(Layer.provideMerge(layerTools, layerOrchestration))("work a link starts
       // Reads are not fenced.
       const read = yield* call(laptop, "t3_thread_read", { threadId: users });
       assert.equal(read.isError, false);
+
+      // Choosing a parent changes that parent's family just like moving a thread.
+      // Exercise both an outside linked client and a thread that link started.
+      const otherLaunch = yield* launch(desk, "Another link's parent");
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const createFrom = Effect.fn("test.createFrom")(function* (
+        source: McpInvocationContext.McpInvocationScope,
+        parent: ThreadId | null | undefined,
+        key: string,
+        tool: "t3_thread_launch" | "create_threads",
+      ) {
+        const placement = parent === undefined ? {} : { groupedUnderThreadId: parent };
+        return yield* call(source, tool, {
+          clientRequestId: key,
+          ...(tool === "t3_thread_launch"
+            ? {
+                projectId,
+                title: key,
+                modelSelection: { instanceId, model: "gpt-5" },
+                ...placement,
+              }
+            : { threads: [{ title: key, ...placement }] }),
+        });
+      });
+      const startCaller = Effect.fn("test.startCaller")(function* (threadId: ThreadId) {
+        yield* threads.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`start:${threadId}`),
+          threadId,
+          messageId: MessageId.make(`message:${threadId}`),
+          text: "Organize work",
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        return {
+          ...laptop,
+          requestNamespace: `provider:${threadId}`,
+          client: undefined,
+          thread: {
+            threadId,
+            providerSessionId: `provider:${threadId}`,
+            providerInstanceId: instanceId,
+          },
+        } satisfies McpInvocationContext.McpInvocationScope;
+      });
+      const threadScope = yield* startCaller(ownLaunch);
+      for (const [tool, source] of [
+        ["t3_thread_launch", laptop],
+        ["t3_thread_launch", threadScope],
+        ["create_threads", threadScope],
+      ] as const) {
+        const prefix = `${tool}:${source.requestNamespace}`;
+        for (const parent of [users, otherLaunch]) {
+          const count = yield* projections.countThreads();
+          assert.equal(
+            failureCode(yield* createFrom(source, parent, `${prefix}:${parent}`, tool)),
+            "capability_denied",
+          );
+          assert.equal(yield* projections.countThreads(), count);
+        }
+        for (const parent of [ownLaunch, null, undefined]) {
+          const result = yield* createFrom(source, parent, `${prefix}:${parent}`, tool);
+          assert.equal(result.isError, false, JSON.stringify(result.content));
+          const id = result.structuredContent as {
+            threadId: ThreadId;
+            threads: [{ threadId: ThreadId }];
+          };
+          assert.equal(
+            (yield* projections.getThreadShell(
+              tool === "t3_thread_launch" ? id.threadId : id.threads[0].threadId,
+            ))?.groupedUnderThreadId,
+            parent === undefined ? (source.thread?.threadId ?? null) : parent,
+          );
+        }
+      }
+      for (const source of [trusted, claudeCode]) {
+        const id = yield* launch(source, "Authorized explicit parent", {
+          groupedUnderThreadId: users,
+        });
+        assert.equal((yield* projections.getThreadShell(id))?.groupedUnderThreadId, users);
+        const result = yield* createFrom(
+          yield* startCaller(id),
+          users,
+          `authorized:${id}`,
+          "create_threads",
+        );
+        assert.equal(result.isError, false, JSON.stringify(result.content));
+        const created = result.structuredContent as { threads: [{ threadId: ThreadId }] };
+        assert.equal(
+          (yield* projections.getThreadShell(created.threads[0].threadId))?.groupedUnderThreadId,
+          users,
+        );
+      }
     }),
   );
 
@@ -410,3 +546,50 @@ it.layer(Layer.provideMerge(layerTools, layerOrchestration))("work a link starts
     }),
   );
 });
+
+it.effect(
+  "refuses remote ownership from provider callers and a different peer even with full access",
+  () =>
+    Effect.gen(function* () {
+      const scope: McpInvocationContext.McpInvocationScope = {
+        environmentId: EnvironmentId.make("destination"),
+        requestNamespace: "peer",
+        capabilities: new Set(["orchestration"]),
+        issuedAt: 0,
+        thread: undefined,
+        client: { sessionId: "peer-a", label: "Peer", access: "full-access", linked: true },
+      };
+      const target = {
+        linkOrigin: { sessionId: "peer-a", label: "Peer", access: "full-access" as const },
+      };
+      assert.equal((yield* requireRemoteDelegationPeer(scope, target)).sessionId, "peer-a");
+      assert.equal(
+        (yield* requireRemoteDelegationPeer(
+          { ...scope, client: { ...scope.client!, sessionId: "peer-b" } },
+          target,
+        ).pipe(Effect.flip)).code,
+        "capability_denied",
+      );
+      assert.equal(
+        (yield* requireRemoteDelegationPeer(
+          {
+            ...scope,
+            thread: {
+              threadId: ThreadId.make("local-agent"),
+              providerSessionId: "provider",
+              providerInstanceId: instanceId,
+            },
+          },
+          target,
+        ).pipe(Effect.flip)).code,
+        "capability_denied",
+      );
+      assert.equal(
+        (yield* requireRemoteDelegationPeer(
+          { ...scope, client: { ...scope.client!, linked: false } },
+          target,
+        ).pipe(Effect.flip)).code,
+        "capability_denied",
+      );
+    }),
+);

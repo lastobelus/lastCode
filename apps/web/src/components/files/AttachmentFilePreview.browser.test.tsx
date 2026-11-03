@@ -2346,7 +2346,7 @@ it("toggles a Mermaid attachment between diagram and source through the lazy pre
 });
 
 it("keeps a workspace PDF open across URL renewals and reloads it when the file changes", async () => {
-  const { WorkspaceBrowserPreview } = await import("./FilePreviewPanel");
+  const { WorkspaceBrowserPreview } = await import("./WorkspaceBrowserPreview");
   using _native = vi.spyOn(navigator, "pdfViewerEnabled", "get").mockReturnValue(true);
   const original = URL.createObjectURL(new Blob(["%PDF-1.4"], { type: "application/pdf" }));
   const edited = URL.createObjectURL(new Blob(["%PDF-1.4 edited"], { type: "application/pdf" }));
@@ -2358,6 +2358,7 @@ it("keeps a workspace PDF open across URL renewals and reloads it when the file 
       workspaceRoot="/repo"
       absolutePath="/repo/planning.pdf"
       title="Planning PDF"
+      revision={0}
       workspaceMutationId={mutation}
     />
   );
@@ -2446,7 +2447,7 @@ function planningPdf(
 
 async function workspacePdfPreview() {
   assetUrlState.mockReset();
-  const { WorkspaceBrowserPreview } = await import("./FilePreviewPanel");
+  const { WorkspaceBrowserPreview } = await import("./WorkspaceBrowserPreview");
   const native = vi.spyOn(navigator, "pdfViewerEnabled", "get").mockReturnValue(false);
   const urls = (() => {
     const original = URL.createObjectURL(planningPdf());
@@ -2484,6 +2485,7 @@ async function workspacePdfPreview() {
           absolutePath={path}
           workspaceRoot="/repo"
           title="Planning PDF"
+          revision={0}
           workspaceMutationId={mutation}
         />
       </div>
@@ -2522,7 +2524,6 @@ it("keeps workspace PDF scroll and zoom after reloads", async () => {
   const { preview, urls } = fixture;
   await using screen = await render(preview(urls.original, "one"));
   await expect.element(screen.getByText("1 / 3 pages", { exact: true })).toBeVisible();
-  using workers = vi.spyOn(window, "Worker");
   await screen.getByRole("button", { name: "Next page", exact: true }).click();
   await vi.waitFor(() => expect(screen.container.textContent).toContain("2 / 3 pages"));
   await screen.getByRole("button", { name: "Next page", exact: true }).click();
@@ -2568,12 +2569,14 @@ it("keeps first-page PDF zoom on reload and resets a different file", async () =
   const { preview, urls } = fixture;
   await using screen = await render(preview(urls.original, "one"));
   await expect.element(screen.getByText("1 / 3 pages", { exact: true })).toBeVisible();
+  using workers = vi.spyOn(window, "Worker");
   const { region } = pdfScroll(screen);
   await screen.getByRole("button", { name: "Zoom in", exact: true }).click();
   const firstPageZoom = screen.container.textContent!.match(/\d+%/)![0];
   await screen.rerender(preview(urls.original, "first-page"));
   await expect.element(screen.getByText("1 / 3 pages", { exact: true })).toBeVisible();
   await vi.waitFor(() => expect(screen.container.textContent).toContain(firstPageZoom));
+  expect(workers).not.toHaveBeenCalled();
   await screen.getByRole("button", { name: "Next page", exact: true }).click();
   await vi.waitFor(() => expect(screen.container.textContent).toContain("2 / 3 pages"));
   await screen.rerender(preview(urls.original, "one", "/repo/another.pdf"));
@@ -2583,7 +2586,6 @@ it("keeps first-page PDF zoom on reload and resets a different file", async () =
     expect(region().scrollTop).toBe(0);
     expect(region().scrollLeft).toBe(0);
   });
-  expect(workers).not.toHaveBeenCalled();
 });
 
 it("clamps workspace PDF scroll when pages shrink or disappear", async () => {

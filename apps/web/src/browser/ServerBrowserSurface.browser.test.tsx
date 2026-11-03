@@ -9,10 +9,15 @@ import { userEvent } from "vite-plus/test/browser";
 
 import { act, render } from "../../test/render";
 
+import "~/index.css";
+
 const mocks = vi.hoisted(() => ({
-  createClient: vi.fn<(target: unknown, handlers: PreviewStreamEvents) => unknown>(),
+  createClient: vi.fn((_target: unknown, _handlers: PreviewStreamEvents) => ({
+    send: vi.fn<(input: PreviewStreamInput) => void>(),
+    stop: vi.fn(),
+  })),
   sent: [] as PreviewStreamInput[],
-  access: { url: "ws://preview.test", token: "test" },
+  access: { httpBaseUrl: "https://environment.example" },
   painted: null as (() => void) | null,
 }));
 
@@ -36,8 +41,10 @@ function setup() {
   mocks.sent.length = 0;
   mocks.painted = null;
   mocks.createClient.mockReset().mockImplementation(() => ({
-    send: (input: PreviewStreamInput) => mocks.sent.push(input),
-    stop: () => undefined,
+    send: vi.fn((input: PreviewStreamInput) => {
+      mocks.sent.push(input);
+    }),
+    stop: vi.fn(),
   }));
 }
 
@@ -189,6 +196,8 @@ describe("ServerBrowserSurface history", () => {
     const canvas = input.closest("[data-server-browser-surface]")!.querySelector("canvas")!;
     canvas.width = 400;
     canvas.height = 300;
+    canvas.style.width = "400px";
+    canvas.style.height = "300px";
     // Synthetic pointers have no active pointer id to capture.
     canvas.setPointerCapture = () => undefined;
     const handlers = mocks.createClient.mock.calls.at(-1)![1];
@@ -218,5 +227,84 @@ describe("ServerBrowserSurface history", () => {
 
     press("pointerdown", 0);
     expect(mouseInputs()).not.toEqual([]);
+  });
+});
+
+describe("server viewer document visibility", () => {
+  it("retains the stream and input after taking control", async () => {
+    setup();
+    const container = document.createElement("div");
+    container.style.cssText = "width:640px;height:480px;position:relative";
+    await using screen = await render(
+      <ServerBrowserSurface
+        environmentId={EnvironmentId.make("viewer-environment")}
+        threadId="viewer-thread"
+        tabId="viewer-tab"
+        className="h-full w-full"
+        visible
+      />,
+      { container },
+    );
+    await vi.waitFor(() => expect(mocks.createClient).toHaveBeenCalledTimes(1));
+    const first = mocks.createClient.mock.results[0]!.value;
+    const callbacks = mocks.createClient.mock.calls[0]![1];
+    await act(() =>
+      callbacks.onControl?.({ canOperate: true, controller: "agent", generation: 0, dialog: null }),
+    );
+    await screen.getByRole("button", { name: "Take control" }).click();
+    expect(first.send).toHaveBeenCalledWith({ type: "takeControl" });
+    await act(() =>
+      callbacks.onControl?.({
+        canOperate: true,
+        controller: "taking-control",
+        generation: 1,
+        dialog: null,
+      }),
+    );
+    await expect.element(screen.getByRole("status")).toHaveTextContent("Taking control…");
+    await expect.element(screen.getByRole("textbox", { name: "Browser page" })).toBeDisabled();
+    await screen.getByRole("button", { name: "Cancel" }).click();
+    expect(first.send).toHaveBeenCalledWith({ type: "releaseControl" });
+    await act(() =>
+      callbacks.onControl?.({ canOperate: true, controller: "you", generation: 1, dialog: null }),
+    );
+    await expect.element(screen.getByRole("status")).toHaveTextContent("You have control");
+    expect(first.stop).not.toHaveBeenCalled();
+    expect(mocks.createClient).toHaveBeenCalledTimes(1);
+    await screen.getByRole("textbox", { name: "Browser page" }).fill("viewer input");
+    expect(first.send).toHaveBeenCalledWith({ type: "text", text: "viewer input" });
+  });
+
+  it("releases the hidden client viewer and reconnects when the user returns", async () => {
+    setup();
+    let visibility: DocumentVisibilityState = "visible";
+    using _visibility = vi
+      .spyOn(document, "visibilityState", "get")
+      .mockImplementation(() => visibility);
+    const container = document.createElement("div");
+    container.style.cssText = "width:640px;height:480px;position:relative";
+    await using _screen = await render(
+      <ServerBrowserSurface
+        environmentId={EnvironmentId.make("viewer-environment")}
+        threadId="viewer-thread"
+        tabId="viewer-tab"
+        visible
+      />,
+      { container },
+    );
+    await vi.waitFor(() => expect(mocks.createClient).toHaveBeenCalledTimes(1));
+    const first = mocks.createClient.mock.results[0]!.value;
+    await act(async () => {
+      visibility = "hidden";
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(first.stop).toHaveBeenCalledOnce();
+    expect(mocks.createClient).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      visibility = "visible";
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await vi.waitFor(() => expect(mocks.createClient).toHaveBeenCalledTimes(2));
+    expect(mocks.createClient.mock.calls[1]![0]).toEqual(mocks.createClient.mock.calls[0]![0]);
   });
 });

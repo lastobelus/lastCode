@@ -7,6 +7,7 @@ import {
   ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
+import { setPreviewBootstrapTokenOnUrl } from "@t3tools/shared/remote";
 
 const { readPreparedConnection, entities, settingsHydration } = vi.hoisted(() => ({
   readPreparedConnection: vi.fn<() => { httpBaseUrl: string } | null>(() => null),
@@ -76,6 +77,29 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe("normalizeHistoryUrl", () => {
+  it("retains a managed preview destination without its one-use browser credential", () => {
+    const destination = "http://localhost:3000/app?token=application-code&view=qa#/route";
+    const navigation = setPreviewBootstrapTokenOnUrl(new URL(destination), "one-use-secret").href;
+    expect(normalizeHistoryUrl(navigation)).toBe(destination);
+    useBrowserHistoryStore.getState().recordVisit("qa", navigation, 1000);
+    expect(useBrowserHistoryStore.getState().byProjectKey.qa).toEqual([
+      { url: destination, lastVisitedAt: 1000 },
+    ]);
+  });
+  it("keeps distinct application reset and invite tokens in browser history", () => {
+    const urls = [
+      "https://app.example/reset?token=first-code",
+      "https://app.example/reset?token=second-code",
+      "https://app.example/invite#token=invite-code",
+    ];
+    for (const [index, url] of urls.entries()) {
+      expect(normalizeHistoryUrl(url)).toBe(url);
+      useBrowserHistoryStore.getState().recordVisit("app-tokens", url, index + 1);
+    }
+    expect(
+      useBrowserHistoryStore.getState().byProjectKey["app-tokens"]?.map((entry) => entry.url),
+    ).toEqual(urls.toReversed());
+  });
   it("normalizes bare loopback hosts to http and keeps path/query", () => {
     expect(normalizeHistoryUrl("localhost:3000/admin?tab=1")).toBe(
       "http://localhost:3000/admin?tab=1",

@@ -1,4 +1,4 @@
-import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -29,7 +29,7 @@ function shell(
   };
 }
 
-it("ranks thread mentions like the palette and leaves out subagent threads", () => {
+it("ranks thread mentions and includes subagent threads", () => {
   const items = matchComposerThreadItems({
     shells: [
       shell("newer-mid-word", "Remodel the settings page", {
@@ -46,36 +46,95 @@ it("ranks thread mentions like the palette and leaves out subagent threads", () 
       shell("other-environment", "Model docs", { environmentId: EnvironmentId.make("env-other") }),
     ],
     environmentId,
-    linkedEnvironments: new Map(),
-    excludeThreadId: null,
+    allowedEnvironmentIds: new Set([environmentId]),
+    excludeThread: null,
     query: "model",
     now: Date.parse("2026-10-23T00:00:00.000Z"),
   });
-  expect(items.map((item) => item.thread.threadId)).toEqual(["word", "newer-mid-word"]);
+  expect(items.map((item) => item.thread.threadId)).toEqual(["word", "subagent", "newer-mid-word"]);
 });
 
-it("also offers threads on linked machines, naming the machine, but no other machine's", () => {
+it("offers authorized environments and keeps duplicate IDs scoped", () => {
   const vps = EnvironmentId.make("env-vps");
   const items = matchComposerThreadItems({
     shells: [
       shell("here", "Deploy script"),
-      shell("there", "Deploy script", { environmentId: vps }),
+      shell("here", "Deploy script", { environmentId: vps, projectTitle: "App" }),
       shell("unlinked", "Deploy notes", { environmentId: EnvironmentId.make("env-unlinked") }),
     ],
     environmentId,
-    linkedEnvironments: new Map([[vps, "Hetzner VPS"]]),
-    excludeThreadId: null,
+    allowedEnvironmentIds: new Set([environmentId, vps]),
+    environmentLabels: new Map([[vps, "Hetzner VPS"]]),
+    excludeThread: null,
     query: "deploy",
     now: Date.parse("2026-10-23T00:00:00.000Z"),
   });
   expect(items.map(({ thread, label, description }) => ({ thread, label, description }))).toEqual([
     { thread: { environmentId, threadId: "here" }, label: "Deploy script", description: "Thread" },
     {
-      thread: { environmentId: vps, threadId: "there" },
+      thread: { environmentId: vps, threadId: "here" },
       label: "Deploy script",
-      description: "Thread on Hetzner VPS",
+      description: "App · Hetzner VPS",
     },
   ]);
+});
+
+it("excludes only the exact current scoped thread and retains archived subagent candidates", () => {
+  const other = EnvironmentId.make("env-other");
+  const archivedSubagent = shell("same", "Model review", {
+    environmentId: other,
+    archivedAt: "2026-10-20T00:00:00.000Z",
+    lineage: {
+      rootThreadId: ThreadId.make("root"),
+      parentThreadId: ThreadId.make("root"),
+      relationshipToParent: "subagent",
+    },
+  });
+  const items = matchComposerThreadItems({
+    shells: [shell("same", "Model review"), archivedSubagent],
+    environmentId,
+    allowedEnvironmentIds: new Set([environmentId, other]),
+    excludeThread: { environmentId, threadId: ThreadId.make("same") },
+    query: "model",
+    now: Date.parse("2026-10-23T00:00:00.000Z"),
+  });
+  expect(items.map((item) => item.thread)).toEqual([{ environmentId: other, threadId: "same" }]);
+  const candidate = {
+    ...archivedSubagent,
+    title: "Unrelated title",
+    searchPullRequests: [
+      {
+        number: 42,
+        title: "Reconnect bug",
+        references: ["acme/app#42", "https://github.com/acme/app/pull/42"],
+      },
+    ],
+  };
+  const cached = shell("same", "Unrelated title", {
+    environmentId: other,
+    linkedPullRequest: {
+      projectId: ProjectId.make("project"),
+      repository: "acme/app",
+      number: 42,
+      url: "https://github.com/acme/app/pull/42",
+    },
+  });
+  for (const shells of [[], [cached]]) {
+    for (const query of ["#42", "Reconnect bug", "acme/app#42"]) {
+      const matched = matchComposerThreadItems({
+        shells,
+        candidates: [candidate],
+        environmentId,
+        allowedEnvironmentIds: new Set([environmentId, other]),
+        excludeThread: null,
+        query,
+        now: Date.parse("2026-10-23T00:00:00.000Z"),
+      });
+      expect(matched.map((item) => item.thread)).toEqual([
+        { environmentId: other, threadId: "same" },
+      ]);
+    }
+  }
 });
 
 describe("matchComposerEnvironmentItems", () => {

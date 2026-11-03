@@ -1,4 +1,4 @@
-import type { ContextMenuItem } from "@t3tools/contracts";
+import type { ContextMenuItem, ThreadId } from "@t3tools/contracts";
 import type { SidebarThreadSummary } from "../../types";
 import {
   lastcodeThreadPersistenceAction,
@@ -14,6 +14,7 @@ export const LASTCODE_THREAD_ACTION_POLICY = {
   "new-thread-on-branch": false,
   rename: true,
   annotate: true,
+  "resolve-annotation": true,
   "mark-unread": false,
   "mark-read": false,
   "creator-independent": true,
@@ -31,6 +32,7 @@ export const LASTCODE_THREAD_ACTION_POLICY = {
   "handoff-show-all": false,
   "dismiss-archive-failure": true,
   delete: true,
+  "archive-discard": true,
 } as const;
 export type LastCodeThreadActionId = keyof typeof LASTCODE_THREAD_ACTION_POLICY;
 export function isLastCodeThreadActionId(action: string | null): action is LastCodeThreadActionId {
@@ -49,12 +51,11 @@ export function parseLastCodeHandoffAction(action: string | null) {
 }
 
 interface ThreadMenuInput {
-  thread: Pick<
-    SidebarThreadSummary,
-    "branch" | "creatorGrouping" | "persistent" | "archivePending"
-  >;
+  thread: Pick<SidebarThreadSummary, "branch" | "persistent" | "archivePending">;
+  parentThreadId: ThreadId | null;
   creator: { groupingEligible: boolean; canOpen: boolean };
   canAnnotate: boolean;
+  hasActiveAnnotation: boolean;
   supportsPersistence: boolean;
   hasStoppableProcesses: boolean;
   projectSettingsKey: string | null;
@@ -68,11 +69,18 @@ function metadataItems(input: ThreadMenuInput): ContextMenuItem<string>[] {
     items.push({ id: "new-thread-on-branch", label: `New thread on ${input.thread.branch}` });
   }
   items.push({ id: "rename", label: "Rename thread" });
-  if (input.canAnnotate) items.push({ id: "annotate", label: "Annotate thread…" });
+  if (input.canAnnotate) {
+    items.push({
+      id: "annotate",
+      label: input.hasActiveAnnotation ? "Edit Annotation…" : "Annotate thread…",
+    });
+    if (input.hasActiveAnnotation)
+      items.push({ id: "resolve-annotation", label: "Resolve Annotation…" });
+  }
   items.push({ id: "mark-unread", label: "Mark unread" });
   items.push({ id: "mark-read", label: "Mark read" });
-  if (input.creator.groupingEligible) {
-    const grouped = input.thread.creatorGrouping === "grouped";
+  if (input.parentThreadId !== null || input.creator.groupingEligible) {
+    const grouped = input.parentThreadId !== null;
     items.push({
       id: grouped ? "creator-independent" : "creator-grouped",
       label: grouped ? "Move to top level" : "Group with creator thread",

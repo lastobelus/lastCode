@@ -70,7 +70,6 @@ it.each([
   const settled = deferred<void>();
   const input = {
     environmentId: EnvironmentId.make("clipboard-target"),
-    linkedEnvironments: new Map(),
     activeThread: undefined,
     activeThreadId: null,
     composerDraftTarget: target,

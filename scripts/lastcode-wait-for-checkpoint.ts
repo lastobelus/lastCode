@@ -17,6 +17,7 @@ export const SERVICE_LABEL = "codes.lastobelus.lastcode-nightly-checkpoint";
 export type SupervisorState = {
   readonly schemaVersion: 1;
   readonly supervisorPid: number;
+  readonly launchdPid: number;
   readonly status: "failed" | "success";
   readonly phase: string;
   readonly startedAt: string;
@@ -39,11 +40,18 @@ export type DaemonStatus = {
   readonly runs?: number;
 };
 
+export type ProcessIdentity = {
+  readonly pid: number;
+  readonly parentPid: number;
+  readonly startedAt: number;
+};
+
 export type WaitDependencies = {
   readonly now: () => number;
   readonly sleep: (milliseconds: number) => Promise<void>;
   readonly readState: () => SupervisorState | null;
   readonly daemonStatus: () => DaemonStatus;
+  readonly readProcesses: () => ReadonlyArray<ProcessIdentity>;
   readonly progress?: (input: {
     readonly state: "working" | "waiting";
     readonly phase: string;
@@ -61,6 +69,9 @@ function validState(value: unknown): value is SupervisorState {
     typeof state.supervisorPid === "number" &&
     Number.isSafeInteger(state.supervisorPid) &&
     state.supervisorPid > 0 &&
+    typeof state.launchdPid === "number" &&
+    Number.isSafeInteger(state.launchdPid) &&
+    state.launchdPid > 0 &&
     (state.status === "success" || state.status === "failed") &&
     typeof state.phase === "string" &&
     Number.isFinite(started) &&
@@ -110,6 +121,30 @@ function daemonStatus(): DaemonStatus {
   return parseDaemonStatus(result.stdout ?? "", result.status ?? 1, Boolean(result.error));
 }
 
+export function parseProcessIdentities(output: string): ReadonlyArray<ProcessIdentity> {
+  return output.split("\n").flatMap((line) => {
+    const match = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/u.exec(line);
+    if (!match) return [];
+    const startedAt = Date.parse(`${match[3]} UTC`);
+    return Number.isFinite(startedAt)
+      ? [{ pid: Number(match[1]), parentPid: Number(match[2]), startedAt }]
+      : [];
+  });
+}
+
+function readProcesses(): ReadonlyArray<ProcessIdentity> {
+  const result = NodeChildProcess.spawnSync("ps", ["-axo", "pid=,ppid=,lstart="], {
+    encoding: "utf8",
+    env: { ...process.env, LC_ALL: "C", TZ: "UTC" },
+    stdio: ["ignore", "pipe", "ignore"],
+    timeout: 10_000,
+  });
+  if (result.error || result.status !== 0) {
+    throw new CheckpointWaitError("probe-failed", "Could not observe checkpoint process ancestry.");
+  }
+  return parseProcessIdentities(result.stdout);
+}
+
 export async function waitForCheckpoint(
   deps: WaitDependencies,
   timeoutMs = DEFAULT_TIMEOUT_MS,
@@ -138,6 +173,15 @@ export async function waitForCheckpoint(
   const initialRuns = initialDaemon.runs;
   const started = deps.now();
   let previousProgress = "";
+  let rootStartedAt: number | undefined;
+  const observedSupervisors = new Map<
+    number,
+    {
+      schedulerPid: number;
+      startedAt: number;
+      observedAt: number;
+    }
+  >();
   while (true) {
     const currentDaemon = deps.daemonStatus();
     const currentState = deps.readState();
@@ -159,9 +203,52 @@ export async function waitForCheckpoint(
         `Checkpoint supervisor run ${pid} cannot be matched to its original launch count.`,
       );
     }
+    // The launchd job may be a wrapper around the scheduler. Capture ancestry while it
+    // exists; terminal PIDs alone cannot establish ownership after those processes exit.
+    if (currentDaemon.state === "running") {
+      const processes = new Map(deps.readProcesses().map((process) => [process.pid, process]));
+      const root = processes.get(pid);
+      if (root) {
+        if (rootStartedAt !== undefined && rootStartedAt !== root.startedAt) {
+          throw new CheckpointWaitError(
+            "run-replaced",
+            `Checkpoint wrapper PID ${pid} was reused.`,
+          );
+        }
+        rootStartedAt = root.startedAt;
+        for (const process of processes.values()) {
+          const scheduler = processes.get(process.parentPid);
+          if (!scheduler) continue;
+          const visited = new Set<number>();
+          let ancestor: ProcessIdentity | undefined = scheduler;
+          while (ancestor && ancestor.pid !== pid && !visited.has(ancestor.pid)) {
+            visited.add(ancestor.pid);
+            ancestor = processes.get(ancestor.parentPid);
+          }
+          if (ancestor?.pid === pid) {
+            observedSupervisors.set(process.pid, {
+              schedulerPid: scheduler.pid,
+              startedAt: Math.max(root.startedAt, scheduler.startedAt, process.startedAt),
+              observedAt: deps.now(),
+            });
+          }
+        }
+      }
+    }
     const daemonExited = currentDaemon.state === "idle";
     if (daemonExited) {
-      if (!validState(currentState) || currentState.supervisorPid !== pid) {
+      const observed = currentState && observedSupervisors.get(currentState.supervisorPid);
+      const matchesDescendant =
+        currentState &&
+        observed &&
+        currentState.launchdPid === observed.schedulerPid &&
+        Date.parse(currentState.startedAt) >= observed.startedAt &&
+        Date.parse(currentState.startedAt) <= observed.observedAt;
+      const matchesRoot =
+        currentState &&
+        currentState.launchdPid === pid &&
+        (rootStartedAt === undefined || Date.parse(currentState.startedAt) >= rootStartedAt);
+      if (!validState(currentState) || (!matchesRoot && !matchesDescendant)) {
         throw new CheckpointWaitError(
           "no-state",
           `Checkpoint supervisor run ${pid} exited without a matching terminal state.`,
@@ -240,6 +327,7 @@ if (import.meta.main) {
         sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
         readState: () => readSupervisorState(options.home),
         daemonStatus,
+        readProcesses,
         progress: (value) => lastCodeAction.progress(value),
       },
       options.timeoutMs,

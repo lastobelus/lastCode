@@ -37,6 +37,7 @@ export interface TerminalSessionState {
   readonly grid: TerminalGrid | null;
   readonly status: TerminalSessionSnapshot["status"] | "closed";
   readonly error: string | null;
+  readonly terminalLinkProfileName?: string;
   readonly hasRunningSubprocess: boolean;
   readonly updatedAt: string | null;
   readonly version: number;
@@ -48,6 +49,7 @@ export interface TerminalBufferState {
   readonly grid: TerminalGrid | null;
   readonly status: TerminalSessionSnapshot["status"] | "closed";
   readonly error: string | null;
+  readonly terminalLinkProfileName?: string;
   readonly updatedAt: string | null;
   readonly version: number;
   readonly lifecycleVersion: number;
@@ -116,6 +118,9 @@ function terminalBufferStateFromSnapshot(
     output: resetOutput(current.output, snapshot.history, maxBufferBytes),
     grid: nextGrid(current.grid, snapshot),
     status: snapshot.status,
+    ...(snapshot.terminalLinkProfileName === undefined
+      ? {}
+      : { terminalLinkProfileName: snapshot.terminalLinkProfileName }),
     error: null,
     updatedAt: snapshot.updatedAt,
     version: current.version + 1,
@@ -143,12 +148,15 @@ export function combineTerminalSessionState(
   summary: TerminalSummary | null,
   buffer: TerminalBufferState,
 ): TerminalSessionState {
+  const terminalLinkProfileName =
+    buffer.version > 0 ? buffer.terminalLinkProfileName : summary?.terminalLinkProfileName;
   return {
     summary,
     output: buffer.output,
     grid: buffer.grid,
     status: buffer.version > 0 ? buffer.status : (summary?.status ?? buffer.status),
     error: buffer.error,
+    ...(terminalLinkProfileName === undefined ? {} : { terminalLinkProfileName }),
     hasRunningSubprocess: summary?.hasRunningSubprocess ?? false,
     updatedAt: latestTimestamp(summary?.updatedAt ?? null, buffer.updatedAt),
     version: buffer.version,

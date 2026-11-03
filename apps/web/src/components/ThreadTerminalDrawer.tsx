@@ -588,6 +588,9 @@ function TerminalSessionViewport({
     (listener: (session: TerminalSessionState) => void) =>
       appAtomRegistry.subscribe(terminalSessionAtom, listener),
   );
+  const readTerminalLinkProfileName = useEffectEvent(
+    () => readTerminalSession().terminalLinkProfileName,
+  );
   const writeTerminal = useEffectEvent((data: string) =>
     runTerminalWrite({
       environmentId,
@@ -625,8 +628,15 @@ function TerminalSessionViewport({
     },
   );
   const openLinkInPreview = useEffectEvent(
-    (url: string, forceBrowser: boolean, fallbackToBrowser: () => void) =>
-      openTerminalLinkInPreview({ url, threadRef, openPreview, fallbackToBrowser, forceBrowser }),
+    (url: string, forceBrowser: boolean, fallbackToBrowser: (url: string) => void) =>
+      openTerminalLinkInPreview({
+        url,
+        terminalLinkProfileName: readTerminalLinkProfileName(),
+        threadRef,
+        openPreview,
+        fallbackToBrowser,
+        forceBrowser,
+      }),
   );
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- sets the terminal input's readOnly from the operate grant and consumes a pending focus request
@@ -1000,16 +1010,19 @@ function TerminalSessionViewport({
             writeSystemMessage(latestTerminal, "Opening links is unavailable in this browser.");
             return;
           }
-          const fallbackToBrowser = () => {
-            void localApi.shell.openExternal(text).catch((error: unknown) => {
+          const fallbackToBrowser = (url: string) => {
+            void localApi.shell.openExternal(url).catch((error: unknown) => {
               writeSystemMessage(
                 latestTerminal,
                 error instanceof Error ? error.message : "Unable to open link",
               );
             });
           };
-          if (!readEnvironmentScope(environmentId, AuthPreviewOperateScope)) {
-            fallbackToBrowser();
+          if (
+            !readEnvironmentScope(environmentId, AuthPreviewOperateScope) &&
+            readTerminalLinkProfileName() === undefined
+          ) {
+            fallbackToBrowser(text);
             return;
           }
           void openLinkInPreview(text, event.metaKey || event.ctrlKey, fallbackToBrowser).catch(
