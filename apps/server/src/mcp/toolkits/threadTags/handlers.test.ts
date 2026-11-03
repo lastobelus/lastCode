@@ -43,7 +43,7 @@ it.effect("read-only clients can discover tags but cannot mutate an execution ta
   }).pipe(
     Effect.provide(
       McpHttpServer.layerThreadTagsToolkit.pipe(
-        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
         Layer.provide(
           Layer.mock(ThreadManagement.ThreadManagementService)({
             getShellSnapshot: () =>
@@ -81,7 +81,7 @@ it.effect("mutation checks the destination thread's execution mode before dispat
   }).pipe(
     Effect.provide(
       McpHttpServer.layerThreadTagsToolkit.pipe(
-        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
         Layer.provide(
           Layer.mock(ThreadManagement.ThreadManagementService)({
             getThreadShell: (id) => Effect.succeed(liveThreadShell(id)),
