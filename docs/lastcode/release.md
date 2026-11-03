@@ -139,10 +139,12 @@ a Git hook. They do not automatically repair an integrity failure: stop, inspect
 the reported config and worktree state, and preserve evidence before changing
 anything.
 
-Workspace test tasks run one package, one Vitest worker, and one concurrent test
-case at a time. This takes longer than the task-runner defaults but avoids
-cross-suite state leaks plus memory and CPU contention between the web, mobile,
-desktop, and server suites on whichever CI node runs the gate.
+Workspace test tasks run one package at a time, with `--maxWorkers=2` and
+`--maxConcurrency=1`. The `apps/server` Vitest config also sets
+`fileParallelism: false`, so server test files still run one at a time. This
+takes longer than the task-runner defaults but avoids cross-suite state leaks
+plus memory and CPU contention between the web, mobile, desktop, and server
+suites on whichever CI node runs the gate.
 
 PR waits use the native pull-request watch, not a Project Action. Call
 `watch_pull_request` with the PR URL, then run the one-shot
