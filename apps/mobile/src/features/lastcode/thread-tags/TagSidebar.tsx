@@ -2,6 +2,7 @@ import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell
 import type { EnvironmentThreadSearchMatch } from "@t3tools/client-runtime/state/thread-search";
 import { requestThreadMessageJump } from "../../threads/threadMessageJump";
 import { scopedThreadKey } from "../../../lib/scopedEntities";
+import { useNowMinuteMs } from "../../../lib/clock";
 import { taggedThreadSearch } from "./search";
 import { useState } from "react";
 import { Pressable, ScrollView, View } from "react-native";
@@ -44,9 +45,8 @@ export function useTagSidebar(
     </View>
   ) : null;
   const needle = searchQuery.trim().toLocaleLowerCase();
-  const threads = discovery.threads.filter(
-    (thread) => taggedThreadSearch(thread, searchQuery, messageMatches).visible,
-  );
+  const nowMs = useNowMinuteMs();
+  const threads = taggedThreadSearch(discovery.threads, searchQuery, messageMatches, nowMs);
   const results =
     tag === null ? null : (
       <ScrollView
@@ -68,18 +68,17 @@ export function useTagSidebar(
             {needle ? "No matching threads." : "No threads with this tag."}
           </Text>
         ) : null}
-        {threads.map((thread) => (
+        {threads.map(({ thread, messageId }) => (
           <Pressable
             key={JSON.stringify([thread.environmentId, thread.id])}
             accessibilityRole="button"
             accessibilityLabel={thread.title}
             className="min-h-12 border-b border-border px-4 py-3"
             onPress={() => {
-              const match = taggedThreadSearch(thread, searchQuery, messageMatches);
-              if (match.messageId)
+              if (messageId)
                 requestThreadMessageJump(
                   scopedThreadKey(thread.environmentId, thread.id),
-                  match.messageId,
+                  messageId,
                 );
               onSelect(thread);
             }}

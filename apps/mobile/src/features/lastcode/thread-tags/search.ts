@@ -1,18 +1,33 @@
-import type { EnvironmentId, MessageId, ThreadId } from "@t3tools/contracts";
-import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
-import { scoreSubsequenceMatch } from "@t3tools/shared/searchRanking";
+import type { MessageId } from "@t3tools/contracts";
+import {
+  threadSearchMatchKey,
+  threadSearchSubject,
+  type ThreadSearchShell,
+} from "@t3tools/client-runtime/state/thread-search";
+import { foldSearchQuery, rankSearchItems, scoreThreadSearch } from "@t3tools/shared/paletteSearch";
 
-export function taggedThreadSearch(
-  thread: { readonly id: ThreadId; readonly environmentId: EnvironmentId; readonly title: string },
+export function taggedThreadSearch<T extends ThreadSearchShell>(
+  threads: readonly T[],
   query: string,
   messageMatches: ReadonlyMap<string, { readonly messageId?: MessageId | null }>,
+  nowMs: number,
 ) {
-  const needle = query.trim().toLocaleLowerCase();
-  if (!needle || scoreSubsequenceMatch(thread.title.toLocaleLowerCase(), needle) !== null) {
-    return { visible: true, messageId: undefined };
-  }
-  const match = messageMatches.get(
-    threadSearchMatchKey({ environmentId: thread.environmentId, threadId: thread.id }),
+  const needle = foldSearchQuery(query);
+  const fieldMatches = new Set(
+    needle
+      ? rankSearchItems(threads, (thread, options) =>
+          scoreThreadSearch(needle, threadSearchSubject(thread, null), nowMs, {
+            ...options,
+            picks: false,
+          }),
+        ).map(({ item }) => item)
+      : threads,
   );
-  return { visible: match !== undefined, messageId: match?.messageId };
+  return threads.flatMap((thread) => {
+    if (fieldMatches.has(thread)) return [{ thread, messageId: undefined }];
+    const match = messageMatches.get(
+      threadSearchMatchKey({ environmentId: thread.environmentId, threadId: thread.id }),
+    );
+    return match === undefined ? [] : [{ thread, messageId: match.messageId }];
+  });
 }

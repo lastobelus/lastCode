@@ -731,24 +731,26 @@ export function HomeScreen(props: HomeScreenProps) {
 
   const listHeader = Platform.OS === "ios" ? undefined : <HomeTopContentSpacer />;
 
+  const scopeFilters =
+    Platform.OS === "ios" && workspace ? (
+      <ThreadListFilters
+        gutter={primaryColumn ? 8 : 0}
+        environments={props.environments}
+        projects={pickableProjectGroups(projectScopes).map((scope) => ({
+          key: scope.key,
+          label: scope.title,
+        }))}
+        selectedEnvironmentId={props.selectedEnvironmentId}
+        selectedProjectKey={props.selectedProjectKey}
+        onEnvironmentChange={props.onEnvironmentChange}
+        onProjectChange={props.onProjectChange}
+      />
+    ) : null;
   const v2ListHeader = (
     <>
       {listHeader}
       {tagSidebar.control}
-      {Platform.OS === "ios" && workspace ? (
-        <ThreadListFilters
-          gutter={primaryColumn ? 8 : 0}
-          environments={props.environments}
-          projects={pickableProjectGroups(projectScopes).map((scope) => ({
-            key: scope.key,
-            label: scope.title,
-          }))}
-          selectedEnvironmentId={props.selectedEnvironmentId}
-          selectedProjectKey={props.selectedProjectKey}
-          onEnvironmentChange={props.onEnvironmentChange}
-          onProjectChange={props.onProjectChange}
-        />
-      ) : null}
+      {scopeFilters}
     </>
   );
 
@@ -779,7 +781,13 @@ export function HomeScreen(props: HomeScreenProps) {
       />
     );
 
-  if (tagSidebar.active) return <View className={containerClassName}>{tagSidebar.results}</View>;
+  if (tagSidebar.active)
+    return (
+      <View className={containerClassName}>
+        {scopeFilters}
+        {tagSidebar.results}
+      </View>
+    );
 
   if (Platform.OS === "android" && threadListV2Items.length === 0) {
     return (
