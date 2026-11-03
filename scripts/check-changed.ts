@@ -172,6 +172,75 @@ export const comparisonBase = Effect.fn("checkChanged.comparisonBase")(function*
   return closest;
 });
 
+// Retained carry compilation can rewrite ancestry. Compare pinned endpoint trees,
+// then run checks only in the completed checkout that actually owns that candidate.
+const assertRepairCandidate = Effect.fn("checkChanged.assertRepairCandidate")(function* (
+  root: string,
+  candidate: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const head = (yield* git(root, ["rev-parse", "HEAD"])).toString().trim();
+  if (head !== candidate) {
+    return yield* Effect.fail(
+      `check:changed: candidate ${candidate} is not checkout HEAD ${head}.`,
+    );
+  }
+  for (const marker of [
+    "rebase-merge",
+    "rebase-apply",
+    "MERGE_HEAD",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+  ]) {
+    const location = (yield* git(root, [
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-path",
+      marker,
+    ]))
+      .toString()
+      .trim();
+    if (yield* fs.exists(location)) {
+      return yield* Effect.fail(
+        `check:changed: finish the pending Git operation (${marker}) first.`,
+      );
+    }
+  }
+  if ((yield* git(root, ["status", "--porcelain", "--untracked-files=all"])).length > 0) {
+    return yield* Effect.fail(
+      "check:changed: repair candidate requires a clean checkout, including untracked files.",
+    );
+  }
+});
+
+const repairComparison = Effect.fn("checkChanged.repairComparison")(function* (
+  root: string,
+  baselineRef: string,
+  candidateRef: string,
+) {
+  const resolve = (ref: string) =>
+    git(root, ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`]).pipe(
+      Effect.map((value) => value.toString().trim()),
+    );
+  const base = yield* resolve(baselineRef);
+  const candidate = yield* resolve(candidateRef);
+  yield* assertRepairCandidate(root, candidate);
+  const files = (yield* git(root, [
+    "diff",
+    "--name-only",
+    "--no-renames",
+    "-z",
+    base,
+    candidate,
+    "--",
+  ]))
+    .toString()
+    .split("\0")
+    .filter(Boolean)
+    .sort();
+  return { base, candidate, files };
+});
+
 const CODE = /\.[cm]?[jt]sx?$/;
 const TEST = /\.test\.[cm]?[jt]sx?$/;
 // CI runs the .github/scripts tests with `node --test`; vitest passes a failing node:test file.
@@ -200,14 +269,28 @@ const override = Effect.fn("checkChanged.override")(function* (
   return value;
 });
 
-// Tests that read a doc; a changed doc has no test beside it to select them.
-export const docReaderTests = (files: ReadonlyArray<string>) =>
-  files.includes("docs/user/t3-connect-troubleshooting.md")
+// Tests that read files without importing them directly.
+export const crossFileTests = (files: ReadonlyArray<string>) => [
+  ...(files.includes("docs/user/t3-connect-troubleshooting.md")
     ? ["apps/server/src/cloud/ConnectReachability.test.ts"]
-    : [];
+    : []),
+  ...(files.some((file) =>
+    [
+      "packages/shared/src/generatedBuildOwnership.ts",
+      "packages/shared/src/nativeFileSystem.ts",
+    ].includes(file),
+  )
+    ? [
+        "scripts/lastcode-checkpoint-lifecycle.test.ts",
+        "scripts/lastcode-checkpoint-publication.test.ts",
+      ]
+    : []),
+];
 
 const checkChanged = Effect.fn("checkChanged")(function* (input: {
   readonly ref: Option.Option<string>;
+  readonly baseline: Option.Option<string>;
+  readonly candidate: Option.Option<string>;
   readonly concurrency: Option.Option<number>;
   readonly timeout: Option.Option<number>;
 }) {
@@ -235,12 +318,38 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
 
   const lines = (...args: Array<string>) => gitLines(root, args);
 
-  const { ref, base } = yield* comparisonBase(root, input.ref);
-  // --no-renames lists a rename as its old and new path, as CI does.
-  const changedFiles = lines("diff", "--name-only", "--no-renames", base, "--");
-  const untrackedFiles = lines("ls-files", "--others", "--exclude-standard");
+  const exact = Option.isSome(input.baseline) && Option.isSome(input.candidate);
+  if (
+    Option.isSome(input.baseline) !== Option.isSome(input.candidate) ||
+    (exact && Option.isSome(input.ref))
+  ) {
+    return yield* Effect.fail(
+      "check:changed: use --baseline and --candidate together, without a positional ref.",
+    );
+  }
+  const repair = exact
+    ? yield* repairComparison(
+        root,
+        Option.getOrThrow(input.baseline),
+        Option.getOrThrow(input.candidate),
+      )
+    : undefined;
+  const { ref, base } = repair
+    ? { ref: "integrated repair", base: repair.base }
+    : yield* comparisonBase(root, input.ref);
+  // --no-renames includes both paths so deletions affect package selection too.
+  const changedFiles = repair
+    ? Effect.succeed(repair.files)
+    : lines("diff", "--name-only", "--no-renames", base, "--");
+  const untrackedFiles = repair
+    ? Effect.succeed([] as Array<string>)
+    : lines("ls-files", "--others", "--exclude-standard");
   const files = [...new Set([...(yield* changedFiles), ...(yield* untrackedFiles)])].sort();
-
+  if (repair) {
+    yield* Console.log(
+      `check:changed: integrated repair baseline ${base} candidate ${repair.candidate}`,
+    );
+  }
   if (files.length === 0) {
     yield* Console.log(`check:changed: no changes since ${base.slice(0, 12)} (${ref}).`);
     return true;
@@ -254,7 +363,7 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
   const inputKey = Effect.gen(function* () {
     const hash = NodeCrypto.createHash("sha256");
     // CI changes test behavior (vite.config.ts rejects .only under CI).
-    hash.update(`${process.version}\0${base}\0${ci}\0`);
+    hash.update(`${process.version}\0${base}\0${repair?.candidate ?? "working-tree"}\0${ci}\0`);
     hash.update(
       yield* git(root, [
         "diff",
@@ -325,7 +434,7 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
       if (entry.startsWith(prefix) && TEST.test(entry)) tests.add(path.join(dir, entry));
     }
   }
-  for (const test of docReaderTests(files)) tests.add(test);
+  for (const test of crossFileTests(files)) tests.add(test);
   // It reads files other than the ones beside it, so no changed file selects it.
   if (affected.includes("t3")) tests.add("apps/server/src/provider/AgentContextBudget.test.ts");
   const { vitestTests, nodeTests } = splitTests(tests);
@@ -558,6 +667,7 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
   if (!runKnip) summary.push("  knip skipped: no code or manifest changed");
   yield* Console.log(`\n${summary.join("\n")}`);
 
+  if (repair) yield* assertRepairCandidate(root, repair.candidate);
   if (results.some((result) => result.outcome !== "pass")) return false;
   if ((yield* inputKey) !== key) {
     yield* Console.log("  pass not cached: files changed during the run");
@@ -579,6 +689,16 @@ export const checkChangedCommand = Command.make(
     ref: Argument.String("ref").pipe(
       Argument.withDescription("Compare against the merge base with this ref."),
       Argument.optional,
+    ),
+    baseline: Flag.String("baseline").pipe(
+      Flag.withDescription("Pre-repair integrated snapshot commit; requires --candidate."),
+      Flag.optional,
+    ),
+    candidate: Flag.String("candidate").pipe(
+      Flag.withDescription(
+        "Completed integrated repair commit at clean HEAD; compared directly with --baseline.",
+      ),
+      Flag.optional,
     ),
     concurrency: Flag.Int("concurrency").pipe(
       Flag.withDescription(
