@@ -11057,6 +11057,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     "mixed-after-offer",
     "mixed-wake-first",
     "mixed-during-drain",
+    "mixed-same-origin-after-offer",
+    "mixed-same-origin-during-drain",
     "stopped",
     "stopped-interrupted",
   ] as const)(
@@ -11065,7 +11067,11 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       Effect.scoped(
         Effect.gen(function* () {
           const mixed = typeof awaited === "string" && awaited.startsWith("mixed");
-          const admittedA = awaited === "mixed-after-offer" || awaited === "mixed-during-drain";
+          const sameOrigin = typeof awaited === "string" && awaited.includes("same-origin");
+          const duringDrain =
+            awaited === "mixed-during-drain" || awaited === "mixed-same-origin-during-drain";
+          const admittedA = awaited === "mixed-after-offer" || duringDrain || sameOrigin;
+          const initialTerminals = mixed && !sameOrigin ? 2 : 1;
           const stopped = awaited === "stopped" || awaited === "stopped-interrupted";
           const harness = yield* makeWakeHarness;
           const now = yield* DateTime.now;
@@ -11086,22 +11092,26 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               taskIds: [WAKE_TASK_ID],
               awaited: true,
             });
-          yield* Queue.offer(harness.sdkMessages, turnOneResult);
-          yield* harness.awaitTerminal(1);
-          assert.equal(harness.terminalEvents()[0]?.status, "completed");
-          assert.isTrue(yield* harness.hasPendingBackgroundWork);
+          if (!sameOrigin) {
+            yield* Queue.offer(harness.sdkMessages, turnOneResult);
+            yield* harness.awaitTerminal(1);
+            assert.equal(harness.terminalEvents()[0]?.status, "completed");
+            assert.isTrue(yield* harness.hasPendingBackgroundWork);
+          }
           assert.lengthOf(harness.continuationRequests, 0);
           let secondInput = turnInput;
           if (mixed) {
-            secondInput = makeClaudeTestTurnInput({
-              threadId: harness.threadId,
-              providerThread: harness.providerThread,
-              now,
-              attemptId: RunAttemptId.make("mixed-second-origin"),
-              text: "Second background command",
-              attachments: [],
-            });
-            yield* harness.runtime.startTurn(secondInput);
+            if (!sameOrigin) {
+              secondInput = makeClaudeTestTurnInput({
+                threadId: harness.threadId,
+                providerThread: harness.providerThread,
+                now,
+                attemptId: RunAttemptId.make("mixed-second-origin"),
+                text: "Second background command",
+                attachments: [],
+              });
+              yield* harness.runtime.startTurn(secondInput);
+            }
             yield* harness.offerAndWait(
               claudeSdkFrame({
                 ...wakeTaskStarted,
@@ -11130,7 +11140,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             yield* harness.offerAndWait(
               claudeSdkFrame({ ...turnOneResult, uuid: "00000000-0000-4000-8000-000000000581" }),
             );
-            yield* harness.awaitTerminal(2);
+            yield* harness.awaitTerminal(initialTerminals);
           }
 
           if (awaited) {
@@ -11184,8 +11194,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           if (!admittedA && awaited !== "mixed-wake-first")
             assert.isFalse(yield* harness.hasPendingBackgroundWork);
 
-          if (mixed && awaited !== "mixed-during-drain")
-            yield* harness.offerAndWait(secondNotification);
+          if (mixed && !duringDrain) yield* harness.offerAndWait(secondNotification);
           yield* harness.offerAndWait(wakeAssistant);
           yield* harness.awaitContinuation(1);
           if (mixed) {
@@ -11209,12 +11218,12 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 attemptId: RunAttemptId.make("mixed-buffer-drain"),
                 text: "Background task completed.",
                 attachments: [],
-                providerTurnOrdinal: 3,
+                providerTurnOrdinal: initialTerminals + 1,
                 messageCreatedBy: "agent",
                 messageCreationSource: "provider",
               }),
             );
-            if (awaited === "mixed-during-drain") yield* harness.offerAndWait(secondNotification);
+            if (duringDrain) yield* harness.offerAndWait(secondNotification);
             yield* harness.offerAndWait(
               makeAssistantTextFrame({
                 uuid: "00000000-0000-4000-8000-000000000583",
@@ -11225,8 +11234,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             yield* harness.offerAndWait(
               claudeSdkFrame({ ...wakeResult, result: "MIXED_TERMINAL_NATIVE_ANSWER" }),
             );
-            yield* harness.awaitTerminal(3);
-            const expectedCount = admittedA ? 2 : 3;
+            yield* harness.awaitTerminal(initialTerminals + 1);
+            const expectedCount = sameOrigin ? 1 : admittedA ? 2 : 3;
             assert.lengthOf(harness.continuationRequests, expectedCount);
             yield* harness.awaitContinuation(expectedCount);
             for (const request of harness.continuationRequests.slice(1)) {
@@ -11248,11 +11257,15 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                         taskIds: [WAKE_TASK_ID],
                       },
                     ]),
-                {
-                  providerThreadId: harness.providerThread.id,
-                  originRunId: secondInput.runId,
-                  taskIds: ["mixed-second-task"],
-                },
+                ...(sameOrigin
+                  ? []
+                  : [
+                      {
+                        providerThreadId: harness.providerThread.id,
+                        originRunId: secondInput.runId,
+                        taskIds: ["mixed-second-task"],
+                      },
+                    ]),
               ],
             );
             assert.isTrue(
@@ -11267,9 +11280,11 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               );
               assert.notInclude(harness.continuationRequests[1]!.detail!, "mixed-second-task");
             }
-            const secondOwnerRequest = harness.continuationRequests.at(-1)!;
-            assert.include(secondOwnerRequest.detail!, "Second origin completed its checks");
-            assert.notInclude(secondOwnerRequest.detail!, WAKE_TASK_ID);
+            if (!sameOrigin) {
+              const secondOwnerRequest = harness.continuationRequests.at(-1)!;
+              assert.include(secondOwnerRequest.detail!, "Second origin completed its checks");
+              assert.notInclude(secondOwnerRequest.detail!, WAKE_TASK_ID);
+            }
             assert.isTrue(
               harness.events.some(
                 (event) =>

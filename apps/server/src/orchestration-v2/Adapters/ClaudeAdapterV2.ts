@@ -4933,7 +4933,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           {
             runId: ProviderAdapter.ProviderAdapterV2TurnInput["runId"] | null;
             taskIds: string[];
-            claimedTaskIds: ReadonlySet<string>;
+            claimedTaskIds: Set<string>;
+            claimedOriginRunId: ProviderAdapter.ProviderAdapterV2TurnInput["runId"] | undefined;
             route: { readonly threadId: ThreadId; readonly providerThreadId: ProviderThreadId };
             requests: Array<{
               request: ProviderContinuationRequests.ProviderContinuationRequest;
@@ -7630,6 +7631,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           )
             return;
           if (!staged.taskIds.includes(taskId)) staged.taskIds.push(taskId);
+          if (originRunId === staged.claimedOriginRunId) {
+            staged.claimedTaskIds.add(taskId);
+            return;
+          }
           let owner = staged.requests.find(
             ({ request }) => request.backgroundResultContinuation?.originRunId === originRunId,
           );
@@ -7919,6 +7924,17 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 }
                 if (nativeThreadId !== null && stagedOwed !== undefined) {
                   owedBackgroundResults.set(nativeThreadId, stagedOwed);
+                }
+                if (
+                  nativeThreadId !== null &&
+                  completingStaged !== undefined &&
+                  input.result !== undefined
+                ) {
+                  const owed = owedBackgroundResults.get(nativeThreadId);
+                  // The admitted owner consumed these late reports in this native answer.
+                  for (const taskId of completingStaged.claimedTaskIds)
+                    if (owed?.get(taskId) === completingStaged.claimedOriginRunId)
+                      owed?.delete(taskId);
                 }
                 const roster =
                   nativeThreadId === null
@@ -8411,6 +8427,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             runId: null,
             taskIds: matchedResults.map((entry) => entry.taskId),
             claimedTaskIds: new Set(backgroundResultContinuation?.taskIds ?? []),
+            claimedOriginRunId: backgroundResultContinuation?.originRunId,
             route,
             requests: [],
             frames: [],
