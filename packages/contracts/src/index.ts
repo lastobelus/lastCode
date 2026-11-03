@@ -86,3 +86,5 @@ export * from "./threadRecovery.ts";
 export * from "./threadArchive.ts";
 
 export * from "./environmentPause.ts";
+
+export * from "./threadTagDiscovery.ts";

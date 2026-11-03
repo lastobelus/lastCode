@@ -1,3 +1,4 @@
+import { TagSidebarResults, useActiveTagFilter } from "../lastcode/thread-tags/TagSidebar";
 import { useAtomValue } from "@effect/atom-react";
 import * as Schema from "effect/Schema";
 import {
@@ -446,6 +447,7 @@ export function AppSidebarLayout({
 }) {
   const sidebarArea = workspaceAreaProps("sidebar", 0, "Threads");
   const sidebarMode = useSidebarMode();
+  const activeTagFilter = useActiveTagFilter();
   const clientSettingsHydrated = useClientSettingsHydrated();
   const [sidebarRouteReveal] = useState<SidebarRouteReveal>(() => ({
     observedKey: null,
@@ -526,12 +528,15 @@ export function AppSidebarLayout({
               {Object.entries(threadSidebars).map(([mode, sidebar]) => (
                 <SidebarPresentation
                   key={mode}
-                  visible={sidebarMode === mode}
+                  visible={sidebarMode === mode && activeTagFilter === null}
                   retain={clientSettingsHydrated}
                 >
                   {sidebar}
                 </SidebarPresentation>
               ))}
+              {activeTagFilter !== null ? (
+                <TagSidebarResults key={activeTagFilter} tag={activeTagFilter} />
+              ) : null}
               <SidebarRail onDoubleClick={resetSidebarWidth} />
             </Sidebar>
           </>

@@ -1,3 +1,4 @@
+import { useTagSidebar } from "../lastcode/thread-tags/TagSidebar";
 import { useActiveNewTask } from "../../state/active-new-task";
 import { ThreadUndoNotice } from "../home/ThreadUndoNotice";
 import { useAndroidControlSizing } from "../../components/ui/useAndroidControlSizing";
@@ -209,6 +210,13 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
     [projectScopes],
   );
   const selectedProjectScope = resolveHomeProjectFilterScope(projectScopes, projects, options);
+  const tagSidebar = useTagSidebar(
+    selectedProjectScope === null
+      ? searchEnvironmentIds.map((environmentId) => ({ environmentId }))
+      : selectedProjectScope.projectRefs,
+    props.onSelectThread,
+    props.searchQuery,
+  );
   const threadSearch = useThreadSearch(
     searchEnvironmentIds,
     props.searchQuery,
@@ -603,6 +611,7 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
       <>
         {header}
         <View className="flex-1">
+          {tagSidebar.active ? tagSidebar.results : (
           <SwipeableScrollGateProvider enabled={swipeEnabled}>
             <GestureDetector gesture={sidebarScrollGesture}>
               <AnimatedLegendList
@@ -633,10 +642,12 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
                 scrollEventThrottle={16}
                 showsVerticalScrollIndicator={false}
                 style={styles.threadList}
+                ListHeaderComponent={tagSidebar.control}
                 ListEmptyComponent={listEmpty}
               />
             </GestureDetector>
           </SwipeableScrollGateProvider>
+          )}
           <ThreadUndoNotice visible={props.visible} />
         </View>
       </>
@@ -657,8 +668,11 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
           overflow: "hidden",
         }}
       >
-        {listItems.length === 0 ? (
-          <View className="flex-1 items-center justify-center">{listEmpty}</View>
+        {tagSidebar.active ? tagSidebar.results : listItems.length === 0 ? (
+          <View className="flex-1">
+            {tagSidebar.control}
+            <View className="flex-1 items-center justify-center">{listEmpty}</View>
+          </View>
         ) : (
           <SwipeableScrollGateProvider enabled={swipeEnabled}>
             <GestureDetector gesture={sidebarScrollGesture}>
@@ -686,6 +700,7 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
                 scrollEventThrottle={16}
                 showsVerticalScrollIndicator={false}
                 style={styles.threadList}
+                ListHeaderComponent={tagSidebar.control}
                 ListEmptyComponent={listEmpty}
               />
             </GestureDetector>
