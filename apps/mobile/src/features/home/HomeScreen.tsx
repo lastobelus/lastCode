@@ -344,13 +344,7 @@ export function HomeScreen(props: HomeScreenProps) {
     pickableProjectGroups(projectScopes),
     v2ProjectScopeKey,
   );
-  const tagSidebar = useTagSidebar(
-    v2ScopedProjectGroup === null
-      ? searchEnvironmentIds.map((environmentId) => ({ environmentId }))
-      : v2ScopedProjectGroup.projectRefs,
-    props.onSelectThread,
-    props.searchQuery,
-  );
+
   const threadSearch = useThreadSearch(
     searchEnvironmentIds,
     props.searchQuery,
@@ -359,6 +353,14 @@ export function HomeScreen(props: HomeScreenProps) {
       : { projectIds: v2ScopedProjectGroup.projectRefs.map((ref) => ref.projectId) },
   );
   const threadSearchMatchByKey = useThreadListSearchMatches(props.threads, threadSearch);
+  const tagSidebar = useTagSidebar(
+    v2ScopedProjectGroup === null
+      ? searchEnvironmentIds.map((environmentId) => ({ environmentId }))
+      : v2ScopedProjectGroup.projectRefs,
+    props.onSelectThread,
+    props.searchQuery,
+    threadSearchMatchByKey,
+  );
   const v2ProjectTitleByProjectKey = new Map(
     projectScopes.flatMap((scope) =>
       scope.projectRefs.map(

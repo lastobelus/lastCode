@@ -210,13 +210,6 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
     [projectScopes],
   );
   const selectedProjectScope = resolveHomeProjectFilterScope(projectScopes, projects, options);
-  const tagSidebar = useTagSidebar(
-    selectedProjectScope === null
-      ? searchEnvironmentIds.map((environmentId) => ({ environmentId }))
-      : selectedProjectScope.projectRefs,
-    props.onSelectThread,
-    props.searchQuery,
-  );
   const threadSearch = useThreadSearch(
     searchEnvironmentIds,
     props.searchQuery,
@@ -227,6 +220,14 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
   // This map reaches LegendList's extraData, which re-renders every row whenever it changes
   // identity; the hook keeps it stable.
   const threadSearchMatchByKey = useThreadListSearchMatches(threads, threadSearch);
+  const tagSidebar = useTagSidebar(
+    selectedProjectScope === null
+      ? searchEnvironmentIds.map((environmentId) => ({ environmentId }))
+      : selectedProjectScope.projectRefs,
+    props.onSelectThread,
+    props.searchQuery,
+    threadSearchMatchByKey,
+  );
   const selectedProjectKey = selectedProjectScope?.key ?? null;
   const projectByKey = useMemo(() => {
     const map = new Map<string, EnvironmentProject>();
