@@ -46,6 +46,7 @@ import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import { buildCodexAdditionalContext } from "../../apps/server/src/provider/CodexDeveloperInstructions.ts";
 import { makeSideChatContext } from "../../apps/server/src/orchestration-v2/ContextHandoffService.ts";
 import { withInlineContext } from "../../apps/server/src/orchestration-v2/ContextHandoffDelivery.ts";
+import { ActionResumeToolkit } from "../../apps/server/src/mcp/toolkits/actionResume/tools.ts";
 import { AttachmentToolkit } from "../../apps/server/src/mcp/toolkits/attachment/tools.ts";
 import { DeviceToolkit } from "../../apps/server/src/mcp/toolkits/device/tools.ts";
 import { EnvironmentToolkit } from "../../apps/server/src/mcp/toolkits/environment/tools.ts";
@@ -81,10 +82,11 @@ const MODELS = {
   "claude-opus-5-5": "Opus 5.5",
   "gpt-6.1-sol": "GPT-6.1 Sol",
   "gpt-6-astra": "GPT-6 Astra",
+  "gpt-6-luna": "GPT-6 Luna",
 } as const;
 type Model = keyof typeof MODELS;
 /** GPT models replay a Codex capture through CLIProxyAPI, the rest a Claude Code capture. */
-const isCodex = (model: Model): model is Extract<Model, `gpt-${string}`> =>
+const isCodex = (model: Model | PricedModel): model is Extract<Model, `gpt-${string}`> =>
   model.startsWith("gpt-");
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 // USD per million tokens. Cache writes use the 5-minute rate.
@@ -94,6 +96,7 @@ const PRICES = {
   "claude-opus-5-5": { input: 4, output: 20, cacheWrite: 5, cacheRead: 0.2 },
 };
 type PricedModel = keyof typeof PRICES;
+type ShellModel = PricedModel | Extract<Model, `gpt-${string}`>;
 const T3_PREFIX = "mcp__t3-code__";
 const RUNTIME_MARKER = "<runtime_info>";
 const TOOL_LOADED = "Tool loaded.";
@@ -250,6 +253,7 @@ export const McpToolUseCase = Schema.Struct({
     /** delegate_task `role` for a delegated child. T3 builds the child's first message from it. */
     delegateRole: Schema.optional(OrchestratorMcpTaskRole),
     context: Schema.optional(Schema.String),
+    contextFiles: Schema.optional(Schema.Array(Schema.String)),
     priorTurns: Schema.optional(
       Schema.Array(
         Schema.Struct({
@@ -265,9 +269,20 @@ export const McpToolUseCase = Schema.Struct({
      * device tool, a T3 `DeviceError` (`{"_tag": ..., "cause": null}`) fails it inside T3.
      */
     mocks: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+    /** First matching partial input wins over a tool's fixed reply. */
+    toolMocks: Schema.optional(
+      Schema.Array(Schema.Struct({ ...McpToolUseCall.fields, result: Schema.Unknown })),
+    ),
     /** Regexes on one part of a shell command. A match wins over the shell simulator. */
     shellMocks: Schema.optional(
-      Schema.Array(Schema.Struct({ match: Schema.String, output: Schema.String })),
+      Schema.Array(
+        Schema.Struct({
+          match: Schema.String,
+          output: Schema.String,
+          /** Match the entire command, including compound commands, without shell parsing. */
+          wholeCommand: Schema.optional(Schema.Boolean),
+        }),
+      ),
     ),
     /** The thread is a side chat's first turn: T3 puts the parent's digest ahead of `prompt`. */
     sideChat: Schema.optional(
@@ -381,6 +396,7 @@ export const normalizeToolInput = (name: string, input: unknown) => {
 // description, and schema through unchanged.
 const t3SourceTools: ReadonlyArray<Tool.Any> = [
   OrchestratorToolkit,
+  ActionResumeToolkit,
   ThreadToolkit,
   AttachmentToolkit,
   ProjectToolkit,
@@ -1200,7 +1216,10 @@ const withProductFields = (name: string, value: unknown, child: boolean): unknow
       ? {
           ...thread,
           link: formatThreadLink({
-            environmentId: EVAL_ENVIRONMENT_ID,
+            environmentId:
+              typeof thread.environmentId === "string"
+                ? EnvironmentId.make(thread.environmentId)
+                : EVAL_ENVIRONMENT_ID,
             threadId: ThreadId.make(id),
           }),
         }
@@ -1349,12 +1368,13 @@ export const shellOutput = (content: ReadonlyArray<Block>) => {
   });
 };
 
-/** A shell mock's output, when the command is one simple command that the mock matches. */
+/** Compound commands require an explicit whole-command mock; defaults match simple commands. */
 export const mockOutput = (sample: Sample, command: string) =>
-  /&&|\|\||[;|\n]/.test(command.trim())
-    ? undefined
-    : sample.testCase.setup.shellMocks?.find((mock) => new RegExp(mock.match).test(command))
-        ?.output;
+  sample.testCase.setup.shellMocks?.find((mock) =>
+    mock.wholeCommand
+      ? new RegExp(`^(?:${mock.match})$`).test(command.trim())
+      : !/&&|\|\||[;|\n]/.test(command.trim()) && new RegExp(mock.match).test(command),
+  )?.output;
 
 type Config = {
   readonly apiKey: string;
@@ -1362,7 +1382,7 @@ type Config = {
   readonly proxy?: { readonly url: string; readonly headers: Readonly<Record<string, string>> };
   readonly effort: string;
   readonly maxSteps: number;
-  readonly shellModel: PricedModel;
+  readonly shellModel: ShellModel;
 };
 
 /**
@@ -1375,7 +1395,7 @@ export const cannedOutput = (sample: Sample, command: string) =>
   sample.devices?.sessionError(sample.shell, command);
 
 /** Output for a shell, file, or web tool: canned output, else the shell simulator. */
-const simulate = Effect.fn("evaluateMcpToolUse.simulate")(function* (
+export const simulate = Effect.fn("evaluateMcpToolUse.simulate")(function* (
   sample: Sample,
   config: Config,
   call: Omit<ShellEntry, "output">,
@@ -1384,10 +1404,11 @@ const simulate = Effect.fn("evaluateMcpToolUse.simulate")(function* (
   let output = typeof command === "string" ? cannedOutput(sample, command) : undefined;
   if (output === undefined) {
     const body = shellRequest(sample, call, config.shellModel);
+    const codexShell = isCodex(config.shellModel);
     const response = yield* callModel(
-      config.apiKey,
+      codexShell ? "" : config.apiKey,
       body,
-      config.apiKey ? undefined : config.proxy,
+      codexShell || !config.apiKey ? config.proxy : undefined,
     );
     addUsage(sample.shellUsage, response.usage);
     output = shellOutput(response.content);
@@ -1400,7 +1421,7 @@ const simulate = Effect.fn("evaluateMcpToolUse.simulate")(function* (
 });
 
 /** The result for one tool call. */
-const answerToolCall = Effect.fn("evaluateMcpToolUse.answerToolCall")(function* (
+export const answerToolCall = Effect.fn("evaluateMcpToolUse.answerToolCall")(function* (
   sample: Sample,
   config: Config,
   call: typeof ToolUse.Type,
@@ -1429,7 +1450,10 @@ const answerToolCall = Effect.fn("evaluateMcpToolUse.answerToolCall")(function* 
     if (found.length === 0) return toolResult(call.id, "No matching deferred tools found");
     return loadTools(tools, call.id, found);
   }
-  const mock = testCase.setup.mocks?.[name];
+  const inputMock = testCase.setup.toolMocks?.find(
+    (mock) => mock.tool === name && matches(mock.args ?? {}, input),
+  );
+  const mock = inputMock === undefined ? testCase.setup.mocks?.[name] : inputMock.result;
   // T3 answers device calls from the world. A mock that is a T3 device error fails inside T3.
   const failure = deviceFailure(mock);
   const fromWorld = mock === undefined || mock === "default" || failure !== undefined;
@@ -1971,7 +1995,7 @@ const spend = (usages: ReadonlyArray<Usage>, model: PricedModel | undefined) => 
 /** Markdown report. With a baseline, each case shows its earlier pass rate and the change. */
 export const summarize = (
   rows: Array<ResultRow>,
-  options: { readonly header: string; readonly shellModel: PricedModel; readonly model: Model },
+  options: { readonly header: string; readonly shellModel: ShellModel; readonly model: Model },
   before?: Map<string, number>,
 ) => {
   const codex = isCodex(options.model);
@@ -1981,7 +2005,7 @@ export const summarize = (
   );
   const shell = spend(
     rows.map((row) => row.shellUsage),
-    options.shellModel,
+    isCodex(options.shellModel) ? undefined : options.shellModel,
   );
   const cost = agent.cost + shell.cost;
   const table = (title: string, key: (row: ResultRow) => string, compare = false) => [
@@ -2019,7 +2043,7 @@ export const summarize = (
       ? "- Cost: the agent is not priced. `vibeproxy` in `~/.codex/config.toml` may use a subscription or bill an API key per token; agent tokens are below."
       : `- Estimated cost $${cost.toFixed(2)}, $${(cost / rows.length).toFixed(3)} per sample.`,
     `- Agent tokens: ${agent.tokens}${codex ? "." : ` ($${agent.cost.toFixed(2)}).`}`,
-    `- Shell simulator (${options.shellModel}) tokens: ${shell.tokens} (API-price estimate $${shell.cost.toFixed(2)}).`,
+    `- Shell simulator (${options.shellModel}) tokens: ${shell.tokens}${isCodex(options.shellModel) ? " (subscription through proxy)." : ` (API-price estimate $${shell.cost.toFixed(2)}).`}`,
     ...(codex
       ? [
           "- Code-mode tools use case mocks and a simulated machine. Native subagent prompts and asynchronous notifications are approximate.",
@@ -2049,7 +2073,10 @@ const Flags = Schema.Struct({
   concurrency: PositiveInt,
   "max-steps": Schema.optional(PositiveInt),
   effort: Schema.optional(Schema.Literals(EFFORTS)),
-  "shell-model": Schema.Literals(Object.keys(PRICES) as Array<PricedModel>),
+  "shell-model": Schema.Literals([
+    ...(Object.keys(PRICES) as Array<PricedModel>),
+    ...(Object.keys(MODELS) as Array<Model>).filter(isCodex),
+  ]),
   "user-instructions": Schema.Literals(["keep", "drop"]),
   "dry-run": Schema.Boolean,
   "stop-on-regression": Schema.Boolean,
@@ -2124,10 +2151,24 @@ const main = Effect.gen(function* () {
   const wanted = flags.case?.flatMap((ids) => ids.split(","));
   const codex = isCodex(flags.model);
   const harness = codex ? "codex" : "claude";
-  const selected = cases.filter(
+  const matching = cases.filter(
     ({ id, setup }) =>
       (wanted === undefined || wanted.includes(id)) &&
       (setup.harness === undefined || setup.harness === harness),
+  );
+  const selected = yield* Effect.forEach(matching, (testCase) =>
+    Effect.gen(function* () {
+      const guidance = yield* Effect.forEach(testCase.setup.contextFiles ?? [], (file) =>
+        fs.readFileString(path.resolve(import.meta.dirname, "../..", file)),
+      );
+      return {
+        ...testCase,
+        setup: {
+          ...testCase.setup,
+          context: [testCase.setup.context, ...guidance].filter(Boolean).join("\n\n"),
+        },
+      };
+    }),
   );
   if (selected.length === 0) return yield* Effect.die(new Error("No case matches --case."));
   // Trimmed captures without user data ship beside the cases. `--template` also takes a raw
@@ -2215,7 +2256,7 @@ const main = Effect.gen(function* () {
   const config: Config = {
     apiKey,
     model: flags.model,
-    ...(codex ? { proxy: proxyConfig() } : {}),
+    ...(codex || isCodex(flags["shell-model"]) ? { proxy: proxyConfig() } : {}),
     effort,
     maxSteps: flags["max-steps"] ?? (codex ? 10 : 6),
     shellModel: flags["shell-model"],

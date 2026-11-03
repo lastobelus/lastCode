@@ -199,6 +199,7 @@ describe("webhook route", () => {
       [{ _tag: "disabled" }, 409, "disabled"],
       [{ _tag: "blocked_by_policy" }, 403, "blocked_by_policy"],
       [{ _tag: "rate_limited", outcome: "rate_limited" }, 429, "rate_limited"],
+      [{ _tag: "environment_paused" }, 503, "environment_paused"],
       [{ _tag: "rate_limited", outcome: "queue_full" }, 429, "queue_full"],
       [{ _tag: "expired" }, 410, "expired"],
     ];

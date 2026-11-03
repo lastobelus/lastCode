@@ -97,7 +97,32 @@ export type ReviewGuideGenerationResult = Omit<
   "headSha" | "generatedAt" | "modelSelection"
 >;
 
+export interface IncomingMessageSummaryGenerationInput {
+  cwd: string;
+  message: string;
+  modelSelection: ModelSelection;
+}
+
+/** Commit, change request, branch, title, summary, and review guide generation for one provider. */
 export interface ProviderTextGeneration {
+  readonly generatePromptSnippets: (input: {
+    cwd: string;
+    modelSelection: ModelSelection;
+    messages: readonly string[];
+    existing: readonly { id: string; title: string; text: string; userEdited?: true }[];
+    dismissed?: readonly { id: string; title: string; text: string }[];
+  }) => Effect.Effect<
+    { snippets: readonly { existingIds: readonly string[]; title: string; text: string }[] },
+    TextGenerationError
+  >;
+
+  readonly generateIncomingMessageSummary: (
+    input: IncomingMessageSummaryGenerationInput,
+  ) => Effect.Effect<{ text: string }, TextGenerationError>;
+
+  /**
+   * Generate a commit message from staged change context.
+   */
   readonly generateCommitMessage: (
     input: CommitMessageGenerationInput,
   ) => Effect.Effect<CommitMessageGenerationResult, TextGenerationError>;

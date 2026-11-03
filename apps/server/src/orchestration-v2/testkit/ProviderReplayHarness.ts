@@ -273,6 +273,7 @@ export function layerProviderReplay<Transcript extends ProviderReplayTranscript,
   | Orchestrator.OrchestratorV2
   | EffectWorker.OrchestrationEffectWorkerV2
   | EventSink.EventSinkV2
+  | ProjectionStore.ProjectionStoreV2
   | CommandOutputRecorder.CommandOutputRecorder
   | ProviderSessionManager.ProviderSessionManagerV2
   | CommandReceiptStore.CommandReceiptStoreV2
@@ -321,6 +322,7 @@ export function layerWithRegistry<Error, SettingsError = never>(
   | Orchestrator.OrchestratorV2
   | EffectWorker.OrchestrationEffectWorkerV2
   | EventSink.EventSinkV2
+  | ProjectionStore.ProjectionStoreV2
   | CommandOutputRecorder.CommandOutputRecorder
   | ProviderSessionManager.ProviderSessionManagerV2
   | CommandReceiptStore.CommandReceiptStoreV2
@@ -611,6 +613,7 @@ export function layerWithRegistry<Error, SettingsError = never>(
     Layer.provide(Layer.merge(layerStores, layerEffectExecutorProvided)),
   );
   const layerReplayRuntime = Layer.mergeAll(
+    ProjectionStore.layer.pipe(Layer.provide(layerDatabase)),
     layerOrchestratorProvided,
     layerProviderSessionManagerProvided,
     layerEffectWorkerProvided,

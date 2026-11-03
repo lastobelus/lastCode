@@ -202,9 +202,9 @@ describe("compressImageForStash", () => {
   });
 
   it("reports too-large when even the smallest encoding overflows the budget", async () => {
-    const { close } = stubCanvasPipeline(() => 8_000_000);
+    const { close } = stubCanvasPipeline(() => 8_000);
 
-    const result = await compressImageForStash(makeFile(9_000_000));
+    const result = await compressImageForStash(makeFile(9_000), 1_000);
 
     expect(result).toEqual({ ok: false, reason: "too-large" });
     expect(close).toHaveBeenCalled();

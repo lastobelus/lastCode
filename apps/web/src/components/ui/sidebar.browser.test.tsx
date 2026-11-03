@@ -33,6 +33,35 @@ function Harness(props: { readonly onResize?: (width: number) => void }) {
 }
 
 describe("Sidebar", () => {
+  it("scrolls the mounted sidebar content when wheeling over its resize rail", async () => {
+    await page.viewport(1280, 800);
+    await using screen = await render(
+      <SidebarProvider defaultOpen>
+        <Sidebar>
+          <div data-slot="scroll-area-viewport" style={{ height: 100, overflowY: "auto" }}>
+            <div data-sidebar="content" style={{ height: 1200 }} />
+          </div>
+          <SidebarRail />
+        </Sidebar>
+      </SidebarProvider>,
+      { router: false /* no routes involved */ },
+    );
+    const rail = screen.container.querySelector<HTMLElement>('[data-sidebar="rail"]')!;
+    const viewport = screen.container.querySelector<HTMLElement>(
+      '[data-slot="scroll-area-viewport"]',
+    )!;
+    const event = new WheelEvent("wheel", {
+      cancelable: true,
+      deltaY: 120,
+      clientY: viewport.getBoundingClientRect().top + 50,
+    });
+
+    rail.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
+    await vi.waitFor(() => expect(viewport.scrollTop).toBe(120));
+  });
+
   it("hands focus to the outside trigger when it collapses around the focused control", async () => {
     await page.viewport(1280, 800);
     await using screen = await render(<Harness />, { router: false /* no routes involved */ });

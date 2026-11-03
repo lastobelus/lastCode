@@ -47,6 +47,7 @@ import * as DependencyMounts from "./DependencyMounts.ts";
 import * as WorktreeConsumers from "./WorktreeConsumers.ts";
 import * as WorktreeCleanup from "../orchestration-v2/WorktreeCleanupService.ts";
 import * as StorageCleanup from "../storageCleanup.ts";
+import * as SuspensionTestkit from "./WorktreeSuspension.testkit.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
@@ -1053,6 +1054,55 @@ it.effect(
       yield* assertBatchWorkspacePreserved(first);
       yield* assertBatchWorkspacePreserved(second);
     }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
+it.effect("records a completed dependency deletion even when cancelled during removal", () =>
+  Effect.gen(function* () {
+    const f = yield* inspectedBatchFixture();
+    const entered = yield* Deferred.make<void>();
+    const release = Promise.withResolvers<void>();
+    const rm = vi.mocked(NodeFSP.rm);
+    const original = rm.getMockImplementation()!;
+    let recorded = false;
+    yield* Effect.acquireRelease(
+      Effect.sync(() => {
+        rm.mockImplementation(async (...args) => {
+          if (args[0] === f.dependencyPath) {
+            Deferred.doneUnsafe(entered, Effect.void);
+            await release.promise;
+          }
+          await original(...args);
+        });
+      }),
+      () => Effect.sync(() => rm.mockImplementation(original)),
+    );
+    yield* Effect.gen(function* () {
+      const removal = yield* f.cleanup
+        .removeBatch(
+          [
+            {
+              inspection: f.inspection,
+              canRemove: Effect.succeed(true),
+              isStillEligible: Effect.succeed(true),
+            },
+          ],
+          (_inspection, decision) =>
+            Effect.sync(() => {
+              if (decision.outcome === "removed") recorded = true;
+            }),
+        )
+        .pipe(Effect.forkScoped);
+      yield* Deferred.await(entered);
+      yield* Effect.sync(() => {
+        removal.interruptUnsafe();
+        release.resolve();
+      });
+      yield* Fiber.await(removal);
+      assert.isFalse(yield* f.fs.exists(f.dependencyPath));
+      assert.isTrue(recorded);
+      yield* assertBatchWorkspacePreserved(f);
+    }).pipe(Effect.ensuring(Effect.sync(() => release.resolve())));
+  }).pipe(Effect.scoped, Effect.provide(testLayer())),
 );
 
 it.effect("one dependency removal error leaves its sibling eligible for deletion", () =>
@@ -2168,7 +2218,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     }),
   );
   const cleanupContext = yield* Layer.build(StorageCleanup.layer).pipe(
-    Effect.provide(dependencies),
+    Effect.provide(Layer.merge(SuspensionTestkit.layer, dependencies)),
     Effect.provideService(
       ServerActivation.ServerActivation,
       workerLifecycle ? Effect.void : Effect.never,
@@ -2207,11 +2257,8 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       yield* worker.drain;
     }).pipe(Effect.ensuring(Deferred.succeed(workerControl.releaseInitialInventory, undefined)));
     // Each sweep inventories dependency and build owners, then refreshes ownership for the audit.
-    assert.equal(reads, mode === "worker-ready-burst" ? 3 : 6);
-    assert.equal(
-      processReads,
-      mode === "worker-terminal-burst" ? 5 : mode === "worker-ready-burst" ? 3 : 4,
-    );
+    assert.equal(reads, mode === "worker-settings-burst" ? 6 : 3);
+    assert.equal(processReads, mode === "worker-settings-burst" ? 4 : 3);
     assert.equal(
       yield* f.fs.readFileString(f.path.join(f.input.worktreePath, "tmp/notes.md")),
       "private notes",

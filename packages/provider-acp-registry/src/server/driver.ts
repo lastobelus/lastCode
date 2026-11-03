@@ -76,6 +76,16 @@ const makeUnsupportedTextGeneration = (): ProviderTextGeneration => {
       }),
     );
   return {
+    generatePromptSnippets: () =>
+      Effect.fail(
+        new TextGenerationError({
+          operation: "generatePromptSnippets",
+          reason: "prompt-mining-unsupported",
+          detail:
+            "The configured text-generation model used for thread titles cannot discover prompts without tools. Choose a supported text-generation model in Settings.",
+        }),
+      ),
+    generateIncomingMessageSummary: () => unsupported("generateIncomingMessageSummary"),
     generateCommitMessage: () => unsupported("generateCommitMessage"),
     generatePrContent: () => unsupported("generatePrContent"),
     generateBranchName: () => unsupported("generateBranchName"),

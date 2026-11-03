@@ -1,18 +1,29 @@
 import {
   type EnvironmentId,
+  EnvironmentAuthorizationError,
+  OrchestratorMcpFailure,
+  type ThreadReadFailureReason,
   type OrchestratorMcpThreadReadInput,
   type OrchestratorMcpThreadReadResult,
   WS_METHODS,
 } from "@t3tools/contracts";
-import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
+import * as Schema from "effect/Schema";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 
 import type { ConnectionCatalogEntry } from "./catalog.ts";
 import * as EnvironmentRegistry from "./registry.ts";
-import { request, subscribe } from "../rpc/client.ts";
+import { getInitialServerConfig, request, subscribe } from "../rpc/client.ts";
+
+const isAuthorizationError = Schema.is(EnvironmentAuthorizationError);
+
+const isThreadNotFound = (error: unknown) =>
+  typeof error === "object" &&
+  error !== null &&
+  "code" in error &&
+  error.code === "thread_not_found";
 
 /** Searches authorized destinations without forwarding a lookup back to its source. */
 export const resolveThreadRead = Effect.fn("connection.resolveThreadRead")(function* <E, R>(
@@ -24,61 +35,75 @@ export const resolveThreadRead = Effect.fn("connection.resolveThreadRead")(funct
     input: OrchestratorMcpThreadReadInput,
   ) => Effect.Effect<OrchestratorMcpThreadReadResult, E, R>,
 ) {
-  const candidates = [...entries.entries()].filter(
-    ([environmentId, entry]) =>
-      environmentId !== sourceEnvironmentId &&
-      entry.enabled &&
-      (input.environmentId === undefined || input.environmentId === environmentId),
-  );
-  const found = yield* Deferred.make<OrchestratorMcpThreadReadResult>();
+  const candidates = [...entries.entries()]
+    .filter(
+      ([environmentId, entry]) =>
+        environmentId !== sourceEnvironmentId &&
+        entry.enabled &&
+        (input.environmentId === undefined || input.environmentId === environmentId),
+    )
+    .map(([environmentId]) => environmentId);
   const unavailable = new Set<EnvironmentId>();
+  const failures = new Map<EnvironmentId, ThreadReadFailureReason>();
   // Start every destination within the same timeout window, and interrupt the
   // remaining requests as soon as one returns the requested history.
-  const attempts = Effect.forEach(
-    candidates,
-    ([environmentId]) =>
-      read(environmentId, input).pipe(
-        Effect.timeout("5 seconds"),
-        Effect.match({
-          onSuccess: (result) => {
-            const matches =
-              result.thread.environmentId === environmentId &&
-              result.thread.threadId === input.threadId;
-            return { environmentId, result: matches ? result : null, unavailable: !matches };
-          },
-          onFailure: (error) => ({
-            environmentId,
-            result: null,
-            unavailable:
-              typeof error !== "object" ||
-              error === null ||
-              !("code" in error) ||
-              error.code !== "thread_not_found",
-          }),
-        }),
-        Effect.tap((attempt) => {
-          if (attempt.unavailable) unavailable.add(attempt.environmentId);
-          return attempt.result === null ? Effect.void : Deferred.succeed(found, attempt.result);
-        }),
-      ),
-    { concurrency: "unbounded" },
-  ).pipe(
-    Effect.map((completed) => completed.find((attempt) => attempt.result !== null)?.result ?? null),
-  );
-  const result = yield* Effect.raceFirst(Deferred.await(found), attempts);
-  const unavailableEnvironmentIds = candidates
-    .filter(([environmentId]) => unavailable.has(environmentId))
-    .map(([environmentId]) => environmentId);
+  const result =
+    candidates.length === 0
+      ? null
+      : yield* Effect.raceAll(
+          candidates.map((environmentId) =>
+            read(environmentId, input).pipe(
+              Effect.timeout("5 seconds"),
+              Effect.filterOrFail(
+                (result) =>
+                  result.thread.environmentId === environmentId &&
+                  result.thread.threadId === input.threadId,
+              ),
+              Effect.tapError((error) =>
+                Effect.sync(() => {
+                  if (isThreadNotFound(error)) return;
+                  unavailable.add(environmentId);
+                  const denied =
+                    isAuthorizationError(error) ||
+                    (typeof error === "object" &&
+                      error !== null &&
+                      "code" in error &&
+                      error.code === "capability_denied");
+                  const unsupported =
+                    typeof error === "object" &&
+                    error !== null &&
+                    "threadReadReason" in error &&
+                    error.threadReadReason === "unsupported";
+                  failures.set(
+                    environmentId,
+                    denied ? "permission_denied" : unsupported ? "unsupported" : "unavailable",
+                  );
+                }),
+              ),
+            ),
+          ),
+        ).pipe(Effect.orElseSucceed(() => null));
   if (
     input.environmentId !== undefined &&
     input.environmentId !== sourceEnvironmentId &&
-    !candidates.some(([environmentId]) => environmentId === input.environmentId)
+    !candidates.includes(input.environmentId)
   ) {
-    unavailableEnvironmentIds.push(input.environmentId);
+    unavailable.add(input.environmentId);
   }
+  const failure =
+    result === null && input.environmentId !== undefined && unavailable.has(input.environmentId)
+      ? {
+          environmentId: input.environmentId,
+          reason:
+            entries.get(input.environmentId)?.serverUpdateRequired === true
+              ? ("unsupported" as const)
+              : (failures.get(input.environmentId) ?? ("unavailable" as const)),
+        }
+      : undefined;
   return {
     result,
-    unavailableEnvironmentIds,
+    unavailableEnvironmentIds: [...unavailable].filter((id) => failure?.environmentId !== id),
+    ...(failure === undefined ? {} : { failure }),
   };
 });
 
@@ -120,7 +145,25 @@ export const watchThreadReadRequests = Effect.fn("connection.watchThreadReadRequ
                         event.input,
                         destinations,
                         (destination, input) =>
-                          registry.run(destination, request(WS_METHODS.threadReadLocal, input)),
+                          registry.run(
+                            destination,
+                            Effect.gen(function* () {
+                              if (input.via === "client") {
+                                const config = yield* getInitialServerConfig();
+                                if (
+                                  config.environment.capabilities.universalThreadReferences !== true
+                                ) {
+                                  return yield* new OrchestratorMcpFailure({
+                                    code: "invalid_request",
+                                    threadReadReason: "unsupported",
+                                    message:
+                                      "The source environment needs a server update to read this thread reference. Report this to the user; do not use another route.",
+                                  });
+                                }
+                              }
+                              return yield* request(WS_METHODS.threadReadLocal, input);
+                            }),
+                          ),
                       );
                       yield* registry.run(
                         environmentId,

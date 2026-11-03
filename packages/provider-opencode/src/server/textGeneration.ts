@@ -13,6 +13,8 @@ import * as OpenCodeServerOwner from "./OpenCodeServerOwner.ts";
 const GENERATION_TIMEOUT = "3 minutes";
 
 const OpenCodeTextGenerationOperation = Schema.Literals([
+  "generatePromptSnippets",
+  "generateIncomingMessageSummary",
   "generateCommitMessage",
   "generatePrContent",
   "generateBranchName",
@@ -162,6 +164,14 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
   const runOpenCodeJson = Effect.fn("runOpenCodeJson")(function* <S extends Schema.Top>(
     input: TextGenerationOperations.Request<S>,
   ) {
+    if (input.operation === "generatePromptSnippets") {
+      return yield* new TextGenerationError({
+        operation: input.operation,
+        reason: "prompt-mining-unsupported",
+        detail:
+          "The configured text-generation model used for thread titles cannot discover prompts without tools. Choose a supported text-generation model in Settings.",
+      });
+    }
     const parsedModel = OpenCodeRuntime.parseOpenCodeModelSlug(input.modelSelection.model);
     if (!parsedModel) {
       return yield* new TextGenerationError({

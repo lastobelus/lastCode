@@ -37,8 +37,10 @@ An agent should use the two LastCode Action tools in this order:
 
 Only one resumable Action continuation can be active for a thread. A user may send other messages
 while the Action runs; the Action keeps running and its automatic follow-up queues behind the
-active turn. Unanswered requests and an environment pause still hold admission. A user may also
-inspect or cancel it from the composer.
+active turn. Unanswered requests still hold admission. An environment pause does not: the
+follow-up enters the thread's queue, which frees the thread to launch another Action, but the agent
+does not run it until the environment is resumed. A user may also inspect or cancel a running
+Action from the composer.
 
 Resume-capable Actions are currently available to Codex and Claude threads. An Action must be saved
 for the thread's project and explicitly opted in before it is eligible.
@@ -180,9 +182,10 @@ verbose transcript into every resumed agent turn. Branch on the reason the comma
   retry. Inspection is limited to runs in the current thread and returns a bounded retained tail.
 - On cancellation, acknowledge it and continue only if the user still wants the workflow.
 
-If LastCode restarted after the command finished but before the follow-up was queued, use
-**Resume agent** to send the saved follow-up or **Discard** to remove it. LastCode does not rerun
-the command automatically.
+If LastCode restarted after the command finished but before the follow-up was delivered, it retries
+delivery at startup; nobody needs to resume it. If LastCode restarted with the command's outcome still
+unknown, the thread offers **Resume agent** to send a follow-up with what was saved from the run, or
+**Discard** to remove it. LastCode never reruns the command automatically.
 
 ## Adapt an existing waiting workflow
 

@@ -106,6 +106,7 @@ function getPageScrollVelocityPxPerMs({
 export function getTimelinePageScrollDistancePx(
   viewport: HTMLElement,
   composerOverlay: HTMLElement | null,
+  keepOneLine: boolean,
 ): number {
   const bounds = viewport.getBoundingClientRect();
   const composerBounds = composerOverlay?.getBoundingClientRect();
@@ -113,6 +114,7 @@ export function getTimelinePageScrollDistancePx(
     composerBounds && composerBounds.height > 0
       ? Math.min(bounds.bottom, Math.max(bounds.top, composerBounds.top))
       : bounds.bottom;
+  if (!keepOneLine) return Math.max(0, bottom - bounds.top);
   const style = getComputedStyle(viewport.querySelector(".chat-markdown") ?? viewport);
   const lineHeight = Number.parseFloat(style.lineHeight) || Number.parseFloat(style.fontSize) * 1.5;
   return Math.max(0, bottom - bounds.top - lineHeight);

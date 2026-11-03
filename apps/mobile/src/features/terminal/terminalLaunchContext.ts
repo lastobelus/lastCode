@@ -17,6 +17,7 @@ export interface PendingTerminalLaunch {
   readonly worktreePath: string | null;
   readonly env?: Record<string, string>;
   readonly initialInput?: string;
+  readonly terminalLinkProfileName?: string;
 }
 
 const pendingTerminalLaunches = new Map<string, PendingTerminalLaunch>();
@@ -34,6 +35,9 @@ export function stagePendingTerminalLaunch(input: {
     worktreePath: input.launch.worktreePath,
     env: input.launch.env ? { ...input.launch.env } : undefined,
     initialInput: input.launch.initialInput,
+    ...(input.launch.terminalLinkProfileName === undefined
+      ? {}
+      : { terminalLinkProfileName: input.launch.terminalLinkProfileName }),
   });
 }
 

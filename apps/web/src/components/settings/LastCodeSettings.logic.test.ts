@@ -19,7 +19,7 @@ const ssh = EnvironmentId.make("ssh");
 const wsl = EnvironmentId.make("wsl");
 
 function entry(target: ConnectionCatalogEntry["target"]): ConnectionCatalogEntry {
-  return { target, profile: Option.none() };
+  return { target, profile: Option.none(), enabled: true };
 }
 
 describe("deriveLastCodeEnvironmentSettingEntries", () => {

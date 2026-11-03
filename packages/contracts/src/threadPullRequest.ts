@@ -79,8 +79,19 @@ export const ThreadPullRequestKey = Schema.Struct({
 });
 export type ThreadPullRequestKey = typeof ThreadPullRequestKey.Type;
 
+export const PullRequestWatchQuietTimeoutMinutes = PositiveInt.check(
+  Schema.isLessThanOrEqualTo(10080),
+);
+
+export const ThreadPullRequestWatchQuietDeadline = Schema.Struct({
+  timeoutMinutes: PullRequestWatchQuietTimeoutMinutes,
+  dueAt: Schema.NullOr(IsoDateTime),
+});
+
 export const ThreadPullRequestWatch = Schema.Struct({
   startedAt: IsoDateTime,
+  /** Null dueAt records a delivered quiet wake until progress or an explicit rearm. */
+  quietDeadline: Schema.optional(ThreadPullRequestWatchQuietDeadline),
   headSha: Schema.NullOr(TrimmedNonEmptyString),
   failedChecks: Schema.Array(TrimmedNonEmptyString),
   passed: Schema.Boolean,

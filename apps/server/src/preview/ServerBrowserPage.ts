@@ -19,7 +19,7 @@ import {
   type PreviewAutomationWaitForInput,
 } from "@t3tools/contracts";
 import { constVoid } from "effect/Function";
-import type { CDPSession, ConsoleMessage, Frame, Locator, Page } from "playwright-core";
+import type { CDPSession, ConsoleMessage, Frame, Locator, Page, Route } from "playwright-core";
 import * as NodeCrypto from "node:crypto";
 import { BrowserControlInterrupted } from "./SessionControl.ts";
 
@@ -37,6 +37,56 @@ export class ServerBrowserOperationError extends Error {
     super(message);
     this.tag = tag;
     this.detail = detail;
+  }
+}
+
+/** Install access in this page's cookie context before navigating; never put credentials in URLs. */
+export async function prepareBrowserCredential(
+  page: Page,
+  destination: string,
+  credential: string,
+  timeoutMs: number,
+): Promise<void> {
+  // Playwright cannot abort this request with our signal. Drain it before handing off
+  // control so a cancelled operation cannot write cookies into later work.
+  let status: number | undefined;
+  try {
+    const response = await page
+      .context()
+      .request.post(new URL("/api/auth/browser-session", destination).href, {
+        data: { credential },
+        maxRedirects: 0,
+        timeout: Math.max(1, Math.min(timeoutMs, 5_000)),
+      });
+    try {
+      status = response.status();
+      if (!response.ok()) throw new Error("Browser session exchange was rejected.");
+    } finally {
+      await response.dispose();
+    }
+  } catch (cause) {
+    const failure = cause instanceof Error ? cause.message : "";
+    const category =
+      status !== undefined && (status < 200 || status >= 300)
+        ? "http"
+        : /Storage\.(getCookies|setCookies)/.test(failure)
+          ? "cookie-context"
+          : /timeout|timed out|ETIMEDOUT/i.test(failure)
+            ? "timeout"
+            : /certificate|TLS|SSL|ERR_CERT|CERT_|UNABLE_TO_VERIFY/i.test(failure)
+              ? "TLS error"
+              : "network error";
+    const message =
+      category === "http"
+        ? `Couldn't sign this browser in to the development server: the server answered with HTTP ${status}. Check that this address is the app's development server and that it was launched with the same development credential.`
+        : category === "cookie-context"
+          ? "Couldn't sign this browser in to the development server: this browser couldn't set up its sign-in cookies. This browser connection doesn't support development sign-in."
+          : `Couldn't sign this browser in to the development server: the server couldn't be reached (${category}). If this browser runs on a different machine than the app, use the HTTPS address published by --share.`;
+    throw new ServerBrowserOperationError("PreviewAutomationExecutionError", message, {
+      boundary: "browser-credential",
+      category,
+      ...(status === undefined ? {} : { status }),
+    });
   }
 }
 
@@ -78,6 +128,65 @@ export const toOperationError = (
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_READ_TIMEOUT_MS = 10_000;
 const DEFAULT_CAPTURE_TIMEOUT_MS = 3_000;
+
+/** Redirect an existing navigation without appending a new history entry. */
+export const navigateWithRedirect = async (
+  page: Page,
+  storedUrl: string,
+  destination: string,
+  navigate: (redirected: boolean) => Promise<unknown>,
+  signal?: AbortSignal,
+) => {
+  signal?.throwIfAborted();
+  if (destination === storedUrl) {
+    await navigate(false);
+    return;
+  }
+  const requestUrl = new URL(storedUrl);
+  requestUrl.hash = "";
+  const matches = (url: URL) => url.href === requestUrl.href;
+  const pending = new Set<Promise<void>>();
+  const redirect = (route: Route) => {
+    const work = (async () => {
+      const request = route.request();
+      if (!request.isNavigationRequest() || request.frame() !== page.mainFrame()) {
+        await route.fallback();
+      } else if (signal?.aborted) {
+        await route.abort("aborted");
+      } else {
+        await route.fulfill({ status: 302, headers: { location: destination } });
+      }
+    })();
+    pending.add(work);
+    void work.then(
+      () => pending.delete(work),
+      () => pending.delete(work),
+    );
+    return work;
+  };
+  await page.route(matches, redirect);
+  try {
+    signal?.throwIfAborted();
+    await navigate(true);
+    signal?.throwIfAborted();
+    // Cached and same-document history traversal can commit without a request to redirect.
+    if (page.url() === storedUrl) {
+      const committed = page.waitForURL((url) => url.href !== storedUrl, {
+        waitUntil: "commit",
+        timeout: DEFAULT_TIMEOUT_MS,
+      });
+      void committed.catch(constVoid);
+      await page.evaluate(`location.replace(${JSON.stringify(destination)})`);
+      await committed;
+    }
+  } finally {
+    try {
+      await page.unroute(matches, redirect);
+    } finally {
+      await Promise.allSettled(pending);
+    }
+  }
+};
 
 type ReadOptions = {
   readonly timeoutMs?: number | undefined;
@@ -650,8 +759,19 @@ type SnapshotInput = ReadOptions & {
 /** The scale a page renders at and its viewport in device-independent pixels. */
 const renderingOf = async (input: SnapshotInput, read: ReadStage) => {
   if (input.renderScale !== "display") {
-    const viewport = await viewportSizeWithinBudget(input.page, input.cdp, read);
-    return { renderScale: input.renderScale, viewport };
+    const viewport = input.page.viewportSize();
+    if (viewport) return { renderScale: input.renderScale, viewport };
+    const { cssVisualViewport } = await read("Page.getLayoutMetrics", () =>
+      input.cdp.send("Page.getLayoutMetrics"),
+    );
+    const zoom = cssVisualViewport.zoom ?? 1;
+    return {
+      renderScale: input.renderScale / zoom,
+      viewport: {
+        width: Math.max(1, Math.round(cssVisualViewport.clientWidth * zoom)),
+        height: Math.max(1, Math.round(cssVisualViewport.clientHeight * zoom)),
+      },
+    };
   }
   // The display ratio a desktop page reports includes its page zoom, and its sizes are CSS pixels.
   const page = await readPageMetricsWithinBudget(input.cdp, read);

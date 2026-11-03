@@ -13,6 +13,47 @@ async function main() {
   // The fixture replaces app hydration; activity, geometry, readiness, and leases use production helpers.
   const bridge = window.surfaceSmokeBridge;
   const fixtures = new Map();
+  const sentinel = document.createElement("textarea");
+  sentinel.id = "host-sentinel";
+  sentinel.setAttribute("aria-label", "Host sentinel");
+  document.body.append(sentinel);
+  const sentinelValue = "host input stays unchanged";
+  const hostKeyboardEvents = [];
+  for (const type of ["keydown", "keyup", "beforeinput", "input"]) {
+    document.addEventListener(type, (event) => {
+      hostKeyboardEvents.push({
+        type,
+        target: event.target?.id ?? null,
+        key: event.key ?? null,
+        data: event.data ?? null,
+        trusted: event.isTrusted,
+      });
+    });
+  }
+  const hostOwnershipEvents = [];
+  let watchingHostOwnership = false;
+  for (const type of [
+    "focusin",
+    "focusout",
+    "selectionchange",
+    "keydown",
+    "keyup",
+    "beforeinput",
+    "input",
+  ]) {
+    document.addEventListener(type, (event) => {
+      if (!watchingHostOwnership) return;
+      hostOwnershipEvents.push({
+        type,
+        target: event.target?.id ?? null,
+        activeElement: document.activeElement?.id ?? document.activeElement?.tagName ?? null,
+        value: sentinel.value,
+        selectionStart: sentinel.selectionStart,
+        selectionEnd: sentinel.selectionEnd,
+        selectionDirection: sentinel.selectionDirection,
+      });
+    });
+  }
   for (const tab of await bridge.configuration()) {
     const wrapper = document.createElement("div");
     const guest = document.createElement("webview");
@@ -90,6 +131,46 @@ async function main() {
       cssWidth: Number(guest.dataset.previewCssWidth),
       cssHeight: Number(guest.dataset.previewCssHeight),
     }));
+  window.surfaceSmokeResetKeyboard = () => {
+    sentinel.value = sentinelValue;
+    sentinel.focus();
+    sentinel.setSelectionRange(sentinel.value.length, sentinel.value.length);
+    hostKeyboardEvents.length = 0;
+  };
+  window.surfaceSmokeKeyboardState = () => ({
+    value: sentinel.value,
+    expected: sentinelValue,
+    activeElement: document.activeElement?.id ?? document.activeElement?.tagName ?? null,
+    events: [...hostKeyboardEvents],
+    selectionStart: sentinel.selectionStart,
+    selectionEnd: sentinel.selectionEnd,
+    selectionDirection: sentinel.selectionDirection,
+    ownershipEvents: [...hostOwnershipEvents],
+  });
+  window.surfaceSmokeWatchHostOwnership = async () => {
+    watchingHostOwnership = false;
+    window.surfaceSmokeResetKeyboard();
+    const selected = new Promise((resolve, reject) => {
+      const changed = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        sentinel.removeEventListener("selectionchange", changed);
+        reject(new Error("Host sentinel selection did not acknowledge its fixture setup."));
+      }, 2000);
+      sentinel.addEventListener("selectionchange", changed, { once: true });
+    });
+    sentinel.setSelectionRange(5, 10, "backward");
+    await selected;
+    hostOwnershipEvents.length = 0;
+    watchingHostOwnership = true;
+    return window.surfaceSmokeKeyboardState();
+  };
+  window.surfaceSmokeStopWatchingHostOwnership = () => {
+    watchingHostOwnership = false;
+    return window.surfaceSmokeKeyboardState();
+  };
   await Promise.all(
     [...fixtures].map(
       ([runtimeTabId, { guest }]) =>
