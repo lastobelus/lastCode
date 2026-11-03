@@ -3087,6 +3087,90 @@ it.effect.each([
           })
           .pipe(Effect.flip);
         expect(refused).toBeDefined();
+        if (label === "awaited command") {
+          const retained = yield* a.threads.getThreadRecords(threadId, ["runs", "providerThreads"]);
+          const fresh = {
+            ...nextRun,
+            id: RunId.make("independent-fresh-background-origin"),
+            ordinal: Math.max(...retained.runs.map((row) => row.ordinal)) + 1,
+            remoteDelegation: undefined,
+            delegatedTaskId: undefined,
+            actionObligations: [],
+            queueHeld: undefined,
+            status: "completed" as const,
+            startedAt: now,
+            completedAt: now,
+          };
+          yield* writeRun("independent-fresh-origin", fresh);
+          yield* a.sink.write({
+            events: [
+              {
+                id: EventId.make("retained-independent-thread"),
+                type: "thread.metadata-updated",
+                threadId,
+                occurredAt: now,
+                payload: {
+                  ...retained.thread,
+                  lineage: { ...retained.thread.lineage, independent: true },
+                },
+              },
+              {
+                id: EventId.make("independent-fresh-background-result"),
+                type: "provider-thread.updated",
+                threadId,
+                occurredAt: now,
+                payload: {
+                  ...providerThread,
+                  pendingBackgroundTasks: [],
+                  owedBackgroundResults: [
+                    { taskId: "fresh-independent-result", originRunId: fresh.id },
+                    { taskId: "former-delegation-result", originRunId: continuationId },
+                  ],
+                },
+              },
+            ],
+          });
+          const resultWake = {
+            type: "message.dispatch" as const,
+            threadId,
+            text: "Actual background result in the retained independent thread",
+            attachments: [],
+            createdBy: "agent" as const,
+            creationSource: "provider" as const,
+            dispatchMode: { type: "queue_after_active" as const },
+            backgroundResultContinuation: {
+              providerThreadId: providerThread.id,
+              originRunId: fresh.id,
+              taskIds: ["fresh-independent-result"],
+            },
+          };
+          const former = yield* a.orchestrator
+            .dispatch({
+              ...resultWake,
+              commandId: CommandId.make("former-independent-wake"),
+              messageId: MessageId.make("former-independent-wake"),
+              backgroundResultContinuation: {
+                ...resultWake.backgroundResultContinuation,
+                originRunId: continuationId,
+                taskIds: ["former-delegation-result"],
+              },
+            })
+            .pipe(Effect.exit);
+          expect(Exit.isFailure(former)).toBe(true);
+          yield* a.orchestrator.dispatch({
+            ...resultWake,
+            commandId: CommandId.make("fresh-independent-wake"),
+            messageId: MessageId.make("fresh-independent-wake"),
+          });
+          const ordinary = (yield* a.threads.getThreadRecords(threadId, ["runs"])).runs.find(
+            (entry) => entry.userMessageId === MessageId.make("fresh-independent-wake"),
+          )!;
+          expect(ordinary.backgroundResultContinuation).toEqual(
+            resultWake.backgroundResultContinuation,
+          );
+          expect(ordinary.remoteDelegation).toBeUndefined();
+          expect(ordinary.delegatedTaskId).toBeUndefined();
+        }
       }),
     ),
 );

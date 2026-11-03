@@ -7122,7 +7122,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         command.createdBy !== "agent" ||
         (command.creationSource !== "provider" && command.creationSource !== "server") ||
         projection.thread.archivePending != null ||
-        projection.thread.lineage.independent === true ||
+        (projection.thread.lineage.independent === true &&
+          (backgroundSource?.delegatedTaskId !== undefined ||
+            backgroundSource?.remoteDelegation !== undefined)) ||
         backgroundSource === undefined ||
         backgroundSource.providerThreadId !== background.providerThreadId ||
         !remoteDelegationMayStart(projection.thread, backgroundSource) ||

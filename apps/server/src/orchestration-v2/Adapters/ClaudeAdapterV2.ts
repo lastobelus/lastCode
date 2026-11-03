@@ -4946,6 +4946,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             seenFrames: Set<string>;
           }
         >();
+        const ordinaryBackgroundResults = new WeakMap<
+          ActiveClaudeTurnContext,
+          NonNullable<ReturnType<typeof stagedBackgroundResults.get>>
+        >();
         // Survives roster REPLACE levels, which rebuild every entry without the agent's mark.
         const awaitedBackgroundTasksByNativeThread = yield* Ref.make(
           new Map<string, Set<string>>(),
@@ -7621,8 +7625,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           taskId: string,
           report: BackgroundWorkReport,
           notification: SDKMessage | undefined,
+          staged = stagedBackgroundResults.get(nativeThreadId),
         ) => {
-          const staged = stagedBackgroundResults.get(nativeThreadId);
           const originRunId = owedBackgroundResults.get(nativeThreadId)?.get(taskId);
           if (
             staged === undefined ||
@@ -7681,7 +7685,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           readonly threadDisposition?: "reusable" | "broken";
           readonly result?: SDKResultMessage;
         }) {
-          const staged = stagedBackgroundResults.get(input.context.nativeThreadId);
+          const staged =
+            ordinaryBackgroundResults.get(input.context) ??
+            stagedBackgroundResults.get(input.context.nativeThreadId);
           const completingStaged = staged?.runId === input.context.input.runId ? staged : undefined;
           const stagedOwed =
             completingStaged !== undefined &&
@@ -8020,7 +8026,21 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             settledTurnByNativeThread.delete(input.context.nativeThreadId);
           }
           if (completingStaged !== undefined && input.result !== undefined) {
-            stagedBackgroundResults.delete(input.context.nativeThreadId);
+            if (
+              ordinaryBackgroundResults.get(input.context) === completingStaged &&
+              completingStaged.taskIds.length > 0
+            ) {
+              const consumed =
+                consumedBackgroundWakeFrames.get(input.context.nativeThreadId) ??
+                new Map<string, ProviderAdapter.ProviderAdapterV2TurnInput["runId"]>();
+              for (const frame of completingStaged.frames) {
+                if (frame.type === "assistant" || frame.type === "result")
+                  consumed.set(frame.uuid, input.context.input.runId);
+              }
+              consumedBackgroundWakeFrames.set(input.context.nativeThreadId, consumed);
+            }
+            if (stagedBackgroundResults.get(input.context.nativeThreadId) === completingStaged)
+              stagedBackgroundResults.delete(input.context.nativeThreadId);
             for (const taskId of completingStaged.taskIds) {
               const generation = backgroundTaskGenerations
                 .get(input.context.nativeThreadId)
@@ -8044,6 +8064,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               );
             }
           }
+          ordinaryBackgroundResults.delete(input.context);
           yield* Ref.update(interruptedTurns, (current) => {
             const next = new Set(current);
             next.delete(input.context.providerTurnId);
@@ -8856,6 +8877,31 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             }
             return;
           }
+          const ordinaryStaged = ordinaryBackgroundResults.get(context);
+          const staged = ordinaryStaged ?? stagedBackgroundResults.get(liveQuery.nativeThreadId);
+          if (staged?.runId === context.input.runId) {
+            if (
+              message.type === "system" &&
+              message.subtype === "task_notification" &&
+              owedBackgroundResults.get(liveQuery.nativeThreadId)?.has(message.task_id)
+            ) {
+              stageBackgroundResult(
+                liveQuery.nativeThreadId,
+                message.task_id,
+                yield* opaqueTaskWakeReport(liveQuery.nativeThreadId, message),
+                message,
+                staged,
+              );
+            }
+            if (
+              (message.type === "assistant" || message.type === "result") &&
+              parentToolUseIdFromSdkMessage(message) === null &&
+              !staged.seenFrames.has(message.uuid)
+            ) {
+              staged.seenFrames.add(message.uuid);
+              staged.frames.push(message);
+            }
+          }
           const focusedPlugin = claudeFocusRequestedPanePlugin(message);
           if (focusedPlugin !== null && context === (yield* Ref.get(activeTurn))) {
             yield* Effect.logWarning("orchestration-v2.claude-mod-pane-focus-unsupported", {
@@ -9522,7 +9568,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               message.task_id,
             );
             if (!isClaudeProviderContinuationTurn(context.input)) {
-              if (wasBackgroundTask) {
+              if (
+                wasBackgroundTask &&
+                !ordinaryBackgroundResults.get(context)?.taskIds.includes(message.task_id)
+              ) {
                 yield* recordWakeReport(
                   liveQuery.nativeThreadId,
                   message.task_id,
@@ -10050,36 +10099,6 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               consumed.set(message.uuid, context.input.runId);
               consumedBackgroundWakeFrames.set(liveQuery.nativeThreadId, consumed);
             }
-          }
-          const staged =
-            liveQuery?.query !== input.query
-              ? undefined
-              : stagedBackgroundResults.get(liveQuery.nativeThreadId);
-          if (
-            staged !== undefined &&
-            context !== null &&
-            staged.runId === context.input.runId &&
-            message.type === "system" &&
-            message.subtype === "task_notification" &&
-            owedBackgroundResults.get(liveQuery!.nativeThreadId)?.has(message.task_id)
-          ) {
-            stageBackgroundResult(
-              liveQuery!.nativeThreadId,
-              message.task_id,
-              yield* opaqueTaskWakeReport(liveQuery!.nativeThreadId, message),
-              message,
-            );
-          }
-          if (
-            staged !== undefined &&
-            context !== null &&
-            staged.runId === context.input.runId &&
-            (message.type === "assistant" || message.type === "result") &&
-            parentToolUseIdFromSdkMessage(message) === null &&
-            !staged.seenFrames.has(message.uuid)
-          ) {
-            staged.seenFrames.add(message.uuid);
-            staged.frames.push(message);
           }
           if (liveQuery?.query === input.query) {
             const echoes = claudeEchoedPromptUuids(message);
@@ -11237,6 +11256,34 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               });
             });
             if (userMessage !== null) {
+              const pending = rosterForNativeThread(
+                yield* Ref.get(pendingBackgroundTasksByNativeThread),
+                nativeThreadId,
+              );
+              const origins = backgroundTaskOrigins.get(nativeThreadId);
+              if (
+                [...(owedBackgroundResults.get(nativeThreadId)?.values() ?? [])].some(
+                  (origin) => origin !== turnInput.runId,
+                ) ||
+                [...pending.keys()].some((taskId) => {
+                  const origin = origins?.get(taskId);
+                  return origin != null && origin !== turnInput.runId;
+                })
+              ) {
+                ordinaryBackgroundResults.set(context, {
+                  runId: turnInput.runId,
+                  taskIds: [],
+                  claimedTaskIds: new Set(),
+                  claimedOriginRunId: turnInput.runId,
+                  route: {
+                    threadId: turnInput.threadId,
+                    providerThreadId: turnInput.providerThread.id,
+                  },
+                  requests: [],
+                  frames: [],
+                  seenFrames: new Set(),
+                });
+              }
               yield* attachTurn;
               yield* startUserTurnForWakeReports(nativeThreadId);
               yield* Effect.uninterruptibleMask((restore) =>

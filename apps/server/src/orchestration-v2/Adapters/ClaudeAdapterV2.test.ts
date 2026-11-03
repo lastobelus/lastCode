@@ -11386,6 +11386,134 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       ),
   );
 
+  it.effect.each([
+    { awaited: true, interrupted: false },
+    { awaited: true, interrupted: true },
+    { awaited: false, interrupted: false },
+  ])(
+    "delivers an older task's report after an ordinary turn (awaited=$awaited interrupted=$interrupted)",
+    ({ awaited, interrupted }) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeWakeHarness;
+          const now = yield* DateTime.now;
+          const turn = (name: string) =>
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make(name),
+              text: name,
+              attachments: [],
+            });
+          const source = turn("ordinary-report-source-a");
+          yield* harness.runtime.startTurn(source);
+          yield* harness.offerAndWait(wakeTaskStarted);
+          if (awaited)
+            yield* harness.runtime.awaitBackgroundTasks!({
+              providerThread: harness.providerThread,
+              taskIds: [WAKE_TASK_ID],
+              awaited: true,
+            });
+          yield* harness.offerAndWait(turnOneResult);
+          yield* harness.awaitTerminal(1);
+          const ordinary = turn("ordinary-report-run-b");
+          assert.equal(ordinary.message.createdBy, "user");
+          yield* harness.runtime.startTurn(ordinary);
+          const before = makeAssistantTextFrame({
+            uuid: "00000000-0000-4000-8000-000000000701",
+            text: "ORDINARY_B_BEFORE_REPORT",
+          });
+          const after = makeAssistantTextFrame({
+            uuid: "00000000-0000-4000-8000-000000000702",
+            text: "ORDINARY_B_AFTER_REPORT",
+          });
+          const result = makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000703",
+            result: "ORDINARY_B_NATIVE_TERMINAL",
+            ...(interrupted ? { terminalReason: "aborted_streaming" as const } : {}),
+          });
+          yield* harness.offerAndWait(before);
+          yield* harness.offerAndWait(wakeNotification);
+          assert.lengthOf(harness.continuationRequests, 0);
+          if (awaited) {
+            while (true) {
+              const { providerThread } = yield* Queue.take(harness.providerThreadReceipts);
+              if (
+                (providerThread.pendingBackgroundTasks?.length ?? 0) !== 0 ||
+                providerThread.owedBackgroundResults?.length !== 1
+              )
+                continue;
+              assert.deepStrictEqual(providerThread.owedBackgroundResults, [
+                { taskId: WAKE_TASK_ID, originRunId: source.runId },
+              ]);
+              break;
+            }
+          }
+          yield* harness.offerAndWait(after);
+          assert.lengthOf(harness.continuationRequests, 0);
+          yield* harness.offerAndWait(result);
+          yield* harness.awaitTerminal(2);
+          assert.equal(
+            harness.terminalEvents()[1]?.status,
+            interrupted ? "interrupted" : "completed",
+          );
+          assert.isTrue(
+            harness.events.some(
+              (event) =>
+                event.type === "message.updated" &&
+                event.message.runId === ordinary.runId &&
+                event.message.text === "ORDINARY_B_AFTER_REPORT",
+            ),
+          );
+          assert.lengthOf(harness.continuationRequests, awaited ? 1 : 0);
+          if (!awaited) return;
+          const request = harness.continuationRequests[0]!;
+          assert.deepStrictEqual(request.backgroundResultContinuation, {
+            providerThreadId: harness.providerThread.id,
+            originRunId: source.runId,
+            taskIds: [WAKE_TASK_ID],
+          });
+          assert.equal(request.delivery, "message_text");
+          for (const marker of [
+            "ORDINARY_B_BEFORE_REPORT",
+            "ORDINARY_B_AFTER_REPORT",
+            "ORDINARY_B_NATIVE_TERMINAL",
+          ])
+            assert.include(request.detail!, marker);
+          assert.isTrue(Option.isSome(yield* request.dispatchIfCurrent!(Effect.void)));
+          assert.isTrue(Option.isNone(yield* request.dispatchIfCurrent!(Effect.void)));
+          if (interrupted) return;
+          const later = turn("ordinary-report-run-c");
+          yield* harness.runtime.startTurn(later);
+          yield* harness.offerAndWait(wakeNotification);
+          yield* harness.offerAndWait(after);
+          yield* harness.offerAndWait(result);
+          assert.lengthOf(harness.terminalEvents(), 2);
+          yield* harness.offerAndWait(
+            makeAssistantTextFrame({
+              uuid: "00000000-0000-4000-8000-000000000704",
+              text: "ORDINARY_C_OWN_ANSWER",
+            }),
+          );
+          yield* harness.offerAndWait(
+            makeResultFrame({
+              uuid: "00000000-0000-4000-8000-000000000705",
+              result: "ORDINARY_C_OWN_ANSWER",
+            }),
+          );
+          yield* harness.awaitTerminal(3);
+          assert.lengthOf(harness.continuationRequests, 1);
+          assert.notInclude(request.detail!, "ORDINARY_C_OWN_ANSWER");
+          assert.isTrue(Option.isNone(yield* request.dispatchIfCurrent!(Effect.void)));
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
+  );
+
   it.effect.each(["known", "idle-null"] as const)(
     "attributes a fresh native task generation after retiring %s",
     (oldOrigin) =>
