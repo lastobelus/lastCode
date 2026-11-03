@@ -7587,15 +7587,47 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           request: ProviderContinuationRequests.ProviderContinuationRequest,
         ): ProviderContinuationRequests.ProviderContinuationRequest => {
           const owner = request.backgroundResultContinuation!;
+          let handled = false;
           return {
             ...request,
             dispatchIfCurrent: (effect) =>
               sdkMessageLock.withPermits(1)(
                 Effect.gen(function* () {
+                  if (handled) return Option.none();
                   const owed = owedBackgroundResults.get(nativeThreadId);
-                  if (!owner.taskIds.every((taskId) => owed?.get(taskId) === owner.originRunId))
+                  if (!owner.taskIds.every((taskId) => owed?.get(taskId) === owner.originRunId)) {
+                    handled = true;
+                    const staged = stagedBackgroundResults.get(nativeThreadId);
+                    const bufferedOwner =
+                      request.delivery !== "message_text" &&
+                      staged?.runId === null &&
+                      staged.claimedOriginRunId === owner.originRunId;
+                    const remaining = [
+                      ...new Set([
+                        ...owner.taskIds,
+                        ...(bufferedOwner ? staged.claimedTaskIds : []),
+                      ]),
+                    ].filter((taskId) => owed?.get(taskId) === owner.originRunId);
+                    if (remaining.length > 0) {
+                      yield* continuationRequests.offer(
+                        ownedBackgroundContinuation(nativeThreadId, {
+                          ...request,
+                          backgroundResultContinuation: { ...owner, taskIds: remaining },
+                        }),
+                      );
+                    } else if (bufferedOwner) {
+                      // Unawaiting every claimed task still leaves native output to drain.
+                      staged.claimedOriginRunId = undefined;
+                      staged.claimedTaskIds.clear();
+                      yield* continuationRequests.offer({
+                        ...request,
+                        backgroundResultContinuation: undefined,
+                      });
+                    }
                     return Option.none();
+                  }
                   const result = yield* effect;
+                  handled = true;
                   for (const taskId of owner.taskIds) {
                     owed?.delete(taskId);
                     const generation = backgroundTaskGenerations.get(nativeThreadId)?.get(taskId);
