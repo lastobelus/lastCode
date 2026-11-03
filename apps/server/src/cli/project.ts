@@ -203,6 +203,7 @@ const projectCommandUuid = Crypto.Crypto.pipe(
 
 const makeProjectCliRuntimeLayer = (layerProjectService: typeof RuntimeLayer.layerProjectService) =>
   layerProjectService.pipe(
+    Layer.provide(ServerSettings.layer.pipe(Layer.provide(ServerSecretStore.layer))),
     Layer.provideMerge(ProjectEnrichmentService.layer),
     Layer.provideMerge(RepositoryIdentityResolver.layer),
     Layer.provideMerge(

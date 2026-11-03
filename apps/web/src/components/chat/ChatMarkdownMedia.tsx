@@ -5,6 +5,7 @@ import { TriangleAlertIcon } from "lucide-react";
 import {
   createContext,
   memo,
+  use,
   useState,
   type ComponentProps,
   type CSSProperties,
@@ -107,12 +108,21 @@ function ChatMarkdownMediaUnavailableLabel(props: {
       : props.kind === "video"
         ? "Video unavailable"
         : "Image unavailable";
+  const text = [label, props.alt, props.detail].filter(Boolean).join(" · ");
   return (
-    <span data-thread-find-ignore className="inline-flex items-center gap-1.5">
+    <span
+      data-thread-find-ignore
+      className="inline-flex items-center gap-1.5"
+      data-markdown-copy-media-text={text}
+    >
       <TriangleAlertIcon aria-hidden className="size-3.5 shrink-0" />
-      {[label, props.alt, props.detail].filter(Boolean).join(" · ")}
+      {text}
     </span>
   );
+}
+
+function MarkdownImageActions(props: ComponentProps<typeof MediaActions>) {
+  return use(MarkdownLinkContext) ? props.children : <MediaActions {...props} />;
 }
 
 export function ChatMarkdownImageFallback(props: {
@@ -134,7 +144,7 @@ export function ChatMarkdownImageFallback(props: {
     </span>
   );
   return props.actionsSource ? (
-    <MediaActions source={props.actionsSource}>{content}</MediaActions>
+    <MarkdownImageActions source={props.actionsSource}>{content}</MarkdownImageActions>
   ) : (
     content
   );
@@ -196,7 +206,7 @@ export function ChatMarkdownImage(props: {
 
   if (settled) {
     return (
-      <MediaActions source={props.actionsSource}>
+      <MarkdownImageActions source={props.actionsSource}>
         <img
           {...props.imageProps}
           ref={markLoadedIfComplete}
@@ -215,7 +225,7 @@ export function ChatMarkdownImage(props: {
           {...expandableMarkdownImageProps(props.onImageExpand, props.alt)}
           {...imageEvents(src)}
         />
-      </MediaActions>
+      </MarkdownImageActions>
     );
   }
   if (!props.standalone) {
@@ -237,7 +247,7 @@ export function ChatMarkdownImage(props: {
     );
   }
   return (
-    <MediaActions source={props.actionsSource}>
+    <MarkdownImageActions source={props.actionsSource}>
       <span
         id={props.imageProps?.id}
         data-markdown-copy={props.copyMarkdown}
@@ -268,7 +278,7 @@ export function ChatMarkdownImage(props: {
           />
         ) : null}
       </span>
-    </MediaActions>
+    </MarkdownImageActions>
   );
 }
 
@@ -283,6 +293,30 @@ export function ChatMarkdownVideo(props: {
   readonly actionsSource?: MediaActionSource | undefined;
   readonly onRetry?: (() => Promise<unknown>) | undefined;
 }) {
+  const insideLink = use(MarkdownLinkContext);
+  if (insideLink) {
+    return props.src && !props.sourceFailed ? (
+      <video
+        src={props.src}
+        aria-label={props.alt}
+        preload="metadata"
+        playsInline
+        controls={false}
+        tabIndex={-1}
+        data-markdown-copy={props.copyMarkdown}
+        className={CHAT_MARKDOWN_MEDIA_BOUNDS_CLASS_NAME}
+        style={props.style}
+      />
+    ) : (
+      <span
+        data-thread-find-ignore
+        data-markdown-copy={props.copyMarkdown}
+        data-markdown-copy-media-text={props.alt}
+      >
+        {props.alt}
+      </span>
+    );
+  }
   return (
     <MediaVideoPlayer
       key={props.mediaIdentity ?? props.copyMarkdown ?? props.src}
