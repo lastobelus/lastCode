@@ -1,5 +1,6 @@
 import {
   EnvironmentAuthInvalidError,
+  EnvironmentInternalError,
   type AuthBrowserSessionResult,
   type AuthCreatePairingCredentialInput,
   type AuthSessionState,
@@ -8,10 +9,11 @@ import {
 import { createBrowserHistory } from "@tanstack/react-router";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import { HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { installEnvironmentHttpTest } from "../test/environmentHttpTest";
-import { __setPrimaryHttpRunnerForTests } from "./lib/runtime";
+import { __setPrimaryHttpRunnerForTests, type PrimaryHttpEffectRunner } from "./lib/runtime";
 
 type TestWindow = {
   location: URL;
@@ -74,6 +76,21 @@ function installTestBrowser(url: string) {
   vi.stubGlobal("document", { title: "T3 Code" });
 
   return testWindow;
+}
+
+function installDesktopBootstrap() {
+  const testWindow = installTestBrowser("http://localhost/");
+  testWindow.desktopBridge = {
+    getLocalEnvironmentBootstraps: () => [
+      {
+        id: "primary",
+        label: "Local environment",
+        httpBaseUrl: "http://localhost:3773",
+        wsBaseUrl: "ws://localhost:3773",
+        bootstrapToken: "desktop-bootstrap-token",
+      },
+    ],
+  } as unknown as DesktopBridge;
 }
 
 function sequence<A>(...values: ReadonlyArray<A>) {
@@ -163,6 +180,90 @@ describe("resolveInitialServerAuthGateState", () => {
 
     expect(testApi.calls.session).toBe(2);
     expect(testApi.calls.browserSession).toEqual([{ credential: "desktop-bootstrap-token" }]);
+  });
+
+  it("keeps retrying desktop session bootstrap across delayed credential prompts", async () => {
+    vi.useFakeTimers();
+    installDesktopBootstrap();
+    let attempts = 0;
+    const request = HttpClientRequest.get("http://localhost/api/auth/session");
+    const response = HttpClientResponse.fromWeb(
+      request,
+      new Response("Internal Server Error", { status: 500 }),
+    );
+    const runner: PrimaryHttpEffectRunner = async <A>() => {
+      attempts += 1;
+      if (attempts < 3) {
+        await new Promise((resolve) => setTimeout(resolve, 20_000));
+        throw new HttpClientError.HttpClientError({
+          reason: new HttpClientError.StatusCodeError({ request, response }),
+        });
+      }
+      return unauthenticatedSession(DESKTOP_AUTH) as A;
+    };
+    __setPrimaryHttpRunnerForTests(runner);
+
+    const { fetchSessionState } = await import("./environments/primary");
+
+    const sessionPromise = fetchSessionState();
+    await vi.advanceTimersByTimeAsync(41_000);
+
+    await expect(sessionPromise).resolves.toEqual(unauthenticatedSession(DESKTOP_AUTH));
+    expect(attempts).toBe(3);
+  });
+
+  it("surfaces genuine desktop internal errors without an hour-long retry", async () => {
+    vi.useFakeTimers();
+    installDesktopBootstrap();
+    let attempts = 0;
+    const runner: PrimaryHttpEffectRunner = async () => {
+      attempts += 1;
+      await new Promise((resolve) => setTimeout(resolve, 20_000));
+      throw new EnvironmentInternalError({
+        code: "internal_error",
+        reason: "internal_error",
+        traceId: "trace-persistent-internal-error",
+      });
+    };
+    __setPrimaryHttpRunnerForTests(runner);
+
+    const { fetchSessionState, PrimaryEnvironmentRequestError } =
+      await import("./environments/primary");
+
+    const sessionPromise = fetchSessionState();
+    const rejection = expect(sessionPromise).rejects.toBeInstanceOf(PrimaryEnvironmentRequestError);
+    await vi.advanceTimersByTimeAsync(20_000);
+
+    await rejection;
+    expect(attempts).toBe(1);
+  });
+
+  it("keeps ordinary desktop gateway retries on the short bootstrap deadline", async () => {
+    vi.useFakeTimers();
+    installDesktopBootstrap();
+    let attempts = 0;
+    const request = HttpClientRequest.get("http://localhost/api/auth/session");
+    const response = HttpClientResponse.fromWeb(
+      request,
+      new Response("Bad Gateway", { status: 502 }),
+    );
+    const runner: PrimaryHttpEffectRunner = async () => {
+      attempts += 1;
+      throw new HttpClientError.HttpClientError({
+        reason: new HttpClientError.StatusCodeError({ request, response }),
+      });
+    };
+    __setPrimaryHttpRunnerForTests(runner);
+
+    const { fetchSessionState, PrimaryEnvironmentRequestError } =
+      await import("./environments/primary");
+
+    const sessionPromise = fetchSessionState();
+    const rejection = expect(sessionPromise).rejects.toBeInstanceOf(PrimaryEnvironmentRequestError);
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    await rejection;
+    expect(attempts).toBe(31);
   });
 
   it("takes a pairing token from the location hash and strips it immediately", async () => {
