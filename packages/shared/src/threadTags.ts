@@ -1,4 +1,37 @@
 import { scoreSubsequenceMatch } from "./searchRanking.ts";
+import type { OrchestrationV2ThreadShell } from "@t3tools/contracts";
+
+type DiscoveryShell = Pick<
+  OrchestrationV2ThreadShell,
+  "id" | "title" | "tags" | "projectId" | "archivedAt" | "deletedAt" | "lineage" | "delegatedFrom"
+>;
+
+/** Existing removals also report changes to archived/omitted rows; text streaming is absent. */
+export function threadTagDiscoveryRevision(input: {
+  readonly generation: number;
+  readonly removals: ReadonlyMap<string, number>;
+  readonly snapshot: {
+    readonly threads: readonly DiscoveryShell[];
+    readonly archivedThreads?: readonly DiscoveryShell[];
+  } | null;
+}): string {
+  return JSON.stringify([
+    input.generation,
+    [...input.removals],
+    [...(input.snapshot?.threads ?? []), ...(input.snapshot?.archivedThreads ?? [])].map(
+      (thread) => [
+        thread.id,
+        thread.title,
+        thread.tags,
+        thread.projectId,
+        thread.archivedAt,
+        thread.deletedAt,
+        thread.lineage,
+        thread.delegatedFrom,
+      ],
+    ),
+  ]);
+}
 
 /** Parent paths are derived for discovery; assignments remain exact strings. */
 export function threadTagPaths(tag: string): string[] {

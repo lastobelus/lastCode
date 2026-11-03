@@ -1,35 +1,57 @@
 import {
   createEnvironmentRpcCommand,
   createEnvironmentRpcQueryAtomFamily,
+  createEnvironmentQueryAtomFamily,
 } from "@t3tools/client-runtime/state/runtime";
 import { enabledEnvironmentIds } from "@t3tools/client-runtime/state/connections";
-import { ORCHESTRATION_V2_WS_METHODS, THREAD_TAG_RPC_METHODS } from "@t3tools/contracts";
+import {
+  ORCHESTRATION_V2_WS_METHODS,
+  THREAD_TAG_RPC_METHODS,
+  type ThreadTagVocabularyInput,
+  type ThreadTagVocabularyEntry,
+} from "@t3tools/contracts";
+import { threadTagDiscoveryRevision } from "@t3tools/shared/threadTags";
+import { request } from "@t3tools/client-runtime/rpc";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import { Atom } from "effect/reactivity";
 import { create } from "zustand";
 import { connectionAtomRuntime } from "../../connection/runtime";
 import { environmentCatalog } from "../../connection/catalog";
-import { threadEnvironment } from "../../state/threads";
+import { environmentShell } from "../../state/shell";
 import { useAtomValue } from "@effect/atom-react";
 
 // The existing shell stream invalidates discovery. Streaming text is deliberately absent.
 const tagRevision = Atom.family(
-  (environmentId: Parameters<typeof threadEnvironment.snapshotAtom>[0]) =>
-    Atom.map(threadEnvironment.snapshotAtom(environmentId), (snapshot) =>
-      JSON.stringify(
-        snapshot?.threads.map((thread) => [
-          thread.id,
-          thread.projectId,
-          thread.tags,
-          thread.archivedAt,
-          thread.deletedAt,
-        ]),
-      ),
+  (environmentId: Parameters<typeof environmentShell.stateValueAtom>[0]) =>
+    Atom.map(environmentShell.stateValueAtom(environmentId), (state) =>
+      threadTagDiscoveryRevision({
+        generation: state.generation,
+        removals: state.removedAt,
+        snapshot: Option.getOrNull(state.snapshot),
+      }),
     ),
 );
 
-export const tagVocabulary = createEnvironmentRpcQueryAtomFamily(connectionAtomRuntime, {
+const loadVocabulary = Effect.fn("ThreadTags.vocabulary")(function* (
+  input: ThreadTagVocabularyInput,
+) {
+  const entries: ThreadTagVocabularyEntry[] = [];
+  let cursor: number | undefined;
+  do {
+    const page = yield* request(THREAD_TAG_RPC_METHODS.vocabulary, {
+      ...input,
+      limit: 100,
+      ...(cursor === undefined ? {} : { cursor }),
+    });
+    entries.push(...page.entries);
+    cursor = page.nextCursor ?? undefined;
+  } while (cursor !== undefined);
+  return { entries };
+});
+export const tagVocabulary = createEnvironmentQueryAtomFamily(connectionAtomRuntime, {
   label: "Thread tag suggestions",
-  tag: THREAD_TAG_RPC_METHODS.vocabulary,
+  execute: loadVocabulary,
   staleTimeMs: 0,
   refreshTrigger: ({ environmentId }) => tagRevision(environmentId),
 });

@@ -10,7 +10,7 @@ import { rankThreadTagVocabulary } from "@t3tools/shared/threadTags";
 import { AsyncResult, Atom } from "effect/reactivity";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { useDeferredValue, useState } from "react";
+import { useState } from "react";
 import { CheckIcon, PlusIcon } from "lucide-react";
 import { Command, CommandInput, CommandItem, CommandList } from "../../components/ui/command";
 import { Button } from "../../components/ui/button";
@@ -28,7 +28,6 @@ const vocabularyPages = Atom.family((key: string) => {
   const input: ThreadTagVocabularyInput = {
     query: target.query,
     archived: target.archived,
-    cursor: target.cursor,
     limit: 100,
     ...(target.projectId
       ? {
@@ -41,13 +40,11 @@ const vocabularyPages = Atom.family((key: string) => {
     const entries = new Map<string, ThreadTagVocabularyEntry>();
     let loading = false;
     let failed = false;
-    let hasMore = false;
     for (const environmentId of target.environmentIds) {
       const result = get(tagVocabulary({ environmentId, input }));
       loading ||= result.waiting || AsyncResult.isInitial(result);
       failed ||= AsyncResult.isFailure(result);
       const page = Option.getOrNull(AsyncResult.value(result));
-      hasMore ||= page?.nextCursor != null;
       for (const entry of page?.entries ?? []) {
         const previous = entries.get(entry.tag);
         entries.set(entry.tag, {
@@ -58,11 +55,12 @@ const vocabularyPages = Atom.family((key: string) => {
       }
     }
     const values = [...entries.values()];
+    const ranked = target.projectId ? values : rankThreadTagVocabulary(values, target.query);
     return {
-      entries: target.projectId ? values : rankThreadTagVocabulary(values, target.query),
+      entries: ranked.slice(target.cursor, target.cursor + 100),
       loading,
       failed,
-      hasMore,
+      hasMore: ranked.length > target.cursor + 100,
     };
   });
 });
@@ -90,12 +88,11 @@ export function TagPicker({
   const [projectOnly, setProjectOnly] = useState(false);
   const [cursor, setCursor] = useState(0);
   const [highlighted, setHighlighted] = useState<string | null>(null);
-  const deferredQuery = useDeferredValue(query);
   const key = JSON.stringify({
     environmentIds,
     projectId,
     projectOnly,
-    query: deferredQuery,
+    query,
     archived,
     cursor,
   });
@@ -103,6 +100,7 @@ export function TagPicker({
   const candidate = query.trim().replace(/^#/, "");
   const canCreate =
     allowCreate &&
+    !result.loading &&
     candidate.length > 0 &&
     isThreadTag(candidate) &&
     !result.entries.some((entry) => entry.tag === candidate) &&
@@ -129,7 +127,8 @@ export function TagPicker({
               event.key !== "Enter" ||
               event.nativeEvent.isComposing ||
               event.keyCode === 229 ||
-              disabled
+              disabled ||
+              result.loading
             )
               return;
             const tag =
@@ -148,7 +147,7 @@ export function TagPicker({
             <CommandItem
               key={entry.tag}
               value={entry.tag}
-              disabled={disabled}
+              disabled={disabled || result.loading}
               onClick={() => onSelect(entry.tag)}
             >
               <span className="min-w-0 flex-1 truncate font-mono">#{entry.tag}</span>
@@ -162,7 +161,11 @@ export function TagPicker({
             </CommandItem>
           ))}
           {canCreate ? (
-            <CommandItem value={candidate} disabled={disabled} onClick={() => onSelect(candidate)}>
+            <CommandItem
+              value={candidate}
+              disabled={disabled || result.loading}
+              onClick={() => onSelect(candidate)}
+            >
               <PlusIcon className="size-3.5" />
               <span className="truncate">Add #{candidate}</span>
             </CommandItem>

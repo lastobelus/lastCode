@@ -76,7 +76,7 @@ export function TagPickerSheet(props: {
         {discovery.loading ? <Text className="text-foreground-muted">Loading tags…</Text> : null}
         {discovery.error ? (
           <Text accessibilityRole="alert" className="text-danger-foreground">
-            Could not load tags.
+            {discovery.error}
           </Text>
         ) : null}
         {tags

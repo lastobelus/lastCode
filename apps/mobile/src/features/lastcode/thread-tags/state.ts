@@ -53,6 +53,8 @@ export interface TagScope {
   readonly projectId?: ProjectId;
 }
 
+import { threadTagDiscoveryRevision } from "@t3tools/shared/threadTags";
+import { environmentThreadShells } from "../../../state/threads";
 import { collectTagPages } from "./pagination";
 export function useTagDiscovery(
   scopes: readonly TagScope[],
@@ -68,17 +70,14 @@ export function useTagDiscovery(
         const targets: TagScope[] = JSON.parse(scopeKey);
         return JSON.stringify(
           targets.map((scope) => {
-            const snapshot = get(environmentShell.stateValueAtom(scope.environmentId)).snapshot;
+            const state = get(environmentShell.stateValueAtom(scope.environmentId));
             return [
               get(serverEnvironment.hiddenThreadTagsAtom(scope.environmentId)),
-              Option.isSome(snapshot)
-                ? snapshot.value.threads.map((thread) => [
-                    thread.id,
-                    thread.tags,
-                    thread.archivedAt,
-                    thread.projectId,
-                  ])
-                : [],
+              threadTagDiscoveryRevision({
+                generation: state.generation,
+                removals: state.removedAt,
+                snapshot: Option.getOrNull(state.snapshot),
+              }),
             ];
           }),
         );
@@ -89,10 +88,23 @@ export function useTagDiscovery(
     () =>
       connectionAtomRuntime.atom((get) => {
         get(revisionAtom);
+        const alreadyHidden = get(environmentThreadShells.hiddenThreadKeysAtom);
+        const loadedKeys = new Set(
+          get(environmentThreadShells.threadRefsAtom).map((ref) =>
+            scopedThreadKey(ref.environmentId, ref.threadId),
+          ),
+        );
+        const hidingAnywhere = get(environmentThreadShells.anyEnvironmentHidingAtom);
+        const targets: TagScope[] = JSON.parse(scopeKey);
+        const hiddenTags = new Map(
+          targets.map((scope) => [
+            scope.environmentId,
+            get(serverEnvironment.hiddenThreadTagsAtom(scope.environmentId)),
+          ]),
+        );
         return Effect.tryPromise({
           try: async (signal) => {
-            const targets: TagScope[] = JSON.parse(scopeKey);
-            const pages = await Promise.all(
+            const outcomes = await Promise.allSettled(
               targets.map(async (scope) => {
                 if (tag !== null) {
                   const threads = await collectTagPages(
@@ -112,33 +124,7 @@ export function useTagDiscovery(
                     },
                     () => !signal.aborted,
                   );
-                  const snapshot = registry.get(
-                    environmentShell.stateValueAtom(scope.environmentId),
-                  ).snapshot;
-                  const byId = new Map(
-                    (Option.isSome(snapshot) ? snapshot.value.threads : []).map((thread) => [
-                      thread.id,
-                      thread,
-                    ]),
-                  );
-                  for (const thread of threads) byId.set(thread.id, thread);
-                  const hidden = hiddenThreadKeys([
-                    {
-                      environmentId: scope.environmentId,
-                      threads: [...byId.values()],
-                      hiddenTags: registry.get(
-                        serverEnvironment.hiddenThreadTagsAtom(scope.environmentId),
-                      ),
-                    },
-                  ]);
-                  return {
-                    entries: [],
-                    threads: threads
-                      .filter(
-                        (thread) => !hidden.has(scopedThreadKey(scope.environmentId, thread.id)),
-                      )
-                      .map((thread) => presentThreadShell(scope.environmentId, thread)),
-                  };
+                  return { scope, entries: [], shells: threads };
                 }
                 const entries = await collectTagPages(
                   async (cursor) => {
@@ -157,12 +143,32 @@ export function useTagDiscovery(
                   },
                   () => !signal.aborted,
                 );
-                return { entries, threads: [] };
+                return { scope, entries, shells: [] };
               }),
+            );
+            const pages = outcomes.flatMap((outcome) =>
+              outcome.status === "fulfilled" ? [outcome.value] : [],
+            );
+            const hidden = hiddenThreadKeys(
+              pages.map((page) => ({
+                environmentId: page.scope.environmentId,
+                threads: page.shells,
+                hiddenTags: hiddenTags.get(page.scope.environmentId) ?? null,
+              })),
+              alreadyHidden,
+              loadedKeys,
+              hidingAnywhere,
             );
             return {
               entries: pages.flatMap((page) => page.entries),
-              threads: pages.flatMap((page) => page.threads),
+              threads: pages.flatMap((page) =>
+                page.shells
+                  .filter(
+                    (thread) => !hidden.has(scopedThreadKey(page.scope.environmentId, thread.id)),
+                  )
+                  .map((thread) => presentThreadShell(page.scope.environmentId, thread)),
+              ),
+              incomplete: outcomes.some((outcome) => outcome.status === "rejected"),
             };
           },
           catch: (error) => (error instanceof Error ? error : new Error("Could not load tags.")),
@@ -174,7 +180,13 @@ export function useTagDiscovery(
   return {
     entries: state.data?.entries ?? [],
     threads: state.data?.threads ?? [],
-    error: state.error,
+    error:
+      state.error ??
+      (state.data?.incomplete
+        ? tag === null
+          ? "Could not load tags from every connection. This list may be incomplete."
+          : "Could not search every connection. Results may be incomplete."
+        : null),
     loading: state.isPending,
   };
 }
