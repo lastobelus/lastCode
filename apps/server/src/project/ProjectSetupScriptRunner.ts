@@ -26,6 +26,7 @@ import * as Schema from "effect/Schema";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
+import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
 import * as ProjectService from "./ProjectService.ts";
 
 export interface ProjectSetupScriptRunnerResultNoScript {
@@ -90,7 +91,13 @@ export class ProjectSetupScriptOperationError extends Schema.TaggedError<Project
     projectId: Schema.optional(Schema.String),
     projectCwd: Schema.optional(Schema.String),
     worktreePath: Schema.String,
-    operation: Schema.Literals(["readThread", "resolveProject", "readSettings", "openTerminal"]),
+    operation: Schema.Literals([
+      "readThread",
+      "resolveProject",
+      "readSettings",
+      "admitSetupScript",
+      "openTerminal",
+    ]),
     cause: Schema.Defect(),
   },
 ) {
@@ -205,6 +212,7 @@ export const make = Effect.gen(function* () {
   const projects = yield* ProjectService.ProjectService;
   const threads = yield* ProjectionStore.ProjectionStoreV2;
   const terminalManager = yield* TerminalManager.TerminalManager;
+  const updateDrainAdmission = yield* UpdateDrainAdmission.UpdateDrainAdmission;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const crypto = yield* Crypto.Crypto;
   const serviceScope = yield* Effect.scope;
@@ -497,83 +505,101 @@ export const make = Effect.gen(function* () {
       ? (yield* crypto.randomUUIDv4().pipe(Effect.orDie)).replaceAll("-", "")
       : null;
     const pendingKey = JSON.stringify([input.threadId, terminalId]);
-    const previousWrite = pendingWrites.get(pendingKey);
-    if (previousWrite !== undefined) yield* Fiber.interrupt(previousWrite);
-    const events = yield* stageTerminalEvents({ threadId: input.threadId, terminalId });
-    const echoedWrapperLines: string[] = [];
-    // Subscribe before opening so neither startup activity nor the sentinel can race the listeners.
-    const observed =
-      observe && completionToken
-        ? yield* observeTerminalCompletion({
+    const { observed, readiness, completionShell, commandLine } = yield* updateDrainAdmission
+      .admit(
+        "setup-script",
+        Effect.gen(function* () {
+          const previousWrite = pendingWrites.get(pendingKey);
+          if (previousWrite !== undefined) yield* Fiber.interrupt(previousWrite);
+          const events = yield* stageTerminalEvents({ threadId: input.threadId, terminalId });
+          const echoedWrapperLines: string[] = [];
+          // Subscribe before opening so neither startup activity nor the sentinel can race the listeners.
+          const observed =
+            observe && completionToken
+              ? yield* observeTerminalCompletion({
+                  threadId: input.threadId,
+                  terminalId,
+                  subscribe: events.subscribe,
+                  sentinel: completionSentinel(completionToken),
+                  sentinelPattern: completionSentinelPattern(completionToken),
+                  echoedWrapperLines,
+                  onOutputLine: observe.onOutputLine,
+                })
+              : undefined;
+          const readiness = yield* watchShellReadiness({
             threadId: input.threadId,
             terminalId,
+            onStartupPrompt: observed?.flushPartialLine ?? Effect.void,
             subscribe: events.subscribe,
-            sentinel: completionSentinel(completionToken),
-            sentinelPattern: completionSentinelPattern(completionToken),
-            echoedWrapperLines,
-            onOutputLine: observe.onOutputLine,
-          })
-        : undefined;
-    const readiness = yield* watchShellReadiness({
-      threadId: input.threadId,
-      terminalId,
-      onStartupPrompt: observed?.flushPartialLine ?? Effect.void,
-      subscribe: events.subscribe,
-    });
-    const { completionShell, commandLine } = yield* Effect.gen(function* () {
-      const shell = yield* terminalManager
-        .open({
-          threadId: input.threadId,
-          terminalId,
-          cwd,
-          worktreePath: input.worktreePath,
-          env: { ...env, NO_COLOR: "1", FORCE_COLOR: "0" },
-        })
-        .pipe(
-          Effect.andThen(() =>
-            terminalManager
-              .getShell({ threadId: input.threadId, terminalId })
-              .pipe(Effect.catchTags({ TerminalNotRunningError: () => Effect.succeed(null) })),
-          ),
-          Effect.mapError(
-            (cause) =>
-              new ProjectSetupScriptOperationError({
-                ...errorContext,
-                operation: "openTerminal",
-                cause,
+          });
+          const { completionShell, commandLine } = yield* Effect.gen(function* () {
+            const shell = yield* terminalManager
+              .open({
+                threadId: input.threadId,
+                terminalId,
+                cwd,
+                worktreePath: input.worktreePath,
+                env: { ...env, NO_COLOR: "1", FORCE_COLOR: "0" },
+              })
+              .pipe(
+                Effect.andThen(() =>
+                  terminalManager
+                    .getShell({ threadId: input.threadId, terminalId })
+                    .pipe(Effect.catchTags({ TerminalNotRunningError: () => Effect.succeed(null) })),
+                ),
+                Effect.mapError(
+                  (cause) =>
+                    new ProjectSetupScriptOperationError({
+                      ...errorContext,
+                      operation: "openTerminal",
+                      cause,
+                    }),
+                ),
+              );
+            if (shell === null) {
+              yield* observed?.abandon ?? Effect.void;
+              return { completionShell: null, commandLine: null };
+            }
+            const completionShell = resolveCompletionShell(shell);
+            let commandLine = script.command;
+            if (observe && completionToken) {
+              if (completionShell === null) {
+                yield* terminalManager.closeIdle({ threadId: input.threadId, terminalId });
+                return yield* new ProjectSetupScriptUnsupportedShellError({ shell });
+              }
+              commandLine = wrapCommandForCompletion(
+                script.command,
+                completionShell,
+                completionSentinel(completionToken),
+              );
+            }
+            echoedWrapperLines.push(...commandLine.split("\r").filter((line) => line.length > 0));
+            return { completionShell, commandLine };
+          }).pipe(
+            Effect.onError(() =>
+              Effect.sync(() => {
+                observed?.unsubscribe();
+                readiness.unsubscribe();
+                events.unsubscribe();
               }),
-          ),
-        );
-      if (shell === null) {
-        yield* observed?.abandon ?? Effect.void;
-        return { completionShell: null, commandLine: null };
-      }
-      const completionShell = resolveCompletionShell(shell);
-      let commandLine = script.command;
-      if (observe && completionToken) {
-        if (completionShell === null) {
-          yield* terminalManager.closeIdle({ threadId: input.threadId, terminalId });
-          return yield* new ProjectSetupScriptUnsupportedShellError({ shell });
-        }
-        commandLine = wrapCommandForCompletion(
-          script.command,
-          completionShell,
-          completionSentinel(completionToken),
-        );
-      }
-      echoedWrapperLines.push(...commandLine.split("\r").filter((line) => line.length > 0));
-      return { completionShell, commandLine };
-    }).pipe(
-      Effect.onError(() =>
-        Effect.sync(() => {
-          observed?.unsubscribe();
-          readiness.unsubscribe();
-          events.unsubscribe();
-        }),
-      ),
-    );
+            ),
+          );
 
-    yield* events.activate;
+          yield* events.activate;
+          return { observed, readiness, completionShell, commandLine };
+        }),
+      )
+      .pipe(
+        Effect.catchTag(["UpdateDrainAdmissionError", "UpdateDrainError"], (cause) =>
+          Effect.fail(
+            new ProjectSetupScriptOperationError({
+              ...errorContext,
+              operation: "admitSetupScript",
+              cause,
+            }),
+          ),
+        ),
+      );
 
     // Return once the terminal exists so callers can show it while a startup prompt waits.
     // PowerShell and cmd have no line-editor signal.
@@ -585,11 +611,16 @@ export const make = Effect.gen(function* () {
       Effect.flatMap((shell) =>
         shell === "exited" || commandLine === null
           ? Effect.void
-          : terminalManager.write({
-              threadId: input.threadId,
-              terminalId,
-              data: projectScriptTerminalInput(commandLine),
-            }),
+          : updateDrainAdmission.admit(
+              "setup-script",
+              Effect.suspend(() =>
+                terminalManager.write({
+                  threadId: input.threadId,
+                  terminalId,
+                  data: projectScriptTerminalInput(commandLine),
+                }),
+              ),
+            ),
       ),
       Effect.onError(() => observed?.abandon ?? Effect.void),
       Effect.catchCause((cause) =>
