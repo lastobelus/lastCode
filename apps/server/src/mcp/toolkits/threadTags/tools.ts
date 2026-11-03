@@ -1,4 +1,4 @@
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import {
   McpCapabilityUnavailableError,
   EnvironmentId,
@@ -18,7 +18,7 @@ import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementSer
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
 const dependencies = [
-  Crypto.Crypto,
+  SecureRandom.SecureRandom,
   ThreadTags.ThreadTags,
   ThreadManagement.ThreadManagementService,
   McpInvocationContext.McpInvocationContext,
