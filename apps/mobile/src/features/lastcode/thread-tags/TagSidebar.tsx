@@ -1,5 +1,8 @@
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
-import { scoreSubsequenceMatch } from "@t3tools/shared/searchRanking";
+import type { EnvironmentThreadSearchMatch } from "@t3tools/client-runtime/state/thread-search";
+import { requestThreadMessageJump } from "../../threads/threadMessageJump";
+import { scopedThreadKey } from "../../../lib/scopedEntities";
+import { taggedThreadSearch } from "./search";
 import { useState } from "react";
 import { Pressable, ScrollView, View } from "react-native";
 import { AppText as Text } from "../../../components/ui/AppText";
@@ -11,6 +14,7 @@ export function useTagSidebar(
   scopes: readonly TagScope[],
   onSelect: (thread: EnvironmentThreadShell) => void,
   searchQuery: string,
+  messageMatches: ReadonlyMap<string, EnvironmentThreadSearchMatch>,
 ) {
   const { sidebar: enabled } = useTagPreferences();
   const [selected, setSelected] = useState<string | null>(null);
@@ -41,9 +45,7 @@ export function useTagSidebar(
   ) : null;
   const needle = searchQuery.trim().toLocaleLowerCase();
   const threads = discovery.threads.filter(
-    (thread) =>
-      needle.length === 0 ||
-      scoreSubsequenceMatch(thread.title.toLocaleLowerCase(), needle) !== null,
+    (thread) => taggedThreadSearch(thread, searchQuery, messageMatches).visible,
   );
   const results =
     tag === null ? null : (
@@ -72,7 +74,15 @@ export function useTagSidebar(
             accessibilityRole="button"
             accessibilityLabel={thread.title}
             className="min-h-12 border-b border-border px-4 py-3"
-            onPress={() => onSelect(thread)}
+            onPress={() => {
+              const match = taggedThreadSearch(thread, searchQuery, messageMatches);
+              if (match.messageId)
+                requestThreadMessageJump(
+                  scopedThreadKey(thread.environmentId, thread.id),
+                  match.messageId,
+                );
+              onSelect(thread);
+            }}
           >
             <Text className="text-base text-foreground">{thread.title}</Text>
           </Pressable>

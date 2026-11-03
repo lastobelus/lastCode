@@ -242,13 +242,7 @@ function ThreadNavigationSidebarPane(
   // An archived project's filter reads as all projects, matching the filter menu.
   const selectedProjectScope =
     pickableProjectGroups(projectScopes).find((scope) => scope.key === resolvedProjectKey) ?? null;
-  const tagSidebar = useTagSidebar(
-    selectedProjectScope === null
-      ? searchEnvironmentIds.map((environmentId) => ({ environmentId }))
-      : selectedProjectScope.projectRefs,
-    props.onSelectThread,
-    props.searchQuery,
-  );
+
   const threadSearch = useThreadSearch(
     searchEnvironmentIds,
     props.searchQuery,
@@ -259,6 +253,14 @@ function ThreadNavigationSidebarPane(
   // This map reaches LegendList's extraData, which re-renders every row whenever it changes
   // identity; the hook keeps it stable.
   const threadSearchMatchByKey = useThreadListSearchMatches(threads, threadSearch);
+  const tagSidebar = useTagSidebar(
+    selectedProjectScope === null
+      ? searchEnvironmentIds.map((environmentId) => ({ environmentId }))
+      : selectedProjectScope.projectRefs,
+    props.onSelectThread,
+    props.searchQuery,
+    threadSearchMatchByKey,
+  );
   const selectedProjectKey = selectedProjectScope?.key ?? null;
   const projectByKey = useMemo(() => {
     const map = new Map<string, EnvironmentProject>();
