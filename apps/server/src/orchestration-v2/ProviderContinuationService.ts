@@ -213,6 +213,7 @@ export const layer = Layer.effectDiscard(
           threadId: request.threadId,
           messageId,
           text: request.detail ?? CONTINUATION_MESSAGE_TEXT,
+          backgroundResultContinuation: request.backgroundResultContinuation,
           notification: request.notification ?? {
             source: { kind: "background_task" },
             outcome: "updated",

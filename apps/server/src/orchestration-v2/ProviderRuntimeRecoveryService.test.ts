@@ -1114,7 +1114,8 @@ it.effect(
 
           providerInstanceId: claudeInstanceId,
           status: "idle",
-          pendingBackgroundTasks: [{ taskId: "bg-settled", description: "sleep 30" }],
+          pendingBackgroundTasks: [],
+          owedBackgroundResults: [{ taskId: "bg-settled", originRunId: settledRunId }],
         },
         {
           id: activeProviderThreadId,
@@ -1254,6 +1255,7 @@ it.effect(
       for (const event of providerThreadEvents) {
         if (event.type !== "provider-thread.updated") continue;
         assert.deepEqual(event.payload.pendingBackgroundTasks ?? [], []);
+        assert.deepEqual(event.payload.owedBackgroundResults ?? [], []);
       }
       const idleThreadEvent = providerThreadEvents.find(
         (event) =>

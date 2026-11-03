@@ -7109,17 +7109,63 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
     }
+    const background = command.backgroundResultContinuation;
+    const backgroundSource =
+      background === undefined
+        ? undefined
+        : projection.runs.find((run) => run.id === background.originRunId);
+    if (background !== undefined) {
+      const providerThread = projection.providerThreads.find(
+        (thread) => thread.id === background.providerThreadId,
+      );
+      if (
+        command.createdBy !== "agent" ||
+        (command.creationSource !== "provider" && command.creationSource !== "server") ||
+        projection.thread.archivePending != null ||
+        (projection.thread.lineage.independent === true &&
+          (backgroundSource?.delegatedTaskId !== undefined ||
+            backgroundSource?.remoteDelegation !== undefined)) ||
+        backgroundSource === undefined ||
+        backgroundSource.providerThreadId !== background.providerThreadId ||
+        !remoteDelegationMayStart(projection.thread, backgroundSource) ||
+        ["cancelled", "interrupted", "failed", "rolled_back"].includes(backgroundSource.status) ||
+        background.taskIds.length === 0 ||
+        !background.taskIds.every((taskId) =>
+          providerThread?.owedBackgroundResults?.some(
+            (owed) => owed.taskId === taskId && owed.originRunId === background.originRunId,
+          ),
+        ) ||
+        projection.runs.some(
+          (run) =>
+            run.backgroundResultContinuation?.providerThreadId === background.providerThreadId &&
+            run.backgroundResultContinuation.originRunId === background.originRunId &&
+            run.backgroundResultContinuation.taskIds.some((taskId) =>
+              background.taskIds.includes(taskId),
+            ),
+        ) ||
+        (yield* stopReachedRun(command, command.threadId, background.originRunId))
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Background result ownership is no longer live.",
+        });
+      }
+    }
     const restartSource = projection.runs.find(
       (run) => run.id === command.restartContinuationOfRunId,
     );
     let continuedTaskId =
       (action?.owner.delegationId === undefined ? action?.owner.taskId : undefined) ??
       restartSource?.delegatedTaskId ??
-      continuationSource?.delegatedTaskId;
+      continuationSource?.delegatedTaskId ??
+      backgroundSource?.delegatedTaskId;
     let continuedRemoteDelegation =
       (action?.owner.delegationId === undefined
         ? restartSource?.remoteDelegation
-        : actionSource?.remoteDelegation) ?? continuationSource?.remoteDelegation;
+        : actionSource?.remoteDelegation) ??
+      continuationSource?.remoteDelegation ??
+      backgroundSource?.remoteDelegation;
 
     if (projection.thread.archivedAt !== null || projection.thread.deletedAt !== null) {
       return yield* new OrchestratorDispatchError({
@@ -7716,6 +7762,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.restartContinuationOfRunId === undefined
           ? {}
           : { restartContinuationOfRunId: command.restartContinuationOfRunId }),
+        ...(command.backgroundResultContinuation === undefined
+          ? {}
+          : { backgroundResultContinuation: command.backgroundResultContinuation }),
         ...(continuedTaskId === undefined ? {} : { delegatedTaskId: continuedTaskId }),
         ...(continuedRemoteDelegation === undefined
           ? {}
@@ -8068,6 +8117,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(dispatchMode.type === "defer_start" && dispatchMode.workspaceStrategy !== undefined
           ? { workspacePreparation: dispatchMode.workspaceStrategy }
           : {}),
+        ...(command.backgroundResultContinuation === undefined
+          ? {}
+          : { backgroundResultContinuation: command.backgroundResultContinuation }),
         ...(continuedTaskId === undefined ? {} : { delegatedTaskId: continuedTaskId }),
         ...(continuedRemoteDelegation === undefined
           ? {}
@@ -8826,6 +8878,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ...(command.restartContinuationOfRunId === undefined
         ? {}
         : { restartContinuationOfRunId: command.restartContinuationOfRunId }),
+      ...(command.backgroundResultContinuation === undefined
+        ? {}
+        : { backgroundResultContinuation: command.backgroundResultContinuation }),
       ...(continuedTaskId === undefined ? {} : { delegatedTaskId: continuedTaskId }),
       ...(continuedRemoteDelegation === undefined
         ? {}
@@ -12735,7 +12790,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
     }
     for (const providerThread of input.projection.providerThreads) {
-      if ((providerThread.pendingBackgroundTasks?.length ?? 0) === 0) continue;
+      if (
+        (providerThread.pendingBackgroundTasks?.length ?? 0) === 0 &&
+        (providerThread.owedBackgroundResults?.length ?? 0) === 0
+      )
+        continue;
       if (providerThread.id === input.stoppedProviderThreadId) {
         // A refused newer start can take ownership and reject the stopped
         // turn's roster clear. Reconcile it without hiding surviving work.
@@ -12758,6 +12817,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               ? "idle"
               : providerThread.status,
           pendingBackgroundTasks: [],
+          owedBackgroundResults: [],
           updatedAt: input.now,
         },
       });
@@ -16227,7 +16287,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       for (const providerThread of afterCancel.providerThreads)
         if (
           providerThread.appThreadId === id &&
-          (providerThread.pendingBackgroundTasks?.length ?? 0) > 0
+          ((providerThread.pendingBackgroundTasks?.length ?? 0) > 0 ||
+            (providerThread.owedBackgroundResults?.length ?? 0) > 0)
         )
           yield* emit(
             events,
@@ -16236,7 +16297,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             type: "provider-thread.updated",
             threadId: id,
             occurredAt: now,
-            payload: { ...providerThread, pendingBackgroundTasks: [], updatedAt: now },
+            payload: {
+              ...providerThread,
+              pendingBackgroundTasks: [],
+              owedBackgroundResults: [],
+              updatedAt: now,
+            },
           });
       for (const turn of afterCancel.providerTurns)
         if (turn.status === "running" || turn.status === "pending")

@@ -8939,6 +8939,16 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           roster(["dev-server"], "00000000-0000-4000-8000-000000000303"),
         );
         yield* nextRoster((tasks) => tasks.length === 1);
+        const abandoned = yield* awaitBackgroundTasks({
+          providerThread: harness.providerThread,
+          taskIds: [WAKE_TASK_ID],
+          awaited: false,
+        });
+        assert.deepStrictEqual(abandoned.matched, [WAKE_TASK_ID]);
+        const { providerThread: releasedThread } = yield* Queue.take(
+          harness.providerThreadReceipts,
+        );
+        assert.deepStrictEqual(releasedThread.owedBackgroundResults, []);
         yield* Queue.offer(
           harness.sdkMessages,
           roster(["dev-server", WAKE_TASK_ID], "00000000-0000-4000-8000-000000000304"),
@@ -8973,6 +8983,37 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             [WAKE_TASK_ID, false],
           ],
         );
+        yield* harness.offerAndWait(roster(["idle-task"], "00000000-0000-4000-8000-000000000305"));
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("idle-later-turn"),
+            text: "Later work",
+            attachments: [],
+          }),
+        );
+        const idleWait = yield* awaitBackgroundTasks({
+          providerThread: harness.providerThread,
+          taskIds: ["idle-task"],
+          awaited: true,
+        });
+        assert.deepStrictEqual(idleWait.matched, []);
+        yield* harness.offerAndWait(
+          claudeSdkFrame({ ...turnOneResult, uuid: "00000000-0000-4000-8000-000000000306" }),
+        );
+        yield* harness.awaitTerminal(2);
+        yield* harness.offerAndWait(roster([], "00000000-0000-4000-8000-000000000307"));
+        yield* harness.offerAndWait(
+          claudeSdkFrame({
+            ...wakeNotification,
+            task_id: "idle-task",
+            uuid: "00000000-0000-4000-8000-000000000308",
+          }),
+        );
+        yield* harness.offerAndWait(wakeAssistant);
+        assert.equal(harness.continuationRequests[0]?.backgroundResultContinuation, undefined);
       }).pipe(
         Effect.provide(
           Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
@@ -11009,50 +11050,714 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
-  it.effect("buffers wake output and requests a single continuation run", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const harness = yield* makeWakeHarness;
-        const now = yield* DateTime.now;
+  it.effect.each([
+    false,
+    true,
+    "mixed",
+    "mixed-after-offer",
+    "mixed-wake-first",
+    "mixed-during-drain",
+    "mixed-same-origin-after-offer",
+    "mixed-same-origin-during-drain",
+    "mixed-same-origin-release-one",
+    "mixed-same-origin-release-all",
+    "mixed-same-origin-release-text-one",
+    "mixed-same-origin-release-text-all",
+    "stopped",
+    "stopped-interrupted",
+  ] as const)(
+    "buffers wake output and requests a single continuation run (awaited: %s)",
+    (awaited) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const mixed = typeof awaited === "string" && awaited.startsWith("mixed");
+          const sameOrigin = typeof awaited === "string" && awaited.includes("same-origin");
+          const duringDrain =
+            awaited === "mixed-during-drain" || awaited === "mixed-same-origin-during-drain";
+          const release = typeof awaited === "string" && awaited.includes("release-");
+          const releaseText = release && awaited.includes("-text-");
+          const releaseAll = release && awaited.endsWith("-all");
+          const wakeFirst = awaited === "mixed-wake-first" || releaseText;
+          const admittedA =
+            !release && (awaited === "mixed-after-offer" || duringDrain || sameOrigin);
+          const initialTerminals = mixed && !sameOrigin ? 2 : 1;
+          const stopped = awaited === "stopped" || awaited === "stopped-interrupted";
+          const harness = yield* makeWakeHarness;
+          const now = yield* DateTime.now;
 
-        yield* harness.runtime.startTurn(
-          makeClaudeTestTurnInput({
+          const turnInput = makeClaudeTestTurnInput({
             threadId: harness.threadId,
             providerThread: harness.providerThread,
             now,
             attemptId: RunAttemptId.make("attempt-claude-wake-1"),
             text: "Run the build in the background.",
             attachments: [],
-          }),
-        );
-        yield* Queue.offer(harness.sdkMessages, wakeTaskStarted);
-        yield* Queue.offer(harness.sdkMessages, turnOneResult);
-        yield* harness.awaitTerminal(1);
-        assert.equal(harness.terminalEvents()[0]?.status, "completed");
-        assert.isTrue(yield* harness.hasPendingBackgroundWork);
-        assert.lengthOf(harness.continuationRequests, 0);
+          });
+          yield* harness.runtime.startTurn(turnInput);
+          yield* harness.offerAndWait(wakeTaskStarted);
+          if (awaited)
+            yield* harness.runtime.awaitBackgroundTasks!({
+              providerThread: harness.providerThread,
+              taskIds: [WAKE_TASK_ID],
+              awaited: true,
+            });
+          if (!sameOrigin) {
+            yield* Queue.offer(harness.sdkMessages, turnOneResult);
+            yield* harness.awaitTerminal(1);
+            assert.equal(harness.terminalEvents()[0]?.status, "completed");
+            assert.isTrue(yield* harness.hasPendingBackgroundWork);
+          }
+          assert.lengthOf(harness.continuationRequests, 0);
+          let secondInput = turnInput;
+          if (mixed) {
+            if (!sameOrigin) {
+              secondInput = makeClaudeTestTurnInput({
+                threadId: harness.threadId,
+                providerThread: harness.providerThread,
+                now,
+                attemptId: RunAttemptId.make("mixed-second-origin"),
+                text: "Second background command",
+                attachments: [],
+              });
+              yield* harness.runtime.startTurn(secondInput);
+            }
+            yield* harness.offerAndWait(
+              claudeSdkFrame({
+                ...wakeTaskStarted,
+                task_id: "mixed-second-task",
+                uuid: "00000000-0000-4000-8000-000000000580",
+              }),
+            );
+            yield* harness.runtime.awaitBackgroundTasks!({
+              providerThread: harness.providerThread,
+              taskIds: ["mixed-second-task"],
+              awaited: true,
+            });
+            yield* harness.offerAndWait(
+              claudeSdkFrame({
+                ...wakeTaskStarted,
+                task_id: "mixed-unreported-task",
+                tool_use_id: "mixed-unreported-tool",
+                uuid: "00000000-0000-4000-8000-000000000599",
+              }),
+            );
+            yield* harness.runtime.awaitBackgroundTasks!({
+              providerThread: harness.providerThread,
+              taskIds: ["mixed-unreported-task"],
+              awaited: true,
+            });
+            yield* harness.offerAndWait(
+              claudeSdkFrame({ ...turnOneResult, uuid: "00000000-0000-4000-8000-000000000581" }),
+            );
+            yield* harness.awaitTerminal(initialTerminals);
+          }
 
-        yield* harness.offerAndWait(wakeNotification);
-        assert.lengthOf(harness.continuationRequests, 0);
-        assert.isFalse(yield* harness.hasPendingBackgroundWork);
+          if (awaited) {
+            yield* harness.offerAndWait(
+              claudeSdkFrame({
+                type: "system",
+                subtype: "background_tasks_changed",
+                tasks: [],
+                uuid: "00000000-0000-4000-8000-000000000579",
+                session_id: WAKE_NATIVE_SESSION,
+              }),
+            );
+            while (true) {
+              const { providerThread } = yield* Queue.take(harness.providerThreadReceipts);
+              if (
+                (providerThread.pendingBackgroundTasks?.length ?? 0) !== 0 ||
+                providerThread.owedBackgroundResults === undefined
+              )
+                continue;
+              assert.deepStrictEqual(providerThread.owedBackgroundResults, [
+                { taskId: WAKE_TASK_ID, originRunId: turnInput.runId },
+                ...(mixed
+                  ? [
+                      { taskId: "mixed-second-task", originRunId: secondInput.runId },
+                      { taskId: "mixed-unreported-task", originRunId: secondInput.runId },
+                    ]
+                  : []),
+              ]);
+              break;
+            }
+          }
+          const secondNotification = claudeSdkFrame({
+            ...wakeNotification,
+            task_id: "mixed-second-task",
+            output_file: "/tmp/claude-replay/tasks/mixed-second-task.output",
+            summary: "Second origin completed its checks",
+            uuid: "00000000-0000-4000-8000-000000000582",
+          });
+          if (wakeFirst) {
+            yield* harness.offerAndWait(wakeTurnInit);
+            assert.lengthOf(harness.continuationRequests, 1);
+          }
+          yield* harness.offerAndWait(
+            stopped ? claudeSdkFrame({ ...wakeNotification, status: "stopped" }) : wakeNotification,
+          );
+          assert.lengthOf(harness.continuationRequests, wakeFirst ? 1 : 0);
+          if (admittedA) {
+            yield* harness.offerAndWait(wakeAssistant);
+            yield* harness.awaitContinuation(1);
+          }
+          if (!admittedA && !wakeFirst) assert.isFalse(yield* harness.hasPendingBackgroundWork);
 
-        yield* Queue.offer(harness.sdkMessages, wakeAssistant);
-        yield* harness.awaitContinuation(1);
-        assert.equal(harness.continuationRequests[0]?.threadId, harness.threadId);
-        assert.equal(harness.continuationRequests[0]?.providerThreadId, harness.providerThread.id);
-        assert.equal(harness.continuationRequests[0]?.driver, ClaudeAdapterV2.CLAUDE_PROVIDER);
-        assert.equal(harness.continuationRequests[0]?.detail, WAKE_SUMMARY);
+          if (mixed && !duringDrain) yield* harness.offerAndWait(secondNotification);
+          yield* harness.offerAndWait(wakeAssistant);
+          yield* harness.awaitContinuation(1);
+          if (release) {
+            const drain = Effect.gen(function* () {
+              yield* harness.runtime.startTurn(
+                makeClaudeTestTurnInput({
+                  threadId: harness.threadId,
+                  providerThread: harness.providerThread,
+                  now,
+                  attemptId: RunAttemptId.make("release-buffer-drain"),
+                  text: "Background task completed.",
+                  attachments: [],
+                  providerTurnOrdinal: 2,
+                  messageCreatedBy: "agent",
+                  messageCreationSource: "provider",
+                }),
+              );
+              yield* harness.offerAndWait(
+                claudeSdkFrame({ ...wakeResult, result: "RELEASE_NATIVE_FINAL" }),
+              );
+              yield* harness.awaitTerminal(2);
+            });
+            if (releaseText) yield* drain;
+            const request = harness.continuationRequests.at(-1)!;
+            assert.deepStrictEqual(request.backgroundResultContinuation?.taskIds, [
+              WAKE_TASK_ID,
+              "mixed-second-task",
+            ]);
+            const count = harness.continuationRequests.length;
+            const released = releaseAll ? [WAKE_TASK_ID, "mixed-second-task"] : [WAKE_TASK_ID];
+            assert.deepStrictEqual(
+              (yield* harness.runtime.awaitBackgroundTasks!({
+                providerThread: harness.providerThread,
+                taskIds: released,
+                awaited: false,
+              })).matched,
+              released,
+            );
+            let dispatched = false;
+            assert.isTrue(
+              Option.isNone(
+                yield* request.dispatchIfCurrent!(
+                  Effect.sync(() => {
+                    dispatched = true;
+                  }),
+                ),
+              ),
+            );
+            assert.isFalse(dispatched);
+            const reoffered = !releaseText || !releaseAll;
+            assert.lengthOf(harness.continuationRequests, count + (reoffered ? 1 : 0));
+            assert.isTrue(Option.isNone(yield* request.dispatchIfCurrent!(Effect.void)));
+            assert.lengthOf(harness.continuationRequests, count + (reoffered ? 1 : 0));
+            if (reoffered) {
+              const replacement = harness.continuationRequests.at(-1)!;
+              assert.deepStrictEqual(
+                replacement.backgroundResultContinuation,
+                releaseAll
+                  ? undefined
+                  : {
+                      providerThreadId: harness.providerThread.id,
+                      originRunId: turnInput.runId,
+                      taskIds: ["mixed-second-task"],
+                    },
+              );
+              if (replacement.dispatchIfCurrent !== undefined) {
+                assert.isTrue(Option.isSome(yield* replacement.dispatchIfCurrent(Effect.void)));
+                assert.isTrue(Option.isNone(yield* replacement.dispatchIfCurrent(Effect.void)));
+              }
+              if (releaseText) assert.include(replacement.detail!, "RELEASE_NATIVE_FINAL");
+            }
+            if (!releaseText) {
+              yield* drain;
+              assert.lengthOf(harness.continuationRequests, count + 1);
+              yield* harness.offerAndWait(
+                claudeSdkFrame({
+                  ...wakeNotification,
+                  task_id: "mixed-unreported-task",
+                  tool_use_id: "mixed-unreported-tool",
+                  uuid: "00000000-0000-4000-8000-000000000601",
+                }),
+              );
+              yield* harness.offerAndWait(
+                makeAssistantTextFrame({
+                  uuid: "00000000-0000-4000-8000-000000000602",
+                  text: "NEXT_NATIVE_WAKE",
+                }),
+              );
+              assert.lengthOf(harness.continuationRequests, count + 2);
+              yield* harness.awaitContinuation(count + 2);
+              assert.deepStrictEqual(
+                harness.continuationRequests.at(-1)!.backgroundResultContinuation,
+                {
+                  providerThreadId: harness.providerThread.id,
+                  originRunId: turnInput.runId,
+                  taskIds: ["mixed-unreported-task"],
+                },
+              );
+            }
+            return;
+          }
+          if (mixed) {
+            assert.lengthOf(harness.continuationRequests, 1);
+            if (admittedA) {
+              assert.equal(
+                harness.continuationRequests[0]?.backgroundResultContinuation?.originRunId,
+                turnInput.runId,
+              );
+              assert.isTrue(
+                Option.isSome(
+                  yield* harness.continuationRequests[0]!.dispatchIfCurrent!(Effect.void),
+                ),
+              );
+            }
+            yield* harness.runtime.startTurn(
+              makeClaudeTestTurnInput({
+                threadId: harness.threadId,
+                providerThread: harness.providerThread,
+                now,
+                attemptId: RunAttemptId.make("mixed-buffer-drain"),
+                text: "Background task completed.",
+                attachments: [],
+                providerTurnOrdinal: initialTerminals + 1,
+                messageCreatedBy: "agent",
+                messageCreationSource: "provider",
+              }),
+            );
+            if (duringDrain) yield* harness.offerAndWait(secondNotification);
+            yield* harness.offerAndWait(
+              makeAssistantTextFrame({
+                uuid: "00000000-0000-4000-8000-000000000583",
+                text: "MIXED_LATE_ASSISTANT_ANSWER",
+              }),
+            );
+            assert.lengthOf(harness.continuationRequests, 1);
+            yield* harness.offerAndWait(
+              claudeSdkFrame({ ...wakeResult, result: "MIXED_TERMINAL_NATIVE_ANSWER" }),
+            );
+            yield* harness.awaitTerminal(initialTerminals + 1);
+            const expectedCount = sameOrigin ? 1 : admittedA ? 2 : 3;
+            assert.lengthOf(harness.continuationRequests, expectedCount);
+            yield* harness.awaitContinuation(expectedCount);
+            for (const request of harness.continuationRequests.slice(1)) {
+              assert.include(request.detail!, WAKE_ASSISTANT_TEXT);
+              assert.include(request.detail!, "MIXED_LATE_ASSISTANT_ANSWER");
+              assert.include(request.detail!, "MIXED_TERMINAL_NATIVE_ANSWER");
+            }
+            assert.deepStrictEqual(
+              harness.continuationRequests
+                .slice(1)
+                .map((request) => request.backgroundResultContinuation),
+              [
+                ...(admittedA
+                  ? []
+                  : [
+                      {
+                        providerThreadId: harness.providerThread.id,
+                        originRunId: turnInput.runId,
+                        taskIds: [WAKE_TASK_ID],
+                      },
+                    ]),
+                ...(sameOrigin
+                  ? []
+                  : [
+                      {
+                        providerThreadId: harness.providerThread.id,
+                        originRunId: secondInput.runId,
+                        taskIds: ["mixed-second-task"],
+                      },
+                    ]),
+              ],
+            );
+            assert.isTrue(
+              harness.continuationRequests
+                .slice(1)
+                .every((request) => request.delivery === "message_text"),
+            );
+            if (!admittedA) {
+              assert.include(
+                harness.continuationRequests[1]!.detail!,
+                encodeJsonString(WAKE_SUMMARY),
+              );
+              assert.notInclude(harness.continuationRequests[1]!.detail!, "mixed-second-task");
+            }
+            if (!sameOrigin) {
+              const secondOwnerRequest = harness.continuationRequests.at(-1)!;
+              assert.include(secondOwnerRequest.detail!, "Second origin completed its checks");
+              assert.notInclude(secondOwnerRequest.detail!, WAKE_TASK_ID);
+            }
+            assert.isTrue(
+              harness.events.some(
+                (event) =>
+                  event.type === "message.updated" &&
+                  event.message.text === "MIXED_LATE_ASSISTANT_ANSWER",
+              ),
+            );
+            yield* harness.offerAndWait(wakeResult);
+            yield* harness.offerAndWait(wakeNotification);
+            yield* harness.offerAndWait(wakeAssistant);
+            assert.lengthOf(harness.continuationRequests, expectedCount);
+            for (const request of harness.continuationRequests.slice(1)) {
+              assert.isTrue(Option.isSome(yield* request.dispatchIfCurrent!(Effect.void)));
+            }
+            while (true) {
+              const { providerThread } = yield* Queue.take(harness.providerThreadReceipts);
+              if (
+                providerThread.owedBackgroundResults === undefined ||
+                providerThread.owedBackgroundResults.length > 1
+              )
+                continue;
+              assert.deepStrictEqual(providerThread.owedBackgroundResults, [
+                { taskId: "mixed-unreported-task", originRunId: secondInput.runId },
+              ]);
+              break;
+            }
+            return;
+          }
+          assert.equal(harness.continuationRequests[0]?.threadId, harness.threadId);
+          assert.equal(
+            harness.continuationRequests[0]?.providerThreadId,
+            harness.providerThread.id,
+          );
+          assert.equal(harness.continuationRequests[0]?.driver, ClaudeAdapterV2.CLAUDE_PROVIDER);
+          assert.equal(harness.continuationRequests[0]?.detail, WAKE_SUMMARY);
+          assert.deepStrictEqual(
+            harness.continuationRequests[0]?.backgroundResultContinuation,
+            awaited
+              ? {
+                  providerThreadId: harness.providerThread.id,
+                  originRunId: turnInput.runId,
+                  taskIds: [WAKE_TASK_ID],
+                }
+              : undefined,
+          );
 
-        yield* harness.offerAndWait(wakeResult);
-        assert.lengthOf(harness.continuationRequests, 1);
-        assert.lengthOf(harness.terminalEvents(), 1);
-        assert.isTrue(yield* harness.hasPendingBackgroundWork);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          if (stopped) {
+            yield* harness.runtime.startTurn(
+              makeClaudeTestTurnInput({
+                threadId: harness.threadId,
+                providerThread: harness.providerThread,
+                now,
+                attemptId: RunAttemptId.make("stopped-buffer-drain"),
+                text: "Background task completed.",
+                attachments: [],
+                providerTurnOrdinal: 2,
+                messageCreatedBy: "agent",
+                messageCreationSource: "provider",
+              }),
+            );
+            yield* harness.offerAndWait(
+              makeAssistantTextFrame({
+                uuid: "00000000-0000-4000-8000-000000000596",
+                text: "NATIVE_COMMAND_STOPPED_FINAL",
+              }),
+            );
+            yield* harness.offerAndWait(
+              makeResultFrame({
+                uuid: "00000000-0000-4000-8000-000000000598",
+                result: "NATIVE_COMMAND_STOPPED_FINAL",
+                ...(awaited === "stopped-interrupted"
+                  ? { terminalReason: "aborted_streaming" as const }
+                  : {}),
+              }),
+            );
+            yield* harness.awaitTerminal(2);
+            assert.equal(
+              harness.terminalEvents()[1]?.status,
+              awaited === "stopped-interrupted" ? "interrupted" : "completed",
+            );
+            assert.isTrue(
+              harness.events.some(
+                (event) =>
+                  event.type === "message.updated" &&
+                  event.message.text === "NATIVE_COMMAND_STOPPED_FINAL",
+              ),
+            );
+            return;
+          }
+          yield* harness.offerAndWait(wakeResult);
+          assert.lengthOf(harness.continuationRequests, 1);
+          assert.lengthOf(harness.terminalEvents(), 1);
+          assert.isTrue(yield* harness.hasPendingBackgroundWork);
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
         ),
       ),
-    ),
+  );
+
+  it.effect.each([
+    { awaited: true, interrupted: false },
+    { awaited: true, interrupted: true },
+    { awaited: false, interrupted: false },
+  ])(
+    "delivers an older task's report after an ordinary turn (awaited=$awaited interrupted=$interrupted)",
+    ({ awaited, interrupted }) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeWakeHarness;
+          const now = yield* DateTime.now;
+          const turn = (name: string) =>
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make(name),
+              text: name,
+              attachments: [],
+            });
+          const source = turn("ordinary-report-source-a");
+          yield* harness.runtime.startTurn(source);
+          yield* harness.offerAndWait(wakeTaskStarted);
+          if (awaited)
+            yield* harness.runtime.awaitBackgroundTasks!({
+              providerThread: harness.providerThread,
+              taskIds: [WAKE_TASK_ID],
+              awaited: true,
+            });
+          yield* harness.offerAndWait(turnOneResult);
+          yield* harness.awaitTerminal(1);
+          const ordinary = turn("ordinary-report-run-b");
+          assert.equal(ordinary.message.createdBy, "user");
+          yield* harness.runtime.startTurn(ordinary);
+          const before = makeAssistantTextFrame({
+            uuid: "00000000-0000-4000-8000-000000000701",
+            text: "ORDINARY_B_BEFORE_REPORT",
+          });
+          const after = makeAssistantTextFrame({
+            uuid: "00000000-0000-4000-8000-000000000702",
+            text: "ORDINARY_B_AFTER_REPORT",
+          });
+          const result = makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000703",
+            result: "ORDINARY_B_NATIVE_TERMINAL",
+            ...(interrupted ? { terminalReason: "aborted_streaming" as const } : {}),
+          });
+          yield* harness.offerAndWait(before);
+          yield* harness.offerAndWait(wakeNotification);
+          assert.lengthOf(harness.continuationRequests, 0);
+          if (awaited) {
+            while (true) {
+              const { providerThread } = yield* Queue.take(harness.providerThreadReceipts);
+              if (
+                (providerThread.pendingBackgroundTasks?.length ?? 0) !== 0 ||
+                providerThread.owedBackgroundResults?.length !== 1
+              )
+                continue;
+              assert.deepStrictEqual(providerThread.owedBackgroundResults, [
+                { taskId: WAKE_TASK_ID, originRunId: source.runId },
+              ]);
+              break;
+            }
+          }
+          yield* harness.offerAndWait(after);
+          assert.lengthOf(harness.continuationRequests, 0);
+          yield* harness.offerAndWait(result);
+          yield* harness.awaitTerminal(2);
+          assert.equal(
+            harness.terminalEvents()[1]?.status,
+            interrupted ? "interrupted" : "completed",
+          );
+          assert.isTrue(
+            harness.events.some(
+              (event) =>
+                event.type === "message.updated" &&
+                event.message.runId === ordinary.runId &&
+                event.message.text === "ORDINARY_B_AFTER_REPORT",
+            ),
+          );
+          assert.lengthOf(harness.continuationRequests, awaited ? 1 : 0);
+          if (!awaited) return;
+          const request = harness.continuationRequests[0]!;
+          assert.deepStrictEqual(request.backgroundResultContinuation, {
+            providerThreadId: harness.providerThread.id,
+            originRunId: source.runId,
+            taskIds: [WAKE_TASK_ID],
+          });
+          assert.equal(request.delivery, "message_text");
+          for (const marker of [
+            "ORDINARY_B_BEFORE_REPORT",
+            "ORDINARY_B_AFTER_REPORT",
+            "ORDINARY_B_NATIVE_TERMINAL",
+          ])
+            assert.include(request.detail!, marker);
+          assert.isTrue(Option.isSome(yield* request.dispatchIfCurrent!(Effect.void)));
+          assert.isTrue(Option.isNone(yield* request.dispatchIfCurrent!(Effect.void)));
+          if (interrupted) return;
+          const later = turn("ordinary-report-run-c");
+          yield* harness.runtime.startTurn(later);
+          yield* harness.offerAndWait(wakeNotification);
+          yield* harness.offerAndWait(after);
+          yield* harness.offerAndWait(result);
+          assert.lengthOf(harness.terminalEvents(), 2);
+          yield* harness.offerAndWait(
+            makeAssistantTextFrame({
+              uuid: "00000000-0000-4000-8000-000000000704",
+              text: "ORDINARY_C_OWN_ANSWER",
+            }),
+          );
+          yield* harness.offerAndWait(
+            makeResultFrame({
+              uuid: "00000000-0000-4000-8000-000000000705",
+              result: "ORDINARY_C_OWN_ANSWER",
+            }),
+          );
+          yield* harness.awaitTerminal(3);
+          assert.lengthOf(harness.continuationRequests, 1);
+          assert.notInclude(request.detail!, "ORDINARY_C_OWN_ANSWER");
+          assert.isTrue(Option.isNone(yield* request.dispatchIfCurrent!(Effect.void)));
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
+  );
+
+  it.effect.each(["known", "idle-null"] as const)(
+    "attributes a fresh native task generation after retiring %s",
+    (oldOrigin) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeWakeHarness;
+          const now = yield* DateTime.now;
+          const turn = (id: string) =>
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make(id),
+              text: "Work",
+              attachments: [],
+            });
+          yield* harness.runtime.startTurn(turn("generation-old"));
+          if (oldOrigin === "known") {
+            yield* harness.offerAndWait(wakeTaskStarted);
+            yield* harness.runtime.awaitBackgroundTasks!({
+              providerThread: harness.providerThread,
+              taskIds: [WAKE_TASK_ID],
+              awaited: true,
+            });
+          }
+          yield* harness.offerAndWait(turnOneResult);
+          yield* harness.awaitTerminal(1);
+          if (oldOrigin === "idle-null") yield* harness.offerAndWait(wakeTaskStarted);
+          if (oldOrigin === "known") {
+            yield* harness.offerAndWait(
+              claudeSdkFrame({
+                ...wakeTaskStarted,
+                tool_use_id: "fresh-generation-tool",
+                uuid: "00000000-0000-4000-8000-000000000594",
+              }),
+            );
+            const ambiguous = yield* harness.runtime.awaitBackgroundTasks!({
+              providerThread: harness.providerThread,
+              taskIds: [WAKE_TASK_ID],
+              awaited: true,
+            });
+            assert.deepStrictEqual(ambiguous.matched, []);
+            yield* harness.offerAndWait(wakeNotification);
+            yield* harness.offerAndWait(wakeAssistant);
+            assert.equal(
+              harness.continuationRequests[0]?.backgroundResultContinuation?.originRunId,
+              turn("generation-old").runId,
+            );
+            yield* harness.continuationRequests[0]!.dispatchIfCurrent!(Effect.void);
+            yield* harness.runtime.startTurn(
+              makeClaudeTestTurnInput({
+                threadId: harness.threadId,
+                providerThread: harness.providerThread,
+                now,
+                attemptId: RunAttemptId.make("generation-old-drain"),
+                text: "Background task completed.",
+                attachments: [],
+                providerTurnOrdinal: 2,
+                messageCreatedBy: "agent",
+                messageCreationSource: "provider",
+              }),
+            );
+            yield* harness.offerAndWait(wakeResult);
+            yield* harness.awaitTerminal(2);
+          }
+          const previousRequests = oldOrigin === "known" ? 1 : 0;
+          const previousTerminals = oldOrigin === "known" ? 2 : 1;
+          yield* harness.offerAndWait(
+            claudeSdkFrame({
+              type: "system",
+              subtype: "background_tasks_changed",
+              tasks: [],
+              uuid: "00000000-0000-4000-8000-000000000590",
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+          );
+          const fresh = turn("generation-fresh");
+          yield* harness.runtime.startTurn(fresh);
+          yield* harness.offerAndWait(
+            claudeSdkFrame({
+              type: "system",
+              subtype: "background_tasks_changed",
+              tasks: [{ task_id: WAKE_TASK_ID, task_type: "local_bash" }],
+              uuid: "00000000-0000-4000-8000-000000000595",
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+          );
+          const unidentified = yield* harness.runtime.awaitBackgroundTasks!({
+            providerThread: harness.providerThread,
+            taskIds: [WAKE_TASK_ID],
+            awaited: true,
+          });
+          assert.deepStrictEqual(unidentified.matched, []);
+          yield* harness.offerAndWait(
+            claudeSdkFrame({
+              ...wakeTaskStarted,
+              tool_use_id: "fresh-generation-tool",
+              uuid: "00000000-0000-4000-8000-000000000591",
+            }),
+          );
+          yield* harness.offerAndWait(wakeTaskStarted);
+          const marked = yield* harness.runtime.awaitBackgroundTasks!({
+            providerThread: harness.providerThread,
+            taskIds: [WAKE_TASK_ID],
+            awaited: true,
+          });
+          assert.deepStrictEqual(marked.matched, [WAKE_TASK_ID]);
+          yield* harness.offerAndWait(
+            claudeSdkFrame({ ...turnOneResult, uuid: "00000000-0000-4000-8000-000000000592" }),
+          );
+          yield* harness.awaitTerminal(previousTerminals + 1);
+          yield* harness.offerAndWait(wakeNotification);
+          assert.lengthOf(harness.continuationRequests, previousRequests);
+          yield* harness.offerAndWait(
+            claudeSdkFrame({
+              ...wakeNotification,
+              tool_use_id: "fresh-generation-tool",
+              uuid: "00000000-0000-4000-8000-000000000593",
+            }),
+          );
+          yield* harness.offerAndWait(
+            makeAssistantTextFrame({
+              uuid: "00000000-0000-4000-8000-000000000597",
+              text: "FRESH_GENERATION_NATIVE_ANSWER",
+            }),
+          );
+          assert.equal(
+            harness.continuationRequests[previousRequests]?.backgroundResultContinuation
+              ?.originRunId,
+            fresh.runId,
+          );
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
   );
 
   it.effect("starts the wake run when Claude opens the wake turn, before its output", () =>

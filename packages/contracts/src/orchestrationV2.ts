@@ -812,6 +812,12 @@ export type OrchestrationV2ThreadLaunchWorkspaceStrategy =
 
 export const ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE = "workspace_preparation_failed";
 
+export const BackgroundResultContinuation = Schema.Struct({
+  providerThreadId: ProviderThreadId,
+  originRunId: RunId,
+  taskIds: Schema.Array(TrimmedNonEmptyString),
+});
+
 export const OrchestrationV2Run = Schema.Struct({
   id: RunId,
   threadId: ThreadId,
@@ -834,6 +840,7 @@ export const OrchestrationV2Run = Schema.Struct({
   delegatedTaskId: Schema.optional(NodeId),
   remoteDelegation: Schema.optional(RemoteDelegationSelector),
   actionObligations: Schema.optional(Schema.Array(ActionResumeObligation)),
+  backgroundResultContinuation: Schema.optional(BackgroundResultContinuation),
   workStartedAt: Schema.optional(Schema.DateTimeUtc),
   restartCancelledBackgroundWork: Schema.optional(
     Schema.Array(OrchestrationV2RestartCancelledBackgroundWork),
@@ -1245,6 +1252,14 @@ export const OrchestrationV2ProviderThread = Schema.Struct({
       providerTurnId: Schema.optional(ProviderTurnId),
       checkpointId: Schema.optional(CheckpointId),
     }),
+  ),
+  owedBackgroundResults: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        taskId: TrimmedNonEmptyString,
+        originRunId: RunId,
+      }),
+    ),
   ),
   pendingBackgroundTasks: Schema.optional(Schema.Array(OrchestrationV2PendingBackgroundTask)).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
@@ -3471,6 +3486,7 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("message.dispatch"),
+    backgroundResultContinuation: Schema.optional(BackgroundResultContinuation),
     notification: Schema.optional(OrchestrationV2Notification),
     /** Sends this pending guest message; the server uses the guest's text, not `text`. */
     guestMessageId: Schema.optional(GuestMessageId),

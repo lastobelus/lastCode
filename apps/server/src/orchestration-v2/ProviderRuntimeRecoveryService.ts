@@ -120,7 +120,10 @@ function isAppOwnedDelegationItem(
 function providerThreadHasPendingBackgroundTasks(
   providerThread: OrchestrationV2ThreadProjection["providerThreads"][number],
 ): boolean {
-  return (providerThread.pendingBackgroundTasks?.length ?? 0) > 0;
+  return (
+    (providerThread.pendingBackgroundTasks?.length ?? 0) > 0 ||
+    (providerThread.owedBackgroundResults?.length ?? 0) > 0
+  );
 }
 
 function resolveStaleBackgroundItemProviderInstanceId(
@@ -670,7 +673,9 @@ export const make = Effect.gen(function* () {
       // and idle active threads without resurrecting active status.
       for (const providerThread of projection.providerThreads ?? []) {
         const needsIdle = providerThread.status === "active";
-        const needsRosterClear = providerThreadHasPendingBackgroundTasks(providerThread);
+        const needsRosterClear =
+          providerThreadHasPendingBackgroundTasks(providerThread) ||
+          (providerThread.owedBackgroundResults?.length ?? 0) > 0;
         if (!needsIdle && !needsRosterClear) {
           continue;
         }
@@ -698,6 +703,7 @@ export const make = Effect.gen(function* () {
             ...providerThread,
             status: needsIdle ? "idle" : providerThread.status,
             pendingBackgroundTasks: [],
+            owedBackgroundResults: [],
             updatedAt: now,
           },
         });

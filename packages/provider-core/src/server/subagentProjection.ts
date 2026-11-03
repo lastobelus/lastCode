@@ -258,7 +258,10 @@ export function delegatedTaskProgress(
       >
     >;
     readonly providerThreads: ReadonlyArray<
-      Pick<OrchestrationV2ThreadProjection["providerThreads"][number], "pendingBackgroundTasks">
+      Pick<
+        OrchestrationV2ThreadProjection["providerThreads"][number],
+        "pendingBackgroundTasks" | "owedBackgroundResults"
+      >
     >;
   },
   ownedRunIds?: ReadonlySet<RunId>,
@@ -267,7 +270,13 @@ export function delegatedTaskProgress(
     ["completed", "failed", "cancelled", "interrupted", "rolled_back"].includes(status);
   const monitorRuns = new Set(
     projection.messages
-      .filter((message) => message.notification?.source.kind === "monitor")
+      .filter(
+        (message) =>
+          message.notification?.source.kind === "monitor" &&
+          !projection.runs.some(
+            (run) => run.id === message.runId && run.backgroundResultContinuation !== undefined,
+          ),
+      )
       .map((message) => message.runId),
   );
   const workRuns = projection.runs.filter(
@@ -300,14 +309,42 @@ export function delegatedTaskProgress(
             (task.completionDelivery?.state === "pending" ||
               task.completionDelivery?.state === "claimed"))),
     ) ||
-    projection.providerThreads.some((thread) =>
-      backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? []),
+    projection.providerThreads.some(
+      (thread) =>
+        backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? []) ||
+        thread.owedBackgroundResults?.some(
+          (owed) =>
+            workRuns.some(
+              (run) =>
+                run.id === owed.originRunId &&
+                !["cancelled", "interrupted", "failed", "rolled_back"].includes(run.status),
+            ) &&
+            !projection.runs.some(
+              (run) =>
+                run.backgroundResultContinuation !== undefined &&
+                run.backgroundResultContinuation.originRunId === owed.originRunId &&
+                run.backgroundResultContinuation.taskIds.includes(owed.taskId),
+            ),
+        ) === true,
     );
+  // Admitting a result run transfers the logical outcome, including an explicit
+  // queued cancellation. A late checkpoint on its origin cannot restore success.
+  const transferredOrigins = new Set(
+    workRuns.flatMap((run) =>
+      run.backgroundResultContinuation === undefined
+        ? []
+        : [run.backgroundResultContinuation.originRunId],
+    ),
+  );
   const resultRun = workRuns
     .filter(
       (run) =>
         terminal(run.status) &&
-        (run.startedAt !== null || run.ordinal === 1 || ownedRunIds?.has(run.id) === true),
+        !transferredOrigins.has(run.id) &&
+        (run.startedAt !== null ||
+          run.ordinal === 1 ||
+          ownedRunIds?.has(run.id) === true ||
+          run.backgroundResultContinuation !== undefined),
     )
     .toSorted((a, b) => (runRanAfter(a, b) ? -1 : runRanAfter(b, a) ? 1 : 0))[0];
   return {
