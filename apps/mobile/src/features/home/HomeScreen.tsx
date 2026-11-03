@@ -686,11 +686,7 @@ export function HomeScreen(props: HomeScreenProps) {
 
   const listHeader = Platform.OS === "ios" ? undefined : <HomeTopContentSpacer />;
 
-  const v2ListHeader = (
-    <>
-      {listHeader}
-      {tagSidebar.control}
-      {Platform.OS === "ios" && workspace ? (
+  const scopeFilters = Platform.OS === "ios" && workspace ? (
         <ThreadListFilters
           gutter={sidebarSurface ? 8 : 0}
           environments={props.environments}
@@ -710,7 +706,12 @@ export function HomeScreen(props: HomeScreenProps) {
           onEnvironmentChange={props.onEnvironmentChange}
           onProjectChange={props.onProjectChange}
         />
-      ) : null}
+      ) : null;
+  const v2ListHeader = (
+    <>
+      {listHeader}
+      {tagSidebar.control}
+      {scopeFilters}
     </>
   );
 
@@ -747,7 +748,13 @@ export function HomeScreen(props: HomeScreenProps) {
       />
     );
 
-  if (tagSidebar.active) return <View className={containerClassName}>{tagSidebar.results}</View>;
+  if (tagSidebar.active)
+    return (
+      <View className={containerClassName}>
+        {scopeFilters}
+        {tagSidebar.results}
+      </View>
+    );
 
   if (Platform.OS === "android" && threadListV2Items.length === 0) {
     return (
