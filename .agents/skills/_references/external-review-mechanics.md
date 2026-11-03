@@ -62,14 +62,24 @@ build, test, package, install, migration, server, browser, or release commands.
 
 ## Command Patterns
 
-Codex read-only review:
+Codex read-only review has no default model. Use the model the owning skill or requester
+names, or otherwise choose one for this review, and check it against the live catalog:
 
 ```sh
-printf '%s\n' "$PROMPT" | codex --search --disable fast_mode -a never exec -m gpt-5 -c 'model_reasoning_effort="medium"' -s read-only -C "$PWD" -
+codex debug models | jq -r '.models[] | select(.visibility == "list") | "\(.slug): \([.supported_reasoning_levels[].effort] | join(" "))"'
 ```
 
-Use `model_reasoning_effort="high"` for heavy mode, correctness-heavy reviews, round 3+,
-or high-risk implementation concerns.
+Set `MODEL` to a listed slug and `EFFORT` to a level listed for that slug. Check the other
+flags against `codex --help`, `codex exec --help`, and `codex features list`, because
+options vary by Codex version and model. If the named model or effort is not supported,
+report that instead of substituting another.
+
+```sh
+printf '%s\n' "$PROMPT" | codex --search --disable fast_mode -a never exec -m "$MODEL" -c "model_reasoning_effort=\"$EFFORT\"" -s read-only -C "$PWD" -
+```
+
+Use a higher effort that the selected model supports for heavy mode, correctness-heavy
+reviews, round 3+, or high-risk implementation concerns.
 
 Opencode review, when configured:
 

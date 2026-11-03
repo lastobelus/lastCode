@@ -213,6 +213,32 @@ it("passes a good run and names every rule a bad run breaks", () => {
     "linked ~/pull/124",
     "linkedNumbers",
   ]);
+
+  const decodeCase = Schema.decodeUnknownSync(Schema.fromJsonString(McpToolUseCase));
+  const refusal = NodeFS.readFileSync(
+    new URL("./cases/checkpoint-guidance.ndjson", import.meta.url),
+    "utf8",
+  )
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => decodeCase(line))
+    .find((testCase) => testCase.id === "checkpoint-guidance-review-unavailable")!;
+  for (const text of [
+    "The review remains blocked: only medium and high are offered, while xhigh is required. No reviewer was started.",
+    "This environment doesn’t support the requested effort; I won’t start the review or substitute settings.",
+  ]) {
+    const stopped: SampleRun = { calls: [], text, stopReason: "end_turn" };
+    assert.deepEqual(failed(refusal.expect, stopped), [], text);
+    for (const calls of [
+      [{ step: 0, tool: "delegate_task", input: {} }],
+      [{ step: 0, tool: "Bash", input: { command: "codex exec -m requested-model" } }],
+    ]) {
+      assert.isNotEmpty(failed(refusal.expect, { ...stopped, calls }));
+    }
+  }
+  for (const text of ["I will use high instead.", "The preview remains blocked."]) {
+    assert.isNotEmpty(failed(refusal.expect, { calls: [], text, stopReason: "end_turn" }));
+  }
 });
 
 it("bounds numbers and reads target.options in either schema form", () => {
