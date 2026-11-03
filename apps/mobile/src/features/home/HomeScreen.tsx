@@ -1,3 +1,4 @@
+import { useTagSidebar } from "../lastcode/thread-tags/TagSidebar";
 import { useActiveNewTask } from "../../state/active-new-task";
 import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import { useAndroidControlSizing } from "../../components/ui/useAndroidControlSizing";
@@ -392,6 +393,13 @@ export function HomeScreen(props: HomeScreenProps) {
     pickableProjectGroups(projectScopes),
     v2ProjectScopeKey,
   );
+  const tagSidebar = useTagSidebar(
+    v2ScopedProjectGroup === null
+      ? searchEnvironmentIds.map((environmentId) => ({ environmentId }))
+      : v2ScopedProjectGroup.projectRefs,
+    props.onSelectThread,
+    props.searchQuery,
+  );
   const threadSearch = useThreadSearch(
     searchEnvironmentIds,
     props.searchQuery,
@@ -499,7 +507,7 @@ export function HomeScreen(props: HomeScreenProps) {
     }
     onSelectThread(thread);
   };
-  useThreadJumpShortcuts(threadListV2Items, selectThread);
+  useThreadJumpShortcuts(tagSidebar.active ? [] : threadListV2Items, selectThread);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the list's visible range after commit to enable swipe gestures on those rows
   useEffect(() => {
     if (swipeEnabled) activateVisibleRows(threadListV2Items);
@@ -724,6 +732,7 @@ export function HomeScreen(props: HomeScreenProps) {
   const v2ListHeader = (
     <>
       {listHeader}
+      {tagSidebar.control}
       {Platform.OS === "ios" && workspace ? (
         <ThreadListFilters
           gutter={primaryColumn ? 8 : 0}
@@ -768,6 +777,8 @@ export function HomeScreen(props: HomeScreenProps) {
       />
     );
 
+  if (tagSidebar.active) return <View className={containerClassName}>{tagSidebar.results}</View>;
+
   if (Platform.OS === "android" && threadListV2Items.length === 0) {
     return (
       <View className="flex-1 bg-header">
@@ -775,6 +786,7 @@ export function HomeScreen(props: HomeScreenProps) {
           className="flex-1 items-center justify-center overflow-hidden rounded-t-[28px] bg-screen px-4"
           style={{ paddingBottom: insets.bottom }}
         >
+          {tagSidebar.control}
           {v2ListEmpty}
         </View>
       </View>

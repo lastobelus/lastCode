@@ -65,11 +65,7 @@ const matchPages = Atom.family((key: string) => {
     const hidden = hiddenThreadKeys(
       environments,
       get(environmentThreadShells.hiddenThreadKeysAtom),
-      new Set(
-        get(environmentThreadShells.threadShellsAtom).map((thread) =>
-          scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
-        ),
-      ),
+      new Set(get(environmentThreadShells.threadRefsAtom).map((ref) => scopedThreadKey(ref))),
     );
     return {
       entries: entries.filter(

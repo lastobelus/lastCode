@@ -58,7 +58,7 @@ export function useTagSidebar(
         ) : null}
         {discovery.error ? (
           <Text accessibilityRole="alert" className="px-4 py-3 text-danger-foreground">
-            Could not load tagged threads.
+            {discovery.error}
           </Text>
         ) : null}
         {!discovery.loading && !discovery.error && threads.length === 0 ? (
