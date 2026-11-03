@@ -23,6 +23,7 @@ export function useThreadHeaderOptions(props: {
   readonly gitControls: Parameters<typeof ThreadGitControls>[0];
   readonly onReturnToThread?: () => void;
   readonly draft?: boolean;
+  readonly onOpenTags?: (() => void) | undefined;
 }) {
   const usesNativeWorkspaceColumns = useNativeWorkspaceColumnsSupported();
   const deviceType = useDeviceType();
@@ -66,6 +67,18 @@ export function useThreadHeaderOptions(props: {
         ]
       : []),
   ];
+  const tagHeaderItems: NativeHeaderItems = props.onOpenTags
+    ? [
+        withNativeGlassHeaderItem({
+          type: "button" as const,
+          identifier: "lastcode-thread-tags",
+          accessibilityLabel: "Thread tags",
+          label: "Tags",
+          icon: { name: "tag", type: "sfSymbol" as const },
+          onPress: props.onOpenTags,
+        }),
+      ]
+    : [];
   const canGoBack = navigation.canGoBack();
   const compactHomeHeaderItems: NativeHeaderItems = [
     withNativeGlassHeaderItem({
@@ -88,8 +101,12 @@ export function useThreadHeaderOptions(props: {
         ? undefined
         : () => compactHomeHeaderItems,
     // The workspace navigator adds compose to the Duo detail column's bar.
-    unstable_headerRightItems: () =>
-      usesDuoHeader || layout.usesSplitView ? threadCenterHeaderItems : compactRightHeaderItems,
+    unstable_headerRightItems: () => [
+      ...tagHeaderItems,
+      ...(usesDuoHeader || layout.usesSplitView
+        ? threadCenterHeaderItems
+        : compactRightHeaderItems),
+    ],
     unstable_headerToolbarItems: () => [],
     unstable_headerSubtitle: props.usesNativeHeaderGlass ? props.subtitle : undefined,
     contentStyle: undefined,
@@ -99,6 +116,7 @@ export function useThreadHeaderOptions(props: {
     options,
     // Factories re-read only on version changes; include displayed items and hidden callback state such as default refs.
     optionsVersion: [
+      tagHeaderItems,
       splitLeftHeaderItems,
       threadCenterHeaderItems,
       compactRightHeaderItems,

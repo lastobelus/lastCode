@@ -91,6 +91,8 @@ export interface Preferences {
   readonly hiddenNavigationTabs?: readonly string[];
   readonly pullRequestHideTestFiles?: boolean;
   readonly pullRequestMergeMethod?: PullRequestMergeMethod;
+  readonly lastcodeThreadTagsHeaderEnabled?: boolean;
+  readonly lastcodeThreadTagsSidebarEnabled?: boolean;
   readonly liveActivitiesEnabled?: boolean;
   readonly themeId?: MobileThemeId;
   readonly lightThemeId?: MobileThemeId;
@@ -175,6 +177,8 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     hiddenNavigationTabs?: readonly string[];
     pullRequestHideTestFiles?: boolean;
     pullRequestMergeMethod?: PullRequestMergeMethod;
+    lastcodeThreadTagsHeaderEnabled?: boolean;
+    lastcodeThreadTagsSidebarEnabled?: boolean;
     liveActivitiesEnabled?: boolean;
     themeId?: MobileThemeId;
     lightThemeId?: MobileThemeId;
@@ -234,6 +238,10 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     preferences.pullRequestMergeMethod = parsed.pullRequestMergeMethod;
   }
 
+  if (typeof parsed.lastcodeThreadTagsHeaderEnabled === "boolean")
+    preferences.lastcodeThreadTagsHeaderEnabled = parsed.lastcodeThreadTagsHeaderEnabled;
+  if (typeof parsed.lastcodeThreadTagsSidebarEnabled === "boolean")
+    preferences.lastcodeThreadTagsSidebarEnabled = parsed.lastcodeThreadTagsSidebarEnabled;
   if (typeof parsed.liveActivitiesEnabled === "boolean") {
     preferences.liveActivitiesEnabled = parsed.liveActivitiesEnabled;
   }

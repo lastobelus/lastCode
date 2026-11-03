@@ -3,6 +3,20 @@
 Use a new thread for a separate task. Choose **New worktree** when its code changes
 need a separate branch and working directory.
 
+## Organize with tags
+
+Use **+Tag** below a thread's title to find or add a tag. On mobile, open
+**Tags** from the header. Search matches partial spellings. Paths such as
+`work/client` let you filter by `work` and include its nested tags, even when no
+thread has `work` itself. Adding or removing a tag changes only that exact tag.
+
+Use the sidebar's tag filter to find matching threads across projects. Suggestions
+come from unarchived threads, including settled ones; **Archived only** searches
+the archive instead on web and desktop. Agents can also find and change tags when you ask. Tags stay
+independent of thread placement, annotations and work status. **Settings → LastCode**
+has separate controls for the header and sidebar UI; hiding either keeps the tags
+and agent access.
+
 ## Pause before going offline
 
 Enable **Environment pause button** in **Settings → LastCode** for each environment

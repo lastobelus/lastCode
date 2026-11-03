@@ -1,3 +1,4 @@
+import { THREAD_TAG_RPC_METHODS } from "@t3tools/contracts";
 import {
   AuthEnvironmentMaintainScope,
   AuthDiagnosticsReadScope,
@@ -87,6 +88,12 @@ describe("RPC authorization scopes", () => {
   });
 
   it("keeps hosted preview observation read-only and process control terminal-authorized", () => {
+    expect(requiredScopeForRpcMethod(THREAD_TAG_RPC_METHODS.vocabulary)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    expect(requiredScopeForRpcMethod(THREAD_TAG_RPC_METHODS.query)).toBe(
+      AuthOrchestrationReadScope,
+    );
     expect(requiredScopeForRpcMethod(WS_METHODS.previewHostingList)).toBe(
       AuthOrchestrationReadScope,
     );

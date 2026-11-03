@@ -1,4 +1,12 @@
 import {
+  THREAD_TAG_RPC_METHODS,
+  ThreadTagVocabularyInput,
+  ThreadTagVocabularyResult,
+  ThreadTagQueryInput,
+  ThreadTagQueryResult,
+  ThreadTagDiscoveryError,
+} from "./threadTagDiscovery.ts";
+import {
   PromptSnippet,
   PromptSnippetSaveInput,
   PromptSnippetsState,
@@ -2105,6 +2113,17 @@ const WsThreadRepairRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.repairThread, {
   success: ThreadRepairResult,
   error: Schema.Union([ThreadRecoveryOperationError, EnvironmentAuthorizationError]),
 });
+const WsThreadTagVocabularyRpc = Rpc.make(THREAD_TAG_RPC_METHODS.vocabulary, {
+  payload: ThreadTagVocabularyInput,
+  success: ThreadTagVocabularyResult,
+  error: Schema.Union([ThreadTagDiscoveryError, EnvironmentAuthorizationError]),
+});
+const WsThreadTagQueryRpc = Rpc.make(THREAD_TAG_RPC_METHODS.query, {
+  payload: ThreadTagQueryInput,
+  success: ThreadTagQueryResult,
+  error: Schema.Union([ThreadTagDiscoveryError, EnvironmentAuthorizationError]),
+});
+
 const WsOrchestrationV2SearchThreadsRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.searchThreads, {
   payload: OrchestrationV2SearchThreadsInput,
   success: OrchestrationV2SearchThreadsResult,
@@ -2610,6 +2629,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationV2GetTurnDiffRpc,
   WsOrchestrationV2GetFullThreadDiffRpc,
   WsOrchestrationV2SearchThreadsRpc,
+  WsThreadTagVocabularyRpc,
+  WsThreadTagQueryRpc,
   WsOrchestrationV2SearchThreadRpc,
   WsOrchestrationV2SearchThreadStreamRpc,
   WsThreadRecoveryRpc,

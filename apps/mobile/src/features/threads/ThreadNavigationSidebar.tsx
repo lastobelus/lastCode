@@ -1,3 +1,4 @@
+import { useTagSidebar } from "../lastcode/thread-tags/TagSidebar";
 import { useActiveNewTask } from "../../state/active-new-task";
 import { ThreadUndoNotice } from "../home/ThreadUndoNotice";
 import { useAndroidControlSizing } from "../../components/ui/useAndroidControlSizing";
@@ -241,6 +242,13 @@ function ThreadNavigationSidebarPane(
   // An archived project's filter reads as all projects, matching the filter menu.
   const selectedProjectScope =
     pickableProjectGroups(projectScopes).find((scope) => scope.key === resolvedProjectKey) ?? null;
+  const tagSidebar = useTagSidebar(
+    selectedProjectScope === null
+      ? searchEnvironmentIds.map((environmentId) => ({ environmentId }))
+      : selectedProjectScope.projectRefs,
+    props.onSelectThread,
+    props.searchQuery,
+  );
   const threadSearch = useThreadSearch(
     searchEnvironmentIds,
     props.searchQuery,
@@ -735,42 +743,47 @@ function ThreadNavigationSidebarPane(
           }}
         />
         <View className="flex-1">
-          <SwipeableScrollGateProvider enabled={swipeEnabled}>
-            <GestureDetector gesture={sidebarScrollGesture}>
-              <AnimatedLegendList
-                renderScrollComponent={Platform.OS === "ios" ? NativeScrollView : undefined}
-                itemLayoutAnimation={THREAD_SIDEBAR_ROW_LAYOUT}
-                data={listItems}
-                drawDistance={500}
-                estimatedItemSize={64}
-                extraData={listExtraData}
-                getItemType={(item) => item.type}
-                itemsAreEqual={sidebarItemsAreEqual}
-                keyExtractor={(item) => item.key}
-                renderItem={renderListItem}
-                automaticallyAdjustsScrollIndicatorInsets={NATIVE_LIQUID_GLASS_SUPPORTED}
-                contentInsetAdjustmentBehavior={
-                  NATIVE_LIQUID_GLASS_SUPPORTED ? "automatic" : "never"
-                }
-                contentContainerStyle={[
-                  styles.threadListContent,
-                  Platform.OS === "android" ? { paddingHorizontal: 0 } : null,
-                  {
-                    paddingBottom: Math.max(insets.bottom, 16) + 16,
-                    paddingTop: 6,
-                  },
-                ]}
-                keyboardDismissMode="on-drag"
-                keyboardShouldPersistTaps="handled"
-                {...scrollGateHandlers}
-                recycleItems
-                scrollEventThrottle={16}
-                showsVerticalScrollIndicator={false}
-                style={styles.threadList}
-                ListEmptyComponent={listEmpty}
-              />
-            </GestureDetector>
-          </SwipeableScrollGateProvider>
+          {tagSidebar.active ? (
+            tagSidebar.results
+          ) : (
+            <SwipeableScrollGateProvider enabled={swipeEnabled}>
+              <GestureDetector gesture={sidebarScrollGesture}>
+                <AnimatedLegendList
+                  renderScrollComponent={Platform.OS === "ios" ? NativeScrollView : undefined}
+                  itemLayoutAnimation={THREAD_SIDEBAR_ROW_LAYOUT}
+                  data={listItems}
+                  drawDistance={500}
+                  estimatedItemSize={64}
+                  extraData={listExtraData}
+                  getItemType={(item) => item.type}
+                  itemsAreEqual={sidebarItemsAreEqual}
+                  keyExtractor={(item) => item.key}
+                  renderItem={renderListItem}
+                  automaticallyAdjustsScrollIndicatorInsets={NATIVE_LIQUID_GLASS_SUPPORTED}
+                  contentInsetAdjustmentBehavior={
+                    NATIVE_LIQUID_GLASS_SUPPORTED ? "automatic" : "never"
+                  }
+                  contentContainerStyle={[
+                    styles.threadListContent,
+                    Platform.OS === "android" ? { paddingHorizontal: 0 } : null,
+                    {
+                      paddingBottom: Math.max(insets.bottom, 16) + 16,
+                      paddingTop: 6,
+                    },
+                  ]}
+                  keyboardDismissMode="on-drag"
+                  keyboardShouldPersistTaps="handled"
+                  {...scrollGateHandlers}
+                  recycleItems
+                  scrollEventThrottle={16}
+                  showsVerticalScrollIndicator={false}
+                  style={styles.threadList}
+                  ListHeaderComponent={tagSidebar.control}
+                  ListEmptyComponent={listEmpty}
+                />
+              </GestureDetector>
+            </SwipeableScrollGateProvider>
+          )}
           <ThreadUndoNotice visible={props.visible} />
         </View>
       </>
@@ -802,8 +815,13 @@ function ThreadNavigationSidebarPane(
             : { paddingBottom: insets.bottom }
         }
       >
-        {Platform.OS === "android" && listItems.length === 0 ? (
-          <View className="flex-1 items-center justify-center">{listEmpty}</View>
+        {tagSidebar.active ? (
+          tagSidebar.results
+        ) : Platform.OS === "android" && listItems.length === 0 ? (
+          <View className="flex-1">
+            {tagSidebar.control}
+            <View className="flex-1 items-center justify-center">{listEmpty}</View>
+          </View>
         ) : (
           <SwipeableScrollGateProvider enabled={swipeEnabled}>
             <GestureDetector gesture={sidebarScrollGesture}>
@@ -838,6 +856,7 @@ function ThreadNavigationSidebarPane(
                 scrollEventThrottle={16}
                 showsVerticalScrollIndicator={false}
                 style={styles.threadList}
+                ListHeaderComponent={tagSidebar.control}
                 ListEmptyComponent={listEmpty}
               />
             </GestureDetector>

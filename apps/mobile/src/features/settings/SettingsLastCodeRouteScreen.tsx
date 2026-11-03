@@ -1,3 +1,4 @@
+import { TagSettings } from "../lastcode/thread-tags/TagSettings";
 import { useAtomValue } from "@effect/atom-react";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { AsyncResult, Atom } from "effect/reactivity";
@@ -118,6 +119,7 @@ export function SettingsLastCodeRouteScreen() {
           contentContainerClassName="gap-6 px-5 pt-4"
           contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 18) + 18 }}
         >
+          <TagSettings />
           {displayTargets.length === 0 ? (
             <Text className="px-2 text-base text-foreground-muted">
               {selectedTargets.length === 0

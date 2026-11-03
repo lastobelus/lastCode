@@ -1,4 +1,7 @@
-import { useMemo } from "react";
+import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { ThreadTagEditor } from "../lastcode/thread-tags/TagSheet";
+import { useTagPreferences } from "../lastcode/thread-tags/state";
+import { useMemo, useState } from "react";
 import { AppBar } from "../../components/ui/AppBar";
 import { ScreenHeaderButton } from "../../components/ui/ScreenHeaderButton";
 import type { AppBarAction } from "../../components/ui/AppBar.types";
@@ -23,9 +26,20 @@ export function ThreadHeader(
   const { layout, panes, toggleAuxiliaryPane, composerKeyboardActive } =
     useAdaptiveWorkspaceLayout();
   const { onOpenTerminal, onMergeBack } = props.gitControls;
-  const native = useThreadHeaderOptions(props);
+  const { header: tagsEnabled } = useTagPreferences();
+  const [tagsOpen, setTagsOpen] = useState(false);
+  const native = useThreadHeaderOptions({
+    ...props,
+    onOpenTags: tagsEnabled ? () => setTagsOpen(true) : undefined,
+  });
   const androidHeaderActions = useMemo<ReadonlyArray<AppBarAction>>(() => {
     const actions: AppBarAction[] = [];
+    if (tagsEnabled)
+      actions.push({
+        accessibilityLabel: "Thread tags",
+        icon: "tag",
+        onPress: () => setTagsOpen(true),
+      });
     if (props.onReturnToThread) {
       actions.push({
         accessibilityLabel: "Return to chat",
@@ -63,6 +77,7 @@ export function ThreadHeader(
     }
     return actions;
   }, [
+    tagsEnabled,
     props.inspectorMode,
     panes.auxiliaryPaneVisible,
     props.onOpenFilesInspector,
@@ -104,6 +119,13 @@ export function ThreadHeader(
         compact={composerKeyboardActive}
       />
       {native.fallback}
+      {tagsEnabled && tagsOpen ? (
+        <ThreadTagEditor
+          environmentId={EnvironmentId.make(props.gitControls.environmentId)}
+          threadId={ThreadId.make(props.gitControls.threadId)}
+          onClose={() => setTagsOpen(false)}
+        />
+      ) : null}
     </>
   );
 }

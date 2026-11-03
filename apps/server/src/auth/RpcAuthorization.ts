@@ -1,3 +1,4 @@
+import { THREAD_TAG_RPC_METHODS } from "@t3tools/contracts";
 import {
   CLIENT_GUARDED_RPC_SCOPES,
   type DeviceListInput,
@@ -51,6 +52,8 @@ export const RPC_REQUIRED_SCOPES = {
   [ORCHESTRATION_V2_WS_METHODS.forceStopThread]: AuthOrchestrationOperateScope,
   [ORCHESTRATION_V2_WS_METHODS.getTurnDiff]: AuthOrchestrationReadScope,
   [ORCHESTRATION_V2_WS_METHODS.getFullThreadDiff]: AuthOrchestrationReadScope,
+  [THREAD_TAG_RPC_METHODS.vocabulary]: AuthOrchestrationReadScope,
+  [THREAD_TAG_RPC_METHODS.query]: AuthOrchestrationReadScope,
   [ORCHESTRATION_V2_WS_METHODS.searchThreads]: AuthOrchestrationReadScope,
   [ORCHESTRATION_V2_WS_METHODS.searchThread]: AuthOrchestrationReadScope,
   [ORCHESTRATION_V2_WS_METHODS.searchThreadStream]: AuthOrchestrationReadScope,
