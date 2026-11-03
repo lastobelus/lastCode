@@ -1537,6 +1537,12 @@ export function threadShellFromProjection(
   return {
     createdBy: projection.thread.createdBy,
     creationSource: projection.thread.creationSource,
+    ...(projection.thread.creatorThreadId === undefined
+      ? {}
+      : { creatorThreadId: projection.thread.creatorThreadId }),
+    ...(projection.thread.creatorGrouping === undefined
+      ? {}
+      : { creatorGrouping: projection.thread.creatorGrouping }),
     id: projection.thread.id,
     projectId: projection.thread.projectId,
     title: projection.thread.title,
@@ -1818,6 +1824,12 @@ function shellFromState(input: {
   return {
     createdBy: input.state.thread.createdBy,
     creationSource: input.state.thread.creationSource,
+    ...(input.state.thread.creatorThreadId === undefined
+      ? {}
+      : { creatorThreadId: input.state.thread.creatorThreadId }),
+    ...(input.state.thread.creatorGrouping === undefined
+      ? {}
+      : { creatorGrouping: input.state.thread.creatorGrouping }),
     id: input.state.thread.id,
     projectId: input.state.thread.projectId,
     title: input.state.thread.title,
