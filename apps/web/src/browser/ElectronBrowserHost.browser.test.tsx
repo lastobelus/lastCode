@@ -20,6 +20,7 @@ import { AsyncResult, Atom } from "effect/reactivity";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { act, fakeTimers, render, stubGlobal } from "../../test/render";
+import { createPreviewBridgeFixture } from "../../test/previewBridge";
 
 const mocks = vi.hoisted(() => ({
   getClientSettings: vi.fn<() => Promise<ClientSettings | null>>(),
@@ -59,16 +60,19 @@ vi.mock(import("~/localApi"), async (original) => {
 });
 
 // The Electron desktop bridge; a browser has none.
-vi.mock(import("~/components/preview/previewBridge"), async (original) => ({
-  ...(await original()),
-  previewBridge: {
-    createTab: mocks.createTab,
-    closeTab: mocks.closeTab,
-    registerWebview: mocks.registerWebview,
-    setShown: mocks.setShown,
-    getPreviewConfig: mocks.getPreviewConfig,
-  } as never,
-}));
+vi.mock(import("~/components/preview/previewBridge"), async (original) => {
+  const { createPreviewBridgeFixture } = await import("../../test/previewBridge");
+  return {
+    ...(await original()),
+    previewBridge: createPreviewBridgeFixture({
+      createTab: mocks.createTab,
+      closeTab: mocks.closeTab,
+      registerWebview: mocks.registerWebview,
+      setShown: mocks.setShown,
+      getPreviewConfig: mocks.getPreviewConfig,
+    }),
+  };
+});
 
 vi.mock(import("~/components/preview/usePreviewBridge"), async (original) => ({
   ...(await original()),
@@ -270,7 +274,7 @@ describe("ElectronBrowserHost", () => {
       const navigate = vi.fn().mockResolvedValue(undefined);
       using _desktopBridge = stubGlobal("desktopBridge", {
         getWindowZoomFactor: () => 1,
-        preview: {
+        preview: createPreviewBridgeFixture({
           refresh,
           navigate,
           browserPresentation: async () => undefined,
@@ -279,7 +283,7 @@ describe("ElectronBrowserHost", () => {
           onOpenLink: () => () => undefined,
           onBrowserSurfaceRequest: () => () => undefined,
           browserSurfaceResponse: async () => undefined,
-        },
+        }),
       });
       await using tab = await mountActivityTab("reconnect");
       const { release, container } = tab;
@@ -418,7 +422,7 @@ describe("ElectronBrowserHost", () => {
       const refresh = vi.fn<DesktopPreviewBridge["refresh"]>().mockResolvedValue(undefined);
       using _desktopBridge = stubGlobal("desktopBridge", {
         getWindowZoomFactor: () => 1,
-        preview: {
+        preview: createPreviewBridgeFixture({
           navigate,
           refresh,
           browserPresentation: async () => undefined,
@@ -427,7 +431,7 @@ describe("ElectronBrowserHost", () => {
           onOpenLink: () => () => undefined,
           onBrowserSurfaceRequest: () => () => undefined,
           browserSurfaceResponse: async () => undefined,
-        },
+        }),
       });
       let release = acquireBrowserSurfaceActivity(runtimeTabId);
       reconcilePreviewServerSessions(threadRef, {
@@ -488,7 +492,7 @@ describe("ElectronBrowserHost", () => {
       });
       using _desktopBridge = stubGlobal("desktopBridge", {
         getWindowZoomFactor: () => 1,
-        preview: {
+        preview: createPreviewBridgeFixture({
           refresh,
           navigate,
           browserPresentation: async () => undefined,
@@ -497,7 +501,7 @@ describe("ElectronBrowserHost", () => {
           onOpenLink: () => () => undefined,
           onBrowserSurfaceRequest: () => () => undefined,
           browserSurfaceResponse: async () => undefined,
-        },
+        }),
       });
       await using tab = await mountActivityTab("new-destination", initialUrl);
       const { initial, prepare, runtimeTabId, release, container } = tab;
@@ -580,7 +584,7 @@ describe("ElectronBrowserHost", () => {
     const refresh = vi.fn<DesktopPreviewBridge["refresh"]>().mockResolvedValue(undefined);
     using _desktopBridge = stubGlobal("desktopBridge", {
       getWindowZoomFactor: () => 1,
-      preview: {
+      preview: createPreviewBridgeFixture({
         navigate,
         refresh,
         browserPresentation: async () => undefined,
@@ -589,7 +593,7 @@ describe("ElectronBrowserHost", () => {
         onOpenLink: () => () => undefined,
         onBrowserSurfaceRequest: () => () => undefined,
         browserSurfaceResponse: async () => undefined,
-      },
+      }),
     });
     await using tab = await mountActivityTab("recovered-destination");
     const { initial, prepare, runtimeTabId, release, container } = tab;
@@ -653,7 +657,7 @@ describe("ElectronBrowserHost", () => {
     let rendererRequest: ((request: DesktopBrowserRendererRequest) => void) | undefined;
     using _desktopBridge = stubGlobal("desktopBridge", {
       getWindowZoomFactor: () => 1,
-      preview: {
+      preview: createPreviewBridgeFixture({
         onBrowserRendererRequest: (listener: typeof rendererRequest) => {
           rendererRequest = listener;
           return () => {
@@ -666,7 +670,7 @@ describe("ElectronBrowserHost", () => {
         onOpenLink: () => () => undefined,
         onBrowserSurfaceRequest: () => () => undefined,
         browserSurfaceResponse: async () => undefined,
-      },
+      }),
     });
     const createElement = document.createElement.bind(document);
     using _createElement = vi.spyOn(document, "createElement").mockImplementation(((

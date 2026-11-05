@@ -19,8 +19,8 @@ import type { ReactNode } from "react";
 
 import "~/index.css";
 import { act, fakeTimers, render as renderUi, type Screen } from "../../test/render";
+import { createPreviewBridgeFixture } from "../../test/previewBridge";
 import { describe, expect, it, vi } from "vite-plus/test";
-import type { previewBridge } from "~/components/preview/previewBridge";
 
 const mocks = vi.hoisted(() => ({
   getClientSettings: vi.fn<() => Promise<ClientSettings | null>>(),
@@ -46,17 +46,20 @@ vi.mock(import("~/components/preview/previewHostingRecovery"), { spy: true });
 vi.mock(import("./browserDefaults"), { spy: true });
 
 // The Electron desktop bridge; a browser has none.
-vi.mock(import("~/components/preview/previewBridge"), async (original) => ({
-  ...(await original()),
-  previewBridge: {
-    createTab: mocks.createTab,
-    closeTab: mocks.closeTab,
-    registerWebview: mocks.registerWebview,
-    getPreviewConfig: mocks.getPreviewConfig,
-    setColorScheme: async () => undefined,
-    setZoomFactor: async () => undefined,
-  } as unknown as NonNullable<typeof previewBridge>,
-}));
+vi.mock(import("~/components/preview/previewBridge"), async (original) => {
+  const { createPreviewBridgeFixture } = await import("../../test/previewBridge");
+  return {
+    ...(await original()),
+    previewBridge: createPreviewBridgeFixture({
+      createTab: mocks.createTab,
+      closeTab: mocks.closeTab,
+      registerWebview: mocks.registerWebview,
+      getPreviewConfig: mocks.getPreviewConfig,
+      setColorScheme: async () => undefined,
+      setZoomFactor: async () => undefined,
+    }),
+  };
+});
 
 vi.mock(import("~/env"), async (original) => ({ ...(await original()), isElectron: true }));
 vi.mock("~/hooks/useTheme", () => ({ useTheme: () => ({ resolvedTheme: "light" }) }));
@@ -267,14 +270,14 @@ describe("Electron browser hosting outside the selected thread", () => {
       let onOpenLink!: Parameters<DesktopPreviewBridge["onOpenLink"]>[0];
       vi.stubGlobal("desktopBridge", {
         getWindowZoomFactor: () => 1,
-        preview: {
+        preview: createPreviewBridgeFixture({
           onOpenLink: (listener: typeof onOpenLink) => {
             onOpenLink = listener;
             return () => undefined;
           },
           onPointerEvent: () => () => undefined,
           setAnnotationTheme: async () => undefined,
-        },
+        }),
       });
       using _host = { [Symbol.dispose]: startElectronBrowserHost() };
       const url = "http://localhost:5173/qa";
@@ -358,14 +361,14 @@ describe("Electron browser hosting outside the selected thread", () => {
     let onOpenLink!: Parameters<DesktopPreviewBridge["onOpenLink"]>[0];
     vi.stubGlobal("desktopBridge", {
       getWindowZoomFactor: () => 1,
-      preview: {
+      preview: createPreviewBridgeFixture({
         onOpenLink: (listener: typeof onOpenLink) => {
           onOpenLink = listener;
           return () => undefined;
         },
         onPointerEvent: () => () => undefined,
         setAnnotationTheme: async () => undefined,
-      },
+      }),
     });
     using _host = { [Symbol.dispose]: startElectronBrowserHost() };
     const failure = new Error("Preview recovery unavailable.");
@@ -914,12 +917,12 @@ describe("HostedBrowserWebview settings hydration", () => {
     const browserPresentation = vi.fn(async () => undefined);
     vi.stubGlobal("desktopBridge", {
       getWindowZoomFactor: () => 1,
-      preview: {
+      preview: createPreviewBridgeFixture({
         browserPresentation,
         setShown: vi.fn<DesktopPreviewBridge["setShown"]>(async () => undefined),
         onBrowserSurfaceRequest: () => () => undefined,
         browserSurfaceResponse: async () => undefined,
-      },
+      }),
     });
     const runtimeTabId = "native-presentation";
     const owner = Symbol("browser-slot");
