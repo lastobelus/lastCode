@@ -997,10 +997,7 @@ const make = Effect.gen(function* () {
   };
 
   const broadcastViewport = async (tab: ServerTab) => {
-    const size =
-      tab.backingPage === "desktop-root"
-        ? await ServerBrowserPage.viewportSize(tab.page, tab.cdp)
-        : await layoutSize(tab);
+    const size = await layoutSize(tab);
     if (!size || tab.closing) return;
     for (const viewer of tab.viewers) viewer.push({ _tag: "viewport", ...size });
   };

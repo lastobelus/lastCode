@@ -350,12 +350,13 @@ describe("opening a saved handoff", () => {
     expect(readThreadHandoffs(remote)).toHaveLength(1);
   });
   it("leaves a failed desktop app tab intact and opens its handoff in the owning environment", async () => {
+    const remote = { ...ref, environmentId: EnvironmentId.make("remote-environment") };
     const ops = operations();
     const url = "http://workstation.example:8123/app?q=1#section";
     const localUrl = "http://127.0.0.1:8123/app?q=1#section";
     native.bridge = { navigate: vi.fn(async () => undefined) };
     hosting.prepare.mockResolvedValue({ url, localUrl, managed: true, restored: true });
-    const entry = recordHandoff(ref, { kind: "url", url });
+    const entry = recordHandoff(remote, { kind: "url", url });
     const failed: PreviewSessionSnapshot = {
       ...snapshot(url, "desktop-tab"),
       profileId: "default",
@@ -364,8 +365,8 @@ describe("opening a saved handoff", () => {
       desktopHostId: "local",
       navStatus: { _tag: "LoadFailed", url, title: "", code: -102, description: "Unreachable" },
     };
-    applyPreviewServerSnapshot(ref, failed);
-    rememberHandoffBrowser(ref, failed.tabId, entry.target, url);
+    applyPreviewServerSnapshot(remote, failed);
+    rememberHandoffBrowser(remote, failed.tabId, entry.target, url);
     ops.openPreview.mockImplementation(async ({ input }) =>
       AsyncResult.success({
         ...snapshot(input.url ?? "", "environment-tab"),
@@ -374,19 +375,55 @@ describe("opening a saved handoff", () => {
       }),
     );
 
-    await openHandoff(ref, entry, ops);
+    await openHandoff(remote, entry, ops);
     expect(ops.openPreview.mock.calls[0]?.[0].input).toMatchObject({
       url: localUrl,
       runtime: "server",
       browserHost: "environment",
     });
     expect(native.bridge.navigate).not.toHaveBeenCalled();
-    expect(panel().activeSurfaceId).toBe("browser:environment-tab");
-    expect(readThreadPreviewState(ref).sessions[failed.tabId]).toEqual(failed);
-    await openHandoff(ref, entry, ops);
+    expect(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, remote)
+        .activeSurfaceId,
+    ).toBe("browser:environment-tab");
+    expect(readThreadPreviewState(remote).sessions[failed.tabId]).toEqual(failed);
+    await openHandoff(remote, entry, ops);
     expect(ops.openPreview).toHaveBeenCalledTimes(1);
-    expect(panel().activeSurfaceId).toBe("browser:environment-tab");
+    expect(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, remote)
+        .activeSurfaceId,
+    ).toBe("browser:environment-tab");
   });
+
+  it.each(["server", "desktop"] as const)(
+    "restores a local managed handoff in its retained %s tab",
+    async (backingPage) => {
+      const ops = operations();
+      const url = "http://127.0.0.1:8123/app";
+      native.bridge = { navigate: vi.fn(async () => undefined) };
+      hosting.prepare.mockResolvedValue({
+        url,
+        localUrl: url,
+        managed: true,
+        restored: true,
+        restarted: true,
+      });
+      const entry = recordHandoff(ref, { kind: "url", url });
+      applyPreviewServerSnapshot(ref, {
+        ...snapshot(url),
+        profileId: "default",
+        runtime: "server",
+        backingPage,
+        ...(backingPage === "desktop" ? { desktopHostId: "local" } : {}),
+      });
+      await openHandoff(ref, entry, ops);
+      expect(ops.openPreview).not.toHaveBeenCalled();
+      expect(panel().activeSurfaceId).toBe("browser:tab");
+      if (backingPage === "desktop")
+        expect(native.bridge.navigate).toHaveBeenCalledWith(expect.any(String), url);
+      else expect(refresh.request).toHaveBeenCalledWith(ref, "tab", url);
+    },
+  );
 
   it("keeps a managed handoff in its existing named desktop profile", async () => {
     const ops = operations();

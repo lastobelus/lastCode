@@ -39,7 +39,8 @@ export function preparedPreviewOpenTarget(
       prepared.managed &&
       prepared.localUrl !== undefined &&
       (profileId === undefined || isBuiltInBrowserProfileId(profileId)) &&
-      readEnvironmentSupportsServerBrowser(environmentId))
+      readEnvironmentSupportsServerBrowser(environmentId) &&
+      desktopBrowserHostFor(environmentId) !== "local")
   ) {
     return {
       url: hostedPreviewNavigationUrl(prepared, prepared.localUrl ?? authoredUrl),

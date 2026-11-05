@@ -2759,6 +2759,51 @@ it.live.each(
     ).pipe(Effect.provide(layer)),
 );
 
+it.effect("published root viewport reads stay ordered during a resize burst", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      desktopRendersNext = true;
+      const { browser, tabId } = yield* ready;
+      const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
+      const cdp = desktopConnections[0]!.context.sessions[0]!;
+      yield* Effect.promise(() => cdp.emitAsync("Page.frameResized"));
+      yield* Queue.takeAll(viewer.output);
+      const reads = yield* Queue.unbounded<PromiseWithResolvers<Record<string, unknown>>>();
+      const send = cdp.send.getMockImplementation()!;
+      cdp.send.mockImplementation(async (method, input) => {
+        if (
+          method === "Page.getLayoutMetrics" ||
+          (method === "Runtime.evaluate" && (input as { contextId?: number }).contextId === 9)
+        ) {
+          const read = Promise.withResolvers<Record<string, unknown>>();
+          Queue.offerUnsafe(reads, read);
+          return read.promise;
+        }
+        return send(method, input);
+      });
+      const answer = (width: number, height: number) => ({
+        cssVisualViewport: { clientWidth: width, clientHeight: height },
+        result: { value: { width, height } },
+      });
+      const first = cdp.emitAsync("Page.frameResized");
+      const firstRead = yield* Queue.take(reads);
+      const burst = Promise.all([
+        cdp.emitAsync("Page.frameResized"),
+        cdp.emitAsync("Page.frameResized"),
+      ]);
+      firstRead.resolve(answer(1000, 750));
+      (yield* Queue.take(reads)).resolve(answer(1250, 938));
+      expect(yield* Queue.size(reads)).toBe(0);
+      yield* Effect.promise(() => Promise.all([first, burst]));
+      expect(viewportSizes(yield* Queue.takeAll(viewer.output))).toEqual([
+        "1000x750",
+        "1250x938",
+        "1250x938",
+      ]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live("published root zoom keeps measured viewport, pointer and snapshot scale coherent", () =>
   Effect.scoped(
     Effect.gen(function* () {

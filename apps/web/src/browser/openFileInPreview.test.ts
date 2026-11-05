@@ -1,3 +1,4 @@
+import { setPreviewBootstrapTokenOnUrl } from "@t3tools/shared/remote";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   EnvironmentId,
@@ -214,6 +215,29 @@ describe("managed app links", () => {
       expect(openPreview.mock.calls[0]?.[0].input).not.toHaveProperty("desktopHostId");
     },
   );
+
+  it("opens a managed app directly on its local desktop with renewed navigation access", async () => {
+    mocks.desktopHost.mockReturnValue("local");
+    const url = "http://127.0.0.1:5173/app?q=1#section";
+    const navigationUrl = setPreviewBootstrapTokenOnUrl(new URL(url), "fresh").href;
+    mocks.prepareHostedPreview.mockResolvedValue({
+      url,
+      localUrl: url,
+      navigationUrl,
+      managed: true,
+      restored: true,
+    });
+    const openPreview = vi.fn(async (_input: { input: PreviewOpenInput }) =>
+      AsyncResult.success(snapshot),
+    );
+    await openUrlInPreview({ threadRef, url, openPreview });
+    expect(openPreview.mock.calls[0]?.[0].input).toMatchObject({
+      url: navigationUrl,
+      runtime: "server",
+      desktopHostId: "local",
+    });
+    expect(openPreview.mock.calls[0]?.[0].input).not.toHaveProperty("browserHost");
+  });
 
   it("preserves an explicitly selected desktop profile for a managed app", async () => {
     mocks.desktopHost.mockReturnValue("remote-desktop");
