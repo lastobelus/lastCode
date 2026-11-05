@@ -32,6 +32,8 @@ import {
   rendersServerTabNatively,
 } from "./previewRuntime";
 
+import { preparedPreviewOpenTarget } from "./preparedPreviewOpenTarget";
+
 const primary = EnvironmentId.make("primary");
 const remote = EnvironmentId.make("remote");
 
@@ -209,5 +211,29 @@ describe("runtime and native ownership boundaries", () => {
         desktopHostId: "host-remote",
       }),
     ).toBe(false);
+  });
+});
+
+describe("managed preview locality", () => {
+  it("uses the desktop only for a confirmed local host and honors explicit streaming", () => {
+    const url = "http://127.0.0.1:8123/app";
+    const prepared = { url, localUrl: url, managed: true, restored: true };
+    expect(preparedPreviewOpenTarget(primary, prepared, url, "default")).toEqual({
+      url,
+      runtime: "server",
+      desktopHostId: "local",
+    });
+    const streamed = { url, runtime: "server", browserHost: "environment" };
+    expect(preparedPreviewOpenTarget(primary, prepared, url, "default", "server")).toEqual(
+      streamed,
+    );
+    expect(preparedPreviewOpenTarget(remote, prepared, url, "default")).toEqual(streamed);
+    for (const localDesktopBrowser of [false, undefined]) {
+      state.localDesktopBrowser = localDesktopBrowser;
+      expect(preparedPreviewOpenTarget(primary, prepared, url, "default")).toEqual(streamed);
+    }
+    state.localDesktopBrowser = true;
+    state.electron = false;
+    expect(preparedPreviewOpenTarget(primary, prepared, url, "default")).toEqual(streamed);
   });
 });

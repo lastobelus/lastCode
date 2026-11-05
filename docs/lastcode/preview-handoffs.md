@@ -140,10 +140,16 @@ An existing server cannot be adopted merely by remembering its URL: relaunch it
 through `preview_host` to establish native ownership. One managed listener owns
 a local origin; use a distinct port for another preview. Native browser recovery
 uses the owning environment and thread, never an unrelated thread or public
-website. In the integrated Browser, managed app links use an environment-hosted
-page and the saved listener's local address, so a loopback-only app does not
-depend on desktop access to its port. An explicitly selected desktop profile
-keeps its desktop identity and requires a reachable browser destination. Native
+website. In the integrated Browser, how a managed app link opens in the default
+or incognito profile depends on the environment. On a verified local host (the
+primary desktop with inherited IPC), it opens as the usual direct desktop page.
+For a remote, unknown, or non-desktop environment, it opens as a streamed
+environment-hosted page at the saved listener's local address, so a
+loopback-only app does not depend on desktop access to its port. An explicit
+server runtime request also uses the environment page. Reopening a handoff keeps
+a healthy streamed tab as it is rather than migrating it, which preserves page
+state. An explicitly selected desktop profile keeps its desktop identity and
+requires a reachable browser destination. Native
 mobile opens managed app links in the environment Browser viewer too. External
 browsers still need a reachable listener. Managed images, audio, video, and PDFs
 use signed environment-hosted resource URLs, so their clients do not need access

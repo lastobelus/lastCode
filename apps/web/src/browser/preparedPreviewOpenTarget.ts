@@ -33,9 +33,11 @@ export function preparedPreviewOpenTarget(
   profileId: string | undefined,
   requestedRuntime?: PreviewRuntime,
 ) {
+  const localDesktop = desktopBrowserHostFor(environmentId) === "local";
   if (
     requestedRuntime === "server" ||
     (requestedRuntime !== "desktop" &&
+      !localDesktop &&
       prepared.managed &&
       prepared.localUrl !== undefined &&
       (profileId === undefined || isBuiltInBrowserProfileId(profileId)) &&
