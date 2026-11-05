@@ -590,7 +590,10 @@ describe("Firefox Snap profiles", () => {
           assert.deepEqual(yield* listSourceProfiles(firefox, context), [
             { directory, name: "abcd.default", cookieCount: 2 },
           ]);
-        }),
+        }).pipe(
+          // Fixture locks use these addresses; avoid resolving the runner's hostname.
+          Effect.provideService(HostProcess.Addresses, Effect.succeed(new Set(["127.0.0.1"]))),
+        ),
       ),
   );
 
@@ -793,7 +796,10 @@ describe("isSourceRunning for Firefox", () => {
 
         yield* fileSystem.symlink(`127.0.0.1:+${process.pid}`, `${profile}/lock`);
         assert.isTrue(yield* isSourceRunning(firefox, context));
-      }),
+      }).pipe(
+        // Fixture locks use loopback, independently of the runner's DNS configuration.
+        Effect.provideService(HostProcess.Addresses, Effect.succeed(new Set(["127.0.0.1"]))),
+      ),
     ),
   );
 

@@ -50,6 +50,7 @@ import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as DesktopWslBackend from "../wsl/DesktopWslBackend.ts";
 
 import * as BrowserImport from "../preview/BrowserImport/BrowserImport.ts";
+import * as DesktopBrowserHost from "../preview/DesktopBrowserHost.ts";
 import * as DesktopBackendConfiguration from "../backend/DesktopBackendConfiguration.ts";
 import * as DesktopCliCommand from "./DesktopCliCommand.ts";
 import * as DesktopClientSettings from "../settings/DesktopClientSettings.ts";
@@ -185,10 +186,28 @@ it.effect(
             shutdown: Effect.void,
           } as DesktopRendererHistory.DesktopRendererHistory["Service"]),
         );
+      const unexpectedBrowserHostCall = () => {
+        throw new Error("Unexpected browser host access in startup test.");
+      };
       const app = yield* runApp.pipe(
         Effect.provide(
           Layer.mergeAll(
             Layer.mock(BrowserImport.BrowserImport, {}),
+            Layer.mock(DesktopBrowserHost.DesktopBrowserHost)({
+              setRootFactory: unexpectedBrowserHostCall,
+              attach: unexpectedBrowserHostCall,
+              reserveTab: unexpectedBrowserHostCall,
+              releaseReservation: unexpectedBrowserHostCall,
+              registerPopup: unexpectedBrowserHostCall,
+              surfaceResponse: unexpectedBrowserHostCall,
+              setPresentation: unexpectedBrowserHostCall,
+              setMainWindow: unexpectedBrowserHostCall,
+              setPictureInPictureWindow: unexpectedBrowserHostCall,
+              setBackgroundThrottling: unexpectedBrowserHostCall,
+              detach: unexpectedBrowserHostCall,
+              humanStartedDownload: unexpectedBrowserHostCall,
+              placeDownload: unexpectedBrowserHostCall,
+            }),
             Layer.mock(DesktopBackendConfiguration.DesktopBackendConfiguration, {}),
             Layer.mock(DesktopCliCommand.DesktopCliCommand, {}),
             Layer.mock(DesktopClientSettings.DesktopClientSettings, {}),
