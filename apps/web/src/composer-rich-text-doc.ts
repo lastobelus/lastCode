@@ -1206,60 +1206,6 @@ function renumberFollowingItems(
   });
 }
 
-/** `prepare` runs first in the same transaction, which the split then reads. */
-export function splitOrLiftListItem(editor: Editor, prepare: Command): boolean {
-  const $from = editor.state.selection.$from;
-  const itemType = listItemTypeAt($from);
-  if (!itemType) return false;
-  const empty = $from.parent.content.size === 0;
-  const move: Command = ({ commands, tr }) => {
-    const moved =
-      commands.splitListItem(
-        itemType,
-        itemType === "taskItem" ? { checked: false } : { space: " " },
-      ) ||
-      (empty && commands.liftListItem(itemType));
-    if (moved) alignListItemWithSiblings(tr, itemType);
-    return moved;
-  };
-  return editor.can().command(move) && editor.chain().command(prepare).command(move).run();
-}
-
-export function convertBulletItemToTask(
-  tr: Transaction,
-  from: number,
-  to: number,
-  checked: boolean,
-): void {
-  tr.delete(from, to);
-  const $pos = tr.doc.resolve(from);
-  const item = $pos.node(-1);
-  const list = $pos.node(-2);
-  const index = $pos.index(-2);
-  const { schema } = tr.doc.type;
-  const before: ProseMirrorNode[] = [];
-  const after: ProseMirrorNode[] = [];
-  list.forEach((child, _, childIndex) => {
-    if (childIndex < index) before.push(child);
-    else if (childIndex > index) after.push(child);
-  });
-  const markerSpace =
-    typeof item.attrs.space === "string" && item.attrs.space ? item.attrs.space : " ";
-  const task = schema.nodes.taskItem!.create(
-    { checked, indent: item.attrs.indent, markerSpace },
-    item.content,
-  );
-  const lists = [
-    ...(before.length > 0 ? [list.copy(Fragment.from(before))] : []),
-    schema.nodes.taskList!.create(null, task),
-    ...(after.length > 0 ? [list.copy(Fragment.from(after))] : []),
-  ];
-  const listStart = $pos.before(-2);
-  tr.replaceWith(listStart, listStart + list.nodeSize, lists);
-  const caret = listStart + (before.length > 0 ? lists[0]!.nodeSize : 0) + 3;
-  tr.setSelection(TextSelection.create(tr.doc, caret));
-}
-
 function listItemTypeAt($pos: ResolvedPos): "listItem" | "taskItem" | null {
   const name = $pos.depth > 1 ? $pos.node(-1).type.name : null;
   return name === "listItem" || name === "taskItem" ? name : null;
