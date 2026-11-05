@@ -15,7 +15,12 @@ import * as Schema from "effect/Schema";
 import { Atom } from "effect/reactivity";
 
 import type { EnvironmentThreadShell, PendingSubagentRequest } from "./models.ts";
-import { presentThreadShell, threadRuntimeIsActive } from "./models.ts";
+import {
+  presentThreadShell,
+  threadRuntimeIsActive,
+  threadShellIsCleanupRecovery,
+  threadShellIsVisible,
+} from "./models.ts";
 import { hiddenThreadKeys, NO_HIDDEN_THREADS } from "./threadTagFilter.ts";
 import { type EnvironmentCatalogState, enabledEnvironmentIds } from "./connections.ts";
 import {
@@ -670,13 +675,12 @@ export function createEnvironmentThreadShellAtoms(input: {
     for (const environmentId of environmentIds) {
       for (const thread of get(environmentThreadsAtom(environmentId))) {
         const parent = thread.delegatedFrom;
-        if (
-          parent !== undefined &&
-          environmentIds.has(parent.environmentId) &&
-          // An archived parent leaves navigation; its task there stays listed on its own.
-          get(environmentThreadIndexAtom(parent.environmentId)).get(parent.threadId)?.archivedAt ===
-            null
-        ) {
+        const parentThread =
+          parent !== undefined && environmentIds.has(parent.environmentId)
+            ? get(environmentThreadIndexAtom(parent.environmentId)).get(parent.threadId)
+            : undefined;
+        // A task stays listed when its parent is no longer visible in navigation.
+        if (parentThread !== undefined && threadShellIsVisible(parentThread)) {
           next.add(threadKey({ environmentId, threadId: thread.id }));
         }
       }
@@ -700,8 +704,9 @@ export function createEnvironmentThreadShellAtoms(input: {
       const subagentRequests = get(pendingSubagentRequestsAtom(environmentId));
       for (const thread of get(environmentThreadsAtom(environmentId))) {
         if (
-          thread.archivedAt !== null ||
-          isShownUnderParent({ environmentId, threadId: thread.id }, thread.lineage, underParent) ||
+          !threadShellIsVisible(thread) ||
+          (!threadShellIsCleanupRecovery(thread) &&
+            isShownUnderParent({ environmentId, threadId: thread.id }, thread.lineage, underParent)) ||
           hidden.has(threadKey({ environmentId, threadId: thread.id }))
         ) {
           continue;

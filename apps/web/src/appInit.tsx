@@ -78,6 +78,9 @@ function startClientAppearance(): void {
     if (previous?.chatWidth !== settings.chatWidth) {
       root.dataset.chatWidth = settings.chatWidth;
     }
+    if (previous?.roundedProjectIcons !== settings.roundedProjectIcons) {
+      root.toggleAttribute("data-rounded-project-icons", settings.roundedProjectIcons);
+    }
     if (previous?.appearanceContrast !== settings.appearanceContrast) {
       applyAppearanceContrast(root, settings.appearanceContrast);
     }
