@@ -26,7 +26,7 @@ import {
   MARKDOWN_SOURCE_MARK,
   type RichTextMark,
 } from "~/composer-rich-text";
-import { caretTakesMarksBefore, serializeEditorDoc } from "~/composer-rich-text-doc";
+import { caretTakesMarksBefore, structuredSerializeEditorDoc } from "~/composer-rich-text-doc";
 
 // Styled text the selection touches becomes source text with the source mark,
 // parsed back once the selection leaves. History steps only replay on the shape
@@ -51,7 +51,7 @@ type StyledRange = TextRange & {
 
 function collectStyledRanges(doc: ProseMirrorNode): StyledRange[] {
   const ranges: StyledRange[] = [];
-  const map = serializeEditorDoc(doc);
+  const map = structuredSerializeEditorDoc(doc);
   let range: StyledRange | null = null;
   let openLength = 0;
   for (const run of map.runs) {

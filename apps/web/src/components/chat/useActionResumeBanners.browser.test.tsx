@@ -1,3 +1,4 @@
+import { act, render, type Screen } from "../../../test/render";
 import {
   AuthOrchestrationOperateScope,
   AuthTerminalOperateScope,
@@ -11,9 +12,10 @@ import {
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
-import { act, useLayoutEffect } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { useLayoutEffect } from "react";
+import { actionResumeStatus } from "@t3tools/shared/actionResume";
+import { actionResumeWait } from "@t3tools/client-runtime/state/action-resume";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
   scopes: new Map<string, Set<string>>(),
@@ -94,28 +96,47 @@ function deferred() {
   return { promise, resolve };
 }
 
-let root: Root;
-let container: HTMLDivElement;
-let banners: ReturnType<typeof useActionResumeBanners>;
+const observation: { banners: ReturnType<typeof useActionResumeBanners> | null } = {
+  banners: null,
+};
 interface ProbeProps {
   route?: ScopedThreadRef;
   thread?: ScopedThreadRef | null;
   action?: ActionResumeState | null;
   mismatch?: boolean;
+  environmentPaused?: boolean;
+  hasPendingRequest?: boolean;
+  followUp?: Parameters<typeof actionResumeStatus>[0]["followUp"];
+  unknown?: boolean;
 }
-function Probe({ route = a, thread = route, action = running, mismatch = false }: ProbeProps) {
+function Probe({
+  route = a,
+  thread = route,
+  action = running,
+  mismatch = false,
+  environmentPaused = false,
+  hasPendingRequest = false,
+  followUp,
+  unknown = false,
+}: ProbeProps) {
+  const wait = actionResumeWait(
+    action ? { action, followUp: followUp ?? null, hasPendingRequest } : null,
+    action,
+    unknown ? null : environmentPaused,
+  );
   const value = useActionResumeBanners({
     routeThreadRef: route,
     threadRef: thread,
-    action,
+    action: wait.presentation === null ? null : action,
+    status: wait.status,
     onRequestTerminalFocus: state.focus,
     // Each render captures the route just as ChatView's error setter does.
     onThreadError: (threadId, message) => state.error(route, threadId, message),
   });
   useLayoutEffect(() => {
-    banners = value;
+    observation.banners = value;
   });
-  const items = [value.interruptedBanner, value.heldBanner, value.runningBanner].filter(
+  const items = [value.interruptedBanner, value.pendingBanner, value.runningBanner].filter(
     (item) => item !== null,
   );
   return (
@@ -136,18 +157,18 @@ function Probe({ route = a, thread = route, action = running, mismatch = false }
     />
   );
 }
-async function render(props: ProbeProps = {}) {
-  await act(async () => root.render(<Probe {...props} />));
+async function show(screen: Screen, props: ProbeProps = {}) {
+  await act(async () => screen.rerender(<Probe {...props} />));
 }
-function button(label: string) {
+function button(container: HTMLElement, label: string) {
   const result = [...container.querySelectorAll("button")].find(
     (node) => node.textContent === label || node.getAttribute("aria-label") === label,
   );
   if (!result) throw new Error(`Missing button: ${label}`);
   return result;
 }
-async function click(label: string) {
-  await act(async () => button(label).click());
+async function click(container: HTMLElement, label: string) {
+  await act(async () => button(container, label).click());
 }
 async function settle(
   pending: ReturnType<typeof deferred>,
@@ -163,29 +184,74 @@ function grant(ref: ScopedThreadRef, scopes: string[]) {
 }
 const allScopes = [AuthTerminalReadScope, AuthTerminalOperateScope, AuthOrchestrationOperateScope];
 
-beforeEach(() => {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  state.scopes.clear();
-  grant(a, allScopes);
-  grant(b, allScopes);
-  for (const command of [state.close, state.resume, state.discard])
-    command.mockReset().mockResolvedValue(success());
-  for (const spy of [state.focus, state.error, state.ensureTerminal]) spy.mockReset();
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
+it("keeps a finished Action visible while its follow-up is pending", async () => {
+  setup();
+  await using screen = await render(null);
+  await show(screen, {
+    action: { ...running, outcome: "succeeded", delivery: "pending", exitCode: 0 },
+  });
+  await expect.element(screen.getByText(/Check work/)).toBeVisible();
+  expect(screen.container.textContent).not.toContain("Cancel");
 });
-afterEach(async () => {
-  await act(async () => root.unmount());
-  container.remove();
-  vi.unstubAllGlobals();
+
+it("distinguishes current pause from a retained hold and a remaining request", async () => {
+  setup();
+  await using screen = await render(null);
+  const action = {
+    ...running,
+    outcome: "succeeded",
+    delivery: "pending",
+    heldByEnvironmentPause: true,
+  } as const;
+  await show(screen, { action, environmentPaused: true });
+  await expect.element(screen.getByText("Check work · Environment paused")).toBeVisible();
+  await show(screen, { action, hasPendingRequest: true });
+  await expect.element(screen.getByText("Check work · Needs your input")).toBeVisible();
+  expect(screen.container.textContent).not.toContain("Resume the environment");
+  await show(screen, { action });
+  await expect.element(screen.getByText("Check work · Sending result")).toBeVisible();
+});
+it("keeps a held exact follow-up visible and removes the notice when that run ends", async () => {
+  setup();
+  await using screen = await render(null);
+  const action = { ...running, outcome: "succeeded", delivery: "delivered" } as const;
+  await show(screen, { action, followUp: { status: "queued", queueHeld: true } });
+  await expect.element(screen.getByText("Check work · Needs attention")).toBeVisible();
+  await show(screen, { action, followUp: { status: "completed", queueHeld: false } });
+  expect(screen.container.textContent).toBe("");
+});
+it("opens the originating retained terminal for a pending Action with read access", async () => {
+  setup();
+  await using screen = await render(null);
+  grant(a, [AuthTerminalReadScope]);
+  await show(screen, { action: { ...running, outcome: "succeeded", delivery: "pending" } });
+  await click(screen.container, "Open terminal");
+  expect(state.ensureTerminal).toHaveBeenCalledExactlyOnceWith(a, running.terminalId, {
+    open: true,
+    active: true,
+  });
+  expect(state.close).not.toHaveBeenCalled();
+});
+it("does not promise automatic continuation when the environment state is unknown", async () => {
+  setup();
+  await using screen = await render(null);
+  await show(screen, {
+    action: { ...running, outcome: "succeeded", delivery: "pending" },
+    unknown: true,
+  });
+  await expect.element(screen.getByText("Check work · Status unknown")).toBeVisible();
+  expect(screen.container.textContent).not.toContain("pick up its result automatically");
 });
 
 describe("running Action controls", () => {
   it("opens only the existing Action terminal with read-only access", async () => {
+    setup();
+    await using screen = await render(null);
+    const { container } = screen;
+
     grant(a, [AuthTerminalReadScope]);
-    await render();
-    await click("Open terminal");
+    await show(screen);
+    await click(screen.container, "Open terminal");
     expect(state.ensureTerminal).toHaveBeenCalledExactlyOnceWith(a, running.terminalId, {
       open: true,
       active: true,
@@ -195,22 +261,29 @@ describe("running Action controls", () => {
     expect(container.textContent).not.toContain("Cancel");
   });
   it("rechecks read access when the rendered control is retained", async () => {
-    await render();
+    setup();
+    await using screen = await render(null);
+    const { container } = screen;
+
+    await show(screen);
     state.scopes.get(a.environmentId)!.delete(AuthTerminalReadScope);
-    await click("Open Action terminal");
+    await click(screen.container, "Open Action terminal");
     expect(state.ensureTerminal).not.toHaveBeenCalled();
     expect(state.focus).not.toHaveBeenCalled();
     grant(a, []);
-    await render();
+    await show(screen);
     expect(container.querySelector("button")).toBeNull();
   });
   it("rechecks destination cancellation access and preserves terminal history", async () => {
-    await render();
+    setup();
+    await using screen = await render(null);
+
+    await show(screen);
     state.scopes.get(a.environmentId)!.delete(AuthTerminalOperateScope);
-    await click("Cancel");
+    await click(screen.container, "Cancel");
     expect(state.close).not.toHaveBeenCalled();
     state.scopes.get(a.environmentId)!.add(AuthTerminalOperateScope);
-    await click("Cancel");
+    await click(screen.container, "Cancel");
     expect(state.close).toHaveBeenCalledExactlyOnceWith({
       environmentId: a.environmentId,
       input: {
@@ -223,31 +296,44 @@ describe("running Action controls", () => {
   it.each(["success", "failure"])(
     "late A cancellation %s cannot clear B, and errors retain A's route",
     async (outcome) => {
+      setup();
+      await using screen = await render(null);
+
       const first = deferred();
       const second = deferred();
       state.close.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
-      await render();
-      await click("Cancel");
-      expect(button("Cancelling...").disabled).toBe(true);
-      await render({ route: b, action: { ...running, runId: "run-b", terminalId: "terminal-b" } });
-      await click("Cancel");
+      await show(screen);
+      await click(screen.container, "Cancel");
+      expect(button(screen.container, "Cancelling...").disabled).toBe(true);
+      await show(screen, {
+        route: b,
+        action: { ...running, runId: "run-b", terminalId: "terminal-b" },
+      });
+      await click(screen.container, "Cancel");
       await settle(first, outcome === "success" ? success() : failure("A failed"));
-      expect(button("Cancelling...").disabled).toBe(true);
+      expect(button(screen.container, "Cancelling...").disabled).toBe(true);
       if (outcome === "failure")
         expect(state.error).toHaveBeenCalledExactlyOnceWith(a, a.threadId, "A failed");
       await settle(second, success());
-      expect(button("Cancel").disabled).toBe(false);
+      expect(button(screen.container, "Cancel").disabled).toBe(false);
     },
   );
   it("keeps interrupted cancellation silent", async () => {
+    setup();
+    await using screen = await render(null);
+
     state.close.mockResolvedValueOnce(AsyncResult.failure(Cause.interrupt(1)));
-    await render();
-    await click("Cancel");
+    await show(screen);
+    await click(screen.container, "Cancel");
     expect(state.error).not.toHaveBeenCalled();
-    expect(button("Cancel").disabled).toBe(false);
+    expect(button(screen.container, "Cancel").disabled).toBe(false);
   });
   it("does nothing with a null destination", async () => {
-    await render({ thread: null });
+    setup();
+    await using screen = await render(null);
+    const { container } = screen;
+
+    await show(screen, { thread: null });
     expect(container.querySelector("button")).toBeNull();
     expect(state.ensureTerminal).not.toHaveBeenCalled();
     expect(state.close).not.toHaveBeenCalled();
@@ -258,10 +344,15 @@ describe("interrupted Action delivery", () => {
   it.each(["resume", "discard"] as const)(
     "%s disables both controls and latches success until projection changes",
     async (operation) => {
+      await using screen = await render(null);
+      const { container } = screen;
+
+      setup();
+
       const pending = deferred();
       state[operation].mockReturnValueOnce(pending.promise);
-      await render({ action: interrupted });
-      await click(operation === "resume" ? "Resume agent" : "Discard");
+      await show(screen, { action: interrupted });
+      await click(screen.container, operation === "resume" ? "Resume agent" : "Discard");
       expect([...container.querySelectorAll("button")].every((node) => node.disabled)).toBe(true);
       expect(state[operation]).toHaveBeenCalledExactlyOnceWith({
         environmentId: a.environmentId,
@@ -270,8 +361,10 @@ describe("interrupted Action delivery", () => {
       expect(state[operation === "resume" ? "discard" : "resume"]).not.toHaveBeenCalled();
       await settle(pending, success());
       expect([...container.querySelectorAll("button")].every((node) => node.disabled)).toBe(true);
-      await render({ action: { ...interrupted, delivery: "delivered" } });
-      expect(container.querySelector("button")).toBeNull();
+      await show(screen, { action: { ...interrupted, delivery: "delivered" } });
+      expect([...container.querySelectorAll("button")].map((node) => node.textContent)).toEqual([
+        "Open terminal",
+      ]);
       expect(state.close).not.toHaveBeenCalled();
       expect(state.ensureTerminal).not.toHaveBeenCalled();
     },
@@ -279,34 +372,43 @@ describe("interrupted Action delivery", () => {
   it.each(["resume", "discard"] as const)(
     "%s failure enables retry and reports the captured route",
     async (operation) => {
+      setup();
+      await using screen = await render(null);
+
       state[operation].mockResolvedValueOnce(failure("Delivery failed"));
-      await render({ action: interrupted });
-      await click(operation === "resume" ? "Resume agent" : "Discard");
-      expect(button("Resume agent").disabled).toBe(false);
-      expect(button("Discard").disabled).toBe(false);
+      await show(screen, { action: interrupted });
+      await click(screen.container, operation === "resume" ? "Resume agent" : "Discard");
+      expect(button(screen.container, "Resume agent").disabled).toBe(false);
+      expect(button(screen.container, "Discard").disabled).toBe(false);
       expect(state.error).toHaveBeenCalledExactlyOnceWith(a, a.threadId, "Delivery failed");
     },
   );
   it.each(["resume", "discard"] as const)(
     "%s interruption clears pending without an error",
     async (operation) => {
+      setup();
+      await using screen = await render(null);
+
       state[operation].mockResolvedValueOnce(AsyncResult.failure(Cause.interrupt(1)));
-      await render({ action: interrupted });
-      await click(operation === "resume" ? "Resume agent" : "Discard");
-      expect(button("Resume agent").disabled).toBe(false);
+      await show(screen, { action: interrupted });
+      await click(screen.container, operation === "resume" ? "Resume agent" : "Discard");
+      expect(button(screen.container, "Resume agent").disabled).toBe(false);
       expect(state.error).not.toHaveBeenCalled();
     },
   );
   it.each(["resume", "discard"] as const)(
     "%s retained controls obey permission revocation",
     async (operation) => {
-      await render({ action: interrupted });
+      setup();
+      await using screen = await render(null);
+
+      await show(screen, { action: interrupted });
       state.scopes.get(a.environmentId)!.delete(AuthOrchestrationOperateScope);
-      await click(operation === "resume" ? "Resume agent" : "Discard");
+      await click(screen.container, operation === "resume" ? "Resume agent" : "Discard");
       expect(state[operation]).not.toHaveBeenCalled();
-      await render({ action: interrupted });
-      expect(button("Resume agent").disabled).toBe(true);
-      expect(button("Discard").disabled).toBe(true);
+      await show(screen, { action: interrupted });
+      expect(button(screen.container, "Resume agent").disabled).toBe(true);
+      expect(button(screen.container, "Discard").disabled).toBe(true);
     },
   );
   it.each([
@@ -315,49 +417,59 @@ describe("interrupted Action delivery", () => {
     ["run", "success"],
     ["run", "failure"],
   ] as const)("resets on %s changes and ignores A's late %s cleanup", async (change, outcome) => {
+    setup();
+    await using screen = await render(null);
+
     const first = deferred();
     const second = deferred();
     state.resume.mockReturnValueOnce(first.promise);
     state.discard.mockReturnValueOnce(second.promise);
-    await render({ action: interrupted });
-    await click("Resume agent");
+    await show(screen, { action: interrupted });
+    await click(screen.container, "Resume agent");
     const next = {
       route: change === "route" ? b : a,
       action: { ...interrupted, runId: change === "run" ? "run-b" : interrupted.runId },
     };
-    await render(next);
-    expect(button("Discard").disabled).toBe(false);
-    await click("Discard");
+    await show(screen, next);
+    expect(button(screen.container, "Discard").disabled).toBe(false);
+    await click(screen.container, "Discard");
     await settle(first, outcome === "success" ? success() : failure("Old delivery failed"));
-    expect(button("Discarding...").disabled).toBe(true);
-    expect(button("Resume agent").disabled).toBe(true);
+    expect(button(screen.container, "Discarding...").disabled).toBe(true);
+    expect(button(screen.container, "Resume agent").disabled).toBe(true);
     if (outcome === "failure")
       expect(state.error).toHaveBeenCalledExactlyOnceWith(a, a.threadId, "Old delivery failed");
     await settle(second, failure());
-    expect(button("Discard").disabled).toBe(false);
+    expect(button(screen.container, "Discard").disabled).toBe(false);
   });
   it("keeps the latest operation pending when both controls dispatch before render", async () => {
+    setup();
+    await using screen = await render(null);
+
     const resume = deferred();
     const discard = deferred();
     state.resume.mockReturnValueOnce(resume.promise);
     state.discard.mockReturnValueOnce(discard.promise);
-    await render({ action: interrupted });
+    await show(screen, { action: interrupted });
     // Existing behavior has no synchronous lock; disabled controls take effect after render.
     await act(async () => {
-      button("Resume agent").click();
-      button("Discard").click();
+      button(screen.container, "Resume agent").click();
+      button(screen.container, "Discard").click();
     });
     expect(state.resume).toHaveBeenCalledOnce();
     expect(state.discard).toHaveBeenCalledOnce();
     await settle(resume, failure());
-    expect(button("Discarding...").disabled).toBe(true);
+    expect(button(screen.container, "Discarding...").disabled).toBe(true);
     await settle(discard, failure());
-    expect(button("Resume agent").disabled).toBe(false);
+    expect(button(screen.container, "Resume agent").disabled).toBe(false);
   });
   it("resets on removal and stays inert without a thread", async () => {
-    await render({ action: interrupted, thread: null });
-    expect(button("Resume agent").disabled).toBe(true);
-    await render({ action: null });
+    setup();
+    await using screen = await render(null);
+    const { container } = screen;
+
+    await show(screen, { action: interrupted, thread: null });
+    expect(button(screen.container, "Resume agent").disabled).toBe(true);
+    await show(screen, { action: null });
     expect(container.textContent).toBe("");
     expect(state.resume).not.toHaveBeenCalled();
     expect(state.discard).not.toHaveBeenCalled();
@@ -378,23 +490,32 @@ describe("completed Action held by Pause", () => {
       exitCode: 0,
       report: { version: 1, outcome: "success", summary: "Documentation preview ready" },
     };
-    await show(screen, { action: held });
-    await expect.element(screen.getByText("Succeeded: Check work")).toBeVisible();
+    await show(screen, { action: held, environmentPaused: true });
+    await expect.element(screen.getByText("Check work · Environment paused")).toBeVisible();
     await expect
-      .element(screen.getByText(/Documentation preview ready.*If this environment is paused/))
+      .element(screen.getByText(/Documentation preview ready.*Automatic wake-ups are held/))
       .toBeVisible();
-    expect(screen.container.textContent).toContain("Settings → Connections");
-    expect(screen.container.querySelector("button")).toBeNull();
+    expect(screen.container.textContent).toContain("Resume the environment");
+    for (const name of ["Resume agent", "Discard", "Cancel", "Open terminal"]) {
+      await expect
+        .element(screen.getByRole("button", { name, exact: true }))
+        .not.toBeInTheDocument();
+    }
     expect(state.resume).not.toHaveBeenCalled();
     expect(state.discard).not.toHaveBeenCalled();
     expect(state.close).not.toHaveBeenCalled();
     expect(state.ensureTerminal).not.toHaveBeenCalled();
 
-    await show(screen, { action: { ...held, delivery: "delivered" } });
-    await expect.element(screen.getByText("Succeeded: Check work")).not.toBeInTheDocument();
+    await show(screen, {
+      action: { ...held, delivery: "delivered" },
+      followUp: { status: "completed", queueHeld: false },
+    });
+    await expect
+      .element(screen.getByText("Check work · Environment paused"))
+      .not.toBeInTheDocument();
     expect(screen.container.textContent).toBe("");
     await show(screen, { action: { ...held, delivery: "available" } });
-    await expect.element(screen.getByText("Check work was interrupted")).toBeVisible();
+    await expect.element(screen.getByText("Check work · Needs attention")).toBeVisible();
     expect(button(screen.container, "Resume agent").disabled).toBe(true);
     expect(button(screen.container, "Discard").disabled).toBe(true);
   });
@@ -404,31 +525,25 @@ describe("Action banner stack", () => {
   it.each([false, true])(
     "preserves environment-first order and Action copy with branch mismatch %s",
     async (mismatch) => {
-      await render({ action: { ...running, delivery: "available" }, mismatch });
-      expect(banners.runningBanner).toMatchObject({
-        id: "action-running:run-a",
-        group: "environment",
-        variant: "warning",
-      });
-      expect(banners.interruptedBanner).toMatchObject({
+      await using screen = await render(null);
+      const { container } = screen;
+
+      setup();
+
+      await show(screen, { action: interrupted, mismatch });
+      expect(observation.banners!.runningBanner).toBeNull();
+      expect(observation.banners!.interruptedBanner).toMatchObject({
         id: "action-interrupted:run-a",
         variant: "warning",
       });
-      const [runningNotice, interruptedNotice] = container.querySelectorAll(
-        '[data-composer-banner-stack="true"]',
+      const interruptedNotice = container.querySelector('[data-composer-banner-stack="true"]')!;
+      expect(interruptedNotice.textContent).toContain("Check work · Interrupted");
+      expect(interruptedNotice.textContent).toContain(
+        "The command was interrupted and the agent won't continue automatically.",
       );
-      expect(interruptedNotice!.textContent).toContain("Check work was interrupted");
-      expect(interruptedNotice!.textContent).toContain(
-        "LastCode did not restart the command or wake the agent.",
-      );
-      expect(runningNotice!.textContent).toContain("Waiting for review");
-      expect(runningNotice!.textContent).toContain("Checks in progress");
-      expect(runningNotice!.textContent).toContain("Resumes when this thread is idle.");
-      if (mismatch)
-        expect(container.textContent!.indexOf("Waiting for review")).toBeLessThan(
-          container.textContent!.indexOf("Branch changed"),
-        );
-      await render({
+      if (mismatch) await expect.element(screen.getByText("Branch changed")).toBeVisible();
+      else await expect.element(screen.getByText("Branch changed")).not.toBeInTheDocument();
+      await show(screen, {
         action: {
           ...running,
           progress: {
@@ -440,10 +555,22 @@ describe("Action banner stack", () => {
         },
         mismatch,
       });
-      expect(banners.runningBanner?.variant).toBe("info");
-      expect(
-        container.querySelector('[data-composer-banner-stack="true"]')?.textContent,
-      ).toContain("Compiling");
+      expect(observation.banners!.runningBanner?.variant).toBe("info");
+      await expect.element(screen.getByText(/Compiling\./)).toBeVisible();
+      if (mismatch)
+        expect(container.textContent!.indexOf("Compiling")).toBeLessThan(
+          container.textContent!.indexOf("Branch changed"),
+        );
     },
   );
 });
+
+function setup() {
+  observation.banners = null;
+  state.scopes.clear();
+  grant(a, allScopes);
+  grant(b, allScopes);
+  for (const command of [state.close, state.resume, state.discard])
+    command.mockReset().mockResolvedValue(success());
+  for (const spy of [state.focus, state.error, state.ensureTerminal]) spy.mockReset();
+}

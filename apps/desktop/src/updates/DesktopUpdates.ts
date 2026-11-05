@@ -764,15 +764,16 @@ export const make = Effect.gen(function* () {
           Effect.as(result),
         );
       }),
-      Effect.catchTag("LastCodeLocalUpdateError", (error) =>
-        setState(
-          state.status === "available" ||
-            state.downloadedVersion !== null ||
-            (state.status === "error" && state.errorContext === "download" && state.canRetry)
-            ? { ...state, checkedAt }
-            : reduceDesktopUpdateStateOnCheckFailure(state, error.message, checkedAt),
-        ).pipe(Effect.as({ checked: true, checkpointRequested: false, error: error.message })),
-      ),
+      Effect.catchTags({
+        LastCodeLocalUpdateError: (error) =>
+          setState(
+            state.status === "available" ||
+              state.downloadedVersion !== null ||
+              (state.status === "error" && state.errorContext === "download" && state.canRetry)
+              ? { ...state, checkedAt }
+              : reduceDesktopUpdateStateOnCheckFailure(state, error.message, checkedAt),
+          ).pipe(Effect.as({ checked: true, checkpointRequested: false, error: error.message })),
+      }),
     );
   });
 
@@ -1604,7 +1605,11 @@ export const make = Effect.gen(function* () {
                 isArm64HostRunningIntelBuild(environment.runtimeInfo),
               );
             }
-            if (enabled && Option.isNone(disabledReason) && (yield* Ref.get(updaterConfiguredRef))) {
+            if (
+              enabled &&
+              Option.isNone(disabledReason) &&
+              (yield* Ref.get(updaterConfiguredRef))
+            ) {
               yield* checkForUpdatesUnlocked("local-nightlies-setting-change");
             }
             return yield* makeLastCodeSettingsState;

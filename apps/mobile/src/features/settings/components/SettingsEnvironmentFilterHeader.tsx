@@ -10,6 +10,7 @@ import { useSettingsEnvironmentFilter } from "../settings-environment-filter";
 
 export function SettingsEnvironmentFilterHeader(props: {
   readonly trailingItems?: readonly NativeStackHeaderItem[];
+  readonly environmentOnly?: boolean;
 }) {
   const {
     availableTargets,
@@ -22,12 +23,17 @@ export function SettingsEnvironmentFilterHeader(props: {
     selectProject,
   } = useSettingsEnvironmentFilter();
   if (Platform.OS !== "ios") return null;
+  const environmentOnly = props.environmentOnly === true;
+  const filterLabel = environmentOnly
+    ? "Filter settings environments"
+    : "Filter settings environments and projects";
 
   const filterIcon =
-    selectedIds === null && selectedProjectKey === null
+    selectedIds === null && (environmentOnly || selectedProjectKey === null)
       ? "line.3.horizontal.decrease"
       : "line.3.horizontal.decrease.circle.fill";
   const filterVersion = JSON.stringify({
+    environmentOnly,
     selection: selectedIds === null ? null : [...selectedIds].sort(),
     targets: availableTargets.map((entry) => [
       entry.environmentId,
@@ -35,8 +41,10 @@ export function SettingsEnvironmentFilterHeader(props: {
       entry.displayUrl,
       resolveEnvironmentMachineKind(entry.serverConfig),
     ]),
-    project: selectedProjectKey,
-    projects: selectableProjectGroups.map((group) => [group.key, group.label]),
+    project: environmentOnly ? null : selectedProjectKey,
+    projects: environmentOnly
+      ? []
+      : selectableProjectGroups.map((group) => [group.key, group.label]),
     trailingItems: props.trailingItems,
   });
 
@@ -46,7 +54,7 @@ export function SettingsEnvironmentFilterHeader(props: {
       options={{
         unstable_headerRightItems: () => [
           withNativeGlassHeaderItem({
-            accessibilityLabel: "Filter settings environments and projects",
+            accessibilityLabel: filterLabel,
             icon: { name: filterIcon, type: "sfSymbol" },
             label: "",
             type: "menu",
@@ -84,27 +92,31 @@ export function SettingsEnvironmentFilterHeader(props: {
                     })),
                   ],
                 },
-                {
-                  type: "submenu",
-                  label:
-                    selectableProjectGroups.find((group) => group.key === selectedProjectKey)
-                      ?.label ??
-                    (selectedProjectKey === null ? "All projects" : "Unavailable project"),
-                  items: [
-                    {
-                      type: "action",
-                      label: "All projects",
-                      state: selectedProjectKey === null ? "on" : undefined,
-                      onPress: () => selectProject(null),
-                    },
-                    ...selectableProjectGroups.map((group) => ({
-                      type: "action" as const,
-                      label: projectMenuLabel(group),
-                      state: selectedProjectKey === group.key ? ("on" as const) : undefined,
-                      onPress: () => selectProject(group.key),
-                    })),
-                  ],
-                },
+                ...(!environmentOnly
+                  ? [
+                      {
+                        type: "submenu" as const,
+                        label:
+                          selectableProjectGroups.find((group) => group.key === selectedProjectKey)
+                            ?.label ??
+                          (selectedProjectKey === null ? "All projects" : "Unavailable project"),
+                        items: [
+                          {
+                            type: "action" as const,
+                            label: "All projects",
+                            state: selectedProjectKey === null ? ("on" as const) : undefined,
+                            onPress: () => selectProject(null),
+                          },
+                          ...selectableProjectGroups.map((group) => ({
+                            type: "action" as const,
+                            label: projectMenuLabel(group),
+                            state: selectedProjectKey === group.key ? ("on" as const) : undefined,
+                            onPress: () => selectProject(group.key),
+                          })),
+                        ],
+                      },
+                    ]
+                  : []),
               ],
             },
           }),
@@ -116,7 +128,9 @@ export function SettingsEnvironmentFilterHeader(props: {
 }
 
 /** Android's settings scope filter, as an `AppBar` menu. */
-export function useSettingsEnvironmentMenu(): AppBarMenu {
+export function useSettingsEnvironmentMenu(
+  props: { readonly environmentOnly?: boolean } = {},
+): AppBarMenu {
   const {
     availableTargets,
     selectedIds,
@@ -126,10 +140,14 @@ export function useSettingsEnvironmentMenu(): AppBarMenu {
     selectedProjectKey,
     selectProject,
   } = useSettingsEnvironmentFilter();
+  const environmentOnly = props.environmentOnly === true;
+  const filterLabel = environmentOnly
+    ? "Filter settings environments"
+    : "Filter settings environments and projects";
   return {
-    title: "Filter settings environments and projects",
+    title: filterLabel,
     icon:
-      selectedIds === null && selectedProjectKey === null
+      selectedIds === null && (environmentOnly || selectedProjectKey === null)
         ? "line.3.horizontal.decrease.circle"
         : "line.3.horizontal.decrease.circle.fill",
     items: [
@@ -147,18 +165,22 @@ export function useSettingsEnvironmentMenu(): AppBarMenu {
         selected: selectedIds === null || selectedIds.has(entry.environmentId),
         onPress: () => toggleEnvironment(entry.environmentId),
       })),
-      {
-        id: "project:all",
-        title: "All projects",
-        selected: selectedProjectKey === null,
-        onPress: () => selectProject(null),
-      },
-      ...selectableProjectGroups.map((group) => ({
-        id: `project:${group.key}`,
-        title: `Project · ${projectMenuLabel(group)}`,
-        selected: selectedProjectKey === group.key,
-        onPress: () => selectProject(group.key),
-      })),
+      ...(!environmentOnly
+        ? [
+            {
+              id: "project:all",
+              title: "All projects",
+              selected: selectedProjectKey === null,
+              onPress: () => selectProject(null),
+            },
+            ...selectableProjectGroups.map((group) => ({
+              id: `project:${group.key}`,
+              title: `Project · ${projectMenuLabel(group)}`,
+              selected: selectedProjectKey === group.key,
+              onPress: () => selectProject(group.key),
+            })),
+          ]
+        : []),
     ],
   };
 }

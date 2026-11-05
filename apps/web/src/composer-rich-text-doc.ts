@@ -1,3 +1,4 @@
+import { collectMarkdownSourceRanges } from "@t3tools/shared/lastcodeMarkdownSourceRanges";
 import { joinTextblockBackward, joinTextblockForward } from "@tiptap/pm/commands";
 import {
   Fragment,
@@ -20,7 +21,6 @@ import { Italic, starInputRegex, starPasteRegex } from "@tiptap/extension-italic
 import {
   type Command,
   type Editor,
-  Extension,
   InputRule,
   markInputRule,
   markPasteRule,
@@ -29,7 +29,6 @@ import {
 import { BulletList, ListItem, OrderedList } from "@tiptap/extension-list";
 import { Strike, inputRegex as strikeInputRegex } from "@tiptap/extension-strike";
 import { TaskItem } from "@tiptap/extension-task-item";
-import { TaskList } from "@tiptap/extension-task-list";
 import {
   type EditorState,
   Plugin,
@@ -321,20 +320,6 @@ export const ComposerStrikeExtension = Strike.extend({
 });
 
 /**
- * Mod+B bolds selected text only. Without a selection Tiptap would toggle bold
- * for the next typed text, which users hit by accident when they mean the
- * sidebar toggle. Runs ahead of the Bold extension and swallows the chord.
- */
-export const ComposerBoldSelectionOnlyExtension = Extension.create({
-  name: "composerBoldSelectionOnly",
-  priority: 1000,
-  addKeyboardShortcuts() {
-    const ignoreWithoutSelection = () => this.editor.state.selection.empty;
-    return { "Mod-b": ignoreWithoutSelection, "Mod-B": ignoreWithoutSelection };
-  },
-});
-
-/**
  * Tiptap's block chords can nest blocks inside quotes that the serializer cannot write,
  * silently dropping their text from stored drafts.
  */
@@ -349,13 +334,6 @@ function withoutBlockChords<Shortcuts extends Record<string, unknown>>(
 
 // Markdown supports one paragraph followed by nested lists per item.
 const LIST_ITEM_CONTENT = "paragraph list*";
-
-/** Task lists come from `- [ ]` alone; Mod-Shift-9 would nest one in a quote. */
-export const ComposerTaskListExtension = TaskList.extend({
-  addKeyboardShortcuts() {
-    return withoutBlockChords(this.parent?.(), ["Mod-Shift-9"]);
-  },
-});
 
 /** Tiptap's nesting shortcuts leave indent unchanged, so rebuilding the draft undoes them. */
 const LIST_NESTING_KEYS = ["Tab", "Shift-Tab"];
@@ -563,7 +541,7 @@ function parseTaskPrefix(head: string): { prefix: TaskLinePrefix; markerLength: 
   };
 }
 
-export function parseOpeningFence(line: string): { fence: string; language: string } | null {
+function parseOpeningFence(line: string): { fence: string; language: string } | null {
   // Unlike `.`, `[^\n]` accepts the stored \r in CRLF lines.
   const match = /^(`{3,}|~{3,})([^\n]*)$/.exec(line);
   if (!match) return null;
@@ -573,7 +551,7 @@ export function parseOpeningFence(line: string): { fence: string; language: stri
   return { fence, language };
 }
 
-export function isClosingFence(line: string, fence: string): boolean {
+function isClosingFence(line: string, fence: string): boolean {
   const match = /^(`{3,}|~{3,})[ \t]*\r?$/.exec(line);
   if (!match) return false;
   const run = match[1]!;
@@ -715,7 +693,7 @@ function textJsonForSpan(text: string, marks: RichTextMark[]): Record<string, un
 }
 
 /** Keeps literalLength leading characters unstyled so path queries reach file search unchanged. */
-export function buildTiptapContent(
+export function structuredBuildTiptapContent(
   value: string,
   skillLabelFor: (name: string) => SkillMeta | null,
   options?: { styling?: boolean; blocks?: boolean; literalText?: boolean; literalLength?: number },
@@ -953,17 +931,17 @@ export function buildTiptapContent(
   return blocks;
 }
 
-export function buildDocJson(
+export function structuredBuildDocJson(
   value: string,
   skillLabelFor: (name: string) => SkillMeta | null,
   options?: { styling?: boolean; literalText?: boolean },
 ) {
-  const content = buildTiptapContent(value, skillLabelFor, options);
+  const content = structuredBuildTiptapContent(value, skillLabelFor, options);
   if (content.at(-1)?.type === "horizontalRule") content.push({ type: "paragraph" });
   return { type: "doc", content };
 }
 
-export interface RichRun {
+export interface StructuredRichRun {
   kind: "text" | "token" | "break" | "prefix";
   /** Flat document offset (atoms count 1, markers excluded). */
   flatStart: number;
@@ -978,9 +956,9 @@ export interface RichRun {
 }
 
 // Shared by every caller that serializes the same doc, so it must not be mutated.
-export interface RichDocMap {
+export interface StructuredRichDocMap {
   readonly value: string;
-  readonly runs: ReadonlyArray<Readonly<RichRun>>;
+  readonly runs: ReadonlyArray<Readonly<StructuredRichRun>>;
   readonly docLength: number;
   readonly contextIds: ReadonlyArray<string>;
 }
@@ -1002,7 +980,7 @@ function readAtomSource(node: ProseMirrorNode): string {
 }
 
 interface RichAccumulator {
-  runs: RichRun[];
+  runs: StructuredRichRun[];
   value: string;
   flat: number;
   md: number;
@@ -1436,7 +1414,11 @@ function walkBlockquote(quote: ProseMirrorNode, quoteStart: number, acc: RichAcc
 }
 
 /** Restores list and quote markers omitted by slices that contain only shared-block content. */
-export function serializeSelection(doc: ProseMirrorNode, from: number, to: number): string {
+export function structuredSerializeSelection(
+  doc: ProseMirrorNode,
+  from: number,
+  to: number,
+): string {
   const slice = doc.slice(from, to);
   const $from = doc.resolve(from);
   let depth = $from.sharedDepth(to);
@@ -1451,23 +1433,23 @@ export function serializeSelection(doc: ProseMirrorNode, from: number, to: numbe
       depth -= 1;
     }
   }
-  return serializeEditorDoc(doc.type.create(null, content)).value;
+  return structuredSerializeEditorDoc(doc.type.create(null, content)).value;
 }
 
 // Docs are immutable, and one keystroke serializes the same doc from the marker
 // plugin, onUpdate, and onSelectionUpdate.
-const serializedDocs = new WeakMap<ProseMirrorNode, RichDocMap>();
+const structuredSerializedDocs = new WeakMap<ProseMirrorNode, StructuredRichDocMap>();
 
-export function serializeEditorDoc(doc: ProseMirrorNode): RichDocMap {
-  let map = serializedDocs.get(doc);
+export function structuredSerializeEditorDoc(doc: ProseMirrorNode): StructuredRichDocMap {
+  let map = structuredSerializedDocs.get(doc);
   if (!map) {
-    map = serializeDoc(doc);
-    serializedDocs.set(doc, map);
+    map = structuredSerializeDoc(doc);
+    structuredSerializedDocs.set(doc, map);
   }
   return map;
 }
 
-function serializeDoc(doc: ProseMirrorNode): RichDocMap {
+function structuredSerializeDoc(doc: ProseMirrorNode): StructuredRichDocMap {
   const acc: RichAccumulator = { runs: [], value: "", flat: 0, md: 0 };
   const blocks: ProseMirrorNode[] = [];
   doc.content.forEach((node) => {
@@ -1533,7 +1515,7 @@ function serializeDoc(doc: ProseMirrorNode): RichDocMap {
   };
 }
 
-export interface SkillChipReplacement {
+export interface StructuredSkillChipReplacement {
   from: number;
   to: number;
   node: ProseMirrorNode;
@@ -1543,14 +1525,14 @@ export interface SkillChipReplacement {
  * Use the same Markdown token boundaries as draft restoration. Apply edits
  * last-first so positions stay valid and unrelated citation nodes keep their keys.
  */
-export function skillChipReplacements(
+export function structuredSkillChipReplacements(
   doc: ProseMirrorNode,
   skillLabelFor: (name: string) => SkillMeta | null,
-): SkillChipReplacement[] {
+): StructuredSkillChipReplacement[] {
   const schema = doc.type.schema;
   const skillType = schema.nodes["composer-skill"];
   if (!skillType) return [];
-  const replacements: SkillChipReplacement[] = [];
+  const replacements: StructuredSkillChipReplacement[] = [];
   doc.descendants((node, pos) => {
     if (node.type !== skillType) return;
     const name = typeof node.attrs.skillName === "string" ? node.attrs.skillName : "";
@@ -1562,7 +1544,7 @@ export function skillChipReplacements(
       });
     }
   });
-  const map = serializeEditorDoc(doc);
+  const map = structuredSerializeEditorDoc(doc);
   let end = 0;
   for (const segment of splitPromptIntoComposerSegments(map.value)) {
     const start = end;
@@ -1594,12 +1576,12 @@ export function skillChipReplacements(
 }
 
 // Run ends belong to the next run, except code ends must stay inside their closing fence.
-function runOwnsOffset(run: RichRun, flatOffset: number): boolean {
+function runOwnsOffset(run: StructuredRichRun, flatOffset: number): boolean {
   const end = run.flatStart + run.docLen;
   return flatOffset < end || (flatOffset === end && run.nodeName === "codeBlock");
 }
 
-export function flatToMarkdown(map: RichDocMap, flatOffset: number): number {
+export function structuredFlatToMarkdown(map: StructuredRichDocMap, flatOffset: number): number {
   const bounded = Math.max(0, Math.min(flatOffset, map.docLength));
   for (const run of map.runs) {
     if (runOwnsOffset(run, bounded)) {
@@ -1613,7 +1595,7 @@ export function flatToMarkdown(map: RichDocMap, flatOffset: number): number {
   return last ? last.mdStart + last.mdLen : 0;
 }
 
-export function markdownToFlat(map: RichDocMap, markdownOffset: number): number {
+export function markdownToFlat(map: StructuredRichDocMap, markdownOffset: number): number {
   for (const run of map.runs) {
     if (markdownOffset < run.mdStart + run.mdLen) {
       if (run.kind === "prefix") return run.flatStart;
@@ -1632,7 +1614,7 @@ export function markdownToFlat(map: RichDocMap, markdownOffset: number): number 
   return map.docLength;
 }
 
-export function flatToPm(map: RichDocMap, flatOffset: number): number {
+export function structuredFlatToPm(map: StructuredRichDocMap, flatOffset: number): number {
   const bounded = Math.max(0, Math.min(flatOffset, map.docLength));
   for (const run of map.runs) {
     if (bounded < run.flatStart + run.docLen) {
@@ -1644,7 +1626,7 @@ export function flatToPm(map: RichDocMap, flatOffset: number): number {
   return last.pmPos + last.docLen;
 }
 
-export function pmToFlat(map: RichDocMap, pmPos: number): number {
+export function structuredPmToFlat(map: StructuredRichDocMap, pmPos: number): number {
   for (const run of map.runs) {
     if (pmPos >= run.pmPos && pmPos <= run.pmPos + run.docLen) {
       if (run.kind === "token" && pmPos === run.pmPos + run.docLen) {
@@ -1695,4 +1677,325 @@ export function stepCaretAcrossStyledEdge(
   const target = direction === -1 ? edge.before : edge.after;
   if (Mark.sameSet(edge.current, target)) return null;
   return state.tr.setStoredMarks(target);
+}
+
+type sourceInlineJson = {
+  type: string;
+  text?: string;
+  attrs?: Record<string, unknown>;
+};
+/** `styling` retains the upstream caller option; fence text stays literal in either preview mode. */
+type sourceBuildOptions = { literalText?: boolean; literalLength?: number; styling?: boolean };
+
+function sourceRandomNodeKey(): string {
+  return `tiptap-${Math.random().toString(36).slice(2)}`;
+}
+
+function sourceAtomJsonForSegment(
+  segment: Exclude<ReturnType<typeof splitPromptIntoComposerSegments>[number], { type: "text" }>,
+  skillLabelFor: (name: string) => SkillMeta | null,
+): sourceInlineJson | null {
+  if (segment.type === "mention") {
+    return {
+      type: "composer-mention",
+      attrs: { path: segment.path, source: segment.source },
+    };
+  }
+  if (segment.type === "skill") {
+    const meta = skillLabelFor(segment.name);
+    if (!meta) return null;
+    return {
+      type: "composer-skill",
+      attrs: {
+        skillName: segment.name,
+        skillLabel: meta.label,
+        skillDescription: meta.description,
+      },
+    };
+  }
+  if (segment.type === "citation") {
+    return {
+      type: "composer-citation",
+      attrs: { citation: segment.citation, source: segment.source, citeKey: sourceRandomNodeKey() },
+    };
+  }
+  return {
+    type: "composer-context-reference",
+    attrs: {
+      kind: segment.kind,
+      contextId: segment.contextId,
+      label: segment.label,
+      source: segment.source,
+    },
+  };
+}
+
+/** Source text stays literal; only recognized composer tokens become inline atoms. */
+export function buildTiptapContent(
+  value: string,
+  skillLabelFor: (name: string) => SkillMeta | null,
+  options?: sourceBuildOptions,
+): Record<string, unknown>[] {
+  const paragraphs: Array<{ type: "paragraph"; content: sourceInlineJson[] }> = [
+    { type: "paragraph", content: [] },
+  ];
+  const appendText = (text: string) => {
+    text.split("\n").forEach((piece, index) => {
+      if (index > 0) paragraphs.push({ type: "paragraph", content: [] });
+      if (!piece) return;
+      const inline = paragraphs[paragraphs.length - 1]!.content;
+      const previous = inline[inline.length - 1];
+      if (previous?.type === "text") previous.text = (previous.text ?? "") + piece;
+      else inline.push({ type: "text", text: piece });
+    });
+  };
+  if (options?.literalText) {
+    appendText(value);
+    return paragraphs;
+  }
+
+  const fences = collectMarkdownSourceRanges(value).fences;
+  const formulas = composerMathRanges(value);
+  const literalLength = Math.max(0, Math.min(options?.literalLength ?? 0, value.length));
+  appendText(value.slice(0, literalLength));
+  let offset = literalLength;
+  for (const segment of splitPromptIntoComposerSegments(value.slice(literalLength))) {
+    const source = segment.type === "text" ? segment.text : segment.source;
+    const end = offset + source.length;
+    if (
+      segment.type === "text" ||
+      fences.some((fence) => offset < fence.to && end > fence.from) ||
+      formulas.some((formula) => offset < formula.end && end > formula.start)
+    ) {
+      appendText(source);
+    } else {
+      const atom = sourceAtomJsonForSegment(segment, skillLabelFor);
+      if (atom) paragraphs[paragraphs.length - 1]!.content.push(atom);
+      else appendText(source);
+    }
+    offset = end;
+  }
+  return paragraphs;
+}
+
+export function buildDocJson(
+  value: string,
+  skillLabelFor: (name: string) => SkillMeta | null,
+  options?: sourceBuildOptions,
+) {
+  return { type: "doc", content: buildTiptapContent(value, skillLabelFor, options) };
+}
+
+export interface RichRun {
+  kind: "text" | "token" | "break";
+  /** Source characters count literally; an inline atom occupies one position. */
+  flatStart: number;
+  docLen: number;
+  mdLen: number;
+  pmPos: number;
+  /** Paragraph boundaries span two ProseMirror positions and one source newline. */
+  nextPmPos?: number;
+  mdStart: number;
+  nodeName?: string;
+}
+
+export interface RichDocMap {
+  readonly value: string;
+  readonly runs: ReadonlyArray<Readonly<RichRun>>;
+  readonly docLength: number;
+  readonly contextIds: ReadonlyArray<string>;
+}
+
+function sourceReadAtomSource(node: ProseMirrorNode): string {
+  const attrs = node.attrs as Record<string, unknown>;
+  switch (node.type.name) {
+    case "composer-mention":
+    case "composer-citation":
+    case "composer-context-reference":
+      return typeof attrs.source === "string" ? attrs.source : "";
+    case "composer-skill": {
+      const name = typeof attrs.skillName === "string" ? attrs.skillName : "";
+      return name ? `$${name}` : "";
+    }
+    default:
+      return "";
+  }
+}
+
+export interface SkillChipReplacement {
+  from: number;
+  to: number;
+  node: ProseMirrorNode;
+}
+
+/** Preserve citation node identities when provider skills load or change. */
+export function skillChipReplacements(
+  doc: ProseMirrorNode,
+  skillLabelFor: (name: string) => SkillMeta | null,
+): SkillChipReplacement[] {
+  const schema = doc.type.schema;
+  const skillType = schema.nodes["composer-skill"];
+  if (!skillType) return [];
+  const replacements: SkillChipReplacement[] = [];
+  doc.descendants((node, pos) => {
+    if (node.type !== skillType) return;
+    const name = typeof node.attrs.skillName === "string" ? node.attrs.skillName : "";
+    if (name && !skillLabelFor(name)) {
+      replacements.push({
+        from: pos,
+        to: pos + node.nodeSize,
+        node: schema.text(sourceReadAtomSource(node), node.marks),
+      });
+    }
+  });
+  const map = serializeEditorDoc(doc);
+  const fences = collectMarkdownSourceRanges(map.value).fences;
+  const formulas = composerMathRanges(map.value);
+  let end = 0;
+  for (const segment of splitPromptIntoComposerSegments(map.value)) {
+    const start = end;
+    end += segment.type === "text" ? segment.text.length : segment.source.length;
+    if (
+      segment.type !== "skill" ||
+      fences.some((fence) => start < fence.to && end > fence.from) ||
+      formulas.some((formula) => start < formula.end && end > formula.start)
+    )
+      continue;
+    const meta = skillLabelFor(segment.name);
+    if (!meta) continue;
+    const run = map.runs.find(
+      (candidate) =>
+        candidate.kind === "text" &&
+        start >= candidate.mdStart &&
+        end <= candidate.mdStart + candidate.docLen,
+    );
+    if (!run) continue;
+    const from = run.pmPos + start - run.mdStart;
+    replacements.push({
+      from,
+      to: from + segment.source.length,
+      node: skillType.create(
+        { skillName: segment.name, skillLabel: meta.label, skillDescription: meta.description },
+        null,
+        doc.nodeAt(from)?.marks,
+      ),
+    });
+  }
+  return replacements.sort((left, right) => right.from - left.from);
+}
+
+const serializedDocs = new WeakMap<ProseMirrorNode, RichDocMap>();
+
+export function serializeEditorDoc(doc: ProseMirrorNode): RichDocMap {
+  let map = serializedDocs.get(doc);
+  if (!map) {
+    map = serializeDoc(doc);
+    serializedDocs.set(doc, map);
+  }
+  return map;
+}
+
+/** Serialize plain paragraphs and atoms while retaining each editable empty line. */
+function serializeDoc(doc: ProseMirrorNode): RichDocMap {
+  const runs: RichRun[] = [];
+  let value = "";
+  let flat = 0;
+  let previousEnd = 1;
+  const append = (
+    kind: RichRun["kind"],
+    source: string,
+    docLen: number,
+    pmPos: number,
+    extra: Pick<RichRun, "nextPmPos" | "nodeName"> = {},
+  ) => {
+    runs.push({
+      kind,
+      flatStart: flat,
+      docLen,
+      mdLen: source.length,
+      pmPos,
+      mdStart: value.length,
+      ...extra,
+    });
+    value += source;
+    flat += docLen;
+  };
+  doc.forEach((paragraph, blockPos, index) => {
+    const contentStart = blockPos + 1;
+    if (index > 0) append("break", "\n", 1, previousEnd, { nextPmPos: contentStart });
+    if (paragraph.childCount === 0) append("text", "", 0, contentStart);
+    paragraph.forEach((node, inlinePos) => {
+      const source = node.isText ? (node.text ?? "") : sourceReadAtomSource(node);
+      append(
+        node.isText ? "text" : "token",
+        source,
+        node.nodeSize,
+        contentStart + inlinePos,
+        node.isText ? {} : { nodeName: node.type.name },
+      );
+    });
+    previousEnd = contentStart + paragraph.content.size;
+  });
+  return { value, runs, docLength: flat, contextIds: collectInlineContextIds(value) };
+}
+
+/** Expand atoms at their edges; source text and paragraph newlines map one-to-one. */
+export function flatToMarkdown(map: RichDocMap, flatOffset: number): number {
+  const bounded = Math.max(0, Math.min(flatOffset, map.docLength));
+  for (const run of map.runs) {
+    if (bounded <= run.flatStart + run.docLen) {
+      const within = bounded - run.flatStart;
+      return run.mdStart + (run.kind === "token" && within > 0 ? run.mdLen : within);
+    }
+  }
+  return map.value.length;
+}
+
+/** Source offsets inside an atom clamp to its leading edge; its source end maps after it. */
+export function expandedMarkdownToFlat(map: RichDocMap, offset: number): number {
+  const bounded = Math.max(0, Math.min(offset, map.value.length));
+  for (const run of map.runs) {
+    if (bounded <= run.mdStart + run.mdLen) {
+      const within = bounded - run.mdStart;
+      if (run.kind === "token") {
+        return run.flatStart + (within === run.mdLen ? run.docLen : 0);
+      }
+      return run.flatStart + within;
+    }
+  }
+  return map.docLength;
+}
+
+export function flatToPm(map: RichDocMap, flatOffset: number): number {
+  const bounded = Math.max(0, Math.min(flatOffset, map.docLength));
+  for (const run of map.runs) {
+    if (bounded <= run.flatStart + run.docLen) {
+      const within = bounded - run.flatStart;
+      if (run.kind === "break") return within === 0 ? run.pmPos : run.nextPmPos!;
+      return run.pmPos + within;
+    }
+  }
+  const last = map.runs[map.runs.length - 1];
+  return last ? last.pmPos + last.docLen : 1;
+}
+
+export function pmToFlat(map: RichDocMap, pmPos: number): number {
+  for (const run of map.runs) {
+    if (pmPos < run.pmPos) return run.flatStart;
+    if (run.kind === "break") {
+      if (pmPos <= run.nextPmPos!) return run.flatStart + (pmPos > run.pmPos ? 1 : 0);
+    } else if (pmPos <= run.pmPos + run.docLen) {
+      return run.flatStart + (pmPos - run.pmPos);
+    }
+  }
+  return map.docLength;
+}
+
+/** Copy and cut preserve the exact source, including delimiter text and whole atom sources. */
+export function serializeSelection(doc: ProseMirrorNode, from: number, to: number): string {
+  const map = serializeEditorDoc(doc);
+  return map.value.slice(
+    flatToMarkdown(map, pmToFlat(map, from)),
+    flatToMarkdown(map, pmToFlat(map, to)),
+  );
 }

@@ -22,7 +22,7 @@ import {
 } from "./sdk.ts";
 import { museModelCapabilities, resolveMuseReasoningEffort } from "./modelCatalog.ts";
 import type { ProviderTextGeneration } from "@t3tools/provider-core/server/textGeneration";
-import { investigationUnsupported } from "@t3tools/provider-core/server/textGenerationOperations";
+import * as TextGenerationOperations from "@t3tools/provider-core/server/textGenerationOperations";
 import {
   buildBranchNamePrompt,
   buildCommitMessagePrompt,
@@ -348,8 +348,24 @@ export const makeMuseTextGeneration = Effect.fn("makeMuseTextGeneration")(functi
     return { title: sanitizeThreadTitle(generated.title) };
   });
   const generateReviewGuide: ProviderTextGeneration["generateReviewGuide"] = () =>
-    Effect.fail(investigationUnsupported("generateReviewGuide", "Muse Code"));
+    Effect.fail(
+      TextGenerationOperations.investigationUnsupported("generateReviewGuide", "Muse Code"),
+    );
+  const { generateIncomingMessageSummary } = TextGenerationOperations.fromRunner(
+    "MuseTextGeneration",
+    runMuseJson,
+  );
   return {
+    generatePromptSnippets: () =>
+      Effect.fail(
+        new TextGenerationError({
+          operation: "generatePromptSnippets",
+          reason: "prompt-mining-unsupported",
+          detail:
+            "The configured text-generation model used for thread titles cannot discover prompts without tools. Choose a supported text-generation model in Settings.",
+        }),
+      ),
+    generateIncomingMessageSummary,
     generateCommitMessage,
     generatePrContent,
     generateBranchName,

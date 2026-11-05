@@ -23,6 +23,7 @@ import { pullRequestPanelContext } from "../pullRequest/pullRequestDetail.logic"
 import { PullRequestDetailPanel } from "../pullRequest/PullRequestDetailPanel";
 import { PullRequestDetailGhost } from "../pullRequest/PullRequestGhosts";
 import { PullRequestsUnavailableState } from "../pullRequest/PullRequestsUnavailableState";
+import { HandoffsPanel } from "../handoffs/HandoffsPanel";
 import { ThreadPullRequestsPanel } from "../pullRequest/ThreadPullRequestsPanel";
 
 const PreviewPanel = lazy(() =>
@@ -166,6 +167,8 @@ export function RightPanelSurfaceContent(props: {
         />
       );
     }
+    case "handoffs":
+      return <HandoffsPanel threadRef={threadRef} />;
     case "pull-requests":
       return <ThreadPullRequestsPanel threadRef={threadRef} />;
     case "side-chat":

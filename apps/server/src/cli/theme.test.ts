@@ -15,6 +15,7 @@ import type { QuitError } from "effect/Terminal";
 import type { CliError } from "effect/cli/CliError";
 
 import { cli } from "../binCli.ts";
+import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
@@ -27,7 +28,8 @@ const runCommand: (
   void,
   Exclude<Command.Error<typeof cli>, QuitError> | CliError,
   NodeServices.NodeServices | Layer.Success<typeof NodeCrypto.layer> | NetService.NetService
-> = Command.runWith(cli, { version: "0.0.0" });
+> = (args) =>
+  Command.runWith(cli, { version: "0.0.0" })(args).pipe(Effect.provide(ManagedPolicy.layerTest()));
 const runCli = (
   args: ReadonlyArray<string>,
 ): Effect.Effect<void, Effect.Error<ReturnType<typeof runCommand>>> =>

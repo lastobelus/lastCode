@@ -1,3 +1,4 @@
+import { resolvePathLinkTarget } from "@t3tools/shared/fileLinks";
 import { formatFilePathForClipboard } from "@t3tools/client-runtime/media-actions";
 import { fileBasename } from "@t3tools/shared/path";
 import type { ThreadId } from "@t3tools/contracts";
@@ -7,7 +8,6 @@ import { hostPreviewMimeTypeFromExtension } from "@t3tools/shared/filePreview";
 
 import {
   isAbsolutePath,
-  resolveFileLinkPath,
   resolveWorkspaceFilePath,
   resolveWorkspaceRelativeFilePath,
 } from "../files/filePath";
@@ -31,13 +31,19 @@ export function resolveFileChipTarget(
 ): FileChipTarget | null {
   const presentation = resolveMarkdownLinkPresentation(href);
   if (presentation.kind !== "file") return null;
-  const path = resolveFileLinkPath(workspaceRoot, presentation.path);
-  if (path === null) return null;
+  let path = presentation.path;
+  if (/^~(?:[\\/]|$)/.test(path)) {
+    if (!path.startsWith("~/")) return null;
+    // Expand only the home prefix because the presentation already decoded filename positions.
+    const home = workspaceRoot ? resolvePathLinkTarget("~/", workspaceRoot) : null;
+    if (!home || !isAbsolutePath(home)) return null;
+    path = resolveWorkspaceFilePath(home, path.slice(2));
+  }
   const relativePath = resolveWorkspaceRelativeFilePath(workspaceRoot, path);
   const fullPath = isAbsolutePath(path)
     ? path
-    : workspaceRoot && relativePath
-      ? resolveWorkspaceFilePath(workspaceRoot, relativePath)
+    : workspaceRoot
+      ? resolveWorkspaceFilePath(workspaceRoot, relativePath ?? path)
       : undefined;
   if (!fullPath && !relativePath) return null;
   return {
