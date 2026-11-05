@@ -7,3 +7,5 @@
 packages/source-control-github/schema/** linguist-generated
 apps/server/schema/** linguist-generated
 **/*.graphql.ts linguist-generated
+# Unified patch context prefixes preserve blank lines and upstream tab indentation.
+patches/*.patch whitespace=-space-before-tab,-blank-at-eol

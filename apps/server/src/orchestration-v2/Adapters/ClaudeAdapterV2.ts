@@ -11865,7 +11865,10 @@ export const createClaudeAdapterV2 = Effect.fn("ClaudeAdapterV2Driver.create")(
       environment,
       hostEnvironment,
     );
-    const claudeEnvironment = yield* makeClaudeEnvironment(config, baseEnvironment);
+    const claudeEnvironment = yield* makeClaudeEnvironment(config, {
+      ...baseEnvironment,
+      T3CODE_LOCAL_CI_SETTINGS_PATH: serverConfig.settingsPath,
+    });
     const path = yield* Path.Path;
     const random = yield* SecureRandom.SecureRandom;
     const binaryPath = yield* resolveClaudeSdkExecutablePath(

@@ -1,3 +1,4 @@
+import * as DesktopClientSettings from "../settings/DesktopClientSettings.ts";
 import {
   SERVER_EXIT_CODE_MANAGED_POLICY,
   SERVER_EXIT_CODE_STATE_DIR_OWNED,
@@ -140,6 +141,8 @@ interface MakeInstanceInput {
     DesktopTelemetryPublisher.DesktopTelemetryPublisher["Service"]
   >;
   readonly pruneRuntimes?: (distro: string | null, runtimeId: string) => Effect.Effect<void>;
+  readonly prepareDesktopBrowser?: Effect.Effect<void>;
+  readonly desktopBrowserHost?: Partial<DesktopBrowserHost.DesktopBrowserHost["Service"]>;
 }
 
 function makeTestInstance(input: MakeInstanceInput) {
@@ -172,7 +175,12 @@ function makeTestInstance(input: MakeInstanceInput) {
       updateCancellations: Stream.empty,
       ...input.desktopTelemetryPublisher,
     }),
-    DesktopBrowserHost.layer,
+    Layer.effect(
+      DesktopBrowserHost.DesktopBrowserHost,
+      DesktopBrowserHost.make.pipe(
+        Effect.map((host) => ({ ...host, ...input.desktopBrowserHost })),
+      ),
+    ).pipe(Layer.provide(DesktopClientSettings.layerTest())),
     DesktopWslEnvironment.layerTest(
       input.pruneRuntimes === undefined ? {} : { pruneRuntimes: input.pruneRuntimes },
     ),
@@ -185,8 +193,9 @@ function makeTestInstance(input: MakeInstanceInput) {
     ...(input.onReady ? { onReady: () => input.onReady! } : {}),
     ...(input.onShutdown ? { onShutdown: () => input.onShutdown! } : {}),
     ...(input.onStateDirOwned ? { onStateDirOwned: () => input.onStateDirOwned! } : {}),
-    ...(input.onPreflightFailed ? { onPreflightFailed: input.onPreflightFailed } : {}),
     ...(input.onStartupFailure ? { onStartupFailure: input.onStartupFailure } : {}),
+    ...(input.onPreflightFailed ? { onPreflightFailed: input.onPreflightFailed } : {}),
+    ...(input.prepareDesktopBrowser ? { prepareDesktopBrowser: input.prepareDesktopBrowser } : {}),
   });
 
   return instance.pipe(Effect.provide(layerServices));
@@ -232,6 +241,62 @@ describe("DesktopBackendManager", () => {
         assert.isTrue(yield* Fiber.join(waiter));
         yield* instance.stop();
         assert.isFalse(yield* instance.waitForReady(Duration.seconds(15)));
+      }),
+    ),
+  );
+
+  it.effect("prepares the local browser before commands and prepares again after restart", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const preparing = yield* Deferred.make<void>();
+        const prepared = yield* Deferred.make<void>();
+        const commands = yield* Queue.unbounded<string>();
+        let preparationCount = 0;
+        const instance = yield* makeTestInstance({
+          config: {
+            ...baseConfig,
+            bootstrap: {
+              ...baseConfig.bootstrap,
+              desktopBrowserFd: 6,
+              desktopBrowserControlFd: 7,
+            },
+          },
+          spawnerLayer: Layer.succeed(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make(() =>
+              Effect.gen(function* () {
+                const closed = yield* Deferred.make<void>();
+                yield* Effect.addFinalizer(() => Deferred.succeed(closed, void 0));
+                return makeProcess({
+                  exitCode: Deferred.await(closed).pipe(Effect.as(ChildProcessSpawner.ExitCode(0))),
+                  getOutputFd: (fd) =>
+                    fd === 7 ? Stream.encodeText(Stream.make("first\nsecond\n")) : Stream.empty,
+                });
+              }),
+            ),
+          ),
+          prepareDesktopBrowser: Effect.sync(() => {
+            preparationCount += 1;
+          }).pipe(
+            Effect.andThen(Deferred.succeed(preparing, void 0)),
+            Effect.andThen(Deferred.await(prepared)),
+          ),
+          desktopBrowserHost: {
+            handleCommandLine: (line) => Queue.offer(commands, line).pipe(Effect.asVoid),
+          },
+        });
+        yield* instance.start;
+        yield* Deferred.await(preparing);
+        assert.equal(yield* Queue.size(commands), 0);
+        yield* Deferred.succeed(prepared, void 0);
+        assert.equal(yield* Queue.take(commands), "first");
+        assert.equal(yield* Queue.take(commands), "second");
+        assert.equal(preparationCount, 1);
+        yield* instance.stop();
+        yield* instance.start;
+        assert.equal(yield* Queue.take(commands), "first");
+        assert.equal(yield* Queue.take(commands), "second");
+        assert.equal(preparationCount, 2);
       }),
     ),
   );
@@ -595,6 +660,7 @@ describe("DesktopBackendManager", () => {
     Effect.scoped(
       Effect.gen(function* () {
         let startCount = 0;
+        let startupFailureCount = 0;
         const refused = yield* Deferred.make<void>();
         const instance = yield* makeTestInstance({
           spawnerLayer: Layer.succeed(
@@ -612,6 +678,10 @@ describe("DesktopBackendManager", () => {
           ),
           httpClientLayer: layerHttpClient(() => Effect.never),
           onStateDirOwned: Deferred.succeed(refused, undefined).pipe(Effect.asVoid),
+          onStartupFailure: () =>
+            Effect.sync(() => {
+              startupFailureCount += 1;
+            }),
         });
         yield* instance.start;
         yield* Deferred.await(refused);
@@ -620,6 +690,7 @@ describe("DesktopBackendManager", () => {
         assert.isFalse(snapshot.restartScheduled);
         yield* TestClock.adjust(Duration.minutes(1));
         assert.equal(startCount, 1);
+        assert.equal(startupFailureCount, 0);
       }).pipe(Effect.provide(TestClock.layer())),
     ),
   );
@@ -719,5 +790,105 @@ describe("DesktopBackendManager", () => {
         assert.equal(failure.reason, "The server started but did not become ready in time.");
       }).pipe(Effect.provide(TestClock.layer())),
     ),
+  );
+  it.effect(
+    "does not report startup failure when a non-ready backend is deliberately stopped",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const started = yield* Deferred.make<void>();
+          const exited = yield* Deferred.make<void>();
+          const notifications: string[] = [];
+          const instance = yield* makeTestInstance({
+            spawnerLayer: Layer.succeed(
+              ChildProcessSpawner.ChildProcessSpawner,
+              ChildProcessSpawner.make(() =>
+                Effect.gen(function* () {
+                  yield* Effect.addFinalizer(() =>
+                    Deferred.succeed(exited, void 0).pipe(Effect.asVoid),
+                  );
+                  yield* Deferred.succeed(started, void 0);
+                  return makeProcess({
+                    exitCode: Deferred.await(exited).pipe(
+                      Effect.as(ChildProcessSpawner.ExitCode(0)),
+                    ),
+                    kill: () => Deferred.succeed(exited, void 0).pipe(Effect.asVoid),
+                  });
+                }),
+              ),
+            ),
+            httpClientLayer: layerHttpClient(() => Effect.never),
+            onStartupFailure: ({ reason }) =>
+              Effect.sync(() => {
+                notifications.push(reason);
+              }),
+          });
+          yield* instance.start;
+          yield* Deferred.await(started);
+          yield* instance.stop();
+          assert.deepEqual(notifications, []);
+        }),
+      ),
+  );
+
+  it.effect(
+    "reports the first early exit after saving diagnostics and deduplicates restart failures",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const starts = yield* Queue.unbounded<number>();
+          const failures = yield* Queue.unbounded<string>();
+          let startCount = 0;
+          const notifications: string[] = [];
+          let persisted = false;
+
+          const layerSpawner = Layer.succeed(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make(() =>
+              Effect.sync(() => {
+                startCount += 1;
+                return makeProcess({
+                  exitCode: Queue.offer(starts, startCount).pipe(
+                    Effect.as(ChildProcessSpawner.ExitCode(1)),
+                  ),
+                });
+              }),
+            ),
+          );
+
+          const instance = yield* makeTestInstance({
+            spawnerLayer: layerSpawner,
+            httpClientLayer: layerHttpClient(() => Effect.never),
+            onStartupFailure: ({ reason }) =>
+              Effect.sync(() => {
+                assert.isTrue(persisted);
+                notifications.push(reason);
+              }),
+            backendOutputLog: {
+              persistFailure: ({ details }) =>
+                Effect.sync(() => {
+                  persisted = true;
+                }).pipe(Effect.andThen(Queue.offer(failures, details)), Effect.asVoid),
+            },
+          });
+
+          yield* instance.start;
+
+          assert.equal(yield* Queue.take(starts), 1);
+          assert.equal(yield* Queue.take(failures), "pid=123 code=1");
+
+          yield* TestClock.adjust(Duration.millis(499));
+          assert.equal(yield* Queue.size(starts), 0);
+          yield* TestClock.adjust(Duration.millis(1));
+          assert.equal(yield* Queue.take(starts), 2);
+
+          yield* TestClock.adjust(Duration.millis(999));
+          assert.equal(yield* Queue.size(starts), 0);
+          yield* TestClock.adjust(Duration.millis(1));
+          assert.equal(yield* Queue.take(starts), 3);
+          yield* TestClock.adjust(Duration.millis(1));
+          assert.deepEqual(notifications, ["The server could not start (code=1)."]);
+        }).pipe(Effect.provide(TestClock.layer())),
+      ),
   );
 });

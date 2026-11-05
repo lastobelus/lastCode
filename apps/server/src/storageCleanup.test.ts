@@ -49,10 +49,12 @@ import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import { CodexProviderCapabilitiesV2 } from "./orchestration-v2/Adapters/CodexAdapterV2.ts";
 import { ServerActivation } from "./serverActivation.ts";
-import { describe, expect, it } from "@effect/vitest";
+import { afterAll, describe, expect, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
 // @effect-diagnostics-next-line nodeBuiltinImport:off - Inject native deletion failures and verify the allocated-byte estimate.
 import * as NodeFSP from "node:fs/promises";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- The suite owns the pristine repository until its final cleanup.
+import * as NodeFS from "node:fs";
 import * as GeneratedDependencies from "./workspace/GeneratedDependencies.ts";
 import * as DependencyMounts from "./workspace/DependencyMounts.ts";
 import * as WorktreeConsumers from "./workspace/WorktreeConsumers.ts";
@@ -394,6 +396,12 @@ const projectShells = (roots: ReadonlyArray<string>) =>
     workspaceRoot,
   }));
 
+let repositoryTemplate: string | undefined;
+
+afterAll(() => {
+  if (repositoryTemplate) NodeFS.rmSync(repositoryTemplate, { recursive: true, force: true });
+});
+
 const cleanupFixture = (
   storageCleanup: StorageCleanupSettings = {
     ...DEFAULT_SERVER_SETTINGS.storageCleanup,
@@ -426,16 +434,33 @@ const cleanupFixture = (
       .pipe(Effect.flatMap((directory) => fs.realPath(directory)));
     const command = (cwd: string, args: string[]) =>
       git.execute({ operation: "cleanup-test", cwd, args });
-    yield* command(repo, ["init", "-b", "main"]);
-    yield* command(repo, ["config", "user.email", "cleanup@example.test"]);
-    yield* command(repo, ["config", "user.name", "Cleanup test"]);
+    if (!repositoryTemplate) {
+      const template = yield* fs.makeTempDirectory({ prefix: "cleanup-repo-template-" });
+      yield* Effect.gen(function* () {
+        yield* command(template, ["init", "-b", "main"]);
+        yield* fs.writeFileString(
+          `${template}/.git/config`,
+          "\n[user]\n\temail = cleanup@example.test\n\tname = Cleanup test\n[core]\n\texcludesFile = /dev/null\n",
+          { flag: "a" },
+        );
+        yield* fs.writeFileString(`${template}/tracked.txt`, "original\n");
+        yield* fs.writeFileString(
+          `${template}/.gitignore`,
+          ".env\ndist/\nnode_modules/\n.t3/\ntarget/\n",
+        );
+        yield* command(template, ["add", "."]);
+        yield* command(template, ["commit", "-m", "initial"]);
+      }).pipe(
+        Effect.onError(() =>
+          fs.remove(template, { recursive: true, force: true }).pipe(Effect.orDie),
+        ),
+      );
+      repositoryTemplate = template;
+    }
+    yield* fs.copy(repositoryTemplate, repo);
     const globalExcludes = `${baseDir}/empty-global-excludes`;
     yield* fs.writeFileString(globalExcludes, "");
     yield* command(repo, ["config", "core.excludesFile", globalExcludes]);
-    yield* fs.writeFileString(`${repo}/tracked.txt`, "original\n");
-    yield* fs.writeFileString(`${repo}/.gitignore`, ".env\ndist/\nnode_modules/\n.t3/\ntarget/\n");
-    yield* command(repo, ["add", "."]);
-    yield* command(repo, ["commit", "-m", "initial"]);
     yield* fs.makeDirectory(config.worktreesDir, { recursive: true });
     let worktree = `${config.worktreesDir}/feature`;
     yield* command(repo, ["worktree", "add", "-b", "feature", worktree]);
