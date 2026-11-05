@@ -2,6 +2,8 @@
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
+import * as Clock from "effect/Clock";
+import * as Schema from "effect/Schema";
 import * as FileSystem from "effect/FileSystem";
 import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
@@ -15,6 +17,11 @@ import { injectLinuxArm64Sea } from "../../../scripts/lib/linux-arm64-sea.ts";
 import rootPackageJson from "../../../package.json" with { type: "json" };
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import { recordDependencyUse } from "@t3tools/shared/dependencyActivity";
+import {
+  createGeneratedBuildStage,
+  copyOwnedGeneratedBuild,
+} from "@t3tools/shared/generatedBuildOwnership";
 import {
   ServerCliBuildAssetMissingError,
   ServerCliCommandExitError,
@@ -22,6 +29,11 @@ import {
   ServerCliDevelopmentIconTargetMissingError,
   ServerCliExecutableImportError,
 } from "./cliErrors.ts";
+
+class DependencyUseRecordError extends Schema.TaggedError<DependencyUseRecordError>()(
+  "DependencyUseRecordError",
+  { cause: Schema.Defect() },
+) {}
 
 const RepoRoot = Effect.service(Path.Path).pipe(
   Effect.flatMap((path) => path.fromFileUrl(new URL("../../..", import.meta.url))),
@@ -45,13 +57,16 @@ const runCommand = Effect.fn("runCommand")(function* (command: ChildProcess.Stan
 const applyDevelopmentIconOverrides = Effect.fn("applyDevelopmentIconOverrides")(function* (
   repoRoot: string,
   serverDir: string,
+  outputDirectory?: string,
 ) {
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
 
   for (const override of DEVELOPMENT_ICON_OVERRIDES) {
     const sourcePath = path.join(repoRoot, override.sourceRelativePath);
-    const targetPath = path.join(serverDir, override.targetRelativePath);
+    const targetPath = outputDirectory
+      ? path.join(outputDirectory, override.targetRelativePath.replace(/^dist\//, ""))
+      : path.join(serverDir, override.targetRelativePath);
 
     if (!(yield* fs.exists(sourcePath))) {
       return yield* new ServerCliDevelopmentIconSourceMissingError({ sourcePath });
@@ -86,7 +101,10 @@ const buildCmd = Command.make(
           );
           const noteDependencyUse = Effect.gen(function* () {
             const now = yield* Clock.currentTimeMillis;
-            yield* Effect.try(() => recordDependencyUse(repoRoot, now)).pipe(
+            yield* Effect.try({
+              try: () => recordDependencyUse(repoRoot, now),
+              catch: (cause) => new DependencyUseRecordError({ cause }),
+            }).pipe(
               Effect.catch(() => Effect.logWarning("[cli] Could not record build dependency use.")),
             );
           });
@@ -123,7 +141,6 @@ const buildCmd = Command.make(
           yield* Effect.sync(() => stage?.publish(completedAt));
         }),
       );
-
     }),
 ).pipe(Command.withDescription("Build the server package (tsdown + bundle web client)."));
 

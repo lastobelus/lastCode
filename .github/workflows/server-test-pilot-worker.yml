@@ -1,0 +1,48 @@
+name: Server Pilot Worker
+
+on:
+  workflow_call:
+    inputs:
+      cohort:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  worker:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      VP_REMOTE_CACHE: "off"
+      VP_REMOTE_CACHE_URL: ""
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+      - uses: ./.github/actions/setup-apt-mirrors
+      - name: Install workspace inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends attr acl e2fsprogs
+      - uses: ./.github/actions/setup-ci-deps
+        with:
+          install-args: --frozen-lockfile
+      - name: Select checkpoint pilot Node runtime
+        run: |
+          vp env use 24.13.1
+          echo 'VP_NODE_VERSION=24.13.1' >> "$GITHUB_ENV"
+          vp env exec --node 24.13.1 node -p 'require("node:path").dirname(process.execPath)' >> "$GITHUB_PATH"
+      - name: Install Chromium and system dependencies
+        run: node apps/server/node_modules/playwright-core/cli.js install --with-deps --only-shell chromium
+      - name: Run uncached cohort
+        run: node scripts/server-test-pilot.ts '${{ inputs.cohort }}' '${{ runner.temp }}/pilot'
+      - name: Retain results, discovery and transfer reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pilot-${{ inputs.cohort }}
+          path: ${{ runner.temp }}/pilot/
+          if-no-files-found: error
+          retention-days: 14
