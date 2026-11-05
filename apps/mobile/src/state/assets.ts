@@ -3,13 +3,20 @@ import { resolveFilesystemReadAccess } from "@t3tools/client-runtime/state/files
 import {
   assetUrlStateFromResult,
   blockedAssetUrlState,
+  fileAssetResourceForAccess,
   createAssetEnvironmentAtoms,
   createProjectFaviconUrlAtomFamily,
   EMPTY_ASSET_URL_ATOM,
   makeRevisionedAssetUrlFamily,
 } from "@t3tools/client-runtime/state/assets";
 import { executeAtomQuery } from "@t3tools/client-runtime/state/runtime";
-import type { AssetResource, EnvironmentId } from "@t3tools/contracts";
+import {
+  AuthFilesystemReadScope,
+  AuthOrchestrationReadScope,
+  sessionGrantsScope,
+  type AssetResource,
+  type EnvironmentId,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { Atom, AsyncResult } from "effect/reactivity";
 
@@ -19,7 +26,7 @@ import { projectFaviconDatabaseCache } from "../lib/projectFaviconDatabaseCache"
 import { type AssetUrlState, deriveAssetUrlState } from "./asset-url-state";
 import { appAtomRegistry } from "./atom-registry";
 import { environmentProjectCloneListAtom } from "./projectClones";
-import { environmentSession, usePreparedConnection } from "./session";
+import { environmentSession, readEnvironmentScope, usePreparedConnection } from "./session";
 import { useEnvironmentPresentation } from "./presentation";
 import { useEnvironmentQuery } from "./query";
 import { useAtomQueryRunner } from "./use-atom-query-runner";
@@ -37,15 +44,7 @@ export const projectFaviconUrlAtom = createProjectFaviconUrlAtomFamily({
 
 const revisionedAssetUrl = makeRevisionedAssetUrlFamily(assetEnvironment.createUrl);
 
-/**
- * Pass `revision` for a host file whose bytes can change under the same path; each new
- * revision re-mints the URL so the image reloads.
- */
-export function useAssetUrlState(
-  environmentId: EnvironmentId | null,
-  resource: AssetResource | null,
-  revision?: string | null,
-): AssetUrlState {
+export function useHostFileAccess(environmentId: EnvironmentId | null) {
   const fileAccessSession = useEnvironmentQuery(
     environmentId === null ? null : environmentSession.sessionStateAtom(environmentId),
   );
@@ -56,15 +55,40 @@ export function useAssetUrlState(
     session: fileAccessSession.data,
     sessionError: fileAccessSession.error,
   });
-  const blocked = blockedAssetUrlState(resource, fileAccess);
+  return {
+    ...fileAccess,
+    canReadLinkedFiles:
+      fileAccessSession.error === null &&
+      fileAccessSession.data !== null &&
+      sessionGrantsScope(fileAccessSession.data, AuthOrchestrationReadScope),
+  };
+}
+
+/**
+ * Pass `revision` for a host file whose bytes can change under the same path; each new
+ * revision re-mints the URL so the image reloads.
+ */
+export function useAssetUrlState(
+  environmentId: EnvironmentId | null,
+  resource: AssetResource | null,
+  revision?: string | null,
+): AssetUrlState {
+  const fileAccess = useHostFileAccess(environmentId);
+  const fileEnvironment = useEnvironmentPresentation(environmentId);
+  const scopedResource =
+    resource === null ? null : fileAssetResourceForAccess(resource, fileAccess.canReadFiles);
+  const blocked = blockedAssetUrlState(scopedResource, {
+    ...fileAccess,
+    canReadThreadFiles: fileAccess.canReadLinkedFiles,
+  });
   const preparedConnection = usePreparedConnection(environmentId);
   const connectionPhase = fileEnvironment.presentation?.connection.phase ?? "available";
   const result = useAtomValue(
-    blocked !== null || environmentId === null || resource === null
+    blocked !== null || environmentId === null || scopedResource === null
       ? EMPTY_ASSET_URL_ATOM
       : revision === undefined
-        ? assetEnvironment.createUrl({ environmentId, input: { resource } })
-        : revisionedAssetUrl({ environmentId, input: { resource }, revision }),
+        ? assetEnvironment.createUrl({ environmentId, input: { resource: scopedResource } })
+        : revisionedAssetUrl({ environmentId, input: { resource: scopedResource }, revision }),
   );
   const shared =
     blocked ??
@@ -91,6 +115,7 @@ export function useRefreshAssetUrl(
   environmentId: EnvironmentId | null,
   resource: AssetResource | null,
 ): () => Promise<string | null> {
+  const fileAccess = useHostFileAccess(environmentId);
   const connection = usePreparedConnection(environmentId);
   const httpBaseUrl = connection._tag === "Some" ? connection.value.httpBaseUrl : null;
   const createUrl = useAtomQueryRunner(assetEnvironment.createUrl, {
@@ -100,7 +125,10 @@ export function useRefreshAssetUrl(
   return async () => {
     if (environmentId === null || resource === null || httpBaseUrl === null) return null;
     const state = assetUrlStateFromResult(
-      await createUrl({ environmentId, input: { resource } }),
+      await createUrl({
+        environmentId,
+        input: { resource: fileAssetResourceForAccess(resource, fileAccess.canReadFiles) },
+      }),
       httpBaseUrl,
     );
     return state._tag === "Success" ? state.url : null;
@@ -115,7 +143,11 @@ export async function refreshAssetUrl(
 ): Promise<string | null> {
   const connectionAtom = environmentSession.preparedConnectionValueAtom(environmentId);
   if (appAtomRegistry.get(connectionAtom)._tag === "None") return null;
-  const atom = assetEnvironment.createUrl({ environmentId, input: { resource } });
+  const scopedResource = fileAssetResourceForAccess(
+    resource,
+    readEnvironmentScope(environmentId, AuthFilesystemReadScope),
+  );
+  const atom = assetEnvironment.createUrl({ environmentId, input: { resource: scopedResource } });
   const result = await executeAtomQuery(appAtomRegistry, atom, {
     label: atom.label?.[0] ?? "asset url",
     refresh: true,

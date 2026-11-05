@@ -12,12 +12,13 @@ function input(): Parameters<typeof buildLastCodeThreadMenu>[0] {
   return {
     thread: {
       branch: "feature",
-      creatorGrouping: "grouped",
       persistent: false,
       archivePending: null,
     },
+    parentThreadId: ThreadId.make("creator"),
     creator: { groupingEligible: true, canOpen: true },
     canAnnotate: true,
+    hasActiveAnnotation: false,
     supportsPersistence: true,
     hasStoppableProcesses: true,
     projectSettingsKey: "project",
@@ -36,10 +37,11 @@ function menuInput(
   return {
     ...data,
     canOperate,
+    hasActiveAnnotation: optional,
+    parentThreadId: grouped ? ThreadId.make("creator") : null,
     thread: {
       ...data.thread,
       persistent,
-      creatorGrouping: grouped ? "grouped" : "independent",
       archivePending: optional
         ? {
             status: "failed",
@@ -54,7 +56,16 @@ function menuInput(
 }
 
 describe("LastCode thread context menu", () => {
-  it("classifies every emitted static action across optional menu states", () => {
+  it("offers edit and resolve instead of creation while an annotation is unresolved", () => {
+    const menu = buildLastCodeThreadMenu({ ...input(), hasActiveAnnotation: true });
+    expect(
+      menu.filter((item) => item.id === "annotate" || item.id === "resolve-annotation"),
+    ).toEqual([
+      { id: "annotate", label: "Edit Annotation…", disabled: false },
+      { id: "resolve-annotation", label: "Resolve Annotation…", disabled: false },
+    ]);
+  });
+  it("classifies every static action emitted by the base menu across optional states", () => {
     const emitted = new Set<string>();
     const permissions = [true, false].flatMap((canOperate) =>
       [true, false].map((persistent) => ({ canOperate, persistent })),
@@ -75,7 +86,12 @@ describe("LastCode thread context menu", () => {
           expect(item.disabled, item.id).toBe(true);
       }
     }
-    expect([...emitted].sort()).toEqual(Object.keys(LASTCODE_THREAD_ACTION_POLICY).sort());
+    expect([...emitted].sort()).toEqual(
+      Object.keys(LASTCODE_THREAD_ACTION_POLICY)
+        // The workspace menu extension adds this action after the base menu is built.
+        .filter((action) => action !== "archive-discard")
+        .sort(),
+    );
     for (const action of [null, "unknown", "constructor", "__proto__"]) {
       expect(isLastCodeThreadActionId(action)).toBe(false);
       expect(lastcodeThreadActionRequiresOperate(action)).toBe(false);
@@ -94,6 +110,7 @@ describe("LastCode thread context menu", () => {
     for (const action of [
       "rename",
       "annotate",
+      "resolve-annotation",
       "creator-independent",
       "creator-grouped",
       "mark-persistent",
@@ -101,6 +118,7 @@ describe("LastCode thread context menu", () => {
       "stop-thread-processes",
       "dismiss-archive-failure",
       "delete",
+      "archive-discard",
     ]) {
       expect(lastcodeThreadActionRequiresOperate(action), action).toBe(true);
     }
@@ -183,6 +201,7 @@ describe("LastCode thread context menu", () => {
       ...data,
       thread: { ...data.thread, branch: null },
       creator: { groupingEligible: false, canOpen: false },
+      parentThreadId: null,
       canAnnotate: false,
       supportsPersistence: false,
       hasStoppableProcesses: false,

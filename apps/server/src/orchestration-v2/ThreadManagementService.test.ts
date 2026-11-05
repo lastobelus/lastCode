@@ -1,3 +1,4 @@
+import * as ProjectionStore from "./ProjectionStore.ts";
 import { expect, it } from "@effect/vitest";
 import {
   CommandId,
@@ -40,6 +41,10 @@ import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import { ThreadReadAuthorization } from "./ThreadReadAuthorization.ts";
 
+const layerThreadManagementTest = ThreadManagementService.layer.pipe(
+  Layer.provide(Layer.mock(ProjectionStore.ProjectionStoreV2)({})),
+);
+
 it.effect("binds a forwarded queued message's read authority before committing its run", () =>
   Effect.gen(function* () {
     const projectId = ProjectId.make("forwarded-project");
@@ -64,7 +69,7 @@ it.effect("binds a forwarded queued message's read authority before committing i
         messages: committed ? [{ id: messageId, runId }] : [],
         turnItems: [],
       }) as unknown as OrchestrationV2ThreadProjection;
-    const layer = ThreadManagementService.layer.pipe(
+    const layer = layerThreadManagementTest.pipe(
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
@@ -220,7 +225,7 @@ it.effect.each([
         turnItems: queued ? [] : [{ type: "user_message", messageId, inputIntent: "steering" }],
       } as unknown as OrchestrationV2ThreadProjection;
     };
-    const testLayer = ThreadManagementService.layer.pipe(
+    const testLayer = layerThreadManagementTest.pipe(
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
@@ -266,7 +271,7 @@ const layerReceiptsTest = CommandReceiptStore.layer.pipe(
 
 const layerDispatchChokepointTest =
   (settingsLayer: ReturnType<typeof ServerSettings.layerTest>) => (dispatched: Array<string>) =>
-    ThreadManagementService.layer.pipe(
+    layerThreadManagementTest.pipe(
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
@@ -382,6 +387,38 @@ it.effect(
   },
 );
 
+it.effect("uses thread-not-found only after a projection loads outside the project", () => {
+  const projectId = ProjectId.make("project:thread-management:requested");
+  const otherProjectId = ProjectId.make("project:thread-management:other");
+  const threadId = ThreadId.make("thread:thread-management:wrong-project");
+  const projection = {
+    thread: {
+      id: threadId,
+      projectId: otherProjectId,
+      deletedAt: null,
+    },
+  } as OrchestrationV2ThreadProjection;
+  const layerTest = layerThreadManagementTest.pipe(
+    Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
+    Layer.provide(
+      Layer.mock(Orchestrator.OrchestratorV2)({
+        getThreadRecords: () => Effect.succeed(projection),
+      }),
+    ),
+    Layer.provide(ServerSettings.layerTest()),
+    Layer.provide(layerReceiptsTest),
+  );
+
+  return Effect.gen(function* () {
+    const service = yield* ThreadManagementService.ThreadManagementService;
+    const error = yield* Effect.flip(service.getProjectThreadRecords({ projectId, threadId }, []));
+
+    expect(error).toBeInstanceOf(ThreadManagementService.ThreadManagementThreadNotFoundError);
+    expect(error).toMatchObject({ projectId, threadId });
+    expect("cause" in error).toBe(false);
+  }).pipe(Effect.provide(layerTest));
+});
+
 it.effect("waitForThread follows a restart continuation instead of the cut run", () =>
   Effect.gen(function* () {
     const projectId = ProjectId.make("project:thread-management:wait-restart");
@@ -398,7 +435,7 @@ it.effect("waitForThread follows a restart continuation instead of the cut run",
     let pending = true;
     const stored = (sequence: number, event: object) =>
       ({ sequence, event: { threadId, ...event } }) as unknown as OrchestrationV2StoredEvent;
-    const layerTest = ThreadManagementService.layer.pipe(
+    const layerTest = layerThreadManagementTest.pipe(
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
@@ -475,7 +512,7 @@ it.effect("waitForThread can wait past an ended run for the thread's delegated w
     let subagents = [{ status: "running" }];
     const stored = (sequence: number, event: object) =>
       ({ sequence, event: { threadId, ...event } }) as unknown as OrchestrationV2StoredEvent;
-    const layerTest = ThreadManagementService.layer.pipe(
+    const layerTest = layerThreadManagementTest.pipe(
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
@@ -553,7 +590,7 @@ it.effect("waitForThread settles delegated work on a thread rolled back past its
       startedAt: DateTime.makeUnsafe(0),
       completedAt: DateTime.makeUnsafe(1_000),
     } as unknown as OrchestrationV2Run;
-    const layerTest = ThreadManagementService.layer.pipe(
+    const layerTest = layerThreadManagementTest.pipe(
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
@@ -606,7 +643,7 @@ it.effect("waitForThread returns the cut run once its continuation is declined",
     const subscribed = yield* Deferred.make<void>();
     const declined = yield* Deferred.make<void>();
     let pending = true;
-    const layerTest = ThreadManagementService.layer.pipe(
+    const layerTest = layerThreadManagementTest.pipe(
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
@@ -695,7 +732,7 @@ it.effect.each(["live", "no-session", "unsupported-runtime"] as const)(
                 }),
             }),
       } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime;
-      const layerTest = ThreadManagementService.layer.pipe(
+      const layerTest = layerThreadManagementTest.pipe(
         Layer.provide(
           Layer.mergeAll(
             Layer.mock(Orchestrator.OrchestratorV2)({
@@ -752,7 +789,7 @@ it.effect.each([
     const threadId = ThreadId.make("thread:thread-management:settle-after-run");
     const runId = RunId.make("run:thread-management:settle-after-run");
     const dispatched: Array<string> = [];
-    const layerTest = ThreadManagementService.layer.pipe(
+    const layerTest = layerThreadManagementTest.pipe(
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
@@ -837,7 +874,7 @@ it.effect.each([
     const dispatched: Array<OrchestrationV2Command | { readonly type: string }> = [];
     const teardowns: Array<string> = [];
     const tornDown = yield* Deferred.make<void>();
-    const layerTest = ThreadManagementService.layer.pipe(
+    const layerTest = layerThreadManagementTest.pipe(
       Layer.provide(
         Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
           isLive: () => Effect.succeed(true),
@@ -918,7 +955,7 @@ it.effect("Force stop refuses once a newer run has started, before killing anyth
   Effect.gen(function* () {
     const threadId = ThreadId.make("thread:thread-management:force-stop-superseded");
     let killed = false;
-    const layerTest = ThreadManagementService.layer.pipe(
+    const layerTest = layerThreadManagementTest.pipe(
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({

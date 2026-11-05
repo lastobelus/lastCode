@@ -64,6 +64,7 @@ const isProjectOperationError = Schema.is(ProjectService.ProjectOperationError);
 const isUpdateDrainAdmissionError = Schema.is(UpdateDrainAdmissionError);
 
 const layerCliRuntime = Layer.mergeAll(
+  ManagedPolicy.layerTest(),
   NodeServices.layer,
   NodeCrypto.layer,
   NetService.layer,
@@ -454,7 +455,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))(
             baseDir,
           ]);
           if ((yield* HostProcess.Platform) !== "darwin") {
-            assert.include((yield* removal.pipe(Effect.flip)).message, "exclusive server ownership");
+            assert.include(
+              (yield* removal.pipe(Effect.flip)).message,
+              "exclusive server ownership",
+            );
             for (const id of [activeId, archivedId])
               assert.isNull((yield* readNativeThreadState(baseDir, id)).thread.deletedAt);
             return;
@@ -502,7 +506,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))(
             yield* removal;
             assert.deepEqual((yield* readProjects(baseDir)).projects, []);
           } else {
-            assert.include((yield* removal.pipe(Effect.flip)).message, "exclusive server ownership");
+            assert.include(
+              (yield* removal.pipe(Effect.flip)).message,
+              "exclusive server ownership",
+            );
             assert.lengthOf((yield* readProjects(baseDir)).projects, 1);
           }
           assert.isFalse(yield* fs.exists(workspaceRoot));
@@ -514,7 +521,9 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))(
         const fs = yield* FileSystem.FileSystem;
         const { baseDir, workspaceRoot, project } = yield* makeProjectLookupFixture();
         yield* fs.rename(workspaceRoot, `${workspaceRoot}-removed`);
-        const replacementDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-v2-project-empty-" });
+        const replacementDir = yield* fs.makeTempDirectoryScoped({
+          prefix: "t3-v2-project-empty-",
+        });
         const error = yield* runCli([
           "project",
           "remove",
@@ -610,7 +619,14 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))(
           .mockReturnValue(Effect.succeed({ endpoint: "unmanaged", release: Effect.void }));
         yield* Effect.gen(function* () {
           const { baseDir, project } = yield* makeProjectLookupFixture();
-          yield* runCli(["project", "rename", project.id, "Renamed offline", "--base-dir", baseDir]);
+          yield* runCli([
+            "project",
+            "rename",
+            project.id,
+            "Renamed offline",
+            "--base-dir",
+            baseDir,
+          ]);
           const before = yield* readProjects(baseDir);
           const error = yield* runCli([
             "project",

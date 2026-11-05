@@ -337,6 +337,7 @@ it.layer(NodeServices.layer)("ClaudeMaintenance", (it) => {
               stateDir: f.directory,
               providerStatusCacheDir: f.directory,
               attachmentsDir: f.directory,
+              settingsPath: `${f.directory}/settings.json`,
             },
             settings: {
               get: Effect.succeed(DEFAULT_SERVER_SETTINGS),

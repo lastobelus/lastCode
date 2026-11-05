@@ -40,7 +40,12 @@ export function MarkdownThreadLink(props: {
     );
     if (resolved.value !== undefined || version === 2) return resolved;
     const target = guessThreadLinkRef(
-      { environmentId: linkedEnvironmentId ?? null, threadId: linkedThreadId, version, legacyThreadId },
+      {
+        environmentId: linkedEnvironmentId ?? null,
+        threadId: linkedThreadId,
+        version,
+        legacyThreadId,
+      },
       get(environmentThreadShells.threadRefsAtom),
     );
     return target === null

@@ -5,6 +5,8 @@ declare module "vite-plus/test/browser" {
   interface BrowserCommands {
     /** Defined in vite.config.ts. Moves Playwright's mouse off the page. */
     resetPointer: () => Promise<void>;
+    /** Native wheel input at the pointer's current position. */
+    wheel: (deltaY: number) => Promise<void>;
   }
 }
 
