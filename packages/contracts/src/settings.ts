@@ -603,6 +603,12 @@ export const ClientSettingsSchema = Schema.Struct({
   legacySidebarEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   // LastCode overrides either upstream sidebar without changing the fallback preference.
   lastcodeSidebarEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  lastcodeThreadTagsHeaderEnabled: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(true)),
+  ),
+  lastcodeThreadTagsSidebarEnabled: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(true)),
+  ),
   sidebarWorkingShelfEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   lastcodeSidebarFamilyStatusSubheaders: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(true)),
@@ -2059,6 +2065,8 @@ export const ClientSettingsPatch = Schema.Struct({
   legacySidebarThreadGroupingStyle: Schema.optionalKey(LegacySidebarThreadGroupingStyle),
   legacySidebarEnabled: Schema.optionalKey(Schema.Boolean),
   lastcodeSidebarEnabled: Schema.optionalKey(Schema.Boolean),
+  lastcodeThreadTagsHeaderEnabled: Schema.optionalKey(Schema.Boolean),
+  lastcodeThreadTagsSidebarEnabled: Schema.optionalKey(Schema.Boolean),
   sidebarWorkingShelfEnabled: Schema.optionalKey(Schema.Boolean),
   legacySidebarScale: Schema.optionalKey(LegacySidebarScale),
   pageScrollOverlapEnabled: Schema.optionalKey(Schema.Boolean),

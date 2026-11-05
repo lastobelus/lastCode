@@ -364,6 +364,7 @@ export const OrchestratorMcpThreadPullRequest = Schema.Struct({
 export type OrchestratorMcpThreadPullRequest = typeof OrchestratorMcpThreadPullRequest.Type;
 
 export const OrchestratorMcpThreadListItem = Schema.Struct({
+  tags: Schema.optional(Schema.Array(Schema.String)),
   threadId: ThreadId,
   projectId: ProjectId,
   environmentId: EnvironmentId,
@@ -446,6 +447,7 @@ export const OrchestratorMcpThreadReadInput = Schema.Struct({
 export type OrchestratorMcpThreadReadInput = typeof OrchestratorMcpThreadReadInput.Type;
 
 export const OrchestratorMcpThreadDetail = Schema.Struct({
+  tags: Schema.optional(Schema.Array(Schema.String)),
   threadId: ThreadId,
   environmentId: EnvironmentId,
   link: Schema.String,

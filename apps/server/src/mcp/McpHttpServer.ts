@@ -1,3 +1,6 @@
+import * as ThreadTags from "../orchestration-v2/ThreadTags.ts";
+import { ThreadTagsToolkit } from "./toolkits/threadTags/tools.ts";
+import * as ThreadTagsHandlers from "./toolkits/threadTags/handlers.ts";
 import { McpProviderSessions } from "@t3tools/provider-core/server/McpProviderSessions";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
@@ -1280,6 +1283,11 @@ export const layerWorktreeSuspensionToolkit = toolkitRegistration(
   WorktreeSuspensionHandlers.layer,
 );
 
+export const layerThreadTagsToolkit = toolkitRegistration(
+  ThreadTagsToolkit,
+  ThreadTagsHandlers.layer,
+).pipe(Layer.provide(ThreadTags.layer));
+
 const layerThreadDashboardToolkit = toolkitRegistration(
   ThreadDashboardToolkit,
   ThreadDashboardHandlers.layer,
@@ -1317,6 +1325,7 @@ export const layerTools = Layer.mergeAll(
   layerActionResumeToolkit,
   layerWorktreeSuspensionToolkit,
   layerThreadDashboardToolkit,
+  layerThreadTagsToolkit,
 );
 
 const layerFullToolkit = layerMcpTransport(layerTools);
@@ -1335,6 +1344,7 @@ const layerThreadOnlyToolkit = makeMcpTransport(
     layerWorktreeToolkitRegistration,
     layerWorktreeSuspensionToolkit,
     layerThreadDashboardToolkit,
+    layerThreadTagsToolkit,
     layerPullRequestsToolkit,
   ),
 );

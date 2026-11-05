@@ -43,6 +43,7 @@ import { textDirection } from "~/textDirection";
 import { useClientSettings } from "../../hooks/useSettings";
 import { GuestShareIndicator } from "./GuestShareControls";
 import { ThreadWorkspaceStatus } from "./ThreadWorkspaceStatus";
+import { HeaderTags } from "../../lastcode/thread-tags/HeaderTags";
 
 interface ChatHeaderProps {
   activeThreadEnvironmentId: EnvironmentId;
@@ -284,11 +285,12 @@ export const ChatHeader = memo(function ChatHeader({
     <div
       ref={breadcrumbContainerRef}
       className={cn(
-        "flex min-w-0 flex-1 items-center gap-2 sm:gap-3",
+        "relative flex min-w-0 flex-1 self-stretch items-center gap-2 sm:gap-3 has-[[data-lastcode-header-tags]]:wco:pb-3",
         rightPanelOpen ? "pr-10" : "pr-24",
       )}
       onContextMenu={handleHeaderContextMenu}
     >
+      {isServerThread ? <HeaderTags threadRef={activeThreadRef} /> : null}
       <WorkspaceBreadcrumb
         ariaLabel="Thread breadcrumb"
         className="flex-1 overflow-clip [overflow-clip-margin:2px]"

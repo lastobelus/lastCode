@@ -312,6 +312,18 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["annotation note composer eyebrow expand collapse edited"],
   },
   {
+    id: "thread-tags-header",
+    title: "Show thread tags in chat header",
+    to: "/settings/lastcode",
+    searchTerms: ["tag label hashtag nested hierarchy chat title agent"],
+  },
+  {
+    id: "thread-tags-sidebar",
+    title: "Show tag filter in sidebar",
+    to: "/settings/lastcode",
+    searchTerms: ["tag label hashtag nested hierarchy parent filter search agent"],
+  },
+  {
     id: "incoming-message-style",
     title: "Incoming message style",
     to: "/settings/lastcode",

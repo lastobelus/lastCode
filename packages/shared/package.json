@@ -582,6 +582,10 @@
     "./promptSnippetSearch": {
       "types": "./src/promptSnippetSearch.ts",
       "import": "./src/promptSnippetSearch.ts"
+    },
+    "./threadTags": {
+      "types": "./src/threadTags.ts",
+      "import": "./src/threadTags.ts"
     }
   },
   "scripts": {

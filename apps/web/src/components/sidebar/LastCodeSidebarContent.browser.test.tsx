@@ -136,7 +136,10 @@ vi.mock("./useLastCodeSidebarShortcuts", () => ({
   },
 }));
 vi.mock("../../hooks/useHandleNewThread", () => ({ useNewThreadHandler: () => fixture.newThread }));
-vi.mock("../../state/threads", () => ({
+vi.mock("../../state/threads", async () => ({
+  environmentThreadShells: {
+    hiddenThreadKeysAtom: (await import("effect/reactivity")).Atom.make(new Set<string>()),
+  },
   useEnvironmentThread: (env: string, id: string) => {
     useEffect(() => {
       const key = `${env}:${id}`;

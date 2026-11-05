@@ -1,3 +1,4 @@
+import { useTagSidebar } from "../lastcode/thread-tags/TagSidebar";
 import { useActiveNewTask } from "../../state/active-new-task";
 import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import { useAndroidControlSizing } from "../../components/ui/useAndroidControlSizing";
@@ -392,6 +393,7 @@ export function HomeScreen(props: HomeScreenProps) {
     pickableProjectGroups(projectScopes),
     v2ProjectScopeKey,
   );
+
   const threadSearch = useThreadSearch(
     searchEnvironmentIds,
     props.searchQuery,
@@ -400,6 +402,14 @@ export function HomeScreen(props: HomeScreenProps) {
       : { projectIds: v2ScopedProjectGroup.projectRefs.map((ref) => ref.projectId) },
   );
   const threadSearchMatchByKey = useThreadListSearchMatches(props.threads, threadSearch);
+  const tagSidebar = useTagSidebar(
+    v2ScopedProjectGroup === null
+      ? searchEnvironmentIds.map((environmentId) => ({ environmentId }))
+      : v2ScopedProjectGroup.projectRefs,
+    props.onSelectThread,
+    props.searchQuery,
+    threadSearchMatchByKey,
+  );
   const v2ProjectTitleByProjectKey = new Map(
     projectScopes.flatMap((scope) =>
       scope.projectRefs.map(
@@ -499,7 +509,7 @@ export function HomeScreen(props: HomeScreenProps) {
     }
     onSelectThread(thread);
   };
-  useThreadJumpShortcuts(threadListV2Items, selectThread);
+  useThreadJumpShortcuts(tagSidebar.active ? [] : threadListV2Items, selectThread);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the list's visible range after commit to enable swipe gestures on those rows
   useEffect(() => {
     if (swipeEnabled) activateVisibleRows(threadListV2Items);
@@ -721,23 +731,26 @@ export function HomeScreen(props: HomeScreenProps) {
 
   const listHeader = Platform.OS === "ios" ? undefined : <HomeTopContentSpacer />;
 
+  const scopeFilters =
+    Platform.OS === "ios" && workspace ? (
+      <ThreadListFilters
+        gutter={primaryColumn ? 8 : 0}
+        environments={props.environments}
+        projects={pickableProjectGroups(projectScopes).map((scope) => ({
+          key: scope.key,
+          label: scope.title,
+        }))}
+        selectedEnvironmentId={props.selectedEnvironmentId}
+        selectedProjectKey={props.selectedProjectKey}
+        onEnvironmentChange={props.onEnvironmentChange}
+        onProjectChange={props.onProjectChange}
+      />
+    ) : null;
   const v2ListHeader = (
     <>
       {listHeader}
-      {Platform.OS === "ios" && workspace ? (
-        <ThreadListFilters
-          gutter={primaryColumn ? 8 : 0}
-          environments={props.environments}
-          projects={pickableProjectGroups(projectScopes).map((scope) => ({
-            key: scope.key,
-            label: scope.title,
-          }))}
-          selectedEnvironmentId={props.selectedEnvironmentId}
-          selectedProjectKey={props.selectedProjectKey}
-          onEnvironmentChange={props.onEnvironmentChange}
-          onProjectChange={props.onProjectChange}
-        />
-      ) : null}
+      {tagSidebar.control}
+      {scopeFilters}
     </>
   );
 
@@ -768,6 +781,14 @@ export function HomeScreen(props: HomeScreenProps) {
       />
     );
 
+  if (tagSidebar.active)
+    return (
+      <View className={containerClassName}>
+        {scopeFilters}
+        {tagSidebar.results}
+      </View>
+    );
+
   if (Platform.OS === "android" && threadListV2Items.length === 0) {
     return (
       <View className="flex-1 bg-header">
@@ -775,6 +796,7 @@ export function HomeScreen(props: HomeScreenProps) {
           className="flex-1 items-center justify-center overflow-hidden rounded-t-[28px] bg-screen px-4"
           style={{ paddingBottom: insets.bottom }}
         >
+          {tagSidebar.control}
           {v2ListEmpty}
         </View>
       </View>
