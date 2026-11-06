@@ -220,6 +220,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("AnalyticsService
           LASTCODE_TELEMETRY_COPY_HOST: "http://copy.example",
           LASTCODE_TELEMETRY_COPY_KEY: "copy-key",
         },
+        {
+          LASTCODE_TELEMETRY_COPY_HOST: "http://copy.example/",
+          LASTCODE_TELEMETRY_COPY_KEY: "copy-key",
+        },
       ];
       for (const config of cases) {
         const requests: Array<{ url: string; body: { api_key: string; batch: unknown[] } }> = [];
@@ -251,6 +255,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("AnalyticsService
           config.LASTCODE_TELEMETRY_COPY_HOST?.trim() && config.LASTCODE_TELEMETRY_COPY_KEY;
         assert.equal(copies.length, configured ? 1 : 0);
         if (configured) {
+          assert.equal(copies[0]?.url, "http://copy.example/batch/");
           assert.equal(copies[0]?.body.api_key, "copy-key");
           assert.equal(upstream[0]?.body.api_key, "phc_test_key");
           assert.deepEqual(copies[0]?.body.batch, upstream[0]?.body.batch);

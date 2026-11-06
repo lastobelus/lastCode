@@ -311,7 +311,9 @@ export const make = Effect.gen(function* () {
       awaitingShellConsent
         ? hostEnvironment.LASTCODE_TELEMETRY_COPY_HOST
         : Option.getOrUndefined(telemetryConfig.copyHost)
-    )?.trim();
+    )
+      ?.trim()
+      .replace(/\/+$/u, "");
     const key = (
       awaitingShellConsent
         ? hostEnvironment.LASTCODE_TELEMETRY_COPY_KEY
