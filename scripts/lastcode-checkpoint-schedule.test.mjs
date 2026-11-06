@@ -43,6 +43,18 @@ describe("daily checkpoint schedule", () => {
       date: "2026-07-15",
       time: "02:00",
     });
+    expect(wallClockAt(new Date("2026-11-06T09:00:00Z"), "America/Vancouver")).toEqual({
+      date: "2026-11-06",
+      time: "02:00",
+    });
+    expect(wallClockAt(new Date("2026-11-06T06:30:00Z"), "America/Vancouver")).toEqual({
+      date: "2026-11-05",
+      time: "23:30",
+    });
+    expect(wallClockAt(new Date("2026-11-06T09:00:00Z"), "aMeRiCa/LoS_aNgElEs")).toEqual({
+      date: "2026-11-06",
+      time: "01:00",
+    });
   });
 
   it("runs once per local date at or after the configured time", () => {

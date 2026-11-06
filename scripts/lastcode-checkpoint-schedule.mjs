@@ -70,25 +70,21 @@ export function parseCheckpointScheduleArgs(argv) {
 }
 
 export function wallClockAt(instant, timeZone) {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    day: "2-digit",
-    hour: "2-digit",
-    hourCycle: "h23",
-    minute: "2-digit",
-    month: "2-digit",
-    timeZone,
-    year: "numeric",
-  }).formatToParts(instant);
-  const value = (type) => parts.find((part) => part.type === type)?.value;
-  const year = value("year");
-  const month = value("month");
-  const day = value("day");
-  const hour = value("hour");
-  const minute = value("minute");
-  if (!year || !month || !day || !hour || !minute) {
+  // The pinned Node runtime can contain older timezone rules than the OS.
+  const resolvedTimeZone = new Intl.DateTimeFormat("en-US", { timeZone }).resolvedOptions()
+    .timeZone;
+  const seconds = String(Math.floor(instant.getTime() / 1000));
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone installed scheduler has no workspace runtime.
+  const dateArguments = process.platform === "darwin" ? ["-r", seconds] : ["-d", `@${seconds}`];
+  const clock = NodeChildProcess.execFileSync("/bin/date", [...dateArguments, "+%Y-%m-%d %H:%M"], {
+    encoding: "utf8",
+    env: { ...process.env, LC_ALL: "C", TZ: resolvedTimeZone },
+  }).trim();
+  const match = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})$/u.exec(clock);
+  if (!match) {
     throw new Error(`Could not resolve the current wall clock in ${timeZone}.`);
   }
-  return { date: `${year}-${month}-${day}`, time: `${hour}:${minute}` };
+  return { date: match[1], time: match[2] };
 }
 
 export function dailyCheckpointDecision({ dailyAt, forced, instant, state, timeZone }) {
