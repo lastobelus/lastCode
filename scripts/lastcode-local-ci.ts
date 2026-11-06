@@ -1337,6 +1337,11 @@ async function executeLocalCi(
         : undefined;
       const env = {
         ...process.env,
+        NODE_COMPILE_CACHE:
+          process.env.NODE_COMPILE_CACHE ??
+          (process.env.NODE_V8_COVERAGE
+            ? undefined
+            : NodePath.join(transferOutputDirectory, "node-compile-cache")),
         ...(step.isolatedGitConfig
           ? {
               GIT_CONFIG_GLOBAL: isolatedGitConfigPath,

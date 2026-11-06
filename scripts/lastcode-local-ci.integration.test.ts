@@ -196,7 +196,7 @@ function fixtureNodeExecutable(): string {
   throw new Error("The CI integration fixture requires the supported project Node on PATH.");
 }
 
-it.each(["standalone", "enclosing Action"] as const)(
+it.each(["standalone", "enclosing Action", "V8 coverage"] as const)(
   "checks docs once and reuses the exact receipt from both entrypoints under %s",
   (context) => {
     const directory = NodeFS.mkdtempSync(
@@ -246,7 +246,7 @@ it.each(["standalone", "enclosing Action"] as const)(
         [
           "#!/usr/bin/env node",
           "const fs = require('node:fs');",
-          `fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({args:process.argv.slice(2),cpu:process.env.GOMAXPROCS})+'\\n');`,
+          `fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({args:process.argv.slice(2),cpu:process.env.GOMAXPROCS,cache:process.env.NODE_COMPILE_CACHE})+'\\n');`,
         ].join("\n"),
       );
       NodeFS.chmodSync(NodePath.join(repoRoot, "node_modules/.bin/vp"), 0o755);
@@ -257,6 +257,12 @@ it.each(["standalone", "enclosing Action"] as const)(
       );
       const inheritedEnv = {
         ...process.env,
+        NODE_COMPILE_CACHE:
+          context === "enclosing Action"
+            ? NodePath.join(directory, "explicit-compile-cache")
+            : undefined,
+        NODE_V8_COVERAGE:
+          context === "V8 coverage" ? NodePath.join(directory, "coverage") : undefined,
         ...(context === "enclosing Action"
           ? {
               [ACTION_RUN_ID_ENV]: "fixture-enclosing-run",
@@ -264,6 +270,7 @@ it.each(["standalone", "enclosing Action"] as const)(
             }
           : {}),
       };
+      if (inheritedEnv.NODE_COMPILE_CACHE) NodeFS.mkdirSync(inheritedEnv.NODE_COMPILE_CACHE);
       // Full CI already holds the real host's admission slot while running
       // this test. Isolate homedir in this subprocess so its CLI fixture cannot
       // wait for its enclosing run or touch the operator's admission files.
@@ -342,8 +349,21 @@ it.each(["standalone", "enclosing Action"] as const)(
         .split("\n")
         .map((line) => JSON.parse(line));
       expect(calls).toEqual([
-        { args: ["check", "--no-error-on-unmatched-pattern", "./README.md"], cpu: "2" },
+        {
+          args: ["check", "--no-error-on-unmatched-pattern", "./README.md"],
+          cpu: "2",
+          ...(context === "V8 coverage"
+            ? {}
+            : {
+                cache:
+                  inheritedEnv.NODE_COMPILE_CACHE ??
+                  expect.stringMatching(/lastcode-local-ci-.*node-compile-cache$/),
+              }),
+        },
       ]);
+      if (context !== "V8 coverage") {
+        expect(NodeFS.existsSync(calls[0].cache)).toBe(context === "enclosing Action");
+      }
 
       write("README.md", "Documentation for the next revision.\n");
       git("add", "README.md");
