@@ -68,6 +68,14 @@ describe("daily checkpoint schedule", () => {
       date: "2026-11-06",
       time: "01:00",
     });
+    for (const [timestamp, timeZone, date, time] of [
+      ["2026-11-06T23:00:00Z", "+05:30", "2026-11-07", "04:30"],
+      ["2026-11-06T00:00:00Z", "-03:30", "2026-11-05", "20:30"],
+      ["2026-11-06T00:00:00Z", "+0530", "2026-11-06", "05:30"],
+      ["2026-11-06T00:00:00Z", "+05", "2026-11-06", "05:00"],
+    ]) {
+      expect(wallClockAt(new Date(timestamp), timeZone)).toEqual({ date, time });
+    }
   });
 
   it("runs once per local date at or after the configured time", () => {

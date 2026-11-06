@@ -73,6 +73,13 @@ export function wallClockAt(instant, timeZone) {
   // The pinned Node runtime can contain older timezone rules than the OS.
   const resolvedTimeZone = new Intl.DateTimeFormat("en-US", { timeZone }).resolvedOptions()
     .timeZone;
+  if (/^[+-]/u.test(resolvedTimeZone)) {
+    const [hours, minutes] = resolvedTimeZone.slice(1).split(":").map(Number);
+    const direction = resolvedTimeZone.startsWith("+") ? 1 : -1;
+    const offset = direction * (hours * 60 + minutes) * 60_000;
+    const local = new Date(instant.getTime() + offset).toISOString();
+    return { date: local.slice(0, 10), time: local.slice(11, 16) };
+  }
   const seconds = String(Math.floor(instant.getTime() / 1000));
   // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone installed scheduler has no workspace runtime.
   const dateArguments = process.platform === "darwin" ? ["-r", seconds] : ["-d", `@${seconds}`];
