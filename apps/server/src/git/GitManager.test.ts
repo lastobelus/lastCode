@@ -8,7 +8,7 @@ import * as NodeChildProcess from "node:child_process";
 
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { it } from "@effect/vitest";
+import { afterAll, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
@@ -207,7 +207,7 @@ function runGit(
   });
 }
 
-function initRepo(
+function createRepoTemplate(
   cwd: string,
 ): Effect.Effect<
   void,
@@ -225,6 +225,29 @@ function initRepo(
     yield* fs.writeFileString(NodePath.join(cwd, "README.md"), "hello\n");
     yield* runGit(cwd, ["add", "README.md"]);
     yield* runGit(cwd, ["commit", "-m", "Initial commit"]);
+  });
+}
+
+let repositoryTemplate: string | undefined;
+
+afterAll(() => {
+  if (repositoryTemplate) NodeFS.rmSync(repositoryTemplate, { recursive: true, force: true });
+});
+
+function initRepo(cwd: string) {
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    if (!repositoryTemplate) {
+      const template = yield* fs.makeTempDirectory({ prefix: "git-manager-template-" });
+      yield* createRepoTemplate(template).pipe(
+        Effect.onError(() =>
+          fs.remove(template, { recursive: true, force: true }).pipe(Effect.orDie),
+        ),
+      );
+      repositoryTemplate = template;
+    }
+    // Each case owns a complete copy, including its refs, config, index, objects, and hooks.
+    yield* fs.copy(repositoryTemplate, cwd);
   });
 }
 
