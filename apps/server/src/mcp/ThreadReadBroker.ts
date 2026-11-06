@@ -80,14 +80,28 @@ const actionContinuationSource = (
   runs: ReadonlyArray<OrchestrationV2Run>,
   run: OrchestrationV2Run,
 ) =>
-  runs.find((source) =>
-    source.actionObligations?.some(
-      (obligation) =>
-        obligation.state === "transferred" &&
-        obligation.owner.sourceRunId === source.id &&
-        obligation.continuationRunId === run.id &&
-        obligation.messageId === run.userMessageId,
-    ),
+  runs.find(
+    (source) =>
+      (run.pullRequestWatchContinuation !== undefined &&
+        run.pullRequestWatchContinuation.owner.sourceRunId === source.id &&
+        run.pullRequestWatchContinuation.messageId === run.userMessageId &&
+        source.pullRequestWatchObligations?.some(
+          (row) =>
+            row.generation === run.pullRequestWatchContinuation!.generation &&
+            row.owner.taskId === run.pullRequestWatchContinuation!.owner.taskId &&
+            row.owner.sourceRunId === source.id &&
+            row.owner.parentEnvironmentId ===
+              run.pullRequestWatchContinuation!.owner.parentEnvironmentId &&
+            row.owner.parentThreadId === run.pullRequestWatchContinuation!.owner.parentThreadId &&
+            row.owner.delegationId === run.pullRequestWatchContinuation!.owner.delegationId,
+        )) ||
+      source.actionObligations?.some(
+        (obligation) =>
+          obligation.state === "transferred" &&
+          obligation.owner.sourceRunId === source.id &&
+          obligation.continuationRunId === run.id &&
+          obligation.messageId === run.userMessageId,
+      ),
   );
 
 const make = Effect.gen(function* () {

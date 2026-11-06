@@ -15,6 +15,7 @@ import {
   ProviderInstanceId,
   ProviderThreadId,
   RunId,
+  RunAttemptId,
   RuntimeRequestId,
   ThreadId,
   TurnItemId,
@@ -416,6 +417,66 @@ it.effect(
       yield* updateTask({ ...task, ownershipReleased: true }, "released");
       assert.isFalse(yield* store.hasOutstandingOwnedWork(parent));
       assert.isFalse(yield* store.hasOutstandingOwnedWork(child));
+
+      const watchThread = yield* createThread("watch-without-polling-link");
+      const watchRunId = RunId.make(`run:${watchThread}:1`);
+      const watchOwner = {
+        parentEnvironmentId: EnvironmentId.make("watch-parent"),
+        parentThreadId: parent,
+        taskId: task.id,
+        sourceRunId: watchRunId,
+      };
+      const watch = {
+        generation: "settlement-watch",
+        key: { host: "github.com", repository: "example/project", number: 1 },
+        owner: watchOwner,
+        sourceAttemptId: RunAttemptId.make("watch-source-attempt"),
+        state: "terminal-pending" as const,
+        pending: {
+          messageId: MessageId.make("settlement-watch-event"),
+          text: "PR merged",
+          notification: {
+            source: { kind: "monitor" as const },
+            outcome: "updated" as const,
+            summary: "Merged",
+          },
+        },
+      };
+      yield* createRun(watchThread, "completed", 1, { pullRequestWatchObligations: [watch] });
+      assert.isTrue(yield* store.hasOutstandingOwnedWork(watchThread));
+      assert.deepEqual(yield* store.getSettlementCandidates(watchThread), []);
+      assert.deepEqual(
+        (yield* store.getPendingPullRequestWatchDeliveries).filter(
+          (row) => row.threadId === watchThread,
+        ),
+        [
+          {
+            threadId: watchThread,
+            generation: watch.generation,
+            messageId: watch.pending.messageId,
+          },
+        ],
+      );
+      yield* createRun(watchThread, "completed", 1, {
+        pullRequestWatchObligations: [{ ...watch, state: "ended" }],
+      });
+      yield* createRun(watchThread, "queued", 2, {
+        queueHeld: true,
+        pullRequestWatchContinuation: {
+          generation: watch.generation,
+          owner: watchOwner,
+          messageId: MessageId.make(`message:run:${watchThread}:2`),
+        },
+      });
+      assert.isTrue(yield* store.hasOutstandingOwnedWork(watchThread));
+      yield* createRun(watchThread, "cancelled", 2, {
+        pullRequestWatchContinuation: {
+          generation: watch.generation,
+          owner: watchOwner,
+          messageId: MessageId.make(`message:run:${watchThread}:2`),
+        },
+      });
+      assert.isFalse(yield* store.hasOutstandingOwnedWork(watchThread));
 
       const actionRuns = yield* ActionRunStore.ActionRunStore;
       const actionState = (

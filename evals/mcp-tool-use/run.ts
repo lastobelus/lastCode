@@ -61,6 +61,7 @@ import { PreviewControlsToolkit } from "../../apps/server/src/mcp/toolkits/previ
 import { ProjectToolkit } from "../../apps/server/src/mcp/toolkits/project/tools.ts";
 import {
   CHILD_PULL_REQUEST_REPORT_NEXT,
+  PullRequestWatchFromSubagentError,
   PullRequestsToolkit,
 } from "../../apps/server/src/mcp/toolkits/pullRequests/tools.ts";
 import { ThreadToolkit } from "../../apps/server/src/mcp/toolkits/thread/tools.ts";
@@ -191,8 +192,11 @@ const McpToolUseExpect = Schema.Struct({
   /** No call may match any entry. */
   callsMustNot: Schema.optional(Schema.Array(McpToolUseCall)),
   notCalls: Schema.optional(Schema.Array(Schema.String)),
-  /** First calls of these tools happen in this order. */
-  order: Schema.optional(Schema.Array(Schema.String)),
+  /** First matching calls happen in this order; arguments can distinguish shell operations. */
+  order: Schema.optional(Schema.Array(Schema.Union([Schema.String, McpToolUseCall]))),
+  callCounts: Schema.optional(
+    Schema.Array(Schema.Struct({ ...McpToolUseCall.fields, count: Schema.Number })),
+  ),
   minCalls: Schema.optional(Schema.Record(Schema.String, Schema.Number)),
   maxCalls: Schema.optional(Schema.Record(Schema.String, Schema.Number)),
   /**
@@ -288,6 +292,8 @@ export const McpToolUseCase = Schema.Struct({
   privacy: Schema.optional(Schema.Literals(["commit-safe", "private"])),
   setup: Schema.Struct({
     role: Schema.Literals(["top", "delegated-child", "native-subagent"]),
+    /** Simulates an app-owned child whose parent verified watch support and installed acceptance. */
+    ownedPullRequestWatch: Schema.optional(Schema.Boolean),
     /** Runs only on this harness, for cases whose right answer depends on it. */
     harness: Schema.optional(Schema.Literals(["claude", "codex"])),
     /** The Linked environments beta is on, so T3 lists its link tools. */
@@ -499,11 +505,20 @@ const pastedSecret = (name: string, input: Readonly<Record<string, unknown>>) =>
 const hiddenFromSubagents = enabledWhen(McpInvocationContext.hiddenFromSubagents);
 // The Linked environments beta starts off, and T3 lists its tools only while it is on.
 const hiddenWhileLinksOff = enabledWhen(McpInvocationContext.hiddenWhileLinksOff);
-const visibleT3Tools = (options: { readonly subagent?: boolean; readonly links?: boolean }) =>
+const visibleT3Tools = (options: {
+  readonly subagent?: boolean;
+  readonly links?: boolean;
+  readonly ownedPullRequestWatch?: boolean;
+}) =>
   t3Tools.filter(
     (tool) =>
       (options.links === true || !hiddenWhileLinksOff.has(tool.name)) &&
-      !(options.subagent === true && hiddenFromSubagents.has(tool.name)),
+      !(
+        options.subagent === true &&
+        (["watch_pull_request", "unwatch_pull_request"].includes(normalizeToolName(tool.name))
+          ? options.ownedPullRequestWatch !== true
+          : hiddenFromSubagents.has(tool.name))
+      ),
   );
 
 /**
@@ -609,6 +624,7 @@ export const buildBase = (
     readonly model: Model;
     readonly keepUserInstructions: boolean;
     readonly subagent?: boolean;
+    readonly ownedPullRequestWatch?: boolean;
     readonly links?: boolean;
     /** A native subagent starts from its task: T3 appends nothing to its system prompt. */
     readonly nativeSubagent?: boolean;
@@ -701,6 +717,7 @@ const buildCodexBase = (
     readonly keepUserInstructions: boolean;
     readonly effort?: string | undefined;
     readonly subagent?: boolean;
+    readonly ownedPullRequestWatch?: boolean;
     readonly links?: boolean;
     /** false: the thread has no agent device access, so T3's text leaves devices out. */
     readonly deviceAccess?: boolean;
@@ -1148,6 +1165,9 @@ export const t3Default = (
         inheritedProviderInstanceId: "claudeAgent",
         inheritedModel: sample.base.model,
         providers: PROVIDERS,
+        ...(sample.testCase.setup.ownedPullRequestWatch === true
+          ? { features: { appOwnedPullRequestWatchContinuationVersion: 1 } }
+          : {}),
       };
     case "delegate_task": {
       const n = sample.nextTask++;
@@ -1381,8 +1401,7 @@ const searchTools = (base: Base, query: string, max: number) => {
   return found.toSorted((a, b) => hits(b).length - hits(a).length).slice(0, max);
 };
 
-const SUBAGENT_WATCH_ERROR =
-  "This thread is a subagent, so it cannot watch pull requests. Its parent thread owns the pull request: finish your task and report back instead.";
+const SUBAGENT_WATCH_ERROR = new PullRequestWatchFromSubagentError({}).message;
 
 /** Result for a native tool the case does not mock, other than shell, file, and web tools. */
 const nativeResult = (name: string, input: Readonly<Record<string, unknown>>) => {
@@ -1615,7 +1634,11 @@ export const answerToolCall = Effect.fn("evaluateMcpToolUse.answerToolCall")(fun
   }
   if (isT3Name(call.name)) {
     // T3 refuses a watch from a delegated child.
-    if (name === "watch_pull_request" && testCase.setup.role === "delegated-child") {
+    if (
+      name === "watch_pull_request" &&
+      testCase.setup.role === "delegated-child" &&
+      testCase.setup.ownedPullRequestWatch !== true
+    ) {
       return failed(SUBAGENT_WATCH_ERROR);
     }
     const value = t3Default(sample, name, input);
@@ -1724,8 +1747,9 @@ export const gradeSample = (expect: McpToolUseCase["expect"], run: SampleRun, pa
   const calls = run.calls.map((call) => ({ ...call, input: withOptionsObject(call.input) }));
   const count = (tool: string) => calls.filter((call) => call.tool === tool).length;
   // `tool` may list alternatives, as in "link_pull_request|watch_pull_request".
-  const found = ({ tool, args = {} }: McpToolUseCall) =>
-    calls.some((call) => tool.split("|").includes(call.tool) && matches(args, call.input));
+  const matchesCall = ({ tool, args = {} }: McpToolUseCall, call: (typeof calls)[number]) =>
+    tool.split("|").includes(call.tool) && matches(args, call.input);
+  const found = (expected: McpToolUseCall) => calls.some((call) => matchesCall(expected, call));
   const label = ({ tool, args }: McpToolUseCall) => (args ? `${tool} ${valueText(args)}` : tool);
   for (const call of expect.calls ?? []) add(`calls ${label(call)}`, found(call));
   if (expect.distinctCalls !== undefined) {
@@ -1742,10 +1766,16 @@ export const gradeSample = (expect: McpToolUseCase["expect"], run: SampleRun, pa
   for (const call of expect.callsMustNot ?? []) add(`callsMustNot ${label(call)}`, !found(call));
   for (const tool of expect.notCalls ?? []) add(`notCalls ${tool}`, count(tool) === 0);
   if (expect.order !== undefined) {
-    const firsts = expect.order.map((tool) => calls.findIndex((call) => call.tool === tool));
+    const expected = expect.order.map((call) => (typeof call === "string" ? { tool: call } : call));
+    const firsts = expected.map((entry) => calls.findIndex((call) => matchesCall(entry, call)));
     const inOrder = firsts.every((at, i) => at > (firsts[i - 1] ?? -1));
-    add(`order ${expect.order.join(" > ")}`, inOrder);
+    add(`order ${expected.map(label).join(" > ")}`, inOrder);
   }
+  for (const expected of expect.callCounts ?? [])
+    add(
+      `callCounts ${label(expected)} == ${expected.count}`,
+      calls.filter((call) => matchesCall(expected, call)).length === expected.count,
+    );
   for (const [t, n] of Object.entries(expect.minCalls ?? {}))
     add(`minCalls ${t} >= ${n}`, count(t) >= n);
   for (const [t, n] of Object.entries(expect.maxCalls ?? {}))
@@ -2397,6 +2427,7 @@ const main = Effect.gen(function* () {
     role: McpToolUseCase["setup"]["role"],
     deviceAccess: boolean,
     links: boolean,
+    ownedPullRequestWatch = false,
   ): Effect.Effect<Base, Schema.SchemaError> =>
     codex
       ? decodeCodexCapture(template).pipe(
@@ -2406,6 +2437,7 @@ const main = Effect.gen(function* () {
               keepUserInstructions,
               effort: flags.effort,
               subagent: role === "delegated-child",
+              ownedPullRequestWatch,
               links,
               deviceAccess,
             }),
@@ -2417,6 +2449,7 @@ const main = Effect.gen(function* () {
               model: flags.model,
               keepUserInstructions,
               subagent: role === "delegated-child",
+              ownedPullRequestWatch,
               nativeSubagent: role === "native-subagent",
               links,
               deviceAccess,
@@ -2430,18 +2463,22 @@ const main = Effect.gen(function* () {
         );
   // Codex has no native subagents; its cases with that role run as top-level threads.
   const baseKey = ({ setup }: McpToolUseCase) =>
-    `${codex && setup.role === "native-subagent" ? "top" : setup.role}:${setup.world?.deviceAgentAccess !== false}:${setup.linkedEnvironments === true}`;
+    `${codex && setup.role === "native-subagent" ? "top" : setup.role}:${setup.world?.deviceAgentAccess !== false}:${setup.linkedEnvironments === true}:${setup.role === "delegated-child" && setup.ownedPullRequestWatch === true}`;
   const base = yield* buildFor("top", true, false);
-  const bases = new Map<string, Base>([["top:true:false", base]]);
+  const bases = new Map<string, Base>([["top:true:false:false", base]]);
   for (const testCase of selected) {
     const key = baseKey(testCase);
     if (bases.has(key)) continue;
-    const [role = "top", access, links] = key.split(":") as [
+    const [role = "top", access, links, ownedWatch] = key.split(":") as [
       McpToolUseCase["setup"]["role"],
       string,
       string,
+      string,
     ];
-    bases.set(key, yield* buildFor(role, access === "true", links === "true"));
+    bases.set(
+      key,
+      yield* buildFor(role, access === "true", links === "true", ownedWatch === "true"),
+    );
   }
   const baseFor = (testCase: McpToolUseCase) => bases.get(baseKey(testCase)) ?? base;
   const effort = flags.effort ?? base.codex?.reasoning.effort ?? "high";

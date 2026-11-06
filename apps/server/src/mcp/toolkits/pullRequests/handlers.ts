@@ -272,10 +272,12 @@ const make = Effect.gen(function* () {
       threadPullRequestsOf(shell).find(
         (link) => link.source !== "stack-dismissed" && threadPullRequestKeysEqual(link, target),
       );
+    const caller = yield* McpInvocationContext.McpInvocationContext;
     if (
       watching &&
       thread.lineage.relationshipToParent === "subagent" &&
-      thread.lineage.independent !== true
+      thread.lineage.independent !== true &&
+      caller.thread?.execution === undefined
     ) {
       return yield* new PullRequestWatchFromSubagentError();
     }
@@ -364,7 +366,20 @@ const make = Effect.gen(function* () {
 
   const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A, E, R>(
     handle: (params: P) => Effect.Effect<A, E, R>,
-  ) => McpToolAccess.writesThreads((params: P) => [params.threadId], handle);
+  ) =>
+    McpToolAccess.writesThreads(
+      (params: P) => [params.threadId],
+      (params: P) =>
+        Effect.gen(function* () {
+          const scope = yield* McpInvocationContext.McpInvocationContext;
+          return yield* handle(params).pipe(
+            Effect.provideService(
+              Orchestrator.PullRequestWatchSourceAuthorization,
+              scope.thread?.execution ?? null,
+            ),
+          );
+        }),
+    );
 
   return {
     link_pull_request: writesThread((input) =>

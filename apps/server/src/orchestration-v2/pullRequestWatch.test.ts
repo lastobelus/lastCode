@@ -98,7 +98,12 @@ describe("evaluatePullRequestWatch", () => {
       ],
     };
     const passed = detail({ checks: [check("lint", "success")] });
-    const baseline = evaluatePullRequestWatch(watch(), passed, []);
+    const baseline = evaluatePullRequestWatch(
+      watch({ generation: "owned-watch-generation" }),
+      passed,
+      [],
+    );
+    assert.equal(baseline.next.generation, "owned-watch-generation");
     const report = evaluatePullRequestWatch(baseline.next, passed, [own]);
     assert.deepEqual(report.changes, [
       {

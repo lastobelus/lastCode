@@ -616,6 +616,10 @@ export interface ProjectionStoreV2Shape {
   readonly hasOutstandingOwnedWork: (
     threadId: ThreadId,
   ) => Effect.Effect<boolean, ProjectionStoreV2Error>;
+  readonly getPendingPullRequestWatchDeliveries: Effect.Effect<
+    ReadonlyArray<{ threadId: ThreadId; generation: string; messageId: MessageId }>,
+    ProjectionStoreV2Error
+  >;
   readonly getThreadsWithPullRequests: (
     threadId?: ThreadId,
   ) => Effect.Effect<ReadonlyArray<ProjectionThreadPullRequests>, ProjectionStoreV2Error>;
@@ -828,6 +832,14 @@ function preserveRunRecordedFields(
       : {}),
     ...(next.actionObligations === undefined && current.actionObligations !== undefined
       ? { actionObligations: current.actionObligations }
+      : {}),
+    ...(next.pullRequestWatchObligations === undefined &&
+    current.pullRequestWatchObligations !== undefined
+      ? { pullRequestWatchObligations: current.pullRequestWatchObligations }
+      : {}),
+    ...(next.pullRequestWatchContinuation === undefined &&
+    current.pullRequestWatchContinuation !== undefined
+      ? { pullRequestWatchContinuation: current.pullRequestWatchContinuation }
       : {}),
     ...(next.restartCancelledBackgroundWork === undefined &&
     current.restartCancelledBackgroundWork !== undefined
@@ -2280,7 +2292,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 completed_at = excluded.completed_at,
                 payload_json = ${keepRecordedRunField(
                   keepRecordedRunField(
-                    keepRecordedRunField(sql`excluded.payload_json`, "$.delegatedCompletion"),
+                    keepRecordedRunField(
+                      keepRecordedRunField(
+                        keepRecordedRunField(
+                          sql`excluded.payload_json`,
+                          "$.pullRequestWatchObligations",
+                        ),
+                        "$.pullRequestWatchContinuation",
+                      ),
+                      "$.delegatedCompletion",
+                    ),
                     "$.actionObligations",
                   ),
                   "$.restartCancelledBackgroundWork",
@@ -6994,6 +7015,18 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         WHERE destination.thread_id = ${thread}
           AND json_extract(association.value, '$.stage') IN ('prepared', 'active')
       ) OR EXISTS (
+        SELECT 1 FROM orchestration_v2_projection_runs source,
+          json_each(source.payload_json, '$.pullRequestWatchObligations') watch
+        WHERE source.thread_id = ${thread}
+          AND CASE WHEN json_valid(source.payload_json) THEN json_type(source.payload_json, '$.pullRequestWatchObligations') = 'array' ELSE 0 END
+          AND (json_extract(watch.value, '$.state') IN ('active', 'terminal-pending') OR
+            (json_extract(watch.value, '$.state') = 'ended' AND EXISTS (
+              SELECT 1 FROM orchestration_v2_projection_runs continuation
+              WHERE continuation.thread_id = source.thread_id
+                AND json_extract(continuation.payload_json, '$.pullRequestWatchContinuation.generation') = json_extract(watch.value, '$.generation')
+                AND continuation.status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+            )))
+      ) OR EXISTS (
         SELECT 1 FROM action_resume_runs action
         WHERE action.thread_id = ${thread}
           AND ${outstandingAction(sql`action.state_json`, thread)}
@@ -7185,6 +7218,36 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         rows.map((row) => ({
           parentThreadId: ThreadId.make(row.thread_id),
           taskId: NodeId.make(row.subagent_id),
+        })),
+      ),
+      Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
+    );
+
+    const getPendingPullRequestWatchDeliveries = sql<{
+      readonly thread_id: string;
+      readonly generation: string;
+      readonly message_id: string;
+    }>`
+      SELECT run.thread_id, json_extract(watch.value, '$.generation') AS generation,
+        json_extract(watch.value, '$.pending.messageId') AS message_id
+      FROM orchestration_v2_projection_runs run,
+        json_each(run.payload_json, '$.pullRequestWatchObligations') watch
+      WHERE CASE WHEN json_valid(run.payload_json) THEN json_type(run.payload_json, '$.pullRequestWatchObligations') = 'array' ELSE 0 END
+        AND json_extract(watch.value, '$.state') IN ('active', 'terminal-pending')
+        AND json_extract(watch.value, '$.pending.messageId') IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM orchestration_v2_effect_outbox delivery
+          WHERE delivery.thread_id = run.thread_id AND delivery.effect_type = 'pull-request-watch.deliver'
+            AND json_extract(delivery.payload_json, '$.generation') = json_extract(watch.value, '$.generation')
+            AND json_extract(delivery.payload_json, '$.messageId') = json_extract(watch.value, '$.pending.messageId')
+            AND delivery.status IN ('pending', 'running')
+        )
+    `.pipe(
+      Effect.map((rows) =>
+        rows.map((row) => ({
+          threadId: ThreadId.make(row.thread_id),
+          generation: row.generation,
+          messageId: MessageId.make(row.message_id),
         })),
       ),
       Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
@@ -7974,6 +8037,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getThread: readOnReader(getThread),
       getSettlementCandidates: readOnReader(getSettlementCandidates),
       hasOutstandingOwnedWork: readOnReader(hasOutstandingOwnedWork),
+      getPendingPullRequestWatchDeliveries: getPendingPullRequestWatchDeliveries.pipe(
+        NodeSqliteClient.readOnly,
+      ),
       getThreadsWithPullRequests: readOnReader(getThreadsWithPullRequests),
       getThreadTitles: readOnReader(getThreadTitles),
       getThreadWorktreePaths: readOnReader(getThreadWorktreePaths),

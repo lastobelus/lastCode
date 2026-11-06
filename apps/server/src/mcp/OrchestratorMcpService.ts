@@ -2576,6 +2576,7 @@ const make = Effect.gen(function* () {
         features: {
           appOwnedSubagents: true,
           appOwnedActionContinuationVersion: 1,
+          appOwnedPullRequestWatchContinuationVersion: 1,
           remoteOwnedContinuationVersion: 1,
           asyncPolling: true,
           cancellation: true,
@@ -2893,13 +2894,20 @@ const make = Effect.gen(function* () {
           (run) =>
             run.delegatedTaskId === input.taskId &&
             ["completed", "failed", "cancelled", "interrupted"].includes(run.status) &&
-            run.actionObligations?.some(
+            (run.pullRequestWatchObligations?.some(
               (row) =>
-                (row.state === "waiting" || row.state === "transferred") &&
+                row.state !== "disposed" &&
                 row.owner.taskId === input.taskId &&
                 row.owner.sourceRunId === run.id &&
                 row.owner.parentThreadId === scope.thread.threadId,
-            ),
+            ) ||
+              run.actionObligations?.some(
+                (row) =>
+                  (row.state === "waiting" || row.state === "transferred") &&
+                  row.owner.taskId === input.taskId &&
+                  row.owner.sourceRunId === run.id &&
+                  row.owner.parentThreadId === scope.thread.threadId,
+              )),
         );
       const stopChild = Effect.gen(function* () {
         if (ownsActionContinuation && parentTask?.runId != null) {

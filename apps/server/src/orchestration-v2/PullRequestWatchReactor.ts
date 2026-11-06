@@ -17,6 +17,7 @@ import {
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
+import { PullRequestWatchDeliveryAuthorization } from "./Orchestrator.ts";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -305,6 +306,9 @@ export const make = Effect.gen(function* () {
       threadId: target.thread.id,
       ...identityOf(target.link),
       startedAt: target.watch.startedAt,
+      ...(target.watch.generation === undefined
+        ? {}
+        : { generation: target.watch.generation, expectedWatch: target.watch }),
       expectedQuietDeadline: target.watch.quietDeadline ?? null,
       watch: next,
       ...(endedWatch === undefined ? {} : { endedWatch }),
@@ -316,7 +320,7 @@ export const make = Effect.gen(function* () {
 
   const giveUp = (target: WatchTarget) =>
     record(target, null, {
-      text: `T3 Code stopped watching pull request #${target.link.number} (${target.link.url}) because it failed to read it from the host ${READ_FAILURE_LIMIT} times in a row. Check it yourself, and call watch_pull_request to watch it again.`,
+      text: `T3 Code stopped watching pull request #${target.link.number} (${target.link.url}) because it failed to read it from the host ${READ_FAILURE_LIMIT} times in a row.${target.watch.generation !== undefined && target.link.snapshot?.state !== undefined && target.link.snapshot.state !== "open" ? ` The last state T3 Code recorded for it was ${target.link.snapshot.state}, and its latest comments and reviews were not read.` : ""} Check it yourself. If it is still open, call watch_pull_request to watch it again.`,
       notification: {
         source: { kind: "monitor" },
         outcome: "failed",
@@ -324,7 +328,9 @@ export const make = Effect.gen(function* () {
       },
     }).pipe(
       Effect.tap(() => woke(target)),
-      Effect.catch(() => record(target, null)),
+      Effect.catch((error) =>
+        target.watch.generation === undefined ? record(target, null) : Effect.fail(error),
+      ),
       Effect.tap(() => ended(target, "unreadable")),
     );
 
@@ -431,11 +437,13 @@ export const make = Effect.gen(function* () {
     );
 
   const endsWithoutRead = ({ thread, link }: WatchTarget): WatchEndReason | undefined =>
-    link.snapshot?.state === "merged"
+    link.snapshot?.state === "merged" && link.watch?.generation === undefined
       ? "merged"
       : thread.settledOverride === "settled" || thread.settledAt !== null
         ? "settled"
-        : thread.lineage.relationshipToParent === "subagent" && thread.lineage.independent !== true
+        : thread.lineage.relationshipToParent === "subagent" &&
+            thread.lineage.independent !== true &&
+            link.watch?.generation === undefined
           ? "subagent"
           : undefined;
 
@@ -544,7 +552,10 @@ export const make = Effect.gen(function* () {
           : {}),
       });
     }
-    if (detail.state !== "open") {
+    if (
+      detail.state !== "open" &&
+      group.targets.every((target) => target.watch.generation === undefined)
+    ) {
       lastReads.delete(group.key);
       return yield* eachTarget(group, (target) =>
         detail.state === "closed"
@@ -579,6 +590,37 @@ export const make = Effect.gen(function* () {
     });
     yield* eachTarget(group, (target) => {
       const report = evaluatePullRequestWatch(target.watch, detail, remarks, now);
+      if (detail.state !== "open") {
+        if (target.watch.generation === undefined)
+          return detail.state === "closed"
+            ? closed(target)
+            : record(target, null).pipe(Effect.tap(() => ended(target, "merged")));
+        const update = pullRequestWatchMessage({
+          number: target.link.number,
+          url: target.link.url,
+          baseBranch: detail.baseBranch,
+          headSha: report.next.headSha,
+          report,
+          ended: detail.state,
+        });
+        return record(
+          target,
+          null,
+          {
+            text: `${update.text}${remarks === null ? "\nT3 Code could not fully read its comments and reviews, so check them yourself if your task depends on them." : ""}`,
+            notification: {
+              source: { kind: "monitor" },
+              outcome: "updated",
+              summary: `#${target.link.number}: ${detail.state}, stopped watching`,
+            },
+          },
+          report.next,
+        ).pipe(
+          Effect.tap(() => woke(target)),
+          Effect.tap(() => ended(target, detail.state === "closed" ? "closed" : "merged")),
+        );
+      }
+
       if (report.changes.length > 0) {
         const wake = pullRequestWatchMessage({
           number: target.link.number,
@@ -604,6 +646,29 @@ export const make = Effect.gen(function* () {
   const sweep = Effect.gen(function* () {
     // Keep the watch and its cursors intact: Resume reads everything that moved.
     if (yield* automationPaused) return;
+    const pending = yield* projections.getPendingPullRequestWatchDeliveries;
+    yield* Effect.forEach(
+      pending,
+      (delivery) =>
+        Effect.gen(function* () {
+          const uuid = yield* random.uuidV4();
+          yield* engine
+            .dispatch({
+              type: "thread.pull-request-watch.deliver",
+              commandId: CommandId.make(`server:pr-watch-recover:${uuid}`),
+              ...delivery,
+            })
+            .pipe(
+              Effect.provideService(PullRequestWatchDeliveryAuthorization, delivery.generation),
+              Effect.catchCause(
+                logFailure("pull request watch delivery recovery failed", {
+                  threadId: delivery.threadId,
+                }),
+              ),
+            );
+        }),
+      { discard: true },
+    );
     const threads = yield* projections.getThreadsWithPullRequests();
     const targets = threads.flatMap((thread) =>
       visibleThreadPullRequests(thread.pullRequests ?? []).flatMap((link) =>

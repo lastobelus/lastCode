@@ -9,6 +9,7 @@ import {
   ProviderInstanceId,
   ProviderSessionId,
   RunId,
+  RunAttemptId,
   ThreadId,
   TurnItemId,
   type OrchestrationV2ThreadProjection,
@@ -77,6 +78,8 @@ type Run = {
   status: string;
   ordinal: number;
   actionObligations?: OrchestrationV2ThreadProjection["runs"][number]["actionObligations"];
+  pullRequestWatchObligations?: OrchestrationV2ThreadProjection["runs"][number]["pullRequestWatchObligations"];
+  pullRequestWatchContinuation?: OrchestrationV2ThreadProjection["runs"][number]["pullRequestWatchContinuation"];
 };
 type Spawn = {
   type: "subagent_spawn";
@@ -811,6 +814,45 @@ describe("ThreadReadBroker", () => {
               owner: { ...obligation.owner, sourceRunId: RunId.make("unrelated-run") },
             },
           ];
+          expect(yield* readFrom(childThreadId, continuation)).toBe("environment_unavailable");
+          originalRun.actionObligations = [];
+          const watch = {
+            generation: "read-authority-watch",
+            owner: obligation.owner,
+            sourceAttemptId: RunAttemptId.make("read-authority-attempt"),
+            key: { host: "github.com", repository: "example/project", number: 1 },
+            state: "ended" as const,
+          };
+          originalRun.pullRequestWatchObligations = [watch];
+          const wake = runs.get(childThreadId)!.find((row) => row.id === continuation)!;
+          const marker = {
+            generation: watch.generation,
+            owner: watch.owner,
+            messageId: wake.userMessageId,
+          };
+          wake.pullRequestWatchContinuation = marker;
+          expect(yield* readFrom(childThreadId, continuation)).toBe("client-session");
+          for (const forged of [
+            { ...marker, generation: "other-generation" },
+            { ...marker, messageId: MessageId.make("other-message") },
+            { ...marker, owner: { ...marker.owner, taskId: NodeId.make("other-task") } },
+            {
+              ...marker,
+              owner: {
+                ...marker.owner,
+                parentEnvironmentId: EnvironmentId.make("other-environment"),
+              },
+            },
+          ]) {
+            wake.pullRequestWatchContinuation = forged;
+            expect(yield* readFrom(childThreadId, continuation)).toBe("environment_unavailable");
+          }
+          wake.pullRequestWatchContinuation = marker;
+          originalRun.pullRequestWatchObligations = [
+            { ...watch, state: "disposed", disposalReason: "owner_unwatch" },
+          ];
+          expect(yield* readFrom(childThreadId, continuation)).toBe("client-session");
+          originalRun.pullRequestWatchObligations = [];
           expect(yield* readFrom(childThreadId, continuation)).toBe("environment_unavailable");
           originalRun.actionObligations = [obligation];
 

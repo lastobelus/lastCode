@@ -158,6 +158,24 @@ it("accepts any tool listed as an alternative", () => {
   ]);
 });
 
+it("orders and counts matching gate calls without rejecting instruction reads", () => {
+  const expect = {
+    order: ["watch_pull_request", { tool: "Bash", args: { command: "~lastcode:pr-gates" } }],
+    callCounts: [{ tool: "Bash", args: { command: "~lastcode:pr-gates" }, count: 1 }],
+  };
+  const read = { tool: "Bash", input: { command: "cat AGENTS.md package.json" } };
+  const watch = { tool: "watch_pull_request", input: {} };
+  const gate = { tool: "Bash", input: { command: "pnpm lastcode:pr-gates" } };
+  const run = (...calls: Array<{ tool: string; input: Record<string, unknown> }>): SampleRun => ({
+    calls: calls.map((call, step) => ({ step, ...call })),
+    text: "",
+    stopReason: "end_turn",
+  });
+  assert.deepEqual(failed(expect, run(read, watch, gate)), []);
+  assert.isNotEmpty(failed(expect, run(read, gate, watch)));
+  assert.isNotEmpty(failed(expect, run(read, watch, gate, gate)));
+});
+
 it("counts the new threads an agent asks for, one brief per thread, over both creation tools", () => {
   const expect = { newThreads: ["~reconnect", "~csv", "~admin"] };
   const run = (...calls: Array<{ tool: string; input: unknown; failed?: boolean }>): SampleRun => ({
@@ -431,6 +449,16 @@ it("rebuilds the template from this checkout and sends a child T3's task prompt"
     child.t3.map((tool) => tool.name),
     "mcp__t3-code__unwatch_pull_request",
   );
+  const owner = buildBase(template, {
+    model: "claude-sonnet-5-5",
+    keepUserInstructions: false,
+    subagent: true,
+    ownedPullRequestWatch: true,
+  });
+  assert.includeMembers(
+    owner.t3.map((tool) => tool.name),
+    ["mcp__t3-code__watch_pull_request", "mcp__t3-code__unwatch_pull_request"],
+  );
   const reminders = buildMessages(makeSample(childCase, base))[0]?.content.map((b) => b.text);
   assert.equal(reminders?.[0], "<system-reminder>\n# currentDate\n</system-reminder>");
   assert.include(reminders?.[1], "Current branch: fix/date-format");
@@ -482,6 +510,41 @@ it("lists link tools only while a case turns the beta on, and sends chips as T3 
   );
   assert.include(prompt?.text, "environmentId: environment-vps");
 });
+
+it.effect("simulates watch admission only for a verified owning child fixture", () =>
+  Effect.gen(function* () {
+    const config = {
+      apiKey: "",
+      model: "claude-sonnet-5-5",
+      effort: "high",
+      maxSteps: 1,
+      shellModel: "claude-haiku-5-5",
+    } as const;
+    for (const ownedPullRequestWatch of [false, true]) {
+      const base = buildBase(template, {
+        model: "claude-sonnet-5-5",
+        keepUserInstructions: false,
+        subagent: true,
+        ownedPullRequestWatch,
+      });
+      const sample = makeSample(
+        { ...childCase, setup: { ...childCase.setup, ownedPullRequestWatch } },
+        base,
+      );
+      sample.tools.push({ name: "mcp__t3-code__watch_pull_request" });
+      const result = yield* answerToolCall(sample, config, {
+        type: "tool_use",
+        id: "watch",
+        name: "mcp__t3-code__watch_pull_request",
+        input: { url: "https://github.com/acme/app/pull/123" },
+      });
+      assert.equal(result.is_error === true, !ownedPullRequestWatch);
+      if (ownedPullRequestWatch) {
+        assert.equal(JSON.parse(String(result.content)).watching, true);
+      }
+    }
+  }).pipe(Effect.provide(FetchHttpClient.layer)),
+);
 
 it.effect.each([
   ["MENTION-THREAD-01", 80],
