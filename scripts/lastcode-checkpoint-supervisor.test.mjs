@@ -31,6 +31,7 @@ import {
 import { refreshPrimaryCheckoutTransaction } from "./lastcode-primary-checkout-transaction.mjs";
 
 function fixture(overrides = {}) {
+  const activities = [];
   const states = [];
   const messages = [];
   let state = overrides.state ?? null;
@@ -45,13 +46,14 @@ function fixture(overrides = {}) {
     }),
     loadConfig: () => ({ schemaVersion: 1, recoveryThreadId: "thread-maintenance" }),
     loadState: () => state,
-    now: () => `2026-08-26T00:00:0${now++}.000Z`,
+    now: () => new Date(Date.UTC(2026, 7, 26, 0, 0, now++)).toISOString(),
     notify: vi.fn(),
     reconcileProjectActions: vi.fn(),
     refreshPrimaryCheckout: vi.fn(),
     refreshSupervisor: vi.fn(),
     runPhase: vi.fn(),
     sendThread: (threadId, message) => messages.push({ message, threadId }),
+    writeActivity: (activity) => activities.push(activity),
     writeState: (next) => {
       state = next;
       states.push(next);
@@ -59,6 +61,7 @@ function fixture(overrides = {}) {
     ...overrides.dependencies,
   };
   return {
+    activities,
     dependencies,
     get state() {
       return state;
@@ -424,6 +427,21 @@ describe("LastCode checkpoint supervisor", () => {
     expect(test.dependencies.reconcileProjectActions).toHaveBeenCalledWith(undefined, []);
     expect(test.messages).toEqual([]);
     expect(test.states.at(-1)).toMatchObject({ status: "success", phase: "complete" });
+  });
+
+  it("keeps running when the activity journal cannot be written", () => {
+    using warning = vi.spyOn(console, "error").mockImplementation(() => {});
+    const writeActivity = vi.fn(() => {
+      throw new Error("activity directory is read-only");
+    });
+    const test = fixture({ dependencies: { writeActivity } });
+
+    expect(runCheckpointSupervisor({}, test.dependencies)).toMatchObject({ status: "success" });
+    expect(test.dependencies.runPhase.mock.calls.some(([phase]) => phase === "checkpoint")).toBe(
+      true,
+    );
+    expect(writeActivity).toHaveBeenCalledOnce();
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining("Could not record activity"));
   });
 
   it("selects the repository's primary checkout", () => {
@@ -901,6 +919,16 @@ describe("LastCode checkpoint supervisor", () => {
     expect(test.state.incident).toBeUndefined();
     expect(test.messages).toEqual([]);
     expect(test.dependencies.reconcileProjectActions).not.toHaveBeenCalled();
+    expect(test.activities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          event: "phase-finish",
+          phase: "checkout-refresh",
+          outcome: "threw",
+        }),
+        expect.objectContaining({ event: "run-finish", status: "success" }),
+      ]),
+    );
   });
 
   it("keeps checkpoint success when Project Action reconciliation fails", () => {
@@ -995,6 +1023,14 @@ describe("LastCode checkpoint supervisor", () => {
       false,
     );
     expect(test.dependencies.refreshPrimaryCheckout).not.toHaveBeenCalled();
+    expect(test.activities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ event: "run-start" }),
+        expect.objectContaining({ event: "phase-finish", phase: "dependencies", outcome: "threw" }),
+        expect.objectContaining({ event: "run-finish", status: "failed", phase: "dependencies" }),
+      ]),
+    );
+    expect(test.activities.some((activity) => activity.phase === "checkpoint")).toBe(false);
   });
 
   it("persists a new checkpoint blocker before alerting one maintenance thread", () => {

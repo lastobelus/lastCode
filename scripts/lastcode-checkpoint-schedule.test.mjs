@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vite-plus/test";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeOS from "node:os";
 
 import {
   dailyCheckpointDecision,
@@ -43,6 +45,37 @@ describe("daily checkpoint schedule", () => {
       date: "2026-07-15",
       time: "02:00",
     });
+    // The host's timezone database can differ across test machines.
+    for (const timestamp of ["2026-11-06T09:00:00Z", "2026-11-06T06:30:00Z"]) {
+      const instant = new Date(timestamp);
+      const seconds = String(instant.getTime() / 1000);
+      // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone scheduler oracle needs the real host's date syntax.
+      const darwin = NodeOS.platform() === "darwin";
+      const dateArguments = darwin ? ["-r", seconds] : ["-d", `@${seconds}`];
+      const [date, time] = NodeChildProcess.execFileSync(
+        "/bin/date",
+        [...dateArguments, "+%F %R"],
+        {
+          encoding: "utf8",
+          env: { ...process.env, LC_ALL: "C", TZ: "America/Vancouver" },
+        },
+      )
+        .trim()
+        .split(" ");
+      expect(wallClockAt(instant, "America/Vancouver")).toEqual({ date, time });
+    }
+    expect(wallClockAt(new Date("2026-11-06T09:00:00Z"), "aMeRiCa/LoS_aNgElEs")).toEqual({
+      date: "2026-11-06",
+      time: "01:00",
+    });
+    for (const [timestamp, timeZone, date, time] of [
+      ["2026-11-06T23:00:00Z", "+05:30", "2026-11-07", "04:30"],
+      ["2026-11-06T00:00:00Z", "-03:30", "2026-11-05", "20:30"],
+      ["2026-11-06T00:00:00Z", "+0530", "2026-11-06", "05:30"],
+      ["2026-11-06T00:00:00Z", "+05", "2026-11-06", "05:00"],
+    ]) {
+      expect(wallClockAt(new Date(timestamp), timeZone)).toEqual({ date, time });
+    }
   });
 
   it("runs once per local date at or after the configured time", () => {

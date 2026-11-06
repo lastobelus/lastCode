@@ -54,6 +54,7 @@ export function supervisorPaths(home = NodeOS.homedir()) {
     configPath: NodePath.join(rootDirectory, "checkpoint-supervisor.json"),
     requestPath: NodePath.join(rootDirectory, "checkpoint-service-run-now.request"),
     runHistoryPath: NodePath.join(rootDirectory, "checkpoint-runs.jsonl"),
+    activityPath: NodePath.join(rootDirectory, "checkpoint-service-activity.jsonl"),
     statePath: NodePath.join(rootDirectory, "checkpoint-service-state.json"),
     threadToolPath: NodePath.join(home, ".lastcode", "userdata", "bin", "lastcode-thread"),
   };
@@ -894,9 +895,63 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
     sendThread: (threadId, message) =>
       sendThread(paths.threadToolPath, threadId, message, environment),
     writeState: (state) => writeJsonAtomic(paths.statePath, state),
+    writeActivity: (activity) => {
+      NodeFS.mkdirSync(NodePath.dirname(paths.activityPath), { recursive: true, mode: 0o700 });
+      NodeFS.appendFileSync(paths.activityPath, `${JSON.stringify(activity)}\n`, { mode: 0o600 });
+    },
     ...overrides,
   };
   const startedAt = dependencies.now();
+  const runId = NodeCrypto.randomUUID();
+  const runClock = performance.now();
+  let activityUnavailable = false;
+  const record = (activity) => {
+    if (activityUnavailable) return;
+    try {
+      dependencies.writeActivity({
+        schemaVersion: 1,
+        runId,
+        supervisorPid: dependencies.supervisorPid,
+        launchdPid: dependencies.launchdPid,
+        ...activity,
+      });
+    } catch (error) {
+      activityUnavailable = true;
+      console.error(
+        `[lastcode:checkpoint-supervisor] Could not record activity: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  };
+  const measure = (phase, operation) => {
+    const phaseStartedAt = dependencies.now();
+    const phaseClock = performance.now();
+    record({ event: "phase-start", phase, startedAt: phaseStartedAt });
+    let outcome = "threw";
+    try {
+      const result = operation();
+      outcome = "returned";
+      return result;
+    } finally {
+      record({
+        event: "phase-finish",
+        phase,
+        startedAt: phaseStartedAt,
+        finishedAt: dependencies.now(),
+        durationMs: performance.now() - phaseClock,
+        outcome,
+      });
+    }
+  };
+  const finish = (status, phase) =>
+    record({
+      event: "run-finish",
+      startedAt,
+      finishedAt: dependencies.now(),
+      durationMs: performance.now() - runClock,
+      status,
+      phase,
+    });
+  record({ event: "run-start", startedAt });
   let previous = null;
   let config = null;
   let preflightError = null;
@@ -919,25 +974,31 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
   try {
     if (preflightError) throw preflightError;
     phase = "fetch";
-    dependencies.runPhase("fetch", "git", [
-      "fetch",
-      "origin",
-      "+refs/heads/lastcode/main:refs/remotes/origin/lastcode/main",
-    ]);
+    measure(phase, () =>
+      dependencies.runPhase("fetch", "git", [
+        "fetch",
+        "origin",
+        "+refs/heads/lastcode/main:refs/remotes/origin/lastcode/main",
+      ]),
+    );
     phase = "checkout";
-    dependencies.runPhase("checkout", "git", [
-      "checkout",
-      "--detach",
-      "--force",
-      "refs/remotes/origin/lastcode/main",
-    ]);
+    measure(phase, () =>
+      dependencies.runPhase("checkout", "git", [
+        "checkout",
+        "--detach",
+        "--force",
+        "refs/remotes/origin/lastcode/main",
+      ]),
+    );
     phase = "supervisor-refresh";
-    dependencies.refreshSupervisor();
+    measure(phase, () => dependencies.refreshSupervisor());
     phase = "dependencies";
-    dependencies.runPhase("dependencies", "./node_modules/.bin/vp", [
-      "install",
-      "--frozen-lockfile",
-    ]);
+    measure(phase, () =>
+      dependencies.runPhase("dependencies", "./node_modules/.bin/vp", [
+        "install",
+        "--frozen-lockfile",
+      ]),
+    );
     phase = "checkpoint";
     try {
       checkpointHistoryBeforeRun = dependencies.latestFailedCheckpointRun();
@@ -947,7 +1008,7 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
         `[lastcode:checkpoint-supervisor] Could not snapshot checkpoint history before the run: ${historyError instanceof Error ? historyError.message : String(historyError)}`,
       );
     }
-    dependencies.runPhase("checkpoint", process.execPath, CHECKPOINT_ARGS);
+    measure(phase, () => dependencies.runPhase("checkpoint", process.execPath, CHECKPOINT_ARGS));
   } catch (error) {
     const finishedAt = dependencies.now();
     let checkpointRun = null;
@@ -1045,7 +1106,7 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
       incident,
     };
     dependencies.writeState(state);
-    state = attemptDelivery(state, config, dependencies);
+    state = measure("incident-delivery", () => attemptDelivery(state, config, dependencies));
     if (!knownIncident) {
       const delivered = state.incident.alertDelivery === "sent";
       dependencies.notify(
@@ -1055,15 +1116,18 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
           : `${failure.phase} failed; thread delivery is pending. Run lastcode-checkpoints --verbose.`,
       );
     }
+    finish("failed", failure.phase);
     throw error;
   }
 
   let maintenanceWarning;
   try {
     phase = "checkout-refresh";
-    const primaryWorktree = dependencies.refreshPrimaryCheckout();
+    const primaryWorktree = measure(phase, () => dependencies.refreshPrimaryCheckout());
     phase = "project-actions";
-    dependencies.reconcileProjectActions(primaryWorktree, projectActionTrustAllowlist(config));
+    measure(phase, () =>
+      dependencies.reconcileProjectActions(primaryWorktree, projectActionTrustAllowlist(config)),
+    );
   } catch (error) {
     // Publication already succeeded; checkout maintenance cannot invalidate that checkpoint.
     maintenanceWarning = {
@@ -1164,7 +1228,8 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
     ...(incident ? { incident } : {}),
   };
   dependencies.writeState(state);
-  state = attemptDelivery(state, config, dependencies);
+  state = measure("incident-delivery", () => attemptDelivery(state, config, dependencies));
+  finish("success", "complete");
   return state;
 }
 
