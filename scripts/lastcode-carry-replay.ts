@@ -117,6 +117,7 @@ export interface ReplayUngroupedInput {
 interface GitOptions {
   readonly allowFailure?: boolean;
   readonly environment?: NodeJS.ProcessEnv;
+  readonly input?: string;
 }
 
 interface ReplayItem {
@@ -137,8 +138,9 @@ function runGit(cwd: string, args: ReadonlyArray<string>, options: GitOptions = 
     cwd,
     encoding: "utf8",
     env: options.environment ?? cleanGitEnvironment(process.env),
+    input: options.input,
     maxBuffer: 64 * 1024 * 1024,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {
@@ -146,6 +148,7 @@ function runGit(cwd: string, args: ReadonlyArray<string>, options: GitOptions = 
     throw new Error(
       [
         `git ${args.join(" ")} failed with exit code ${result.status ?? "unknown"}.`,
+        result.stdout.trim(),
         result.stderr.trim(),
       ]
         .filter(Boolean)
@@ -440,14 +443,9 @@ function normalizeCarryDeletions(
         const tree = runGit(repo, ["write-tree"], { environment });
         return tree === resolveTree(repo, parent)
           ? undefined
-          : runGit(repo, [
-              "commit-tree",
-              tree,
-              "-p",
-              parent,
-              "-m",
-              commitMessage(repo, item.commit),
-            ]);
+          : runGit(repo, ["commit-tree", tree, "-p", parent, "-F", "-"], {
+              input: commitMessage(repo, item.commit),
+            });
       };
       try {
         // A deletion follows the carried introduction, so regrouping cannot re-add it.
@@ -647,8 +645,15 @@ function assertWorktreeHead(worktree: string, expected: string): void {
   const actual = resolveCommit(worktree, "HEAD");
   if (actual !== expected)
     throw new Error(`Carry replay worktree is at ${actual}, expected ${expected}.`);
-  if (runGit(worktree, ["status", "--porcelain", "--untracked-files=all"])) {
-    throw new Error("Carry replay worktree must be clean before replay starts.");
+  const status = runGit(worktree, ["status", "--porcelain", "--untracked-files=all"]);
+  if (status) {
+    const diff = runGit(worktree, ["diff", "--raw", "--no-abbrev"])
+      .split("\n")
+      .slice(0, 20)
+      .join("\n");
+    throw new Error(
+      `Carry replay worktree must be clean before replay starts.\n${status.split("\n").slice(0, 20).join("\n")}\n${diff}`,
+    );
   }
 }
 
@@ -665,8 +670,9 @@ function createAnchor(
     GIT_COMMITTER_NAME: "LastCode carry replay",
     GIT_COMMITTER_EMAIL: "carry-replay@localhost",
   };
-  return runGit(repo, ["commit-tree", resolveTree(repo, base), "-p", base, "-m", message], {
+  return runGit(repo, ["commit-tree", resolveTree(repo, base), "-p", base, "-F", "-"], {
     environment,
+    input: message,
   });
 }
 

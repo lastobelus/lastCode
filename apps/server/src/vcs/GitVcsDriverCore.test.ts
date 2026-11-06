@@ -5,7 +5,7 @@ import * as NodeURL from "node:url";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import { assert, it, describe } from "@effect/vitest";
+import { afterAll, assert, it, describe } from "@effect/vitest";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -274,7 +274,7 @@ const withGitFileProtocol = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
     ),
   );
 
-const initRepoWithCommit = (
+const createRepoWithCommit = (
   cwd: string,
 ): Effect.Effect<
   { readonly initialBranch: string },
@@ -284,13 +284,43 @@ const initRepoWithCommit = (
   Effect.gen(function* () {
     const driver = yield* GitVcsDriver.GitVcsDriver;
     yield* driver.initRepo({ cwd });
-    yield* git(cwd, ["config", "user.email", "test@test.com"]);
-    yield* git(cwd, ["config", "user.name", "Test"]);
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    yield* fs.writeFileString(
+      path.join(cwd, ".git", "config"),
+      "\n[user]\n\temail = test@test.com\n\tname = Test\n",
+      { flag: "a" },
+    );
     yield* writeTextFile(cwd, "README.md", "# test\n");
     yield* git(cwd, ["add", "."]);
     yield* git(cwd, ["commit", "-m", "initial commit"]);
     const initialBranch = yield* git(cwd, ["branch", "--show-current"]);
     return { initialBranch };
+  });
+
+let repositoryTemplate: { cwd: string; initialBranch: string } | undefined;
+
+afterAll(() => {
+  if (repositoryTemplate) {
+    NodeFS.rmSync(repositoryTemplate.cwd, { recursive: true, force: true });
+  }
+});
+
+const initRepoWithCommit = (cwd: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    if (!repositoryTemplate) {
+      const templateCwd = yield* fs.makeTempDirectory({ prefix: "git-vcs-driver-template-" });
+      const { initialBranch } = yield* createRepoWithCommit(templateCwd).pipe(
+        Effect.onError(() =>
+          fs.remove(templateCwd, { recursive: true, force: true }).pipe(Effect.orDie),
+        ),
+      );
+      repositoryTemplate = { cwd: templateCwd, initialBranch };
+    }
+    // Copy all Git state so every case owns its refs, config, index, objects, and hooks.
+    yield* fs.copy(repositoryTemplate.cwd, cwd);
+    return { initialBranch: repositoryTemplate.initialBranch };
   });
 
 it.effect.each(["root", "nested", "worktree"] as const)(
