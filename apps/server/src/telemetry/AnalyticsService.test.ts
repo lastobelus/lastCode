@@ -4,6 +4,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Clock from "effect/Clock";
 import * as ConfigProvider from "effect/ConfigProvider";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -113,7 +114,11 @@ const recordTwentyEvents = Effect.gen(function* () {
   }
 });
 
-const analyticsLayerWith = (client: HttpClient.HttpClient, policy?: ManagedPolicyDocument) =>
+const analyticsLayerWith = (
+  client: HttpClient.HttpClient,
+  policy?: ManagedPolicyDocument,
+  config: Readonly<Record<string, string | boolean>> = {},
+) =>
   AnalyticsService.layer.pipe(
     Layer.provideMerge(
       ServerConfig.ServerConfig.layerTest(process.cwd(), { prefix: "t3-telemetry-retry-" }),
@@ -124,6 +129,7 @@ const analyticsLayerWith = (client: HttpClient.HttpClient, policy?: ManagedPolic
           T3CODE_TELEMETRY_ENABLED: true,
           T3CODE_POSTHOG_KEY: "phc_test_key",
           T3CODE_POSTHOG_HOST: "http://localhost",
+          ...config,
         }),
       ),
     ),
@@ -199,6 +205,211 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("AnalyticsService
       assert.deepEqual(
         batches.flat().map((event) => event.event),
         ["test.allowed"],
+      );
+    }),
+  );
+
+  it.effect("copies the same events only when both destination settings are present", () =>
+    Effect.gen(function* () {
+      const cases: ReadonlyArray<Readonly<Record<string, string>>> = [
+        {},
+        { LASTCODE_TELEMETRY_COPY_HOST: "http://copy.example" },
+        { LASTCODE_TELEMETRY_COPY_KEY: "copy-key" },
+        { LASTCODE_TELEMETRY_COPY_HOST: " ", LASTCODE_TELEMETRY_COPY_KEY: "copy-key" },
+        {
+          LASTCODE_TELEMETRY_COPY_HOST: "http://copy.example",
+          LASTCODE_TELEMETRY_COPY_KEY: "copy-key",
+        },
+      ];
+      for (const config of cases) {
+        const requests: Array<{ url: string; body: { api_key: string; batch: unknown[] } }> = [];
+        const client = HttpClient.make((request) =>
+          Effect.gen(function* () {
+            if (request.body._tag === "Uint8Array") {
+              requests.push({
+                url: request.url,
+                body: JSON.parse(new TextDecoder().decode(request.body.body)) as {
+                  api_key: string;
+                  batch: unknown[];
+                },
+              });
+            }
+            return yield* respondWithStatus(204)(request);
+          }),
+        );
+        yield* Effect.gen(function* () {
+          const analytics = yield* AnalyticsService.AnalyticsService;
+          yield* analytics.record("test.copy", { index: 7 });
+          yield* analytics.flush;
+          yield* TestClock.adjust("10 seconds");
+        }).pipe(Effect.provide(analyticsLayerWith(client, undefined, config)));
+
+        const upstream = requests.filter(({ url }) => url.startsWith("http://localhost/"));
+        const copies = requests.filter(({ url }) => url.startsWith("http://copy.example/"));
+        assert.equal(upstream.length, 1);
+        const configured =
+          config.LASTCODE_TELEMETRY_COPY_HOST?.trim() && config.LASTCODE_TELEMETRY_COPY_KEY;
+        assert.equal(copies.length, configured ? 1 : 0);
+        if (configured) {
+          assert.equal(copies[0]?.body.api_key, "copy-key");
+          assert.equal(upstream[0]?.body.api_key, "phc_test_key");
+          assert.deepEqual(copies[0]?.body.batch, upstream[0]?.body.batch);
+        }
+      }
+    }),
+  );
+
+  it.effect("discovers the copy destination after desktop startup", () =>
+    Effect.gen(function* () {
+      const env: NodeJS.ProcessEnv = { T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING: "1" };
+      const requests: Array<{ url: string; batch: unknown[] }> = [];
+      const client = HttpClient.make((request) =>
+        Effect.gen(function* () {
+          if (request.body._tag === "Uint8Array") {
+            const body = JSON.parse(new TextDecoder().decode(request.body.body)) as {
+              batch: unknown[];
+            };
+            requests.push({ url: request.url, batch: body.batch });
+          }
+          return yield* respondWithStatus(204)(request);
+        }),
+      );
+      yield* Effect.gen(function* () {
+        const analytics = yield* AnalyticsService.AnalyticsService;
+        yield* analytics.record("test.before-discovery");
+        env.LASTCODE_TELEMETRY_COPY_HOST = "http://copy.example";
+        env.LASTCODE_TELEMETRY_COPY_KEY = "copy-key";
+        delete env.T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING;
+        yield* analytics.record("test.after-discovery", { index: 1 });
+        yield* analytics.flush;
+        yield* TestClock.adjust("10 seconds");
+        const upstream = requests.filter(({ url }) => url.startsWith("http://localhost/"));
+        const copies = requests.filter(({ url }) => url.startsWith("http://copy.example/"));
+        assert.equal(upstream.length, 1);
+        assert.equal(copies.length, 1);
+        assert.deepEqual(copies[0]?.batch, upstream[0]?.batch);
+      }).pipe(
+        Effect.provide(analyticsLayerWith(client)),
+        Effect.provideService(HostProcess.Environment, env),
+      );
+    }),
+  );
+
+  it.effect("applies opt-out and managed policy to the copy", () =>
+    Effect.gen(function* () {
+      const copyConfig = {
+        LASTCODE_TELEMETRY_COPY_HOST: "http://copy.example",
+        LASTCODE_TELEMETRY_COPY_KEY: "copy-key",
+      };
+      const policy = { schemaVersion: 1, organization: "Example Corp" } as const;
+      for (const [config, managedPolicy] of [
+        [{ ...copyConfig, T3CODE_TELEMETRY_ENABLED: false }, undefined],
+        [copyConfig, { ...policy, limits: { telemetry: false } }],
+      ] as const) {
+        const requests: string[] = [];
+        const client = HttpClient.make((request) => {
+          requests.push(request.url);
+          return respondWithStatus(204)(request);
+        });
+        yield* Effect.gen(function* () {
+          const analytics = yield* AnalyticsService.AnalyticsService;
+          yield* analytics.record("test.disabled");
+          yield* analytics.flush;
+          yield* TestClock.adjust("10 seconds");
+        }).pipe(Effect.provide(analyticsLayerWith(client, managedPolicy, config)));
+        assert.deepEqual(requests, []);
+      }
+
+      const env: NodeJS.ProcessEnv = {
+        T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING: "1",
+        LASTCODE_TELEMETRY_COPY_HOST: copyConfig.LASTCODE_TELEMETRY_COPY_HOST,
+        LASTCODE_TELEMETRY_COPY_KEY: copyConfig.LASTCODE_TELEMETRY_COPY_KEY,
+      };
+      const requests: string[] = [];
+      const client = HttpClient.make((request) => {
+        requests.push(request.url);
+        return respondWithStatus(204)(request);
+      });
+      yield* Effect.gen(function* () {
+        const analytics = yield* AnalyticsService.AnalyticsService;
+        delete env.T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING;
+        env.T3CODE_TELEMETRY_ENABLED = "true";
+        yield* analytics.record("test.before-opt-out");
+        env.T3CODE_TELEMETRY_ENABLED = "false";
+        yield* analytics.flush;
+        yield* TestClock.adjust("10 seconds");
+      }).pipe(
+        Effect.provide(analyticsLayerWith(client, undefined, copyConfig)),
+        Effect.provideService(HostProcess.Environment, env),
+      );
+      assert.deepEqual(requests, []);
+    }),
+  );
+
+  it.effect("a stalled copy does not hold up upstream delivery", () =>
+    Effect.gen(function* () {
+      const copyStarted = yield* Deferred.make<void>();
+      const releaseCopy = yield* Deferred.make<void>();
+      const upstreamEvents: string[] = [];
+      const client = HttpClient.make((request) =>
+        Effect.gen(function* () {
+          if (request.url.startsWith("http://copy.example/")) {
+            yield* Deferred.succeed(copyStarted, undefined);
+            yield* Deferred.await(releaseCopy);
+            return yield* respondWithStatus(503)(request);
+          }
+          if (request.body._tag === "Uint8Array") {
+            const body = yield* decodeSentBatch(new TextDecoder().decode(request.body.body)).pipe(
+              Effect.orDie,
+            );
+            upstreamEvents.push(...body.batch.map(({ event }) => event));
+          }
+          return yield* respondWithStatus(204)(request);
+        }),
+      );
+      yield* Effect.gen(function* () {
+        const analytics = yield* AnalyticsService.AnalyticsService;
+        yield* analytics.record("test.first");
+        yield* TestClock.adjust("10 seconds");
+        yield* Deferred.await(copyStarted);
+        yield* analytics.record("test.second");
+        yield* analytics.flush;
+        assert.deepEqual(upstreamEvents, ["test.first", "test.second"]);
+        yield* Deferred.succeed(releaseCopy, undefined);
+      }).pipe(
+        Effect.provide(
+          analyticsLayerWith(client, undefined, {
+            LASTCODE_TELEMETRY_COPY_HOST: "http://copy.example",
+            LASTCODE_TELEMETRY_COPY_KEY: "copy-key",
+          }),
+        ),
+      );
+    }),
+  );
+
+  it.effect("upstream failures do not prevent copy delivery", () =>
+    Effect.gen(function* () {
+      const requests: string[] = [];
+      const client = HttpClient.make((request) => {
+        requests.push(request.url);
+        return respondWithStatus(request.url.startsWith("http://copy.example/") ? 204 : 503)(
+          request,
+        );
+      });
+      yield* Effect.gen(function* () {
+        const analytics = yield* AnalyticsService.AnalyticsService;
+        yield* analytics.record("test.copy-during-outage");
+        yield* analytics.flush;
+        yield* TestClock.adjust("10 seconds");
+        assert.isTrue(requests.some((url) => url.startsWith("http://copy.example/")));
+        assert.isTrue(requests.some((url) => url.startsWith("http://localhost/")));
+      }).pipe(
+        Effect.provide(
+          analyticsLayerWith(client, undefined, {
+            LASTCODE_TELEMETRY_COPY_HOST: "http://copy.example",
+            LASTCODE_TELEMETRY_COPY_KEY: "copy-key",
+          }),
+        ),
       );
     }),
   );

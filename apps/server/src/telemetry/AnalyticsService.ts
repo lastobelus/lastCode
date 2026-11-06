@@ -71,6 +71,8 @@ const TelemetryEnvConfig = Config.all({
   posthogHost: Config.String("T3CODE_POSTHOG_HOST").pipe(
     Config.withDefault("https://ingest.t3.codes"),
   ),
+  copyHost: Config.String("LASTCODE_TELEMETRY_COPY_HOST").pipe(Config.option),
+  copyKey: Config.String("LASTCODE_TELEMETRY_COPY_KEY").pipe(Config.option),
   enabled: Config.Boolean("T3CODE_TELEMETRY_ENABLED").pipe(Config.withDefault(true)),
   flushBatchSize: Config.Number("T3CODE_TELEMETRY_FLUSH_BATCH_SIZE").pipe(Config.withDefault(20)),
   maxBufferedEvents: Config.Number("T3CODE_TELEMETRY_MAX_BUFFERED_EVENTS").pipe(
@@ -147,62 +149,23 @@ export const make = Effect.gen(function* () {
   const serverConfig = yield* ServerConfig.ServerConfig;
   const { distinctId, installId } = yield* getTelemetryIdentity;
   const crypto = yield* SecureRandom.SecureRandom;
-  const bufferRef = yield* Ref.make<ReadonlyArray<BufferedAnalyticsEvent>>([]);
-  const deliveryRef = yield* Ref.make<DeliveryState>({
-    failedBatch: [],
-    batchAttempts: 0,
-    firstFailedAt: 0,
-    failures: 0,
-    retryAt: 0,
-  });
   const recordedOwnersRef = yield* Ref.make<
     Readonly<Record<"server" | "client", ReadonlySet<string>>>
   >({ server: new Set(), client: new Set() });
-  // The background flush and the shutdown flush must not send the same batch at once.
-  const flushLock = yield* Semaphore.make(1);
   const clientType = serverConfig.mode === "desktop" ? "desktop-app" : "cli-web-client";
   const hostPlatform = yield* HostProcess.Platform;
   const hostArchitecture = yield* HostProcess.Architecture;
 
-  const enqueueBufferedEvent = (
-    uuid: string,
-    event: string,
-    properties?: Readonly<Record<string, unknown>>,
-  ) =>
-    Effect.flatMap(DateTime.now, (now) =>
-      Ref.modify(bufferRef, (current) => {
-        const appended = [
-          ...current,
-          {
-            uuid,
-            event,
-            ...(properties ? { properties } : {}),
-            capturedAt: DateTime.formatIso(now),
-          } satisfies BufferedAnalyticsEvent,
-        ];
-
-        const next =
-          appended.length > telemetryConfig.maxBufferedEvents
-            ? appended.slice(appended.length - telemetryConfig.maxBufferedEvents)
-            : appended;
-
-        return [
-          {
-            size: next.length,
-            dropped: next.length !== appended.length,
-          } as const,
-          next,
-        ] as const;
-      }),
-    );
-
   const sendBatch = Effect.fn("AnalyticsService.sendBatch")(function* (
     events: ReadonlyArray<BufferedAnalyticsEvent>,
+    getDestination: () => { readonly host: string; readonly key: string } | null,
   ) {
     if (!(yield* telemetryEnabled) || !distinctId) return;
+    const destination = getDestination();
+    if (!destination) return;
 
     const payload = {
-      api_key: telemetryConfig.posthogKey,
+      api_key: destination.key,
       batch: events.map((event) => ({
         uuid: event.uuid,
         event: event.event,
@@ -227,7 +190,7 @@ export const make = Effect.gen(function* () {
       })),
     };
 
-    yield* HttpClientRequest.post(`${telemetryConfig.posthogHost}/batch/`).pipe(
+    yield* HttpClientRequest.post(`${destination.host}/batch/`).pipe(
       HttpClientRequest.bodyJson(payload),
       Effect.flatMap(httpClient.execute),
       Effect.flatMap(HttpClientResponse.filterStatusOk),
@@ -235,79 +198,129 @@ export const make = Effect.gen(function* () {
     );
   });
 
-  const takeBatch = Ref.modify(bufferRef, (current) => {
-    const nextBatch = current.slice(0, telemetryConfig.flushBatchSize);
-    return [nextBatch, current.slice(nextBatch.length)] as const;
-  });
+  // Each destination owns its buffer, retry state, and lock, so a stalled copy cannot block upstream.
+  const makeDestination = Effect.fn("AnalyticsService.makeDestination")(function* (
+    getDestination: () => { readonly host: string; readonly key: string } | null,
+  ) {
+    const bufferRef = yield* Ref.make<ReadonlyArray<BufferedAnalyticsEvent>>([]);
+    const deliveryRef = yield* Ref.make<DeliveryState>({
+      failedBatch: [],
+      batchAttempts: 0,
+      firstFailedAt: 0,
+      failures: 0,
+      retryAt: 0,
+    });
+    const flushLock = yield* Semaphore.make(1);
+    const enqueue = (event: BufferedAnalyticsEvent) =>
+      Ref.modify(bufferRef, (current) => {
+        const appended = [...current, event];
+        const next =
+          appended.length > telemetryConfig.maxBufferedEvents
+            ? appended.slice(appended.length - telemetryConfig.maxBufferedEvents)
+            : appended;
+        return [{ size: next.length, dropped: next.length !== appended.length }, next] as const;
+      });
 
-  // Back off even after dropping rejected batches so bad API keys cannot drain the queue in a tight loop.
-  const flush: AnalyticsService["Service"]["flush"] = Effect.gen(function* () {
-    while (true) {
-      const delivery = yield* Ref.get(deliveryRef);
-      const batch = delivery.failedBatch.length > 0 ? delivery.failedBatch : yield* takeBatch;
-      if (batch.length === 0) {
-        return;
-      }
+    const takeBatch = Ref.modify(bufferRef, (current) => {
+      const nextBatch = current.slice(0, telemetryConfig.flushBatchSize);
+      return [nextBatch, current.slice(nextBatch.length)] as const;
+    });
 
-      const sent = yield* Effect.result(sendBatch(batch));
-      if (Result.isSuccess(sent)) {
+    // Back off even after dropping rejected batches so bad API keys cannot drain the queue in a tight loop.
+    const flush = Effect.gen(function* () {
+      while (true) {
+        const delivery = yield* Ref.get(deliveryRef);
+        const batch = delivery.failedBatch.length > 0 ? delivery.failedBatch : yield* takeBatch;
+        if (batch.length === 0) {
+          return;
+        }
+
+        const sent = yield* Effect.result(sendBatch(batch, getDestination));
+        if (Result.isSuccess(sent)) {
+          yield* Ref.set(deliveryRef, {
+            failedBatch: [],
+            batchAttempts: 0,
+            firstFailedAt: 0,
+            failures: 0,
+            retryAt: 0,
+          });
+          continue;
+        }
+
+        const now = yield* Clock.currentTimeMillis;
+        const failures = delivery.failures + 1;
+        const batchAttempts = delivery.batchAttempts + 1;
+        const firstFailedAt = delivery.batchAttempts === 0 ? now : delivery.firstFailedAt;
+        const retryAt = now + retryDelayMs(failures, yield* Random.next);
+        const error = sent.failure;
+        const rejected =
+          error._tag === "HttpClientError" &&
+          error.reason._tag === "StatusCodeError" &&
+          REJECTED_BATCH_STATUSES.has(error.reason.response.status);
+        if (!rejected && now - firstFailedAt < MAX_BATCH_RETRY_MS) {
+          yield* Ref.set(deliveryRef, {
+            failedBatch: batch,
+            batchAttempts,
+            firstFailedAt,
+            failures,
+            retryAt,
+          });
+          yield* Effect.logDebug("Failed to send telemetry batch; will retry", {
+            attempt: batchAttempts,
+            cause: error,
+          });
+          return;
+        }
         yield* Ref.set(deliveryRef, {
           failedBatch: [],
           batchAttempts: 0,
           firstFailedAt: 0,
-          failures: 0,
-          retryAt: 0,
-        });
-        continue;
-      }
-
-      const now = yield* Clock.currentTimeMillis;
-      const failures = delivery.failures + 1;
-      const batchAttempts = delivery.batchAttempts + 1;
-      const firstFailedAt = delivery.batchAttempts === 0 ? now : delivery.firstFailedAt;
-      const retryAt = now + retryDelayMs(failures, yield* Random.next);
-      const error = sent.failure;
-      const rejected =
-        error._tag === "HttpClientError" &&
-        error.reason._tag === "StatusCodeError" &&
-        REJECTED_BATCH_STATUSES.has(error.reason.response.status);
-      if (!rejected && now - firstFailedAt < MAX_BATCH_RETRY_MS) {
-        yield* Ref.set(deliveryRef, {
-          failedBatch: batch,
-          batchAttempts,
-          firstFailedAt,
           failures,
           retryAt,
         });
-        yield* Effect.logDebug("Failed to send telemetry batch; will retry", {
-          attempt: batchAttempts,
-          cause: error,
-        });
+        yield* Effect.logWarning(
+          rejected
+            ? "Dropped telemetry batch the endpoint rejected"
+            : "Dropped telemetry batch after repeated send failures",
+          { events: batch.length, attempts: batchAttempts, cause: error },
+        );
         return;
       }
-      yield* Ref.set(deliveryRef, {
-        failedBatch: [],
-        batchAttempts: 0,
-        firstFailedAt: 0,
-        failures,
-        retryAt,
-      });
-      yield* Effect.logWarning(
-        rejected
-          ? "Dropped telemetry batch the endpoint rejected"
-          : "Dropped telemetry batch after repeated send failures",
-        { events: batch.length, attempts: batchAttempts, cause: error },
-      );
-      return;
-    }
-  }).pipe(flushLock.withPermit);
+    }).pipe(flushLock.withPermit);
 
-  const flushWhenDue = Effect.gen(function* () {
-    const { retryAt } = yield* Ref.get(deliveryRef);
-    if ((yield* Clock.currentTimeMillis) >= retryAt) {
-      yield* flush;
-    }
+    const flushWhenDue = Effect.gen(function* () {
+      const { retryAt } = yield* Ref.get(deliveryRef);
+      if ((yield* Clock.currentTimeMillis) >= retryAt) {
+        yield* flush;
+      }
+    });
+
+    yield* Effect.forever(Effect.sleep(FLUSH_INTERVAL_MS).pipe(Effect.andThen(flushWhenDue)), {
+      disableYield: true,
+    }).pipe(Effect.forkScoped);
+    return { enqueue, flush };
   });
+
+  const upstream = yield* makeDestination(() => ({
+    host: telemetryConfig.posthogHost,
+    key: telemetryConfig.posthogKey,
+  }));
+  // Desktop shell discovery can finish after this service reads its initial config.
+  const copyDestination = () => {
+    const host = (
+      awaitingShellConsent
+        ? hostEnvironment.LASTCODE_TELEMETRY_COPY_HOST
+        : Option.getOrUndefined(telemetryConfig.copyHost)
+    )?.trim();
+    const key = (
+      awaitingShellConsent
+        ? hostEnvironment.LASTCODE_TELEMETRY_COPY_KEY
+        : Option.getOrUndefined(telemetryConfig.copyKey)
+    )?.trim();
+    return host && key ? { host, key } : null;
+  };
+  const copy =
+    awaitingShellConsent || copyDestination() ? yield* makeDestination(copyDestination) : null;
 
   const record: AnalyticsService["Service"]["record"] = Effect.fn("AnalyticsService.record")(
     function* (event, properties) {
@@ -317,7 +330,15 @@ export const make = Effect.gen(function* () {
       const uuid = yield* Effect.exit(crypto.uuidV7());
       if (Exit.isFailure(uuid)) return;
 
-      const enqueueResult = yield* enqueueBufferedEvent(uuid.value, event, properties);
+      const now = yield* DateTime.now;
+      const bufferedEvent: BufferedAnalyticsEvent = {
+        uuid: uuid.value,
+        event,
+        ...(properties ? { properties } : {}),
+        capturedAt: DateTime.formatIso(now),
+      };
+      const enqueueResult = yield* upstream.enqueue(bufferedEvent);
+      if (copy && copyDestination()) yield* copy.enqueue(bufferedEvent);
       if (enqueueResult.dropped) {
         yield* Effect.logDebug("analytics buffer full; dropping oldest event", {
           size: enqueueResult.size,
@@ -350,15 +371,14 @@ export const make = Effect.gen(function* () {
     ),
   );
 
-  yield* Effect.forever(Effect.sleep(FLUSH_INTERVAL_MS).pipe(Effect.andThen(flushWhenDue)), {
-    disableYield: true,
-  }).pipe(Effect.forkScoped);
-
   yield* Effect.addFinalizer(() =>
-    flush.pipe(Effect.timeout(SHUTDOWN_FLUSH_TIMEOUT), Effect.ignore),
+    Effect.all(copy ? [upstream.flush, copy.flush] : [upstream.flush], {
+      concurrency: "unbounded",
+      discard: true,
+    }).pipe(Effect.timeout(SHUTDOWN_FLUSH_TIMEOUT), Effect.ignore),
   );
 
-  return AnalyticsService.of({ record, flush, recordOwners });
+  return AnalyticsService.of({ record, flush: upstream.flush, recordOwners });
 });
 
 export const layer = Layer.effect(AnalyticsService, make);

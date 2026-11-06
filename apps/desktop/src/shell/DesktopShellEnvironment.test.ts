@@ -2,6 +2,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { DesktopHostTelemetryMessage } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Deferred from "effect/Deferred";
@@ -34,6 +35,7 @@ const cacheCodec = Schema.fromJsonString(
 );
 const encodeCache = Schema.encodeSync(cacheCodec);
 const decodeCache = Schema.decodeUnknownEffect(cacheCodec);
+const decodeDesktopHostMessage = Schema.decodeUnknownEffect(DesktopHostTelemetryMessage);
 
 function envOutput(values: Readonly<Record<string, string>>): string {
   return Object.entries(values)
@@ -184,6 +186,48 @@ describe("DesktopShellEnvironment", () => {
             assert.isDefined(startup.pollUnsafe());
             yield* Deferred.succeed(release, undefined);
             return yield* service.awaitDiscovery;
+          }),
+      });
+    }),
+  );
+
+  it.effect("discovers copy settings and sends them in the shell environment snapshot", () =>
+    Effect.gen(function* () {
+      const env: NodeJS.ProcessEnv = { SHELL: "/bin/zsh", PATH: "/usr/bin" };
+      yield* runShellEnvironment({
+        env,
+        platform: "darwin",
+        handler: (command) => {
+          if (command._tag === "StandardCommand") {
+            assert.include(command.args.join(" "), "LASTCODE_TELEMETRY_COPY_HOST");
+            assert.include(command.args.join(" "), "LASTCODE_TELEMETRY_COPY_KEY");
+          }
+          return envOutput({
+            PATH: "/fresh/bin",
+            LASTCODE_TELEMETRY_COPY_HOST: "https://copy.example",
+            LASTCODE_TELEMETRY_COPY_KEY: "test-key",
+          });
+        },
+        use: (service) =>
+          Effect.gen(function* () {
+            yield* service.installIntoProcess;
+            yield* service.awaitDiscovery;
+            const snapshot = yield* Stream.runHead(service.updates);
+            assert.isTrue(Option.isSome(snapshot));
+            if (Option.isSome(snapshot)) {
+              const decoded = yield* decodeDesktopHostMessage(
+                JSON.parse(JSON.stringify(snapshot.value)),
+              ).pipe(Effect.orDie);
+              assert.equal(decoded.type, "shellEnvironment");
+              if (decoded.type === "shellEnvironment") {
+                assert.equal(
+                  decoded.environment.LASTCODE_TELEMETRY_COPY_HOST,
+                  "https://copy.example",
+                );
+                assert.equal(decoded.environment.LASTCODE_TELEMETRY_COPY_KEY, "test-key");
+              }
+            }
+            return true;
           }),
       });
     }),
