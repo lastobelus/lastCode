@@ -1,41 +1,30 @@
-import { act, useEffect, useState } from "react";
-import { createRoot } from "react-dom/client";
+import { act, render } from "../../../test/render";
+import { useEffect, useState } from "react";
 import { expect, it, vi } from "vite-plus/test";
 import { SidebarPresentation } from "./SidebarPresentation";
 
 it("unmounts the pre-hydration placeholder rather than retaining its hidden effects and state", async () => {
-  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
-  const container = document.createElement("div");
-  document.body.append(container);
-  const root = createRoot(container);
-  const render = (visible: boolean, retain: boolean) =>
-    act(() =>
-      root.render(
-        <SidebarPresentation visible={visible} retain={retain}>
-          <input defaultValue="Placeholder" />
-        </SidebarPresentation>,
-      ),
+  await using screen = await render(null);
+  const container = screen.container;
+  const update = (visible: boolean, retain: boolean) =>
+    screen.rerender(
+      <SidebarPresentation visible={visible} retain={retain}>
+        <input defaultValue="Placeholder" />
+      </SidebarPresentation>,
     );
-  try {
-    await render(true, false);
-    const first = container.querySelector("input")!;
-    first.value = "Placeholder draft";
-    await render(false, true);
-    expect(container.querySelector("input")).toBeNull();
-    await render(true, true);
-    expect(container.querySelector("input")).not.toBe(first);
-    expect(container.querySelector("input")?.value).toBe("Placeholder");
-  } finally {
-    await act(() => root.unmount());
-    container.remove();
-  }
+  await update(true, false);
+  const first = container.querySelector("input")!;
+  first.value = "Placeholder draft";
+  await update(false, true);
+  expect(container.querySelector("input")).toBeNull();
+  await update(true, true);
+  expect(container.querySelector("input")).not.toBe(first);
+  expect(container.querySelector("input")?.value).toBe("Placeholder");
 });
 
 it("defers first mount and preserves drafts while hidden effects are released", async () => {
-  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
-  const container = document.createElement("div");
-  document.body.append(container);
-  const root = createRoot(container);
+  await using screen = await render(null);
+  const container = screen.container;
   const subscribe = vi.fn(),
     unsubscribe = vi.fn();
   function Editor() {
@@ -46,35 +35,28 @@ it("defers first mount and preserves drafts while hidden effects are released", 
     }, []);
     return <input value={value} onChange={(event) => setValue(event.target.value)} />;
   }
-  const render = (visible: boolean) =>
-    act(() =>
-      root.render(
-        <SidebarPresentation visible={visible}>
-          <Editor />
-        </SidebarPresentation>,
-      ),
+  const update = (visible: boolean) =>
+    screen.rerender(
+      <SidebarPresentation visible={visible}>
+        <Editor />
+      </SidebarPresentation>,
     );
-  try {
-    await render(false);
-    expect(container.querySelector("input")).toBeNull();
-    expect(subscribe).not.toHaveBeenCalled();
-    await render(true);
-    const input = container.querySelector("input")!;
-    await act(() => {
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
-        input,
-        "Unsent draft",
-      );
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    await render(false);
-    expect(unsubscribe).toHaveBeenCalledTimes(1);
-    await render(true);
-    expect(container.querySelector("input")).toBe(input);
-    expect(input.value).toBe("Unsent draft");
-    expect(subscribe).toHaveBeenCalledTimes(2);
-  } finally {
-    await act(() => root.unmount());
-    container.remove();
-  }
+  await update(false);
+  expect(container.querySelector("input")).toBeNull();
+  expect(subscribe).not.toHaveBeenCalled();
+  await update(true);
+  const input = container.querySelector("input")!;
+  await act(() => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
+      input,
+      "Unsent draft",
+    );
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await update(false);
+  expect(unsubscribe).toHaveBeenCalledTimes(1);
+  await update(true);
+  expect(container.querySelector("input")).toBe(input);
+  expect(input.value).toBe("Unsent draft");
+  expect(subscribe).toHaveBeenCalledTimes(2);
 });

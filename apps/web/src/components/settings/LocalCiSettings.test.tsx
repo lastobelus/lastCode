@@ -37,6 +37,11 @@ const state = vi.hoisted(() => ({
 vi.mock("../../state/environments", () => ({
   useEnvironments: () => ({ environments: state.environments }),
   usePrimaryEnvironmentId: () => state.environments[0]?.environmentId ?? null,
+  usePrimaryEnvironment: () => state.environments[0] ?? null,
+}));
+vi.mock("../../state/entities", () => ({
+  useServerConfigs: () =>
+    new Map(state.environments.map((entry) => [entry.environmentId, entry.serverConfig])),
 }));
 vi.mock("../../state/session", () => ({
   useEnvironmentScope: (id: EnvironmentId | null, scope: AuthEnvironmentScope) =>

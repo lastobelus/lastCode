@@ -34,6 +34,7 @@ import * as Digest from "effect/crypto/Digest";
 import * as Mac from "effect/crypto/Mac";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Exit from "effect/Exit";
@@ -57,6 +58,7 @@ import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import * as DueHint from "../scheduling/DueHint.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
+import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts";
 import { isMissedFixedTimeRun, isSameSchedule, nextScheduledRunAt } from "./Schedule.ts";
 import {
   redactHeaders,
@@ -148,6 +150,7 @@ export type WebhookDeliveryOutcome =
   | "prompt_too_long"
   | "queue_full"
   | "rate_limited"
+  | "environment_paused"
   | "disabled"
   | "rejected_signature"
   | "expired"
@@ -166,6 +169,7 @@ export type WebhookTriggerResult =
   | { readonly _tag: "rejected_signature" }
   | { readonly _tag: "disabled" }
   | { readonly _tag: "blocked_by_policy" }
+  | { readonly _tag: "environment_paused" }
   | {
       readonly _tag: "rate_limited";
       readonly outcome: "rate_limited" | "queue_full";
@@ -462,6 +466,25 @@ export const layer = Layer.effect(
     const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
     const secretRequests = yield* SecretRequests.SecretRequests;
     const scheduler = yield* Scheduler.Scheduler;
+    const pauseStore = yield* Effect.serviceOption(EnvironmentPauseStore.EnvironmentPauseStore);
+    const automationPaused = Option.isSome(pauseStore)
+      ? pauseStore.value.get.pipe(
+          Effect.map((session) => session !== null && session.phase !== "resuming"),
+        )
+      : Effect.succeed(false);
+    const awaitEnvironmentResume = Effect.gen(function* () {
+      while (yield* automationPaused) {
+        const resumed = yield* Deferred.make<void>();
+        yield* Effect.scoped(
+          scheduler
+            .register(
+              "webhook-environment-resume",
+              Deferred.succeed(resumed, undefined).pipe(Effect.asVoid),
+            )
+            .pipe(Effect.andThen(Deferred.await(resumed))),
+        );
+      }
+    });
     const readWebhookOrigin = yield* ScheduledTaskWebhookOrigin;
     const managedPolicy = yield* ManagedPolicy.ManagedPolicy;
     const webhookPolicyOrganization = ManagedPolicy.deniedBy(managedPolicy, "webhookTasks");
@@ -854,6 +877,11 @@ export const layer = Layer.effect(
         readonly dispatched: Ref.Ref<boolean>;
       },
     ) {
+      // A previously admitted webhook owns its full payload in the existing
+      // bounded queue. Hold it before any thread/worktree preparation.
+      if (trigger === "webhook") yield* awaitEnvironmentResume;
+      if (trigger === "scheduled" && (yield* automationPaused))
+        return { task, threadId: null, dispatchFailed: false };
       // Read before reserving: nothing between the reservation and its release may fail.
       const startedAt = yield* localNow;
       const startedAtIso = iso(startedAt);
@@ -907,6 +935,9 @@ export const layer = Layer.effect(
           if (reason !== null) return yield* new WebhookDeliverySkipped({ reason });
         }
 
+        if (trigger === "webhook") yield* awaitEnvironmentResume;
+        if (trigger === "scheduled" && (yield* automationPaused))
+          return { task: active, threadId: null, dispatchFailed: false };
         if (webhook === undefined) yield* markRunning(active.id, startedAtIso);
         else
           yield* sql
@@ -2003,6 +2034,12 @@ export const layer = Layer.effect(
       yield* Effect.annotateCurrentSpan({ "scheduled_task.id": task.id });
       const schedule = task.schedule;
       if (schedule.type !== "webhook") return yield* notFound;
+      // Refuse before claiming the relay delivery: its next pass must retain
+      // the same payload and ID rather than treating this refusal as consumed.
+      if (yield* automationPaused) {
+        yield* observeDelivery(request, "environment_paused", undefined, undefined);
+        return { _tag: "environment_paused" as const };
+      }
 
       const now = yield* localNow;
       // Anyone can reach the tunnel directly and set the relay's header, so

@@ -50,6 +50,7 @@ import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import { buildCodexAdditionalContext } from "../../apps/server/src/provider/CodexDeveloperInstructions.ts";
 import { makeSideChatContext } from "../../apps/server/src/orchestration-v2/ContextHandoffService.ts";
 import { withInlineContext } from "../../apps/server/src/orchestration-v2/ContextHandoffDelivery.ts";
+import { ActionResumeToolkit } from "../../apps/server/src/mcp/toolkits/actionResume/tools.ts";
 import { AttachmentToolkit } from "../../apps/server/src/mcp/toolkits/attachment/tools.ts";
 import { DeviceToolkit } from "../../apps/server/src/mcp/toolkits/device/tools.ts";
 import { EnvironmentToolkit } from "../../apps/server/src/mcp/toolkits/environment/tools.ts";
@@ -92,10 +93,11 @@ const MODELS = {
   "claude-opus-5-5": "Opus 5.5",
   "gpt-6.1-sol": "GPT-6.1 Sol",
   "gpt-6-astra": "GPT-6 Astra",
+  "gpt-6-luna": "GPT-6 Luna",
 } as const;
 type Model = keyof typeof MODELS;
 /** GPT models replay a Codex capture through CLIProxyAPI, the rest a Claude Code capture. */
-const isCodex = (model: Model): model is Extract<Model, `gpt-${string}`> =>
+const isCodex = (model: Model | PricedModel): model is Extract<Model, `gpt-${string}`> =>
   model.startsWith("gpt-");
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 // USD per million tokens. Cache writes use the 5-minute rate.
@@ -106,7 +108,10 @@ const PRICES = {
 };
 type PricedModel = keyof typeof PRICES;
 /** GPT models that can play the shell through CLIProxyAPI, when no Anthropic key is at hand. */
-const PROXY_SHELL_MODELS = ["gpt-6-luna", "gpt-6.1-terra"] as const;
+const PROXY_SHELL_MODELS = [
+  "gpt-6.1-terra",
+  ...(Object.keys(MODELS) as Array<Model>).filter(isCodex),
+] as const;
 type ShellModel = PricedModel | (typeof PROXY_SHELL_MODELS)[number];
 const isPricedModel = (model: ShellModel): model is PricedModel => model in PRICES;
 const T3_PREFIX = "mcp__t3-code__";
@@ -290,6 +295,7 @@ export const McpToolUseCase = Schema.Struct({
     /** delegate_task `role` for a delegated child. T3 builds the child's first message from it. */
     delegateRole: Schema.optional(OrchestratorMcpTaskRole),
     context: Schema.optional(Schema.String),
+    contextFiles: Schema.optional(Schema.Array(Schema.String)),
     priorTurns: Schema.optional(
       Schema.Array(
         Schema.Struct({
@@ -305,9 +311,20 @@ export const McpToolUseCase = Schema.Struct({
      * device tool, a T3 `DeviceError` (`{"_tag": ..., "cause": null}`) fails it inside T3.
      */
     mocks: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+    /** First matching partial input wins over a tool's fixed reply. */
+    toolMocks: Schema.optional(
+      Schema.Array(Schema.Struct({ ...McpToolUseCall.fields, result: Schema.Unknown })),
+    ),
     /** Regexes on one part of a shell command. A match wins over the shell simulator. */
     shellMocks: Schema.optional(
-      Schema.Array(Schema.Struct({ match: Schema.String, output: Schema.String })),
+      Schema.Array(
+        Schema.Struct({
+          match: Schema.String,
+          output: Schema.String,
+          /** Match the entire command, including compound commands, without shell parsing. */
+          wholeCommand: Schema.optional(Schema.Boolean),
+        }),
+      ),
     ),
     /** The thread is a side chat's first turn: T3 puts the parent's digest ahead of `prompt`. */
     sideChat: Schema.optional(
@@ -424,6 +441,7 @@ export const normalizeToolInput = (name: string, input: unknown) => {
 // description, and schema through unchanged.
 const t3SourceTools: ReadonlyArray<Tool.Any> = [
   OrchestratorToolkit,
+  ActionResumeToolkit,
   ThreadToolkit,
   AttachmentToolkit,
   ProjectToolkit,
@@ -1290,7 +1308,10 @@ const withProductFields = (name: string, value: unknown, child: boolean): unknow
       ? {
           ...thread,
           link: formatThreadLink({
-            environmentId: EVAL_ENVIRONMENT_ID,
+            environmentId:
+              typeof thread.environmentId === "string"
+                ? EnvironmentId.make(thread.environmentId)
+                : EVAL_ENVIRONMENT_ID,
             threadId: ThreadId.make(id),
           }),
         }
@@ -1487,12 +1508,13 @@ export const shellOutput = (content: ReadonlyArray<Block>) => {
   });
 };
 
-/** A shell mock's output, when the command is one simple command that the mock matches. */
+/** Compound commands require an explicit whole-command mock; defaults match simple commands. */
 export const mockOutput = (sample: Sample, command: string) =>
-  /&&|\|\||[;|\n]/.test(command.trim())
-    ? undefined
-    : sample.testCase.setup.shellMocks?.find((mock) => new RegExp(mock.match).test(command))
-        ?.output;
+  sample.testCase.setup.shellMocks?.find((mock) =>
+    mock.wholeCommand
+      ? new RegExp(`^(?:${mock.match})$`).test(command.trim())
+      : !/&&|\|\||[;|\n]/.test(command.trim()) && new RegExp(mock.match).test(command),
+  )?.output;
 
 type Config = {
   readonly apiKey: string;
@@ -1513,7 +1535,7 @@ export const cannedOutput = (sample: Sample, command: string) =>
   sample.devices?.sessionError(sample.shell, command);
 
 /** Output for a shell, file, or web tool: canned output, else the shell simulator. */
-const simulate = Effect.fn("evaluateMcpToolUse.simulate")(function* (
+export const simulate = Effect.fn("evaluateMcpToolUse.simulate")(function* (
   sample: Sample,
   config: Config,
   call: Omit<ShellEntry, "output">,
@@ -1570,7 +1592,10 @@ export const answerToolCall = Effect.fn("evaluateMcpToolUse.answerToolCall")(fun
     if (found.length === 0) return toolResult(call.id, "No matching deferred tools found");
     return loadTools(tools, call.id, found);
   }
-  const mock = testCase.setup.mocks?.[name];
+  const inputMock = testCase.setup.toolMocks?.find(
+    (mock) => mock.tool === name && matches(mock.args ?? {}, input),
+  );
+  const mock = inputMock === undefined ? testCase.setup.mocks?.[name] : inputMock.result;
   // T3 answers device calls from the world. A mock that is a T3 device error fails inside T3.
   const failure = deviceFailure(mock);
   const fromWorld = mock === undefined || mock === "default" || failure !== undefined;
@@ -2179,7 +2204,7 @@ export const summarize = (
   );
   const shell = spend(
     rows.map((row) => row.shellUsage),
-    options.shellModel,
+    !isPricedModel(options.shellModel) ? undefined : options.shellModel,
   );
   const cost = agent.cost + shell.cost;
   const table = (title: string, key: (row: ResultRow) => string, compare = false) => [
@@ -2217,7 +2242,7 @@ export const summarize = (
       ? "- Cost: the agent is not priced. `vibeproxy` in `~/.codex/config.toml` may use a subscription or bill an API key per token; agent tokens are below."
       : `- Estimated cost $${cost.toFixed(2)}, $${(cost / rows.length).toFixed(3)} per sample.`,
     `- Agent tokens: ${agent.tokens}${codex ? "." : ` ($${agent.cost.toFixed(2)}).`}`,
-    `- Shell simulator (${options.shellModel}) tokens: ${shell.tokens} (API-price estimate $${shell.cost.toFixed(2)}).`,
+    `- Shell simulator (${options.shellModel}) tokens: ${shell.tokens}${!isPricedModel(options.shellModel) ? " (subscription through proxy)." : ` (API-price estimate $${shell.cost.toFixed(2)}).`}`,
     ...(codex
       ? [
           "- Code-mode tools use case mocks and a simulated machine. Native subagent prompts and asynchronous notifications are approximate.",
@@ -2333,6 +2358,9 @@ const main = Effect.gen(function* () {
   if (selectedCases.length === 0) return yield* Effect.die(new Error("No case matches --case."));
   const selected = yield* Effect.forEach(selectedCases, (testCase) =>
     Effect.gen(function* () {
+      const guidance = yield* Effect.forEach(testCase.setup.contextFiles ?? [], (file) =>
+        fs.readFileString(path.resolve(import.meta.dirname, "../..", file)),
+      );
       const priorTurns = yield* Effect.forEach(testCase.setup.priorTurns ?? [], (turn) =>
         Effect.gen(function* () {
           const toolCalls = yield* Effect.forEach(turn.toolCalls ?? [], (call) =>
@@ -2349,6 +2377,7 @@ const main = Effect.gen(function* () {
         ...testCase,
         setup: {
           ...testCase.setup,
+          context: [testCase.setup.context, ...guidance].filter(Boolean).join("\n\n"),
           priorTurns,
         },
       };

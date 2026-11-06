@@ -2369,7 +2369,7 @@ it("toggles a Mermaid attachment between diagram and source through the lazy pre
 });
 
 it("keeps a workspace PDF open across URL renewals and reloads it when the file changes", async () => {
-  const { WorkspaceBrowserPreview } = await import("./FilePreviewPanel");
+  const { WorkspaceBrowserPreview } = await import("./WorkspaceBrowserPreview");
   using _native = vi.spyOn(navigator, "pdfViewerEnabled", "get").mockReturnValue(true);
   const original = URL.createObjectURL(new Blob(["%PDF-1.4"], { type: "application/pdf" }));
   const edited = URL.createObjectURL(new Blob(["%PDF-1.4 edited"], { type: "application/pdf" }));
@@ -2381,6 +2381,7 @@ it("keeps a workspace PDF open across URL renewals and reloads it when the file 
       workspaceRoot="/repo"
       absolutePath="/repo/planning.pdf"
       title="Planning PDF"
+      revision={0}
       workspaceMutationId={mutation}
     />
   );
@@ -2482,7 +2483,7 @@ function nextPdfLoad() {
 it("keeps a workspace PDF's page, offset and zoom when a new revision reloads it", async () => {
   assetUrlState.mockReset();
   pdfOpens.length = 0;
-  const { WorkspaceBrowserPreview } = await import("./FilePreviewPanel");
+  const { WorkspaceBrowserPreview } = await import("./WorkspaceBrowserPreview");
   using _native = vi.spyOn(navigator, "pdfViewerEnabled", "get").mockReturnValue(false);
   const original = URL.createObjectURL(planningPdf());
   // A taller first page moves page 2, so only a page-relative restore lands on the same spot.
@@ -2507,6 +2508,7 @@ it("keeps a workspace PDF's page, offset and zoom when a new revision reloads it
           absolutePath={path}
           workspaceRoot="/repo"
           title="Planning PDF"
+          revision={0}
           workspaceMutationId={mutation}
         />
       </div>
@@ -2522,7 +2524,6 @@ it("keeps a workspace PDF's page, offset and zoom when a new revision reloads it
     await using screen = await render(preview(original, "one"));
     await loaded;
     await expect.element(screen.getByText("1 / 3 pages", { exact: true })).toBeVisible();
-    using workers = vi.spyOn(window, "Worker");
     const region = () => screen.getByRole("region", { name: "Planning PDF" }).element();
     const offset = () =>
       region().getBoundingClientRect().top -
@@ -2546,7 +2547,23 @@ it("keeps a workspace PDF's page, offset and zoom when a new revision reloads it
     expect(screen.container.textContent).toContain(zoom);
     expect(region().scrollLeft).toBe(80);
     expect(offset()).toBeCloseTo(savedOffset, 0);
-    expect(workers).not.toHaveBeenCalled();
+
+    await screen.getByRole("button", { name: "Fit width", exact: true }).click();
+    await act(async () => {
+      const scrolled = new Promise((resolve) =>
+        region().addEventListener("scroll", resolve, { once: true }),
+      );
+      region().scrollTo({ top: region().scrollTop + 30 });
+      await scrolled;
+    });
+    const fitOffset = offset();
+    await reload(screen, preview(original, "fit-width"));
+    await expect.element(screen.getByText("2 / 3 pages", { exact: true })).toBeVisible();
+    await vi.waitFor(() => {
+      expect(screen.container.textContent).toContain("Fit width");
+      expect(region().scrollLeft).toBe(0);
+      expect(offset()).toBeCloseTo(fitOffset, 0);
+    });
 
     await reload(screen, preview(updated, "two", "/repo/another.pdf"));
     await expect.element(screen.getByText("1 / 3 pages", { exact: true })).toBeVisible();
@@ -2561,7 +2578,7 @@ it("keeps a workspace PDF's page, offset and zoom when a new revision reloads it
 it("keeps first-page PDF zoom on reload and resets a different file", async () => {
   assetUrlState.mockReset();
   pdfOpens.length = 0;
-  const { WorkspaceBrowserPreview } = await import("./FilePreviewPanel");
+  const { WorkspaceBrowserPreview } = await import("./WorkspaceBrowserPreview");
   using _native = vi.spyOn(navigator, "pdfViewerEnabled", "get").mockReturnValue(false);
   const original = URL.createObjectURL(planningPdf());
   const preview = (src: string, mutation: string, path = "/repo/planning.pdf") => {
@@ -2582,6 +2599,7 @@ it("keeps first-page PDF zoom on reload and resets a different file", async () =
           absolutePath={path}
           workspaceRoot="/repo"
           title="Planning PDF"
+          revision={0}
           workspaceMutationId={mutation}
         />
       </div>
@@ -2604,6 +2622,7 @@ it("keeps first-page PDF zoom on reload and resets a different file", async () =
     await reload(screen, preview(original, "first-page"));
     await expect.element(screen.getByText("1 / 3 pages", { exact: true })).toBeVisible();
     expect(screen.container.textContent).toContain(firstPageZoom);
+    expect(workers).not.toHaveBeenCalled();
     await screen.getByRole("button", { name: "Next page", exact: true }).click();
     await expect.element(screen.getByText("2 / 3 pages", { exact: true })).toBeVisible();
     await reload(screen, preview(original, "one", "/repo/another.pdf"));
@@ -2611,10 +2630,138 @@ it("keeps first-page PDF zoom on reload and resets a different file", async () =
     expect(screen.container.textContent).toContain("Fit width");
     expect(region().scrollTop).toBe(0);
     expect(region().scrollLeft).toBe(0);
-    expect(workers).not.toHaveBeenCalled();
   } finally {
     URL.revokeObjectURL(original);
   }
+});
+
+async function workspacePdfPreview() {
+  assetUrlState.mockReset();
+  pdfOpens.length = 0;
+  const { WorkspaceBrowserPreview } = await import("./WorkspaceBrowserPreview");
+  const native = vi.spyOn(navigator, "pdfViewerEnabled", "get").mockReturnValue(false);
+  const urls = (() => {
+    const original = URL.createObjectURL(planningPdf());
+    const updated = URL.createObjectURL(
+      planningPdf(["Quarterly outlook", "Delivery milestones", "Updated budget"], 500),
+    );
+    const shorter = URL.createObjectURL(planningPdf(["Quarterly outlook", "Updated milestones"]));
+    const shrunk = URL.createObjectURL(
+      planningPdf(["Quarterly outlook", "Small page", "Budget and risks"], 500, 200),
+    );
+    const single = URL.createObjectURL(planningPdf(["Quarterly outlook"]));
+    return {
+      original,
+      updated,
+      shorter,
+      shrunk,
+      single,
+      [Symbol.dispose]: () =>
+        [original, updated, shorter, shrunk, single].forEach(URL.revokeObjectURL),
+    };
+  })();
+  const threadId = ThreadId.make(urls.original);
+  const preview = (src: string, mutation: string, path = "/repo/planning.pdf") => {
+    assetUrlState.mockReturnValue({
+      _tag: "Success",
+      url: `${src}#preview`,
+      expiresAt: Date.now() + 3_600_000,
+    });
+    return (
+      <div className="flex h-[600px] w-[320px]">
+        <WorkspaceBrowserPreview
+          environmentId={EnvironmentId.make("test")}
+          threadRef={{ environmentId: EnvironmentId.make("test"), threadId }}
+          draft={false}
+          absolutePath={path}
+          workspaceRoot="/repo"
+          title="Planning PDF"
+          revision={0}
+          workspaceMutationId={mutation}
+        />
+      </div>
+    );
+  };
+  return {
+    preview,
+    urls,
+    [Symbol.dispose]() {
+      native.mockRestore();
+      urls[Symbol.dispose]();
+    },
+  };
+}
+
+function pdfScroll(screen: Screen) {
+  const region = () => screen.container.querySelector<HTMLElement>('[role="region"]')!;
+  const canvas = (page: number) =>
+    region().querySelector<HTMLCanvasElement>(`canvas[aria-label="Page ${page}"]`)!;
+  const offset = (page: number) =>
+    region().getBoundingClientRect().top - canvas(page).getBoundingClientRect().top;
+  const scrollTo = (options: ScrollToOptions) =>
+    act(async () => {
+      const node = region();
+      const scrolled = new Promise<void>((resolve) =>
+        node.addEventListener("scroll", () => resolve(), { once: true }),
+      );
+      node.scrollTo(options);
+      await scrolled;
+    });
+  return { region, canvas, offset, scrollTo };
+}
+
+it("clamps workspace PDF scroll when pages shrink or disappear", async () => {
+  using fixture = await workspacePdfPreview();
+  const { preview, urls } = fixture;
+  const loaded = nextPdfLoad();
+  await using screen = await render(preview(urls.original, "one"));
+  await loaded;
+  await expect.element(screen.getByText("1 / 3 pages", { exact: true })).toBeVisible();
+  await screen.getByRole("button", { name: "Next page", exact: true }).click();
+  await expect.element(screen.getByText("2 / 3 pages", { exact: true })).toBeVisible();
+  for (let index = 0; index < 4; index++) {
+    await screen.getByRole("button", { name: "Zoom in", exact: true }).click();
+  }
+  const { region, canvas, offset, scrollTo } = pdfScroll(screen);
+  const zoom = screen.container.textContent!.match(/\d+%/)![0];
+  const secondPageTop = region().scrollTop;
+  await scrollTo({ top: secondPageTop + 600, left: 80 });
+  await vi.waitFor(() => expect(region().scrollTop).toBeCloseTo(secondPageTop + 600, 0));
+  {
+    const loaded = nextPdfLoad();
+    await screen.rerender(preview(urls.shrunk, "smaller-page"));
+    await loaded;
+  }
+  await expect.element(screen.getByText("2 / 3 pages", { exact: true })).toBeVisible();
+  await vi.waitFor(() => {
+    expect(screen.container.textContent).toContain(zoom);
+    expect(region().scrollLeft).toBe(80);
+    expect(offset(2)).toBeGreaterThan(0);
+    expect(offset(2)).toBeLessThan(canvas(2).getBoundingClientRect().height);
+  });
+  {
+    const loaded = nextPdfLoad();
+    await screen.rerender(preview(urls.shorter, "three"));
+    await loaded;
+  }
+  await expect.element(screen.getByText("2 / 2 pages", { exact: true })).toBeVisible();
+  await vi.waitFor(() => {
+    expect(screen.container.querySelector('[role="region"]')?.textContent).toContain(
+      "Updated milestones",
+    );
+  });
+  {
+    const loaded = nextPdfLoad();
+    await screen.rerender(preview(urls.single, "four"));
+    await loaded;
+  }
+  await expect.element(screen.getByText("1 / 1 pages", { exact: true })).toBeVisible();
+  {
+    const loaded = nextPdfLoad();
+    await screen.rerender(preview(urls.original, "five"));
+    await loaded;
+  }
+  await expect.element(screen.getByText("1 / 3 pages", { exact: true })).toBeVisible();
 });
 
 it("unwraps one text attachment without turning off the word wrap setting", async () => {

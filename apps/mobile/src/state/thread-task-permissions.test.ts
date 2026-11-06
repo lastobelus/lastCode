@@ -30,6 +30,7 @@ const state = vi.hoisted(() => ({
     text: "Keep my draft",
     attachments: [] as DraftComposerImageAttachment[],
     modelSelection: undefined as ModelSelection | undefined,
+    context: undefined as import("@t3tools/contracts").OrchestrationMessageContext | undefined,
   },
   serverConfig: null as ServerConfig | null,
   projection: null as OrchestrationV2ThreadProjection | null,
@@ -97,8 +98,32 @@ vi.mock("@effect/atom-react", async () => {
 vi.mock("./entities", () => ({ useServerConfigs: () => new Map() }));
 vi.mock("./session", () => ({
   readEnvironmentScope: (environmentId: string, scope: string) =>
-    scope === AuthOrchestrationOperateScope && state.grantedEnvironments.has(environmentId),
+    (scope === AuthOrchestrationOperateScope || scope === "orchestration:read") &&
+    state.grantedEnvironments.has(environmentId),
 }));
+vi.mock("./workspace", async () => {
+  const { Atom } = await import("effect/reactivity");
+  return {
+    workspaceConnections: {
+      environmentsAtom: Atom.make([
+        { environmentId: "secondary", connectionState: "connected", label: "Destination" },
+        { environmentId: "source", connectionState: "connected", label: "Source" },
+      ]),
+    },
+  };
+});
+vi.mock("./server", async () => {
+  const { Atom } = await import("effect/reactivity");
+  const config = { environment: { capabilities: { universalThreadReferences: true } } };
+  return {
+    environmentServerConfigsAtom: Atom.make(
+      new Map([
+        ["secondary", config],
+        ["source", config],
+      ]),
+    ),
+  };
+});
 vi.mock("./use-thread-selection", () => ({
   useThreadSelection: () => ({
     selectedThread: state.thread,
@@ -193,7 +218,12 @@ const NO_SIDE_CHATS = { startSideChat: async () => false };
 beforeEach(() => {
   state.grantedEnvironments = new Set(["primary"]);
   state.connectionState = "connected";
-  state.draft = { text: "Keep my draft", attachments: [], modelSelection: undefined };
+  state.draft = {
+    text: "Keep my draft",
+    attachments: [],
+    modelSelection: undefined,
+    context: undefined,
+  };
   state.freshPending = false;
   state.compactDue = false;
   state.thread.latestRun = null;
@@ -370,6 +400,34 @@ describe("mobile task permissions", () => {
     expect(await useThreadComposerState({ startSideChat }).onSendMessage()).toBeNull();
     expect(startSideChat).toHaveBeenCalledOnce();
     expect(state.clearDraft).not.toHaveBeenCalled();
+  });
+
+  it("retains the draft when a referenced foreign thread loses read access", async () => {
+    state.grantedEnvironments.add("secondary");
+    state.draft = {
+      ...state.draft,
+      text: "Compare with [Remote](t3-context://v1/thread/thread_remote)",
+      context: {
+        version: 1,
+        records: [
+          {
+            version: 1,
+            kind: "thread",
+            contextId: "thread_remote" as never,
+            label: "Remote",
+            environmentId: "source" as never,
+            threadId: "remote-thread" as never,
+            title: "Remote",
+          },
+        ],
+      },
+    };
+    const composer = useThreadComposerState(NO_SIDE_CHATS);
+
+    expect(await composer.onSendMessage()).toBeNull();
+    expect(state.enqueue).not.toHaveBeenCalled();
+    expect(state.clearDraft).not.toHaveBeenCalled();
+    expect(state.draft.text).toContain("thread_remote");
   });
 
   it("rechecks a retained send callback before clearing or queueing the draft", async () => {

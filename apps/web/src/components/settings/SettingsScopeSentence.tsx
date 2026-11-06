@@ -48,6 +48,7 @@ export const SETTINGS_DEVICE_ONLY_PATHS: ReadonlySet<string> = new Set([
   "/settings/chat",
   "/settings/diffs",
   "/settings/snap-shot",
+  "/settings/connect",
   "/settings/connections",
   // Access picks its environment on the page itself.
   "/settings/access",

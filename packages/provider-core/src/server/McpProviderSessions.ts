@@ -1,9 +1,10 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Pure synchronous hashing keeps page matching bounded without a runtime dependency.
 import * as NodeCrypto from "node:crypto";
-import type { ThreadId } from "@t3tools/contracts";
+import type { RunId, RunAttemptId, ThreadId } from "@t3tools/contracts";
 import type { HtmlRenderReference } from "@t3tools/shared/htmlRender";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 
@@ -11,6 +12,8 @@ import type { McpProviderSessionConfig } from "./mcpSession.ts";
 
 // Other providers may never consume these references.
 const MAX_KEPT_HTML_RENDERS = 64;
+const MAX_LIVE_ORIGINS = 4096;
+const MAX_ENDED_ORIGINS = 4096;
 
 // Antigravity truncates long HTML arguments to a marked tail of at most 8,000 characters.
 const BOUNDED_TEXT_MARKER = "[Earlier output truncated]\n\n";
@@ -27,9 +30,59 @@ interface KeptHtmlRender {
 
 const hashHtml = (html: string) => NodeCrypto.createHash("sha256").update(html).digest("hex");
 
+export interface McpExecutionOrigin {
+  readonly runId: RunId;
+  readonly attemptId: RunAttemptId;
+}
+
+export type McpNativeOrigin =
+  | { readonly provider: "codex"; readonly nativeThreadId: string; readonly nativeTurnId: string }
+  | { readonly provider: "claude"; readonly toolUseId: string };
+
+const originKey = (origin: McpNativeOrigin): string =>
+  JSON.stringify(
+    origin.provider === "codex"
+      ? [origin.provider, origin.nativeThreadId, origin.nativeTurnId]
+      : [origin.provider, origin.toolUseId],
+  );
+const record = (value: unknown): Record<string, unknown> | undefined =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+
+const nativeOriginFromMetadata = (metadata: unknown): McpNativeOrigin | undefined => {
+  const meta = record(metadata);
+  const codex = record(meta?.["x-codex-turn-metadata"]);
+  const toolUseId = meta?.["claudecode/toolUseId"];
+  if (codex !== undefined && toolUseId !== undefined) return undefined;
+  if (typeof codex?.thread_id === "string" && typeof codex.turn_id === "string") {
+    return { provider: "codex", nativeThreadId: codex.thread_id, nativeTurnId: codex.turn_id };
+  }
+  return typeof toolUseId === "string" ? { provider: "claude", toolUseId } : undefined;
+};
+
 export class McpProviderSessions extends Context.Service<
   McpProviderSessions,
   {
+    readonly beginCodexTurn: (
+      threadId: ThreadId,
+      nativeThreadId: string,
+    ) => Effect.Effect<Effect.Effect<void>>;
+    readonly registerExecution: (
+      threadId: ThreadId,
+      origin: McpNativeOrigin,
+      execution: McpExecutionOrigin,
+    ) => Effect.Effect<void>;
+    readonly endExecution: (
+      threadId: ThreadId,
+      execution: McpExecutionOrigin,
+    ) => Effect.Effect<void>;
+    readonly resolveExecution: (input: {
+      readonly threadId: ThreadId;
+      readonly providerSessionId: string;
+      readonly authorizationHeader: string;
+      readonly metadata: unknown;
+    }) => Effect.Effect<McpExecutionOrigin | undefined>;
     readonly set: (config: McpProviderSessionConfig) => Effect.Effect<void>;
     readonly read: (threadId: ThreadId) => Effect.Effect<McpProviderSessionConfig | undefined>;
     readonly clear: (threadId: ThreadId) => Effect.Effect<void>;
@@ -80,10 +133,106 @@ const matchingPageIndex = (
 const make = Effect.gen(function* () {
   const sessions = yield* Ref.make(new Map<ThreadId, McpProviderSessionConfig>());
   const htmlRenders = yield* Ref.make(new Map<ThreadId, ReadonlyArray<KeptHtmlRender>>());
+  const pendingCodex = new Map<
+    ThreadId,
+    { readonly nativeThreadId: string; readonly ready: Deferred.Deferred<void> }
+  >();
+  const endedOrigins = new Map<ThreadId, Set<string>>();
+  const origins = new Map<
+    ThreadId,
+    Map<
+      string,
+      {
+        readonly config: McpProviderSessionConfig;
+        readonly execution: McpExecutionOrigin;
+      }
+    >
+  >();
   return McpProviderSessions.of({
+    beginCodexTurn: Effect.fn("McpProviderSessions.beginCodexTurn")(
+      function* (threadId, nativeThreadId) {
+        const ready = yield* Deferred.make<void>();
+        const pending = { nativeThreadId, ready };
+        pendingCodex.set(threadId, pending);
+        return Effect.sync(() => {
+          if (pendingCodex.get(threadId) === pending) pendingCodex.delete(threadId);
+        }).pipe(Effect.andThen(Deferred.succeed(ready, undefined)), Effect.asVoid);
+      },
+    ),
+    registerExecution: Effect.fn("McpProviderSessions.registerExecution")(
+      function* (threadId, origin, execution) {
+        const config = (yield* Ref.get(sessions)).get(threadId);
+        if (config === undefined) return;
+        const entries = origins.get(threadId) ?? new Map();
+        const key = originKey(origin);
+        // Ended history never consumes live capacity; neither category may rebind a known key.
+        if (
+          entries.has(key) ||
+          endedOrigins.get(threadId)?.has(key) ||
+          entries.size >= MAX_LIVE_ORIGINS
+        )
+          return;
+        entries.set(key, { config, execution: Object.freeze({ ...execution }) });
+        origins.set(threadId, entries);
+      },
+    ),
+    endExecution: Effect.fn("McpProviderSessions.endExecution")(function (threadId, execution) {
+      return Effect.sync(() => {
+        const entries = origins.get(threadId);
+        for (const [key, entry] of entries ?? []) {
+          if (
+            entry.execution.runId === execution.runId &&
+            entry.execution.attemptId === execution.attemptId
+          ) {
+            entries?.delete(key);
+            const ended = endedOrigins.get(threadId) ?? new Set<string>();
+            ended.add(key);
+            // Expiring a tombstone does not create a binding. Only the adapter can
+            // register a native identity; stale HTTP metadata remains unattributed.
+            if (ended.size > MAX_ENDED_ORIGINS) {
+              const oldest = ended.values().next().value;
+              if (oldest !== undefined) ended.delete(oldest);
+            }
+            endedOrigins.set(threadId, ended);
+          }
+        }
+        if (entries?.size === 0) origins.delete(threadId);
+      });
+    }),
+    resolveExecution: Effect.fn("McpProviderSessions.resolveExecution")(function* (input) {
+      const origin = nativeOriginFromMetadata(input.metadata);
+      if (origin === undefined) return undefined;
+      const config = (yield* Ref.get(sessions)).get(input.threadId);
+      if (
+        config?.providerSessionId !== input.providerSessionId ||
+        config.authorizationHeader !== input.authorizationHeader
+      )
+        return undefined;
+      const pending = pendingCodex.get(input.threadId);
+      // HTTP and app-server notifications use different connections. Only wait for a
+      // known in-progress start, then look up the original IDs without changing them.
+      if (
+        origin.provider === "codex" &&
+        pending?.nativeThreadId === origin.nativeThreadId &&
+        !origins.get(input.threadId)?.has(originKey(origin)) &&
+        !endedOrigins.get(input.threadId)?.has(originKey(origin))
+      ) {
+        yield* Deferred.await(pending.ready);
+      }
+      const entry = origins.get(input.threadId)?.get(originKey(origin));
+      return entry?.config.providerSessionId === input.providerSessionId &&
+        entry.config.authorizationHeader === input.authorizationHeader
+        ? entry.execution
+        : undefined;
+    }),
     set: Effect.fn("McpProviderSessions.set")(function* (config) {
       const current = yield* Ref.get(sessions);
-      if (current.get(config.threadId)?.providerSessionId !== config.providerSessionId) {
+      if (
+        current.get(config.threadId)?.providerSessionId !== config.providerSessionId ||
+        current.get(config.threadId)?.authorizationHeader !== config.authorizationHeader
+      ) {
+        origins.delete(config.threadId);
+        endedOrigins.delete(config.threadId);
         yield* Ref.update(htmlRenders, (kept) => {
           const next = new Map(kept);
           next.delete(config.threadId);
@@ -96,6 +245,8 @@ const make = Effect.gen(function* () {
       return Ref.get(sessions).pipe(Effect.map((current) => current.get(threadId)));
     }),
     clear: Effect.fn("McpProviderSessions.clear")(function (threadId) {
+      origins.delete(threadId);
+      endedOrigins.delete(threadId);
       return Ref.update(sessions, (current) => {
         const next = new Map(current);
         next.delete(threadId);

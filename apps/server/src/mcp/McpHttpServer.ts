@@ -1,3 +1,4 @@
+import { McpProviderSessions } from "@t3tools/provider-core/server/McpProviderSessions";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -30,7 +31,6 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as DeviceService from "../device/DeviceService.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
-import * as ServerSettings from "../serverSettings.ts";
 import * as HtmlRender from "../htmlRender/HtmlRender.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
@@ -63,6 +63,7 @@ import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 import * as OrchestratorHandlers from "./toolkits/orchestrator/handlers.ts";
 import { OrchestratorToolkit } from "./toolkits/orchestrator/tools.ts";
 import * as PreviewHandlers from "./toolkits/preview/handlers.ts";
+import { PreviewRemoteUnavailableFailure } from "./toolkits/preview/errors.ts";
 import {
   PreviewSnapshotTool,
   PreviewSnapshotToolkit,
@@ -84,6 +85,10 @@ import { HtmlPreviewTool, HtmlPreviewToolkit, HtmlRenderToolkit } from "./toolki
 import { requestUrl } from "../requestUrl.ts";
 import * as ActionResumeHandlers from "./toolkits/actionResume/handlers.ts";
 import { ActionResumeToolkit } from "./toolkits/actionResume/tools.ts";
+import * as WorktreeSuspensionHandlers from "./toolkits/worktreeSuspension/handlers.ts";
+import { WorktreeSuspensionToolkit } from "./toolkits/worktreeSuspension/tools.ts";
+import * as ThreadDashboardHandlers from "./toolkits/threadDashboard/handlers.ts";
+import { ThreadDashboardToolkit } from "./toolkits/threadDashboard/tools.ts";
 
 const mcpResourceMetadataUrl = (request: HttpServerRequest.HttpServerRequest) =>
   requestUrl(request).pipe(
@@ -199,9 +204,23 @@ const linkedEnvironmentsOff = HttpServerResponse.jsonUnsafe(
   { status: 403, headers: { "cache-control": "no-store" } },
 );
 
-const makeMcpAuthMiddleware = Effect.gen(function* () {
+type McpEndpointPath = "/mcp" | "/mcp/thread";
+
+export const canInvokeMcpEndpoint = (
+  path: McpEndpointPath,
+  invocation: McpInvocationContext.McpInvocationScope,
+): boolean =>
+  path === "/mcp/thread" ||
+  invocation.client !== undefined ||
+  invocation.capabilities.has("preview") ||
+  invocation.capabilities.has("device");
+
+const makeMcpAuthMiddleware = Effect.fn("McpHttpServer.makeAuthMiddleware")(function* (
+  path: McpEndpointPath,
+) {
   const registry = yield* McpSessionRegistry.McpSessionRegistry;
   const clients = yield* Effect.serviceOption(McpClientAuthenticator);
+  const providerSessions = yield* Effect.serviceOption(McpProviderSessions);
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const runtimeModeCeiling = serverSettings.managedPolicy?.limits?.maxRuntimeMode;
   const linksEnabled = serverSettings.getSettings.pipe(
@@ -218,7 +237,10 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
       (Option.isSome(clients) && token.length > 0
         ? yield* clients.value.authenticate(request)
         : undefined);
-    if (!invocation) {
+    if (!invocation || !canInvokeMcpEndpoint(path, invocation)) {
+      // Without this the only symptom of a dead credential is the agent
+      // quietly losing the whole `t3-code` toolkit for the rest of its
+      // session, with nothing on the server to explain why.
       yield* Effect.logWarning("rejected MCP request with an unusable credential", {
         reason:
           authorization === undefined
@@ -227,7 +249,9 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
               ? "unsupported_scheme"
               : token.length === 0
                 ? "missing_bearer_token"
-                : "unknown_or_expired_token",
+                : invocation
+                  ? "insufficient_capability"
+                  : "unknown_or_expired_token",
       });
       return unauthorized({
         request,
@@ -235,7 +259,31 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
         offerOAuth: Option.isSome(clients) && !looksLikeProviderToken(token),
       });
     }
-    const asked = withModeLimit(invocation, request);
+    let attributed = invocation;
+    if (
+      invocation.thread !== undefined &&
+      request.method === "POST" &&
+      Option.isSome(providerSessions)
+    ) {
+      const body = yield* request.json.pipe(Effect.orElseSucceed(() => undefined));
+      const params =
+        typeof body === "object" && body !== null && "params" in body ? body.params : undefined;
+      const metadata =
+        typeof params === "object" && params !== null && "_meta" in params
+          ? params._meta
+          : undefined;
+      const execution = yield* providerSessions.value.resolveExecution({
+        threadId: invocation.thread.threadId,
+        providerSessionId: invocation.thread.providerSessionId,
+        authorizationHeader: authorization ?? "",
+        metadata,
+      });
+      attributed = {
+        ...invocation,
+        thread: { ...invocation.thread, ...(execution === undefined ? {} : { execution }) },
+      };
+    }
+    const asked = withModeLimit(attributed, request);
     if (asked === undefined) return invalidModeLimit;
     const limited = McpInvocationContext.withRuntimeModeCeiling(asked, runtimeModeCeiling);
     const linkedEnvironments = yield* linksEnabled;
@@ -251,11 +299,12 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
       Effect.map(normalizeMcpHttpResponse),
     );
   }) satisfies McpAuthMiddleware;
-}).pipe(Effect.withSpan("McpHttpServer.makeAuthMiddleware"));
+});
 
-const layerMcpAuthMiddleware = HttpRouter.middleware<{
-  provides: McpInvocationContext.McpInvocationContext;
-}>()(makeMcpAuthMiddleware).layer;
+const layerMcpAuthMiddlewareFor = (path: McpEndpointPath) =>
+  HttpRouter.middleware<{
+    provides: McpInvocationContext.McpInvocationContext;
+  }>()(makeMcpAuthMiddleware(path)).layer;
 
 /** Claude Code spills oversized results to files, losing locators; bound both text and its preferred structuredContent. */
 export const MAX_SNAPSHOT_TEXT_BYTES = 20_000;
@@ -475,6 +524,7 @@ const decodeAsAdvertised = <Tools extends Record<string, Tool.Any>>(
   ) as unknown as Toolkit.Toolkit<Tools>;
 
 const isPreviewAutomationError = Schema.is(PreviewAutomationError);
+const isPreviewRemoteUnavailableFailure = Schema.is(PreviewRemoteUnavailableFailure);
 
 const previewSnapshotFailure = Effect.fn("previewSnapshotFailure")(function <E>(
   cause: Cause.Cause<E>,
@@ -491,25 +541,47 @@ const previewSnapshotFailure = Effect.fn("previewSnapshotFailure")(function <E>(
     typeof firstFailure._tag === "string"
       ? firstFailure._tag
       : "PreviewSnapshotError";
-  // Preview errors contain server-authored recovery guidance, never page output.
-  const message = isPreviewAutomationError(firstFailure) ? firstFailure.message : undefined;
+  // This separate snapshot adapter retains the ordinary tools' safe correlation
+  // without exposing the remote cause or host identity.
+  const diagnostic = isPreviewRemoteUnavailableFailure(firstFailure)
+    ? {
+        connectionId: firstFailure.connectionId,
+        requestId: firstFailure.requestId,
+        ...(firstFailure.reason === undefined ? {} : { reason: firstFailure.reason }),
+      }
+    : undefined;
+  const message = diagnostic
+    ? "Preview automation snapshot is unavailable."
+    : isPreviewAutomationError(firstFailure)
+      ? firstFailure.message
+      : undefined;
+  const error = {
+    _tag: errorTag,
+    operation: "snapshot",
+    failureCount: failures.length,
+    ...(message === undefined ? {} : { message }),
+    ...diagnostic,
+  };
   const result = new McpSchema.CallToolResult({
     isError: true,
     structuredContent: {
-      error: {
-        _tag: errorTag,
-        operation: "snapshot",
-        failureCount: failures.length,
-        ...(message === undefined ? {} : { message }),
-      },
+      error,
     },
     // Some clients show only the text content and others only structuredContent, so both carry it.
-    content: [{ type: "text", text: `Preview snapshot failed: ${message ?? `${errorTag}.`}` }],
+    content: [
+      {
+        type: "text",
+        text: diagnostic
+          ? JSON.stringify(error)
+          : `Preview snapshot failed: ${message ?? `${errorTag}.`}`,
+      },
+    ],
   });
   return Effect.logWarning("preview snapshot failed", {
     operation: "snapshot",
     errorTag,
     failureCount: failures.length,
+    ...diagnostic,
   }).pipe(Effect.as(result));
 });
 
@@ -1243,15 +1315,31 @@ export const layerInProcessMcpServer = McpServer.middleware<{
   { global: true },
 ).pipe(Layer.provideMerge(McpServer.McpServer.layer));
 
-export const layerMcpTransport = <RA, RE, RR>(registrations: Layer.Layer<RA, RE, RR>) =>
+export const layerWorktreeSuspensionToolkit = toolkitRegistration(
+  WorktreeSuspensionToolkit,
+  WorktreeSuspensionHandlers.layer,
+);
+
+const layerThreadDashboardToolkit = toolkitRegistration(
+  ThreadDashboardToolkit,
+  ThreadDashboardHandlers.layer,
+);
+
+const makeMcpTransport = <RA, RE, RR>(
+  path: McpEndpointPath,
+  registrations: Layer.Layer<RA, RE, RR>,
+) =>
   McpServer.layerHttp({
     name: "T3 Code",
     version: packageJson.version,
-    path: "/mcp",
+    path,
     protocols: [McpProtocol.v2025_06_18],
     allowSessionTermination: true,
     registrations,
-  }).pipe(Layer.provide(layerMcpAuthMiddleware));
+  }).pipe(Layer.provide(layerMcpAuthMiddlewareFor(path)));
+
+export const layerMcpTransport = <RA, RE, RR>(registrations: Layer.Layer<RA, RE, RR>) =>
+  makeMcpTransport("/mcp", registrations);
 
 /** Every tool the T3 MCP server advertises. AgentContextBudget.test.ts measures this set. */
 export const layerTools = Layer.mergeAll(
@@ -1267,6 +1355,33 @@ export const layerTools = Layer.mergeAll(
   layerDeviceToolkit,
   layerHtmlToolkit,
   layerActionResumeToolkit,
+  layerWorktreeSuspensionToolkit,
+  layerThreadDashboardToolkit,
 );
 
-export const layer = layerMcpTransport(layerTools);
+const layerFullToolkit = layerMcpTransport(layerTools);
+
+// Sessions created while agent browser access is disabled still receive the
+// dashboard tools, but preview tools stay absent from discovery entirely.
+const layerThreadOnlyToolkit = makeMcpTransport(
+  "/mcp/thread",
+  Layer.mergeAll(
+    layerOrchestratorToolkit,
+    layerHtmlToolkit,
+    layerThreadToolkit,
+    layerAttachmentToolkit,
+    layerProjectRegistration,
+    layerEnvironmentToolkit,
+    layerWorktreeToolkitRegistration,
+    layerWorktreeSuspensionToolkit,
+    layerThreadDashboardToolkit,
+    layerPullRequestsToolkit,
+  ),
+);
+
+// Each transport needs its own mutable MCP registry. Sharing the memoized
+// McpServer layer would expose the full catalog on the restricted endpoint too.
+export const layer = Layer.mergeAll(
+  Layer.fresh(layerFullToolkit),
+  Layer.fresh(layerThreadOnlyToolkit),
+);

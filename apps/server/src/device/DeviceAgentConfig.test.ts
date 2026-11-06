@@ -166,6 +166,7 @@ const layer = (
       Layer.succeed(SecretResolver.SecretResolver, {
         read: (references) => Effect.succeed(references.map(() => undefined)),
         invalidate: () => Effect.void,
+        label: (provider) => Effect.succeed(provider),
       }),
     ),
     Layer.provide(ProcessRunner.layer),
