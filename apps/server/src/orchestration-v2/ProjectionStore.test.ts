@@ -8270,6 +8270,8 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
             passedChecks: [],
             remarksThrough: DateTime.formatIso(at),
             remarkIds: [],
+            reactionKeys: [],
+            reactionCounts: {},
             conflicting: false,
             wakes: 0,
           },
