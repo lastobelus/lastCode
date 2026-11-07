@@ -265,6 +265,20 @@ const make = Effect.gen(function* () {
           ) {
             return yield* new SuspensionRegistryError({ operation: "ownership-changed" });
           }
+          if (
+            expected === null &&
+            !next.detached &&
+            current.checkouts.some(
+              (entry) =>
+                !entry.detached &&
+                [entry.path, ...entry.aliases].some((alias) =>
+                  [next.path, ...next.aliases].some(
+                    (candidate) => path.resolve(candidate) === path.resolve(alias),
+                  ),
+                ),
+            )
+          )
+            return yield* new SuspensionRegistryError({ operation: "ownership-changed" });
           yield* write({
             ...current,
             checkouts: [

@@ -116,26 +116,22 @@ export const layer = Layer.effect(
       }),
       cleanupArchivedTerminals: Effect.fn("ResourceCleanupService.cleanupArchivedTerminals")(
         function* (threadId: string) {
-          const previewsResult = yield* Effect.result(previews.list(threadId));
-          // An unreadable lease file cannot identify owners; preserve the managed namespace.
-          yield* terminals
-            .closeThreadExcept(
-              threadId,
-              previewsResult._tag === "Success"
-                ? previewsResult.success.map((lease) => lease.terminalId)
-                : [],
-              previewsResult._tag === "Failure" ? ["preview-"] : [],
-            )
-            .pipe(
-              Effect.mapError(
-                (cause) => new ResourceCleanupError({ operation: "terminal", threadId, cause }),
-              ),
-            );
+          const previewsResult = yield* Effect.result(previews.removeThread(threadId));
+          // A legacy preview terminal may not have the managed prefix, so a
+          // failed cancellation leaves all terminals alone until the retry.
           if (previewsResult._tag === "Failure") {
             return yield* new ResourceCleanupError({
               operation: "preview",
               threadId,
               cause: previewsResult.failure,
+            });
+          }
+          const terminalResult = yield* Effect.result(terminals.closeThreadExcept(threadId, []));
+          if (terminalResult._tag === "Failure") {
+            return yield* new ResourceCleanupError({
+              operation: "terminal",
+              threadId,
+              cause: terminalResult.failure,
             });
           }
         },

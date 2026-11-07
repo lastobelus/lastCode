@@ -29,6 +29,7 @@ import {
 } from "@t3tools/contracts";
 import * as ServerConfig from "../config.ts";
 import * as PortScanner from "./PortScanner.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as PreviewHosting from "./Hosting.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import type * as PtyAdapter from "@t3tools/shared/PtyAdapter";
@@ -318,6 +319,11 @@ function leaseFixture(
   };
 }
 
+const activeOwners = Layer.mock(ProjectionStore.ProjectionStoreV2)({
+  getThread: () => Effect.succeed({ archivedAt: null, deletedAt: null } as never),
+});
+const testHostingLayer = PreviewHosting.layer.pipe(Layer.provide(activeOwners));
+
 function hostingLayer(
   config: ServerConfig.ServerConfig["Service"],
   harness: TerminalHarness,
@@ -326,6 +332,7 @@ function hostingLayer(
   attributeTerminal = true,
   fileSystemLayer?: Layer.Layer<FileSystem.FileSystem>,
   httpLayer: Layer.Layer<HttpClient.HttpClient> = FetchHttpClient.layer,
+  owners = activeOwners,
 ) {
   const dependencies = Layer.mergeAll(
     WorkspaceAcquisitionTestkit.layer,
@@ -338,8 +345,8 @@ function hostingLayer(
   );
   const hosting =
     fileSystemLayer === undefined
-      ? PreviewHosting.layer
-      : PreviewHosting.layer.pipe(Layer.provide(fileSystemLayer));
+      ? PreviewHosting.layer.pipe(Layer.provide(owners))
+      : PreviewHosting.layer.pipe(Layer.provide(owners), Layer.provide(fileSystemLayer));
   return hosting.pipe(Layer.provideMerge(dependencies));
 }
 
@@ -452,6 +459,224 @@ const warmProcessFixture = Effect.fn("warmProcessFixture")(function* (
 });
 
 describe("PreviewHosting", () => {
+  it.effect(
+    "reconciles archived leases while preserving active owners and refuses stale recovery",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(1_000);
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-archived-owner-" });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        const archived = leaseFixture({
+          id: "archived",
+          threadId: "archived",
+          terminalId: "legacy-terminal",
+          status: "sleeping",
+        });
+        const active = leaseFixture({
+          id: "active",
+          threadId: "active",
+          terminalId: "active-terminal",
+          url: "http://localhost:5174/",
+        });
+        yield* fs.makeDirectory(config.stateDir, { recursive: true });
+        yield* fs.writeFileString(
+          `${config.stateDir}/preview-hosting.json`,
+          encodePersistedHostingState({ version: 1, leases: [archived, active] }),
+        );
+        let activeArchived = false;
+        const owners = Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getThread: (id) =>
+            Effect.succeed({
+              archivedAt: id === "archived" || activeArchived ? "archived" : null,
+              deletedAt: null,
+            } as never),
+        });
+        const harness = testTerminalHarness();
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            assert.deepEqual(yield* hosting.list(), [active]);
+            assert.deepEqual(harness.closes, [
+              { threadId: "archived", terminalId: "legacy-terminal" },
+            ]);
+            activeArchived = true;
+            assert.isNull(
+              yield* hosting.recover({
+                threadId: active.threadId,
+                leaseId: PreviewHostingLeaseId.make(active.id),
+                url: active.url,
+              }),
+            );
+            assert.deepEqual(yield* hosting.list(), []);
+            const rejected = yield* Effect.result(
+              hosting.launch({
+                threadId: active.threadId,
+                command: active.command,
+                cwd: active.cwd,
+                worktreePath: active.worktreePath,
+                url: active.url,
+              }),
+            );
+            assert.equal(rejected._tag, "Failure");
+            assert.equal(harness.opens.length, 0);
+          }).pipe(
+            Effect.provide(
+              hostingLayer(
+                config,
+                harness,
+                true,
+                [],
+                true,
+                undefined,
+                FetchHttpClient.layer,
+                owners,
+              ),
+            ),
+          ),
+        );
+      }).pipe(
+        Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, TestClock.layer())),
+      ),
+  );
+
+  it.effect(
+    "keeps leases and refuses recovery when owner lookup fails, then retries reconciliation",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(1_000);
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-owner-unavailable-" });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        const saved = leaseFixture({ status: "sleeping" });
+        yield* fs.makeDirectory(config.stateDir, { recursive: true });
+        yield* fs.writeFileString(
+          `${config.stateDir}/preview-hosting.json`,
+          encodePersistedHostingState({ version: 1, leases: [saved] }),
+        );
+        let unavailable = true;
+        const owners = Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getThread: (threadId) =>
+            unavailable
+              ? Effect.fail(
+                  new ProjectionStore.ProjectionStoreReadError({
+                    threadId,
+                    cause: new Error("unavailable"),
+                  }),
+                )
+              : Effect.succeed({ archivedAt: "archived", deletedAt: null } as never),
+        });
+        const closed = yield* Deferred.make<void>();
+        const harness = testTerminalHarness({
+          onClose: () => Deferred.succeed(closed, undefined).pipe(Effect.asVoid),
+        });
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const recovery = yield* Effect.result(
+              hosting.recover({
+                threadId: saved.threadId,
+                leaseId: PreviewHostingLeaseId.make(saved.id),
+                url: saved.url,
+              }),
+            );
+            assert.equal(recovery._tag, "Failure");
+            assert.deepEqual(yield* hosting.list(), [saved]);
+            assert.deepEqual(harness.opens, []);
+            assert.deepEqual(harness.closes, []);
+            unavailable = false;
+            yield* TestClock.adjust(Duration.minutes(1));
+            yield* Deferred.await(closed);
+          }).pipe(
+            Effect.provide(
+              hostingLayer(
+                config,
+                harness,
+                true,
+                [],
+                true,
+                undefined,
+                FetchHttpClient.layer,
+                owners,
+              ),
+            ),
+          ),
+        );
+      }).pipe(
+        Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, TestClock.layer())),
+      ),
+  );
+
+  it.effect(
+    "removes only an owner's leases for the selected workspace including legacy cwd leases",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(1_000);
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-workspace-owner-" });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        const matching = leaseFixture({
+          id: "matching",
+          terminalId: "matching",
+          worktreePath: "/workspace/one",
+          cwd: "/workspace/one/app",
+        });
+        const legacy = leaseFixture({
+          id: "legacy",
+          terminalId: "legacy",
+          worktreePath: null,
+          cwd: "/workspace/one/sub",
+          url: "http://localhost:5174/",
+        });
+        const otherWorkspace = leaseFixture({
+          id: "other-workspace",
+          terminalId: "other-workspace",
+          worktreePath: "/workspace/other",
+          cwd: "/workspace/other",
+          url: "http://localhost:5175/",
+        });
+        const otherOwner = leaseFixture({
+          id: "other-owner",
+          terminalId: "other-owner",
+          threadId: "thread-2",
+          worktreePath: "/workspace/one",
+          cwd: "/workspace/one",
+          url: "http://localhost:5176/",
+        });
+        yield* fs.makeDirectory(config.stateDir, { recursive: true });
+        yield* fs.writeFileString(
+          `${config.stateDir}/preview-hosting.json`,
+          encodePersistedHostingState({
+            version: 1,
+            leases: [matching, legacy, otherWorkspace, otherOwner],
+          }),
+        );
+        const harness = testTerminalHarness();
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            yield* hosting.removeThreadWorkspace("thread-1", "/workspace/one");
+            assert.deepEqual(yield* hosting.list(), [otherWorkspace, otherOwner]);
+            assert.sameMembers(
+              harness.closes.map((entry) => entry.terminalId),
+              ["matching", "legacy"],
+            );
+          }).pipe(Effect.provide(hostingLayer(config, harness))),
+        );
+      }).pipe(
+        Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, TestClock.layer())),
+      ),
+  );
+
   it.effect(
     "unloads the least recently used inactive app without deleting its recovery recipe",
     () =>
@@ -707,7 +932,7 @@ describe("PreviewHosting", () => {
             }),
           retain: Effect.void,
         });
-        const layer = PreviewHosting.layer.pipe(
+        const layer = testHostingLayer.pipe(
           Layer.provide(WorkspaceAcquisitionTestkit.layer),
           Layer.provideMerge(
             Layer.mergeAll(
@@ -801,7 +1026,7 @@ describe("PreviewHosting", () => {
           ),
       });
       const original = fixture.leases[0]!;
-      const layer = PreviewHosting.layer.pipe(
+      const layer = testHostingLayer.pipe(
         Layer.provide(WorkspaceAcquisitionTestkit.layer),
         Layer.provideMerge(
           Layer.mergeAll(
@@ -1107,7 +1332,7 @@ describe("PreviewHosting", () => {
           yield* terminals.waitForThreadShutdown("thread-2");
         }).pipe(
           Effect.provide(
-            PreviewHosting.layer.pipe(
+            testHostingLayer.pipe(
               Layer.provide(WorkspaceAcquisitionTestkit.layer),
               Layer.provideMerge(dependencies),
             ),
@@ -1117,69 +1342,76 @@ describe("PreviewHosting", () => {
     }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
 
-  it.effect.each(["launch", "recover"] as const)(
-    "stops a preview immediately while %s is waiting for a server that never becomes ready",
-    (operation) =>
-      Effect.gen(function* () {
-        yield* TestClock.setTime(1_000);
-        const fs = yield* FileSystem.FileSystem;
-        const root = yield* fs.makeTempDirectoryScoped({
-          prefix: "preview-hosting-stop-readiness-",
-        });
-        const config = yield* Effect.provide(
-          ServerConfig.ServerConfig,
-          ServerConfig.layerTest(process.cwd(), root),
-        );
-        const preview = leaseFixture();
-        yield* fs.makeDirectory(config.stateDir, { recursive: true });
-        yield* fs.writeFileString(
-          `${config.stateDir}/preview-hosting.json`,
-          encodePersistedHostingState({ version: 1, leases: [preview] }),
-        );
-        const wrote = yield* Deferred.make<void>();
-        const harness = testTerminalHarness({
-          summaries: [terminalFixture("thread-1", "ordinary-terminal")],
-          onWrite: () => Deferred.succeed(wrote, undefined).pipe(Effect.asVoid),
-        });
-        yield* Effect.scoped(
-          Effect.gen(function* () {
-            const hosting = yield* PreviewHosting.PreviewHosting;
-            const pending = yield* (
-              operation === "recover"
-                ? hosting.recover({
-                    threadId: "thread-1",
-                    leaseId: PreviewHostingLeaseId.make(preview.id),
-                    url: preview.url,
-                  })
-                : hosting.launch({
-                    threadId: preview.threadId,
-                    command: preview.command,
-                    cwd: preview.cwd,
-                    worktreePath: preview.worktreePath,
-                    url: preview.url,
-                  })
-            ).pipe(Effect.result, Effect.forkScoped);
-            yield* Deferred.await(wrote);
-            yield* hosting.stopThread("thread-1");
-            const cancelled = yield* Fiber.join(pending);
-            if (operation === "recover") {
-              assert.equal(cancelled._tag, "Success");
-              if (cancelled._tag === "Success") assert.isNull(cancelled.success);
-            } else {
-              assert.equal(cancelled._tag, "Failure");
-              if (cancelled._tag === "Failure") {
-                assert.equal(cancelled.failure._tag, "PreviewHostingError");
-              }
+  it.effect.each([
+    ["launch", "stop"],
+    ["recover", "stop"],
+    ["launch", "archive"],
+    ["recover", "archive"],
+  ] as const)("cancels %s while waiting for readiness on %s cleanup", ([operation, cleanup]) =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(1_000);
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({
+        prefix: "preview-hosting-stop-readiness-",
+      });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const preview = leaseFixture();
+      yield* fs.makeDirectory(config.stateDir, { recursive: true });
+      yield* fs.writeFileString(
+        `${config.stateDir}/preview-hosting.json`,
+        encodePersistedHostingState({ version: 1, leases: [preview] }),
+      );
+      const wrote = yield* Deferred.make<void>();
+      const harness = testTerminalHarness({
+        summaries: [terminalFixture("thread-1", "ordinary-terminal")],
+        onWrite: () => Deferred.succeed(wrote, undefined).pipe(Effect.asVoid),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const pending = yield* (
+            operation === "recover"
+              ? hosting.recover({
+                  threadId: "thread-1",
+                  leaseId: PreviewHostingLeaseId.make(preview.id),
+                  url: preview.url,
+                })
+              : hosting.launch({
+                  threadId: preview.threadId,
+                  command: preview.command,
+                  cwd: preview.cwd,
+                  worktreePath: preview.worktreePath,
+                  url: preview.url,
+                })
+          ).pipe(Effect.result, Effect.forkScoped);
+          yield* Deferred.await(wrote);
+          if (cleanup === "archive") yield* hosting.removeThread("thread-1");
+          else yield* hosting.stopThread("thread-1");
+          const cancelled = yield* Fiber.join(pending);
+          if (operation === "recover") {
+            assert.equal(cancelled._tag, "Success");
+            if (cancelled._tag === "Success") assert.isNull(cancelled.success);
+          } else {
+            assert.equal(cancelled._tag, "Failure");
+            if (cancelled._tag === "Failure") {
+              assert.equal(cancelled.failure._tag, "PreviewHostingError");
             }
-            assert.deepEqual(harness.summaries, []);
-            assert.deepEqual(yield* hosting.list(), []);
-            assert.include(
-              harness.closes.map((terminal) => terminal.terminalId),
-              "ordinary-terminal",
-            );
-          }).pipe(Effect.provide(hostingLayer(config, harness, false))),
-        );
-      }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+          }
+          assert.deepEqual(
+            harness.summaries.map((item) => item.terminalId),
+            cleanup === "archive" ? ["ordinary-terminal"] : [],
+          );
+          assert.deepEqual(yield* hosting.list(), []);
+          assert.equal(
+            harness.closes.some((terminal) => terminal.terminalId === "ordinary-terminal"),
+            cleanup === "stop",
+          );
+        }).pipe(Effect.provide(hostingLayer(config, harness, false))),
+      );
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
 
   it.effect(
@@ -2427,7 +2659,7 @@ describe("PreviewHosting", () => {
           subscribe: () => Deferred.succeed(waitingForReadiness, undefined).pipe(Effect.asVoid),
           retain: Effect.void,
         });
-        const layer = PreviewHosting.layer.pipe(
+        const layer = testHostingLayer.pipe(
           Layer.provide(WorkspaceAcquisitionTestkit.layer),
           Layer.provide(fileSystem),
           Layer.provideMerge(
@@ -3322,7 +3554,7 @@ describe("PreviewHosting", () => {
           }),
         retain: Effect.void,
       });
-      const layer = PreviewHosting.layer.pipe(
+      const layer = testHostingLayer.pipe(
         Layer.provide(WorkspaceAcquisitionTestkit.layer),
         Layer.provide(fileSystemLayer),
         Layer.provideMerge(
@@ -4086,7 +4318,7 @@ describe("PreviewHosting", () => {
               return listening;
             }),
         });
-        const layer = PreviewHosting.layer.pipe(
+        const layer = testHostingLayer.pipe(
           Layer.provide(WorkspaceAcquisitionTestkit.layer),
           Layer.provideMerge(
             Layer.mergeAll(
@@ -4185,7 +4417,7 @@ describe("PreviewHosting", () => {
         pid: 100,
         terminal: { threadId: ThreadId.make(saved.threadId), terminalId: saved.terminalId },
       };
-      const layer = PreviewHosting.layer.pipe(
+      const layer = testHostingLayer.pipe(
         Layer.provide(WorkspaceAcquisitionTestkit.layer),
         Layer.provideMerge(
           Layer.mergeAll(
@@ -4340,7 +4572,7 @@ describe("PreviewHosting", () => {
             }),
           retain: Effect.void,
         });
-        const layer = PreviewHosting.layer.pipe(
+        const layer = testHostingLayer.pipe(
           Layer.provide(WorkspaceAcquisitionTestkit.layer),
           Layer.provideMerge(
             Layer.mergeAll(
@@ -4483,7 +4715,7 @@ describe("PreviewHosting", () => {
             ),
           retain: Effect.void,
         });
-        const layer = PreviewHosting.layer.pipe(
+        const layer = testHostingLayer.pipe(
           Layer.provide(WorkspaceAcquisitionTestkit.layer),
           Layer.provideMerge(
             Layer.mergeAll(

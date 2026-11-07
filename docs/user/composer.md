@@ -435,9 +435,9 @@ can break the preview, so save a copy if you need to keep it.
 
 ## Preview links
 
-Managed QA previews stay available for 24 hours after handoff. Opening one
-restarts its temporary server if needed; the server stops automatically when
-that window ends. Viewing does not extend the window. Open the link from its
+Managed QA preview servers sleep after 24 hours of inactivity; opening a retained link restarts
+the server. Archiving the thread or automatically suspending its workspace ends
+the preview, so its old link cannot restart it. Open a retained link from its
 thread so LastCode can restore it before opening either browser. Remote viewing
 still requires the server to be reachable from your device.
 

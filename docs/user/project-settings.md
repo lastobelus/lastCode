@@ -220,6 +220,7 @@ agent-created children, or other threads. These choices start Off. A separate ch
 can suspend while its parent remains open; a shared checkout stays until every owner qualifies.
 The delay starts from settlement or the last workspace use or restore, whichever is later. An
 archived thread that never settled counts from its archive time instead of settlement.
+Automatic suspension closes the eligible owners' previews before saving the workspace.
 Project **Off** pauses automatic suspension as well as cleanup.
 
 You can also choose **Suspend worktree** from a thread's menu. Staged changes, unstaged changes

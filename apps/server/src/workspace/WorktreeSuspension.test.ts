@@ -12,6 +12,7 @@ import {
   GitCommandError,
   OrchestrationV2ThreadShell,
   ProjectId,
+  RunId,
   ThreadId,
   type OrchestrationV2ServerCommand,
   type WorktreeSuspensionTransitionInput,
@@ -146,6 +147,8 @@ const harness = (
     occupyRestoreOnBarrier?: boolean;
     occupyRecoveryOnBarrier?: boolean;
     deleteRecoveryAfterPublication?: boolean;
+    previews?: Array<{ threadId: string; workspacePath: string }>;
+    terminals?: Effect.Success<TerminalManager.TerminalManager["Service"]["refreshMetadata"]>;
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -177,6 +180,10 @@ const harness = (
       deletedAt: null,
     };
     const projects = [project];
+    const previewLeases = [...(options.previews ?? [])];
+    const terminalRecords = [...(options.terminals ?? [])];
+    const previewReleases: string[] = [];
+    let onPreviewRelease: ((threadId: string) => void) | undefined;
     let settings = options.settings ?? DEFAULT_SERVER_SETTINGS;
     let registerWhenIsolated: string | null = null;
     let failedPublication = false;
@@ -389,9 +396,44 @@ const harness = (
           Layer.mock(Cleanup.WorktreeCleanupService)({
             historicalWorktreeOwners: Effect.sync(() => options.historicalOwners ?? []),
           }),
-          Layer.mock(TerminalManager.TerminalManager)({ refreshMetadata: Effect.succeed([]) }),
+          Layer.mock(TerminalManager.TerminalManager)({
+            refreshMetadata: Effect.sync(() => [...terminalRecords]),
+          }),
           Layer.mock(PreviewHosting.PreviewHosting)({
-            protectedWorkspacePaths: () => Effect.succeed([]),
+            protectedWorkspacePaths: () =>
+              Effect.sync(() => previewLeases.map((lease) => lease.workspacePath)),
+            list: () =>
+              Effect.sync(() =>
+                previewLeases.map((lease) => ({
+                  id: `preview-${lease.threadId}`,
+                  threadId: lease.threadId,
+                  terminalId: `preview-${lease.threadId}`,
+                  command: "fixture",
+                  cwd: lease.workspacePath,
+                  worktreePath: lease.workspacePath,
+                  url: "http://127.0.0.1:1234/",
+                  handedOffAt: DateTime.formatIso(at),
+                  expiresAt: DateTime.formatIso(at),
+                  status: "active" as const,
+                })),
+              ),
+            removeThreadWorkspace: (threadId, workspacePath) =>
+              Effect.sync(() => {
+                previewReleases.push(threadId);
+                for (let index = previewLeases.length - 1; index >= 0; index--)
+                  if (
+                    previewLeases[index]!.threadId === threadId &&
+                    previewLeases[index]!.workspacePath === workspacePath
+                  ) {
+                    previewLeases.splice(index, 1);
+                    const terminal = terminalRecords.findIndex(
+                      (entry) =>
+                        entry.threadId === threadId && entry.terminalId === `preview-${threadId}`,
+                    );
+                    if (terminal >= 0) terminalRecords.splice(terminal, 1);
+                  }
+                onPreviewRelease?.(threadId);
+              }),
           }),
           Layer.mock(ServerSettings.ServerSettingsService)({
             getSettings: Effect.sync(() => settings),
@@ -453,6 +495,11 @@ const harness = (
       acquisition,
       lifecycle,
       threads,
+      previewLeases,
+      previewReleases,
+      onPreviewRelease: (callback: (threadId: string) => void) => {
+        onPreviewRelease = callback;
+      },
       setSettings: (next: SettingsValue) => {
         settings = next;
       },
@@ -2224,6 +2271,151 @@ it.live(
     ),
 );
 
+it.live("automatically releases eligible owners' previews before saving their workspace", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, {
+        cleanupThreads: true,
+        settings: automaticSettings,
+        previews: [{ threadId: firstId, workspacePath: f.workspace }],
+        terminals: [
+          {
+            threadId: firstId,
+            terminalId: `preview-${firstId}`,
+            cwd: f.workspace,
+            worktreePath: f.workspace,
+            status: "running",
+            pid: 100,
+            exitCode: null,
+            exitSignal: null,
+            hasRunningSubprocess: true,
+            label: "preview",
+            updatedAt: DateTime.formatIso(at),
+          },
+        ],
+      });
+      untouchedOwners(h.threads);
+      yield* h.service.sweep;
+      expect(h.previewLeases).toEqual([]);
+      expect((yield* h.registry.list)[0]!.summary.state).toBe("suspended");
+    }),
+  ),
+);
+
+it.live("keeps previews when a shared owner is ineligible for automatic suspension", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, {
+        cleanupThreads: true,
+        settings: automaticSettings,
+        previews: [{ threadId: firstId, workspacePath: f.workspace }],
+      });
+      untouchedOwners(h.threads);
+      h.threads.set(secondId, {
+        ...h.threads.get(secondId)!,
+        createdBy: "user",
+        workspaceUserAdopted: true,
+      });
+      yield* h.service.sweep;
+      expect(h.previewLeases).toHaveLength(1);
+      expect(h.previewReleases).toEqual([]);
+    }),
+  ),
+);
+
+it.live("keeps previews when historical workspace ownership prevents suspension", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, {
+        cleanupThreads: true,
+        settings: automaticSettings,
+        historicalOwners: [
+          { threadId: "fixture:former", projectId, worktreePath: f.workspace, branch: "former" },
+        ],
+        previews: [{ threadId: firstId, workspacePath: f.workspace }],
+      });
+      untouchedOwners(h.threads);
+      yield* h.service.sweep;
+      expect(h.previewLeases).toHaveLength(1);
+      expect(h.previewReleases).toEqual([]);
+    }),
+  ),
+);
+
+it.live("keeps previews while an unrelated terminal uses the workspace", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, {
+        cleanupThreads: true,
+        settings: automaticSettings,
+        previews: [{ threadId: firstId, workspacePath: f.workspace }],
+        terminals: [
+          {
+            threadId: firstId,
+            terminalId: "ordinary-terminal",
+            cwd: f.workspace,
+            worktreePath: f.workspace,
+            status: "running",
+            pid: 100,
+            exitCode: null,
+            exitSignal: null,
+            hasRunningSubprocess: true,
+            label: "ordinary-terminal",
+            updatedAt: DateTime.formatIso(at),
+          },
+        ],
+      });
+      untouchedOwners(h.threads);
+      yield* h.service.sweep;
+      expect(h.previewLeases).toHaveLength(1);
+      expect(h.previewReleases).toEqual([]);
+    }),
+  ),
+);
+
+it.live("does not release an unrelated owner's preview of an eligible workspace", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, {
+        cleanupThreads: true,
+        settings: automaticSettings,
+        previews: [{ threadId: "fixture:other", workspacePath: f.workspace }],
+      });
+      untouchedOwners(h.threads);
+      yield* h.service.sweep;
+      expect(h.previewLeases).toHaveLength(1);
+      expect(h.previewReleases).not.toContain("fixture:other");
+      expect((yield* h.registry.list)[0]!.summary.state).toBe("active");
+    }),
+  ),
+);
+
+it.live("stops releasing previews when an owner becomes active during cleanup", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, {
+        cleanupThreads: true,
+        settings: automaticSettings,
+        previews: [
+          { threadId: firstId, workspacePath: f.workspace },
+          { threadId: secondId, workspacePath: f.workspace },
+        ],
+      });
+      untouchedOwners(h.threads);
+      h.onPreviewRelease((threadId) => {
+        if (threadId === firstId)
+          h.threads.set(secondId, {
+            ...h.threads.get(secondId)!,
+            activeRunId: RunId.make("fixture:run"),
+          });
+      });
+      yield* h.service.sweep;
+      expect(h.previewLeases.map((lease) => lease.threadId)).toEqual([secondId]);
+      expect((yield* h.registry.list)[0]!.summary.state).toBe("active");
+    }),
+  ),
+);
+
 it.live.each(["original", "isolated"] as const)(
   "retains interrupted isolation when a project claims the %s path",
   (claim) =>
@@ -3014,6 +3206,65 @@ it.live("remembers unverified workspace use across restart and later Git repair"
       const record = (yield* restarted.registry.list)[0]!;
       expect(record.summary.state).toBe("active");
       expect(record.lastWorkspaceUseAt).toBeDefined();
+    }),
+  ),
+);
+
+it.live("keeps one checkout record for simultaneous first workspace uses", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, {
+        settings: { ...automaticSettings, worktreeSuspension: { mode: "off" } },
+      });
+      yield* Effect.forEach(
+        [firstId, secondId],
+        (threadId) => h.acquisition.acquire({ path: f.workspace, purpose: "editor", threadId }),
+        { concurrency: 2 },
+      );
+      const records = yield* h.registry.list;
+      expect(records).toHaveLength(1);
+      expect(records[0]!.lastWorkspaceUseAt).toBeDefined();
+    }),
+  ),
+);
+
+it.live("keeps recent use safe when first identification races an automatic sweep", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, { cleanupThreads: true, settings: automaticSettings });
+      untouchedOwners(h.threads);
+      yield* Effect.all(
+        [
+          h.service.sweep,
+          h.acquisition.acquire({ path: f.workspace, purpose: "editor", threadId: firstId }),
+        ],
+        { concurrency: 2 },
+      );
+      const records = yield* h.registry.list;
+      expect(records).toHaveLength(1);
+      expect(records[0]!.summary.state).toBe("active");
+      expect(records[0]!.lastWorkspaceUseAt).toBeDefined();
+      expect(
+        yield* Effect.promise(() =>
+          NodeFSP.readFile(NodePath.join(f.workspace, "tracked"), "utf8"),
+        ),
+      ).toBe("working\n");
+    }),
+  ),
+);
+
+it.live("allows use of an active recorded checkout when Git metadata becomes unavailable", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, {
+        settings: { ...automaticSettings, worktreeSuspension: { mode: "off" } },
+      });
+      yield* h.acquisition.acquire({ path: f.workspace, purpose: "editor", threadId: firstId });
+      yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(f.workspace, ".git"), "broken"));
+      expect(
+        yield* h.acquisition.acquire({ path: f.workspace, purpose: "editor", threadId: firstId }),
+      ).toMatchObject({ path: f.workspace, branch: null, restored: false });
+      expect((yield* h.registry.list)[0]!.lastWorkspaceUseAt).toBeDefined();
     }),
   ),
 );

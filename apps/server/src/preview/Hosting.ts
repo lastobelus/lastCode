@@ -39,6 +39,7 @@ import * as TerminalManager from "../terminal/Manager.ts";
 import * as HostingAuth from "./HostingAuth.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import * as WorkspaceAcquisition from "../workspace/WorkspaceAcquisition.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 
 export const PREVIEW_HOSTING_LEASE_MS = 24 * 60 * 60 * 1_000;
 const WARM_PROCESS_LIMIT = 8;
@@ -195,6 +196,10 @@ export class PreviewHosting extends Context.Service<
     readonly removeThread: (
       threadId: string,
     ) => Effect.Effect<void, PreviewHostingError | TerminalManager.TerminalError>;
+    readonly removeThreadWorkspace: (
+      threadId: string,
+      workspacePath: string,
+    ) => Effect.Effect<void, PreviewHostingError | TerminalManager.TerminalError>;
     readonly stopThread: (
       threadId: string,
     ) => Effect.Effect<
@@ -255,6 +260,7 @@ const discoveryPortKey = (value: string): string => {
 
 const make = Effect.gen(function* () {
   const workspaceAcquisition = yield* WorkspaceAcquisition.WorkspaceAcquisition;
+  const projections = yield* ProjectionStore.ProjectionStoreV2;
   const random = yield* SecureRandom.SecureRandom;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -1119,6 +1125,20 @@ const make = Effect.gen(function* () {
   // Only same-thread reservations wait for terminal cleanup. Readiness stays
   // outside this lock so cleanup can cancel launches and recoveries immediately.
   const threadLocks = yield* KeyedLock.make<string>();
+  const ownerIsArchived = (threadId: string) =>
+    projections.getThread(ThreadId.make(threadId)).pipe(
+      Effect.map((thread) => thread.archivedAt !== null || thread.deletedAt !== null),
+      Effect.mapError(
+        (cause) =>
+          new PreviewHostingError({
+            operation: "validate",
+            statePath,
+            threadId,
+            detail: "Preview owner unavailable.",
+            cause,
+          }),
+      ),
+    );
   const launchGate = yield* Semaphore.make(1);
   const launch: PreviewHosting["Service"]["launch"] = Effect.fn("PreviewHosting.launch")(
     function* (requestedInput) {
@@ -1153,6 +1173,14 @@ const make = Effect.gen(function* () {
           withWorkspaceLease(
             path.resolve(input.worktreePath ?? input.cwd),
             Effect.gen(function* () {
+              if (yield* ownerIsArchived(input.threadId)) {
+                return yield* new PreviewHostingError({
+                  operation: "validate",
+                  statePath,
+                  threadId: input.threadId,
+                  detail: "Thread is archived.",
+                });
+              }
               input = yield* acquirePreviewInput(input);
               if (startupError !== null) return yield* startupError;
               const normalizedUrl = normalizeLocalHttpUrl(input.url);
@@ -1324,6 +1352,15 @@ const make = Effect.gen(function* () {
   const recover: PreviewHosting["Service"]["recover"] = Effect.fn("PreviewHosting.recover")(
     function* (input) {
       if (startupError !== null) return yield* startupError;
+      const archived = yield* threadLocks.withLock(
+        input.threadId,
+        Effect.gen(function* () {
+          if (!(yield* ownerIsArchived(input.threadId))) return false;
+          yield* removeThreadLocked(input.threadId);
+          return true;
+        }),
+      );
+      if (archived) return null;
       const normalizedUrl = normalizeLocalHttpUrl(input.url);
       if (normalizedUrl === null) return null;
       const leases = yield* SynchronizedRef.get(leasesRef);
@@ -1383,15 +1420,20 @@ const make = Effect.gen(function* () {
     );
   });
 
-  const removeThreadLocked = Effect.fnUntraced(function* (threadId: string) {
+  const removeThreadLocked = Effect.fnUntraced(function* (
+    threadId: string,
+    leaseIds?: ReadonlySet<string>,
+  ) {
     if (startupError !== null) return yield* startupError;
     const { owned, cancellation } = yield* persistLock.withPermit(
       Effect.uninterruptible(
         Effect.gen(function* () {
           const current = yield* SynchronizedRef.get(leasesRef);
-          const owned = current.filter((lease) => lease.threadId === threadId);
+          const matches = (lease: PreviewHostingLease) =>
+            lease.threadId === threadId && (leaseIds === undefined || leaseIds.has(lease.id));
+          const owned = current.filter(matches);
           const next = current.map((lease) =>
-            lease.threadId === threadId ? { ...lease, status: "expired" as const } : lease,
+            matches(lease) ? { ...lease, status: "expired" as const } : lease,
           );
           const cancellation = yield* (owned.length === 0 ? Effect.void : persistState(next)).pipe(
             Effect.result,
@@ -1426,6 +1468,47 @@ const make = Effect.gen(function* () {
 
   const removeThread: PreviewHosting["Service"]["removeThread"] = (threadId) =>
     threadLocks.withLock(threadId, removeThreadLocked(threadId));
+
+  const removeThreadWorkspace: PreviewHosting["Service"]["removeThreadWorkspace"] = (
+    threadId,
+    workspacePath,
+  ) =>
+    threadLocks.withLock(
+      threadId,
+      Effect.gen(function* () {
+        if (startupError !== null) return yield* startupError;
+        const root = yield* canonicalWorkspacePath(workspacePath).pipe(
+          Effect.mapError(
+            (cause) =>
+              new PreviewHostingError({ operation: "validate", statePath, threadId, cause }),
+          ),
+        );
+        const owned = (yield* SynchronizedRef.get(leasesRef)).filter(
+          (lease) => lease.threadId === threadId,
+        );
+        const matching = yield* Effect.forEach(owned, (lease) =>
+          canonicalWorkspacePath(lease.worktreePath ?? lease.cwd).pipe(
+            Effect.map((candidate) => {
+              const relative = path.relative(root, candidate);
+              return lease.worktreePath === null
+                ? relative === "" ||
+                    (!relative.startsWith(`..${path.sep}`) &&
+                      relative !== ".." &&
+                      !path.isAbsolute(relative))
+                : relative === "";
+            }),
+            Effect.mapError(
+              (cause) =>
+                new PreviewHostingError({ operation: "validate", statePath, threadId, cause }),
+            ),
+          ),
+        );
+        yield* removeThreadLocked(
+          threadId,
+          new Set(owned.filter((_, index) => matching[index]).map((lease) => lease.id)),
+        );
+      }),
+    );
 
   const stopThread: PreviewHosting["Service"]["stopThread"] = (threadId) =>
     threadLocks.withLock(
@@ -1490,8 +1573,33 @@ const make = Effect.gen(function* () {
     return currentTime;
   });
 
+  const pendingReconciliation = new Set(initialLeases.map((lease) => lease.threadId));
+  const reconcileArchivedOwners = Effect.suspend(() =>
+    Effect.forEach(
+      [...pendingReconciliation],
+      (threadId) =>
+        threadLocks
+          .withLock(
+            threadId,
+            Effect.gen(function* () {
+              if (yield* ownerIsArchived(threadId)) yield* removeThreadLocked(threadId);
+              pendingReconciliation.delete(threadId);
+            }),
+          )
+          .pipe(
+            Effect.catch((error) =>
+              Effect.logWarning("failed to reconcile preview owner; cleanup will retry", {
+                threadId,
+                error: error.message,
+              }),
+            ),
+          ),
+      { concurrency: 4, discard: true },
+    ),
+  );
   const expiryWorker = Effect.forever(
     Effect.gen(function* () {
+      yield* reconcileArchivedOwners;
       const checkedAt = yield* expireDueLeases();
       const now = yield* nowMillis;
       const leases = yield* SynchronizedRef.get(leasesRef);
@@ -1512,9 +1620,10 @@ const make = Effect.gen(function* () {
       );
       const activeDelayMs =
         activeExpiry.length === 0 ? undefined : Math.max(0, Math.min(...activeExpiry) - now);
-      const delayMs = failedCleanupPending
-        ? Math.min(EXPIRED_TERMINAL_RETRY_MS, activeDelayMs ?? EXPIRED_TERMINAL_RETRY_MS)
-        : activeDelayMs;
+      const delayMs =
+        failedCleanupPending || pendingReconciliation.size > 0
+          ? Math.min(EXPIRED_TERMINAL_RETRY_MS, activeDelayMs ?? EXPIRED_TERMINAL_RETRY_MS)
+          : activeDelayMs;
       if (delayMs === undefined) {
         yield* Queue.take(wakeups);
       } else {
@@ -1523,6 +1632,7 @@ const make = Effect.gen(function* () {
     }),
   );
 
+  yield* reconcileArchivedOwners;
   yield* expireDueLeases();
   yield* Effect.forkScoped(expiryWorker);
 
@@ -1606,6 +1716,7 @@ const make = Effect.gen(function* () {
     subscribe,
     ownsTerminal,
     removeThread,
+    removeThreadWorkspace,
     stopThread,
     protectedWorkspacePaths,
   });
