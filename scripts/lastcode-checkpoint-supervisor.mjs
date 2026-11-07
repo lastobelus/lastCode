@@ -483,50 +483,29 @@ export function checkpointResolvedMessage(incident) {
   return `Automated LastCode checkpoint maintenance resolved alert ${incident.fingerprint.slice(0, 12)}${nightly}. The checkpoint service completed successfully again.`;
 }
 
-// Use the CLI from the pinned source checkout; the generated lastcode-thread
-// wrapper runs whatever branch the primary checkout happens to have. When a
-// failed dependency install stops that CLI from loading, nothing was dispatched,
-// so the installed app's self-contained CLI can still report the failure.
-function sendThread(repoRoot, home, threadId, message, environment) {
-  const args = [
-    "thread",
-    "send",
-    "--base-dir",
-    NodePath.join(home, ".lastcode"),
-    "--state-dir",
-    NodePath.join(home, ".lastcode", "userdata"),
-    threadId,
-    "--message",
-    message,
-    "--json",
-  ];
-  // The CLI logs its errors to stdout; stderr carries only runtime warnings.
-  const options = { capture: true, stdoutDiagnostic: true };
-  try {
-    runCommand(
-      "alert-delivery",
-      repoRoot,
-      process.execPath,
-      [NodePath.join(repoRoot, "apps", "server", "src", "bin.ts"), ...args],
-      environment,
-      options,
-    );
-  } catch (error) {
-    if (
-      !(error instanceof CommandFailure) ||
-      !/ERR_MODULE_NOT_FOUND|Cannot find (?:module|package)/u.test(error.diagnostic ?? "")
-    ) {
-      throw error;
-    }
-    runCommand(
-      "alert-delivery",
-      home,
-      NodePath.join(home, ".lastcode", "bin", "t3"),
-      args,
-      environment,
-      options,
-    );
-  }
+// The CLI opens and migrates the live database, so it must be the installed
+// app's own build. Source checkouts can carry migrations the app lacks.
+function sendThread(home, threadId, message, environment) {
+  runCommand(
+    "alert-delivery",
+    home,
+    NodePath.join(home, ".lastcode", "bin", "t3"),
+    [
+      "thread",
+      "send",
+      "--base-dir",
+      NodePath.join(home, ".lastcode"),
+      "--state-dir",
+      NodePath.join(home, ".lastcode", "userdata"),
+      threadId,
+      "--message",
+      message,
+      "--json",
+    ],
+    environment,
+    // The CLI logs its errors to stdout; stderr carries only runtime warnings.
+    { capture: true, stdoutDiagnostic: true },
+  );
 }
 
 function deliveryFailure(error) {
@@ -924,7 +903,7 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
       retainedRecoveryMatches(repoRoot, checkpointRun, environment),
     refreshSupervisor: () => refreshInstalledSupervisor(repoRoot, installedSupervisorPath),
     runPhase: (phase, command, args) => runCommand(phase, repoRoot, command, args, environment),
-    sendThread: (threadId, message) => sendThread(repoRoot, home, threadId, message, environment),
+    sendThread: (threadId, message) => sendThread(home, threadId, message, environment),
     writeState: (state) => writeJsonAtomic(paths.statePath, state),
     writeActivity: (activity) => {
       NodeFS.mkdirSync(NodePath.dirname(paths.activityPath), { recursive: true, mode: 0o700 });

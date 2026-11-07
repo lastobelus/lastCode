@@ -1244,22 +1244,24 @@ describe("LastCode checkpoint supervisor", () => {
     });
   });
 
-  it("sends through the pinned checkout's CLI and classifies the error it logs on stdout", () => {
+  it("sends through the installed app's CLI and classifies the error it logs on stdout", () => {
     using warning = vi.spyOn(console, "error").mockImplementation(() => {});
-    const repoRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "supervisor-cli-"));
+    const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "supervisor-cli-"));
     try {
-      const argvPath = NodePath.join(repoRoot, "argv.json");
-      const entry = NodePath.join(repoRoot, "apps", "server", "src", "bin.ts");
-      NodeFS.mkdirSync(NodePath.dirname(entry), { recursive: true });
+      const argvPath = NodePath.join(home, "argv");
+      const installed = NodePath.join(home, ".lastcode", "bin", "t3");
+      NodeFS.mkdirSync(NodePath.dirname(installed), { recursive: true });
       NodeFS.writeFileSync(
-        entry,
+        installed,
         [
-          'import * as NodeFS from "node:fs";',
-          `NodeFS.writeFileSync(${JSON.stringify(argvPath)}, JSON.stringify(process.argv.slice(2)));`,
-          'process.stderr.write("(node:1) ExperimentalWarning: SQLite is an experimental feature\\n");',
-          "process.stdout.write(\"ERROR (#2): ThreadSendTargetError: LastCode thread 'thread-maintenance' was not found.\\n\");",
-          "process.exit(1);",
+          "#!/bin/sh",
+          `printf '%s\\n' "$@" > ${JSON.stringify(argvPath)}`,
+          "echo '(node:1) ExperimentalWarning: SQLite is an experimental feature' >&2",
+          "echo \"ERROR (#2): ThreadSendTargetError: LastCode thread 'thread-maintenance' was not found.\"",
+          "exit 1",
+          "",
         ].join("\n"),
+        { mode: 0o700 },
       );
       const failed = fixture({
         dependencies: {
@@ -1270,65 +1272,9 @@ describe("LastCode checkpoint supervisor", () => {
       });
       delete failed.dependencies.sendThread;
 
-      expect(() =>
-        runCheckpointSupervisor({ home: "/example/home", repoRoot }, failed.dependencies),
-      ).toThrow("fetch failed");
+      expect(() => runCheckpointSupervisor({ home }, failed.dependencies)).toThrow("fetch failed");
 
-      expect(JSON.parse(NodeFS.readFileSync(argvPath, "utf8"))).toEqual([
-        "thread",
-        "send",
-        "--base-dir",
-        "/example/home/.lastcode",
-        "--state-dir",
-        "/example/home/.lastcode/userdata",
-        "thread-maintenance",
-        "--message",
-        expect.stringContaining("Automated LastCode checkpoint maintenance alert"),
-        "--json",
-      ]);
-      expect(failed.state.incident.alertDelivery).toBe("rejected");
-      expect(warning).toHaveBeenCalledWith(
-        expect.stringContaining("LastCode thread 'thread-maintenance' was not found."),
-      );
-    } finally {
-      NodeFS.rmSync(repoRoot, { recursive: true, force: true });
-    }
-  });
-
-  it("falls back to the installed CLI when the pinned checkout cannot load its dependencies", () => {
-    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "supervisor-cli-fallback-"));
-    try {
-      const repoRoot = NodePath.join(root, "checkout");
-      const home = NodePath.join(root, "home");
-      const argvPath = NodePath.join(root, "argv");
-      const entry = NodePath.join(repoRoot, "apps", "server", "src", "bin.ts");
-      const installed = NodePath.join(home, ".lastcode", "bin", "t3");
-      NodeFS.mkdirSync(NodePath.dirname(entry), { recursive: true });
-      NodeFS.mkdirSync(NodePath.dirname(installed), { recursive: true });
-      NodeFS.writeFileSync(
-        entry,
-        "process.stderr.write(\"Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'effect'\\n\");\nprocess.exit(1);\n",
-      );
-      NodeFS.writeFileSync(
-        installed,
-        `#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(argvPath)}\necho '{"kind":"accepted"}'\n`,
-        { mode: 0o700 },
-      );
-      const failed = fixture({
-        dependencies: {
-          runPhase: () => {
-            throw new Error("dependency installation failed");
-          },
-        },
-      });
-      delete failed.dependencies.sendThread;
-
-      expect(() => runCheckpointSupervisor({ home, repoRoot }, failed.dependencies)).toThrow(
-        "dependency installation failed",
-      );
-
-      const argv = NodeFS.readFileSync(argvPath, "utf8").split("\n");
-      expect(argv.slice(0, 7)).toEqual([
+      expect(NodeFS.readFileSync(argvPath, "utf8").split("\n").slice(0, 7)).toEqual([
         "thread",
         "send",
         "--base-dir",
@@ -1337,9 +1283,12 @@ describe("LastCode checkpoint supervisor", () => {
         NodePath.join(home, ".lastcode", "userdata"),
         "thread-maintenance",
       ]);
-      expect(failed.state.incident.alertDelivery).toBe("sent");
+      expect(failed.state.incident.alertDelivery).toBe("rejected");
+      expect(warning).toHaveBeenCalledWith(
+        expect.stringContaining("LastCode thread 'thread-maintenance' was not found."),
+      );
     } finally {
-      NodeFS.rmSync(root, { recursive: true, force: true });
+      NodeFS.rmSync(home, { recursive: true, force: true });
     }
   });
 
