@@ -59,6 +59,7 @@ import * as UpdateDrain from "../updateDrain/UpdateDrain.ts";
 import * as UpdateDrainRepository from "../persistence/UpdateDrainRepository.ts";
 import * as ServerOwnerLease from "../serverOwnerLease.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+import * as SuspensionRegistryTestkit from "../workspace/WorktreeSuspensionRegistry.testkit.ts";
 
 const isProjectOperationError = Schema.is(ProjectService.ProjectOperationError);
 const isUpdateDrainAdmissionError = Schema.is(UpdateDrainAdmissionError);
@@ -178,6 +179,7 @@ const readProjects = (baseDir: string) =>
       Layer.provideMerge(ProjectFaviconResolver.layer),
       Layer.provideMerge(T3ProjectFileLoader.layer),
       Layer.provideMerge(WorkspacePaths.layer),
+      Layer.provideMerge(SuspensionRegistryTestkit.layer),
       Layer.provideMerge(
         ServerSettings.layer.pipe(
           Layer.provide(Layer.merge(ServerSecretStore.layer, ManagedPolicy.layerTest())),

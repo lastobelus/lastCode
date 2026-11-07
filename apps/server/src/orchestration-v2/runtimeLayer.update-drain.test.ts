@@ -23,6 +23,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import { TerminalManager } from "../terminal/Manager.ts";
 import { UpdateDrainAdmission } from "../updateDrain/UpdateDrainAdmission.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+import * as SuspensionRegistryTestkit from "../workspace/WorktreeSuspensionRegistry.testkit.ts";
 import * as RuntimeLayer from "./runtimeLayer.ts";
 
 const enrichment = {
@@ -65,6 +66,7 @@ const layer = Layer.mergeAll(
   Layer.provide(ServerSettings.layerTest()),
   Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "admission-wiring-" })),
   Layer.provide(WorkspaceAcquisitionTestkit.layer),
+  Layer.provide(SuspensionRegistryTestkit.layer),
   Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
 );
 

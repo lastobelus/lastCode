@@ -45,6 +45,8 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as UpdateDrainAdmissionTestkit from "../updateDrain/UpdateDrainAdmission.testkit.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { withProjectRootLease } from "../workspace/projectRootLease.ts";
+import * as SuspensionRegistry from "../workspace/WorktreeSuspensionRegistry.ts";
+import * as SuspensionRegistryTestkit from "../workspace/WorktreeSuspensionRegistry.testkit.ts";
 import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
 import * as ProjectFaviconResolver from "./ProjectFaviconResolver.ts";
 import * as ProjectService from "./ProjectService.ts";
@@ -115,6 +117,7 @@ const layerTestFor = (
     Layer.provideMerge(ServerSettings.layerTest()),
     Layer.provideMerge(ProjectEnrichmentService.layer),
     Layer.provideMerge(layerWorkspacePaths),
+    Layer.provideMerge(SuspensionRegistryTestkit.layer),
     Layer.provideMerge(projectMetadataLayer),
     Layer.provideMerge(SqlitePersistence.layerMemory),
     Layer.provideMerge(ServerSettings.layerTest()),
@@ -209,6 +212,7 @@ it.effect("resolves only the requested active project page in creation order", (
 
 const layerProjectServiceDependencies = Layer.mergeAll(
   UpdateDrainAdmissionTestkit.layerOpen,
+  SuspensionRegistryTestkit.layer,
   RuntimeLayer.layerEventSink,
   ProjectStore.layer,
   ProjectionStore.layer,
@@ -855,6 +859,124 @@ it.effect("invalidates workspace-derived metadata when a project moves", () =>
       );
     }).pipe(Effect.provide(layerTestFor(layerVersionedMetadata)));
   }),
+);
+
+it.effect.each(["suspended", "interrupted capture"] as const)(
+  "does not recreate a missing workspace protected by %s",
+  (state) =>
+    Effect.gen(function* () {
+      let created = false;
+      const registry = yield* SuspensionRegistry.WorktreeSuspensionRegistry;
+      yield* registry.put(
+        {
+          checkoutId: "fixture-saved-workspace",
+          repositoryRoot: "/work/repository",
+          path: "/work/saved-workspace",
+          aliases: ["/work/saved-workspace"],
+          owners: [],
+          summary: {
+            checkoutId: "fixture-saved-workspace",
+            generation: 1,
+            state: state === "suspended" ? "suspended" : "capturing",
+            snapshotId: "fixture-snapshot",
+            lastRestoredAt: null,
+            keepWorkspace: false,
+          },
+          history: [],
+          blockedReason: null,
+        },
+        null,
+      );
+      const service = yield* ProjectService.make.pipe(
+        Effect.provideService(WorkspacePaths.WorkspacePaths, {
+          resolveRelativePathWithinRoot: ({ workspaceRoot, relativePath }) =>
+            Effect.succeed({ absolutePath: `${workspaceRoot}/${relativePath}`, relativePath }),
+          normalizeWorkspaceRoot: (workspaceRoot, options) =>
+            options?.createIfMissing
+              ? Effect.sync(() => {
+                  created = true;
+                  return workspaceRoot;
+                })
+              : Effect.fail(
+                  new WorkspacePaths.WorkspaceRootNotExistsError({
+                    workspaceRoot,
+                    normalizedWorkspaceRoot: workspaceRoot,
+                  }),
+                ),
+        }),
+        Effect.provideService(SuspensionRegistry.WorktreeSuspensionRegistry, registry),
+      );
+      const result = yield* Effect.result(
+        service.create({
+          commandId: CommandId.make(`command:protected:${state}`),
+          projectId: ProjectId.make(`project:protected:${state}`),
+          title: "Workspace",
+          workspaceRoot: "/work/saved-workspace",
+          createWorkspaceRootIfMissing: true,
+        }),
+      );
+      assert.equal(result._tag, "Failure");
+      assert.isFalse(created);
+    }).pipe(
+      Effect.provide(
+        Layer.merge(
+          layerProjectServiceDependencies,
+          SuspensionRegistry.layer.pipe(
+            Layer.provide(
+              ServerConfig.layerTest(process.cwd(), { prefix: "protected-project-root-" }),
+            ),
+            Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+          ),
+        ),
+      ),
+    ),
+);
+
+it.effect.each(["available", "unavailable"] as const)(
+  "handles a missing project directory when saved-workspace authority is %s",
+  (authority) =>
+    Effect.gen(function* () {
+      let created = false;
+      const service = yield* ProjectService.make.pipe(
+        Effect.provideService(WorkspacePaths.WorkspacePaths, {
+          resolveRelativePathWithinRoot: ({ workspaceRoot, relativePath }) =>
+            Effect.succeed({ absolutePath: `${workspaceRoot}/${relativePath}`, relativePath }),
+          normalizeWorkspaceRoot: (workspaceRoot, options) =>
+            options?.createIfMissing
+              ? Effect.sync(() => {
+                  created = true;
+                  return workspaceRoot;
+                })
+              : Effect.fail(
+                  new WorkspacePaths.WorkspaceRootNotExistsError({
+                    workspaceRoot,
+                    normalizedWorkspaceRoot: workspaceRoot,
+                  }),
+                ),
+        }),
+        Effect.provide(
+          Layer.mock(SuspensionRegistry.WorktreeSuspensionRegistry)({
+            automaticProtection: () =>
+              authority === "available"
+                ? Effect.succeed(null)
+                : Effect.fail(
+                    new SuspensionRegistry.SuspensionRegistryError({ operation: "read" }),
+                  ),
+          }),
+        ),
+      );
+      const result = yield* Effect.result(
+        service.create({
+          commandId: CommandId.make("command:missing-authority"),
+          projectId: ProjectId.make("project:missing-authority"),
+          title: "Workspace",
+          workspaceRoot: "/work/missing-authority",
+          createWorkspaceRootIfMissing: true,
+        }),
+      );
+      assert.equal(result._tag, authority === "available" ? "Success" : "Failure");
+      assert.equal(created, authority === "available");
+    }).pipe(Effect.provide(layerProjectServiceDependencies)),
 );
 
 it.effect("does not register a workspace removed after the final project-root check", () =>

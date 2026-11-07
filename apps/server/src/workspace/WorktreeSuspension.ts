@@ -66,7 +66,7 @@ import {
   type CheckoutAuthority,
 } from "./WorktreeSuspensionRegistry.ts";
 import * as WorktreeConsumers from "./WorktreeConsumers.ts";
-import { withProjectRootLease } from "./projectRootLease.ts";
+import { canonicalProjectRoot, withProjectRootLease } from "./projectRootLease.ts";
 import {
   withWorkspaceLease,
   registerWorkspaceLeaseRoot,
@@ -210,42 +210,6 @@ export const make = Effect.gen(function* () {
         () => Effect.succeed(path.resolve(value)),
       ),
     );
-  const canonicalProjectRoot = Effect.fn("WorktreeSuspension.canonicalProjectRoot")(function* (
-    value: string,
-  ) {
-    let candidate = path.resolve(value);
-    const missing: string[] = [];
-    let links = 0;
-    for (;;) {
-      const resolved = yield* fs.realPath(candidate).pipe(
-        Effect.catchIf(
-          (cause) => cause.reason._tag === "NotFound",
-          () => Effect.succeed(null),
-        ),
-      );
-      if (resolved !== null) return path.join(resolved, ...missing);
-      const link = yield* fs.readLink(candidate).pipe(
-        Effect.catchIf(
-          (cause) =>
-            cause.reason._tag === "NotFound" ||
-            (cause.cause instanceof Error &&
-              "code" in cause.cause &&
-              cause.cause.code === "EINVAL"),
-          () => Effect.succeed(null),
-        ),
-      );
-      if (link !== null) {
-        if (++links > 40) return yield* failure("protected", "Project root cannot be verified.");
-        candidate = path.resolve(path.dirname(candidate), link);
-        continue;
-      }
-      const parent = path.dirname(candidate);
-      if (parent === candidate)
-        return yield* failure("protected", "Project root cannot be verified.");
-      missing.unshift(path.basename(candidate));
-      candidate = parent;
-    }
-  });
   const overlaps = (a: string, b: string) => {
     const relative = path.relative(a, b);
     return (
@@ -460,7 +424,7 @@ export const make = Effect.gen(function* () {
     for (const project of yield* projects.list()) {
       const roots = [
         path.resolve(project.workspaceRoot),
-        yield* canonicalProjectRoot(project.workspaceRoot),
+        yield* canonicalProjectRoot(project.workspaceRoot).pipe(Effect.mapError(safeFailure)),
       ];
       if (
         roots.some((root) =>
