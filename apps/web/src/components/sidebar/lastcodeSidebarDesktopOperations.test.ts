@@ -130,7 +130,7 @@ describe("LastCode update operations", () => {
       expect(mocks.confirm).toHaveBeenCalledWith(
         expect.stringContaining("Install update 1.1.0 and restart T3 Code?"),
       );
-      expect(shell.installUpdate).toHaveBeenCalledOnce();
+      expect(shell.installUpdate).toHaveBeenCalledExactlyOnceWith(state.downloadedVersion);
       expect(mocks.toast).toHaveBeenCalledWith(
         expect.objectContaining({
           title: "Could not install update",

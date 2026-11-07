@@ -232,7 +232,7 @@ function AboutVersionSection() {
         return;
       }
       void bridge
-        .installUpdate()
+        .installUpdate(updateState?.downloadedVersion ?? undefined)
         .catch((error: unknown) => {
           toastManager.add(
             stackedThreadToast({

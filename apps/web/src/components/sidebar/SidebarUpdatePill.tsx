@@ -424,6 +424,8 @@ function SidebarUpdateControl() {
     }
 
     if (action === "install") {
+      // The version the person confirms is the only one this click may install.
+      const confirmedVersion = state.downloadedVersion ?? undefined;
       let confirmed = false;
       try {
         confirmed = await ensureLocalApi().dialogs.confirm(
@@ -444,7 +446,9 @@ function SidebarUpdateControl() {
         setIsActionPending(false);
         return;
       }
-      void installLocalUpdate(bridge).finally(() => setIsActionPending(false));
+      void installLocalUpdate(bridge, undefined, confirmedVersion).finally(() =>
+        setIsActionPending(false),
+      );
       return;
     }
 
@@ -480,6 +484,25 @@ function SidebarUpdateControl() {
       .finally(() => setIsActionPending(false));
   };
 
+  // The confirmation dialog already showed this app's version, so it is not asked again.
+  const runAppOnly = async () => {
+    const bridge = window.desktopBridge;
+    if (!bridge || !state || localUpdateVersion === null || isActionPending) return;
+    setIsActionPending(true);
+    try {
+      if (action === "download") {
+        await downloadLocalUpdate(bridge, {
+          notifyDownloaded: true,
+          isLocalBuild: state.source === "lastcode-local",
+        });
+      } else if (action === "install") {
+        await installLocalUpdate(bridge, undefined, localUpdateVersion);
+      }
+    } finally {
+      setIsActionPending(false);
+    }
+  };
+
   const runEverything = async () => {
     const bridge = window.desktopBridge;
     setIsConfirmingEverything(false);
@@ -496,8 +519,11 @@ function SidebarUpdateControl() {
                 }),
             }
           : {}),
-        ...(bridge && action !== "none"
-          ? { installLocal: (reportError) => installLocalUpdate(bridge, reportError) }
+        ...(bridge && localUpdateVersion !== null
+          ? {
+              installLocal: (reportError) =>
+                installLocalUpdate(bridge, reportError, localUpdateVersion),
+            }
           : {}),
       }),
     );
@@ -551,6 +577,14 @@ function SidebarUpdateControl() {
       rows={everything.rows}
       restarts={everything.restarts}
       onConfirm={() => void runEverything()}
+      onConfirmAppOnly={
+        localUpdateVersion !== null && everything.alsoUpdates !== null
+          ? () => {
+              setIsConfirmingEverything(false);
+              void runAppOnly();
+            }
+          : undefined
+      }
     />
   );
 
@@ -577,7 +611,13 @@ function SidebarUpdateControl() {
                     failures: [],
                     restarting: [],
                   });
-                  if (!(await installLocalUpdate(window.desktopBridge!))) {
+                  if (
+                    !(await installLocalUpdate(
+                      window.desktopBridge!,
+                      undefined,
+                      localUpdateVersion ?? undefined,
+                    ))
+                  ) {
                     clearSavedUpdateEverythingResult();
                   }
                 },

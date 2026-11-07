@@ -66,7 +66,7 @@ export async function installLastCodeSidebarUpdate(
     return;
   }
   void bridge
-    .installUpdate()
+    .installUpdate(desktopUpdateState.downloadedVersion ?? undefined)
     .then((result) => {
       if (!shouldToastDesktopUpdateActionResult(result)) return;
       const actionError = getDesktopUpdateActionError(result);
