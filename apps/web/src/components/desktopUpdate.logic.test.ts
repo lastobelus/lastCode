@@ -236,9 +236,20 @@ describe("getDesktopUpdatePopoverHeader", () => {
     [
       "failed install",
       {
-        status: "error",
+        status: "downloaded",
         errorContext: "install",
         downloadedVersion: "0.1.8-nightly.20261107.4301",
+        canRetry: true,
+      },
+      "Install failed · click to retry",
+    ],
+    [
+      "failed retry of an unapplied install",
+      {
+        status: "downloaded",
+        errorContext: "install",
+        downloadedVersion: "0.1.8-nightly.20261107.4301",
+        notAppliedVersion: "0.1.8-nightly.20261107.4301",
       },
       "Install failed · click to retry",
     ],
@@ -261,16 +272,23 @@ describe("getDesktopUpdatePopoverHeader", () => {
     }
   });
 
-  it("names hosted versions in full", () => {
+  it("names hosted versions in full and reports a failed download", () => {
     expect(
       getDesktopUpdatePopoverHeader(
-        { ...baseState, status: "downloaded", downloadedVersion: "1.1.0" },
+        {
+          ...baseState,
+          currentVersion: "0.0.50-nightly.20260101.512",
+          status: "available",
+          availableVersion: "0.0.50-nightly.20260102.530",
+          errorContext: "download",
+          canRetry: true,
+        },
         "T3 Code",
       ),
     ).toEqual({
-      title: "T3 Code 1.0.0 → 1.1.0",
-      readiness: "Downloaded and ready to install · restart required",
-      targetVersion: "1.1.0",
+      title: "T3 Code 0.0.50-nightly.20260101.512 → 0.0.50-nightly.20260102.530",
+      readiness: "Download failed · click to retry",
+      targetVersion: "0.0.50-nightly.20260102.530",
     });
   });
 });

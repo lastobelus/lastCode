@@ -8,6 +8,7 @@ import { CheckIcon, CopyIcon, TriangleAlertIcon } from "lucide-react";
 import { type ComponentProps, useId, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import { APP_BASE_NAME } from "../../branding";
 import { isElectron } from "../../env";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
@@ -26,6 +27,7 @@ import {
   getDesktopUpdateDownloadedVersion,
   getDesktopUpdateIdleTooltip,
   getDesktopUpdateInstallConfirmationMessage,
+  getDesktopUpdatePopoverHeader,
   getDesktopUpdateProgressPercent,
   isDesktopUpdateButtonDisabled,
   resolveDesktopUpdateButtonAction,
@@ -65,7 +67,10 @@ function shouldUseSidebarUpdateReleaseNotesPopover(
   showUpdateDetails: boolean,
   state: DesktopUpdateState | null,
 ): boolean {
-  return showUpdateDetails && (state?.releaseNotes.length ?? 0) > 0;
+  if (!showUpdateDetails || !state) return false;
+  return (
+    state.releaseNotes.length > 0 || getDesktopUpdatePopoverHeader(state, APP_BASE_NAME) !== null
+  );
 }
 
 function handleSidebarUpdateReleaseNotesPopoverOpenChange(
@@ -150,14 +155,19 @@ export function resolveSidebarUpdateButtonToneClassName({
 }
 
 export function SidebarLocalBuildFailurePopover({
+  alsoUpdates = null,
   failure,
   isCopied,
   onCopy,
+  state = null,
 }: {
+  readonly alsoUpdates?: string | null;
   readonly failure: DesktopLocalBuildFailure;
   readonly isCopied: boolean;
   readonly onCopy: () => void;
+  readonly state?: DesktopUpdateState | null;
 }) {
+  const header = state ? getDesktopUpdatePopoverHeader(state, APP_BASE_NAME) : null;
   return (
     <div className="w-[min(22rem,calc(100vw-2rem))] space-y-3 p-1 text-left" role="alert">
       <div>
@@ -168,6 +178,12 @@ export function SidebarLocalBuildFailurePopover({
           {failure.phase} · {failure.percent}% est.
         </div>
       </div>
+      {header || alsoUpdates ? (
+        <div className="space-y-0.5 text-xs leading-4 text-muted-foreground">
+          {header ? <div>{header.title}</div> : null}
+          {alsoUpdates ? <div>Also: {alsoUpdates}</div> : null}
+        </div>
+      ) : null}
       <p className="max-h-24 overflow-y-auto whitespace-pre-wrap break-words text-xs leading-4 text-popover-foreground/90">
         {formatLocalBuildFailureError(failure.error)}
       </p>
@@ -686,7 +702,9 @@ function SidebarUpdateControl() {
           >
             {localBuildFailure ? (
               <SidebarLocalBuildFailurePopover
+                alsoUpdates={runsEverything ? everything.alsoUpdates : null}
                 failure={localBuildFailure}
+                state={state}
                 isCopied={isCopied}
                 onCopy={() => copyToClipboard(formatLocalBuildFailureDetails(localBuildFailure))}
               />
