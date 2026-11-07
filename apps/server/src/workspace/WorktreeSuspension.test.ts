@@ -22,6 +22,7 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
@@ -148,6 +149,7 @@ const harness = (
 ) =>
   Effect.gen(function* () {
     const original = yield* Registry.WorktreeSuspensionRegistry;
+    const fs = yield* FileSystem.FileSystem;
     const acquisition = yield* Acquisition.WorkspaceAcquisition;
     const lifecycle = yield* Lifecycle.WorkspaceLifecycle;
     const updates = yield* Queue.unbounded<Registry.CheckoutAuthority>();
@@ -173,6 +175,8 @@ const harness = (
       updatedAt: DateTime.formatIso(at),
       deletedAt: null,
     };
+    const projects = [project];
+    let registerWhenIsolated: string | null = null;
     let failedPublication = false;
     let pausedCapture = false;
     let pausedCaptureIntent = false;
@@ -352,7 +356,18 @@ const harness = (
           }),
           Layer.mock(ProjectStore.ProjectStoreV2)({
             get: (id) => Effect.succeed(id === projectId ? Option.some(project) : Option.none()),
-            list: () => Effect.succeed([project]),
+            list: () =>
+              Effect.gen(function* () {
+                if (registerWhenIsolated !== null && !(yield* fs.exists(fixture.workspace))) {
+                  projects.push({
+                    ...project,
+                    projectId: ProjectId.make("fixture:registered"),
+                    workspaceRoot: registerWhenIsolated,
+                  });
+                  registerWhenIsolated = null;
+                }
+                return [...projects];
+              }),
           }),
           Layer.mock(Orchestrator.OrchestratorV2)({
             transitionWorktreeSuspension: transition,
@@ -423,6 +438,16 @@ const harness = (
       acquisition,
       lifecycle,
       threads,
+      registerProjectRoot: (workspaceRoot: string) => {
+        projects.push({
+          ...project,
+          projectId: ProjectId.make("fixture:registered"),
+          workspaceRoot,
+        });
+      },
+      registerProjectWhenIsolated: (workspaceRoot: string) => {
+        registerWhenIsolated = workspaceRoot;
+      },
       commandReceipts,
       registry,
       awaitRecord,
@@ -2179,6 +2204,55 @@ it.live(
         expect(saved.captureFailure).toBeUndefined();
       }),
     ),
+);
+
+it.live.each([
+  "before admission",
+  "after capture",
+  "after isolation",
+  "after isolation via alias",
+  "after isolation via leaf link",
+] as const)("keeps a newly registered project root %s", (registration) =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const h = yield* harness(f, {
+        cleanupThreads: true,
+        settings: automaticSettings,
+        pauseCaptured: { entered, release },
+      });
+      untouchedOwners(h.threads);
+      for (const [id, owner] of h.threads)
+        h.threads.set(id, { ...owner, archivedAt: at, settledAt: null });
+      yield* h.service.previewSuspend({ threadId: firstId });
+      if (registration === "before admission") h.registerProjectRoot(f.workspace);
+      if (registration === "after isolation") h.registerProjectWhenIsolated(f.workspace);
+      if (registration === "after isolation via alias") {
+        const alias = NodePath.join(f.root, "project-alias");
+        yield* Effect.promise(() => NodeFSP.symlink(NodePath.dirname(f.workspace), alias));
+        h.registerProjectWhenIsolated(NodePath.join(alias, NodePath.basename(f.workspace)));
+      }
+      if (registration === "after isolation via leaf link") {
+        const alias = NodePath.join(f.root, "project-link");
+        yield* Effect.promise(() => NodeFSP.symlink(f.workspace, alias));
+        h.registerProjectWhenIsolated(alias);
+      }
+      const pass = yield* Effect.forkChild(h.service.sweep);
+      if (registration === "after capture") {
+        yield* Deferred.await(entered);
+        h.registerProjectRoot(f.workspace);
+      }
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(pass);
+      expect((yield* h.registry.list)[0]!.summary.state).toBe("active");
+      expect(
+        yield* Effect.promise(() =>
+          NodeFSP.readFile(NodePath.join(f.workspace, "tracked"), "utf8"),
+        ),
+      ).toBe("working\n");
+    }),
+  ),
 );
 
 it.live(

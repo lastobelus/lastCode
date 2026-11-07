@@ -209,6 +209,42 @@ export const make = Effect.gen(function* () {
         () => Effect.succeed(path.resolve(value)),
       ),
     );
+  const canonicalProjectRoot = Effect.fn("WorktreeSuspension.canonicalProjectRoot")(function* (
+    value: string,
+  ) {
+    let candidate = path.resolve(value);
+    const missing: string[] = [];
+    let links = 0;
+    for (;;) {
+      const resolved = yield* fs.realPath(candidate).pipe(
+        Effect.catchIf(
+          (cause) => cause.reason._tag === "NotFound",
+          () => Effect.succeed(null),
+        ),
+      );
+      if (resolved !== null) return path.join(resolved, ...missing);
+      const link = yield* fs.readLink(candidate).pipe(
+        Effect.catchIf(
+          (cause) =>
+            cause.reason._tag === "NotFound" ||
+            (cause.cause instanceof Error &&
+              "code" in cause.cause &&
+              cause.cause.code === "EINVAL"),
+          () => Effect.succeed(null),
+        ),
+      );
+      if (link !== null) {
+        if (++links > 40) return yield* failure("protected", "Project root cannot be verified.");
+        candidate = path.resolve(path.dirname(candidate), link);
+        continue;
+      }
+      const parent = path.dirname(candidate);
+      if (parent === candidate)
+        return yield* failure("protected", "Project root cannot be verified.");
+      missing.unshift(path.basename(candidate));
+      candidate = parent;
+    }
+  });
   const overlaps = (a: string, b: string) => {
     const relative = path.relative(a, b);
     return (
@@ -420,6 +456,18 @@ export const make = Effect.gen(function* () {
   ) {
     const owners = yield* checkOwners(record);
     yield* originalStillOwned(record, physicalPath);
+    for (const project of yield* projects.list()) {
+      const roots = [
+        path.resolve(project.workspaceRoot),
+        yield* canonicalProjectRoot(project.workspaceRoot),
+      ];
+      if (
+        roots.some((root) =>
+          [...record.aliases, physicalPath].some((workspace) => overlaps(workspace, root)),
+        )
+      )
+        return yield* failure("protected", "A registered project uses this workspace.");
+    }
     if (record.summary.keepWorkspace)
       return yield* failure("protected", "Keep workspace is enabled.");
     for (const owner of owners) {
