@@ -14,6 +14,7 @@ export const layerWith = (
       root: "/test/saved-workspaces",
       list: Effect.succeed([]),
       dependenciesRemoved: () => Effect.void,
+      recoveryDestinationProtection: () => Effect.succeed(null),
       ...registry,
       automaticProtection,
     }),

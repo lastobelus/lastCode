@@ -21,6 +21,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as ServerConfig from "../config.ts";
+import { canonicalProjectRoot } from "./projectRootLease.ts";
 
 export const CheckoutAuthority = Schema.Struct({
   checkoutId: TrimmedNonEmptyString,
@@ -108,6 +109,11 @@ export type CheckoutAuthority = typeof CheckoutAuthority.Type;
 const Catalog = Schema.Struct({
   version: Schema.Literal(1),
   checkouts: Schema.Array(CheckoutAuthority).check(Schema.isMaxLength(10_000)),
+  unverifiedUses: Schema.optionalKey(
+    Schema.Array(Schema.Struct({ path: TrimmedNonEmptyString, usedAt: IsoDateTime })).check(
+      Schema.isMaxLength(10_000),
+    ),
+  ),
 });
 const decodeCatalog = Schema.decodeUnknownEffect(Schema.fromJsonString(Catalog));
 const encodeCatalog = Schema.encodeEffect(Schema.fromJsonString(Catalog));
@@ -135,9 +141,19 @@ export class WorktreeSuspensionRegistry extends Context.Service<
   {
     readonly root: string;
     readonly list: Effect.Effect<ReadonlyArray<CheckoutAuthority>, SuspensionRegistryError>;
+    readonly recordUnverifiedUse: (
+      workspacePath: string,
+      usedAt: string,
+    ) => Effect.Effect<void, SuspensionRegistryError>;
+    readonly unverifiedUse: (
+      workspacePaths: readonly string[],
+    ) => Effect.Effect<string | null, SuspensionRegistryError>;
     readonly automaticProtection: (
       workspacePath: string,
       resource?: "worktree" | "dependencies",
+    ) => Effect.Effect<string | null, SuspensionRegistryError>;
+    readonly recoveryDestinationProtection: (
+      workspacePath: string,
     ) => Effect.Effect<string | null, SuspensionRegistryError>;
     /** Called after verified dependency removal while the checkout lease is held. */
     readonly dependenciesRemoved: (
@@ -191,7 +207,7 @@ const make = Effect.gen(function* () {
     if (!(yield* fs.exists(catalogPath))) {
       if ((yield* fs.readDirectory(root)).length !== 0)
         return yield* new SuspensionRegistryError({ operation: "read" });
-      return [];
+      return { version: 1 as const, checkouts: [], unverifiedUses: [] };
     }
     if ((yield* fs.realPath(catalogPath)) !== catalogPath) {
       return yield* new SuspensionRegistryError({ operation: "read" });
@@ -211,17 +227,41 @@ const make = Effect.gen(function* () {
     ) {
       return yield* new SuspensionRegistryError({ operation: "read" });
     }
-    return value.checkouts;
+    return value;
   });
-  const list = read().pipe(
+  const catalog = read().pipe(
     Effect.mapError((cause) => new SuspensionRegistryError({ operation: "read", cause })),
   );
+  const list = catalog.pipe(Effect.map((value) => value.checkouts));
+  const write = Effect.fn("WorktreeSuspensionRegistry.write")(function* (
+    value: typeof Catalog.Type,
+  ) {
+    const contents = yield* encodeCatalog(value);
+    if (new TextEncoder().encode(contents).byteLength > MAX_CATALOG_BYTES)
+      return yield* new SuspensionRegistryError({ operation: "write" });
+    const temporary = path.join(root, `authority-${yield* random.uuidV4()}.tmp`);
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const file = yield* fs.open(temporary, { flag: "wx", mode: 0o600 });
+        yield* file.writeAll(new TextEncoder().encode(contents));
+        yield* file.sync;
+      }),
+    );
+    yield* fs.rename(temporary, catalogPath);
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const directory = yield* fs.open(root, { flag: "r" });
+        yield* directory.sync;
+      }),
+    );
+  });
   const put = Effect.fn("WorktreeSuspensionRegistry.put")(
     function* (next: CheckoutAuthority, expected: CheckoutAuthority | null) {
       return yield* mutex.withPermits(1)(
         Effect.gen(function* () {
-          const current = yield* list;
-          const existing = current.find((entry) => entry.checkoutId === next.checkoutId) ?? null;
+          const current = yield* catalog;
+          const existing =
+            current.checkouts.find((entry) => entry.checkoutId === next.checkoutId) ?? null;
           if (
             existing === null || expected === null
               ? existing !== expected
@@ -229,28 +269,66 @@ const make = Effect.gen(function* () {
           ) {
             return yield* new SuspensionRegistryError({ operation: "ownership-changed" });
           }
-          const contents = yield* encodeCatalog({
-            version: 1,
-            checkouts: [...current.filter((entry) => entry.checkoutId !== next.checkoutId), next],
+          const samePath = (left: string, right: string) =>
+            path.resolve(left) === path.resolve(right);
+          const nextPaths = next.detached ? [] : [next.path, ...next.aliases];
+          const nextDestination =
+            next.operation?.kind === "recovery" || next.operation?.kind === "restore"
+              ? next.operation.destinationPath
+              : undefined;
+          if (
+            (nextPaths.length > 0 || nextDestination !== undefined) &&
+            current.checkouts.some((entry) => {
+              if (entry.checkoutId === next.checkoutId) return false;
+              const entryPaths = entry.detached ? [] : [entry.path, ...entry.aliases];
+              const entryDestination =
+                entry.operation?.kind === "recovery" || entry.operation?.kind === "restore"
+                  ? entry.operation.destinationPath
+                  : undefined;
+              const sameRecovery =
+                (entry.operation?.kind === "recovery" &&
+                  next.sourceCheckoutId === entry.checkoutId &&
+                  next.checkoutId === entry.operation?.id) ||
+                (next.operation?.kind === "recovery" &&
+                  entry.sourceCheckoutId === next.checkoutId &&
+                  entry.checkoutId === next.operation?.id);
+              return (
+                (expected === null &&
+                  entryPaths.some((alias) =>
+                    nextPaths.some((candidate) => samePath(alias, candidate)),
+                  )) ||
+                (!sameRecovery &&
+                  entryDestination !== undefined &&
+                  nextPaths.some((candidate) => samePath(candidate, entryDestination))) ||
+                (!sameRecovery &&
+                  nextDestination !== undefined &&
+                  [
+                    ...entryPaths,
+                    ...(entryDestination === undefined ? [] : [entryDestination]),
+                  ].some((candidate) => samePath(candidate, nextDestination)))
+              );
+            })
+          )
+            return yield* new SuspensionRegistryError({ operation: "ownership-changed" });
+          yield* write({
+            ...current,
+            checkouts: [
+              ...current.checkouts.filter((entry) => entry.checkoutId !== next.checkoutId),
+              next,
+            ],
+            ...(current.unverifiedUses === undefined
+              ? {}
+              : {
+                  unverifiedUses: current.unverifiedUses.filter(
+                    (entry) =>
+                      next.lastWorkspaceUseAt === undefined ||
+                      entry.usedAt > next.lastWorkspaceUseAt ||
+                      ![next.path, ...next.aliases].some(
+                        (alias) => path.resolve(alias) === entry.path,
+                      ),
+                  ),
+                }),
           });
-          if (new TextEncoder().encode(contents).byteLength > MAX_CATALOG_BYTES) {
-            return yield* new SuspensionRegistryError({ operation: "write" });
-          }
-          const temporary = path.join(root, `authority-${yield* random.uuidV4()}.tmp`);
-          yield* Effect.scoped(
-            Effect.gen(function* () {
-              const file = yield* fs.open(temporary, { flag: "wx", mode: 0o600 });
-              yield* file.writeAll(new TextEncoder().encode(contents));
-              yield* file.sync;
-            }),
-          );
-          yield* fs.rename(temporary, catalogPath);
-          yield* Effect.scoped(
-            Effect.gen(function* () {
-              const directory = yield* fs.open(root, { flag: "r" });
-              yield* directory.sync;
-            }),
-          );
         }),
       );
     },
@@ -258,6 +336,43 @@ const make = Effect.gen(function* () {
       isRegistryError(cause) ? cause : new SuspensionRegistryError({ operation: "write", cause }),
     ),
   );
+  const recordUnverifiedUse = Effect.fn("WorktreeSuspensionRegistry.recordUnverifiedUse")(
+    function* (workspacePath: string, usedAt: string) {
+      yield* mutex.withPermits(1)(
+        Effect.gen(function* () {
+          const current = yield* catalog;
+          const candidate = path.resolve(workspacePath);
+          const existing = current.unverifiedUses?.find((entry) => entry.path === candidate);
+          yield* write({
+            ...current,
+            unverifiedUses: [
+              ...(current.unverifiedUses ?? []).filter((entry) => entry.path !== candidate),
+              {
+                path: candidate,
+                usedAt: existing && existing.usedAt > usedAt ? existing.usedAt : usedAt,
+              },
+            ],
+          });
+        }),
+      );
+    },
+    Effect.mapError((cause) =>
+      isRegistryError(cause) ? cause : new SuspensionRegistryError({ operation: "write", cause }),
+    ),
+  );
+  const unverifiedUse = (workspacePaths: readonly string[]) =>
+    catalog.pipe(
+      Effect.map((current) => {
+        const candidates = new Set(workspacePaths.map((entry) => path.resolve(entry)));
+        return (
+          (current.unverifiedUses ?? [])
+            .filter((entry) => candidates.has(entry.path))
+            .map((entry) => entry.usedAt)
+            .sort()
+            .at(-1) ?? null
+        );
+      }),
+    );
   const settledActive = (entry: CheckoutAuthority) =>
     !entry.detached &&
     entry.summary.state === "active" &&
@@ -266,21 +381,49 @@ const make = Effect.gen(function* () {
     entry.pendingProjection === undefined;
   const exactMatch = (entry: CheckoutAuthority, candidate: string) =>
     [entry.path, ...entry.aliases].some((alias) => path.resolve(alias) === candidate);
+  const canonical = (value: string) =>
+    canonicalProjectRoot(value).pipe(
+      Effect.mapError((cause) => new SuspensionRegistryError({ operation: "read", cause })),
+    );
+  const pathsOverlap = (first: string, second: string) => {
+    const inside = (value: string) =>
+      value === "" ||
+      (!path.isAbsolute(value) && value !== ".." && !value.startsWith(`..${path.sep}`));
+    return inside(path.relative(first, second)) || inside(path.relative(second, first));
+  };
+  const recoveryDestination = (entry: CheckoutAuthority) =>
+    entry.operation?.kind === "recovery" || entry.operation?.kind === "restore"
+      ? entry.operation.destinationPath
+      : undefined;
+  const recoveryDestinationProtection = Effect.fn(
+    "WorktreeSuspensionRegistry.recoveryDestinationProtection",
+  )(function* (workspacePath: string) {
+    const destinations = (yield* list)
+      .map(recoveryDestination)
+      .filter((value) => value !== undefined);
+    if (destinations.length === 0) return null;
+    const candidate = yield* canonical(workspacePath);
+    for (const destination of destinations) {
+      if (pathsOverlap(candidate, yield* canonical(destination)))
+        return "The workspace is protected by a saved-workspace operation.";
+    }
+    return null;
+  });
 
   const automaticProtection = Effect.fn("WorktreeSuspensionRegistry.automaticProtection")(
     function* (workspacePath: string, resource: "worktree" | "dependencies" = "worktree") {
       const candidate = path.resolve(workspacePath);
-      const overlaps = (other: string) => {
-        const relative = path.relative(candidate, other);
-        const inverse = path.relative(other, candidate);
-        const inside = (value: string) =>
-          value === "" ||
-          (!path.isAbsolute(value) && value !== ".." && !value.startsWith(`..${path.sep}`));
-        return inside(relative) || inside(inverse);
-      };
+      const overlaps = (other: string) => pathsOverlap(candidate, other);
+      let canonicalCandidate: string | undefined;
       for (const entry of yield* list) {
-        if (entry.detached) continue;
-        if (!entry.aliases.some(overlaps) && !overlaps(entry.path)) continue;
+        const destination = recoveryDestination(entry);
+        let destinationMatches = destination !== undefined && overlaps(destination);
+        if (destination !== undefined && !destinationMatches) {
+          canonicalCandidate ??= yield* canonical(candidate);
+          destinationMatches = pathsOverlap(canonicalCandidate, yield* canonical(destination));
+        }
+        if (entry.detached && !destinationMatches) continue;
+        if (!destinationMatches && !entry.aliases.some(overlaps) && !overlaps(entry.path)) continue;
         // A settled failed save protects source, but cannot veto an independent
         // dependency policy whose recognition, inactivity and consumer guards pass.
         if (
@@ -322,7 +465,10 @@ const make = Effect.gen(function* () {
     root,
     list,
     put,
+    recordUnverifiedUse,
+    unverifiedUse,
     automaticProtection,
+    recoveryDestinationProtection,
     dependenciesRemoved,
   });
 });

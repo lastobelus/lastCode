@@ -2,6 +2,7 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 // @effect-diagnostics nodeBuiltinImport:off -- Owned real-Git fixtures exercise the service and its durable native store together.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
+import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
@@ -9,19 +10,25 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CommandId,
   DEFAULT_SERVER_SETTINGS,
+  GitCommandError,
   OrchestrationV2ThreadShell,
   ProjectId,
+  RunId,
   ThreadId,
   type OrchestrationV2ServerCommand,
   type WorktreeSuspensionTransitionInput,
   type ServerSettings as SettingsValue,
 } from "@t3tools/contracts";
-import { createWorktreeSuspensionStore } from "@t3tools/shared/worktreeSuspension";
+import {
+  createWorktreeSuspensionStore,
+  type WorktreeSuspensionStoreOptions,
+} from "@t3tools/shared/worktreeSuspension";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
@@ -49,6 +56,7 @@ import * as Registry from "./WorktreeSuspensionRegistry.ts";
 import * as Consumers from "./WorktreeConsumers.ts";
 import * as Mounts from "./DependencyMounts.ts";
 import { withWorkspaceLease, resolveWorkspaceLeaseRoot } from "./workspaceLease.ts";
+import { withProjectRootLease } from "./projectRootLease.ts";
 
 const execute = NodeUtil.promisify(NodeChildProcess.execFile);
 const git = async (cwd: string, ...args: readonly string[]) =>
@@ -144,10 +152,17 @@ const harness = (
     occupyRestoreOnBarrier?: boolean;
     occupyRecoveryOnBarrier?: boolean;
     deleteRecoveryAfterPublication?: boolean;
+    previews?: Array<{ threadId: string; workspacePath: string }>;
+    onPreviewScan?: (leases: Array<{ threadId: string; workspacePath: string }>) => void;
+    pausePreviewLocks?: { entered: Deferred.Deferred<void>; release: Deferred.Deferred<void> };
+    pausePreviewRemoval?: { entered: Deferred.Deferred<void>; release: Deferred.Deferred<void> };
+    onStoreBoundary?: WorktreeSuspensionStoreOptions["onBoundary"];
+    terminals?: Effect.Success<TerminalManager.TerminalManager["Service"]["refreshMetadata"]>;
   } = {},
 ) =>
   Effect.gen(function* () {
     const original = yield* Registry.WorktreeSuspensionRegistry;
+    const fs = yield* FileSystem.FileSystem;
     const acquisition = yield* Acquisition.WorkspaceAcquisition;
     const lifecycle = yield* Lifecycle.WorkspaceLifecycle;
     const updates = yield* Queue.unbounded<Registry.CheckoutAuthority>();
@@ -173,6 +188,26 @@ const harness = (
       updatedAt: DateTime.formatIso(at),
       deletedAt: null,
     };
+    const projects = [project];
+    const previewLeases = [...(options.previews ?? [])];
+    const terminalRecords = [...(options.terminals ?? [])];
+    const hostingLeases = () =>
+      previewLeases.map((lease) => ({
+        id: `preview-${lease.threadId}`,
+        threadId: lease.threadId,
+        terminalId: `preview-${lease.threadId}`,
+        command: "fixture",
+        cwd: lease.workspacePath,
+        worktreePath: lease.workspacePath,
+        url: "http://127.0.0.1:1234/",
+        handedOffAt: DateTime.formatIso(at),
+        expiresAt: DateTime.formatIso(at),
+        status: "active" as const,
+      }));
+    const previewReleases: string[] = [];
+    let onPreviewRelease: ((threadId: string) => void) | undefined;
+    let settings = options.settings ?? DEFAULT_SERVER_SETTINGS;
+    let registerWhenIsolated: string | null = null;
     let failedPublication = false;
     let pausedCapture = false;
     let pausedCaptureIntent = false;
@@ -304,7 +339,9 @@ const harness = (
         NodeFSP.writeFile(NodePath.join(original.root, "authority.json"), "{"),
       );
     }
-    const service = yield* Suspension.make.pipe(
+    const service = yield* Suspension.makeWithStoreOptions(
+      options.onStoreBoundary === undefined ? {} : { onBoundary: options.onStoreBoundary },
+    ).pipe(
       Effect.provide(
         Layer.mergeAll(
           Layer.succeed(Registry.WorktreeSuspensionRegistry, registry),
@@ -339,8 +376,8 @@ const harness = (
               Effect.sync(() => ({
                 schemaVersion: 2 as const,
                 snapshotSequence: 0,
-                threads: current(),
-                archivedThreads: [],
+                threads: current().filter((thread) => thread.archivedAt === null),
+                archivedThreads: current().filter((thread) => thread.archivedAt !== null),
               })),
             getWorktreeCleanupThreads: Effect.sync(() =>
               options.cleanupThreads
@@ -352,7 +389,21 @@ const harness = (
           }),
           Layer.mock(ProjectStore.ProjectStoreV2)({
             get: (id) => Effect.succeed(id === projectId ? Option.some(project) : Option.none()),
-            list: () => Effect.succeed([project]),
+            list: () =>
+              Effect.gen(function* () {
+                if (
+                  registerWhenIsolated !== null &&
+                  !(yield* fs.exists(fixture.workspace).pipe(Effect.orDie))
+                ) {
+                  projects.push({
+                    ...project,
+                    projectId: ProjectId.make("fixture:registered"),
+                    workspaceRoot: registerWhenIsolated,
+                  });
+                  registerWhenIsolated = null;
+                }
+                return [...projects];
+              }),
           }),
           Layer.mock(Orchestrator.OrchestratorV2)({
             transitionWorktreeSuspension: transition,
@@ -369,24 +420,74 @@ const harness = (
           Layer.mock(Cleanup.WorktreeCleanupService)({
             historicalWorktreeOwners: Effect.sync(() => options.historicalOwners ?? []),
           }),
-          Layer.mock(TerminalManager.TerminalManager)({ refreshMetadata: Effect.succeed([]) }),
+          Layer.mock(TerminalManager.TerminalManager)({
+            refreshMetadata: Effect.sync(() => [...terminalRecords]),
+          }),
           Layer.mock(PreviewHosting.PreviewHosting)({
-            protectedWorkspacePaths: () => Effect.succeed([]),
+            protectedWorkspacePaths: () =>
+              Effect.sync(() => previewLeases.map((lease) => lease.workspacePath)),
+            list: () => Effect.sync(hostingLeases),
+            protectedWorkspaceLeases: () =>
+              Effect.sync(() => {
+                const observed = hostingLeases();
+                options.onPreviewScan?.(previewLeases);
+                return observed;
+              }),
+            withThreadPreviewLocks: (_threadIds, use) =>
+              Effect.gen(function* () {
+                if (options.pausePreviewLocks !== undefined) {
+                  yield* Deferred.succeed(options.pausePreviewLocks.entered, undefined);
+                  yield* Deferred.await(options.pausePreviewLocks.release);
+                }
+                return yield* use((threadId, workspacePath) =>
+                  Effect.gen(function* () {
+                    if (options.pausePreviewRemoval !== undefined) {
+                      yield* Deferred.succeed(options.pausePreviewRemoval.entered, undefined);
+                      yield* Deferred.await(options.pausePreviewRemoval.release);
+                    }
+                    previewReleases.push(threadId);
+                    for (let index = previewLeases.length - 1; index >= 0; index--)
+                      if (
+                        previewLeases[index]!.threadId === threadId &&
+                        previewLeases[index]!.workspacePath === workspacePath
+                      ) {
+                        previewLeases.splice(index, 1);
+                        const terminal = terminalRecords.findIndex(
+                          (entry) =>
+                            entry.threadId === threadId &&
+                            entry.terminalId === `preview-${threadId}`,
+                        );
+                        if (terminal >= 0) terminalRecords.splice(terminal, 1);
+                      }
+                    onPreviewRelease?.(threadId);
+                  }),
+                );
+              }),
           }),
           Layer.mock(ServerSettings.ServerSettingsService)({
-            getSettings: Effect.succeed(options.settings ?? DEFAULT_SERVER_SETTINGS),
+            getSettings: Effect.sync(() => settings),
           }),
           Layer.mock(GitVcsDriver.GitVcsDriver)({
             execute: (input) =>
-              Effect.promise(async () => {
-                gitRequests.push(input.operation);
-                return {
-                  stdout: await git(input.cwd, ...input.args),
-                  stderr: "",
-                  stdoutTruncated: false,
-                  stderrTruncated: false,
-                  exitCode: ChildProcessSpawner.ExitCode(0),
-                };
+              Effect.tryPromise({
+                try: async () => {
+                  gitRequests.push(input.operation);
+                  return {
+                    stdout: await git(input.cwd, ...input.args),
+                    stderr: "",
+                    stdoutTruncated: false,
+                    stderrTruncated: false,
+                    exitCode: ChildProcessSpawner.ExitCode(0),
+                  };
+                },
+                catch: (cause) =>
+                  new GitCommandError({
+                    operation: input.operation,
+                    command: "git",
+                    cwd: input.cwd,
+                    detail: "Fixture Git command failed",
+                    cause,
+                  }),
               }),
           }),
         ),
@@ -423,6 +524,24 @@ const harness = (
       acquisition,
       lifecycle,
       threads,
+      previewLeases,
+      previewReleases,
+      onPreviewRelease: (callback: (threadId: string) => void) => {
+        onPreviewRelease = callback;
+      },
+      setSettings: (next: SettingsValue) => {
+        settings = next;
+      },
+      registerProjectRoot: (workspaceRoot: string) => {
+        projects.push({
+          ...project,
+          projectId: ProjectId.make("fixture:registered"),
+          workspaceRoot,
+        });
+      },
+      registerProjectWhenIsolated: (workspaceRoot: string) => {
+        registerWhenIsolated = workspaceRoot;
+      },
       commandReceipts,
       registry,
       awaitRecord,
@@ -1426,6 +1545,93 @@ it.live(
     ),
 );
 
+it.live("rejects historical recovery into another checkout's reserved path", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f);
+      const saved = yield* h.suspend;
+      const snapshotId = saved.summary.snapshotId!;
+      yield* h.acquisition.acquire({ path: f.workspace, purpose: "file-write" });
+      const source = (yield* h.registry.list)[0]!;
+      const destination = NodePath.join(NodePath.dirname(f.workspace), "reserved-workspace");
+      yield* h.registry.put(
+        {
+          ...source,
+          checkoutId: "fixture:reserved",
+          path: destination,
+          aliases: [destination],
+          owners: [],
+          history: [],
+          snapshots: [],
+          summary: { ...source.summary, checkoutId: "fixture:reserved", state: "suspended" },
+        },
+        null,
+      );
+      const result = yield* h.service
+        .restore({
+          checkoutId: saved.checkoutId,
+          snapshotId,
+          projectId,
+          destinationPath: destination,
+        })
+        .pipe(Effect.flip);
+      expect(result.reason).toBe("protected");
+      expect(
+        (yield* h.registry.list).find((entry) => entry.checkoutId === saved.checkoutId)!.operation,
+      ).toBeUndefined();
+      expect(
+        yield* Effect.promise(() =>
+          NodeFSP.stat(destination).then(
+            () => true,
+            () => false,
+          ),
+        ),
+      ).toBe(false);
+    }),
+  ),
+);
+
+it.live("rejects an ordinary restore into another saved checkout's path", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f);
+      const saved = yield* h.suspend;
+      const source = (yield* h.registry.list)[0]!;
+      const destination = NodePath.join(NodePath.dirname(f.workspace), "reserved-workspace");
+      const other = {
+        ...source,
+        checkoutId: "fixture:reserved",
+        path: destination,
+        aliases: [destination],
+        owners: [],
+        history: [],
+        snapshots: [],
+        summary: { ...source.summary, checkoutId: "fixture:reserved" },
+      };
+      yield* h.registry.put(other, null);
+      const result = yield* h.service
+        .restore({
+          checkoutId: saved.checkoutId,
+          snapshotId: saved.summary.snapshotId!,
+          destinationPath: destination,
+        })
+        .pipe(Effect.flip);
+      expect(result.reason).toBe("protected");
+      expect(
+        (yield* h.registry.list).find((entry) => entry.checkoutId === saved.checkoutId),
+      ).toEqual(source);
+      expect(
+        yield* Effect.promise(() =>
+          NodeFSP.stat(destination).then(
+            () => true,
+            () => false,
+          ),
+        ),
+      ).toBe(false);
+    }),
+  ),
+);
+
 it.live("recovers a retained orphan only through a separate mapped checkout", () =>
   realGit((f) =>
     Effect.gen(function* () {
@@ -1632,6 +1838,52 @@ const untouchedOwners = (threads: Map<ThreadId, OrchestrationV2ThreadShell>) => 
       workspaceUserAdopted: false,
     });
 };
+
+it.live("automatically saves a shared workspace after unsettled archived owners age out", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, {
+        cleanupThreads: true,
+        settings: {
+          ...automaticSettings,
+          worktreeSuspension: {
+            ...automaticSettings.worktreeSuspension,
+            scopes: { subagents: true, untouchedChildren: true, otherThreads: true },
+          },
+        },
+      });
+      const now = yield* DateTime.now;
+      h.threads.set(firstId, { ...h.threads.get(firstId)!, archivedAt: at, settledAt: null });
+      h.threads.set(secondId, {
+        ...h.threads.get(secondId)!,
+        createdBy: "agent",
+        creatorThreadId: firstId,
+        workspaceUserAdopted: false,
+        lineage: {
+          rootThreadId: firstId,
+          parentThreadId: firstId,
+          relationshipToParent: "subagent",
+        },
+        archivedAt: now,
+        settledAt: null,
+      });
+      yield* h.service.previewSuspend({ threadId: firstId });
+      yield* h.service.sweep;
+      expect((yield* h.registry.list)[0]?.summary.state).toBe("active");
+      h.threads.set(secondId, { ...h.threads.get(secondId)!, archivedAt: at });
+      const record = (yield* h.registry.list)[0]!;
+      yield* h.registry.put({ ...record, lastWorkspaceUseAt: DateTime.formatIso(now) }, record);
+      yield* h.service.sweep;
+      expect((yield* h.registry.list)[0]!.summary.state).toBe("active");
+      const used = (yield* h.registry.list)[0]!;
+      yield* h.registry.put({ ...used, lastWorkspaceUseAt: DateTime.formatIso(at) }, used);
+      yield* h.service.sweep;
+      expect((yield* h.registry.list)[0]!.summary.state).toBe("suspended");
+      expect(h.threads.get(firstId)?.worktreeSuspension?.state).toBe("suspended");
+      expect(h.threads.get(secondId)?.worktreeSuspension?.state).toBe("suspended");
+    }),
+  ),
+);
 
 it.live(
   "automatically saves retained source after an oversized dependency install is removed",
@@ -2135,6 +2387,497 @@ it.live(
     ),
 );
 
+it.live("automatically releases eligible owners' previews before saving their workspace", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, {
+        cleanupThreads: true,
+        settings: automaticSettings,
+        previews: [{ threadId: firstId, workspacePath: f.workspace }],
+        terminals: [
+          {
+            threadId: firstId,
+            terminalId: `preview-${firstId}`,
+            cwd: f.workspace,
+            worktreePath: f.workspace,
+            status: "running",
+            pid: 100,
+            exitCode: null,
+            exitSignal: null,
+            hasRunningSubprocess: true,
+            label: "preview",
+            updatedAt: DateTime.formatIso(at),
+          },
+        ],
+      });
+      untouchedOwners(h.threads);
+      yield* h.service.sweep;
+      expect(h.previewLeases).toEqual([]);
+      expect((yield* h.registry.list)[0]!.summary.state).toBe("suspended");
+    }),
+  ),
+);
+
+it.live("keeps previews when a shared owner is ineligible for automatic suspension", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, {
+        cleanupThreads: true,
+        settings: automaticSettings,
+        previews: [{ threadId: firstId, workspacePath: f.workspace }],
+      });
+      untouchedOwners(h.threads);
+      h.threads.set(secondId, {
+        ...h.threads.get(secondId)!,
+        createdBy: "user",
+        workspaceUserAdopted: true,
+      });
+      yield* h.service.sweep;
+      expect(h.previewLeases).toHaveLength(1);
+      expect(h.previewReleases).toEqual([]);
+    }),
+  ),
+);
+
+it.live("keeps previews when historical workspace ownership prevents suspension", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, {
+        cleanupThreads: true,
+        settings: automaticSettings,
+        historicalOwners: [
+          { threadId: "fixture:former", projectId, worktreePath: f.workspace, branch: "former" },
+        ],
+        previews: [{ threadId: firstId, workspacePath: f.workspace }],
+      });
+      untouchedOwners(h.threads);
+      yield* h.service.sweep;
+      expect(h.previewLeases).toHaveLength(1);
+      expect(h.previewReleases).toEqual([]);
+    }),
+  ),
+);
+
+it.live("keeps previews while an unrelated terminal uses the workspace", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, {
+        cleanupThreads: true,
+        settings: automaticSettings,
+        previews: [{ threadId: firstId, workspacePath: f.workspace }],
+        terminals: [
+          {
+            threadId: firstId,
+            terminalId: "ordinary-terminal",
+            cwd: f.workspace,
+            worktreePath: f.workspace,
+            status: "running",
+            pid: 100,
+            exitCode: null,
+            exitSignal: null,
+            hasRunningSubprocess: true,
+            label: "ordinary-terminal",
+            updatedAt: DateTime.formatIso(at),
+          },
+        ],
+      });
+      untouchedOwners(h.threads);
+      yield* h.service.sweep;
+      expect(h.previewLeases).toHaveLength(1);
+      expect(h.previewReleases).toEqual([]);
+    }),
+  ),
+);
+
+it.live("does not release an unrelated owner's preview of an eligible workspace", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, {
+        cleanupThreads: true,
+        settings: automaticSettings,
+        previews: [
+          { threadId: firstId, workspacePath: f.workspace },
+          { threadId: "fixture:other", workspacePath: f.workspace },
+        ],
+      });
+      untouchedOwners(h.threads);
+      yield* h.service.sweep;
+      expect(h.previewLeases).toHaveLength(2);
+      expect(h.previewReleases).toEqual([]);
+      expect(h.previewReleases).not.toContain("fixture:other");
+      expect((yield* h.registry.list)[0]!.summary.state).toBe("active");
+    }),
+  ),
+);
+
+it.live(
+  "keeps an owner preview when another thread reserves the workspace after the first scan",
+  () =>
+    realGit((f) =>
+      Effect.gen(function* () {
+        let added = false;
+        const h = yield* harness(f, {
+          cleanupThreads: true,
+          settings: automaticSettings,
+          previews: [{ threadId: firstId, workspacePath: f.workspace }],
+          onPreviewScan: (leases) => {
+            if (added) return;
+            added = true;
+            leases.push({ threadId: "fixture:other", workspacePath: f.workspace });
+          },
+        });
+        untouchedOwners(h.threads);
+        yield* h.service.sweep;
+        expect(h.previewLeases).toHaveLength(2);
+        expect(h.previewReleases).toEqual([]);
+      }),
+    ),
+);
+
+it.live("keeps a preview when workspace use occurs before cancellation is locked", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const h = yield* harness(f, {
+        cleanupThreads: true,
+        settings: automaticSettings,
+        previews: [{ threadId: firstId, workspacePath: f.workspace }],
+        pausePreviewLocks: { entered, release },
+      });
+      untouchedOwners(h.threads);
+      const sweep = yield* Effect.forkChild(h.service.sweep);
+      yield* Deferred.await(entered);
+      yield* h.acquisition.acquire({ path: f.workspace, purpose: "file-write" });
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(sweep);
+      expect(h.previewLeases).toHaveLength(1);
+      expect(h.previewReleases).toEqual([]);
+      expect((yield* h.registry.list)[0]!.summary.state).toBe("active");
+    }),
+  ),
+);
+
+it.live("keeps previews when process inventory is unavailable", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, {
+        cleanupThreads: true,
+        settings: automaticSettings,
+        previews: [{ threadId: firstId, workspacePath: f.workspace }],
+      });
+      untouchedOwners(h.threads);
+      yield* h.service.sweep.pipe(
+        Effect.provideService(Consumers.ProcessPaths, Effect.succeed(null)),
+      );
+      expect(h.previewLeases).toHaveLength(1);
+      expect(h.previewReleases).toEqual([]);
+    }),
+  ),
+);
+
+it.live.each(["root", "nested"] as const)(
+  "serializes a %s project claim with preview removal",
+  (location) =>
+    realGit((f) =>
+      Effect.gen(function* () {
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const projectRoot =
+          location === "root" ? f.workspace : NodePath.join(f.workspace, "nested");
+        if (location === "nested") yield* Effect.promise(() => NodeFSP.mkdir(projectRoot));
+        const h = yield* harness(f, {
+          cleanupThreads: true,
+          settings: automaticSettings,
+          previews: [{ threadId: firstId, workspacePath: f.workspace }],
+          pausePreviewRemoval: { entered, release },
+        });
+        untouchedOwners(h.threads);
+        const pass = yield* Effect.forkChild(h.service.sweep);
+        yield* Deferred.await(entered);
+        let registered = false;
+        const scope = yield* Effect.scope;
+        const claim = yield* Effect.forkIn(
+          withProjectRootLease(
+            Effect.sync(() => {
+              h.registerProjectRoot(projectRoot);
+              registered = true;
+            }),
+          ),
+          scope,
+          { startImmediately: true },
+        );
+        const registeredDuringRemoval = registered;
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(claim);
+        yield* Fiber.join(pass);
+        expect(registeredDuringRemoval).toBe(false);
+        expect(registered).toBe(true);
+        expect(
+          yield* Effect.promise(() =>
+            NodeFSP.readFile(NodePath.join(f.workspace, "tracked"), "utf8"),
+          ),
+        ).toBe("working\n");
+      }),
+    ),
+);
+
+it.live("releases an eligible preview while retaining a checkout used by another process", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, {
+        cleanupThreads: true,
+        settings: automaticSettings,
+        previews: [{ threadId: firstId, workspacePath: f.workspace }],
+      });
+      untouchedOwners(h.threads);
+      yield* h.service.sweep.pipe(
+        Effect.provideService(
+          Consumers.ProcessPaths,
+          Effect.succeed([NodePath.join(f.workspace, "tracked")]),
+        ),
+      );
+      expect(h.previewLeases).toEqual([]);
+      const current = (yield* h.registry.list)[0]!;
+      expect(current.summary.state).toBe("active");
+      expect(current.operation).toBeUndefined();
+      expect(
+        yield* Effect.promise(() =>
+          NodeFSP.readFile(NodePath.join(f.workspace, "tracked"), "utf8"),
+        ),
+      ).toBe("working\n");
+    }),
+  ),
+);
+
+it.live.each([false, true])(
+  "releases an eligible preview before checking its runtime descriptor, still active=%s",
+  (stillActive) =>
+    realGit((f) =>
+      Effect.gen(function* () {
+        const h = yield* harness(f, {
+          cleanupThreads: true,
+          settings: automaticSettings,
+          previews: [{ threadId: firstId, workspacePath: f.workspace }],
+        });
+        const directory = NodePath.join(f.workspace, ".t3", "dev");
+        const descriptor = NodePath.join(directory, "server-runtime.json");
+        yield* Effect.promise(async () => {
+          await NodeFSP.mkdir(directory, { recursive: true });
+          await NodeFSP.writeFile(
+            descriptor,
+            JSON.stringify({
+              version: 1,
+              pid: process.pid,
+              port: 1234,
+              origin: "http://workstation.example",
+              startedAt: "2026-01-01T00:00:00Z",
+            }),
+          );
+        });
+        if (!stillActive) h.onPreviewRelease(() => NodeFS.unlinkSync(descriptor));
+        untouchedOwners(h.threads);
+        yield* h.service.sweep;
+        expect(h.previewLeases).toEqual([]);
+        expect((yield* h.registry.list)[0]!.summary.state).toBe(
+          stillActive ? "active" : "suspended",
+        );
+      }),
+    ),
+);
+
+it.live("stops releasing previews when an owner becomes active during cleanup", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, {
+        cleanupThreads: true,
+        settings: automaticSettings,
+        previews: [
+          { threadId: firstId, workspacePath: f.workspace },
+          { threadId: secondId, workspacePath: f.workspace },
+        ],
+      });
+      untouchedOwners(h.threads);
+      h.onPreviewRelease((threadId) => {
+        if (threadId === firstId)
+          h.threads.set(secondId, {
+            ...h.threads.get(secondId)!,
+            activeRunId: RunId.make("fixture:run"),
+          });
+      });
+      yield* h.service.sweep;
+      expect(h.previewLeases.map((lease) => lease.threadId)).toEqual([secondId]);
+      expect((yield* h.registry.list)[0]!.summary.state).toBe("active");
+    }),
+  ),
+);
+
+it.live.each(["original", "isolated"] as const)(
+  "retains interrupted isolation when a project claims the %s path",
+  (claim) =>
+    realGit((f) =>
+      Effect.gen(function* () {
+        const h = yield* harness(f);
+        yield* h.service.previewSuspend({ threadId: firstId });
+        const initial = (yield* h.registry.list)[0]!;
+        const id = "30d188de-7851-4d2b-b3e9-ac622221cd26";
+        yield* Effect.promise(() =>
+          h.store.capture({
+            sourcePath: f.workspace,
+            snapshotId: id,
+            operationId: id,
+            ownerBinding: initial.checkoutId,
+          }),
+        );
+        yield* Effect.promise(() => h.store.trialRestore(id));
+        const journal = yield* Effect.promise(() =>
+          h.store.isolate(id, { quarantineParent: NodePath.join(f.root, "quarantine") }),
+        );
+        const isolated = journal.isolatedPath!;
+        const summary = {
+          ...initial.summary,
+          state: "capturing" as const,
+          snapshotId: id,
+          generation: initial.summary.generation + 1,
+        };
+        yield* h.registry.put(
+          {
+            ...initial,
+            summary,
+            owners: initial.owners.map((owner) => ({ ...owner, generation: summary.generation })),
+            operation: {
+              id,
+              kind: "capture" as const,
+              snapshotIds: [id],
+              manual: true,
+              acceptedAt: DateTime.formatIso(at),
+            },
+          },
+          initial,
+        );
+        for (const [key, thread] of h.threads)
+          h.threads.set(key, { ...thread, worktreeSuspension: summary });
+        h.registerProjectRoot(claim === "original" ? f.workspace : isolated);
+        yield* h.service.sweep;
+        expect((yield* h.registry.list)[0]!.operation?.id).toBe(id);
+        expect((yield* Effect.promise(() => h.store.readJournal(id))).phase).toBe("isolated");
+        expect(
+          yield* Effect.promise(() => NodeFSP.readFile(NodePath.join(isolated, "tracked"), "utf8")),
+        ).toBe("working\n");
+      }),
+    ),
+);
+
+it.live.each([
+  "before admission",
+  "after capture",
+  "after isolation",
+  "after isolation via alias",
+  "after isolation via leaf link",
+] as const)("keeps a newly registered project root %s", (registration) =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const h = yield* harness(f, {
+        cleanupThreads: true,
+        settings: automaticSettings,
+        pauseCaptured: { entered, release },
+      });
+      untouchedOwners(h.threads);
+      for (const [id, owner] of h.threads)
+        h.threads.set(id, { ...owner, archivedAt: at, settledAt: null });
+      yield* h.service.previewSuspend({ threadId: firstId });
+      if (registration === "before admission") h.registerProjectRoot(f.workspace);
+      if (registration === "after isolation") h.registerProjectWhenIsolated(f.workspace);
+      if (registration === "after isolation via alias") {
+        const alias = NodePath.join(f.root, "project-alias");
+        yield* Effect.promise(() => NodeFSP.symlink(NodePath.dirname(f.workspace), alias));
+        h.registerProjectWhenIsolated(NodePath.join(alias, NodePath.basename(f.workspace)));
+      }
+      if (registration === "after isolation via leaf link") {
+        const alias = NodePath.join(f.root, "project-link");
+        yield* Effect.promise(() => NodeFSP.symlink(f.workspace, alias));
+        h.registerProjectWhenIsolated(alias);
+      }
+      const pass = yield* Effect.forkChild(h.service.sweep);
+      if (registration === "after capture") {
+        yield* Deferred.await(entered);
+        h.registerProjectRoot(f.workspace);
+      }
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(pass);
+      const retained = (yield* h.registry.list)[0]!;
+      if (registration.startsWith("after isolation")) {
+        expect(retained.summary.state).toBe("capturing");
+        const journal = yield* Effect.promise(() =>
+          h.store.readJournal(retained.operation!.snapshotIds[0]!),
+        );
+        expect(journal.phase).toBe("isolated");
+        expect(
+          yield* Effect.promise(() =>
+            NodeFSP.readFile(NodePath.join(journal.isolatedPath!, "tracked"), "utf8"),
+          ),
+        ).toBe("working\n");
+        return;
+      }
+      expect(retained.summary.state).toBe("active");
+      expect(
+        yield* Effect.promise(() =>
+          NodeFSP.readFile(NodePath.join(f.workspace, "tracked"), "utf8"),
+        ),
+      ).toBe("working\n");
+    }),
+  ),
+);
+
+it.live("does not capture files after their checkout becomes a project root", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      let paused = false;
+      let captureFinished = false;
+      const h = yield* harness(f, {
+        onStoreBoundary: async (phase) => {
+          if (phase === "capturing" && !paused) {
+            paused = true;
+            entered.resolve();
+            await release.promise;
+          }
+          if (phase === "verifying") captureFinished = true;
+        },
+      });
+      const preview = yield* h.service.previewSuspend({ threadId: firstId });
+      yield* Queue.clear(h.updates);
+      yield* h.service.suspend({ threadId: firstId, previewToken: preview.token });
+      yield* Effect.promise(() => entered.promise);
+      const attempted = yield* Deferred.make<void>();
+      let registeredDuringCapture = false;
+      const registration = yield* Deferred.succeed(attempted, undefined).pipe(
+        Effect.andThen(
+          withProjectRootLease(
+            Effect.sync(() => {
+              registeredDuringCapture = !captureFinished;
+              h.registerProjectRoot(f.workspace);
+            }),
+          ),
+        ),
+        Effect.forkChild,
+      );
+      yield* Deferred.await(attempted);
+      release.resolve();
+      yield* Fiber.join(registration);
+      expect(registeredDuringCapture).toBe(false);
+      expect(
+        yield* Effect.promise(() =>
+          NodeFSP.readFile(NodePath.join(f.workspace, "tracked"), "utf8"),
+        ),
+      ).toBe("working\n");
+    }),
+  ),
+);
+
 it.live(
   "retains promoted and unknown legacy children instead of treating no authored messages as untouched",
   () =>
@@ -2452,6 +3195,118 @@ it.live(
     ),
 );
 
+it.live.each(["current", "historical"] as const)(
+  "prevents project registration while a %s restore is being materialized",
+  (kind) =>
+    realGit((f) =>
+      Effect.gen(function* () {
+        const staging = Promise.withResolvers<string>();
+        const release = Promise.withResolvers<void>();
+        let h!: Effect.Success<ReturnType<typeof harness>>;
+        let paused = false;
+        let armed = false;
+        h = yield* harness(f, {
+          onStoreBoundary: async (phase, id) => {
+            if (phase !== "restoring" || paused || !armed) return;
+            const journal = await h.store.readJournal(id);
+            if (journal.restoreIdentity === undefined || journal.restorePath === undefined) return;
+            paused = true;
+            staging.resolve(journal.restorePath);
+            await release.promise;
+          },
+        });
+        const saved = yield* h.suspend;
+        const destination =
+          kind === "current"
+            ? f.workspace
+            : NodePath.join(NodePath.dirname(f.workspace), "historical");
+        if (kind === "historical")
+          yield* h.acquisition.acquire({
+            path: f.workspace,
+            purpose: "file-write",
+            threadId: firstId,
+          });
+        yield* Queue.clear(h.updates);
+        armed = true;
+        yield* h.service.restore({
+          checkoutId: saved.checkoutId,
+          snapshotId: saved.summary.snapshotId!,
+          destinationPath: destination,
+          ...(kind === "historical" ? { projectId } : {}),
+        });
+        const stagingPath = yield* Effect.promise(() => staging.promise);
+        const attempted = yield* Deferred.make<void>();
+        let registered = false;
+        const claim = yield* Deferred.succeed(attempted, undefined).pipe(
+          Effect.andThen(
+            withProjectRootLease(
+              Effect.sync(() => {
+                if (NodeFS.existsSync(stagingPath)) {
+                  h.registerProjectRoot(stagingPath);
+                  registered = true;
+                }
+              }),
+            ),
+          ),
+          Effect.forkChild,
+        );
+        yield* Deferred.await(attempted);
+        release.resolve();
+        yield* Fiber.join(claim);
+        expect(registered).toBe(false);
+        const active = yield* h.awaitRecord(
+          (record) =>
+            (kind === "current"
+              ? record.checkoutId === saved.checkoutId
+              : record.sourceCheckoutId === saved.checkoutId) &&
+            record.summary.state === "active" &&
+            record.operation === undefined,
+        );
+        expect(active.path).toBe(destination);
+      }),
+    ),
+);
+
+it.live("retains a staged restore claimed by another project after interruption", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f);
+      const saved = yield* h.suspend;
+      const id = saved.summary.snapshotId!;
+      const staged = yield* Effect.promise(() =>
+        h.store.stageRestore(id, { destinationPath: f.workspace }),
+      );
+      const summary = { ...saved.summary, state: "restoring" as const };
+      yield* h.registry.put(
+        {
+          ...saved,
+          summary,
+          operation: {
+            id: "fixture:restore",
+            kind: "restore",
+            snapshotIds: [id],
+            manual: true,
+            acceptedAt: DateTime.formatIso(at),
+            destinationPath: f.workspace,
+          },
+        },
+        saved,
+      );
+      for (const [key, thread] of h.threads)
+        h.threads.set(key, { ...thread, worktreeSuspension: summary });
+      h.registerProjectRoot(staged.restorePath!);
+      yield* h.service.sweep;
+      expect((yield* h.registry.list)[0]!.operation?.kind).toBe("restore");
+      expect((yield* Effect.promise(() => h.store.readJournal(id))).phase).toBe("restoring");
+      expect(
+        yield* Effect.promise(() =>
+          NodeFSP.readFile(NodePath.join(staged.restorePath!, "tracked"), "utf8"),
+        ),
+      ).toBe("working\n");
+    }),
+  ),
+);
+
 it.live("read-only discovery does not fabricate a workspace-use clock", () =>
   realGit((f) =>
     Effect.gen(function* () {
@@ -2690,6 +3545,141 @@ it.live("editor acquisition records positive use before automatic suspension", (
       expect((yield* h.registry.list)[0]?.lastWorkspaceUseAt).toBeDefined();
       yield* h.service.sweep;
       expect((yield* h.registry.list)[0]!.summary.state).toBe("active");
+    }),
+  ),
+);
+
+it.live("records workspace use while automatic suspension is disabled", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, {
+        cleanupThreads: true,
+        settings: { ...automaticSettings, worktreeSuspension: { mode: "off" } },
+      });
+      untouchedOwners(h.threads);
+      for (const [id, owner] of h.threads)
+        h.threads.set(id, { ...owner, archivedAt: at, settledAt: null });
+      yield* h.acquisition.acquire({ path: f.workspace, purpose: "editor", threadId: firstId });
+      expect((yield* h.registry.list)[0]?.lastWorkspaceUseAt).toBeDefined();
+      h.setSettings(automaticSettings);
+      yield* h.service.sweep;
+      expect((yield* h.registry.list)[0]!.summary.state).toBe("active");
+    }),
+  ),
+);
+
+it.live("allows workspace use while suspension is off when the checkout is a project root", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, {
+        settings: { ...automaticSettings, worktreeSuspension: { mode: "off" } },
+      });
+      h.registerProjectRoot(f.workspace);
+      expect(
+        yield* h.acquisition.acquire({ path: f.workspace, purpose: "editor", threadId: firstId }),
+      ).toMatchObject({ path: f.workspace, restored: false });
+    }),
+  ),
+);
+
+it.live("allows workspace use while suspension is off if Git metadata is unavailable", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, {
+        settings: { ...automaticSettings, worktreeSuspension: { mode: "off" } },
+      });
+      yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(f.workspace, ".git"), "broken"));
+      expect(
+        yield* h.acquisition.acquire({ path: f.workspace, purpose: "editor", threadId: firstId }),
+      ).toMatchObject({ path: f.workspace, restored: false });
+    }),
+  ),
+);
+
+it.live("remembers unverified workspace use across restart and later Git repair", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const off = { ...automaticSettings, worktreeSuspension: { mode: "off" as const } };
+      const h = yield* harness(f, { cleanupThreads: true, settings: off });
+      untouchedOwners(h.threads);
+      for (const [id, owner] of h.threads)
+        h.threads.set(id, { ...owner, archivedAt: at, settledAt: null });
+      const gitPointer = yield* Effect.promise(() =>
+        NodeFSP.readFile(NodePath.join(f.workspace, ".git"), "utf8"),
+      );
+      yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(f.workspace, ".git"), "broken"));
+      yield* h.acquisition.acquire({ path: f.workspace, purpose: "editor", threadId: firstId });
+      expect(yield* h.registry.list).toEqual([]);
+      yield* Effect.promise(() =>
+        NodeFSP.writeFile(NodePath.join(f.workspace, ".git"), gitPointer),
+      );
+      const restarted = yield* harness(f, { cleanupThreads: true, settings: automaticSettings });
+      untouchedOwners(restarted.threads);
+      for (const [id, owner] of restarted.threads)
+        restarted.threads.set(id, { ...owner, archivedAt: at, settledAt: null });
+      yield* restarted.service.sweep;
+      const record = (yield* restarted.registry.list)[0]!;
+      expect(record.summary.state).toBe("active");
+      expect(record.lastWorkspaceUseAt).toBeDefined();
+    }),
+  ),
+);
+
+it.live("keeps one checkout record for simultaneous first workspace uses", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, {
+        settings: { ...automaticSettings, worktreeSuspension: { mode: "off" } },
+      });
+      yield* Effect.forEach(
+        [firstId, secondId],
+        (threadId) => h.acquisition.acquire({ path: f.workspace, purpose: "editor", threadId }),
+        { concurrency: 2 },
+      );
+      const records = yield* h.registry.list;
+      expect(records).toHaveLength(1);
+      expect(records[0]!.lastWorkspaceUseAt).toBeDefined();
+    }),
+  ),
+);
+
+it.live("keeps recent use safe when first identification races an automatic sweep", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, { cleanupThreads: true, settings: automaticSettings });
+      untouchedOwners(h.threads);
+      yield* Effect.all(
+        [
+          h.service.sweep,
+          h.acquisition.acquire({ path: f.workspace, purpose: "editor", threadId: firstId }),
+        ],
+        { concurrency: 2 },
+      );
+      const records = yield* h.registry.list;
+      expect(records).toHaveLength(1);
+      expect(records[0]!.summary.state).toBe("active");
+      expect(records[0]!.lastWorkspaceUseAt).toBeDefined();
+      expect(
+        yield* Effect.promise(() =>
+          NodeFSP.readFile(NodePath.join(f.workspace, "tracked"), "utf8"),
+        ),
+      ).toBe("working\n");
+    }),
+  ),
+);
+
+it.live("allows use of an active recorded checkout when Git metadata becomes unavailable", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, {
+        settings: { ...automaticSettings, worktreeSuspension: { mode: "off" } },
+      });
+      yield* h.acquisition.acquire({ path: f.workspace, purpose: "editor", threadId: firstId });
+      yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(f.workspace, ".git"), "broken"));
+      expect(
+        yield* h.acquisition.acquire({ path: f.workspace, purpose: "editor", threadId: firstId }),
+      ).toMatchObject({ path: f.workspace, branch: null, restored: false });
+      expect((yield* h.registry.list)[0]!.lastWorkspaceUseAt).toBeDefined();
     }),
   ),
 );

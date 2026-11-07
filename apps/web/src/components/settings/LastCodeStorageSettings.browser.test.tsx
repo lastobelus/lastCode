@@ -208,7 +208,9 @@ it("sets project Off and restores Inherit without losing other project overrides
   await expect
     .element(screen.getByRole("combobox", { name: "Suspend worktrees automatically" }))
     .toHaveTextContent("Inherit");
-  await expect.element(screen.getByText(/after 14 days settled and unused/)).toBeVisible();
+  await expect
+    .element(screen.getByText(/after 14 days settled or archived and unused/))
+    .toBeVisible();
 });
 
 it("does not copy one machine’s policy when configuring mixed targets", async () => {
@@ -331,7 +333,9 @@ it("shows inherited suspension without a veto when project cleanup inherits envi
   await expect
     .element(screen.getByRole("combobox", { name: "Suspend worktrees automatically" }))
     .toHaveTextContent("Inherit");
-  await expect.element(screen.getByText(/after 14 days settled and unused/)).toBeVisible();
+  await expect
+    .element(screen.getByText(/after 14 days settled or archived and unused/))
+    .toBeVisible();
   await expect.element(screen.getByText(/will not suspend/)).not.toBeInTheDocument();
   expect(state.write).not.toHaveBeenCalled();
 });
