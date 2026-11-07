@@ -113,6 +113,45 @@ it.effect("persists authority privately and rejects a stale generation write", (
   }).pipe(Effect.provide(layer)),
 );
 
+it.effect("reserves recovery destinations against other checkout claims", () =>
+  Effect.gen(function* () {
+    const registry = yield* Registry.WorktreeSuspensionRegistry;
+    yield* registry.put(record, null);
+    const operation = {
+      id: "fixture-recovery",
+      kind: "recovery" as const,
+      snapshotIds: [],
+      manual: true,
+      acceptedAt: "2026-01-01T00:00:00.000Z",
+      destinationPath: "/managed/recovered",
+    };
+    const pending = { ...record, operation };
+    yield* registry.put(pending, record);
+    const recovered = {
+      ...record,
+      checkoutId: operation.id,
+      sourceCheckoutId: record.checkoutId,
+      path: operation.destinationPath,
+      aliases: [operation.destinationPath],
+      summary: { ...record.summary, checkoutId: operation.id },
+      operation,
+    };
+    const unrelated = {
+      ...record,
+      checkoutId: "unrelated",
+      path: operation.destinationPath,
+      aliases: [operation.destinationPath],
+      summary: { ...recovered.summary, checkoutId: "unrelated" },
+    };
+    assert.strictEqual(
+      (yield* registry.put(unrelated, null).pipe(Effect.flip)).operation,
+      "ownership-changed",
+    );
+    yield* registry.put(recovered, null);
+    assert.lengthOf(yield* registry.list, 2);
+  }).pipe(Effect.provide(layer)),
+);
+
 it.effect("only permits dependency cleanup for a settled exact failure", () =>
   Effect.gen(function* () {
     const registry = yield* Registry.WorktreeSuspensionRegistry;

@@ -182,6 +182,19 @@ const harness = (
     const projects = [project];
     const previewLeases = [...(options.previews ?? [])];
     const terminalRecords = [...(options.terminals ?? [])];
+    const hostingLeases = () =>
+      previewLeases.map((lease) => ({
+        id: `preview-${lease.threadId}`,
+        threadId: lease.threadId,
+        terminalId: `preview-${lease.threadId}`,
+        command: "fixture",
+        cwd: lease.workspacePath,
+        worktreePath: lease.workspacePath,
+        url: "http://127.0.0.1:1234/",
+        handedOffAt: DateTime.formatIso(at),
+        expiresAt: DateTime.formatIso(at),
+        status: "active" as const,
+      }));
     const previewReleases: string[] = [];
     let onPreviewRelease: ((threadId: string) => void) | undefined;
     let settings = options.settings ?? DEFAULT_SERVER_SETTINGS;
@@ -402,21 +415,8 @@ const harness = (
           Layer.mock(PreviewHosting.PreviewHosting)({
             protectedWorkspacePaths: () =>
               Effect.sync(() => previewLeases.map((lease) => lease.workspacePath)),
-            list: () =>
-              Effect.sync(() =>
-                previewLeases.map((lease) => ({
-                  id: `preview-${lease.threadId}`,
-                  threadId: lease.threadId,
-                  terminalId: `preview-${lease.threadId}`,
-                  command: "fixture",
-                  cwd: lease.workspacePath,
-                  worktreePath: lease.workspacePath,
-                  url: "http://127.0.0.1:1234/",
-                  handedOffAt: DateTime.formatIso(at),
-                  expiresAt: DateTime.formatIso(at),
-                  status: "active" as const,
-                })),
-              ),
+            list: () => Effect.sync(hostingLeases),
+            protectedWorkspaceLeases: () => Effect.sync(hostingLeases),
             removeThreadWorkspace: (threadId, workspacePath) =>
               Effect.sync(() => {
                 previewReleases.push(threadId);
@@ -1516,6 +1516,52 @@ it.live(
     ),
 );
 
+it.live("rejects historical recovery into another checkout's reserved path", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f);
+      const saved = yield* h.suspend;
+      const snapshotId = saved.summary.snapshotId!;
+      yield* h.acquisition.acquire({ path: f.workspace, purpose: "file-write" });
+      const source = (yield* h.registry.list)[0]!;
+      const destination = NodePath.join(NodePath.dirname(f.workspace), "reserved-workspace");
+      yield* h.registry.put(
+        {
+          ...source,
+          checkoutId: "fixture:reserved",
+          path: destination,
+          aliases: [destination],
+          owners: [],
+          history: [],
+          snapshots: [],
+          summary: { ...source.summary, checkoutId: "fixture:reserved", state: "suspended" },
+        },
+        null,
+      );
+      const result = yield* h.service
+        .restore({
+          checkoutId: saved.checkoutId,
+          snapshotId,
+          projectId,
+          destinationPath: destination,
+        })
+        .pipe(Effect.flip);
+      expect(result.reason).toBe("protected");
+      expect(
+        (yield* h.registry.list).find((entry) => entry.checkoutId === saved.checkoutId)!.operation,
+      ).toBeUndefined();
+      expect(
+        yield* Effect.promise(() =>
+          NodeFSP.stat(destination).then(
+            () => true,
+            () => false,
+          ),
+        ),
+      ).toBe(false);
+    }),
+  ),
+);
+
 it.live("recovers a retained orphan only through a separate mapped checkout", () =>
   realGit((f) =>
     Effect.gen(function* () {
@@ -2379,13 +2425,35 @@ it.live("does not release an unrelated owner's preview of an eligible workspace"
       const h = yield* harness(f, {
         cleanupThreads: true,
         settings: automaticSettings,
-        previews: [{ threadId: "fixture:other", workspacePath: f.workspace }],
+        previews: [
+          { threadId: firstId, workspacePath: f.workspace },
+          { threadId: "fixture:other", workspacePath: f.workspace },
+        ],
       });
       untouchedOwners(h.threads);
       yield* h.service.sweep;
-      expect(h.previewLeases).toHaveLength(1);
+      expect(h.previewLeases).toHaveLength(2);
+      expect(h.previewReleases).toEqual([]);
       expect(h.previewReleases).not.toContain("fixture:other");
       expect((yield* h.registry.list)[0]!.summary.state).toBe("active");
+    }),
+  ),
+);
+
+it.live("keeps previews when process inventory is unavailable", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, {
+        cleanupThreads: true,
+        settings: automaticSettings,
+        previews: [{ threadId: firstId, workspacePath: f.workspace }],
+      });
+      untouchedOwners(h.threads);
+      yield* h.service.sweep.pipe(
+        Effect.provideService(Consumers.ProcessPaths, Effect.succeed(null)),
+      );
+      expect(h.previewLeases).toHaveLength(1);
+      expect(h.previewReleases).toEqual([]);
     }),
   ),
 );

@@ -210,6 +210,10 @@ export class PreviewHosting extends Context.Service<
       ReadonlyArray<string>,
       PreviewHostingError
     >;
+    readonly protectedWorkspaceLeases: () => Effect.Effect<
+      ReadonlyArray<PreviewHostingLease>,
+      PreviewHostingError
+    >;
   }
 >()("t3/preview/Hosting/PreviewHosting") {}
 
@@ -1487,16 +1491,21 @@ const make = Effect.gen(function* () {
           (lease) => lease.threadId === threadId,
         );
         const matching = yield* Effect.forEach(owned, (lease) =>
-          canonicalWorkspacePath(lease.worktreePath ?? lease.cwd).pipe(
-            Effect.map((candidate) => {
-              const relative = path.relative(root, candidate);
-              return lease.worktreePath === null
-                ? relative === "" ||
-                    (!relative.startsWith(`..${path.sep}`) &&
-                      relative !== ".." &&
-                      !path.isAbsolute(relative))
-                : relative === "";
-            }),
+          Effect.forEach(
+            [lease.cwd, ...(lease.worktreePath === null ? [] : [lease.worktreePath])],
+            canonicalWorkspacePath,
+          ).pipe(
+            Effect.map((candidates) =>
+              candidates.some((candidate) => {
+                const relative = path.relative(root, candidate);
+                return (
+                  relative === "" ||
+                  (!relative.startsWith(`..${path.sep}`) &&
+                    relative !== ".." &&
+                    !path.isAbsolute(relative))
+                );
+              }),
+            ),
             Effect.mapError(
               (cause) =>
                 new PreviewHostingError({ operation: "validate", statePath, threadId, cause }),
@@ -1539,6 +1548,9 @@ const make = Effect.gen(function* () {
     );
     return [...new Set(canonicalPaths)];
   });
+
+  const protectedWorkspaceLeases: PreviewHosting["Service"]["protectedWorkspaceLeases"] = () =>
+    startupError !== null ? Effect.fail(startupError) : SynchronizedRef.get(leasesRef);
 
   const expireDueLeases = Effect.fn("PreviewHosting.expireDueLeases")(function* () {
     const currentTime = yield* nowMillis;
@@ -1719,6 +1731,7 @@ const make = Effect.gen(function* () {
     removeThreadWorkspace,
     stopThread,
     protectedWorkspacePaths,
+    protectedWorkspaceLeases,
   });
 });
 

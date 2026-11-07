@@ -644,6 +644,13 @@ describe("PreviewHosting", () => {
           cwd: "/workspace/other",
           url: "http://localhost:5175/",
         });
+        const cwdInWorkspace = leaseFixture({
+          id: "cwd-in-workspace",
+          terminalId: "cwd-in-workspace",
+          worktreePath: "/workspace/other",
+          cwd: "/workspace/one/sub",
+          url: "http://localhost:5177/",
+        });
         const otherOwner = leaseFixture({
           id: "other-owner",
           terminalId: "other-owner",
@@ -657,7 +664,7 @@ describe("PreviewHosting", () => {
           `${config.stateDir}/preview-hosting.json`,
           encodePersistedHostingState({
             version: 1,
-            leases: [matching, legacy, otherWorkspace, otherOwner],
+            leases: [matching, legacy, cwdInWorkspace, otherWorkspace, otherOwner],
           }),
         );
         const harness = testTerminalHarness();
@@ -668,7 +675,7 @@ describe("PreviewHosting", () => {
             assert.deepEqual(yield* hosting.list(), [otherWorkspace, otherOwner]);
             assert.sameMembers(
               harness.closes.map((entry) => entry.terminalId),
-              ["matching", "legacy"],
+              ["matching", "legacy", "cwd-in-workspace"],
             );
           }).pipe(Effect.provide(hostingLayer(config, harness))),
         );

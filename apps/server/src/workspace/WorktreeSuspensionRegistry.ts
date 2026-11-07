@@ -265,18 +265,41 @@ const make = Effect.gen(function* () {
           ) {
             return yield* new SuspensionRegistryError({ operation: "ownership-changed" });
           }
+          const samePath = (left: string, right: string) =>
+            path.resolve(left) === path.resolve(right);
+          const nextPaths = [next.path, ...next.aliases];
+          const nextDestination =
+            next.operation?.kind === "recovery" ? next.operation.destinationPath : undefined;
           if (
-            expected === null &&
             !next.detached &&
-            current.checkouts.some(
-              (entry) =>
-                !entry.detached &&
-                [entry.path, ...entry.aliases].some((alias) =>
-                  [next.path, ...next.aliases].some(
-                    (candidate) => path.resolve(candidate) === path.resolve(alias),
-                  ),
-                ),
-            )
+            current.checkouts.some((entry) => {
+              if (entry.detached || entry.checkoutId === next.checkoutId) return false;
+              const entryPaths = [entry.path, ...entry.aliases];
+              const entryDestination =
+                entry.operation?.kind === "recovery" ? entry.operation.destinationPath : undefined;
+              const sameRecovery =
+                (entry.operation?.kind === "recovery" &&
+                  next.sourceCheckoutId === entry.checkoutId &&
+                  next.checkoutId === entry.operation?.id) ||
+                (next.operation?.kind === "recovery" &&
+                  entry.sourceCheckoutId === next.checkoutId &&
+                  entry.checkoutId === next.operation?.id);
+              return (
+                (expected === null &&
+                  entryPaths.some((alias) =>
+                    nextPaths.some((candidate) => samePath(alias, candidate)),
+                  )) ||
+                (!sameRecovery &&
+                  entryDestination !== undefined &&
+                  nextPaths.some((candidate) => samePath(candidate, entryDestination))) ||
+                (!sameRecovery &&
+                  nextDestination !== undefined &&
+                  [
+                    ...entryPaths,
+                    ...(entryDestination === undefined ? [] : [entryDestination]),
+                  ].some((candidate) => samePath(candidate, nextDestination)))
+              );
+            })
           )
             return yield* new SuspensionRegistryError({ operation: "ownership-changed" });
           yield* write({
