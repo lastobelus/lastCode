@@ -85,14 +85,13 @@ function ReleaseLink({
 /** When this offer was last confirmed, and why a later refresh failed while it stayed usable. */
 export function SidebarUpdateFreshness({ state }: { readonly state: DesktopUpdateState }) {
   const checked = useRelativeTimeState(state.checkSucceededAt ?? null);
-  if (state.checkSucceededAt === undefined && state.refreshFailure === undefined) return null;
   return (
     <>
-      <div className="mt-0.5 text-2xs leading-4 text-muted-foreground">
-        {checked.status === "relative"
-          ? `Checked ${checked.suffix ? `${checked.value} ${checked.suffix}` : checked.value}`
-          : "Not checked since launch"}
-      </div>
+      {checked.status === "relative" ? (
+        <div className="mt-0.5 text-2xs leading-4 text-muted-foreground">
+          {`Checked ${checked.suffix ? `${checked.value} ${checked.suffix}` : checked.value}`}
+        </div>
+      ) : null}
       {state.refreshFailure ? (
         <div className="mt-0.5 break-words text-2xs leading-4 text-warning">
           Latest check failed: {state.refreshFailure}
