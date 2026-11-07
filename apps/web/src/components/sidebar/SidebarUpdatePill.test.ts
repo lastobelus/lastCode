@@ -66,8 +66,9 @@ describe("SidebarUpdatePill release notes", () => {
   it("renders ordered sections, summaries outside bullets, separators, and scrolling", () => {
     const markup = renderToStaticMarkup(
       createElement(SidebarUpdateReleaseNotes, {
+        alsoUpdates: "3 provider updates",
         shell: undefined,
-        tooltip: "Update available",
+        tooltip: "Update this app and 3 providers",
         state: {
           enabled: true,
           source: "lastcode-local",
@@ -106,6 +107,10 @@ describe("SidebarUpdatePill release notes", () => {
       }),
     );
 
+    expect(markup).toContain("T3 Code 1.2.4-nightly.1 → 1.2.4-nightly.2");
+    expect(markup).toContain("Ready to build");
+    expect(markup).toContain("Also: 3 provider updates");
+    expect(markup).not.toContain("Update this app and 3 providers");
     expect(markup.indexOf("LastCode changes")).toBeLessThan(markup.indexOf("Upstream changes"));
     expect(markup).toContain("overflow-y-auto");
     expect(markup).toContain('<li class="list-disc break-words">local change</li>');

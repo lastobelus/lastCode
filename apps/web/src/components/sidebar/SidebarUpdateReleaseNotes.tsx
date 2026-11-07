@@ -5,7 +5,9 @@ import type {
 } from "@t3tools/contracts";
 import { ExternalLinkIcon } from "lucide-react";
 
+import { APP_BASE_NAME } from "../../branding";
 import {
+  getDesktopUpdatePopoverHeader,
   getDesktopUpdateReleaseHistoryUrl,
   getDesktopUpdateReleaseUrl,
 } from "../desktopUpdate.logic";
@@ -79,10 +81,12 @@ function ReleaseLink({
 }
 
 export function SidebarUpdateReleaseNotes({
+  alsoUpdates = null,
   shell,
   state,
   tooltip,
 }: {
+  readonly alsoUpdates?: string | null;
   readonly shell: DesktopUpdateShell | undefined;
   readonly state: DesktopUpdateState;
   readonly tooltip: string;
@@ -90,25 +94,27 @@ export function SidebarUpdateReleaseNotes({
   if (state.releaseNotes.length === 0) {
     return <>{tooltip}</>;
   }
-  const releasedAt = state.releaseNotes.find(
-    (releaseNote) => releaseNote.version === state.availableVersion,
-  )?.releasedAt;
+  const header = getDesktopUpdatePopoverHeader(state, APP_BASE_NAME);
+  const releasedAt = header
+    ? state.releaseNotes.find((releaseNote) => releaseNote.version === header.targetVersion)
+        ?.releasedAt
+    : undefined;
 
   return (
     <div className="flex max-h-[calc(var(--available-height)-0.5rem)] min-h-0 w-fit max-w-[min(24rem,calc(100vw-2rem))] flex-col text-left text-pretty">
       <div className="shrink-0 px-1">
-        {state.status === "available" ? (
+        {header ? (
           <div>
-            <div className="whitespace-nowrap text-sm leading-5 font-medium">
-              {state.source === "lastcode-local"
-                ? "Local nightly ready to build"
-                : "Update ready to download"}
+            <div className="whitespace-nowrap text-sm leading-5 font-medium">{header.title}</div>
+            <div className="mt-0.5 text-xs leading-4 text-muted-foreground">{header.readiness}</div>
+            <div className="mt-0.5 text-2xs leading-4 text-muted-foreground">
+              {releasedAt
+                ? `${header.targetVersion} · ${formatReleaseAge(releasedAt)}`
+                : header.targetVersion}
             </div>
-            {state.availableVersion ? (
-              <div className="mt-0.5 text-xs leading-4 text-muted-foreground">
-                {releasedAt
-                  ? `${state.availableVersion} · ${formatReleaseAge(releasedAt)}`
-                  : state.availableVersion}
+            {alsoUpdates ? (
+              <div className="mt-1.5 text-xs leading-4 text-muted-foreground">
+                Also: {alsoUpdates}
               </div>
             ) : null}
           </div>

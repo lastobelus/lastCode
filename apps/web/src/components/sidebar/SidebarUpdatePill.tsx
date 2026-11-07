@@ -692,6 +692,7 @@ function SidebarUpdateControl() {
               />
             ) : (
               <SidebarUpdateReleaseNotes
+                alsoUpdates={runsEverything ? everything.alsoUpdates : null}
                 shell={window.desktopBridge}
                 state={state}
                 tooltip={tooltip}

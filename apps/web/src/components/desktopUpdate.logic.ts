@@ -212,6 +212,55 @@ export function getDesktopUpdateButtonTooltip(state: DesktopUpdateState): string
   return "Up to date";
 }
 
+/** Nightlies read by checkpoint number (`4301`, or `3814.1` for a revision); others in full. */
+function formatDesktopUpdateShortVersion(version: string): string {
+  return /-nightly\.\d{8}\.(\d+(?:\.\d+)?)$/u.exec(version)?.[1] ?? version;
+}
+
+export interface DesktopUpdatePopoverHeader {
+  readonly title: string;
+  readonly readiness: string;
+  readonly targetVersion: string;
+}
+
+/** Names the app's target and what clicking does, in every state that offers one. */
+export function getDesktopUpdatePopoverHeader(
+  state: DesktopUpdateState,
+  appName: string,
+): DesktopUpdatePopoverHeader | null {
+  const targetVersion = getDesktopUpdateDownloadedVersion(state);
+  if (!targetVersion) return null;
+  const action = resolveDesktopUpdateButtonAction(state);
+  if (action === "none" && state.status !== "downloading") return null;
+  const isLocal = state.source === "lastcode-local";
+  const readiness = (() => {
+    if (state.notAppliedVersion === targetVersion && action !== "none") {
+      return "Did not apply last time · click to retry";
+    }
+    if (state.status === "downloading") {
+      if (isLocal && state.localBuildProgress) {
+        return `${state.localBuildProgress.phase} · ${state.localBuildProgress.percent}% est.`;
+      }
+      const percent =
+        typeof state.downloadPercent === "number" ? ` · ${Math.floor(state.downloadPercent)}%` : "";
+      return `${isLocal ? "Building" : "Downloading"}${percent}`;
+    }
+    if (state.status === "error" && state.errorContext === "download") {
+      return `${isLocal ? "Build" : "Download"} failed · click to retry`;
+    }
+    if (state.status === "error" && state.errorContext === "install") {
+      return "Install failed · click to retry";
+    }
+    if (action === "download") return isLocal ? "Ready to build" : "Ready to download";
+    return `${isLocal ? "Built" : "Downloaded"} and ready to install · restart required`;
+  })();
+  return {
+    title: `${appName} ${formatDesktopUpdateShortVersion(state.currentVersion)} → ${formatDesktopUpdateShortVersion(targetVersion)}`,
+    readiness,
+    targetVersion,
+  };
+}
+
 export function getDesktopUpdateInstallConfirmationMessage(
   state: Pick<DesktopUpdateState, "availableVersion" | "downloadedVersion"> &
     Partial<Pick<DesktopUpdateState, "source">>,

@@ -7,6 +7,7 @@ import {
   getDesktopUpdateActionError,
   getDesktopUpdateButtonTooltip,
   getDesktopUpdateInstallConfirmationMessage,
+  getDesktopUpdatePopoverHeader,
   getDesktopUpdateReleaseHistoryUrl,
   getDesktopUpdateProgressPercent,
   MAX_LOCAL_BUILD_DIAGNOSTIC_LENGTH,
@@ -196,6 +197,81 @@ describe("desktop update UI helpers", () => {
         downloadedVersion: state.availableVersion,
       }),
     ).toContain("restart LastCode?");
+  });
+});
+
+describe("getDesktopUpdatePopoverHeader", () => {
+  const local: DesktopUpdateState = {
+    ...baseState,
+    source: "lastcode-local",
+    currentVersion: "0.1.8-nightly.20261105.4218",
+    availableVersion: "0.1.8-nightly.20261107.4301",
+  };
+
+  it.each<[string, Partial<DesktopUpdateState>, string | null]>([
+    ["candidate", { status: "available" }, "Ready to build"],
+    [
+      "build in progress",
+      {
+        status: "downloading",
+        localBuildProgress: {
+          checkpointTag: "lastcode/checkpoint/v0.1.8-nightly.20261107.4301",
+          phase: "Workspace tests",
+          percent: 31,
+          errorKind: "build",
+        },
+      },
+      "Workspace tests · 31% est.",
+    ],
+    [
+      "built package",
+      { status: "downloaded", downloadedVersion: "0.1.8-nightly.20261107.4301" },
+      "Built and ready to install · restart required",
+    ],
+    [
+      "failed build",
+      { status: "error", errorContext: "download" },
+      "Build failed · click to retry",
+    ],
+    [
+      "failed install",
+      {
+        status: "error",
+        errorContext: "install",
+        downloadedVersion: "0.1.8-nightly.20261107.4301",
+      },
+      "Install failed · click to retry",
+    ],
+    [
+      "unapplied install",
+      {
+        status: "downloaded",
+        downloadedVersion: "0.1.8-nightly.20261107.4301",
+        notAppliedVersion: "0.1.8-nightly.20261107.4301",
+      },
+      "Did not apply last time · click to retry",
+    ],
+    ["no offer", { status: "idle", availableVersion: null }, null],
+  ])("keeps the app target visible for a %s", (_name, change, readiness) => {
+    const header = getDesktopUpdatePopoverHeader({ ...local, ...change }, "LastCode");
+    expect(header?.readiness ?? null).toBe(readiness);
+    if (readiness !== null) {
+      expect(header?.title).toBe("LastCode 4218 → 4301");
+      expect(header?.targetVersion).toBe("0.1.8-nightly.20261107.4301");
+    }
+  });
+
+  it("names hosted versions in full", () => {
+    expect(
+      getDesktopUpdatePopoverHeader(
+        { ...baseState, status: "downloaded", downloadedVersion: "1.1.0" },
+        "T3 Code",
+      ),
+    ).toEqual({
+      title: "T3 Code 1.0.0 → 1.1.0",
+      readiness: "Downloaded and ready to install · restart required",
+      targetVersion: "1.1.0",
+    });
   });
 });
 
