@@ -813,22 +813,29 @@ describe("LastCode userland install command", () => {
       failure: "replace-relaunched",
       relaunched: false,
     },
+    { name: "rollback left the original aside", failure: "replace-aside", relaunched: true },
+    { name: "rollback left a partial new bundle", failure: "replace-partial", relaunched: false },
   ])(
     "leaves an app running when a committed install fails because $name",
     async ({ failure, relaunched }) => {
       const targetPath = temporaryDirectory();
+      const backup = `${targetPath}.previous`;
       const launches = [];
       let running = false;
       await expect(
         finishCommittedInstall(
-          { targetPath, version: "0.1.8-nightly.20261107.4301" },
+          { targetPath, backup, version: "0.1.8-nightly.20261107.4301", oldAppMoved: false },
           { pid: 62_323, identity: "" },
           {
             waitForParentExit: async () => {
               if (failure === "wait") throw new Error("LastCode process 62323 did not quit");
             },
-            replacePreparedApp: async () => {
+            replacePreparedApp: async (prepared) => {
               if (failure === "replace-relaunched") running = true;
+              if (failure === "replace-aside") NodeFS.renameSync(targetPath, backup);
+              if (failure === "replace-aside" || failure === "replace-partial") {
+                prepared.oldAppMoved = true;
+              }
               throw new Error("rename failed");
             },
             isRunning: () => running,
@@ -837,6 +844,7 @@ describe("LastCode userland install command", () => {
         ),
       ).rejects.toThrow(failure === "wait" ? "did not quit" : "rename failed");
       expect(launches).toEqual(relaunched ? [targetPath] : []);
+      NodeFS.rmSync(backup, { force: true, recursive: true });
     },
   );
 

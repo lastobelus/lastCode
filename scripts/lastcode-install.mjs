@@ -453,12 +453,13 @@ function processIsAlive(pid) {
     process.kill(pid, 0);
     return true;
   } catch (error) {
-    if (error?.code === "ESRCH") return false;
+    // EPERM: another user's process now holds the PID, so the parent has exited.
+    if (error?.code === "ESRCH" || error?.code === "EPERM") return false;
     throw error;
   }
 }
 
-// Start time plus executable path identifies one process; a reused PID gets a new start time.
+// Start time plus argv[0] (the executable path LaunchServices passes) identifies one process.
 function processIdentity(pid) {
   const result = NodeChildProcess.spawnSync(
     "/bin/ps",
@@ -500,6 +501,7 @@ export async function waitForParentExit(pid, identity, options = {}) {
     // A different process now holds the PID, so the parent has exited.
     if (current !== "" && current !== identity) return;
     if (step.signal === null) {
+      if (!isAlive(pid)) return;
       throw new Error(
         `LastCode process ${pid} did not quit within ${Math.round((now() - startedAt) / 1_000)} seconds.`,
       );
@@ -828,7 +830,20 @@ export async function finishCommittedInstall(prepared, parent, options = {}) {
     console.log(`Installed and launched LastCode ${prepared.version}`);
   } catch (error) {
     console.error(`LastCode ${prepared.version} was not installed: ${error.message}`);
-    if (NodeFS.existsSync(prepared.targetPath) && !isRunning()) {
+    // Relaunch only the original bundle: restore it if a failed rollback left it aside.
+    if (
+      prepared.oldAppMoved &&
+      !NodeFS.existsSync(prepared.targetPath) &&
+      NodeFS.existsSync(prepared.backup)
+    ) {
+      try {
+        NodeFS.renameSync(prepared.backup, prepared.targetPath);
+        prepared.oldAppMoved = false;
+      } catch (restoreError) {
+        console.error(`Warning: could not restore the previous LastCode: ${restoreError.message}`);
+      }
+    }
+    if (!prepared.oldAppMoved && NodeFS.existsSync(prepared.targetPath) && !isRunning()) {
       try {
         await launch(prepared.targetPath);
       } catch (relaunchError) {
