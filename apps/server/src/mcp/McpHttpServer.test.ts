@@ -1878,7 +1878,7 @@ it.effect("hides tools for links and refuses another environment while the beta 
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
-it.effect("lists pull request watch tools only to threads that are not delegated children", () =>
+it.effect("lists watch tools to app-owned children before native tool-call metadata exists", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const scopeFor = (
@@ -1900,6 +1900,16 @@ it.effect("lists pull request watch tools only to threads that are not delegated
       const scopes = new Map([
         ["parentToken", scopeFor("parentToken", false)],
         ["childToken", scopeFor("childToken", true)],
+        [
+          "ownedChildToken",
+          {
+            ...scopeFor("ownedChildToken", true),
+            thread: {
+              ...scopeFor("ownedChildToken", true).thread,
+              appOwnedSubagent: true,
+            },
+          },
+        ],
       ]);
       const serverLayer = McpHttpServer.layerMcpTransport(
         McpHttpServer.layerPullRequestsToolkit,
@@ -1964,6 +1974,9 @@ it.effect("lists pull request watch tools only to threads that are not delegated
       expect(childTools).toContain("link_pull_request");
       expect(childTools).not.toContain("watch_pull_request");
       expect(childTools).not.toContain("unwatch_pull_request");
+      expect(yield* listedTools("ownedChildToken")).toEqual(
+        expect.arrayContaining(["watch_pull_request", "unwatch_pull_request"]),
+      );
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

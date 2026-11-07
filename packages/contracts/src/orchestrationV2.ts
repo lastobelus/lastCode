@@ -83,6 +83,8 @@ import {
   ThreadPullRequestSnapshot,
   ThreadPullRequestStack,
   ThreadPullRequestWatch,
+  PullRequestWatchObligation,
+  PullRequestWatchContinuation,
   ThreadPullRequestWatchQuietDeadline,
   PullRequestWatchQuietTimeoutMinutes,
 } from "./threadPullRequest.ts";
@@ -842,6 +844,8 @@ export const OrchestrationV2Run = Schema.Struct({
   delegatedTaskId: Schema.optional(NodeId),
   remoteDelegation: Schema.optional(RemoteDelegationSelector),
   actionObligations: Schema.optional(Schema.Array(ActionResumeObligation)),
+  pullRequestWatchObligations: Schema.optional(Schema.Array(PullRequestWatchObligation)),
+  pullRequestWatchContinuation: Schema.optional(PullRequestWatchContinuation),
   backgroundResultContinuation: Schema.optional(BackgroundResultContinuation),
   workStartedAt: Schema.optional(Schema.DateTimeUtc),
   restartCancelledBackgroundWork: Schema.optional(
@@ -3521,6 +3525,7 @@ export const OrchestrationV2Command = Schema.Union([
     modelSelection: Schema.optional(ModelSelection),
     sourcePlanRef: Schema.optional(Schema.Struct({ threadId: ThreadId, planId: PlanId })),
     restartContinuationOfRunId: Schema.optional(RunId),
+    pullRequestWatchContinuation: Schema.optional(PullRequestWatchContinuation),
     actionContinuation: Schema.optional(
       Schema.Struct({ actionRunId: TrimmedNonEmptyString, owner: ActionResumeOwner }),
     ),
@@ -3853,6 +3858,13 @@ const OrchestrationV2InternalCommand = Schema.Union([
     error: Schema.String,
   }),
 
+  Schema.Struct({
+    type: Schema.Literal("thread.pull-request-watch.deliver"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    generation: TrimmedNonEmptyString,
+    messageId: MessageId,
+  }),
   /**
    * Records what a pull request watch saw, and wakes the agent in the same transaction when
    * `wake` is set. Rejected once the watch started at `startedAt` has ended, and a wake is
@@ -3864,7 +3876,9 @@ const OrchestrationV2InternalCommand = Schema.Union([
     threadId: ThreadId,
     ...ThreadPullRequestKey.fields,
     startedAt: IsoDateTime,
+    generation: Schema.optional(TrimmedNonEmptyString),
     expectedQuietDeadline: Schema.optional(Schema.NullOr(ThreadPullRequestWatchQuietDeadline)),
+    expectedWatch: Schema.optional(ThreadPullRequestWatch),
     watch: Schema.NullOr(ThreadPullRequestWatch),
     /** With `watch: null`, the state the ended watch keeps instead of its last saved one. */
     endedWatch: Schema.optional(ThreadPullRequestWatch),

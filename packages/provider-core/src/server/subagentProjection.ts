@@ -197,8 +197,10 @@ export function subagentResultForRun(
   readonly turnItemId: OrchestrationV2TurnItem["id"] | null;
 } {
   if (
-    run.status === "interrupted" &&
-    run.actionObligations?.some((row) => row.state === "disposed")
+    (run.status === "interrupted" &&
+      run.actionObligations?.some((row) => row.state === "disposed")) ||
+    ((run.status === "interrupted" || run.status === "cancelled") &&
+      run.pullRequestWatchObligations?.some((row) => row.state === "disposed"))
   )
     return {
       text: `Child task ended with status ${run.status}.`,
@@ -280,7 +282,20 @@ export function delegatedTaskProgress(
         (message) =>
           message.notification?.source.kind === "monitor" &&
           !projection.runs.some(
-            (run) => run.id === message.runId && run.backgroundResultContinuation !== undefined,
+            (run) =>
+              run.id === message.runId &&
+              (run.backgroundResultContinuation !== undefined ||
+                (run.pullRequestWatchContinuation !== undefined &&
+                  run.pullRequestWatchContinuation.messageId === run.userMessageId &&
+                  projection.runs.some(
+                    (source) =>
+                      source.id === run.pullRequestWatchContinuation!.owner.sourceRunId &&
+                      source.pullRequestWatchObligations?.some(
+                        (row) =>
+                          row.generation === run.pullRequestWatchContinuation!.generation &&
+                          row.owner.taskId === run.pullRequestWatchContinuation!.owner.taskId,
+                      ),
+                  ))),
           ),
       )
       .map((message) => message.runId),
@@ -301,8 +316,14 @@ export function delegatedTaskProgress(
   const active = workRuns.some(
     (run) =>
       (!terminal(run.status) &&
-        (run.status !== "queued" || run.queueHeld !== true || actionContinuations.has(run.id))) ||
-      run.actionObligations?.some((row) => row.state === "waiting") === true,
+        (run.status !== "queued" ||
+          run.queueHeld !== true ||
+          actionContinuations.has(run.id) ||
+          run.pullRequestWatchContinuation !== undefined)) ||
+      run.actionObligations?.some((row) => row.state === "waiting") === true ||
+      run.pullRequestWatchObligations?.some(
+        (row) => row.state === "active" || row.state === "terminal-pending",
+      ) === true,
   );
   const children =
     projection.subagents.some(
@@ -350,7 +371,8 @@ export function delegatedTaskProgress(
         (run.startedAt !== null ||
           run.ordinal === 1 ||
           ownedRunIds?.has(run.id) === true ||
-          run.backgroundResultContinuation !== undefined),
+          run.backgroundResultContinuation !== undefined ||
+          run.pullRequestWatchContinuation !== undefined),
     )
     .toSorted((a, b) => (runRanAfter(a, b) ? -1 : runRanAfter(b, a) ? 1 : 0))[0];
   return {

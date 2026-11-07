@@ -497,6 +497,7 @@ it.effect(
           getThread: () => Ref.get(projection).pipe(Effect.map((state) => state.thread)),
           getSettlementCandidates: () => Effect.die("unused getSettlementCandidates"),
           hasOutstandingOwnedWork: () => Effect.die("unused hasOutstandingOwnedWork"),
+          getPendingPullRequestWatchDeliveries: Effect.succeed([]),
           getThreadsWithPullRequests: () => Effect.die("unused getThreadsWithPullRequests"),
           getThreadWorktreePaths: () => Effect.die("unused getThreadWorktreePaths"),
           getWorktreeSuspensionThreads: () => Effect.die("unused getWorktreeSuspensionThreads"),

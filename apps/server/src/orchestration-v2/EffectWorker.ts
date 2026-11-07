@@ -31,7 +31,10 @@ import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationServic
 import * as IncomingMessageSummaryService from "./IncomingMessageSummaryService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import { DispatchModeLimit } from "./DispatchModeLimit.ts";
-import { AcceptedSteeringContinuation } from "./Orchestrator.ts";
+import {
+  PullRequestWatchDeliveryAuthorization,
+  AcceptedSteeringContinuation,
+} from "./Orchestrator.ts";
 import * as SubagentPromotionService from "./SubagentPromotionService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
@@ -173,6 +176,30 @@ export const layerExecutor: Layer.Layer<
       execute: Effect.fn("OrchestrationEffectExecutorV2.execute")(function (effect, options) {
         const willRetry = options?.willRetry ?? false;
         switch (effect.request.type) {
+          case "pull-request-watch.deliver":
+            return threads
+              .dispatch({
+                type: "thread.pull-request-watch.deliver",
+                threadId: effect.threadId,
+                commandId: CommandId.make(`${effect.id}:attempt:${effect.attemptCount}`),
+                generation: effect.request.generation,
+                messageId: effect.request.messageId,
+              })
+              .pipe(
+                Effect.provideService(
+                  PullRequestWatchDeliveryAuthorization,
+                  effect.request.generation,
+                ),
+                Effect.asVoid,
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationEffectExecutionError({
+                      effectId: effect.id,
+                      effectType: effect.request.type,
+                      cause,
+                    }),
+                ),
+              );
           case "environment-pause.record-delivery":
             return Option.isNone(environmentPauseStore)
               ? Effect.fail(

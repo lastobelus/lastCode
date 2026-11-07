@@ -514,6 +514,43 @@ it("waits for nested work and retains the report across monitor acknowledgements
     }).state,
     "working",
   );
+  const watchOwner = obligation.owner;
+  const watch = {
+    generation: "watch-generation",
+    key: { host: "github.com", repository: "example/project", number: 1 },
+    owner: watchOwner,
+    sourceAttemptId: RunAttemptId.make("watch-attempt"),
+    state: "active" as const,
+  };
+  assert.equal(
+    delegatedTaskProgress({
+      ...projection,
+      runs: [{ ...run, pullRequestWatchObligations: [watch] }],
+    }).state,
+    "working",
+  );
+  const watchContinuation = {
+    generation: watch.generation,
+    owner: watchOwner,
+    messageId: pending.userMessageId,
+  };
+  const wake = { ...pending, queueHeld: true, pullRequestWatchContinuation: watchContinuation };
+  assert.equal(
+    delegatedTaskProgress({
+      ...projection,
+      runs: [
+        { ...run, pullRequestWatchObligations: [{ ...watch, state: "ended" as const }] },
+        wake,
+      ],
+      messages: [
+        {
+          runId: wake.id,
+          notification: { source: { kind: "monitor" }, outcome: "updated", summary: "PR changed" },
+        },
+      ],
+    }).state,
+    "working",
+  );
   const report = { ...pending, status: "completed" as const, startedAt: parentCreatedAt };
   const monitor = { ...report, id: RunId.make("monitor"), ordinal: 3 };
   const artifacts = makeSubagentConversationArtifacts({
@@ -644,6 +681,35 @@ it("orders a task's assistant messages by turn item, not by timestamps", () => {
     messageId: null,
     turnItemId: null,
   });
+  for (const status of ["cancelled", "interrupted"] as const) {
+    const stoppedWatch = subagentResultForRun(
+      { ...projection, messages: [progress.message], turnItems: [progress.turnItem] },
+      {
+        ...run,
+        status,
+        pullRequestWatchObligations: [
+          {
+            generation: "stopped-watch",
+            key: { host: "github.com", repository: "example/project", number: 1 },
+            sourceAttemptId: RunAttemptId.make("stopped-attempt"),
+            owner: {
+              parentEnvironmentId: EnvironmentId.make("parent"),
+              parentThreadId,
+              taskId: NodeId.make("task"),
+              sourceRunId: run.id,
+            },
+            state: "disposed",
+            disposalReason: "lifecycle",
+          },
+        ],
+      },
+    );
+    assert.deepEqual(stoppedWatch, {
+      text: `Child task ended with status ${status}.`,
+      messageId: null,
+      turnItemId: null,
+    });
+  }
 });
 
 it.effect("ends an orphaned native subagent's node when only its record already ended", () =>

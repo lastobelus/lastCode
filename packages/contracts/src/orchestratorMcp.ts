@@ -717,6 +717,7 @@ export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
   features: Schema.Struct({
     appOwnedSubagents: Schema.Boolean,
     appOwnedActionContinuationVersion: Schema.optional(Schema.Literal(1)),
+    appOwnedPullRequestWatchContinuationVersion: Schema.optional(Schema.Literal(1)),
     remoteOwnedContinuationVersion: Schema.optional(Schema.Literal(1)),
     asyncPolling: Schema.Boolean,
     cancellation: Schema.Boolean,

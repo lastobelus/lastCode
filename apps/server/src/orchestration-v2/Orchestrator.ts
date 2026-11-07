@@ -76,7 +76,8 @@ import {
   type OrchestrationV2LimitRecoveryUpdate,
   type OrchestrationV2ServerCommand,
   type ThreadPullRequestLink,
-  type ThreadPullRequestWatch,
+  ThreadPullRequestWatch,
+  type PullRequestWatchObligation,
   OrchestrationV2AppThread,
   type OrchestrationV2ContextHandoff,
   type OrchestrationV2ContextSourcePoint,
@@ -680,6 +681,7 @@ function wakeWorkStartedAt(
 }
 
 const threadPullRequestLinksEqual = Schema.toEquivalence(Schema.NullOr(ThreadLinkedPullRequest));
+const pullRequestWatchesEqual = Schema.toEquivalence(ThreadPullRequestWatch);
 const isAppThread = Schema.is(OrchestrationV2AppThread);
 
 /** Unfinished runs (including queued) or open requests block moving a thread to another project. */
@@ -702,6 +704,16 @@ export function threadHasUnfinishedWork(records: {
 /** Owned Action continuations are admitted only by the Action service. */
 export const ActionContinuationAuthorization = Context.Reference<string | null>(
   "t3/orchestration-v2/ActionContinuationAuthorization",
+  { defaultValue: () => null },
+);
+
+export const PullRequestWatchSourceAuthorization = Context.Reference<ActionResumeSource | null>(
+  "t3/orchestration-v2/PullRequestWatchSourceAuthorization",
+  { defaultValue: () => null },
+);
+
+export const PullRequestWatchDeliveryAuthorization = Context.Reference<string | null>(
+  "t3/orchestration-v2/PullRequestWatchDeliveryAuthorization",
   { defaultValue: () => null },
 );
 
@@ -732,6 +744,21 @@ function remoteActionOwnerSource(
     projection.thread.archivePending == null
     ? source
     : undefined;
+}
+
+function pullRequestWatchRunBelongsToOwner(
+  run: OrchestrationV2Run,
+  owner: ActionResumeOwner,
+): boolean {
+  if (owner.delegationId === undefined)
+    return run.delegatedTaskId === owner.taskId && run.remoteDelegation === undefined;
+  const remote = run.remoteDelegation;
+  return (
+    remote?.delegationId === owner.delegationId &&
+    remote.sourceTaskId === owner.taskId &&
+    remote.parentThreadId === owner.parentThreadId &&
+    remote.parentEnvironmentId === owner.parentEnvironmentId
+  );
 }
 
 function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
@@ -777,6 +804,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.pull-request-link.sync":
     case "thread.pull-request.watch":
     case "thread.pull-request-watch.sync":
+    case "thread.pull-request-watch.deliver":
     case "thread.pull-request.sync":
     case "thread.title.regeneration.complete":
     case "thread.project.adopt-folder":
@@ -3999,6 +4027,304 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     });
   });
 
+  const watchOwnerLive = Effect.fnUntraced(function* (
+    projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs">,
+    owner: ActionResumeOwner,
+  ) {
+    if (
+      projection.thread.archivedAt !== null ||
+      projection.thread.deletedAt !== null ||
+      projection.thread.archivePending != null ||
+      projection.thread.lineage.independent === true ||
+      projection.thread.settledOverride === "settled" ||
+      projection.thread.settledAt !== null
+    )
+      return false;
+    if (owner.delegationId !== undefined)
+      return remoteActionOwnerSource(projection, owner) !== undefined;
+    const source = projection.runs.find((run) => run.id === owner.sourceRunId);
+    if (
+      source?.delegatedTaskId !== owner.taskId ||
+      projection.thread.lineage.parentThreadId !== owner.parentThreadId
+    )
+      return false;
+    const parent = yield* projectionStore
+      .getThreadRecords(owner.parentThreadId, ["subagents"])
+      .pipe(
+        Effect.mapError(
+          (cause) => new OrchestratorProjectionError({ threadId: projection.thread.id, cause }),
+        ),
+      );
+    const task = parent.subagents.find((row) => row.id === owner.taskId);
+    return (
+      parent.thread.archivedAt === null &&
+      parent.thread.deletedAt === null &&
+      parent.thread.archivePending == null &&
+      task?.origin === "app_owned" &&
+      task.childThreadId === projection.thread.id &&
+      task.result === null &&
+      task.ownershipReleased !== true &&
+      !["completed", "failed", "interrupted", "cancelled"].includes(task.status)
+    );
+  });
+
+  const ownedWatchRegistration = Effect.fnUntraced(function* (
+    command: Extract<OrchestrationV2ServerCommand, { readonly type: "thread.pull-request.watch" }>,
+  ) {
+    const source = yield* PullRequestWatchSourceAuthorization;
+    if (source === null)
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "A child watch requires authenticated execution provenance.",
+      });
+    const projection = yield* projectionStore
+      .getThreadRecords(command.threadId, ["runs", "attempts", "turnItems"])
+      .pipe(mapDispatchError(command));
+    const run = projection.runs.find((row) => row.id === source.runId);
+    const attempt = projection.attempts.find((row) => row.id === source.attemptId);
+    if (
+      run?.status !== "running" ||
+      run.activeAttemptId !== source.attemptId ||
+      attempt?.runId !== run.id ||
+      attempt.status !== "running" ||
+      projection.turnItems.some(
+        (item) => item.type === "run_interrupt_request" && item.runId === run.id,
+      ) ||
+      (yield* stopReachedRun(command, command.threadId, run.id))
+    )
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "A child watch requires an exact live delegated execution.",
+      });
+    const key = normalizeThreadPullRequestKey(command);
+    const active = projection.runs
+      .flatMap((row) => row.pullRequestWatchObligations ?? [])
+      .find((row) => row.state === "active" && threadPullRequestKeysEqual(row.key, key));
+    const taskId = run.delegatedTaskId ?? run.remoteDelegation?.sourceTaskId;
+    if (active !== undefined) {
+      if (!pullRequestWatchRunBelongsToOwner(run, active.owner))
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "This execution does not own the active watch generation.",
+        });
+      if (!(yield* watchOwnerLive(projection, active.owner)))
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Watch ownership is no longer live.",
+        });
+      return {
+        owner: active.owner,
+        sourceAttemptId: active.sourceAttemptId,
+        generation: active.generation,
+      };
+    }
+    const selector = run.remoteDelegation;
+    const owner: ActionResumeOwner | undefined =
+      selector !== undefined
+        ? {
+            parentEnvironmentId: selector.parentEnvironmentId,
+            parentThreadId: selector.parentThreadId,
+            taskId: selector.sourceTaskId,
+            sourceRunId: run.id,
+            delegationId: selector.delegationId,
+          }
+        : taskId !== undefined &&
+            projection.thread.lineage.parentThreadId !== null &&
+            Option.isSome(actionEnvironmentIdentity)
+          ? {
+              parentEnvironmentId: yield* actionEnvironmentIdentity.value.getEnvironmentId,
+              parentThreadId: projection.thread.lineage.parentThreadId,
+              taskId,
+              sourceRunId: run.id,
+            }
+          : undefined;
+    if (owner === undefined || !(yield* watchOwnerLive(projection, owner)))
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Watch ownership is no longer live.",
+      });
+    return {
+      owner,
+      sourceAttemptId: source.attemptId,
+      generation: `pr-watch:${command.commandId}`,
+    };
+  });
+
+  const queueOwnedWatchDelivery = (
+    command: OrchestrationV2ServerCommand,
+    generation: string,
+    messageId: MessageId,
+    effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+  ) =>
+    Ref.update(effects, (existing) => [
+      ...existing,
+      {
+        id: `effect:${command.commandId}:${generation}:pr-watch-deliver`,
+        commandId: command.commandId,
+        threadId: commandThreadId(command),
+        request: { type: "pull-request-watch.deliver" as const, generation, messageId },
+      },
+    ]);
+
+  const disposeOwnedWatches = Effect.fnUntraced(function* (
+    command: OrchestrationV2ServerCommand,
+    threadId: ThreadId,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    reason: NonNullable<PullRequestWatchObligation["disposalReason"]>,
+    matches: (row: PullRequestWatchObligation) => boolean = () => true,
+    preserveRunId?: RunId,
+  ) {
+    const projection = yield* getProjectionWithPendingEvents(threadId, events).pipe(
+      mapDispatchError(command),
+    );
+    const generations = new Set(
+      projection.runs.flatMap(
+        (run) =>
+          run.pullRequestWatchObligations
+            ?.filter(
+              (row) =>
+                row.state !== "disposed" &&
+                matches(row) &&
+                (row.state !== "ended" ||
+                  projection.runs.some(
+                    (continuation) =>
+                      continuation.pullRequestWatchContinuation?.generation === row.generation &&
+                      delegatedTaskTerminalStatus(continuation.status) === null,
+                  )),
+            )
+            .map((row) => row.generation) ?? [],
+      ),
+    );
+    if (generations.size === 0) return;
+    const now = yield* DateTime.now;
+    for (const source of projection.runs) {
+      if (!source.pullRequestWatchObligations?.some((row) => generations.has(row.generation)))
+        continue;
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "run.updated",
+        threadId,
+        runId: source.id,
+        occurredAt: now,
+        payload: {
+          ...source,
+          ...(reason !== "owner_unwatch" &&
+          source.id !== preserveRunId &&
+          delegatedTaskTerminalStatus(source.status) !== null
+            ? { status: "interrupted" as const, completedAt: now }
+            : {}),
+          pullRequestWatchObligations: source.pullRequestWatchObligations.map((row) => {
+            if (!generations.has(row.generation)) return row;
+            const { pending: _pending, terminalEvent: _terminalEvent, ...rest } = row;
+            return { ...rest, state: "disposed" as const, disposalReason: reason };
+          }),
+        },
+      });
+    }
+    for (const run of projection.runs) {
+      if (
+        run.id !== preserveRunId &&
+        run.status === "queued" &&
+        run.pullRequestWatchContinuation !== undefined &&
+        generations.has(run.pullRequestWatchContinuation.generation)
+      ) {
+        yield* dispatchQueuedRunCancel(
+          { type: "queued-run.cancel", commandId: command.commandId, threadId, runId: run.id },
+          events,
+        );
+      }
+    }
+    const links = threadPullRequestsOf(projection.thread);
+    if (
+      links.some(
+        (link) => link.watch?.generation !== undefined && generations.has(link.watch.generation),
+      )
+    ) {
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "thread.pull-request-synced",
+        threadId,
+        occurredAt: now,
+        payload: {
+          ...projection.thread,
+          pullRequests: links.map((link) =>
+            link.watch?.generation !== undefined && generations.has(link.watch.generation)
+              ? withPullRequestWatch(link, undefined)
+              : link,
+          ),
+        },
+      });
+    }
+  });
+
+  const reserveOwnedWatchEvent = Effect.fnUntraced(function* (
+    command: OrchestrationV2ServerCommand,
+    generation: string,
+    wake: NonNullable<
+      Extract<
+        OrchestrationV2ServerCommand,
+        { readonly type: "thread.pull-request-watch.sync" }
+      >["wake"]
+    >,
+    terminal: boolean,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+  ) {
+    const projection = yield* getProjectionWithPendingEvents(commandThreadId(command), events).pipe(
+      mapDispatchError(command),
+    );
+    const source = projection.runs.find((run) =>
+      run.pullRequestWatchObligations?.some((row) => row.generation === generation),
+    );
+    const obligation = source?.pullRequestWatchObligations?.find(
+      (row) => row.generation === generation,
+    );
+    if (source === undefined || obligation === undefined || obligation.state !== "active") return;
+    if (wake.notification.source.kind !== "monitor")
+      return yield* new OrchestratorProjectionError({
+        threadId: commandThreadId(command),
+        cause: "PR watch events require monitor notifications.",
+      });
+    if (obligation.pending !== undefined && !terminal) return;
+    const saved = {
+      ...wake,
+      text: wake.text.slice(0, 64_000),
+      notification: { ...wake.notification, source: { kind: "monitor" as const } },
+    };
+    yield* emit(
+      events,
+      command,
+    )({
+      type: "run.updated",
+      threadId: commandThreadId(command),
+      runId: source.id,
+      occurredAt: yield* DateTime.now,
+      payload: {
+        ...source,
+        pullRequestWatchObligations: source.pullRequestWatchObligations?.map((row) =>
+          row.generation !== generation
+            ? row
+            : {
+                ...row,
+                state: terminal ? ("terminal-pending" as const) : ("active" as const),
+                ...(row.pending === undefined ? { pending: saved } : { terminalEvent: saved }),
+              },
+        ),
+      },
+    });
+    if (obligation.pending === undefined)
+      yield* queueOwnedWatchDelivery(command, generation, wake.messageId, effects);
+  });
+
   // Recheck under the lock after reading the host. Record the watch first so wake events carry it.
   const dispatchPullRequestWatchSync = Effect.fn("orchestrationV2.dispatch.pullRequestWatchSync")(
     function* (
@@ -4028,6 +4354,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         isProviderNativeSubagentThread(thread);
       if (
         link?.watch?.startedAt !== command.startedAt ||
+        link.watch.generation !== command.generation ||
+        (command.expectedWatch !== undefined &&
+          !pullRequestWatchesEqual(link.watch, command.expectedWatch)) ||
+        (command.watch !== null && command.watch.generation !== link.watch.generation) ||
         (command.expectedQuietDeadline !== undefined &&
           (command.expectedQuietDeadline?.dueAt !== link.watch.quietDeadline?.dueAt ||
             command.expectedQuietDeadline?.timeoutMinutes !==
@@ -4040,8 +4370,35 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: "The pull request watch ended or its thread settled while it was read.",
         });
       }
+      const generation = link?.watch?.generation;
+      if (generation !== undefined && command.watch === null && command.wake === undefined)
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "An owned watch cannot end without reserving its final notification.",
+        });
+      if (generation !== undefined) {
+        const projection = yield* projectionStore
+          .getThreadRecords(command.threadId, ["runs"])
+          .pipe(mapDispatchError(command));
+        const obligation = projection.runs
+          .flatMap((run) => run.pullRequestWatchObligations ?? [])
+          .find((row) => row.generation === generation);
+        if (obligation?.state !== "active" || obligation.pending !== undefined) return;
+      }
       yield* dispatchThreadMutation(command, events, effects);
       if (command.wake === undefined) return;
+      if (generation !== undefined) {
+        yield* reserveOwnedWatchEvent(
+          command,
+          generation,
+          command.wake,
+          command.watch === null,
+          events,
+          effects,
+        );
+        return;
+      }
       yield* dispatchMessage(
         {
           type: "message.dispatch",
@@ -4307,24 +4664,20 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         cause: `Thread ${command.threadId} is settled or archived and cannot watch pull requests.`,
       });
     }
-    // Child tasks report to their parent, which owns PR monitoring; child watches would cause unrelated wakes.
-    if (
+    const ownedWatch =
       command.type === "thread.pull-request.watch" &&
       command.watching &&
-      thread.lineage.relationshipToParent === "subagent" &&
-      thread.lineage.independent !== true
-    ) {
-      return yield* new OrchestratorDispatchError({
-        commandId: command.commandId,
-        commandType: command.type,
-        cause: `Thread ${command.threadId} is a subagent; its parent thread watches pull requests.`,
-      });
-    }
+      ((thread.lineage.relationshipToParent === "subagent" &&
+        thread.lineage.independent !== true) ||
+        thread.remoteDelegations?.some((entry) => entry.stage === "active") === true)
+        ? yield* ownedWatchRegistration(command).pipe(mapDispatchError(command))
+        : undefined;
     // Agent watches use the latest executed run to catch calls racing Stop; users can still watch.
     if (
       command.type === "thread.pull-request.watch" &&
       command.watching &&
-      command.link?.source === "agent"
+      command.link?.source === "agent" &&
+      ownedWatch === undefined
     ) {
       const { runs } = yield* projectionStore
         .getThreadRecords(command.threadId, ["runs"])
@@ -4942,7 +5295,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                         ),
                     ),
                     ...(command.linkedPullRequest
-                      ? [legacyPullRequestLink(thread, command.linkedPullRequest, now)]
+                      ? [
+                          threadPullRequestsOf(thread).find((link) =>
+                            threadPullRequestKeysEqual(
+                              link,
+                              legacyThreadPullRequestKey(command.linkedPullRequest!),
+                            ),
+                          ) ?? legacyPullRequestLink(thread, command.linkedPullRequest, now),
+                        ]
                       : []),
                   ],
                 }),
@@ -5127,6 +5487,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                     : { ...existing.watch, quietDeadline }
                   : {
                       startedAt,
+                      ...(ownedWatch === undefined ? {} : { generation: ownedWatch.generation }),
                       ...(quietDeadline === undefined ? {} : { quietDeadline }),
                       headSha: null,
                       failedChecks: [],
@@ -5195,7 +5556,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                         ),
                     ),
                     ...(command.linkedPullRequest
-                      ? [legacyPullRequestLink(thread, command.linkedPullRequest, now)]
+                      ? [
+                          threadPullRequestsOf(thread).find((link) =>
+                            threadPullRequestKeysEqual(
+                              link,
+                              legacyThreadPullRequestKey(command.linkedPullRequest!),
+                            ),
+                          ) ?? legacyPullRequestLink(thread, command.linkedPullRequest, now),
+                        ]
                       : []),
                   ],
                 }),
@@ -5224,6 +5592,110 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           };
       }
     })();
+    if (command.type !== "thread.pull-request-watch.sync") {
+      const ending = threadPullRequestsOf(thread).filter(
+        (link) =>
+          link.watch?.generation !== undefined &&
+          !threadPullRequestsOf(updatedThread).some(
+            (next) => next.watch?.generation === link.watch!.generation,
+          ),
+      );
+      if (ending.length > 0) {
+        const sourceCall = yield* PullRequestWatchSourceAuthorization;
+        const projection = yield* getProjectionWithPendingEvents(command.threadId, events).pipe(
+          mapDispatchError(command),
+        );
+        const current = projection.runs.find(
+          (run) =>
+            run.id === sourceCall?.runId &&
+            run.activeAttemptId === sourceCall.attemptId &&
+            run.status === "running",
+        );
+        for (const link of ending) {
+          const generation = link.watch!.generation!;
+          const row = projection.runs
+            .flatMap((run) => run.pullRequestWatchObligations ?? [])
+            .find((row) => row.generation === generation);
+          const ownerCall =
+            row !== undefined &&
+            current !== undefined &&
+            pullRequestWatchRunBelongsToOwner(current, row.owner);
+          if (ownerCall || command.type === "thread.settle" || command.type === "thread.archive") {
+            yield* disposeOwnedWatches(
+              command,
+              command.threadId,
+              events,
+              ownerCall ? "owner_unwatch" : "lifecycle",
+              (row) => row.generation === generation,
+              ownerCall ? current.id : undefined,
+            );
+          } else {
+            yield* reserveOwnedWatchEvent(
+              command,
+              generation,
+              {
+                messageId: MessageId.make(`pr-watch:${generation}:stopped:${command.commandId}`),
+                text: `The watch on pull request #${link.number} (${link.url}) was stopped, so no more updates about it will arrive. This says nothing new about its checks, reviews, or merge state; check it yourself if your task depends on them.`,
+                notification: {
+                  source: { kind: "monitor" },
+                  outcome: "cancelled",
+                  summary: `#${link.number}: stopped watching`,
+                },
+              },
+              true,
+              events,
+              effects,
+            );
+          }
+        }
+      }
+    }
+    if (ownedWatch !== undefined) {
+      if (
+        !threadPullRequestsOf(updatedThread).some(
+          (link) => link.watch?.generation === ownedWatch.generation,
+        )
+      )
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "An owned watch must link its pull request before registration.",
+        });
+      const projection = yield* getProjectionWithPendingEvents(command.threadId, events).pipe(
+        mapDispatchError(command),
+      );
+      const source = projection.runs.find((run) => run.id === ownedWatch.owner.sourceRunId);
+      if (
+        source !== undefined &&
+        !source.pullRequestWatchObligations?.some((row) => row.generation === ownedWatch.generation)
+      ) {
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "run.updated",
+          threadId: command.threadId,
+          runId: source.id,
+          occurredAt: now,
+          payload: {
+            ...source,
+            pullRequestWatchObligations: [
+              ...(source.pullRequestWatchObligations ?? []),
+              {
+                ...ownedWatch,
+                key: normalizeThreadPullRequestKey(
+                  command as Extract<
+                    OrchestrationV2ServerCommand,
+                    { type: "thread.pull-request.watch" }
+                  >,
+                ),
+                state: "active",
+              },
+            ],
+          },
+        });
+      }
+    }
     if (
       command.type === "thread.pull-request-link.sync" ||
       command.type === "thread.pull-request-watch.sync"
@@ -7289,6 +7761,32 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       projection = applyToProjection(projection, event);
     }
 
+    const watch = command.pullRequestWatchContinuation;
+    let watchSource: OrchestrationV2Run | undefined;
+    if (watch !== undefined) {
+      watchSource = projection.runs.find((run) => run.id === watch.owner.sourceRunId);
+      const obligation = watchSource?.pullRequestWatchObligations?.find(
+        (row) => row.generation === watch.generation,
+      );
+      if (
+        (yield* PullRequestWatchDeliveryAuthorization) !== watch.generation ||
+        obligation?.pending?.messageId !== command.messageId ||
+        watch.messageId !== command.messageId ||
+        obligation.owner.parentEnvironmentId !== watch.owner.parentEnvironmentId ||
+        obligation.owner.parentThreadId !== watch.owner.parentThreadId ||
+        obligation.owner.taskId !== watch.owner.taskId ||
+        obligation.owner.sourceRunId !== watch.owner.sourceRunId ||
+        obligation.owner.delegationId !== watch.owner.delegationId ||
+        !["active", "terminal-pending"].includes(obligation.state) ||
+        !(yield* watchOwnerLive(projection, watch.owner)) ||
+        (yield* stopReachedRun(command, command.threadId, watch.owner.sourceRunId))
+      )
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Watch continuation requires live service-authorized ownership.",
+        });
+    }
     const action = command.actionContinuation;
     let actionSource: OrchestrationV2Run | undefined;
     if (action !== undefined) {
@@ -7388,11 +7886,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       (run) => run.id === command.restartContinuationOfRunId,
     );
     let continuedTaskId =
+      (watch?.owner.delegationId === undefined ? watch?.owner.taskId : undefined) ??
       (action?.owner.delegationId === undefined ? action?.owner.taskId : undefined) ??
       restartSource?.delegatedTaskId ??
       continuationSource?.delegatedTaskId ??
       backgroundSource?.delegatedTaskId;
     let continuedRemoteDelegation =
+      watchSource?.remoteDelegation ??
       (action?.owner.delegationId === undefined
         ? restartSource?.remoteDelegation
         : actionSource?.remoteDelegation) ??
@@ -7833,7 +8333,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       dispatchMode.type === "defer_start" ||
       dispatchMode.type === "start_immediately" ||
       dispatchMode.type === "queue_after_active";
-    const shouldQueue = pausedAutomaticWake || (queueBehindRun !== undefined && startsOrQueuesRun);
+    const shouldQueue =
+      pausedAutomaticWake ||
+      (queueBehindRun !== undefined && startsOrQueuesRun) ||
+      (watch !== undefined &&
+        projection.runs.some((run) => run.status === "queued" && run.queueHeld === true));
     // Client user messages release stop/restart holds in queue order; server
     // continuations and scheduled tasks do not. Provider/usage failures can hold
     // the queue again. Failed worktree setup stays held until a worktree exists
@@ -9974,7 +10478,69 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const recordSubagentFollowup = Effect.fnUntraced(function* (
     command: Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
   ) {
+    if (command.pullRequestWatchContinuation !== undefined) {
+      const marker = command.pullRequestWatchContinuation;
+      const pending = yield* Ref.get(events);
+      const continuation = pending.find(
+        (event) =>
+          event.type === "run.created" && event.payload.userMessageId === command.messageId,
+      );
+      const source = (yield* getProjectionWithPendingEvents(command.threadId, events)).runs.find(
+        (run) => run.id === marker.owner.sourceRunId,
+      );
+      if (continuation?.type !== "run.created" || source === undefined)
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Watch continuation must create its own run.",
+        });
+      const now = yield* DateTime.now;
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "run.updated",
+        threadId: command.threadId,
+        runId: continuation.payload.id,
+        occurredAt: now,
+        payload: { ...continuation.payload, pullRequestWatchContinuation: marker },
+      });
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "run.updated",
+        threadId: command.threadId,
+        runId: source.id,
+        occurredAt: now,
+        payload: {
+          ...source,
+          pullRequestWatchObligations: source.pullRequestWatchObligations?.map((row) => {
+            if (row.generation !== marker.generation) return row;
+            const { pending: _pending, terminalEvent, ...rest } = row;
+            return terminalEvent !== undefined
+              ? { ...rest, pending: terminalEvent }
+              : {
+                  ...rest,
+                  state: row.state === "terminal-pending" ? ("ended" as const) : row.state,
+                };
+          }),
+        },
+      });
+      const queuedTerminal = source.pullRequestWatchObligations?.find(
+        (row) => row.generation === marker.generation,
+      )?.terminalEvent;
+      if (queuedTerminal !== undefined)
+        yield* queueOwnedWatchDelivery(
+          command,
+          marker.generation,
+          queuedTerminal.messageId,
+          effects,
+        );
+      return;
+    }
     if (command.actionContinuation !== undefined) {
       const pending = yield* Ref.get(events);
       const continuation = pending.find((event) => event.type === "run.created");
@@ -10331,6 +10897,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const run = projection.runs.find((entry) => entry.id === runId);
       const selector = run?.remoteDelegation;
       if (run === undefined || selector === undefined) return;
+      yield* disposeOwnedWatches(
+        command,
+        threadId,
+        events,
+        "lifecycle",
+        (row) =>
+          row.owner.delegationId === selector.delegationId &&
+          row.owner.taskId === selector.sourceTaskId,
+      );
       const belongs = (row: NonNullable<OrchestrationV2Run["actionObligations"]>[number]) =>
         row.owner.delegationId === selector.delegationId &&
         row.owner.parentEnvironmentId === selector.parentEnvironmentId &&
@@ -10338,6 +10913,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         row.owner.taskId === selector.sourceTaskId;
       if (run.actionObligations?.some((row) => row.state !== "disposed" && belongs(row)) !== true)
         return;
+      const current = (yield* getProjectionWithPendingEvents(threadId, events).pipe(
+        mapDispatchError(command),
+      )).runs.find((row) => row.id === runId)!;
       const now = yield* DateTime.now;
       yield* emit(
         events,
@@ -10348,7 +10926,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         runId,
         occurredAt: now,
         payload: {
-          ...run,
+          ...current,
           actionObligations: run.actionObligations.map((row) =>
             belongs(row) ? { ...row, state: "disposed" as const } : row,
           ),
@@ -10393,7 +10971,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           events,
         );
       }
-      const projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+      const projection = yield* getProjectionWithPendingEvents(command.threadId, events).pipe(
+        mapDispatchError(command),
+      );
       const thread = projection.thread;
       const associations = thread.remoteDelegations ?? [];
       const selector =
@@ -11954,7 +12534,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 capturedAt: DateTime.toEpochMillis(now),
               },
         );
-        return yield* recordSubagentFollowup(answer, events).pipe(mapDispatchError(answer));
+        return yield* recordSubagentFollowup(answer, events, effects).pipe(
+          mapDispatchError(answer),
+        );
       }
       if (providerSessionId === null) return;
       if (runtimeRequest.kind === "user_input" && resolvedNodeStatus === "completed") {
@@ -13624,6 +14206,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         },
       });
     }
+    yield* disposeOwnedWatches(input.command, thread.id, input.events, "lifecycle");
     const cohortRunIds = new Set(input.cohortRunIds);
     for (const run of runs) {
       if (run.delegatedCompletion?.delivery != null) cohortRunIds.add(run.id);
@@ -13889,8 +14472,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         row.owner.parentThreadId === command.threadId &&
         row.owner.delegationId === undefined;
       const waitingSources =
-        child?.runs.filter((source) =>
-          source.actionObligations?.some((row) => ownsObligation(source, row)),
+        child?.runs.filter(
+          (source) =>
+            source.actionObligations?.some((row) => ownsObligation(source, row)) ||
+            source.pullRequestWatchObligations?.some(
+              (row) =>
+                row.owner.taskId === subagent.id &&
+                row.owner.sourceRunId === source.id &&
+                row.state !== "disposed",
+            ),
         ) ?? [];
       if (isOrchestrationV2WorkActive(subagent.status) && waitingSources.length > 0) {
         if (
@@ -13906,8 +14496,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           });
         }
         yield* refuseAboveDispatchModeLimit(command, childThreadId, child.thread);
+        yield* disposeOwnedWatches(
+          command,
+          childThreadId,
+          events,
+          "lifecycle",
+          (row) => row.owner.taskId === subagent.id,
+        );
         const now = yield* DateTime.now;
-        for (const source of waitingSources) {
+        for (const originalSource of waitingSources) {
+          const source = (yield* getProjectionWithPendingEvents(childThreadId, events)).runs.find(
+            (run) => run.id === originalSource.id,
+          )!;
           yield* emit(
             events,
             command,
@@ -15320,7 +15920,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           : taskRuns.toSorted((a, b) => b.ordinal - a.ordinal)[0];
       if (childRun === undefined) return;
       if (
-        taskRuns.some((run) => run.actionObligations?.some((row) => row.state === "waiting")) &&
+        taskRuns.some(
+          (run) =>
+            run.actionObligations?.some((row) => row.state === "waiting") ||
+            run.pullRequestWatchObligations?.some(
+              (row) => row.state === "active" || row.state === "terminal-pending",
+            ),
+        ) &&
         options.task.ownershipReleased !== true &&
         options.task.result === null &&
         !["cancelled", "interrupted"].includes(options.task.status)
@@ -15331,11 +15937,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (terminalStatus === null) {
         if (childRun.delegatedTaskId === undefined || childRun.id !== options.syncRunId) return;
         const task = options.task;
-        const ownedActionContinuation = taskRuns.some((run) =>
-          run.actionObligations?.some(
-            (row) => row.state === "transferred" && row.continuationRunId === childRun.id,
-          ),
-        );
+        const ownedActionContinuation =
+          childRun.pullRequestWatchContinuation !== undefined ||
+          taskRuns.some((run) =>
+            run.actionObligations?.some(
+              (row) => row.state === "transferred" && row.continuationRunId === childRun.id,
+            ),
+          );
         const status: OrchestrationV2Subagent["status"] =
           childRun.status === "queued"
             ? childRun.queueHeld === true
@@ -15639,18 +16247,22 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         task.childThreadId !== childThreadId ||
         (task.id === childControls.thread.forkedFrom.nodeId &&
           progress.state !== "result_available" &&
-          !childControls.runs.some((run) =>
-            run.actionObligations?.some(
-              (row) =>
-                row.state === "transferred" &&
-                row.owner.taskId === task.id &&
-                row.continuationRunId === options?.syncRunId &&
-                childControls.runs.some(
-                  (continued) =>
-                    continued.id === row.continuationRunId &&
-                    delegatedTaskTerminalStatus(continued.status) === null,
-                ),
-            ),
+          !childControls.runs.some(
+            (run) =>
+              (run.id === options?.syncRunId &&
+                run.pullRequestWatchContinuation?.owner.taskId === task.id &&
+                delegatedTaskTerminalStatus(run.status) === null) ||
+              run.actionObligations?.some(
+                (row) =>
+                  row.state === "transferred" &&
+                  row.owner.taskId === task.id &&
+                  row.continuationRunId === options?.syncRunId &&
+                  childControls.runs.some(
+                    (continued) =>
+                      continued.id === row.continuationRunId &&
+                      delegatedTaskTerminalStatus(continued.status) === null,
+                  ),
+              ),
           )) ||
         (task.result !== null &&
           parent.contextTransfers.some(
@@ -15873,7 +16485,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     command: Extract<OrchestrationV2Command, { type: "notification.delivery.accept" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
   ) {
-    const projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+    const projection = yield* getProjectionWithPendingEvents(command.threadId, events).pipe(
+      mapDispatchError(command),
+    );
     const message = projection.messages.find((row) => row.id === command.messageId);
     const ownership = message?.delegatedCompletion;
     const parentRun = projection.runs.find((run) => run.id === ownership?.parentRunId);
@@ -17230,10 +17844,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           }
           worktreeCleanup = planned.success;
         }
+        yield* disposeOwnedWatches(command, command.threadId, events, "lifecycle");
+        const watchProjection = yield* getProjectionWithPendingEvents(
+          command.threadId,
+          events,
+        ).pipe(mapDispatchError(command));
         const deletion = yield* mapDispatchError(command)(
           planThreadDeletion({
             command,
-            projection: { ...projection, thread: { ...projection.thread, worktreeCleanup } },
+            projection: {
+              ...watchProjection,
+              thread: { ...watchProjection.thread, worktreeCleanup },
+            },
             attachmentIds: yield* projectionStore
               .getThreadAttachmentIds(command.threadId)
               .pipe(mapDispatchError(command)),
@@ -17284,6 +17906,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               cause: `Thread ${threadId} is persistent. Disable its protection before deleting its parent.`,
             });
           }
+          yield* disposeOwnedWatches(command, threadId, events, "lifecycle");
+          const watchChild = yield* getProjectionWithPendingEvents(threadId, events).pipe(
+            mapDispatchError(command),
+          );
           const childDeletion = yield* planThreadDeletion({
             command: {
               type: "thread.delete",
@@ -17292,7 +17918,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 : command.commandId,
               threadId,
             },
-            projection: child,
+            projection: watchChild,
             attachmentIds: yield* projectionStore
               .getThreadAttachmentIds(threadId)
               .pipe(mapDispatchError(command)),
@@ -17302,7 +17928,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           familyEvents.push(...childDeletion.events);
           familyEffects.push(...childDeletion.effects);
         }
-        return { events: [...familyEvents, ...(yield* Ref.get(events))], effects: familyEffects };
+        return {
+          events: [...(yield* Ref.get(events)), ...familyEvents],
+          effects: [...(yield* Ref.get(effects)), ...familyEffects],
+        };
       }
       case "thread.archive": {
         const root = yield* projectionStore
@@ -17393,6 +18022,73 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.pull-request-watch.sync":
         yield* dispatchPullRequestWatchSync(command, events, effects);
         break;
+      case "thread.pull-request-watch.deliver": {
+        if ((yield* PullRequestWatchDeliveryAuthorization) !== command.generation)
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "Watch delivery requires service authorization.",
+          });
+        const projection = yield* getProjectionWithPendingEvents(command.threadId, events).pipe(
+          mapDispatchError(command),
+        );
+        const source = projection.runs.find((run) =>
+          run.pullRequestWatchObligations?.some((row) => row.generation === command.generation),
+        );
+        const obligation = source?.pullRequestWatchObligations?.find(
+          (row) => row.generation === command.generation,
+        );
+        if (
+          source === undefined ||
+          obligation === undefined ||
+          obligation.pending?.messageId !== command.messageId ||
+          obligation.state === "disposed"
+        )
+          break;
+        if (
+          !(yield* watchOwnerLive(projection, obligation.owner)) ||
+          (yield* stopReachedRun(command, command.threadId, source.id))
+        ) {
+          yield* disposeOwnedWatches(
+            command,
+            projection.thread.id,
+            events,
+            "lifecycle",
+            (row) => row.generation === command.generation,
+          );
+          break;
+        }
+        const requests = yield* projectionStore
+          .getThreadRecords(command.threadId, ["runtimeRequests"])
+          .pipe(mapDispatchError(command));
+        if (requests.runtimeRequests.some((request) => request.status === "pending"))
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "Watch delivery is held until unanswered input is resolved.",
+          });
+        const message: Extract<OrchestrationV2Command, { type: "message.dispatch" }> = {
+          type: "message.dispatch",
+          commandId: command.commandId,
+          threadId: command.threadId,
+          messageId: obligation.pending.messageId,
+          text: obligation.pending.text,
+          notification: obligation.pending.notification,
+          attachments: [],
+          dispatchMode: { type: "queue_after_active" },
+          createdBy: "agent",
+          creationSource: "server",
+          pullRequestWatchContinuation: {
+            generation: obligation.generation,
+            owner: obligation.owner,
+            messageId: obligation.pending.messageId,
+          },
+        };
+        yield* dispatchMessage(message, events, effects);
+        yield* recordSubagentFollowup(message, events, effects).pipe(mapDispatchError(command));
+        break;
+      }
+
       case "thread.guest-share.open":
       case "thread.guest-share.redeem":
       case "thread.guest-share.close":
@@ -17455,7 +18151,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 context: { version: 1 as const, records: [], guest: guestSend.guest },
               };
         cancelUnsettledEffects = yield* dispatchMessage(dispatched, events, effects);
-        yield* recordSubagentFollowup(dispatched, events).pipe(mapDispatchError(command));
+        yield* recordSubagentFollowup(dispatched, events, effects).pipe(mapDispatchError(command));
         break;
       }
       case "notification.delivery.accept":
@@ -17799,6 +18495,20 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       default:
         return yield* dispatchUnsupported(command);
     }
+    const watchLifecycleThreads = new Set(
+      (yield* Ref.get(events)).flatMap((event) =>
+        event.type === "thread.archived" ||
+        event.type === "thread.deleted" ||
+        event.type === "thread.settled" ||
+        (event.type === "thread.metadata-updated" &&
+          (event.payload.archivePending?.status === "stopping" ||
+            event.payload.lineage.independent === true))
+          ? [event.threadId]
+          : [],
+      ),
+    );
+    for (const threadId of watchLifecycleThreads)
+      yield* disposeOwnedWatches(command, threadId, events, "lifecycle");
     // Local lifecycle decisions revoke destination ownership in the same event commit.
     const remoteStoppedThreads = new Set(
       (yield* Ref.get(events))
@@ -18187,6 +18897,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             // Repeating an archive, settling ended work, or stopping an idle
             // thread can succeed without another lifecycle event.
             planned.events.length > 0 ||
+            command.type === "thread.pull-request-watch.deliver" ||
             command.type === "remote_delegation.settle" ||
             command.type === "remote_delegation.prepare" ||
             command.type === "delegated_task.remote.interaction" ||
@@ -18709,8 +19420,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }
         if (
           command.type === "runtime-request.respond" ||
+          command.type === "thread.pull-request.watch" ||
+          command.type === "thread.pull-request.unlink" ||
+          command.type === "thread.pull-request.sync" ||
+          command.type === "thread.pull-request-watch.sync" ||
+          command.type === "thread.pull-request-watch.deliver" ||
           (command.type === "message.dispatch" &&
-            (mayStartSubagentFollowup(command) || command.actionContinuation !== undefined))
+            (mayStartSubagentFollowup(command) ||
+              command.actionContinuation !== undefined ||
+              command.pullRequestWatchContinuation !== undefined))
         ) {
           const parentThreadId = yield* appOwnedSubagentParentThreadId(command.threadId).pipe(
             Effect.mapError(
@@ -18724,6 +19442,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     );
     if (
       command.type === "message.dispatch" ||
+      command.type === "thread.pull-request-watch.deliver" ||
       command.type === "delegated_task.request" ||
       command.type === "remote_delegation.activate"
     )

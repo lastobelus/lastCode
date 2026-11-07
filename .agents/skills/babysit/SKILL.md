@@ -20,10 +20,7 @@ stopping point; this does not authorize creating or merging a PR.
 Read the repository `AGENTS.md`, `.agents/skills/lastcode-pr/SKILL.md`, and
 `.agents/skills/_references/external-review-mechanics.md` before acting. Those
 documents are authoritative for focused validation, review mechanics, Project
-Actions, and guarded merge requirements. In a delegated child task, the parent
-launches every Action and owns every PR watch in this skill, except Actions the
-child's brief says it owns; see
-[Parent-mediated Actions](../../../docs/internals/resumable-project-actions-setup.md#parent-mediated-actions-for-delegated-children).
+Actions, and guarded merge requirements. An app-owned delegated child leaves Actions and PR watches to its parent unless its brief verifies the matching capability and installed acceptance for that kind of wait, or authorizes a narrow isolated acceptance scenario. Actions need `features.appOwnedActionContinuationVersion`; PR watches need `features.appOwnedPullRequestWatchContinuationVersion` and explicit Phase 4 acceptance in #482, so Action acceptance alone never enables a watch. Requests already mediated keep their owner. A child that owns its watch follows this same watch-then-gates workflow and ends its turn unfinished while waiting. See [Parent-mediated Actions](../../../docs/internals/resumable-project-actions-setup.md#parent-mediated-actions-for-delegated-children).
 
 Resolve the requested PRs and stopping point. A LastCode PR must target
 `lastcode/main` or have a same-repository parent chain leading there. Do not use

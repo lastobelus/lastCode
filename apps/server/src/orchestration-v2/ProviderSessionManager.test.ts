@@ -2940,16 +2940,65 @@ it.effect(
 );
 
 it.effect.each([
-  { relationshipToParent: null, remoteStage: null, subagent: false, independent: false },
-  { relationshipToParent: "subagent", remoteStage: null, subagent: true, independent: false },
-  { relationshipToParent: null, remoteStage: "prepared", subagent: true, independent: false },
-  { relationshipToParent: null, remoteStage: "active", subagent: true, independent: false },
-  { relationshipToParent: null, remoteStage: "disposed", subagent: true, independent: false },
-  { relationshipToParent: null, remoteStage: "settled", subagent: true, independent: false },
-  { relationshipToParent: null, remoteStage: "disposed", subagent: false, independent: true },
+  {
+    relationshipToParent: null,
+    remoteStage: null,
+    subagent: false,
+    independent: false,
+    appOwned: false,
+  },
+  {
+    relationshipToParent: "subagent",
+    remoteStage: null,
+    subagent: true,
+    independent: false,
+    appOwned: false,
+  },
+  {
+    relationshipToParent: "subagent",
+    remoteStage: null,
+    subagent: true,
+    independent: false,
+    appOwned: true,
+  },
+  {
+    relationshipToParent: null,
+    remoteStage: "prepared",
+    subagent: true,
+    independent: false,
+    appOwned: false,
+  },
+  {
+    relationshipToParent: null,
+    remoteStage: "active",
+    subagent: true,
+    independent: false,
+    appOwned: false,
+  },
+  {
+    relationshipToParent: null,
+    remoteStage: "disposed",
+    subagent: true,
+    independent: false,
+    appOwned: false,
+  },
+  {
+    relationshipToParent: null,
+    remoteStage: "settled",
+    subagent: true,
+    independent: false,
+    appOwned: false,
+  },
+  {
+    relationshipToParent: null,
+    remoteStage: "disposed",
+    subagent: false,
+    independent: true,
+    appOwned: false,
+  },
 ] as const)(
   "ProviderSessionManagerV2 marks MCP credentials of delegated children ($relationshipToParent/$remoteStage)",
-  ({ relationshipToParent, remoteStage, subagent, independent }) =>
+  ({ relationshipToParent, remoteStage, subagent, independent, appOwned }) =>
     Effect.gen(function* () {
       const state = yield* Ref.make(emptyState);
       const mcpConfigs = yield* Ref.make<
@@ -2974,6 +3023,7 @@ it.effect.each([
               ...created,
               payload: {
                 ...created.payload,
+                forkedFrom: appOwned ? { type: "node", nodeId: NodeId.make("owned-task") } : null,
                 lineage:
                   relationshipToParent === null
                     ? { ...created.payload.lineage, independent }
@@ -3003,7 +3053,9 @@ it.effect.each([
           "",
         );
         assert.isDefined(token);
-        assert.equal((yield* registry.resolve(token!))?.thread.subagent, subagent);
+        const caller = (yield* registry.resolve(token!))?.thread;
+        assert.equal(caller?.subagent, subagent);
+        assert.equal(caller?.appOwnedSubagent, !independent && (appOwned || remoteStage !== null));
         yield* manager.close(providerSessionId);
       });
 
@@ -3433,9 +3485,9 @@ it.effect("ProviderSessionManagerV2 duplicate detach preserves replacement MCP c
   }),
 );
 
-it.effect(
+it.effect.each([false, true])(
   "ProviderSessionManagerV2 keeps a thread's MCP credential stable across detach and re-attach on a shared session",
-  () =>
+  (changesClassification) =>
     Effect.gen(function* () {
       const state = yield* Ref.make(emptyState);
       const mcpConfigs = yield* Ref.make<
@@ -3454,9 +3506,25 @@ it.effect(
           threadId,
         });
 
-        yield* eventSink.write({
-          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
-        });
+        const created = yield* makeThreadCreatedEvent({ idAllocator, threadId, now });
+        const thread = {
+          ...created.payload,
+          ...(changesClassification
+            ? {
+                remoteDelegations: [
+                  {
+                    parentEnvironmentId: EnvironmentId.make("remote-parent"),
+                    parentThreadId: ThreadId.make("remote-parent-thread"),
+                    sourceTaskId: NodeId.make("remote-task"),
+                    delegationId: "remote-delegation",
+                    linkSessionId: "remote-link",
+                    stage: "active" as const,
+                  },
+                ],
+              }
+            : {}),
+        };
+        yield* eventSink.write({ events: [{ ...created, payload: thread }] });
         yield* manager.open({
           threadId,
           providerSessionId,
@@ -3476,6 +3544,26 @@ it.effect(
           "detach must not revoke the credential the live provider process still holds",
         );
 
+        if (changesClassification) {
+          assert.isTrue((yield* registry.resolve(originalToken!))?.thread.appOwnedSubagent);
+          yield* eventSink.write({
+            events: [
+              {
+                id: yield* idAllocator.allocate.event({ threadId }),
+                type: "thread.metadata-updated",
+                threadId,
+                occurredAt: now,
+                payload: {
+                  ...thread,
+                  remoteDelegations: thread.remoteDelegations!.map((entry) => ({
+                    ...entry,
+                    stage: "settled" as const,
+                  })),
+                },
+              },
+            ],
+          });
+        }
         yield* manager.open({
           threadId,
           providerSessionId,

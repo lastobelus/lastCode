@@ -199,6 +199,7 @@ export function evaluatePullRequestWatch(
     changes,
     next: {
       startedAt: watch.startedAt,
+      ...(watch.generation === undefined ? {} : { generation: watch.generation }),
       ...(quietDeadline === undefined ? {} : { quietDeadline }),
       headSha,
       failedChecks,
@@ -309,6 +310,7 @@ export function pullRequestWatchMessage(input: {
   readonly baseBranch: string;
   readonly headSha: string | null;
   readonly report: PullRequestWatchReport;
+  readonly ended?: "merged" | "closed";
 }): { readonly text: string; readonly notification: OrchestrationV2Notification } {
   const { changes, exhausted } = input.report;
   const context = {
@@ -316,14 +318,18 @@ export function pullRequestWatchMessage(input: {
     commit: input.headSha === null ? "" : ` on ${input.headSha.slice(0, 7)}`,
   };
   const text = [
-    `Update on pull request #${input.number} (${input.url}), which T3 Code is watching for you:`,
+    input.ended === undefined
+      ? `Update on pull request #${input.number} (${input.url}), which T3 Code is watching for you:`
+      : `Pull request #${input.number} (${input.url}) was ${input.ended}, so T3 Code stopped watching it.`,
     ...changes.flatMap((change) => changeLines(change, context)),
     "",
-    exhausted
-      ? `T3 Code stopped watching after ${PULL_REQUEST_WATCH_WAKE_LIMIT} comment-only updates in a row. Call watch_pull_request to watch it again.`
-      : changes.some((change) => change.kind === "quiet")
-        ? "When you hand the work back to the user, call unwatch_pull_request first so the thread returns to their inbox."
-        : `Look into each item and act on it as your task requires. This PR stays linked and watched, so do not link, watch, or list it again. End your turn when you are done, and T3 Code wakes you on the next change. When you hand the work back to the user, call unwatch_pull_request first so the thread returns to their inbox.`,
+    input.ended !== undefined
+      ? "Look into each item and act on it as your task requires."
+      : exhausted
+        ? `T3 Code stopped watching after ${PULL_REQUEST_WATCH_WAKE_LIMIT} comment-only updates in a row. Call watch_pull_request to watch it again.`
+        : changes.some((change) => change.kind === "quiet")
+          ? "When you hand the work back to the user, call unwatch_pull_request first so the thread returns to their inbox."
+          : `Look into each item and act on it as your task requires. This PR stays linked and watched, so do not link, watch, or list it again. End your turn when you are done, and T3 Code wakes you on the next change. When you hand the work back to the user, call unwatch_pull_request first so the thread returns to their inbox.`,
   ].join("\n");
   const failed = changes.some(
     (change) => change.kind === "checks-failed" || change.kind === "conflicting",

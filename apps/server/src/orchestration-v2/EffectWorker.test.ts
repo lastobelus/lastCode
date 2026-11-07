@@ -32,6 +32,7 @@ import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
 import * as CheckpointService from "./CheckpointService.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EffectWorker from "./EffectWorker.ts";
+import { PullRequestWatchDeliveryAuthorization } from "./Orchestrator.ts";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
@@ -1059,5 +1060,45 @@ it.effect.each(["confirmed", "unconfirmed", "failed"] as const)(
         yield* Ref.get(events),
         outcome === "confirmed" ? ["stop-child", "settle-child"] : ["stop-child"],
       );
+    }),
+);
+
+it.effect(
+  "retries watch admission with a fresh command identity and the same authorized saved event",
+  () =>
+    Effect.gen(function* () {
+      const events = yield* Ref.make<ReadonlyArray<string>>([]);
+      const commands: string[] = [];
+      const generation = "watch-generation";
+      const messageId = MessageId.make("saved-watch-message");
+      const executor = yield* EffectWorker.OrchestrationEffectExecutorV2.pipe(
+        Effect.provide(
+          layerExecutorFor({
+            events,
+            threads: {
+              dispatch: (command) =>
+                Effect.gen(function* () {
+                  assert.equal(command.type, "thread.pull-request-watch.deliver");
+                  if (command.type !== "thread.pull-request-watch.deliver")
+                    throw new Error("Expected watch delivery");
+                  assert.equal(command.messageId, messageId);
+                  assert.equal(command.generation, generation);
+                  assert.equal(yield* PullRequestWatchDeliveryAuthorization, generation);
+                  commands.push(command.commandId);
+                  return { sequence: 1, storedEvents: [] };
+                }),
+            },
+          }),
+        ),
+      );
+      const base = restartEffect(yield* DateTime.now, { type: "detach" });
+      for (const attemptCount of [1, 2])
+        yield* executor.execute({
+          ...base,
+          attemptCount,
+          request: { type: "pull-request-watch.deliver", generation, messageId },
+        });
+      assert.lengthOf(commands, 2);
+      assert.notEqual(commands[0], commands[1]);
     }),
 );

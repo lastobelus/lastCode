@@ -118,6 +118,8 @@ All other PRs keep the full workflow in this skill.
 
 ## Babysit and Merge
 
+An app-owned delegated child uses this watch workflow only when its parent's brief verifies `features.appOwnedPullRequestWatchContinuationVersion` and #482 Phase 4 acceptance of the destination's installed checkpoint, or authorizes a narrow isolated acceptance scenario. Otherwise the child reports an unfinished PR handoff and its parent owns the watch. Parent-mediated waits stay with their recorded owner. Owning a watch leaves merge authority and the exact-head and base gates unchanged.
+
 Use this workflow whenever the authorized task includes waiting for a LastCode
 PR's checks or review, including PRs created while repairing checkpoint or build
 failures. The user does not need to say “babysit.” Creating a PR alone does not
