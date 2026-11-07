@@ -398,6 +398,25 @@ export const make = Effect.gen(function* () {
     return Option.isNone(row) ? Option.none() : Option.some(yield* hydrate(row.value));
   });
 
+  const guardRecoveryDestination = Effect.fn("ProjectService.guardRecoveryDestination")(function* (
+    projectId: ProjectId,
+    workspaceRoot: string,
+  ) {
+    const protection = yield* suspensionRegistry.recoveryDestinationProtection(workspaceRoot).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProjectOperationError({
+            operation: "normalize-workspace",
+            projectId,
+            workspaceRoot,
+            cause,
+          }),
+      ),
+    );
+    if (protection !== null)
+      return yield* new ProjectInvalidError({ projectId, detail: protection });
+  });
+
   const create: ProjectService["Service"]["create"] = Effect.fn("ProjectService.create")(
     function* (input) {
       const workspaceRoot = yield* withProjectRootLease(
@@ -459,6 +478,7 @@ export const make = Effect.gen(function* () {
               workspaceRoot: input.workspaceRoot,
             });
           }
+          yield* guardRecoveryDestination(input.projectId, root);
           yield* commit({
             type: "project.create",
             commandId: input.commandId,
@@ -491,6 +511,9 @@ export const make = Effect.gen(function* () {
                 projectId: input.projectId,
                 workspaceRoot: input.workspaceRoot,
               });
+        if (workspaceRoot !== previousRoot) {
+          yield* guardRecoveryDestination(input.projectId, workspaceRoot);
+        }
         yield* commit({
           type: "project.meta.update",
           commandId: input.commandId,

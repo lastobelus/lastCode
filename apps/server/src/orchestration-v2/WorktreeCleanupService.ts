@@ -197,6 +197,10 @@ const make = Effect.gen(function* () {
               );
               if (projectRoots.some((root) => containsPath(normalized, root)))
                 return yield* Effect.fail("The worktree contains an active project root.");
+              if ((yield* suspensionRegistry.automaticProtection(normalized)) !== null)
+                return yield* Effect.fail(
+                  "Saved workspace data or Keep workspace protection retains this worktree.",
+                );
               yield* git.removeWorktree({
                 cwd: currentCleanup.repositoryRoot,
                 path: currentCleanup.worktreePath,

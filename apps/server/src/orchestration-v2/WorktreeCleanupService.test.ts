@@ -418,6 +418,50 @@ it.effect("retains a worktree containing a registered project root", () =>
   }).pipe(Effect.scoped),
 );
 
+it.effect("rechecks recovery protection under the project-root lease before removal", () =>
+  Effect.gen(function* () {
+    const held = yield* Deferred.make<void>();
+    const checked = yield* Deferred.make<void>();
+    const reserved = yield* Deferred.make<void>();
+    let checks = 0;
+    let hasReservation = false;
+    const harness = yield* makeHarness(
+      [pending("nested-recovery")],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [],
+      Effect.gen(function* () {
+        checks++;
+        const result = hasReservation ? "A nested recovery is reserved." : null;
+        if (checks === 2) {
+          yield* Deferred.succeed(checked, undefined);
+          yield* Deferred.await(reserved);
+        }
+        return result;
+      }),
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* Cleanup.WorktreeCleanupService;
+      const recovery = yield* withProjectRootLease(
+        Effect.gen(function* () {
+          yield* Deferred.succeed(held, undefined);
+          yield* Deferred.await(checked);
+          hasReservation = true;
+          yield* Deferred.succeed(reserved, undefined);
+        }),
+      ).pipe(Effect.forkChild);
+      yield* Deferred.await(held);
+      yield* service.reconcile;
+      yield* Fiber.join(recovery);
+      yield* service.drain;
+      assert.equal((yield* Ref.get(harness.state))[0]!.worktreeCleanup?.status, "failed");
+      assert.isFalse((yield* Ref.get(harness.timeline)).includes("remove:/work/nested-recovery"));
+    }).pipe(Effect.provide(harness.layer));
+  }).pipe(Effect.scoped),
+);
+
 it.effect("rechecks project roots after a competing registration finishes", () =>
   Effect.gen(function* () {
     const registrationHeld = yield* Deferred.make<void>();

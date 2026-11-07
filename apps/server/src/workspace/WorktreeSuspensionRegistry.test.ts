@@ -162,6 +162,42 @@ it.effect("reserves recovery destinations against other checkout claims", () =>
   }).pipe(Effect.provide(layer)),
 );
 
+it.effect("protects recovery destinations through canonical directory aliases", () =>
+  Effect.gen(function* () {
+    const registry = yield* Registry.WorktreeSuspensionRegistry;
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* fs.makeTempDirectoryScoped({ prefix: "recovery-alias-" });
+    const real = path.join(root, "real");
+    const alias = path.join(root, "alias");
+    yield* fs.makeDirectory(real);
+    yield* fs.symlink(real, alias);
+    yield* registry.put(
+      {
+        ...record,
+        operation: {
+          id: "fixture-recovery",
+          kind: "recovery",
+          snapshotIds: [],
+          manual: true,
+          acceptedAt: "2026-01-01T00:00:00.000Z",
+          destinationPath: path.join(alias, "recovered"),
+        },
+      },
+      null,
+    );
+    assert.strictEqual(
+      yield* registry.automaticProtection(path.join(real, "recovered")),
+      "The workspace is protected by a saved-workspace operation.",
+    );
+    assert.strictEqual(
+      yield* registry.recoveryDestinationProtection(real),
+      "The workspace is protected by a saved-workspace operation.",
+    );
+    assert.isNull(yield* registry.recoveryDestinationProtection(path.join(root, "other")));
+  }).pipe(Effect.provide(layer)),
+);
+
 it.effect("rejects an ordinary restore into another checkout's reserved path", () =>
   Effect.gen(function* () {
     const registry = yield* Registry.WorktreeSuspensionRegistry;

@@ -945,6 +945,83 @@ it.effect.each(["suspended", "interrupted capture", "accepted recovery"] as cons
     ),
 );
 
+it.effect.each(["restore", "recovery"] as const)(
+  "refuses project roots that overlap a reserved %s destination",
+  (kind) =>
+    Effect.gen(function* () {
+      const registry = yield* SuspensionRegistry.WorktreeSuspensionRegistry;
+      const service = yield* ProjectService.make.pipe(
+        Effect.provideService(SuspensionRegistry.WorktreeSuspensionRegistry, registry),
+      );
+      const projectId = ProjectId.make("project:recovery-update");
+      yield* service.create({
+        commandId: CommandId.make("recovery:initial-project"),
+        projectId,
+        title: "Existing",
+        workspaceRoot: "/work/original",
+      });
+      yield* registry.put(
+        {
+          checkoutId: "saved",
+          repositoryRoot: "/work/repository",
+          path: "/work/saved",
+          aliases: ["/work/saved"],
+          owners: [],
+          summary: {
+            checkoutId: "saved",
+            generation: 1,
+            state: "suspended",
+            snapshotId: "snapshot",
+            lastRestoredAt: null,
+            keepWorkspace: false,
+          },
+          history: [],
+          blockedReason: null,
+          operation: {
+            id: "recovery",
+            kind,
+            snapshotIds: [],
+            manual: true,
+            acceptedAt: "2026-01-01T00:00:00.000Z",
+            destinationPath: "/work/recovery/checkout",
+          },
+        },
+        null,
+      );
+      const created = yield* Effect.result(
+        service.create({
+          commandId: CommandId.make("recovery:create-project"),
+          projectId: ProjectId.make("project:recovery-create"),
+          title: "Overlapping",
+          workspaceRoot: "/work/recovery",
+        }),
+      );
+      const updated = yield* Effect.result(
+        service.update({
+          commandId: CommandId.make("recovery:update-project"),
+          projectId,
+          workspaceRoot: "/work/recovery/checkout",
+        }),
+      );
+      assert.equal(created._tag, "Failure");
+      assert.equal(updated._tag, "Failure");
+      assert.equal(
+        Option.getOrThrow(yield* service.getById(projectId)).workspaceRoot,
+        "/work/original",
+      );
+    }).pipe(
+      Effect.provide(
+        Layer.merge(
+          layerProjectServiceDependencies,
+          SuspensionRegistry.layer.pipe(
+            Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "project-recovery-" })),
+            Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+          ),
+        ),
+      ),
+    ),
+);
+
 it.effect.each(["available", "unavailable"] as const)(
   "handles a missing project directory when saved-workspace authority is %s",
   (authority) =>
@@ -970,6 +1047,7 @@ it.effect.each(["available", "unavailable"] as const)(
         Effect.provide(
           Layer.mock(SuspensionRegistry.WorktreeSuspensionRegistry)({
             root: "/test/saved-workspaces",
+            recoveryDestinationProtection: () => Effect.succeed(null),
             automaticProtection: () =>
               authority === "available"
                 ? Effect.succeed(null)
