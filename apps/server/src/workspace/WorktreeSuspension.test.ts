@@ -9,6 +9,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CommandId,
   DEFAULT_SERVER_SETTINGS,
+  GitCommandError,
   OrchestrationV2ThreadShell,
   ProjectId,
   ThreadId,
@@ -176,6 +177,7 @@ const harness = (
       deletedAt: null,
     };
     const projects = [project];
+    let settings = options.settings ?? DEFAULT_SERVER_SETTINGS;
     let registerWhenIsolated: string | null = null;
     let failedPublication = false;
     let pausedCapture = false;
@@ -392,19 +394,29 @@ const harness = (
             protectedWorkspacePaths: () => Effect.succeed([]),
           }),
           Layer.mock(ServerSettings.ServerSettingsService)({
-            getSettings: Effect.succeed(options.settings ?? DEFAULT_SERVER_SETTINGS),
+            getSettings: Effect.sync(() => settings),
           }),
           Layer.mock(GitVcsDriver.GitVcsDriver)({
             execute: (input) =>
-              Effect.promise(async () => {
-                gitRequests.push(input.operation);
-                return {
-                  stdout: await git(input.cwd, ...input.args),
-                  stderr: "",
-                  stdoutTruncated: false,
-                  stderrTruncated: false,
-                  exitCode: ChildProcessSpawner.ExitCode(0),
-                };
+              Effect.tryPromise({
+                try: async () => {
+                  gitRequests.push(input.operation);
+                  return {
+                    stdout: await git(input.cwd, ...input.args),
+                    stderr: "",
+                    stdoutTruncated: false,
+                    stderrTruncated: false,
+                    exitCode: ChildProcessSpawner.ExitCode(0),
+                  };
+                },
+                catch: (cause) =>
+                  new GitCommandError({
+                    operation: input.operation,
+                    command: "git",
+                    cwd: input.cwd,
+                    detail: "Fixture Git command failed",
+                    cause,
+                  }),
               }),
           }),
         ),
@@ -441,6 +453,9 @@ const harness = (
       acquisition,
       lifecycle,
       threads,
+      setSettings: (next: SettingsValue) => {
+        settings = next;
+      },
       registerProjectRoot: (workspaceRoot: string) => {
         projects.push({
           ...project,
@@ -2209,6 +2224,62 @@ it.live(
     ),
 );
 
+it.live.each(["original", "isolated"] as const)(
+  "retains interrupted isolation when a project claims the %s path",
+  (claim) =>
+    realGit((f) =>
+      Effect.gen(function* () {
+        const h = yield* harness(f);
+        yield* h.service.previewSuspend({ threadId: firstId });
+        const initial = (yield* h.registry.list)[0]!;
+        const id = "30d188de-7851-4d2b-b3e9-ac622221cd26";
+        yield* Effect.promise(() =>
+          h.store.capture({
+            sourcePath: f.workspace,
+            snapshotId: id,
+            operationId: id,
+            ownerBinding: initial.checkoutId,
+          }),
+        );
+        yield* Effect.promise(() => h.store.trialRestore(id));
+        const journal = yield* Effect.promise(() =>
+          h.store.isolate(id, { quarantineParent: NodePath.join(f.root, "quarantine") }),
+        );
+        const isolated = journal.isolatedPath!;
+        const summary = {
+          ...initial.summary,
+          state: "capturing" as const,
+          snapshotId: id,
+          generation: initial.summary.generation + 1,
+        };
+        yield* h.registry.put(
+          {
+            ...initial,
+            summary,
+            owners: initial.owners.map((owner) => ({ ...owner, generation: summary.generation })),
+            operation: {
+              id,
+              kind: "capture" as const,
+              snapshotIds: [id],
+              manual: true,
+              acceptedAt: DateTime.formatIso(at),
+            },
+          },
+          initial,
+        );
+        for (const [key, thread] of h.threads)
+          h.threads.set(key, { ...thread, worktreeSuspension: summary });
+        h.registerProjectRoot(claim === "original" ? f.workspace : isolated);
+        yield* h.service.sweep;
+        expect((yield* h.registry.list)[0]!.operation?.id).toBe(id);
+        expect((yield* Effect.promise(() => h.store.readJournal(id))).phase).toBe("isolated");
+        expect(
+          yield* Effect.promise(() => NodeFSP.readFile(NodePath.join(isolated, "tracked"), "utf8")),
+        ).toBe("working\n");
+      }),
+    ),
+);
+
 it.live.each([
   "before admission",
   "after capture",
@@ -2248,7 +2319,21 @@ it.live.each([
       }
       yield* Deferred.succeed(release, undefined);
       yield* Fiber.join(pass);
-      expect((yield* h.registry.list)[0]!.summary.state).toBe("active");
+      const retained = (yield* h.registry.list)[0]!;
+      if (registration.startsWith("after isolation")) {
+        expect(retained.summary.state).toBe("capturing");
+        const journal = yield* Effect.promise(() =>
+          h.store.readJournal(retained.operation!.snapshotIds[0]!),
+        );
+        expect(journal.phase).toBe("isolated");
+        expect(
+          yield* Effect.promise(() =>
+            NodeFSP.readFile(NodePath.join(journal.isolatedPath!, "tracked"), "utf8"),
+          ),
+        ).toBe("working\n");
+        return;
+      }
+      expect(retained.summary.state).toBe("active");
       expect(
         yield* Effect.promise(() =>
           NodeFSP.readFile(NodePath.join(f.workspace, "tracked"), "utf8"),
@@ -2813,6 +2898,53 @@ it.live("editor acquisition records positive use before automatic suspension", (
       expect((yield* h.registry.list)[0]?.lastWorkspaceUseAt).toBeDefined();
       yield* h.service.sweep;
       expect((yield* h.registry.list)[0]!.summary.state).toBe("active");
+    }),
+  ),
+);
+
+it.live("records workspace use while automatic suspension is disabled", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, {
+        cleanupThreads: true,
+        settings: { ...automaticSettings, worktreeSuspension: { mode: "off" } },
+      });
+      untouchedOwners(h.threads);
+      for (const [id, owner] of h.threads)
+        h.threads.set(id, { ...owner, archivedAt: at, settledAt: null });
+      yield* h.acquisition.acquire({ path: f.workspace, purpose: "editor", threadId: firstId });
+      expect((yield* h.registry.list)[0]?.lastWorkspaceUseAt).toBeDefined();
+      h.setSettings(automaticSettings);
+      yield* h.service.sweep;
+      expect((yield* h.registry.list)[0]!.summary.state).toBe("active");
+    }),
+  ),
+);
+
+it.live("allows workspace use while suspension is off when the checkout is a project root", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, {
+        settings: { ...automaticSettings, worktreeSuspension: { mode: "off" } },
+      });
+      h.registerProjectRoot(f.workspace);
+      expect(
+        yield* h.acquisition.acquire({ path: f.workspace, purpose: "editor", threadId: firstId }),
+      ).toMatchObject({ path: f.workspace, restored: false });
+    }),
+  ),
+);
+
+it.live("allows workspace use while suspension is off if Git metadata is unavailable", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, {
+        settings: { ...automaticSettings, worktreeSuspension: { mode: "off" } },
+      });
+      yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(f.workspace, ".git"), "broken"));
+      expect(
+        yield* h.acquisition.acquire({ path: f.workspace, purpose: "editor", threadId: firstId }),
+      ).toMatchObject({ path: f.workspace, restored: false });
     }),
   ),
 );

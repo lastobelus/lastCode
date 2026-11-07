@@ -111,6 +111,20 @@ it("round-trips physical asar files and directories in a linked worktree", async
   ]);
 });
 
+it("reports a nested Git directory as an unsupported repository", async () => {
+  await using test = await fixture();
+  const nested = NodePath.join(test.workspace, "nested", ".git");
+  await NodeFSP.mkdir(nested, { recursive: true });
+  await expect(
+    test.store.capture({
+      sourcePath: test.workspace,
+      operationId: "nested-repository",
+      ownerBinding: "fixture-owner",
+    }),
+  ).rejects.toThrow("nested repositories are unsupported");
+  expect((await NodeFSP.stat(nested)).isDirectory()).toBe(true);
+});
+
 it.each(["read", "readJournal"] as const)(
   "keeps a missing snapshot read-only through %s before capture",
   async (method) => {
