@@ -61,6 +61,7 @@ import * as DependencyMounts from "./workspace/DependencyMounts.ts";
 import * as WorktreeConsumers from "./workspace/WorktreeConsumers.ts";
 import * as SuspensionTestkit from "./workspace/WorktreeSuspension.testkit.ts";
 import * as SuspensionRegistry from "./workspace/WorktreeSuspensionRegistry.ts";
+import { withProjectRootLease } from "./workspace/projectRootLease.ts";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const original = await importOriginal<typeof NodeFSP>();
@@ -490,6 +491,7 @@ const cleanupFixture = (
     let failHistoricalOwners = false;
     let projectRoots = [{ id: ProjectId.make("project-1"), workspaceRoot: repo }];
     let editBeforeRemoval = false;
+    let beforeWorktreeRemoval: Effect.Effect<void> | null = null;
     let onDependencyInspection: (() => void) | null = null;
     let onWorktreeInventory: (() => void) | null = null;
     let worktreeInventoryCalls = 0;
@@ -619,6 +621,15 @@ const cleanupFixture = (
               (input.args.includes("remove") || input.args.includes("--porcelain"))
             )
               yield* fs.writeFileString(`${worktree}/tracked.txt`, "late edit\n");
+            if (
+              beforeWorktreeRemoval !== null &&
+              input.operation === "StorageCleanup.cleanupGit" &&
+              input.args.includes("remove")
+            ) {
+              const hook = beforeWorktreeRemoval;
+              beforeWorktreeRemoval = null;
+              yield* hook;
+            }
             if (input.operation === "GeneratedDependencies.inspect" && onDependencyInspection) {
               const callback = onDependencyInspection;
               onDependencyInspection = null;
@@ -973,6 +984,9 @@ const cleanupFixture = (
         }),
       editBeforeRemoval: () => {
         editBeforeRemoval = true;
+      },
+      onBeforeWorktreeRemoval: (hook: Effect.Effect<void>) => {
+        beforeWorktreeRemoval = hook;
       },
       fs,
       get worktree() {
@@ -3017,6 +3031,58 @@ describe("provider protection during storage cleanup", () => {
 });
 
 describe("dependency cleanup reports", () => {
+  it.live.each(["dependencies", "worktree"] as const)(
+    "serializes a project-root claim with %s removal",
+    (resource) =>
+      runCleanupTest(
+        isolatedDependencies(
+          Effect.gen(function* () {
+            const fixture = yield* cleanupFixture();
+            if (resource === "dependencies") yield* fixture.enableDependencies;
+            fixture.setThreads([
+              shell({
+                branch: "feature",
+                worktreePath: fixture.worktree,
+                archivedAt: fixture.at(-DAY_MS),
+              }),
+            ]);
+            const scope = yield* Effect.scope;
+            const completed = yield* Deferred.make<boolean>();
+            let entered = false;
+            const claim = Effect.gen(function* () {
+              yield* Effect.forkIn(
+                withProjectRootLease(
+                  Effect.gen(function* () {
+                    entered = true;
+                    const exists = yield* fixture.fs.exists(fixture.worktree);
+                    if (exists)
+                      fixture.setProjectRoots(projectShells([fixture.repo, fixture.worktree]));
+                    yield* Deferred.succeed(completed, exists);
+                  }),
+                ),
+                scope,
+                { startImmediately: true },
+              );
+              expect(entered).toBe(false);
+            });
+            if (resource === "dependencies") fixture.onDependencyInspection(claim);
+            else fixture.onBeforeWorktreeRemoval(claim);
+            const report = yield* fixture.service.runNow;
+            expect(
+              report.entries.find(
+                (entry) =>
+                  entry.path ===
+                  (resource === "dependencies"
+                    ? `${fixture.worktree}/node_modules`
+                    : fixture.worktree),
+              ),
+            ).toMatchObject({ outcome: "removed" });
+            expect(yield* Deferred.await(completed)).toBe(resource === "dependencies");
+          }),
+        ),
+      ),
+  );
+
   it.live("cleans owned dependencies beside a separately registered linked worktree", () =>
     runCleanupTest(
       isolatedDependencies(

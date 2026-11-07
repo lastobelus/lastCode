@@ -77,6 +77,7 @@ import * as WorktreeConsumers from "./workspace/WorktreeConsumers.ts";
 import { physicalCleanupFileSystem } from "./workspace/physicalCleanupFileSystem.ts";
 import { WorktreeSuspension } from "./workspace/WorktreeSuspension.ts";
 import { WorktreeSuspensionRegistry } from "./workspace/WorktreeSuspensionRegistry.ts";
+import { withProjectRootLease } from "./workspace/projectRootLease.ts";
 
 const decodeCleanupThread = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2AppThreadJson),
@@ -2132,7 +2133,7 @@ const make = Effect.gen(function* () {
       const leasedPaths = [...new Set([cwd, recordedPath])].sort();
       yield* leasedPaths.reduceRight(
         (effect, target) => withWorkspaceLease(target, effect),
-        cleanOwnerless,
+        withProjectRootLease(cleanOwnerless),
       );
     }
     const candidates = [
@@ -2719,7 +2720,10 @@ const make = Effect.gen(function* () {
           ]),
         ),
       ].sort();
-      yield* paths.reduceRight((effect, cwd) => withWorkspaceLease(cwd, effect), removeGroup);
+      yield* paths.reduceRight(
+        (effect, cwd) => withWorkspaceLease(cwd, effect),
+        withProjectRootLease(removeGroup),
+      );
     }
   });
 
@@ -3308,27 +3312,31 @@ const make = Effect.gen(function* () {
         const submodules = yield* submoduleRemoval(worktreePath);
         if (submodules.reason !== null) return keep(submodules.reason);
         if (!(yield* sameRepository())) return keep("repository and project mapping changed");
-        const finalBlocked = yield* blockedSinceCheck();
-        if (finalBlocked !== null) return keep(finalBlocked);
-        const finalFiles = yield* localChangesReason(worktreePath);
-        if (finalFiles !== null) return keep(finalFiles);
-        // Read settings after all awaited guards, including every shared owner.
-        if (!policiesUnchanged(yield* settingsService.getSettings))
-          return keep("settings changed since check");
-        // Ordinary removals let Git reject late changes. Submodules require force
-        // after the recursive history and file checks; unknown files are never cleaned.
-        yield* removeLinkedWorktree({
-          operation: "StorageCleanup.cleanupGit",
-          cwd: project.workspaceRoot,
-          worktreePath,
-          force: submodules.force,
-          execute: git.execute,
-          run: (args) => cleanupGit(project.workspaceRoot, [...args], "git worktree remove"),
-        });
-        entries.push({ ...entry, outcome: "removed", reason: sentence(removalReason), bytes });
-        yield* gitManager.invalidateStatus(project.workspaceRoot);
-        // Preserve branch/path so ProviderTurnStartService can recreate the checkout on resume.
-        yield* Effect.logInfo("storage cleanup removed worktree", { threadId: thread.id });
+        return yield* withProjectRootLease(
+          Effect.gen(function* () {
+            const finalBlocked = yield* blockedSinceCheck();
+            if (finalBlocked !== null) return keep(finalBlocked);
+            const finalFiles = yield* localChangesReason(worktreePath);
+            if (finalFiles !== null) return keep(finalFiles);
+            // Read settings after all awaited guards, including every shared owner.
+            if (!policiesUnchanged(yield* settingsService.getSettings))
+              return keep("settings changed since check");
+            // Ordinary removals let Git reject late changes. Submodules require force
+            // after the recursive history and file checks; unknown files are never cleaned.
+            yield* removeLinkedWorktree({
+              operation: "StorageCleanup.cleanupGit",
+              cwd: project.workspaceRoot,
+              worktreePath,
+              force: submodules.force,
+              execute: git.execute,
+              run: (args) => cleanupGit(project.workspaceRoot, [...args], "git worktree remove"),
+            });
+            entries.push({ ...entry, outcome: "removed", reason: sentence(removalReason), bytes });
+            yield* gitManager.invalidateStatus(project.workspaceRoot);
+            // Preserve branch/path so ProviderTurnStartService can recreate the checkout on resume.
+            yield* Effect.logInfo("storage cleanup removed worktree", { threadId: thread.id });
+          }),
+        );
       }).pipe(
         (effect) =>
           [...new Set([worktreePath, ...owners.map((owner) => owner.recordedPath)])]

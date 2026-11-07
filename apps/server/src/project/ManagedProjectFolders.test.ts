@@ -76,6 +76,7 @@ const layer = (baseDir: string, options?: HarnessOptions) =>
           ),
     ),
     Layer.provideMerge(RuntimeLayer.layerProjectService),
+    Layer.provideMerge(SuspensionRegistryTestkit.layer),
     Layer.provide(UpdateDrainAdmissionTestkit.layerOpen),
     Layer.provideMerge(layerEnrichment),
     Layer.provideMerge(WorkspacePaths.layer),

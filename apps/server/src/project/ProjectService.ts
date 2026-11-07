@@ -51,7 +51,8 @@ import { UpdateDrainAdmission } from "../updateDrain/UpdateDrainAdmission.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import * as WorkspaceLifecycle from "../workspace/WorkspaceLifecycle.ts";
 import * as ProjectRootGuard from "../vcs/ProjectRootGuard.ts";
-import { withProjectRootLease } from "../workspace/projectRootLease.ts";
+import { canonicalProjectRoot, withProjectRootLease } from "../workspace/projectRootLease.ts";
+import * as SuspensionRegistry from "../workspace/WorktreeSuspensionRegistry.ts";
 
 const isWorktreeSuspensionRequestError = Schema.is(WorktreeSuspensionRequestError);
 
@@ -207,6 +208,7 @@ export const make = Effect.gen(function* () {
   const autoPullStatus = yield* AutoPullStatus.AutoPullStatus;
   const rootGuard = yield* ProjectRootGuard.ProjectRootGuard;
   const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
+  const suspensionRegistry = yield* SuspensionRegistry.WorktreeSuspensionRegistry;
   const threadProjections = yield* ProjectionStore.ProjectionStoreV2;
   const eventSink = yield* EventSink.EventSinkV2;
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
@@ -400,11 +402,63 @@ export const make = Effect.gen(function* () {
     function* (input) {
       const workspaceRoot = yield* withProjectRootLease(
         Effect.gen(function* () {
-          const root = yield* normalizeWorkspaceRoot({
-            projectId: input.projectId,
-            workspaceRoot: input.workspaceRoot,
-            createIfMissing: input.createWorkspaceRootIfMissing ?? false,
-          });
+          let root: string;
+          if (input.createWorkspaceRootIfMissing) {
+            const existing = yield* workspacePaths
+              .normalizeWorkspaceRoot(input.workspaceRoot)
+              .pipe(Effect.result);
+            if (Result.isSuccess(existing)) {
+              root = existing.success;
+            } else if (existing.failure._tag === "WorkspaceRootNotExistsError") {
+              const candidate = existing.failure.normalizedWorkspaceRoot;
+              const protect = (value: string) =>
+                suspensionRegistry.automaticProtection(value).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ProjectOperationError({
+                        operation: "normalize-workspace",
+                        projectId: input.projectId,
+                        workspaceRoot: input.workspaceRoot,
+                        cause,
+                      }),
+                  ),
+                );
+              const resolved = yield* canonicalProjectRoot(candidate).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProjectOperationError({
+                      operation: "normalize-workspace",
+                      projectId: input.projectId,
+                      workspaceRoot: input.workspaceRoot,
+                      cause,
+                    }),
+                ),
+              );
+              const protection = (yield* protect(candidate)) ?? (yield* protect(resolved));
+              if (protection !== null)
+                return yield* new ProjectInvalidError({
+                  projectId: input.projectId,
+                  detail: protection,
+                });
+              root = yield* normalizeWorkspaceRoot({
+                projectId: input.projectId,
+                workspaceRoot: input.workspaceRoot,
+                createIfMissing: true,
+              });
+            } else {
+              return yield* new ProjectOperationError({
+                operation: "normalize-workspace",
+                projectId: input.projectId,
+                workspaceRoot: input.workspaceRoot,
+                cause: existing.failure,
+              });
+            }
+          } else {
+            root = yield* normalizeWorkspaceRoot({
+              projectId: input.projectId,
+              workspaceRoot: input.workspaceRoot,
+            });
+          }
           yield* commit({
             type: "project.create",
             commandId: input.commandId,
