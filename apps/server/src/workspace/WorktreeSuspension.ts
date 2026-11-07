@@ -337,10 +337,11 @@ export const make = Effect.gen(function* () {
     const common = yield* commonDirectory(actual);
     if (common !== (yield* commonDirectory(repositoryRoot)))
       return yield* failure("protected", "The worktree belongs to a different repository.");
-    for (const candidate of yield* projects.list()) {
-      if (overlaps(actual, yield* canonical(candidate.workspaceRoot)))
-        return yield* failure("protected", "A registered project uses this workspace.");
-    }
+    if (purpose === "capture")
+      for (const candidate of yield* projects.list()) {
+        if (overlaps(actual, yield* canonical(candidate.workspaceRoot)))
+          return yield* failure("protected", "A registered project uses this workspace.");
+      }
     const checkoutId = yield* random.uuidV4();
     const inspected = yield* native(() =>
       purpose === "activity" ? store.inspectActiveSource(actual) : store.inspectSource(actual),
@@ -414,6 +415,18 @@ export const make = Effect.gen(function* () {
       );
     return owners;
   });
+  const guardProjectRoots = Effect.fn("WorktreeSuspension.guardProjectRoots")(function* (
+    paths: readonly string[],
+  ) {
+    for (const project of yield* projects.list()) {
+      const roots = [
+        path.resolve(project.workspaceRoot),
+        yield* canonicalProjectRoot(project.workspaceRoot).pipe(Effect.mapError(safeFailure)),
+      ];
+      if (roots.some((root) => paths.some((workspace) => overlaps(workspace, root))))
+        return yield* failure("protected", "A registered project uses this workspace.");
+    }
+  });
   const guard = Effect.fn("WorktreeSuspension.guard")(function* (
     record: CheckoutAuthority,
     physicalPath = record.path,
@@ -421,18 +434,7 @@ export const make = Effect.gen(function* () {
   ) {
     const owners = yield* checkOwners(record);
     yield* originalStillOwned(record, physicalPath);
-    for (const project of yield* projects.list()) {
-      const roots = [
-        path.resolve(project.workspaceRoot),
-        yield* canonicalProjectRoot(project.workspaceRoot).pipe(Effect.mapError(safeFailure)),
-      ];
-      if (
-        roots.some((root) =>
-          [...record.aliases, physicalPath].some((workspace) => overlaps(workspace, root)),
-        )
-      )
-        return yield* failure("protected", "A registered project uses this workspace.");
-    }
+    yield* guardProjectRoots([...record.aliases, physicalPath]);
     if (record.summary.keepWorkspace)
       return yield* failure("protected", "Keep workspace is enabled.");
     for (const owner of owners) {
@@ -1603,7 +1605,14 @@ export const make = Effect.gen(function* () {
       });
     }
     if (["isolating", "isolated", "removing"].includes(journal.phase)) {
-      const recovered = yield* native(() => store.reconcileRemoval(id));
+      const recovered = yield* withProjectRootLease(
+        Effect.gen(function* () {
+          if (journal.isolatedPath === undefined)
+            return yield* failure("protected", "The isolated workspace path is unavailable.");
+          yield* guardProjectRoots([...record.aliases, record.path, journal.isolatedPath]);
+          return yield* native(() => store.reconcileRemoval(id));
+        }),
+      );
       if (recovered.status === "restore-required") {
         const restoring = yield* publish(
           record,
@@ -2732,18 +2741,21 @@ export const make = Effect.gen(function* () {
               return yield* new WorkspaceUnavailableError({ reason: "snapshot-unavailable" });
             }
             if (thread !== null && matchesPath && positiveUse(input.purpose)) {
-              const policy = resolveWorktreeSuspension(
-                yield* settings.getSettings,
-                thread.projectId,
-              );
               if (
-                policy.mode !== "off" &&
-                Object.values(policy.scopes).some(Boolean) &&
                 (yield* fs.exists(binding.worktreePath)) &&
                 (yield* isManaged(binding.worktreePath))
               ) {
-                record = yield* identify(thread.id, undefined, "activity");
-                break;
+                const policy = resolveWorktreeSuspension(
+                  yield* settings.getSettings,
+                  thread.projectId,
+                );
+                if (policy.mode === "off" || !Object.values(policy.scopes).some(Boolean)) {
+                  const identified = yield* identify(thread.id, undefined, "activity").pipe(
+                    Effect.option,
+                  );
+                  if (Option.isSome(identified)) record = identified.value;
+                } else record = yield* identify(thread.id, undefined, "activity");
+                if (record !== undefined) break;
               }
             }
           }
