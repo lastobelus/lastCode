@@ -19,6 +19,9 @@ const LAUNCH_POLL_INTERVAL_MS = 250;
 const LAUNCH_RETRY_INTERVAL_MS = 2_000;
 const LAUNCH_STABILITY_MS = 3_000;
 const LAUNCH_TIMEOUT_MS = 30_000;
+const PARENT_QUIT_GRACE_MS = 30_000;
+const PARENT_TERM_GRACE_MS = 15_000;
+const PARENT_KILL_WAIT_MS = 5_000;
 const TCC_RESET_TIMEOUT_MS = 10_000;
 export const INSTALL_READY_PREFIX = "LASTCODE_INSTALL_READY=";
 
@@ -442,19 +445,69 @@ export async function validateDmgArtifact(dmgPath, options = {}) {
   return result;
 }
 
-async function waitForProcessExit(pid, timeoutMs = 30_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (true) {
-    try {
-      process.kill(pid, 0);
-    } catch (error) {
-      if (error?.code === "ESRCH") return;
-      throw error;
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") return false;
+    throw error;
+  }
+}
+
+// Start time plus command identifies one process; a reused PID gets a new start time.
+export function processIdentity(pid) {
+  const result = NodeChildProcess.spawnSync(
+    "/bin/ps",
+    ["-ww", "-o", "lstart=", "-o", "command=", "-p", String(pid)],
+    { encoding: "utf8", timeout: 10_000 },
+  );
+  return result.status === 0 ? result.stdout.trim() : "";
+}
+
+// The desktop has already stopped its backends and committed this install, so a
+// shutdown that stalls past the grace period only delays the swap. A second
+// SIGTERM makes a stalled desktop quit exit (DesktopLifecycle.exitIfShutdownStalled).
+export async function waitForParentExit(pid, identity, options = {}) {
+  const isAlive = options.isAlive ?? processIsAlive;
+  const identityOf = options.processIdentity ?? processIdentity;
+  const sendSignal = options.signal ?? ((target, signal) => process.kill(target, signal));
+  const now = options.now ?? Date.now;
+  const wait = options.wait ?? NodeTimersPromises.setTimeout;
+  const graceMs = options.graceMs ?? PARENT_QUIT_GRACE_MS;
+  const termMs = options.termMs ?? PARENT_TERM_GRACE_MS;
+  const killMs = options.killMs ?? PARENT_KILL_WAIT_MS;
+  const executable = ` ${NodePath.resolve(options.targetPath ?? DEFAULT_APP_PATH)}/Contents/MacOS/`;
+  const signalable = identity.includes(executable);
+  const startedAt = now();
+  const escalations = [
+    { at: startedAt + graceMs, signal: "SIGTERM" },
+    { at: startedAt + graceMs + termMs, signal: "SIGKILL" },
+  ];
+  const deadline = startedAt + graceMs + termMs + killMs;
+  while (isAlive(pid)) {
+    const currentTime = now();
+    const due = escalations[0];
+    if (due && currentTime >= due.at) {
+      escalations.shift();
+      if (signalable && identityOf(pid) === identity) {
+        console.log(
+          `LastCode process ${pid} is still quitting after ${Math.round((currentTime - startedAt) / 1_000)} seconds; sending ${due.signal}.`,
+        );
+        try {
+          sendSignal(pid, due.signal);
+        } catch (error) {
+          if (error?.code !== "ESRCH") throw error;
+        }
+      }
+      continue;
     }
-    if (Date.now() >= deadline) {
-      throw new Error(`LastCode process ${pid} did not quit within 30 seconds.`);
+    if (currentTime >= deadline) {
+      throw new Error(
+        `LastCode process ${pid} did not quit within ${Math.round((deadline - startedAt) / 1_000)} seconds.`,
+      );
     }
-    await NodeTimersPromises.setTimeout(100);
+    await wait(Math.min(100, Math.max(0, (escalations[0]?.at ?? deadline) - currentTime)));
   }
 }
 
@@ -741,6 +794,8 @@ async function installDmg(dmgPath, targetPath = DEFAULT_APP_PATH) {
 }
 
 async function handoffInstall(options) {
+  // Captured while the parent is certainly alive: it holds the readiness pipe.
+  const parentIdentity = processIdentity(options.parentPid);
   const prepared = await prepareDmgInstall(options.dmgPath, options);
   try {
     NodeFS.writeSync(
@@ -754,7 +809,10 @@ async function handoffInstall(options) {
     NodeFS.closeSync(options.readyFd);
     const command = await readHandoffCommand();
     if (command === "CANCEL") return;
-    await waitForProcessExit(options.parentPid);
+    console.log(`Waiting for LastCode process ${options.parentPid} to quit…`);
+    await waitForParentExit(options.parentPid, parentIdentity, {
+      targetPath: prepared.targetPath,
+    });
     await replacePreparedApp(prepared);
     console.log(`Installed and launched LastCode ${prepared.version}`);
   } finally {
