@@ -956,6 +956,7 @@ it.effect.each(["available", "unavailable"] as const)(
         }),
         Effect.provide(
           Layer.mock(SuspensionRegistry.WorktreeSuspensionRegistry)({
+            root: "/test/saved-workspaces",
             automaticProtection: () =>
               authority === "available"
                 ? Effect.succeed(null)
