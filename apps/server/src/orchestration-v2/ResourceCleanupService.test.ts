@@ -86,6 +86,10 @@ it.effect("archive cleanup removes owned previews before closing ordinary termin
             list: (threadId) => Effect.succeed(threadId === "thread-1" ? [previewLease] : []),
             removeThread: (threadId) =>
               Ref.update(closeCalls, (values) => [...values, `preview:${threadId}`]),
+            cleanupArchivedThread: (threadId, closeTerminals) =>
+              Ref.update(closeCalls, (values) => [...values, `preview:${threadId}`]).pipe(
+                Effect.andThen(closeTerminals),
+              ),
           }),
         ),
       ),
@@ -134,6 +138,14 @@ it.effect("archive cleanup leaves terminals alone when preview cancellation fail
           Layer.mock(PreviewHosting.PreviewHosting)({
             list: () => Effect.succeed([]),
             removeThread: () =>
+              Effect.fail(
+                new PreviewHosting.PreviewHostingError({
+                  operation: "persist",
+                  statePath: "/state/preview-hosting.json",
+                  cause: new Error("unreadable lease state"),
+                }),
+              ),
+            cleanupArchivedThread: () =>
               Effect.fail(
                 new PreviewHosting.PreviewHostingError({
                   operation: "persist",
@@ -308,6 +320,7 @@ it.effect("deletion closes every browser tab, preserves other threads, and is re
           Layer.mock(PreviewHosting.PreviewHosting)({
             list: () => Effect.succeed([]),
             removeThread: () => Effect.void,
+            cleanupArchivedThread: (_threadId, closeTerminals) => closeTerminals,
           }),
         ),
       ),
