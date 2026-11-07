@@ -170,6 +170,7 @@ current GitHub thread and review-query mechanics.
    expired wait and what is still pending as a blocker, then call
    `unwatch_pull_request`; ending the turn instead can wait forever. Watch again
    only when the user asks you to keep waiting or new actionable work needs it.
+
 5. Use `pnpm lastcode:merge`; do not bypass the guarded merge in the GitHub UI.
    The wrapper independently revalidates a successful exact-head/base GitHub CI
    run and aggregate `CI Gate`, strict exact-head review readiness with zero
