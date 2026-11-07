@@ -51,6 +51,7 @@ import { UpdateDrainAdmission } from "../updateDrain/UpdateDrainAdmission.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import * as WorkspaceLifecycle from "../workspace/WorkspaceLifecycle.ts";
 import * as ProjectRootGuard from "../vcs/ProjectRootGuard.ts";
+import { withProjectRootLease } from "../workspace/projectRootLease.ts";
 
 const isWorktreeSuspensionRequestError = Schema.is(WorktreeSuspensionRequestError);
 
@@ -397,19 +398,24 @@ export const make = Effect.gen(function* () {
 
   const create: ProjectService["Service"]["create"] = Effect.fn("ProjectService.create")(
     function* (input) {
-      const workspaceRoot = yield* normalizeWorkspaceRoot({
-        projectId: input.projectId,
-        workspaceRoot: input.workspaceRoot,
-        createIfMissing: input.createWorkspaceRootIfMissing ?? false,
-      });
-      yield* commit({
-        type: "project.create",
-        commandId: input.commandId,
-        projectId: input.projectId,
-        title: input.title,
-        workspaceRoot,
-        ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
-      });
+      const workspaceRoot = yield* withProjectRootLease(
+        Effect.gen(function* () {
+          const root = yield* normalizeWorkspaceRoot({
+            projectId: input.projectId,
+            workspaceRoot: input.workspaceRoot,
+            createIfMissing: input.createWorkspaceRootIfMissing ?? false,
+          });
+          yield* commit({
+            type: "project.create",
+            commandId: input.commandId,
+            projectId: input.projectId,
+            title: input.title,
+            workspaceRoot: root,
+            ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
+          });
+          return root;
+        }),
+      );
       yield* rootGuard.protect(workspaceRoot);
       yield* projectEnrichment.invalidate([workspaceRoot]);
       return yield* readCommitted(input.projectId);
@@ -418,42 +424,45 @@ export const make = Effect.gen(function* () {
 
   const update: ProjectService["Service"]["update"] = Effect.fn("ProjectService.update")(
     function* (input) {
-      const existing = yield* readRow(input.projectId);
-      if (Option.isNone(existing)) {
-        return yield* new ProjectNotFoundError({ projectId: input.projectId });
-      }
-      const previousRoot = existing.value.workspaceRoot;
-      const workspaceRoot =
-        input.workspaceRoot === undefined
-          ? previousRoot
-          : yield* normalizeWorkspaceRoot({
-              projectId: input.projectId,
-              workspaceRoot: input.workspaceRoot,
-            });
-      yield* commit({
-        type: "project.meta.update",
-        commandId: input.commandId,
-        projectId: input.projectId,
-        ...(input.title === undefined ? {} : { title: input.title }),
-        ...(workspaceRoot === previousRoot ? {} : { workspaceRoot }),
-        ...(input.defaultModelSelection === undefined
-          ? {}
-          : { defaultModelSelection: input.defaultModelSelection }),
-        ...(input.autoPull === undefined ? {} : { autoPull: input.autoPull }),
-        ...(input.projectIcon === undefined ? {} : { projectIcon: input.projectIcon }),
-        ...(input.faviconPath === undefined ? {} : { faviconPath: input.faviconPath }),
-        ...(input.defaultThreadEnvMode === undefined
-          ? {}
-          : { defaultThreadEnvMode: input.defaultThreadEnvMode }),
-        ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
-        ...(input.pinned === undefined ? {} : { pinned: input.pinned }),
-        ...(input.archived === undefined ? {} : { archived: input.archived }),
+      const run = Effect.gen(function* () {
+        const existing = yield* readRow(input.projectId);
+        if (Option.isNone(existing)) {
+          return yield* new ProjectNotFoundError({ projectId: input.projectId });
+        }
+        const previousRoot = existing.value.workspaceRoot;
+        const workspaceRoot =
+          input.workspaceRoot === undefined
+            ? previousRoot
+            : yield* normalizeWorkspaceRoot({
+                projectId: input.projectId,
+                workspaceRoot: input.workspaceRoot,
+              });
+        yield* commit({
+          type: "project.meta.update",
+          commandId: input.commandId,
+          projectId: input.projectId,
+          ...(input.title === undefined ? {} : { title: input.title }),
+          ...(workspaceRoot === previousRoot ? {} : { workspaceRoot }),
+          ...(input.defaultModelSelection === undefined
+            ? {}
+            : { defaultModelSelection: input.defaultModelSelection }),
+          ...(input.autoPull === undefined ? {} : { autoPull: input.autoPull }),
+          ...(input.projectIcon === undefined ? {} : { projectIcon: input.projectIcon }),
+          ...(input.faviconPath === undefined ? {} : { faviconPath: input.faviconPath }),
+          ...(input.defaultThreadEnvMode === undefined
+            ? {}
+            : { defaultThreadEnvMode: input.defaultThreadEnvMode }),
+          ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
+          ...(input.pinned === undefined ? {} : { pinned: input.pinned }),
+          ...(input.archived === undefined ? {} : { archived: input.archived }),
+        });
+        if (workspaceRoot !== previousRoot) {
+          yield* rootGuard.protect(workspaceRoot);
+          yield* projectEnrichment.invalidate([previousRoot, workspaceRoot]);
+        }
+        return yield* readCommitted(input.projectId);
       });
-      if (workspaceRoot !== previousRoot) {
-        yield* rootGuard.protect(workspaceRoot);
-        yield* projectEnrichment.invalidate([previousRoot, workspaceRoot]);
-      }
-      return yield* readCommitted(input.projectId);
+      return yield* input.workspaceRoot === undefined ? run : withProjectRootLease(run);
     },
   );
 

@@ -66,6 +66,7 @@ import {
   type CheckoutAuthority,
 } from "./WorktreeSuspensionRegistry.ts";
 import * as WorktreeConsumers from "./WorktreeConsumers.ts";
+import { withProjectRootLease } from "./projectRootLease.ts";
 import {
   withWorkspaceLease,
   registerWorkspaceLeaseRoot,
@@ -1723,25 +1724,32 @@ export const make = Effect.gen(function* () {
                 );
                 record = yield* remember(record, snapshot);
                 yield* native(() => store.trialRestore(id));
-                yield* guard(record);
-                const journal = yield* native(() =>
-                  store.isolate(id, {
-                    quarantineParent: path.join(path.dirname(record.path), ".suspended-workspaces"),
+                yield* withProjectRootLease(
+                  Effect.gen(function* () {
+                    yield* guard(record);
+                    const journal = yield* native(() =>
+                      store.isolate(id, {
+                        quarantineParent: path.join(
+                          path.dirname(record.path),
+                          ".suspended-workspaces",
+                        ),
+                      }),
+                    );
+                    if (journal.isolatedPath === undefined)
+                      return yield* failure(
+                        "unavailable",
+                        "The isolated workspace could not be verified.",
+                      );
+                    yield* guard(record, journal.isolatedPath);
+                    yield* native(() => store.prepareRemoval(id));
+                    yield* guard(record, journal.isolatedPath, automatic);
+                    yield* native(() => store.finishRemoval(id));
+                    yield* publish(record, clearOperation(record), {
+                      ...record.summary,
+                      state: "suspended",
+                    });
                   }),
                 );
-                if (journal.isolatedPath === undefined)
-                  return yield* failure(
-                    "unavailable",
-                    "The isolated workspace could not be verified.",
-                  );
-                yield* guard(record, journal.isolatedPath);
-                yield* native(() => store.prepareRemoval(id));
-                yield* guard(record, journal.isolatedPath, automatic);
-                yield* native(() => store.finishRemoval(id));
-                yield* publish(record, clearOperation(record), {
-                  ...record.summary,
-                  state: "suspended",
-                });
               }),
             (release) => Effect.sync(release),
           );

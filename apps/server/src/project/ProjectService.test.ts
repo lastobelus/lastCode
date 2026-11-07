@@ -44,6 +44,7 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as UpdateDrainAdmissionTestkit from "../updateDrain/UpdateDrainAdmission.testkit.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+import { withProjectRootLease } from "../workspace/projectRootLease.ts";
 import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
 import * as ProjectFaviconResolver from "./ProjectFaviconResolver.ts";
 import * as ProjectService from "./ProjectService.ts";
@@ -854,6 +855,106 @@ it.effect("invalidates workspace-derived metadata when a project moves", () =>
       );
     }).pipe(Effect.provide(layerTestFor(layerVersionedMetadata)));
   }),
+);
+
+it.effect("does not register a workspace removed after the final project-root check", () =>
+  Effect.gen(function* () {
+    let exists = true;
+    let normalized = false;
+    const workspacePaths: WorkspacePaths.WorkspacePaths["Service"] = {
+      resolveRelativePathWithinRoot: ({ workspaceRoot, relativePath }) =>
+        Effect.succeed({ absolutePath: `${workspaceRoot}/${relativePath}`, relativePath }),
+      normalizeWorkspaceRoot: (workspaceRoot) =>
+        Effect.suspend(() => {
+          normalized = true;
+          return exists
+            ? Effect.succeed(workspaceRoot)
+            : Effect.fail(
+                new WorkspacePaths.WorkspaceRootNotExistsError({
+                  workspaceRoot,
+                  normalizedWorkspaceRoot: workspaceRoot,
+                }),
+              );
+        }),
+    };
+    const service = yield* ProjectService.make.pipe(
+      Effect.provideService(WorkspacePaths.WorkspacePaths, workspacePaths),
+    );
+    const projectId = ProjectId.make("project:removed-workspace");
+    const registration = yield* withProjectRootLease(
+      Effect.gen(function* () {
+        const attempt = yield* service
+          .create({
+            commandId: CommandId.make("command:removed-workspace"),
+            projectId,
+            title: "Workspace",
+            workspaceRoot: "/work/removed-workspace",
+          })
+          .pipe(Effect.result, Effect.forkChild({ startImmediately: true }));
+        assert.isFalse(normalized);
+        exists = false;
+        return attempt;
+      }),
+    );
+    assert.equal((yield* Fiber.join(registration))._tag, "Failure");
+    assert.isTrue(Option.isNone(yield* service.getById(projectId)));
+  }).pipe(Effect.provide(layerProjectServiceDependencies)),
+);
+
+it.effect("does not move a project to a workspace removed during the final check", () =>
+  Effect.gen(function* () {
+    const initial = yield* ProjectService.make;
+    const projectId = ProjectId.make("project:moved-to-removed-workspace");
+    yield* initial.create({
+      commandId: CommandId.make("command:move-race:create"),
+      projectId,
+      title: "Workspace",
+      workspaceRoot: "/work/original",
+    });
+    const projects = yield* ProjectStore.ProjectStoreV2;
+    const original = yield* projects.get(projectId);
+    let exists = true;
+    let normalized = false;
+    const service = yield* ProjectService.make.pipe(
+      Effect.provideService(ProjectStore.ProjectStoreV2, {
+        ...projects,
+        get: (id, options) =>
+          id === projectId ? Effect.succeed(original) : projects.get(id, options),
+      }),
+      Effect.provideService(WorkspacePaths.WorkspacePaths, {
+        resolveRelativePathWithinRoot: ({ workspaceRoot, relativePath }) =>
+          Effect.succeed({ absolutePath: `${workspaceRoot}/${relativePath}`, relativePath }),
+        normalizeWorkspaceRoot: (workspaceRoot) =>
+          Effect.suspend(() => {
+            normalized = true;
+            return exists
+              ? Effect.succeed(workspaceRoot)
+              : Effect.fail(
+                  new WorkspacePaths.WorkspaceRootNotExistsError({
+                    workspaceRoot,
+                    normalizedWorkspaceRoot: workspaceRoot,
+                  }),
+                );
+          }),
+      }),
+    );
+    const update = yield* withProjectRootLease(
+      Effect.gen(function* () {
+        const attempt = yield* service
+          .update({
+            commandId: CommandId.make("command:move-race:update"),
+            projectId,
+            workspaceRoot: "/work/removed-workspace",
+          })
+          .pipe(Effect.result, Effect.forkChild({ startImmediately: true }));
+        assert.isFalse(normalized);
+        exists = false;
+        return attempt;
+      }),
+    );
+    assert.equal((yield* Fiber.join(update))._tag, "Failure");
+    assert.equal(Option.getOrThrow(yield* projects.get(projectId)).workspaceRoot, "/work/original");
+  }).pipe(Effect.provide(layerProjectServiceDependencies)),
 );
 
 it.effect("serializes two projects claiming the same workspace root", () =>
