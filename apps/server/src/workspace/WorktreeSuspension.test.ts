@@ -339,8 +339,8 @@ const harness = (
               Effect.sync(() => ({
                 schemaVersion: 2 as const,
                 snapshotSequence: 0,
-                threads: current(),
-                archivedThreads: [],
+                threads: current().filter((thread) => thread.archivedAt === null),
+                archivedThreads: current().filter((thread) => thread.archivedAt !== null),
               })),
             getWorktreeCleanupThreads: Effect.sync(() =>
               options.cleanupThreads
@@ -1632,6 +1632,52 @@ const untouchedOwners = (threads: Map<ThreadId, OrchestrationV2ThreadShell>) => 
       workspaceUserAdopted: false,
     });
 };
+
+it.live("automatically saves a shared workspace after unsettled archived owners age out", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, {
+        cleanupThreads: true,
+        settings: {
+          ...automaticSettings,
+          worktreeSuspension: {
+            ...automaticSettings.worktreeSuspension,
+            scopes: { subagents: true, untouchedChildren: true, otherThreads: true },
+          },
+        },
+      });
+      const now = yield* DateTime.now;
+      h.threads.set(firstId, { ...h.threads.get(firstId)!, archivedAt: at, settledAt: null });
+      h.threads.set(secondId, {
+        ...h.threads.get(secondId)!,
+        createdBy: "agent",
+        creatorThreadId: firstId,
+        workspaceUserAdopted: false,
+        lineage: {
+          rootThreadId: firstId,
+          parentThreadId: firstId,
+          relationshipToParent: "subagent",
+        },
+        archivedAt: now,
+        settledAt: null,
+      });
+      yield* h.service.previewSuspend({ threadId: firstId });
+      yield* h.service.sweep;
+      expect((yield* h.registry.list)[0]?.summary.state).toBe("active");
+      h.threads.set(secondId, { ...h.threads.get(secondId)!, archivedAt: at });
+      const record = (yield* h.registry.list)[0]!;
+      yield* h.registry.put({ ...record, lastWorkspaceUseAt: DateTime.formatIso(now) }, record);
+      yield* h.service.sweep;
+      expect((yield* h.registry.list)[0]!.summary.state).toBe("active");
+      const used = (yield* h.registry.list)[0]!;
+      yield* h.registry.put({ ...used, lastWorkspaceUseAt: DateTime.formatIso(at) }, used);
+      yield* h.service.sweep;
+      expect((yield* h.registry.list)[0]!.summary.state).toBe("suspended");
+      expect(h.threads.get(firstId)?.worktreeSuspension?.state).toBe("suspended");
+      expect(h.threads.get(secondId)?.worktreeSuspension?.state).toBe("suspended");
+    }),
+  ),
+);
 
 it.live(
   "automatically saves retained source after an oversized dependency install is removed",

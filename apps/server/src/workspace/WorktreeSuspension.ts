@@ -935,6 +935,9 @@ export const make = Effect.gen(function* () {
     lastUse: string | null,
     held: boolean,
   ) => {
+    // Archived threads are excluded from automatic settlement, so their archive
+    // time is the inactivity anchor when they have never settled.
+    const settledOrArchivedAt = thread.settledAt ?? thread.archivedAt;
     const adopted =
       thread.workspaceUserAdopted === true ||
       thread.createdBy === "user" ||
@@ -955,7 +958,7 @@ export const make = Effect.gen(function* () {
               ? false
               : null,
         humanParticipation: adopted ? true : thread.workspaceUserAdopted === false ? false : null,
-        settledAt: thread.settledAt === null ? null : DateTime.formatIso(thread.settledAt),
+        settledAt: settledOrArchivedAt === null ? null : DateTime.formatIso(settledOrArchivedAt),
         lastWorkspaceUseAt: lastUse,
         active: thread.activeRunId !== null,
         pendingWork:
