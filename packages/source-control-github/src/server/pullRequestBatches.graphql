@@ -93,7 +93,28 @@ query PullRequestWatchFingerprint($owner: String!, $name: String!, $number: Int!
       comments(first: 100, orderBy: { field: UPDATED_AT, direction: DESC }) {
         totalCount
         nodes {
+          id
           lastEditedAt
+          reactionGroups {
+            content
+            reactors(first: 10) {
+              totalCount
+              nodes {
+                ... on User {
+                  login
+                }
+                ... on Bot {
+                  login
+                }
+                ... on Organization {
+                  login
+                }
+                ... on Mannequin {
+                  login
+                }
+              }
+            }
+          }
         }
       }
       reviews(last: 100) {
