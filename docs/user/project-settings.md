@@ -214,11 +214,12 @@ hourly. Offline machines keep their existing policies.
 
 ### Suspend worktrees
 
-Use **Suspend settled worktrees** to save local work and put away a checkout without archiving
+Use **Suspend inactive worktrees** to save local work and put away a checkout without archiving
 its conversation. Choose a delay and which threads may suspend: subagents, untouched
 agent-created children, or other threads. These choices start Off. A separate child checkout
 can suspend while its parent remains open; a shared checkout stays until every owner qualifies.
-The delay starts from settlement or the last workspace use or restore, whichever is later.
+The delay starts from settlement or the last workspace use or restore, whichever is later. An
+archived thread that never settled counts from its archive time instead of settlement.
 Project **Off** pauses automatic suspension as well as cleanup.
 
 You can also choose **Suspend worktree** from a thread's menu. Staged changes, unstaged changes

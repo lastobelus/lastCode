@@ -62,7 +62,7 @@ function policySummary(policy: WorktreeSuspensionPolicy): string {
   const scopeCount = Object.values(policy.scopes).filter(Boolean).length;
   return scopeCount === 0
     ? "No thread types are enabled for automatic suspension."
-    : `Enabled for ${scopeCount} ${scopeCount === 1 ? "thread type" : "thread types"} after ${policy.afterDays} ${policy.afterDays === 1 ? "day" : "days"} settled and unused.`;
+    : `Enabled for ${scopeCount} ${scopeCount === 1 ? "thread type" : "thread types"} after ${policy.afterDays} ${policy.afterDays === 1 ? "day" : "days"} settled or archived and unused.`;
 }
 
 function SuspensionPolicyForm({
@@ -165,7 +165,7 @@ function SuspensionPolicyForm({
         <>
           <SettingsRow
             title="Suspend after"
-            description="Suspend after [1 – 3650] days, counted from when the thread settled or its worktree was last used or restored, whichever is later. Status updates do not restart the count."
+            description="Suspend after [1 – 3650] days since settlement (or archive if never settled), workspace use or restore, whichever is later. Status updates do not restart the count."
             serverScoped
             settingKeys={["worktreeSuspension"]}
             control={
@@ -338,7 +338,7 @@ export function LastCodeStorageSettings({
   readonly savedWorkspaces?: ReactNode;
 }) {
   return (
-    <SettingsSection id="storage-suspension" title="Suspend settled worktrees">
+    <SettingsSection id="storage-suspension" title="Suspend inactive worktrees">
       <WorktreeSuspensionSettings savedWorkspaces={savedWorkspaces} />
     </SettingsSection>
   );
