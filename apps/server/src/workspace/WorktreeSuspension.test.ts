@@ -155,6 +155,7 @@ const harness = (
     previews?: Array<{ threadId: string; workspacePath: string }>;
     onPreviewScan?: (leases: Array<{ threadId: string; workspacePath: string }>) => void;
     pausePreviewLocks?: { entered: Deferred.Deferred<void>; release: Deferred.Deferred<void> };
+    pausePreviewRemoval?: { entered: Deferred.Deferred<void>; release: Deferred.Deferred<void> };
     onStoreBoundary?: WorktreeSuspensionStoreOptions["onBoundary"];
     terminals?: Effect.Success<TerminalManager.TerminalManager["Service"]["refreshMetadata"]>;
   } = {},
@@ -439,7 +440,11 @@ const harness = (
                   yield* Deferred.await(options.pausePreviewLocks.release);
                 }
                 return yield* use((threadId, workspacePath) =>
-                  Effect.sync(() => {
+                  Effect.gen(function* () {
+                    if (options.pausePreviewRemoval !== undefined) {
+                      yield* Deferred.succeed(options.pausePreviewRemoval.entered, undefined);
+                      yield* Deferred.await(options.pausePreviewRemoval.release);
+                    }
                     previewReleases.push(threadId);
                     for (let index = previewLeases.length - 1; index >= 0; index--)
                       if (
@@ -2569,6 +2574,52 @@ it.live("keeps previews when process inventory is unavailable", () =>
       expect(h.previewReleases).toEqual([]);
     }),
   ),
+);
+
+it.live.each(["root", "nested"] as const)(
+  "serializes a %s project claim with preview removal",
+  (location) =>
+    realGit((f) =>
+      Effect.gen(function* () {
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const projectRoot =
+          location === "root" ? f.workspace : NodePath.join(f.workspace, "nested");
+        if (location === "nested") yield* Effect.promise(() => NodeFSP.mkdir(projectRoot));
+        const h = yield* harness(f, {
+          cleanupThreads: true,
+          settings: automaticSettings,
+          previews: [{ threadId: firstId, workspacePath: f.workspace }],
+          pausePreviewRemoval: { entered, release },
+        });
+        untouchedOwners(h.threads);
+        const pass = yield* Effect.forkChild(h.service.sweep);
+        yield* Deferred.await(entered);
+        let registered = false;
+        const scope = yield* Effect.scope;
+        const claim = yield* Effect.forkIn(
+          withProjectRootLease(
+            Effect.sync(() => {
+              h.registerProjectRoot(projectRoot);
+              registered = true;
+            }),
+          ),
+          scope,
+          { startImmediately: true },
+        );
+        const registeredDuringRemoval = registered;
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(claim);
+        yield* Fiber.join(pass);
+        expect(registeredDuringRemoval).toBe(false);
+        expect(registered).toBe(true);
+        expect(
+          yield* Effect.promise(() =>
+            NodeFSP.readFile(NodePath.join(f.workspace, "tracked"), "utf8"),
+          ),
+        ).toBe("working\n");
+      }),
+    ),
 );
 
 it.live("releases an eligible preview while retaining a checkout used by another process", () =>

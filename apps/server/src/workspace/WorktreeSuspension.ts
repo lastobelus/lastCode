@@ -2853,38 +2853,44 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
                 Effect.gen(function* () {
                   record = yield* requireRecord(record.checkoutId);
                   if (!(yield* automaticallyEligible(record))) return;
-                  const currentOwners = yield* checkOwners(record);
-                  if (
-                    currentOwners.length !== owners.length ||
-                    currentOwners.some(
-                      (owner) => !owners.some((original) => original.id === owner.id),
-                    )
-                  )
-                    return;
-                  if (currentOwners.some(ownerHasUnfinishedWork)) return;
-                  yield* guardBeforePreviews(record);
                   if (
                     (yield* WorktreeConsumers.worktreeConsumerPreflightReason(record.path)) !== null
                   )
                     return;
-                  const currentLeases = yield* previews.protectedWorkspaceLeases();
-                  for (const lease of currentLeases) {
-                    for (const previewPath of [lease.cwd, lease.worktreePath]) {
-                      if (previewPath === null) continue;
-                      const resolved = yield* canonical(previewPath);
-                      if (!record.aliases.some((alias) => overlaps(alias, resolved))) continue;
-                      if (!currentOwners.some((owner) => owner.id === lease.threadId)) return;
-                      previewOwners.add(lease.threadId);
-                      break;
-                    }
-                  }
-                  for (const owner of currentOwners) {
-                    if (!previewOwners.has(owner.id)) continue;
-                    record = yield* requireRecord(record.checkoutId);
-                    if (!(yield* automaticallyEligible(record))) return;
-                    if ((yield* checkOwners(record)).some(ownerHasUnfinishedWork)) return;
-                    yield* remove(owner.id, record.path);
-                  }
+                  yield* withProjectRootLease(
+                    Effect.gen(function* () {
+                      record = yield* requireRecord(record.checkoutId);
+                      if (!(yield* automaticallyEligible(record))) return;
+                      const currentOwners = yield* checkOwners(record);
+                      if (
+                        currentOwners.length !== owners.length ||
+                        currentOwners.some(
+                          (owner) => !owners.some((original) => original.id === owner.id),
+                        )
+                      )
+                        return;
+                      if (currentOwners.some(ownerHasUnfinishedWork)) return;
+                      yield* guardBeforePreviews(record);
+                      const currentLeases = yield* previews.protectedWorkspaceLeases();
+                      for (const lease of currentLeases) {
+                        for (const previewPath of [lease.cwd, lease.worktreePath]) {
+                          if (previewPath === null) continue;
+                          const resolved = yield* canonical(previewPath);
+                          if (!record.aliases.some((alias) => overlaps(alias, resolved))) continue;
+                          if (!currentOwners.some((owner) => owner.id === lease.threadId)) return;
+                          previewOwners.add(lease.threadId);
+                          break;
+                        }
+                      }
+                      for (const owner of currentOwners) {
+                        if (!previewOwners.has(owner.id)) continue;
+                        record = yield* requireRecord(record.checkoutId);
+                        if (!(yield* automaticallyEligible(record))) return;
+                        if ((yield* checkOwners(record)).some(ownerHasUnfinishedWork)) return;
+                        yield* remove(owner.id, record.path);
+                      }
+                    }),
+                  );
                 }),
               ),
           );
