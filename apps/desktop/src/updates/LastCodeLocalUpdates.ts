@@ -354,6 +354,34 @@ export function terminateHelperProcess(
   return child.kill("SIGKILL");
 }
 
+/**
+ * Cancels an install preflight that outlives its budget. The helper reads CANCEL only after
+ * preparation, so one stuck in `hdiutil` or `codesign` is terminated after a grace period.
+ */
+export function armInstallPreflightTimeout(
+  child: Pick<NodeChildProcess.ChildProcess, "pid" | "kill" | "stdin">,
+  platform: NodeJS.Platform,
+  callbacks: { readonly onCancel: () => void; readonly onStuck: () => void },
+  timing: { readonly timeoutMs: number; readonly graceMs: number } = {
+    timeoutMs: 120_000,
+    graceMs: 15_000,
+  },
+): () => void {
+  let grace: ReturnType<typeof setTimeout> | undefined;
+  const timeout = setTimeout(() => {
+    callbacks.onCancel();
+    child.stdin?.end("CANCEL\n");
+    grace = setTimeout(() => {
+      terminateHelperProcess(child, platform);
+      callbacks.onStuck();
+    }, timing.graceMs);
+  }, timing.timeoutMs);
+  return () => {
+    clearTimeout(timeout);
+    clearTimeout(grace);
+  };
+}
+
 function makeLive(environment: DesktopEnvironment.DesktopEnvironment["Service"]) {
   const dashboardPath = NodePath.join(environment.homeDirectory, ".lastcode", "dashboard.json");
   const buildLogPath = NodePath.join(
@@ -530,14 +558,20 @@ function makeLive(environment: DesktopEnvironment.DesktopEnvironment["Service"])
             new Error(
               `Local install preflight did not finish within 2 minutes. Cleanup completed before returning. See ${installLogPath}.`,
             );
-          const preflightTimeout = setTimeout(() => {
-            if (ready) return;
-            preflightTimedOut = true;
-            control?.end("CANCEL\n");
-          }, 120_000);
+          const disarmPreflight = armInstallPreflightTimeout(child, environment.platform, {
+            onCancel: () => {
+              preflightTimedOut = true;
+            },
+            onStuck: () =>
+              failBeforeReady(
+                new Error(
+                  `Local install preflight did not finish within 2 minutes and ignored cancellation, so it was stopped. See ${installLogPath}.`,
+                ),
+              ),
+          });
           const failBeforeReady = (cause: unknown) => {
             if (ready) return;
-            clearTimeout(preflightTimeout);
+            disarmPreflight();
             signal.removeEventListener("abort", abort);
             reject(cause);
           };
@@ -583,7 +617,7 @@ function makeLive(environment: DesktopEnvironment.DesktopEnvironment["Service"])
                 throw new Error("Local install helper accepted a different artifact or version.");
               }
               ready = true;
-              clearTimeout(preflightTimeout);
+              disarmPreflight();
               signal.removeEventListener("abort", abort);
               readyStream.destroy();
 
