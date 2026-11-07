@@ -560,6 +560,15 @@ function collectLastCodeReleaseNotes(repoRoot, installables, currentInstallable,
   };
 }
 
+// Notes are context for an offer; git failures over missing tags must not hide it.
+function collectLastCodeReleaseNotesOrUnavailable(...args) {
+  try {
+    return collectLastCodeReleaseNotes(...args);
+  } catch {
+    return { status: "unavailable" };
+  }
+}
+
 function listUpstreamNightlyTags(repoRoot) {
   return splitLines(git(repoRoot, ["tag", "--list", "v*-nightly.*"]))
     .filter((tag) => {
@@ -635,7 +644,7 @@ function inspectGrouped(options, installableTags, checkpointTag, availableVersio
     availableVersion,
     ...(build ? { build } : {}),
     releaseNotes: {
-      lastCode: collectLastCodeReleaseNotes(
+      lastCode: collectLastCodeReleaseNotesOrUnavailable(
         options.repoRoot,
         installables,
         currentInstallable,
