@@ -221,6 +221,7 @@ can suspend while its parent remains open; a shared checkout stays until every o
 The delay starts from settlement or the last workspace use or restore, whichever is later. An
 archived thread that never settled counts from its archive time instead of settlement.
 Automatic suspension closes the eligible owners' previews before saving the workspace.
+If another process is still using the checkout, the checkout stays in place.
 Project **Off** pauses automatic suspension as well as cleanup.
 
 You can also choose **Suspend worktree** from a thread's menu. Staged changes, unstaged changes

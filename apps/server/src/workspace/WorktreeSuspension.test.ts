@@ -2588,6 +2588,34 @@ it.live("keeps previews when process inventory is unavailable", () =>
   ),
 );
 
+it.live("releases an eligible preview while retaining a checkout used by another process", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, {
+        cleanupThreads: true,
+        settings: automaticSettings,
+        previews: [{ threadId: firstId, workspacePath: f.workspace }],
+      });
+      untouchedOwners(h.threads);
+      yield* h.service.sweep.pipe(
+        Effect.provideService(
+          Consumers.ProcessPaths,
+          Effect.succeed([NodePath.join(f.workspace, "tracked")]),
+        ),
+      );
+      expect(h.previewLeases).toEqual([]);
+      const current = (yield* h.registry.list)[0]!;
+      expect(current.summary.state).toBe("active");
+      expect(current.operation).toBeUndefined();
+      expect(
+        yield* Effect.promise(() =>
+          NodeFSP.readFile(NodePath.join(f.workspace, "tracked"), "utf8"),
+        ),
+      ).toBe("working\n");
+    }),
+  ),
+);
+
 it.live("stops releasing previews when an owner becomes active during cleanup", () =>
   realGit((f) =>
     Effect.gen(function* () {
