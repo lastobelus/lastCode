@@ -1295,6 +1295,54 @@ describe("LastCode checkpoint supervisor", () => {
     }
   });
 
+  it("falls back to the installed CLI when the pinned checkout cannot load its dependencies", () => {
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "supervisor-cli-fallback-"));
+    try {
+      const repoRoot = NodePath.join(root, "checkout");
+      const home = NodePath.join(root, "home");
+      const argvPath = NodePath.join(root, "argv");
+      const entry = NodePath.join(repoRoot, "apps", "server", "src", "bin.ts");
+      const installed = NodePath.join(home, ".lastcode", "bin", "t3");
+      NodeFS.mkdirSync(NodePath.dirname(entry), { recursive: true });
+      NodeFS.mkdirSync(NodePath.dirname(installed), { recursive: true });
+      NodeFS.writeFileSync(
+        entry,
+        "process.stderr.write(\"Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'effect'\\n\");\nprocess.exit(1);\n",
+      );
+      NodeFS.writeFileSync(
+        installed,
+        `#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(argvPath)}\necho '{"kind":"accepted"}'\n`,
+        { mode: 0o700 },
+      );
+      const failed = fixture({
+        dependencies: {
+          runPhase: () => {
+            throw new Error("dependency installation failed");
+          },
+        },
+      });
+      delete failed.dependencies.sendThread;
+
+      expect(() => runCheckpointSupervisor({ home, repoRoot }, failed.dependencies)).toThrow(
+        "dependency installation failed",
+      );
+
+      const argv = NodeFS.readFileSync(argvPath, "utf8").split("\n");
+      expect(argv.slice(0, 7)).toEqual([
+        "thread",
+        "send",
+        "--base-dir",
+        NodePath.join(home, ".lastcode"),
+        "--state-dir",
+        NodePath.join(home, ".lastcode", "userdata"),
+        "thread-maintenance",
+      ]);
+      expect(failed.state.incident.alertDelivery).toBe("sent");
+    } finally {
+      NodeFS.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it.each(["ENOENT", "EACCES", "ENOTDIR", "E2BIG", "ETIMEDOUT", "ENOBUFS"])(
     "distinguishes launch rejection from uncertain process failure: %s",
     (code) => {

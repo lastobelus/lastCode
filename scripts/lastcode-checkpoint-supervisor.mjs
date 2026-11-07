@@ -484,29 +484,49 @@ export function checkpointResolvedMessage(incident) {
 }
 
 // Use the CLI from the pinned source checkout; the generated lastcode-thread
-// wrapper runs whatever branch the primary checkout happens to have.
+// wrapper runs whatever branch the primary checkout happens to have. When a
+// failed dependency install stops that CLI from loading, nothing was dispatched,
+// so the installed app's self-contained CLI can still report the failure.
 function sendThread(repoRoot, home, threadId, message, environment) {
-  runCommand(
-    "alert-delivery",
-    repoRoot,
-    process.execPath,
-    [
-      NodePath.join(repoRoot, "apps", "server", "src", "bin.ts"),
-      "thread",
-      "send",
-      "--base-dir",
-      NodePath.join(home, ".lastcode"),
-      "--state-dir",
-      NodePath.join(home, ".lastcode", "userdata"),
-      threadId,
-      "--message",
-      message,
-      "--json",
-    ],
-    environment,
-    // The CLI logs its errors to stdout; stderr carries only runtime warnings.
-    { capture: true, stdoutDiagnostic: true },
-  );
+  const args = [
+    "thread",
+    "send",
+    "--base-dir",
+    NodePath.join(home, ".lastcode"),
+    "--state-dir",
+    NodePath.join(home, ".lastcode", "userdata"),
+    threadId,
+    "--message",
+    message,
+    "--json",
+  ];
+  // The CLI logs its errors to stdout; stderr carries only runtime warnings.
+  const options = { capture: true, stdoutDiagnostic: true };
+  try {
+    runCommand(
+      "alert-delivery",
+      repoRoot,
+      process.execPath,
+      [NodePath.join(repoRoot, "apps", "server", "src", "bin.ts"), ...args],
+      environment,
+      options,
+    );
+  } catch (error) {
+    if (
+      !(error instanceof CommandFailure) ||
+      !/ERR_MODULE_NOT_FOUND|Cannot find (?:module|package)/u.test(error.diagnostic ?? "")
+    ) {
+      throw error;
+    }
+    runCommand(
+      "alert-delivery",
+      home,
+      NodePath.join(home, ".lastcode", "bin", "t3"),
+      args,
+      environment,
+      options,
+    );
+  }
 }
 
 function deliveryFailure(error) {
