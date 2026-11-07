@@ -599,6 +599,13 @@ describe("lastcode-local-update", () => {
           upstream: expectedUpstream,
         },
       });
+
+      // A checkout without the installed upstream nightly tag still offers the update.
+      runGit(repo, ["tag", "--delete", nightly1]);
+      assert.deepNestedInclude(inspectRepository(repo, root, nightly1.slice(1), true), {
+        status: "available",
+        "releaseNotes.upstream": { groups: [], omittedGroups: 0 },
+      });
     } finally {
       NodeFS.rmSync(root, { recursive: true, force: true });
     }

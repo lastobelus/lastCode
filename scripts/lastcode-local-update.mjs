@@ -576,9 +576,8 @@ function collectUpstreamReleaseNotes(repoRoot, current, target) {
   const nightlyTags = listUpstreamNightlyTags(repoRoot);
   const currentIndex = nightlyTags.indexOf(current.nightlyTag);
   const targetIndex = nightlyTags.indexOf(target.version.nightlyTag);
-  if (currentIndex < 0 || targetIndex <= currentIndex) {
-    throw new Error("Could not resolve the installed-to-target upstream nightly interval.");
-  }
+  // Missing or pruned upstream tags lose only these notes, never the update itself.
+  if (currentIndex < 0 || targetIndex <= currentIndex) return { groups: [], omittedGroups: 0 };
 
   const nonEmptyGroups = nightlyTags
     .slice(currentIndex + 1, targetIndex + 1)
