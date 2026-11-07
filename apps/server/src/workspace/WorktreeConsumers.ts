@@ -569,16 +569,25 @@ export const processPathsUseRoot = async (
   canonicalRoot: string,
   paths: ReadonlyArray<string>,
   observation?: TargetObservation,
+  completeProof = false,
 ): Promise<boolean> => {
   if (!NodePath.isAbsolute(canonicalRoot)) throw new Error("Consumer target root is not absolute");
   const captured = (paths as CapturedPaths)[nativeIdentities];
   const unresolved: ObjectIdentity[] = [];
   let vanishedSocket = false;
+  let matched = false;
   for (const [index, path] of paths.entries()) {
     if (!NodePath.isAbsolute(path)) throw new Error("Process consumer path is not absolute");
-    if (within(canonicalRoot, path)) return true;
+    if (within(canonicalRoot, path)) {
+      if (!completeProof) return true;
+      matched = true;
+      continue;
+    }
     try {
-      if (within(canonicalRoot, await NodeFSP.realpath(path))) return true;
+      if (within(canonicalRoot, await NodeFSP.realpath(path))) {
+        if (!completeProof) return true;
+        matched = true;
+      }
     } catch (error) {
       if (
         !gone(error) &&
@@ -612,7 +621,7 @@ export const processPathsUseRoot = async (
       unresolved.push(identity);
     }
   }
-  if (unresolved.length === 0 && !vanishedSocket) return false;
+  if (unresolved.length === 0 && !vanishedSocket) return matched;
   const identities = await targetEvidence(
     canonicalRoot,
     paths,
@@ -622,6 +631,7 @@ export const processPathsUseRoot = async (
     throw new ObjectProofUnavailable("Consumer target inventory could not be verified", { cause });
   });
   return (
+    matched ||
     (vanishedSocket && identities.hasSockets) ||
     unresolved.some((identity) =>
       identity.device === null
@@ -665,6 +675,35 @@ const runtimeKeptReason = async (root: string): Promise<string | null> => {
   }
   return null;
 };
+
+/** Check whether consumer evidence is complete before stopping owned previews. */
+export const worktreeConsumerPreflightReason = Effect.fn(
+  "WorktreeConsumers.worktreeConsumerPreflightReason",
+)(function* (canonicalRoot: string) {
+  const paths = yield* yield* ProcessPaths;
+  if (paths === null) return "Process file-consumer inventory is unavailable.";
+  const mounts = yield* yield* DependencyMounts.MountPoints;
+  if (mounts === null) return "Mount inventory is unavailable.";
+  if (DependencyMounts.containsMount(canonicalRoot, mounts))
+    return "A mounted path is inside the worktree.";
+  return yield* Effect.tryPromise({
+    try: async (): Promise<string | null> => {
+      if (
+        !NodePath.isAbsolute(canonicalRoot) ||
+        (await NodeFSP.realpath(canonicalRoot)) !== canonicalRoot
+      )
+        return "Worktree root is not canonical.";
+      const runtime = await runtimeKeptReason(canonicalRoot);
+      if (runtime !== null) return runtime;
+      await processPathsUseRoot(canonicalRoot, paths, undefined, true);
+      return null;
+    },
+    catch: (cause) =>
+      cause instanceof ObjectProofUnavailable
+        ? "Process object identity or target inventory could not be verified."
+        : "Worktree consumer protection could not be verified.",
+  }).pipe(Effect.catch((reason) => Effect.succeed(reason)));
+});
 
 /** Call under the canonical workspace lease immediately before removing generated files or a checkout. */
 export const worktreeConsumerReason = Effect.fn("WorktreeConsumers.worktreeConsumerReason")(

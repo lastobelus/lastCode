@@ -1355,6 +1355,18 @@ describe("Fresh native observation retry", () => {
 });
 
 describe("worktree removal guard", () => {
+  it.effect("checks the complete process inventory before releasing previews", () =>
+    Effect.gen(function* () {
+      const paths = ["/workspace/example/preview", "not-an-absolute-path"];
+      const result = yield* WorktreeConsumers.worktreeConsumerPreflightReason(
+        "/workspace/example",
+      ).pipe(
+        Effect.provideService(WorktreeConsumers.ProcessPaths, Effect.succeed(paths)),
+        Effect.provideService(DependencyMounts.MountPoints, Effect.succeed(["/"])),
+      );
+      expect(result).toBe("Worktree consumer protection could not be verified.");
+    }),
+  );
   it.effect("fails closed for unsupported hosts and missing process or mount inventories", () =>
     Effect.gen(function* () {
       expect(yield* inventory("win32")).toBeNull();

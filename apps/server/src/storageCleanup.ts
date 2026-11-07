@@ -1549,8 +1549,10 @@ const make = Effect.gen(function* () {
         return location ? [{ recordedPath: path.resolve(location), branch: branch ?? null }] : [];
       });
     });
-    const readProjectRepositories = Effect.fn("StorageCleanup.projectRepositories")(function* () {
-      return yield* Effect.forEach(snapshot.projects, (project) =>
+    const readProjectRepositories = Effect.fn("StorageCleanup.projectRepositories")(function* (
+      projects: typeof snapshot.projects = snapshot.projects,
+    ) {
+      return yield* Effect.forEach(projects, (project) =>
         Effect.gen(function* () {
           const result = yield* git.execute({
             operation: "StorageCleanup.projectRepository",
@@ -1977,7 +1979,7 @@ const make = Effect.gen(function* () {
           if (yield* previewUsesDependencies(cwd, recordedPath))
             return "A preview is using this worktree, or preview ownership could not be checked";
           if (yield* hasLiveProviderSession(cwd)) return "A provider session is still open";
-          if (yield* containsProjectRoot(cwd, snapshot.projects))
+          if (yield* containsProjectRoot(cwd, yield* projectStore.listShells()))
             return "A project uses this worktree as its main workspace";
           return null;
         });
@@ -2012,7 +2014,9 @@ const make = Effect.gen(function* () {
           if (!(yield* pathIdentityUnchanged(recordedPath, cwd)))
             return keep("Worktree path is a symlink or its location changed");
           if (yield* branchChanged(cwd, branch)) return keep("Repository or branch changed");
-          const currentRepositories = yield* readProjectRepositories();
+          const currentRepositories = yield* readProjectRepositories(
+            yield* projectStore.listShells(),
+          );
           if (
             currentRepositories.some((repository) => repository.uncertain) ||
             currentRepositories.filter(
@@ -2051,14 +2055,8 @@ const make = Effect.gen(function* () {
           return false;
         }
         if (generatedBuilds) {
-          const removed = yield* builds.remove(
-            buildInput(input),
-            now,
-            days,
-            false,
-            canRemove,
-            canRemove,
-            contextKey,
+          const removed = yield* withProjectRootLease(
+            builds.remove(buildInput(input), now, days, false, canRemove, canRemove, contextKey),
           );
           entry.reason = removed.reason;
           if (removed.failed) entry.outcome = "failed";
@@ -2076,23 +2074,25 @@ const make = Effect.gen(function* () {
         if (inspection === null)
           return keep("No dependency install could be safely recognized and measured");
         dependencyEstimates.set(entry, inspection.estimatedReclaimedBytes);
-        const removed = yield* dependencies.removeBatch(
-          [{ inspection, canRemove, isStillEligible: canRemove }],
-          (_inspection, decision) =>
-            Effect.sync(() => {
-              const genericRefusal =
-                decision.outcome === "kept" &&
-                decision.reason === "Worktree ownership or cleanup eligibility changed";
-              Object.assign(entry, {
-                outcome: decision.outcome,
-                reason: genericRefusal ? entry.reason : decision.reason,
-                bytes: decision.outcome === "removed" ? inspection.estimatedReclaimedBytes : null,
-              });
-            }).pipe(
-              Effect.andThen(
-                decision.outcome === "removed" ? dependenciesRemoved(cwd) : Effect.void,
+        const removed = yield* withProjectRootLease(
+          dependencies.removeBatch(
+            [{ inspection, canRemove, isStillEligible: canRemove }],
+            (_inspection, decision) =>
+              Effect.sync(() => {
+                const genericRefusal =
+                  decision.outcome === "kept" &&
+                  decision.reason === "Worktree ownership or cleanup eligibility changed";
+                Object.assign(entry, {
+                  outcome: decision.outcome,
+                  reason: genericRefusal ? entry.reason : decision.reason,
+                  bytes: decision.outcome === "removed" ? inspection.estimatedReclaimedBytes : null,
+                });
+              }).pipe(
+                Effect.andThen(
+                  decision.outcome === "removed" ? dependenciesRemoved(cwd) : Effect.void,
+                ),
               ),
-            ),
+          ),
         );
         if (removed.length > 0) {
           entry.outcome = "removed";
@@ -2112,7 +2112,7 @@ const make = Effect.gen(function* () {
       const leasedPaths = [...new Set([cwd, recordedPath])].sort();
       yield* leasedPaths.reduceRight(
         (effect, target) => withWorkspaceLease(target, effect),
-        withProjectRootLease(cleanOwnerless),
+        cleanOwnerless,
       );
     }
     const candidates = [
@@ -2459,7 +2459,12 @@ const make = Effect.gen(function* () {
                     yield* workspaceOwnershipChanged(worktreePath, thread.projectId, thread.branch)
                   )
                     return keep("Workspace ownership changed during cleanup");
-                  if (yield* containsProjectRoot(worktreePath, [project, ...snapshot.projects]))
+                  if (
+                    yield* containsProjectRoot(worktreePath, [
+                      project,
+                      ...(yield* projectStore.listShells()),
+                    ])
+                  )
                     return keep("A project uses this worktree as its main workspace");
                   if (yield* previewUsesDependencies(worktreePath, recordedWorktreePath))
                     return keep(
@@ -2595,18 +2600,20 @@ const make = Effect.gen(function* () {
                 return null;
               }
               if (generatedBuilds) {
-                const removed = yield* builds.remove(
-                  buildInput({
-                    managedWorktreesRoot,
-                    worktreePath,
-                    repositoryRoot: project.workspaceRoot,
-                  }),
-                  now,
-                  days,
-                  archived,
-                  canRemove,
-                  isStillEligible,
-                  contextKey,
+                const removed = yield* withProjectRootLease(
+                  builds.remove(
+                    buildInput({
+                      managedWorktreesRoot,
+                      worktreePath,
+                      repositoryRoot: project.workspaceRoot,
+                    }),
+                    now,
+                    days,
+                    archived,
+                    canRemove,
+                    isStillEligible,
+                    contextKey,
+                  ),
                 );
                 entry.reason = removed.reason;
                 if (removed.failed) entry.outcome = "failed";
@@ -2651,27 +2658,29 @@ const make = Effect.gen(function* () {
             ),
           { concurrency: group.length },
         )).filter((entry) => entry !== null);
-        const removedEntries = yield* dependencies.removeBatch(prepared, (inspection, decision) =>
-          Effect.sync(() => {
-            const entry = reports.get(inspection.worktreePath)!;
-            dependencyEstimates.set(entry, inspection.estimatedReclaimedBytes);
-            const genericRefusal =
-              decision.outcome === "kept" &&
-              decision.reason === "Worktree ownership or cleanup eligibility changed";
-            Object.assign(entry, {
-              outcome: decision.outcome,
-              reason:
-                genericRefusal &&
-                entry.reason !== "A final safety check prevented dependency removal"
-                  ? entry.reason
-                  : decision.reason,
-              bytes: decision.outcome === "removed" ? inspection.estimatedReclaimedBytes : null,
-            });
-          }).pipe(
-            Effect.andThen(
-              decision.outcome === "removed"
-                ? dependenciesRemoved(inspection.worktreePath)
-                : Effect.void,
+        const removedEntries = yield* withProjectRootLease(
+          dependencies.removeBatch(prepared, (inspection, decision) =>
+            Effect.sync(() => {
+              const entry = reports.get(inspection.worktreePath)!;
+              dependencyEstimates.set(entry, inspection.estimatedReclaimedBytes);
+              const genericRefusal =
+                decision.outcome === "kept" &&
+                decision.reason === "Worktree ownership or cleanup eligibility changed";
+              Object.assign(entry, {
+                outcome: decision.outcome,
+                reason:
+                  genericRefusal &&
+                  entry.reason !== "A final safety check prevented dependency removal"
+                    ? entry.reason
+                    : decision.reason,
+                bytes: decision.outcome === "removed" ? inspection.estimatedReclaimedBytes : null,
+              });
+            }).pipe(
+              Effect.andThen(
+                decision.outcome === "removed"
+                  ? dependenciesRemoved(inspection.worktreePath)
+                  : Effect.void,
+              ),
             ),
           ),
         );
@@ -2699,10 +2708,7 @@ const make = Effect.gen(function* () {
           ]),
         ),
       ].sort();
-      yield* paths.reduceRight(
-        (effect, cwd) => withWorkspaceLease(cwd, effect),
-        withProjectRootLease(removeGroup),
-      );
+      yield* paths.reduceRight((effect, cwd) => withWorkspaceLease(cwd, effect), removeGroup);
     }
   });
 
