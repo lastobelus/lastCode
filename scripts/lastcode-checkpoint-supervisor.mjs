@@ -56,7 +56,6 @@ export function supervisorPaths(home = NodeOS.homedir()) {
     runHistoryPath: NodePath.join(rootDirectory, "checkpoint-runs.jsonl"),
     activityPath: NodePath.join(rootDirectory, "checkpoint-service-activity.jsonl"),
     statePath: NodePath.join(rootDirectory, "checkpoint-service-state.json"),
-    threadToolPath: NodePath.join(home, ".lastcode", "userdata", "bin", "lastcode-thread"),
   };
 }
 
@@ -341,7 +340,9 @@ function runCommand(phase, cwd, command, args, environment, options = {}) {
         phase,
         command,
         result.status,
-        boundedCommandDiagnostic(result.stderr),
+        boundedCommandDiagnostic(
+          options.stdoutDiagnostic ? `${result.stderr}\n${result.stdout}` : result.stderr,
+        ),
       );
     }
     return result.stdout.trim();
@@ -482,15 +483,34 @@ export function checkpointResolvedMessage(incident) {
   return `Automated LastCode checkpoint maintenance resolved alert ${incident.fingerprint.slice(0, 12)}${nightly}. The checkpoint service completed successfully again.`;
 }
 
-function sendThread(threadToolPath, threadId, message, environment) {
+// The CLI opens and migrates the live database, so it must be the installed
+// app's own build. Source checkouts can carry migrations the app lacks.
+function sendThread(home, threadId, message, environment) {
   runCommand(
     "alert-delivery",
-    NodePath.dirname(threadToolPath),
-    threadToolPath,
-    ["send", threadId, "--message", message, "--json"],
+    home,
+    NodePath.join(home, ".lastcode", "bin", "t3"),
+    [
+      "thread",
+      "send",
+      "--base-dir",
+      NodePath.join(home, ".lastcode"),
+      "--state-dir",
+      NodePath.join(home, ".lastcode", "userdata"),
+      threadId,
+      "--message",
+      message,
+      "--json",
+    ],
     environment,
-    { capture: true },
+    // The CLI logs its errors to stdout; stderr carries only runtime warnings.
+    { capture: true, stdoutDiagnostic: true },
   );
+}
+
+function deliveryFailure(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return error?.diagnostic ? `${message}\n${error.diagnostic}` : message;
 }
 
 function notify(title, message, environment) {
@@ -580,15 +600,6 @@ function rejectedThreadSend(error, target) {
     typeof error.diagnostic !== "string"
   ) {
     return false;
-  }
-  // The generated shell wrapper exits before the CLI starts when exec fails.
-  if (
-    [126, 127].includes(error.status) &&
-    /(?:^|\n)[^\n]*: (?:exec:|line \d+:)[^\n]*(?:not found|No such file or directory|Permission denied|cannot execute)[^\n]*$/imu.test(
-      error.diagnostic,
-    )
-  ) {
-    return true;
   }
   // These diagnostics originate before runThreadSend calls dispatch. Keep
   // dispatch failures out: a timeout there does not prove non-delivery.
@@ -704,7 +715,7 @@ function attemptDelivery(state, config, dependencies) {
         dependencies.writeState(nextState);
       }
       console.error(
-        `[lastcode:checkpoint-supervisor] Could not deliver a pending alert to the maintenance thread: ${error instanceof Error ? error.message : String(error)}`,
+        `[lastcode:checkpoint-supervisor] Could not deliver a pending alert to the maintenance thread: ${deliveryFailure(error)}`,
       );
       if (rejectedThreadSend(error, targetThreadId)) {
         // Preserve old uncertainty without starving later incidents. Attempt
@@ -751,7 +762,7 @@ function attemptDelivery(state, config, dependencies) {
         dependencies.writeState(nextState);
       } catch (error) {
         console.error(
-          `[lastcode:checkpoint-supervisor] Could not deliver a pending resolution to the maintenance thread: ${error instanceof Error ? error.message : String(error)}`,
+          `[lastcode:checkpoint-supervisor] Could not deliver a pending resolution to the maintenance thread: ${deliveryFailure(error)}`,
         );
         if (rejectedThreadSend(error, deliveryThreadId(updatedIncident))) {
           rejectedResolutions.add(updatedIncident.fingerprint);
@@ -815,7 +826,7 @@ function attemptDelivery(state, config, dependencies) {
       dependencies.writeState(nextState);
     }
     console.error(
-      `[lastcode:checkpoint-supervisor] Could not deliver ${resolving ? "resolution" : "alert"} to the maintenance thread: ${error instanceof Error ? error.message : String(error)}`,
+      `[lastcode:checkpoint-supervisor] Could not deliver ${resolving ? "resolution" : "alert"} to the maintenance thread: ${deliveryFailure(error)}`,
     );
   }
   return nextState;
@@ -892,8 +903,7 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
       retainedRecoveryMatches(repoRoot, checkpointRun, environment),
     refreshSupervisor: () => refreshInstalledSupervisor(repoRoot, installedSupervisorPath),
     runPhase: (phase, command, args) => runCommand(phase, repoRoot, command, args, environment),
-    sendThread: (threadId, message) =>
-      sendThread(paths.threadToolPath, threadId, message, environment),
+    sendThread: (threadId, message) => sendThread(home, threadId, message, environment),
     writeState: (state) => writeJsonAtomic(paths.statePath, state),
     writeActivity: (activity) => {
       NodeFS.mkdirSync(NodePath.dirname(paths.activityPath), { recursive: true, mode: 0o700 });
