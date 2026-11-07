@@ -16,6 +16,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as SuspensionRegistry from "../workspace/WorktreeSuspensionRegistry.ts";
 import { withProjectRootLease } from "../workspace/projectRootLease.ts";
 import * as Ref from "effect/Ref";
@@ -416,6 +417,37 @@ it.effect("retains a worktree containing a registered project root", () =>
       assert.isFalse((yield* Ref.get(harness.timeline)).includes("remove:/work/nested-project"));
     }).pipe(Effect.provide(harness.layer));
   }).pipe(Effect.scoped),
+);
+
+it.effect("retains a worktree containing an aliased missing project root", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const temporary = yield* fs.makeTempDirectoryScoped({ prefix: "cleanup-project-root-" });
+    const root = yield* fs.realPath(temporary);
+    const worktree = path.join(root, "checkout");
+    const alias = path.join(root, "alias");
+    yield* fs.makeDirectory(worktree);
+    yield* fs.symlink(worktree, alias);
+    const thread = pending("alias-project");
+    const harness = yield* makeHarness([
+      {
+        ...thread,
+        worktreePath: worktree,
+        worktreeCleanup: { ...thread.worktreeCleanup!, worktreePath: worktree },
+      },
+    ]);
+    yield* Ref.set(harness.projectRoots, [
+      { workspaceRoot: path.join(alias, "missing") } as OrchestrationProjectShell,
+    ]);
+    yield* Effect.gen(function* () {
+      const service = yield* Cleanup.WorktreeCleanupService;
+      yield* service.reconcile;
+      yield* service.drain;
+      assert.equal((yield* Ref.get(harness.state))[0]!.worktreeCleanup?.status, "failed");
+      assert.isFalse((yield* Ref.get(harness.timeline)).includes(`remove:${worktree}`));
+    }).pipe(Effect.provide(harness.layer));
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
 it.effect("rechecks recovery protection under the project-root lease before removal", () =>
