@@ -23,6 +23,8 @@ const LAUNCH_TIMEOUT_MS = 30_000;
 const PARENT_QUIT_GRACE_MS = 30_000;
 const PARENT_TERM_GRACE_MS = 15_000;
 const PARENT_KILL_WAIT_MS = 5_000;
+const PARENT_UNSIGNALLED_WAIT_MS = 10 * 60_000;
+const HANDOFF_COMMAND_TIMEOUT_MS = 10 * 60_000;
 const TCC_RESET_TIMEOUT_MS = 10_000;
 export const INSTALL_READY_PREFIX = "LASTCODE_INSTALL_READY=";
 
@@ -477,11 +479,14 @@ export async function waitForParentExit(pid, identity, options = {}) {
   const now = options.now ?? (() => NodePerfHooks.performance.now());
   const wait = options.wait ?? NodeTimersPromises.setTimeout;
   const executable = ` ${NodePath.resolve(options.targetPath ?? DEFAULT_APP_PATH)}/Contents/MacOS/`;
-  const steps = [
-    { afterMs: PARENT_QUIT_GRACE_MS, signal: "SIGTERM" },
-    { afterMs: PARENT_TERM_GRACE_MS, signal: "SIGKILL" },
-    { afterMs: PARENT_KILL_WAIT_MS, signal: null },
-  ];
+  // A committed parent that cannot be signalled still quits on its own; give it longer.
+  const steps = identity.includes(executable)
+    ? [
+        { afterMs: PARENT_QUIT_GRACE_MS, signal: "SIGTERM" },
+        { afterMs: PARENT_TERM_GRACE_MS, signal: "SIGKILL" },
+        { afterMs: PARENT_KILL_WAIT_MS, signal: null },
+      ]
+    : [{ afterMs: PARENT_UNSIGNALLED_WAIT_MS, signal: null }];
   const startedAt = now();
   let stepStartedAt = startedAt;
   while (isAlive(pid)) {
@@ -499,7 +504,7 @@ export async function waitForParentExit(pid, identity, options = {}) {
         `LastCode process ${pid} did not quit within ${Math.round((now() - startedAt) / 1_000)} seconds.`,
       );
     }
-    if (current === identity && identity.includes(executable)) {
+    if (current === identity) {
       console.log(
         `LastCode process ${pid} is still quitting after ${Math.round((now() - startedAt) / 1_000)} seconds; sending ${step.signal}.`,
       );
@@ -514,19 +519,32 @@ export async function waitForParentExit(pid, identity, options = {}) {
   }
 }
 
-async function readHandoffCommand(stream = process.stdin) {
-  let raw = "";
-  for await (const chunk of stream) {
-    raw += chunk.toString("utf8");
-    const newline = raw.indexOf("\n");
-    if (newline >= 0) {
-      const command = raw.slice(0, newline).trim();
-      if (command === "COMMIT" || command === "CANCEL") return command;
-      throw new Error(`Invalid install handoff command '${command}'.`);
+// A desktop that wedged after READY must not hold the install lock forever.
+export async function readHandoffCommand(
+  stream = process.stdin,
+  timeoutMs = HANDOFF_COMMAND_TIMEOUT_MS,
+) {
+  const timer = setTimeout(() => {
+    stream.destroy(
+      new Error(`Install handoff got no COMMIT or CANCEL within ${timeoutMs / 1_000} seconds.`),
+    );
+  }, timeoutMs);
+  try {
+    let raw = "";
+    for await (const chunk of stream) {
+      raw += chunk.toString("utf8");
+      const newline = raw.indexOf("\n");
+      if (newline >= 0) {
+        const command = raw.slice(0, newline).trim();
+        if (command === "COMMIT" || command === "CANCEL") return command;
+        throw new Error(`Invalid install handoff command '${command}'.`);
+      }
+      if (raw.length > 32) throw new Error("Install handoff command is too large.");
     }
-    if (raw.length > 32) throw new Error("Install handoff command is too large.");
+    throw new Error("Install handoff closed before COMMIT or CANCEL.");
+  } finally {
+    clearTimeout(timer);
   }
-  throw new Error("Install handoff closed before COMMIT or CANCEL.");
 }
 
 function unrelatedApfsMountWarnings(stderr, bundlePaths, bundleDevice) {
@@ -796,6 +814,31 @@ async function installDmg(dmgPath, targetPath = DEFAULT_APP_PATH) {
   }
 }
 
+// After COMMIT the parent is quitting for good, so a failed install must still
+// leave an app running: the old bundle stays at the target unless the swap ran.
+export async function finishCommittedInstall(prepared, parent, options = {}) {
+  const waitForParent = options.waitForParentExit ?? waitForParentExit;
+  const replace = options.replacePreparedApp ?? replacePreparedApp;
+  const isRunning = options.isRunning ?? appIsRunning;
+  const launch = options.launchApp ?? ((appPath) => launchApp(appPath));
+  try {
+    console.log(`Waiting for LastCode process ${parent.pid} to quit…`);
+    await waitForParent(parent.pid, parent.identity, { targetPath: prepared.targetPath });
+    await replace(prepared);
+    console.log(`Installed and launched LastCode ${prepared.version}`);
+  } catch (error) {
+    console.error(`LastCode ${prepared.version} was not installed: ${error.message}`);
+    if (NodeFS.existsSync(prepared.targetPath) && !isRunning()) {
+      try {
+        await launch(prepared.targetPath);
+      } catch (relaunchError) {
+        console.error(`Warning: could not relaunch LastCode: ${relaunchError.message}`);
+      }
+    }
+    throw error;
+  }
+}
+
 async function handoffInstall(options) {
   // Captured while the parent is certainly alive: it spawned this helper and holds its pipes.
   const parentIdentity =
@@ -813,12 +856,10 @@ async function handoffInstall(options) {
     NodeFS.closeSync(options.readyFd);
     const command = await readHandoffCommand();
     if (command === "CANCEL") return;
-    console.log(`Waiting for LastCode process ${options.parentPid} to quit…`);
-    await waitForParentExit(options.parentPid, parentIdentity, {
-      targetPath: prepared.targetPath,
+    await finishCommittedInstall(prepared, {
+      pid: options.parentPid,
+      identity: parentIdentity,
     });
-    await replacePreparedApp(prepared);
-    console.log(`Installed and launched LastCode ${prepared.version}`);
   } finally {
     cleanupPreparedInstall(prepared);
   }
@@ -914,6 +955,11 @@ export function uninstallCommand(home) {
 
 async function main(argv) {
   if (argv[0] === "handoff") {
+    // install.log accumulates every run; timestamps make one attempt readable.
+    for (const method of ["log", "error"]) {
+      const write = console[method].bind(console);
+      console[method] = (...args) => write(`[${new Date().toISOString()}]`, ...args);
+    }
     await handoffInstall(parseHandoffOptions(argv.slice(1)));
     return;
   }

@@ -4,6 +4,7 @@ import * as NodeFS from "node:fs";
 import * as NodeModule from "node:module";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeStream from "node:stream";
 
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -30,6 +31,8 @@ import {
   uninstallCommand,
   validateAppBundle,
   validateDmgArtifact,
+  finishCommittedInstall,
+  readHandoffCommand,
   waitForParentExit,
 } from "./lastcode-install.mjs";
 
@@ -794,12 +797,56 @@ describe("LastCode userland install command", () => {
       name: "an app outside the target",
       identity: "Sat Nov  7 13:50:01 2026 /tmp/LastCode.app/Contents/MacOS/LastCode",
     },
-  ])("never signals a parent with $name", async ({ identity }) => {
+  ])("never signals a parent with $name, and waits longer for it", async ({ identity }) => {
     const parent = fakeParent({ identity });
     await expect(waitForParentExit(62_323, identity, parent.options)).rejects.toThrow(
-      "LastCode process 62323 did not quit within 50 seconds.",
+      "LastCode process 62323 did not quit within 600 seconds.",
     );
     expect(parent.sent).toEqual([]);
+  });
+
+  it.each([
+    { name: "the parent never quits", failure: "wait", relaunched: true },
+    { name: "the swap fails before moving anything", failure: "replace", relaunched: true },
+    {
+      name: "the swap already relaunched the old app",
+      failure: "replace-relaunched",
+      relaunched: false,
+    },
+  ])(
+    "leaves an app running when a committed install fails because $name",
+    async ({ failure, relaunched }) => {
+      const targetPath = temporaryDirectory();
+      const launches = [];
+      let running = false;
+      await expect(
+        finishCommittedInstall(
+          { targetPath, version: "0.1.8-nightly.20261107.4301" },
+          { pid: 62_323, identity: "" },
+          {
+            waitForParentExit: async () => {
+              if (failure === "wait") throw new Error("LastCode process 62323 did not quit");
+            },
+            replacePreparedApp: async () => {
+              if (failure === "replace-relaunched") running = true;
+              throw new Error("rename failed");
+            },
+            isRunning: () => running,
+            launchApp: async (appPath) => launches.push(appPath),
+          },
+        ),
+      ).rejects.toThrow(failure === "wait" ? "did not quit" : "rename failed");
+      expect(launches).toEqual(relaunched ? [targetPath] : []);
+    },
+  );
+
+  it("gives up on a handoff that never receives COMMIT or CANCEL", async () => {
+    vi.useFakeTimers();
+    const stream = new NodeStream.PassThrough();
+    const command = readHandoffCommand(stream, 600_000);
+    vi.advanceTimersByTime(600_000);
+    await expect(command).rejects.toThrow("no COMMIT or CANCEL within 600 seconds");
+    vi.useRealTimers();
   });
 
   it("scrubs Electron's Node mode and retries until the app remains running", async () => {
