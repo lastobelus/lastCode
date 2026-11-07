@@ -861,7 +861,7 @@ it.effect("invalidates workspace-derived metadata when a project moves", () =>
   }),
 );
 
-it.effect.each(["suspended", "interrupted capture"] as const)(
+it.effect.each(["suspended", "interrupted capture", "accepted recovery"] as const)(
   "does not recreate a missing workspace protected by %s",
   (state) =>
     Effect.gen(function* () {
@@ -884,6 +884,18 @@ it.effect.each(["suspended", "interrupted capture"] as const)(
           },
           history: [],
           blockedReason: null,
+          ...(state === "accepted recovery"
+            ? {
+                operation: {
+                  id: "fixture-recovery",
+                  kind: "recovery" as const,
+                  snapshotIds: [],
+                  manual: true,
+                  acceptedAt: "2026-01-01T00:00:00.000Z",
+                  destinationPath: "/work/recovery-destination",
+                },
+              }
+            : {}),
         },
         null,
       );
@@ -911,7 +923,8 @@ it.effect.each(["suspended", "interrupted capture"] as const)(
           commandId: CommandId.make(`command:protected:${state}`),
           projectId: ProjectId.make(`project:protected:${state}`),
           title: "Workspace",
-          workspaceRoot: "/work/saved-workspace",
+          workspaceRoot:
+            state === "accepted recovery" ? "/work/recovery-destination" : "/work/saved-workspace",
           createWorkspaceRootIfMissing: true,
         }),
       );

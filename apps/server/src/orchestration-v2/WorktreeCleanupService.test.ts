@@ -17,6 +17,7 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as SuspensionRegistry from "../workspace/WorktreeSuspensionRegistry.ts";
+import { withProjectRootLease } from "../workspace/projectRootLease.ts";
 import * as Ref from "effect/Ref";
 import { TestClock } from "effect/testing";
 
@@ -66,6 +67,7 @@ const makeHarness = Effect.fn(function* (
     string | null,
     SuspensionRegistry.SuspensionRegistryError
   > = Effect.succeed(null),
+  beforeThreadOwners: Effect.Effect<void> = Effect.void,
 ) {
   const state = yield* Ref.make(initial);
   const timeline = yield* Ref.make<ReadonlyArray<string>>([]);
@@ -104,7 +106,7 @@ const makeHarness = Effect.fn(function* (
               threads: [],
               archivedThreads: [],
             }),
-          getThreadWorktreePaths: () => Effect.succeed([]),
+          getThreadWorktreePaths: () => beforeThreadOwners.pipe(Effect.as([])),
         }),
         Layer.mock(Project.ProjectStoreV2)({ listShells: () => Ref.get(projectRoots) }),
         Layer.mock(Threads.ThreadManagementService)({
@@ -400,30 +402,126 @@ it.effect("persists removal failures and refuses a worktree that became a projec
   }).pipe(Effect.scoped),
 );
 
-it.effect("serializes one repository while another repository continues independently", () =>
+it.effect("retains a worktree containing a registered project root", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness([pending("nested-project")]);
+    yield* Ref.set(harness.projectRoots, [
+      { workspaceRoot: "/work/nested-project/src" } as OrchestrationProjectShell,
+    ]);
+    yield* Effect.gen(function* () {
+      const service = yield* Cleanup.WorktreeCleanupService;
+      yield* service.reconcile;
+      yield* service.drain;
+      assert.equal((yield* Ref.get(harness.state))[0]!.worktreeCleanup?.status, "failed");
+      assert.isFalse((yield* Ref.get(harness.timeline)).includes("remove:/work/nested-project"));
+    }).pipe(Effect.provide(harness.layer));
+  }).pipe(Effect.scoped),
+);
+
+it.effect("rechecks project roots after a competing registration finishes", () =>
+  Effect.gen(function* () {
+    const registrationHeld = yield* Deferred.make<void>();
+    const finishRegistration = yield* Deferred.make<void>();
+    const ownersReached = yield* Deferred.make<void>();
+    const registered = yield* Deferred.make<void>();
+    const harness = yield* makeHarness(
+      [pending("registration-first")],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [],
+      Effect.succeed(null),
+      Deferred.succeed(ownersReached, undefined).pipe(Effect.andThen(Deferred.await(registered))),
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* Cleanup.WorktreeCleanupService;
+      const registration = yield* withProjectRootLease(
+        Effect.gen(function* () {
+          yield* Deferred.succeed(registrationHeld, undefined);
+          yield* Deferred.await(finishRegistration);
+          yield* Ref.set(harness.projectRoots, [
+            { workspaceRoot: "/work/registration-first/src" } as OrchestrationProjectShell,
+          ]);
+          yield* Deferred.succeed(registered, undefined);
+        }),
+      ).pipe(Effect.forkChild);
+      yield* Deferred.await(registrationHeld);
+      yield* service.reconcile;
+      yield* Deferred.await(ownersReached);
+      yield* Deferred.succeed(finishRegistration, undefined);
+      yield* Fiber.join(registration);
+      yield* service.drain;
+      assert.equal((yield* Ref.get(harness.state))[0]!.worktreeCleanup?.status, "failed");
+      assert.isFalse(
+        (yield* Ref.get(harness.timeline)).includes("remove:/work/registration-first"),
+      );
+    }).pipe(Effect.provide(harness.layer));
+  }).pipe(Effect.scoped),
+);
+
+it.effect("holds the project-root lease through worktree removal", () =>
+  Effect.gen(function* () {
+    const scope = yield* Effect.scope;
+    const registered = yield* Deferred.make<boolean>();
+    let removed = false;
+    let registrationEntered = false;
+    const harness = yield* makeHarness([pending("removal-first")], () =>
+      Effect.gen(function* () {
+        yield* Effect.forkIn(
+          withProjectRootLease(
+            Effect.gen(function* () {
+              registrationEntered = true;
+              yield* Deferred.succeed(registered, removed);
+            }),
+          ),
+          scope,
+          { startImmediately: true },
+        );
+        assert.isFalse(registrationEntered);
+        removed = true;
+      }),
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* Cleanup.WorktreeCleanupService;
+      yield* service.reconcile;
+      yield* service.drain;
+      assert.isTrue(yield* Deferred.await(registered));
+      assert.isNull((yield* Ref.get(harness.state))[0]!.worktreeCleanup);
+    }).pipe(Effect.provide(harness.layer));
+  }).pipe(Effect.scoped),
+);
+
+it.effect("keeps one repository's queue ordered while another reaches cleanup", () =>
   Effect.gen(function* () {
     const entered = yield* Deferred.make<void>();
     const release = yield* Deferred.make<void>();
-    const otherDone = yield* Deferred.make<void>();
+    const otherReady = yield* Deferred.make<void>();
     const harness = yield* makeHarness(
       [pending("first"), pending("second"), pending("other", "/work/other-repo")],
       (path) =>
         path === "/work/first"
           ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release)))
-          : path === "/work/other"
-            ? Deferred.succeed(otherDone, undefined).pipe(Effect.asVoid)
-            : Effect.void,
+          : Effect.void,
+      undefined,
+      undefined,
+      (threadId) =>
+        threadId === "other"
+          ? Deferred.succeed(otherReady, undefined).pipe(Effect.asVoid)
+          : Effect.void,
     );
+    yield* Ref.set(harness.projectRoots, [{ workspaceRoot: "/work" } as OrchestrationProjectShell]);
     yield* Effect.gen(function* () {
       const service = yield* Cleanup.WorktreeCleanupService;
       yield* service.reconcile;
       yield* Deferred.await(entered);
-      yield* Deferred.await(otherDone);
+      yield* Deferred.await(otherReady);
       assert.isFalse((yield* Ref.get(harness.timeline)).includes("remove:/work/second"));
       const drain = yield* service.drain.pipe(Effect.forkChild);
       yield* Deferred.succeed(release, undefined);
       yield* Fiber.join(drain);
       const entries = yield* Ref.get(harness.timeline);
+      assert.isTrue(entries.includes("remove:/work/other"));
       assert.isTrue(
         entries.indexOf("persist:first:complete") < entries.indexOf("remove:/work/second"),
       );

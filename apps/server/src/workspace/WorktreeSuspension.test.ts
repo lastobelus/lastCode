@@ -2616,6 +2616,42 @@ it.live("releases an eligible preview while retaining a checkout used by another
   ),
 );
 
+it.live.each([false, true])(
+  "releases an eligible preview before checking its runtime descriptor, still active=%s",
+  (stillActive) =>
+    realGit((f) =>
+      Effect.gen(function* () {
+        const h = yield* harness(f, {
+          cleanupThreads: true,
+          settings: automaticSettings,
+          previews: [{ threadId: firstId, workspacePath: f.workspace }],
+        });
+        const directory = NodePath.join(f.workspace, ".t3", "dev");
+        const descriptor = NodePath.join(directory, "server-runtime.json");
+        yield* Effect.promise(async () => {
+          await NodeFSP.mkdir(directory, { recursive: true });
+          await NodeFSP.writeFile(
+            descriptor,
+            JSON.stringify({
+              version: 1,
+              pid: process.pid,
+              port: 1234,
+              origin: "http://workstation.example",
+              startedAt: "2026-01-01T00:00:00Z",
+            }),
+          );
+        });
+        if (!stillActive) h.onPreviewRelease(() => NodeFS.unlinkSync(descriptor));
+        untouchedOwners(h.threads);
+        yield* h.service.sweep;
+        expect(h.previewLeases).toEqual([]);
+        expect((yield* h.registry.list)[0]!.summary.state).toBe(
+          stillActive ? "active" : "suspended",
+        );
+      }),
+    ),
+);
+
 it.live("stops releasing previews when an owner becomes active during cleanup", () =>
   realGit((f) =>
     Effect.gen(function* () {
@@ -2752,6 +2788,53 @@ it.live.each([
         return;
       }
       expect(retained.summary.state).toBe("active");
+      expect(
+        yield* Effect.promise(() =>
+          NodeFSP.readFile(NodePath.join(f.workspace, "tracked"), "utf8"),
+        ),
+      ).toBe("working\n");
+    }),
+  ),
+);
+
+it.live("does not capture files after their checkout becomes a project root", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      let paused = false;
+      let captureFinished = false;
+      const h = yield* harness(f, {
+        onStoreBoundary: async (phase) => {
+          if (phase === "capturing" && !paused) {
+            paused = true;
+            entered.resolve();
+            await release.promise;
+          }
+          if (phase === "verifying") captureFinished = true;
+        },
+      });
+      const preview = yield* h.service.previewSuspend({ threadId: firstId });
+      yield* Queue.clear(h.updates);
+      yield* h.service.suspend({ threadId: firstId, previewToken: preview.token });
+      yield* Effect.promise(() => entered.promise);
+      const attempted = yield* Deferred.make<void>();
+      let registeredDuringCapture = false;
+      const registration = yield* Deferred.succeed(attempted, undefined).pipe(
+        Effect.andThen(
+          withProjectRootLease(
+            Effect.sync(() => {
+              registeredDuringCapture = !captureFinished;
+              h.registerProjectRoot(f.workspace);
+            }),
+          ),
+        ),
+        Effect.forkChild,
+      );
+      yield* Deferred.await(attempted);
+      release.resolve();
+      yield* Fiber.join(registration);
+      expect(registeredDuringCapture).toBe(false);
       expect(
         yield* Effect.promise(() =>
           NodeFSP.readFile(NodePath.join(f.workspace, "tracked"), "utf8"),

@@ -1411,6 +1411,12 @@ describe("worktree removal guard", () => {
           }),
         );
         native.isProcessAlive.mockReturnValue(true);
+        expect(
+          yield* WorktreeConsumers.worktreeConsumerPreflightReason("/workspace/example").pipe(
+            Effect.provideService(WorktreeConsumers.ProcessPaths, Effect.succeed([])),
+            Effect.provideService(DependencyMounts.MountPoints, Effect.succeed(["/"])),
+          ),
+        ).toBeNull();
         expect(yield* guard([])).toBe("A server runtime is still active.");
         native.isProcessAlive.mockReturnValue(false);
         expect(yield* guard([])).toBeNull();

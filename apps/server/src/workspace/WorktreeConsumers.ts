@@ -693,8 +693,8 @@ export const worktreeConsumerPreflightReason = Effect.fn(
         (await NodeFSP.realpath(canonicalRoot)) !== canonicalRoot
       )
         return "Worktree root is not canonical.";
-      const runtime = await runtimeKeptReason(canonicalRoot);
-      if (runtime !== null) return runtime;
+      // An owned preview may itself be the runtime; the final removal guard
+      // checks runtime descriptors again after preview shutdown.
       await processPathsUseRoot(canonicalRoot, paths, undefined, true);
       return null;
     },

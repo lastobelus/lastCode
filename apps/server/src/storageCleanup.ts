@@ -77,7 +77,7 @@ import * as WorktreeConsumers from "./workspace/WorktreeConsumers.ts";
 import { physicalCleanupFileSystem } from "./workspace/physicalCleanupFileSystem.ts";
 import { WorktreeSuspension } from "./workspace/WorktreeSuspension.ts";
 import { WorktreeSuspensionRegistry } from "./workspace/WorktreeSuspensionRegistry.ts";
-import { withProjectRootLease } from "./workspace/projectRootLease.ts";
+import { canonicalProjectRoot, withProjectRootLease } from "./workspace/projectRootLease.ts";
 
 const decodeCleanupThread = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2AppThreadJson),
@@ -701,9 +701,7 @@ const make = Effect.gen(function* () {
       const projectPath = path.resolve(project.workspaceRoot);
       if (pathKey(projectPath) === pathKey(worktreePath) || inside(worktreePath, projectPath))
         return true;
-      const realPath = yield* fs
-        .realPath(projectPath)
-        .pipe(Effect.orElseSucceed(() => projectPath));
+      const realPath = yield* canonicalProjectRoot(projectPath);
       if (pathKey(realPath) === pathKey(worktreePath) || inside(worktreePath, realPath))
         return true;
     }
@@ -2261,8 +2259,6 @@ const make = Effect.gen(function* () {
           ? { workspaceRoot: thread.workspaceRoot }
           : snapshot.projects.find((entry) => entry.id === thread.projectId);
         if (project === undefined) return keep("Project is no longer available");
-        if (projectRepositories.some((repository) => repository.uncertain))
-          return keep("Could not verify repository ownership for every current project");
         const repository = projectRepositories.find(
           (repository) => repository.project.id === thread.projectId,
         );
@@ -2876,6 +2872,7 @@ const make = Effect.gen(function* () {
         if (actualCommon !== (yield* fs.realPath(expectedPath))) return false;
         let mappings = 0;
         for (const currentProject of yield* projectStore.listShells()) {
+          if (currentProject.id !== thread.projectId) continue;
           const repository = yield* git.execute({
             operation: "StorageCleanup.worktreeRepository",
             cwd: currentProject.workspaceRoot,
@@ -2901,7 +2898,6 @@ const make = Effect.gen(function* () {
           )
             return false;
           const currentCommon = yield* fs.realPath(commonPath);
-          if (currentProject.id !== thread.projectId) continue;
           if (
             currentCommon !== actualCommon ||
             path.resolve(currentProject.workspaceRoot) !== path.resolve(project.workspaceRoot)

@@ -464,14 +464,12 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       const target = yield* canonicalProjectRoot(destination).pipe(Effect.mapError(safeFailure));
       for (const entry of yield* registry.list) {
         if (
-          entry.detached ||
           entry.checkoutId === source.checkoutId ||
           (entry.sourceCheckoutId === source.checkoutId && entry.checkoutId === operationId)
         )
           continue;
         const candidates = [
-          entry.path,
-          ...entry.aliases,
+          ...(entry.detached ? [] : [entry.path, ...entry.aliases]),
           ...((entry.operation?.kind === "recovery" || entry.operation?.kind === "restore") &&
           entry.operation.destinationPath !== undefined
             ? [entry.operation.destinationPath]
@@ -1797,12 +1795,17 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
             }),
             () =>
               Effect.gen(function* () {
-                const snapshot = yield* native(() =>
-                  store.capture({
-                    sourcePath: record.path,
-                    snapshotId: id,
-                    operationId: record.operation!.id,
-                    ownerBinding: record.checkoutId,
+                const snapshot = yield* withProjectRootLease(
+                  Effect.gen(function* () {
+                    yield* guard(record, record.path, automatic);
+                    return yield* native(() =>
+                      store.capture({
+                        sourcePath: record.path,
+                        snapshotId: id,
+                        operationId: record.operation!.id,
+                        ownerBinding: record.checkoutId,
+                      }),
+                    );
                   }),
                 );
                 record = yield* remember(record, snapshot);
@@ -2022,35 +2025,40 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       return yield* failure("protected", "This copy is not the current suspended workspace.");
     if (!(yield* isManaged(destinationPath)))
       return yield* failure("protected", "Choose a managed worktree destination.");
-    if (yield* fs.exists(destinationPath))
-      return yield* failure(
-        "protected",
-        "The restore destination is occupied. Choose another managed destination.",
-      );
-    yield* guardRecoveryDestination(record, destinationPath);
     const id = yield* random.uuidV4();
-    return yield* publish(
-      record,
-      {
-        ...record,
-        aliases: [...new Set([...record.aliases, destinationPath])],
-        operation: {
-          id,
-          kind: "restore",
-          snapshotIds: [record.summary.snapshotId],
-          manual,
-          acceptedAt: yield* now,
-          destinationPath,
-        },
-        blockedReason: null,
-      },
-      { ...record.summary, state: "restoring" },
-    ).pipe(
-      Effect.catchIf(
-        (error) =>
-          error._tag === "SuspensionRegistryError" && error.operation === "ownership-changed",
-        () => failure("protected", "Another saved workspace reserves this destination."),
-      ),
+    return yield* withProjectRootLease(
+      Effect.gen(function* () {
+        if (yield* fs.exists(destinationPath))
+          return yield* failure(
+            "protected",
+            "The restore destination is occupied. Choose another managed destination.",
+          );
+        yield* guardProjectRoots([destinationPath]);
+        yield* guardRecoveryDestination(record, destinationPath);
+        return yield* publish(
+          record,
+          {
+            ...record,
+            aliases: [...new Set([...record.aliases, destinationPath])],
+            operation: {
+              id,
+              kind: "restore",
+              snapshotIds: [record.summary.snapshotId!],
+              manual,
+              acceptedAt: yield* now,
+              destinationPath,
+            },
+            blockedReason: null,
+          },
+          { ...record.summary, state: "restoring" },
+        ).pipe(
+          Effect.catchIf(
+            (error) =>
+              error._tag === "SuspensionRegistryError" && error.operation === "ownership-changed",
+            () => failure("protected", "Another saved workspace reserves this destination."),
+          ),
+        );
+      }),
     );
   });
   const restore = Effect.fn("WorktreeSuspension.restore")(function* (
@@ -2125,12 +2133,6 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
               "protected",
               "Historical recovery needs a separate managed destination.",
             );
-          if (yield* fs.exists(destinationPath))
-            return yield* failure(
-              "protected",
-              "The recovery destination is occupied. Choose another managed destination.",
-            );
-          yield* guardRecoveryDestination(record, destinationPath);
           const pending: CheckoutAuthority = {
             ...record,
             operation: {
@@ -2146,11 +2148,22 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
             },
             blockedReason: null,
           };
-          yield* registry.put(pending, record).pipe(
-            Effect.catchIf(
-              (error) => error.operation === "ownership-changed",
-              () => failure("protected", "Another saved workspace reserves this destination."),
-            ),
+          yield* withProjectRootLease(
+            Effect.gen(function* () {
+              if (yield* fs.exists(destinationPath))
+                return yield* failure(
+                  "protected",
+                  "The recovery destination is occupied. Choose another managed destination.",
+                );
+              yield* guardProjectRoots([destinationPath]);
+              yield* guardRecoveryDestination(record, destinationPath);
+              yield* registry.put(pending, record).pipe(
+                Effect.catchIf(
+                  (error) => error.operation === "ownership-changed",
+                  () => failure("protected", "Another saved workspace reserves this destination."),
+                ),
+              );
+            }),
           );
           yield* registerWorkspaceLeaseRoot(destinationPath);
           return yield* queue(

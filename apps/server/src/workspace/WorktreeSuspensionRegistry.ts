@@ -267,16 +267,16 @@ const make = Effect.gen(function* () {
           }
           const samePath = (left: string, right: string) =>
             path.resolve(left) === path.resolve(right);
-          const nextPaths = [next.path, ...next.aliases];
+          const nextPaths = next.detached ? [] : [next.path, ...next.aliases];
           const nextDestination =
             next.operation?.kind === "recovery" || next.operation?.kind === "restore"
               ? next.operation.destinationPath
               : undefined;
           if (
-            !next.detached &&
+            (nextPaths.length > 0 || nextDestination !== undefined) &&
             current.checkouts.some((entry) => {
-              if (entry.detached || entry.checkoutId === next.checkoutId) return false;
-              const entryPaths = [entry.path, ...entry.aliases];
+              if (entry.checkoutId === next.checkoutId) return false;
+              const entryPaths = entry.detached ? [] : [entry.path, ...entry.aliases];
               const entryDestination =
                 entry.operation?.kind === "recovery" || entry.operation?.kind === "restore"
                   ? entry.operation.destinationPath
@@ -390,8 +390,13 @@ const make = Effect.gen(function* () {
         return inside(relative) || inside(inverse);
       };
       for (const entry of yield* list) {
-        if (entry.detached) continue;
-        if (!entry.aliases.some(overlaps) && !overlaps(entry.path)) continue;
+        const destination =
+          entry.operation?.kind === "recovery" || entry.operation?.kind === "restore"
+            ? entry.operation.destinationPath
+            : undefined;
+        const destinationMatches = destination !== undefined && overlaps(destination);
+        if (entry.detached && !destinationMatches) continue;
+        if (!destinationMatches && !entry.aliases.some(overlaps) && !overlaps(entry.path)) continue;
         // A settled failed save protects source, but cannot veto an independent
         // dependency policy whose recognition, inactivity and consumer guards pass.
         if (
