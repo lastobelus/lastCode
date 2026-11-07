@@ -46,6 +46,16 @@ it.effect("persists authority privately and rejects a stale generation write", (
     );
     const restored = yield* registry.list;
     assert.deepStrictEqual(restored, [record]);
+    const duplicate = {
+      ...record,
+      checkoutId: "fixture-duplicate",
+      summary: { ...record.summary, checkoutId: "fixture-duplicate" },
+    };
+    assert.strictEqual(
+      (yield* registry.put(duplicate, null).pipe(Effect.flip)).operation,
+      "ownership-changed",
+    );
+    assert.deepStrictEqual(yield* registry.list, [record]);
     yield* registry.dependenciesRemoved("/managed/feature");
     yield* registry.dependenciesRemoved("/unknown");
     assert.deepStrictEqual(yield* registry.list, [record]);

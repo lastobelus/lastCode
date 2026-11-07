@@ -384,9 +384,29 @@ export const make = Effect.gen(function* () {
         keepWorkspace: false,
       },
     };
-    yield* registry.put(record, null);
-    yield* registerWorkspaceLeaseRoot(record.path, record.aliases);
-    return record;
+    const registered = yield* registry.put(record, null).pipe(
+      Effect.as(record),
+      Effect.catchIf(
+        (error) => error.operation === "ownership-changed",
+        (error) =>
+          registry.list.pipe(
+            Effect.flatMap((entries) => {
+              const same = entries.find(
+                (entry) =>
+                  !entry.detached &&
+                  [entry.path, ...entry.aliases].some((alias) =>
+                    record.aliases.some(
+                      (candidate) => path.resolve(candidate) === path.resolve(alias),
+                    ),
+                  ),
+              );
+              return same === undefined ? Effect.fail(error) : Effect.succeed(same);
+            }),
+          ),
+      ),
+    );
+    yield* registerWorkspaceLeaseRoot(registered.path, registered.aliases);
+    return registered;
   });
   const requireRecord = Effect.fn("WorktreeSuspension.requireRecord")(function* (
     checkoutId: string,
@@ -433,10 +453,17 @@ export const make = Effect.gen(function* () {
         return yield* failure("protected", "A registered project uses this workspace.");
     }
   });
-  const guard = Effect.fn("WorktreeSuspension.guard")(function* (
+  const ownerHasUnfinishedWork = (owner: OrchestrationV2ThreadShell) =>
+    owner.activeRunId !== null ||
+    owner.pendingRuntimeRequest !== null ||
+    (owner.pendingBackgroundTasks?.length ?? 0) > 0 ||
+    hasOpenActionableDashboardItems(owner.dashboardItems) ||
+    owner.archivePending != null ||
+    (owner.actionResume != null &&
+      !["delivered", "disposed"].includes(owner.actionResume.delivery));
+  const guardBeforePreviews = Effect.fn("WorktreeSuspension.guardBeforePreviews")(function* (
     record: CheckoutAuthority,
     physicalPath = record.path,
-    automatic = false,
   ) {
     const owners = yield* checkOwners(record);
     yield* originalStillOwned(record, physicalPath);
@@ -444,15 +471,7 @@ export const make = Effect.gen(function* () {
     if (record.summary.keepWorkspace)
       return yield* failure("protected", "Keep workspace is enabled.");
     for (const owner of owners) {
-      if (
-        owner.activeRunId !== null ||
-        owner.pendingRuntimeRequest !== null ||
-        (owner.pendingBackgroundTasks?.length ?? 0) > 0 ||
-        hasOpenActionableDashboardItems(owner.dashboardItems) ||
-        owner.archivePending != null ||
-        (owner.actionResume != null &&
-          !["delivered", "disposed"].includes(owner.actionResume.delivery))
-      )
+      if (ownerHasUnfinishedWork(owner))
         return yield* failure(
           "protected",
           "A workspace owner has unfinished work or needs attention.",
@@ -487,9 +506,6 @@ export const make = Effect.gen(function* () {
       if (!migratedDuplicate)
         return yield* failure("protected", "Historical workspace ownership needs review.");
     }
-    const previewPaths = yield* previews.protectedWorkspacePaths();
-    if (previewPaths.some((cwd) => record.aliases.some((alias) => overlaps(alias, cwd))))
-      return yield* failure("protected", "A retained preview uses the workspace.");
     const runtimeOwners = yield* sessions.workspaceOwnership;
     if (
       runtimeOwners.some(
@@ -499,6 +515,43 @@ export const make = Effect.gen(function* () {
       )
     )
       return yield* failure("protected", "A provider still owns the workspace.");
+    const activeTerminals = (yield* terminals.refreshMetadata).filter(
+      (terminal) =>
+        ["starting", "running"].includes(terminal.status) &&
+        record.aliases.some((alias) => overlaps(alias, terminal.cwd)),
+    );
+    if (activeTerminals.length > 0) {
+      const leases = yield* previews.list();
+      if (
+        activeTerminals.some(
+          (terminal) =>
+            !leases.some(
+              (lease) =>
+                lease.threadId === terminal.threadId &&
+                lease.terminalId === terminal.terminalId &&
+                record.owners.some((owner) => owner.threadId === lease.threadId),
+            ),
+        )
+      )
+        return yield* failure("protected", "A terminal uses the workspace.");
+    }
+    if (
+      yield* Effect.try({
+        try: () => generatedBuildReviewProtection(physicalPath),
+        catch: safeFailure,
+      })
+    )
+      return yield* failure("protected", "Reviewed generated files retain this workspace.");
+  });
+  const guard = Effect.fn("WorktreeSuspension.guard")(function* (
+    record: CheckoutAuthority,
+    physicalPath = record.path,
+    automatic = false,
+  ) {
+    yield* guardBeforePreviews(record, physicalPath);
+    const previewPaths = yield* previews.protectedWorkspacePaths();
+    if (previewPaths.some((cwd) => record.aliases.some((alias) => overlaps(alias, cwd))))
+      return yield* failure("protected", "A retained preview uses the workspace.");
     const terminalMetadata = yield* terminals.refreshMetadata;
     if (
       terminalMetadata.some(
@@ -508,28 +561,10 @@ export const make = Effect.gen(function* () {
       )
     )
       return yield* failure("protected", "A terminal uses the workspace.");
-    if (
-      yield* Effect.try({
-        try: () => generatedBuildReviewProtection(physicalPath),
-        catch: safeFailure,
-      })
-    )
-      return yield* failure("protected", "Reviewed generated files retain this workspace.");
     const consumer = yield* WorktreeConsumers.worktreeConsumerReason(physicalPath);
     if (consumer !== null) return yield* failure("protected", consumer);
     const latestOwners = yield* checkOwners(record);
-    if (
-      latestOwners.some(
-        (owner) =>
-          owner.activeRunId !== null ||
-          owner.pendingRuntimeRequest !== null ||
-          (owner.pendingBackgroundTasks?.length ?? 0) > 0 ||
-          hasOpenActionableDashboardItems(owner.dashboardItems) ||
-          owner.archivePending != null ||
-          (owner.actionResume != null &&
-            !["delivered", "disposed"].includes(owner.actionResume.delivery)),
-      )
-    )
+    if (latestOwners.some(ownerHasUnfinishedWork))
       return yield* failure(
         "protected",
         "A workspace owner acquired unfinished work or attention during verification.",
@@ -2714,12 +2749,23 @@ export const make = Effect.gen(function* () {
           liveOperations.has(identified.checkoutId)
         )
           return;
-        const record = yield* refreshActiveOwners(identified);
-        if (yield* automaticallyEligible(record)) {
-          yield* acceptCapture(record, true);
-          const running = liveOperations.get(record.checkoutId);
-          if (running !== undefined) yield* Deferred.await(running.completed);
+        let record = yield* refreshActiveOwners(identified);
+        if (!(yield* automaticallyEligible(record))) return;
+        const owners = yield* checkOwners(record);
+        if (owners.some(ownerHasUnfinishedWork)) return;
+        yield* guardBeforePreviews(record);
+        for (const owner of owners) {
+          record = yield* requireRecord(record.checkoutId);
+          if (!(yield* automaticallyEligible(record))) return;
+          if ((yield* checkOwners(record)).some(ownerHasUnfinishedWork)) return;
+          yield* previews.removeThreadWorkspace(owner.id, record.path);
         }
+        record = yield* requireRecord(record.checkoutId);
+        if (!(yield* automaticallyEligible(record))) return;
+        if ((yield* checkOwners(record)).some(ownerHasUnfinishedWork)) return;
+        yield* acceptCapture(record, true);
+        const running = liveOperations.get(record.checkoutId);
+        if (running !== undefined) yield* Deferred.await(running.completed);
       }).pipe(Effect.ignoreCause);
     }
   }).pipe(
@@ -2818,7 +2864,7 @@ export const make = Effect.gen(function* () {
               return yield* new WorkspaceUnavailableError({ reason: "blocked" });
             const suffix = path.relative(alias, normalized);
             if (current.summary.state === "active") {
-              yield* checkOwners(current);
+              const owners = yield* checkOwners(current);
               if (positiveUse(input.purpose)) {
                 const used = { ...current, lastWorkspaceUseAt: yield* now };
                 if (used.captureFailure !== undefined)
@@ -2841,6 +2887,24 @@ export const make = Effect.gen(function* () {
                           result.stdout.trim().startsWith("refs/heads/")
                             ? shortBranch(result.stdout.trim())
                             : null,
+                        ),
+                        Effect.catch((error) =>
+                          Effect.gen(function* () {
+                            const configured = yield* settings.getSettings;
+                            const disabled =
+                              owners.length > 0 &&
+                              owners.every((owner) => {
+                                const policy = resolveWorktreeSuspension(
+                                  configured,
+                                  owner.projectId,
+                                );
+                                return (
+                                  policy.mode === "off" ||
+                                  !Object.values(policy.scopes).some(Boolean)
+                                );
+                              });
+                            return disabled ? null : yield* error;
+                          }),
                         ),
                       ),
                 restored: false,
