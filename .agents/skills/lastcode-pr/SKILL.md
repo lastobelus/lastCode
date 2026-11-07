@@ -147,10 +147,13 @@ current GitHub thread and review-query mechanics.
    needs judgement, wait as the global `babysit` skill's Wait section says: call
    `watch_pull_request` with the PR's explicit URL, then run
    `pnpm lastcode:pr-gates` once (add `--pr PR_NUMBER` for a stack or a PR
-   outside a clean matching checkout), and on `pending` end the turn. Do not
-   poll GitHub, sleep, or start a polling Action or watcher. On each wake,
-   rerun the check and fix actionable failures or findings even while another
-   gate is pending; otherwise end the turn and let the watch continue. Call
+   outside a clean matching checkout), and on `pending` end the turn. The check
+   needs a checkout with dependencies installed, because `pnpm` installs them
+   first; without one, take the `babysit` snapshot with `gh` instead, and never
+   install dependencies just for the gate. Do not poll GitHub, sleep, or start
+   a polling Action or watcher. On each wake, rerun the check and fix
+   actionable failures or findings even while another gate is pending;
+   otherwise end the turn and let the watch continue. Call
    `unwatch_pull_request` before handing the work back.
 
    Act on the check's `attention` reasons:
