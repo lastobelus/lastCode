@@ -3079,5 +3079,5 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
   });
 });
 
-export const make = makeWithStoreOptions();
+const make = makeWithStoreOptions();
 export const layer = Layer.effect(WorktreeSuspension, make);
