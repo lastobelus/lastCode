@@ -158,7 +158,7 @@ review again. Review waits end at a configurable quiet deadline, 45 minutes by
 default: once the newest exact-head review request is older than the deadline,
 the check reports `review-stalled` attention, even if Codex has reacted with
 eyes. The timeout never counts as approval, permits a merge, or substitutes for
-review. [Wait for Remote Gates](../../.agents/skills/babysit/SKILL.md#wait-for-remote-gates)
+review. [LastCode PR](../../.agents/skills/lastcode-pr/SKILL.md#babysit-and-merge)
 owns the handling. A CI run that never registers cannot wake the watch, so the
 check reports `ci-not-registered` attention once review is no longer pending.
 

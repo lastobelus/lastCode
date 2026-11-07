@@ -58,8 +58,13 @@ asks for an upstream contribution; never pause to ask whether to go upstream.
 4. Local Quick CI is optional; GitHub CI remains required. In the default
    Automatic mode, run the independent **Run Quick CI** Project Action. It uses
    free local capacity immediately or defers to GitHub without queuing. After
-   resume, verify the exact clean head and workstream base. A local pass records
-   a reusable receipt; a `validation: github-only` result permits publishing but
+   resume, verify the exact clean head and workstream base. Launch it only from
+   the clean exact checkout being validated: a shell's working directory and a
+   `--pr` gate check don't change the saved Action's checkout. Prefer the
+   repository-managed `lc-local-ci` over the older saved `run-quick-ci` if both
+   exist, and never run Quick CI synchronously as a fallback. A local pass needs
+   a receipt matching the head, base ref, base commit and Quick-gate version, and
+   records a reusable receipt; a `validation: github-only` result permits publishing but
    is not a local pass. In GitHub-only mode, publish without requiring the local
    Action. The ordinary pre-push hook follows the same policy; keep it enabled.
    Always local mode waits for capacity, and `--require-local` explicitly forces
@@ -139,15 +144,36 @@ current GitHub thread and review-query mechanics.
    an explicit clean result or every finding for the exact current head has a
    durable handled state, and no review thread remains unresolved.
 4. While exact-head GitHub CI or Codex review is passive and no current finding
-   needs judgement, follow the babysit skill's
-   [Wait for Remote Gates](../babysit/SKILL.md#wait-for-remote-gates): call
+   needs judgement, wait as the global `babysit` skill's Wait section says: call
    `watch_pull_request` with the PR's explicit URL, then run
    `pnpm lastcode:pr-gates` once (add `--pr PR_NUMBER` for a stack or a PR
-   outside a clean matching checkout), and on `pending` end the turn. Do not
-   poll GitHub, sleep, or start a polling Action or watcher. On each wake,
-   rerun the check and fix actionable failures or findings even while another
-   gate is pending; otherwise end the turn and let the watch continue. Call
+   outside a clean matching checkout), and on `pending` end the turn. The check
+   needs a checkout with dependencies installed, because `pnpm` installs them
+   first; without one, take the `babysit` snapshot with `gh` instead, and never
+   install dependencies just for the gate. Do not poll GitHub, sleep, or start
+   a polling Action or watcher. On each wake, rerun the check and fix
+   actionable failures or findings even while another gate is pending;
+   otherwise end the turn and let the watch continue. Call
    `unwatch_pull_request` before handing the work back.
+
+   Act on the check's `attention` reasons:
+   - `observation-failed` (a GitHub read failed, or the PR or evidence changed
+     during the check) or `mergeability-unknown`: rerun the check once, and
+     report the blocker if it persists.
+   - `review-stalled`: the newest exact-head review request is older than the
+     quiet deadline in Settings → LastCode (45 minutes by default), even if
+     Codex reacted with eyes. Report it as a blocker. It is not approval, and it
+     permits no merge, second review request, or substitute review.
+   - `ci-not-registered`: no CI run registered, so nothing can wake the watch.
+     Report it as a blocker. A base that moved without a push starts no run;
+     otherwise check the workflow trigger and Actions configuration.
+
+   The watch also wakes once when the PR has been quiet for that deadline. Run
+   the check and act on what it reports. If it is still `pending`, report the
+   expired wait and what is still pending as a blocker, then call
+   `unwatch_pull_request`; ending the turn instead can wait forever. Watch again
+   only when the user asks you to keep waiting or new actionable work needs it.
+
 5. Use `pnpm lastcode:merge`; do not bypass the guarded merge in the GitHub UI.
    The wrapper independently revalidates a successful exact-head/base GitHub CI
    run and aggregate `CI Gate`, strict exact-head review readiness with zero
@@ -157,7 +183,10 @@ current GitHub thread and review-query mechanics.
    never hold it. Use the updated guarded command rather than the GitHub UI or
    old worktree scripts, which do not participate in this coordination. Preserve
    an uncertain remote lock until its owner and operation outcome are verified.
-6. Verify the PR is merged and `origin/lastcode/main` contains the merge result.
+6. Verify the PR is merged, the merged tree matches the reviewed head, and
+   `origin/lastcode/main` contains the merge result. Ordinary PRs have no Full CI
+   action or local Full-CI stamp; checkpoint and release Full CI are a separate
+   workflow.
    For a whole-stack merge request, restack and validate the next authorized
    member using the stack reference; one merged PR does not finish the request.
 7. If the work is tracked by Markover, confirm the GitHub terminal state and
@@ -171,6 +200,11 @@ One immediate status snapshot can establish that a wait is needed. For this
 LastCode workflow, the native PR watch owns subsequent passive checks; the
 general repository CI polling rule does not require agent-side sleeps or
 repeated queries. Stop at the requested ready/merged state or a real blocker.
+
+Do not build or install an Intel package after merge unless the user asks for
+an Intel update separately. Then use the **Build Intel package (macOS)** Project
+Action for the merged change's exact installable tag, and leave installation or
+restart as a later explicit decision.
 
 ## Handoff
 
