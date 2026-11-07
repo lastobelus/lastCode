@@ -239,6 +239,9 @@ export const make = Effect.gen(function* () {
       settledWorktreeCleanup: true,
       worktreesDirectory: true,
       threadAutoSettlementScope: true,
+      worktreeBuildCleanup: hostPlatform === "darwin" || hostPlatform === "linux",
+      worktreeBuildReview: hostPlatform === "darwin" || hostPlatform === "linux",
+      worktreeLocalPreservation: true,
       threadRestartContinuation: true,
       projectSettingsOverrides: true,
       projectProviderInstanceOverrides: true,
@@ -274,6 +277,7 @@ export const make = Effect.gen(function* () {
       scheduledTaskThreadModes: true,
       npmReleaseLookup: true,
       voiceTranscription: isSpeechPlatformSupported(hostPlatform, hostArchitecture, hostLibc),
+      threadWorktreeCleanup: true,
       ...(serverSelfUpdate === null ? {} : { serverSelfUpdate }),
       ...(serverInstallation === null ? {} : { serverInstallation }),
       ...(serverSelfUpdate === "boot-service" || desktopAppUpdate
