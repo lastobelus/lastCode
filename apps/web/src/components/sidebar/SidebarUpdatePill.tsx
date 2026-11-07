@@ -485,22 +485,21 @@ function SidebarUpdateControl() {
   };
 
   // The confirmation dialog already showed this app's version, so it is not asked again.
-  const runAppOnly = async () => {
+  const runAppOnly = () => {
     const bridge = window.desktopBridge;
     if (!bridge || !state || localUpdateVersion === null || isActionPending) return;
+    const update =
+      action === "download"
+        ? downloadLocalUpdate(bridge, {
+            notifyDownloaded: true,
+            isLocalBuild: state.source === "lastcode-local",
+          })
+        : action === "install"
+          ? installLocalUpdate(bridge, undefined, localUpdateVersion)
+          : null;
+    if (!update) return;
     setIsActionPending(true);
-    try {
-      if (action === "download") {
-        await downloadLocalUpdate(bridge, {
-          notifyDownloaded: true,
-          isLocalBuild: state.source === "lastcode-local",
-        });
-      } else if (action === "install") {
-        await installLocalUpdate(bridge, undefined, localUpdateVersion);
-      }
-    } finally {
-      setIsActionPending(false);
-    }
+    void update.finally(() => setIsActionPending(false));
   };
 
   const runEverything = async () => {
@@ -581,7 +580,7 @@ function SidebarUpdateControl() {
         localUpdateVersion !== null && everything.alsoUpdates !== null
           ? () => {
               setIsConfirmingEverything(false);
-              void runAppOnly();
+              runAppOnly();
             }
           : undefined
       }
