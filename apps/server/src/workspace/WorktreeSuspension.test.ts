@@ -458,23 +458,6 @@ const harness = (
                   }),
                 );
               }),
-            removeThreadWorkspace: (threadId, workspacePath) =>
-              Effect.sync(() => {
-                previewReleases.push(threadId);
-                for (let index = previewLeases.length - 1; index >= 0; index--)
-                  if (
-                    previewLeases[index]!.threadId === threadId &&
-                    previewLeases[index]!.workspacePath === workspacePath
-                  ) {
-                    previewLeases.splice(index, 1);
-                    const terminal = terminalRecords.findIndex(
-                      (entry) =>
-                        entry.threadId === threadId && entry.terminalId === `preview-${threadId}`,
-                    );
-                    if (terminal >= 0) terminalRecords.splice(terminal, 1);
-                  }
-                onPreviewRelease?.(threadId);
-              }),
           }),
           Layer.mock(ServerSettings.ServerSettingsService)({
             getSettings: Effect.sync(() => settings),

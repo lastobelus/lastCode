@@ -16,7 +16,7 @@ import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import * as Duration from "effect/Duration";
 import { FetchHttpClient, HttpClient } from "effect/http";
-import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
+import { registerWorkspaceLeaseRoot, withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import * as WorkspaceAcquisitionTestkit from "../workspace/WorkspaceAcquisition.testkit.ts";
 
 import {
@@ -30,6 +30,9 @@ import {
 import * as ServerConfig from "../config.ts";
 import * as PortScanner from "./PortScanner.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ResourceCleanupService from "../orchestration-v2/ResourceCleanupService.ts";
+import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
+import * as PreviewManager from "./Manager.ts";
 import * as PreviewHosting from "./Hosting.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import type * as PtyAdapter from "@t3tools/shared/PtyAdapter";
@@ -75,6 +78,9 @@ interface TerminalHarness {
   readonly onWaitForThreadShutdown?: (
     threadId: string,
   ) => Effect.Effect<void, TerminalManager.TerminalShutdownError>;
+  readonly onCloseThreadExcept?: (
+    threadId: string,
+  ) => Effect.Effect<void, TerminalManager.TerminalError>;
 }
 
 function terminalLayer(harness: TerminalHarness) {
@@ -202,6 +208,13 @@ function terminalLayer(harness: TerminalHarness) {
   } satisfies Partial<TerminalManager.TerminalManager["Service"]>;
   return Layer.mock(TerminalManager.TerminalManager)({
     ...service,
+    closeThreadExcept: (threadId) =>
+      Effect.gen(function* () {
+        yield* harness.onCloseThreadExcept?.(threadId) ?? Effect.void;
+        for (let index = harness.summaries.length - 1; index >= 0; index--) {
+          if (harness.summaries[index]?.threadId === threadId) harness.summaries.splice(index, 1);
+        }
+      }),
     shutdownThread: (threadId) =>
       Effect.gen(function* () {
         const sessions = (yield* service.metadata).filter(
@@ -459,6 +472,228 @@ const warmProcessFixture = Effect.fn("warmProcessFixture")(function* (
 });
 
 describe("PreviewHosting", () => {
+  it.effect("rechecks archive state on delayed cleanup, retry, and a later archive", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-archive-recheck-" });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      let archived = false;
+      let failClose = false;
+      let unavailable = false;
+      let closeCalls = 0;
+      let pausePreviewClose = false;
+      const previewClosing = yield* Deferred.make<void>();
+      const releasePreviewClose = yield* Deferred.make<void>();
+      const owners = Layer.mock(ProjectionStore.ProjectionStoreV2)({
+        getThread: (threadId) =>
+          unavailable
+            ? Effect.fail(
+                new ProjectionStore.ProjectionStoreReadError({
+                  threadId,
+                  cause: new Error("unavailable"),
+                }),
+              )
+            : Effect.sync(
+                () => ({ archivedAt: archived ? "archived" : null, deletedAt: null }) as never,
+              ),
+      });
+      const harness = testTerminalHarness({
+        onClose: () =>
+          pausePreviewClose
+            ? Deferred.succeed(previewClosing, undefined).pipe(
+                Effect.andThen(Deferred.await(releasePreviewClose)),
+              )
+            : Effect.void,
+        onCloseThreadExcept: () => {
+          closeCalls++;
+          return failClose
+            ? Effect.fail(
+                new TerminalManager.TerminalWriteError({
+                  threadId: "thread-1",
+                  terminalId: "shell",
+                  terminalPid: 100,
+                  cause: new Error("close failed"),
+                }),
+              )
+            : Effect.void;
+        },
+      });
+      const hosting = hostingLayer(
+        config,
+        harness,
+        true,
+        [],
+        true,
+        undefined,
+        FetchHttpClient.layer,
+        owners,
+      );
+      const layer = ResourceCleanupService.layer.pipe(
+        Layer.provideMerge(hosting),
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.mock(ScheduledTaskService.ScheduledTaskService)({
+              deleteForThread: () => Effect.void,
+            }),
+            Layer.mock(PreviewManager.PreviewManager)({ close: () => Effect.void }),
+          ),
+        ),
+      );
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const previews = yield* PreviewHosting.PreviewHosting;
+          const cleanup = yield* ResourceCleanupService.ResourceCleanupService;
+          const launch = () =>
+            previews.launch({
+              threadId: "thread-1",
+              command: "node app",
+              cwd: root,
+              url: PREVIEW_URL,
+            });
+          yield* launch();
+          yield* cleanup.cleanupArchivedTerminals("thread-1");
+          assert.equal((yield* previews.list("thread-1")).length, 1);
+          assert.equal(closeCalls, 0);
+          unavailable = true;
+          assert.equal(
+            (yield* Effect.result(cleanup.cleanupArchivedTerminals("thread-1")))._tag,
+            "Failure",
+          );
+          assert.equal((yield* previews.list("thread-1")).length, 1);
+          assert.equal(closeCalls, 0);
+          unavailable = false;
+
+          archived = true;
+          failClose = true;
+          assert.equal(
+            (yield* Effect.result(cleanup.cleanupArchivedTerminals("thread-1")))._tag,
+            "Failure",
+          );
+          archived = false;
+          failClose = false;
+          yield* launch();
+          yield* cleanup.cleanupArchivedTerminals("thread-1");
+          assert.equal((yield* previews.list("thread-1")).length, 1);
+          assert.equal(closeCalls, 1);
+
+          archived = true;
+          pausePreviewClose = true;
+          const pending = yield* cleanup
+            .cleanupArchivedTerminals("thread-1")
+            .pipe(Effect.forkScoped);
+          yield* Deferred.await(previewClosing);
+          archived = false;
+          yield* Deferred.succeed(releasePreviewClose, undefined);
+          yield* Fiber.join(pending);
+          assert.equal(closeCalls, 1);
+          pausePreviewClose = false;
+          yield* launch();
+
+          archived = true;
+          yield* cleanup.cleanupArchivedTerminals("thread-1");
+          assert.deepEqual(yield* previews.list("thread-1"), []);
+          assert.equal(closeCalls, 2);
+        }).pipe(Effect.provide(layer)),
+      );
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+  );
+
+  it.effect("serializes a new launch with archived terminal cleanup", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-archive-race-" });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      let archived = true;
+      let unarchivedLookups = 0;
+      const closing = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const canonicalRoot = yield* fs.realPath(root);
+      yield* registerWorkspaceLeaseRoot(root);
+      const owners = Layer.mock(ProjectionStore.ProjectionStoreV2)({
+        getThread: () =>
+          Effect.sync(() => {
+            if (!archived) unarchivedLookups++;
+            return { archivedAt: archived ? "archived" : null, deletedAt: null } as never;
+          }),
+      });
+      const paths = Layer.succeed(
+        FileSystem.FileSystem,
+        new Proxy(fs, {
+          get(target, property) {
+            if (property === "realPath")
+              return (value: string) =>
+                value === root ? Effect.succeed(canonicalRoot) : target.realPath(value);
+            return target[property as keyof typeof target];
+          },
+        }),
+      );
+      const harness = testTerminalHarness({
+        onCloseThreadExcept: () =>
+          Deferred.succeed(closing, undefined).pipe(Effect.andThen(Deferred.await(release))),
+      });
+      const hosting = hostingLayer(
+        config,
+        harness,
+        true,
+        [],
+        true,
+        paths,
+        FetchHttpClient.layer,
+        owners,
+      );
+      const layer = ResourceCleanupService.layer.pipe(
+        Layer.provideMerge(hosting),
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.mock(ScheduledTaskService.ScheduledTaskService)({
+              deleteForThread: () => Effect.void,
+            }),
+            Layer.mock(PreviewManager.PreviewManager)({ close: () => Effect.void }),
+          ),
+        ),
+      );
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const previews = yield* PreviewHosting.PreviewHosting;
+          const cleanup = yield* ResourceCleanupService.ResourceCleanupService;
+          const pendingCleanup = yield* cleanup
+            .cleanupArchivedTerminals("thread-1")
+            .pipe(Effect.forkScoped);
+          yield* Deferred.await(closing);
+          archived = false;
+          const scope = yield* Effect.scope;
+          const pendingLaunch = yield* Effect.forkIn(
+            previews.launch({
+              threadId: "thread-1",
+              command: "node app",
+              cwd: root,
+              worktreePath: root,
+              url: PREVIEW_URL,
+            }),
+            scope,
+            { startImmediately: true },
+          );
+          assert.equal(unarchivedLookups, 0);
+          yield* Deferred.succeed(release, undefined);
+          yield* Fiber.join(pendingCleanup);
+          const launched = yield* Fiber.join(pendingLaunch);
+          assert.deepEqual(
+            (yield* previews.list("thread-1")).map((lease) => lease.id),
+            [launched.id],
+          );
+          assert.isTrue(
+            harness.summaries.some((terminal) => terminal.terminalId === launched.terminalId),
+          );
+        }).pipe(Effect.provide(layer)),
+      );
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+  );
   it.effect(
     "reconciles archived leases while preserving active owners and refuses stale recovery",
     () =>
@@ -482,26 +717,38 @@ describe("PreviewHosting", () => {
           terminalId: "active-terminal",
           url: "http://localhost:5174/",
         });
+        const missing = leaseFixture({
+          id: "missing",
+          threadId: "missing",
+          terminalId: "missing-terminal",
+          status: "sleeping",
+          url: "http://localhost:5175/",
+        });
         yield* fs.makeDirectory(config.stateDir, { recursive: true });
         yield* fs.writeFileString(
           `${config.stateDir}/preview-hosting.json`,
-          encodePersistedHostingState({ version: 1, leases: [archived, active] }),
+          encodePersistedHostingState({ version: 1, leases: [archived, active, missing] }),
         );
         let activeArchived = false;
         const owners = Layer.mock(ProjectionStore.ProjectionStoreV2)({
           getThread: (id) =>
-            Effect.succeed({
-              archivedAt: id === "archived" || activeArchived ? "archived" : null,
-              deletedAt: null,
-            } as never),
+            id === "missing"
+              ? Effect.fail(
+                  new ProjectionStore.ProjectionStoreThreadNotFoundError({ threadId: id }),
+                )
+              : Effect.succeed({
+                  archivedAt: id === "archived" || activeArchived ? "archived" : null,
+                  deletedAt: null,
+                } as never),
         });
         const harness = testTerminalHarness();
         yield* Effect.scoped(
           Effect.gen(function* () {
             const hosting = yield* PreviewHosting.PreviewHosting;
             assert.deepEqual(yield* hosting.list(), [active]);
-            assert.deepEqual(harness.closes, [
+            assert.sameDeepMembers(harness.closes, [
               { threadId: "archived", terminalId: "legacy-terminal" },
+              { threadId: "missing", terminalId: "missing-terminal" },
             ]);
             activeArchived = true;
             assert.isNull(
@@ -671,7 +918,9 @@ describe("PreviewHosting", () => {
         yield* Effect.scoped(
           Effect.gen(function* () {
             const hosting = yield* PreviewHosting.PreviewHosting;
-            yield* hosting.removeThreadWorkspace("thread-1", "/workspace/one");
+            yield* hosting.withThreadPreviewLocks(["thread-1"], (remove) =>
+              withWorkspaceLease("/workspace/one", remove("thread-1", "/workspace/one")),
+            );
             assert.deepEqual(yield* hosting.list(), [otherWorkspace, otherOwner]);
             assert.sameMembers(
               harness.closes.map((entry) => entry.terminalId),

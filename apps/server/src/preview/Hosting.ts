@@ -196,10 +196,10 @@ export class PreviewHosting extends Context.Service<
     readonly removeThread: (
       threadId: string,
     ) => Effect.Effect<void, PreviewHostingError | TerminalManager.TerminalError>;
-    readonly removeThreadWorkspace: (
+    readonly cleanupArchivedThread: <E, R>(
       threadId: string,
-      workspacePath: string,
-    ) => Effect.Effect<void, PreviewHostingError | TerminalManager.TerminalError>;
+      closeTerminals: Effect.Effect<void, E, R>,
+    ) => Effect.Effect<void, E | PreviewHostingError | TerminalManager.TerminalError, R>;
     readonly withThreadPreviewLocks: <A, E, R>(
       threadIds: ReadonlyArray<string>,
       use: (
@@ -1141,6 +1141,7 @@ const make = Effect.gen(function* () {
   const ownerIsArchived = (threadId: string) =>
     projections.getThread(ThreadId.make(threadId)).pipe(
       Effect.map((thread) => thread.archivedAt !== null || thread.deletedAt !== null),
+      Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.succeed(true) }),
       Effect.mapError(
         (cause) =>
           new PreviewHostingError({
@@ -1482,8 +1483,22 @@ const make = Effect.gen(function* () {
   const removeThread: PreviewHosting["Service"]["removeThread"] = (threadId) =>
     threadLocks.withLock(threadId, removeThreadLocked(threadId));
 
+  const cleanupArchivedThread: PreviewHosting["Service"]["cleanupArchivedThread"] = (
+    threadId,
+    closeTerminals,
+  ) =>
+    threadLocks.withLock(
+      threadId,
+      Effect.gen(function* () {
+        if (!(yield* ownerIsArchived(threadId))) return;
+        yield* removeThreadLocked(threadId);
+        if (!(yield* ownerIsArchived(threadId))) return;
+        yield* closeTerminals;
+      }),
+    );
+
   const removeThreadWorkspaceLocked = Effect.fn("PreviewHosting.removeThreadWorkspaceLocked")(
-    function* (threadId: string, workspacePath: string, leaseLocksHeld = false) {
+    function* (threadId: string, workspacePath: string) {
       if (startupError !== null) return yield* startupError;
       const root = yield* canonicalWorkspacePath(workspacePath).pipe(
         Effect.mapError(
@@ -1518,15 +1533,10 @@ const make = Effect.gen(function* () {
       yield* removeThreadLocked(
         threadId,
         new Set(owned.filter((_, index) => matching[index]).map((lease) => lease.id)),
-        leaseLocksHeld,
+        true,
       );
     },
   );
-
-  const removeThreadWorkspace: PreviewHosting["Service"]["removeThreadWorkspace"] = (
-    threadId,
-    workspacePath,
-  ) => threadLocks.withLock(threadId, removeThreadWorkspaceLocked(threadId, workspacePath));
 
   const withThreadPreviewLocks: PreviewHosting["Service"]["withThreadPreviewLocks"] = (
     threadIds,
@@ -1562,7 +1572,7 @@ const make = Effect.gen(function* () {
               return Effect.fail(
                 new PreviewHostingError({ operation: "validate", statePath, threadId }),
               );
-            return removeThreadWorkspaceLocked(threadId, workspacePath, true);
+            return removeThreadWorkspaceLocked(threadId, workspacePath);
           }),
         );
       }),
@@ -1778,7 +1788,7 @@ const make = Effect.gen(function* () {
     subscribe,
     ownsTerminal,
     removeThread,
-    removeThreadWorkspace,
+    cleanupArchivedThread,
     withThreadPreviewLocks,
     stopThread,
     protectedWorkspacePaths,
