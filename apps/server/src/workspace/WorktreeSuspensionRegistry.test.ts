@@ -127,6 +127,16 @@ it.effect("reserves recovery destinations against other checkout claims", () =>
     };
     const pending = { ...record, operation };
     yield* registry.put(pending, record);
+    for (const target of [operation.destinationPath, `${operation.destinationPath}/node_modules`]) {
+      assert.strictEqual(
+        yield* registry.automaticProtection(target),
+        "The workspace is protected by a saved-workspace operation.",
+      );
+      assert.strictEqual(
+        yield* registry.automaticProtection(target, "dependencies"),
+        "The workspace is protected by a saved-workspace operation.",
+      );
+    }
     const recovered = {
       ...record,
       checkoutId: operation.id,
@@ -181,6 +191,37 @@ it.effect("rejects an ordinary restore into another checkout's reserved path", (
       "ownership-changed",
     );
     assert.deepStrictEqual(yield* registry.list, [record, other]);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("reserves the destination of a detached historical recovery", () =>
+  Effect.gen(function* () {
+    const registry = yield* Registry.WorktreeSuspensionRegistry;
+    const operation = {
+      id: "fixture-detached-recovery",
+      kind: "recovery" as const,
+      snapshotIds: [],
+      manual: true,
+      acceptedAt: "2026-01-01T00:00:00.000Z",
+      destinationPath: "/managed/recovered",
+    };
+    const detached = { ...record, detached: true, operation };
+    yield* registry.put(detached, null);
+    assert.strictEqual(
+      yield* registry.automaticProtection(operation.destinationPath),
+      "The workspace is protected by a saved-workspace operation.",
+    );
+    const other = {
+      ...record,
+      checkoutId: "other-checkout",
+      path: operation.destinationPath,
+      aliases: [operation.destinationPath],
+      summary: { ...record.summary, checkoutId: "other-checkout" },
+    };
+    assert.strictEqual(
+      (yield* registry.put(other, null).pipe(Effect.flip)).operation,
+      "ownership-changed",
+    );
   }).pipe(Effect.provide(layer)),
 );
 

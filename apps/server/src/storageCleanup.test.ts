@@ -3055,6 +3055,62 @@ describe("provider protection during storage cleanup", () => {
 
 describe("dependency cleanup reports", () => {
   it.live.each(["dependencies", "worktree"] as const)(
+    "cleans an owned %s when an unrelated project directory is unavailable",
+    (resource) =>
+      runCleanupTest(
+        isolatedDependencies(
+          Effect.gen(function* () {
+            const fixture = yield* cleanupFixture();
+            if (resource === "dependencies") yield* fixture.enableDependencies;
+            fixture.setProjectRoots(
+              projectShells([fixture.repo, `${fixture.config.baseDir}/missing-project`]),
+            );
+            fixture.setThreads([
+              shell({
+                branch: "feature",
+                worktreePath: fixture.worktree,
+                archivedAt: fixture.at(-DAY_MS),
+              }),
+            ]);
+            const report = yield* fixture.service.runNow;
+            const target =
+              resource === "dependencies" ? `${fixture.worktree}/node_modules` : fixture.worktree;
+            expect(report.entries.find((entry) => entry.path === target)).toMatchObject({
+              outcome: "removed",
+            });
+            expect(yield* fixture.fs.exists(target)).toBe(false);
+          }),
+        ),
+      ),
+  );
+
+  it.live.each(["dependencies", "worktree"] as const)(
+    "keeps an owned %s when a project root cannot be resolved",
+    (resource) =>
+      runCleanupTest(
+        isolatedDependencies(
+          Effect.gen(function* () {
+            const fixture = yield* cleanupFixture();
+            if (resource === "dependencies") yield* fixture.enableDependencies;
+            const loop = `${fixture.config.baseDir}/unresolved-project`;
+            yield* fixture.fs.symlink(loop, loop);
+            fixture.setProjectRoots(projectShells([fixture.repo, loop]));
+            fixture.setThreads([
+              shell({
+                branch: "feature",
+                worktreePath: fixture.worktree,
+                archivedAt: fixture.at(-DAY_MS),
+              }),
+            ]);
+            yield* fixture.service.runNow;
+            const target =
+              resource === "dependencies" ? `${fixture.worktree}/node_modules` : fixture.worktree;
+            expect(yield* fixture.fs.exists(target)).toBe(true);
+          }),
+        ),
+      ),
+  );
+  it.live.each(["dependencies", "worktree"] as const)(
     "serializes a project-root claim with %s removal",
     (resource) =>
       runCleanupTest(
