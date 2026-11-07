@@ -529,8 +529,7 @@ export const layerWithOptions = (
                           ((thread.lineage.relationshipToParent === "subagent" &&
                             thread.lineage.parentThreadId !== null &&
                             thread.forkedFrom?.type === "node") ||
-                            (thread.remoteDelegations?.some((entry) => entry.stage === "active") ??
-                              false)),
+                            (thread.remoteDelegations?.length ?? 0) > 0),
                       };
                     }),
                     Effect.orElseSucceed(() => ({ subagent: false, appOwnedSubagent: false })),
@@ -557,9 +556,10 @@ export const layerWithOptions = (
                     resolved.capabilities.has("preview") === browserToolsAvailable &&
                     resolved.capabilities.has("device") === deviceToolsAvailable &&
                     // A credential issued while the lineage read failed is replaced once it works.
-                    (resolved.thread.subagent === true) === subagent &&
-                    (resolved.thread.appOwnedSubagent === true) === appOwnedSubagent
+                    (resolved.thread.subagent === true) === subagent
                   ) {
+                    // A live MCP client keeps its initial tool set and credential. Discovery-only
+                    // classification changes cannot revoke it; watch calls recheck current ownership.
                     return { mcpCredentialId: existing.providerSessionId, issued: false };
                   }
                   dropMcpCredentialReservation(threadId, existing.providerSessionId);
