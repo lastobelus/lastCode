@@ -29,7 +29,7 @@ import * as ProjectStore from "./ProjectStore.ts";
 import * as ProviderSessions from "./ProviderSessionManager.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
-import { withProjectRootLease } from "../workspace/projectRootLease.ts";
+import { canonicalProjectRoot, withProjectRootLease } from "../workspace/projectRootLease.ts";
 import * as SuspensionRegistry from "../workspace/WorktreeSuspensionRegistry.ts";
 
 type PendingCleanup = Exclude<ThreadWorktreeCleanup, { readonly status: "failed" }>;
@@ -192,7 +192,10 @@ const make = Effect.gen(function* () {
             Effect.gen(function* () {
               const projectRoots = yield* Effect.forEach(
                 yield* projects.listShells(),
-                (project) => canonical(project.workspaceRoot),
+                (project) =>
+                  canonicalProjectRoot(project.workspaceRoot).pipe(
+                    Effect.map(normalizeProjectPathForComparison),
+                  ),
                 { concurrency: 8 },
               );
               if (projectRoots.some((root) => containsPath(normalized, root)))
