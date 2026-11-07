@@ -2286,14 +2286,8 @@ const make = Effect.gen(function* () {
         const repository = projectRepositories.find(
           (repository) => repository.project.id === thread.projectId,
         );
-        if (
-          repository?.commonDirectory === null ||
-          repository === undefined ||
-          projectRepositories.filter(
-            (entry) => entry.commonDirectory === repository.commonDirectory,
-          ).length !== 1
-        )
-          return keep("Repository and project mapping could not be verified uniquely");
+        if (repository?.commonDirectory == null)
+          return keep("Repository and project mapping could not be verified");
         if (!archived) {
           const dependencyActivity = dependencyActivityByPath.get(worktreePath) ?? null;
           if (dependencyActivity === null) return keep(unrecognizedReason());
@@ -2917,14 +2911,14 @@ const make = Effect.gen(function* () {
             commonPath.includes("\n")
           )
             return false;
-          if ((yield* fs.realPath(commonPath)) === actualCommon) {
-            if (
-              currentProject.id !== thread.projectId ||
-              path.resolve(currentProject.workspaceRoot) !== path.resolve(project.workspaceRoot)
-            )
-              return false;
-            mappings++;
-          }
+          const currentCommon = yield* fs.realPath(commonPath);
+          if (currentProject.id !== thread.projectId) continue;
+          if (
+            currentCommon !== actualCommon ||
+            path.resolve(currentProject.workspaceRoot) !== path.resolve(project.workspaceRoot)
+          )
+            return false;
+          mappings++;
         }
         return mappings === 1;
       });
