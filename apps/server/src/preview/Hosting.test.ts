@@ -684,6 +684,67 @@ describe("PreviewHosting", () => {
       ),
   );
 
+  it.effect("holds the workspace lease through preview cancellation", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(1_000);
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-workspace-lock-" });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const saved = leaseFixture({ worktreePath: "/workspace/one", cwd: "/workspace/one" });
+      yield* fs.makeDirectory(config.stateDir, { recursive: true });
+      yield* fs.writeFileString(
+        `${config.stateDir}/preview-hosting.json`,
+        encodePersistedHostingState({ version: 1, leases: [saved] }),
+      );
+      const harness = testTerminalHarness();
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const useStarted = yield* Deferred.make<void>();
+      let used = false;
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const cancellation = yield* hosting
+            .withThreadPreviewLocks([saved.threadId], (remove) =>
+              withWorkspaceLease(
+                "/workspace/one",
+                Effect.gen(function* () {
+                  yield* Deferred.succeed(entered, undefined);
+                  yield* Deferred.await(release);
+                  yield* remove(saved.threadId, "/workspace/one");
+                }),
+              ),
+            )
+            .pipe(Effect.forkScoped);
+          yield* Deferred.await(entered);
+          const use = yield* Deferred.succeed(useStarted, undefined).pipe(
+            Effect.andThen(
+              withWorkspaceLease(
+                "/workspace/one",
+                Effect.sync(() => {
+                  used = true;
+                }),
+              ),
+            ),
+            Effect.forkScoped,
+          );
+          yield* Deferred.await(useStarted);
+          assert.isFalse(used);
+          yield* Deferred.succeed(release, undefined);
+          yield* Fiber.join(cancellation);
+          yield* Fiber.join(use);
+          assert.isTrue(used);
+          assert.deepEqual(yield* hosting.list(), []);
+        }).pipe(Effect.provide(hostingLayer(config, harness))),
+      );
+    }).pipe(
+      Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, TestClock.layer())),
+    ),
+  );
+
   it.effect(
     "unloads the least recently used inactive app without deleting its recovery recipe",
     () =>

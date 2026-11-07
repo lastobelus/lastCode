@@ -152,6 +152,38 @@ it.effect("reserves recovery destinations against other checkout claims", () =>
   }).pipe(Effect.provide(layer)),
 );
 
+it.effect("rejects an ordinary restore into another checkout's reserved path", () =>
+  Effect.gen(function* () {
+    const registry = yield* Registry.WorktreeSuspensionRegistry;
+    const other = {
+      ...record,
+      checkoutId: "other-checkout",
+      path: "/managed/other",
+      aliases: ["/managed/other"],
+      summary: { ...record.summary, checkoutId: "other-checkout", state: "suspended" as const },
+    };
+    yield* registry.put(record, null);
+    yield* registry.put(other, null);
+    const restoring = {
+      ...record,
+      aliases: [...record.aliases, other.path],
+      operation: {
+        id: "restore-operation",
+        kind: "restore" as const,
+        snapshotIds: [],
+        manual: true,
+        acceptedAt: "2026-01-01T00:00:00.000Z",
+        destinationPath: other.path,
+      },
+    };
+    assert.strictEqual(
+      (yield* registry.put(restoring, record).pipe(Effect.flip)).operation,
+      "ownership-changed",
+    );
+    assert.deepStrictEqual(yield* registry.list, [record, other]);
+  }).pipe(Effect.provide(layer)),
+);
+
 it.effect("only permits dependency cleanup for a settled exact failure", () =>
   Effect.gen(function* () {
     const registry = yield* Registry.WorktreeSuspensionRegistry;
