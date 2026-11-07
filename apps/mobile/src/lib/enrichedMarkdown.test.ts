@@ -7,7 +7,7 @@ describe("Enriched authored file labels", () => {
     const source = "Read [**the guide** and `examples`](/workspace/guide.md:12) now.";
     const result = prepareEnrichedMarkdown(source);
     expect(result.markdown).toBe(
-      "Read [**the guide** and `examples` (guide.md:12)](/workspace/guide.md:12) now.",
+      "Read [**the guide** and `examples` (guide.md · L12)](/workspace/guide.md:12) now.",
     );
     expect([...result.authoredFileLinks]).toEqual(["/workspace/guide.md:12"]);
   });

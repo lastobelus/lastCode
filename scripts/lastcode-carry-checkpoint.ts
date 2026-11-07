@@ -94,6 +94,45 @@ export function readManifestReplayConfiguration(
   return parseManifestReplayConfiguration(JSON.parse(NodeFS.readFileSync(manifestPath, "utf8")));
 }
 
+export function checkpointTrailer(message: string, name: string): string | undefined {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${escaped}:\\s*(\\S(?:.*\\S)?)\\s*$`, "m").exec(message)?.[1];
+}
+
+export function validateHistoricalBootstrapSourceTag(
+  bootstrap: CarryBootstrap,
+  tag:
+    | { readonly commit: string; readonly annotated: boolean; readonly message: string }
+    | undefined,
+): string | undefined {
+  const { representedSource, sourceTag } = bootstrap;
+  if (!representedSource || !sourceTag) return undefined;
+  if (!tag) {
+    throw new Error(`Carry bootstrap source tag ${sourceTag} is not an available installable.`);
+  }
+  if (!tag.annotated) {
+    throw new Error(`Carry bootstrap source tag ${sourceTag} must be annotated.`);
+  }
+  if (tag.commit !== bootstrap.source) {
+    throw new Error(
+      `Carry bootstrap source tag ${sourceTag} resolves to ${tag.commit}, expected ${bootstrap.source}.`,
+    );
+  }
+  const recordedSource = checkpointTrailer(tag.message, "Source-Commit");
+  if (recordedSource !== representedSource) {
+    throw new Error(
+      `Carry bootstrap source tag ${sourceTag} records Source-Commit ${recordedSource ?? "missing"}, expected ${representedSource}.`,
+    );
+  }
+  const recordedUpstream = checkpointTrailer(tag.message, "Upstream-Commit");
+  if (recordedUpstream !== bootstrap.base) {
+    throw new Error(
+      `Carry bootstrap source tag ${sourceTag} records Upstream-Commit ${recordedUpstream ?? "missing"}, expected ${bootstrap.base}.`,
+    );
+  }
+  return representedSource;
+}
+
 export function resolveCheckpointReplay(input: {
   readonly configured: ManifestReplayConfiguration | undefined;
   readonly requestedMode?: CheckpointReplayMode;
