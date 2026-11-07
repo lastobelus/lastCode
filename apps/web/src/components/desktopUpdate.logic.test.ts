@@ -263,6 +263,7 @@ describe("getDesktopUpdatePopoverHeader", () => {
       "Did not apply last time · click to retry",
     ],
     ["no offer", { status: "idle", availableVersion: null }, null],
+    ["check in progress", { status: "checking" }, null],
   ])("keeps the app target visible for a %s", (_name, change, readiness) => {
     const header = getDesktopUpdatePopoverHeader({ ...local, ...change }, "LastCode");
     expect(header?.readiness ?? null).toBe(readiness);

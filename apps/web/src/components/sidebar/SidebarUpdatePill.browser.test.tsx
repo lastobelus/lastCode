@@ -88,7 +88,7 @@ function publish(update: DesktopUpdateState | null) {
   });
 }
 
-const releaseNotes = () => document.querySelector('[aria-label="Update release notes"]');
+const releaseNotes = () => document.querySelector('[aria-label="Update details"]');
 
 describe("SidebarUpdatePill release notes", () => {
   it("closes when the update stops applying", async () => {

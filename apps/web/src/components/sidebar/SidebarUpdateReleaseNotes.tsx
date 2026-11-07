@@ -91,15 +91,23 @@ function SidebarUpdateHeader({
   readonly header: DesktopUpdatePopoverHeader;
   readonly releasedAt?: string | undefined;
 }) {
+  // A shortened title still needs the full version; a full one only needs the release age.
+  const fullVersionInTitle = header.title.endsWith(header.targetVersion);
+  const age = releasedAt ? formatReleaseAge(releasedAt) : null;
+  const versionDetail = fullVersionInTitle
+    ? age
+    : age
+      ? `${header.targetVersion} · ${age}`
+      : header.targetVersion;
   return (
     <div>
-      <div className="whitespace-nowrap text-sm leading-5 font-medium">{header.title}</div>
+      <div className="break-words text-sm leading-5 font-medium">{header.title}</div>
       <div className="mt-0.5 text-xs leading-4 text-muted-foreground">{header.readiness}</div>
-      <div className="mt-0.5 text-2xs leading-4 text-muted-foreground">
-        {releasedAt
-          ? `${header.targetVersion} · ${formatReleaseAge(releasedAt)}`
-          : header.targetVersion}
-      </div>
+      {versionDetail ? (
+        <div className="mt-0.5 break-words text-2xs leading-4 text-muted-foreground">
+          {versionDetail}
+        </div>
+      ) : null}
       {alsoUpdates ? (
         <div className="mt-1.5 text-xs leading-4 text-muted-foreground">Also: {alsoUpdates}</div>
       ) : null}

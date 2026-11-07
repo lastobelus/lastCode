@@ -188,7 +188,7 @@ export function SidebarLocalBuildFailurePopover({
         {formatLocalBuildFailureError(failure.error)}
       </p>
       <div className="flex items-center justify-between gap-3 border-t border-destructive/20 pt-2">
-        <span className="min-w-0 truncate text-2xs text-muted-foreground">
+        <span className="min-w-0 break-all text-2xs text-muted-foreground">
           {failure.targetVersion}
         </span>
         <Button
@@ -685,7 +685,7 @@ function SidebarUpdateControl() {
         {showUpdatePopover && state ? (
           <PopoverPopup
             align="center"
-            aria-label={localBuildFailure ? "Local build failure details" : "Update release notes"}
+            aria-label={localBuildFailure ? "Local build failure details" : "Update details"}
             elevated
             initialFocus={false}
             onKeyDownCapture={(event) => {
