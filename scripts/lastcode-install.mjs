@@ -6,6 +6,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodePerfHooks from "node:perf_hooks";
 import * as NodeTimersPromises from "node:timers/promises";
 import * as NodeURL from "node:url";
 
@@ -455,59 +456,61 @@ function processIsAlive(pid) {
   }
 }
 
-// Start time plus command identifies one process; a reused PID gets a new start time.
-export function processIdentity(pid) {
+// Start time plus executable path identifies one process; a reused PID gets a new start time.
+function processIdentity(pid) {
   const result = NodeChildProcess.spawnSync(
     "/bin/ps",
-    ["-ww", "-o", "lstart=", "-o", "command=", "-p", String(pid)],
+    ["-o", "lstart=", "-o", "comm=", "-p", String(pid)],
     { encoding: "utf8", timeout: 10_000 },
   );
   return result.status === 0 ? result.stdout.trim() : "";
 }
 
-// The desktop has already stopped its backends and committed this install, so a
-// shutdown that stalls past the grace period only delays the swap. A second
-// SIGTERM makes a stalled desktop quit exit (DesktopLifecycle.exitIfShutdownStalled).
+// Before COMMIT the desktop stopped its backends and began quitting, so a stalled
+// quit is already waiting on shutdown and exits on SIGTERM
+// (DesktopLifecycle.exitIfShutdownStalled). SIGKILL covers a quit that ignores it.
+// The monotonic clock keeps each grace period intact across sleep.
 export async function waitForParentExit(pid, identity, options = {}) {
   const isAlive = options.isAlive ?? processIsAlive;
   const identityOf = options.processIdentity ?? processIdentity;
   const sendSignal = options.signal ?? ((target, signal) => process.kill(target, signal));
-  const now = options.now ?? Date.now;
+  const now = options.now ?? (() => NodePerfHooks.performance.now());
   const wait = options.wait ?? NodeTimersPromises.setTimeout;
-  const graceMs = options.graceMs ?? PARENT_QUIT_GRACE_MS;
-  const termMs = options.termMs ?? PARENT_TERM_GRACE_MS;
-  const killMs = options.killMs ?? PARENT_KILL_WAIT_MS;
   const executable = ` ${NodePath.resolve(options.targetPath ?? DEFAULT_APP_PATH)}/Contents/MacOS/`;
-  const signalable = identity.includes(executable);
-  const startedAt = now();
-  const escalations = [
-    { at: startedAt + graceMs, signal: "SIGTERM" },
-    { at: startedAt + graceMs + termMs, signal: "SIGKILL" },
+  const steps = [
+    { afterMs: PARENT_QUIT_GRACE_MS, signal: "SIGTERM" },
+    { afterMs: PARENT_TERM_GRACE_MS, signal: "SIGKILL" },
+    { afterMs: PARENT_KILL_WAIT_MS, signal: null },
   ];
-  const deadline = startedAt + graceMs + termMs + killMs;
+  const startedAt = now();
+  let stepStartedAt = startedAt;
   while (isAlive(pid)) {
-    const currentTime = now();
-    const due = escalations[0];
-    if (due && currentTime >= due.at) {
-      escalations.shift();
-      if (signalable && identityOf(pid) === identity) {
-        console.log(
-          `LastCode process ${pid} is still quitting after ${Math.round((currentTime - startedAt) / 1_000)} seconds; sending ${due.signal}.`,
-        );
-        try {
-          sendSignal(pid, due.signal);
-        } catch (error) {
-          if (error?.code !== "ESRCH") throw error;
-        }
-      }
+    const step = steps[0];
+    const elapsed = now() - stepStartedAt;
+    if (elapsed < step.afterMs) {
+      await wait(Math.min(100, step.afterMs - elapsed));
       continue;
     }
-    if (currentTime >= deadline) {
+    const current = identity ? identityOf(pid) : "";
+    // A different process now holds the PID, so the parent has exited.
+    if (current !== "" && current !== identity) return;
+    if (step.signal === null) {
       throw new Error(
-        `LastCode process ${pid} did not quit within ${Math.round((deadline - startedAt) / 1_000)} seconds.`,
+        `LastCode process ${pid} did not quit within ${Math.round((now() - startedAt) / 1_000)} seconds.`,
       );
     }
-    await wait(Math.min(100, Math.max(0, (escalations[0]?.at ?? deadline) - currentTime)));
+    if (current === identity && identity.includes(executable)) {
+      console.log(
+        `LastCode process ${pid} is still quitting after ${Math.round((now() - startedAt) / 1_000)} seconds; sending ${step.signal}.`,
+      );
+      try {
+        sendSignal(pid, step.signal);
+      } catch (error) {
+        if (error?.code !== "ESRCH") throw error;
+      }
+    }
+    steps.shift();
+    stepStartedAt = now();
   }
 }
 
@@ -794,8 +797,9 @@ async function installDmg(dmgPath, targetPath = DEFAULT_APP_PATH) {
 }
 
 async function handoffInstall(options) {
-  // Captured while the parent is certainly alive: it holds the readiness pipe.
-  const parentIdentity = processIdentity(options.parentPid);
+  // Captured while the parent is certainly alive: it spawned this helper and holds its pipes.
+  const parentIdentity =
+    process.ppid === options.parentPid ? processIdentity(options.parentPid) : "";
   const prepared = await prepareDmgInstall(options.dmgPath, options);
   try {
     NodeFS.writeSync(

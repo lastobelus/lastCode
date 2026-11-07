@@ -743,6 +743,26 @@ describe("LastCode userland install command", () => {
     ).rejects.toThrow("did not quit within 30 seconds");
   });
 
+  const APP_IDENTITY =
+    "Sat Nov  7 13:50:01 2026 /Applications/LastCode.app/Contents/MacOS/LastCode";
+  const fakeParent = ({ exitsAfter = Number.POSITIVE_INFINITY, identity = APP_IDENTITY } = {}) => {
+    let elapsed = 0;
+    const sent = [];
+    return {
+      sent,
+      options: {
+        isAlive: () => elapsed < exitsAfter,
+        now: () => elapsed,
+        processIdentity: () => identity,
+        signal: (pid, signal) => sent.push([pid, signal, elapsed]),
+        wait: (ms) => {
+          elapsed += ms;
+          return Promise.resolve();
+        },
+      },
+    };
+  };
+
   it.each([
     { name: "quits within the grace period", exitsAfter: 10_000, signals: [] },
     { name: "exits after SIGTERM", exitsAfter: 31_000, signals: [["SIGTERM", 30_000]] },
@@ -755,43 +775,31 @@ describe("LastCode userland install command", () => {
       ],
     },
   ])("waits for a committed parent that $name", async ({ exitsAfter, signals }) => {
-    let elapsed = 0;
-    const sent = [];
-    const identity = "Sat Nov  7 13:50:01 2026 /Applications/LastCode.app/Contents/MacOS/LastCode";
-    await waitForParentExit(62_323, identity, {
-      isAlive: () => elapsed < exitsAfter,
-      now: () => elapsed,
-      processIdentity: () => identity,
-      signal: (pid, signal) => sent.push([pid, signal, elapsed]),
-      wait: (ms) => {
-        elapsed += ms;
-        return Promise.resolve();
-      },
-    });
-    expect(sent).toEqual(signals.map(([signal, at]) => [62_323, signal, at]));
+    const parent = fakeParent({ exitsAfter });
+    await waitForParentExit(62_323, APP_IDENTITY, parent.options);
+    expect(parent.sent).toEqual(signals.map(([signal, at]) => [62_323, signal, at]));
   });
 
-  it("never signals a reused parent PID", async () => {
-    let elapsed = 0;
-    const sent = [];
-    await expect(
-      waitForParentExit(
-        62_323,
-        "Sat Nov  7 13:50:01 2026 /Applications/LastCode.app/Contents/MacOS/LastCode",
-        {
-          isAlive: () => true,
-          now: () => elapsed,
-          processIdentity: () =>
-            "Sat Nov  7 13:58:20 2026 /Applications/LastCode.app/Contents/MacOS/LastCode",
-          signal: (pid, signal) => sent.push([pid, signal]),
-          wait: (ms) => {
-            elapsed += ms;
-            return Promise.resolve();
-          },
-        },
-      ),
-    ).rejects.toThrow("LastCode process 62323 did not quit within 50 seconds.");
-    expect(sent).toEqual([]);
+  it("treats a reused parent PID as exited without signalling it", async () => {
+    const parent = fakeParent({
+      identity: "Sat Nov  7 13:58:20 2026 /Applications/LastCode.app/Contents/MacOS/LastCode",
+    });
+    await waitForParentExit(62_323, APP_IDENTITY, parent.options);
+    expect(parent.sent).toEqual([]);
+  });
+
+  it.each([
+    { name: "an unknown identity", identity: "" },
+    {
+      name: "an app outside the target",
+      identity: "Sat Nov  7 13:50:01 2026 /tmp/LastCode.app/Contents/MacOS/LastCode",
+    },
+  ])("never signals a parent with $name", async ({ identity }) => {
+    const parent = fakeParent({ identity });
+    await expect(waitForParentExit(62_323, identity, parent.options)).rejects.toThrow(
+      "LastCode process 62323 did not quit within 50 seconds.",
+    );
+    expect(parent.sent).toEqual([]);
   });
 
   it("scrubs Electron's Node mode and retries until the app remains running", async () => {
