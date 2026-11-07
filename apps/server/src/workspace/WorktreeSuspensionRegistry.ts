@@ -21,6 +21,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as ServerConfig from "../config.ts";
+import { canonicalProjectRoot } from "./projectRootLease.ts";
 
 export const CheckoutAuthority = Schema.Struct({
   checkoutId: TrimmedNonEmptyString,
@@ -150,6 +151,9 @@ export class WorktreeSuspensionRegistry extends Context.Service<
     readonly automaticProtection: (
       workspacePath: string,
       resource?: "worktree" | "dependencies",
+    ) => Effect.Effect<string | null, SuspensionRegistryError>;
+    readonly recoveryDestinationProtection: (
+      workspacePath: string,
     ) => Effect.Effect<string | null, SuspensionRegistryError>;
     /** Called after verified dependency removal while the checkout lease is held. */
     readonly dependenciesRemoved: (
@@ -377,24 +381,47 @@ const make = Effect.gen(function* () {
     entry.pendingProjection === undefined;
   const exactMatch = (entry: CheckoutAuthority, candidate: string) =>
     [entry.path, ...entry.aliases].some((alias) => path.resolve(alias) === candidate);
+  const canonical = (value: string) =>
+    canonicalProjectRoot(value).pipe(
+      Effect.mapError((cause) => new SuspensionRegistryError({ operation: "read", cause })),
+    );
+  const pathsOverlap = (first: string, second: string) => {
+    const inside = (value: string) =>
+      value === "" ||
+      (!path.isAbsolute(value) && value !== ".." && !value.startsWith(`..${path.sep}`));
+    return inside(path.relative(first, second)) || inside(path.relative(second, first));
+  };
+  const recoveryDestination = (entry: CheckoutAuthority) =>
+    entry.operation?.kind === "recovery" || entry.operation?.kind === "restore"
+      ? entry.operation.destinationPath
+      : undefined;
+  const recoveryDestinationProtection = Effect.fn(
+    "WorktreeSuspensionRegistry.recoveryDestinationProtection",
+  )(function* (workspacePath: string) {
+    const destinations = (yield* list)
+      .map(recoveryDestination)
+      .filter((value) => value !== undefined);
+    if (destinations.length === 0) return null;
+    const candidate = yield* canonical(workspacePath);
+    for (const destination of destinations) {
+      if (pathsOverlap(candidate, yield* canonical(destination)))
+        return "The workspace is protected by a saved-workspace operation.";
+    }
+    return null;
+  });
 
   const automaticProtection = Effect.fn("WorktreeSuspensionRegistry.automaticProtection")(
     function* (workspacePath: string, resource: "worktree" | "dependencies" = "worktree") {
       const candidate = path.resolve(workspacePath);
-      const overlaps = (other: string) => {
-        const relative = path.relative(candidate, other);
-        const inverse = path.relative(other, candidate);
-        const inside = (value: string) =>
-          value === "" ||
-          (!path.isAbsolute(value) && value !== ".." && !value.startsWith(`..${path.sep}`));
-        return inside(relative) || inside(inverse);
-      };
+      const overlaps = (other: string) => pathsOverlap(candidate, other);
+      let canonicalCandidate: string | undefined;
       for (const entry of yield* list) {
-        const destination =
-          entry.operation?.kind === "recovery" || entry.operation?.kind === "restore"
-            ? entry.operation.destinationPath
-            : undefined;
-        const destinationMatches = destination !== undefined && overlaps(destination);
+        const destination = recoveryDestination(entry);
+        let destinationMatches = destination !== undefined && overlaps(destination);
+        if (destination !== undefined && !destinationMatches) {
+          canonicalCandidate ??= yield* canonical(candidate);
+          destinationMatches = pathsOverlap(canonicalCandidate, yield* canonical(destination));
+        }
         if (entry.detached && !destinationMatches) continue;
         if (!destinationMatches && !entry.aliases.some(overlaps) && !overlaps(entry.path)) continue;
         // A settled failed save protects source, but cannot veto an independent
@@ -441,6 +468,7 @@ const make = Effect.gen(function* () {
     recordUnverifiedUse,
     unverifiedUse,
     automaticProtection,
+    recoveryDestinationProtection,
     dependenciesRemoved,
   });
 });
