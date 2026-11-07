@@ -25,6 +25,7 @@ import {
 } from "@t3tools/contracts";
 import {
   createWorktreeSuspensionStore,
+  type WorktreeSuspensionStoreOptions,
   WorktreeSuspensionError,
   type WorktreeSuspensionSnapshot,
 } from "@t3tools/shared/worktreeSuspension";
@@ -141,7 +142,9 @@ const equivalentSummary = Schema.toEquivalence(
   ),
 );
 
-export const make = Effect.gen(function* () {
+export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreOptions")(function* (
+  options: Omit<WorktreeSuspensionStoreOptions, "storeRoot"> = {},
+) {
   const registry = yield* WorktreeSuspensionRegistry;
   const lifecycle = yield* WorkspaceLifecycle.WorkspaceLifecycle;
   const receipts = yield* CommandReceipts.CommandReceiptStoreV2;
@@ -161,7 +164,10 @@ export const make = Effect.gen(function* () {
   const scope = yield* Scope.Scope;
   const saves = yield* Semaphore.make(1);
   const isManaged = yield* makeIsManagedWorktreePath;
-  const store = createWorktreeSuspensionStore({ storeRoot: path.join(registry.root, "snapshots") });
+  const store = createWorktreeSuspensionStore({
+    ...options,
+    storeRoot: path.join(registry.root, "snapshots"),
+  });
   const previewsByToken = new Map<
     string,
     { authority: CheckoutAuthority; snapshotIds?: readonly string[]; expiresAt: number }
@@ -466,7 +472,8 @@ export const make = Effect.gen(function* () {
         const candidates = [
           entry.path,
           ...entry.aliases,
-          ...(entry.operation?.kind === "recovery" && entry.operation.destinationPath !== undefined
+          ...((entry.operation?.kind === "recovery" || entry.operation?.kind === "restore") &&
+          entry.operation.destinationPath !== undefined
             ? [entry.operation.destinationPath]
             : []),
         ];
@@ -656,7 +663,10 @@ export const make = Effect.gen(function* () {
       generation: transition.next.generation,
       ...(transition.workspace === undefined
         ? {}
-        : { worktreePath: transition.workspace.worktreePath, branch: transition.workspace.branch }),
+        : {
+            worktreePath: transition.workspace.worktreePath,
+            branch: transition.workspace.branch,
+          }),
     }));
     const matches = (
       expected: readonly WorktreeSuspensionOwner[],
@@ -1362,18 +1372,18 @@ export const make = Effect.gen(function* () {
     if (!(yield* isManaged(operation.destinationPath)))
       return yield* failure("protected", "Choose a managed worktree destination.");
     yield* checkOwners(record);
-    let journal = yield* native(() => store.readJournal(id));
-    let staged = false;
-    if (journal.phase === "suspended" || journal.phase === "removing") {
-      yield* withProjectRootLease(guardProjectRoots([operation.destinationPath]));
-      yield* native(() =>
-        store.stageRestore(id, { destinationPath: operation.destinationPath! }),
-      ).pipe(Effect.onError(() => cancelUnstartedRestore(record).pipe(Effect.ignoreCause)));
-      journal = yield* native(() => store.readJournal(id));
-      staged = true;
-    }
     const restored = yield* withProjectRootLease(
       Effect.gen(function* () {
+        let journal = yield* native(() => store.readJournal(id));
+        let staged = false;
+        if (journal.phase === "suspended" || journal.phase === "removing") {
+          yield* guardProjectRoots([operation.destinationPath!]);
+          yield* native(() =>
+            store.stageRestore(id, { destinationPath: operation.destinationPath! }),
+          ).pipe(Effect.onError(() => cancelUnstartedRestore(record).pipe(Effect.ignoreCause)));
+          journal = yield* native(() => store.readJournal(id));
+          staged = true;
+        }
         if (journal.phase !== "restoring") return yield* native(() => store.verifyRestored(id));
         if (journal.restorePath === undefined)
           return yield* failure("protected", "The staged restore path is unavailable.");
@@ -1404,7 +1414,7 @@ export const make = Effect.gen(function* () {
         },
         { worktreePath: restored.path, branch: shortBranch(restored.branch) },
       );
-    journal = yield* native(() => store.readJournal(id));
+    const journal = yield* native(() => store.readJournal(id));
     if (journal.phase === "restored") yield* native(() => store.finalizeRestore(id));
     const finished = clearOperation(record);
     yield* registry.put(finished, record);
@@ -1443,26 +1453,26 @@ export const make = Effect.gen(function* () {
     if (saved.ownerBinding !== initial.checkoutId)
       return yield* failure("changed", "The historical copy belongs to a different checkout.");
     yield* guardRecoveryDestination(initial, operation.destinationPath, operation.id);
-    let journal = yield* native(() => store.readJournal(id));
-    let staged = false;
-    if (
-      journal.phase === "suspended" ||
-      (journal.phase === "active" &&
-        (journal.destinationPath !== operation.destinationPath ||
-          journal.branch !== `refs/heads/${operation.branch}`))
-    ) {
-      yield* withProjectRootLease(guardProjectRoots([operation.destinationPath]));
-      yield* native(() =>
-        store.stageRestore(id, {
-          destinationPath: operation.destinationPath!,
-          branchName: operation.branch!,
-        }),
-      ).pipe(Effect.onError(() => cancelUnstartedRestore(initial).pipe(Effect.ignoreCause)));
-      journal = yield* native(() => store.readJournal(id));
-      staged = true;
-    }
     const result = yield* withProjectRootLease(
       Effect.gen(function* () {
+        let journal = yield* native(() => store.readJournal(id));
+        let staged = false;
+        if (
+          journal.phase === "suspended" ||
+          (journal.phase === "active" &&
+            (journal.destinationPath !== operation.destinationPath ||
+              journal.branch !== `refs/heads/${operation.branch}`))
+        ) {
+          yield* guardProjectRoots([operation.destinationPath!]);
+          yield* native(() =>
+            store.stageRestore(id, {
+              destinationPath: operation.destinationPath!,
+              branchName: operation.branch!,
+            }),
+          ).pipe(Effect.onError(() => cancelUnstartedRestore(initial).pipe(Effect.ignoreCause)));
+          journal = yield* native(() => store.readJournal(id));
+          staged = true;
+        }
         if (journal.phase !== "restoring") return yield* native(() => store.verifyRestored(id));
         if (journal.restorePath === undefined)
           return yield* failure("protected", "The staged restore path is unavailable.");
@@ -2017,6 +2027,7 @@ export const make = Effect.gen(function* () {
         "protected",
         "The restore destination is occupied. Choose another managed destination.",
       );
+    yield* guardRecoveryDestination(record, destinationPath);
     const id = yield* random.uuidV4();
     return yield* publish(
       record,
@@ -2034,6 +2045,12 @@ export const make = Effect.gen(function* () {
         blockedReason: null,
       },
       { ...record.summary, state: "restoring" },
+    ).pipe(
+      Effect.catchIf(
+        (error) =>
+          error._tag === "SuspensionRegistryError" && error.operation === "ownership-changed",
+        () => failure("protected", "Another saved workspace reserves this destination."),
+      ),
     );
   });
   const restore = Effect.fn("WorktreeSuspension.restore")(function* (
@@ -2566,7 +2583,9 @@ export const make = Effect.gen(function* () {
             "invalid-preview",
             "Refresh the saved-workspace confirmation before continuing.",
           );
-        const inventory = yield* lifecycleInventory(input, { allowOrphans: preview.allowOrphans });
+        const inventory = yield* lifecycleInventory(input, {
+          allowOrphans: preview.allowOrphans,
+        });
         if (
           inventory.records.length !== preview.records.length ||
           inventory.records.some(
@@ -2653,7 +2672,10 @@ export const make = Effect.gen(function* () {
                 );
               }
             }
-            const consent = { ...fresh, operation: { ...fresh.operation, consentCommitted: true } };
+            const consent = {
+              ...fresh,
+              operation: { ...fresh.operation, consentCommitted: true },
+            };
             yield* registry.put(consent, fresh);
             yield* finishDiscard(consent);
           }),
@@ -2810,16 +2832,49 @@ export const make = Effect.gen(function* () {
           }
         }
         if (previewOwners.size > 0) {
-          yield* guardBeforePreviews(record);
-          if ((yield* WorktreeConsumers.worktreeConsumerPreflightReason(record.path)) !== null)
-            return;
-          for (const owner of owners) {
-            if (!previewOwners.has(owner.id)) continue;
-            record = yield* requireRecord(record.checkoutId);
-            if (!(yield* automaticallyEligible(record))) return;
-            if ((yield* checkOwners(record)).some(ownerHasUnfinishedWork)) return;
-            yield* previews.removeThreadWorkspace(owner.id, record.path);
-          }
+          yield* previews.withThreadPreviewLocks(
+            owners.map((owner) => owner.id),
+            (remove) =>
+              withWorkspaceLease(
+                record.path,
+                Effect.gen(function* () {
+                  record = yield* requireRecord(record.checkoutId);
+                  if (!(yield* automaticallyEligible(record))) return;
+                  const currentOwners = yield* checkOwners(record);
+                  if (
+                    currentOwners.length !== owners.length ||
+                    currentOwners.some(
+                      (owner) => !owners.some((original) => original.id === owner.id),
+                    )
+                  )
+                    return;
+                  if (currentOwners.some(ownerHasUnfinishedWork)) return;
+                  yield* guardBeforePreviews(record);
+                  if (
+                    (yield* WorktreeConsumers.worktreeConsumerPreflightReason(record.path)) !== null
+                  )
+                    return;
+                  const currentLeases = yield* previews.protectedWorkspaceLeases();
+                  for (const lease of currentLeases) {
+                    for (const previewPath of [lease.cwd, lease.worktreePath]) {
+                      if (previewPath === null) continue;
+                      const resolved = yield* canonical(previewPath);
+                      if (!record.aliases.some((alias) => overlaps(alias, resolved))) continue;
+                      if (!currentOwners.some((owner) => owner.id === lease.threadId)) return;
+                      previewOwners.add(lease.threadId);
+                      break;
+                    }
+                  }
+                  for (const owner of currentOwners) {
+                    if (!previewOwners.has(owner.id)) continue;
+                    record = yield* requireRecord(record.checkoutId);
+                    if (!(yield* automaticallyEligible(record))) return;
+                    if ((yield* checkOwners(record)).some(ownerHasUnfinishedWork)) return;
+                    yield* remove(owner.id, record.path);
+                  }
+                }),
+              ),
+          );
         }
         record = yield* requireRecord(record.checkoutId);
         if (!(yield* automaticallyEligible(record))) return;
@@ -3005,4 +3060,5 @@ export const make = Effect.gen(function* () {
   });
 });
 
+export const make = makeWithStoreOptions();
 export const layer = Layer.effect(WorktreeSuspension, make);

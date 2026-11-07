@@ -2,6 +2,7 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 // @effect-diagnostics nodeBuiltinImport:off -- Owned real-Git fixtures exercise the service and its durable native store together.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
+import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
@@ -18,7 +19,10 @@ import {
   type WorktreeSuspensionTransitionInput,
   type ServerSettings as SettingsValue,
 } from "@t3tools/contracts";
-import { createWorktreeSuspensionStore } from "@t3tools/shared/worktreeSuspension";
+import {
+  createWorktreeSuspensionStore,
+  type WorktreeSuspensionStoreOptions,
+} from "@t3tools/shared/worktreeSuspension";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -52,6 +56,7 @@ import * as Registry from "./WorktreeSuspensionRegistry.ts";
 import * as Consumers from "./WorktreeConsumers.ts";
 import * as Mounts from "./DependencyMounts.ts";
 import { withWorkspaceLease, resolveWorkspaceLeaseRoot } from "./workspaceLease.ts";
+import { withProjectRootLease } from "./projectRootLease.ts";
 
 const execute = NodeUtil.promisify(NodeChildProcess.execFile);
 const git = async (cwd: string, ...args: readonly string[]) =>
@@ -148,6 +153,9 @@ const harness = (
     occupyRecoveryOnBarrier?: boolean;
     deleteRecoveryAfterPublication?: boolean;
     previews?: Array<{ threadId: string; workspacePath: string }>;
+    onPreviewScan?: (leases: Array<{ threadId: string; workspacePath: string }>) => void;
+    pausePreviewLocks?: { entered: Deferred.Deferred<void>; release: Deferred.Deferred<void> };
+    onStoreBoundary?: WorktreeSuspensionStoreOptions["onBoundary"];
     terminals?: Effect.Success<TerminalManager.TerminalManager["Service"]["refreshMetadata"]>;
   } = {},
 ) =>
@@ -330,7 +338,9 @@ const harness = (
         NodeFSP.writeFile(NodePath.join(original.root, "authority.json"), "{"),
       );
     }
-    const service = yield* Suspension.make.pipe(
+    const service = yield* Suspension.makeWithStoreOptions(
+      options.onStoreBoundary === undefined ? {} : { onBoundary: options.onStoreBoundary },
+    ).pipe(
       Effect.provide(
         Layer.mergeAll(
           Layer.succeed(Registry.WorktreeSuspensionRegistry, registry),
@@ -416,7 +426,38 @@ const harness = (
             protectedWorkspacePaths: () =>
               Effect.sync(() => previewLeases.map((lease) => lease.workspacePath)),
             list: () => Effect.sync(hostingLeases),
-            protectedWorkspaceLeases: () => Effect.sync(hostingLeases),
+            protectedWorkspaceLeases: () =>
+              Effect.sync(() => {
+                const observed = hostingLeases();
+                options.onPreviewScan?.(previewLeases);
+                return observed;
+              }),
+            withThreadPreviewLocks: (_threadIds, use) =>
+              Effect.gen(function* () {
+                if (options.pausePreviewLocks !== undefined) {
+                  yield* Deferred.succeed(options.pausePreviewLocks.entered, undefined);
+                  yield* Deferred.await(options.pausePreviewLocks.release);
+                }
+                return yield* use((threadId, workspacePath) =>
+                  Effect.sync(() => {
+                    previewReleases.push(threadId);
+                    for (let index = previewLeases.length - 1; index >= 0; index--)
+                      if (
+                        previewLeases[index]!.threadId === threadId &&
+                        previewLeases[index]!.workspacePath === workspacePath
+                      ) {
+                        previewLeases.splice(index, 1);
+                        const terminal = terminalRecords.findIndex(
+                          (entry) =>
+                            entry.threadId === threadId &&
+                            entry.terminalId === `preview-${threadId}`,
+                        );
+                        if (terminal >= 0) terminalRecords.splice(terminal, 1);
+                      }
+                    onPreviewRelease?.(threadId);
+                  }),
+                );
+              }),
             removeThreadWorkspace: (threadId, workspacePath) =>
               Effect.sync(() => {
                 previewReleases.push(threadId);
@@ -1562,6 +1603,47 @@ it.live("rejects historical recovery into another checkout's reserved path", () 
   ),
 );
 
+it.live("rejects an ordinary restore into another saved checkout's path", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f);
+      const saved = yield* h.suspend;
+      const source = (yield* h.registry.list)[0]!;
+      const destination = NodePath.join(NodePath.dirname(f.workspace), "reserved-workspace");
+      const other = {
+        ...source,
+        checkoutId: "fixture:reserved",
+        path: destination,
+        aliases: [destination],
+        owners: [],
+        history: [],
+        snapshots: [],
+        summary: { ...source.summary, checkoutId: "fixture:reserved" },
+      };
+      yield* h.registry.put(other, null);
+      const result = yield* h.service
+        .restore({
+          checkoutId: saved.checkoutId,
+          snapshotId: saved.summary.snapshotId!,
+          destinationPath: destination,
+        })
+        .pipe(Effect.flip);
+      expect(result.reason).toBe("protected");
+      expect(
+        (yield* h.registry.list).find((entry) => entry.checkoutId === saved.checkoutId),
+      ).toEqual(source);
+      expect(
+        yield* Effect.promise(() =>
+          NodeFSP.stat(destination).then(
+            () => true,
+            () => false,
+          ),
+        ),
+      ).toBe(false);
+    }),
+  ),
+);
+
 it.live("recovers a retained orphan only through a separate mapped checkout", () =>
   realGit((f) =>
     Effect.gen(function* () {
@@ -2440,6 +2522,54 @@ it.live("does not release an unrelated owner's preview of an eligible workspace"
   ),
 );
 
+it.live(
+  "keeps an owner preview when another thread reserves the workspace after the first scan",
+  () =>
+    realGit((f) =>
+      Effect.gen(function* () {
+        let added = false;
+        const h = yield* harness(f, {
+          cleanupThreads: true,
+          settings: automaticSettings,
+          previews: [{ threadId: firstId, workspacePath: f.workspace }],
+          onPreviewScan: (leases) => {
+            if (added) return;
+            added = true;
+            leases.push({ threadId: "fixture:other", workspacePath: f.workspace });
+          },
+        });
+        untouchedOwners(h.threads);
+        yield* h.service.sweep;
+        expect(h.previewLeases).toHaveLength(2);
+        expect(h.previewReleases).toEqual([]);
+      }),
+    ),
+);
+
+it.live("keeps a preview when workspace use occurs before cancellation is locked", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const h = yield* harness(f, {
+        cleanupThreads: true,
+        settings: automaticSettings,
+        previews: [{ threadId: firstId, workspacePath: f.workspace }],
+        pausePreviewLocks: { entered, release },
+      });
+      untouchedOwners(h.threads);
+      const sweep = yield* Effect.forkChild(h.service.sweep);
+      yield* Deferred.await(entered);
+      yield* h.acquisition.acquire({ path: f.workspace, purpose: "file-write" });
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(sweep);
+      expect(h.previewLeases).toHaveLength(1);
+      expect(h.previewReleases).toEqual([]);
+      expect((yield* h.registry.list)[0]!.summary.state).toBe("active");
+    }),
+  ),
+);
+
 it.live("keeps previews when process inventory is unavailable", () =>
   realGit((f) =>
     Effect.gen(function* () {
@@ -2916,6 +3046,78 @@ it.live(
         expect(h.threads.size).toBe(2);
         expect((yield* h.registry.list)[0]!.operation).toBeUndefined();
         expect((yield* Effect.promise(() => h.store.readJournal(snapshotId))).phase).toBe("active");
+      }),
+    ),
+);
+
+it.live.each(["current", "historical"] as const)(
+  "prevents project registration while a %s restore is being materialized",
+  (kind) =>
+    realGit((f) =>
+      Effect.gen(function* () {
+        const staging = Promise.withResolvers<string>();
+        const release = Promise.withResolvers<void>();
+        let h!: Effect.Success<ReturnType<typeof harness>>;
+        let paused = false;
+        let armed = false;
+        h = yield* harness(f, {
+          onStoreBoundary: async (phase, id) => {
+            if (phase !== "restoring" || paused || !armed) return;
+            const journal = await h.store.readJournal(id);
+            if (journal.restoreIdentity === undefined || journal.restorePath === undefined) return;
+            paused = true;
+            staging.resolve(journal.restorePath);
+            await release.promise;
+          },
+        });
+        const saved = yield* h.suspend;
+        const destination =
+          kind === "current"
+            ? f.workspace
+            : NodePath.join(NodePath.dirname(f.workspace), "historical");
+        if (kind === "historical")
+          yield* h.acquisition.acquire({
+            path: f.workspace,
+            purpose: "file-write",
+            threadId: firstId,
+          });
+        yield* Queue.clear(h.updates);
+        armed = true;
+        yield* h.service.restore({
+          checkoutId: saved.checkoutId,
+          snapshotId: saved.summary.snapshotId!,
+          destinationPath: destination,
+          ...(kind === "historical" ? { projectId } : {}),
+        });
+        const stagingPath = yield* Effect.promise(() => staging.promise);
+        const attempted = yield* Deferred.make<void>();
+        let registered = false;
+        const claim = yield* Deferred.succeed(attempted, undefined).pipe(
+          Effect.andThen(
+            withProjectRootLease(
+              Effect.sync(() => {
+                if (NodeFS.existsSync(stagingPath)) {
+                  h.registerProjectRoot(stagingPath);
+                  registered = true;
+                }
+              }),
+            ),
+          ),
+          Effect.forkChild,
+        );
+        yield* Deferred.await(attempted);
+        release.resolve();
+        yield* Fiber.join(claim);
+        expect(registered).toBe(false);
+        const active = yield* h.awaitRecord(
+          (record) =>
+            (kind === "current"
+              ? record.checkoutId === saved.checkoutId
+              : record.sourceCheckoutId === saved.checkoutId) &&
+            record.summary.state === "active" &&
+            record.operation === undefined,
+        );
+        expect(active.path).toBe(destination);
       }),
     ),
 );

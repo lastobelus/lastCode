@@ -269,14 +269,18 @@ const make = Effect.gen(function* () {
             path.resolve(left) === path.resolve(right);
           const nextPaths = [next.path, ...next.aliases];
           const nextDestination =
-            next.operation?.kind === "recovery" ? next.operation.destinationPath : undefined;
+            next.operation?.kind === "recovery" || next.operation?.kind === "restore"
+              ? next.operation.destinationPath
+              : undefined;
           if (
             !next.detached &&
             current.checkouts.some((entry) => {
               if (entry.detached || entry.checkoutId === next.checkoutId) return false;
               const entryPaths = [entry.path, ...entry.aliases];
               const entryDestination =
-                entry.operation?.kind === "recovery" ? entry.operation.destinationPath : undefined;
+                entry.operation?.kind === "recovery" || entry.operation?.kind === "restore"
+                  ? entry.operation.destinationPath
+                  : undefined;
               const sameRecovery =
                 (entry.operation?.kind === "recovery" &&
                   next.sourceCheckoutId === entry.checkoutId &&

@@ -200,6 +200,15 @@ export class PreviewHosting extends Context.Service<
       threadId: string,
       workspacePath: string,
     ) => Effect.Effect<void, PreviewHostingError | TerminalManager.TerminalError>;
+    readonly withThreadPreviewLocks: <A, E, R>(
+      threadIds: ReadonlyArray<string>,
+      use: (
+        remove: (
+          threadId: string,
+          workspacePath: string,
+        ) => Effect.Effect<void, PreviewHostingError | TerminalManager.TerminalError>,
+      ) => Effect.Effect<A, E, R>,
+    ) => Effect.Effect<A, E | PreviewHostingError | TerminalManager.TerminalError, R>;
     readonly stopThread: (
       threadId: string,
     ) => Effect.Effect<
@@ -1427,6 +1436,7 @@ const make = Effect.gen(function* () {
   const removeThreadLocked = Effect.fnUntraced(function* (
     threadId: string,
     leaseIds?: ReadonlySet<string>,
+    leaseLocksHeld = false,
   ) {
     if (startupError !== null) return yield* startupError;
     const { owned, cancellation } = yield* persistLock.withPermit(
@@ -1453,16 +1463,15 @@ const make = Effect.gen(function* () {
     );
     const results = yield* Effect.forEach(
       owned,
-      (lease) =>
-        withLeaseLock(
-          lease.id,
-          Effect.gen(function* () {
-            const latest = yield* findLease(lease.id);
-            if (latest === null || latest.threadId !== threadId) return;
-            yield* closeOwnedTerminal(latest);
-            yield* removeLease(latest.id);
-          }),
-        ).pipe(Effect.result),
+      (lease) => {
+        const remove = Effect.gen(function* () {
+          const latest = yield* findLease(lease.id);
+          if (latest === null || latest.threadId !== threadId) return;
+          yield* closeOwnedTerminal(latest);
+          yield* removeLease(latest.id);
+        });
+        return (leaseLocksHeld ? remove : withLeaseLock(lease.id, remove)).pipe(Effect.result);
+      },
       { concurrency: "unbounded" },
     );
     if (cancellation._tag === "Failure") return yield* cancellation.failure;
@@ -1473,51 +1482,92 @@ const make = Effect.gen(function* () {
   const removeThread: PreviewHosting["Service"]["removeThread"] = (threadId) =>
     threadLocks.withLock(threadId, removeThreadLocked(threadId));
 
-  const removeThreadWorkspace: PreviewHosting["Service"]["removeThreadWorkspace"] = (
-    threadId,
-    workspacePath,
-  ) =>
-    threadLocks.withLock(
-      threadId,
-      Effect.gen(function* () {
-        if (startupError !== null) return yield* startupError;
-        const root = yield* canonicalWorkspacePath(workspacePath).pipe(
+  const removeThreadWorkspaceLocked = Effect.fn("PreviewHosting.removeThreadWorkspaceLocked")(
+    function* (threadId: string, workspacePath: string, leaseLocksHeld = false) {
+      if (startupError !== null) return yield* startupError;
+      const root = yield* canonicalWorkspacePath(workspacePath).pipe(
+        Effect.mapError(
+          (cause) => new PreviewHostingError({ operation: "validate", statePath, threadId, cause }),
+        ),
+      );
+      const owned = (yield* SynchronizedRef.get(leasesRef)).filter(
+        (lease) => lease.threadId === threadId,
+      );
+      const matching = yield* Effect.forEach(owned, (lease) =>
+        Effect.forEach(
+          [lease.cwd, ...(lease.worktreePath === null ? [] : [lease.worktreePath])],
+          canonicalWorkspacePath,
+        ).pipe(
+          Effect.map((candidates) =>
+            candidates.some((candidate) => {
+              const relative = path.relative(root, candidate);
+              return (
+                relative === "" ||
+                (!relative.startsWith(`..${path.sep}`) &&
+                  relative !== ".." &&
+                  !path.isAbsolute(relative))
+              );
+            }),
+          ),
           Effect.mapError(
             (cause) =>
               new PreviewHostingError({ operation: "validate", statePath, threadId, cause }),
           ),
-        );
-        const owned = (yield* SynchronizedRef.get(leasesRef)).filter(
-          (lease) => lease.threadId === threadId,
-        );
-        const matching = yield* Effect.forEach(owned, (lease) =>
-          Effect.forEach(
-            [lease.cwd, ...(lease.worktreePath === null ? [] : [lease.worktreePath])],
-            canonicalWorkspacePath,
-          ).pipe(
-            Effect.map((candidates) =>
-              candidates.some((candidate) => {
-                const relative = path.relative(root, candidate);
-                return (
-                  relative === "" ||
-                  (!relative.startsWith(`..${path.sep}`) &&
-                    relative !== ".." &&
-                    !path.isAbsolute(relative))
-                );
-              }),
-            ),
-            Effect.mapError(
-              (cause) =>
-                new PreviewHostingError({ operation: "validate", statePath, threadId, cause }),
-            ),
-          ),
-        );
-        yield* removeThreadLocked(
-          threadId,
-          new Set(owned.filter((_, index) => matching[index]).map((lease) => lease.id)),
+        ),
+      );
+      yield* removeThreadLocked(
+        threadId,
+        new Set(owned.filter((_, index) => matching[index]).map((lease) => lease.id)),
+        leaseLocksHeld,
+      );
+    },
+  );
+
+  const removeThreadWorkspace: PreviewHosting["Service"]["removeThreadWorkspace"] = (
+    threadId,
+    workspacePath,
+  ) => threadLocks.withLock(threadId, removeThreadWorkspaceLocked(threadId, workspacePath));
+
+  const withThreadPreviewLocks: PreviewHosting["Service"]["withThreadPreviewLocks"] = (
+    threadIds,
+    use,
+  ) => {
+    const owners = [...new Set(threadIds)].sort();
+    const withThreads = <A, E, R>(
+      index: number,
+      body: Effect.Effect<A, E, R>,
+    ): Effect.Effect<A, E, R> =>
+      index === owners.length
+        ? body
+        : threadLocks.withLock(owners[index]!, withThreads(index + 1, body));
+    return withThreads(
+      0,
+      Effect.gen(function* () {
+        if (startupError !== null) return yield* startupError;
+        const leases = (yield* SynchronizedRef.get(leasesRef))
+          .filter((lease) => owners.includes(lease.threadId))
+          .map((lease) => lease.id)
+          .sort();
+        const withLeases = <A, E, R>(
+          index: number,
+          body: Effect.Effect<A, E, R>,
+        ): Effect.Effect<A, E, R> =>
+          index === leases.length
+            ? body
+            : withLeaseLock(leases[index]!, withLeases(index + 1, body));
+        return yield* withLeases(
+          0,
+          use((threadId, workspacePath) => {
+            if (!owners.includes(threadId))
+              return Effect.fail(
+                new PreviewHostingError({ operation: "validate", statePath, threadId }),
+              );
+            return removeThreadWorkspaceLocked(threadId, workspacePath, true);
+          }),
         );
       }),
     );
+  };
 
   const stopThread: PreviewHosting["Service"]["stopThread"] = (threadId) =>
     threadLocks.withLock(
@@ -1729,6 +1779,7 @@ const make = Effect.gen(function* () {
     ownsTerminal,
     removeThread,
     removeThreadWorkspace,
+    withThreadPreviewLocks,
     stopThread,
     protectedWorkspacePaths,
     protectedWorkspaceLeases,
