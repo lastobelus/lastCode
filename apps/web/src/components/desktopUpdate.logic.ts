@@ -299,6 +299,19 @@ export function getDesktopUpdateActionError(result: DesktopUpdateActionResult): 
     : message;
 }
 
+/** Why a confirmed install was refused because a different build replaced the confirmed one. */
+export function getDesktopUpdateInstallRefusal(
+  result: DesktopUpdateActionResult,
+  confirmedVersion: string | undefined,
+): string | null {
+  if (result.accepted || confirmedVersion === undefined) return null;
+  const current = result.state.downloadedVersion;
+  if (current === confirmedVersion) return null;
+  return current
+    ? `${confirmedVersion} was replaced by ${current}. Review it and try again.`
+    : `${confirmedVersion} is no longer ready to install.`;
+}
+
 export function shouldToastDesktopUpdateActionResult(result: DesktopUpdateActionResult): boolean {
   return getDesktopUpdateActionError(result) !== null;
 }

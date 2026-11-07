@@ -27,6 +27,7 @@ import {
   getDesktopUpdateDownloadedVersion,
   getDesktopUpdateIdleTooltip,
   getDesktopUpdateInstallConfirmationMessage,
+  getDesktopUpdateInstallRefusal,
   getDesktopUpdatePopoverHeader,
   getDesktopUpdateProgressPercent,
   isDesktopUpdateButtonDisabled,
@@ -276,7 +277,9 @@ export async function installLocalUpdate(
   try {
     const result = await bridge.installUpdate(expectedVersion);
     if (!result.accepted) {
-      showDesktopUpdateDownloadedToast(bridge, result.state);
+      const refusal = getDesktopUpdateInstallRefusal(result, expectedVersion);
+      if (refusal) reportError("Update not installed", refusal);
+      else showDesktopUpdateDownloadedToast(bridge, result.state);
       return false;
     }
     const actionError = shouldToastDesktopUpdateActionResult(result)
@@ -576,11 +579,20 @@ function SidebarUpdateControl() {
       rows={everything.rows}
       restarts={everything.restarts}
       onConfirm={() => void runEverything()}
-      onConfirmAppOnly={
-        localUpdateVersion !== null && everything.alsoUpdates !== null
-          ? () => {
-              setIsConfirmingEverything(false);
-              runAppOnly();
+      appOnly={
+        localUpdateVersion !== null && everything.alsoUpdates !== null && action !== "none"
+          ? {
+              // Building or downloading never installs; that still asks for the version it shows.
+              label:
+                action === "install"
+                  ? "Only update this app"
+                  : state?.source === "lastcode-local"
+                    ? "Only build this app"
+                    : "Only download this app",
+              onConfirm: () => {
+                setIsConfirmingEverything(false);
+                runAppOnly();
+              },
             }
           : undefined
       }
@@ -602,6 +614,9 @@ function SidebarUpdateControl() {
           icon={statusIcon}
           {...(run.localVersion === null && action === "install" && window.desktopBridge
             ? {
+                restartLabel: state
+                  ? getDesktopUpdatePopoverHeader(state, APP_BASE_NAME)?.title
+                  : undefined,
                 onRestart: async () => {
                   saveUpdateEverythingResult({
                     localVersion: localUpdateVersion,

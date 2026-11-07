@@ -60,11 +60,14 @@ export function SidebarUpdateCapsule({
   local,
   icon,
   onRestart,
+  restartLabel,
 }: {
   readonly run: UpdateEverythingRun;
   readonly local: UpdateRunLocalState;
   readonly icon: ReactNode;
   readonly onRestart?: () => Promise<void>;
+  /** Names the version "Restart to update" installs, e.g. "LastCode 4218 → 4301". */
+  readonly restartLabel?: string | undefined;
 }) {
   const machines = useUpdateRunMachineViews(run);
   const hasActiveMachine = machines.some(
@@ -137,7 +140,7 @@ export function SidebarUpdateCapsule({
             </div>
           ) : onRestart ? (
             <div className="flex items-center justify-between gap-3">
-              <span>This app</span>
+              <span className="min-w-0 truncate">{restartLabel ?? "This app"}</span>
               <Button size="xs" variant="outline" onClick={() => void onRestart()}>
                 Restart to update
               </Button>

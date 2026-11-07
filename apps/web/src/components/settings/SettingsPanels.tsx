@@ -37,6 +37,7 @@ import {
   getDesktopUpdateButtonTooltip,
   getDesktopUpdateDisabledReason,
   getDesktopUpdateInstallConfirmationMessage,
+  getDesktopUpdateInstallRefusal,
   isDesktopUpdateButtonDisabled,
   resolveDesktopUpdateButtonAction,
 } from "../../components/desktopUpdate.logic";
@@ -231,8 +232,20 @@ function AboutVersionSection() {
         setIsUpdateActionPending(false);
         return;
       }
+      const confirmedVersion = updateState?.downloadedVersion ?? undefined;
       void bridge
-        .installUpdate(updateState?.downloadedVersion ?? undefined)
+        .installUpdate(confirmedVersion)
+        .then((result) => {
+          const refusal = getDesktopUpdateInstallRefusal(result, confirmedVersion);
+          if (!refusal) return;
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Update not installed",
+              description: refusal,
+            }),
+          );
+        })
         .catch((error: unknown) => {
           toastManager.add(
             stackedThreadToast({
