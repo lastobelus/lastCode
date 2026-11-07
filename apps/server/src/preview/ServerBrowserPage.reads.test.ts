@@ -20,15 +20,19 @@ const metadata = {
   visibleText: "continue",
   interactiveElements: [],
 };
-const PNG_HEADER = (() => {
+const pngHeader = (width: number, height: number) => {
   const header = Buffer.alloc(24);
   header.write("IHDR", 12);
-  header.writeUInt32BE(1280, 16);
-  header.writeUInt32BE(800, 20);
+  header.writeUInt32BE(width, 16);
+  header.writeUInt32BE(height, 20);
   return header.toString("base64");
-})();
-const layout = { cssVisualViewport: { pageX: 10, pageY: 20 } };
-const makeBrowser = () => {
+};
+const PNG_HEADER = pngHeader(1280, 800);
+const UNSCALED_PNG_HEADER = pngHeader(2560, 1600);
+const layout = {
+  cssVisualViewport: { clientWidth: 2560, clientHeight: 1600, pageX: 10, pageY: 20, zoom: 1 },
+};
+const makeBrowser = (options: { nativeViewport?: boolean } = {}) => {
   const pageEvaluate = vi.fn().mockResolvedValue(metadata);
   const ariaSnapshot = vi.fn().mockResolvedValue('- button "continue" [ref=e1]');
   const send = vi.fn<(method: string, params?: unknown) => Promise<unknown>>((method) => {
@@ -36,7 +40,9 @@ const makeBrowser = () => {
       case "Page.getLayoutMetrics":
         return Promise.resolve(layout);
       case "Page.captureScreenshot":
-        return Promise.resolve({ data: PNG_HEADER });
+        return Promise.resolve({ data: UNSCALED_PNG_HEADER });
+      case "Runtime.callFunctionOn":
+        return Promise.resolve({ result: { value: PNG_HEADER } });
       case "Runtime.evaluate":
         return Promise.resolve({ result: { value: 42 } });
       default:
@@ -45,12 +51,20 @@ const makeBrowser = () => {
   });
   const mainFrame = {} as Frame;
   const dottedValues = vi.fn<() => Promise<Array<string>>>().mockResolvedValue([]);
-  const maskingSend = vi.fn(async (method: string) => {
+  const maskingSend = vi.fn(async (method: string, params?: unknown) => {
     switch (method) {
       case "Page.getFrameTree":
         return { frameTree: { frame: { id: "main" } } };
       case "Page.createIsolatedWorld":
-        return { executionContextId: 1 };
+        return {
+          executionContextId:
+            typeof params === "object" &&
+            params !== null &&
+            "worldName" in params &&
+            params.worldName === "t3-preview-screenshot"
+              ? 2
+              : 1,
+        };
       case "Runtime.evaluate":
         return { result: { value: await dottedValues() } };
       default:
@@ -60,7 +74,7 @@ const makeBrowser = () => {
   const page = {
     frames: () => [mainFrame],
     mainFrame: () => mainFrame,
-    viewportSize: () => ({ width: 2560, height: 1600 }),
+    viewportSize: () => (options.nativeViewport ? null : { width: 2560, height: 1600 }),
     on: vi.fn(),
     evaluate: pageEvaluate,
     ariaSnapshot,
@@ -72,8 +86,9 @@ const makeBrowser = () => {
       (method === "Runtime.evaluate" &&
         typeof params === "object" &&
         params !== null &&
-        "contextId" in params)
-        ? maskingSend(method)
+        "contextId" in params &&
+        params.contextId === 1)
+        ? maskingSend(method, params)
         : params === undefined
           ? send(method)
           : send(method, params),
@@ -120,14 +135,14 @@ describe("bounded server browser reads", () => {
     "Page.getLayoutMetrics",
     "Page.captureScreenshot",
   ])("times out a stalled %s stage and permits a fresh snapshot", async (stage) => {
-    const browser = makeBrowser();
+    const browser = makeBrowser({ nativeViewport: stage === "Page.getLayoutMetrics" });
     const stalled = deferred<never>();
     const abort = observeAbort();
     if (stage === "snapshot metadata") browser.pageEvaluate.mockReturnValueOnce(stalled.promise);
     else if (stage === "accessibility tree")
       browser.ariaSnapshot.mockReturnValueOnce(stalled.promise);
     else if (stage === "Page.getLayoutMetrics") browser.send.mockReturnValueOnce(stalled.promise);
-    else browser.send.mockResolvedValueOnce(layout).mockReturnValueOnce(stalled.promise);
+    else browser.send.mockReturnValueOnce(stalled.promise);
     const failed = expect(
       browser.snapshot({ timeoutMs: 100, signal: abort.controller.signal }),
     ).rejects.toMatchObject({
@@ -141,7 +156,10 @@ describe("bounded server browser reads", () => {
     if (stage === "Page.getLayoutMetrics")
       expect(browser.send).not.toHaveBeenCalledWith("Page.captureScreenshot", expect.anything());
     const fresh = await browser.snapshot({ signal: abort.controller.signal });
-    expect(fresh).toMatchObject({ title: "Test page", screenshot: { data: PNG_HEADER } });
+    expect(fresh).toMatchObject({
+      title: "Test page",
+      screenshot: { data: PNG_HEADER, width: 1280, height: 800 },
+    });
     expect(String(fresh.accessibilityTree)).toContain("[ref=t3-");
     abort.expectClean();
     // The timed-out protocol response can reject after the replacement read finishes.
@@ -208,62 +226,50 @@ describe("bounded server browser reads", () => {
     abort.expectClean();
   });
 
-  it.each(["Page.getLayoutMetrics", "Page.captureScreenshot"])(
-    "bounds a standalone stalled %s and permits another capture",
-    async (stage) => {
-      const browser = makeBrowser();
-      const stalled = deferred<never>();
-      const abort = observeAbort();
-      if (stage === "Page.getLayoutMetrics") browser.send.mockReturnValueOnce(stalled.promise);
-      else browser.send.mockResolvedValueOnce(layout).mockReturnValueOnce(stalled.promise);
-      const options = {
-        format: "jpeg",
-        quality: 70,
-        scale: 0.5,
-        timeoutMs: 100,
-        signal: abort.controller.signal,
-      } as const;
-      const failed = expect(
-        ServerBrowserPage.captureViewport(browser.page, browser.cdp, options),
-      ).rejects.toMatchObject({
-        tag: "PreviewAutomationTimeoutError",
-        detail: { stage, timeoutMs: 100 },
-      });
-      await vi.advanceTimersByTimeAsync(100);
-      await failed;
-      abort.expectClean();
-      expect(await ServerBrowserPage.captureViewport(browser.page, browser.cdp, options)).toBe(
-        PNG_HEADER,
-      );
-      abort.expectClean();
-      stalled.reject(new Error("Late capture failure"));
-      await vi.advanceTimersByTimeAsync(0);
-    },
-  );
-
-  it("shares the total capture budget across layout and screenshot", async () => {
+  it("bounds a standalone stalled capture and permits another capture", async () => {
     const browser = makeBrowser();
+    const stalled = deferred<never>();
+    const abort = observeAbort();
+    browser.send.mockReturnValueOnce(stalled.promise);
+    const options = {
+      format: "jpeg",
+      quality: 70,
+      timeoutMs: 100,
+      signal: abort.controller.signal,
+    } as const;
+    const failed = expect(
+      ServerBrowserPage.captureViewport(browser.cdp, options),
+    ).rejects.toMatchObject({
+      tag: "PreviewAutomationTimeoutError",
+      detail: { stage: "Page.captureScreenshot", timeoutMs: 100 },
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    await failed;
+    abort.expectClean();
+    expect(await ServerBrowserPage.captureViewport(browser.cdp, options)).toBe(UNSCALED_PNG_HEADER);
+    expect(browser.send.mock.calls).toEqual([
+      ["Page.captureScreenshot", { format: "jpeg", quality: 70 }],
+      ["Page.captureScreenshot", { format: "jpeg", quality: 70 }],
+    ]);
+    abort.expectClean();
+    stalled.reject(new Error("Late capture failure"));
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it("shares the native snapshot budget across layout and screenshot", async () => {
+    const browser = makeBrowser({ nativeViewport: true });
     const metrics = deferred<typeof layout>();
     browser.send
       .mockReturnValueOnce(metrics.promise)
       .mockReturnValueOnce(new Promise<never>(() => {}));
-    const failed = expect(
-      ServerBrowserPage.captureViewport(browser.page, browser.cdp, {
-        format: "png",
-        scale: 0.5,
-        timeoutMs: 100,
-      }),
-    ).rejects.toMatchObject({
+    const failed = expect(browser.snapshot({ timeoutMs: 100 })).rejects.toMatchObject({
       tag: "PreviewAutomationTimeoutError",
       detail: { stage: "Page.captureScreenshot", timeoutMs: 100 },
     });
     await vi.advanceTimersByTimeAsync(80);
     metrics.resolve(layout);
     await vi.advanceTimersByTimeAsync(0);
-    expect(browser.send).toHaveBeenCalledWith(
-      "Page.captureScreenshot",
-      expect.objectContaining({ clip: { x: 10, y: 20, width: 2560, height: 1600, scale: 0.5 } }),
-    );
+    expect(browser.send).toHaveBeenCalledWith("Page.captureScreenshot", { format: "png" });
     await vi.advanceTimersByTimeAsync(19);
     expect(vi.getTimerCount()).toBe(1);
     await vi.advanceTimersByTimeAsync(1);
@@ -271,23 +277,37 @@ describe("bounded server browser reads", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("shares the snapshot deadline with the screenshot after layout completes", async () => {
+  it("shares the snapshot deadline with shrinking after the screenshot completes", async () => {
     const browser = makeBrowser();
-    const metrics = deferred<typeof layout>();
+    const screenshot = deferred<{ data: string }>();
     browser.send
-      .mockReturnValueOnce(metrics.promise)
+      .mockReturnValueOnce(screenshot.promise)
       .mockReturnValueOnce(new Promise<never>(() => {}));
     const failed = expect(browser.snapshot({ timeoutMs: 100 })).rejects.toMatchObject({
-      detail: { stage: "Page.captureScreenshot", timeoutMs: 100 },
+      detail: { stage: "Runtime.callFunctionOn", timeoutMs: 100 },
     });
     await vi.advanceTimersByTimeAsync(80);
-    metrics.resolve(layout);
+    screenshot.resolve({ data: UNSCALED_PNG_HEADER });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(browser.maskingSend).toHaveBeenCalledWith("Page.createIsolatedWorld", {
+      frameId: "main",
+      worldName: "t3-preview-screenshot",
+    });
+    expect(browser.send).toHaveBeenCalledWith(
+      "Runtime.callFunctionOn",
+      expect.objectContaining({
+        executionContextId: 2,
+        arguments: [{ value: UNSCALED_PNG_HEADER }, { value: 1280 }, { value: 800 }],
+        awaitPromise: true,
+        returnByValue: true,
+      }),
+    );
     await vi.advanceTimersByTimeAsync(20);
     await failed;
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("skips both capture stages when the snapshot does not include an image", async () => {
+  it("skips capture and shrinking when the snapshot does not include an image", async () => {
     const browser = makeBrowser();
     browser.send.mockReturnValue(new Promise<never>(() => {}));
     const result = await browser.snapshot({ includeImage: false });
@@ -308,18 +328,18 @@ describe("bounded server browser reads", () => {
     abort.expectClean();
   });
 
-  it("aborts every pending snapshot stage and never starts capture after delayed layout", async () => {
-    const browser = makeBrowser();
+  it("aborts a native snapshot and never starts capture after delayed layout", async () => {
+    const browser = makeBrowser({ nativeViewport: true });
     const abort = observeAbort();
     const metrics = deferred<typeof layout>();
-    browser.pageEvaluate.mockReturnValueOnce(new Promise<never>(() => {}));
-    browser.ariaSnapshot.mockReturnValueOnce(new Promise<never>(() => {}));
     browser.send.mockReturnValueOnce(metrics.promise);
     const failed = expect(
       browser.snapshot({ signal: abort.controller.signal }),
     ).rejects.toMatchObject({ tag: "PreviewAutomationControlInterruptedError" });
     await vi.advanceTimersByTimeAsync(0);
     expect(browser.send).toHaveBeenCalledWith("Page.getLayoutMetrics");
+    expect(browser.pageEvaluate).not.toHaveBeenCalled();
+    expect(browser.ariaSnapshot).not.toHaveBeenCalled();
     abort.controller.abort();
     await failed;
     abort.expectClean();
@@ -340,9 +360,8 @@ describe("bounded server browser reads", () => {
         operation === "snapshot"
           ? browser.snapshot({ signal: abort.controller.signal })
           : operation === "capture"
-            ? ServerBrowserPage.captureViewport(browser.page, browser.cdp, {
+            ? ServerBrowserPage.captureViewport(browser.cdp, {
                 format: "png",
-                scale: 0.5,
                 signal: abort.controller.signal,
               })
             : ServerBrowserPage.evaluate(
@@ -409,9 +428,8 @@ describe("bounded server browser reads", () => {
     browser.send.mockReturnValueOnce(stalled.promise);
     const failed = expect(
       operation === "capture"
-        ? ServerBrowserPage.captureViewport(browser.page, browser.cdp, {
+        ? ServerBrowserPage.captureViewport(browser.cdp, {
             format: "png",
-            scale: 0.5,
             signal: abort.controller.signal,
           })
         : ServerBrowserPage.evaluate(
@@ -435,7 +453,7 @@ describe("bounded server browser reads", () => {
     const timeoutMs = operation === "capture" ? 3_000 : 10_000;
     const failed = expect(
       operation === "capture"
-        ? ServerBrowserPage.captureViewport(browser.page, browser.cdp, { format: "png", scale: 1 })
+        ? ServerBrowserPage.captureViewport(browser.cdp, { format: "png" })
         : ServerBrowserPage.evaluate(browser.cdp, { expression: "42" }),
     ).rejects.toMatchObject({ detail: { timeoutMs } });
     await vi.advanceTimersByTimeAsync(timeoutMs);

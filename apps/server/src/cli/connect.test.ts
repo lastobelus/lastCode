@@ -16,6 +16,7 @@ import * as TestConsole from "effect/testing/TestConsole";
 import { Command } from "effect/cli";
 
 import { makeCli } from "../binCli.ts";
+import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import {
   makePersistedServerRuntimeState,
   persistServerRuntimeState,
@@ -119,6 +120,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, NetService.layer))
           Layer.mergeAll(
             ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),
             Layer.fresh(TestConsole.layer),
+            ManagedPolicy.layerTest(),
           ),
         ),
       );

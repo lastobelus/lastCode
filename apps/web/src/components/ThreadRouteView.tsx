@@ -1,4 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
+import { purgeThreadHandoffs } from "../handoffs/handoffsStore";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { parseThreadKey, threadKey } from "@t3tools/client-runtime/state/entities";
 import { visibilityParentKey } from "@t3tools/client-runtime/state/threads";
@@ -49,6 +50,11 @@ export function ThreadRouteView({
   const serverThreadRef = target.kind === "server" ? target.threadRef : null;
   const serverThreadShell = useQuietThreadShell(serverThreadRef);
   const shellStatus = useEnvironmentShellStatus(serverThreadRef?.environmentId ?? null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- removes deleted server threads from the external draft-handoff registry when their tombstone arrives
+  useEffect(() => {
+    if (serverThreadRef && serverThreadShell?.deletedAt != null)
+      purgeThreadHandoffs(serverThreadRef);
+  }, [serverThreadRef, serverThreadShell?.deletedAt]);
   const environmentThreadRefs = useEnvironmentThreadRefs(serverThreadRef?.environmentId ?? null);
   const bootstrapComplete = isThreadRouteSnapshotAuthoritative(shellStatus);
   const draftThread = useComposerDraftStore((store) =>

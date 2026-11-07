@@ -1,5 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Canonical lstat boundaries for selective generated-file removal.
-import * as NodeFSP from "node:fs/promises";
+import { promises as NodeFSP } from "@t3tools/shared/nativeFileSystem";
 import * as NodePath from "node:path";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";

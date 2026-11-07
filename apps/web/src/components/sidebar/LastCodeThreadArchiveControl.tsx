@@ -10,7 +10,7 @@ import type { LastCodeThreadActions } from "./LastCodeThreadActions";
 import { readThreadShell } from "../../state/entities";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { reportThreadOperationFailure } from "./lastcodeThreadOperationResult";
-import type { ScopedThreadRef } from "@t3tools/contracts";
+import type { CommandId, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 import type { LastCodeThreadEditingCapabilities } from "./useLastCodeThreadEditing";
 
 const ARCHIVE_BUTTON_CLASS =
@@ -26,6 +26,7 @@ export function LastCodeThreadArchiveControl({
 }) {
   const confirmRequired = useClientSettings((settings) => settings.confirmThreadArchive);
   const confirmButton = useRef<HTMLButtonElement | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- focuses the mounted archive confirmation button after its DOM is available and cancels pending focus on cleanup
   useEffect(() => {
     if (!confirming) return;
     const frame = requestAnimationFrame(() => confirmButton.current?.focus());
@@ -77,6 +78,7 @@ export async function archiveLastCodeThread(
   ref: ScopedThreadRef,
   inlineConfirmed: boolean,
   archive: LastCodeThreadActions["archiveThread"],
+  attempt?: { readonly threadId: ThreadId; readonly commandId: CommandId },
 ) {
   if (!checkTaskPermission(ref.environmentId)) return;
   if (readThreadShell(ref)?.persistent === true) {
@@ -89,7 +91,13 @@ export async function archiveLastCodeThread(
     );
     return;
   }
-  const result = inlineConfirmed ? await archive(ref, { confirmed: true }) : await archive(ref);
+  const target = attempt ? scopeThreadRef(ref.environmentId, attempt.threadId) : ref;
+  const options = {
+    ...(inlineConfirmed ? { confirmed: true } : {}),
+    ...(attempt ? { expectedArchiveCommandId: attempt.commandId } : {}),
+  };
+  const result =
+    inlineConfirmed || attempt ? await archive(target, options) : await archive(target);
   reportThreadOperationFailure(result, "Failed to archive thread");
 }
 
@@ -102,15 +110,19 @@ function useArchiveClick(
 ) {
   const { archiveThread } = useLastCodeThreadActions();
   const ref = scopeThreadRef(thread.environmentId, thread.id);
+  const displayedAttempt =
+    thread.archivePending?.status === "failed" ? thread.archivePending : undefined;
+  const confirmationAttempt = useRef(displayedAttempt);
   return (event: React.MouseEvent<HTMLButtonElement>) => {
     event.preventDefault();
     event.stopPropagation();
     if (confirming) editing.cancelArchiveConfirmation(ref);
     if (thread.persistent) return;
+    if (!confirming) confirmationAttempt.current = displayedAttempt;
     if (!confirming && confirmRequired) {
       if (checkTaskPermission(thread.environmentId)) editing.requestArchiveConfirmation(ref);
       return;
     }
-    void archiveLastCodeThread(ref, confirming, archiveThread);
+    void archiveLastCodeThread(ref, confirming, archiveThread, confirmationAttempt.current);
   };
 }

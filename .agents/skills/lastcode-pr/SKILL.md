@@ -63,7 +63,10 @@ asks for an upstream contribution; never pause to ask whether to go upstream.
    is not a local pass. In GitHub-only mode, publish without requiring the local
    Action. The ordinary pre-push hook follows the same policy; keep it enabled.
    Always local mode waits for capacity, and `--require-local` explicitly forces
-   local Quick CI. Settings → LastCode → Local CI selects the mode.
+   local Quick CI. Settings → LastCode → Local CI selects the mode. A delegated
+   child task hands this and every other Action in this workflow to its parent
+   unless its brief says it owns its Actions;
+   see [Parent-mediated Actions](../../../docs/internals/resumable-project-actions-setup.md#parent-mediated-actions-for-delegated-children).
 5. Open a PR targeting `lastcode/main` only when the user explicitly asks.
 
 For an explicitly requested stack, a child may instead branch from and target
@@ -114,6 +117,8 @@ one. Its goal is a published package, not a complete fix.
 All other PRs keep the full workflow in this skill.
 
 ## Babysit and Merge
+
+An app-owned delegated child uses this watch workflow only when its parent's brief verifies `features.appOwnedPullRequestWatchContinuationVersion` and #482 Phase 4 acceptance of the destination's installed checkpoint, or authorizes a narrow isolated acceptance scenario. Otherwise the child reports an unfinished PR handoff and its parent owns the watch. Parent-mediated waits stay with their recorded owner. Owning a watch leaves merge authority and the exact-head and base gates unchanged.
 
 Use this workflow whenever the authorized task includes waiting for a LastCode
 PR's checks or review, including PRs created while repairing checkpoint or build

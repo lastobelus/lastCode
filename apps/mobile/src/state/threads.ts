@@ -42,16 +42,16 @@ export const environmentThreadShells = createEnvironmentThreadShellAtoms({
   snapshotAtom: threadEnvironment.snapshotAtom,
   hiddenThreadTagsAtom: serverEnvironment.hiddenThreadTagsAtom,
 });
-export const childThreadApprovalsAtom = createChildThreadApprovalsAtom({
-  childThreadInputsAtom: environmentThreadShells.childThreadInputsAtom,
-  pendingRequestsAtom: environmentThreadDetails.pendingRequestsAtom,
-});
 export const environmentThreads = createEnvironmentThreadStateAtoms(connectionAtomRuntime, (ref) =>
   Atom.map(environmentThreadShells.threadShellAtom(ref), (thread) => thread !== null),
 );
 export const environmentThreadDetails = createEnvironmentThreadDetailAtoms(
   environmentThreads.stateAtom,
 );
+export const childThreadApprovalsAtom = createChildThreadApprovalsAtom({
+  childThreadInputsAtom: environmentThreadShells.childThreadInputsAtom,
+  pendingRequestsAtom: environmentThreadDetails.pendingRequestsAtom,
+});
 
 // Long enough for the opened screen to subscribe; its subscription keeps the thread after this.
 const OPENING_THREAD_HOLD_MS = 3_000;

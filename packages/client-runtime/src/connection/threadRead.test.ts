@@ -117,6 +117,22 @@ describe("connected environment thread reads", () => {
       }),
   );
 
+  it.effect("preserves an exact-source authorization refusal after a reference was sent", () =>
+    Effect.gen(function* () {
+      const response = yield* resolveThreadRead(
+        source,
+        { ...input, environmentId: destination, via: "client" },
+        entries([destination, true]),
+        () =>
+          Effect.fail(new OrchestratorMcpFailure({ code: "capability_denied", message: "Denied" })),
+      );
+      expect(response).toMatchObject({
+        result: null,
+        failure: { environmentId: destination, reason: "permission_denied" },
+      });
+    }),
+  );
+
   it.effect("only searches the explicitly requested environment", () =>
     Effect.gen(function* () {
       const calls: EnvironmentId[] = [];
@@ -181,7 +197,7 @@ describe("connected environment thread reads", () => {
           entries([destination, false]),
           () => notFound(),
         );
-        expect(explicit.unavailableEnvironmentIds).toEqual([destination]);
+        expect(explicit.failure).toEqual({ environmentId: destination, reason: "unavailable" });
       }),
   );
 

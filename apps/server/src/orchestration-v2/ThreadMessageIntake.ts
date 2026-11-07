@@ -1,6 +1,12 @@
 import { remapComposerContextAttachments } from "@t3tools/shared/composerContextReferences";
 import { appendUserInputAttachmentPaths } from "../provider/userInputAttachments.ts";
-import type { ChatAttachment, OrchestrationV2Command } from "@t3tools/contracts";
+import {
+  UpdateDrainAdmissionError,
+  UpdateDrainError,
+  type ChatAttachment,
+  type OrchestrationMessageContext,
+  type OrchestrationV2Command,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { resolveAttachmentPath } from "../attachmentStore.ts";
@@ -8,10 +14,18 @@ import * as ServerConfig from "../config.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 
 import * as AttachmentClaims from "./AttachmentClaims.ts";
+import {
+  ThreadReadAuthorization,
+  questionAnswerAuthorizationId,
+  queuedEditAuthorizationId,
+  referencedThreads,
+} from "./ThreadReadAuthorization.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 
 // These failures precede commitCommand; generic dispatch errors can follow commits and remain ambiguous.
+const isAdmissionError = Schema.is(UpdateDrainAdmissionError);
+const isDrainError = Schema.is(UpdateDrainError);
 function dispatchWasNotAccepted(
   error: Orchestrator.OrchestratorV2Error | ThreadManagement.ThreadManagementError,
 ) {
@@ -26,13 +40,59 @@ function dispatchWasNotAccepted(
     case "OrchestratorThreadAboveModeLimitError":
     case "OrchestratorRuntimeModeAboveCeilingError":
     case "ThreadManagementProviderInstanceDisabledError":
+    case "OrchestratorThreadArchivingError":
       return true;
+    case "OrchestratorDispatchError":
+      // Admission fails before dispatch starts. Other dispatch errors can occur
+      // after a commit and must retain the provider's attachment copies.
+      return isAdmissionError(error.cause) || isDrainError(error.cause);
     default:
       return false;
   }
 }
 const isOrchestratorError = Schema.is(Orchestrator.OrchestratorV2Error);
 const isThreadManagementError = Schema.is(ThreadManagement.ThreadManagementError);
+
+function adoptsWorkspace(command: OrchestrationV2Command): boolean {
+  switch (command.type) {
+    case "message.dispatch":
+      return command.createdBy === "user";
+    case "thread.metadata.update":
+      return (
+        command.workspaceUserAdopted === true ||
+        command.title !== undefined ||
+        command.regenerateTitle === true ||
+        command.branch !== undefined ||
+        command.worktreePath !== undefined
+      );
+    case "checkpoint.rollback":
+      return command.restoreFiles !== false;
+    case "queued-run.edit":
+    case "runtime-request.respond":
+    case "queue.resume":
+    case "thread.annotation.upsert":
+    case "thread.persistence.set":
+    case "thread.runtime-mode.set":
+    case "thread.interaction-mode.set":
+    case "thread.model-selection.set":
+    case "provider.switch":
+    case "subagent.promote.request":
+    case "thread.fork":
+    case "thread.merge_back":
+      return true;
+    default:
+      return false;
+  }
+}
+
+export const dispatchUserCommand = Effect.fn("ThreadMessageIntake.dispatchUserCommand")(function* (
+  command: OrchestrationV2Command,
+) {
+  return yield* dispatchCommand(
+    command,
+    adoptsWorkspace(command) ? { workspaceUserAdopted: true } : undefined,
+  );
+});
 
 const releaseUnusedClaims = Effect.fn("ThreadMessageIntake.releaseUnusedClaims")(function* (
   claimedPaths: ReadonlyArray<string>,
@@ -82,11 +142,51 @@ const withGuestAttachments = Effect.fn("ThreadMessageIntake.withGuestAttachments
   return { ...command, attachments: message?.attachments ?? [] };
 });
 
+function withQuestionContext(
+  command: Extract<OrchestrationV2Command, { type: "runtime-request.respond" }>,
+): typeof command {
+  if (command.contextsByQuestionId === undefined) return command;
+  const contexts: Array<[string, OrchestrationMessageContext]> = [];
+  const supplied = new Map(Object.entries(command.contextsByQuestionId));
+  const answers = Object.fromEntries(
+    Object.entries(command.answers ?? {}).map(([questionId, answer]) => {
+      const context = supplied.get(questionId);
+      if (typeof answer !== "string" || context === undefined) return [questionId, answer];
+      const records = referencedThreads(answer, context);
+      if (records.length === 0) return [questionId, answer];
+      contexts.push([questionId, { version: 1, records }]);
+      return [questionId, answer];
+    }),
+  );
+  const { contextsByQuestionId: _contexts, ...rest } = command;
+  return {
+    ...rest,
+    answers,
+    ...(contexts.length > 0 ? { contextsByQuestionId: Object.fromEntries(contexts) } : {}),
+  };
+}
+
 export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(function* (
   incoming: OrchestrationV2Command,
+  options?: Orchestrator.OrchestratorV2DispatchOptions,
 ) {
   const command =
-    incoming.type === "message.dispatch" ? yield* withGuestAttachments(incoming) : incoming;
+    incoming.type === "message.dispatch"
+      ? yield* withGuestAttachments(incoming)
+      : incoming.type === "runtime-request.respond"
+        ? withQuestionContext(incoming)
+        : incoming;
+  if (command.type === "runtime-request.respond" && command.contextsByQuestionId !== undefined) {
+    const authorization = yield* ThreadReadAuthorization;
+    yield* authorization.authorize(
+      command.threadId,
+      questionAnswerAuthorizationId(command.commandId),
+    );
+  }
+  if (command.type === "queued-run.edit") {
+    const authorization = yield* ThreadReadAuthorization;
+    yield* authorization.authorize(command.threadId, queuedEditAuthorizationId(command.commandId));
+  }
   const threads = yield* ThreadManagement.ThreadManagementService;
   if (command.type === "runtime-request.respond" && command.attachmentsByQuestionId) {
     const config = yield* ServerConfig.ServerConfig;
@@ -118,11 +218,14 @@ export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(
       return { answers, attachmentsByQuestionId };
     }).pipe(Effect.onError(() => AttachmentClaims.releaseClaimedAttachments(claimedPaths)));
     return yield* threads
-      .dispatch({
-        ...command,
-        answers: prepared.answers,
-        attachmentsByQuestionId: prepared.attachmentsByQuestionId,
-      })
+      .dispatch(
+        {
+          ...command,
+          answers: prepared.answers,
+          attachmentsByQuestionId: prepared.attachmentsByQuestionId,
+        },
+        options,
+      )
       .pipe(
         Effect.tap((result) => {
           // Replayed receipts refer to the first answer; release this attempt's unused copies only with a resolved item.
@@ -156,25 +259,28 @@ export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(
     command.type !== "message.dispatch" &&
     (command.type !== "queued-run.edit" || command.attachments === undefined)
   )
-    return yield* threads.dispatch(command);
+    return yield* threads.dispatch(command, options);
   const claimed = yield* AttachmentClaims.claimPendingAttachments({
     threadId: command.threadId,
     attachments: command.attachments ?? [],
   });
   return yield* threads
-    .dispatch({
-      ...command,
-      attachments: claimed.attachments,
-      ...(command.context
-        ? {
-            context: remapComposerContextAttachments(
-              command.context,
-              command.attachments ?? [],
-              claimed.attachments,
-            ),
-          }
-        : {}),
-    })
+    .dispatch(
+      {
+        ...command,
+        attachments: claimed.attachments,
+        ...(command.context
+          ? {
+              context: remapComposerContextAttachments(
+                command.context,
+                command.attachments ?? [],
+                claimed.attachments,
+              ),
+            }
+          : {}),
+      },
+      options,
+    )
     .pipe(
       Effect.tap((result) =>
         releaseUnusedClaims(

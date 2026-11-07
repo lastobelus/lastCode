@@ -206,6 +206,7 @@ it.effect("fails before the server can construct persistence or listen", () => {
               available: false,
               isShown: () => false,
               isPresented: () => false,
+              isRendering: () => false,
             }),
           ),
         ),
