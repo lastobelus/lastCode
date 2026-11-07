@@ -20,6 +20,7 @@ import {
   collectUpdateEverythingResult,
   describeUpdateEverything,
   runUpdateEverything,
+  SKIPPED_SERVER_UPDATE,
   type UpdateRunMachine,
 } from "./updateEverything.logic";
 import {
@@ -184,13 +185,16 @@ export function useUpdateEverything(
           updateServers: async () => {
             const runs = servers.map(async (server) => {
               const serverOutcome = await updateServer(server, { quiet: true });
+              // Skipped is unfinished, not done: keep the server for the retry action.
               settleUpdateRunMachine(
                 server.environmentId,
                 serverOutcome.status === "failed"
                   ? serverOutcome.message
-                  : (providerFailures.get(server.environmentId) ?? null),
+                  : serverOutcome.status === "skipped"
+                    ? SKIPPED_SERVER_UPDATE
+                    : (providerFailures.get(server.environmentId) ?? null),
                 {
-                  serverUpdated: serverOutcome.status !== "failed",
+                  serverUpdated: serverOutcome.status === "updated",
                   providerFailure: providerFailures.get(server.environmentId) ?? null,
                 },
               );
