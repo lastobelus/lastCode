@@ -81,6 +81,7 @@ export function resolveLocalBuildEnvironment(
   environment?: NodeJS.ProcessEnv,
   nodeExecutable?: string,
 ): NodeJS.ProcessEnv;
+export function rotateBuildLog(logPath: string, maxBytes?: number): void;
 export function resolveMiseNodeExecutable(
   cwd: string,
   mise: string,

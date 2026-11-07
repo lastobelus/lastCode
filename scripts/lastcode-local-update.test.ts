@@ -24,6 +24,7 @@ import {
   resolveLatestInstallableTag,
   resolveLocalBuildEnvironment,
   resolveMiseNodeExecutable,
+  rotateBuildLog,
 } from "./lastcode-local-update.mjs";
 import { checkpointServiceRunNowPaths } from "./lib/lastcode-checkpoint-service-run-now.mjs";
 
@@ -369,6 +370,26 @@ describe("lastcode-local-update", () => {
         "upstream-commit",
       ),
     );
+  });
+
+  it("rotates an oversized build log and keeps the previous one", () => {
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-build-log-"));
+    try {
+      const logPath = NodePath.join(root, "build.log");
+      NodeFS.writeFileSync(logPath, "small\n");
+      rotateBuildLog(logPath, 16);
+      assert.equal(NodeFS.readFileSync(logPath, "utf8"), "small\n");
+
+      NodeFS.writeFileSync(logPath, "x".repeat(17));
+      rotateBuildLog(logPath, 16);
+      assert.isFalse(NodeFS.existsSync(logPath));
+      assert.equal(NodeFS.readFileSync(`${logPath}.1`, "utf8"), "x".repeat(17));
+
+      rotateBuildLog(logPath, 16);
+      assert.isFalse(NodeFS.existsSync(logPath));
+    } finally {
+      NodeFS.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("orders checkpoints and LastCode revisions", () => {
