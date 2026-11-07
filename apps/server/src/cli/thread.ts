@@ -809,6 +809,11 @@ const ThreadCliOfflineRuntimeLive = Layer.mergeAll(ProjectionStore.layer, Projec
 );
 
 const THREAD_CLI_LIVE_TIMEOUT = Duration.seconds(3);
+// A send has no offline fallback, and the server drops a dispatch whose client hangs up.
+// Accepting a message into a very large thread can take several seconds.
+const THREAD_CLI_SEND_TIMEOUT = Duration.seconds(30);
+export const withThreadSendTimeout = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  Effect.timeout(effect, THREAD_CLI_SEND_TIMEOUT);
 const makeLiveClient = (origin: string) =>
   HttpApiClient.make(EnvironmentHttpApi, { baseUrl: origin });
 
@@ -1047,7 +1052,7 @@ const runThreadSend = Effect.fn("runThreadSend")(function* (
                     payload: command,
                   } as Parameters<typeof client.orchestration.dispatch>[0])
                   .pipe(
-                    Effect.timeout(THREAD_CLI_LIVE_TIMEOUT),
+                    withThreadSendTimeout,
                     Effect.asVoid,
                     Effect.mapError((cause) =>
                       waitForCompletion && !isAuthoritativeDispatchFailure(cause)

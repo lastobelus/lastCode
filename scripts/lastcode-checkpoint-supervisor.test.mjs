@@ -1244,69 +1244,55 @@ describe("LastCode checkpoint supervisor", () => {
     });
   });
 
-  it.each(["missing", "non-executable"])("retires alerts rejected by wrapper exec: %s", (kind) => {
-    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "thread-wrapper-test-"));
+  it("sends through the pinned checkout's CLI and classifies the error it logs on stdout", () => {
+    using warning = vi.spyOn(console, "error").mockImplementation(() => {});
+    const repoRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "supervisor-cli-"));
     try {
-      const executable = NodePath.join(directory, "runtime");
-      if (kind === "non-executable")
-        NodeFS.writeFileSync(executable, "#!/bin/sh\nexit 0\n", { mode: 0o600 });
-      const wrapper = NodePath.join(directory, "lastcode-thread");
+      const argvPath = NodePath.join(repoRoot, "argv.json");
+      const entry = NodePath.join(repoRoot, "apps", "server", "src", "bin.ts");
+      NodeFS.mkdirSync(NodePath.dirname(entry), { recursive: true });
       NodeFS.writeFileSync(
-        wrapper,
-        '#!/bin/sh\ncase "$1" in\n  send) command="$1"; shift; exec "$1" thread "$command" ;;\nesac\n',
-        { mode: 0o700 },
+        entry,
+        [
+          'import * as NodeFS from "node:fs";',
+          `NodeFS.writeFileSync(${JSON.stringify(argvPath)}, JSON.stringify(process.argv.slice(2)));`,
+          'process.stderr.write("(node:1) ExperimentalWarning: SQLite is an experimental feature\\n");',
+          "process.stdout.write(\"ERROR (#2): ThreadSendTargetError: LastCode thread 'thread-maintenance' was not found.\\n\");",
+          "process.exit(1);",
+        ].join("\n"),
       );
-      const result = NodeChildProcess.spawnSync("/bin/bash", [wrapper, "send", executable], {
-        encoding: "utf8",
-      });
-      expect([126, 127]).toContain(result.status);
       const failed = fixture({
         dependencies: {
           runPhase: () => {
             throw new Error("fetch failed");
           },
-          sendThread: () => {
-            throw Object.assign(new Error("wrapper exec failed"), {
-              phase: "alert-delivery",
-              status: result.status,
-              diagnostic: result.stderr,
-            });
-          },
         },
       });
-      expect(() => runCheckpointSupervisor({}, failed.dependencies)).toThrow("fetch failed");
-      expect(failed.state.incident.alertDelivery).toBe("rejected");
-      const recovered = fixture({ state: failed.state });
-      runCheckpointSupervisor({}, recovered.dependencies);
-      expect(recovered.messages).toEqual([]);
-    } finally {
-      NodeFS.rmSync(directory, { recursive: true, force: true });
-    }
-  });
+      delete failed.dependencies.sendThread;
 
-  it.each([
-    [127, "lastcode-thread: line 3: /example/runtime: No such file or directory"],
-    [126, "lastcode-thread: line 3: /example/runtime: Permission denied"],
-  ])("rejects a Bash wrapper failure without a second exec line: %s", (status, diagnostic) => {
-    const failed = fixture({
-      dependencies: {
-        runPhase: () => {
-          throw new Error("fetch failed");
-        },
-        sendThread: () => {
-          throw Object.assign(new Error("exec failed"), {
-            phase: "alert-delivery",
-            status,
-            diagnostic,
-          });
-        },
-      },
-    });
-    expect(() => runCheckpointSupervisor({}, failed.dependencies)).toThrow("fetch failed");
-    expect(failed.state.incident.alertDelivery).toBe("rejected");
-    const recovered = fixture({ state: failed.state });
-    runCheckpointSupervisor({}, recovered.dependencies);
-    expect(recovered.messages).toEqual([]);
+      expect(() =>
+        runCheckpointSupervisor({ home: "/example/home", repoRoot }, failed.dependencies),
+      ).toThrow("fetch failed");
+
+      expect(JSON.parse(NodeFS.readFileSync(argvPath, "utf8"))).toEqual([
+        "thread",
+        "send",
+        "--base-dir",
+        "/example/home/.lastcode",
+        "--state-dir",
+        "/example/home/.lastcode/userdata",
+        "thread-maintenance",
+        "--message",
+        expect.stringContaining("Automated LastCode checkpoint maintenance alert"),
+        "--json",
+      ]);
+      expect(failed.state.incident.alertDelivery).toBe("rejected");
+      expect(warning).toHaveBeenCalledWith(
+        expect.stringContaining("LastCode thread 'thread-maintenance' was not found."),
+      );
+    } finally {
+      NodeFS.rmSync(repoRoot, { recursive: true, force: true });
+    }
   });
 
   it.each(["ENOENT", "EACCES", "ENOTDIR", "E2BIG", "ETIMEDOUT", "ENOBUFS"])(

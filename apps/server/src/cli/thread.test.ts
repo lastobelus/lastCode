@@ -5,6 +5,8 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as Fiber from "effect/Fiber";
+import * as TestClock from "effect/testing/TestClock";
 import * as TestConsole from "effect/testing/TestConsole";
 import { vi } from "vite-plus/test";
 import * as McpBridge from "../mcp/AcpMcpStdioBridge.ts";
@@ -53,6 +55,7 @@ import {
   validateThreadTurnLimit,
   withReadSession,
   withSendSession,
+  withThreadSendTimeout,
 } from "./thread.ts";
 import { readLatestMessages, type ThreadTools, titleFromMessage } from "./threadMcp.ts";
 
@@ -164,6 +167,20 @@ it.effect(
         ),
       ),
     ),
+);
+
+it.effect("waits for a slow send instead of abandoning it after the read probe budget", () =>
+  Effect.gen(function* () {
+    const dispatch = yield* withThreadSendTimeout(
+      Effect.sleep("6 seconds").pipe(Effect.as("accepted")),
+    ).pipe(Effect.forkChild);
+    yield* TestClock.adjust("6 seconds");
+    assert.strictEqual(yield* Fiber.join(dispatch), "accepted");
+
+    const stalled = yield* withThreadSendTimeout(Effect.never).pipe(Effect.flip, Effect.forkChild);
+    yield* TestClock.adjust("30 seconds");
+    assert.strictEqual((yield* Fiber.join(stalled))._tag, "TimeoutError");
+  }),
 );
 
 it.effect("does not retry an authoritative tracked dispatch rejection", () =>
