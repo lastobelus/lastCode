@@ -1878,7 +1878,7 @@ it.effect("hides tools for links and refuses another environment while the beta 
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
-it.effect("lists pull request watch tools to ordinary threads and attributed children", () =>
+it.effect("lists watch tools to app-owned children before native tool-call metadata exists", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const scopeFor = (
@@ -1906,10 +1906,7 @@ it.effect("lists pull request watch tools to ordinary threads and attributed chi
             ...scopeFor("ownedChildToken", true),
             thread: {
               ...scopeFor("ownedChildToken", true).thread,
-              execution: {
-                runId: RunId.make("owned-child-run"),
-                attemptId: RunAttemptId.make("owned-child-attempt"),
-              },
+              appOwnedSubagent: true,
             },
           },
         ],

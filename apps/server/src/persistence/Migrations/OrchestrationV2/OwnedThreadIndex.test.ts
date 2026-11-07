@@ -19,6 +19,7 @@ it.effect("upgrades existing v2 databases and indexes every step of owned-thread
       [16, "OrchestrationV2CommandHistoryIndex"],
       [17, "OrchestrationV2ThreadReadAuthorizationIndex"],
       [18, "OrchestrationV2InteractiveThreadParentIndex"],
+      [19, "OrchestrationV2PullRequestWatchIndex"],
     ]);
     assert.deepEqual(yield* runDatabaseMigrations(), []);
     const plan = yield* sql<{ readonly detail: string }>`

@@ -514,15 +514,27 @@ export const layerWithOptions = (
                 >(["orchestration", "worktree", "pull-requests"]);
                 if (browserToolsAvailable) capabilities.add("preview");
                 if (deviceToolsAvailable) capabilities.add("device");
-                const subagent = yield* projectionStore.getThread(threadId).pipe(
-                  Effect.map(
-                    (thread) =>
-                      thread.lineage.independent !== true &&
-                      (thread.lineage.relationshipToParent === "subagent" ||
-                        (thread.remoteDelegations?.length ?? 0) > 0),
-                  ),
-                  Effect.orElseSucceed(() => false),
-                );
+                const { subagent, appOwnedSubagent } = yield* projectionStore
+                  .getThread(threadId)
+                  .pipe(
+                    Effect.map((thread) => {
+                      const subagent =
+                        thread.lineage.independent !== true &&
+                        (thread.lineage.relationshipToParent === "subagent" ||
+                          (thread.remoteDelegations?.length ?? 0) > 0);
+                      return {
+                        subagent,
+                        appOwnedSubagent:
+                          subagent &&
+                          ((thread.lineage.relationshipToParent === "subagent" &&
+                            thread.lineage.parentThreadId !== null &&
+                            thread.forkedFrom?.type === "node") ||
+                            (thread.remoteDelegations?.some((entry) => entry.stage === "active") ??
+                              false)),
+                      };
+                    }),
+                    Effect.orElseSucceed(() => ({ subagent: false, appOwnedSubagent: false })),
+                  );
                 const existing = yield* mcpSessions.read(threadId);
                 if (existing !== undefined) {
                   // Reserve before async validation so release cannot revoke between validation and reservation.
@@ -545,7 +557,8 @@ export const layerWithOptions = (
                     resolved.capabilities.has("preview") === browserToolsAvailable &&
                     resolved.capabilities.has("device") === deviceToolsAvailable &&
                     // A credential issued while the lineage read failed is replaced once it works.
-                    (resolved.thread.subagent === true) === subagent
+                    (resolved.thread.subagent === true) === subagent &&
+                    (resolved.thread.appOwnedSubagent === true) === appOwnedSubagent
                   ) {
                     return { mcpCredentialId: existing.providerSessionId, issued: false };
                   }
@@ -558,6 +571,7 @@ export const layerWithOptions = (
                   browserToolsAvailable,
                   capabilities,
                   subagent,
+                  appOwnedSubagent,
                 });
                 yield* mcpSessions.set(credential.config);
                 reserveMcpCredential(threadId, credential.config.providerSessionId);
