@@ -10,8 +10,9 @@ import {
   type DesktopUpdatePopoverHeader,
   getDesktopUpdatePopoverHeader,
   getDesktopUpdateReleaseHistoryUrl,
-  getDesktopUpdateReleaseUrl,
+  getDesktopUpdateReleaseNoteUrl,
 } from "../desktopUpdate.logic";
+import { useRelativeTimeState } from "../../hooks/useRelativeTimeState";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { openDesktopUpdateReleaseNotes } from "../desktopUpdate.toast";
 
@@ -81,15 +82,37 @@ function ReleaseLink({
   );
 }
 
+/** When this offer was last confirmed, and why a later refresh failed while it stayed usable. */
+export function SidebarUpdateFreshness({ state }: { readonly state: DesktopUpdateState }) {
+  const checked = useRelativeTimeState(state.checkSucceededAt ?? null);
+  if (state.checkSucceededAt === undefined && state.refreshFailure === undefined) return null;
+  return (
+    <>
+      <div className="mt-0.5 text-2xs leading-4 text-muted-foreground">
+        {checked.status === "relative"
+          ? `Checked ${checked.suffix ? `${checked.value} ${checked.suffix}` : checked.value}`
+          : "Not checked since launch"}
+      </div>
+      {state.refreshFailure ? (
+        <div className="mt-0.5 break-words text-2xs leading-4 text-warning">
+          Latest check failed: {state.refreshFailure}
+        </div>
+      ) : null}
+    </>
+  );
+}
+
 /** The app's target, readiness, and the run's other updates; shared by every update popover. */
 function SidebarUpdateHeader({
   alsoUpdates,
   header,
   releasedAt,
+  state,
 }: {
   readonly alsoUpdates: string | null;
   readonly header: DesktopUpdatePopoverHeader;
   readonly releasedAt?: string | undefined;
+  readonly state: DesktopUpdateState;
 }) {
   // A shortened title still needs the full version; a full one only needs the release age.
   const fullVersionInTitle = header.title.endsWith(header.targetVersion);
@@ -108,6 +131,7 @@ function SidebarUpdateHeader({
           {versionDetail}
         </div>
       ) : null}
+      <SidebarUpdateFreshness state={state} />
       {alsoUpdates ? (
         <div className="mt-1.5 text-xs leading-4 text-muted-foreground">Also: {alsoUpdates}</div>
       ) : null}
@@ -139,7 +163,12 @@ export function SidebarUpdateReleaseNotes({
     <div className="flex max-h-[calc(var(--available-height)-0.5rem)] min-h-0 w-fit max-w-[min(24rem,calc(100vw-2rem))] flex-col text-left text-pretty">
       <div className="shrink-0 px-1">
         {header ? (
-          <SidebarUpdateHeader alsoUpdates={alsoUpdates} header={header} releasedAt={releasedAt} />
+          <SidebarUpdateHeader
+            alsoUpdates={alsoUpdates}
+            header={header}
+            releasedAt={releasedAt}
+            state={state}
+          />
         ) : (
           <div className="text-sm leading-5 font-medium">{tooltip}</div>
         )}
@@ -147,7 +176,7 @@ export function SidebarUpdateReleaseNotes({
       {state.releaseNotes.length > 0 ? (
         <div className="min-h-0 max-h-[min(28rem,calc(100vh-6rem))] overflow-y-auto px-1 pt-3 pb-1">
           {keyReleaseNoteGroups(state.releaseNotes).map(({ releaseNote, key }, index) => {
-            const releaseUrl = getDesktopUpdateReleaseUrl(releaseNote.version);
+            const releaseUrl = getDesktopUpdateReleaseNoteUrl(releaseNote);
             const omittedItemCount = Math.max(0, releaseNote.totalItems - releaseNote.items.length);
             const linkLabel =
               releaseNote.stats ??

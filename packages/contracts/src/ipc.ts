@@ -330,6 +330,10 @@ export interface DesktopUpdateState {
   errorContext: "check" | "download" | "install" | null;
   canRetry: boolean;
   notAppliedVersion?: string;
+  /** When a check last succeeded; `checkedAt` also advances on failed attempts. */
+  checkSucceededAt?: string;
+  /** Why the latest check failed while an earlier offer stayed usable; cleared by a successful check. */
+  refreshFailure?: string;
   /** Off only because a managed policy rules out this channel; switching channels turns it on. */
   channelBlockedByPolicy?: true;
 }
@@ -347,6 +351,8 @@ export interface DesktopUpdateReleaseNote {
   footer?: string;
   heading?: string;
   summaries?: ReadonlyArray<string>;
+  /** The release that published these changes: an exact tag in this app's repository, or upstream's `v<version>`. */
+  release?: { readonly tag: string } | { readonly upstream: true };
 }
 
 export const DesktopUpdateReleaseNoteSchema = Schema.Struct({
@@ -359,6 +365,12 @@ export const DesktopUpdateReleaseNoteSchema = Schema.Struct({
   footer: Schema.optionalKey(Schema.String),
   heading: Schema.optionalKey(Schema.String),
   summaries: Schema.optionalKey(Schema.Array(Schema.String)),
+  release: Schema.optionalKey(
+    Schema.Union([
+      Schema.Struct({ tag: Schema.String }),
+      Schema.Struct({ upstream: Schema.Literal(true) }),
+    ]),
+  ),
 });
 
 export const DesktopUpdateStateSchema = Schema.Struct({
@@ -382,6 +394,8 @@ export const DesktopUpdateStateSchema = Schema.Struct({
   errorContext: Schema.NullOr(Schema.Literals(["check", "download", "install"])),
   canRetry: Schema.Boolean,
   notAppliedVersion: Schema.optionalKey(Schema.String),
+  checkSucceededAt: Schema.optionalKey(Schema.String),
+  refreshFailure: Schema.optionalKey(Schema.String),
 });
 
 export const DesktopCliCommandStateSchema = Schema.Struct({

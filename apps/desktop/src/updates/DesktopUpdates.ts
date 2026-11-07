@@ -46,6 +46,7 @@ import { desktopUpdateChannelOf } from "@t3tools/shared/cliRelease";
 import { compareSemverVersions } from "@t3tools/shared/semver";
 import {
   createInitialDesktopUpdateState,
+  recordSuccessfulDesktopUpdateCheck,
   reduceDesktopUpdateStateOnCheckFailure,
   reduceDesktopUpdateStateOnCheckStart,
   reduceDesktopUpdateStateOnDownloadComplete,
@@ -111,6 +112,7 @@ export function mapLastCodeLocalReleaseNotes(
     groups.push({
       version: inspection.availableVersion,
       heading: "LastCode changes",
+      release: { tag: inspection.checkpointTag },
       items: [],
       totalItems: 0,
       summaries: ["Couldn’t determine changes from this installed build."],
@@ -119,6 +121,7 @@ export function mapLastCodeLocalReleaseNotes(
     groups.push({
       version: inspection.availableVersion,
       heading: "LastCode changes",
+      release: { tag: inspection.checkpointTag },
       items: lastCode.items,
       totalItems: lastCode.items.length + lastCode.omittedItems,
       ...(lastCode.omittedItems > 0
@@ -135,6 +138,7 @@ export function mapLastCodeLocalReleaseNotes(
     (group): DesktopUpdateReleaseNote => ({
       version: group.version,
       heading: group.isTarget ? "Upstream changes" : `Upstream changes in ${group.version}`,
+      release: { upstream: true },
       items: group.items,
       totalItems: group.items.length + group.omittedItems,
       ...(group.omittedItems > 0
@@ -712,8 +716,10 @@ export const make = Effect.gen(function* () {
                   errorContext: null,
                   canRetry: false,
                 }
-              : { ...state, checkedAt };
-          return setState(applyRequest(pending)).pipe(Effect.as(result));
+              : state;
+          return setState(
+            applyRequest(recordSuccessfulDesktopUpdateCheck(pending, checkedAt)),
+          ).pipe(Effect.as(result));
         }
         if (inspection.status === "up-to-date") {
           return Ref.set(localCheckpointTagRef, Option.none()).pipe(
@@ -734,7 +740,9 @@ export const make = Effect.gen(function* () {
           state.availableVersion === inspection.availableVersion &&
           (state.errorContext === "install" || !build)
         ) {
-          return setState({ ...state, checkedAt }).pipe(Effect.as(result));
+          return setState(recordSuccessfulDesktopUpdateCheck(state, checkedAt)).pipe(
+            Effect.as(result),
+          );
         }
         const releaseNotes = mapLastCodeLocalReleaseNotes(inspection);
         const available = reduceDesktopUpdateStateOnUpdateAvailable(
@@ -771,7 +779,7 @@ export const make = Effect.gen(function* () {
             state.status === "available" ||
               state.downloadedVersion !== null ||
               (state.status === "error" && state.errorContext === "download" && state.canRetry)
-              ? { ...state, checkedAt }
+              ? { ...state, checkedAt, refreshFailure: error.message }
               : reduceDesktopUpdateStateOnCheckFailure(state, error.message, checkedAt),
           ).pipe(Effect.as({ checked: true, checkpointRequested: false, error: error.message })),
       }),
