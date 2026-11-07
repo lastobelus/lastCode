@@ -1213,7 +1213,7 @@ describe("PreviewManager", () => {
         yield* Effect.yieldNow;
         expect(guest.attach).toHaveBeenCalledTimes(1);
 
-        yield* TestClock.adjust(Duration.seconds(5));
+        yield* TestClock.adjust(Duration.seconds(30));
         yield* Effect.yieldNow;
         expect(guest.detach).toHaveBeenCalledTimes(1);
         // The session map's lock is free again, so closing the tab completes.

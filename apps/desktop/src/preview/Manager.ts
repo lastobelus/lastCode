@@ -136,7 +136,8 @@ const CAPTURE_PAGE_RETRY_ATTEMPTS = 3;
 const CAPTURE_PAGE_RETRY_DELAY_MS = 120;
 const CAPTURE_PAGE_ATTEMPT_TIMEOUT_MS = 1_000;
 // Opening a session holds the session map's lock; a closing guest can leave CDP unanswered.
-const CONTROL_SESSION_INIT_TIMEOUT_MS = 5_000;
+// Giving up costs one guest its automation session; never giving up blocked every tab.
+const CONTROL_SESSION_INIT_TIMEOUT_MS = 30_000;
 const PICTURE_IN_PICTURE_INITIAL_WIDTH = 480;
 const PICTURE_IN_PICTURE_INITIAL_HEIGHT = 320;
 const PICTURE_IN_PICTURE_MIN_WIDTH = 240;
