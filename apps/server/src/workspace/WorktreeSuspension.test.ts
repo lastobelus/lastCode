@@ -358,7 +358,10 @@ const harness = (
             get: (id) => Effect.succeed(id === projectId ? Option.some(project) : Option.none()),
             list: () =>
               Effect.gen(function* () {
-                if (registerWhenIsolated !== null && !(yield* fs.exists(fixture.workspace))) {
+                if (
+                  registerWhenIsolated !== null &&
+                  !(yield* fs.exists(fixture.workspace).pipe(Effect.orDie))
+                ) {
                   projects.push({
                     ...project,
                     projectId: ProjectId.make("fixture:registered"),

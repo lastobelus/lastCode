@@ -4,9 +4,15 @@ import * as NodePath from "@effect/platform-node/NodePath";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 
 const projectRoots = Semaphore.makeUnsafe(1);
+
+class ProjectRootResolutionError extends Schema.TaggedError<ProjectRootResolutionError>()(
+  "ProjectRootResolutionError",
+  {},
+) {}
 
 /** Serialize project-root claims with the final isolation and removal of a workspace. */
 export const withProjectRootLease = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
@@ -38,13 +44,12 @@ export const canonicalProjectRoot = Effect.fn("canonicalProjectRoot")(
         ),
       );
       if (link !== null) {
-        if (++links > 40) return yield* Effect.fail(new Error("Project root cannot be verified."));
+        if (++links > 40) return yield* new ProjectRootResolutionError();
         candidate = path.resolve(path.dirname(candidate), link);
         continue;
       }
       const parent = path.dirname(candidate);
-      if (parent === candidate)
-        return yield* Effect.fail(new Error("Project root cannot be verified."));
+      if (parent === candidate) return yield* new ProjectRootResolutionError();
       missing.unshift(path.basename(candidate));
       candidate = parent;
     }
