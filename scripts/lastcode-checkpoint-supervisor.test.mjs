@@ -27,6 +27,7 @@ import {
   runCheckpointSupervisorEntrypoint,
   selectPrimaryWorktree,
   supervisorPaths,
+  writeIncidentRecord,
 } from "./lastcode-checkpoint-supervisor.mjs";
 import { refreshPrimaryCheckoutTransaction } from "./lastcode-primary-checkout-transaction.mjs";
 
@@ -54,6 +55,7 @@ function fixture(overrides = {}) {
     runPhase: vi.fn(),
     sendThread: (threadId, message) => messages.push({ message, threadId }),
     writeActivity: (activity) => activities.push(activity),
+    writeIncidentRecord: () => undefined,
     writeState: (next) => {
       state = next;
       states.push(next);
@@ -1289,6 +1291,84 @@ describe("LastCode checkpoint supervisor", () => {
       );
     } finally {
       NodeFS.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    { recorded: true, expected: "Failure record: /example/incidents/record.json." },
+    { recorded: false, expected: "Diagnostic: CONFLICT (content): Merge conflict" },
+  ])(
+    "names the incident record instead of inlining output (written: $recorded)",
+    ({ recorded, expected }) => {
+      using _warning = vi.spyOn(console, "error").mockImplementation(() => {});
+      const records = [];
+      let historyReads = 0;
+      const test = fixture({
+        dependencies: {
+          latestFailedCheckpointRun: () =>
+            historyReads++ === 0
+              ? null
+              : {
+                  status: "failed",
+                  upstreamTag: "nightly-1",
+                  failurePhase: "rebase",
+                  recoveryBranch: "sync/nightly/nightly-1",
+                  error: "CONFLICT (content): Merge conflict",
+                },
+          runPhase: (phase) => {
+            if (phase === "checkpoint") throw new Error("node failed with exit code 1.");
+          },
+          writeIncidentRecord: (incident) => {
+            if (!recorded) throw new Error("incidents directory is read-only");
+            records.push(incident);
+            return "/example/incidents/record.json";
+          },
+        },
+      });
+
+      expect(() => runCheckpointSupervisor({}, test.dependencies)).toThrow(
+        "node failed with exit code 1.",
+      );
+
+      expect(records.map((incident) => incident.fingerprint)).toEqual(
+        recorded ? [test.state.incident.fingerprint] : [],
+      );
+      expect(test.messages[0].message).toContain(expected);
+      expect(test.messages[0].message.includes("CONFLICT")).toBe(!recorded);
+    },
+  );
+
+  it("writes a private incident record and prunes records older than two weeks", () => {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "incident-records-"));
+    try {
+      const nowMs = Date.UTC(2026, 10, 7);
+      const stale = NodePath.join(directory, "stale.json");
+      const recent = NodePath.join(directory, "recent.json");
+      NodeFS.writeFileSync(stale, "{}");
+      NodeFS.writeFileSync(recent, "{}");
+      NodeFS.utimesSync(
+        stale,
+        new Date(nowMs - 15 * 86_400_000),
+        new Date(nowMs - 15 * 86_400_000),
+      );
+      NodeFS.utimesSync(recent, new Date(nowMs - 86_400_000), new Date(nowMs - 86_400_000));
+      const incident = {
+        fingerprint: "abc123",
+        openedAt: "2026-11-07T09:01:04.937Z",
+        failure: { phase: "checkpoint", diagnostic: "CONFLICT (content): Merge conflict" },
+      };
+
+      const recordPath = writeIncidentRecord(directory, incident, nowMs);
+
+      expect(recordPath).toBe(NodePath.join(directory, "abc123.json"));
+      expect(JSON.parse(NodeFS.readFileSync(recordPath, "utf8"))).toEqual({
+        schemaVersion: 1,
+        ...incident,
+      });
+      expect(NodeFS.statSync(recordPath).mode & 0o777).toBe(0o600);
+      expect(NodeFS.readdirSync(directory).sort()).toEqual(["abc123.json", "recent.json"]);
+    } finally {
+      NodeFS.rmSync(directory, { recursive: true, force: true });
     }
   });
 
