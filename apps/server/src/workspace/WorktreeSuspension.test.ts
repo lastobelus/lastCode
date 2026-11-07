@@ -2660,6 +2660,46 @@ it.live(
     ),
 );
 
+it.live("retains a staged restore claimed by another project after interruption", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f);
+      const saved = yield* h.suspend;
+      const id = saved.summary.snapshotId!;
+      const staged = yield* Effect.promise(() =>
+        h.store.stageRestore(id, { destinationPath: f.workspace }),
+      );
+      const summary = { ...saved.summary, state: "restoring" as const };
+      yield* h.registry.put(
+        {
+          ...saved,
+          summary,
+          operation: {
+            id: "fixture:restore",
+            kind: "restore",
+            snapshotIds: [id],
+            manual: true,
+            acceptedAt: DateTime.formatIso(at),
+            destinationPath: f.workspace,
+          },
+        },
+        saved,
+      );
+      for (const [key, thread] of h.threads)
+        h.threads.set(key, { ...thread, worktreeSuspension: summary });
+      h.registerProjectRoot(staged.restorePath!);
+      yield* h.service.sweep;
+      expect((yield* h.registry.list)[0]!.operation?.kind).toBe("restore");
+      expect((yield* Effect.promise(() => h.store.readJournal(id))).phase).toBe("restoring");
+      expect(
+        yield* Effect.promise(() =>
+          NodeFSP.readFile(NodePath.join(staged.restorePath!, "tracked"), "utf8"),
+        ),
+      ).toBe("working\n");
+    }),
+  ),
+);
+
 it.live("read-only discovery does not fabricate a workspace-use clock", () =>
   realGit((f) =>
     Effect.gen(function* () {
@@ -2945,6 +2985,35 @@ it.live("allows workspace use while suspension is off if Git metadata is unavail
       expect(
         yield* h.acquisition.acquire({ path: f.workspace, purpose: "editor", threadId: firstId }),
       ).toMatchObject({ path: f.workspace, restored: false });
+    }),
+  ),
+);
+
+it.live("remembers unverified workspace use across restart and later Git repair", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const off = { ...automaticSettings, worktreeSuspension: { mode: "off" as const } };
+      const h = yield* harness(f, { cleanupThreads: true, settings: off });
+      untouchedOwners(h.threads);
+      for (const [id, owner] of h.threads)
+        h.threads.set(id, { ...owner, archivedAt: at, settledAt: null });
+      const gitPointer = yield* Effect.promise(() =>
+        NodeFSP.readFile(NodePath.join(f.workspace, ".git"), "utf8"),
+      );
+      yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(f.workspace, ".git"), "broken"));
+      yield* h.acquisition.acquire({ path: f.workspace, purpose: "editor", threadId: firstId });
+      expect(yield* h.registry.list).toEqual([]);
+      yield* Effect.promise(() =>
+        NodeFSP.writeFile(NodePath.join(f.workspace, ".git"), gitPointer),
+      );
+      const restarted = yield* harness(f, { cleanupThreads: true, settings: automaticSettings });
+      untouchedOwners(restarted.threads);
+      for (const [id, owner] of restarted.threads)
+        restarted.threads.set(id, { ...owner, archivedAt: at, settledAt: null });
+      yield* restarted.service.sweep;
+      const record = (yield* restarted.registry.list)[0]!;
+      expect(record.summary.state).toBe("active");
+      expect(record.lastWorkspaceUseAt).toBeDefined();
     }),
   ),
 );

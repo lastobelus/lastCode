@@ -37,7 +37,13 @@ it.effect("persists authority privately and rejects a stale generation write", (
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     assert.deepStrictEqual(yield* registry.list, []);
+    yield* registry.recordUnverifiedUse("/managed/feature", "2026-01-02T00:00:00.000Z");
+    yield* registry.recordUnverifiedUse("/managed/feature", "2026-01-01T00:00:00.000Z");
     yield* registry.put(record, null);
+    assert.strictEqual(
+      yield* registry.unverifiedUse(["/managed/feature"]),
+      "2026-01-02T00:00:00.000Z",
+    );
     const restored = yield* registry.list;
     assert.deepStrictEqual(restored, [record]);
     yield* registry.dependenciesRemoved("/managed/feature");
@@ -92,6 +98,8 @@ it.effect("persists authority privately and rejects a stale generation write", (
     );
     yield* registry.dependenciesRemoved("/managed/feature");
     assert.deepStrictEqual(yield* registry.list, [legacy]);
+    yield* registry.put({ ...legacy, lastWorkspaceUseAt: "2026-01-02T00:00:00.000Z" }, legacy);
+    assert.isNull(yield* registry.unverifiedUse(["/managed/feature"]));
   }).pipe(Effect.provide(layer)),
 );
 
