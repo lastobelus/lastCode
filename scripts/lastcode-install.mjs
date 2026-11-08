@@ -376,6 +376,26 @@ export function temporaryAppPaths(targetPath, processId = process.pid) {
   };
 }
 
+/**
+ * Installs hold the install lock from preparation through the swap, so another process's temporary
+ * bundles are leftovers from an install that died mid-swap. Restores a missing app from the newest
+ * backup, then removes the rest.
+ */
+export function recoverInterruptedSwap(targetPath) {
+  const parent = NodePath.dirname(targetPath);
+  const leftovers = NodeFS.readdirSync(parent)
+    .filter((name) => /^\.LastCode\.(?:previous|install)-\d+\.app$/.test(name))
+    .map((name) => NodePath.join(parent, name));
+  const newestBackup = leftovers
+    .filter((path) => NodePath.basename(path).startsWith(".LastCode.previous-"))
+    .toSorted((left, right) => NodeFS.statSync(right).mtimeMs - NodeFS.statSync(left).mtimeMs)[0];
+  if (newestBackup !== undefined && !NodeFS.existsSync(targetPath)) {
+    NodeFS.renameSync(newestBackup, targetPath);
+    console.log(`Restored ${targetPath} left aside by an interrupted install.`);
+  }
+  for (const path of leftovers) NodeFS.rmSync(path, { force: true, recursive: true });
+}
+
 export function acquireInstallLock(lockDirectory) {
   return acquirePortableLock(lockDirectory, INSTALL_LOCK_NAME, "install");
 }
@@ -652,6 +672,7 @@ export async function prepareDmgInstall(dmgPath, options = {}) {
   );
   let prepared;
   try {
+    recoverInterruptedSwap(targetPath);
     const mountPoint = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-install-"));
     const { backup, staging } = temporaryAppPaths(targetPath);
     prepared = {
