@@ -445,7 +445,12 @@ it("gates the completed replay's conflict files without repeating the broader CI
   project.git("commit", "-m", "completed replay");
   const files = "node_modules/recovery-files.txt";
   project.write(files, `${project.source}\npackages/example/package.json\n${project.source}\n`);
-  const rejected = project.run("lint", ["--checkpoint-recovery-files", files, "--baseline", "HEAD^"]);
+  const rejected = project.run("lint", [
+    "--checkpoint-recovery-files",
+    files,
+    "--baseline",
+    "HEAD^",
+  ]);
   expect(rejected.status, rejected.stdout + rejected.stderr).toBe(1);
   expect(rejected.stdout).toContain("FAIL  lint");
   expect(
@@ -657,7 +662,9 @@ it.each([
       expect(
         project.calls().some(({ args }) => args.includes("typecheck") && args.includes("example")),
       ).toBe(true);
-      expect(project.calls().some(({ args }) => args[0] === "fmt" || args[0] === "lint")).toBe(false);
+      expect(project.calls().some(({ args }) => args[0] === "fmt" || args[0] === "lint")).toBe(
+        false,
+      );
     }
   },
 );
