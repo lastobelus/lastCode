@@ -4,7 +4,7 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { assertSupportedNodeVersion } from "./lastcode-local-ci.ts";
+import { assertSupportedNodeVersion, FULL_CI_ANCHOR_WORKSPACES } from "./lastcode-local-ci.ts";
 
 const NIGHTLY_A = "v9.9.9-nightly.20990101.1";
 const NIGHTLY_B = "v9.9.9-nightly.20990102.2";
@@ -113,6 +113,14 @@ if [ "$1" = install ] && [ -n "$FIXTURE_MOVED_NIGHTLY" ]; then
 fi
 if [ -n "$FIXTURE_UNPUBLISHED_TAG" ] && git show-ref --verify --quiet "refs/tags/$FIXTURE_UNPUBLISHED_TAG"; then echo 'candidate tag was published before validation'; exit 74; fi
 if [ -n "$FIXTURE_CI_EVENTS" ]; then printf 'vp %s\\n' "$*" >> "$FIXTURE_CI_EVENTS"; fi
+if [ "$#" -eq 1 ] && [ "$1" = run ]; then
+  cat <<'TASKS'
+${[...FULL_CI_ANCHOR_WORKSPACES, "@fixture/early", "@fixture/later"]
+  .flatMap((name) => ["typecheck", "test"].map((task) => `  ${name}#${task}: fixture`))
+  .join("\n")}
+TASKS
+  exit 0
+fi
 if [ "$1" = check ] && [ -f "$FIXTURE_CI_FAILURES/lint" ]; then echo 'fixture lint failure'; exit 71; fi
 if [ "$1" = run ] && [ "$2" = -r ] && [ "$5" = typecheck ] && [ -f "$FIXTURE_CI_FAILURES/typecheck" ]; then echo 'fixture smoke typecheck failure'; exit 72; fi
 if [ "$1" = run ] && [ "$2" = --filter ] && [ "$3" = @fixture/early ] && [ "$7" = typecheck ] && [ -f "$FIXTURE_CI_FAILURES/typecheck" ]; then echo 'fixture early typecheck failure'; exit 72; fi
@@ -176,6 +184,16 @@ function initFixture(): Fixture {
     NodeFS.copyFileSync(NodePath.join(taskRoot, path), target);
   }
   write(repo, "pnpm-workspace.yaml", "packages:\n  - fixtures/*\n");
+  for (const [index, name] of FULL_CI_ANCHOR_WORKSPACES.entries()) {
+    write(
+      repo,
+      `fixtures/anchor-${index}/package.json`,
+      JSON.stringify({
+        name,
+        scripts: { typecheck: "fixture", test: "fixture" },
+      }),
+    );
+  }
   for (const name of ["early", "later"]) {
     write(
       repo,

@@ -422,40 +422,76 @@ interface WorkspaceCiTask {
   readonly task: "typecheck" | "test";
 }
 
+// These release-critical workspaces must retain both checks even if discovery drops a task.
+export const FULL_CI_ANCHOR_WORKSPACES = ["t3", "@t3tools/web", "@t3tools/desktop"] as const;
+
+const ROOT_CI_WRAPPERS: Readonly<Record<string, string>> = {
+  typecheck: "vp run -r --cache --concurrency-limit 4 typecheck",
+  test: "vp run -r test",
+};
+
 function readWorkspaceCiTasks(
   repoRoot: string,
-  workspaceNames: ReadonlySet<string>,
+  workspaceNames: ReadonlyMap<string, ReadonlySet<string>>,
 ): WorkspaceCiTask[] {
-  // Vite+ 1.4 lists the resolved graph for bare `vp run` with non-TTY input.
-  // It includes run.tasks from Vite config as well as package.json scripts.
-  const listing = NodeChildProcess.execFileSync("vp", ["run"], {
-    cwd: repoRoot,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-    env: {
-      ...process.env,
-      PATH: [NodePath.join(repoRoot, "node_modules/.bin"), process.env.PATH ?? ""].join(
-        NodePath.delimiter,
-      ),
-      NO_COLOR: "1",
-      FORCE_COLOR: "0",
-    },
-    maxBuffer: 8 * 1024 * 1024,
-  });
+  // Bare non-TTY `vp run` uses an undocumented format verified with Vite+ 1.4.0;
+  // re-check it on a Vite+ bump. It includes config tasks and package scripts.
+  let listing: string;
+  try {
+    listing = NodeChildProcess.execFileSync("vp", ["run"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        PATH: [NodePath.join(repoRoot, "node_modules/.bin"), process.env.PATH ?? ""].join(
+          NodePath.delimiter,
+        ),
+        NO_COLOR: "1",
+        FORCE_COLOR: "0",
+      },
+      maxBuffer: 8 * 1024 * 1024,
+    });
+  } catch (error) {
+    throw new Error(
+      `Full CI Vite+ task listing failed (Vite+ 1.4.0): ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+  return parseViteTaskListing(listing, workspaceNames);
+}
+
+export function parseViteTaskListing(
+  listing: string,
+  workspaceNames: ReadonlyMap<string, ReadonlySet<string>>,
+): WorkspaceCiTask[] {
   const tasks: WorkspaceCiTask[] = [];
   const seen = new Set<string>();
+  let hasTaskRow = false;
   for (const line of listing.split(/\r?\n/)) {
     if (!line.trim()) continue;
-    const match = /^ {2}(\S+):(?: |$)/.exec(line);
+    const match = /^ {2}(\S+):(?: (.*)|$)/.exec(line);
     if (!match) {
+      // Commands are printed raw, including unindented lines after a newline.
+      if (hasTaskRow && !line.startsWith("  ")) continue;
       throw new Error(
         "Full CI cannot read the Vite+ task listing; check the `vp run` output format.",
       );
     }
+    hasTaskRow = true;
     const specifier = match[1]!;
     const separator = specifier.indexOf("#");
-    // Tasks in the current (root) package are unqualified, including recursive wrappers.
-    if (separator < 0) continue;
+    if (separator < 0) {
+      if (
+        (specifier === "typecheck" || specifier === "test") &&
+        match[2] !== ROOT_CI_WRAPPERS[specifier]
+      ) {
+        throw new Error(
+          `Full CI found an unsupported root ${specifier} task; collect it explicitly.`,
+        );
+      }
+      continue;
+    }
     const packageName = specifier.slice(0, separator);
     const task = specifier.slice(separator + 1);
     if (task !== "typecheck" && task !== "test") continue;
@@ -467,6 +503,26 @@ function readWorkspaceCiTasks(
   }
   if (!tasks.length)
     throw new Error("Full CI found no workspace typecheck or test tasks in Vite+.");
+  for (const task of ["typecheck", "test"] as const) {
+    if (!tasks.some((entry) => entry.task === task)) {
+      throw new Error(`Full CI Vite+ task listing has no workspace ${task} tasks.`);
+    }
+  }
+  // Manifest scripts are independently known tasks; anchors also cover config-only tasks.
+  for (const [name, scripts] of workspaceNames) {
+    for (const task of ["typecheck", "test"] as const) {
+      if (scripts.has(task) && !seen.has(`${name}#${task}`)) {
+        throw new Error(`Full CI Vite+ task listing is missing ${name}#${task}.`);
+      }
+    }
+  }
+  for (const name of FULL_CI_ANCHOR_WORKSPACES) {
+    for (const task of ["typecheck", "test"] as const) {
+      if (!seen.has(`${name}#${task}`)) {
+        throw new Error(`Full CI Vite+ task listing is missing required ${name}#${task}.`);
+      }
+    }
+  }
   return tasks;
 }
 
@@ -496,25 +552,36 @@ export function resolveCollectedCiSteps(
       return { name: manifest.name, scripts: manifest.scripts };
     });
   if (workspaces.length === 0) throw new Error("Full CI found no workspace packages.");
-  const names = new Set<string>();
+  const names = new Map<string, ReadonlySet<string>>();
   for (const manifest of workspaces) {
     if (typeof manifest.name !== "string" || names.has(manifest.name)) {
       throw new Error("Full CI requires uniquely named workspaces.");
     }
-    names.add(manifest.name);
+    names.set(
+      manifest.name,
+      new Set(
+        Object.entries(manifest.scripts ?? {})
+          .filter(([, command]) => typeof command === "string")
+          .map(([task]) => task),
+      ),
+    );
   }
   const tasks = readWorkspaceCiTasks(repoRoot, names);
-  // Manifest scripts are also graph tasks. Reject a truncated or changed listing
-  // instead of treating it as evidence that those checks no longer exist.
   const listed = new Set(tasks.map(({ packageName, task }) => `${packageName}#${task}`));
-  for (const manifest of workspaces) {
-    for (const task of ["typecheck", "test"] as const) {
-      if (typeof manifest.scripts?.[task] === "string" && !listed.has(`${manifest.name}#${task}`)) {
-        throw new Error(`Full CI Vite+ task listing is missing ${manifest.name}#${task}.`);
-      }
-    }
+  const uncovered = tasks.filter(
+    ({ task }) =>
+      !steps.some(
+        (step) =>
+          step.kind === "command" &&
+          step.label === (task === "test" ? "Workspace tests" : "Workspace typecheck"),
+      ),
+  );
+  if (uncovered.length) {
+    throw new Error(
+      `Full CI task coverage is incomplete: ${uncovered.map(({ packageName, task }) => `${packageName}#${task}`).join(", ")}.`,
+    );
   }
-  const collected = steps.flatMap((step): LocalCiStep[] => {
+  return steps.flatMap((step): LocalCiStep[] => {
     const task =
       step.label === "Workspace tests"
         ? "test"
@@ -526,6 +593,7 @@ export function resolveCollectedCiSteps(
       .filter((manifest) => listed.has(`${manifest.name}#${task}`))
       .map((manifest) => ({
         ...step,
+        command: "vp",
         label: `${step.label} (${manifest.name})`,
         args: [
           "run",
@@ -542,29 +610,6 @@ export function resolveCollectedCiSteps(
           : {}),
       }));
   });
-  const uncovered = tasks.filter(
-    ({ packageName, task }) =>
-      !collected.some(
-        (step) =>
-          step.kind === "command" &&
-          step.command === "vp" &&
-          [
-            "run",
-            "--filter",
-            packageName,
-            "--fail-if-no-match",
-            "--concurrency-limit",
-            "1",
-            task,
-          ].every((arg, index) => step.args[index] === arg),
-      ),
-  );
-  if (uncovered.length) {
-    throw new Error(
-      `Full CI task coverage is incomplete: ${uncovered.map(({ packageName, task }) => `${packageName}#${task}`).join(", ")}.`,
-    );
-  }
-  return collected;
 }
 
 export function verifyPreloadBundle(repoRoot: string): void {

@@ -15,10 +15,12 @@ import {
   captureRepositoryIntegrity,
   formatLocalCiFailureSummary,
   formatLocalCiSummary,
+  FULL_CI_ANCHOR_WORKSPACES,
   hasPrePushBranchCommit,
   hasMatchingQuickCiReceipt,
   parsePrePushUpdates,
   parseLocalCiOptions,
+  parseViteTaskListing,
   prepareLocalCiRepository,
   QUICK_CI_GATE_VERSION,
   readFullCiStamp,
@@ -63,6 +65,83 @@ function createIntegrityRepository(): string {
 }
 
 describe("lastcode-local-ci", () => {
+  describe("Vite+ task listing", () => {
+    const names = new Map([
+      ["t3", new Set(["typecheck", "test"])],
+      ["@t3tools/web", new Set(["typecheck", "test"])],
+      // Desktop's tasks are config-only, so manifest cross-checks cannot find them.
+      ["@t3tools/desktop", new Set<string>()],
+    ]);
+    const listing = [...names.keys()]
+      .flatMap((name) => ["typecheck", "test"].map((task) => `  ${name}#${task}: fixture\n`))
+      .join("");
+
+    it("accepts root wrappers and multiline command continuations", () => {
+      const text =
+        "  typecheck: vp run -r --cache --concurrency-limit 4 typecheck\n" +
+        "  test: vp run -r test\n" +
+        listing.replace("t3#test: fixture", "t3#test: echo first\necho second") +
+        "  t3#build: echo first\necho second\n";
+      expect(parseViteTaskListing(text, names)).toHaveLength(6);
+    });
+
+    it.each([
+      {
+        reason: "an unmatched first line",
+        text: `unrecognized format\n${listing}`,
+        error: "cannot read the Vite+ task listing",
+      },
+      {
+        reason: "an unknown package",
+        text: `${listing}  unknown#test: fixture\n`,
+        error: "unknown or duplicate",
+      },
+      {
+        reason: "a duplicate task",
+        text: `${listing}  t3#test: fixture\n`,
+        error: "unknown or duplicate",
+      },
+      { reason: "zero tasks", text: "", error: "found no workspace" },
+      {
+        reason: "a missing manifest task",
+        text: listing.replace("  t3#test: fixture\n", ""),
+        error: "missing t3#test",
+      },
+      {
+        reason: "a missing config-only desktop task",
+        text: listing.replace("  @t3tools/desktop#typecheck: fixture\n", ""),
+        error: "missing required @t3tools/desktop#typecheck",
+      },
+      {
+        reason: "no typecheck tasks",
+        names: new Map([...names.keys()].map((name) => [name, new Set(["check:types", "test"])])),
+        text: listing
+          .split("\n")
+          .filter((line) => !line.includes("#typecheck:"))
+          .join("\n"),
+        error: "no workspace typecheck tasks",
+      },
+      {
+        reason: "no test tasks",
+        names: new Map(
+          [...names.keys()].map((name) => [name, new Set(["typecheck", "test:unit"])]),
+        ),
+        text: listing
+          .split("\n")
+          .filter((line) => !line.includes("#test:"))
+          .join("\n"),
+        error: "no workspace test tasks",
+      },
+      {
+        reason: "a real root check",
+        text: `  typecheck: node check.cjs\n${listing}`,
+        error: "unsupported root typecheck task",
+      },
+    ])("rejects $reason", ({ text, error, names: expectedNames }) => {
+      expect(() => parseViteTaskListing(text, expectedNames ?? names)).toThrow(error);
+    });
+  });
+
   it("plans independent workspace checks without changing Quick CI", () => {
     const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-collection-plan-"));
     try {
@@ -81,13 +160,27 @@ describe("lastcode-local-ci", () => {
           name: "@fixture/root",
           private: true,
           packageManager,
-          scripts: { typecheck: "vp run -r typecheck", test: "vp run -r test" },
+          scripts: {
+            typecheck: "vp run -r --cache --concurrency-limit 4 typecheck",
+            test: "vp run -r test",
+          },
         }),
       );
       NodeFS.writeFileSync(
         NodePath.join(root, "pnpm-workspace.yaml"),
         "packages:\n  - packages/*\n",
       );
+      for (const [index, name] of FULL_CI_ANCHOR_WORKSPACES.entries()) {
+        const directory = NodePath.join(root, "packages", `anchor-${index}`);
+        NodeFS.mkdirSync(directory, { recursive: true });
+        NodeFS.writeFileSync(
+          NodePath.join(directory, "package.json"),
+          JSON.stringify({
+            name,
+            scripts: { typecheck: "fixture", test: "fixture" },
+          }),
+        );
+      }
       for (const name of ["first", "later", "config-only"]) {
         const directory = NodePath.join(root, "packages", name);
         NodeFS.mkdirSync(directory, { recursive: true });
@@ -105,13 +198,13 @@ describe("lastcode-local-ci", () => {
         NodePath.join(root, "packages/config-only/vite.config.ts"),
         `export default { run: { tasks: {
           typecheck: { command: "node check.cjs" },
-          test: { command: "node test.cjs" }
+          test: { command: "node test.cjs\\nnode second-test.cjs" }
         } } };`,
       );
       const steps = resolveCollectedCiSteps(root, resolveLocalCiSteps("full"));
       expect(
         steps
-          .filter(({ label }) => label.startsWith("Workspace tests ("))
+          .filter(({ label }) => label.startsWith("Workspace tests (@fixture/"))
           .map(({ label }) => label),
       ).toEqual([
         "Workspace tests (@fixture/config-only)",
@@ -168,6 +261,17 @@ describe("lastcode-local-ci", () => {
           ),
         ).toThrow(/Full CI task coverage is incomplete:.*@fixture\/config-only#/);
       }
+      NodeFS.unlinkSync(NodePath.join(root, "node_modules"));
+      const bin = NodePath.join(root, "node_modules/.bin");
+      NodeFS.mkdirSync(bin, { recursive: true });
+      NodeFS.writeFileSync(
+        NodePath.join(bin, "vp"),
+        "#!/bin/sh\necho fixture listing failure >&2\nexit 17\n",
+        { mode: 0o755 },
+      );
+      expect(() => resolveCollectedCiSteps(root, resolveLocalCiSteps("full"))).toThrow(
+        "Vite+ task listing failed (Vite+ 1.4.0)",
+      );
     } finally {
       NodeFS.rmSync(root, { recursive: true, force: true });
     }
