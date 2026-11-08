@@ -1,8 +1,8 @@
 import type { DesktopBridge, DesktopUpdateState } from "@t3tools/contracts";
+import { LASTCODE_TRIAGE_CLI_COMMAND as TRIAGE_CLI_COMMAND } from "@t3tools/shared/desktopDistribution";
 
-const FALLBACK_TRIAGE_COMMAND = "npx t3 triage";
 const DOWNLOAD_URL = "https://t3.codes/download";
-const ISSUE_URL = "https://github.com/pingdotgg/t3code/issues/new";
+const ISSUE_URL = "https://github.com/lastobelus/lastCode/issues/new";
 const LAST_FAILURE_KEY = "t3code:boot-failed-at";
 const REPEAT_FAILURE_MS = 5 * 60_000;
 const MAX_CAUSES = 3;
@@ -23,7 +23,7 @@ function launcherCommand(launcherPath: string) {
     : `'${launcherPath.replaceAll("'", `'"'"'`)}'`;
 }
 
-/** Desktop can run its bundled launcher without Node; everything else falls back to npx. */
+/** Desktop can name its exact launcher; other clients use LastCode's default install. */
 export async function resolveTriageCommand(bridge: DesktopBridge | undefined) {
   try {
     const state = await bridge?.cliCommand.getState();
@@ -34,7 +34,7 @@ export async function resolveTriageCommand(bridge: DesktopBridge | undefined) {
   } catch (error) {
     console.warn("Could not read the desktop CLI state.", error);
   }
-  return FALLBACK_TRIAGE_COMMAND;
+  return TRIAGE_CLI_COMMAND;
 }
 
 /** The update button only appears when the desktop updater has a newer build to offer. */
@@ -293,7 +293,7 @@ export function showBootError(error: unknown) {
   const updateNote = element("p", { id: "boot-error-update-note", hidden: true });
   if (bridge) mountUpdateButton(bridge, update, updateNote, announce);
 
-  const command = element("code", { textContent: FALLBACK_TRIAGE_COMMAND });
+  const command = element("code", { textContent: TRIAGE_CLI_COMMAND });
   const copyCommand = element("button", {
     className: "boot-error-icon",
     type: "button",

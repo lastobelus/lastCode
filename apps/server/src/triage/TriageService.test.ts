@@ -16,25 +16,36 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as TriageService from "./TriageService.ts";
 import { pickSourceRef } from "./TriageService.ts";
 
-const MAIN = "a1dc856ee61278d0199c36d4bcdef5fdea4d21fe\trefs/heads/main";
+const MAIN = "a1dc856ee61278d0199c36d4bcdef5fdea4d21fe\trefs/heads/lastcode/main";
 
-it("clones the server's release tag, peeling annotated tags to their commit", () => {
-  assert.deepEqual(pickSourceRef(`${MAIN}\n7027b1f\trefs/tags/v0.1.1\n`, "0.1.1"), {
-    ref: "v0.1.1",
-    commit: "7027b1f",
-  });
-  assert.deepEqual(
-    pickSourceRef(`${MAIN}\n1111111\trefs/tags/v0.1.1\n2222222\trefs/tags/v0.1.1^{}\n`, "0.1.1"),
-    { ref: "v0.1.1", commit: "2222222" },
-  );
+it("clones the server's LastCode tag, peeling annotated tags to their commit", () => {
+  for (const [version, tag] of [
+    ["1.2.3-nightly.20260101.7", "lastcode/checkpoint/v1.2.3-nightly.20260101.7"],
+    ["1.2.3-nightly.20260101.7.2", "lastcode/revision/v1.2.3-nightly.20260101.7.2"],
+  ] as const) {
+    const upstream = `9999999\trefs/tags/v${version}\n`;
+    assert.deepEqual(pickSourceRef(`${MAIN}\n${upstream}7027b1f\trefs/tags/${tag}\n`, version), {
+      ref: tag,
+      commit: "7027b1f",
+    });
+    assert.deepEqual(
+      pickSourceRef(
+        `${MAIN}\n${upstream}1111111\trefs/tags/${tag}\n2222222\trefs/tags/${tag}^{}\n`,
+        version,
+      ),
+      { ref: tag, commit: "2222222" },
+    );
+  }
 });
 
-it("falls back to main when the server's version has no tag", () => {
-  assert.deepEqual(pickSourceRef(`${MAIN}\n`, "0.1.2-dev"), {
-    ref: "main",
+it("falls back to lastcode/main when the server's version has no LastCode tag", () => {
+  const upstream = "9999999\trefs/heads/main\n8888888\trefs/tags/v0.1.1\n";
+  assert.deepEqual(pickSourceRef(`${MAIN}\n${upstream}`, "0.1.1"), {
+    ref: "lastcode/main",
     commit: "a1dc856ee61278d0199c36d4bcdef5fdea4d21fe",
   });
   assert.isUndefined(pickSourceRef("", "0.1.1"));
+  assert.isUndefined(pickSourceRef(upstream, "0.1.1"));
 });
 
 const TestLayer = GitVcsDriver.layer.pipe(
@@ -50,7 +61,7 @@ const makeTriage = (
   answer: (command: string) => Effect.Effect<string, GitCommandError> = (command) =>
     Effect.succeed(
       command === "ls-remote"
-        ? `${RELEASE_COMMIT}\trefs/tags/v${packageJson.version}\n`
+        ? `${RELEASE_COMMIT}\trefs/tags/lastcode/checkpoint/v${packageJson.version}\n`
         : command === "rev-parse"
           ? `${RELEASE_COMMIT}\n`
           : "",
@@ -96,7 +107,9 @@ it.effect("sessions started during a clone share it, and a release tag is looked
       command === "fetch"
         ? Queue.offer(fetches, undefined).pipe(Effect.andThen(Effect.never))
         : Effect.succeed(
-            command === "ls-remote" ? `${RELEASE_COMMIT}\trefs/tags/v${packageJson.version}\n` : "",
+            command === "ls-remote"
+              ? `${RELEASE_COMMIT}\trefs/tags/lastcode/checkpoint/v${packageJson.version}\n`
+              : "",
           ),
     );
 

@@ -4,6 +4,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentId } from "@t3tools/contracts";
+import { LASTCODE_TRIAGE_CLI_COMMAND as TRIAGE_CLI_COMMAND } from "@t3tools/shared/desktopDistribution";
 import { useNavigation } from "@react-navigation/native";
 import * as Clipboard from "expo-clipboard";
 import Constants from "expo-constants";
@@ -20,8 +21,6 @@ import {
 } from "../../state/use-composer-drafts";
 import { useSelectWorkspaceDetail } from "../layout/workspace/useSelectWorkspaceDetail";
 
-const CLI_COMMAND = "npx t3 triage";
-
 /**
  * In-app `t3 triage`, as on web: the server writes the session files and
  * clones the matching source, then a No project draft opens with the prompt.
@@ -35,13 +34,13 @@ export function useStartTriage() {
   const fail = (message: string) =>
     Dialog.alert(
       "Could not start triage",
-      `${message} Run ${CLI_COMMAND} in a terminal on that machine instead.`,
+      `${message} Run ${TRIAGE_CLI_COMMAND} in a terminal on that machine instead.`,
       [
         {
           text: "Copy command",
           onPress: () =>
-            void Clipboard.setStringAsync(CLI_COMMAND).catch(() =>
-              Dialog.alert("Could not copy", `Type ${CLI_COMMAND} instead.`),
+            void Clipboard.setStringAsync(TRIAGE_CLI_COMMAND).catch(() =>
+              Dialog.alert("Could not copy", `Type ${TRIAGE_CLI_COMMAND} instead.`),
             ),
         },
         { text: "OK", style: "cancel" },

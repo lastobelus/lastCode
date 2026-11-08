@@ -1,5 +1,6 @@
+import { LASTCODE_TRIAGE_CLI_COMMAND as TRIAGE_CLI_COMMAND } from "@t3tools/shared/desktopDistribution";
+
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
-import { TRIAGE_CLI_COMMAND } from "~/hooks/useStartTriage";
 
 import { InlineButton } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -31,7 +32,7 @@ export function TriageDraftHero(props: {
             )}
           </TooltipTrigger>
           <TooltipPopup side="bottom">
-            The agent reads T3 Code's logs and source here, and asks before it applies a fix or
+            The agent reads LastCode's logs and source here, and asks before it applies a fix or
             posts anything.
           </TooltipPopup>
         </Tooltip>
