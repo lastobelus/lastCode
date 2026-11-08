@@ -93,6 +93,12 @@ it.live("keeps a project's main checkout on its default branch", () =>
       assert.equal((yield* git(root, ["switch", "-c", "on-purpose"], override)).exitCode, 0);
       assert.equal((yield* git(root, ["switch", "trunk"])).exitCode, 0);
 
+      // Without an upstream default nothing is guarded, so a new local `main` cannot trap the root.
+      yield* git(root, ["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"]);
+      yield* git(root, ["update-ref", "-d", "refs/remotes/origin/trunk"]);
+      assert.equal((yield* git(root, ["switch", "-c", "main"])).exitCode, 0);
+      assert.equal((yield* git(root, ["switch", "trunk"])).exitCode, 0);
+
       // Reinstalling keeps a person's opt-out.
       yield* git(root, ["config", "hook.lastcode-root-guard.enabled", "false"]);
       assert.isTrue(yield* installProjectRootGuard(root));

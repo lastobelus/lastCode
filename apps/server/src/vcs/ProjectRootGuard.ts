@@ -29,18 +29,15 @@ case "$next" in
 esac
 current=$(git symbolic-ref -q HEAD) || current=
 [ "$target" != "$current" ] || exit 0
+# Remote-tracking refs, unlike local branches, cannot appear mid-switch. Without one
+# there is no upstream to keep this checkout on.
 default=$(git symbolic-ref -q refs/remotes/origin/HEAD) && default=\${default#refs/remotes/origin/}
-if [ -n "$default" ]; then
-  [ "$target" != "refs/heads/$default" ] || exit 0
-  base=origin/$default
-else
-  # Without a known default branch there is nothing to keep this checkout on.
-  if git show-ref -q --verify refs/heads/main; then default=main
-  elif git show-ref -q --verify refs/heads/master; then default=master
+if [ -z "$default" ]; then
+  if git show-ref -q --verify refs/remotes/origin/main; then default=main
+  elif git show-ref -q --verify refs/remotes/origin/master; then default=master
   else exit 0; fi
-  [ "$target" != "refs/heads/$default" ] || exit 0
-  base=$default
 fi
+[ "$target" != "refs/heads/$default" ] || exit 0
 wanted=\${target#refs/heads/}
 [ -n "$target" ] || wanted="a detached HEAD"
 # Checkout already moved the index and files to the target; carry them back, keeping local
@@ -55,7 +52,7 @@ cat >&2 <<EOF
 lastcode-root-guard: refused to move $(pwd) to $wanted.$restore
 This is a LastCode project's main checkout. It stays on $default so it can auto-pull.
 Do branch work in a worktree instead:
-  git worktree add <path> -b <branch> $base
+  git worktree add <path> -b <branch> origin/$default
   (if Git already created the branch: git worktree add <path> <branch>)
 In a LastCode thread, t3_worktree_handoff moves the thread into a new worktree.
 To switch here on purpose: ${PROJECT_ROOT_GUARD_OVERRIDE_ENV}=1 git switch <branch>
