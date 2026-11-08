@@ -158,6 +158,8 @@ export const ThreadPullRequestWatch = Schema.Struct({
    * none did. Null once either happened; absent on watches saved before it existed.
    */
   checksAwaitedSince: Schema.optional(Schema.NullOr(IsoDateTime)),
+  /** Set on an ended watch that T3 stopped because it could not read the PR. */
+  unreadable: Schema.optional(Schema.Literal(true)),
 });
 export type ThreadPullRequestWatch = typeof ThreadPullRequestWatch.Type;
 

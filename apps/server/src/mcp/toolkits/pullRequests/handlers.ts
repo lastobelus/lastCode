@@ -42,7 +42,7 @@ import {
   type WatchPullRequestInput,
   PullRequestWatchFailedError,
   PullRequestWatchFromSubagentError,
-  PullRequestWatchQuietExpiredError,
+  PullRequestWatchRestartRefusedError,
   PullRequestThreadRequiredError,
   PullRequestGuideFailedError,
   PullRequestProjectNotFoundError,
@@ -286,14 +286,12 @@ const make = Effect.gen(function* () {
     if (watching && before?.snapshot?.state === "merged") {
       return yield* new PullRequestNotOpenError({ state: "merged" });
     }
-    // A null dueAt means the quiet wake fired and nothing on the PR has restarted the timer since.
-    if (
-      watching &&
-      before?.watch?.quietDeadline?.dueAt === null &&
-      input.quietTimeoutMinutes !== null &&
-      input.restartAfterQuiet !== true
-    ) {
-      return yield* new PullRequestWatchQuietExpiredError();
+    if (watching && input.restart !== true) {
+      // A null dueAt means the quiet wake fired and nothing on the PR has restarted the timer since.
+      if (before?.watch?.quietDeadline?.dueAt === null && input.quietTimeoutMinutes !== null)
+        return yield* new PullRequestWatchRestartRefusedError({ reason: "quiet" });
+      if (before?.watch === undefined && before?.endedWatch?.unreadable === true)
+        return yield* new PullRequestWatchRestartRefusedError({ reason: "unreadable" });
     }
     yield* engine
       .dispatch({

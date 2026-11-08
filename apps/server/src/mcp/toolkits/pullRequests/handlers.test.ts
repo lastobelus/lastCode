@@ -351,44 +351,51 @@ describe("pull request toolkit handlers", () => {
   );
 
   it.effect.each([
-    { dueAt: null, input: {}, refused: true },
-    { dueAt: null, input: { quietTimeoutMinutes: 45 }, refused: true },
-    { dueAt: null, input: { restartAfterQuiet: true }, refused: false },
-    { dueAt: null, input: { quietTimeoutMinutes: null }, refused: false },
-    { dueAt: "2026-08-20T00:45:00.000Z", input: {}, refused: false },
-  ] as const)(
-    "re-watching after a quiet wake with no activity needs restartAfterQuiet: $dueAt $input",
-    ({ dueAt, input, refused }) =>
-      Effect.gen(function* () {
-        const harness = yield* makeHarness({
-          thread: makeThread([
-            makeLink(4, {
-              headBranch: "waiting",
-              watch: {
-                startedAt: "2026-08-20T00:00:00.000Z",
-                quietDeadline: { timeoutMinutes: 45, dueAt },
-                headSha: "abc",
-                failedChecks: [],
-                passed: false,
-                passedChecks: [],
-                remarksThrough: "2026-08-20T00:00:00.000Z",
-                remarkIds: [],
-                reactionKeys: [],
-                reactionCounts: {},
-                conflicting: false,
-                wakes: 0,
-              },
-            }),
-          ]),
-        });
-        const result = yield* harness
-          .call("watch_pull_request", { repository: "t3tools/t3code", number: 4, ...input })
-          .pipe(Effect.flip, Effect.option);
-        expect(Option.getOrUndefined(result)?._tag).toBe(
-          refused ? "PullRequestWatchQuietExpiredError" : undefined,
-        );
-        expect((yield* Ref.get(harness.commands)).length).toBe(refused ? 0 : 1);
-      }),
+    { ended: false, dueAt: null, input: {}, refused: "quiet" },
+    { ended: false, dueAt: null, input: { quietTimeoutMinutes: 45 }, refused: "quiet" },
+    { ended: false, dueAt: null, input: { restart: true }, refused: null },
+    { ended: false, dueAt: null, input: { quietTimeoutMinutes: null }, refused: null },
+    { ended: false, dueAt: "2026-08-20T00:45:00.000Z", input: {}, refused: null },
+    { ended: true, unreadable: true, input: {}, refused: "unreadable" },
+    { ended: true, unreadable: true, input: { quietTimeoutMinutes: null }, refused: "unreadable" },
+    { ended: true, unreadable: true, input: { restart: true }, refused: null },
+    { ended: true, input: {}, refused: null },
+  ] as const)("re-watching right after a quiet wake or unreadable stop needs restart: %o", (row) =>
+    Effect.gen(function* () {
+      const watch = {
+        startedAt: "2026-08-20T00:00:00.000Z",
+        quietDeadline: { timeoutMinutes: 45, dueAt: "dueAt" in row ? row.dueAt : null },
+        headSha: "abc",
+        failedChecks: [],
+        passed: false,
+        passedChecks: [],
+        remarksThrough: "2026-08-20T00:00:00.000Z",
+        remarkIds: [],
+        reactionKeys: [],
+        reactionCounts: {},
+        conflicting: false,
+        wakes: 0,
+        ...("unreadable" in row ? { unreadable: row.unreadable } : {}),
+      };
+      const harness = yield* makeHarness({
+        thread: makeThread([
+          makeLink(4, {
+            headBranch: "waiting",
+            ...(row.ended ? { endedWatch: watch } : { watch }),
+          }),
+        ]),
+      });
+      const result = yield* harness
+        .call("watch_pull_request", { repository: "t3tools/t3code", number: 4, ...row.input })
+        .pipe(Effect.flip, Effect.option);
+      const error = Option.getOrUndefined(result);
+      expect(error && { tag: error._tag, reason: "reason" in error ? error.reason : null }).toEqual(
+        row.refused === null
+          ? undefined
+          : { tag: "PullRequestWatchRestartRefusedError", reason: row.refused },
+      );
+      expect((yield* Ref.get(harness.commands)).length).toBe(row.refused === null ? 1 : 0);
+    }),
   );
 
   it.effect("watches a pull request saved as closed, since it may have reopened", () =>

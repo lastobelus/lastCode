@@ -65,10 +65,10 @@ export const WatchPullRequestInput = Schema.Struct({
   quietTimeoutMinutes: Schema.optional(
     Schema.NullOr(PullRequestWatchQuietTimeoutMinutes).annotate({
       description:
-        "Wake you once after this many minutes without new actionable checks, comments, reviews, conflicts or pushes; each resets the timer. A number starts it now; null disables it. Omit to keep the timer; new waits and restarts use the setting (default 45). Restart after the quiet wake only if the user asked (restartAfterQuiet).",
+        "Wake you once after this many minutes without new actionable checks, comments, reviews, conflicts or pushes; each resets the timer. A number starts it now; null disables it. Omit to keep the timer; new waits and restarts use the setting (default 45). After a quiet wake or unreadable stop, re-watch only if the user asked (restart).",
     }),
   ),
-  restartAfterQuiet: Schema.optional(Schema.Boolean),
+  restart: Schema.optional(Schema.Boolean),
 });
 export type WatchPullRequestInput = typeof WatchPullRequestInput.Type;
 
@@ -162,12 +162,14 @@ export class PullRequestWatchFromSubagentError extends Schema.TaggedError<PullRe
   }
 }
 
-export class PullRequestWatchQuietExpiredError extends Schema.TaggedError<PullRequestWatchQuietExpiredError>()(
-  "PullRequestWatchQuietExpiredError",
-  {},
+export class PullRequestWatchRestartRefusedError extends Schema.TaggedError<PullRequestWatchRestartRefusedError>()(
+  "PullRequestWatchRestartRefusedError",
+  { reason: Schema.Literals(["quiet", "unreadable"]) },
 ) {
   override get message(): string {
-    return "Not watched again: this watch's quiet deadline already expired and the PR has had no activity since, so a new watch would expire the same way. The watch is still registered: it still wakes you on failed or passed checks, new comments or reviews, and conflicts, and a push restarts its timer, so after a push just run the gate check. Otherwise report the pending gates as a blocker and call unwatch_pull_request. Pass restartAfterQuiet: true only if the user asked you to keep waiting.";
+    return this.reason === "quiet"
+      ? "Not watched again: this watch's quiet deadline already expired and the PR has had no activity since, so a new watch would expire the same way. The watch is still registered: it still wakes you on failed or passed checks, new comments or reviews, and conflicts, and a push restarts its timer, so after a push just run the gate check. Otherwise report the pending gates as a blocker and call unwatch_pull_request. Pass restart: true only if the user asked you to keep waiting."
+      : "Not watched again: T3 Code stopped this watch because it could not read the PR from the host, and a new watch would stop the same way. Check the PR yourself and report that T3 Code cannot read it as a blocker. Pass restart: true only if the user asked you to keep waiting.";
   }
 }
 
@@ -212,7 +214,7 @@ export const PullRequestToolError = Schema.Union([
   PullRequestWatchFailedError,
   PullRequestNotOpenError,
   PullRequestWatchFromSubagentError,
-  PullRequestWatchQuietExpiredError,
+  PullRequestWatchRestartRefusedError,
   PullRequestProjectNotFoundError,
   PullRequestGuideFailedError,
 ]);
