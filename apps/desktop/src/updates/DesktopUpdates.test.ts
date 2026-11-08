@@ -1775,6 +1775,8 @@ describe("DesktopUpdates", () => {
       Effect.gen(function* () {
         const updates = yield* DesktopUpdates.DesktopUpdates;
         yield* updates.configure;
+        const configured = yield* updates.getState;
+        yield* TestClock.adjust(Duration.millis(1));
         // A backed-out switch's download keeps reporting progress until it finishes.
         harness.emit("download-progress", { percent: 40 });
         yield* flushCallbacks;
@@ -1784,6 +1786,9 @@ describe("DesktopUpdates", () => {
         const state = yield* updates.getState;
         assert.equal(state.downloadedVersion, null);
         assert.notEqual(state.status, "downloading");
+        // The finished download inspected nothing, so it is not a fresher check.
+        assert.equal(state.checkSucceededAt, configured.checkSucceededAt);
+        assert.equal(state.refreshFailure, configured.refreshFailure);
       }),
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });

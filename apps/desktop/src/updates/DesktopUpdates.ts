@@ -1549,9 +1549,21 @@ export const make = Effect.gen(function* () {
             });
             // Its progress events left the updater "downloading", which would block every check.
             if (state.status === "downloading") {
-              yield* setState(
-                reduceDesktopUpdateStateOnNoUpdate(state, yield* currentIsoTimestamp),
-              );
+              // Finishing a download inspected nothing, so the last check's freshness stands.
+              const {
+                checkSucceededAt: _,
+                refreshFailure: __,
+                ...reset
+              } = reduceDesktopUpdateStateOnNoUpdate(state, yield* currentIsoTimestamp);
+              yield* setState({
+                ...reset,
+                ...(state.checkSucceededAt === undefined
+                  ? {}
+                  : { checkSucceededAt: state.checkSucceededAt }),
+                ...(state.refreshFailure === undefined
+                  ? {}
+                  : { refreshFailure: state.refreshFailure }),
+              });
             }
             return;
           }
