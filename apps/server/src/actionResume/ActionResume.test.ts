@@ -192,6 +192,7 @@ const makeHarness = Effect.gen(function* () {
   const opened: TerminalOpenInput[] = [];
   const written: TerminalWriteInput[] = [];
   const writes = yield* Queue.unbounded<TerminalWriteInput>();
+  const followUpDispatches = yield* Queue.unbounded<ThreadId>();
   const closeRequests: Array<{ readonly deleteHistory?: boolean | undefined }> = [];
   const closed: string[] = [];
   const otherThreads = new Map<ThreadId, OrchestrationV2ThreadShell>();
@@ -210,6 +211,10 @@ const makeHarness = Effect.gen(function* () {
     recordsReceipt: null as Deferred.Deferred<void> | null,
     launchResolved: null as Deferred.Deferred<void> | null,
     pauseDelivery: null as {
+      entered: Deferred.Deferred<void>;
+      release: Deferred.Deferred<void>;
+    } | null,
+    pauseWrite: null as {
       entered: Deferred.Deferred<void>;
       release: Deferred.Deferred<void>;
     } | null,
@@ -371,7 +376,10 @@ const makeHarness = Effect.gen(function* () {
                 error: null,
               })
               .pipe(Effect.orDie);
-          if (command.type === "message.dispatch") yield* Deferred.succeed(delivered, undefined);
+          if (command.type === "message.dispatch") {
+            yield* Deferred.succeed(delivered, undefined);
+            yield* Queue.offer(followUpDispatches, command.threadId);
+          }
           return { sequence: commands.length, storedEvents: [] };
         });
         if (command.type !== "message.dispatch") return apply;
@@ -444,6 +452,11 @@ const makeHarness = Effect.gen(function* () {
         state.failWrite
           ? Effect.die("write failed")
           : Effect.gen(function* () {
+              const pause = state.pauseWrite;
+              if (pause !== null) {
+                yield* Deferred.succeed(pause.entered, undefined);
+                yield* Deferred.await(pause.release);
+              }
               written.push(input);
               yield* Queue.offer(writes, input);
               if (state.autoStart)
@@ -509,6 +522,7 @@ const makeHarness = Effect.gen(function* () {
     opened,
     written,
     writes,
+    followUpDispatches,
     closeRequests,
     closed,
     otherThreads,
@@ -698,16 +712,134 @@ it.effect("fails an unready Action shell at the launch deadline without sending 
       const actions = yield* ActionResume.ActionResume;
       const run = yield* actions.runProjectActionAndResume(invocation, "qa");
       yield* TestClock.adjust("30 seconds");
+      assert.equal(h.state.latest?.outcome, "running");
+      yield* TestClock.adjust("30 seconds");
       yield* Deferred.await(h.terminalClosed);
       yield* Deferred.await(h.delivered);
       assert.equal(h.written.length, 0);
       assert.equal(h.state.latest?.outcome, "failed");
       assert.include(
         (yield* actions.inspectActionRun(invocation, run.runId)).outputTail,
-        "command was not sent",
+        "shell was not ready within 60 seconds; the command was not sent",
       );
     }).pipe(Effect.provide(h.layer));
   }).pipe(Effect.provide(StoreTestLayer)),
+);
+
+it.effect("sends the command to a ready shell after another thread holds the Action lock", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness;
+    const otherId = ThreadId.make("thread-action-lock-holder");
+    h.otherThreads.set(otherId, { ...shell, id: otherId, actionResume: null });
+    yield* Effect.gen(function* () {
+      const actions = yield* ActionResume.ActionResume;
+      const other = yield* actions.runProjectActionAndResume(
+        { threadId: otherId, providerInstanceId },
+        "qa",
+      );
+      yield* Queue.take(h.writes);
+      h.state.readyOnOpen = false;
+      const run = yield* actions.runProjectActionAndResume(invocation, "qa");
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      h.state.pauseDelivery = { entered, release };
+      const otherExit = yield* h
+        .emit({
+          type: "exited",
+          threadId: otherId,
+          terminalId: other.terminalId,
+          exitCode: 0,
+          exitSignal: null,
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(entered);
+      yield* h.emit({ type: "output", threadId, terminalId: run.terminalId, data: "\x1b[?2004h" });
+      yield* TestClock.adjust("2 minutes");
+      h.state.pauseDelivery = null;
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(otherExit);
+      const written = yield* Queue.take(h.writes).pipe(
+        Effect.raceFirst(Deferred.await(h.terminalClosed).pipe(Effect.as(null))),
+      );
+      assert.equal(written?.terminalId, run.terminalId);
+      assert.equal(h.state.latest?.outcome, "running");
+      yield* actions.cancelByUser(threadId);
+    }).pipe(Effect.provide(h.layer));
+  }).pipe(Effect.provide(StoreTestLayer)),
+);
+
+it.effect.each([
+  { type: "closed", outcome: "cancelled_by_user" },
+  { type: "error", outcome: "failed" },
+] as const)("stops a write waiting on the terminal lock on a $type event", ({ type, outcome }) =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness;
+    const entered = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    h.state.pauseWrite = { entered, release };
+    yield* Effect.gen(function* () {
+      const actions = yield* ActionResume.ActionResume;
+      const run = yield* actions.runProjectActionAndResume(invocation, "qa");
+      yield* Deferred.await(entered);
+      // The terminal manager publishes these while holding the lock the write waits on.
+      const event = { threadId, terminalId: run.terminalId };
+      yield* h.emit(
+        type === "closed"
+          ? { ...event, type, deleteHistory: false }
+          : { ...event, type, message: "spawn failed" },
+      );
+      yield* Deferred.succeed(release, undefined);
+      yield* Queue.take(h.followUpDispatches);
+      assert.equal(h.state.latest?.outcome, outcome);
+      assert.equal(h.written.length, 0);
+      assert.equal(h.followUps().length, 1);
+    }).pipe(Effect.provide(h.layer));
+  }).pipe(Effect.provide(StoreTestLayer)),
+);
+
+it.effect(
+  "settles a terminal error published under admission while the Action lock waits on it",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness;
+      const otherId = ThreadId.make("thread-action-lock-holder");
+      h.otherThreads.set(otherId, { ...shell, id: otherId, actionResume: null });
+      yield* Effect.gen(function* () {
+        const actions = yield* ActionResume.ActionResume;
+        const run = yield* actions.runProjectActionAndResume(invocation, "qa");
+        yield* Queue.take(h.writes);
+        const other = yield* actions.runProjectActionAndResume(
+          { threadId: otherId, providerInstanceId },
+          "qa",
+        );
+        yield* Queue.take(h.writes);
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        h.state.pauseDelivery = { entered, release };
+        // The other thread's follow-up holds the Action lock and next needs admission.
+        const otherExit = yield* h
+          .emit({
+            type: "exited",
+            threadId: otherId,
+            terminalId: other.terminalId,
+            exitCode: 0,
+            exitSignal: null,
+          })
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(entered);
+        // A client terminal reopen publishes its spawn error while holding admission.
+        yield* h.admission.admit(
+          "terminal-open",
+          h.emit({ type: "error", threadId, terminalId: run.terminalId, message: "spawn failed" }),
+        );
+        h.state.pauseDelivery = null;
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(otherExit);
+        assert.equal(yield* Queue.take(h.followUpDispatches), otherId);
+        assert.equal(yield* Queue.take(h.followUpDispatches), threadId);
+        assert.equal(h.state.latest?.outcome, "failed");
+      }).pipe(Effect.provide(h.layer));
+    }).pipe(Effect.provide(StoreTestLayer)),
 );
 
 it.effect("rejects a replacement shell instead of forwarding the accepted Action again", () =>

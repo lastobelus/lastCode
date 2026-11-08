@@ -148,6 +148,9 @@ export class ActionResume extends Context.Service<
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
 const MAX_ACTION_OUTPUT_CHARS = 12_000;
+// Shell startup slows under heavy load; a stuck rc-file prompt still fails within a minute.
+const ACTION_SHELL_READY_SECONDS = 60;
+const ACTION_START_SECONDS = 30;
 const ACTION_PROGRESS_MIN_INTERVAL_MS = 1_000;
 const ACTION_PROGRESS_MAX_UPDATES = 128;
 const ACTION_OUTPUT_OSC = "777;T3ActionOutput";
@@ -1017,6 +1020,9 @@ const make = Effect.gen(function* () {
                   yield* Deferred.succeed(startup.stopped, undefined);
                   return;
                 }
+                // Stop startup before a pending write so a closed or failed terminal never receives the command.
+                if (event.type === "closed" || event.type === "error")
+                  yield* Deferred.succeed(startup.stopped, undefined);
                 yield* handleTerminalEvent(event);
               }),
             );
@@ -1066,8 +1072,15 @@ const make = Effect.gen(function* () {
                   return yield* Effect.gen(function* () {
                     const posix =
                       terminal.shellFamily !== "powershell" && terminal.shellFamily !== "cmd";
-                    const ready = posix ? yield* readiness.wait : "ready";
-                    if (ready !== "ready") return yield* Deferred.await(startup.stopped);
+                    // Each deadline covers only its own phase; waiting for the environment-wide
+                    // Action lock in between must not read as an unready shell.
+                    if (posix) {
+                      const ready = yield* readiness.wait.pipe(
+                        Effect.timeoutOption(Duration.seconds(ACTION_SHELL_READY_SECONDS)),
+                      );
+                      if (Option.isNone(ready)) return "shell_not_ready" as const;
+                      if (ready.value !== "ready") return yield* Deferred.await(startup.stopped);
+                    }
                     const written = yield* mutex.withPermits(1)(
                       admission.admit(
                         "action-resume",
@@ -1101,19 +1114,23 @@ const make = Effect.gen(function* () {
                         }),
                       ),
                     );
-                    if (written && posix) yield* Deferred.await(startup.started);
+                    if (!written || !posix) return;
+                    const started = yield* Deferred.await(startup.started).pipe(
+                      Effect.timeoutOption(Duration.seconds(ACTION_START_SECONDS)),
+                    );
+                    if (Option.isNone(started)) return "not_started" as const;
                   }).pipe(Effect.raceFirst(Deferred.await(startup.stopped)));
-                }).pipe(Effect.timeoutOption("30 seconds"));
+                });
                 const result = yield* Effect.exit(waiting);
                 const message = startup.replaced
                   ? "Action launch stopped because its terminal was replaced; the command may not have been sent."
                   : result._tag === "Failure"
                     ? "Action command could not be written to the terminal; launch stopped."
-                    : Option.isNone(result.value)
-                      ? startup.written
-                        ? "Action command was sent, but it did not start within 30 seconds; it was not resent."
-                        : "Action shell was not ready within 30 seconds; the command was not sent."
-                      : null;
+                    : result.value === "shell_not_ready"
+                      ? `Action shell was not ready within ${ACTION_SHELL_READY_SECONDS} seconds; the command was not sent.`
+                      : result.value === "not_started"
+                        ? `Action command was sent, but it did not start within ${ACTION_START_SECONDS} seconds; it was not resent.`
+                        : null;
                 if (message !== null) yield* failStartup(state, startup, message);
               }).pipe(
                 Effect.catchCause((cause) =>
@@ -1307,6 +1324,11 @@ const make = Effect.gen(function* () {
     );
   });
 
+  // Close and spawn errors publish under the terminal lock (and admission for client opens), while
+  // Action mutex holders wait on both; settling on the publisher's fiber could deadlock them.
+  const settleOffPublisher = (effect: Effect.Effect<void>) =>
+    effect.pipe(Effect.forkIn(serviceScope, { startImmediately: true }), Effect.asVoid);
+
   // Terminal chunks share the enclosing launch/event span.
   const handleTerminalEvent = Effect.fnUntraced(function* (event: TerminalEvent) {
     const state = registry.getLatest(event.threadId);
@@ -1393,12 +1415,14 @@ const make = Effect.gen(function* () {
         if (protocol) consumeActionTerminalOutput(capture, protocol.decoder.finish());
         finishActionOutputCapture(capture);
       }
-      return yield* finish({
-        threadId: state.threadId,
-        runId: state.runId,
-        outcome: "cancelled_by_user",
-        deliver: !event.deleteHistory,
-      });
+      return yield* settleOffPublisher(
+        finish({
+          threadId: state.threadId,
+          runId: state.runId,
+          outcome: "cancelled_by_user",
+          deliver: !event.deleteHistory,
+        }),
+      );
     }
     if (event.type === "error") {
       const protocol = protocolCaptureByRunId.get(state.runId);
@@ -1407,7 +1431,9 @@ const make = Effect.gen(function* () {
         if (protocol) consumeActionTerminalOutput(capture, protocol.decoder.finish());
         finishActionOutputCapture(capture);
       }
-      return yield* finish({ threadId: state.threadId, runId: state.runId, outcome: "failed" });
+      return yield* settleOffPublisher(
+        finish({ threadId: state.threadId, runId: state.runId, outcome: "failed" }),
+      );
     }
     return;
   });
