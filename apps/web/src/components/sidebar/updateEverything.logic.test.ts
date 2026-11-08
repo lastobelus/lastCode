@@ -6,10 +6,12 @@ import {
   collectRestartingMachines,
   localSwitchBlockReason,
   collectServerUpdateTargets,
+  collectUpdateEverythingResult,
   describeUpdateCapsule,
   describeUpdateEverything,
   runUpdateEverything,
   type UpdateEverythingMachine,
+  SKIPPED_SERVER_UPDATE,
 } from "./updateEverything.logic";
 
 function machine(
@@ -330,6 +332,25 @@ describe("runUpdateEverything", () => {
 
     expect(calls).toEqual(["providers", "servers"]);
     expect(result.localReady).toBe(false);
+  });
+});
+
+describe("collectUpdateEverythingResult", () => {
+  it("reports skipped servers as not updated", () => {
+    const result = collectUpdateEverythingResult({
+      localVersion: null,
+      localFailures: [],
+      servers: [
+        { label: "build-host", outcome: { status: "updated" } },
+        { label: "managed-server", outcome: { status: "skipped" } },
+      ],
+      providers: [{ status: "updated" }, { status: "interrupted" }],
+    });
+
+    expect(result.updatedServers).toBe(1);
+    expect(result.updatedProviders).toBe(1);
+    // An interrupted provider command proves nothing about the update, so it is neither counted nor failed.
+    expect(result.failures).toEqual([`managed-server: ${SKIPPED_SERVER_UPDATE}`]);
   });
 });
 
