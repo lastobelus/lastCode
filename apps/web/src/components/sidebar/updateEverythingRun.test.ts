@@ -1,14 +1,26 @@
+import { serverUpdateStateAtom } from "@t3tools/client-runtime/state/server";
 import { EnvironmentId } from "@t3tools/contracts";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { serverEnvironment } from "~/state/server";
-import { startDesktopUpdateLaunchNotice } from "./updateEverythingRun";
+import { serverReachedVersion, startDesktopUpdateLaunchNotice } from "./updateEverythingRun";
+
+function stubStorage(entries: ReadonlyArray<readonly [string, string]>) {
+  const store = new Map(entries);
+  vi.stubGlobal("window", {
+    localStorage: {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => store.set(key, value),
+      removeItem: (key: string) => store.delete(key),
+    },
+  });
+}
 
 function relaunchWhileRestarting(environmentId: EnvironmentId) {
   const now = 1_800_000_000_000;
   vi.useFakeTimers({ now });
-  const store = new Map([
+  stubStorage([
     [
       "t3code:update-everything-result:v1",
       JSON.stringify({
@@ -21,12 +33,6 @@ function relaunchWhileRestarting(environmentId: EnvironmentId) {
       }),
     ],
   ]);
-  vi.stubGlobal("window", {
-    localStorage: {
-      getItem: (key: string) => store.get(key) ?? null,
-      removeItem: (key: string) => store.delete(key),
-    },
-  });
   return startDesktopUpdateLaunchNotice();
 }
 
@@ -66,5 +72,47 @@ describe("startDesktopUpdateLaunchNotice", () => {
       release();
       stop();
     }
+  });
+
+  it("follows a handed-off server on every relaunch until its deadline", async () => {
+    const environmentId = EnvironmentId.make("twice-relaunched");
+    const stateAtom = serverEnvironment.updateStateAtom(environmentId);
+    const startedAt = 1_800_000_000_000;
+    // The app comes back after the 10-minute result notice has expired.
+    vi.useFakeTimers({ now: startedAt + 15 * 60 * 1000 });
+    stubStorage([
+      [
+        "t3code:update-everything-handoffs:v1",
+        JSON.stringify([{ environmentId, label: "Slow", targetVersion: "9.9.9", startedAt }]),
+      ],
+    ]);
+    const release = appAtomRegistry.mount(stateAtom);
+    try {
+      startDesktopUpdateLaunchNotice()();
+      expect(appAtomRegistry.get(stateAtom)).toMatchObject({ status: "running" });
+      appAtomRegistry.set(serverUpdateStateAtom(environmentId), { status: "idle" });
+
+      startDesktopUpdateLaunchNotice()();
+      expect(appAtomRegistry.get(stateAtom)).toMatchObject({ status: "running" });
+      await vi.advanceTimersByTimeAsync(17 * 60 * 1000);
+      expect(appAtomRegistry.get(stateAtom)).toEqual({ status: "idle" });
+    } finally {
+      release();
+    }
+  });
+});
+
+describe("serverReachedVersion", () => {
+  it.each([
+    ["1.2.4", "1.2.4", true],
+    ["1.2.5", "1.2.4", true],
+    ["1.2.3", "1.2.4", false],
+    ["1.2.4-beta.1", "1.2.4", false],
+    ["0.1.8-nightly.20261107.4301", "0.1.8-nightly.20261107.4301", true],
+    ["0.1.8-nightly.20261106.4262", "0.1.8-nightly.20261107.4301", false],
+    ["not-a-version", "1.2.4", false],
+    [null, "1.2.4", false],
+  ] as const)("%s reaching %s is %s", (serverVersion, targetVersion, reached) => {
+    expect(serverReachedVersion(serverVersion, targetVersion)).toBe(reached);
   });
 });
