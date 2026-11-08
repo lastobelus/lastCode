@@ -68,7 +68,8 @@ The command:
 2. selects the newest available nightly newer than the current downstream base;
 3. creates an initial checkpoint for the current base when bootstrapping;
 4. pins that target for the run and replays directly onto it in a dedicated Git worktree;
-5. replays carry groups with Git `rerere` and automatic resolution staging disabled;
+5. enables Git `rerere` in repository configuration for historical, non-carry
+   rebases; carry replay overrides it with `-c rerere.enabled=false -c rerere.autoupdate=false`;
 6. installs dependencies and runs the checkpoint smoke gate;
 7. creates and optionally pushes one annotated checkpoint tag for that target;
 8. publishes a revision when `lastcode/main` has new commits but upstream has no
@@ -318,13 +319,16 @@ work and are not protected. Dry-run mode previews the same skip without aborting
 or deleting anything. The brief final verification-and-removal transaction assumes an
 operator is not simultaneously editing that recovery worktree; the service does
 not add cross-process locking for that exceptional race.
-Carry replay deliberately disables `rerere` and its automatic index updates;
-resolve each conflict explicitly and preserve the retained worktree. A later
-checkpoint run can continue a retained rebase once every resolution is staged;
-genuinely unmerged paths still stop for review. Automatic continuation also stops if Git rejects
-`rebase --continue` without advancing the rebase (for example, because a hook
-or signing key fails), preserving the recovery worktree for operator action
-instead of retrying in a loop.
+The checkpoint command enables `rerere` and automatic index updates in repository
+configuration so historical, non-carry rebases can reuse and stage remembered
+resolutions. Carry replay overrides both settings on its own Git commands only,
+so continue a carry rebase manually with
+`git -c rerere.enabled=false -c rerere.autoupdate=false rebase --continue`.
+Resolve carry conflicts explicitly and preserve the retained worktree. A later
+checkpoint run can continue once every resolution is staged; genuinely unmerged
+paths still stop for review. Automatic continuation also stops if Git rejects
+the continue without advancing the rebase (for example, because a hook or signing
+key fails), preserving the recovery worktree instead of retrying in a loop.
 
 Upstream migration history must match the selected nightly exactly. LastCode
 migrations use a separate, append-only history: never renumber, remove, or edit
