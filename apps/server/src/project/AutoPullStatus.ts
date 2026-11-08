@@ -3,6 +3,8 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 
+import type { GitStatusFetchState } from "../vcs/GitVcsDriver.ts";
+
 export type AutoPullOutcome =
   | { readonly result: "pulled" | "up-to-date" }
   | { readonly result: "skipped" | "failed"; readonly reason: string };
@@ -31,6 +33,19 @@ export function autoPullSkipReason(state: AutoPullCheckoutState): string | null 
 }
 
 export const AUTO_PULL_FETCH_FAILED = "could not fetch from the remote";
+
+/** What a check that found nothing to pull proves, given whether its fetch reached the remote. */
+export function autoPullCurrencyOutcome(fetchState: GitStatusFetchState): AutoPullOutcome {
+  // Status reads old remote refs when its fetch fails, so only a fetch proves currency.
+  switch (fetchState) {
+    case "fetched":
+      return { result: "up-to-date" };
+    case "failed":
+      return { result: "failed", reason: AUTO_PULL_FETCH_FAILED };
+    case "pending":
+      return { result: "skipped", reason: "remote fetch still running" };
+  }
+}
 
 export function autoPullFailureReason(error: { readonly message: string }): string {
   const firstLine = error.message.trim().split("\n", 1)[0]?.trim() ?? "";

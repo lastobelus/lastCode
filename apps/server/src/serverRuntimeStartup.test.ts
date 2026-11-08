@@ -321,10 +321,16 @@ it.effect("automatic pull only updates enabled, behind, clean default-branch che
           hasUpstream: true,
           hasWorkingTreeChanges: dirty.has(cwd),
           aheadCount: cwd === "/ahead" ? 3 : 0,
-          behindCount: cwd === "/current" || cwd === "/offline" ? 0 : 1,
+          behindCount: ["/current", "/offline", "/slow"].includes(cwd) ? 0 : 1,
         } as never),
       statusFetchState: (cwd: string) =>
-        Effect.succeed(cwd === "/offline" ? ("failed" as const) : ("fetched" as const)),
+        Effect.succeed(
+          cwd === "/offline"
+            ? ("failed" as const)
+            : cwd === "/slow"
+              ? ("pending" as const)
+              : ("fetched" as const),
+        ),
       pullCurrentBranch: (cwd: string) =>
         cwd === "/broken"
           ? Effect.fail({ message: "fatal: Not possible to fast-forward, aborting.\nmore" })
@@ -368,6 +374,7 @@ it.effect("automatic pull only updates enabled, behind, clean default-branch che
         project("/feature"),
         project("/broken"),
         project("/offline"),
+        project("/slow"),
         project("/disabled"),
       ],
       overrides({
@@ -378,6 +385,7 @@ it.effect("automatic pull only updates enabled, behind, clean default-branch che
         "/feature": true,
         "/broken": true,
         "/offline": true,
+        "/slow": true,
         "/disabled": false,
       }),
     );
@@ -404,6 +412,10 @@ it.effect("automatic pull only updates enabled, behind, clean default-branch che
     assert.deepStrictEqual(yield* outcome("/offline"), {
       result: "failed",
       reason: AutoPullStatus.AUTO_PULL_FETCH_FAILED,
+    });
+    assert.deepStrictEqual(yield* outcome("/slow"), {
+      result: "skipped",
+      reason: "remote fetch still running",
     });
     assert.isNull(yield* statusStore.get("/disabled"));
 

@@ -440,6 +440,7 @@ export const make = Effect.gen(function* () {
   const maybeAutoPull = Effect.fn("VcsStatusBroadcaster.maybeAutoPull")(function* (
     cwd: string,
     remoteRead: CachedRemoteStatus | null,
+    local: VcsStatusLocalResult,
     policyCwds: ReadonlyArray<string>,
   ) {
     const remote = remoteRead?.value ?? null;
@@ -454,11 +455,6 @@ export const make = Effect.gen(function* () {
     return yield* Effect.gen(function* () {
       if (remote === null || enabledCwds.length === 0) return null;
 
-      const canPull = remote.hasUpstream && remote.aheadCount === 0 && remote.behindCount > 0;
-      // Only a pull needs a fresh read; a skip reason can come from the status already cached.
-      if (canPull) yield* workflow.invalidateLocalStatus(cwd);
-      const cachedLocal = canPull ? null : ((yield* getCachedStatus(cwd))?.local?.value ?? null);
-      const local = cachedLocal ?? (yield* workflow.localStatus({ cwd }));
       if (local.refName !== remoteRead?.branch) return null;
       const skipReason = AutoPullStatus.autoPullSkipReason({
         isRepo: local.isRepo,
@@ -472,15 +468,10 @@ export const make = Effect.gen(function* () {
         yield* record({ result: "skipped", reason: skipReason });
         return null;
       }
-      if (!canPull) {
-        // Status reads old remote refs when its fetch fails, so only a fetch proves currency.
-        const fetchState = yield* autoPullPolicy.fetchState(cwd);
-        if (fetchState !== "pending")
-          yield* record(
-            fetchState === "failed"
-              ? { result: "failed", reason: AutoPullStatus.AUTO_PULL_FETCH_FAILED }
-              : { result: "up-to-date" },
-          );
+      if (remote.behindCount <= 0) {
+        yield* record(
+          AutoPullStatus.autoPullCurrencyOutcome(yield* autoPullPolicy.fetchState(cwd)),
+        );
         return null;
       }
 
@@ -528,12 +519,12 @@ export const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const remoteRead = yield* readRemoteStatus(cwd, options);
         // Base refs and merge bases can move without changing divergence counts, and
-        // automatic pull judges the checkout from this local status.
-        yield* refreshLocalStatusCore(cwd);
+        // automatic pull judges the checkout from this fresh local status.
+        const local = yield* refreshLocalStatusCore(cwd);
         const pulled =
           options?.refreshUpstream === false
             ? null
-            : yield* maybeAutoPull(cwd, remoteRead, options?.policyCwds ?? [cwd]);
+            : yield* maybeAutoPull(cwd, remoteRead, local, options?.policyCwds ?? [cwd]);
         if (pulled !== null) return pulled.remote;
         return yield* updateCachedRemoteStatus(cwd, remoteRead, { publish: true });
       }),
@@ -571,9 +562,11 @@ export const make = Effect.gen(function* () {
         yield* workflow.invalidateStatus(cwd);
         const remoteRead = yield* readRemoteStatus(cwd, { refreshUpstream });
         // Fetch can move the base used for local Changes totals.
-        yield* refreshLocalStatusCore(cwd);
+        const refreshedLocal = yield* refreshLocalStatusCore(cwd);
         // Without a fetch, the cached behind count cannot justify an automatic pull.
-        const pulled = refreshUpstream ? yield* maybeAutoPull(cwd, remoteRead, [rawCwd]) : null;
+        const pulled = refreshUpstream
+          ? yield* maybeAutoPull(cwd, remoteRead, refreshedLocal, [rawCwd])
+          : null;
         if (pulled !== null) return mergeGitStatusParts(pulled.local, pulled.remote);
         yield* updateCachedRemoteStatus(cwd, remoteRead, { publish: true });
         const parts = yield* getStatusParts(cwd);
