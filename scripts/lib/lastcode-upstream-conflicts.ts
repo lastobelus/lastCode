@@ -25,6 +25,8 @@ export function upstreamCommitsTouchingFiles(
       "log",
       "--format=%x01%H%x00%h%x00%s",
       "--name-only",
+      "--no-ext-diff",
+      "--no-textconv",
       "--no-renames",
       "-z",
       `${oldBase}..${newBase}`,
@@ -36,6 +38,7 @@ export function upstreamCommitsTouchingFiles(
       env: cleanGitEnvironment(process.env),
       encoding: "utf8",
       timeout,
+      killSignal: "SIGKILL",
       maxBuffer: 64 * 1024 * 1024,
     },
   );
