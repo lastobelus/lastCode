@@ -1692,7 +1692,11 @@ export const createCodexAdapterV2 = Effect.fn("CodexAdapterV2.createCodexAdapter
   return yield* makeCodexAdapterV2({
     instanceId,
     settings,
-    environment: yield* mergeProviderInstanceEnvironment(environment, hostEnvironment),
+    environment: yield* mergeProviderInstanceEnvironment(
+      environment,
+      hostEnvironment,
+      serverConfig.settingsPath,
+    ),
     clientFactory,
     digest,
     fileSystem,
@@ -1765,7 +1769,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           providerSessionId: input.providerSessionId,
           runtimePolicy: input.runtimePolicy,
           settings: resolvedRuntime?.config ?? adapterOptions.settings,
-          environment: resolvedRuntime?.environment ?? adapterOptions.environment,
+          environment: yield* mergeProviderInstanceEnvironment(
+            undefined,
+            resolvedRuntime?.environment ?? adapterOptions.environment,
+            serverConfig.settingsPath,
+          ),
         });
         const additionalContextByThread = yield* Ref.make(
           new Map<
