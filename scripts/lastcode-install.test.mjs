@@ -377,15 +377,20 @@ describe("LastCode userland install command", () => {
   it("restores an app that an interrupted install left aside before preparing", async () => {
     const fixture = idleFixture();
     const root = NodePath.dirname(fixture.targetPath);
-    const backup = NodePath.join(root, ".LastCode.previous-99999.app");
-    const staging = NodePath.join(root, ".LastCode.install-99999.app");
+    const exited = NodeChildProcess.spawnSync(process.execPath, ["--eval", ""]).pid;
+    const backup = NodePath.join(root, `.LastCode.previous-${exited}.app`);
+    const staging = NodePath.join(root, `.LastCode.install-${exited}.app`);
+    // A live installer's bundles, here this process's parent, are never touched.
+    const liveStaging = NodePath.join(root, `.LastCode.install-${process.ppid}.app`);
     NodeFS.renameSync(fixture.targetPath, backup);
     NodeFS.mkdirSync(staging);
+    NodeFS.mkdirSync(liveStaging);
     const prepared = await prepareDmgInstall(fixture.dmgPath, fixture.options);
     try {
       expect(NodeFS.readFileSync(NodePath.join(fixture.targetPath, "version"), "utf8")).toBe("old");
       expect(NodeFS.existsSync(backup)).toBe(false);
       expect(NodeFS.existsSync(staging)).toBe(false);
+      expect(NodeFS.existsSync(liveStaging)).toBe(true);
     } finally {
       cleanupPreparedInstall(prepared, fixture.options);
     }
