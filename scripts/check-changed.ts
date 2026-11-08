@@ -328,15 +328,21 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
   const lines = (...args: Array<string>) => gitLines(root, args);
 
   const recovery = Option.isSome(input.checkpointRecoveryFiles);
-  if (recovery && [input.ref, input.baseline, input.candidate].some(Option.isSome)) {
+  if (recovery && [input.ref, input.candidate].some(Option.isSome)) {
     return yield* Effect.fail(
-      "check:changed: --checkpoint-recovery-files cannot be combined with a ref, --baseline or --candidate.",
+      "check:changed: --checkpoint-recovery-files cannot be combined with a positional ref or --candidate.",
+    );
+  }
+  if (recovery && Option.isNone(input.baseline)) {
+    return yield* Effect.fail(
+      "check:changed: --checkpoint-recovery-files requires --baseline <pre-replay-head> to verify deleted paths.",
     );
   }
   const recoveryHead = recovery
     ? (yield* git(root, ["rev-parse", "HEAD"])).toString().trim()
     : undefined;
   let recoveryFiles: Array<string> = [];
+  let recoveryBase: string | undefined;
   if (recoveryHead) {
     yield* assertRepairCandidate(root, recoveryHead);
     recoveryFiles = (yield* fs.readFileString(Option.getOrThrow(input.checkpointRecoveryFiles)))
@@ -356,10 +362,42 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
         "check:changed: recovery file list must contain repository-relative conflicted and repaired paths, one per line.",
       );
     }
+    recoveryBase = (yield* git(root, [
+      "rev-parse",
+      "--verify",
+      "--end-of-options",
+      `${Option.getOrThrow(input.baseline)}^{commit}`,
+    ]))
+      .toString()
+      .trim();
+    const treePaths = (yield* git(root, ["ls-tree", "-r", "--name-only", "-z", recoveryHead]))
+      .toString()
+      .split("\0")
+      .filter(Boolean);
+    const deletedPaths = (yield* git(root, [
+      "diff",
+      "--name-only",
+      "--no-renames",
+      "--diff-filter=D",
+      "-z",
+      recoveryBase,
+      recoveryHead,
+      "--",
+    ]))
+      .toString()
+      .split("\0")
+      .filter(Boolean);
+    const knownPaths = new Set([...treePaths, ...deletedPaths]);
+    const unknown = recoveryFiles.filter((file) => !knownPaths.has(file));
+    if (unknown.length > 0) {
+      return yield* Effect.fail(
+        `check:changed: unknown recovery path(s): ${unknown.join(", ")}. Correct the file list: each path must exist in HEAD or be deleted between --baseline and HEAD.`,
+      );
+    }
   }
-  const exact = Option.isSome(input.baseline) && Option.isSome(input.candidate);
+  const exact = !recovery && Option.isSome(input.baseline) && Option.isSome(input.candidate);
   if (
-    Option.isSome(input.baseline) !== Option.isSome(input.candidate) ||
+    (!recovery && Option.isSome(input.baseline) !== Option.isSome(input.candidate)) ||
     (exact && Option.isSome(input.ref))
   ) {
     return yield* Effect.fail(
@@ -373,8 +411,8 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
         Option.getOrThrow(input.candidate),
       )
     : undefined;
-  const { ref, base } = recoveryHead
-    ? { ref: "checkpoint recovery", base: recoveryHead }
+  const { ref, base } = recoveryBase
+    ? { ref: "checkpoint recovery", base: recoveryBase }
     : repair
       ? { ref: "integrated repair", base: repair.base }
       : yield* comparisonBase(root, input.ref);
@@ -408,7 +446,9 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
     const hash = NodeCrypto.createHash("sha256");
     // CI changes test behavior (vite.config.ts rejects .only under CI).
     hash.update(`${process.version}\0${base}\0${repair?.candidate ?? "working-tree"}\0${ci}\0`);
-    hash.update(recovery ? `checkpoint-recovery\0${files.join("\0")}\0` : "changed\0");
+    hash.update(
+      recovery ? `checkpoint-recovery\0${recoveryHead}\0${files.join("\0")}\0` : "changed\0",
+    );
     hash.update(
       yield* git(root, [
         "diff",
@@ -752,7 +792,9 @@ export const checkChangedCommand = Command.make(
       Argument.optional,
     ),
     baseline: Flag.String("baseline").pipe(
-      Flag.withDescription("Pre-repair integrated snapshot commit; requires --candidate."),
+      Flag.withDescription(
+        "Pre-repair snapshot or pre-replay head; requires --candidate or --checkpoint-recovery-files.",
+      ),
       Flag.optional,
     ),
     candidate: Flag.String("candidate").pipe(

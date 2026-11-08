@@ -445,13 +445,13 @@ it("gates the completed replay's conflict files without repeating the broader CI
   project.git("commit", "-m", "completed replay");
   const files = "node_modules/recovery-files.txt";
   project.write(files, `${project.source}\npackages/example/package.json\n${project.source}\n`);
-  const rejected = project.run("lint", ["--checkpoint-recovery-files", files]);
+  const rejected = project.run("lint", ["--checkpoint-recovery-files", files, "--baseline", "HEAD^"]);
   expect(rejected.status, rejected.stdout + rejected.stderr).toBe(1);
   expect(rejected.stdout).toContain("FAIL  lint");
   expect(
     NodeFS.existsSync(NodePath.join(project.root, "node_modules/.cache/check-changed.json")),
   ).toBe(false);
-  const result = project.run("", ["--checkpoint-recovery-files", files]);
+  const result = project.run("", ["--checkpoint-recovery-files", files, "--baseline", "HEAD^"]);
   expect(result.status, result.stdout + result.stderr).toBe(0);
   const commands = project.calls().map(({ args }) => args);
   expect(commands).toContainEqual(["lint", "--no-error-on-unmatched-pattern", project.source]);
@@ -585,27 +585,82 @@ it("checks every integrated repair against a pinned snapshot across rewritten ca
 });
 
 it.each([
-  [
-    "recovery with a ref",
-    ["HEAD", "--checkpoint-recovery-files", "node_modules/paths.txt"],
-    "cannot be combined",
-  ],
-  ["missing candidate", ["--baseline", "HEAD"], "use --baseline and --candidate together"],
-  ["missing baseline", ["--candidate", "HEAD"], "use --baseline and --candidate together"],
-  [
-    "positional ref",
-    ["HEAD", "--baseline", "HEAD", "--candidate", "HEAD"],
-    "without a positional ref",
-  ],
-  ["invalid baseline", ["--baseline", "missing-commit", "--candidate", "HEAD"], "git rev-parse"],
-  ["invalid candidate", ["--baseline", "HEAD", "--candidate", "missing-commit"], "git rev-parse"],
-])("rejects %s before running checks", (_name, args, message) => {
-  using project = launcherFixture();
-  const result = project.run("", args);
-  expect(result.status, result.stdout + result.stderr).toBe(1);
-  expect(result.stdout + result.stderr).toContain(message);
-  expect(project.calls()).toEqual([]);
-});
+  {
+    name: "recovery with a ref",
+    args: ["HEAD", "--checkpoint-recovery-files", "node_modules/paths.txt"],
+    message: "cannot be combined",
+  },
+  {
+    name: "recovery without a baseline",
+    args: ["--checkpoint-recovery-files", "node_modules/paths.txt"],
+    message: "requires --baseline <pre-replay-head>",
+  },
+  {
+    name: "invalid recovery path",
+    args: ["--checkpoint-recovery-files", "node_modules/paths.txt", "--baseline", "HEAD"],
+    paths: "packages/example/typo.ts\n",
+    message: "unknown recovery path(s): packages/example/typo.ts",
+  },
+  {
+    name: "legitimately deleted recovery path",
+    args: ["--checkpoint-recovery-files", "node_modules/paths.txt", "--baseline", "HEAD^"],
+    deleted: true,
+    message: "checkpoint recovery",
+    expectedStatus: 0,
+  },
+  {
+    name: "empty recovery path list",
+    args: ["--checkpoint-recovery-files", "node_modules/paths.txt", "--baseline", "HEAD"],
+    paths: "\n",
+    message: "recovery file list must contain",
+  },
+  {
+    name: "missing candidate",
+    args: ["--baseline", "HEAD"],
+    message: "use --baseline and --candidate together",
+  },
+  {
+    name: "missing baseline",
+    args: ["--candidate", "HEAD"],
+    message: "use --baseline and --candidate together",
+  },
+  {
+    name: "positional ref",
+    args: ["HEAD", "--baseline", "HEAD", "--candidate", "HEAD"],
+    message: "without a positional ref",
+  },
+  {
+    name: "invalid baseline",
+    args: ["--baseline", "missing-commit", "--candidate", "HEAD"],
+    message: "git rev-parse",
+  },
+  {
+    name: "invalid candidate",
+    args: ["--baseline", "HEAD", "--candidate", "missing-commit"],
+    message: "git rev-parse",
+  },
+])(
+  "validates $name before running scoped checks",
+  ({ args, message, paths, deleted, expectedStatus = 1 }) => {
+    using project = launcherFixture(true);
+    if (paths !== undefined) project.write("node_modules/paths.txt", paths);
+    if (deleted) {
+      project.git("rm", "--", project.source);
+      project.git("commit", "-m", "delete conflicted source during replay");
+      project.write("node_modules/paths.txt", `${project.source}\n`);
+    }
+    const result = project.run("", args);
+    expect(result.status, result.stdout + result.stderr).toBe(expectedStatus);
+    expect(result.stdout + result.stderr).toContain(message);
+    if (expectedStatus !== 0) expect(project.calls()).toEqual([]);
+    else {
+      expect(
+        project.calls().some(({ args }) => args.includes("typecheck") && args.includes("example")),
+      ).toBe(true);
+      expect(project.calls().some(({ args }) => args[0] === "fmt" || args[0] === "lint")).toBe(false);
+    }
+  },
+);
 
 it.each(["tracked", "untracked", "wrong HEAD", "rebase", "merge"])(
   "rejects an incomplete candidate: %s",
