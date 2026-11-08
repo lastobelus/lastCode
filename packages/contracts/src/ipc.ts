@@ -1301,7 +1301,10 @@ export interface DesktopBridge {
     channel: DesktopUpdateChannel,
     minimumVersion?: string,
   ) => Promise<DesktopUpdateState>;
-  checkForUpdate: () => Promise<DesktopUpdateCheckResult>;
+  /** Inspects only, unless `requestCheckpoint` asks the local checkpoint service for a new run. */
+  checkForUpdate: (options?: {
+    readonly requestCheckpoint: boolean;
+  }) => Promise<DesktopUpdateCheckResult>;
   downloadUpdate: () => Promise<DesktopUpdateActionResult>;
   /** With a version, installs only that downloaded build. */
   installUpdate: (expectedVersion?: string) => Promise<DesktopUpdateActionResult>;

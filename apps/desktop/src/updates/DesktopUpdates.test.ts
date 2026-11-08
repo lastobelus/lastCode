@@ -24,7 +24,7 @@ import * as LastCodeLocalUpdates from "./LastCodeLocalUpdates.ts";
 import { flushCallbacks, makeHarness } from "./updatesTestHarness.ts";
 
 describe("DesktopUpdates", () => {
-  it.effect("keeps an available local build actionable during a menu checkpoint request", () => {
+  it.effect("keeps an available local build actionable during a checkpoint request", () => {
     const harness = makeHarness({
       localNightliesEnabled: true,
       localInspect: (_version, requestCheckpoint) =>
@@ -45,7 +45,7 @@ describe("DesktopUpdates", () => {
         const updates = yield* DesktopUpdates.DesktopUpdates;
         yield* updates.configure;
         const available = yield* updates.getState;
-        const requested = yield* updates.check("menu");
+        const requested = yield* updates.check("checkpoint-request");
         assert.equal(requested.state.status, "available");
         assert.equal(requested.state.availableVersion, available.availableVersion);
         assert.deepEqual(requested.state.releaseNotes, available.releaseNotes);
@@ -75,7 +75,7 @@ describe("DesktopUpdates", () => {
         yield* updates.configure;
         const configured = yield* updates.getState;
         yield* TestClock.adjust(Duration.millis(1));
-        const requested = yield* updates.check("menu");
+        const requested = yield* updates.check("checkpoint-request");
         assert.equal(requested.state.status, "idle");
         assert.include(requested.state.message ?? "", "Checkpoint requested");
         // Requesting a checkpoint inspected nothing, so the last successful check stands.
@@ -131,12 +131,12 @@ describe("DesktopUpdates", () => {
           const updates = yield* DesktopUpdates.DesktopUpdates;
           yield* updates.configure;
           assert.equal((yield* updates.getState).errorContext, "check");
-          const recovered = yield* updates.check("menu");
+          const recovered = yield* updates.check("checkpoint-request");
           assert.isTrue(recovered.checkpointRequested);
           assert.equal(recovered.state.status, "idle");
           assert.isNull(recovered.state.errorContext);
           assert.include(recovered.state.message ?? "", "Checkpoint requested");
-          const discovered = yield* updates.check("menu");
+          const discovered = yield* updates.check("checkpoint-request");
           assert.isTrue(discovered.checkpointRequested);
           assert.equal(discovered.state.status, "available");
           assert.equal(discovered.state.availableVersion, "1.2.3-nightly.20260814.1089.1");
@@ -169,6 +169,7 @@ describe("DesktopUpdates", () => {
         assert.isTrue(requests.every((requested) => !requested));
         requests.length = 0;
         for (const reason of [
+          "checkpoint-request",
           "web-ui",
           "menu",
           "poll",
@@ -179,7 +180,7 @@ describe("DesktopUpdates", () => {
           const result = yield* updates.check(reason);
           assert.isTrue(result.checked);
         }
-        assert.deepEqual(requests, [true, true, false, false, false, false]);
+        assert.deepEqual(requests, [true, false, false, false, false, false, false]);
         yield* updates.setShowAndInstallLocalNightlies(false);
         requests.length = 0;
         yield* updates.check("web-ui");
@@ -211,7 +212,7 @@ describe("DesktopUpdates", () => {
       Effect.gen(function* () {
         const updates = yield* DesktopUpdates.DesktopUpdates;
         yield* updates.configure;
-        const result = yield* updates.check("web-ui");
+        const result = yield* updates.check("checkpoint-request");
         assert.equal(result.error, "Could not request checkpoint.");
         assert.equal(result.state.status, "error");
         assert.equal(result.state.errorContext, "check");
@@ -320,7 +321,7 @@ describe("DesktopUpdates", () => {
             assert.equal(prior.status, priorKind);
           }
           yield* TestClock.adjust(Duration.millis(1));
-          const requested = yield* updates.check("menu");
+          const requested = yield* updates.check("checkpoint-request");
           assert.isTrue(requested.checked);
           assert.isFalse(requested.checkpointRequested);
           assert.equal(requested.error, "Could not request checkpoint.");
@@ -675,7 +676,7 @@ describe("DesktopUpdates", () => {
         assert.equal(failed.localBuildProgress?.phase, "Building DMG");
         assert.equal(failed.localBuildFailure?.errorKind, "packaging");
 
-        const requested = yield* updates.check("menu");
+        const requested = yield* updates.check("checkpoint-request");
         assert.deepEqual({ ...requested.state, checkedAt: failed.checkedAt }, failed);
 
         const retry = yield* updates.download;
@@ -847,7 +848,7 @@ describe("DesktopUpdates", () => {
           const failed = yield* updates.getState;
           assert.equal(failed.status, "downloaded");
           assert.equal(failed.errorContext, "install");
-          const requested = yield* updates.check("menu");
+          const requested = yield* updates.check("checkpoint-request");
           assert.isTrue(requested.checkpointRequested);
           assert.deepEqual({ ...requested.state, checkedAt: failed.checkedAt }, failed);
           const retried = yield* updates.install;

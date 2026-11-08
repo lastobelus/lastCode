@@ -290,7 +290,7 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   importT3Settings: () => ipcRenderer.invoke(IpcChannels.LASTCODE_SETTINGS_IMPORT_CHANNEL),
   setUpdateChannel: (channel, minimumVersion) =>
     ipcRenderer.invoke(IpcChannels.UPDATE_SET_CHANNEL_CHANNEL, { channel, minimumVersion }),
-  checkForUpdate: () => ipcRenderer.invoke(IpcChannels.UPDATE_CHECK_CHANNEL),
+  checkForUpdate: (options) => ipcRenderer.invoke(IpcChannels.UPDATE_CHECK_CHANNEL, options),
   downloadUpdate: () => ipcRenderer.invoke(IpcChannels.UPDATE_DOWNLOAD_CHANNEL),
   installUpdate: (expectedVersion) =>
     ipcRenderer.invoke(IpcChannels.UPDATE_INSTALL_CHANNEL, expectedVersion),

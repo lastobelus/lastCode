@@ -284,50 +284,8 @@ describe("DesktopApplicationMenu", () => {
     }),
   );
 
-  it.effect.each(["idle", "available", "downloaded", "error"] as const)(
-    "confirms a checkpoint request while preserving %s updates",
-    (status) =>
-      Effect.gen(function* () {
-        const selectedAction = yield* Deferred.make<string>();
-        const templateReady =
-          yield* Deferred.make<readonly Electron.MenuItemConstructorOptions[]>();
-        const messageReady = yield* Deferred.make<Electron.MessageBoxOptions>();
-        const state = {
-          ...createInitialDesktopUpdateState(
-            "1.2.3",
-            {
-              hostArch: "arm64",
-              appArch: "arm64",
-              runningUnderArm64Translation: false,
-            },
-            "nightly",
-          ),
-          enabled: true,
-          source: "lastcode-local" as const,
-          status,
-          message: status === "error" ? "Local build failed" : "Unrelated update message",
-        };
-        yield* configureMenu(
-          selectedAction,
-          templateReady,
-          { checked: true, checkpointRequested: true, error: null, state },
-          (options) => Deferred.succeed(messageReady, options).pipe(Effect.asVoid),
-        );
-        const template = yield* Deferred.await(templateReady);
-        const check = template
-          .flatMap((item) => (Array.isArray(item.submenu) ? item.submenu : []))
-          .find((item) => item.label === "Check for Updates...");
-        assert.isDefined(check);
-        assert.isFunction(check.click);
-        check.click!({} as Electron.MenuItem, {} as Electron.BrowserWindow, {} as KeyboardEvent);
-        const dialog = yield* Deferred.await(messageReady);
-        assert.equal(dialog.title, "Checkpoint requested");
-        assert.equal(dialog.message, DesktopUpdates.checkpointRequestedMessage);
-      }),
-  );
-
   it.effect.each(["available", "downloaded", "error"] as const)(
-    "reports a failed checkpoint request while preserving %s updates",
+    "reports a failed check while preserving %s updates",
     (status) =>
       Effect.gen(function* () {
         const selectedAction = yield* Deferred.make<string>();
@@ -355,7 +313,7 @@ describe("DesktopApplicationMenu", () => {
           {
             checked: true,
             checkpointRequested: false,
-            error: "Could not request checkpoint.",
+            error: "Could not inspect local releases.",
             state,
           },
           (options) => Deferred.succeed(messageReady, options).pipe(Effect.asVoid),
@@ -369,7 +327,7 @@ describe("DesktopApplicationMenu", () => {
         check.click!({} as Electron.MenuItem, {} as Electron.BrowserWindow, {} as KeyboardEvent);
         const dialog = yield* Deferred.await(messageReady);
         assert.equal(dialog.title, "Update check failed");
-        assert.equal(dialog.detail, "Could not request checkpoint.");
+        assert.equal(dialog.detail, "Could not inspect local releases.");
       }),
   );
 
