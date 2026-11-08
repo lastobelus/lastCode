@@ -6,6 +6,7 @@ import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as Layer from "effect/Layer";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import * as ProjectRootGuard from "../vcs/ProjectRootGuard.ts";
 import * as Effect from "effect/Effect";
 import * as OrchestrationCommandReceipts from "../persistence/OrchestrationCommandReceipts.ts";
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
@@ -119,6 +120,7 @@ export const layerProjectService = ProjectService.layer.pipe(
       IdAllocator.layer,
       ThreadCommandExecutor.layer,
       layerLegacyV1ThreadImporterProvided,
+      ProjectRootGuard.layer.pipe(Layer.provide(GitVcsDriver.layer)),
     ),
   ),
 );

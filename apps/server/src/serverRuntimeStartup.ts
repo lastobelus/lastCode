@@ -43,6 +43,7 @@ import * as ThreadManagement from "./orchestration-v2/ThreadManagementService.ts
 import * as AutoPullStatus from "./project/AutoPullStatus.ts";
 import * as ProjectService from "./project/ProjectService.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
+import { protectProjectRoot } from "./vcs/ProjectRootGuard.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
@@ -248,6 +249,16 @@ export const autoPullProjects = Effect.fn("autoPullProjects")(function* (
           ),
         ),
       ),
+    { concurrency: 4, discard: true },
+  );
+});
+
+const protectProjectRoots = Effect.fn("protectProjectRoots")(function* (
+  projects: ReadonlyArray<Pick<Project, "workspaceRoot">>,
+) {
+  yield* Effect.forEach(
+    new Set(projects.map((project) => project.workspaceRoot)),
+    protectProjectRoot,
     { concurrency: 4, discard: true },
   );
 });
@@ -597,6 +608,19 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
     ).pipe(
       Effect.catch((cause) =>
         Effect.logWarning("Failed to load projects for automatic pull", { cause }),
+      ),
+      forkParked,
+    );
+
+    yield* runStartupPhase(
+      "projects.root-guard",
+      ProjectStore.ProjectStoreV2.pipe(
+        Effect.flatMap((store) => store.listShells()),
+        Effect.flatMap(protectProjectRoots),
+      ),
+    ).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("Failed to load projects for the root guard", { cause }),
       ),
       forkParked,
     );

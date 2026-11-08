@@ -453,6 +453,7 @@ const GIT_FAILURE_REASON_PATTERNS: ReadonlyArray<readonly [RegExp, GitCommandFai
     "authentication_failed",
   ],
   [/host key verification failed/i, "host_key_unverified"],
+  [/update aborted by the reference-transaction hook/i, "ref_update_rejected_by_hook"],
   [
     /(?:could not read from remote repository|does not appear to be a git repository|repository .+ not found)/i,
     "remote_unreachable",
@@ -484,6 +485,8 @@ const GIT_FAILURE_REASON_DETAILS: Partial<Record<GitCommandFailureReason, string
     "The remote has commits this branch doesn't have. Pull or rebase, then push again.",
   config_locked:
     "Another Git process kept the repository's config locked. Wait for it to finish, then retry.",
+  ref_update_rejected_by_hook:
+    "A Git hook refused this change; run the command in a terminal to see why. A LastCode project's main checkout stays on its default branch, so do branch work in a worktree.",
 };
 
 function gitFailureDetail(reason: GitCommandFailureReason | null): string {
@@ -1177,7 +1180,11 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
           new GitCommandError({
             ...gitCommandContext({ operation, cwd, args }),
             ...(reason === null ? {} : { reason }),
-            detail: options.fallbackErrorDetail ?? gitFailureDetail(reason),
+            // A known reason explains more than a call site's generic fallback.
+            detail:
+              (reason === null ? undefined : GIT_FAILURE_REASON_DETAILS[reason]) ??
+              options.fallbackErrorDetail ??
+              gitFailureDetail(reason),
             ...(result.exitCode === null ? {} : { exitCode: result.exitCode }),
             stdoutLength: result.stdout.length,
             stderrLength: result.stderr.length,
