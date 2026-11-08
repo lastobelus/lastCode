@@ -560,6 +560,15 @@ function collectLastCodeReleaseNotes(repoRoot, installables, currentInstallable,
   };
 }
 
+// Notes are context for an offer; git failures over missing tags must not hide it.
+function collectLastCodeReleaseNotesOrUnavailable(...args) {
+  try {
+    return collectLastCodeReleaseNotes(...args);
+  } catch {
+    return { status: "unavailable" };
+  }
+}
+
 function listUpstreamNightlyTags(repoRoot) {
   return splitLines(git(repoRoot, ["tag", "--list", "v*-nightly.*"]))
     .filter((tag) => {
@@ -576,9 +585,8 @@ function collectUpstreamReleaseNotes(repoRoot, current, target) {
   const nightlyTags = listUpstreamNightlyTags(repoRoot);
   const currentIndex = nightlyTags.indexOf(current.nightlyTag);
   const targetIndex = nightlyTags.indexOf(target.version.nightlyTag);
-  if (currentIndex < 0 || targetIndex <= currentIndex) {
-    throw new Error("Could not resolve the installed-to-target upstream nightly interval.");
-  }
+  // Missing or pruned upstream tags lose only these notes, never the update itself.
+  if (currentIndex < 0 || targetIndex <= currentIndex) return { groups: [], omittedGroups: 0 };
 
   const nonEmptyGroups = nightlyTags
     .slice(currentIndex + 1, targetIndex + 1)
@@ -636,7 +644,7 @@ function inspectGrouped(options, installableTags, checkpointTag, availableVersio
     availableVersion,
     ...(build ? { build } : {}),
     releaseNotes: {
-      lastCode: collectLastCodeReleaseNotes(
+      lastCode: collectLastCodeReleaseNotesOrUnavailable(
         options.repoRoot,
         installables,
         currentInstallable,

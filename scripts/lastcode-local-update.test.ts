@@ -541,6 +541,14 @@ describe("lastcode-local-update", () => {
           },
         },
       });
+
+      // Without the target's upstream tag, both note groups degrade and the offer stays.
+      runGit(repo, ["tag", "--delete", nightly3]);
+      assert.deepNestedInclude(inspectRepository(repo, root, nightly1.slice(1), true), {
+        status: "available",
+        "releaseNotes.lastCode": { status: "unavailable" },
+        "releaseNotes.upstream": { groups: [], omittedGroups: 0 },
+      });
     } finally {
       NodeFS.rmSync(root, { recursive: true, force: true });
     }
@@ -598,6 +606,13 @@ describe("lastcode-local-update", () => {
           lastCode: { status: "unavailable" },
           upstream: expectedUpstream,
         },
+      });
+
+      // A checkout without the installed upstream nightly tag still offers the update.
+      runGit(repo, ["tag", "--delete", nightly1]);
+      assert.deepNestedInclude(inspectRepository(repo, root, nightly1.slice(1), true), {
+        status: "available",
+        "releaseNotes.upstream": { groups: [], omittedGroups: 0 },
       });
     } finally {
       NodeFS.rmSync(root, { recursive: true, force: true });
