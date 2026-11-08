@@ -70,6 +70,12 @@ from=$(git rev-parse -q --verify "\${target:-$next}^{commit}") || from=$(git has
 if [ "$from" != "$(git rev-parse -q --verify HEAD)" ]; then
   git read-tree -m -u "$from" HEAD ||
     restore=" Git had already changed files here toward $wanted; check git status before continuing."
+  # --recurse-submodules also moved (clean) submodules to the target's commits; move them back.
+  git diff --raw --no-abbrev "$from" HEAD | awk -F '\\t' '$1 ~ /^:160000 160000 / {
+    split($1, f, " "); print f[3], f[4], $2 }' | while read -r moved back path; do
+    (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX; cd "$path" 2>/dev/null &&
+      [ "$(git rev-parse -q --verify HEAD)" = "$moved" ] && git checkout -q --detach "$back")
+  done
 fi
 refuse "move $(pwd) to $wanted.$restore"
 `;

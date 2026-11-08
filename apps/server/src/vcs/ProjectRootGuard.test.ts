@@ -114,3 +114,39 @@ it.live("keeps a project's main checkout on its default branch", () =>
     }),
   ).pipe(Effect.provide(layerTest)),
 );
+
+it.live("moves submodules back after refusing a recursive switch", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const base = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-root-guard-sub-" });
+      const lib = path.join(base, "lib");
+      const root = path.join(base, "root");
+      const identity = ["-c", "user.name=Test", "-c", "user.email=test@example.com"];
+      const fileProtocol = { GIT_ALLOW_PROTOCOL: "file" };
+      yield* git(base, ["init", "-q", "-b", "main", lib]);
+      yield* git(lib, [...identity, "commit", "-q", "--allow-empty", "-m", "one"]);
+      yield* git(lib, [...identity, "commit", "-q", "--allow-empty", "-m", "two"]);
+      yield* git(base, ["init", "-q", "-b", "main", root]);
+      yield* git(root, ["submodule", "-q", "add", lib, "module"], fileProtocol);
+      const module = path.join(root, "module");
+      yield* git(module, ["checkout", "-q", "main~1"]);
+      yield* git(root, ["add", "module"]);
+      yield* git(root, [...identity, "commit", "-q", "-m", "pin one"]);
+      yield* git(root, ["update-ref", "refs/remotes/origin/main", "HEAD"]);
+      yield* git(root, ["switch", "-q", "-c", "bumped"]);
+      yield* git(module, ["checkout", "-q", "main"]);
+      yield* git(root, ["add", "module"]);
+      yield* git(root, [...identity, "commit", "-q", "-m", "pin two"]);
+      yield* git(root, ["switch", "-q", "main"]);
+      yield* git(root, ["submodule", "-q", "update"], fileProtocol);
+      assert.isTrue(yield* installProjectRootGuard(root));
+
+      const refused = yield* git(root, ["switch", "--recurse-submodules", "bumped"]);
+      assert.notEqual(refused.exitCode, 0);
+      assert.equal(yield* head(root), "main");
+      assert.equal((yield* git(root, ["status", "--porcelain"])).stdout, "");
+    }),
+  ).pipe(Effect.provide(layerTest)),
+);
