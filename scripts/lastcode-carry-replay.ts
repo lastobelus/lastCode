@@ -169,15 +169,19 @@ function createCommit(
   tree: string,
   parent: string,
   message: string,
-  environment?: NodeJS.ProcessEnv,
+  environment: NodeJS.ProcessEnv = cleanGitEnvironment(process.env),
 ): string {
   const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-carry-message-"));
   const path = NodePath.join(directory, "message");
   try {
     NodeFS.writeFileSync(path, message, { mode: 0o600 });
-    return runGit(repo, ["-c", "commit.gpgSign=false", "commit-tree", tree, "-p", parent, "-F", path], {
-      environment,
-    });
+    return runGit(
+      repo,
+      ["-c", "commit.gpgSign=false", "commit-tree", tree, "-p", parent, "-F", path],
+      {
+        environment,
+      },
+    );
   } finally {
     NodeFS.rmSync(directory, { recursive: true, force: true });
   }
