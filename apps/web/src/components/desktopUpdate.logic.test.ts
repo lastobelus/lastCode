@@ -7,6 +7,7 @@ import {
   getDesktopUpdateActionError,
   getDesktopUpdateButtonTooltip,
   getDesktopUpdateInstallConfirmationMessage,
+  getDesktopUpdateInstallRefusal,
   getDesktopUpdatePopoverHeader,
   getDesktopUpdateReleaseHistoryUrl,
   getDesktopUpdateReleaseNoteUrl,
@@ -311,6 +312,43 @@ describe("getDesktopUpdatePopoverHeader", () => {
       readiness: "Download failed · click to retry",
       targetVersion: "0.0.50-nightly.20260102.530",
     });
+  });
+});
+
+describe("getDesktopUpdateInstallRefusal", () => {
+  it.each<[string, boolean, Partial<DesktopUpdateState>, string | null]>([
+    ["an accepted install", true, { downloadedVersion: "1.1.0" }, null],
+    [
+      "a check still holding the install",
+      false,
+      { downloadedVersion: "1.1.0" },
+      "1.1.0 could not start installing yet, for example while an update check finishes. Try again in a moment.",
+    ],
+    [
+      "a newer build",
+      false,
+      { downloadedVersion: "1.2.0" },
+      "1.1.0 was replaced by 1.2.0. Review it and try again.",
+    ],
+    [
+      "a newer offer not yet downloaded",
+      false,
+      { downloadedVersion: null, availableVersion: "1.2.0" },
+      "1.1.0 was replaced by 1.2.0. Review it and try again.",
+    ],
+    [
+      "nothing on offer",
+      false,
+      { downloadedVersion: null },
+      "1.1.0 is no longer ready to install.",
+    ],
+  ])("explains %s", (_name, accepted, change, message) => {
+    expect(
+      getDesktopUpdateInstallRefusal(
+        { accepted, completed: false, state: { ...baseState, ...change } },
+        "1.1.0",
+      ),
+    ).toBe(message);
   });
 });
 

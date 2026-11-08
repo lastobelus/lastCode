@@ -27,6 +27,7 @@ import {
   getDesktopUpdateDownloadedVersion,
   getDesktopUpdateIdleTooltip,
   getDesktopUpdateInstallConfirmationMessage,
+  getDesktopUpdateInstallRefusal,
   getDesktopUpdatePopoverHeader,
   getDesktopUpdateProgressPercent,
   isDesktopUpdateButtonDisabled,
@@ -276,7 +277,9 @@ export async function installLocalUpdate(
   try {
     const result = await bridge.installUpdate(expectedVersion);
     if (!result.accepted) {
-      showDesktopUpdateDownloadedToast(bridge, result.state);
+      const refusal = getDesktopUpdateInstallRefusal(result, expectedVersion);
+      if (refusal) reportError("Update not installed", refusal);
+      else showDesktopUpdateDownloadedToast(bridge, result.state);
       return false;
     }
     const actionError = shouldToastDesktopUpdateActionResult(result)
@@ -424,6 +427,8 @@ function SidebarUpdateControl() {
     }
 
     if (action === "install") {
+      // The version the person confirms is the only one this click may install.
+      const confirmedVersion = state.downloadedVersion ?? undefined;
       let confirmed = false;
       try {
         confirmed = await ensureLocalApi().dialogs.confirm(
@@ -444,7 +449,9 @@ function SidebarUpdateControl() {
         setIsActionPending(false);
         return;
       }
-      void installLocalUpdate(bridge).finally(() => setIsActionPending(false));
+      void installLocalUpdate(bridge, undefined, confirmedVersion).finally(() =>
+        setIsActionPending(false),
+      );
       return;
     }
 
@@ -480,6 +487,24 @@ function SidebarUpdateControl() {
       .finally(() => setIsActionPending(false));
   };
 
+  // The confirmation dialog already showed this app's version, so it is not asked again.
+  const runAppOnly = () => {
+    const bridge = window.desktopBridge;
+    if (!bridge || !state || localUpdateVersion === null || isActionPending) return;
+    const update =
+      action === "download"
+        ? downloadLocalUpdate(bridge, {
+            notifyDownloaded: true,
+            isLocalBuild: state.source === "lastcode-local",
+          })
+        : action === "install"
+          ? installLocalUpdate(bridge, undefined, localUpdateVersion)
+          : null;
+    if (!update) return;
+    setIsActionPending(true);
+    void update.finally(() => setIsActionPending(false));
+  };
+
   const runEverything = async () => {
     const bridge = window.desktopBridge;
     setIsConfirmingEverything(false);
@@ -496,8 +521,11 @@ function SidebarUpdateControl() {
                 }),
             }
           : {}),
-        ...(bridge && action !== "none"
-          ? { installLocal: (reportError) => installLocalUpdate(bridge, reportError) }
+        ...(bridge && localUpdateVersion !== null
+          ? {
+              installLocal: (reportError) =>
+                installLocalUpdate(bridge, reportError, localUpdateVersion),
+            }
           : {}),
       }),
     );
@@ -551,6 +579,23 @@ function SidebarUpdateControl() {
       rows={everything.rows}
       restarts={everything.restarts}
       onConfirm={() => void runEverything()}
+      appOnly={
+        localUpdateVersion !== null && everything.alsoUpdates !== null && action !== "none"
+          ? {
+              // Building or downloading never installs; that still asks for the version it shows.
+              label:
+                action === "install"
+                  ? "Only update this app"
+                  : state?.source === "lastcode-local"
+                    ? "Only build this app"
+                    : "Only download this app",
+              onConfirm: () => {
+                setIsConfirmingEverything(false);
+                runAppOnly();
+              },
+            }
+          : undefined
+      }
     />
   );
 
@@ -569,6 +614,9 @@ function SidebarUpdateControl() {
           icon={statusIcon}
           {...(run.localVersion === null && action === "install" && window.desktopBridge
             ? {
+                restartLabel: state
+                  ? getDesktopUpdatePopoverHeader(state, APP_BASE_NAME)?.title
+                  : undefined,
                 onRestart: async () => {
                   saveUpdateEverythingResult({
                     localVersion: localUpdateVersion,
@@ -577,7 +625,13 @@ function SidebarUpdateControl() {
                     failures: [],
                     restarting: [],
                   });
-                  if (!(await installLocalUpdate(window.desktopBridge!))) {
+                  if (
+                    !(await installLocalUpdate(
+                      window.desktopBridge!,
+                      undefined,
+                      localUpdateVersion ?? undefined,
+                    ))
+                  ) {
                     clearSavedUpdateEverythingResult();
                   }
                 },
