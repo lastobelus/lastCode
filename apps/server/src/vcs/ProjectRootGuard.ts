@@ -4,13 +4,13 @@ import * as Path from "effect/Path";
 
 import * as GitVcsDriver from "./GitVcsDriver.ts";
 
-export const PROJECT_ROOT_GUARD_HOOK = "lastcode-root-guard";
+const PROJECT_ROOT_GUARD_HOOK = "lastcode-root-guard";
 export const PROJECT_ROOT_GUARD_OVERRIDE_ENV = "LASTCODE_ALLOW_ROOT_BRANCH_CHANGE";
 
 // A non-zero exit in the "prepared" state aborts the ref update. Git holds HEAD.lock
 // in this checkout's own git dir only while its HEAD is being rewritten, and the lock
 // holds the next value; `git worktree add` from here locks the new worktree's HEAD instead.
-export const PROJECT_ROOT_GUARD_SCRIPT = `#!/bin/sh
+const PROJECT_ROOT_GUARD_SCRIPT = `#!/bin/sh
 # Installed by LastCode: keeps this project's main checkout on its default branch.
 [ "$1" = prepared ] || exit 0
 grep ' HEAD$' >/dev/null || exit 0

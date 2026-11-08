@@ -253,14 +253,14 @@ export const autoPullProjects = Effect.fn("autoPullProjects")(function* (
   );
 });
 
-export const protectProjectRoots = Effect.fn("protectProjectRoots")(function* (
+const protectProjectRoots = Effect.fn("protectProjectRoots")(function* (
   projects: ReadonlyArray<Pick<Project, "workspaceRoot">>,
 ) {
   yield* Effect.forEach(
     new Set(projects.map((project) => project.workspaceRoot)),
     (cwd) =>
       installProjectRootGuard(cwd).pipe(
-        Effect.catch((cause) =>
+        Effect.catchCause((cause) =>
           Effect.logWarning("Failed to install the project root guard", { cwd, cause }),
         ),
       ),
@@ -607,13 +607,25 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
       "projects.auto-pull",
       Effect.gen(function* () {
         const projects = yield* (yield* ProjectStore.ProjectStoreV2).listShells();
-        yield* protectProjectRoots(projects);
         const settings = yield* serverSettings.getSettings;
         yield* autoPullProjects(projects, settings);
       }),
     ).pipe(
       Effect.catch((cause) =>
         Effect.logWarning("Failed to load projects for automatic pull", { cause }),
+      ),
+      forkParked,
+    );
+
+    yield* runStartupPhase(
+      "projects.root-guard",
+      ProjectStore.ProjectStoreV2.pipe(
+        Effect.flatMap((store) => store.listShells()),
+        Effect.flatMap(protectProjectRoots),
+      ),
+    ).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("Failed to load projects for the root guard", { cause }),
       ),
       forkParked,
     );

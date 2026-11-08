@@ -70,7 +70,10 @@ it.live("keeps a project's main checkout on its default branch", () =>
       // Work that keeps HEAD on the default branch, and other worktrees, stays free.
       const worktree = path.join(base, "worktree");
       assert.equal((yield* git(root, ["worktree", "add", worktree, "-b", "side"])).exitCode, 0);
-      assert.equal((yield* git(worktree, ["commit", "-q", "--allow-empty", "-m", "w"])).exitCode, 0);
+      assert.equal(
+        (yield* git(worktree, ["commit", "-q", "--allow-empty", "-m", "w"])).exitCode,
+        0,
+      );
       assert.equal((yield* git(worktree, ["switch", "existing"])).exitCode, 0);
       assert.equal((yield* git(root, ["commit", "-q", "--allow-empty", "-m", "c"])).exitCode, 0);
       assert.equal((yield* git(root, ["rebase", "side"])).exitCode, 0);
