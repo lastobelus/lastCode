@@ -150,7 +150,7 @@ When accepted, rename the branch to `port/upstream/pr-<number>-<slug>`.
    clean Codex result for the exact head, zero unresolved threads, and a
    successful exact-head/base GitHub CI run and aggregate `CI Gate`. During
    passive review or CI waits, use the `lastcode-pr` gate check and PR watch,
-   and merge only through `pnpm lastcode:merge`.
+   and merge only through `pnpm --config.verify-deps-before-run=false lastcode:merge`.
 6. Verify the merged commit on `origin/lastcode/main`. For a squash merge,
    compare stable patch IDs so provenance verification does not depend on the
    topic commit remaining an ancestor.

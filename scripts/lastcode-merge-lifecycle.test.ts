@@ -12,6 +12,7 @@ import { MAIN_WRITE_LOCK_REF } from "./lastcode-main-write-lock.ts";
 import { validateCarrySourceRange } from "./lastcode-carry-delivery.ts";
 import { compileCarrySetSameBase } from "./lastcode-carry-replay.ts";
 import { assertSupportedNodeVersion } from "./lastcode-local-ci.ts";
+import { NO_INSTALLED_DEPENDENCIES_IMPORT } from "./lastcode-no-installed-dependencies.fixture.ts";
 
 function fixtureNodeExecutable(): string {
   // Vite+ may host tests on a newer Node than the runtime required by the merge CLI.
@@ -252,7 +253,11 @@ process.stdout.write(JSON.stringify(result));
         const node = fixtureNodeExecutable();
         const result = NodeChildProcess.spawnSync(
           node,
-          [NodeURL.fileURLToPath(new URL("./lastcode-merge.ts", import.meta.url))],
+          [
+            "--import",
+            NO_INSTALLED_DEPENDENCIES_IMPORT,
+            NodeURL.fileURLToPath(new URL("./lastcode-merge.ts", import.meta.url)),
+          ],
           {
             cwd: repo,
             encoding: "utf8",

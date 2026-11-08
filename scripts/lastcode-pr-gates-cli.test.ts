@@ -5,6 +5,8 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
+import { NO_INSTALLED_DEPENDENCIES_IMPORT } from "./lastcode-no-installed-dependencies.fixture.ts";
+
 const script = NodePath.resolve(import.meta.dirname, "lastcode-pr-gates.ts");
 const repository = "example/stack-project";
 const head = "a".repeat(40);
@@ -135,19 +137,23 @@ function fixture(stacked = false) {
     "fixture",
   );
   const runFrom = (workingDirectory: string, ...args: string[]) =>
-    NodeChildProcess.spawnSync(process.execPath, ["--import", runtimePath, script, ...args], {
-      cwd: workingDirectory,
-      env: {
-        ...process.env,
-        PATH: `${bin}${NodePath.delimiter}${process.env.PATH ?? ""}`,
-        LASTCODE_GITHUB_REPOSITORY: repository,
-        GATES_TEST_STATE: statePath,
-        T3CODE_PR_WATCH_SETTINGS_PATH: undefined,
-        T3CODE_HOME: settingsHome,
+    NodeChildProcess.spawnSync(
+      process.execPath,
+      ["--import", NO_INSTALLED_DEPENDENCIES_IMPORT, "--import", runtimePath, script, ...args],
+      {
+        cwd: workingDirectory,
+        env: {
+          ...process.env,
+          PATH: `${bin}${NodePath.delimiter}${process.env.PATH ?? ""}`,
+          LASTCODE_GITHUB_REPOSITORY: repository,
+          GATES_TEST_STATE: statePath,
+          T3CODE_PR_WATCH_SETTINGS_PATH: undefined,
+          T3CODE_HOME: settingsHome,
+        },
+        encoding: "utf8",
+        timeout: 15_000,
       },
-      encoding: "utf8",
-      timeout: 15_000,
-    });
+    );
 
   const run = (...args: string[]) => runFrom(cwd, ...args);
   return { cwd, state, save, run, runFrom, git, settingsPath };

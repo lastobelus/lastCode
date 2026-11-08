@@ -2,7 +2,7 @@
 
 // @effect-diagnostics nodeBuiltinImport:off globalConsole:off globalDate:off -- Bounded host-side GitHub reads.
 import * as NodeChildProcess from "node:child_process";
-import { DEFAULT_LASTCODE_PULL_REQUEST_WATCH_QUIET_MINUTES } from "../packages/contracts/src/lastcodePullRequestWatchSettings.ts";
+import { DEFAULT_LASTCODE_PULL_REQUEST_WATCH_QUIET_MINUTES } from "../packages/contracts/src/lastcodePullRequestWatchQuietMinutes.ts";
 
 import { readPullRequestWatchQuietMinutes } from "./lib/lastcode-pr-watch-settings.ts";
 
@@ -837,7 +837,9 @@ export function parsePrGatesOptions(args: ReadonlyArray<string>): {
     Number.isSafeInteger(Number(args[1]))
   )
     return { pullRequestNumber: Number(args[1]) };
-  throw new Error("Usage: pnpm lastcode:pr-gates [--pr PR_NUMBER]");
+  throw new Error(
+    "Usage: pnpm --config.verify-deps-before-run=false lastcode:pr-gates [--pr PR_NUMBER]",
+  );
 }
 
 if (import.meta.main) {

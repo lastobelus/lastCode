@@ -140,8 +140,9 @@ executing merge owns it only through the final checks and merge request. A busy
 lock fails promptly so a later invocation can retry. Existing GitHub account and
 checkpoint push permissions remain unchanged.
 
-Use the updated `pnpm lastcode:merge` command for all PR merges after deploying
-this change, and refresh the coordinator before resuming checkpoint runs.
+Use the updated `pnpm --config.verify-deps-before-run=false lastcode:merge`
+command for all PR merges after deploying this change, and refresh the
+coordinator before resuming checkpoint runs.
 Direct GitHub UI merges, plain `gh pr merge`, old scripts, and manual pushes do
 not participate in this coordination. The checkpoint source lease still protects
 commits written outside it, but those writes can invalidate PR validation during
@@ -169,8 +170,8 @@ than inferred from commit titles.
 A later admitted checkpoint run can replay newly merged work onto a published
 checkpoint as an immutable `lastcode/revision/...` tag. Repeated runs recognize
 the revision's source metadata and cannot manufacture duplicate revisions.
-Ordinary `pnpm lastcode:merge` requests no service run; `--skip-checkpoint`
-explicitly selects the same behavior. `--checkpoint` requests an extra run only
+An ordinary merge requests no service run; `--skip-checkpoint` explicitly
+selects the same behavior. `--checkpoint` requests an extra run only
 when separately authorized by the user. Merge authority and dependency requests
 do not authorize it. These options do not change the service schedule or stop an
 active run. Closing other start paths and enforcing batch spacing belongs in

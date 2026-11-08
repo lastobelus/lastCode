@@ -24,7 +24,7 @@ for published cross-repository links. Ordinary GitHub
 links and `owner/repo#number` shorthand create backlinks; replaying downstream
 commits during checkpoint rebases repeats those entries and can spam the
 upstream PR. Keep canonical GitHub URLs for API and `gh` targets and Git
-operations. Before `pnpm lastcode:merge`, inspect the current PR body because
+operations. Before merging, inspect the current PR body because
 the guarded wrapper derives the squash message from it. Do not rewrite
 existing historical commits or immutable checkpoint tags solely to change
 links.
@@ -89,7 +89,8 @@ promotion lease must protect that source against concurrent merges. Merging
 while a checkpoint prepares is safe: the validated tag still publishes and
 promotion defers if main advances. Ordinary merges request no checkpoint.
 `--skip-checkpoint` makes that default explicit; use `--checkpoint` only when
-the user separately authorizes an extra service run. A dependency request or
+the user separately authorizes an extra service run. It starts the service
+from this checkout, which needs installed dependencies. A dependency request or
 permission to merge does not authorize one. New merged work belongs to a later
 admitted batch, without automatically revising the selected release.
 A repaired recovery retains its exact selection and worktree until promotion
@@ -146,12 +147,11 @@ current GitHub thread and review-query mechanics.
 4. While exact-head GitHub CI or Codex review is passive and no current finding
    needs judgement, wait as the global `babysit` skill's Wait section says: call
    `watch_pull_request` with the PR's explicit URL, then run
-   `pnpm lastcode:pr-gates` once (add `--pr PR_NUMBER` for a stack or a PR
-   outside a clean matching checkout), and on `pending` end the turn. The check
-   needs a checkout with dependencies installed, because `pnpm` installs them
-   first; without one, take the `babysit` snapshot with `gh` instead, judge the
-   `attention` reasons below from it yourself, and never install dependencies
-   just for the gate. Do not poll GitHub, sleep, or start a polling Action or
+   `pnpm --config.verify-deps-before-run=false lastcode:pr-gates` once (add `--pr PR_NUMBER` for a
+   stack or a PR outside a clean matching checkout), and on `pending` end the
+   turn. The check and the merge need only Node, `git` and `gh`, so run them in
+   a checkout without `node_modules`; the flag stops pnpm from installing
+   dependencies first. Do not poll GitHub, sleep, or start a polling Action or
    watcher. On each wake, rerun the check and fix actionable failures or
    findings even while another gate is pending; otherwise end the turn and let
    the watch continue. Call `unwatch_pull_request` before handing the work back.
@@ -174,7 +174,8 @@ current GitHub thread and review-query mechanics.
    `unwatch_pull_request`; ending the turn instead can wait forever. Watch again
    only when the user asks you to keep waiting or new actionable work needs it.
 
-5. Use `pnpm lastcode:merge`; do not bypass the guarded merge in the GitHub UI.
+5. Merge with `pnpm --config.verify-deps-before-run=false lastcode:merge` from the PR's
+   own checkout; do not bypass the guarded merge in the GitHub UI.
    The wrapper independently revalidates a successful exact-head/base GitHub CI
    run and aggregate `CI Gate`, strict exact-head review readiness with zero
    unresolved review threads, a clean current PR, and an unchanged fetched
