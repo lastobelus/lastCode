@@ -245,10 +245,39 @@ disabled, report that setup problem rather than reverting to a sleep loop.
 
 ### Resuming a repaired checkpoint
 
-When a retained nightly rebase is complete but validation required additional
-commits, do not delete the worktree and rely on rerere: Git only remembers
-conflict resolutions, not subsequent repairs. Commit the repairs and incorporate
-any downstream merges made since that attempt before selecting its exact head.
+Preserve the retained worktree, including resolutions and subsequent repairs.
+Carry replay deliberately disables rerere. Commit repairs and incorporate any
+downstream merges made since that attempt before selecting its exact head.
+
+Record the repository-relative conflicted paths from every replay group, plus
+any other repaired paths, in a newline-delimited file outside tracked source.
+After replay completes, use this order:
+
+1. Prepare dependencies once through the owning Project Action. If client QA
+   needs a separate checkout, create it at the completed candidate before this
+   preparation; use that same prepared checkout for the gate and later QA, while
+   the service owns the retained recovery worktree. Reuse the successful preparation
+   unless dependencies changed or were cleaned up. Do not start another dependency
+   Action just to begin QA.
+2. Run one focused gate from that prepared checkout:
+
+   ```bash
+   vp run check:changed --checkpoint-recovery-files <conflicted-and-repaired-paths-file> --concurrency 1
+   ```
+
+   This checks format and lint of those paths, typechecks affected packages and
+   their consumers, and runs tests beside the conflicted or repaired files.
+   It requires a clean, completed replay. Fix concrete failures and commit before
+   rerunning it. Broader checks remain in the service's unchanged Full CI;
+   this preflight does not create a Full CI stamp or a PR Quick CI receipt.
+
+3. Select the exact repaired candidate and request the service run immediately,
+   using the commands below. Aim to start Full CI within about five minutes of
+   replay completion; measure dependency preparation and this gate if it takes longer.
+4. Run the required integrated client QA alongside Full CI, using `test-t3-app`
+   or `test-t3-mobile` as applicable. Additional investigation and broader focused
+   checks also belong alongside Full CI. A successful CI result does not prove
+   client QA passed. If either finds a defect, follow the replacement procedure below.
 
 If you finish a retained carry rebase with manual `git rebase --continue` calls,
 select its clean six-group head once before appending repair commits. This records
@@ -293,14 +322,50 @@ validation or be automatically superseded. A changed head,
 or a main that no longer descends from the selected source, requires inspection
 and selection again. Failed validation retains the worktree and selection.
 
-Use **Wait for Checkpoint** immediately after requesting the service run, and
-end the turn. After publication, use **Build Local Package** on the exact new
+Once concurrent QA and other useful work are finished, use **Wait for Checkpoint**
+for a service run that is still active, then end the turn; do not poll its status.
+After publication, use **Build Local Package** on the exact new
 installable tag; selection and publication do not install or restart the app.
 Selected recovery processes only its selected nightly. Later nightlies belong
 to a separately admitted run after the selected repair is reconciled.
 If publication succeeded but cleanup was interrupted, a retry recognizes the
 matching immutable tag represented on main and finishes cleanup without
 republishing.
+
+#### Replacing a candidate after a QA or check failure
+
+`run-now` requests another pass without interrupting the current one. Selection
+shares the checkpoint operation lock, so a running pass cannot be superseded by
+selecting a different head. Do not edit its retained checkout while it validates.
+
+For the managed macOS service, stop the loaded job with launchd before repairing
+the retained candidate. These existing service-manager operations keep its plist,
+schedule, alert configuration, and recovery selection; `service uninstall` does not.
+Stopping a service remains subject to the operator's existing authorization.
+
+```bash
+launchctl bootout "gui/$(id -u)/codes.lastobelus.lastcode-nightly-checkpoint"
+```
+
+Confirm the loaded job and its owned CI processes have exited before editing.
+launchd terminates the job's process group; detached CI workers also stop their
+owned groups when their controller disconnects. Preserve an uncertain lock or
+process owner for inspection instead of deleting it. If the pass already
+published an immutable tag, leave it intact and use the normal repair-revision
+workflow; do not attempt to replace that published candidate.
+
+Fix and commit the defect with its owning `Carry-Group`, update the path list,
+rerun the focused gate using the prepared checkout, and select the repaired head
+again. Restore the same installed service and request the new pass:
+
+```bash
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/codes.lastobelus.lastcode-nightly-checkpoint.plist"
+pnpm lastcode:checkpoint:service run-now
+```
+
+If stopping is not authorized, report the defect and let the current pass finish
+before repairing and reselecting. Keep the client QA result separate from service
+publication and final acceptance.
 
 ### Publishing a revision while newer nightlies are on hold
 
