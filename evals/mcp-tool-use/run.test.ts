@@ -363,12 +363,25 @@ it("checkpoint recovery guidance grades the operational order, not just keywords
   const failures = (text: string) =>
     failed(recovery.expect, { calls: [], text, stopReason: "end_turn" });
   assert.deepEqual(failures(sequence([prepare, gate, select, start, qa])), []);
+  assert.deepEqual(
+    failures(
+      sequence([
+        "Prepare Dependencies in the separate checkout.",
+        `${gate}. Repeat dependency preparation only if manifests or the lockfile changed.`,
+        select,
+        start,
+        qa,
+      ]),
+    ),
+    [],
+  );
   for (const steps of [
     [select, prepare, gate, start, qa],
     [prepare, select, gate, start, qa],
     [prepare, gate, start, select, qa],
     [prepare, gate, qa, select, start, "QA is still required."],
     ["Run checks once.", gate, select, start, qa],
+    ["Prepare Dependencies. Run checks once.", gate, select, start, qa],
     [prepare, gate, select, "Run integrated client QA before run-now.", start, qa],
   ]) {
     const text = sequence(steps);
