@@ -313,7 +313,7 @@ it("compares against an explicit ref instead of the closest remote main", async 
   assert.strictEqual(result.ref, "origin/main");
 });
 
-function launcherFixture() {
+function launcherFixture(nativeLauncher = false) {
   const root = NodeFS.realpathSync(
     NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3 checks & (fixture) ")),
   );
@@ -364,11 +364,18 @@ function launcherFixture() {
   // Select the Windows launcher without changing the Effect runtime's host platform.
   write(
     "scripts/check-changed.ts",
-    NodeFS.readFileSync(NodePath.join(import.meta.dirname, "check-changed.ts"), "utf8").replace(
-      "vitePlusCommand(args, platform)",
-      'vitePlusCommand(args, "win32")',
-    ),
+    nativeLauncher
+      ? NodeFS.readFileSync(NodePath.join(import.meta.dirname, "check-changed.ts"), "utf8")
+      : NodeFS.readFileSync(NodePath.join(import.meta.dirname, "check-changed.ts"), "utf8").replace(
+          "vitePlusCommand(args, platform)",
+          'vitePlusCommand(args, "win32")',
+        ),
   );
+  write(
+    "node_modules/.bin/vp",
+    `#!/bin/sh\nexec '${process.execPath}' '${root}/node_modules/vite-plus/cli.js' "$@"\n`,
+  );
+  NodeFS.chmodSync(NodePath.join(root, "node_modules/.bin/vp"), 0o755);
   for (const name of ["effect", "@effect/platform-node", "@t3tools/shared"]) {
     const dest = NodePath.join(root, "node_modules", name);
     NodeFS.mkdirSync(NodePath.dirname(dest), { recursive: true });
@@ -409,7 +416,13 @@ function launcherFixture() {
       return NodeChildProcess.spawnSync(process.execPath, ["scripts/check-changed.ts", ...args], {
         cwd: root,
         encoding: "utf8",
-        env: { ...env, TEMP: NodeOS.tmpdir(), RECORDS: records, FAIL_STEP: failStep },
+        env: {
+          ...env,
+          PATH: `${root}/node_modules/.bin:${process.env.PATH ?? ""}`,
+          TEMP: NodeOS.tmpdir(),
+          RECORDS: records,
+          FAIL_STEP: failStep,
+        },
       });
     },
     calls: (): Array<{ args: Array<string>; cwd: string }> =>
@@ -421,6 +434,49 @@ function launcherFixture() {
     },
   };
 }
+
+it("gates the completed replay's conflict files without repeating the broader CI checks", () => {
+  using project = launcherFixture(true);
+  const test = project.source.replace(/\.ts$/, ".test.ts");
+  const unrelated = "packages/example/unrelated.ts";
+  project.write(test, "export {};\n");
+  project.write(unrelated, "export const unrelated = true;\n");
+  project.git("add", ".");
+  project.git("commit", "-m", "completed replay");
+  const files = "node_modules/recovery-files.txt";
+  project.write(files, `${project.source}\npackages/example/package.json\n${project.source}\n`);
+  const rejected = project.run("lint", ["--checkpoint-recovery-files", files]);
+  expect(rejected.status, rejected.stdout + rejected.stderr).toBe(1);
+  expect(rejected.stdout).toContain("FAIL  lint");
+  expect(
+    NodeFS.existsSync(NodePath.join(project.root, "node_modules/.cache/check-changed.json")),
+  ).toBe(false);
+  const result = project.run("", ["--checkpoint-recovery-files", files]);
+  expect(result.status, result.stdout + result.stderr).toBe(0);
+  const commands = project.calls().map(({ args }) => args);
+  expect(commands).toContainEqual(["lint", "--no-error-on-unmatched-pattern", project.source]);
+  expect(commands).toContainEqual([
+    "fmt",
+    "--check",
+    "--no-error-on-unmatched-pattern",
+    "packages/example/package.json",
+    project.source,
+  ]);
+  expect(commands.some((args) => args.includes("typecheck") && args.includes("example"))).toBe(
+    true,
+  );
+  expect(commands).toContainEqual(["test", "run", "--passWithNoTests", test]);
+  expect(
+    commands.some(
+      (args) => args.includes(unrelated) || args.includes("knip") || args[0] === "install",
+    ),
+  ).toBe(false);
+  // This pass cannot satisfy an ordinary changed-file gate, even at the same HEAD.
+  const ordinary = project.run("", ["HEAD^"]);
+  expect(ordinary.status, ordinary.stdout + ordinary.stderr).toBe(0);
+  expect(ordinary.stdout).not.toContain("Nothing changed since the last passing run");
+  expect(project.calls().some(({ args }) => args.includes("knip"))).toBe(true);
+});
 
 it("checks changed source paths through the Windows launcher", () => {
   using project = launcherFixture();
@@ -529,6 +585,11 @@ it("checks every integrated repair against a pinned snapshot across rewritten ca
 });
 
 it.each([
+  [
+    "recovery with a ref",
+    ["HEAD", "--checkpoint-recovery-files", "node_modules/paths.txt"],
+    "cannot be combined",
+  ],
   ["missing candidate", ["--baseline", "HEAD"], "use --baseline and --candidate together"],
   ["missing baseline", ["--candidate", "HEAD"], "use --baseline and --candidate together"],
   [
