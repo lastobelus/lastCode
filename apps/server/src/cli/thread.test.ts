@@ -10,6 +10,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as TestConsole from "effect/testing/TestConsole";
 import { vi } from "vite-plus/test";
 import * as McpBridge from "../mcp/AcpMcpStdioBridge.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import {
   makePersistedServerRuntimeState,
   persistServerRuntimeState,
@@ -111,6 +112,12 @@ it.effect(
           port: 3_773,
         }),
       });
+      // A running server has already created and migrated its database.
+      yield* Effect.void.pipe(
+        Effect.provide(
+          SqlitePersistence.layerFromPath(path.join(baseDir, "userdata", "statev2.sqlite")),
+        ),
+      );
       using _session = vi.spyOn(McpBridge, "mcpToolSession").mockReturnValue(
         Effect.succeed({
           call: (tool, args) => {

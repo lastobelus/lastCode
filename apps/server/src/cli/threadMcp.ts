@@ -237,7 +237,7 @@ const withThreadTools = Effect.fn("cli.thread.withThreadTools")(function* <A, E,
   }).pipe(
     Effect.scoped,
     Effect.provide(
-      EnvironmentAuth.layerRuntime.pipe(
+      EnvironmentAuth.layerRuntimeWithoutMigrations.pipe(
         Layer.provide(ServerConfig.layer(config)),
         Layer.provide(Layer.succeed(References.MinimumLogLevel, config.logLevel)),
       ),
