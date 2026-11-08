@@ -449,7 +449,6 @@ function isAutomationIgnoredPath(path: string): boolean {
   return (
     path === ".DS_Store" ||
     path.endsWith("/.DS_Store") ||
-    path === ".agents/skills/babysit" ||
     path.startsWith(".vite-hooks/") ||
     path === "node_modules/" ||
     path.endsWith("/node_modules/") ||
