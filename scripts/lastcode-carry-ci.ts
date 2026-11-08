@@ -11,7 +11,8 @@ import {
   validateHistoricalBootstrapSourceTag,
   type CarryBootstrap,
 } from "./lastcode-carry-checkpoint.ts";
-import { cleanGitEnvironment, parseLastCodeInstallableTag } from "./lastcode-nightly.ts";
+import { cleanGitEnvironment } from "./lib/lastcode-git.ts";
+import { parseLastCodeInstallableTag } from "./lib/lastcode-installable-tag.ts";
 
 import {
   carrySquashBody,

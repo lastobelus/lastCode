@@ -1,6 +1,8 @@
 /** Session-invariant; harnesses with a native system-prompt append can carry it once per session. */
 export const PULL_REQUEST_LINKING_INSTRUCTIONS = `<pull_request_linking>
-Link each PR you create, take over, or push to: link_pull_request, or link_pull_requests for several, full URL, every stack layer, as your next call. Host tools do not link for you. If linking fails, say so. Skip PRs you only read or review, and PRs named only as background. Call watch_pull_request when asked to monitor or babysit, or when work you were asked to do, such as a merge, still waits on checks or reviews, even after an earlier unwatch. Finish any needed branch update and push first, then watch and end your turn. Otherwise act now or hand back. Delegated children never watch, even if the brief says babysit. After PR work, a child's last line is: PR <full URL>, head <SHA>, checks and reviews <state>. Links and watches persist across pushes. For PR waits, no sleep, loops, gh --watch, Monitor or ScheduleWakeup. Before handback, call unwatch_pull_request on any PR you watch.
+Link each PR you create, take over, or push to: link_pull_request, or link_pull_requests for several, full URL, every stack layer, as your next call. Host tools do not link for you. If linking fails, say so. Skip PRs you only read or review, and PRs named only as background. Call watch_pull_request when asked to monitor or babysit, or when work you were asked to do, such as a merge, still waits on checks or reviews, even after an earlier unwatch. Finish any needed branch update and push first, then watch, run any required project gate check once, and end your turn while gates are pending. Otherwise act now or hand back. An app-owned delegated child owns a PR watch only when its brief says the parent verified features.appOwnedPullRequestWatchContinuationVersion and #482 Phase 4 acceptance of that destination's installed checkpoint, or authorized an isolated acceptance scenario; Action ownership, the flag in source, or a newer-looking version does not count. Otherwise, or if the watch is refused, the child ends with an unfinished handoff asking its parent to own the watch. An owning child ends each turn unfinished while waiting and continues only on its own watch wakes; its parent does not poll, read, or relay those events. After PR work, a child's last line is: PR <full URL>, head <SHA>, checks and reviews <state>. Links and watches persist across pushes. For PR waits, no sleep, loops, gh --watch, Monitor or ScheduleWakeup. Before handback, call unwatch_pull_request on any PR you watch.
+
+A delegated child owns resumable Project Actions only when its brief says the parent verified features.appOwnedActionContinuationVersion and installed acceptance, or authorized an isolated acceptance scenario. Then launch the eligible saved Action yourself and end your turn, saying the task is unfinished and what it waits on: the Action, or a Pause, pending input, or recovery that needs attention. Your task continues when the result arrives. Otherwise, or if the launch is refused, leave the Action to your parent, even when run_project_action_and_resume is available: end your turn with a final response that marks the work unfinished and requests the Action, giving your thread, project, environment, exact checkout and head SHA, the eligible Action, the result you expect, and your next step. That response is the handoff; send no separate parent message.
 </pull_request_linking>`;
 
 const PREVIEW_HANDOFF_INSTRUCTIONS = `<preview_handoffs>
@@ -8,14 +10,14 @@ When the t3-code MCP server exposes preview_host, launch temporary QA dev server
 </preview_handoffs>`;
 
 /** Omit model and effort when the harness manages them dynamically. */
-export function buildRuntimeInstructions(runtime: {
+export function buildRuntimeInstructionSections(runtime: {
   readonly harness: string;
   readonly model?: string | undefined;
   readonly modelName?: string | undefined;
   readonly reasoningEffort?: string | undefined;
   /** False when the session's system prompt already carries the linking instructions. */
   readonly pullRequestLinking?: boolean;
-}): string {
+}): readonly [string, string] {
   const harness = toSingleLine(runtime.harness);
   const model = toSingleLine(runtime.model ?? "");
   const modelName = toSingleLine(runtime.modelName ?? "");
@@ -27,7 +29,13 @@ export function buildRuntimeInstructions(runtime: {
   const runtimeInfo = `<runtime_info>In case you're asked: you are running in T3 Code through the ${harness} harness${modelInfo}${effortInfo}. No need to mention this otherwise. You can embed images, video, and audio in your response using Markdown image syntax with absolute file paths. Link any other file you produce using its absolute path so the user can open it in T3 Code's files viewer.</runtime_info>`;
   const linkingInstructions =
     runtime.pullRequestLinking === false ? "" : `\n\n${PULL_REQUEST_LINKING_INSTRUCTIONS}`;
-  return `${runtimeInfo}${linkingInstructions}\n\n${PREVIEW_HANDOFF_INSTRUCTIONS}`;
+  return [`${runtimeInfo}${linkingInstructions}`, PREVIEW_HANDOFF_INSTRUCTIONS];
+}
+
+export function buildRuntimeInstructions(
+  runtime: Parameters<typeof buildRuntimeInstructionSections>[0],
+): string {
+  return buildRuntimeInstructionSections(runtime).join("\n\n");
 }
 
 function toSingleLine(value: string): string {

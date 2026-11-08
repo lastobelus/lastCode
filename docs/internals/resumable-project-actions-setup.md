@@ -103,6 +103,83 @@ If the agent manually polls instead, inspect the repository guidance first. Comm
 or conflicting workflow instructions, a skill that mentions the Action without prescribing the
 tool sequence, or an Action that is missing or disabled in the current environment.
 
+## Parent-mediated Actions for delegated children
+
+An app-owned delegated child launches its own resumable Actions only when its parent's brief says
+both of these hold for the child's environment:
+
+- `orchestrator_capabilities` reports `features.appOwnedActionContinuationVersion`. The flag
+  reports technical support only. Source availability, a version number, or the Action tools
+  being present do not imply it.
+- Issue #482, the rollout record, explicitly accepts the immutable installed checkpoint that
+  environment runs for child-owned Actions.
+
+Before that acceptance, only narrowly authorized isolated acceptance scenarios use child
+ownership. An owning child launches its Action, ends its turn saying the task is unfinished and
+what it waits on, and the runtime carries the same task through the Action and its continuation.
+The parent ends its turn and receives one final result when the whole task ends.
+This covers local and remote app-owned tasks on Codex and Claude, not provider-native subagents.
+The runtime refuses a delegated launch it cannot attribute to a specific child turn before the
+Action starts. Not every provider-generated wake can be attributed yet, so an Action requested
+from such a wake falls back to mediation.
+
+Every other child, including one whose launch was refused, must not launch or wait on a resumable
+Action, whatever else its brief says. That covers dependency preparation, CI, build, and checkpoint
+waits. Requests already handed to a parent stay with it; nothing migrates them. A child owns its PR watch only when the parent separately verifies `features.appOwnedPullRequestWatchContinuationVersion` and explicit Phase 4 acceptance of the destination's installed checkpoint in #482, or a narrowly authorized isolated acceptance scenario applies; otherwise the parent keeps the watch. Ordinary top-level and independent threads launch and resume their own Actions directly; mediation does not apply to them.
+
+For mediation, the injected instructions carry the sequence each side follows: the child ends its
+turn with a final response that marks the work unfinished and requests the exact Action, and the
+parent waits for that recorded result, verifies the target, launches, and queues the result back to
+the same child with a `taskId` receipt. The rest of this section holds the setup detail they leave
+out.
+
+### Choose the target
+
+A listed, eligible Action shows only that it exists and is opted in. Use `t3_project_read` to
+inspect the registered workspace and saved scripts, and `t3_thread_read` to check the parent's
+checkout. Before launching for a child, verify the saved command, opt-in, effective working
+directory, environment, and worktree-local package or build selection against the child's exact
+checkout and head. Use **Settings → Projects** when importing, changing, or opting in an Action;
+reading its definition does not itself need a UI visit.
+
+- **Shared checkout.** When the child works in the parent's checkout, the parent's saved Action
+  usually targets it already; verify it as above. Serialize changes to that checkout while the
+  Action runs.
+- **Separate child worktree.** The parent needs a saved Action explicitly targeted at that
+  worktree and opted in, set up as in [Let the agent complete the UI setup](#let-the-agent-complete-the-ui-setup).
+  Its setup must not depend on packages the child's worktree is still missing. Keep concrete
+  paths and selections in the environment's settings, not in repository files.
+
+If a correctly targeted Action cannot be prepared, use the shared checkout when that is safe, and
+otherwise report the specific blocker before launch.
+
+### Automatic settlement
+
+A top-level thread's own Actions and the Actions a parent launches through mediation need no
+automatic-settlement setting change. `run_project_action_and_resume` never checks automatic
+settlement, so Actions launch and resume the same way under any setting.
+
+The runtime keeps a thread from being settled automatically while its Action is unfinished or
+recoverable, and while that Action's exact retained or queued follow-up is outstanding. Child-owned
+Actions also keep parent and child unsettled while the task or its result is owed. This protection
+covers the Action continuation, not other work the thread still intends to do. An explicit Stop,
+Settle, or other lifecycle choice from the user stands.
+
+### Observe progress
+
+A parent reads the bounded latest-Action summary through `t3_thread_read`: identity, outcome,
+delivery, timing, exit, derived follow-up status, and an untrusted report summary. A mediated
+Action belongs to the parent's own thread; reading the child does not show that parent-owned run.
+The retained hold flag and raw output are available only through `inspect_action_run` in the
+thread that launched the run, which for mediated Actions is the parent. A child-owned Action runs
+in the child's thread; its parent waits for the task's completion instead of reading progress.
+
+### When the handoff ends
+
+Mediation ends per environment, once both conditions above hold for its installed checkpoint. The
+capability flag, a newer source tree, or a version number alone is not enough. Mediated work
+already in flight keeps its recorded owner until someone deliberately hands it over.
+
 ## Troubleshooting
 
 ### The Action list is empty

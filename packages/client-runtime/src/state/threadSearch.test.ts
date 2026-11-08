@@ -151,6 +151,42 @@ it("asks environments that omit older settled threads for their rows, with the c
   registry.dispose();
 });
 
+it("runs mention metadata searches without an older-settled cutoff and reports failed sources", () => {
+  const inputs: Array<readonly [EnvironmentId, OrchestrationV2SearchThreadsInput]> = [];
+  const search = createThreadSearchResultsAtomFamily<Error>({
+    getSearchAtom: (environmentId, input) => {
+      inputs.push([environmentId, input]);
+      return environmentId === envA
+        ? Atom.make(AsyncResult.success({ matches: [], mentionsTruncated: true }))
+        : Atom.make(
+            AsyncResult.failure<OrchestrationSearchThreadsResult, Error>(
+              Cause.fail(new Error("offline")),
+            ),
+          );
+    },
+    olderSettledBefore: () => Atom.make<string | null>(null),
+    labelPrefix: "test:thread-search-mention",
+  });
+  const registry = AtomRegistry.make();
+  const state = registry.get(
+    search.results(
+      makeThreadSearchKey([envA, envB], "", {
+        mode: "thread-mention",
+        threadIds: [ThreadId.make("saved-thread")],
+      }),
+    ),
+  );
+
+  expect(inputs).toEqual([
+    [envA, { query: "", mode: "thread-mention", threadIds: ["saved-thread"] }],
+    [envB, { query: "", mode: "thread-mention", threadIds: ["saved-thread"] }],
+  ]);
+  expect(state.mentionFailures).toEqual([envB]);
+  expect(state.mentionResolvedEnvironments).toEqual([envA]);
+  expect(state.mentionsTruncated).toBe(true);
+  registry.dispose();
+});
+
 it("keeps the previous results visible only while a refined or widened query is pending", () => {
   const previous = {
     query: "websock",

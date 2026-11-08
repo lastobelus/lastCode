@@ -53,6 +53,7 @@ const FIXTURE_RUNTIME_PATHS = [
   "scripts/lastcode-main-write-lock.ts",
   "scripts/lastcode-build-mac.ts",
   "scripts/lastcode-nightly.ts",
+  "scripts/lib/lastcode-git.ts",
   "scripts/lib/lastcode-installable-tag.ts",
 ] as const;
 

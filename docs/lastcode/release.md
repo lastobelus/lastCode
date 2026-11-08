@@ -148,15 +148,19 @@ suites on whichever CI node runs the gate.
 
 PR waits use the native pull-request watch, not a Project Action. Call
 `watch_pull_request` with the PR URL, then run the one-shot
-`pnpm lastcode:pr-gates [--pr PR_NUMBER]` check; when it reports `pending`, end
+`pnpm --config.verify-deps-before-run=false lastcode:pr-gates [--pr PR_NUMBER]` check; when it reports `pending`, end
 the turn. On each wake, run the check again. It reads the exact GitHub pull-request workflow run,
 whose identity records the PR number, head, base, and synthetic merge commit
 behind one stable aggregate `CI Gate`, together with exact-head Codex review
 and unresolved review threads. Head or base drift invalidates earlier evidence
 and requires the agent to decide whether to rebase, republish, and request
-review again. The watch has no review timeout. A CI run that never registers
-cannot wake it, so the check reports `ci-not-registered` attention once review
-is no longer pending.
+review again. Review waits end at a configurable quiet deadline, 45 minutes by
+default: once the newest exact-head review request is older than the deadline,
+the check reports `review-stalled` attention, even if Codex has reacted with
+eyes. The timeout never counts as approval, permits a merge, or substitutes for
+review. [LastCode PR](../../.agents/skills/lastcode-pr/SKILL.md#babysit-and-merge)
+owns the handling. A CI run that never registers cannot wake the watch, so the
+check reports `ci-not-registered` attention once review is no longer pending.
 
 For sequential stacked PRs, `--pr` checks one PR independently of the current
 checkout and rebuilds its parent chain live on every run. See
@@ -174,11 +178,24 @@ This applies to authorized repair PRs opened during checkpoint or build recovery
 without a separate request to babysit. Handle existing findings first, then
 use the check and watch above. Do not poll GitHub or run a separate watcher.
 
+Checkpoint review keeps `gpt-6.1-sol` at high effort as its default. A small
+pilot supported that choice, but its limited evidence does not show either model
+is better in general. Add `gpt-6.1-terra` at xhigh effort selectively, as an
+independent second opinion on publication or validation safety. It is not
+required on every review and never replaces the required exact-head GitHub Codex
+review. The selected model and effort must be available in the capability
+catalog; [External Review Mechanics](../../.agents/skills/_references/external-review-mechanics.md)
+covers how to check that and run the review.
+
 Merge the current ready PR with:
 
 ```bash
-pnpm lastcode:merge
+pnpm --config.verify-deps-before-run=false lastcode:merge
 ```
+
+The gate check and the merge need only Node, `git` and `gh`, so they run in a
+checkout without `node_modules`. The flag stops pnpm installing dependencies
+before the script.
 
 The merge wrapper refuses dirty worktrees, missing or stale exact GitHub CI,
 exact-head Codex review that is missing or pending, unresolved review threads,

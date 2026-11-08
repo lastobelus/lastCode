@@ -93,6 +93,9 @@ export function ProjectActionsSettings() {
       runOnSettle: fileScript.runOnSettle ?? false,
       stopOnSettle: fileScript.stopOnSettle ?? false,
       keybinding: null,
+      ...(fileScript.terminalLinkProfileName === undefined
+        ? {}
+        : { terminalLinkProfileName: fileScript.terminalLinkProfileName }),
       previewUrl: fileScript.previewUrl ?? null,
       autoOpenPreview: fileScript.previewUrl ? (fileScript.autoOpenPreview ?? false) : false,
       // Import never grants an agent permission to execute a checked-in command.

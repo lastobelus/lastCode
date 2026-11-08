@@ -10,6 +10,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import type * as Electron from "electron";
 
 import * as ElectronApp from "../electron/ElectronApp.ts";
+import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronTheme from "../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
@@ -87,6 +88,7 @@ function layerDesktopWindow(
   input: {
     readonly activate?: Effect.Effect<void>;
     readonly flushMainWindowBounds?: Effect.Effect<void>;
+    readonly runningActionCount?: Effect.Effect<number>;
   } = {},
 ) {
   return Layer.succeed(DesktopWindow.DesktopWindow, {
@@ -104,6 +106,10 @@ function layerDesktopWindow(
     dispatchSnapShotEvent: () => Effect.void,
     zoomMain: () => Effect.void,
     runMainContentsCommand: () => Effect.void,
+    runningActionCount: input.runningActionCount ?? Effect.succeed(0),
+    reportRunningActionCount: () => Effect.void,
+    acknowledgeRunningActionQuitWarning: Effect.void,
+    consumeRunningActionQuitWarningAcknowledgment: Effect.succeed(false),
     syncAppearance: Effect.void,
   });
 }
@@ -121,6 +127,7 @@ describe("DesktopLifecycle", () => {
 
       const layer = DesktopLifecycle.layer.pipe(
         Layer.provideMerge(layerElectronApp(appListeners)),
+        Layer.provideMerge(ElectronDialog.layer),
         Layer.provideMerge(layerElectronTheme),
         Layer.provideMerge(
           layerElectronWindow(
@@ -199,6 +206,7 @@ describe("DesktopLifecycle", () => {
 
       const layer = DesktopLifecycle.layer.pipe(
         Layer.provideMerge(layerElectronApp(appListeners, quit)),
+        Layer.provideMerge(ElectronDialog.layer),
         Layer.provideMerge(layerElectronTheme),
         Layer.provideMerge(layerElectronWindow(destroyAll)),
         Layer.provideMerge(layerDesktopWindow({ flushMainWindowBounds })),
@@ -243,6 +251,7 @@ describe("DesktopLifecycle", () => {
             (options) => Deferred.succeed(relaunched, options).pipe(Effect.asVoid),
           ),
         ),
+        Layer.provideMerge(ElectronDialog.layer),
         Layer.provideMerge(layerElectronTheme),
         Layer.provideMerge(layerElectronWindow()),
         Layer.provideMerge(layerDesktopWindow()),
@@ -262,8 +271,8 @@ describe("DesktopLifecycle", () => {
         Effect.provideService(HostProcess.Arguments, [
           "/opt/T3 Code/t3code",
           "--no-sandbox",
-          "T3CODE://pair?token=spent",
-          "t3code://new?prompt=hello",
+          "LASTCODE://pair?token=spent",
+          "lastcode://new?prompt=hello",
         ]),
       );
 
@@ -285,6 +294,7 @@ describe("DesktopLifecycle", () => {
       } as DesktopEnvironment.DesktopEnvironment["Service"]);
       const layer = DesktopLifecycle.layer.pipe(
         Layer.provideMerge(layerElectronApp(appListeners, Effect.void, exit)),
+        Layer.provideMerge(ElectronDialog.layer),
         Layer.provideMerge(layerElectronTheme),
         Layer.provideMerge(layerElectronWindow()),
         Layer.provideMerge(layerDesktopWindow()),
@@ -338,6 +348,7 @@ describe("DesktopLifecycle", () => {
       } as DesktopEnvironment.DesktopEnvironment["Service"]);
       const layer = DesktopLifecycle.layer.pipe(
         Layer.provideMerge(layerElectronApp(appListeners)),
+        Layer.provideMerge(ElectronDialog.layer),
         Layer.provideMerge(layerElectronTheme),
         Layer.provideMerge(layerElectronWindow()),
         Layer.provideMerge(layerDesktopWindow({ activate })),
@@ -359,5 +370,158 @@ describe("DesktopLifecycle", () => {
         }),
       ).pipe(Effect.provide(layer));
     }),
+  );
+  it.effect.each([false, true])(
+    "warns with the running Action count before quitting unless an install committed (%s)",
+    (installQuit) =>
+      Effect.gen(function* () {
+        const appListeners = new Map<string, (...args: readonly unknown[]) => void>();
+        const shownOptions = yield* Deferred.make<Electron.MessageBoxOptions>();
+        const dialogResponse = yield* Deferred.make<Electron.MessageBoxReturnValue>();
+        const quitCalled = yield* Deferred.make<void>();
+
+        const electronAppLayer = Layer.succeed(ElectronApp.ElectronApp, {
+          metadata: Effect.die("unexpected metadata read"),
+          name: Effect.succeed("T3 Code"),
+          systemLocale: Effect.succeed("en-US"),
+          whenReady: Effect.void,
+          requestSingleInstanceLock: Effect.succeed(true),
+          quit: Deferred.succeed(quitCalled, undefined).pipe(Effect.asVoid),
+          exit: () => Effect.void,
+          relaunch: () => Effect.void,
+          setPath: () => Effect.void,
+          setName: () => Effect.void,
+          setAboutPanelOptions: () => Effect.void,
+          setAppUserModelId: () => Effect.void,
+          getAppMetrics: Effect.succeed([]),
+          setAsDefaultProtocolClient: () => Effect.succeed(true),
+          setDesktopName: () => Effect.void,
+          setDockIcon: () => Effect.void,
+          appendCommandLineSwitch: () => Effect.void,
+          removeCommandLineSwitch: () => Effect.void,
+          onBeforeQuitForUpdate: (listener) =>
+            Effect.acquireRelease(
+              Effect.sync(() => {
+                appListeners.set("before-quit-for-update", listener);
+              }),
+              () =>
+                Effect.sync(() => {
+                  appListeners.delete("before-quit-for-update");
+                }),
+            ).pipe(Effect.asVoid),
+          on: (eventName, listener) =>
+            Effect.acquireRelease(
+              Effect.sync(() => {
+                appListeners.set(
+                  eventName,
+                  listener as unknown as (...args: readonly unknown[]) => void,
+                );
+              }),
+              () =>
+                Effect.sync(() => {
+                  appListeners.delete(eventName);
+                }),
+            ).pipe(Effect.asVoid),
+        } satisfies ElectronApp.ElectronApp["Service"]);
+
+        const electronDialogLayer = Layer.succeed(ElectronDialog.ElectronDialog, {
+          pickFolder: () => Effect.die("unexpected folder picker"),
+          pickFiles: () => Effect.die("unexpected file picker"),
+          showMessageBox: (options) =>
+            Deferred.succeed(shownOptions, options).pipe(
+              Effect.andThen(Deferred.await(dialogResponse)),
+            ),
+          showErrorBox: () => Effect.die("unexpected error dialog"),
+        });
+
+        const desktopWindowLayer = Layer.succeed(DesktopWindow.DesktopWindow, {
+          createMain: Effect.die("unexpected window creation"),
+          ensureMain: Effect.die("unexpected window creation"),
+          revealOrCreateMain: Effect.die("unexpected window creation"),
+          activate: Effect.void,
+          createMainIfBackendReady: Effect.void,
+          showConnectingSplash: Effect.void,
+          handleBackendReady: () => Effect.void,
+          handleBackendNotReady: Effect.void,
+          flushMainWindowBounds: Effect.void,
+          dispatchMenuAction: () => Effect.void,
+          runMainContentsCommand: () => Effect.die("unexpected contents command"),
+          prepareCaptureReveal: Effect.die("unexpected capture reveal"),
+          dispatchSnapShotEvent: () => Effect.void,
+          zoomMain: () => Effect.void,
+          runningActionCount: Effect.succeed(3),
+          reportRunningActionCount: () => Effect.void,
+          acknowledgeRunningActionQuitWarning: Effect.void,
+          consumeRunningActionQuitWarningAcknowledgment: Effect.succeed(false),
+          syncAppearance: Effect.void,
+        });
+
+        const layerEnvironment = Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
+          platform: "darwin",
+          isDevelopment: false,
+        } as DesktopEnvironment.DesktopEnvironment["Service"]);
+
+        const layer = DesktopLifecycle.layer.pipe(
+          Layer.provideMerge(electronAppLayer),
+          Layer.provideMerge(electronDialogLayer),
+          Layer.provideMerge(layerElectronWindow()),
+          Layer.provideMerge(
+            Layer.succeed(ElectronTheme.ElectronTheme, {
+              shouldUseDarkColors: Effect.succeed(false),
+              setSource: () => Effect.void,
+              onUpdated: () => Effect.void,
+            }),
+          ),
+          Layer.provideMerge(desktopWindowLayer),
+          Layer.provideMerge(layerEnvironment),
+          Layer.provideMerge(
+            Layer.succeed(DesktopShutdown.DesktopShutdown, {
+              request: Effect.void,
+              awaitRequest: Effect.void,
+              markComplete: Effect.void,
+              awaitComplete: Effect.void,
+              isComplete: Effect.succeed(true),
+            }),
+          ),
+          Layer.provideMerge(DesktopState.layer),
+        );
+
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
+            const state = yield* DesktopState.DesktopState;
+            yield* lifecycle.register;
+            // Admitting an install sets `quitting` long before COMMIT; only the committed quit skips the prompt.
+            yield* Ref.set(state.quitting, true);
+            if (installQuit) yield* Ref.set(state.installQuitCommitted, true);
+
+            let prevented = false;
+            appListeners.get("before-quit")?.({
+              preventDefault: () => {
+                prevented = true;
+              },
+            } as Electron.Event);
+
+            if (installQuit) {
+              yield* Deferred.await(quitCalled);
+              assert.isTrue(prevented);
+              assert.isFalse(yield* Deferred.isDone(shownOptions));
+              return;
+            }
+            const options = yield* Deferred.await(shownOptions);
+            assert.isTrue(prevented);
+            assert.equal(options.title, "Running Actions");
+            assert.equal(options.message, "Quit and cancel 3 running Actions?");
+            assert.equal(options.detail, "The commands will not be restarted automatically.");
+            assert.deepEqual(options.buttons, ["Quit and cancel", "Keep running"]);
+
+            yield* Deferred.succeed(dialogResponse, {
+              response: 0,
+              checkboxChecked: false,
+            });
+            yield* Deferred.await(quitCalled);
+          }),
+        ).pipe(Effect.provide(layer));
+      }),
   );
 });
