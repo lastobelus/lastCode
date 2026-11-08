@@ -335,6 +335,55 @@ describe("DesktopLifecycle", () => {
     }),
   );
 
+  it.effect("exits once shutdown passes its ceiling without a repeated quit", () =>
+    Effect.gen(function* () {
+      const appListeners = new Map<string, (...args: readonly unknown[]) => void>();
+      const exitCodes: number[] = [];
+      let quitCalls = 0;
+      const layer = DesktopLifecycle.layer.pipe(
+        Layer.provideMerge(
+          layerElectronApp(
+            appListeners,
+            Effect.sync(() => {
+              quitCalls += 1;
+            }),
+            (code) =>
+              Effect.sync(() => {
+                exitCodes.push(code);
+              }),
+          ),
+        ),
+        Layer.provideMerge(ElectronDialog.layer),
+        Layer.provideMerge(layerElectronTheme),
+        Layer.provideMerge(layerElectronWindow()),
+        Layer.provideMerge(layerDesktopWindow()),
+        Layer.provideMerge(
+          Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
+            platform: "darwin",
+            isDevelopment: false,
+          } as DesktopEnvironment.DesktopEnvironment["Service"]),
+        ),
+        // Nothing marks this shutdown complete, so it stays pending.
+        Layer.provideMerge(DesktopShutdown.layer),
+        Layer.provideMerge(DesktopState.layer),
+      );
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
+          yield* lifecycle.register;
+          appListeners.get("before-quit")?.({ preventDefault: () => undefined } as Electron.Event);
+
+          yield* TestClock.adjust("59999 millis");
+          assert.deepEqual(exitCodes, []);
+          yield* TestClock.adjust("1 millis");
+          assert.deepEqual(exitCodes, [0]);
+          assert.equal(quitCalls, 0);
+        }),
+      ).pipe(Effect.provide(layer));
+    }),
+  );
+
   it.effect("ignores app activation while quitting", () =>
     Effect.gen(function* () {
       const appListeners = new Map<string, (...args: readonly unknown[]) => void>();

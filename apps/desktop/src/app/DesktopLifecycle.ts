@@ -3,6 +3,7 @@ import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -88,16 +89,29 @@ function addScopedListener<Args extends ReadonlyArray<unknown>>(
   ).pipe(Effect.asVoid);
 }
 
+// A quit nobody repeats must not wait forever on a stalled finalizer. Well above
+// the backend stop budget and the preview debugger setup timeout.
+const SHUTDOWN_CEILING = Duration.seconds(60);
+
 const requestDesktopShutdownAndWait = Effect.fn("desktop.lifecycle.requestShutdownAndWait")(
   function* (
     afterBoundsFlush: Effect.Effect<void> = Effect.void,
-  ): Effect.fn.Return<void, never, DesktopShutdown.DesktopShutdown | DesktopWindow.DesktopWindow> {
+  ): Effect.fn.Return<
+    "completed" | "timed-out",
+    never,
+    DesktopShutdown.DesktopShutdown | DesktopWindow.DesktopWindow
+  > {
     const shutdown = yield* DesktopShutdown.DesktopShutdown;
     const desktopWindow = yield* DesktopWindow.DesktopWindow;
     yield* desktopWindow.flushMainWindowBounds;
     yield* afterBoundsFlush;
     yield* shutdown.request;
-    yield* shutdown.awaitComplete;
+    const completed = yield* shutdown.awaitComplete.pipe(Effect.timeoutOption(SHUTDOWN_CEILING));
+    if (Option.isSome(completed)) return "completed";
+    yield* logLifecycleError("desktop shutdown passed its ceiling; exiting without it", {
+      ceilingMs: Duration.toMillis(SHUTDOWN_CEILING),
+    });
+    return "timed-out";
   },
 );
 
@@ -191,13 +205,18 @@ function handleBeforeQuit(
       yield* startWaitingForShutdown(quit);
       yield* Ref.set(state.quitting, true);
       yield* logLifecycleInfo("before-quit received");
-      yield* requestDesktopShutdownAndWait(
+      const outcome = yield* requestDesktopShutdownAndWait(
         electronWindow.destroyAll.pipe(
           Effect.catchCause((cause) =>
             logLifecycleError("failed to destroy windows before shutdown", { cause }),
           ),
         ),
       );
+      if (outcome === "timed-out") {
+        const electronApp = yield* ElectronApp.ElectronApp;
+        yield* electronApp.exit(0);
+        return false;
+      }
       return true;
     }).pipe(Effect.withSpan("desktop.lifecycle.beforeQuit")),
   )
@@ -235,7 +254,10 @@ function quitFromSignal(
       if (wasQuitting) return;
       yield* startWaitingForShutdown(quit);
       yield* logLifecycleInfo("process signal received", { signal });
-      yield* requestDesktopShutdownAndWait();
+      if ((yield* requestDesktopShutdownAndWait()) === "timed-out") {
+        yield* electronApp.exit(0);
+        return;
+      }
       quit.phase = "allowed";
       yield* electronApp.quit;
     }).pipe(Effect.withSpan("desktop.lifecycle.processSignal")),
