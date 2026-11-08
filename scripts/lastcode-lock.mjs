@@ -42,27 +42,29 @@ function isProcessRunning(pid) {
 // owner to check, so such a directory is reclaimable once nothing has touched it this long.
 const INCOMPLETE_LOCK_GRACE_MS = 60_000;
 
+function staleClaimPath(ownerPath, staleOwner) {
+  return `${ownerPath}.claim-${staleOwner.token ?? "untokened"}`;
+}
+
 /**
- * Moves a stale owner record aside. Only one contender's rename can succeed, and
- * it restores the record when another contender already replaced the stale owner.
+ * Claims a dead owner's record by hard-linking it under a name that belongs to that owner alone,
+ * so only one contender can claim it and no live owner's record is ever moved.
  */
 export function claimStaleOwner(ownerPath, staleOwner) {
-  const claimPath = `${ownerPath}.claim-${NodeProcess.pid}-${NodeCrypto.randomUUID()}`;
+  const claimPath = staleClaimPath(ownerPath, staleOwner);
   try {
-    NodeFS.renameSync(ownerPath, claimPath);
+    NodeFS.linkSync(ownerPath, claimPath);
   } catch (error) {
     if (error?.code === "ENOENT") return false;
-    throw error;
-  }
-  if (readLockOwner(claimPath)?.token === staleOwner.token) {
+    if (error?.code !== "EEXIST") throw error;
+    // A claimant that crashed leaves its claim behind; it expires like an ownerless lock.
+    if (Date.now() - NodeFS.lstatSync(claimPath).ctimeMs <= INCOMPLETE_LOCK_GRACE_MS) return false;
     NodeFS.rmSync(claimPath, { force: true });
-    return true;
+    return claimStaleOwner(ownerPath, staleOwner);
   }
-  try {
-    NodeFS.linkSync(claimPath, ownerPath);
-  } finally {
-    NodeFS.rmSync(claimPath, { force: true });
-  }
+  if (readLockOwner(claimPath)?.token === staleOwner.token) return true;
+  // A live owner had already replaced the record; drop only this claim's extra link to it.
+  NodeFS.rmSync(claimPath, { force: true });
   return false;
 }
 
@@ -76,19 +78,34 @@ export function acquireDirectoryLock(lockDirectory, lockName, activity) {
     startedAt: new Date().toISOString(),
   };
 
-  // Linking a complete temporary file never overwrites an owner or leaves a partial one.
-  const recordOwner = () => {
+  // Owner records only appear complete: they are linked or renamed from a temporary file.
+  const withTemporaryOwner = (use) => {
     const temporaryPath = `${ownerPath}.${owner.token}.tmp`;
     NodeFS.writeFileSync(temporaryPath, `${JSON.stringify(owner)}\n`, { mode: 0o600 });
     try {
-      NodeFS.linkSync(temporaryPath, ownerPath);
-      return true;
-    } catch (error) {
-      if (error?.code === "EEXIST") return false;
-      throw error;
+      return use(temporaryPath);
     } finally {
       NodeFS.rmSync(temporaryPath, { force: true });
     }
+  };
+
+  const recordOwner = () =>
+    withTemporaryOwner((temporaryPath) => {
+      try {
+        NodeFS.linkSync(temporaryPath, ownerPath);
+        return true;
+      } catch (error) {
+        if (error?.code === "EEXIST") return false;
+        throw error;
+      }
+    });
+
+  const replaceStaleOwner = (staleOwner) => {
+    if (!claimStaleOwner(ownerPath, staleOwner)) return false;
+    // Holding this dead owner's claim makes its record ours to overwrite.
+    withTemporaryOwner((temporaryPath) => NodeFS.renameSync(temporaryPath, ownerPath));
+    NodeFS.rmSync(staleClaimPath(ownerPath, staleOwner), { force: true });
+    return true;
   };
 
   const contention = (existingOwner) =>
@@ -125,9 +142,7 @@ export function acquireDirectoryLock(lockDirectory, lockName, activity) {
           ? !NodeFS.existsSync(ownerPath) &&
             Date.now() - NodeFS.statSync(lockPath).mtimeMs > INCOMPLETE_LOCK_GRACE_MS &&
             recordOwner()
-          : !isProcessRunning(existingOwner.pid) &&
-            claimStaleOwner(ownerPath, existingOwner) &&
-            recordOwner();
+          : !isProcessRunning(existingOwner.pid) && replaceStaleOwner(existingOwner);
     } catch (error) {
       if (error?.code !== "ENOENT") throw error;
     }

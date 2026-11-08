@@ -5,7 +5,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 
-import { afterEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   acquireDirectoryLock,
@@ -84,8 +84,36 @@ describe("LastCode portable update lock", () => {
       PortableLockContentionError,
     );
 
+    expect(NodeFS.readdirSync(lockPath)).toEqual(["owner.json"]);
+
     release();
     expect(NodeFS.existsSync(lockPath)).toBe(false);
+  });
+
+  it("lets a crashed claimant's claim expire after a minute", () => {
+    const root = temporaryDirectory();
+    const lockPath = NodePath.join(root, "update.lock.d");
+    const ownerPath = NodePath.join(lockPath, "owner.json");
+    const exited = NodeChildProcess.spawnSync(process.execPath, ["--eval", ""]);
+    NodeFS.mkdirSync(lockPath);
+    NodeFS.writeFileSync(
+      ownerPath,
+      JSON.stringify({ schemaVersion: 2, pid: exited.pid, token: "stale-owner" }),
+    );
+    const claimPath = `${ownerPath}.claim-stale-owner`;
+    NodeFS.linkSync(ownerPath, claimPath);
+    expect(() => acquireDirectoryLock(root, "update.lock", "test")).toThrow(
+      PortableLockContentionError,
+    );
+
+    const now = vi
+      .spyOn(Date, "now")
+      .mockReturnValue(NodeFS.lstatSync(claimPath).ctimeMs + 120_000);
+    try {
+      acquireDirectoryLock(root, "update.lock", "test")();
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it("reclaims a directory lock whose owner never recorded itself after a minute", () => {
