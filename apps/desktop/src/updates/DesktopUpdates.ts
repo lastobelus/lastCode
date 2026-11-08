@@ -443,8 +443,7 @@ function isArm64HostRunningIntelBuild(runtimeInfo: DesktopRuntimeInfo): boolean 
   return runtimeInfo.hostArch === "arm64" && runtimeInfo.appArch === "x64";
 }
 
-export const checkpointRequestedMessage =
-  "Checkpoint requested. Check again later to pick up the result.";
+const checkpointRequestedMessage = "Checkpoint requested. Check again later to pick up the result.";
 
 /** @public */
 export const make = Effect.gen(function* () {
@@ -687,7 +686,8 @@ export const make = Effect.gen(function* () {
     const state = yield* Ref.get(updateStateRef);
     const checkedAt = yield* currentIsoTimestamp;
     yield* setState(reduceDesktopUpdateStateOnCheckStart(state, checkedAt));
-    const requestCheckpoint = reason === "web-ui" || reason === "menu";
+    // Checking only inspects; a new checkpoint is its own explicit request.
+    const requestCheckpoint = reason === "checkpoint-request";
     return yield* localUpdates.inspect(environment.appVersion, requestCheckpoint).pipe(
       Effect.flatMap((inspection) => {
         const checkpointRequested =

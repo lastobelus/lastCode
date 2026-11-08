@@ -1405,6 +1405,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/lastcode",
   },
   {
+    id: "local-checkpoint-request",
+    title: "Request a checkpoint",
+    to: "/settings/lastcode",
+    searchTerms: ["local nightly build checkpoint service run now"],
+  },
+  {
     id: "lastcode-sidebar",
     title: "LastCode sidebar",
     to: "/settings/lastcode",
