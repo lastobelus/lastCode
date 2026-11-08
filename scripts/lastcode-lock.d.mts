@@ -15,7 +15,8 @@ export function acquireDirectoryLock(
   activity: string,
 ): () => void;
 
-export function claimStaleOwner(
-  ownerPath: string,
-  staleOwner: { readonly token?: string },
+export function replaceDeadRecord(
+  recordPath: string,
+  deadHolder: { readonly token?: string },
+  record: { readonly pid: number; readonly token: string },
 ): boolean;
