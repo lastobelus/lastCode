@@ -343,6 +343,39 @@ it("passes a good run and names every rule a bad run breaks", () => {
   }
 });
 
+it("checkpoint recovery guidance grades the operational order, not just keywords", () => {
+  const decodeCase = Schema.decodeUnknownSync(Schema.fromJsonString(McpToolUseCase));
+  const recovery = NodeFS.readFileSync(
+    new URL("./cases/checkpoint-recovery.ndjson", import.meta.url),
+    "utf8",
+  )
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => decodeCase(line))
+    .find((testCase) => testCase.id === "checkpoint-recovery-ci-before-qa")!;
+  const prepare = "Prepare Dependencies once in the separate checkout.";
+  const gate =
+    "git checkout --detach <retained-head>; vp run check:changed --checkpoint-recovery-files <paths> --baseline <pre-replay-head>";
+  const select = "pnpm lastcode:checkpoint -- --select-recovery <retained-head>";
+  const start = "pnpm lastcode:checkpoint:service run-now";
+  const qa = "Run integrated client QA alongside Full CI.";
+  const sequence = (steps: Array<string>) => steps.map((step, i) => `${i + 1}. ${step}`).join("\n");
+  const failures = (text: string) =>
+    failed(recovery.expect, { calls: [], text, stopReason: "end_turn" });
+  assert.deepEqual(failures(sequence([prepare, gate, select, start, qa])), []);
+  for (const steps of [
+    [select, prepare, gate, start, qa],
+    [prepare, select, gate, start, qa],
+    [prepare, gate, start, select, qa],
+    [prepare, gate, qa, select, start, "QA is still required."],
+    ["Run checks once.", gate, select, start, qa],
+    [prepare, gate, select, "Run integrated client QA before run-now.", start, qa],
+  ]) {
+    const text = sequence(steps);
+    assert.isNotEmpty(failures(text), text);
+  }
+});
+
 it("bounds numbers and reads target.options in either schema form", () => {
   const expect = {
     calls: [
