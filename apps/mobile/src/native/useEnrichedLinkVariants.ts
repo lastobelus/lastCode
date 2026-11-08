@@ -93,13 +93,14 @@ export function useEnrichedLinkVariants(
   urls: ReadonlyArray<string>,
   props: SelectableMarkdownTextProps,
   fileHrefs: ReadonlySet<string>,
+  authoredFileLinks: ReadonlySet<string>,
 ) {
   const { linkCustomization, skills, textStyle, fileEmbedLabel } = props;
   const theme = useUniwindTheme();
   const links = useMemo(() => {
     const byUrl = new Map<string, MarkdownLinkCustomization>();
     for (const url of urls) {
-      if (byUrl.has(url)) continue;
+      if (byUrl.has(url) || authoredFileLinks.has(url)) continue;
       const label = fileHrefs.has(url) ? fileEmbedLabel?.(url, false) : null;
       const value = label
         ? {
@@ -111,7 +112,7 @@ export function useEnrichedLinkVariants(
       if (value) byUrl.set(url, value);
     }
     return byUrl;
-  }, [urls, linkCustomization, skills, textStyle, fileHrefs, fileEmbedLabel]);
+  }, [urls, linkCustomization, skills, textStyle, fileHrefs, authoredFileLinks, fileEmbedLabel]);
   const chipForegrounds = useMemo(
     () =>
       new Map(
