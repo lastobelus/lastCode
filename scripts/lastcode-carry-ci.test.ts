@@ -356,6 +356,31 @@ describe("LastCode carry CI", () => {
     }
   });
 
+  it("labels a conflicting deletion partition with its source commit's own group", () => {
+    const { repo, cleanup } = fixture();
+    try {
+      const { base } = compactFixture(repo);
+      write(repo, "f.txt", "one\n");
+      commit(repo, "add f", "Carry-Group: legacy-sidebar");
+      write(repo, "f.txt", "two\n");
+      const edit = commit(repo, "edit f", "Carry-Group: incubator");
+      git(repo, ["rm", "--quiet", "f.txt"]);
+      write(repo, "g.txt", "g\n");
+      const head = commit(repo, "drop f and add g", "Carry-Group: tooling");
+      const short = (commit: string) => commit.slice(0, 12);
+      expect(() => validateCarryPullRequest(repo, { base, head, number: 220 })).toThrow(
+        [
+          `Carry replay conflicted in f.txt while replaying ${short(head)} "drop f and add g" (Carry-Group: tooling; deletion partition replayed with legacy-sidebar).`,
+          "These commits in later carry groups change the same files earlier in history, so the replay has not applied them yet:",
+          `- ${short(edit)} "edit f" (Carry-Group: incubator): f.txt`,
+          `Likely fix: retag ${short(head)}'s Carry-Group to incubator so it replays after them, or split its changes to f.txt into a separate incubator commit.`,
+        ].join("\n"),
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
   it("reuses the compact chain and retained source contributions with an exact final tree", () => {
     const { repo, cleanup } = fixture();
     try {
