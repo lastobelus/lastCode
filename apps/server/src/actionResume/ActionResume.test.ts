@@ -625,6 +625,44 @@ it.effect("waits for live shell readiness before writing one complete long Actio
   }).pipe(Effect.provide(StoreTestLayer)),
 );
 
+it("binds an Action to the PR for its checkout branch", () => {
+  const legacy = { projectId, repository: "owner/repo", number: 1, url: "https://pr/1" };
+  const branchPr = { ...legacy, number: 2, url: "https://pr/2" };
+  const link = (number: number, headBranch: string) => ({
+    host: "github.com",
+    repository: "owner/repo",
+    number,
+    url: `https://pr/${number}`,
+    source: "agent" as const,
+    linkedAt: nowIso,
+    snapshot: {
+      state: "open" as const,
+      title: "PR",
+      headBranch,
+      baseBranch: "main",
+      isDraft: false,
+      updatedAt: null,
+      syncedAt: nowIso,
+    },
+    stack: null,
+  });
+  const cases = [
+    [{ branch: "f", pullRequests: [link(3, "g"), link(4, "f")] }, 4],
+    [{ branch: "f", branchPullRequest: branchPr, pullRequests: [link(3, "g"), link(4, "g")] }, 2],
+    // A shared checkout switched away from the thread's branch keeps no branch PR.
+    [{ branch: "other", branchPullRequest: branchPr }, undefined],
+    [{ branch: "other", pullRequests: [link(3, "g")] }, 3],
+    [{ branch: "other", linkedPullRequest: legacy }, 1],
+    [
+      { branch: "other", linkedPullRequest: legacy, pullRequests: [link(3, "g"), link(4, "h")] },
+      undefined,
+    ],
+  ] as const;
+  for (const [thread, expected] of cases) {
+    assert.equal(ActionResume.boundPullRequest(thread, "f")?.number, expected);
+  }
+});
+
 it.effect("names the launch head on resume and flags a head that moved since launch", () =>
   Effect.gen(function* () {
     const h = yield* makeHarness;
@@ -673,7 +711,7 @@ it.effect("names the launch head on resume and flags a head that moved since lau
       assert.include(text, `Launch checkout: {"head":"${launchHead}","branch":"feature"`);
       assert.include(
         text,
-        `WARNING: HEAD moved since launch. This Action ran on ${launchHead} (branch feature); the checkout is now at ${"b".repeat(40)} (branch feature).`,
+        `WARNING: HEAD moved since launch. This Action ran on ${launchHead} (branch feature); when this result was sent, the checkout was at ${"b".repeat(40)} (branch feature).`,
       );
       assert.equal(parseActionResumeFollowUp(text)?.runId, run.runId);
       const inspected = yield* actions.inspectActionRun(invocation, run.runId);

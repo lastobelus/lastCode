@@ -241,17 +241,23 @@ function actionOutputFromTranscript(
   return transcript.slice(0, endIndex).slice(-MAX_ACTION_OUTPUT_CHARS);
 }
 
-/** The thread's PR for the launch branch, else its branch PR, else its only linked PR. */
-function boundPullRequest(
-  thread: Pick<OrchestrationV2ThreadShell, "pullRequests" | "branchPullRequest">,
+/**
+ * The linked PR whose head is the launch branch, else the thread's branch PR when the thread's
+ * branch is the launch branch, else its only linked PR (legacy or current).
+ */
+export function boundPullRequest(
+  thread: Pick<
+    OrchestrationV2ThreadShell,
+    "pullRequests" | "branchPullRequest" | "linkedPullRequest" | "branch"
+  >,
   branch: string | null,
 ): ActionRunCheckout["pullRequest"] {
   const linked = (thread.pullRequests ?? []).filter((link) => link.source !== "stack-dismissed");
   const bound =
     linked.find((link) => branch !== null && link.snapshot?.headBranch === branch) ??
-    thread.branchPullRequest ??
-    (linked.length === 1 ? linked[0] : undefined);
-  return bound === undefined ? undefined : { number: bound.number, url: bound.url };
+    (branch !== null && thread.branch === branch ? thread.branchPullRequest : null) ??
+    (linked.length === 1 ? linked[0] : linked.length === 0 ? thread.linkedPullRequest : null);
+  return bound == null ? undefined : { number: bound.number, url: bound.url };
 }
 
 const followUpText = (

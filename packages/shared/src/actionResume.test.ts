@@ -62,12 +62,12 @@ describe("Action resume follow-up presentation", () => {
   it.each([
     {
       current: { head: "a".repeat(40), branch: "feature" },
-      line: `Current checkout: unchanged at ${"a".repeat(40)} (branch feature).`,
+      line: `Current checkout: unchanged at ${"a".repeat(40)} (branch feature) when this result was sent.`,
       last: "Continue the originating task using this result.",
     },
     {
       current: { head: "b".repeat(40), branch: null },
-      line: `WARNING: HEAD moved since launch. This Action ran on ${"a".repeat(40)} (branch feature); the checkout is now at ${"b".repeat(40)} (detached HEAD).`,
+      line: `WARNING: HEAD moved since launch. This Action ran on ${"a".repeat(40)} (branch feature); when this result was sent, the checkout was at ${"b".repeat(40)} (detached HEAD).`,
       last: "This result may not describe the current head. Relaunch on the current head before relying on it.",
     },
     {

@@ -336,10 +336,13 @@ function checkoutLines(launched: ActionRunCheckout, current: ActionCheckoutHead 
   if (actionHeadMoved(launched, current)) {
     return [
       launchLine,
-      `WARNING: HEAD moved since launch. This Action ran on ${describeHead(launched)}; the checkout is now at ${describeHead(current)}.`,
+      `WARNING: HEAD moved since launch. This Action ran on ${describeHead(launched)}; when this result was sent, the checkout was at ${describeHead(current)}.`,
     ];
   }
-  return [launchLine, `Current checkout: unchanged at ${describeHead(current)}.`];
+  return [
+    launchLine,
+    `Current checkout: unchanged at ${describeHead(current)} when this result was sent.`,
+  ];
 }
 
 export function parseActionResumeFollowUp(text: string): ActionResumeFollowUp | null {
