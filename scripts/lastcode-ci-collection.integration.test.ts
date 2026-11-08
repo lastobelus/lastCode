@@ -4,7 +4,11 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { expect, it } from "vite-plus/test";
-import { assertSupportedNodeVersion, resolveFullCiStampPath } from "./lastcode-local-ci.ts";
+import {
+  assertSupportedNodeVersion,
+  FULL_CI_ANCHOR_WORKSPACES,
+  resolveFullCiStampPath,
+} from "./lastcode-local-ci.ts";
 
 function fixtureNodeExecutable(): string {
   // Vite+ may host tests on a newer Node than the runtime required by the CI CLI.
@@ -98,6 +102,15 @@ it.each(
       git("config", "user.email", "fixture@example.invalid");
       write(NodePath.join(root, "pnpm-workspace.yaml"), "packages:\n  - packages/*\n");
       write(NodePath.join(root, ".gitignore"), "node_modules\napps/desktop/dist-electron/\n");
+      for (const [index, name] of FULL_CI_ANCHOR_WORKSPACES.entries()) {
+        write(
+          NodePath.join(root, "packages", `anchor-${index}`, "package.json"),
+          JSON.stringify({
+            name,
+            scripts: { typecheck: "fixture", test: "fixture" },
+          }),
+        );
+      }
       for (const name of ["first", "later"]) {
         write(
           NodePath.join(root, "packages", name, "package.json"),
@@ -130,6 +143,13 @@ it.each(
         "vp",
         [
           "const fs = require('node:fs'); const args = process.argv.slice(2);",
+          `if (args.length === 1 && args[0] === 'run') { console.log(${JSON.stringify(
+            [...FULL_CI_ANCHOR_WORKSPACES, "@fixture/first", "@fixture/later"]
+              .flatMap((name) =>
+                ["typecheck", "test"].map((task) => `  ${name}#${task}: node check.cjs`),
+              )
+              .join("\n"),
+          )}); process.exit(0); }`,
           `fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify(args)+'\\n');`,
           ...(changeCandidate
             ? [
