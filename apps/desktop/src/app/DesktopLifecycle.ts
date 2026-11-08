@@ -167,10 +167,13 @@ function handleBeforeQuit(
   void runEffect(
     Effect.gen(function* () {
       const desktopWindow = yield* DesktopWindow.DesktopWindow;
+      const state = yield* DesktopState.DesktopState;
+      // A committed install already confirmed the interruption and closed every window.
+      const quitAlreadyDecided = yield* Ref.get(state.installQuitCommitted);
       const warningAcknowledged =
         yield* desktopWindow.consumeRunningActionQuitWarningAcknowledgment;
       const runningActionCount = yield* desktopWindow.runningActionCount;
-      if (runningActionCount > 0 && !warningAcknowledged) {
+      if (runningActionCount > 0 && !warningAcknowledged && !quitAlreadyDecided) {
         const dialog = yield* ElectronDialog.ElectronDialog;
         const result = yield* dialog.showMessageBox({
           type: "warning",
@@ -184,7 +187,6 @@ function handleBeforeQuit(
         });
         if (result.response !== 0) return false;
       }
-      const state = yield* DesktopState.DesktopState;
       const electronWindow = yield* ElectronWindow.ElectronWindow;
       yield* startWaitingForShutdown(quit);
       yield* Ref.set(state.quitting, true);

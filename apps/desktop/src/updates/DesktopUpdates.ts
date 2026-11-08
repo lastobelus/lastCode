@@ -1217,7 +1217,8 @@ export const make = Effect.gen(function* () {
                   yield* Effect.gen(function* () {
                     yield* Effect.forEach(
                       instances,
-                      (instance) => instance.stop({ timeout: Duration.seconds(5) }),
+                      (instance) =>
+                        instance.stop({ timeout: DesktopBackendManager.BACKEND_QUIT_STOP_TIMEOUT }),
                       { concurrency: "unbounded" },
                     );
                     yield* acceptedHandoff.commit;
@@ -1242,6 +1243,7 @@ export const make = Effect.gen(function* () {
                     ),
                   );
                   yield* electronWindow.destroyAll;
+                  yield* Ref.set(desktopState.installQuitCommitted, true);
                   yield* electronApp.quit;
                   return { accepted: true, completed: false, failed: false };
                 }),
