@@ -65,14 +65,10 @@ export const WatchPullRequestInput = Schema.Struct({
   quietTimeoutMinutes: Schema.optional(
     Schema.NullOr(PullRequestWatchQuietTimeoutMinutes).annotate({
       description:
-        "Wake you once if the PR has no new actionable check results, comments, reviews, conflicts, or pushes for this many minutes. New watch updates or a push restarts the timer. A number starts the timer now; null turns it off. Omit to keep an armed timer; a new wait or explicit restart after the quiet wake uses the environment setting (45 minutes by default).",
+        "Wake you once after this many minutes without actionable checks, comments, reviews, conflicts or pushes; each restarts the timer. A number starts it now; null turns it off. Omit to keep an armed timer, else the environment default (45). After the quiet wake, restart only if the user asked (restartAfterQuiet: true).",
     }),
   ),
-  restartAfterQuiet: Schema.optional(
-    Schema.Boolean.annotate({
-      description: "True only if the user asked you to keep waiting after the quiet-deadline wake.",
-    }),
-  ),
+  restartAfterQuiet: Schema.optional(Schema.Boolean),
 });
 export type WatchPullRequestInput = typeof WatchPullRequestInput.Type;
 
