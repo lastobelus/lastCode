@@ -38,6 +38,7 @@ import { resolveSidebarThreadStatus, type SidebarThreadStatus } from "./Sidebar.
 import {
   createThreadNotificationGate,
   isSnoozedForNotification,
+  isUserThread,
   type ThreadNotificationKind,
   type ThreadNotificationObservation,
 } from "./ThreadNotificationCoordinator.logic";
@@ -142,7 +143,13 @@ export function startThreadNotifications(
         .has(threadKey({ environmentId, threadId: thread.id }))
     )
       return;
-    const { notificationMode: mode, inAppNotificationsEnabled } = getClientSettings();
+    const {
+      notificationMode: mode,
+      inAppNotificationsEnabled,
+      finishedThreadAlerts,
+    } = getClientSettings();
+    const finished = kind === "completion" || status === "failed" || status === "limited";
+    if (finished && finishedThreadAlerts === "mine" && !isUserThread(state.raw)) return;
     const active = activeThread();
     const title =
       kind === "completion"

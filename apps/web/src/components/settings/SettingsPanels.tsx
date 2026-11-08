@@ -156,6 +156,11 @@ const TIMESTAMP_FORMAT_LABELS = {
   "24-hour": msg("24-hour"),
 };
 
+const FINISHED_THREAD_ALERT_LABELS = {
+  mine: "Your threads",
+  all: "All threads",
+} as const;
+
 const DIFF_LAYOUT_LABELS: Record<DiffLayout, string> = {
   stacked: msg("Stacked", { $context: "diff layout" }),
   split: msg("Split", { $context: "diff layout" }),
@@ -540,6 +545,9 @@ export function useSettingsRestore(onRestored?: () => void) {
     ...(settings.inAppNotificationsEnabled !== DEFAULT_UNIFIED_SETTINGS.inAppNotificationsEnabled
       ? [gt("In-app notifications")]
       : []),
+    ...(settings.finishedThreadAlerts !== DEFAULT_UNIFIED_SETTINGS.finishedThreadAlerts
+      ? ["Finished thread alerts"]
+      : []),
     ...(settings.sidebarProjectGroupingMode !== DEFAULT_UNIFIED_SETTINGS.sidebarProjectGroupingMode
       ? [gt("Project Grouping")]
       : []),
@@ -717,6 +725,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
       notificationMode: DEFAULT_UNIFIED_SETTINGS.notificationMode,
       inAppNotificationsEnabled: DEFAULT_UNIFIED_SETTINGS.inAppNotificationsEnabled,
+      finishedThreadAlerts: DEFAULT_UNIFIED_SETTINGS.finishedThreadAlerts,
       wordWrap: DEFAULT_UNIFIED_SETTINGS.wordWrap,
       persistComposerContextStrip: DEFAULT_UNIFIED_SETTINGS.persistComposerContextStrip,
       diffFilesCollapsed: DEFAULT_UNIFIED_SETTINGS.diffFilesCollapsed,
@@ -871,6 +880,38 @@ export function GeneralSettingsPanel() {
               onCheckedChange={(checked) => updateSettings({ inAppNotificationsEnabled: checked })}
               aria-label={gt("In-app notifications")}
             />
+          }
+        />
+        <SettingsRow
+          {...searchableSetting("finished-thread-alerts")}
+          description="Which threads alert when they finish, fail, or hit a usage limit. Yours are threads you started or have sent a message in. Requests for input or approval always alert."
+          control={
+            <Select
+              value={settings.finishedThreadAlerts}
+              onValueChange={(value) => {
+                if (value === "mine" || value === "all") {
+                  updateSettings({ finishedThreadAlerts: value });
+                }
+              }}
+            >
+              <SelectTrigger
+                size="sm"
+                className="w-full sm:w-40"
+                aria-label="Finished thread alerts"
+              >
+                <SelectValue>
+                  {FINISHED_THREAD_ALERT_LABELS[settings.finishedThreadAlerts]}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                <SelectItem hideIndicator value="mine">
+                  {FINISHED_THREAD_ALERT_LABELS.mine}
+                </SelectItem>
+                <SelectItem hideIndicator value="all">
+                  {FINISHED_THREAD_ALERT_LABELS.all}
+                </SelectItem>
+              </SelectPopup>
+            </Select>
           }
         />
       </SettingsSection>
