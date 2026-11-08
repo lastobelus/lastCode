@@ -1684,8 +1684,9 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     const cacheKey = new StatusRemoteRefreshCacheKey({ gitCommonDir, remoteName });
     yield* Cache.get(statusRemoteRefreshCache, cacheKey).pipe(Effect.ignore);
     const key = statusRemoteRefreshFailureKey(cacheKey);
-    if (statusRemoteRefreshFailures.has(key)) unconfirmedStatusFetches.set(cwd, "failed");
-    else if (statusFetches.has(key)) unconfirmedStatusFetches.set(cwd, "pending");
+    // A retry still running outranks the failure it may yet clear.
+    if (statusFetches.has(key)) unconfirmedStatusFetches.set(cwd, "pending");
+    else if (statusRemoteRefreshFailures.has(key)) unconfirmedStatusFetches.set(cwd, "failed");
     else unconfirmedStatusFetches.delete(cwd);
   });
 

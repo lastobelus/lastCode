@@ -527,13 +527,14 @@ export const make = Effect.gen(function* () {
       cwd,
       Effect.gen(function* () {
         const remoteRead = yield* readRemoteStatus(cwd, options);
+        // Base refs and merge bases can move without changing divergence counts, and
+        // automatic pull judges the checkout from this local status.
+        yield* refreshLocalStatusCore(cwd);
         const pulled =
           options?.refreshUpstream === false
             ? null
             : yield* maybeAutoPull(cwd, remoteRead, options?.policyCwds ?? [cwd]);
         if (pulled !== null) return pulled.remote;
-        // Base refs and merge bases can move without changing divergence counts.
-        yield* refreshLocalStatusCore(cwd);
         return yield* updateCachedRemoteStatus(cwd, remoteRead, { publish: true });
       }),
     );
