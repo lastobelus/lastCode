@@ -38,7 +38,35 @@ function isProcessRunning(pid) {
   }
 }
 
-function acquireDirectoryLock(lockDirectory, lockName, activity) {
+// A crash between creating the lock directory and recording its owner leaves no
+// owner to check, so such a directory is reclaimable once nothing has touched it this long.
+const INCOMPLETE_LOCK_GRACE_MS = 60_000;
+
+/**
+ * Moves a stale owner record aside. Only one contender's rename can succeed, and
+ * it restores the record when another contender already replaced the stale owner.
+ */
+export function claimStaleOwner(ownerPath, staleOwner) {
+  const claimPath = `${ownerPath}.claim-${NodeProcess.pid}-${NodeCrypto.randomUUID()}`;
+  try {
+    NodeFS.renameSync(ownerPath, claimPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+  if (readLockOwner(claimPath)?.token === staleOwner.token) {
+    NodeFS.rmSync(claimPath, { force: true });
+    return true;
+  }
+  try {
+    NodeFS.linkSync(claimPath, ownerPath);
+  } finally {
+    NodeFS.rmSync(claimPath, { force: true });
+  }
+  return false;
+}
+
+export function acquireDirectoryLock(lockDirectory, lockName, activity) {
   const lockPath = NodePath.join(lockDirectory, `${lockName}.d`);
   const ownerPath = NodePath.join(lockPath, "owner.json");
   const owner = {
@@ -48,39 +76,65 @@ function acquireDirectoryLock(lockDirectory, lockName, activity) {
     startedAt: new Date().toISOString(),
   };
 
-  const tryAcquire = (mayRecoverStaleOwner) => {
+  // Linking a complete temporary file never overwrites an owner or leaves a partial one.
+  const recordOwner = () => {
+    const temporaryPath = `${ownerPath}.${owner.token}.tmp`;
+    NodeFS.writeFileSync(temporaryPath, `${JSON.stringify(owner)}\n`, { mode: 0o600 });
+    try {
+      NodeFS.linkSync(temporaryPath, ownerPath);
+      return true;
+    } catch (error) {
+      if (error?.code === "EEXIST") return false;
+      throw error;
+    } finally {
+      NodeFS.rmSync(temporaryPath, { force: true });
+    }
+  };
+
+  const contention = (existingOwner) =>
+    new PortableLockContentionError(
+      `Another LastCode ${activity} is already running (PID ${existingOwner?.pid ?? "unknown"}, started ${existingOwner?.startedAt ?? "at an unknown time"}).`,
+    );
+
+  const tryAcquire = (mayRetry) => {
+    let created = false;
     try {
       NodeFS.mkdirSync(lockPath);
+      created = true;
     } catch (error) {
       if (error?.code !== "EEXIST") throw error;
-      const existingOwner = readLockOwner(ownerPath);
-      if (
-        mayRecoverStaleOwner &&
-        existingOwner !== undefined &&
-        !isProcessRunning(existingOwner.pid)
-      ) {
-        const stalePath = `${lockPath}.stale-${NodeProcess.pid}-${NodeCrypto.randomUUID()}`;
-        try {
-          NodeFS.renameSync(lockPath, stalePath);
-        } catch (renameError) {
-          if (renameError?.code === "ENOENT") return tryAcquire(false);
-          throw renameError;
-        }
-        NodeFS.rmSync(stalePath, { force: true, recursive: true });
-        return tryAcquire(false);
-      }
-      throw new PortableLockContentionError(
-        `Another LastCode ${activity} is already running (PID ${existingOwner?.pid ?? "unknown"}, started ${existingOwner?.startedAt ?? "at an unknown time"}).`,
-        { cause: error },
-      );
     }
 
-    try {
-      NodeFS.writeFileSync(ownerPath, `${JSON.stringify(owner)}\n`, { mode: 0o600 });
-    } catch (error) {
-      NodeFS.rmSync(lockPath, { force: true, recursive: true });
-      throw error;
+    if (created) {
+      let recorded;
+      try {
+        recorded = recordOwner();
+      } catch (error) {
+        NodeFS.rmSync(lockPath, { force: true, recursive: true });
+        throw error;
+      }
+      if (!recorded) throw contention(readLockOwner(ownerPath));
+      return;
     }
+
+    const existingOwner = readLockOwner(ownerPath);
+    let reclaimed = false;
+    try {
+      reclaimed =
+        existingOwner === undefined
+          ? !NodeFS.existsSync(ownerPath) &&
+            Date.now() - NodeFS.statSync(lockPath).mtimeMs > INCOMPLETE_LOCK_GRACE_MS &&
+            recordOwner()
+          : !isProcessRunning(existingOwner.pid) &&
+            claimStaleOwner(ownerPath, existingOwner) &&
+            recordOwner();
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    if (reclaimed) return;
+    // The holder released the lock while this attempt inspected it.
+    if (mayRetry && !NodeFS.existsSync(lockPath)) return tryAcquire(false);
+    throw contention(existingOwner);
   };
 
   tryAcquire(true);

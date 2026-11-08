@@ -8,3 +8,14 @@ export function acquirePortableLock(
   lockName: string,
   activity: string,
 ): () => void;
+
+export function acquireDirectoryLock(
+  lockDirectory: string,
+  lockName: string,
+  activity: string,
+): () => void;
+
+export function claimStaleOwner(
+  ownerPath: string,
+  staleOwner: { readonly token?: string },
+): boolean;

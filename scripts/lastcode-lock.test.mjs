@@ -7,7 +7,12 @@ import * as NodeURL from "node:url";
 
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
-import { acquirePortableLock, PortableLockContentionError } from "./lastcode-lock.mjs";
+import {
+  acquireDirectoryLock,
+  acquirePortableLock,
+  claimStaleOwner,
+  PortableLockContentionError,
+} from "./lastcode-lock.mjs";
 
 const temporaryDirectories = [];
 // oxlint-disable-next-line t3code/no-global-process-runtime -- This regression exercises Darwin's O_EXLOCK behavior.
@@ -54,6 +59,46 @@ describe("LastCode portable update lock", () => {
 
     const release = acquirePortableLock(root, "update.lock", "test");
     release();
+  });
+
+  it("lets only one contender recover a dead owner's directory lock", () => {
+    const root = temporaryDirectory();
+    const lockPath = NodePath.join(root, "update.lock.d");
+    const ownerPath = NodePath.join(lockPath, "owner.json");
+    const exited = NodeChildProcess.spawnSync(process.execPath, ["--eval", ""]);
+    const staleOwner = {
+      schemaVersion: 2,
+      pid: exited.pid,
+      token: "stale-owner",
+      startedAt: "2026-01-01T00:00:00.000Z",
+    };
+    NodeFS.mkdirSync(lockPath);
+    NodeFS.writeFileSync(ownerPath, JSON.stringify(staleOwner));
+
+    const release = acquireDirectoryLock(root, "update.lock", "test");
+    const recoveredOwner = NodeFS.readFileSync(ownerPath, "utf8");
+    // A contender that read the dead owner before the recovery must not take the lock.
+    expect(claimStaleOwner(ownerPath, staleOwner)).toBe(false);
+    expect(NodeFS.readFileSync(ownerPath, "utf8")).toBe(recoveredOwner);
+    expect(() => acquireDirectoryLock(root, "update.lock", "test")).toThrow(
+      PortableLockContentionError,
+    );
+
+    release();
+    expect(NodeFS.existsSync(lockPath)).toBe(false);
+  });
+
+  it("reclaims a directory lock whose owner never recorded itself after a minute", () => {
+    const root = temporaryDirectory();
+    const lockPath = NodePath.join(root, "update.lock.d");
+    NodeFS.mkdirSync(lockPath);
+    expect(() => acquireDirectoryLock(root, "update.lock", "test")).toThrow(
+      PortableLockContentionError,
+    );
+
+    const longAgo = new Date("2026-01-01T00:00:00.000Z");
+    NodeFS.utimesSync(lockPath, longAgo, longAgo);
+    acquireDirectoryLock(root, "update.lock", "test")();
   });
 
   itMacOnly("does not classify lock-file permission failures as contention", () => {
