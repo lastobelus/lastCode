@@ -196,6 +196,33 @@ function makePartitionedSquash(
 }
 
 describe("carry conflict dossier", () => {
+  it("keeps file-level owners when overlap ranking cannot read a source parent", () => {
+    const { repo, cleanup } = initRepo();
+    try {
+      const fixture = prepareCrossBaseConflicts(repo);
+      const input = { repo, worktree: repo, sourceBase: fixture.base, compactHead: fixture.compact, onto: fixture.onto };
+      assert.throws(() => replayCarrySetOnto(input));
+      const groups = readCarryGroupChain(repo, fixture.compact, fixture.base).map((group, index) => index === 0 ? {
+        ...group,
+        contributions: [{ ...group.contributions[0]!, sourceCommit: fixture.base }],
+      } : group);
+      const indexBefore = NodeFS.readFileSync(NodePath.join(git(repo, ["rev-parse", "--absolute-git-dir"]), "index"));
+      const dossierPath = writeCarryConflictDossier(input, groups);
+      assert.ok(dossierPath);
+      const dossier = JSON.parse(NodeFS.readFileSync(dossierPath, "utf8")) as CarryConflictDossier;
+      const shared = dossier.stopped.files.find(({ path }) => path === "shared.txt")!;
+      assert.deepEqual(shared.ownership.candidates.map(({ sourceCommit }) => sourceCommit), [fixture.base]);
+      assert.deepEqual(shared.ownership.candidates[0]!.observations, ["retain the first behavior"]);
+      assert.equal(shared.ownership.candidates[0]!.overlapLines, null);
+      assert.equal(shared.ownership.ranking, "file-only");
+      assert.ok(dossier.warnings.some((warning) => warning.includes("file-level owners retained")));
+      assert.deepEqual(dossier.forecast.groups.find(({ group }) => group === "tooling")!.files.map(({ path }) => path), ["later.txt", "shared.txt"]);
+      assert.deepEqual(NodeFS.readFileSync(NodePath.join(git(repo, ["rev-parse", "--absolute-git-dir"]), "index")), indexBefore);
+    } finally {
+      cleanup();
+    }
+  });
+
   it.each([false, true])("retains cross-base recovery with dossier write failure=%s", (failDossier) => {
     const { repo, cleanup } = initRepo();
     try {
