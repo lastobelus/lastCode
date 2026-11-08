@@ -763,7 +763,10 @@ it.effect("sends the command to a ready shell after another thread holds the Act
   }).pipe(Effect.provide(StoreTestLayer)),
 );
 
-it.effect("stops a write waiting on the terminal lock when the terminal closes", () =>
+it.effect.each([
+  { type: "closed", outcome: "cancelled_by_user" },
+  { type: "error", outcome: "failed" },
+] as const)("stops a write waiting on the terminal lock on a $type event", ({ type, outcome }) =>
   Effect.gen(function* () {
     const h = yield* makeHarness;
     const entered = yield* Deferred.make<void>();
@@ -773,15 +776,15 @@ it.effect("stops a write waiting on the terminal lock when the terminal closes",
       const actions = yield* ActionResume.ActionResume;
       const run = yield* actions.runProjectActionAndResume(invocation, "qa");
       yield* Deferred.await(entered);
-      // The terminal manager publishes `closed` while holding the lock the write waits on.
-      yield* h.emit({
-        type: "closed",
-        threadId,
-        terminalId: run.terminalId,
-        deleteHistory: false,
-      });
+      // The terminal manager publishes these while holding the lock the write waits on.
+      const event = { threadId, terminalId: run.terminalId };
+      yield* h.emit(
+        type === "closed"
+          ? { ...event, type, deleteHistory: false }
+          : { ...event, type, message: "spawn failed" },
+      );
       yield* Deferred.succeed(release, undefined);
-      assert.equal(h.state.latest?.outcome, "cancelled_by_user");
+      assert.equal(h.state.latest?.outcome, outcome);
       yield* actions.retryPendingFollowUps;
       assert.equal(h.written.length, 0);
       assert.equal(h.followUps().length, 1);
