@@ -71,15 +71,14 @@ import {
   waitForRun,
 } from "./threadMcp.ts";
 
-vi.mock("../auth/EnvironmentAuth.ts", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../auth/EnvironmentAuth.ts")>();
+vi.mock("./threadCliAuth.ts", async () => {
+  const { EnvironmentAuth } = await import("../auth/EnvironmentAuth.ts");
   const Layer = await import("effect/Layer");
   const Effect = await import("effect/Effect");
   const DateTime = await import("effect/DateTime");
   const { AuthSessionId } = await import("@t3tools/contracts");
   return {
-    ...actual,
-    layerRuntime: Layer.mock(actual.EnvironmentAuth)({
+    layer: Layer.mock(EnvironmentAuth)({
       issueMcpClientSession: () =>
         Effect.map(DateTime.now, (expiresAt) => ({
           sessionId: AuthSessionId.make("test-session"),

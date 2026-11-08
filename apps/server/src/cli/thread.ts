@@ -54,6 +54,7 @@ import {
   ThreadUsageError,
   reportThreadErrors,
 } from "./threadMcp.ts";
+import * as ThreadCliAuth from "./threadCliAuth.ts";
 
 export {
   jsonFlag,
@@ -1010,7 +1011,7 @@ const tryRunLiveThreadRead = Effect.fn("tryRunLiveThreadRead")(function* (
       );
     }).pipe(
       Effect.provide(
-        EnvironmentAuth.layerRuntime.pipe(
+        ThreadCliAuth.layer.pipe(
           Layer.provide(ServerConfig.layer(config)),
           Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
         ),
@@ -1249,7 +1250,7 @@ const runThreadSend = Effect.fn("runThreadSend")(function* (
   }).pipe(
     Effect.provideService(References.MinimumLogLevel, minimumLogLevel),
     Effect.provide(
-      EnvironmentAuth.layerRuntime.pipe(
+      ThreadCliAuth.layer.pipe(
         Layer.provide(ServerConfig.layer(config)),
         Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
       ),
@@ -1330,7 +1331,7 @@ const runThreadWait = Effect.fn("runThreadWait")(function* (
     Effect.scoped,
     Effect.provideService(References.MinimumLogLevel, minimumLogLevel),
     Effect.provide(
-      EnvironmentAuth.layerRuntime.pipe(
+      ThreadCliAuth.layer.pipe(
         Layer.provide(ServerConfig.layer(config)),
         Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
       ),

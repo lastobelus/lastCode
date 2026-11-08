@@ -10,24 +10,21 @@ import * as FileSystem from "effect/FileSystem";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
-import { migrationManifest, runMigrations } from "./persistence/Migrations.ts";
-import { runLastCodeMigrations } from "./persistence/LastCodeMigrations.ts";
+import { runDatabaseMigrations } from "./persistence/DatabaseMigrations.ts";
 import {
   makePersistedServerRuntimeState,
   persistServerRuntimeState,
 } from "./serverRuntimeState.ts";
 
-it.live("keeps migration progress out of JSON thread output", () =>
+it.live("prints JSON thread output against a migrated server database", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cli-json-" });
     const stateDir = `${root}/userdata`;
     yield* fs.makeDirectory(stateDir);
-    yield* Effect.gen(function* () {
-      // LastCode rejects future ledgers; a valid pending migration exercises log suppression.
-      yield* runMigrations({ toMigrationInclusive: migrationManifest.at(-2)![0] });
-      yield* runLastCodeMigrations();
-    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: `${stateDir}/statev2.sqlite` })));
+    yield* runDatabaseMigrations().pipe(
+      Effect.provide(NodeSqliteClient.layer({ filename: `${stateDir}/statev2.sqlite` })),
+    );
 
     const server = yield* Effect.acquireRelease(
       Effect.promise(async () => {

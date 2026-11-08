@@ -42,6 +42,7 @@ import * as ProcessRunner from "../processRunner.ts";
 import { readLiveServerRuntimeState } from "../serverRuntimeState.ts";
 import { unsetInheritedRepositoryEnv } from "../vcs/VcsProcess.ts";
 import { projectLocationFlags, resolveThreadInspectionConfig } from "./config.ts";
+import * as ThreadCliAuth from "./threadCliAuth.ts";
 
 /**
  * Short enough that a run which stops to ask the user something is noticed
@@ -256,57 +257,65 @@ export type ThreadTools = ReturnType<typeof makeThreadTools>;
  * Signs in as a short-lived MCP client of the running server, the same way an
  * outside agent does, and revokes that session when the command ends.
  */
-export const withThreadTools = Effect.fn("cli.thread.withThreadTools")(function* <A, E, R>(
-  flags: {
-    readonly baseDir: Option.Option<string>;
-    readonly stateDir?: Option.Option<string>;
-    readonly json: boolean;
-    readonly clientLabel?: string;
-  },
-  run: (tools: ThreadTools) => Effect.Effect<A, E, R>,
-) {
-  const logLevel = yield* GlobalFlag.LogLevel;
-  const resolveConfig = resolveThreadInspectionConfig(flags, logLevel);
-  const config = yield* flags.json
-    ? resolveConfig.pipe(Effect.provideService(References.MinimumLogLevel, "Error"))
-    : resolveConfig;
-  const minimumLogLevel = flags.json ? "Error" : config.logLevel;
-  return yield* Effect.gen(function* () {
-    const runtimeState = yield* readLiveServerRuntimeState(config.serverRuntimeStatePath);
-    if (Option.isNone(runtimeState)) {
-      return yield* new ThreadServerNotRunningError({ baseDir: config.baseDir });
-    }
-    const origin = runtimeState.value.origin;
-    const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
-    const issued = yield* Effect.acquireRelease(
-      environmentAuth.issueMcpClientSession({
-        label: flags.clientLabel ?? "t3 thread cli",
-        // The CLI runs as the machine's owner. New threads still start at
-        // the project's default mode, never at this ceiling by default.
-        access: "full-access",
-        peerLink: false,
-        client: { deviceType: "bot" },
-      }),
-      (session) =>
-        environmentAuth.revokeSession(session.sessionId).pipe(Effect.ignore({ log: true })),
+const makeWithThreadTools = (verifyOnly: boolean) =>
+  Effect.fn("cli.thread.withThreadTools")(function* <A, E, R>(
+    flags: {
+      readonly baseDir: Option.Option<string>;
+      readonly stateDir?: Option.Option<string>;
+      readonly json: boolean;
+      readonly clientLabel?: string;
+    },
+    run: (tools: ThreadTools) => Effect.Effect<A, E, R>,
+  ) {
+    const logLevel = yield* GlobalFlag.LogLevel;
+    const resolveConfig = resolveThreadInspectionConfig(flags, logLevel);
+    const config = yield* flags.json
+      ? resolveConfig.pipe(Effect.provideService(References.MinimumLogLevel, "Error"))
+      : resolveConfig;
+    const minimumLogLevel = flags.json ? "Error" : config.logLevel;
+    const readOrigin = Effect.gen(function* () {
+      const runtimeState = yield* readLiveServerRuntimeState(config.serverRuntimeStatePath);
+      if (Option.isNone(runtimeState)) {
+        return yield* new ThreadServerNotRunningError({ baseDir: config.baseDir });
+      }
+      return runtimeState.value.origin;
+    }).pipe(Effect.provideService(References.MinimumLogLevel, minimumLogLevel));
+    const precheckedOrigin = verifyOnly ? yield* readOrigin : undefined;
+    const runWithSession = Effect.gen(function* () {
+      const origin = precheckedOrigin ?? (yield* readOrigin);
+      const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
+      const issued = yield* Effect.acquireRelease(
+        environmentAuth.issueMcpClientSession({
+          label: flags.clientLabel ?? "t3 thread cli",
+          // The CLI runs as the machine's owner. New threads still start at
+          // the project's default mode, never at this ceiling by default.
+          access: "full-access",
+          peerLink: false,
+          client: { deviceType: "bot" },
+        }),
+        (session) =>
+          environmentAuth.revokeSession(session.sessionId).pipe(Effect.ignore({ log: true })),
+      );
+      const session = yield* mcpToolSession({
+        endpoint: new URL("/mcp", origin).href,
+        authorization: `Bearer ${issued.token}`,
+        clientName: "t3-thread-cli",
+      }).pipe(Effect.mapError((cause) => new ThreadServerUnreachableError({ origin, cause })));
+      return yield* run(makeThreadTools(session, origin));
+    }).pipe(Effect.scoped, Effect.provideService(References.MinimumLogLevel, minimumLogLevel));
+    const dependencies = Layer.mergeAll(
+      ServerConfig.layer(config),
+      Layer.succeed(References.MinimumLogLevel, minimumLogLevel),
     );
-    const session = yield* mcpToolSession({
-      endpoint: new URL("/mcp", origin).href,
-      authorization: `Bearer ${issued.token}`,
-      clientName: "t3-thread-cli",
-    }).pipe(Effect.mapError((cause) => new ThreadServerUnreachableError({ origin, cause })));
-    return yield* run(makeThreadTools(session, origin));
-  }).pipe(
-    Effect.scoped,
-    Effect.provideService(References.MinimumLogLevel, minimumLogLevel),
-    Effect.provide(
-      EnvironmentAuth.layerRuntime.pipe(
-        Layer.provide(ServerConfig.layer(config)),
-        Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
-      ),
-    ),
-  );
-});
+    return yield* verifyOnly
+      ? runWithSession.pipe(Effect.provide(ThreadCliAuth.layer.pipe(Layer.provide(dependencies))))
+      : runWithSession.pipe(
+          Effect.provide(EnvironmentAuth.layerRuntime.pipe(Layer.provide(dependencies))),
+        );
+  });
+
+export const withThreadTools = makeWithThreadTools(false);
+export const withThreadToolsWithoutMigrations = makeWithThreadTools(true);
 
 const readMessageArgument = Effect.fn("cli.thread.readMessage")(function* (argument: string) {
   const text =
@@ -899,7 +908,7 @@ export const listProjectThreads = Effect.fn("cli.thread.listProjectThreads")(
     readonly project: string;
     readonly json: boolean;
   }) =>
-    withThreadTools(
+    withThreadToolsWithoutMigrations(
       flags,
       Effect.fn("cli.thread.list")(function* (tools) {
         const project = yield* resolveProject(tools, flags.project);
@@ -980,7 +989,7 @@ export const threadStartCommand = Command.make("start", {
       const title = yield* decodeTitle(
         Option.getOrElse(flags.title, () => titleFromMessage(message)),
       ).pipe(Effect.mapError(() => new ThreadUsageError({ detail: "The title is empty." })));
-      yield* withThreadTools(
+      yield* withThreadToolsWithoutMigrations(
         flags,
         Effect.fn("cli.thread.start")(function* (tools) {
           const project = yield* resolveProject(tools, flags.project);
@@ -1025,7 +1034,7 @@ export const sendMcpThreadMessage = Effect.fn("cli.thread.sendMessage")(function
   const threadId = yield* decodeThreadId(flags.thread);
   const message = yield* readMessageArgument(flags.message);
   const output = yield* readOutputSchema(flags.outputSchema);
-  yield* withThreadTools(
+  yield* withThreadToolsWithoutMigrations(
     flags,
     Effect.fn("cli.thread.send")(function* (tools) {
       // Work already running when this is sent is not this message's to wait for.
@@ -1064,7 +1073,7 @@ export const threadShowCommand = Command.make("show", {
   Command.withHandler((flags) =>
     Effect.gen(function* () {
       const threadId = yield* decodeThreadId(flags.thread);
-      yield* withThreadTools(
+      yield* withThreadToolsWithoutMigrations(
         flags,
         Effect.fn("cli.thread.show")(function* (tools) {
           const { thread, messages: latest } = yield* readLatestMessages(
@@ -1125,7 +1134,7 @@ export const threadCapacityCommand = Command.make("capacity", {
     "Print this environment's capacity as JSON: mode, per-class verdicts, sampled metrics and reasons. Reports only; never holds work.",
   ),
   Command.withHandler((flags) =>
-    withThreadTools({ ...flags, json: true }, (tools) =>
+    withThreadToolsWithoutMigrations({ ...flags, json: true }, (tools) =>
       tools
         .call(
           "t3_environment_read",

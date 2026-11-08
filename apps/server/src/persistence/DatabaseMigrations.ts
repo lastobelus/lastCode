@@ -261,6 +261,31 @@ const convertLegacyHistory = Effect.fn("convertLegacyMigrationHistory")(function
   }
 });
 
+export class DatabaseSchemaMismatchError extends Schema.TaggedError<DatabaseSchemaMismatchError>()(
+  "DatabaseSchemaMismatchError",
+  { message: Schema.String },
+) {}
+
+/** Fails unless both ledgers record exactly this build's migrations, and never writes. */
+export const verifyDatabaseMigrations = Effect.fn("verifyDatabaseMigrations")(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  for (const [table, manifest] of [
+    ["effect_sql_migrations", migrationManifest],
+    ["lastcode_sql_migrations", lastcodeMigrationManifest],
+  ] as const) {
+    const mismatch = () =>
+      new DatabaseSchemaMismatchError({
+        message: `This build's migration history does not match ${table}. Only the server that owns this database migrates it; use that installation's own CLI.`,
+      });
+    const exists = yield* sql`SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ${table}`;
+    if (exists.length === 0) return yield* mismatch();
+    const rows = yield* verifyLedger(table, manifest).pipe(
+      Effect.catchTags({ MigrationHistoryError: () => Effect.fail(mismatch()) }),
+    );
+    if (rows.length !== manifest.length) return yield* mismatch();
+  }
+});
+
 /** Server and snapshot tools use this entrypoint; upstream keeps its own runner. */
 export const runDatabaseMigrations = Effect.fn("runDatabaseMigrations")(function* (
   options: { readonly authorityFence?: "verify" | "repair" } = {},
