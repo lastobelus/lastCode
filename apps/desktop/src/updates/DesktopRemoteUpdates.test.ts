@@ -794,6 +794,53 @@ describe("DesktopRemoteUpdates", () => {
     );
   });
 
+  it.effect("keeps a local nightly build running when its remote request is cancelled", () => {
+    const buildStarted = Deferred.makeUnsafe<void>();
+    let buildInterrupted = false;
+    const checkpointTag = "lastcode/checkpoint/v1.2.4-nightly.20260814.1089";
+    const harness = makeHarness({
+      localNightliesEnabled: true,
+      localInspection: {
+        schemaVersion: 2,
+        checkpointRequested: false,
+        status: "available",
+        checkpointTag,
+        availableVersion: "1.2.4-nightly.20260814.1089",
+        releaseNotes: {
+          lastCode: { status: "known", items: [], omittedItems: 0 },
+          upstream: { groups: [], omittedGroups: 0 },
+        },
+      },
+      localBuildEffect: () =>
+        Deferred.succeed(buildStarted, undefined).pipe(
+          Effect.andThen(Effect.never),
+          Effect.onInterrupt(() =>
+            Effect.sync(() => {
+              buildInterrupted = true;
+            }),
+          ),
+        ),
+    });
+
+    return runRemoteUpdatesTest(harness, ({ requests, cancellations }) =>
+      Effect.gen(function* () {
+        yield* Queue.offer(requests, request("req-local-build"));
+        yield* settle;
+        yield* Deferred.await(buildStarted);
+        yield* Queue.offer(cancellations, {
+          version: 1,
+          type: "cancelDesktopUpdate",
+          requestId: "req-local-build",
+        });
+        yield* settle;
+
+        assert.isFalse(buildInterrupted);
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        assert.equal((yield* updates.getState).status, "downloading");
+      }),
+    );
+  });
+
   it.effect("cancels an active preparation so the next request can run", () => {
     const releaseCheck = Deferred.makeUnsafe<void>();
     const harness = makeHarness({ checkForUpdates: Deferred.await(releaseCheck) });

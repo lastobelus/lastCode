@@ -12,7 +12,7 @@ import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import { desktopUpdateChannelOf } from "@t3tools/shared/cliRelease";
 import { compareSemverVersions } from "@t3tools/shared/semver";
-import type * as Scope from "effect/Scope";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import * as DesktopObservability from "../app/DesktopObservability.ts";
@@ -55,6 +55,7 @@ export const listen: Effect.Effect<
   const updates = yield* DesktopUpdates.DesktopUpdates;
   const backends = yield* DesktopBackendPool.DesktopBackendPool;
   const publisher = yield* DesktopTelemetryPublisher.DesktopTelemetryPublisher;
+  const listenScope = yield* Scope.Scope;
   const activeRequestIdRef = yield* Ref.make(Option.none<string>());
   const requestControlRef = yield* Ref.make<{
     readonly active: Option.Option<{
@@ -275,7 +276,12 @@ export const listen: Effect.Effect<
                   attempts = { ...attempts, downloads: attempts.downloads - 1 };
                   return retryLater(state);
                 }),
-                Effect.forkScoped,
+                // A cancelled request (such as the server's timeout) stops waiting, but a local
+                // build outlives it: interrupting the build kills it mid-package.
+                (download) =>
+                  state.source === "lastcode-local"
+                    ? Effect.forkIn(download, listenScope)
+                    : Effect.forkScoped(download),
               );
               return false;
             case "install": {
