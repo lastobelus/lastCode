@@ -536,9 +536,6 @@ export function collectUpdateEverythingResult(input: {
     | { readonly status: "failed"; readonly line: string }
   >;
 }): UpdateEverythingResult {
-  const interruptedProviders = input.providers.filter(
-    (outcome) => outcome.status === "interrupted",
-  ).length;
   return {
     localVersion: input.localVersion,
     updatedServers: input.servers.filter(({ outcome }) => outcome.status === "updated").length,
@@ -554,11 +551,6 @@ export function collectUpdateEverythingResult(input: {
             : [],
       ),
       ...input.providers.flatMap((outcome) => (outcome.status === "failed" ? [outcome.line] : [])),
-      ...(interruptedProviders === 0
-        ? []
-        : [
-            `${interruptedProviders} provider ${interruptedProviders === 1 ? "update was" : "updates were"} interrupted.`,
-          ]),
     ],
   };
 }

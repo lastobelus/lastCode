@@ -185,17 +185,22 @@ export function useUpdateEverything(
           updateServers: async () => {
             const runs = servers.map(async (server) => {
               const serverOutcome = await updateServer(server, { quiet: true });
-              // Skipped is unfinished, not done: keep the server for the retry action.
+              const providerFailure = providerFailures.get(server.environmentId) ?? null;
+              // Skipped is unfinished, not done: keep the server for the retry action. Track
+              // switches retry through their own planner, so a skip there stays as before.
+              const skipped = serverOutcome.status === "skipped" && !channelSwitch;
               settleUpdateRunMachine(
                 server.environmentId,
                 serverOutcome.status === "failed"
                   ? serverOutcome.message
-                  : serverOutcome.status === "skipped"
-                    ? SKIPPED_SERVER_UPDATE
-                    : (providerFailures.get(server.environmentId) ?? null),
+                  : skipped
+                    ? [SKIPPED_SERVER_UPDATE, providerFailure].filter(Boolean).join(" ")
+                    : providerFailure,
                 {
-                  serverUpdated: serverOutcome.status === "updated",
-                  providerFailure: providerFailures.get(server.environmentId) ?? null,
+                  serverUpdated:
+                    serverOutcome.status === "updated" ||
+                    (!skipped && serverOutcome.status === "skipped"),
+                  providerFailure,
                 },
               );
               const finished = { label: server.serverLabel, outcome: serverOutcome };
@@ -214,7 +219,9 @@ export function useUpdateEverything(
           collectUpdateEverythingResult({
             localVersion: null,
             localFailures,
-            servers: finished,
+            servers: channelSwitch
+              ? finished.filter(({ outcome }) => outcome.status !== "skipped")
+              : finished,
             providers: outcome.providers,
           });
         if (outcome.localReady && installLocal) {

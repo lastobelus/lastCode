@@ -336,7 +336,7 @@ describe("runUpdateEverything", () => {
 });
 
 describe("collectUpdateEverythingResult", () => {
-  it("reports skipped servers and interrupted providers as not updated", () => {
+  it("reports skipped servers as not updated", () => {
     const result = collectUpdateEverythingResult({
       localVersion: null,
       localFailures: [],
@@ -349,10 +349,8 @@ describe("collectUpdateEverythingResult", () => {
 
     expect(result.updatedServers).toBe(1);
     expect(result.updatedProviders).toBe(1);
-    expect(result.failures).toEqual([
-      `managed-server: ${SKIPPED_SERVER_UPDATE}`,
-      "1 provider update was interrupted.",
-    ]);
+    // An interrupted provider command proves nothing about the update, so it is neither counted nor failed.
+    expect(result.failures).toEqual([`managed-server: ${SKIPPED_SERVER_UPDATE}`]);
   });
 });
 
