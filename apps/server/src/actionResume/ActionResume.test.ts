@@ -213,6 +213,10 @@ const makeHarness = Effect.gen(function* () {
       entered: Deferred.Deferred<void>;
       release: Deferred.Deferred<void>;
     } | null,
+    pauseWrite: null as {
+      entered: Deferred.Deferred<void>;
+      release: Deferred.Deferred<void>;
+    } | null,
     request: null as OrchestrationV2RuntimeRequest["kind"] | null,
     archived: false,
     archivePending: null as OrchestrationV2AppThread["archivePending"],
@@ -444,6 +448,11 @@ const makeHarness = Effect.gen(function* () {
         state.failWrite
           ? Effect.die("write failed")
           : Effect.gen(function* () {
+              const pause = state.pauseWrite;
+              if (pause !== null) {
+                yield* Deferred.succeed(pause.entered, undefined);
+                yield* Deferred.await(pause.release);
+              }
               written.push(input);
               yield* Queue.offer(writes, input);
               if (state.autoStart)
@@ -750,6 +759,32 @@ it.effect("sends the command to a ready shell after another thread holds the Act
       assert.equal(written?.terminalId, run.terminalId);
       assert.equal(h.state.latest?.outcome, "running");
       yield* actions.cancelByUser(threadId);
+    }).pipe(Effect.provide(h.layer));
+  }).pipe(Effect.provide(StoreTestLayer)),
+);
+
+it.effect("stops a write waiting on the terminal lock when the terminal closes", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness;
+    const entered = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    h.state.pauseWrite = { entered, release };
+    yield* Effect.gen(function* () {
+      const actions = yield* ActionResume.ActionResume;
+      const run = yield* actions.runProjectActionAndResume(invocation, "qa");
+      yield* Deferred.await(entered);
+      // The terminal manager publishes `closed` while holding the lock the write waits on.
+      yield* h.emit({
+        type: "closed",
+        threadId,
+        terminalId: run.terminalId,
+        deleteHistory: false,
+      });
+      yield* Deferred.succeed(release, undefined);
+      assert.equal(h.state.latest?.outcome, "cancelled_by_user");
+      yield* actions.retryPendingFollowUps;
+      assert.equal(h.written.length, 0);
+      assert.equal(h.followUps().length, 1);
     }).pipe(Effect.provide(h.layer));
   }).pipe(Effect.provide(StoreTestLayer)),
 );

@@ -1020,6 +1020,9 @@ const make = Effect.gen(function* () {
                   yield* Deferred.succeed(startup.stopped, undefined);
                   return;
                 }
+                // Close publishes under the terminal lock a pending write holds the Action mutex for;
+                // stop startup first so finishing the run cannot wait on that mutex forever.
+                if (event.type === "closed") yield* Deferred.succeed(startup.stopped, undefined);
                 yield* handleTerminalEvent(event);
               }),
             );
