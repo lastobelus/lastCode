@@ -698,14 +698,58 @@ it.effect("fails an unready Action shell at the launch deadline without sending 
       const actions = yield* ActionResume.ActionResume;
       const run = yield* actions.runProjectActionAndResume(invocation, "qa");
       yield* TestClock.adjust("30 seconds");
+      assert.equal(h.state.latest?.outcome, "running");
+      yield* TestClock.adjust("30 seconds");
       yield* Deferred.await(h.terminalClosed);
       yield* Deferred.await(h.delivered);
       assert.equal(h.written.length, 0);
       assert.equal(h.state.latest?.outcome, "failed");
       assert.include(
         (yield* actions.inspectActionRun(invocation, run.runId)).outputTail,
-        "command was not sent",
+        "shell was not ready within 60 seconds; the command was not sent",
       );
+    }).pipe(Effect.provide(h.layer));
+  }).pipe(Effect.provide(StoreTestLayer)),
+);
+
+it.effect("sends the command to a ready shell after another thread holds the Action lock", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness;
+    const otherId = ThreadId.make("thread-action-lock-holder");
+    h.otherThreads.set(otherId, { ...shell, id: otherId, actionResume: null });
+    yield* Effect.gen(function* () {
+      const actions = yield* ActionResume.ActionResume;
+      const other = yield* actions.runProjectActionAndResume(
+        { threadId: otherId, providerInstanceId },
+        "qa",
+      );
+      yield* Queue.take(h.writes);
+      h.state.readyOnOpen = false;
+      const run = yield* actions.runProjectActionAndResume(invocation, "qa");
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      h.state.pauseDelivery = { entered, release };
+      const otherExit = yield* h
+        .emit({
+          type: "exited",
+          threadId: otherId,
+          terminalId: other.terminalId,
+          exitCode: 0,
+          exitSignal: null,
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(entered);
+      yield* h.emit({ type: "output", threadId, terminalId: run.terminalId, data: "\x1b[?2004h" });
+      yield* TestClock.adjust("2 minutes");
+      h.state.pauseDelivery = null;
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(otherExit);
+      const written = yield* Queue.take(h.writes).pipe(
+        Effect.raceFirst(Deferred.await(h.terminalClosed).pipe(Effect.as(null))),
+      );
+      assert.equal(written?.terminalId, run.terminalId);
+      assert.equal(h.state.latest?.outcome, "running");
+      yield* actions.cancelByUser(threadId);
     }).pipe(Effect.provide(h.layer));
   }).pipe(Effect.provide(StoreTestLayer)),
 );
