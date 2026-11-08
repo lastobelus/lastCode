@@ -7,7 +7,7 @@ import * as NodePath from "node:path";
 
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { compileCarrySetSameBase } from "./lastcode-carry-replay.ts";
+import { CarryReplayConflictError, compileCarrySetSameBase } from "./lastcode-carry-replay.ts";
 import { carrySquashBody, validateCarrySourceRange } from "./lastcode-carry-delivery.ts";
 import { validateCarryPullRequest } from "./lastcode-carry-ci.ts";
 
@@ -331,12 +331,18 @@ describe("LastCode carry CI", () => {
       const sidebar = commit(repo, "show sidebar state", "Carry-Group: legacy-sidebar");
       write(repo, "shared.txt", "action behavior\nsidebar\ntooling\n");
       const head = commit(repo, "extend sidebar tooling", "Carry-Group: tooling");
-      let message = "";
+      let failure: unknown;
       try {
         validateCarryPullRequest(repo, { base, head, number: 219 });
       } catch (error) {
-        message = error instanceof Error ? error.message : String(error);
+        failure = error;
       }
+      const message = failure instanceof Error ? failure.message : "";
+      // Checkpoint paths see only the shared error, whose sources are merged and cannot be retagged.
+      const cause = failure instanceof Error ? failure.cause : undefined;
+      expect(cause).toBeInstanceOf(CarryReplayConflictError);
+      expect((cause as CarryReplayConflictError).message).not.toContain("Likely fix");
+      expect((cause as CarryReplayConflictError).advice).toContain("Likely fix");
       const short = (commit: string) => commit.slice(0, 12);
       expect(message).toContain(
         [
@@ -358,29 +364,72 @@ describe("LastCode carry CI", () => {
     try {
       const { base } = compactFixture(repo);
       const lines = Array.from({ length: 10 }, (_, line) => `line ${line + 1}`);
-      const edit = (line: number, text: string) => {
-        lines[line - 1] = text;
+      const save = (subject: string, group: string) => {
         write(repo, "h.txt", `${lines.join("\n")}\n`);
+        return commit(repo, subject, `Carry-Group: ${group}`);
       };
-      edit(1, "line 1");
-      commit(repo, "add h", "Carry-Group: tooling");
-      edit(1, "incubator line 1");
-      commit(repo, "incubate h", "Carry-Group: incubator");
-      edit(8, "sidebar line 8");
-      const sidebar = commit(repo, "sidebar h", "Carry-Group: legacy-sidebar");
-      edit(8, "tooling line 8");
-      const stopped = commit(repo, "tool h", "Carry-Group: tooling");
-      edit(10, "tooling line 10");
-      const follower = commit(repo, "tool h again", "Carry-Group: tooling");
+      save("add h", "tooling");
+      lines[9] = "incubator line 10";
+      save("incubate h", "incubator");
+      lines[7] = "sidebar line 8";
+      const sidebar = save("sidebar h", "legacy-sidebar");
+      lines.splice(8, 0, "inserted after line 8");
+      const stopped = save("insert h", "build-ci");
+      lines[10] = "build line 10";
+      const follower = save("build h again", "build-ci");
+      lines[4] = "tooling line 5";
+      // Tooling already replays before build-ci, so this commit needs no move.
+      const head = save("tool h", "tooling");
       const short = (commit: string) => commit.slice(0, 12);
-      expect(() => validateCarryPullRequest(repo, { base, head: follower, number: 221 })).toThrow(
+      expect(() => validateCarryPullRequest(repo, { base, head, number: 221 })).toThrow(
         [
-          `Carry replay conflicted in h.txt while replaying ${short(stopped)} "tool h" (Carry-Group: tooling).`,
+          `Carry replay conflicted in h.txt while replaying ${short(stopped)} "insert h" (Carry-Group: build-ci).`,
           "These commits in later carry groups changed those lines earlier in history, so the replay has not applied them yet:",
           `- ${short(sidebar)} "sidebar h" (Carry-Group: legacy-sidebar): h.txt`,
           `Likely fix: retag ${short(stopped)}'s Carry-Group to legacy-sidebar so it replays after them, or split its changes to h.txt into a separate legacy-sidebar commit.`,
           "These later commits also edit those files and would still replay before legacy-sidebar; move them the same way:",
-          `- ${short(follower)} "tool h again" (Carry-Group: tooling)`,
+          `- ${short(follower)} "build h again" (Carry-Group: build-ci)`,
+          "Push the corrected head",
+        ].join("\n"),
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("attributes lines in a merged squash to the source commit that changed them", () => {
+    const { repo, cleanup } = fixture();
+    try {
+      const { base: compact } = compactFixture(repo);
+      const lines = Array.from({ length: 10 }, (_, line) => `line ${line + 1}`);
+      const save = (subject: string, group: string) => {
+        write(repo, "h.txt", `${lines.join("\n")}\n`);
+        return commit(repo, subject, `Carry-Group: ${group}`);
+      };
+      save("add h", "tooling");
+      lines[1] = "build line 2";
+      const build = save("build h", "build-ci");
+      lines[8] = "incubator line 9";
+      const prior = save("incubate h", "incubator");
+      const retained = validateCarrySourceRange(repo, 222, compact, prior);
+      git(repo, ["update-ref", retained.ref, prior]);
+      const base = git(repo, [
+        "commit-tree",
+        `${prior}^{tree}`,
+        "-p",
+        compact,
+        "-m",
+        carrySquashBody("prior squash", retained),
+      ]);
+      git(repo, ["checkout", "--quiet", "--detach", base]);
+      lines[1] = "tooling line 2";
+      const head = save("tool h", "tooling");
+      const short = (commit: string) => commit.slice(0, 12);
+      expect(() => validateCarryPullRequest(repo, { base, head, number: 223 })).toThrow(
+        [
+          "These commits in later carry groups changed those lines earlier in history, so the replay has not applied them yet:",
+          `- ${short(build)} "build h" (Carry-Group: build-ci): h.txt`,
+          `Likely fix: retag ${short(head)}'s Carry-Group to build-ci so it replays after them`,
         ].join("\n"),
       );
     } finally {

@@ -115,6 +115,7 @@ export interface ReplayUngroupedInput {
 }
 
 interface GitOptions {
+  readonly raw?: boolean;
   readonly allowFailure?: boolean;
   readonly environment?: NodeJS.ProcessEnv;
   readonly input?: string;
@@ -155,7 +156,7 @@ function runGit(cwd: string, args: ReadonlyArray<string>, options: GitOptions = 
         .join("\n"),
     );
   }
-  return result.stdout.trim();
+  return options.raw ? result.stdout : result.stdout.trim();
 }
 
 function resolveCommit(repo: string, ref: string): string {
@@ -911,7 +912,8 @@ export class CarryReplayConflictError extends Error {
   readonly gitOutput: string;
 
   constructor(conflict: RegroupConflict, gitOutput: string, options?: ErrorOptions) {
-    super(`${conflict.diagnosis}\nGit output:\n${gitOutput}`, options);
+    // Bounded failure records keep the tail, so the diagnosis goes last.
+    super(`Git output:\n${gitOutput}\n${conflict.diagnosis}`, options);
     this.diagnosis = conflict.diagnosis;
     this.advice = conflict.advice;
     this.gitOutput = gitOutput;
@@ -939,7 +941,7 @@ function changedPaths(
       "--",
       ...paths,
     ],
-    { input: `${Array.from(new Set(commits)).join("\n")}\n` },
+    { input: `${Array.from(new Set(commits)).join("\n")}\n`, raw: true },
   );
   for (const chunk of output.split("\x01").slice(1)) {
     const [commit, ...rest] = chunk.split("\0");
@@ -949,18 +951,29 @@ function changedPaths(
   return result;
 }
 
-// Git conflicts on overlapping or adjacent hunks, so blame the stopped commit's
-// old-side lines widened by one to find who last changed them.
-function blamedCommits(
+function blame(repo: string, args: ReadonlyArray<string>, path: string) {
+  const output = runGit(repo, ["blame", "--porcelain", ...args, "--", path], {
+    allowFailure: true,
+  });
+  return Array.from(output.matchAll(/^([0-9a-f]{40}) (\d+) \d+/gmu), (match) => ({
+    commit: match[1]!,
+    line: Number(match[2]),
+  }));
+}
+
+// Git conflicts on overlapping or adjacent hunks, so take the stopped commit's
+// old-side lines widened by one; an insertion touches only its two neighbours.
+function conflictRanges(
   repo: string,
   parent: string,
   stopped: string,
   path: string,
 ): ReadonlyArray<string> {
-  const lineCount = runGit(repo, ["cat-file", "-p", `${parent}:${path}`], {
+  const contents = runGit(repo, ["cat-file", "-p", `${parent}:${path}`], {
     allowFailure: true,
-  }).split("\n").length;
-  const ranges: string[] = [];
+    raw: true,
+  });
+  const lineCount = contents.split("\n").length - (contents.endsWith("\n") ? 1 : 0);
   const diff = runGit(repo, [
     "--literal-pathspecs",
     "diff",
@@ -972,20 +985,13 @@ function blamedCommits(
     "--",
     path,
   ]);
-  for (const hunk of diff.matchAll(/^@@ -(\d+)(?:,(\d+))? /gmu)) {
+  return Array.from(diff.matchAll(/^@@ -(\d+)(?:,(\d+))? /gmu)).flatMap((hunk) => {
     const start = Number(hunk[1]);
     const count = hunk[2] === undefined ? 1 : Number(hunk[2]);
-    const low = Math.max(1, start - (count === 0 ? 0 : 1));
-    const high = Math.min(lineCount, (count === 0 ? start + 1 : start + count - 1) + 1);
-    if (low <= high) ranges.push("-L", `${low},${high}`);
-  }
-  if (ranges.length === 0) return [];
-  const blame = runGit(repo, ["blame", "--porcelain", ...ranges, parent, "--", path], {
-    allowFailure: true,
+    const low = Math.max(1, count === 0 ? start : start - 1);
+    const high = Math.min(lineCount, count === 0 ? start + 1 : start + count);
+    return low <= high ? ["-L", `${low},${high}`] : [];
   });
-  return Array.from(
-    new Set(Array.from(blame.matchAll(/^([0-9a-f]{40}) \d+ \d+/gmu), (m) => m[1]!)),
-  );
 }
 
 // Grouping replays each group's contributions together, in CARRY_REPLAY_GROUPS
@@ -1002,7 +1008,7 @@ function describeRegroupConflict(
   const index = items.findIndex((item) => item.commit === stopped);
   const current = items[index];
   const parent = current ? commitParents(repo, current.commit)[0] : undefined;
-  const files = runGit(worktree, ["diff", "--name-only", "--diff-filter=U", "-z"])
+  const files = runGit(worktree, ["diff", "--name-only", "--diff-filter=U", "-z"], { raw: true })
     .split("\0")
     .filter(Boolean);
   if (!current?.metadata || !parent || files.length === 0) return undefined;
@@ -1019,11 +1025,31 @@ function describeRegroupConflict(
     own(item.commit, item);
     if (item.metadata) own(item.metadata.sourceCommit, item);
   }
-  const sourcesOf = (commit: string): ReadonlyArray<string> => {
-    const trailers = parseCarryTrailers(commitMessage(repo, commit));
-    return trailers.sourceBase && trailers.sourceHead
-      ? [commit, ...firstParentCommits(repo, trailers.sourceBase, trailers.sourceHead)]
-      : [commit];
+  const blamedSources = (path: string): ReadonlyArray<string> => {
+    const ranges = conflictRanges(repo, parent, current.commit, path);
+    if (ranges.length === 0) return [];
+    const blamed = new Map<string, number[]>();
+    for (const { commit, line } of blame(repo, [...ranges, parent], path)) {
+      blamed.set(commit, [...(blamed.get(commit) ?? []), line]);
+    }
+    const sources = new Set(blamed.keys());
+    for (const [commit, lineNumbers] of blamed) {
+      const { sourceBase, sourceHead } = parseCarryTrailers(commitMessage(repo, commit));
+      if (!sourceBase || !sourceHead) continue;
+      // A squash stands for a whole PR; blame its lines again inside the retained source range.
+      if (resolveTree(repo, commit) === resolveTree(repo, sourceHead)) {
+        const lines = Array.from(new Set(lineNumbers)).flatMap((line) => ["-L", `${line},${line}`]);
+        for (const { commit: source } of blame(
+          repo,
+          [...lines, `${sourceBase}..${sourceHead}`],
+          path,
+        ))
+          sources.add(source);
+      } else {
+        for (const source of firstParentCommits(repo, sourceBase, sourceHead)) sources.add(source);
+      }
+    }
+    return Array.from(sources);
   };
   const touchedBy = changedPaths(
     repo,
@@ -1033,20 +1059,15 @@ function describeRegroupConflict(
 
   const found = new Map<ReplayItem, Set<string>>();
   const unexplained: string[] = [];
+  const wholeFile = new Set<string>();
   for (const path of files) {
-    const blamed = blamedCommits(repo, parent, current.commit, path).flatMap((commit) => {
-      try {
-        return sourcesOf(commit);
-      } catch {
-        return [commit];
-      }
-    });
-    let owning = blamed
+    let owning = blamedSources(path)
       .flatMap((commit) => owners.get(commit) ?? [])
       .filter((item) => touchedBy.get(item.commit)?.includes(path));
     // Blame cannot see through every rewrite; fall back to any later-group change to the file.
     if (owning.length === 0) {
       owning = candidates.filter((item) => touchedBy.get(item.commit)?.includes(path));
+      if (owning.length > 0) wholeFile.add(path);
     }
     if (owning.length === 0) unexplained.push(path);
     for (const item of owning) found.set(item, (found.get(item) ?? new Set()).add(path));
@@ -1074,7 +1095,10 @@ function describeRegroupConflict(
   const overlap = files.filter((path) => !unexplained.includes(path));
   const followers = items
     .slice(index + 1)
-    .filter((item) => item.metadata && rank(item.group) < rank(target));
+    .filter(
+      (item) =>
+        item.metadata && rank(item.group) >= rank(current.group) && rank(item.group) < rank(target),
+    );
   const followerPaths = changedPaths(
     repo,
     followers.map((item) => item.commit),
@@ -1086,7 +1110,10 @@ function describeRegroupConflict(
     diagnosis: [
       `Carry replay conflicted in ${files.join(", ")} while replaying ${label(current)}.`,
       "These commits in later carry groups changed those lines earlier in history, so the replay has not applied them yet:",
-      ...owning.map((item) => `- ${label(item)}: ${Array.from(found.get(item)!).join(", ")}`),
+      ...owning.map(
+        (item) =>
+          `- ${label(item)}: ${Array.from(found.get(item)!, (path) => (wholeFile.has(path) ? `${path} (somewhere in the file; blame found no later-group line)` : path)).join(", ")}`,
+      ),
       ...(unexplained.length > 0
         ? [
             `No later carry group changes ${unexplained.join(", ")} earlier in history; that conflict has another cause.`,
