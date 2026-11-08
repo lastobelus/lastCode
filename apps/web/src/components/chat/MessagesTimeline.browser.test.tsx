@@ -1,6 +1,6 @@
 import { flushSync } from "react-dom";
 import { AudioPreview } from "../files/AudioPreview";
-import { cdp, page } from "vite-plus/test/browser";
+import { cdp, page, userEvent } from "vite-plus/test/browser";
 import {
   ComposerContextId,
   EnvironmentId,
@@ -35,6 +35,7 @@ import { environmentThreadDetails } from "../../state/threads";
 import { act, fakeTimers, render, stubGlobal } from "../../../test/render";
 import { ChangedFilesCard } from "./ChangedFilesTree";
 import { MessagesTimeline } from "./MessagesTimeline";
+import { createWorkspaceFocusController, workspaceAreaProps } from "../../lib/workspaceFocus";
 import { makeStreamingTimelineFixture } from "../../test-fixtures";
 import {
   type PendingApproval,
@@ -341,6 +342,54 @@ describe("MessagesTimeline work rows", () => {
 });
 
 describe("MessagesTimeline messages", () => {
+  it("scrolls with arrow keys after F6 or a click focuses the conversation", async () => {
+    setup();
+    const props = baseProps();
+    const entries = Array.from({ length: 40 }, (_, index) =>
+      message(`Turn ${index}:\n\n${"x ".repeat(200)}`, {}, `turn-${index}`),
+    );
+    const conversation = (timelineEntries: Entry[]) => (
+      <>
+        <div
+          {...workspaceAreaProps("conversation", 1, "Conversation")}
+          className="relative flex min-h-0 flex-1 flex-col"
+        >
+          <MessagesTimeline {...props} timelineEntries={timelineEntries} />
+        </div>
+        <div {...workspaceAreaProps("composer", 2, "Message input")}>
+          <button type="button">Send</button>
+        </div>
+      </>
+    );
+    await using screen = await renderElement(conversation([]));
+    const focus = createWorkspaceFocusController(document);
+    using cleanup = new DisposableStack();
+    cleanup.defer(focus.dispose);
+    screen.button("Send").focus();
+    focus.move(-1);
+    expect(document.activeElement?.getAttribute("data-workspace-area")).toBe("conversation");
+    await screen.rerender(conversation(entries));
+    const viewport = props.listRef.current!.getScrollableNode()!;
+    await vi.waitFor(() => expect(viewport.scrollTop).toBeGreaterThan(0));
+    const atEnd = viewport.scrollTop;
+    await userEvent.keyboard("{ArrowUp}");
+    await vi.waitFor(() => expect(viewport.scrollTop).toBeLessThan(atEnd));
+    await vi.waitFor(() => expect(document.activeElement).toBe(viewport));
+    screen.button("Send").focus();
+    focus.move(-1);
+    expect(document.activeElement).toBe(viewport);
+    screen.button("Send").focus();
+    await userEvent.click(viewport);
+    await userEvent.keyboard("{Home}");
+    await vi.waitFor(() => expect(viewport.scrollTop).toBe(0));
+    await userEvent.keyboard("{ArrowDown}");
+    await vi.waitFor(() => expect(viewport.scrollTop).toBeGreaterThan(0));
+    screen.button("Send").focus();
+    await screen.rerender(conversation([]));
+    await screen.rerender(conversation(entries));
+    expect(document.activeElement).toBe(screen.button("Send"));
+  });
+
   it("settles when equally long messages have very different rendered heights", async () => {
     const props = baseProps();
     const tall = message("a\n\n".repeat(6000), { role: "assistant" }, "tall");

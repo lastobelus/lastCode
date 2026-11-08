@@ -55,8 +55,8 @@ describe("workspace area focus", () => {
     composer.style.cssText = `position: fixed; top: ${viewport.getBoundingClientRect().top + 140}px; height: 60px`;
     area.element.focus();
     viewport.scrollTop = 300;
-    const page = (key: string) =>
-      area.element.dispatchEvent(
+    const page = (key: string, target = area.element) =>
+      target.dispatchEvent(
         new KeyboardEvent("keydown", {
           key,
           bubbles: true,
@@ -86,6 +86,13 @@ describe("workspace area focus", () => {
     expect(viewport.scrollTop).toBe(480);
     page("PageUp");
     expect(viewport.scrollTop).toBe(380);
+    viewport.tabIndex = -1;
+    viewport.focus();
+    page("PageDown", viewport);
+    expect(viewport.scrollTop).toBe(480);
+    page("PageUp", viewport);
+    expect(viewport.scrollTop).toBe(380);
+    expect(document.activeElement).toBe(viewport);
   });
 
   it("runs configured page-key shortcuts before the scrolling fallback", () => {
@@ -221,6 +228,14 @@ describe("workspace area focus", () => {
     expect(document.activeElement).toBe(sidebar.button);
     fixture.controller.move(-1);
     expect(document.activeElement).toBe(panel.button);
+    const timeline = document.createElement("div");
+    timeline.tabIndex = -1;
+    timeline.dataset.workspaceFocusDefault = "";
+    timeline.style.height = "200px";
+    conversation.element.append(timeline);
+    composer.button.focus();
+    fixture.controller.move(-1);
+    expect(document.activeElement).toBe(timeline);
   });
 
   it("skips hidden, inert, and maximized-away areas", () => {
