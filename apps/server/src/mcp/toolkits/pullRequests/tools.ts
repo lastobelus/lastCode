@@ -171,7 +171,7 @@ export class PullRequestWatchQuietExpiredError extends Schema.TaggedError<PullRe
   {},
 ) {
   override get message(): string {
-    return "Not watched again: this watch's quiet deadline already expired and the PR has had no activity since, so a new watch would expire the same way. The watch is still registered and wakes you on any push, check result, comment, review or conflict, which also restarts its timer; after a push, just run the gate check. Otherwise report the pending gates as a blocker and call unwatch_pull_request. Pass restartAfterQuiet: true only if the user asked you to keep waiting.";
+    return "Not watched again: this watch's quiet deadline already expired and the PR has had no activity since, so a new watch would expire the same way. The watch is still registered: it still wakes you on failed or passed checks, new comments or reviews, and conflicts, and a push restarts its timer, so after a push just run the gate check. Otherwise report the pending gates as a blocker and call unwatch_pull_request. Pass restartAfterQuiet: true only if the user asked you to keep waiting.";
   }
 }
 
