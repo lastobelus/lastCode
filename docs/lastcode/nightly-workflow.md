@@ -222,8 +222,15 @@ When upstream adopts a fix exactly, replay can reconcile its now-empty delta.
 A repair agent may adapt a different upstream implementation after checking the
 intended behavior and focused validation. A change to deliberately chosen behavior
 requires the user's decision. If equivalence remains uncertain but the carried
-fix still applies and validates, retain it and record that uncertainty. A conflict
-or missing proof of required behavior blocks publication.
+fix still applies and validates, keep it for this checkpoint and file a
+convergence item: a GitHub issue labelled `carry-convergence` that names the
+source contribution, the upstream change, and what remains uncertain. Search open
+`carry-convergence` issues first and add to a matching one instead of opening
+another. Like carry trailers, the issue is public: no private infrastructure or
+raw logs. Keeping the fix only protects this checkpoint. Carries are meant to
+converge on upstream, and the user decides from the item whether to retire,
+reconcile, or keep it. A conflict or missing proof of required behavior blocks
+publication.
 
 ### Carry replay inspection and rollout
 
