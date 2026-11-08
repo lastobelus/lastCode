@@ -627,7 +627,6 @@ it.effect("waits for live shell readiness before writing one complete long Actio
 
 it("binds an Action to the PR for its checkout branch", () => {
   const legacy = { projectId, repository: "owner/repo", number: 1, url: "https://pr/1" };
-  const branchPr = { ...legacy, number: 2, url: "https://pr/2" };
   const link = (number: number, headBranch: string) => ({
     host: "github.com",
     repository: "owner/repo",
@@ -647,16 +646,12 @@ it("binds an Action to the PR for its checkout branch", () => {
     stack: null,
   });
   const cases = [
-    [{ branch: "f", pullRequests: [link(3, "g"), link(4, "f")] }, 4],
-    [{ branch: "f", branchPullRequest: branchPr, pullRequests: [link(3, "g"), link(4, "g")] }, 2],
-    // A shared checkout switched away from the thread's branch keeps no branch PR.
-    [{ branch: "other", branchPullRequest: branchPr }, undefined],
-    [{ branch: "other", pullRequests: [link(3, "g")] }, 3],
-    [{ branch: "other", linkedPullRequest: legacy }, 1],
-    [
-      { branch: "other", linkedPullRequest: legacy, pullRequests: [link(3, "g"), link(4, "h")] },
-      undefined,
-    ],
+    [{ pullRequests: [link(3, "g"), link(4, "f")] }, 4],
+    [{ pullRequests: [link(3, "g")] }, 3],
+    [{ pullRequests: [link(3, "g"), link(4, "h")] }, undefined],
+    [{ pullRequests: [{ ...link(4, "f"), source: "stack-dismissed" as const }] }, undefined],
+    [{ linkedPullRequest: legacy }, 1],
+    [{ linkedPullRequest: legacy, pullRequests: [link(3, "g"), link(4, "h")] }, undefined],
   ] as const;
   for (const [thread, expected] of cases) {
     assert.equal(ActionResume.boundPullRequest(thread, "f")?.number, expected);

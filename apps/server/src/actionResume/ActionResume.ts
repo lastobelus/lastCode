@@ -241,21 +241,14 @@ function actionOutputFromTranscript(
   return transcript.slice(0, endIndex).slice(-MAX_ACTION_OUTPUT_CHARS);
 }
 
-/**
- * The linked PR whose head is the launch branch, else the thread's branch PR when the thread's
- * branch is the launch branch, else its only linked PR (legacy or current).
- */
+/** The linked PR whose head is the launch branch, else the thread's only linked PR. */
 export function boundPullRequest(
-  thread: Pick<
-    OrchestrationV2ThreadShell,
-    "pullRequests" | "branchPullRequest" | "linkedPullRequest" | "branch"
-  >,
+  thread: Pick<OrchestrationV2ThreadShell, "pullRequests" | "linkedPullRequest">,
   branch: string | null,
 ): ActionRunCheckout["pullRequest"] {
   const linked = (thread.pullRequests ?? []).filter((link) => link.source !== "stack-dismissed");
   const bound =
     linked.find((link) => branch !== null && link.snapshot?.headBranch === branch) ??
-    (branch !== null && thread.branch === branch ? thread.branchPullRequest : null) ??
     (linked.length === 1 ? linked[0] : linked.length === 0 ? thread.linkedPullRequest : null);
   return bound == null ? undefined : { number: bound.number, url: bound.url };
 }
