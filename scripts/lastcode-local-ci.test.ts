@@ -66,27 +66,64 @@ describe("lastcode-local-ci", () => {
   it("plans independent workspace checks without changing Quick CI", () => {
     const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-collection-plan-"));
     try {
+      // Use this checkout's Vite+ rather than resolving a global CLI in the fixture.
+      NodeFS.symlinkSync(
+        NodePath.resolve(import.meta.dirname, "../node_modules"),
+        NodePath.join(root, "node_modules"),
+        "dir",
+      );
+      const { packageManager } = JSON.parse(
+        NodeFS.readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+      ) as { packageManager: string };
+      NodeFS.writeFileSync(
+        NodePath.join(root, "package.json"),
+        JSON.stringify({
+          name: "@fixture/root",
+          private: true,
+          packageManager,
+          scripts: { typecheck: "vp run -r typecheck", test: "vp run -r test" },
+        }),
+      );
       NodeFS.writeFileSync(
         NodePath.join(root, "pnpm-workspace.yaml"),
         "packages:\n  - packages/*\n",
       );
-      for (const name of ["first", "later"]) {
+      for (const name of ["first", "later", "config-only"]) {
         const directory = NodePath.join(root, "packages", name);
         NodeFS.mkdirSync(directory, { recursive: true });
         NodeFS.writeFileSync(
           NodePath.join(directory, "package.json"),
           JSON.stringify({
             name: `@fixture/${name}`,
-            scripts: { test: "node test.cjs", typecheck: "node check.cjs" },
+            ...(name === "config-only"
+              ? {}
+              : { scripts: { test: "node test.cjs", typecheck: "node check.cjs" } }),
           }),
         );
       }
+      NodeFS.writeFileSync(
+        NodePath.join(root, "packages/config-only/vite.config.ts"),
+        `export default { run: { tasks: {
+          typecheck: { command: "node check.cjs" },
+          test: { command: "node test.cjs" }
+        } } };`,
+      );
       const steps = resolveCollectedCiSteps(root, resolveLocalCiSteps("full"));
       expect(
         steps
           .filter(({ label }) => label.startsWith("Workspace tests ("))
           .map(({ label }) => label),
-      ).toEqual(["Workspace tests (@fixture/first)", "Workspace tests (@fixture/later)"]);
+      ).toEqual([
+        "Workspace tests (@fixture/config-only)",
+        "Workspace tests (@fixture/first)",
+        "Workspace tests (@fixture/later)",
+      ]);
+      expect(
+        steps.find(({ label }) => label === "Workspace typecheck (@fixture/config-only)"),
+      ).toMatchObject({
+        command: "vp",
+        args: expect.arrayContaining(["@fixture/config-only", "typecheck"]),
+      });
       expect(steps.find(({ label }) => label === "Workspace tests (@fixture/later)")).toMatchObject(
         {
           command: "vp",
@@ -123,6 +160,14 @@ describe("lastcode-local-ci", () => {
       expect(
         resolveLocalCiSteps("quick").some(({ label }) => label === "Workspace typecheck"),
       ).toBe(true);
+      for (const label of ["Workspace typecheck", "Workspace tests"]) {
+        expect(() =>
+          resolveCollectedCiSteps(
+            root,
+            resolveLocalCiSteps("full").filter((step) => step.label !== label),
+          ),
+        ).toThrow(/Full CI task coverage is incomplete:.*@fixture\/config-only#/);
+      }
     } finally {
       NodeFS.rmSync(root, { recursive: true, force: true });
     }

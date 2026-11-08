@@ -130,6 +130,11 @@ it.each(
         "vp",
         [
           "const fs = require('node:fs'); const args = process.argv.slice(2);",
+          `if (args.length === 1 && args[0] === 'run') { console.log(${JSON.stringify(
+            ["first", "later"].flatMap((name) =>
+              ["typecheck", "test"].map((task) => `  @fixture/${name}#${task}: node check.cjs`),
+            ).join("\n"),
+          )}); process.exit(0); }`,
           `fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify(args)+'\\n');`,
           ...(changeCandidate
             ? [

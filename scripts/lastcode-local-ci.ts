@@ -417,6 +417,58 @@ export function resolveLocalCiSteps(
   });
 }
 
+interface WorkspaceCiTask {
+  readonly packageName: string;
+  readonly task: "typecheck" | "test";
+}
+
+function readWorkspaceCiTasks(
+  repoRoot: string,
+  workspaceNames: ReadonlySet<string>,
+): WorkspaceCiTask[] {
+  // Vite+ 1.4 lists the resolved graph for bare `vp run` with non-TTY input.
+  // It includes run.tasks from Vite config as well as package.json scripts.
+  const listing = NodeChildProcess.execFileSync("vp", ["run"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      PATH: [NodePath.join(repoRoot, "node_modules/.bin"), process.env.PATH ?? ""].join(
+        NodePath.delimiter,
+      ),
+      NO_COLOR: "1",
+      FORCE_COLOR: "0",
+    },
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  const tasks: WorkspaceCiTask[] = [];
+  const seen = new Set<string>();
+  for (const line of listing.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const match = /^ {2}(\S+):(?: |$)/.exec(line);
+    if (!match) {
+      throw new Error(
+        "Full CI cannot read the Vite+ task listing; check the `vp run` output format.",
+      );
+    }
+    const specifier = match[1]!;
+    const separator = specifier.indexOf("#");
+    // Tasks in the current (root) package are unqualified, including recursive wrappers.
+    if (separator < 0) continue;
+    const packageName = specifier.slice(0, separator);
+    const task = specifier.slice(separator + 1);
+    if (task !== "typecheck" && task !== "test") continue;
+    if (!workspaceNames.has(packageName) || seen.has(specifier)) {
+      throw new Error(`Full CI found an unknown or duplicate Vite+ task: ${specifier}.`);
+    }
+    seen.add(specifier);
+    tasks.push({ packageName, task });
+  }
+  if (!tasks.length) throw new Error("Full CI found no workspace typecheck or test tasks in Vite+.");
+  return tasks;
+}
+
 /** Recursive task execution stops at the first failed workspace, even with --parallel. */
 export function resolveCollectedCiSteps(
   repoRoot: string,
@@ -450,7 +502,18 @@ export function resolveCollectedCiSteps(
     }
     names.add(manifest.name);
   }
-  return steps.flatMap((step): LocalCiStep[] => {
+  const tasks = readWorkspaceCiTasks(repoRoot, names);
+  // Manifest scripts are also graph tasks. Reject a truncated or changed listing
+  // instead of treating it as evidence that those checks no longer exist.
+  const listed = new Set(tasks.map(({ packageName, task }) => `${packageName}#${task}`));
+  for (const manifest of workspaces) {
+    for (const task of ["typecheck", "test"] as const) {
+      if (typeof manifest.scripts?.[task] === "string" && !listed.has(`${manifest.name}#${task}`)) {
+        throw new Error(`Full CI Vite+ task listing is missing ${manifest.name}#${task}.`);
+      }
+    }
+  }
+  const collected = steps.flatMap((step): LocalCiStep[] => {
     const task =
       step.label === "Workspace tests"
         ? "test"
@@ -459,7 +522,7 @@ export function resolveCollectedCiSteps(
           : undefined;
     if (!task || step.kind !== "command") return [step];
     return workspaces
-      .filter((manifest) => typeof manifest.scripts?.[task] === "string")
+      .filter((manifest) => listed.has(`${manifest.name}#${task}`))
       .map((manifest) => ({
         ...step,
         label: `${step.label} (${manifest.name})`,
@@ -478,6 +541,22 @@ export function resolveCollectedCiSteps(
           : {}),
       }));
   });
+  const uncovered = tasks.filter(
+    ({ packageName, task }) =>
+      !collected.some(
+        (step) =>
+          step.kind === "command" &&
+          step.command === "vp" &&
+          ["run", "--filter", packageName, "--fail-if-no-match", "--concurrency-limit", "1", task]
+            .every((arg, index) => step.args[index] === arg),
+      ),
+  );
+  if (uncovered.length) {
+    throw new Error(
+      `Full CI task coverage is incomplete: ${uncovered.map(({ packageName, task }) => `${packageName}#${task}`).join(", ")}.`,
+    );
+  }
+  return collected;
 }
 
 export function verifyPreloadBundle(repoRoot: string): void {
