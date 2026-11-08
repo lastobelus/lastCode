@@ -445,6 +445,13 @@ describe("lastcode-local-update", () => {
       NodeChildProcess.execFileSync("git", ["tag", `lastcode/revision/${nightly}.1`], {
         cwd: repo,
       });
+      const blob = NodeChildProcess.execFileSync("git", ["hash-object", "-w", "tracked.txt"], {
+        cwd: repo,
+        encoding: "utf8",
+      }).trim();
+      NodeChildProcess.execFileSync("git", ["tag", "lastcode/checkpoint/notes", blob], {
+        cwd: repo,
+      });
 
       const output = NodeChildProcess.execFileSync(
         process.execPath,

@@ -510,14 +510,7 @@ function readInstallableRefs(repoRoot) {
       index,
       index + INSTALLABLE_REF_FIELDS,
     );
-    const tag = name.replace(/^\n/, "");
-    const commit =
-      peeledType === "commit"
-        ? peeledObject
-        : type === "commit"
-          ? object
-          : git(repoRoot, ["rev-parse", `${tag}^{commit}`]);
-    refs.set(tag, { commit, sourceCommit: /^Source-Commit:\s*(\S+)\s*$/m.exec(message)?.[1] });
+    refs.set(name.replace(/^\n/, ""), { type, object, peeledType, peeledObject, message });
   }
   return refs;
 }
@@ -530,7 +523,14 @@ function listInstallableRefs(repoRoot, tags) {
       if (!installable) return [];
       const ref = refs.get(tag);
       if (!ref) throw new Error(`Could not read installable tag ${tag}.`);
-      return [{ ...installable, ...ref }];
+      const commit =
+        ref.peeledType === "commit"
+          ? ref.peeledObject
+          : ref.type === "commit"
+            ? ref.object
+            : git(repoRoot, ["rev-parse", `${tag}^{commit}`]);
+      const sourceCommit = /^Source-Commit:\s*(\S+)\s*$/m.exec(ref.message.trim())?.[1];
+      return [{ ...installable, commit, sourceCommit }];
     })
     .toSorted((left, right) => compareNightlyVersions(left.version.tag, right.version.tag));
 }
