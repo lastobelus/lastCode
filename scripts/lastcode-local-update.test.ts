@@ -297,7 +297,7 @@ describe("lastcode-local-update", () => {
     const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-lock-alert-"));
     const lastCodeRoot = NodePath.join(root, ".lastcode");
     const capturePath = NodePath.join(root, "thread-message.json");
-    const threadToolPath = NodePath.join(lastCodeRoot, "userdata", "bin", "lastcode-thread");
+    const threadToolPath = NodePath.join(lastCodeRoot, "bin", "t3");
     try {
       NodeFS.mkdirSync(NodePath.dirname(threadToolPath), { recursive: true });
       NodeFS.mkdirSync(NodePath.join(lastCodeRoot, "automation"), { recursive: true });
@@ -336,9 +336,17 @@ describe("lastcode-local-update", () => {
 
       assert.equal(result.status, 1);
       const args = JSON.parse(NodeFS.readFileSync(capturePath, "utf8")) as Array<string>;
-      assert.deepEqual(args.slice(0, 2), ["send", "thread-maintenance"]);
-      assert.include(args[3] ?? "", "Automated LastCode local update build alert");
-      assert.include(args[3] ?? "", "EEXIST");
+      assert.deepEqual(args.slice(0, 7), [
+        "thread",
+        "send",
+        "--base-dir",
+        lastCodeRoot,
+        "--state-dir",
+        NodePath.join(lastCodeRoot, "userdata"),
+        "thread-maintenance",
+      ]);
+      assert.include(args[8] ?? "", "Automated LastCode local update build alert");
+      assert.include(args[8] ?? "", "EEXIST");
     } finally {
       NodeFS.rmSync(root, { recursive: true, force: true });
     }

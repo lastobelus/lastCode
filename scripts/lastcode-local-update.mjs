@@ -94,13 +94,9 @@ export function deliverLocalBuildFailure(options, error, overrides = {}) {
     "automation",
     "checkpoint-supervisor.json",
   );
-  const threadToolPath = NodePath.join(
-    options.home,
-    ".lastcode",
-    "userdata",
-    "bin",
-    "lastcode-thread",
-  );
+  const lastCodeRoot = NodePath.join(options.home, ".lastcode");
+  // The thread CLI opens the live database, so it must be the installed app's own build.
+  const threadCliPath = NodePath.join(lastCodeRoot, "bin", "t3");
   const config = (overrides.readConfig ?? readJson)(configPath);
   if (typeof config?.recoveryThreadId !== "string" || config.recoveryThreadId.length === 0) {
     return { status: "not-configured" };
@@ -128,9 +124,20 @@ export function deliverLocalBuildFailure(options, error, overrides = {}) {
     overrides.sendThread ??
     ((threadId, threadMessage) =>
       run(
-        NodePath.dirname(threadToolPath),
-        threadToolPath,
-        ["send", threadId, "--message", threadMessage, "--json"],
+        NodePath.dirname(threadCliPath),
+        threadCliPath,
+        [
+          "thread",
+          "send",
+          "--base-dir",
+          lastCodeRoot,
+          "--state-dir",
+          NodePath.join(lastCodeRoot, "userdata"),
+          threadId,
+          "--message",
+          threadMessage,
+          "--json",
+        ],
         { env: resolveDeterministicBuildEnvironment() },
       ));
   sendThread(config.recoveryThreadId, message);
