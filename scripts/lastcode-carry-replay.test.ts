@@ -121,12 +121,15 @@ function prepareCrossBaseConflicts(repo: string) {
   const base = commit(repo, "old upstream");
   write(repo, "shared.txt", contents.replace("line-5\n", "first carry\n"));
   write(repo, "deleted.txt", "carried modification\n");
+  write(repo, "introduced.txt", "introduced by the first group\n");
   const first = commit(repo, "first owner", "Carry-Group: upstream-bugfixes\nCarry-Observation: retain the first behavior");
   write(repo, "shared.txt", contents.replace("line-5\n", "second carry\n"));
   const second = commit(repo, "overlapping owner", "Carry-Group: upstream-bugfixes\nCarry-Observation: retain the second behavior");
   write(repo, "shared.txt", contents.replace("line-5\n", "second carry\n").replace("line-30\n", "distant carry\n"));
   const distant = commit(repo, "distant owner", "Carry-Group: upstream-bugfixes");
   write(repo, "later.txt", "tooling\n");
+  write(repo, "shared.txt", contents.replace("line-5\n", "tooling carry\n").replace("line-30\n", "distant carry\n"));
+  write(repo, "introduced.txt", "extended by the later group\n");
   const source = commit(repo, "later group owner", "Carry-Group: tooling");
   const sourceRef = `refs/lastcode/carry-sources/pr-1/${source}`;
   git(repo, ["update-ref", sourceRef, source]);
@@ -231,7 +234,8 @@ describe("carry conflict dossier", () => {
         assert.deepEqual(shared.upstreamCommits.map(({ commit }: { commit: string }) => commit), [fixture.onto]);
         assert.equal(dossier.forecast.advisory, true);
         assert.match(dossier.forecast.note, /over-report/u);
-        assert.deepEqual(dossier.forecast.groups.find(({ group }) => group === "tooling")!.files.map(({ path }) => path), ["later.txt"]);
+        assert.deepEqual(dossier.forecast.groups.find(({ group }) => group === "tooling")!.files.map(({ path }) => path), ["later.txt", "shared.txt"]);
+        assert.deepEqual(dossier.forecast.groups.find(({ group }) => group === "build-ci")!.files, []);
         assert.match(NodeFS.readFileSync(NodePath.join(gitDirectory, "lastcode-carry-conflict-dossier.txt"), "utf8"), /Forecast/u);
         const retained = ["index", "HEAD", "ORIG_HEAD", "REBASE_HEAD", ...NodeFS.readdirSync(NodePath.join(gitDirectory, "rebase-merge")).map((name) => `rebase-merge/${name}`)];
         const before = retained.map((path) => NodeFS.readFileSync(NodePath.join(gitDirectory, path)));
@@ -250,7 +254,7 @@ describe("carry conflict dossier", () => {
       git(repo, ["add", "shared.txt"]);
       assert.throws(() => git(repo, ["-c", "core.editor=true", "rebase", "--continue"]));
       assert.equal(git(repo, ["rev-parse", "REBASE_HEAD"]), groups[1]?.commit);
-      assert.equal(git(repo, ["diff", "--name-only", "--diff-filter=U"]), "later.txt");
+      assert.deepEqual(git(repo, ["diff", "--name-only", "--diff-filter=U"]).split("\n"), ["later.txt", "shared.txt"]);
     } finally {
       cleanup();
     }
