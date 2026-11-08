@@ -465,7 +465,8 @@ function readWorkspaceCiTasks(
     seen.add(specifier);
     tasks.push({ packageName, task });
   }
-  if (!tasks.length) throw new Error("Full CI found no workspace typecheck or test tasks in Vite+.");
+  if (!tasks.length)
+    throw new Error("Full CI found no workspace typecheck or test tasks in Vite+.");
   return tasks;
 }
 
@@ -547,8 +548,15 @@ export function resolveCollectedCiSteps(
         (step) =>
           step.kind === "command" &&
           step.command === "vp" &&
-          ["run", "--filter", packageName, "--fail-if-no-match", "--concurrency-limit", "1", task]
-            .every((arg, index) => step.args[index] === arg),
+          [
+            "run",
+            "--filter",
+            packageName,
+            "--fail-if-no-match",
+            "--concurrency-limit",
+            "1",
+            task,
+          ].every((arg, index) => step.args[index] === arg),
       ),
   );
   if (uncovered.length) {
