@@ -254,6 +254,7 @@ const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (
         ServerSettings.layerTest(),
         ProviderRegistryMock.layer([provider]),
         UpdateDrainAdmission.layerOpen,
+        Layer.mock(GitVcsDriver.GitVcsDriver)({}),
         Layer.mock(ProjectStore.ProjectStoreV2)({
           getShell: () => Effect.succeedSome(project),
         }),

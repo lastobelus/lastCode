@@ -59,6 +59,51 @@ describe("Action resume follow-up presentation", () => {
     expect(parseActionResumeFollowUp("Automated maintenance completed.")).toBeNull();
   });
 
+  it.each([
+    {
+      current: { head: "a".repeat(40), branch: "feature" },
+      line: `Current checkout: unchanged at ${"a".repeat(40)} (branch feature).`,
+      last: "Continue the originating task using this result.",
+    },
+    {
+      current: { head: "b".repeat(40), branch: null },
+      line: `WARNING: HEAD moved since launch. This Action ran on ${"a".repeat(40)} (branch feature); the checkout is now at ${"b".repeat(40)} (detached HEAD).`,
+      last: "This result may not describe the current head. Relaunch on the current head before relying on it.",
+    },
+    {
+      current: null,
+      line: "Current checkout: unavailable, so this result can't be matched to the current head.",
+      last: "Continue the originating task using this result.",
+    },
+  ])("names the launch checkout and compares it with $current", ({ current, line, last }) => {
+    const text = formatActionResumeFollowUp({
+      actionName: "Run Quick CI",
+      actionId: "lc-local-ci",
+      runId: "run-checkout",
+      validatedStatus: "succeeded",
+      lifecycleOutcome: "succeeded",
+      exitCode: 0,
+      report: undefined,
+      output: "ok",
+      checkout: {
+        launched: {
+          head: "a".repeat(40),
+          branch: "feature",
+          cwd: "/workspace/project",
+          pullRequest: { number: 7, url: "https://github.example/o/r/pull/7" },
+        },
+        current,
+      },
+    });
+
+    expect(text.split("\n").slice(-3)).toEqual([
+      `Launch checkout: {"head":"${"a".repeat(40)}","branch":"feature","pullRequest":{"number":7,"url":"https://github.example/o/r/pull/7"}}`,
+      line,
+      last,
+    ]);
+    expect(parseActionResumeFollowUp(text)?.runId).toBe("run-checkout");
+  });
+
   it("round-trips action identities containing the legacy delimiter", () => {
     const text = formatActionResumeFollowUp({
       actionName: "QA (production)",

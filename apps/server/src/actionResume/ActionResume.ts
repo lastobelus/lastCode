@@ -1,5 +1,7 @@
 /** Project Actions run as terminal processes and deliver one durable V2 follow-up. */
 import {
+  type ActionCheckoutHead,
+  type ActionRunCheckout,
   ActionResumeState,
   ActionResumeError,
   ActionRunInspection,
@@ -8,6 +10,7 @@ import {
   CommandId,
   MessageId,
   type OrchestrationProjectShell,
+  type OrchestrationV2ThreadShell,
   ProviderDriverKind,
   type ActionProgress,
   type ProviderInstanceId,
@@ -17,6 +20,7 @@ import {
 } from "@t3tools/contracts";
 import { projectScriptRuntimeEnv, resolveProjectScripts } from "@t3tools/shared/projectScripts";
 import {
+  actionHeadMoved,
   actionResumeStatus,
   actionResumeSummary,
   formatActionResumeFollowUp,
@@ -57,6 +61,7 @@ import * as CommandReceipts from "../orchestration-v2/CommandReceiptStore.ts";
 import * as ActionRunStore from "./ActionRunStore.ts";
 import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
 import { ProviderRegistry } from "../provider/ProviderRegistry.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 
 const ACTION_RESUME_PROVIDER_DRIVERS = new Set([
   ProviderDriverKind.make("codex"),
@@ -236,7 +241,24 @@ function actionOutputFromTranscript(
   return transcript.slice(0, endIndex).slice(-MAX_ACTION_OUTPUT_CHARS);
 }
 
-const followUpText = (state: ActionResumeState, outputTail: string | undefined): string => {
+/** The thread's PR for the launch branch, else its branch PR, else its only linked PR. */
+function boundPullRequest(
+  thread: Pick<OrchestrationV2ThreadShell, "pullRequests" | "branchPullRequest">,
+  branch: string | null,
+): ActionRunCheckout["pullRequest"] {
+  const linked = (thread.pullRequests ?? []).filter((link) => link.source !== "stack-dismissed");
+  const bound =
+    linked.find((link) => branch !== null && link.snapshot?.headBranch === branch) ??
+    thread.branchPullRequest ??
+    (linked.length === 1 ? linked[0] : undefined);
+  return bound === undefined ? undefined : { number: bound.number, url: bound.url };
+}
+
+const followUpText = (
+  state: ActionResumeState,
+  outputTail: string | undefined,
+  currentCheckout: ActionCheckoutHead | null,
+): string => {
   const status =
     state.outcome === "succeeded"
       ? "succeeded"
@@ -256,6 +278,9 @@ const followUpText = (state: ActionResumeState, outputTail: string | undefined):
     exitCode: state.exitCode,
     report: state.report,
     output: outputTail,
+    ...(state.checkout === undefined
+      ? {}
+      : { checkout: { launched: state.checkout, current: currentCheckout } }),
   });
 };
 
@@ -322,6 +347,7 @@ const make = Effect.gen(function* () {
   const serverSettings = yield* ServerSettingsService;
   const runs = yield* ActionRunStore.ActionRunStore;
   const admission = yield* UpdateDrainAdmission.UpdateDrainAdmission;
+  const git = yield* GitVcsDriver.GitVcsDriver;
   const latestByThreadId = new Map<string, ActionResumeState>();
   const pendingShellPublications = new Set<string>();
   const registry = {
@@ -343,6 +369,29 @@ const make = Effect.gen(function* () {
   const startups = new Map<string, ActionStartup>();
   const stagedTerminals = new Set<string>();
   const protocolCaptureByRunId = new Map<string, ActionProtocolCapture>();
+
+  const readCheckoutHead = Effect.fn("ActionResume.readCheckoutHead")(function* (cwd: string) {
+    const result = yield* git
+      .execute({
+        operation: "ActionResume.readCheckoutHead",
+        cwd,
+        args: ["rev-parse", "HEAD", "--abbrev-ref", "HEAD"],
+        allowNonZeroExit: true,
+        timeoutMs: 5_000,
+      })
+      // Checkout identity is advisory; no Git failure may block a launch or a delivery.
+      .pipe(
+        Effect.option,
+        Effect.catchDefect(() => Effect.succeedNone),
+      );
+    if (Option.isNone(result) || result.value.exitCode !== 0) return null;
+    const [head, branch] = result.value.stdout.trim().split("\n");
+    if (head === undefined || !/^[0-9a-f]{40,64}$/.test(head)) return null;
+    return {
+      head,
+      branch: branch === undefined || branch === "" || branch === "HEAD" ? null : branch,
+    } satisfies ActionCheckoutHead;
+  });
 
   const providerSupportsActionResume = Effect.fn("ActionResume.providerSupportsActionResume")(
     function* (providerInstanceId: ProviderInstanceId) {
@@ -615,6 +664,8 @@ const make = Effect.gen(function* () {
               Effect.catchCause(() => Effect.as(Effect.void, undefined)),
             )));
     if (outputTail !== undefined) yield* runs.save(state, outputTail);
+    const currentCheckout =
+      state.checkout === undefined ? null : yield* readCheckoutHead(state.checkout.cwd);
 
     const commandId = CommandId.make(`server:action-resume:${state.runId}:delivery`);
     const messageId = MessageId.make(`action-resume:${state.runId}:follow-up`);
@@ -624,7 +675,7 @@ const make = Effect.gen(function* () {
         commandId,
         threadId,
         messageId,
-        text: followUpText(state, outputTail),
+        text: followUpText(state, outputTail, currentCheckout),
         attachments: [],
         createdBy: "system",
         creationSource: "server",
@@ -925,6 +976,16 @@ const make = Effect.gen(function* () {
             const terminalId = `action-${runId}`;
             const eventToken = yield* random.uuidV4().pipe(Effect.orDie);
             const startedAt = yield* nowIso;
+            const head = yield* readCheckoutHead(acquired.path);
+            const pullRequest = head === null ? undefined : boundPullRequest(thread, head.branch);
+            const checkout: ActionRunCheckout | undefined =
+              head === null
+                ? undefined
+                : {
+                    ...head,
+                    cwd: acquired.path,
+                    ...(pullRequest === undefined ? {} : { pullRequest }),
+                  };
             const child = yield* threads.getThreadShell(invocation.threadId);
             const delegated =
               child !== null &&
@@ -945,6 +1006,7 @@ const make = Effect.gen(function* () {
               actionId: script.id,
               actionName: script.name,
               command: script.command,
+              ...(checkout === undefined ? {} : { checkout }),
               terminalId,
               outcome: "running",
               delivery: "armed",
@@ -1233,6 +1295,13 @@ const make = Effect.gen(function* () {
     return state === null ? null : actionResumeSummary(state, yield* readStatus(state));
   });
 
+  const inspectCheckout = Effect.fn("ActionResume.inspectCheckout")(function* (
+    launched: ActionRunCheckout,
+  ) {
+    const current = yield* readCheckoutHead(launched.cwd);
+    return { launched, current, headMoved: actionHeadMoved(launched, current) };
+  });
+
   const inspectActionRunImpl = Effect.fn("ActionResume.inspectActionRun")(function* (
     invocation: ActionResumeInvocation,
     runId: string,
@@ -1267,6 +1336,7 @@ const make = Effect.gen(function* () {
       status: yield* readStatus(state),
       exitCode: state.exitCode,
       exitSignal: state.exitSignal,
+      ...(state.checkout === undefined ? {} : { checkout: yield* inspectCheckout(state.checkout) }),
       outputTail,
     });
   });

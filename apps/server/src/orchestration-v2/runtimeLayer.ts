@@ -311,6 +311,7 @@ const layerActionResumeProvided = ActionResume.layer.pipe(
       ProjectStore.layer,
       layerCommandReceiptStoreProvided,
       ActionRunStore.layer,
+      GitVcsDriver.layer,
     ),
   ),
   Layer.provide(layerUpdateDrainAdmission),

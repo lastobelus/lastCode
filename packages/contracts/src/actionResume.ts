@@ -182,6 +182,21 @@ export const ActionProtocolEvent = ActionProtocolEventFields.check(
 );
 export type ActionProtocolEvent = typeof ActionProtocolEvent.Type;
 
+export const ActionCheckoutHead = Schema.Struct({
+  head: TrimmedNonEmptyString,
+  /** Null when HEAD is detached. */
+  branch: Schema.NullOr(TrimmedNonEmptyString),
+});
+export type ActionCheckoutHead = typeof ActionCheckoutHead.Type;
+
+/** The checkout an Action launched on, so a later result can't pass for a newer head. */
+export const ActionRunCheckout = Schema.Struct({
+  ...ActionCheckoutHead.fields,
+  cwd: TrimmedNonEmptyString,
+  pullRequest: Schema.optional(Schema.Struct({ number: PositiveInt, url: TrimmedNonEmptyString })),
+});
+export type ActionRunCheckout = typeof ActionRunCheckout.Type;
+
 /**
  * Durable one-shot state for one Project Action process and its follow-up.
  * The thread shell exposes the latest run; retained runs preserve their output.
@@ -195,6 +210,8 @@ export const ActionResumeState = Schema.Struct({
   actionName: TrimmedNonEmptyString,
   /** Exact command captured at launch; absent on states persisted by older servers. */
   command: Schema.optional(TrimmedNonEmptyString),
+  /** Absent when the Action's directory isn't a Git checkout, or on older rows. */
+  checkout: Schema.optional(ActionRunCheckout),
   terminalId: TrimmedNonEmptyString,
   outcome: ActionResumeOutcome,
   delivery: ActionResumeDelivery,
@@ -263,6 +280,14 @@ export const ActionRunInspection = Schema.Struct({
   status: ActionResumeStatus,
   exitCode: Schema.NullOr(Schema.Int),
   exitSignal: Schema.NullOr(Schema.Int),
+  checkout: Schema.optional(
+    Schema.Struct({
+      launched: ActionRunCheckout,
+      /** Null when the checkout can no longer be read. */
+      current: Schema.NullOr(ActionCheckoutHead),
+      headMoved: Schema.Boolean,
+    }),
+  ),
   outputTail: Schema.String.check(Schema.isMaxLength(12_000)),
 });
 export type ActionRunInspection = typeof ActionRunInspection.Type;

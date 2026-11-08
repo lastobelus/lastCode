@@ -4140,6 +4140,7 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
       let reservationRunId = "";
       let reservationSourceRunId = source.id;
       const dependencies = Layer.mergeAll(
+        Layer.mock(GitVcsDriver.GitVcsDriver)({}),
         Layer.mock(ThreadManagement.ThreadManagementService)({
           getThreadShell: orchestrator.getThreadShell,
           getThreadRecords: orchestrator.getThreadRecords,
