@@ -1,6 +1,8 @@
 import {
   ActionReport,
   ActionResumeOutcome,
+  type ActionCheckoutHead,
+  type ActionRunCheckout,
   type ActionReport as ActionReportType,
   type ActionResumeOutcome as ActionResumeOutcomeType,
   type ActionResumeState,
@@ -282,8 +284,14 @@ export function formatActionResumeFollowUp(input: {
   readonly exitCode: number | null;
   readonly report: ActionReportType | undefined;
   readonly output: string | undefined;
+  readonly checkout?: {
+    readonly launched: ActionRunCheckout;
+    readonly current: ActionCheckoutHead | null;
+  };
 }): string {
   const outputSummary = summarizeActionOutput(input.output);
+  const checkout = input.checkout;
+  const moved = checkout !== undefined && actionHeadMoved(checkout.launched, checkout.current);
   return [
     ACTION_FOLLOW_UP_HEADER,
     `Action identity: ${JSON.stringify({ name: input.actionName, id: input.actionId })}`,
@@ -293,8 +301,48 @@ export function formatActionResumeFollowUp(input: {
     `Exit code: ${input.exitCode ?? "unavailable"}`,
     `${ACTION_COMPACT_RESULT_PREFIX}${JSON.stringify(input.report ?? { summary: outputSummary })}`,
     `${ACTION_INSPECTION_PREFIX}${JSON.stringify({ tool: "inspect_action_run", runId: input.runId })}`,
-    "Continue the originating task using this result.",
+    // Parsers read the fixed lines above by position; checkout lines must stay after them.
+    ...(checkout === undefined ? [] : checkoutLines(checkout.launched, checkout.current)),
+    moved
+      ? "This result may not describe the current head. Relaunch on the current head before relying on it."
+      : "Continue the originating task using this result.",
   ].join("\n");
+}
+
+/** Whether the checkout's HEAD commit differs from the one the Action launched on. */
+export function actionHeadMoved(
+  launched: Pick<ActionCheckoutHead, "head">,
+  current: Pick<ActionCheckoutHead, "head"> | null,
+): boolean {
+  return current !== null && current.head !== launched.head;
+}
+
+function describeHead(checkout: ActionCheckoutHead): string {
+  return `${checkout.head} (${checkout.branch === null ? "detached HEAD" : `branch ${checkout.branch}`})`;
+}
+
+function checkoutLines(launched: ActionRunCheckout, current: ActionCheckoutHead | null) {
+  const launchLine = `Launch checkout: ${JSON.stringify({
+    head: launched.head,
+    branch: launched.branch,
+    ...(launched.pullRequest === undefined ? {} : { pullRequest: launched.pullRequest }),
+  })}`;
+  if (current === null) {
+    return [
+      launchLine,
+      "Current checkout: unavailable, so this result can't be matched to the current head.",
+    ];
+  }
+  if (actionHeadMoved(launched, current)) {
+    return [
+      launchLine,
+      `WARNING: HEAD moved since launch. This Action ran on ${describeHead(launched)}; when this result was sent, the checkout was at ${describeHead(current)}.`,
+    ];
+  }
+  return [
+    launchLine,
+    `Current checkout: unchanged at ${describeHead(current)} when this result was sent.`,
+  ];
 }
 
 export function parseActionResumeFollowUp(text: string): ActionResumeFollowUp | null {

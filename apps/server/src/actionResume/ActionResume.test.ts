@@ -37,6 +37,7 @@ import * as Queue from "effect/Queue";
 import * as TestClock from "effect/testing/TestClock";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import { ChildProcessSpawner } from "effect/process";
 import * as WorkspaceAcquisitionTestkit from "../workspace/WorkspaceAcquisition.testkit.ts";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
@@ -67,6 +68,7 @@ import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMoc
 import { makePausedEnvironment } from "../orchestration-v2/EnvironmentAutomation.testkit.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ActionResume from "./ActionResume.ts";
 import actionRunMigration from "./ActionRunMigration.ts";
 import * as ActionRunStore from "./ActionRunStore.ts";
@@ -234,6 +236,8 @@ const makeHarness = Effect.gen(function* () {
     followUpRun: null as OrchestrationV2ThreadProjection["runs"][number] | null,
     unrelatedRun: null as OrchestrationV2ThreadProjection["runs"][number] | null,
     latest: null as ActionResumeState | null,
+    checkout: null as { head: string; branch: string } | null,
+    pullRequests: undefined as OrchestrationV2AppThread["pullRequests"],
   };
   const appThread = () => ({
     ...thread,
@@ -241,6 +245,7 @@ const makeHarness = Effect.gen(function* () {
     archivePending: state.archivePending,
     actionResume: state.latest,
     deletedAt: state.deleted ? now : null,
+    ...(state.pullRequests === undefined ? {} : { pullRequests: state.pullRequests }),
   });
   const projection = (): OrchestrationV2ThreadProjection => ({
     thread: appThread(),
@@ -509,6 +514,17 @@ const makeHarness = Effect.gen(function* () {
     ]),
     ServerSettings.layerTest(),
     Layer.succeed(UpdateDrainAdmission.UpdateDrainAdmission, admission),
+    Layer.mock(GitVcsDriver.GitVcsDriver)({
+      execute: () =>
+        Effect.sync(() => ({
+          exitCode: ChildProcessSpawner.ExitCode(state.checkout === null ? 128 : 0),
+          stdout:
+            state.checkout === null ? "" : `${state.checkout.head}\n${state.checkout.branch}\n`,
+          stderr: "",
+          stdoutTruncated: false,
+          stderrTruncated: false,
+        })),
+    }),
   );
   return {
     store,
@@ -605,6 +621,97 @@ it.effect("waits for live shell readiness before writing one complete long Actio
         (yield* actions.inspectActionRun(invocation, run.runId)).outputTail,
         "receipt",
       );
+    }).pipe(Effect.provide(h.layer));
+  }).pipe(Effect.provide(StoreTestLayer)),
+);
+
+it("binds an Action to the PR for its checkout branch", () => {
+  const legacy = { projectId, repository: "owner/repo", number: 1, url: "https://pr/1" };
+  const link = (number: number, headBranch: string) => ({
+    host: "github.com",
+    repository: "owner/repo",
+    number,
+    url: `https://pr/${number}`,
+    source: "agent" as const,
+    linkedAt: nowIso,
+    snapshot: {
+      state: "open" as const,
+      title: "PR",
+      headBranch,
+      baseBranch: "main",
+      isDraft: false,
+      updatedAt: null,
+      syncedAt: nowIso,
+    },
+    stack: null,
+  });
+  const cases = [
+    [{ pullRequests: [link(3, "g"), link(4, "f")] }, 4],
+    [{ pullRequests: [link(3, "g")] }, 3],
+    [{ pullRequests: [link(3, "g"), link(4, "h")] }, undefined],
+    [{ pullRequests: [{ ...link(4, "f"), source: "stack-dismissed" as const }] }, undefined],
+    [{ linkedPullRequest: legacy }, 1],
+    [{ linkedPullRequest: legacy, pullRequests: [link(3, "g"), link(4, "h")] }, undefined],
+  ] as const;
+  for (const [thread, expected] of cases) {
+    assert.equal(ActionResume.boundPullRequest(thread, "f")?.number, expected);
+  }
+});
+
+it.effect("names the launch head on resume and flags a head that moved since launch", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness;
+    const launchHead = "a".repeat(40);
+    const pullRequestLink = (number: number, headBranch: string) => ({
+      host: "github.com",
+      repository: "owner/repo",
+      number,
+      url: `https://github.com/owner/repo/pull/${number}`,
+      source: "agent" as const,
+      linkedAt: nowIso,
+      snapshot: {
+        state: "open" as const,
+        title: `PR ${number}`,
+        headBranch,
+        baseBranch: "main",
+        isDraft: false,
+        updatedAt: null,
+        syncedAt: nowIso,
+      },
+      stack: null,
+    });
+    h.state.checkout = { head: launchHead, branch: "feature" };
+    h.state.pullRequests = [pullRequestLink(6, "other"), pullRequestLink(7, "feature")];
+    yield* Effect.gen(function* () {
+      const actions = yield* ActionResume.ActionResume;
+      const run = yield* actions.runProjectActionAndResume(invocation, "qa");
+      assert.deepEqual(run.checkout, {
+        head: launchHead,
+        branch: "feature",
+        cwd: project.workspaceRoot,
+        pullRequest: { number: 7, url: "https://github.com/owner/repo/pull/7" },
+      });
+      yield* Queue.take(h.writes);
+      h.state.checkout = { head: "b".repeat(40), branch: "feature" };
+      const event = { threadId, terminalId: run.terminalId };
+      yield* h.emit({
+        ...event,
+        type: "output",
+        data: ActionResume.actionOutputMarker(run.runId, "end"),
+      });
+      yield* h.emit({ ...event, type: "exited", exitCode: 0, exitSignal: null });
+      yield* actions.retryPendingFollowUps;
+
+      const text = h.followUps()[0]!.text;
+      assert.include(text, `Launch checkout: {"head":"${launchHead}","branch":"feature"`);
+      assert.include(
+        text,
+        `WARNING: HEAD moved since launch. This Action ran on ${launchHead} (branch feature); when this result was sent, the checkout was at ${"b".repeat(40)} (branch feature).`,
+      );
+      assert.equal(parseActionResumeFollowUp(text)?.runId, run.runId);
+      const inspected = yield* actions.inspectActionRun(invocation, run.runId);
+      assert.deepEqual(inspected.checkout?.current, { head: "b".repeat(40), branch: "feature" });
+      assert.isTrue(inspected.checkout?.headMoved);
     }).pipe(Effect.provide(h.layer));
   }).pipe(Effect.provide(StoreTestLayer)),
 );
