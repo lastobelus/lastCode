@@ -601,10 +601,21 @@ function recoveryProblemLines(repoRoot, worktree, failure) {
   let overlappingUpstreamCommits = [];
   if (range) {
     try {
-      overlappingUpstreamCommits = conflictPaths.length === 0 ? [] : splitLines(git(repoRoot, [
-        "--literal-pathspecs", "log", "--format=%h %s", "--no-ext-diff", "--no-textconv",
-        `${range.previousUpstreamTag}..${range.upstreamTag}`, "--", ...conflictPaths,
-      ]));
+      overlappingUpstreamCommits =
+        conflictPaths.length === 0
+          ? []
+          : splitLines(
+              git(repoRoot, [
+                "--literal-pathspecs",
+                "log",
+                "--format=%h %s",
+                "--no-ext-diff",
+                "--no-textconv",
+                `${range.previousUpstreamTag}..${range.upstreamTag}`,
+                "--",
+                ...conflictPaths,
+              ]),
+            );
     } catch {
       // Diagnostics remain optional when the retained range is unavailable.
     }

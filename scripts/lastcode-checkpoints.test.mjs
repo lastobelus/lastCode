@@ -169,11 +169,15 @@ describe("LastCode checkpoint dashboard", () => {
   });
 
   it("launches the installed dashboard with the repository's pinned Node runtime", () => {
-    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "checkpoint-install-test-"));
+    const directory = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "checkpoint-install-test-"),
+    );
     try {
       const installed = NodePath.join(directory, "lastcode-checkpoints.mjs");
       NodeFS.copyFileSync(new URL("./lastcode-checkpoints.mjs", import.meta.url), installed);
-      const result = NodeChildProcess.spawnSync(process.execPath, [installed, "--help"], { encoding: "utf8" });
+      const result = NodeChildProcess.spawnSync(process.execPath, [installed, "--help"], {
+        encoding: "utf8",
+      });
       expect(result.stderr).toBe("");
       expect(result.status).toBe(0);
       expect(result.stdout).toContain("Usage:");

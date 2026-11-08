@@ -24,7 +24,10 @@ interface GitOptions {
 }
 
 function runGit(cwd: string, args: ReadonlyArray<string>, options: GitOptions = {}): string {
-  const directory = options.input === undefined ? undefined : NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-carry-input-"));
+  const directory =
+    options.input === undefined
+      ? undefined
+      : NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-carry-input-"));
   let descriptor: number | undefined;
   try {
     if (directory) {
@@ -33,8 +36,12 @@ function runGit(cwd: string, args: ReadonlyArray<string>, options: GitOptions = 
       descriptor = NodeFS.openSync(path, "r");
     }
     const result = NodeChildProcess.spawnSync("git", ["-c", "core.fsmonitor=false", ...args], {
-      cwd, encoding: "utf8", env: cleanGitEnvironment(process.env),
-      timeout: options.timeout, killSignal: "SIGKILL", maxBuffer: 64 * 1024 * 1024,
+      cwd,
+      encoding: "utf8",
+      env: cleanGitEnvironment(process.env),
+      timeout: options.timeout,
+      killSignal: "SIGKILL",
+      maxBuffer: 64 * 1024 * 1024,
       stdio: [descriptor ?? "ignore", "pipe", "pipe"],
     });
     if (result.error) throw result.error;
@@ -147,11 +154,16 @@ function unmergedFiles(entries: ReadonlyArray<string>): ReadonlyArray<ConflictFi
   }
   return Array.from(stages, ([path, present]) => ({
     path,
-    kind: present.size === 3 ? "content"
-      : present.size === 2 && present.has(2) && present.has(3) ? "add/add"
-      : present.size === 2 && present.has(1) && present.has(3) ? "deleted upstream"
-      : present.size === 2 && present.has(1) && present.has(2) ? "deleted by carry"
-      : "conflict",
+    kind:
+      present.size === 3
+        ? "content"
+        : present.size === 2 && present.has(2) && present.has(3)
+          ? "add/add"
+          : present.size === 2 && present.has(1) && present.has(3)
+            ? "deleted upstream"
+            : present.size === 2 && present.has(1) && present.has(2)
+              ? "deleted by carry"
+              : "conflict",
   })).sort((a, b) => a.path.localeCompare(b.path));
 }
 
@@ -227,7 +239,17 @@ function retainedSourceRefs(git: DossierGit, groups: ReadonlyArray<CarryGroupRes
   return result;
 }
 
-const PATCH_FLAGS = ["--raw", "--no-abbrev", "-z", "-p", "-U0", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color"];
+const PATCH_FLAGS = [
+  "--raw",
+  "--no-abbrev",
+  "-z",
+  "-p",
+  "-U0",
+  "--no-ext-diff",
+  "--no-textconv",
+  "--no-renames",
+  "--no-color",
+];
 
 // Raw NUL-delimited paths precede the patches in the same order, including quoted filenames.
 interface FilePatch {
@@ -246,15 +268,27 @@ function regionsByPath(output: string): ReadonlyMap<string, FilePatch> {
       throw new Error("Could not read batched patch paths.");
     paths.push({ path: fields[index + 1]!, oldBlob: fields[index]!.trim().split(" ")[2]! });
   }
-  const patches = output.slice(boundary + 2).split(/^diff --git /mu).slice(1);
+  const patches = output
+    .slice(boundary + 2)
+    .split(/^diff --git /mu)
+    .slice(1);
   if (paths.length !== patches.length) throw new Error("Batched patch paths do not match patches.");
-  return new Map(paths.map(({ path, oldBlob }, index) => [path, { oldBlob, regions: patchRegions(patches[index]!) }]));
+  return new Map(
+    paths.map(({ path, oldBlob }, index) => [
+      path,
+      { oldBlob, regions: patchRegions(patches[index]!) },
+    ]),
+  );
 }
 
 function partitionPaths(contribution: CarryContributionMetadata): ReadonlyArray<string> {
   if (contribution.deletedPaths) return contribution.deletedPaths;
   // Older compiled chains recorded deletion partitions in their public provenance notes.
-  if (!contribution.metadata["Carry-Observation"].some((note) => note.startsWith("Deletion partition follows the ")))
+  if (
+    !contribution.metadata["Carry-Observation"].some((note) =>
+      note.startsWith("Deletion partition follows the "),
+    )
+  )
     return [];
   return contribution.metadata["Carry-Supersedes"].flatMap((note) => {
     const match = /^[0-9a-f]{40,64} \((.*)\)$/u.exec(note);
@@ -262,26 +296,68 @@ function partitionPaths(contribution: CarryContributionMetadata): ReadonlyArray<
   });
 }
 
-function ownsPath(contribution: CarryContributionMetadata, path: string, groups: ReadonlyArray<CarryGroupResult>): boolean {
+function ownsPath(
+  contribution: CarryContributionMetadata,
+  path: string,
+  groups: ReadonlyArray<CarryGroupResult>,
+): boolean {
   const deleted = partitionPaths(contribution);
   if (deleted.length > 0) return deleted.includes(path);
-  return !groups.some(({ contributions }) => contributions.some((other) =>
-    other.sourceCommit === contribution.sourceCommit && partitionPaths(other).includes(path)));
+  return !groups.some(({ contributions }) =>
+    contributions.some(
+      (other) =>
+        other.sourceCommit === contribution.sourceCommit && partitionPaths(other).includes(path),
+    ),
+  );
 }
 
-function rankOwners(git: DossierGit, stopped: CarryGroupResult, ours: string,
-  observed: Array<CarryConflictDossier["stopped"]["files"][number]>, checkBudget: () => number) {
+function rankOwners(
+  git: DossierGit,
+  stopped: CarryGroupResult,
+  ours: string,
+  observed: Array<CarryConflictDossier["stopped"]["files"][number]>,
+  checkBudget: () => number,
+) {
   const paths = observed.map(({ path }) => path);
-  const sources = Array.from(new Set(observed.flatMap(({ ownership }) => ownership.candidates.map(({ sourceCommit }) => sourceCommit))));
+  const sources = Array.from(
+    new Set(
+      observed.flatMap(({ ownership }) =>
+        ownership.candidates.map(({ sourceCommit }) => sourceCommit),
+      ),
+    ),
+  );
   if (sources.length === 0) return;
   const parent = `${stopped.commit}^`;
-  const upstream = regionsByPath(git(["--literal-pathspecs", "diff", ...PATCH_FLAGS, parent, ours, "--", ...paths], { raw: true }));
+  const upstream = regionsByPath(
+    git(["--literal-pathspecs", "diff", ...PATCH_FLAGS, parent, ours, "--", ...paths], {
+      raw: true,
+    }),
+  );
   const changes = new Map<string, ReadonlyMap<string, FilePatch>>();
-  const sourceOutput = git(["--literal-pathspecs", "log", "--no-walk=unsorted", "--stdin", "--format=%x00%x00%H%x00%P%x00", ...PATCH_FLAGS, "--", ...paths], { input: `${sources.join("\n")}\n`, raw: true });
-  const sourceHeaders = Array.from(sourceOutput.matchAll(/\0\0([0-9a-f]{40,64})\0([0-9a-f ]*)\0/gu));
+  const sourceOutput = git(
+    [
+      "--literal-pathspecs",
+      "log",
+      "--no-walk=unsorted",
+      "--stdin",
+      "--format=%x00%x00%H%x00%P%x00",
+      ...PATCH_FLAGS,
+      "--",
+      ...paths,
+    ],
+    { input: `${sources.join("\n")}\n`, raw: true },
+  );
+  const sourceHeaders = Array.from(
+    sourceOutput.matchAll(/\0\0([0-9a-f]{40,64})\0([0-9a-f ]*)\0/gu),
+  );
   sourceHeaders.forEach((header, index) => {
     if (!header[2]) throw new Error(`Source parent unavailable for ${header[1]}.`);
-    changes.set(header[1]!, regionsByPath(sourceOutput.slice(header.index + header[0].length, sourceHeaders[index + 1]?.index)));
+    changes.set(
+      header[1]!,
+      regionsByPath(
+        sourceOutput.slice(header.index + header[0].length, sourceHeaders[index + 1]?.index),
+      ),
+    );
   });
   // Flatten only relevant blob pairs into two temporary trees. Comparing every source tree
   // against every conflicted path would produce a large, mostly irrelevant Cartesian product.
@@ -302,58 +378,150 @@ function rankOwners(git: DossierGit, stopped: CarryGroupResult, ours: string,
       if (!/^0+$/u.test(newBlob)) newEntries.push(`100644 blob ${newBlob}\t${alias}`);
     }
   }
-  const trees = lines(git(["mktree", "--batch"], { input: [oldEntries, newEntries].map((entries) => `${entries.length ? `${entries.join("\n")}\n` : ""}\n`).join("") }));
+  const trees = lines(
+    git(["mktree", "--batch"], {
+      input: [oldEntries, newEntries]
+        .map((entries) => `${entries.length ? `${entries.join("\n")}\n` : ""}\n`)
+        .join(""),
+    }),
+  );
   if (trees.length !== 2) throw new Error("Could not build batched line-mapping trees.");
-  const mappings = regionsByPath(git(["diff-tree", ...PATCH_FLAGS, trees[0]!, trees[1]!], { raw: true }));
+  const mappings = regionsByPath(
+    git(["diff-tree", ...PATCH_FLAGS, trees[0]!, trees[1]!], { raw: true }),
+  );
   observed.forEach((file, index) => {
     checkBudget();
     const upstreamRegions = upstream.get(file.path)?.regions ?? [];
-    const candidates = file.ownership.candidates.map((candidate) => {
-      const sourceChanges = changes.get(candidate.sourceCommit)?.get(file.path)?.regions ?? [];
-      const alias = aliases.get(JSON.stringify([file.path, candidate.sourceCommit]));
-      const mapping = alias === undefined ? [] : mappings.get(alias)?.regions ?? [];
-      const overlapLines = sourceChanges.length === 0 || upstreamRegions.length === 0 ? null : upstreamRegions.reduce((total, region) => {
-        const low = mappedLine(Math.max(1, region.oldStart), mapping, false);
-        const high = mappedLine(region.oldStart + Math.max(1, region.oldCount) - 1, mapping, true);
-        return total + sourceChanges.reduce((sum, changed) => sum + Math.max(0,
-          Math.min(high, changed.oldStart + Math.max(1, changed.oldCount) - 1) - Math.max(low, changed.oldStart) + 1), 0);
-      }, 0);
-      return { ...candidate, overlapLines };
-    }).sort((a, b) => (b.overlapLines ?? -1) - (a.overlapLines ?? -1));
-    const overlapping = candidates.filter(({ overlapLines }) => overlapLines !== null && overlapLines > 0);
-    observed[index] = { ...file, ownership: {
-      ranking: "overlap",
-      basis: "Candidates are the sources that touch this file, ranked by overlap with changes on the rebased side. Line mapping is approximate; the ranking is evidence, not proof of hunk ownership.",
-      ambiguous: overlapping.length > 1 || (candidates.length > 1 && (overlapping.length === 0 || candidates.some(({ overlapLines }) => overlapLines === null))),
-      candidates,
-    } };
+    const candidates = file.ownership.candidates
+      .map((candidate) => {
+        const sourceChanges = changes.get(candidate.sourceCommit)?.get(file.path)?.regions ?? [];
+        const alias = aliases.get(JSON.stringify([file.path, candidate.sourceCommit]));
+        const mapping = alias === undefined ? [] : (mappings.get(alias)?.regions ?? []);
+        const overlapLines =
+          sourceChanges.length === 0 || upstreamRegions.length === 0
+            ? null
+            : upstreamRegions.reduce((total, region) => {
+                const low = mappedLine(Math.max(1, region.oldStart), mapping, false);
+                const high = mappedLine(
+                  region.oldStart + Math.max(1, region.oldCount) - 1,
+                  mapping,
+                  true,
+                );
+                return (
+                  total +
+                  sourceChanges.reduce(
+                    (sum, changed) =>
+                      sum +
+                      Math.max(
+                        0,
+                        Math.min(high, changed.oldStart + Math.max(1, changed.oldCount) - 1) -
+                          Math.max(low, changed.oldStart) +
+                          1,
+                      ),
+                    0,
+                  )
+                );
+              }, 0);
+        return { ...candidate, overlapLines };
+      })
+      .sort((a, b) => (b.overlapLines ?? -1) - (a.overlapLines ?? -1));
+    const overlapping = candidates.filter(
+      ({ overlapLines }) => overlapLines !== null && overlapLines > 0,
+    );
+    observed[index] = {
+      ...file,
+      ownership: {
+        ranking: "overlap",
+        basis:
+          "Candidates are the sources that touch this file, ranked by overlap with changes on the rebased side. Line mapping is approximate; the ranking is evidence, not proof of hunk ownership.",
+        ambiguous:
+          overlapping.length > 1 ||
+          (candidates.length > 1 &&
+            (overlapping.length === 0 ||
+              candidates.some(({ overlapLines }) => overlapLines === null))),
+        candidates,
+      },
+    };
   });
 }
 
-function forecastGroups(input: ReplayCarrySetInput, groups: ReadonlyArray<CarryGroupResult>, stoppedIndex: number, git: DossierGit, remaining: () => number): CarryConflictDossier["forecast"]["groups"] {
+function forecastGroups(
+  input: ReplayCarrySetInput,
+  groups: ReadonlyArray<CarryGroupResult>,
+  stoppedIndex: number,
+  git: DossierGit,
+  remaining: () => number,
+): CarryConflictDossier["forecast"]["groups"] {
   if (stoppedIndex === groups.length - 1) return [];
   const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-carry-forecast-"));
   // A bare object view has no repository/global merge-driver configuration or worktree helpers.
-  const environment = { ...cleanGitEnvironment(process.env), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_ATTR_NOSYSTEM: "1" };
-  const spawn = (args: ReadonlyArray<string>) => NodeChildProcess.spawnSync("git", args, {
-    cwd: directory, env: environment, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
-    timeout: remaining(), killSignal: "SIGKILL", maxBuffer: 64 * 1024 * 1024,
-  });
+  const environment = {
+    ...cleanGitEnvironment(process.env),
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_ATTR_NOSYSTEM: "1",
+  };
+  const spawn = (args: ReadonlyArray<string>) =>
+    NodeChildProcess.spawnSync("git", args, {
+      cwd: directory,
+      env: environment,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: remaining(),
+      killSignal: "SIGKILL",
+      maxBuffer: 64 * 1024 * 1024,
+    });
   try {
     const init = spawn(["init", "--bare", "--template=", "--quiet"]);
     if (init.error) throw init.error;
     if (init.status !== 0) throw new Error(`Forecast object view failed: ${init.stderr.trim()}`);
-    NodeFS.writeFileSync(NodePath.join(directory, "objects/info/alternates"), `${git(["rev-parse", "--path-format=absolute", "--git-path", "objects"])}\n`);
+    NodeFS.writeFileSync(
+      NodePath.join(directory, "objects/info/alternates"),
+      `${git(["rev-parse", "--path-format=absolute", "--git-path", "objects"])}\n`,
+    );
     return groups.slice(stoppedIndex + 1).map(({ group, commit }, offset) => {
       const parent = groups[stoppedIndex + offset]!.commit;
-      const touched = new Set(git(["diff", "--name-only", "--no-ext-diff", "--no-textconv", "--no-renames", "-z", parent, commit], { raw: true }).split("\0").filter(Boolean));
-      const result = spawn(["merge-tree", "--write-tree", "--name-only", "--messages", "-z", `--merge-base=${input.sourceBase}`, input.onto, commit]);
+      const touched = new Set(
+        git(
+          [
+            "diff",
+            "--name-only",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "-z",
+            parent,
+            commit,
+          ],
+          { raw: true },
+        )
+          .split("\0")
+          .filter(Boolean),
+      );
+      const result = spawn([
+        "merge-tree",
+        "--write-tree",
+        "--name-only",
+        "--messages",
+        "-z",
+        `--merge-base=${input.sourceBase}`,
+        input.onto,
+        commit,
+      ]);
       if (result.error) throw result.error;
-      if (result.status !== 0 && result.status !== 1) throw new Error(`Conflict forecast failed: ${result.stderr.trim()}`);
+      if (result.status !== 0 && result.status !== 1)
+        throw new Error(`Conflict forecast failed: ${result.stderr.trim()}`);
       const entries = result.stdout.split("\0").slice(1);
       const boundary = entries.indexOf("");
-      const paths = (boundary < 0 ? entries : entries.slice(0, boundary)).filter((path) => touched.has(path));
-      return { group, commit, base: input.sourceBase, files: paths.sort().map((path) => ({ path, kind: "conflict" })) };
+      const paths = (boundary < 0 ? entries : entries.slice(0, boundary)).filter((path) =>
+        touched.has(path),
+      );
+      return {
+        group,
+        commit,
+        base: input.sourceBase,
+        files: paths.sort().map((path) => ({ path, kind: "conflict" })),
+      };
     });
   } finally {
     NodeFS.rmSync(directory, { recursive: true, force: true });
@@ -363,7 +531,9 @@ function forecastGroups(input: ReplayCarrySetInput, groups: ReadonlyArray<CarryG
 const SUMMARY_BYTES = 64 * 1024;
 function short(value: string, limit = 240): string {
   const line = value.replace(/\s+/gu, " ");
-  return Buffer.byteLength(line) > limit ? `${Buffer.from(line).subarray(0, limit).toString("utf8")}… [truncated]` : line;
+  return Buffer.byteLength(line) > limit
+    ? `${Buffer.from(line).subarray(0, limit).toString("utf8")}… [truncated]`
+    : line;
 }
 
 function readableSummary(dossier: CarryConflictDossier, jsonPath: string): string {
@@ -381,32 +551,64 @@ function readableSummary(dossier: CarryConflictDossier, jsonPath: string): strin
     const owners = file.ownership.candidates;
     const chunk = [
       `  ${short(file.path, 400)}: ${file.kind}; ${owners.length} source candidate(s)${file.ownership.ambiguous ? "; ambiguous" : ""}${file.ownership.ranking === "file-only" ? "; file-level owners only" : ""}; ${file.upstreamCommits.length} upstream commit(s)`,
-      ...owners.slice(0, 3).map((owner) => `    ${owner.sourceCommit.slice(0, 12)} ${short(owner.subject)}${owner.observations.length ? ` — ${short(owner.observations.slice(0, 2).join("; "))}${owner.observations.length > 2 ? `; ${owner.observations.length - 2} more notes in JSON` : ""}` : ""}`),
+      ...owners
+        .slice(0, 3)
+        .map(
+          (owner) =>
+            `    ${owner.sourceCommit.slice(0, 12)} ${short(owner.subject)}${owner.observations.length ? ` — ${short(owner.observations.slice(0, 2).join("; "))}${owner.observations.length > 2 ? `; ${owner.observations.length - 2} more notes in JSON` : ""}` : ""}`,
+        ),
       ...(owners.length > 3 ? [`    ${owners.length - 3} more source candidates in JSON`] : []),
-      ...file.upstreamCommits.slice(0, 5).map((sha) => `    upstream ${sha.slice(0, 12)} ${short(records.get(sha)!.subject)}`),
-      ...(file.upstreamCommits.length > 5 ? [`    ${file.upstreamCommits.length - 5} more upstream commits in JSON`] : []),
+      ...file.upstreamCommits
+        .slice(0, 5)
+        .map((sha) => `    upstream ${sha.slice(0, 12)} ${short(records.get(sha)!.subject)}`),
+      ...(file.upstreamCommits.length > 5
+        ? [`    ${file.upstreamCommits.length - 5} more upstream commits in JSON`]
+        : []),
     ].join("\n");
     // Reserve space for the forecast, warnings, and explicit omitted-file count.
     if (size + Buffer.byteLength(chunk) + 1 > SUMMARY_BYTES - 8_192) break;
-    output.push(chunk); size += Buffer.byteLength(chunk) + 1; included += 1;
+    output.push(chunk);
+    size += Buffer.byteLength(chunk) + 1;
+    included += 1;
   }
-  if (included < dossier.stopped.files.length) output.push(`[truncated] ${dossier.stopped.files.length - included} more conflicted files in JSON.`);
+  if (included < dossier.stopped.files.length)
+    output.push(
+      `[truncated] ${dossier.stopped.files.length - included} more conflicted files in JSON.`,
+    );
   output.push(...dossier.warnings.slice(0, 5).map((warning) => `Warning: ${short(warning, 500)}`));
   output.push(dossier.forecast.note);
-  output.push(...dossier.forecast.groups.map(({ group, files }) => `  ${group}: ${files.length} predicted file(s)${files.length ? ` — ${files.slice(0, 5).map(({ path }) => short(path, 120)).join(", ")}${files.length > 5 ? `; ${files.length - 5} more in JSON` : ""}` : ""}`));
+  output.push(
+    ...dossier.forecast.groups.map(
+      ({ group, files }) =>
+        `  ${group}: ${files.length} predicted file(s)${
+          files.length
+            ? ` — ${files
+                .slice(0, 5)
+                .map(({ path }) => short(path, 120))
+                .join(", ")}${files.length > 5 ? `; ${files.length - 5} more in JSON` : ""}`
+            : ""
+        }`,
+    ),
+  );
   return `${output.join("\n")}\n`;
 }
 
 // Only reads the stopped index and history. Forecast objects live in a separate bare repository.
-export function writeCarryConflictDossier(input: ReplayCarrySetInput, groups: ReadonlyArray<CarryGroupResult>): string | undefined {
+export function writeCarryConflictDossier(
+  input: ReplayCarrySetInput,
+  groups: ReadonlyArray<CarryGroupResult>,
+): string | undefined {
   const started = performance.now();
   const remaining = (reserve = 0) => {
     const timeout = Math.floor(8_000 - reserve - (performance.now() - started));
     if (timeout <= 0) throw new Error("Conflict dossier time budget reached.");
     return timeout;
   };
-  const git: DossierGit = (args, options = {}) => runGit(input.worktree, args, { ...options, timeout: remaining(1_000) });
-  const stoppedCommit = git(["rev-parse", "--verify", "--quiet", "REBASE_HEAD"], { allowFailure: true });
+  const git: DossierGit = (args, options = {}) =>
+    runGit(input.worktree, args, { ...options, timeout: remaining(1_000) });
+  const stoppedCommit = git(["rev-parse", "--verify", "--quiet", "REBASE_HEAD"], {
+    allowFailure: true,
+  });
   const stoppedIndex = groups.findIndex(({ commit }) => commit === stoppedCommit);
   const stopped = groups[stoppedIndex];
   const files = unmergedFiles(git(["ls-files", "--unmerged", "-z"], { raw: true }).split("\0"));
@@ -419,25 +621,69 @@ export function writeCarryConflictDossier(input: ReplayCarrySetInput, groups: Re
   const warnings: string[] = [];
   const warn = (message: string, error: unknown) => {
     const warning = `${message} Cause: ${error instanceof Error ? error.message : String(error)}`;
-    warnings.push(warning); console.warn(`[lastcode:checkpoint] ${warning}`);
+    warnings.push(warning);
+    console.warn(`[lastcode:checkpoint] ${warning}`);
   };
-  const commits = Array.from(new Set(stopped.contributions.map(({ sourceCommit }) => sourceCommit)));
+  const commits = Array.from(
+    new Set(stopped.contributions.map(({ sourceCommit }) => sourceCommit)),
+  );
   const touched = changedPaths(input.worktree, commits, paths, remaining(1_000));
   let upstream: ReadonlyArray<UpstreamConflictCommit> = [];
-  try { upstream = upstreamCommitsTouchingFiles(input.worktree, input.sourceBase, input.onto, paths, remaining(1_000)); }
-  catch (error) { warn("Upstream history unavailable.", error); }
+  try {
+    upstream = upstreamCommitsTouchingFiles(
+      input.worktree,
+      input.sourceBase,
+      input.onto,
+      paths,
+      remaining(1_000),
+    );
+  } catch (error) {
+    warn("Upstream history unavailable.", error);
+  }
   const observed: Array<CarryConflictDossier["stopped"]["files"][number]> = files.map((file) => {
-    const candidates = stopped.contributions.filter((contribution) => touched.get(contribution.sourceCommit)?.includes(file.path) && ownsPath(contribution, file.path, groups)).map((contribution) => ({
-      sourceCommit: contribution.sourceCommit, subject: contribution.subject, sourceRefs: [],
-      observations: contribution.metadata["Carry-Observation"], overlapLines: null,
-    }));
-    return { ...file, ownership: { ranking: "file-only", basis: "Candidates are the sources that touch this file. Overlap ranking unavailable.", ambiguous: candidates.length > 1, candidates }, upstreamCommits: upstream.filter(({ paths: changed }) => changed.includes(file.path)).map(({ commit }) => commit) };
+    const candidates = stopped.contributions
+      .filter(
+        (contribution) =>
+          touched.get(contribution.sourceCommit)?.includes(file.path) &&
+          ownsPath(contribution, file.path, groups),
+      )
+      .map((contribution) => ({
+        sourceCommit: contribution.sourceCommit,
+        subject: contribution.subject,
+        sourceRefs: [],
+        observations: contribution.metadata["Carry-Observation"],
+        overlapLines: null,
+      }));
+    return {
+      ...file,
+      ownership: {
+        ranking: "file-only",
+        basis: "Candidates are the sources that touch this file. Overlap ranking unavailable.",
+        ambiguous: candidates.length > 1,
+        candidates,
+      },
+      upstreamCommits: upstream
+        .filter(({ paths: changed }) => changed.includes(file.path))
+        .map(({ commit }) => commit),
+    };
   });
   let forecast: CarryConflictDossier["forecast"]["groups"] = [];
-  const note = "Advisory forecast for later groups. Each cumulative carry chain was merged onto the new upstream, with the old upstream as base. Only files the group changes are listed. Earlier resolutions can change these conflicts.";
+  const note =
+    "Advisory forecast for later groups. Each cumulative carry chain was merged onto the new upstream, with the old upstream as base. Only files the group changes are listed. Earlier resolutions can change these conflicts.";
   const persist = () => {
     remaining();
-    const dossier: CarryConflictDossier = { schemaVersion: 1, sourceBase: input.sourceBase, compactHead: input.compactHead, onto: input.onto, ours, upstreamCommits: upstream, durationMs: Math.ceil(performance.now() - started), warnings, stopped: { group: stopped.group, commit: stopped.commit, files: observed }, forecast: { advisory: true, method: "cumulative-attribution", note, groups: forecast } };
+    const dossier: CarryConflictDossier = {
+      schemaVersion: 1,
+      sourceBase: input.sourceBase,
+      compactHead: input.compactHead,
+      onto: input.onto,
+      ours,
+      upstreamCommits: upstream,
+      durationMs: Math.ceil(performance.now() - started),
+      warnings,
+      stopped: { group: stopped.group, commit: stopped.commit, files: observed },
+      forecast: { advisory: true, method: "cumulative-attribution", note, groups: forecast },
+    };
     const summary = readableSummary(dossier, jsonPath);
     const json = `${JSON.stringify(dossier, null, 2)}\n`;
     remaining();
@@ -449,14 +695,41 @@ export function writeCarryConflictDossier(input: ReplayCarrySetInput, groups: Re
   // Save usable file-level ownership before optional ranking or forecasting spends its reserve.
   persist();
   try {
-    const enrich: DossierGit = (args, options = {}) => runGit(input.worktree, args, { ...options, timeout: remaining(stoppedIndex < groups.length - 1 ? 2_500 : 1_000) });
+    const enrich: DossierGit = (args, options = {}) =>
+      runGit(input.worktree, args, {
+        ...options,
+        timeout: remaining(stoppedIndex < groups.length - 1 ? 2_500 : 1_000),
+      });
     const refs = retainedSourceRefs(enrich, groups);
-    observed.forEach((file, index) => { observed[index] = { ...file, ownership: { ...file.ownership, candidates: file.ownership.candidates.map((candidate) => ({ ...candidate, sourceRefs: refs.get(candidate.sourceCommit) ?? [] })) } }; });
-    rankOwners(enrich, stopped, ours, observed, () => remaining(stoppedIndex < groups.length - 1 ? 2_500 : 1_000));
-  } catch (error) { warn("Overlap ranking did not finish; file-level owners kept.", error); }
-  try { forecast = forecastGroups(input, groups, stoppedIndex, git, () => remaining(1_000)); }
-  catch (error) { warn("Later-group forecast unavailable; stopped-group details retained.", error); }
-  try { persist(); }
-  catch (error) { console.warn(`[lastcode:checkpoint] Dossier enrichment could not be saved; initial stopped-group summary retained. ${String(error)}`); }
+    observed.forEach((file, index) => {
+      observed[index] = {
+        ...file,
+        ownership: {
+          ...file.ownership,
+          candidates: file.ownership.candidates.map((candidate) => ({
+            ...candidate,
+            sourceRefs: refs.get(candidate.sourceCommit) ?? [],
+          })),
+        },
+      };
+    });
+    rankOwners(enrich, stopped, ours, observed, () =>
+      remaining(stoppedIndex < groups.length - 1 ? 2_500 : 1_000),
+    );
+  } catch (error) {
+    warn("Overlap ranking did not finish; file-level owners kept.", error);
+  }
+  try {
+    forecast = forecastGroups(input, groups, stoppedIndex, git, () => remaining(1_000));
+  } catch (error) {
+    warn("Later-group forecast unavailable; stopped-group details retained.", error);
+  }
+  try {
+    persist();
+  } catch (error) {
+    console.warn(
+      `[lastcode:checkpoint] Dossier enrichment could not be saved; initial stopped-group summary retained. ${String(error)}`,
+    );
+  }
   return summaryPath;
 }
