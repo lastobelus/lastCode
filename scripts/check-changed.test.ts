@@ -450,13 +450,22 @@ it("gates the completed replay's conflict files without repeating the broader CI
     files,
     "--baseline",
     "HEAD^",
+    "--onto",
+    "HEAD^",
   ]);
   expect(rejected.status, rejected.stdout + rejected.stderr).toBe(1);
   expect(rejected.stdout).toContain("FAIL  lint");
   expect(
     NodeFS.existsSync(NodePath.join(project.root, "node_modules/.cache/check-changed.json")),
   ).toBe(false);
-  const result = project.run("", ["--checkpoint-recovery-files", files, "--baseline", "HEAD^"]);
+  const result = project.run("", [
+    "--checkpoint-recovery-files",
+    files,
+    "--baseline",
+    "HEAD^",
+    "--onto",
+    "HEAD^",
+  ]);
   expect(result.status, result.stdout + result.stderr).toBe(0);
   const commands = project.calls().map(({ args }) => args);
   expect(commands).toContainEqual(["lint", "--no-error-on-unmatched-pattern", project.source]);
@@ -601,21 +610,82 @@ it.each([
     message: "requires --baseline <pre-replay-head>",
   },
   {
-    name: "invalid recovery path",
+    name: "recovery without its upstream",
     args: ["--checkpoint-recovery-files", "node_modules/paths.txt", "--baseline", "HEAD"],
+    message: "requires --onto <replay-upstream-head>",
+  },
+  {
+    name: "upstream without recovery files",
+    args: ["--onto", "HEAD"],
+    message: "--onto requires --checkpoint-recovery-files",
+  },
+  {
+    name: "invalid recovery path",
+    args: [
+      "--checkpoint-recovery-files",
+      "node_modules/paths.txt",
+      "--baseline",
+      "HEAD",
+      "--onto",
+      "HEAD",
+    ],
     paths: "packages/example/typo.ts\n",
     message: "unknown recovery path(s): packages/example/typo.ts",
   },
   {
     name: "legitimately deleted recovery path",
-    args: ["--checkpoint-recovery-files", "node_modules/paths.txt", "--baseline", "HEAD^"],
+    args: [
+      "--checkpoint-recovery-files",
+      "node_modules/paths.txt",
+      "--baseline",
+      "HEAD^",
+      "--onto",
+      "HEAD^",
+    ],
     deleted: true,
     message: "checkpoint recovery",
     expectedStatus: 0,
   },
   {
+    name: "upstream-introduced file deleted by replay",
+    args: [
+      "--checkpoint-recovery-files",
+      "node_modules/paths.txt",
+      "--baseline",
+      "HEAD~2",
+      "--onto",
+      "HEAD^",
+    ],
+    deleted: true,
+    introduced: true,
+    message: "checkpoint recovery",
+    expectedStatus: 0,
+  },
+  {
+    name: "surviving test beside a deleted source",
+    args: [
+      "--checkpoint-recovery-files",
+      "node_modules/paths.txt",
+      "--baseline",
+      "HEAD^",
+      "--onto",
+      "HEAD^",
+    ],
+    deleted: true,
+    neighbor: true,
+    message: "checkpoint recovery",
+    expectedStatus: 0,
+  },
+  {
     name: "empty recovery path list",
-    args: ["--checkpoint-recovery-files", "node_modules/paths.txt", "--baseline", "HEAD"],
+    args: [
+      "--checkpoint-recovery-files",
+      "node_modules/paths.txt",
+      "--baseline",
+      "HEAD",
+      "--onto",
+      "HEAD",
+    ],
     paths: "\n",
     message: "recovery file list must contain",
   },
@@ -646,13 +716,24 @@ it.each([
   },
 ])(
   "validates $name before running scoped checks",
-  ({ args, message, paths, deleted, expectedStatus = 1 }) => {
+  ({ args, message, paths, deleted, introduced, neighbor, expectedStatus = 1 }) => {
     using project = launcherFixture(true);
     if (paths !== undefined) project.write("node_modules/paths.txt", paths);
+    const source = introduced ? "packages/example/new-upstream.ts" : project.source;
+    const test = source.replace(/\.ts$/, ".test.ts");
+    if (introduced) {
+      project.write(source, "export const upstream = true;\n");
+      project.git("add", ".");
+      project.git("commit", "-m", "upstream introduces a source");
+    }
+    if (neighbor) {
+      project.write(test, "export {};\n");
+      project.git("add", ".");
+    }
     if (deleted) {
-      project.git("rm", "--", project.source);
+      project.git("rm", "--", source);
       project.git("commit", "-m", "delete conflicted source during replay");
-      project.write("node_modules/paths.txt", `${project.source}\n`);
+      project.write("node_modules/paths.txt", `${source}\n`);
     }
     const result = project.run("", args);
     expect(result.status, result.stdout + result.stderr).toBe(expectedStatus);
@@ -665,6 +746,14 @@ it.each([
       expect(project.calls().some(({ args }) => args[0] === "fmt" || args[0] === "lint")).toBe(
         false,
       );
+      if (neighbor) {
+        expect(project.calls().map(({ args }) => args)).toContainEqual([
+          "test",
+          "run",
+          "--passWithNoTests",
+          test,
+        ]);
+      }
     }
   },
 );

@@ -300,6 +300,7 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
   readonly baseline: Option.Option<string>;
   readonly candidate: Option.Option<string>;
   readonly checkpointRecoveryFiles: Option.Option<string>;
+  readonly onto: Option.Option<string>;
   readonly concurrency: Option.Option<number>;
   readonly timeout: Option.Option<number>;
 }) {
@@ -328,6 +329,9 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
   const lines = (...args: Array<string>) => gitLines(root, args);
 
   const recovery = Option.isSome(input.checkpointRecoveryFiles);
+  if (!recovery && Option.isSome(input.onto)) {
+    return yield* Effect.fail("check:changed: --onto requires --checkpoint-recovery-files.");
+  }
   if (recovery && [input.ref, input.candidate].some(Option.isSome)) {
     return yield* Effect.fail(
       "check:changed: --checkpoint-recovery-files cannot be combined with a positional ref or --candidate.",
@@ -338,11 +342,17 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
       "check:changed: --checkpoint-recovery-files requires --baseline <pre-replay-head> to verify deleted paths.",
     );
   }
+  if (recovery && Option.isNone(input.onto)) {
+    return yield* Effect.fail(
+      "check:changed: --checkpoint-recovery-files requires --onto <replay-upstream-head> to verify upstream deletions.",
+    );
+  }
   const recoveryHead = recovery
     ? (yield* git(root, ["rev-parse", "HEAD"])).toString().trim()
     : undefined;
   let recoveryFiles: Array<string> = [];
   let recoveryBase: string | undefined;
+  let recoveryOnto: string | undefined;
   if (recoveryHead) {
     yield* assertRepairCandidate(root, recoveryHead);
     recoveryFiles = (yield* fs.readFileString(Option.getOrThrow(input.checkpointRecoveryFiles)))
@@ -362,36 +372,33 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
         "check:changed: recovery file list must contain repository-relative conflicted and repaired paths, one per line.",
       );
     }
-    recoveryBase = (yield* git(root, [
-      "rev-parse",
-      "--verify",
-      "--end-of-options",
-      `${Option.getOrThrow(input.baseline)}^{commit}`,
-    ]))
-      .toString()
-      .trim();
+    const resolveCommit = (ref: string) =>
+      git(root, ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`]).pipe(
+        Effect.map((stdout) => stdout.toString().trim()),
+      );
+    recoveryBase = yield* resolveCommit(Option.getOrThrow(input.baseline));
+    recoveryOnto = yield* resolveCommit(Option.getOrThrow(input.onto));
     const treePaths = (yield* git(root, ["ls-tree", "-r", "--name-only", "-z", recoveryHead]))
       .toString()
       .split("\0")
       .filter(Boolean);
-    const deletedPaths = (yield* git(root, [
-      "diff",
-      "--name-only",
-      "--no-renames",
-      "--diff-filter=D",
-      "-z",
-      recoveryBase,
-      recoveryHead,
-      "--",
-    ]))
-      .toString()
-      .split("\0")
-      .filter(Boolean);
-    const knownPaths = new Set([...treePaths, ...deletedPaths]);
+    const deletedPaths = yield* Effect.forEach([recoveryBase, recoveryOnto], (deletionBase) =>
+      git(root, [
+        "diff",
+        "--name-only",
+        "--no-renames",
+        "--diff-filter=D",
+        "-z",
+        deletionBase,
+        recoveryHead,
+        "--",
+      ]).pipe(Effect.map((stdout) => stdout.toString().split("\0").filter(Boolean))),
+    );
+    const knownPaths = new Set([...treePaths, ...deletedPaths.flat()]);
     const unknown = recoveryFiles.filter((file) => !knownPaths.has(file));
     if (unknown.length > 0) {
       return yield* Effect.fail(
-        `check:changed: unknown recovery path(s): ${unknown.join(", ")}. Correct the file list: each path must exist in HEAD or be deleted between --baseline and HEAD.`,
+        `check:changed: unknown recovery path(s): ${unknown.join(", ")}. Correct the file list: each path must exist in HEAD or be deleted from --baseline or --onto to HEAD.`,
       );
     }
   }
@@ -447,7 +454,9 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
     // CI changes test behavior (vite.config.ts rejects .only under CI).
     hash.update(`${process.version}\0${base}\0${repair?.candidate ?? "working-tree"}\0${ci}\0`);
     hash.update(
-      recovery ? `checkpoint-recovery\0${recoveryHead}\0${files.join("\0")}\0` : "changed\0",
+      recovery
+        ? `checkpoint-recovery\0${recoveryHead}\0${recoveryOnto}\0${files.join("\0")}\0`
+        : "changed\0",
     );
     hash.update(
       yield* git(root, [
@@ -512,8 +521,9 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
   // `related` reaches most of a package: one leaf server file pulled in 252 of
   // 406 server test files and took 7 minutes. CI runs the rest.
   const tests = new Set(code.filter((file) => TEST.test(file)));
-  for (const file of code) {
+  for (const file of files.filter((file) => CODE.test(file))) {
     const dir = path.dirname(file);
+    if (!(yield* fs.exists(inRoot(dir)))) continue;
     const prefix = `${path.basename(file).replace(CODE, "")}.`;
     for (const entry of yield* fs.readDirectory(inRoot(dir))) {
       if (entry.startsWith(prefix) && TEST.test(entry)) tests.add(path.join(dir, entry));
@@ -807,6 +817,10 @@ export const checkChangedCommand = Command.make(
       Flag.withDescription(
         "Completed checkpoint replay: newline-delimited conflict/repair paths for format, lint, affected typechecks and neighboring tests before Full CI.",
       ),
+      Flag.optional,
+    ),
+    onto: Flag.String("onto").pipe(
+      Flag.withDescription("Replay upstream commit; required with --checkpoint-recovery-files."),
       Flag.optional,
     ),
     concurrency: Flag.Int("concurrency").pipe(
