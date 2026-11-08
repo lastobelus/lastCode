@@ -747,6 +747,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["notification toast popup completion input approval failure"],
   },
   {
+    id: "finished-thread-alerts",
+    title: "Finished thread alerts",
+    to: "/settings/general",
+    searchTerms: ["notification toast completion finished agent mcp delegated eval mine all"],
+  },
+  {
     id: "time-format",
     title: "Time format",
     to: "/settings/general",
