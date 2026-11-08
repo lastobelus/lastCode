@@ -95,7 +95,7 @@ function SidebarUpdateHeader({
   const fullVersionInTitle = header.title.endsWith(header.targetVersion);
   const age = releasedAt ? formatReleaseAge(releasedAt) : null;
   const versionDetail = fullVersionInTitle
-    ? age
+    ? age && `Released ${age}`
     : age
       ? `${header.targetVersion} · ${age}`
       : header.targetVersion;
