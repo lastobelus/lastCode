@@ -347,6 +347,10 @@ export const NotificationMode = Schema.Literals([
 ]);
 export type NotificationMode = typeof NotificationMode.Type;
 
+/** Which threads alert when they finish; "mine" leaves agent-run threads to their parent's report. */
+export const FinishedThreadAlerts = Schema.Literals(["mine", "all"]);
+export type FinishedThreadAlerts = typeof FinishedThreadAlerts.Type;
+
 export const QuitConfirmationMode = Schema.Literals(["direct", "hold", "double-click"]);
 export type QuitConfirmationMode = typeof QuitConfirmationMode.Type;
 const DEFAULT_QUIT_CONFIRMATION_MODE: QuitConfirmationMode = "hold";
@@ -472,6 +476,9 @@ export const ClientSettingsSchema = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed("off" as const)),
   ),
   inAppNotificationsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  finishedThreadAlerts: FinishedThreadAlerts.pipe(
+    Schema.withDecodingDefault(Effect.succeed("mine" as const)),
+  ),
   diffColorScheme: DiffColorScheme.pipe(
     Schema.withDecodingDefault(Effect.succeed("red-green" as const)),
   ),
@@ -2059,6 +2066,7 @@ export function requiredScopesForProjectMutation(
 export const ClientSettingsPatch = Schema.Struct({
   notificationMode: Schema.optionalKey(NotificationMode),
   inAppNotificationsEnabled: Schema.optionalKey(Schema.Boolean),
+  finishedThreadAlerts: Schema.optionalKey(FinishedThreadAlerts),
   diffColorScheme: Schema.optionalKey(DiffColorScheme),
   chatWidth: Schema.optionalKey(ChatWidth),
   effortDisplay: Schema.optionalKey(EffortDisplay),

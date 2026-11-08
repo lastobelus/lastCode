@@ -33,6 +33,7 @@ import {
 import { resolveSidebarThreadStatus, type SidebarThreadStatus } from "./Sidebar.logic";
 import {
   createThreadNotificationGate,
+  isUserThread,
   type ThreadNotificationKind,
   type ThreadNotificationObservation,
 } from "./ThreadNotificationCoordinator.logic";
@@ -123,7 +124,13 @@ export function startThreadNotifications(
         .has(threadKey({ environmentId, threadId: thread.id }))
     )
       return;
-    const { notificationMode: mode, inAppNotificationsEnabled } = getClientSettings();
+    const {
+      notificationMode: mode,
+      inAppNotificationsEnabled,
+      finishedThreadAlerts,
+    } = getClientSettings();
+    const finished = kind === "completion" || status === "failed" || status === "limited";
+    if (finished && finishedThreadAlerts === "mine" && !isUserThread(state.raw)) return;
     const active = (router.state.matches.at(-1)?.params ?? {}) as {
       environmentId?: string;
       threadId?: string;

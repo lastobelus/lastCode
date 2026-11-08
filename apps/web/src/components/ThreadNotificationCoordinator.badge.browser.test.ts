@@ -10,6 +10,7 @@ import { stubGlobal } from "../../test/render";
 const state = vi.hoisted(() => ({
   mode: "notifications",
   inApp: false,
+  finishedThreadAlerts: "mine",
   toast: vi.fn(),
   shells: null as unknown as { set: (id: string, value: unknown) => void },
   navigate: vi.fn(),
@@ -66,6 +67,7 @@ vi.mock(import("../hooks/useSettings"), async (original) => ({
   getClientSettings: (() => ({
     notificationMode: state.mode,
     inAppNotificationsEnabled: state.inApp,
+    finishedThreadAlerts: state.finishedThreadAlerts,
   })) as never,
 }));
 vi.mock(import("../threadNotifications"), async (original) => ({
@@ -108,6 +110,8 @@ const thread = {
   hasPendingUserInput: false,
   session: null as { status: string } | null,
   latestTurn: { turnId: "turn", state: "running", completedAt: null as string | null },
+  createdBy: "user" as "user" | "agent",
+  latestUserAuthoredMessageAt: null as string | null,
 };
 let focused = false;
 let visibility = "visible";
@@ -133,8 +137,8 @@ function toV2ThreadShell(input: typeof thread) {
       relationshipToParent: null,
     },
     forkedFrom: null,
-    createdBy: "user",
-    creationSource: "web",
+    createdBy: input.createdBy,
+    creationSource: input.createdBy === "user" ? "web" : "mcp",
     latestRunId: latestTurn.turnId,
     activeRunId: null,
     status:
@@ -150,6 +154,9 @@ function toV2ThreadShell(input: typeof thread) {
         : null,
     latestVisibleMessage: null,
     latestUserMessageAt: null,
+    latestUserAuthoredMessageAt: input.latestUserAuthoredMessageAt
+      ? DateTime.makeUnsafe(input.latestUserAuthoredMessageAt)
+      : null,
     hasActionableProposedPlan: false,
     itemCount: 0,
     visibleItemCount: 0,
@@ -188,6 +195,7 @@ function setup() {
   stack.defer(() => testRegistry.dispose());
   state.mode = "notifications";
   state.inApp = false;
+  state.finishedThreadAlerts = "mine";
   state.settingsListeners.clear();
   registry.set(environmentIdsAtom, ["one", "two"]);
   state.shells.set("one", shell());
@@ -314,5 +322,55 @@ it.each([false, true])(
     expect(TestNotification.sent.map(({ title }) => title)).toEqual(["Thread completed"]);
     state.shells.set("one", continued ? shell() : completed);
     expect(TestNotification.sent.map(({ title }) => title)).toEqual(["Thread completed"]);
+  },
+);
+
+it.each(["mine", "all"])(
+  "limits finished-thread alerts to the user's threads when set to %s",
+  async (scope) => {
+    await using app = setup();
+    state.finishedThreadAlerts = scope;
+    const agent = { createdBy: "agent" as const };
+    const running = [
+      { id: "user", title: "user" },
+      { id: "agent", title: "agent", ...agent },
+      {
+        id: "adopted",
+        title: "adopted",
+        ...agent,
+        latestUserAuthoredMessageAt: "2026-09-13T07:00:00.000Z",
+      },
+      { id: "agent-failed", title: "agent-failed", ...agent },
+      { id: "agent-asking", title: "agent-asking", ...agent },
+    ] as const;
+    state.shells.set("one", shell(...running));
+    app.start();
+    const completed = {
+      turnId: "turn",
+      state: "completed",
+      completedAt: "2026-09-13T07:05:00.000Z",
+    };
+    const [user, plain, adopted, failed, asking] = running;
+    state.shells.set(
+      "one",
+      shell(
+        { ...user, latestTurn: completed },
+        { ...plain, latestTurn: completed },
+        { ...adopted, latestTurn: completed },
+        { ...failed, latestTurn: { ...completed, state: "error" } },
+        { ...asking, hasPendingApprovals: true },
+      ),
+    );
+    expect(TestNotification.sent.map(({ title, options }) => `${title}: ${options.body}`)).toEqual(
+      scope === "mine"
+        ? ["Thread completed: user", "Thread completed: adopted", "Approval needed: agent-asking"]
+        : [
+            "Thread completed: user",
+            "Thread completed: agent",
+            "Thread completed: adopted",
+            "Thread failed: agent-failed",
+            "Approval needed: agent-asking",
+          ],
+    );
   },
 );
