@@ -376,6 +376,43 @@ export function temporaryAppPaths(targetPath, processId = process.pid) {
   };
 }
 
+// EPERM means another account's process holds the PID, and it may be that account's installer.
+function installerMayBeRunning(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== "ESRCH";
+  }
+}
+
+/**
+ * Temporary bundles are named for the installer process that made them. Once that process is gone
+ * they are leftovers from an install that died mid-swap: restore a missing app from the newest
+ * backup, then remove the rest. Bundles this account may not touch are left alone.
+ */
+export function recoverInterruptedSwap(targetPath) {
+  const parent = NodePath.dirname(targetPath);
+  const leftovers = NodeFS.readdirSync(parent).flatMap((name) => {
+    const match = /^\.LastCode\.(previous|install)-(\d+)\.app$/.exec(name);
+    if (!match || installerMayBeRunning(Number(match[2]))) return [];
+    return [{ path: NodePath.join(parent, name), backup: match[1] === "previous" }];
+  });
+  const newestBackup = leftovers
+    .filter((leftover) => leftover.backup)
+    .map((leftover) => leftover.path)
+    .toSorted((left, right) => NodeFS.statSync(right).mtimeMs - NodeFS.statSync(left).mtimeMs)[0];
+  try {
+    if (newestBackup !== undefined && !NodeFS.existsSync(targetPath)) {
+      NodeFS.renameSync(newestBackup, targetPath);
+      console.log(`Restored ${targetPath} left aside by an interrupted install.`);
+    }
+    for (const { path } of leftovers) NodeFS.rmSync(path, { force: true, recursive: true });
+  } catch (error) {
+    console.error(`Warning: could not clean up an interrupted install: ${error.message}`);
+  }
+}
+
 export function acquireInstallLock(lockDirectory) {
   return acquirePortableLock(lockDirectory, INSTALL_LOCK_NAME, "install");
 }
@@ -652,6 +689,7 @@ export async function prepareDmgInstall(dmgPath, options = {}) {
   );
   let prepared;
   try {
+    recoverInterruptedSwap(targetPath);
     const mountPoint = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-install-"));
     const { backup, staging } = temporaryAppPaths(targetPath);
     prepared = {
