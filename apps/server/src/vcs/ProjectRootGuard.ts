@@ -34,9 +34,11 @@ if [ -n "$default" ]; then
   [ "$target" != "refs/heads/$default" ] || exit 0
   base=origin/$default
 else
-  case "$target" in refs/heads/main | refs/heads/master) exit 0 ;; esac
-  default=main
-  git show-ref -q --verify refs/heads/main || default=master
+  # Without a known default branch there is nothing to keep this checkout on.
+  if git show-ref -q --verify refs/heads/main; then default=main
+  elif git show-ref -q --verify refs/heads/master; then default=master
+  else exit 0; fi
+  [ "$target" != "refs/heads/$default" ] || exit 0
   base=$default
 fi
 wanted=\${target#refs/heads/}
