@@ -5,7 +5,7 @@ import * as Migrator from "effect/sql/Migrator";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
-import { runDatabaseMigrations } from "./DatabaseMigrations.ts";
+import { runDatabaseMigrations, verifyDatabaseMigrations } from "./DatabaseMigrations.ts";
 import { migrationManifest, runMigrations } from "./Migrations.ts";
 import { legacyUpstreamMigrationEntries } from "./LegacyUpstreamMigrations.ts";
 import {
@@ -154,6 +154,28 @@ it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))("fresh database", (it
         [],
       );
       assert.deepStrictEqual(yield* runDatabaseMigrations(), []);
+    }),
+  );
+});
+
+it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))("ledger verification", (it) => {
+  it.effect("accepts only this build's exact migrations and never writes", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      assert.ok(Exit.isFailure(yield* Effect.exit(verifyDatabaseMigrations())));
+      yield* runDatabaseMigrations();
+      yield* verifyDatabaseMigrations();
+
+      const [lastId, lastName] = lastcodeMigrationManifest.at(-1)!;
+      yield* sql`DELETE FROM lastcode_sql_migrations WHERE migration_id = ${lastId}`;
+      assert.ok(Exit.isFailure(yield* Effect.exit(verifyDatabaseMigrations())));
+      assert.deepStrictEqual(
+        yield* sql`SELECT name FROM lastcode_sql_migrations WHERE migration_id = ${lastId}`,
+        [],
+      );
+
+      yield* sql`INSERT INTO lastcode_sql_migrations (migration_id, name) VALUES (${lastId}, ${lastName}), (${lastId + 1}, 'FutureMigration')`;
+      assert.ok(Exit.isFailure(yield* Effect.exit(verifyDatabaseMigrations())));
     }),
   );
 });

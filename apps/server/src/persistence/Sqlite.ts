@@ -5,7 +5,11 @@ import * as Path from "effect/Path";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
-import { runDatabaseMigrations } from "./DatabaseMigrations.ts";
+import {
+  DatabaseSchemaMismatchError,
+  runDatabaseMigrations,
+  verifyDatabaseMigrations,
+} from "./DatabaseMigrations.ts";
 import { initializeV2Database } from "./initializeV2Database.ts";
 import * as ServerConfig from "../config.ts";
 
@@ -64,6 +68,30 @@ export const layerFromPath = Effect.fn("makeSqlitePersistenceLive")(function* (d
   );
 }, Layer.unwrap);
 
+/** Opens an existing server's database without creating, initializing, or migrating it. */
+export const layerFromPathWithoutMigrations = Effect.fn("makeSqliteVerifiedPersistenceLive")(
+  function* (dbPath: string) {
+    const fs = yield* FileSystem.FileSystem;
+    if (!(yield* fs.exists(dbPath))) {
+      return yield* new DatabaseSchemaMismatchError({
+        message: `No database exists at ${dbPath}. Start the server that owns it first.`,
+      });
+    }
+    return Layer.provideMerge(
+      Layer.effectDiscard(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql`PRAGMA busy_timeout = 5000;`;
+          yield* sql`PRAGMA foreign_keys = ON;`;
+          yield* verifyDatabaseMigrations();
+        }).pipe(Effect.withSpan("Sqlite.verify")),
+      ),
+      NodeSqliteClient.layer({ filename: dbPath }),
+    );
+  },
+  Layer.unwrap,
+);
+
 export const layerMemory = Layer.provideMerge(
   layerSetup,
   NodeSqliteClient.layer({ filename: ":memory:" }),
@@ -74,5 +102,12 @@ export const layerConfig = Layer.unwrap(
     const { dbPath } = yield* ServerConfig.ServerConfig;
     yield* initializeV2Database(dbPath);
     return layerFromPath(dbPath);
+  }),
+);
+
+export const layerConfigWithoutMigrations = Layer.unwrap(
+  Effect.gen(function* () {
+    const { dbPath } = yield* ServerConfig.ServerConfig;
+    return layerFromPathWithoutMigrations(dbPath);
   }),
 );

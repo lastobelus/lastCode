@@ -903,7 +903,7 @@ const tryRunLiveThreadRead = Effect.fn("tryRunLiveThreadRead")(function* (
       );
     }).pipe(
       Effect.provide(
-        EnvironmentAuth.layerRuntime.pipe(
+        EnvironmentAuth.layerRuntimeWithoutMigrations.pipe(
           Layer.provide(ServerConfig.layer(config)),
           Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
         ),
@@ -1123,7 +1123,7 @@ const runThreadSend = Effect.fn("runThreadSend")(function* (
     );
   }).pipe(
     Effect.provide(
-      EnvironmentAuth.layerRuntime.pipe(
+      EnvironmentAuth.layerRuntimeWithoutMigrations.pipe(
         Layer.provide(ServerConfig.layer(config)),
         Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
       ),
@@ -1198,7 +1198,7 @@ const runThreadWait = Effect.fn("runThreadWait")(function* (
     );
   }).pipe(
     Effect.provide(
-      EnvironmentAuth.layerRuntime.pipe(
+      EnvironmentAuth.layerRuntimeWithoutMigrations.pipe(
         Layer.provide(ServerConfig.layer(config)),
         Layer.provide(Layer.succeed(References.MinimumLogLevel, config.logLevel)),
       ),

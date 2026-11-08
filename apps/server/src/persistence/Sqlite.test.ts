@@ -9,10 +9,12 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 import { vi } from "vite-plus/test";
 
+import { lastcodeMigrationManifest } from "./LastCodeMigrations.ts";
 import * as SqlitePersistence from "./Sqlite.ts";
 
 const workers = vi.hoisted((): Array<NodeWorkerThreads.Worker> => []);
@@ -179,6 +181,58 @@ it.effect("drops planner statistics a database already has", () => {
         "SEARCH parent USING INDEX sqlite_autoindex_walk_probe_1 (node_id=?)",
       );
     }).pipe(Effect.provide(persistence()));
+  }).pipe(
+    Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),
+  );
+});
+
+it.effect("opens a server's database without creating or migrating it", () => {
+  const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-sqlite-verified-"));
+  const dbPath = NodePath.join(tempDir, "state.sqlite");
+  const openWithoutMigrations = (path: string) =>
+    Effect.exit(
+      Effect.void.pipe(
+        Effect.provide(
+          SqlitePersistence.layerFromPathWithoutMigrations(path).pipe(
+            Layer.provide(NodeServices.layer),
+          ),
+        ),
+      ),
+    );
+  const withDatabase = <A>(use: (database: NodeSqlite.DatabaseSync) => A) => {
+    const database = new NodeSqlite.DatabaseSync(dbPath);
+    try {
+      return use(database);
+    } finally {
+      database.close();
+    }
+  };
+
+  return Effect.gen(function* () {
+    const missingPath = NodePath.join(tempDir, "missing.sqlite");
+    assert.ok(Exit.isFailure(yield* openWithoutMigrations(missingPath)));
+    assert.isFalse(NodeFS.existsSync(missingPath));
+
+    yield* Effect.void.pipe(
+      Effect.provide(
+        SqlitePersistence.layerFromPath(dbPath).pipe(Layer.provide(NodeServices.layer)),
+      ),
+    );
+    assert.ok(Exit.isSuccess(yield* openWithoutMigrations(dbPath)));
+
+    // A database this build is ahead of stays exactly as its server left it.
+    const [lastId] = lastcodeMigrationManifest.at(-1)!;
+    withDatabase((database) =>
+      database.prepare("DELETE FROM lastcode_sql_migrations WHERE migration_id = ?").run(lastId),
+    );
+    assert.ok(Exit.isFailure(yield* openWithoutMigrations(dbPath)));
+    assert.equal(
+      withDatabase(
+        (database) =>
+          database.prepare("SELECT COUNT(*) AS count FROM lastcode_sql_migrations").get()?.count,
+      ),
+      lastcodeMigrationManifest.length - 1,
+    );
   }).pipe(
     Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),
   );

@@ -1468,3 +1468,12 @@ export const layerRuntime = layer.pipe(
   Layer.provideMerge(layerStorage),
   Layer.provideMerge(ServerEnvironment.layerIdentity),
 );
+
+/** CLIs that reach a running server can come from another build, so they never migrate its database. */
+export const layerRuntimeWithoutMigrations = layer.pipe(
+  Layer.provideMerge(ManagedPolicy.layer),
+  Layer.provideMerge(
+    Layer.mergeAll(ServerSecretStore.layer, SqlitePersistence.layerConfigWithoutMigrations),
+  ),
+  Layer.provideMerge(ServerEnvironment.layerIdentity),
+);
