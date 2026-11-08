@@ -65,7 +65,7 @@ export const WatchPullRequestInput = Schema.Struct({
   quietTimeoutMinutes: Schema.optional(
     Schema.NullOr(PullRequestWatchQuietTimeoutMinutes).annotate({
       description:
-        "Wake you once after this many minutes without actionable checks, comments, reviews, conflicts or pushes; each restarts the timer. A number starts it now; null turns it off. Omit to keep an armed timer, else the environment default (45). After the quiet wake, restart only if the user asked (restartAfterQuiet: true).",
+        "Wake you once after this many minutes without new actionable checks, comments, reviews, conflicts or pushes; each resets the timer. A number starts it now; null disables it. Omit to keep the timer; new waits and restarts use the setting (default 45). Restart after the quiet wake only if the user asked (restartAfterQuiet).",
     }),
   ),
   restartAfterQuiet: Schema.optional(Schema.Boolean),
@@ -397,7 +397,7 @@ const ListThreadPullRequestsTool = Tool.make("list_thread_pull_requests", {
 
 const WatchPullRequestTool = Tool.make("watch_pull_request", {
   description:
-    "Watch an open PR for this thread, linking it first if needed. T3 wakes you on failed checks, passed required checks, new comments or reviews, others' reactions to your top-level PR comments, and conflicts. Handle existing comments before you register; later changes wake you. Reactions carry no timestamp, so an old one may be reported once, and inline or review reactions may take the slower full read, up to about 30 minutes. After registering, run any required project gate check, then end your turn if gates are pending. The watch persists across wakes; register again only for an explicitly allowed rearm. A wake is neither merge permission nor a clean review. An app-owned delegated child may watch only when its brief says the parent verified features.appOwnedPullRequestWatchContinuationVersion and #482 Phase 4 acceptance of the destination's installed checkpoint, or authorized a narrow isolated acceptance scenario; otherwise hand the watch to the parent. An owning child stays unfinished across passive waits, handles its own events, and unwatches before handback.",
+    "Watch an open PR for this thread, linking it first if needed. T3 wakes you on failed checks, passed required checks, new comments or reviews, others' reactions to your top-level PR comments, and conflicts. Handle existing comments before you register; later changes wake you. Reactions carry no timestamp, so an old one may be reported once, and inline or review reactions may take the slower full read, up to about 30 minutes. After registering, run any required project gate check, then end your turn if gates are pending. The watch persists across wakes; register again only for an allowed rearm. A wake is neither merge permission nor a clean review. An app-owned delegated child may watch only when its brief says the parent verified features.appOwnedPullRequestWatchContinuationVersion and #482 Phase 4 acceptance of the destination's installed checkpoint, or authorized a narrow isolated acceptance scenario; otherwise hand the watch to the parent. An owning child stays unfinished across passive waits, handles its own events, and unwatches before handback.",
   parameters: WatchPullRequestInput,
   success: WatchPullRequestResult,
   failure: PullRequestToolError,
