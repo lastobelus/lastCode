@@ -10,7 +10,7 @@ import {
   type ServerSelfUpdateCapability,
 } from "@t3tools/contracts";
 import { cliReleaseChannelOf, desktopUpdateChannelOf } from "@t3tools/shared/cliRelease";
-import { compareSemverVersions } from "@t3tools/shared/semver";
+import { compareSemverVersions, parseSemver } from "@t3tools/shared/semver";
 import { msg } from "gt-react";
 
 import { m, type MessageResolver } from "~/i18n/messages";
@@ -536,6 +536,18 @@ export function resolveUpdateRunMachineStatus(
 /** "current": the server already runs the target, so retrying it only settles the row. */
 export type RestoredRetry = ServerUpdateTarget | "current";
 
+export function serverReachedVersion(
+  serverVersion: string | null | undefined,
+  targetVersion: string,
+): boolean {
+  return (
+    serverVersion != null &&
+    parseSemver(serverVersion) !== null &&
+    parseSemver(targetVersion) !== null &&
+    compareSemverVersions(serverVersion, targetVersion) >= 0
+  );
+}
+
 /** A row restored after this app relaunched keeps only its target version, so its retry is
  * rebuilt from the server as it is now, as the dialog would. Null when there is nothing to retry. */
 export function resolveRestoredRetry(
@@ -550,7 +562,7 @@ export function resolveRestoredRetry(
   if (
     current.connected &&
     config !== null &&
-    resolveVersionMismatch(config.environment.serverVersion, targetVersion) === null
+    serverReachedVersion(config.environment.serverVersion, targetVersion)
   ) {
     return "current";
   }

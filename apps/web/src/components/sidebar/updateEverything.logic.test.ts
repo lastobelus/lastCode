@@ -11,6 +11,7 @@ import {
   describeUpdateEverything,
   resolveRestoredRetry,
   runUpdateEverything,
+  serverReachedVersion,
   SKIPPED_SERVER_UPDATE,
   type UpdateEverythingMachine,
   type UpdateRunMachine,
@@ -537,6 +538,22 @@ describe("describeUpdateCapsule", () => {
     expect(describeUpdateCapsule({ ...run, trackSwitch: true }, [failed], null, 0).action).toBe(
       "dismiss",
     );
+  });
+});
+
+describe("serverReachedVersion", () => {
+  it.each([
+    ["1.2.4", "1.2.4", true],
+    ["1.2.5", "1.2.4", true],
+    ["1.2.3", "1.2.4", false],
+    ["1.2.4-beta.1", "1.2.4", false],
+    ["0.1.8-nightly.20261107.4301", "0.1.8-nightly.20261107.4301", true],
+    ["0.1.8-nightly.20261106.4262", "0.1.8-nightly.20261107.4301", false],
+    ["not-a-version", "1.2.4", false],
+    ["not-a-version", "not-a-version", false],
+    [null, "1.2.4", false],
+  ] as const)("%s reaching %s is %s", (serverVersion, targetVersion, reached) => {
+    expect(serverReachedVersion(serverVersion, targetVersion)).toBe(reached);
   });
 });
 

@@ -17,10 +17,28 @@ import {
   startDesktopUpdateLaunchNotice,
 } from "./updateEverythingRun";
 
-function relaunchWhileRestarting(environmentId: EnvironmentId, updateId?: string) {
+const HANDOFFS_KEY = "t3code:update-everything-handoffs:v1";
+
+function stubStorage(entries: ReadonlyArray<readonly [string, string]> = []) {
+  const store = new Map(entries);
+  vi.stubGlobal("window", {
+    localStorage: {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => store.set(key, value),
+      removeItem: (key: string) => store.delete(key),
+    },
+  });
+  return store;
+}
+
+function relaunchWhileRestarting(
+  environmentId: EnvironmentId,
+  updateId?: string,
+  elapsedMinutes = 0,
+) {
   const now = 1_800_000_000_000;
-  vi.useFakeTimers({ now });
-  const store = new Map([
+  vi.useFakeTimers({ now: now + elapsedMinutes * 60_000 });
+  stubStorage([
     [
       "t3code:update-everything-result:v1",
       JSON.stringify({
@@ -41,12 +59,6 @@ function relaunchWhileRestarting(environmentId: EnvironmentId, updateId?: string
       }),
     ],
   ]);
-  vi.stubGlobal("window", {
-    localStorage: {
-      getItem: (key: string) => store.get(key) ?? null,
-      removeItem: (key: string) => store.delete(key),
-    },
-  });
   return startDesktopUpdateLaunchNotice();
 }
 
@@ -56,18 +68,11 @@ describe("startDesktopUpdateLaunchNotice", () => {
     vi.unstubAllGlobals();
   });
 
-  it("keeps a restored track switch out of the capsule's retry", async () => {
+  it("keeps a track switch out of the capsule's retry on repeated relaunches", async () => {
     const environmentId = EnvironmentId.make("switching-machine");
     const now = 1_800_000_000_000;
     vi.useFakeTimers({ now });
-    const store = new Map<string, string>();
-    vi.stubGlobal("window", {
-      localStorage: {
-        getItem: (key: string) => store.get(key) ?? null,
-        setItem: (key: string, value: string) => store.set(key, value),
-        removeItem: (key: string) => store.delete(key),
-      },
-    });
+    const store = stubStorage();
     setUpdateEverythingRun(() => ({
       trackSwitch: true,
       localVersion: "9.9.9",
@@ -96,13 +101,49 @@ describe("startDesktopUpdateLaunchNotice", () => {
     });
     setUpdateEverythingRun(() => null);
 
-    const stop = startDesktopUpdateLaunchNotice();
-    let run: UpdateEverythingRun | null = null;
-    setUpdateEverythingRun((current) => (run = current));
+    const launch = async (elapsedMinutes: number) => {
+      vi.setSystemTime(now + elapsedMinutes * 60_000);
+      const stop = startDesktopUpdateLaunchNotice();
+      const pending = new Map(store);
+      let run: UpdateEverythingRun | null = null;
+      setUpdateEverythingRun((current) => (run = current));
+      try {
+        expect(run).toMatchObject({ trackSwitch: true, machines: [{ environmentId }] });
+        expect([...pending.keys()]).toEqual([HANDOFFS_KEY]);
+      } finally {
+        await vi.advanceTimersByTimeAsync((32 - elapsedMinutes) * 60_000);
+        stop();
+        setUpdateEverythingRun(() => null);
+      }
+      expect(store.has(HANDOFFS_KEY)).toBe(false);
+      return pending;
+    };
+    const pending = await launch(15);
+    // The next launch sees the storage from before the first launch settled.
+    for (const [key, value] of pending) store.set(key, value);
+    await launch(16);
+  });
+
+  it("follows a handoff from an expired legacy notice until the stable target arrives", async () => {
+    const environmentId = EnvironmentId.make("legacy-machine");
+    const stateAtom = serverEnvironment.updateStateAtom(environmentId);
+    const config = (serverVersion: string) => ({ environment: { serverVersion } }) as ServerConfig;
+    const configAtom = Atom.make<ServerConfig | null>(config("9.9.9-beta.1"));
+    using _config = vi.spyOn(serverEnvironment, "configValueAtom").mockReturnValue(configAtom);
+    const stop = relaunchWhileRestarting(environmentId, undefined, 15);
+    const release = appAtomRegistry.mount(stateAtom);
     try {
-      expect(run).toMatchObject({ trackSwitch: true, machines: [{ environmentId }] });
+      expect(appAtomRegistry.get(stateAtom)).toMatchObject({
+        status: "running",
+        stage: "resuming",
+      });
+      expect(window.localStorage.getItem(HANDOFFS_KEY)).not.toBeNull();
+      appAtomRegistry.set(configAtom, config("9.9.9"));
+      expect(appAtomRegistry.get(stateAtom)).toEqual({ status: "idle" });
+      expect(window.localStorage.getItem(HANDOFFS_KEY)).toBeNull();
     } finally {
-      await vi.advanceTimersByTimeAsync(32 * 60 * 1000);
+      await vi.advanceTimersByTimeAsync(17 * 60_000);
+      release();
       stop();
       setUpdateEverythingRun(() => null);
     }
@@ -208,7 +249,7 @@ describe("retryFailedUpdateRunServers", () => {
     const targetVersion = "9.9.9";
     const serverVersions = new Map([
       [EnvironmentId.make("already-updated"), targetVersion],
-      [EnvironmentId.make("behind"), "9.9.8"],
+      [EnvironmentId.make("behind"), "9.9.9-beta.1"],
     ]);
     using _config = vi
       .spyOn(serverEnvironment, "configValueAtom")
