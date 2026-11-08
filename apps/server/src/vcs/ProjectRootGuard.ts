@@ -1,5 +1,7 @@
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 
 import * as GitVcsDriver from "./GitVcsDriver.ts";
@@ -27,7 +29,7 @@ case "$next" in
 esac
 current=$(git symbolic-ref -q HEAD) || current=
 [ "$target" != "$current" ] || exit 0
-default=$(git symbolic-ref -q --short refs/remotes/origin/HEAD) && default=\${default#origin/}
+default=$(git symbolic-ref -q refs/remotes/origin/HEAD) && default=\${default#refs/remotes/origin/}
 if [ -n "$default" ]; then
   [ "$target" != "refs/heads/$default" ] || exit 0
 else
@@ -36,12 +38,13 @@ else
 fi
 wanted=\${target#refs/heads/}
 [ -n "$target" ] || wanted="a detached HEAD"
-# Checkout already moved the index and files to the target; carry them back, keeping local edits.
+# Checkout already moved the index and files to the target; carry them back, keeping local
+# edits. An unborn (orphan) target starts from the empty tree.
 restore=
-target_commit=$(git rev-parse -q --verify "\${target:-$next}^{commit}") || target_commit=
-if [ -n "$target_commit" ] && [ "$target_commit" != "$(git rev-parse -q --verify HEAD)" ]; then
-  git read-tree -m -u "$target_commit" HEAD ||
-    restore="Git already changed the files here; put them back with: git read-tree -m -u $target_commit HEAD"
+from=$(git rev-parse -q --verify "\${target:-$next}^{commit}") || from=$(git hash-object -t tree /dev/null)
+if [ "$from" != "$(git rev-parse -q --verify HEAD)" ]; then
+  git read-tree -m -u "$from" HEAD ||
+    restore=" Git had already changed files here toward $wanted; check git status before continuing."
 fi
 cat >&2 <<EOF
 lastcode-root-guard: refused to move $(pwd) to $wanted.$restore
@@ -94,14 +97,15 @@ export const installProjectRootGuard = Effect.fn("ProjectRootGuard.install")(fun
           suffix: ".tmp",
         });
         yield* fileSystem.writeFileString(temporaryPath, PROJECT_ROOT_GUARD_SCRIPT);
+        yield* fileSystem.chmod(temporaryPath, 0o644);
         yield* fileSystem.rename(temporaryPath, scriptPath);
       }),
     );
   }
 
-  // A missing script must not abort every ref update, so the command checks for it first.
+  // A missing or unreadable script must not abort every ref update.
   const settings = [
-    ["command", `[ ! -f ${shellQuote(scriptPath)} ] || exec sh ${shellQuote(scriptPath)}`],
+    ["command", `[ ! -r ${shellQuote(scriptPath)} ] || exec sh ${shellQuote(scriptPath)}`],
     ["event", "reference-transaction"],
   ] as const;
   for (const [field, value] of settings) {
@@ -122,3 +126,31 @@ export const installProjectRootGuard = Effect.fn("ProjectRootGuard.install")(fun
   }
   return true;
 });
+
+/** Guards a project root as it becomes known; failures are logged, never raised. */
+export class ProjectRootGuard extends Context.Reference<{
+  readonly protect: (workspaceRoot: string) => Effect.Effect<void>;
+}>("t3/vcs/ProjectRootGuard", {
+  defaultValue: () => ({ protect: () => Effect.void }),
+}) {}
+
+export const protectProjectRoot = (workspaceRoot: string) =>
+  installProjectRootGuard(workspaceRoot).pipe(
+    Effect.catchCause((cause) =>
+      Effect.logWarning("Failed to install the project root guard", { workspaceRoot, cause }),
+    ),
+  );
+
+export const layer = Layer.effect(
+  ProjectRootGuard,
+  Effect.gen(function* () {
+    const context = yield* Effect.context<
+      GitVcsDriver.GitVcsDriver | FileSystem.FileSystem | Path.Path
+    >();
+    return {
+      protect: Effect.fn("ProjectRootGuard.protect")(function* (workspaceRoot: string) {
+        yield* protectProjectRoot(workspaceRoot).pipe(Effect.provideContext(context));
+      }),
+    };
+  }),
+);

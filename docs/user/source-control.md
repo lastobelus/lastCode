@@ -160,7 +160,7 @@ make your first commit before pushing.
 ## Keep project checkouts on their default branch
 
 A project's main checkout stays on its default branch (the one `origin/HEAD` names, or else `main` or `master`),
-so it keeps pulling cleanly while threads work elsewhere. When the server starts, LastCode tells
+so it keeps pulling cleanly while threads work elsewhere. When the server starts or you add a project, LastCode tells
 Git (2.54 or later) to refuse any command that moves that checkout to another branch or a detached
 HEAD, including commands agents run. Do branch work in a worktree instead. Commits, pulls, rebases,
 `git worktree add`, and switching back to the default branch still work there.

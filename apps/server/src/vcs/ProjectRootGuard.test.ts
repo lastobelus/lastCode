@@ -45,7 +45,9 @@ it.live("keeps a project's main checkout on its default branch", () =>
       yield* git(root, ["init", "-q", "-b", "trunk"]);
       yield* git(root, ["config", "user.name", "Test"]);
       yield* git(root, ["config", "user.email", "test@example.com"]);
-      yield* git(root, ["commit", "-q", "--allow-empty", "-m", "first"]);
+      yield* fileSystem.writeFileString(path.join(root, "tracked"), "x\n");
+      yield* git(root, ["add", "tracked"]);
+      yield* git(root, ["commit", "-q", "-m", "first"]);
       yield* git(root, ["update-ref", "refs/remotes/origin/trunk", "HEAD"]);
       yield* git(root, ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk"]);
       yield* git(root, ["switch", "-q", "-c", "existing"]);
@@ -62,9 +64,16 @@ it.live("keeps a project's main checkout on its default branch", () =>
       assert.include(refused.stderr, "git worktree add <path> -b <branch> origin/trunk");
       assert.equal(yield* head(root), "trunk");
       assert.notEqual((yield* git(root, ["switch", "existing"])).exitCode, 0);
+      assert.notEqual((yield* git(root, ["switch", "--orphan", "orphan"])).exitCode, 0);
       // Checkout rewrites files before HEAD; a refused switch must not leave them behind.
       assert.equal((yield* git(root, ["status", "--porcelain"])).stdout, "");
       assert.notEqual((yield* git(root, ["checkout", "--detach"])).exitCode, 0);
+      const fromApp = yield* GitVcsDriver.GitVcsDriver.pipe(
+        Effect.flatMap((driver) => driver.switchRef({ cwd: root, refName: "existing" })),
+        Effect.flip,
+      );
+      assert.equal(fromApp.reason, "ref_update_rejected_by_hook");
+      assert.include(fromApp.detail, "worktree");
       assert.equal(yield* head(root), "trunk");
 
       // Work that keeps HEAD on the default branch, and other worktrees, stays free.

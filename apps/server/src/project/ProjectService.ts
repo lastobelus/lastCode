@@ -50,6 +50,7 @@ import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
 import { UpdateDrainAdmission } from "../updateDrain/UpdateDrainAdmission.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import * as WorkspaceLifecycle from "../workspace/WorkspaceLifecycle.ts";
+import * as ProjectRootGuard from "../vcs/ProjectRootGuard.ts";
 
 const isWorktreeSuspensionRequestError = Schema.is(WorktreeSuspensionRequestError);
 
@@ -203,6 +204,7 @@ export const make = Effect.gen(function* () {
   const admission = yield* UpdateDrainAdmission;
   const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
   const autoPullStatus = yield* AutoPullStatus.AutoPullStatus;
+  const rootGuard = yield* ProjectRootGuard.ProjectRootGuard;
   const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
   const threadProjections = yield* ProjectionStore.ProjectionStoreV2;
   const eventSink = yield* EventSink.EventSinkV2;
@@ -408,6 +410,7 @@ export const make = Effect.gen(function* () {
         workspaceRoot,
         ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
       });
+      yield* rootGuard.protect(workspaceRoot);
       yield* projectEnrichment.invalidate([workspaceRoot]);
       return yield* readCommitted(input.projectId);
     },
@@ -447,6 +450,7 @@ export const make = Effect.gen(function* () {
         ...(input.archived === undefined ? {} : { archived: input.archived }),
       });
       if (workspaceRoot !== previousRoot) {
+        yield* rootGuard.protect(workspaceRoot);
         yield* projectEnrichment.invalidate([previousRoot, workspaceRoot]);
       }
       return yield* readCommitted(input.projectId);

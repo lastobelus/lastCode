@@ -43,7 +43,7 @@ import * as ThreadManagement from "./orchestration-v2/ThreadManagementService.ts
 import * as AutoPullStatus from "./project/AutoPullStatus.ts";
 import * as ProjectService from "./project/ProjectService.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
-import { installProjectRootGuard } from "./vcs/ProjectRootGuard.ts";
+import { protectProjectRoot } from "./vcs/ProjectRootGuard.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
@@ -258,12 +258,7 @@ const protectProjectRoots = Effect.fn("protectProjectRoots")(function* (
 ) {
   yield* Effect.forEach(
     new Set(projects.map((project) => project.workspaceRoot)),
-    (cwd) =>
-      installProjectRootGuard(cwd).pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning("Failed to install the project root guard", { cwd, cause }),
-        ),
-      ),
+    protectProjectRoot,
     { concurrency: 4, discard: true },
   );
 });
