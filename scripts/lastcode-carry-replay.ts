@@ -1035,19 +1035,17 @@ function describeRegroupConflict(
     const sources = new Set(blamed.keys());
     for (const [commit, lineNumbers] of blamed) {
       const { sourceBase, sourceHead } = parseCarryTrailers(commitMessage(repo, commit));
+      // A squash stands for a whole PR; blame its lines again inside the retained source
+      // range. Line numbers only carry over when the squash tree is the source head's.
       if (!sourceBase || !sourceHead) continue;
-      // A squash stands for a whole PR; blame its lines again inside the retained source range.
-      if (resolveTree(repo, commit) === resolveTree(repo, sourceHead)) {
-        const lines = Array.from(new Set(lineNumbers)).flatMap((line) => ["-L", `${line},${line}`]);
-        for (const { commit: source } of blame(
-          repo,
-          [...lines, `${sourceBase}..${sourceHead}`],
-          path,
-        ))
-          sources.add(source);
-      } else {
-        for (const source of firstParentCommits(repo, sourceBase, sourceHead)) sources.add(source);
-      }
+      if (resolveTree(repo, commit) !== resolveTree(repo, sourceHead)) continue;
+      const lines = Array.from(new Set(lineNumbers)).flatMap((line) => ["-L", `${line},${line}`]);
+      for (const { commit: source } of blame(
+        repo,
+        [...lines, `${sourceBase}..${sourceHead}`],
+        path,
+      ))
+        sources.add(source);
     }
     return Array.from(sources);
   };
