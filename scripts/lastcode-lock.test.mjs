@@ -5,13 +5,13 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import {
   acquireDirectoryLock,
   acquirePortableLock,
-  claimStaleOwner,
   PortableLockContentionError,
+  replaceDeadRecord,
 } from "./lastcode-lock.mjs";
 
 const temporaryDirectories = [];
@@ -28,6 +28,10 @@ function temporaryDirectory() {
   const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-lock-test-"));
   temporaryDirectories.push(directory);
   return directory;
+}
+
+function exitedPid() {
+  return NodeChildProcess.spawnSync(process.execPath, ["--eval", ""]).pid;
 }
 
 function spawnLockHolder(root) {
@@ -65,68 +69,44 @@ describe("LastCode portable update lock", () => {
     const root = temporaryDirectory();
     const lockPath = NodePath.join(root, "update.lock.d");
     const ownerPath = NodePath.join(lockPath, "owner.json");
-    const exited = NodeChildProcess.spawnSync(process.execPath, ["--eval", ""]);
-    const staleOwner = {
-      schemaVersion: 2,
-      pid: exited.pid,
-      token: "stale-owner",
-      startedAt: "2026-01-01T00:00:00.000Z",
-    };
+    const staleOwner = { schemaVersion: 2, pid: exitedPid(), token: "stale-owner" };
     NodeFS.mkdirSync(lockPath);
     NodeFS.writeFileSync(ownerPath, JSON.stringify(staleOwner));
 
     const release = acquireDirectoryLock(root, "update.lock", "test");
     const recoveredOwner = NodeFS.readFileSync(ownerPath, "utf8");
     // A contender that read the dead owner before the recovery must not take the lock.
-    expect(claimStaleOwner(ownerPath, staleOwner)).toBe(false);
+    expect(
+      replaceDeadRecord(ownerPath, staleOwner, { pid: process.pid, token: "late-contender" }),
+    ).toBe(false);
     expect(NodeFS.readFileSync(ownerPath, "utf8")).toBe(recoveredOwner);
+    expect(NodeFS.readdirSync(lockPath)).toEqual(["owner.json"]);
     expect(() => acquireDirectoryLock(root, "update.lock", "test")).toThrow(
       PortableLockContentionError,
     );
 
-    expect(NodeFS.readdirSync(lockPath)).toEqual(["owner.json"]);
-
     release();
-    expect(NodeFS.existsSync(lockPath)).toBe(false);
+    expect(NodeFS.existsSync(ownerPath)).toBe(false);
+    acquireDirectoryLock(root, "update.lock", "test")();
   });
 
-  it("lets a crashed claimant's claim expire after a minute", () => {
+  it("keeps a live claimant's claim and replaces a dead claimant's", () => {
     const root = temporaryDirectory();
     const lockPath = NodePath.join(root, "update.lock.d");
     const ownerPath = NodePath.join(lockPath, "owner.json");
-    const exited = NodeChildProcess.spawnSync(process.execPath, ["--eval", ""]);
     NodeFS.mkdirSync(lockPath);
-    NodeFS.writeFileSync(
-      ownerPath,
-      JSON.stringify({ schemaVersion: 2, pid: exited.pid, token: "stale-owner" }),
-    );
-    const claimPath = `${ownerPath}.claim-stale-owner`;
-    NodeFS.linkSync(ownerPath, claimPath);
+    NodeFS.writeFileSync(ownerPath, JSON.stringify({ pid: exitedPid(), token: "stale-owner" }));
+    const claimPath = `${ownerPath}.stale-owner`;
+
+    // A claimant suspended mid-recovery is still alive, so nobody may take over its claim.
+    NodeFS.writeFileSync(claimPath, JSON.stringify({ pid: process.pid, token: "suspended" }));
     expect(() => acquireDirectoryLock(root, "update.lock", "test")).toThrow(
       PortableLockContentionError,
     );
 
-    const now = vi
-      .spyOn(Date, "now")
-      .mockReturnValue(NodeFS.lstatSync(claimPath).ctimeMs + 120_000);
-    try {
-      acquireDirectoryLock(root, "update.lock", "test")();
-    } finally {
-      now.mockRestore();
-    }
-  });
-
-  it("reclaims a directory lock whose owner never recorded itself after a minute", () => {
-    const root = temporaryDirectory();
-    const lockPath = NodePath.join(root, "update.lock.d");
-    NodeFS.mkdirSync(lockPath);
-    expect(() => acquireDirectoryLock(root, "update.lock", "test")).toThrow(
-      PortableLockContentionError,
-    );
-
-    const longAgo = new Date("2026-01-01T00:00:00.000Z");
-    NodeFS.utimesSync(lockPath, longAgo, longAgo);
+    NodeFS.writeFileSync(claimPath, JSON.stringify({ pid: exitedPid(), token: "crashed" }));
     acquireDirectoryLock(root, "update.lock", "test")();
+    expect(NodeFS.readdirSync(lockPath)).toEqual([]);
   });
 
   itMacOnly("does not classify lock-file permission failures as contention", () => {
