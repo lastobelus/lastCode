@@ -486,7 +486,7 @@ const GIT_FAILURE_REASON_DETAILS: Partial<Record<GitCommandFailureReason, string
   config_locked:
     "Another Git process kept the repository's config locked. Wait for it to finish, then retry.",
   ref_update_rejected_by_hook:
-    "A Git hook refused to move this checkout. A LastCode project's main checkout stays on its default branch; do branch work in a worktree.",
+    "A Git hook refused this change; run the command in a terminal to see why. A LastCode project's main checkout stays on its default branch, so do branch work in a worktree.",
 };
 
 function gitFailureDetail(reason: GitCommandFailureReason | null): string {

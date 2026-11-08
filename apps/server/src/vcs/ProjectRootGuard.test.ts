@@ -99,6 +99,9 @@ it.live("keeps a project's main checkout on its default branch", () =>
       assert.equal((yield* git(root, ["switch", "on-purpose"])).exitCode, 0);
 
       assert.isFalse(yield* installProjectRootGuard(worktree));
+      const nested = path.join(root, "nested");
+      yield* fileSystem.makeDirectory(nested);
+      assert.isFalse(yield* installProjectRootGuard(nested));
     }),
   ).pipe(Effect.provide(layerTest)),
 );

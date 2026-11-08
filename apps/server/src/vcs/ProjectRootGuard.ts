@@ -32,9 +32,12 @@ current=$(git symbolic-ref -q HEAD) || current=
 default=$(git symbolic-ref -q refs/remotes/origin/HEAD) && default=\${default#refs/remotes/origin/}
 if [ -n "$default" ]; then
   [ "$target" != "refs/heads/$default" ] || exit 0
+  base=origin/$default
 else
   case "$target" in refs/heads/main | refs/heads/master) exit 0 ;; esac
   default=main
+  git show-ref -q --verify refs/heads/main || default=master
+  base=$default
 fi
 wanted=\${target#refs/heads/}
 [ -n "$target" ] || wanted="a detached HEAD"
@@ -50,7 +53,7 @@ cat >&2 <<EOF
 lastcode-root-guard: refused to move $(pwd) to $wanted.$restore
 This is a LastCode project's main checkout. It stays on $default so it can auto-pull.
 Do branch work in a worktree instead:
-  git worktree add <path> -b <branch> origin/$default
+  git worktree add <path> -b <branch> $base
   (if Git already created the branch: git worktree add <path> <branch>)
 In a LastCode thread, t3_worktree_handoff moves the thread into a new worktree.
 To switch here on purpose: ${PROJECT_ROOT_GUARD_OVERRIDE_ENV}=1 git switch <branch>
@@ -76,12 +79,14 @@ export const installProjectRootGuard = Effect.fn("ProjectRootGuard.install")(fun
   const dirs = yield* git.execute({
     operation: "ProjectRootGuard.resolveGitDirs",
     cwd,
-    args: ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
+    args: ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir", "--show-prefix"],
     allowNonZeroExit: true,
   });
-  const [gitDir, commonDir] = dirs.stdout.trim().split("\n");
-  // A linked worktree's project root is not a main checkout; there is nothing to guard.
-  if (dirs.exitCode !== 0 || gitDir === undefined || gitDir !== commonDir) return false;
+  const [gitDir, commonDir, prefix] = dirs.stdout.split("\n");
+  // Guard only a main checkout's own top level: not a linked worktree, nor a folder
+  // that merely sits inside some enclosing repository.
+  if (dirs.exitCode !== 0 || gitDir === undefined || gitDir !== commonDir || prefix !== "")
+    return false;
 
   const scriptPath = path.join(commonDir, PROJECT_ROOT_GUARD_HOOK);
   const installed = yield* fileSystem
