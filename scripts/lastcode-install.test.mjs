@@ -374,6 +374,23 @@ describe("LastCode userland install command", () => {
     }
   });
 
+  it("restores an app that an interrupted install left aside before preparing", async () => {
+    const fixture = idleFixture();
+    const root = NodePath.dirname(fixture.targetPath);
+    const backup = NodePath.join(root, ".LastCode.previous-99999.app");
+    const staging = NodePath.join(root, ".LastCode.install-99999.app");
+    NodeFS.renameSync(fixture.targetPath, backup);
+    NodeFS.mkdirSync(staging);
+    const prepared = await prepareDmgInstall(fixture.dmgPath, fixture.options);
+    try {
+      expect(NodeFS.readFileSync(NodePath.join(fixture.targetPath, "version"), "utf8")).toBe("old");
+      expect(NodeFS.existsSync(backup)).toBe(false);
+      expect(NodeFS.existsSync(staging)).toBe(false);
+    } finally {
+      cleanupPreparedInstall(prepared, fixture.options);
+    }
+  });
+
   it("rolls back a failed staging rename without launching", async () => {
     const fixture = idleFixture();
     const prepared = await prepareDmgInstall(fixture.dmgPath, fixture.options);
