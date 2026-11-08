@@ -189,6 +189,99 @@ const makeDebuggee = (
 // oxlint-disable-next-line t3code/no-real-time-wait-in-tests -- a zero-delay macrotask boundary, not a wait for time
 const settle = Effect.promise(() => new Promise<void>((resolve) => setImmediate(resolve)));
 
+it.effect.each([
+  { destroyed: "guest", visible: true },
+  { destroyed: "guest", visible: false },
+  { destroyed: "host", visible: true },
+  { destroyed: "host", visible: false },
+])("ignores destroyed $destroyed during queued browser shutdown (visible: $visible)", (input) =>
+  Effect.gen(function* () {
+    const host = yield* DesktopBrowserHost.make.pipe(
+      Effect.provide(DesktopClientSettings.layerTest()),
+    );
+    const main = makePresentationWindow(input.visible);
+    const debuggee = makeDebuggee();
+    let destroyedReads = 0;
+    Object.defineProperty(debuggee.webContents, "hostWebContents", {
+      get: () => {
+        if (debuggee.webContents.isDestroyed()) {
+          destroyedReads++;
+          throw new TypeError("Object has been destroyed");
+        }
+        return debuggee.hostContents;
+      },
+    });
+    Object.defineProperty(debuggee.hostContents, "id", {
+      get: () => {
+        if (debuggee.hostContents.isDestroyed()) {
+          destroyedReads++;
+          throw new TypeError("Object has been destroyed");
+        }
+        return 77;
+      },
+    });
+    host.setMainWindow(main.window);
+    host.setPresentation(
+      { runtimeTabId: "runtime-shutdown", presented: true, rendering: true },
+      77,
+    );
+    const queued: Array<() => void> = [];
+    {
+      using _queue = vi
+        .spyOn(globalThis, "queueMicrotask")
+        .mockImplementation((task) => queued.push(task));
+      host.attach(key, debuggee.tab, "runtime-shutdown");
+    }
+    expect(queued).toHaveLength(1);
+    (input.destroyed === "guest" ? debuggee.webContents : debuggee.hostContents).destroy();
+    expect(() => queued[0]!()).not.toThrow();
+    expect(() => main.close()).not.toThrow();
+    expect(() =>
+      host.setPresentation({ runtimeTabId: "runtime-shutdown", presented: false }, 77),
+    ).not.toThrow();
+    yield* host.handleCommandLine(
+      encodeJson({
+        type: "surface",
+        ...key,
+        requestId: "late-capture",
+        leaseId: "late",
+        action: "acquire",
+      }),
+    );
+    yield* settle;
+    expect(destroyedReads).toBe(0);
+    host.detach(key);
+  }).pipe(Effect.scoped),
+);
+
+it.effect("discards queued browser lifetime synchronization after its scope closes", () =>
+  Effect.gen(function* () {
+    const queued: Array<() => void> = [];
+    let nativeReads = 0;
+    yield* Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const debuggee = makeDebuggee();
+      Object.defineProperty(debuggee.webContents, "hostWebContents", {
+        get: () => {
+          nativeReads++;
+          return debuggee.hostContents;
+        },
+      });
+      using _queue = vi
+        .spyOn(globalThis, "queueMicrotask")
+        .mockImplementation((task) => queued.push(task));
+      host.attach(key, debuggee.tab, "runtime-shutdown");
+    }).pipe(Effect.scoped);
+    expect(queued).toHaveLength(1);
+    const before = nativeReads;
+    queued[0]!();
+    yield* settle;
+    expect(nativeReads).toBe(before);
+  }),
+);
+
 it.effect(
   "shares one 32-page native budget across remote and local renderer tabs, protecting viewers and rendering",
   () =>
@@ -3802,6 +3895,7 @@ it.effect("transfers native remote downloads as bytes before reporting CDP compl
         method === "Target.getTargetInfo" ? { targetInfo: { targetId: "GUEST" } } : {},
     });
     const webContents = Object.assign(new NodeEvents.EventEmitter(), {
+      ...makeRenderingContents(),
       getURL: () => "https://example.com/",
       getTitle: () => "Download",
       getUserAgent: () => "Electron",
