@@ -47,7 +47,7 @@ import {
   shouldContinueDesktopUpdateCheckAnimation,
   shouldShowDesktopUpdateCheckIcon,
 } from "./DesktopUpdateStatusIcon";
-import { SidebarUpdateReleaseNotes } from "./SidebarUpdateReleaseNotes";
+import { SidebarUpdateFreshness, SidebarUpdateReleaseNotes } from "./SidebarUpdateReleaseNotes";
 import { SidebarUpdateCapsule } from "./SidebarUpdateCapsule";
 import { UpdateEverythingDialog } from "./UpdateEverythingDialog";
 import type { UpdateEverythingRun, UpdateRunLocalState } from "./updateEverything.logic";
@@ -178,9 +178,10 @@ export function SidebarLocalBuildFailurePopover({
           {failure.phase} · {failure.percent}% est.
         </div>
       </div>
-      {header || alsoUpdates ? (
+      {header || alsoUpdates || state ? (
         <div className="space-y-0.5 text-xs leading-4 text-muted-foreground">
           {header ? <div>{header.title}</div> : null}
+          {state ? <SidebarUpdateFreshness state={state} /> : null}
           {alsoUpdates ? <div>Also: {alsoUpdates}</div> : null}
         </div>
       ) : null}

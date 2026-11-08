@@ -9,6 +9,7 @@ import {
   getDesktopUpdateInstallConfirmationMessage,
   getDesktopUpdatePopoverHeader,
   getDesktopUpdateReleaseHistoryUrl,
+  getDesktopUpdateReleaseNoteUrl,
   getDesktopUpdateProgressPercent,
   MAX_LOCAL_BUILD_DIAGNOSTIC_LENGTH,
   getDesktopUpdateReleaseUrl,
@@ -180,6 +181,25 @@ describe("desktop update UI helpers", () => {
       );
     },
   );
+
+  it.each([
+    [
+      { tag: "lastcode/checkpoint/v0.1.8-nightly.20261107.4301" },
+      "https://github.com/lastobelus/lastCode/releases/tag/lastcode/checkpoint/v0.1.8-nightly.20261107.4301",
+    ],
+    [
+      { upstream: true as const },
+      "https://github.com/pingdotgg/t3code/releases/tag/v0.1.8-nightly.20261107.4301",
+    ],
+    [undefined, "https://github.com/lastobelus/lastCode/releases/tag/v0.1.8-nightly.20261107.4301"],
+  ])("links a release-note group to the release that published it", (release, url) => {
+    expect(
+      getDesktopUpdateReleaseNoteUrl(
+        { version: "0.1.8-nightly.20261107.4301", ...(release ? { release } : {}) },
+        "lastobelus/lastCode",
+      ),
+    ).toBe(url);
+  });
 
   it("uses build and LastCode language for local nightlies", () => {
     const state: DesktopUpdateState = {

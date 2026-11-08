@@ -46,6 +46,7 @@ import { desktopUpdateChannelOf } from "@t3tools/shared/cliRelease";
 import { compareSemverVersions } from "@t3tools/shared/semver";
 import {
   createInitialDesktopUpdateState,
+  recordSuccessfulDesktopUpdateCheck,
   reduceDesktopUpdateStateOnCheckFailure,
   reduceDesktopUpdateStateOnCheckStart,
   reduceDesktopUpdateStateOnDownloadComplete,
@@ -111,6 +112,7 @@ export function mapLastCodeLocalReleaseNotes(
     groups.push({
       version: inspection.availableVersion,
       heading: "LastCode changes",
+      release: { tag: inspection.checkpointTag },
       items: [],
       totalItems: 0,
       summaries: ["Couldn’t determine changes from this installed build."],
@@ -119,6 +121,7 @@ export function mapLastCodeLocalReleaseNotes(
     groups.push({
       version: inspection.availableVersion,
       heading: "LastCode changes",
+      release: { tag: inspection.checkpointTag },
       items: lastCode.items,
       totalItems: lastCode.items.length + lastCode.omittedItems,
       ...(lastCode.omittedItems > 0
@@ -135,6 +138,7 @@ export function mapLastCodeLocalReleaseNotes(
     (group): DesktopUpdateReleaseNote => ({
       version: group.version,
       heading: group.isTarget ? "Upstream changes" : `Upstream changes in ${group.version}`,
+      release: { upstream: true },
       items: group.items,
       totalItems: group.items.length + group.omittedItems,
       ...(group.omittedItems > 0
@@ -713,6 +717,7 @@ export const make = Effect.gen(function* () {
                   canRetry: false,
                 }
               : { ...state, checkedAt };
+          // Requesting a checkpoint inspects nothing, so the offer's freshness stays as it was.
           return setState(applyRequest(pending)).pipe(Effect.as(result));
         }
         if (inspection.status === "up-to-date") {
@@ -734,7 +739,9 @@ export const make = Effect.gen(function* () {
           state.availableVersion === inspection.availableVersion &&
           (state.errorContext === "install" || !build)
         ) {
-          return setState({ ...state, checkedAt }).pipe(Effect.as(result));
+          return setState(recordSuccessfulDesktopUpdateCheck(state, checkedAt)).pipe(
+            Effect.as(result),
+          );
         }
         const releaseNotes = mapLastCodeLocalReleaseNotes(inspection);
         const available = reduceDesktopUpdateStateOnUpdateAvailable(
@@ -771,7 +778,7 @@ export const make = Effect.gen(function* () {
             state.status === "available" ||
               state.downloadedVersion !== null ||
               (state.status === "error" && state.errorContext === "download" && state.canRetry)
-              ? { ...state, checkedAt }
+              ? { ...state, checkedAt, refreshFailure: error.message }
               : reduceDesktopUpdateStateOnCheckFailure(state, error.message, checkedAt),
           ).pipe(Effect.as({ checked: true, checkpointRequested: false, error: error.message })),
       }),
@@ -1542,9 +1549,21 @@ export const make = Effect.gen(function* () {
             });
             // Its progress events left the updater "downloading", which would block every check.
             if (state.status === "downloading") {
-              yield* setState(
-                reduceDesktopUpdateStateOnNoUpdate(state, yield* currentIsoTimestamp),
-              );
+              // Finishing a download inspected nothing, so the last check's freshness stands.
+              const {
+                checkSucceededAt: _,
+                refreshFailure: __,
+                ...reset
+              } = reduceDesktopUpdateStateOnNoUpdate(state, yield* currentIsoTimestamp);
+              yield* setState({
+                ...reset,
+                ...(state.checkSucceededAt === undefined
+                  ? {}
+                  : { checkSucceededAt: state.checkSucceededAt }),
+                ...(state.refreshFailure === undefined
+                  ? {}
+                  : { refreshFailure: state.refreshFailure }),
+              });
             }
             return;
           }

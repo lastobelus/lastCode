@@ -1,6 +1,7 @@
 import type {
   DesktopLocalBuildFailure,
   DesktopUpdateActionResult,
+  DesktopUpdateReleaseNote,
   DesktopUpdateState,
 } from "@t3tools/contracts";
 
@@ -114,6 +115,22 @@ export function getDesktopUpdateReleaseUrl(
   const normalizedVersion = version?.trim();
   if (!normalizedVersion) return null;
   return `${desktopReleaseRepositoryUrl(repository)}/tag/v${encodeURIComponent(normalizedVersion)}`;
+}
+
+/** Links a group to the release that published it, not to a guess from its version. */
+export function getDesktopUpdateReleaseNoteUrl(
+  releaseNote: Pick<DesktopUpdateReleaseNote, "version" | "release">,
+  repository: string | undefined = import.meta.env.T3CODE_DESKTOP_UPDATE_REPOSITORY,
+): string | null {
+  const release = releaseNote.release;
+  if (release && "upstream" in release) {
+    return getDesktopUpdateReleaseUrl(releaseNote.version, DEFAULT_DESKTOP_RELEASE_REPOSITORY);
+  }
+  if (release?.tag.trim()) {
+    const tag = release.tag.trim().split("/").map(encodeURIComponent).join("/");
+    return `${desktopReleaseRepositoryUrl(repository)}/tag/${tag}`;
+  }
+  return getDesktopUpdateReleaseUrl(releaseNote.version, repository);
 }
 
 export function getDesktopUpdateReleaseHistoryUrl(
