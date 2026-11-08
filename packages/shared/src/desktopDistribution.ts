@@ -15,4 +15,6 @@ export const LASTCODE_DESKTOP_DISTRIBUTION = {
   linuxUrlHandlerDesktopEntryName: "lastcode-url-handler.desktop",
 } as const;
 
-export const LASTCODE_TRIAGE_CLI_COMMAND = `~/${LASTCODE_DESKTOP_DISTRIBUTION.defaultHomeDirName}/bin/t3 triage`;
+export const LASTCODE_TRIAGE_CLI_COMMAND = '"${T3CODE_HOME:-$HOME/.lastcode}/bin/t3" triage';
+export const LASTCODE_TRIAGE_CUSTOM_HOME_HINT =
+  "If you installed LastCode with a custom data folder, set T3CODE_HOME to that folder before running the command.";

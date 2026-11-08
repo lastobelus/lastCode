@@ -8,6 +8,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 
 import packageJson from "../../package.json" with { type: "json" };
@@ -37,6 +38,7 @@ const GIT_ENV = {
 export class TriageService extends Context.Service<
   TriageService,
   {
+    readonly getCliCommand: () => Effect.Effect<Option.Option<string>>;
     readonly prepare: (
       input: ServerPrepareTriageInput,
     ) => Effect.Effect<ServerPrepareTriageResult, ServerPrepareTriageError>;
@@ -83,6 +85,15 @@ const make = Effect.gen(function* () {
   // finished clone moves in with a rename.
   const stagingDir = `${sourceDir}-staging`;
   const serverVersion = packageJson.version;
+
+  const getCliCommand = Effect.fn("TriageService.getCliCommand")(function* () {
+    const launcher = path.join(config.baseDir, "bin", "t3");
+    if (!(yield* fs.exists(launcher).pipe(Effect.orElseSucceed(() => false)))) {
+      return Option.none<string>();
+    }
+    const quote = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
+    return Option.some(`${quote(launcher)} triage --base-dir ${quote(config.baseDir)}`);
+  });
 
   const runGit = (operation: string, cwd: string, args: ReadonlyArray<string>, timeoutMs: number) =>
     git.execute({ operation: `TriageService.${operation}`, cwd, args, timeoutMs, env: GIT_ENV });
@@ -221,7 +232,7 @@ const make = Effect.gen(function* () {
     },
   );
 
-  return TriageService.of({ prepare });
+  return TriageService.of({ prepare, getCliCommand });
 });
 
 export const layer = Layer.effect(TriageService, make);

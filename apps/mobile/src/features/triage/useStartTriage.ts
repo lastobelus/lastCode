@@ -4,13 +4,17 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentId } from "@t3tools/contracts";
-import { LASTCODE_TRIAGE_CLI_COMMAND as TRIAGE_CLI_COMMAND } from "@t3tools/shared/desktopDistribution";
+import {
+  LASTCODE_TRIAGE_CLI_COMMAND as TRIAGE_CLI_COMMAND,
+  LASTCODE_TRIAGE_CUSTOM_HOME_HINT,
+} from "@t3tools/shared/desktopDistribution";
 import { useNavigation } from "@react-navigation/native";
 import * as Clipboard from "expo-clipboard";
 import Constants from "expo-constants";
 
 import * as Dialog from "../../components/ui/Dialog";
 import { authClientMetadata } from "../../lib/authClientMetadata";
+import { appAtomRegistry } from "../../state/atom-registry";
 import { projectEnvironment } from "../../state/projects";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -31,21 +35,26 @@ export function useStartTriage() {
   const prepare = useAtomCommand(serverEnvironment.prepareTriage, { reportFailure: false });
   const openScratch = useAtomCommand(projectEnvironment.openScratch, { reportFailure: false });
 
-  const fail = (message: string) =>
-    Dialog.alert(
+  const fail = (message: string, environmentId: EnvironmentId) => {
+    const command =
+      appAtomRegistry.get(serverEnvironment.configValueAtom(environmentId))?.triageCliCommand ??
+      TRIAGE_CLI_COMMAND;
+    const hint = command === TRIAGE_CLI_COMMAND ? ` ${LASTCODE_TRIAGE_CUSTOM_HOME_HINT}` : "";
+    return Dialog.alert(
       "Could not start triage",
-      `${message} Run ${TRIAGE_CLI_COMMAND} in a terminal on that machine instead.`,
+      `${message} Run ${command} in a terminal on that machine instead.${hint}`,
       [
         {
           text: "Copy command",
           onPress: () =>
-            void Clipboard.setStringAsync(TRIAGE_CLI_COMMAND).catch(() =>
-              Dialog.alert("Could not copy", `Type ${TRIAGE_CLI_COMMAND} instead.`),
+            void Clipboard.setStringAsync(command).catch(() =>
+              Dialog.alert("Could not copy", `Type ${command} instead.`),
             ),
         },
         { text: "OK", style: "cancel" },
       ],
     );
+  };
   const errorMessage = (error: unknown, fallback: string) =>
     error instanceof Error ? error.message : fallback;
 
@@ -71,7 +80,7 @@ export function useStartTriage() {
           squashAtomCommandFailure(scratch),
           (failure) =>
             errorMessage(failure, "This machine cannot start threads without a project."),
-          fail,
+          (message) => fail(message, environmentId),
         );
       }
       return;
@@ -85,7 +94,7 @@ export function useStartTriage() {
         pipe(
           squashAtomCommandFailure(prepared),
           (failure) => errorMessage(failure, "The server could not prepare it."),
-          fail,
+          (message) => fail(message, environmentId),
         );
       }
       return;
@@ -93,7 +102,7 @@ export function useStartTriage() {
     try {
       await waitForComposerDraftsLoaded();
     } catch {
-      fail("Drafts could not be loaded.");
+      fail("Drafts could not be loaded.", environmentId);
       return;
     }
     if (routeChanged()) return;

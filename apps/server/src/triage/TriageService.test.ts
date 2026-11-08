@@ -1,3 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off - Exercises a scoped shell launcher fixture.
+import * as NodeChildProcess from "node:child_process";
+
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { GitCommandError } from "@t3tools/contracts";
@@ -6,6 +9,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import { ChildProcessSpawner } from "effect/process";
 
@@ -49,7 +53,7 @@ it("falls back to lastcode/main when the server's version has no LastCode tag", 
 });
 
 const TestLayer = GitVcsDriver.layer.pipe(
-  Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-triage-service-" })),
+  Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3 triage's service-" })),
   Layer.provideMerge(VcsProcess.layer),
   Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
 );
@@ -99,6 +103,27 @@ const readContext = Effect.gen(function* () {
   const [session] = yield* fs.readDirectory(sessions);
   return yield* fs.readFileString(`${sessions}/${session}/context.md`);
 });
+
+it.live("offers this environment's custom-home launcher only when it exists", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const config = yield* ServerConfig.ServerConfig;
+    const { triage } = yield* makeTriage();
+    assert.isTrue(Option.isNone(yield* triage.getCliCommand()));
+
+    yield* fs.makeDirectory(`${config.baseDir}/bin`, { recursive: true });
+    yield* fs.writeFileString(`${config.baseDir}/bin/t3`, '#!/bin/sh\nprintf "%s\\n" "$@"\n', {
+      mode: 0o755,
+    });
+    const command = Option.getOrThrow(yield* triage.getCliCommand());
+    const result = NodeChildProcess.spawnSync("/bin/sh", ["-c", command], {
+      env: { ...process.env, T3CODE_HOME: "/home/user/a-different-home" },
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0);
+    assert.deepEqual(result.stdout.trimEnd().split("\n"), ["triage", "--base-dir", config.baseDir]);
+  }).pipe(Effect.provide(TestLayer)),
+);
 
 it.effect("sessions started during a clone share it, and a release tag is looked up once", () =>
   Effect.gen(function* () {

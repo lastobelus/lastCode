@@ -1,5 +1,8 @@
 import type { DesktopBridge, DesktopUpdateState } from "@t3tools/contracts";
-import { LASTCODE_TRIAGE_CLI_COMMAND as TRIAGE_CLI_COMMAND } from "@t3tools/shared/desktopDistribution";
+import {
+  LASTCODE_TRIAGE_CLI_COMMAND as TRIAGE_CLI_COMMAND,
+  LASTCODE_TRIAGE_CUSTOM_HOME_HINT,
+} from "@t3tools/shared/desktopDistribution";
 
 const DOWNLOAD_URL = "https://t3.codes/download";
 const ISSUE_URL = "https://github.com/lastobelus/lastCode/issues/new";
@@ -294,6 +297,7 @@ export function showBootError(error: unknown) {
   if (bridge) mountUpdateButton(bridge, update, updateNote, announce);
 
   const command = element("code", { textContent: TRIAGE_CLI_COMMAND });
+  const customHomeHint = element("p", { textContent: LASTCODE_TRIAGE_CUSTOM_HOME_HINT });
   const copyCommand = element("button", {
     className: "boot-error-icon",
     type: "button",
@@ -318,7 +322,10 @@ export function showBootError(error: unknown) {
       },
     ),
   );
-  void resolveTriageCommand(bridge).then((value) => (command.textContent = value));
+  void resolveTriageCommand(bridge).then((value) => {
+    command.textContent = value;
+    customHomeHint.hidden = value !== TRIAGE_CLI_COMMAND;
+  });
 
   let report = "(no error message)";
   try {
@@ -370,6 +377,7 @@ export function showBootError(error: unknown) {
           "Run this on the computer that runs T3 Code. Your agent can check the local logs and help you file a bug report.",
       }),
       element("div", { id: "boot-error-command" }, [command, copyCommand]),
+      customHomeHint,
     ]),
     element("div", {}, [
       details,
