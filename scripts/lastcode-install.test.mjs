@@ -815,10 +815,17 @@ describe("LastCode userland install command", () => {
     },
     { name: "rollback left the original aside", failure: "replace-aside", relaunched: true },
     { name: "rollback left a partial new bundle", failure: "replace-partial", relaunched: false },
+    {
+      name: "a first install left a partial bundle",
+      failure: "replace-fresh-partial",
+      relaunched: false,
+    },
   ])(
     "leaves an app running when a committed install fails because $name",
     async ({ failure, relaunched }) => {
-      const targetPath = temporaryDirectory();
+      const root = temporaryDirectory();
+      const targetPath = NodePath.join(root, "LastCode.app");
+      if (failure !== "replace-fresh-partial") NodeFS.mkdirSync(targetPath);
       const backup = `${targetPath}.previous`;
       const launches = [];
       let running = false;
@@ -833,6 +840,7 @@ describe("LastCode userland install command", () => {
             replacePreparedApp: async (prepared) => {
               if (failure === "replace-relaunched") running = true;
               if (failure === "replace-aside") NodeFS.renameSync(targetPath, backup);
+              if (failure === "replace-fresh-partial") NodeFS.mkdirSync(targetPath);
               if (failure === "replace-aside" || failure === "replace-partial") {
                 prepared.oldAppMoved = true;
               }

@@ -823,6 +823,8 @@ export async function finishCommittedInstall(prepared, parent, options = {}) {
   const replace = options.replacePreparedApp ?? replacePreparedApp;
   const isRunning = options.isRunning ?? appIsRunning;
   const launch = options.launchApp ?? ((appPath) => launchApp(appPath));
+  // Only an original bundle that was already at the target is safe to relaunch.
+  const originalAtTarget = NodeFS.existsSync(prepared.targetPath);
   try {
     console.log(`Waiting for LastCode process ${parent.pid} to quit…`);
     await waitForParent(parent.pid, parent.identity, { targetPath: prepared.targetPath });
@@ -843,7 +845,12 @@ export async function finishCommittedInstall(prepared, parent, options = {}) {
         console.error(`Warning: could not restore the previous LastCode: ${restoreError.message}`);
       }
     }
-    if (!prepared.oldAppMoved && NodeFS.existsSync(prepared.targetPath) && !isRunning()) {
+    if (
+      originalAtTarget &&
+      !prepared.oldAppMoved &&
+      NodeFS.existsSync(prepared.targetPath) &&
+      !isRunning()
+    ) {
       try {
         await launch(prepared.targetPath);
       } catch (relaunchError) {
