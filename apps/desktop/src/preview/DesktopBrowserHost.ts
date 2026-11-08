@@ -89,6 +89,12 @@ export interface DesktopBrowserTabDebugger {
 const keyOf = ({ threadId, tabId, desktopHostId = "local" }: DesktopBrowserTabKey) =>
   JSON.stringify([desktopHostId, threadId, tabId]);
 
+const liveHostWebContents = (guest: Electron.WebContents) => {
+  if (guest.isDestroyed()) return undefined;
+  const host = guest.hostWebContents;
+  return host && !host.isDestroyed() ? host : undefined;
+};
+
 interface AttachedTab {
   readonly key: DesktopBrowserTabKey;
   readonly debuggee: DesktopBrowserTabDebugger;
@@ -291,6 +297,7 @@ export const make = Effect.gen(function* () {
     );
   };
   const tabs = new Map<string, AttachedTab>();
+  let disposed = false;
   /** Threads whose agent turn runs, by the server's account. */
   const agentTurns = new Map<string, Set<string>>();
   // Visibility can arrive before attachment and must survive debugger detachment.
@@ -432,7 +439,7 @@ export const make = Effect.gen(function* () {
   const updatePresentation = (tab: AttachedTab) => {
     const presented = tab.popup
       ? windowVisible(tab.popup.window)
-      : nativePresented(tab.runtimeTabId, tab.debuggee.webContents.hostWebContents?.id);
+      : nativePresented(tab.runtimeTabId, liveHostWebContents(tab.debuggee.webContents)?.id);
     if (tab.presented === presented) {
       syncNativeLifetime();
       return;
@@ -445,7 +452,7 @@ export const make = Effect.gen(function* () {
     syncNativeLifetime();
   };
   const rendererRenderingActive = (tab: AttachedTab) =>
-    renderingSlots.get(tab.runtimeTabId) === tab.debuggee.webContents.hostWebContents?.id &&
+    renderingSlots.get(tab.runtimeTabId) === liveHostWebContents(tab.debuggee.webContents)?.id &&
     renderingSlots.has(tab.runtimeTabId);
   const renderingActive = (tab: AttachedTab) =>
     tab.presented ||
@@ -454,6 +461,7 @@ export const make = Effect.gen(function* () {
     rendererRenderingActive(tab) ||
     (tab.popup?.creation !== undefined && tab.popup.creation.stage !== "published");
   const syncNativeLifetime = () => {
+    if (disposed) return;
     const pendingIds = [...pendingSlots.values()].map(keyOf);
     const demanded = new Set<string>(
       [...pendingSlots]
@@ -463,6 +471,7 @@ export const make = Effect.gen(function* () {
         .map(([, key]) => keyOf(key)),
     );
     for (const [id, tab] of tabs) {
+      if (tab.debuggee.webContents.isDestroyed()) continue;
       const active = renderingActive(tab);
       // Server surface leases already protect their process through the server's activity owner.
       const rendererActive = rendererRenderingActive(tab);
@@ -480,9 +489,9 @@ export const make = Effect.gen(function* () {
       }
       if (active) demanded.add(id);
       const update = tab.lifecycle.then(async () => {
+        if (disposed || tabs.get(id) !== tab || tab.debuggee.webContents.isDestroyed()) return;
         const frozen = !renderingActive(tab);
-        if (tabs.get(id) !== tab || tab.frozen === frozen || tab.debuggee.webContents.isDestroyed())
-          return;
+        if (tab.frozen === frozen) return;
         await tab.debuggee.debugger.sendCommand("Page.setWebLifecycleState", {
           state: frozen ? "frozen" : "active",
         });
@@ -493,6 +502,7 @@ export const make = Effect.gen(function* () {
     for (const popup of unboundPopups.values()) {
       popup.lifecycle = popup.lifecycle
         .then(async () => {
+          if (disposed) return;
           const frozen = !windowVisible(popup.window);
           if (popup.boundKey || popup.contents.isDestroyed() || popup.frozen === frozen) return;
           await popup.contents.debugger.sendCommand("Page.setWebLifecycleState", {
@@ -521,7 +531,7 @@ export const make = Effect.gen(function* () {
   };
   let syncQueued = false;
   const scheduleNativeLifetime = () => {
-    if (syncQueued) return;
+    if (disposed || syncQueued) return;
     syncQueued = true;
     queueMicrotask(() => {
       syncQueued = false;
@@ -544,6 +554,7 @@ export const make = Effect.gen(function* () {
   };
   yield* Effect.addFinalizer(() =>
     Effect.sync(() => {
+      disposed = true;
       releaseMainWindow?.();
       lifetime.dispose();
       closeAutomationLifetime(automationLifetime);
@@ -595,7 +606,7 @@ export const make = Effect.gen(function* () {
   };
   const acquireRendering = (tab: AttachedTab) => {
     const guest = tab.debuggee.webContents;
-    const host = guest.hostWebContents;
+    const host = liveHostWebContents(guest);
     if (guest.isDestroyed() || (!tab.popup && (!host || host.isDestroyed()))) return null;
     const releases: Array<() => void> = [];
     try {
@@ -628,7 +639,7 @@ export const make = Effect.gen(function* () {
   >();
   const sendSurface = (tab: AttachedTab, request: DesktopBrowserSurfaceRequest) => {
     if (tab.popup) return false;
-    const host = tab.debuggee.webContents.hostWebContents;
+    const host = liveHostWebContents(tab.debuggee.webContents);
     if (!host || host.isDestroyed()) return false;
     try {
       host.send(DESKTOP_BROWSER_SURFACE_REQUEST_CHANNEL, request);
@@ -1099,7 +1110,7 @@ export const make = Effect.gen(function* () {
       waitingScreenshots: [],
       presented: popup
         ? windowVisible(popup.window)
-        : nativePresented(runtimeTabId, debuggee.webContents.hostWebContents?.id),
+        : nativePresented(runtimeTabId, liveHostWebContents(debuggee.webContents)?.id),
       rendering: false,
       lifecycle: popup?.lifecycle ?? Promise.resolve(),
       frozen: popup?.frozen,
@@ -1995,7 +2006,7 @@ export const make = Effect.gen(function* () {
                 tab,
                 request,
                 serverRequestId: command.requestId,
-                senderId: tab.debuggee.webContents.hostWebContents?.id ?? -1,
+                senderId: liveHostWebContents(tab.debuggee.webContents)?.id ?? -1,
                 timer,
               });
               if (!sendSurface(tab, request))
@@ -2155,7 +2166,8 @@ export const make = Effect.gen(function* () {
     registerPopup,
     setPresentation: (input, senderId) => {
       const tab = [...tabs.values()].find((tab) => tab.runtimeTabId === input.runtimeTabId);
-      if (tab && (tab.popup || tab.debuggee.webContents.hostWebContents?.id !== senderId)) return;
+      if (tab && (tab.popup || liveHostWebContents(tab.debuggee.webContents)?.id !== senderId))
+        return;
       // Registration and relay attachment are asynchronous. Retain the slot
       // state so an attach cannot lose a presentation reported before it.
       if (input.presented) presentedSlots.set(input.runtimeTabId, senderId);
