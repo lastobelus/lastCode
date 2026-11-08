@@ -40,6 +40,7 @@ import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManag
 import * as ThreadLaunch from "./orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadRecovery from "./orchestration-v2/ThreadRecoveryService.ts";
 import * as ThreadManagement from "./orchestration-v2/ThreadManagementService.ts";
+import * as AutoPullStatus from "./project/AutoPullStatus.ts";
 import * as ProjectService from "./project/ProjectService.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
@@ -204,36 +205,24 @@ export const autoPullProjects = Effect.fn("autoPullProjects")(function* (
     ),
   ];
 
+  const autoPullStatus = yield* AutoPullStatus.AutoPullStatus;
   yield* Effect.forEach(
     workspaceRoots,
     (cwd) =>
       Effect.gen(function* () {
         const status = yield* git.statusDetails(cwd);
-        if (
-          !status.isRepo ||
-          !status.isDefaultBranch ||
-          !status.hasUpstream ||
-          status.hasWorkingTreeChanges ||
-          status.aheadCount > 0
-        ) {
-          yield* Effect.logDebug("Skipped automatic project pull", {
-            cwd,
-            reason: !status.isRepo
-              ? "not-a-repository"
-              : !status.isDefaultBranch
-                ? "not-on-default-branch"
-                : !status.hasUpstream
-                  ? "no-upstream"
-                  : status.hasWorkingTreeChanges
-                    ? "working-tree-changes"
-                    : "local-commits",
-          });
-          return;
+        const skipReason = AutoPullStatus.autoPullSkipReason(status);
+        if (skipReason !== null) {
+          yield* Effect.logInfo("Skipped automatic project pull", { cwd, reason: skipReason });
+          return yield* autoPullStatus.record(cwd, { result: "skipped", reason: skipReason });
         }
 
-        if (status.behindCount <= 0) return;
+        if (status.behindCount <= 0) {
+          return yield* autoPullStatus.record(cwd, { result: "up-to-date" });
+        }
 
         const result = yield* git.pullCurrentBranch(cwd);
+        yield* autoPullStatus.record(cwd, { result: "pulled" });
         yield* Effect.logDebug("Automatic project pull completed", {
           cwd,
           status: result.status,
@@ -244,7 +233,14 @@ export const autoPullProjects = Effect.fn("autoPullProjects")(function* (
           Effect.logWarning("Automatic project pull failed", {
             cwd,
             cause,
-          }),
+          }).pipe(
+            Effect.andThen(
+              autoPullStatus.record(cwd, {
+                result: "failed",
+                reason: AutoPullStatus.autoPullFailureReason(cause),
+              }),
+            ),
+          ),
         ),
       ),
     { concurrency: 4, discard: true },

@@ -154,6 +154,15 @@ export const ReceivedProjectIcon = ForwardCompatibleUnion(projectIconMembers, "k
   ),
 );
 
+export const ProjectAutoPullStatus = Schema.Struct({
+  lastAttemptAt: IsoDateTime,
+  lastSuccessAt: Schema.NullOr(IsoDateTime),
+  result: Schema.Literals(["pulled", "up-to-date", "skipped", "failed"]),
+  // Why the last attempt left the checkout as it was; null after a pull or an up-to-date check.
+  reason: Schema.NullOr(TrimmedNonEmptyString),
+});
+export type ProjectAutoPullStatus = typeof ProjectAutoPullStatus.Type;
+
 export const Project = Schema.Struct({
   id: ProjectId,
   title: TrimmedNonEmptyString,
@@ -165,6 +174,8 @@ export const Project = Schema.Struct({
   defaultThreadEnvMode: Schema.optional(Schema.NullOr(ThreadEnvMode)),
   // Opt-in because background sync performs network I/O and may move the checkout.
   autoPull: Schema.optional(Schema.Boolean),
+  // Kept in memory since server start; null until auto-pull checks this checkout.
+  autoPullStatus: Schema.optional(Schema.NullOr(ProjectAutoPullStatus)),
   scripts: Schema.Array(ProjectScript),
   pinnedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   archivedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
@@ -206,6 +217,9 @@ export const ProjectUpdatePayload = Schema.Struct({
   ),
 });
 export type ProjectUpdatePayload = typeof ProjectUpdatePayload.Type;
+
+export const ProjectAutoPullStatusInput = Schema.Struct({ projectId: ProjectId });
+export type ProjectAutoPullStatusInput = typeof ProjectAutoPullStatusInput.Type;
 
 export const ProjectMutation = Schema.Union([
   Schema.Struct({

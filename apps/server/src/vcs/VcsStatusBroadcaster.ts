@@ -30,6 +30,7 @@ import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import * as AutoPullStatus from "../project/AutoPullStatus.ts";
 import * as ServerSettings from "../serverSettings.ts";
 
 const VCS_STATUS_REFRESH_FAILURE_BASE_DELAY = Duration.seconds(30);
@@ -242,6 +243,7 @@ const normalizeCwd = (cwd: string) =>
 export const make = Effect.gen(function* () {
   const automaticFetchInterval = yield* VcsAutomaticFetchInterval;
   const autoPullPolicy = yield* VcsAutoPullPolicy;
+  const autoPullStatus = yield* AutoPullStatus.AutoPullStatus;
   const workflow = yield* GitWorkflowService.GitWorkflowService;
   const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;
   const fs = yield* FileSystem.FileSystem;
@@ -435,32 +437,47 @@ export const make = Effect.gen(function* () {
   ) {
     const remote = remoteRead?.value ?? null;
     let pullAttempted = false;
+    const enabledCwds = yield* Effect.filter(policyCwds, autoPullPolicy.isEnabled, {
+      concurrency: "unbounded",
+    });
+    const record = (outcome: AutoPullStatus.AutoPullOutcome) =>
+      Effect.forEach(enabledCwds, (policyCwd) => autoPullStatus.record(policyCwd, outcome), {
+        discard: true,
+      });
     return yield* Effect.gen(function* () {
-      const autoPullEnabled = (yield* Effect.forEach(policyCwds, autoPullPolicy.isEnabled, {
-        concurrency: "unbounded",
-      })).some(Boolean);
-      if (
-        remote === null ||
-        !remote.hasUpstream ||
-        remote.aheadCount > 0 ||
-        remote.behindCount <= 0 ||
-        !autoPullEnabled
-      ) {
+      if (remote === null || enabledCwds.length === 0) return null;
+
+      const canPull = remote.hasUpstream && remote.aheadCount === 0 && remote.behindCount > 0;
+      // Only a pull needs a fresh read; a skip reason can come from the cached status.
+      if (canPull) yield* workflow.invalidateLocalStatus(cwd);
+      const local = yield* workflow.localStatus({ cwd });
+      if (local.refName !== remoteRead?.branch) return null;
+      const skipReason = AutoPullStatus.autoPullSkipReason({
+        isRepo: local.isRepo,
+        isDefaultBranch: local.isDefaultRef,
+        branch: local.refName,
+        hasUpstream: remote.hasUpstream,
+        hasWorkingTreeChanges: local.hasWorkingTreeChanges,
+        aheadCount: remote.aheadCount,
+      });
+      if (skipReason !== null) {
+        yield* record({ result: "skipped", reason: skipReason });
+        return null;
+      }
+      if (!canPull) {
+        yield* record({ result: "up-to-date" });
         return null;
       }
 
-      yield* workflow.invalidateLocalStatus(cwd);
-      const local = yield* workflow.localStatus({ cwd });
-      if (
-        !local.isRepo ||
-        !local.isDefaultRef ||
-        local.hasWorkingTreeChanges ||
-        local.refName !== remoteRead?.branch
-      )
-        return null;
-
       pullAttempted = true;
-      yield* workflow.pullCurrentBranch(cwd);
+      yield* workflow
+        .pullCurrentBranch(cwd)
+        .pipe(
+          Effect.tapError((error) =>
+            record({ result: "failed", reason: AutoPullStatus.autoPullFailureReason(error) }),
+          ),
+        );
+      yield* record({ result: "pulled" });
       yield* workflow.invalidateStatus(cwd);
       yield* refreshLocalStatusCore(cwd);
       const refreshedRemote = yield* readRemoteStatus(cwd, { refreshUpstream: false });
