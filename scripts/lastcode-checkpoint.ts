@@ -2415,7 +2415,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       writeRecoverySelection(selectionPath, selection);
     }
     console.log(
-      `[lastcode:checkpoint] ${options.dryRun ? "Would select" : "Selected"} repaired ${selection.nightlyTag} at ${selection.head}. Request a service run, then use Wait for Checkpoint.`,
+      `[lastcode:checkpoint] ${options.dryRun ? "Would select" : "Selected"} repaired ${selection.nightlyTag} at ${selection.head}. Before requesting a service run, confirm this head's tree matches the gated head's tree; a selection that only records the replay plan needs no run yet.`,
     );
     return;
   }
