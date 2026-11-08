@@ -11,6 +11,7 @@ import {
   isCheckpointMessageRewrite,
   normalizeCheckpointCommits,
 } from "./lastcode-quiet-references.ts";
+import { writeCarryConflictDossier } from "./lastcode-carry-dossier.ts";
 
 export const CARRY_REPLAY_GROUPS = [
   "upstream-bugfixes",
@@ -1150,12 +1151,22 @@ export function replayCarrySetOnto(input: ReplayCarrySetInput): CarryReplayResul
     sourceBase,
     onto,
   });
-  runInteractiveReplay({
-    worktree: input.worktree,
-    upstream: sourceBase,
-    onto,
-    todo: groups.map(({ commit, group }) => `pick ${commit} carry(${group})`),
-  });
+  try {
+    runInteractiveReplay({
+      worktree: input.worktree,
+      upstream: sourceBase,
+      onto,
+      todo: groups.map(({ commit, group }) => `pick ${commit} carry(${group})`),
+    });
+  } catch (error) {
+    try {
+      const conflictDossierPath = writeCarryConflictDossier({ ...input, sourceBase, compactHead, onto }, groups);
+      if (conflictDossierPath && error instanceof Error) Object.assign(error, { conflictDossierPath });
+    } catch (dossierError) {
+      console.warn(`[lastcode:checkpoint] Could not write conflict dossier: ${dossierError instanceof Error ? dossierError.message : String(dossierError)}`);
+    }
+    throw error;
+  }
   return completeCarryReplay(input.worktree);
 }
 

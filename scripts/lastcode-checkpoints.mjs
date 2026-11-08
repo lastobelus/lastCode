@@ -6,6 +6,8 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 
+import { upstreamCommitsTouchingFiles } from "./lib/lastcode-upstream-conflicts.ts";
+
 const DEFAULT_COUNT = 8;
 const CHECKPOINT_PREFIX = "lastcode/checkpoint/";
 const REVISION_PREFIX = "lastcode/revision/";
@@ -598,22 +600,16 @@ function recoveryProblemLines(repoRoot, worktree, failure) {
     allowFailure: true,
   });
   const range = selectRebaseRange(failure?.error, retainedRebaseRange(worktree));
-  const overlappingUpstreamCommits =
-    range && conflictPaths.length > 0
-      ? splitLines(
-          git(
-            repoRoot,
-            [
-              "log",
-              "--format=%h %s",
-              `${range.previousUpstreamTag}..${range.upstreamTag}`,
-              "--",
-              ...conflictPaths,
-            ],
-            { allowFailure: true },
-          ),
-        )
-      : [];
+  let overlappingUpstreamCommits = [];
+  if (range) {
+    try {
+      overlappingUpstreamCommits = upstreamCommitsTouchingFiles(
+        repoRoot, range.previousUpstreamTag, range.upstreamTag, conflictPaths,
+      ).map(({ abbreviatedCommit, subject }) => `${abbreviatedCommit} ${subject}`);
+    } catch {
+      // Diagnostics remain optional when the retained range is unavailable.
+    }
+  }
   return formatRecoveryProblemLines({
     stoppedCommit,
     conflictPaths,

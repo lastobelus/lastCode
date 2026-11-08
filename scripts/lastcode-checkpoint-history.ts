@@ -18,6 +18,7 @@ export interface CheckpointRunRecord {
   readonly localTagRetained?: boolean;
   readonly recoveryBranch?: string;
   readonly recoveryFingerprint?: string;
+  readonly conflictDossierPath?: string;
   readonly replayMode?: "carry" | "historical";
   readonly rollbackReason?: string;
   readonly sourceObjectRef?: string;
@@ -78,6 +79,7 @@ function isCheckpointRunRecord(record: unknown): record is CheckpointRunRecord {
     isOptionalBoolean(candidate.localTagRetained) &&
     isOptionalString(candidate.recoveryBranch) &&
     isOptionalString(candidate.recoveryFingerprint) &&
+    isOptionalString(candidate.conflictDossierPath) &&
     (candidate.replayMode === undefined ||
       candidate.replayMode === "carry" ||
       candidate.replayMode === "historical") &&
@@ -104,6 +106,7 @@ export function checkpointFailureRecord(
   },
   finishedAtMs = Date.now(),
 ): CheckpointRunRecord {
+  const conflictDossierPath = input.error instanceof Error && "conflictDossierPath" in input.error && typeof input.error.conflictDossierPath === "string" ? input.error.conflictDossierPath : undefined;
   return {
     schemaVersion: 1,
     status: "failed",
@@ -117,6 +120,7 @@ export function checkpointFailureRecord(
     ...(input.localTagRetained ? { localTagRetained: true } : {}),
     ...(input.recoveryBranch ? { recoveryBranch: input.recoveryBranch } : {}),
     ...(input.recoveryFingerprint ? { recoveryFingerprint: input.recoveryFingerprint } : {}),
+    ...(conflictDossierPath ? { conflictDossierPath } : {}),
     ...(input.replayMode ? { replayMode: input.replayMode } : {}),
     ...(input.rollbackReason ? { rollbackReason: input.rollbackReason } : {}),
     ...(input.sourceObjectRef ? { sourceObjectRef: input.sourceObjectRef } : {}),
