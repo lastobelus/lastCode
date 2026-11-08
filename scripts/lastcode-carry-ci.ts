@@ -22,6 +22,7 @@ import {
 } from "./lastcode-carry-delivery.ts";
 import {
   CARRY_REPLAY_GROUPS,
+  CarryReplayConflictError,
   compileCarrySetSameBase,
   parseCarryTrailers,
   readCarryGroupChain,
@@ -295,9 +296,12 @@ export function validateCarryPullRequest(
       compilation: compilePullRequest(repoRoot, source, manifest),
     };
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
+    const detail =
+      error instanceof CarryReplayConflictError
+        ? `${error.diagnosis}\n${error.advice}\nPush the corrected head and rerun carry validation before merging.\nGit output:\n${error.gitOutput}`
+        : `${error instanceof Error ? error.message : String(error)} Reconcile the source contributions with their owning groups and rerun carry validation before merging.`;
     throw new Error(
-      `PR #${pullRequest.number} same-base carry compilation failed for ${base}..${head}: ${detail} Reconcile the source contributions with their owning groups and rerun carry validation before merging.`,
+      `PR #${pullRequest.number} same-base carry compilation failed for ${base}..${head}: ${detail}`,
       { cause: error },
     );
   }

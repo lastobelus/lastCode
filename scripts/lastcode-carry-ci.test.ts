@@ -7,7 +7,7 @@ import * as NodePath from "node:path";
 
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { compileCarrySetSameBase } from "./lastcode-carry-replay.ts";
+import { CarryReplayConflictError, compileCarrySetSameBase } from "./lastcode-carry-replay.ts";
 import { carrySquashBody, validateCarrySourceRange } from "./lastcode-carry-delivery.ts";
 import { validateCarryPullRequest } from "./lastcode-carry-ci.ts";
 
@@ -317,6 +317,145 @@ describe("LastCode carry CI", () => {
       expect(snapshot(repo)).toEqual(before);
       expect(NodeFS.readFileSync(NodePath.join(repo, "untracked.txt"), "utf8")).toBe(
         "keep this work\n",
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("names the later carry groups whose changes a regrouped commit conflicts with", () => {
+    const { repo, cleanup } = fixture();
+    try {
+      const { base } = compactFixture(repo);
+      write(repo, "shared.txt", "action behavior\nsidebar\n");
+      const sidebar = commit(repo, "show sidebar state", "Carry-Group: legacy-sidebar");
+      write(repo, "shared.txt", "action behavior\nsidebar\ntooling\n");
+      const head = commit(repo, "extend sidebar tooling", "Carry-Group: tooling");
+      let failure: unknown;
+      try {
+        validateCarryPullRequest(repo, { base, head, number: 219 });
+      } catch (error) {
+        failure = error;
+      }
+      const message = failure instanceof Error ? failure.message : "";
+      // Checkpoint paths see only the shared error, whose sources are merged and cannot be retagged.
+      const cause = failure instanceof Error ? failure.cause : undefined;
+      expect(cause).toBeInstanceOf(CarryReplayConflictError);
+      expect((cause as CarryReplayConflictError).message).not.toContain("Likely fix");
+      expect((cause as CarryReplayConflictError).advice).toContain("Likely fix");
+      const short = (commit: string) => commit.slice(0, 12);
+      expect(message).toContain(
+        [
+          `Carry replay conflicted in shared.txt while replaying ${short(head)} "extend sidebar tooling" (Carry-Group: tooling).`,
+          "These commits in later carry groups changed those lines earlier in history, so the replay has not applied them yet:",
+          `- ${short(sidebar)} "show sidebar state" (Carry-Group: legacy-sidebar): shared.txt`,
+          `Likely fix: retag ${short(head)}'s Carry-Group to legacy-sidebar so it replays after them, or split its changes to shared.txt into a separate legacy-sidebar commit.`,
+          "Push the corrected head and rerun carry validation before merging.",
+          "Git output:",
+        ].join("\n"),
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("recommends the group that changed the conflicting lines and names later commits to move", () => {
+    const { repo, cleanup } = fixture();
+    try {
+      const { base } = compactFixture(repo);
+      const lines = Array.from({ length: 10 }, (_, line) => `line ${line + 1}`);
+      const save = (subject: string, group: string) => {
+        write(repo, "h.txt", `${lines.join("\n")}\n`);
+        return commit(repo, subject, `Carry-Group: ${group}`);
+      };
+      save("add h", "tooling");
+      lines[9] = "incubator line 10";
+      save("incubate h", "incubator");
+      lines[7] = "sidebar line 8";
+      const sidebar = save("sidebar h", "legacy-sidebar");
+      lines.splice(8, 0, "inserted after line 8");
+      const stopped = save("insert h", "build-ci");
+      lines[10] = "build line 10";
+      const follower = save("build h again", "build-ci");
+      lines[4] = "tooling line 5";
+      // Tooling already replays before build-ci, so this commit needs no move.
+      const head = save("tool h", "tooling");
+      const short = (commit: string) => commit.slice(0, 12);
+      expect(() => validateCarryPullRequest(repo, { base, head, number: 221 })).toThrow(
+        [
+          `Carry replay conflicted in h.txt while replaying ${short(stopped)} "insert h" (Carry-Group: build-ci).`,
+          "These commits in later carry groups changed those lines earlier in history, so the replay has not applied them yet:",
+          `- ${short(sidebar)} "sidebar h" (Carry-Group: legacy-sidebar): h.txt`,
+          `Likely fix: retag ${short(stopped)}'s Carry-Group to legacy-sidebar so it replays after them, or split its changes to h.txt into a separate legacy-sidebar commit.`,
+          "These later commits also edit those files and would still replay before legacy-sidebar; move them the same way:",
+          `- ${short(follower)} "build h again" (Carry-Group: build-ci)`,
+          "Push the corrected head",
+        ].join("\n"),
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("attributes lines in a merged squash to the source commit that changed them", () => {
+    const { repo, cleanup } = fixture();
+    try {
+      const { base: compact } = compactFixture(repo);
+      const lines = Array.from({ length: 10 }, (_, line) => `line ${line + 1}`);
+      const save = (subject: string, group: string) => {
+        write(repo, "h.txt", `${lines.join("\n")}\n`);
+        return commit(repo, subject, `Carry-Group: ${group}`);
+      };
+      save("add h", "tooling");
+      lines[1] = "build line 2";
+      const build = save("build h", "build-ci");
+      lines[8] = "incubator line 9";
+      const prior = save("incubate h", "incubator");
+      const retained = validateCarrySourceRange(repo, 222, compact, prior);
+      git(repo, ["update-ref", retained.ref, prior]);
+      const base = git(repo, [
+        "commit-tree",
+        `${prior}^{tree}`,
+        "-p",
+        compact,
+        "-m",
+        carrySquashBody("prior squash", retained),
+      ]);
+      git(repo, ["checkout", "--quiet", "--detach", base]);
+      lines[1] = "tooling line 2";
+      const head = save("tool h", "tooling");
+      const short = (commit: string) => commit.slice(0, 12);
+      expect(() => validateCarryPullRequest(repo, { base, head, number: 223 })).toThrow(
+        [
+          "These commits in later carry groups changed those lines earlier in history, so the replay has not applied them yet:",
+          `- ${short(build)} "build h" (Carry-Group: build-ci): h.txt`,
+          `Likely fix: retag ${short(head)}'s Carry-Group to build-ci so it replays after them`,
+        ].join("\n"),
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("labels a conflicting deletion partition with its source commit's own group", () => {
+    const { repo, cleanup } = fixture();
+    try {
+      const { base } = compactFixture(repo);
+      write(repo, "f.txt", "one\n");
+      commit(repo, "add f", "Carry-Group: legacy-sidebar");
+      write(repo, "f.txt", "two\n");
+      const edit = commit(repo, "edit f", "Carry-Group: incubator");
+      git(repo, ["rm", "--quiet", "f.txt"]);
+      write(repo, "g.txt", "g\n");
+      const head = commit(repo, "drop f and add g", "Carry-Group: tooling");
+      const short = (commit: string) => commit.slice(0, 12);
+      expect(() => validateCarryPullRequest(repo, { base, head, number: 220 })).toThrow(
+        [
+          `Carry replay conflicted in f.txt while replaying ${short(head)} "drop f and add g" (Carry-Group: tooling; deletion partition replayed with legacy-sidebar).`,
+          "These commits in later carry groups changed those lines earlier in history, so the replay has not applied them yet:",
+          `- ${short(edit)} "edit f" (Carry-Group: incubator): f.txt`,
+          `Likely fix: retag ${short(head)}'s Carry-Group to incubator so it replays after them, or split its changes to f.txt into a separate incubator commit.`,
+        ].join("\n"),
       );
     } finally {
       cleanup();
