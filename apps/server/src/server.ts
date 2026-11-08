@@ -498,7 +498,10 @@ const layerVcs = Layer.empty.pipe(
       // finalization), so the policy cannot read the store from the runtime's
       // output.
       Layer.provide(
-        VcsStatusBroadcaster.layerAutoPullPolicy.pipe(Layer.provide(ProjectStore.layer)),
+        VcsStatusBroadcaster.layerAutoPullPolicy.pipe(
+          Layer.provide(ProjectStore.layer),
+          Layer.provide(GitVcsDriver.layer),
+        ),
       ),
     ),
   ),

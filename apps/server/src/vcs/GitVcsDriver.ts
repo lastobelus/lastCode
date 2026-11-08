@@ -299,6 +299,8 @@ export interface GitSetBranchUpstreamInput {
   remoteBranch: string;
 }
 
+export type GitStatusFetchState = "fetched" | "failed" | "pending";
+
 export interface GitRemoteStatusOptions {
   readonly refreshUpstream?: boolean;
 }
@@ -322,6 +324,8 @@ export class GitVcsDriver extends Context.Service<
       cwd: string,
       options?: GitRemoteStatusOptions,
     ) => Effect.Effect<GitRemoteStatusDetails, GitCommandError>;
+    /** Whether the background fetch behind this cwd's last status read reached its remote. */
+    readonly statusFetchState: (cwd: string) => Effect.Effect<GitStatusFetchState>;
     readonly prepareCommitContext: (
       cwd: string,
       filePaths?: readonly string[],

@@ -21,6 +21,7 @@ import * as Fiber from "effect/Fiber";
 import * as Ref from "effect/Ref";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 
@@ -42,6 +43,7 @@ import * as ThreadManagement from "./orchestration-v2/ThreadManagementService.ts
 import * as ThreadRecovery from "./orchestration-v2/ThreadRecoveryService.ts";
 import * as SqlitePersistence from "./persistence/Sqlite.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
+import * as AutoPullStatus from "./project/AutoPullStatus.ts";
 import * as ProjectService from "./project/ProjectService.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import { ServerActivation } from "./serverActivation.ts";
@@ -309,26 +311,39 @@ it.effect("enqueueCommand fails queued work when readiness fails", () =>
 it.effect("automatic pull only updates enabled, behind, clean default-branch checkouts", () =>
   Effect.gen(function* () {
     const pulled: string[] = [];
+    const dirty = new Set(["/dirty"]);
     const git = {
       statusDetails: (cwd: string) =>
         Effect.succeed({
           isRepo: true,
           isDefaultBranch: cwd !== "/feature",
+          branch: cwd === "/feature" ? "lastcode/telemetry-copy" : "main",
           hasUpstream: true,
-          hasWorkingTreeChanges: cwd === "/dirty",
-          aheadCount: cwd === "/ahead" ? 1 : 0,
-          behindCount: cwd === "/current" ? 0 : 1,
+          hasWorkingTreeChanges: dirty.has(cwd),
+          aheadCount: cwd === "/ahead" ? 3 : 0,
+          behindCount: ["/current", "/offline", "/slow"].includes(cwd) ? 0 : 1,
         } as never),
+      statusFetchState: (cwd: string) =>
+        Effect.succeed(
+          cwd === "/offline"
+            ? ("failed" as const)
+            : cwd === "/slow"
+              ? ("pending" as const)
+              : ("fetched" as const),
+        ),
       pullCurrentBranch: (cwd: string) =>
-        Effect.sync(() => {
-          pulled.push(cwd);
-          return {
-            status: "pulled" as const,
-            refName: "main",
-            upstreamRef: "origin/main",
-          };
-        }),
+        cwd === "/broken"
+          ? Effect.fail({ message: "fatal: Not possible to fast-forward, aborting.\nmore" })
+          : Effect.sync(() => {
+              pulled.push(cwd);
+              return {
+                status: "pulled" as const,
+                refName: "main",
+                upstreamRef: "origin/main",
+              };
+            }),
     } as unknown as GitVcsDriver.GitVcsDriver["Service"];
+    const statusStore = AutoPullStatus.make();
     const project = (workspaceRoot: string) =>
       ({ id: ProjectId.make(workspaceRoot), workspaceRoot }) as never;
     const overrides = (entries: Record<string, boolean>) => ({
@@ -340,14 +355,26 @@ it.effect("automatic pull only updates enabled, behind, clean default-branch che
         ]),
       ),
     });
+    const run = (...args: Parameters<typeof ServerRuntimeStartup.autoPullProjects>) =>
+      ServerRuntimeStartup.autoPullProjects(...args).pipe(
+        Effect.provideService(GitVcsDriver.GitVcsDriver, git),
+        Effect.provideService(AutoPullStatus.AutoPullStatus, statusStore),
+      );
+    const outcome = (root: string) =>
+      statusStore
+        .get(root)
+        .pipe(Effect.map((status) => status && { result: status.result, reason: status.reason }));
 
-    yield* ServerRuntimeStartup.autoPullProjects(
+    yield* run(
       [
         project("/clean"),
         project("/current"),
         project("/dirty"),
         project("/ahead"),
         project("/feature"),
+        project("/broken"),
+        project("/offline"),
+        project("/slow"),
         project("/disabled"),
       ],
       overrides({
@@ -356,17 +383,58 @@ it.effect("automatic pull only updates enabled, behind, clean default-branch che
         "/dirty": true,
         "/ahead": true,
         "/feature": true,
+        "/broken": true,
+        "/offline": true,
+        "/slow": true,
         "/disabled": false,
       }),
-    ).pipe(Effect.provideService(GitVcsDriver.GitVcsDriver, git));
+    );
 
     assert.deepStrictEqual(pulled, ["/clean"]);
+    assert.deepStrictEqual(yield* outcome("/clean"), { result: "pulled", reason: null });
+    assert.deepStrictEqual(yield* outcome("/current"), { result: "up-to-date", reason: null });
+    assert.deepStrictEqual(yield* outcome("/dirty"), {
+      result: "skipped",
+      reason: "uncommitted changes",
+    });
+    assert.deepStrictEqual(yield* outcome("/ahead"), {
+      result: "skipped",
+      reason: "3 local commits",
+    });
+    assert.deepStrictEqual(yield* outcome("/feature"), {
+      result: "skipped",
+      reason: "on branch lastcode/telemetry-copy, not the default branch",
+    });
+    assert.deepStrictEqual(yield* outcome("/broken"), {
+      result: "failed",
+      reason: "fatal: Not possible to fast-forward, aborting.",
+    });
+    assert.deepStrictEqual(yield* outcome("/offline"), {
+      result: "failed",
+      reason: AutoPullStatus.AUTO_PULL_FETCH_FAILED,
+    });
+    assert.deepStrictEqual(yield* outcome("/slow"), {
+      result: "skipped",
+      reason: "remote fetch still running",
+    });
+    assert.isNull(yield* statusStore.get("/disabled"));
+
+    // A later skip keeps the time the checkout was last current.
+    const firstPull = (yield* statusStore.get("/clean"))?.lastSuccessAt;
+    yield* TestClock.adjust("1 hour");
+    dirty.add("/clean");
+    yield* run([project("/clean")], overrides({ "/clean": true }));
+    const skipped = yield* statusStore.get("/clean");
+    assert.equal(skipped?.result, "skipped");
+    assert.equal(skipped?.lastSuccessAt, firstPull);
+    assert.notEqual(skipped?.lastAttemptAt, firstPull);
+    dirty.delete("/clean");
 
     pulled.length = 0;
-    yield* ServerRuntimeStartup.autoPullProjects(
-      [project("/inherited"), project("/opted-out"), project("/dirty")],
-      { ...overrides({ "/opted-out": false }), defaultAutoPull: true },
-    ).pipe(Effect.provideService(GitVcsDriver.GitVcsDriver, git));
+    yield* run([project("/inherited"), project("/opted-out"), project("/dirty")], {
+      ...overrides({ "/opted-out": false }),
+      defaultAutoPull: true,
+    });
     assert.deepStrictEqual(pulled, ["/inherited"]);
   }),
 );

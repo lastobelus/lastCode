@@ -4109,6 +4109,30 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
       }),
     );
 
+    it.effect("reports whether a status read's background fetch reached the remote", () =>
+      Effect.gen(function* () {
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const tracked = Effect.fn(function* (remoteUrl?: string) {
+          const cwd = yield* makeTmpDir();
+          const remote = yield* makeTmpDir("git-vcs-driver-remote-");
+          const { initialBranch } = yield* initRepoWithCommit(cwd);
+          yield* git(remote, ["init", "--bare"]);
+          yield* git(cwd, ["remote", "add", "origin", remote]);
+          yield* git(cwd, ["push", "-u", "origin", initialBranch]);
+          if (remoteUrl !== undefined) yield* git(cwd, ["remote", "set-url", "origin", remoteUrl]);
+          return cwd;
+        });
+        const healthy = yield* tracked();
+        const unreachable = yield* tracked(`${yield* makeTmpDir()}/missing.git`);
+
+        yield* driver.statusDetails(healthy);
+        yield* driver.statusDetails(unreachable);
+
+        assert.equal(yield* driver.statusFetchState(healthy), "fetched");
+        assert.equal(yield* driver.statusFetchState(unreachable), "failed");
+      }),
+    );
+
     it.effect("does not start Git auto-maintenance from background upstream fetches", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();

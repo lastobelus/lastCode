@@ -3206,6 +3206,15 @@ const layerCoreWsRpc = (
                 Effect.ignoreCause({ log: true }),
               ),
           }),
+        [WS_METHODS.projectsAutoPullStatus]: ({ projectId }) =>
+          projectService.getById(projectId).pipe(
+            Effect.map((project) =>
+              Option.isSome(project) ? (project.value.autoPullStatus ?? null) : null,
+            ),
+            Effect.mapError(
+              (cause) => new OrchestrationDispatchCommandError({ message: cause.message, cause }),
+            ),
+          ),
         [WS_METHODS.projectsEnsureScratch]: () =>
           managedFolders.ensureScratchProject.pipe(
             Effect.mapError(

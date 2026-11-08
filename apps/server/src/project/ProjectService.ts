@@ -45,6 +45,7 @@ import {
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import { planThreadDeletion } from "../orchestration-v2/ThreadDeletion.ts";
+import * as AutoPullStatus from "./AutoPullStatus.ts";
 import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
 import { UpdateDrainAdmission } from "../updateDrain/UpdateDrainAdmission.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
@@ -201,6 +202,7 @@ export const make = Effect.gen(function* () {
   const settings = yield* ServerSettings.ServerSettingsService;
   const admission = yield* UpdateDrainAdmission;
   const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
+  const autoPullStatus = yield* AutoPullStatus.AutoPullStatus;
   const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
   const threadProjections = yield* ProjectionStore.ProjectionStoreV2;
   const eventSink = yield* EventSink.EventSinkV2;
@@ -239,7 +241,10 @@ export const make = Effect.gen(function* () {
       row.deletedAt === null
         ? yield* projectEnrichment.getAvailable(row.workspaceRoot)
         : yield* projectEnrichment.peek(row.workspaceRoot);
-    return toProject(row, enrichment);
+    return {
+      ...toProject(row, enrichment),
+      autoPullStatus: yield* autoPullStatus.get(row.workspaceRoot),
+    };
   });
 
   const readRow = (projectId: ProjectId, options?: { readonly includeDeleted?: boolean }) =>
