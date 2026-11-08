@@ -6,6 +6,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodePerfHooks from "node:perf_hooks";
 import * as NodeTimersPromises from "node:timers/promises";
 import * as NodeURL from "node:url";
 
@@ -19,6 +20,9 @@ const LAUNCH_POLL_INTERVAL_MS = 250;
 const LAUNCH_RETRY_INTERVAL_MS = 2_000;
 const LAUNCH_STABILITY_MS = 3_000;
 const LAUNCH_TIMEOUT_MS = 30_000;
+const PARENT_QUIT_GRACE_MS = 30_000;
+const PARENT_TERM_GRACE_MS = 15_000;
+const PARENT_KILL_WAIT_MS = 5_000;
 const TCC_RESET_TIMEOUT_MS = 10_000;
 export const INSTALL_READY_PREFIX = "LASTCODE_INSTALL_READY=";
 
@@ -442,19 +446,71 @@ export async function validateDmgArtifact(dmgPath, options = {}) {
   return result;
 }
 
-async function waitForProcessExit(pid, timeoutMs = 30_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (true) {
-    try {
-      process.kill(pid, 0);
-    } catch (error) {
-      if (error?.code === "ESRCH") return;
-      throw error;
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") return false;
+    throw error;
+  }
+}
+
+// Start time plus executable path identifies one process; a reused PID gets a new start time.
+function processIdentity(pid) {
+  const result = NodeChildProcess.spawnSync(
+    "/bin/ps",
+    ["-o", "lstart=", "-o", "comm=", "-p", String(pid)],
+    { encoding: "utf8", timeout: 10_000 },
+  );
+  return result.status === 0 ? result.stdout.trim() : "";
+}
+
+// Before COMMIT the desktop stopped its backends and began quitting, so a stalled
+// quit is already waiting on shutdown and exits on SIGTERM
+// (DesktopLifecycle.exitIfShutdownStalled). SIGKILL covers a quit that ignores it.
+// The monotonic clock keeps each grace period intact across sleep.
+export async function waitForParentExit(pid, identity, options = {}) {
+  const isAlive = options.isAlive ?? processIsAlive;
+  const identityOf = options.processIdentity ?? processIdentity;
+  const sendSignal = options.signal ?? ((target, signal) => process.kill(target, signal));
+  const now = options.now ?? (() => NodePerfHooks.performance.now());
+  const wait = options.wait ?? NodeTimersPromises.setTimeout;
+  const executable = ` ${NodePath.resolve(options.targetPath ?? DEFAULT_APP_PATH)}/Contents/MacOS/`;
+  const steps = [
+    { afterMs: PARENT_QUIT_GRACE_MS, signal: "SIGTERM" },
+    { afterMs: PARENT_TERM_GRACE_MS, signal: "SIGKILL" },
+    { afterMs: PARENT_KILL_WAIT_MS, signal: null },
+  ];
+  const startedAt = now();
+  let stepStartedAt = startedAt;
+  while (isAlive(pid)) {
+    const step = steps[0];
+    const elapsed = now() - stepStartedAt;
+    if (elapsed < step.afterMs) {
+      await wait(Math.min(100, step.afterMs - elapsed));
+      continue;
     }
-    if (Date.now() >= deadline) {
-      throw new Error(`LastCode process ${pid} did not quit within 30 seconds.`);
+    const current = identity ? identityOf(pid) : "";
+    // A different process now holds the PID, so the parent has exited.
+    if (current !== "" && current !== identity) return;
+    if (step.signal === null) {
+      throw new Error(
+        `LastCode process ${pid} did not quit within ${Math.round((now() - startedAt) / 1_000)} seconds.`,
+      );
     }
-    await NodeTimersPromises.setTimeout(100);
+    if (current === identity && identity.includes(executable)) {
+      console.log(
+        `LastCode process ${pid} is still quitting after ${Math.round((now() - startedAt) / 1_000)} seconds; sending ${step.signal}.`,
+      );
+      try {
+        sendSignal(pid, step.signal);
+      } catch (error) {
+        if (error?.code !== "ESRCH") throw error;
+      }
+    }
+    steps.shift();
+    stepStartedAt = now();
   }
 }
 
@@ -741,6 +797,9 @@ async function installDmg(dmgPath, targetPath = DEFAULT_APP_PATH) {
 }
 
 async function handoffInstall(options) {
+  // Captured while the parent is certainly alive: it spawned this helper and holds its pipes.
+  const parentIdentity =
+    process.ppid === options.parentPid ? processIdentity(options.parentPid) : "";
   const prepared = await prepareDmgInstall(options.dmgPath, options);
   try {
     NodeFS.writeSync(
@@ -754,7 +813,10 @@ async function handoffInstall(options) {
     NodeFS.closeSync(options.readyFd);
     const command = await readHandoffCommand();
     if (command === "CANCEL") return;
-    await waitForProcessExit(options.parentPid);
+    console.log(`Waiting for LastCode process ${options.parentPid} to quit…`);
+    await waitForParentExit(options.parentPid, parentIdentity, {
+      targetPath: prepared.targetPath,
+    });
     await replacePreparedApp(prepared);
     console.log(`Installed and launched LastCode ${prepared.version}`);
   } finally {
