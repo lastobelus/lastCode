@@ -66,7 +66,7 @@ function compactFixture(repo: string) {
     source,
     preparedPartition: { base: upstream, source, head: source },
   }).head;
-  return { upstream, base, partition };
+  return { upstream, base };
 }
 
 function snapshot(repo: string) {
@@ -326,7 +326,7 @@ describe("LastCode carry CI", () => {
   it("names the later carry groups whose changes a regrouped commit conflicts with", () => {
     const { repo, cleanup } = fixture();
     try {
-      const { base, partition } = compactFixture(repo);
+      const { base } = compactFixture(repo);
       write(repo, "shared.txt", "action behavior\nsidebar\n");
       const sidebar = commit(repo, "show sidebar state", "Carry-Group: legacy-sidebar");
       write(repo, "shared.txt", "action behavior\nsidebar\ntooling\n");
@@ -341,15 +341,47 @@ describe("LastCode carry CI", () => {
       expect(message).toContain(
         [
           `Carry replay conflicted in shared.txt while replaying ${short(head)} "extend sidebar tooling" (Carry-Group: tooling).`,
-          "These commits in later carry groups change the same files earlier in history, so the replay has not applied them yet:",
-          `- ${short(partition)} "action modification" (Carry-Group: resumable-actions): shared.txt`,
+          "These commits in later carry groups changed those lines earlier in history, so the replay has not applied them yet:",
           `- ${short(sidebar)} "show sidebar state" (Carry-Group: legacy-sidebar): shared.txt`,
           `Likely fix: retag ${short(head)}'s Carry-Group to legacy-sidebar so it replays after them, or split its changes to shared.txt into a separate legacy-sidebar commit.`,
+          "Push the corrected head and rerun carry validation before merging.",
           "Git output:",
         ].join("\n"),
       );
-      expect(message).toMatch(
-        /\nApply the likely fix above, push the corrected head, and rerun carry validation before merging\.$/u,
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("recommends the group that changed the conflicting lines and names later commits to move", () => {
+    const { repo, cleanup } = fixture();
+    try {
+      const { base } = compactFixture(repo);
+      const lines = Array.from({ length: 10 }, (_, line) => `line ${line + 1}`);
+      const edit = (line: number, text: string) => {
+        lines[line - 1] = text;
+        write(repo, "h.txt", `${lines.join("\n")}\n`);
+      };
+      edit(1, "line 1");
+      commit(repo, "add h", "Carry-Group: tooling");
+      edit(1, "incubator line 1");
+      commit(repo, "incubate h", "Carry-Group: incubator");
+      edit(8, "sidebar line 8");
+      const sidebar = commit(repo, "sidebar h", "Carry-Group: legacy-sidebar");
+      edit(8, "tooling line 8");
+      const stopped = commit(repo, "tool h", "Carry-Group: tooling");
+      edit(10, "tooling line 10");
+      const follower = commit(repo, "tool h again", "Carry-Group: tooling");
+      const short = (commit: string) => commit.slice(0, 12);
+      expect(() => validateCarryPullRequest(repo, { base, head: follower, number: 221 })).toThrow(
+        [
+          `Carry replay conflicted in h.txt while replaying ${short(stopped)} "tool h" (Carry-Group: tooling).`,
+          "These commits in later carry groups changed those lines earlier in history, so the replay has not applied them yet:",
+          `- ${short(sidebar)} "sidebar h" (Carry-Group: legacy-sidebar): h.txt`,
+          `Likely fix: retag ${short(stopped)}'s Carry-Group to legacy-sidebar so it replays after them, or split its changes to h.txt into a separate legacy-sidebar commit.`,
+          "These later commits also edit those files and would still replay before legacy-sidebar; move them the same way:",
+          `- ${short(follower)} "tool h again" (Carry-Group: tooling)`,
+        ].join("\n"),
       );
     } finally {
       cleanup();
@@ -371,7 +403,7 @@ describe("LastCode carry CI", () => {
       expect(() => validateCarryPullRequest(repo, { base, head, number: 220 })).toThrow(
         [
           `Carry replay conflicted in f.txt while replaying ${short(head)} "drop f and add g" (Carry-Group: tooling; deletion partition replayed with legacy-sidebar).`,
-          "These commits in later carry groups change the same files earlier in history, so the replay has not applied them yet:",
+          "These commits in later carry groups changed those lines earlier in history, so the replay has not applied them yet:",
           `- ${short(edit)} "edit f" (Carry-Group: incubator): f.txt`,
           `Likely fix: retag ${short(head)}'s Carry-Group to incubator so it replays after them, or split its changes to f.txt into a separate incubator commit.`,
         ].join("\n"),

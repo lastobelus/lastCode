@@ -880,129 +880,229 @@ export function compileCarrySetSameBase(input: CompileCarrySetInput): CarryRepla
       todo,
     });
   } catch (error) {
-    let conflict: string | undefined;
+    let conflict: RegroupConflict | undefined;
     try {
-      conflict = rebaseInProgress(input.worktree)
-        ? describeRegroupConflict(input.repo, input.worktree, expanded.items)
-        : undefined;
+      // Cross-base tails were written against another tree, so their conflicts may not be regrouping.
+      conflict =
+        sameBaseCompilation && rebaseInProgress(input.worktree)
+          ? describeRegroupConflict(input.repo, input.worktree, expanded.items)
+          : undefined;
     } catch {
       // The diagnosis is advisory; the replay failure is the error that matters.
     }
     if (!conflict) throw error;
     const detail = error instanceof Error ? error.message : String(error);
-    throw new CarryReplayConflictError(`${conflict}\nGit output:\n${detail}`, { cause: error });
+    throw new CarryReplayConflictError(conflict, detail, { cause: error });
   }
   return completeCarryReplay(input.worktree);
+}
+
+interface RegroupConflict {
+  readonly diagnosis: string;
+  readonly advice: string;
 }
 
 // @effect-diagnostics-next-line extendsNativeError:off -- Plain Git orchestration; callers use instanceof.
 export class CarryReplayConflictError extends Error {
   override readonly name = "CarryReplayConflictError";
+  readonly diagnosis: string;
+  // Retagging applies only to unmerged sources, so callers decide whether to show it.
+  readonly advice: string;
+  readonly gitOutput: string;
+
+  constructor(conflict: RegroupConflict, gitOutput: string, options?: ErrorOptions) {
+    super(`${conflict.diagnosis}\nGit output:\n${gitOutput}`, options);
+    this.diagnosis = conflict.diagnosis;
+    this.advice = conflict.advice;
+    this.gitOutput = gitOutput;
+  }
 }
 
-function nulSeparated(value: string): ReadonlyArray<string> {
-  return value.split("\0").filter(Boolean);
-}
-
-function touchedPaths(repo: string, commit: string, paths: ReadonlyArray<string>) {
-  const parent = commitParents(repo, commit)[0];
-  if (!parent) return [];
-  return nulSeparated(
-    runGit(repo, [
+function changedPaths(
+  repo: string,
+  commits: ReadonlyArray<string>,
+  paths: ReadonlyArray<string>,
+): ReadonlyMap<string, ReadonlyArray<string>> {
+  const result = new Map<string, ReadonlyArray<string>>();
+  if (commits.length === 0 || paths.length === 0) return result;
+  const output = runGit(
+    repo,
+    [
       "--literal-pathspecs",
-      "diff",
+      "log",
+      "--no-walk=unsorted",
+      "--stdin",
+      "--format=%x01%H",
       "--name-only",
       "--no-renames",
       "-z",
-      parent,
-      commit,
       "--",
       ...paths,
-    ]),
+    ],
+    { input: `${Array.from(new Set(commits)).join("\n")}\n` },
+  );
+  for (const chunk of output.split("\x01").slice(1)) {
+    const [commit, ...rest] = chunk.split("\0");
+    const touched = rest.map((path) => path.replace(/^\n/u, "")).filter(Boolean);
+    if (commit && touched.length > 0) result.set(commit, touched);
+  }
+  return result;
+}
+
+// Git conflicts on overlapping or adjacent hunks, so blame the stopped commit's
+// old-side lines widened by one to find who last changed them.
+function blamedCommits(
+  repo: string,
+  parent: string,
+  stopped: string,
+  path: string,
+): ReadonlyArray<string> {
+  const lineCount = runGit(repo, ["cat-file", "-p", `${parent}:${path}`], {
+    allowFailure: true,
+  }).split("\n").length;
+  const ranges: string[] = [];
+  const diff = runGit(repo, [
+    "--literal-pathspecs",
+    "diff",
+    "-U0",
+    "--no-renames",
+    "--no-ext-diff",
+    parent,
+    stopped,
+    "--",
+    path,
+  ]);
+  for (const hunk of diff.matchAll(/^@@ -(\d+)(?:,(\d+))? /gmu)) {
+    const start = Number(hunk[1]);
+    const count = hunk[2] === undefined ? 1 : Number(hunk[2]);
+    const low = Math.max(1, start - (count === 0 ? 0 : 1));
+    const high = Math.min(lineCount, (count === 0 ? start + 1 : start + count - 1) + 1);
+    if (low <= high) ranges.push("-L", `${low},${high}`);
+  }
+  if (ranges.length === 0) return [];
+  const blame = runGit(repo, ["blame", "--porcelain", ...ranges, parent, "--", path], {
+    allowFailure: true,
+  });
+  return Array.from(
+    new Set(Array.from(blame.matchAll(/^([0-9a-f]{40}) \d+ \d+/gmu), (m) => m[1]!)),
   );
 }
 
 // Grouping replays each group's contributions together, in CARRY_REPLAY_GROUPS
-// order. A contribution that edits files a later group changed earlier in
+// order. A contribution that edits lines a later group changed earlier in
 // history therefore replays before the changes it was written against.
 function describeRegroupConflict(
   repo: string,
   worktree: string,
   items: ReadonlyArray<ReplayItem>,
-): string | undefined {
+): RegroupConflict | undefined {
   const stopped = runGit(worktree, ["rev-parse", "--verify", "--quiet", "REBASE_HEAD"], {
     allowFailure: true,
   });
   const index = items.findIndex((item) => item.commit === stopped);
   const current = items[index];
-  const files = nulSeparated(runGit(worktree, ["diff", "--name-only", "--diff-filter=U", "-z"]));
-  if (!current?.metadata || files.length === 0) return undefined;
+  const parent = current ? commitParents(repo, current.commit)[0] : undefined;
+  const files = runGit(worktree, ["diff", "--name-only", "--diff-filter=U", "-z"])
+    .split("\0")
+    .filter(Boolean);
+  if (!current?.metadata || !parent || files.length === 0) return undefined;
   const rank = (group: CarryReplayGroup) => CARRY_REPLAY_GROUPS.indexOf(group);
-  const resolve = (commit: string) =>
-    runGit(repo, ["rev-parse", "--verify", "--quiet", `${commit}^{commit}`], {
-      allowFailure: true,
-    });
-  const label = (commit: string, subject: string, group: CarryReplayGroup) => {
-    const resolved = resolve(commit);
-    const own = resolved ? parseCarryTrailers(commitMessage(repo, resolved)).group : undefined;
-    const partition = own && own !== group ? `; deletion partition replayed with ${group}` : "";
-    return `${commit.slice(0, 12)} "${subject}" (Carry-Group: ${own ?? group}${partition})`;
-  };
-  const later: string[] = [];
-  const explained = new Set<string>();
-  let target = current.group;
-  for (const item of items.slice(0, index)) {
-    if (rank(item.group) <= rank(current.group)) continue;
-    const touched = touchedPaths(repo, item.commit, files);
-    if (touched.length === 0) continue;
-    for (const path of touched) explained.add(path);
-    if (rank(item.group) > rank(target)) target = item.group;
-    if (item.metadata) {
-      later.push(
-        `- ${label(item.metadata.sourceCommit, item.metadata.subject, item.group)}: ${touched.join(", ")}`,
-      );
-      continue;
-    }
-    // A compiled group commit stands for earlier contributions; name those when their sources resolve.
-    const group = item.group;
-    let unresolved = 0;
-    let named = 0;
-    for (const contribution of parseCarryTrailers(commitMessage(repo, item.commit)).contributions) {
-      const commit = resolve(contribution.sourceCommit);
-      if (!commit) {
-        unresolved += 1;
-        continue;
-      }
-      const paths = touchedPaths(repo, commit, touched);
-      if (paths.length > 0) {
-        named += 1;
-        later.push(
-          `- ${label(contribution.sourceCommit, contribution.subject, group)}: ${paths.join(", ")}`,
-        );
-      }
-    }
-    if (unresolved > 0 || named === 0) {
-      const note = unresolved > 0 ? ` (${unresolved} source contributions unavailable)` : "";
-      later.push(
-        `- compiled ${group} group commit ${item.commit.slice(0, 12)}${note}: ${touched.join(", ")}`,
-      );
-    }
+  const candidates = items.slice(0, index).filter((item) => rank(item.group) > rank(current.group));
+  if (candidates.length === 0) return undefined;
+
+  // History names a contribution by its source commit, or by the squash or compiled
+  // group commit that published it.
+  const owners = new Map<string, ReplayItem[]>();
+  const own = (commit: string, item: ReplayItem) =>
+    owners.set(commit, [...(owners.get(commit) ?? []), item]);
+  for (const item of candidates) {
+    own(item.commit, item);
+    if (item.metadata) own(item.metadata.sourceCommit, item);
   }
-  if (later.length === 0) return undefined;
+  const sourcesOf = (commit: string): ReadonlyArray<string> => {
+    const trailers = parseCarryTrailers(commitMessage(repo, commit));
+    return trailers.sourceBase && trailers.sourceHead
+      ? [commit, ...firstParentCommits(repo, trailers.sourceBase, trailers.sourceHead)]
+      : [commit];
+  };
+  const touchedBy = changedPaths(
+    repo,
+    candidates.map((item) => item.commit),
+    files,
+  );
+
+  const found = new Map<ReplayItem, Set<string>>();
+  const unexplained: string[] = [];
+  for (const path of files) {
+    const blamed = blamedCommits(repo, parent, current.commit, path).flatMap((commit) => {
+      try {
+        return sourcesOf(commit);
+      } catch {
+        return [commit];
+      }
+    });
+    let owning = blamed
+      .flatMap((commit) => owners.get(commit) ?? [])
+      .filter((item) => touchedBy.get(item.commit)?.includes(path));
+    // Blame cannot see through every rewrite; fall back to any later-group change to the file.
+    if (owning.length === 0) {
+      owning = candidates.filter((item) => touchedBy.get(item.commit)?.includes(path));
+    }
+    if (owning.length === 0) unexplained.push(path);
+    for (const item of owning) found.set(item, (found.get(item) ?? new Set()).add(path));
+  }
+  if (found.size === 0) return undefined;
+
+  const label = (item: ReplayItem) => {
+    if (!item.metadata) return `compiled ${item.group} group commit ${item.commit.slice(0, 12)}`;
+    const { sourceCommit, subject } = item.metadata;
+    const partition = item.metadata.metadata?.["Carry-Observation"]?.some((observation) =>
+      observation.startsWith("Deletion partition follows the "),
+    );
+    const source = partition
+      ? parseCarryTrailers(commitMessage(repo, sourceCommit)).group
+      : item.group;
+    const note =
+      source && source !== item.group ? `; deletion partition replayed with ${item.group}` : "";
+    return `${sourceCommit.slice(0, 12)} "${subject}" (Carry-Group: ${source ?? item.group}${note})`;
+  };
+  const owning = candidates.filter((item) => found.has(item));
+  const target = owning.reduce(
+    (latest, item) => (rank(item.group) > rank(latest) ? item.group : latest),
+    current.group,
+  );
+  const overlap = files.filter((path) => !unexplained.includes(path));
+  const followers = items
+    .slice(index + 1)
+    .filter((item) => item.metadata && rank(item.group) < rank(target));
+  const followerPaths = changedPaths(
+    repo,
+    followers.map((item) => item.commit),
+    overlap,
+  );
+  const following = followers.filter((item) => followerPaths.has(item.commit));
   const replaying = current.metadata.sourceCommit.slice(0, 12);
-  const overlap = files.filter((path) => explained.has(path));
-  const unexplained = files.filter((path) => !explained.has(path));
-  return [
-    `Carry replay conflicted in ${files.join(", ")} while replaying ${label(current.metadata.sourceCommit, current.metadata.subject, current.group)}.`,
-    "These commits in later carry groups change the same files earlier in history, so the replay has not applied them yet:",
-    ...later,
-    ...(unexplained.length > 0
-      ? [
-          `No later carry group changes ${unexplained.join(", ")} earlier in history; that conflict has another cause.`,
-        ]
-      : []),
-    `Likely fix: retag ${replaying}'s Carry-Group to ${target} so it replays after them, or split its changes to ${overlap.join(", ")} into a separate ${target} commit.`,
-  ].join("\n");
+  return {
+    diagnosis: [
+      `Carry replay conflicted in ${files.join(", ")} while replaying ${label(current)}.`,
+      "These commits in later carry groups changed those lines earlier in history, so the replay has not applied them yet:",
+      ...owning.map((item) => `- ${label(item)}: ${Array.from(found.get(item)!).join(", ")}`),
+      ...(unexplained.length > 0
+        ? [
+            `No later carry group changes ${unexplained.join(", ")} earlier in history; that conflict has another cause.`,
+          ]
+        : []),
+    ].join("\n"),
+    advice: [
+      `Likely fix: retag ${replaying}'s Carry-Group to ${target} so it replays after them, or split its changes to ${overlap.join(", ")} into a separate ${target} commit.`,
+      ...(following.length > 0
+        ? [
+            `These later commits also edit those files and would still replay before ${target}; move them the same way:`,
+            ...following.map((item) => `- ${label(item)}`),
+          ]
+        : []),
+    ].join("\n"),
+  };
 }
 
 export function replayCarrySetOnto(input: ReplayCarrySetInput): CarryReplayResult {
