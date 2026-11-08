@@ -254,10 +254,17 @@ The retained recovery worktree is the only checkout that receives committed
 repairs. Incorporate any downstream merges made since that attempt before
 selecting its exact head.
 
-Record the exact pre-replay head and the repository-relative conflicted paths
-from every replay group, plus any other repaired paths. Keep the newline-delimited
-path list outside the checkout or in an ignored path. After replay completes, use
-this order:
+Record the exact pre-replay head (`<pre-replay-head>`), the replay's upstream
+commit (`<replay-upstream-head>`, the `onto` in the retained replay plan), and
+the repository-relative conflicted paths from every replay group, plus any other
+repaired paths. Keep the newline-delimited path list outside the checkout or in
+an ignored path. After replay completes, use this order:
+
+**Step 0, only if you continued a carry replay manually:** before appending any
+repair commits, select the clean six-group head with the selection command below.
+This records the completed replay plan so the final selection can fold repairs
+into their owning groups. This selection is bookkeeping: never request `run-now`
+after it. Only step 3's final selection leads to `run-now`.
 
 1. Run the gate and client QA in one separate checkout, always; the service
    validates the retained recovery worktree, so neither runs there. Create the
@@ -269,24 +276,29 @@ this order:
 
    ```bash
    git checkout --detach <retained-head>
-   vp run check:changed --checkpoint-recovery-files <conflicted-and-repaired-paths-file> --baseline <pre-replay-head>
+   vp run check:changed --checkpoint-recovery-files <conflicted-and-repaired-paths-file> --baseline <pre-replay-head> --onto <replay-upstream-head>
    ```
 
    This checks format and lint of those paths, typechecks affected packages and
    their consumers, and runs tests beside the conflicted or repaired files.
-   It requires a clean, completed replay. `--baseline` proves legitimate deletions:
-   the gate rejects a listed path absent from HEAD unless it was deleted between
-   `<pre-replay-head>` and HEAD. Fix concrete failures by committing in the retained
-   worktree, update the path list, then refresh the separate checkout and rerun the
-   gate. Broader checks remain in the service's unchanged Full CI; this preflight
+   It requires a clean, completed replay and both `--baseline` and `--onto`, which
+   prove legitimate deletions: a listed path absent from HEAD passes only if it
+   exists in the `<pre-replay-head>` or `<replay-upstream-head>` tree, so deleting
+   a file the new upstream nightly introduced also passes. Tests that survive
+   beside a deleted file still run. Fix concrete failures by committing in the
+   retained worktree, update the path list, then refresh the separate checkout and
+   rerun the gate. Broader checks remain in the service's unchanged Full CI; this preflight
    does not create a Full CI stamp or a PR Quick CI receipt.
 
-3. Select only the head the gate passed: the gate checkout's HEAD, the current
-   retained recovery HEAD, and the exact head passed to `--select-recovery` must
-   all match. If a repair moved the retained HEAD, refresh and rerun the gate first.
-   Select the candidate and request the service run immediately using the commands
-   below. Aim to start Full CI within about five minutes of replay completion;
-   measure dependency preparation and this gate if it takes longer.
+3. Record the passing gate checkout's HEAD as `<gated-head>`. If repairs moved
+   the retained HEAD since that run, refresh the separate checkout and rerun the
+   gate first. Then run the final selection and the tree comparison below, and
+   request `run-now` only after the comparison succeeds. Selection recompiles the
+   carry groups and already verifies that the tree is preserved, so it may record
+   a different commit with the same tree: compare trees, not commits. Use the full
+   head the selection prints as `<selected-head>`, not the commit you passed in.
+   Aim to start Full CI within about five minutes of replay completion; measure
+   preparation and the gate if it takes longer.
 4. Run the required integrated client QA alongside Full CI, using `test-t3-app`
    or `test-t3-mobile` as applicable. Additional investigation and broader focused
    checks also belong alongside Full CI. A successful CI result does not prove
@@ -306,8 +318,31 @@ is unchanged. Ordinary retries cannot refresh a completed carry plan.
 
 ```bash
 pnpm lastcode:checkpoint -- --select-recovery <full-repaired-head> --recovery-source <full-current-main-commit>
-pnpm lastcode:checkpoint:service run-now
 ```
+
+For either selection, `<full-repaired-head>` is the retained worktree's current
+HEAD. If selection rewrites it, that HEAD becomes the printed `<selected-head>`;
+use it for a retry after gating the selected tree.
+
+Its normal output names the selected full head in the `Selected repaired ... at ...`
+line; use that value as `<selected-head>`. After the final selection, compare its
+tree with `<gated-head>` before starting the service:
+
+```bash
+if gated_tree=$(git rev-parse '<gated-head>^{tree}') &&
+   selected_tree=$(git rev-parse '<selected-head>^{tree}') &&
+   test "$selected_tree" = "$gated_tree"; then
+  pnpm lastcode:checkpoint:service run-now
+else
+  echo "Stop: refresh the gate checkout to the selected head and gate it before run-now."
+  false
+fi
+```
+
+If the trees differ or Git cannot resolve either one, stop before `run-now`.
+Refresh the gate checkout to `<selected-head>`, rerun the gate there, then repeat
+the final selection and tree comparison. A different commit with the same tree
+needs no new gate run.
 
 `--recovery-source` is the operator's assertion that the repaired tree includes
 that exact LastCode main revision. Inspect the replay and subsequent commits

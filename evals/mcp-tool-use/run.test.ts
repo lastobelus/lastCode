@@ -355,34 +355,57 @@ it("checkpoint recovery guidance grades the operational order, not just keywords
     .find((testCase) => testCase.id === "checkpoint-recovery-ci-before-qa")!;
   const prepare = "Prepare Dependencies once in the separate checkout.";
   const gate =
-    "git checkout --detach <retained-head>; vp run check:changed --checkpoint-recovery-files <paths> --baseline <pre-replay-head>";
+    "git checkout --detach <retained-head>; vp run check:changed --checkpoint-recovery-files <paths> --baseline <pre-replay-head> --onto <replay-upstream-head>";
   const select = "pnpm lastcode:checkpoint -- --select-recovery <retained-head>";
+  const verify =
+    "git rev-parse '<gated-head>^{tree}' '<selected-head>^{tree}'; verify the trees match, otherwise stop and gate the selected head.";
   const start = "pnpm lastcode:checkpoint:service run-now";
   const qa = "Run integrated client QA alongside Full CI.";
   const sequence = (steps: Array<string>) => steps.map((step, i) => `${i + 1}. ${step}`).join("\n");
   const failures = (text: string) =>
     failed(recovery.expect, { calls: [], text, stopReason: "end_turn" });
-  assert.deepEqual(failures(sequence([prepare, gate, select, start, qa])), []);
+  assert.deepEqual(failures(sequence([prepare, gate, select, verify, start, qa])), []);
   assert.deepEqual(
     failures(
       sequence([
         "Prepare Dependencies in the separate checkout.",
         `${gate}. Repeat dependency preparation only if manifests or the lockfile changed.`,
         select,
+        verify,
         start,
         qa,
       ]),
     ),
     [],
   );
+  const manual = NodeFS.readFileSync(
+    new URL("./cases/checkpoint-recovery.ndjson", import.meta.url),
+    "utf8",
+  )
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => decodeCase(line))
+    .find((testCase) => testCase.id === "checkpoint-recovery-manual-bookkeeping")!;
+  const manualFailures = (steps: Array<string>) =>
+    failed(manual.expect, {
+      calls: [],
+      text: sequence(steps),
+      stopReason: "end_turn",
+    });
+  assert.deepEqual(manualFailures([select, prepare, gate, select, verify, start, qa]), []);
+  assert.isNotEmpty(manualFailures([select, start, prepare, gate, select, verify, start, qa]));
+  assert.isNotEmpty(manualFailures([prepare, gate, select, verify, start, qa]));
+  assert.isNotEmpty(manualFailures([select, prepare, gate, select, start, verify, qa]));
   for (const steps of [
-    [select, prepare, gate, start, qa],
-    [prepare, select, gate, start, qa],
-    [prepare, gate, start, select, qa],
-    [prepare, gate, qa, select, start, "QA is still required."],
-    ["Run checks once.", gate, select, start, qa],
-    ["Prepare Dependencies. Run checks once.", gate, select, start, qa],
-    [prepare, gate, select, "Run integrated client QA before run-now.", start, qa],
+    [select, prepare, gate, verify, start, qa],
+    [prepare, select, gate, verify, start, qa],
+    [prepare, gate, start, select, verify, qa],
+    [prepare, gate, qa, select, verify, start, "QA is still required."],
+    ["Run checks once.", gate, select, verify, start, qa],
+    ["Prepare Dependencies. Run checks once.", gate, select, verify, start, qa],
+    [prepare, gate, select, verify, "Run integrated client QA before run-now.", start, qa],
+    [prepare, gate, select, start, verify, qa],
+    [prepare, gate, select, "Confirm the commit IDs match.", start, qa],
   ]) {
     const text = sequence(steps);
     assert.isNotEmpty(failures(text), text);
