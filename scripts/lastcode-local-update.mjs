@@ -16,6 +16,7 @@ import { triggerIntelBuild } from "./lib/lastcode-intel-build-trigger.mjs";
 
 import { acquirePortableLock, PortableLockContentionError } from "./lastcode-lock.mjs";
 
+const BUILD_LOG_ROTATE_BYTES = 64 * 1024 * 1024;
 const CHECKPOINT_PREFIX = "lastcode/checkpoint/";
 const REVISION_PREFIX = "lastcode/revision/";
 const BUILD_PREFIX = "lastcode/build/";
@@ -655,6 +656,13 @@ function inspectGrouped(options, installableTags, checkpointTag, availableVersio
   };
 }
 
+// Each build appends; past the limit the log moves to build.log.1 so the previous
+// build stays readable while the file stops growing without bound.
+export function rotateBuildLog(logPath, maxBytes = BUILD_LOG_ROTATE_BYTES) {
+  const size = NodeFS.statSync(logPath, { throwIfNoEntry: false })?.size ?? 0;
+  if (size > maxBytes) NodeFS.renameSync(logPath, `${logPath}.1`);
+}
+
 export function inspect(options, overrides = {}) {
   if (!parseNightlyVersion(options.currentVersion)) {
     throw new Error(`Installed version '${options.currentVersion}' is not a LastCode nightly.`);
@@ -794,6 +802,7 @@ function buildUnlocked(options, updateRoot) {
 
   NodeFS.mkdirSync(updateRoot, { recursive: true });
   const logPath = NodePath.join(updateRoot, "build.log");
+  rotateBuildLog(logPath);
   const logFd = NodeFS.openSync(logPath, "a", 0o600);
   try {
     NodeFS.writeSync(logFd, `\n[${new Date().toISOString()}] Building ${options.checkpointTag}\n`);
