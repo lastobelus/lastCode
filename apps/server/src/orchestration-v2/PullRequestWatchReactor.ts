@@ -319,17 +319,24 @@ export const make = Effect.gen(function* () {
   });
 
   const giveUp = (target: WatchTarget) =>
-    record(target, null, {
-      text: `T3 Code stopped watching pull request #${target.link.number} (${target.link.url}) because it failed to read it from the host ${READ_FAILURE_LIMIT} times in a row.${target.watch.generation !== undefined && target.link.snapshot?.state !== undefined && target.link.snapshot.state !== "open" ? ` The last state T3 Code recorded for it was ${target.link.snapshot.state}, and its latest comments and reviews were not read.` : ""} Check it yourself. If it is still open, call watch_pull_request to watch it again.`,
-      notification: {
-        source: { kind: "monitor" },
-        outcome: "failed",
-        summary: `#${target.link.number}: stopped watching, could not read it`,
+    record(
+      target,
+      null,
+      {
+        text: `T3 Code stopped watching pull request #${target.link.number} (${target.link.url}) because it failed to read it from the host ${READ_FAILURE_LIMIT} times in a row.${target.watch.generation !== undefined && target.link.snapshot?.state !== undefined && target.link.snapshot.state !== "open" ? ` The last state T3 Code recorded for it was ${target.link.snapshot.state}, and its latest comments and reviews were not read.` : ""} Check it yourself and act on what you find. If it is still open and waiting, report that T3 Code cannot read it as a blocker: a new watch would stop the same way. Watch again only if the user asks you to keep waiting.`,
+        notification: {
+          source: { kind: "monitor" },
+          outcome: "failed",
+          summary: `#${target.link.number}: stopped watching, could not read it`,
+        },
       },
-    }).pipe(
+      { ...target.watch, unreadable: true },
+    ).pipe(
       Effect.tap(() => woke(target)),
       Effect.catch((error) =>
-        target.watch.generation === undefined ? record(target, null) : Effect.fail(error),
+        target.watch.generation === undefined
+          ? record(target, null, undefined, { ...target.watch, unreadable: true })
+          : Effect.fail(error),
       ),
       Effect.tap(() => ended(target, "unreadable")),
     );

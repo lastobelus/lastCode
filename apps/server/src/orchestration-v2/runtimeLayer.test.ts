@@ -4538,6 +4538,7 @@ it.layer(layerTest)("RuntimeLayer.layer lifecycle", (it) => {
         const thread = yield* orchestrator.getThreadShell(threadId);
         if (reason !== "failed") {
           assert.isUndefined(thread?.pullRequests?.[0]?.watch);
+          assert.isTrue(thread?.pullRequests?.[0]?.endedWatch?.unreadable);
           assert.deepEqual(yield* summaries, ["#8: stopped watching, could not read it"]);
           return;
         }

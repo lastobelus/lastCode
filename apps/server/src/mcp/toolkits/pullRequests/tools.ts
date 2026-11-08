@@ -65,9 +65,10 @@ export const WatchPullRequestInput = Schema.Struct({
   quietTimeoutMinutes: Schema.optional(
     Schema.NullOr(PullRequestWatchQuietTimeoutMinutes).annotate({
       description:
-        "Wake you once if the PR has no new actionable check results, comments, reviews, conflicts, or pushes for this many minutes. New watch updates or a push restarts the timer. A number starts the timer now; null turns it off. Omit to keep an armed timer; a new wait or explicit restart after the quiet wake uses the environment setting (45 minutes by default).",
+        "Wake you once after this many minutes without new actionable checks, comments, reviews, conflicts or pushes; each resets the timer. A number starts it now; null disables it. Omit to keep the timer; new waits and restarts use the setting (default 45). After a quiet wake or unreadable stop, re-watch only if the user asked (restart).",
     }),
   ),
+  restart: Schema.optional(Schema.Boolean),
 });
 export type WatchPullRequestInput = typeof WatchPullRequestInput.Type;
 
@@ -161,6 +162,17 @@ export class PullRequestWatchFromSubagentError extends Schema.TaggedError<PullRe
   }
 }
 
+export class PullRequestWatchRestartRefusedError extends Schema.TaggedError<PullRequestWatchRestartRefusedError>()(
+  "PullRequestWatchRestartRefusedError",
+  { reason: Schema.Literals(["quiet", "unreadable"]) },
+) {
+  override get message(): string {
+    return this.reason === "quiet"
+      ? "Not watched again: this watch's quiet deadline already expired and the PR has had no activity since, so a new watch would expire the same way. The watch is still registered: it still wakes you on failed or passed checks, new comments or reviews, and conflicts, and a push restarts its timer, so after a push just run the gate check. Otherwise report the pending gates as a blocker and call unwatch_pull_request. Pass restart: true only if the user asked you to keep waiting."
+      : "Not watched again: T3 Code stopped this watch because it could not read the PR from the host, and a new watch would stop the same way. Check the PR yourself and report that T3 Code cannot read it as a blocker. Pass restart: true only if the user asked you to keep waiting.";
+  }
+}
+
 export class PullRequestListFailedError extends Schema.TaggedError<PullRequestListFailedError>()(
   "PullRequestListFailedError",
   { cause: Schema.Defect() },
@@ -202,6 +214,7 @@ export const PullRequestToolError = Schema.Union([
   PullRequestWatchFailedError,
   PullRequestNotOpenError,
   PullRequestWatchFromSubagentError,
+  PullRequestWatchRestartRefusedError,
   PullRequestProjectNotFoundError,
   PullRequestGuideFailedError,
 ]);
@@ -386,7 +399,7 @@ const ListThreadPullRequestsTool = Tool.make("list_thread_pull_requests", {
 
 const WatchPullRequestTool = Tool.make("watch_pull_request", {
   description:
-    "Watch an open PR for this thread, linking it first if needed. T3 wakes you on failed checks, passed required checks, new comments or reviews, others' reactions to your top-level PR comments, and conflicts. Handle existing comments before you register; later changes wake you. Reactions carry no timestamp, so an old one may be reported once, and inline or review reactions may take the slower full read, up to about 30 minutes. After registering, run any required project gate check, then end your turn if gates are pending. The watch persists across wakes; register again only for an explicitly allowed rearm. A wake is neither merge permission nor a clean review. An app-owned delegated child may watch only when its brief says the parent verified features.appOwnedPullRequestWatchContinuationVersion and #482 Phase 4 acceptance of the destination's installed checkpoint, or authorized a narrow isolated acceptance scenario; otherwise hand the watch to the parent. An owning child stays unfinished across passive waits, handles its own events, and unwatches before handback.",
+    "Watch an open PR for this thread, linking it first if needed. T3 wakes you on failed checks, passed required checks, new comments or reviews, others' reactions to your top-level PR comments, and conflicts. Handle existing comments before you register; later changes wake you. Reactions carry no timestamp, so an old one may be reported once, and inline or review reactions may take the slower full read, up to about 30 minutes. After registering, run any required project gate check, then end your turn if gates are pending. The watch persists across wakes; register again only for an allowed rearm. A wake is neither merge permission nor a clean review. An app-owned delegated child may watch only when its brief says the parent verified features.appOwnedPullRequestWatchContinuationVersion and #482 Phase 4 acceptance of the destination's installed checkpoint, or authorized a narrow isolated acceptance scenario; otherwise hand the watch to the parent. An owning child stays unfinished across passive waits, handles its own events, and unwatches before handback.",
   parameters: WatchPullRequestInput,
   success: WatchPullRequestResult,
   failure: PullRequestToolError,
