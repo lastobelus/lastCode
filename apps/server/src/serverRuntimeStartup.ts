@@ -43,6 +43,7 @@ import * as ThreadManagement from "./orchestration-v2/ThreadManagementService.ts
 import * as AutoPullStatus from "./project/AutoPullStatus.ts";
 import * as ProjectService from "./project/ProjectService.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
+import { installProjectRootGuard } from "./vcs/ProjectRootGuard.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
@@ -246,6 +247,21 @@ export const autoPullProjects = Effect.fn("autoPullProjects")(function* (
               }),
             ),
           ),
+        ),
+      ),
+    { concurrency: 4, discard: true },
+  );
+});
+
+export const protectProjectRoots = Effect.fn("protectProjectRoots")(function* (
+  projects: ReadonlyArray<Pick<Project, "workspaceRoot">>,
+) {
+  yield* Effect.forEach(
+    new Set(projects.map((project) => project.workspaceRoot)),
+    (cwd) =>
+      installProjectRootGuard(cwd).pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("Failed to install the project root guard", { cwd, cause }),
         ),
       ),
     { concurrency: 4, discard: true },
@@ -591,6 +607,7 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
       "projects.auto-pull",
       Effect.gen(function* () {
         const projects = yield* (yield* ProjectStore.ProjectStoreV2).listShells();
+        yield* protectProjectRoots(projects);
         const settings = yield* serverSettings.getSettings;
         yield* autoPullProjects(projects, settings);
       }),
