@@ -955,10 +955,18 @@ function blame(repo: string, args: ReadonlyArray<string>, path: string) {
   const output = runGit(repo, ["blame", "--porcelain", ...args, "--", path], {
     allowFailure: true,
   });
-  return Array.from(output.matchAll(/^([0-9a-f]{40}) (\d+) \d+/gmu), (match) => ({
-    commit: match[1]!,
-    line: Number(match[2]),
-  }));
+  const lines: Array<{ readonly commit: string; readonly line: number }> = [];
+  // A boundary commit only marks where a range blame stopped; it did not change the line.
+  const boundaries = new Set<string>();
+  let commit = "";
+  for (const entry of output.split("\n")) {
+    const header = /^([0-9a-f]{40}) (\d+) \d+/u.exec(entry);
+    if (header) {
+      commit = header[1]!;
+      lines.push({ commit, line: Number(header[2]) });
+    } else if (entry === "boundary") boundaries.add(commit);
+  }
+  return lines.filter((line) => !boundaries.has(line.commit));
 }
 
 // Git conflicts on overlapping or adjacent hunks, so take the stopped commit's
