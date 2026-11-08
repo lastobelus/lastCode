@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Progress transport tests use isolated host-side log fixtures.
 import { assert, describe, it } from "@effect/vitest";
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -11,6 +12,7 @@ import * as Ref from "effect/Ref";
 import * as TestClock from "effect/testing/TestClock";
 
 import {
+  armInstallPreflightTimeout,
   groupedInspectionArgs,
   LocalBuildProgressTracker,
   monitorLocalBuildProgress,
@@ -84,6 +86,43 @@ describe("LastCodeLocalUpdates", () => {
     );
     assert.deepEqual(groupSignals, [[-4242, "SIGKILL"]]);
     assert.equal(directKills, 0);
+  });
+
+  it.each([
+    { name: "ignores the cancel", script: "setInterval(() => {}, 1000)", stuck: true },
+    {
+      name: "exits on the cancel",
+      script: "process.stdin.once('data', () => process.exit(0)); setInterval(() => {}, 1000)",
+      stuck: false,
+    },
+  ])("terminates a timed-out preflight helper only when it $name", async ({ script, stuck }) => {
+    const child = NodeChildProcess.spawn(process.execPath, ["-e", script], {
+      detached: true,
+      stdio: ["pipe", "ignore", "ignore"],
+    });
+    const exited = new Promise<NodeJS.Signals | number | null>((resolve) =>
+      child.once("exit", (code, signal) => resolve(signal ?? code)),
+    );
+    let cancelled = false;
+    let stopped = false;
+    const disarm = armInstallPreflightTimeout(
+      child,
+      "darwin",
+      {
+        onCancel: () => {
+          cancelled = true;
+        },
+        onStuck: () => {
+          stopped = true;
+        },
+      },
+      { timeoutMs: 10, graceMs: 1_000 },
+    );
+    const outcome = await exited;
+    disarm();
+    assert.isTrue(cancelled);
+    assert.equal(stopped, stuck);
+    assert.equal(outcome, stuck ? "SIGKILL" : 0);
   });
 
   it("tails only bytes appended after tracking starts", () => {
