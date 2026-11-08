@@ -192,6 +192,7 @@ const makeHarness = Effect.gen(function* () {
   const opened: TerminalOpenInput[] = [];
   const written: TerminalWriteInput[] = [];
   const writes = yield* Queue.unbounded<TerminalWriteInput>();
+  const followUpDispatches = yield* Queue.unbounded<ThreadId>();
   const closeRequests: Array<{ readonly deleteHistory?: boolean | undefined }> = [];
   const closed: string[] = [];
   const otherThreads = new Map<ThreadId, OrchestrationV2ThreadShell>();
@@ -375,7 +376,10 @@ const makeHarness = Effect.gen(function* () {
                 error: null,
               })
               .pipe(Effect.orDie);
-          if (command.type === "message.dispatch") yield* Deferred.succeed(delivered, undefined);
+          if (command.type === "message.dispatch") {
+            yield* Deferred.succeed(delivered, undefined);
+            yield* Queue.offer(followUpDispatches, command.threadId);
+          }
           return { sequence: commands.length, storedEvents: [] };
         });
         if (command.type !== "message.dispatch") return apply;
@@ -518,6 +522,7 @@ const makeHarness = Effect.gen(function* () {
     opened,
     written,
     writes,
+    followUpDispatches,
     closeRequests,
     closed,
     otherThreads,
@@ -784,12 +789,57 @@ it.effect.each([
           : { ...event, type, message: "spawn failed" },
       );
       yield* Deferred.succeed(release, undefined);
+      yield* Queue.take(h.followUpDispatches);
       assert.equal(h.state.latest?.outcome, outcome);
-      yield* actions.retryPendingFollowUps;
       assert.equal(h.written.length, 0);
       assert.equal(h.followUps().length, 1);
     }).pipe(Effect.provide(h.layer));
   }).pipe(Effect.provide(StoreTestLayer)),
+);
+
+it.effect(
+  "settles a terminal error published under admission while the Action lock waits on it",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness;
+      const otherId = ThreadId.make("thread-action-lock-holder");
+      h.otherThreads.set(otherId, { ...shell, id: otherId, actionResume: null });
+      yield* Effect.gen(function* () {
+        const actions = yield* ActionResume.ActionResume;
+        const run = yield* actions.runProjectActionAndResume(invocation, "qa");
+        yield* Queue.take(h.writes);
+        const other = yield* actions.runProjectActionAndResume(
+          { threadId: otherId, providerInstanceId },
+          "qa",
+        );
+        yield* Queue.take(h.writes);
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        h.state.pauseDelivery = { entered, release };
+        // The other thread's follow-up holds the Action lock and next needs admission.
+        const otherExit = yield* h
+          .emit({
+            type: "exited",
+            threadId: otherId,
+            terminalId: other.terminalId,
+            exitCode: 0,
+            exitSignal: null,
+          })
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(entered);
+        // A client terminal reopen publishes its spawn error while holding admission.
+        yield* h.admission.admit(
+          "terminal-open",
+          h.emit({ type: "error", threadId, terminalId: run.terminalId, message: "spawn failed" }),
+        );
+        h.state.pauseDelivery = null;
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(otherExit);
+        assert.equal(yield* Queue.take(h.followUpDispatches), otherId);
+        assert.equal(yield* Queue.take(h.followUpDispatches), threadId);
+        assert.equal(h.state.latest?.outcome, "failed");
+      }).pipe(Effect.provide(h.layer));
+    }).pipe(Effect.provide(StoreTestLayer)),
 );
 
 it.effect("rejects a replacement shell instead of forwarding the accepted Action again", () =>

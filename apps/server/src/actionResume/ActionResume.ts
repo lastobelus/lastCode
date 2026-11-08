@@ -1020,8 +1020,7 @@ const make = Effect.gen(function* () {
                   yield* Deferred.succeed(startup.stopped, undefined);
                   return;
                 }
-                // Close and spawn errors publish under the terminal lock a pending write holds the
-                // Action mutex for; stop startup first so finishing the run cannot wait forever.
+                // Stop startup before a pending write so a closed or failed terminal never receives the command.
                 if (event.type === "closed" || event.type === "error")
                   yield* Deferred.succeed(startup.stopped, undefined);
                 yield* handleTerminalEvent(event);
@@ -1325,6 +1324,11 @@ const make = Effect.gen(function* () {
     );
   });
 
+  // Close and spawn errors publish under the terminal lock (and admission for client opens), while
+  // Action mutex holders wait on both; settling on the publisher's fiber could deadlock them.
+  const settleOffPublisher = (effect: Effect.Effect<void>) =>
+    effect.pipe(Effect.forkIn(serviceScope, { startImmediately: true }), Effect.asVoid);
+
   // Terminal chunks share the enclosing launch/event span.
   const handleTerminalEvent = Effect.fnUntraced(function* (event: TerminalEvent) {
     const state = registry.getLatest(event.threadId);
@@ -1411,12 +1415,14 @@ const make = Effect.gen(function* () {
         if (protocol) consumeActionTerminalOutput(capture, protocol.decoder.finish());
         finishActionOutputCapture(capture);
       }
-      return yield* finish({
-        threadId: state.threadId,
-        runId: state.runId,
-        outcome: "cancelled_by_user",
-        deliver: !event.deleteHistory,
-      });
+      return yield* settleOffPublisher(
+        finish({
+          threadId: state.threadId,
+          runId: state.runId,
+          outcome: "cancelled_by_user",
+          deliver: !event.deleteHistory,
+        }),
+      );
     }
     if (event.type === "error") {
       const protocol = protocolCaptureByRunId.get(state.runId);
@@ -1425,7 +1431,9 @@ const make = Effect.gen(function* () {
         if (protocol) consumeActionTerminalOutput(capture, protocol.decoder.finish());
         finishActionOutputCapture(capture);
       }
-      return yield* finish({ threadId: state.threadId, runId: state.runId, outcome: "failed" });
+      return yield* settleOffPublisher(
+        finish({ threadId: state.threadId, runId: state.runId, outcome: "failed" }),
+      );
     }
     return;
   });
