@@ -33,7 +33,9 @@ describe("checkpoint run history", () => {
       failurePhase: "rebase",
       recoveryBranch: "sync/nightly/v0.0.1-nightly.20260813.2",
       recoveryFingerprint: "nightly-fingerprint",
-      error: Object.assign(new Error("nightly replay needs repair"), { conflictDossierPath: "/recovery/git/conflict-dossier.json" }),
+      error: Object.assign(new Error("nightly replay needs repair"), {
+        conflictDossierPath: "/recovery/git/conflict-dossier.json",
+      }),
       startedAtMs: 1_000,
       upstreamTag: "v0.0.1-nightly.20260813.2",
     });

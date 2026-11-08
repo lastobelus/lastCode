@@ -106,7 +106,12 @@ export function checkpointFailureRecord(
   },
   finishedAtMs = Date.now(),
 ): CheckpointRunRecord {
-  const conflictDossierPath = input.error instanceof Error && "conflictDossierPath" in input.error && typeof input.error.conflictDossierPath === "string" ? input.error.conflictDossierPath : undefined;
+  const conflictDossierPath =
+    input.error instanceof Error &&
+    "conflictDossierPath" in input.error &&
+    typeof input.error.conflictDossierPath === "string"
+      ? input.error.conflictDossierPath
+      : undefined;
   return {
     schemaVersion: 1,
     status: "failed",

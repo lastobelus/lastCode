@@ -1160,10 +1160,16 @@ export function replayCarrySetOnto(input: ReplayCarrySetInput): CarryReplayResul
     });
   } catch (error) {
     try {
-      const conflictDossierPath = writeCarryConflictDossier({ ...input, sourceBase, compactHead, onto }, groups);
-      if (conflictDossierPath && error instanceof Error) Object.assign(error, { conflictDossierPath });
+      const conflictDossierPath = writeCarryConflictDossier(
+        { ...input, sourceBase, compactHead, onto },
+        groups,
+      );
+      if (conflictDossierPath && error instanceof Error)
+        Object.assign(error, { conflictDossierPath });
     } catch (dossierError) {
-      console.warn(`[lastcode:checkpoint] Could not write conflict dossier: ${dossierError instanceof Error ? dossierError.message : String(dossierError)}`);
+      console.warn(
+        `[lastcode:checkpoint] Could not write conflict dossier: ${dossierError instanceof Error ? dossierError.message : String(dossierError)}`,
+      );
     }
     throw error;
   }

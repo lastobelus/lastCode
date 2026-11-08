@@ -604,7 +604,10 @@ function recoveryProblemLines(repoRoot, worktree, failure) {
   if (range) {
     try {
       overlappingUpstreamCommits = upstreamCommitsTouchingFiles(
-        repoRoot, range.previousUpstreamTag, range.upstreamTag, conflictPaths,
+        repoRoot,
+        range.previousUpstreamTag,
+        range.upstreamTag,
+        conflictPaths,
       ).map(({ abbreviatedCommit, subject }) => `${abbreviatedCommit} ${subject}`);
     } catch {
       // Diagnostics remain optional when the retained range is unavailable.
