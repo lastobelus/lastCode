@@ -68,6 +68,11 @@ export const WatchPullRequestInput = Schema.Struct({
         "Wake you once if the PR has no new actionable check results, comments, reviews, conflicts, or pushes for this many minutes. New watch updates or a push restarts the timer. A number starts the timer now; null turns it off. Omit to keep an armed timer; a new wait or explicit restart after the quiet wake uses the environment setting (45 minutes by default).",
     }),
   ),
+  restartAfterQuiet: Schema.optional(
+    Schema.Boolean.annotate({
+      description: "True only if the user asked you to keep waiting after the quiet-deadline wake.",
+    }),
+  ),
 });
 export type WatchPullRequestInput = typeof WatchPullRequestInput.Type;
 
@@ -161,6 +166,15 @@ export class PullRequestWatchFromSubagentError extends Schema.TaggedError<PullRe
   }
 }
 
+export class PullRequestWatchQuietExpiredError extends Schema.TaggedError<PullRequestWatchQuietExpiredError>()(
+  "PullRequestWatchQuietExpiredError",
+  {},
+) {
+  override get message(): string {
+    return "Not watched again: this watch's quiet deadline already expired and the PR has had no activity since, so a new watch would expire the same way. The watch is still registered and wakes you on any push, check result, comment, review or conflict, which also restarts its timer; after a push, just run the gate check. Otherwise report the pending gates as a blocker and call unwatch_pull_request. Pass restartAfterQuiet: true only if the user asked you to keep waiting.";
+  }
+}
+
 export class PullRequestListFailedError extends Schema.TaggedError<PullRequestListFailedError>()(
   "PullRequestListFailedError",
   { cause: Schema.Defect() },
@@ -202,6 +216,7 @@ export const PullRequestToolError = Schema.Union([
   PullRequestWatchFailedError,
   PullRequestNotOpenError,
   PullRequestWatchFromSubagentError,
+  PullRequestWatchQuietExpiredError,
   PullRequestProjectNotFoundError,
   PullRequestGuideFailedError,
 ]);
