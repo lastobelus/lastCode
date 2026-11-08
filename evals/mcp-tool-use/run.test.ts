@@ -378,6 +378,14 @@ it("checkpoint recovery guidance grades the operational order, not just keywords
     ),
     [],
   );
+  const prepareAgain =
+    "Prepare dependencies again only if repairs change dependency manifests or the lockfile.";
+  assert.deepEqual(
+    failures(
+      sequence(["Prepare Dependencies.", `${gate}. ${prepareAgain}`, select, verify, start, qa]),
+    ),
+    [],
+  );
   const manual = NodeFS.readFileSync(
     new URL("./cases/checkpoint-recovery.ndjson", import.meta.url),
     "utf8",
@@ -393,6 +401,18 @@ it("checkpoint recovery guidance grades the operational order, not just keywords
       stopReason: "end_turn",
     });
   assert.deepEqual(manualFailures([select, prepare, gate, select, verify, start, qa]), []);
+  assert.deepEqual(
+    manualFailures([
+      select,
+      "Prepare Dependencies.",
+      `${gate}. ${prepareAgain}`,
+      select,
+      verify,
+      start,
+      qa,
+    ]),
+    [],
+  );
   assert.isNotEmpty(manualFailures([select, start, prepare, gate, select, verify, start, qa]));
   assert.isNotEmpty(manualFailures([prepare, gate, select, verify, start, qa]));
   assert.isNotEmpty(manualFailures([select, prepare, gate, select, start, verify, qa]));
@@ -403,6 +423,14 @@ it("checkpoint recovery guidance grades the operational order, not just keywords
     [prepare, gate, qa, select, verify, start, "QA is still required."],
     ["Run checks once.", gate, select, verify, start, qa],
     ["Prepare Dependencies. Run checks once.", gate, select, verify, start, qa],
+    [
+      "Prepare Dependencies. Run checks again only if manifests changed.",
+      gate,
+      select,
+      verify,
+      start,
+      qa,
+    ],
     [prepare, gate, select, verify, "Run integrated client QA before run-now.", start, qa],
     [prepare, gate, select, start, verify, qa],
     [prepare, gate, select, "Confirm the commit IDs match.", start, qa],
