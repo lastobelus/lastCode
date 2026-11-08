@@ -806,7 +806,7 @@ describe("LastCode userland install command", () => {
   });
 
   it.each([
-    { name: "the parent never quits", failure: "wait", relaunched: true },
+    { name: "the parent outlasted the wait", failure: "wait", relaunched: true },
     { name: "the swap fails before moving anything", failure: "replace", relaunched: true },
     {
       name: "the swap already relaunched the old app",
@@ -835,7 +835,14 @@ describe("LastCode userland install command", () => {
           { pid: 62_323, identity: "" },
           {
             waitForParentExit: async () => {
-              if (failure === "wait") throw new Error("LastCode process 62323 did not quit");
+              if (failure !== "wait") return;
+              // The parent is still quitting, so it still counts as a running app.
+              running = true;
+              throw new Error("LastCode process 62323 did not quit");
+            },
+            waitUntilParentGone: async () => {
+              running = false;
+              return true;
             },
             replacePreparedApp: async (prepared) => {
               if (failure === "replace-relaunched") running = true;

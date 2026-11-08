@@ -25,6 +25,7 @@ const PARENT_TERM_GRACE_MS = 15_000;
 const PARENT_KILL_WAIT_MS = 5_000;
 const PARENT_UNSIGNALLED_WAIT_MS = 10 * 60_000;
 const HANDOFF_COMMAND_TIMEOUT_MS = 10 * 60_000;
+const PARENT_ABANDON_WAIT_MS = 24 * 60 * 60_000;
 const TCC_RESET_TIMEOUT_MS = 10_000;
 export const INSTALL_READY_PREFIX = "LASTCODE_INSTALL_READY=";
 
@@ -818,20 +819,35 @@ async function installDmg(dmgPath, targetPath = DEFAULT_APP_PATH) {
 
 // After COMMIT the parent is quitting for good, so a failed install must still
 // leave an app running: the old bundle stays at the target unless the swap ran.
+// Waits without signalling for a parent the helper could not stop; true once it has exited.
+async function waitUntilProcessGone(pid) {
+  const deadline = NodePerfHooks.performance.now() + PARENT_ABANDON_WAIT_MS;
+  while (processIsAlive(pid)) {
+    if (NodePerfHooks.performance.now() >= deadline) return false;
+    await NodeTimersPromises.setTimeout(1_000);
+  }
+  return true;
+}
+
 export async function finishCommittedInstall(prepared, parent, options = {}) {
   const waitForParent = options.waitForParentExit ?? waitForParentExit;
   const replace = options.replacePreparedApp ?? replacePreparedApp;
   const isRunning = options.isRunning ?? appIsRunning;
   const launch = options.launchApp ?? ((appPath) => launchApp(appPath));
+  const waitUntilParentGone = options.waitUntilParentGone ?? waitUntilProcessGone;
   // Only an original bundle that was already at the target is safe to relaunch.
   const originalAtTarget = NodeFS.existsSync(prepared.targetPath);
+  let parentGone = false;
   try {
     console.log(`Waiting for LastCode process ${parent.pid} to quit…`);
     await waitForParent(parent.pid, parent.identity, { targetPath: prepared.targetPath });
+    parentGone = true;
     await replace(prepared);
     console.log(`Installed and launched LastCode ${prepared.version}`);
   } catch (error) {
     console.error(`LastCode ${prepared.version} was not installed: ${error.message}`);
+    // A parent still quitting would look like a running app; relaunch after it has gone.
+    if (!parentGone && !(await waitUntilParentGone(parent.pid))) throw error;
     // Relaunch only the original bundle: restore it if a failed rollback left it aside.
     if (
       prepared.oldAppMoved &&
