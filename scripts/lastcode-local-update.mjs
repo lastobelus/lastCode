@@ -174,6 +174,7 @@ function run(cwd, command, args, options = {}) {
     cwd,
     encoding: "utf8",
     env: options.env ?? process.env,
+    ...(options.maxBuffer === undefined ? {} : { maxBuffer: options.maxBuffer }),
     stdio:
       options.logFd === undefined
         ? ["ignore", "pipe", "pipe"]
@@ -445,11 +446,6 @@ export function quarantineIncompleteBuild(
   return quarantinePath;
 }
 
-function checkpointSourceCommit(repoRoot, tag) {
-  const message = git(repoRoot, ["for-each-ref", `refs/tags/${tag}`, "--format=%(contents)"]);
-  return /^Source-Commit:\s*(\S+)\s*$/m.exec(message)?.[1];
-}
-
 function hasCommit(repoRoot, ref) {
   const result = NodeChildProcess.spawnSync("git", ["cat-file", "-e", `${ref}^{commit}`], {
     cwd: repoRoot,
@@ -489,18 +485,52 @@ function parseCommitSubjects(value) {
     .filter(({ subject }) => subject.length > 0);
 }
 
+const INSTALLABLE_REF_FIELDS = 6;
+
+/** One `for-each-ref` for every installable tag; a spawn per tag cost seconds on each poll. */
+function readInstallableRefs(repoRoot) {
+  const fields = run(
+    repoRoot,
+    "git",
+    [
+      "for-each-ref",
+      "--format=%(refname:strip=2)%00%(objecttype)%00%(objectname)%00%(*objecttype)%00%(*objectname)%00%(contents)%00",
+      `refs/tags/${CHECKPOINT_PREFIX}`,
+      `refs/tags/${REVISION_PREFIX}`,
+    ],
+    { maxBuffer: 64 * 1024 * 1024 },
+  ).split("\0");
+  const refs = new Map();
+  for (
+    let index = 0;
+    index + INSTALLABLE_REF_FIELDS <= fields.length;
+    index += INSTALLABLE_REF_FIELDS
+  ) {
+    const [name, type, object, peeledType, peeledObject, message] = fields.slice(
+      index,
+      index + INSTALLABLE_REF_FIELDS,
+    );
+    const tag = name.replace(/^\n/, "");
+    const commit =
+      peeledType === "commit"
+        ? peeledObject
+        : type === "commit"
+          ? object
+          : git(repoRoot, ["rev-parse", `${tag}^{commit}`]);
+    refs.set(tag, { commit, sourceCommit: /^Source-Commit:\s*(\S+)\s*$/m.exec(message)?.[1] });
+  }
+  return refs;
+}
+
 function listInstallableRefs(repoRoot, tags) {
+  const refs = readInstallableRefs(repoRoot);
   return tags
     .flatMap((tag) => {
       const installable = parseInstallableTag(tag);
       if (!installable) return [];
-      return [
-        {
-          ...installable,
-          commit: git(repoRoot, ["rev-parse", `${tag}^{commit}`]),
-          sourceCommit: checkpointSourceCommit(repoRoot, tag),
-        },
-      ];
+      const ref = refs.get(tag);
+      if (!ref) throw new Error(`Could not read installable tag ${tag}.`);
+      return [{ ...installable, ...ref }];
     })
     .toSorted((left, right) => compareNightlyVersions(left.version.tag, right.version.tag));
 }
