@@ -299,14 +299,16 @@ export function getDesktopUpdateActionError(result: DesktopUpdateActionResult): 
     : message;
 }
 
-/** Why a confirmed install was refused because a different build replaced the confirmed one. */
+/** Why a confirmed install was refused: a different build replaced it, or it could not start yet. */
 export function getDesktopUpdateInstallRefusal(
   result: DesktopUpdateActionResult,
   confirmedVersion: string | undefined,
 ): string | null {
   if (result.accepted || confirmedVersion === undefined) return null;
-  const current = result.state.downloadedVersion;
-  if (current === confirmedVersion) return null;
+  const current = result.state.downloadedVersion ?? result.state.availableVersion;
+  if (current === confirmedVersion) {
+    return `${confirmedVersion} could not start installing yet, for example while an update check finishes. Try again in a moment.`;
+  }
   return current
     ? `${confirmedVersion} was replaced by ${current}. Review it and try again.`
     : `${confirmedVersion} is no longer ready to install.`;

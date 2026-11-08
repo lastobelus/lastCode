@@ -140,7 +140,7 @@ export function SidebarUpdateCapsule({
             </div>
           ) : onRestart ? (
             <div className="flex items-center justify-between gap-3">
-              <span className="min-w-0 truncate">{restartLabel ?? "This app"}</span>
+              <span className="min-w-0 break-words">{restartLabel ?? "This app"}</span>
               <Button size="xs" variant="outline" onClick={() => void onRestart()}>
                 Restart to update
               </Button>
