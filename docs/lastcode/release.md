@@ -245,6 +245,8 @@ disabled, report that setup problem rather than reverting to a sleep loop.
 
 ### Resuming a repaired checkpoint
 
+When the checkpoint failure record links a conflict dossier, read it before you resolve a retained carry conflict.
+
 Preserve the retained worktree, including resolutions and subsequent repairs.
 The checkpoint command enables rerere in repository configuration for
 historical, non-carry rebases; carry replay overrides it on its own rebase

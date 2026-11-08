@@ -1,4 +1,8 @@
 import { describe, expect, it } from "vite-plus/test";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 
 import {
   carrySetShadowDetailLines,
@@ -165,6 +169,21 @@ describe("LastCode checkpoint dashboard", () => {
   });
 
   it("launches the installed dashboard with the repository's pinned Node runtime", () => {
+    const directory = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "checkpoint-install-test-"),
+    );
+    try {
+      const installed = NodePath.join(directory, "lastcode-checkpoints.mjs");
+      NodeFS.copyFileSync(new URL("./lastcode-checkpoints.mjs", import.meta.url), installed);
+      const result = NodeChildProcess.spawnSync(process.execPath, [installed, "--help"], {
+        encoding: "utf8",
+      });
+      expect(result.stderr).toBe("");
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain("Usage:");
+    } finally {
+      NodeFS.rmSync(directory, { recursive: true, force: true });
+    }
     expect(renderLauncher("/tmp/Last Code/checkpoints.mjs")).toContain(
       "env MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@24.13.1 -- node '/tmp/Last Code/checkpoints.mjs' \"$@\"",
     );

@@ -15,6 +15,7 @@ import {
   replayCarrySetOnto,
   replayUngroupedOnto,
 } from "./lastcode-carry-replay.ts";
+import { writeCarryConflictDossier, type CarryConflictDossier } from "./lastcode-carry-dossier.ts";
 
 function git(repo: string, args: ReadonlyArray<string>, input?: string): string {
   return NodeChildProcess.execFileSync("git", args, {
@@ -112,6 +113,107 @@ function checkout(repo: string, branch: string, commit: string): void {
   git(repo, ["checkout", "--quiet", "-B", branch, commit]);
 }
 
+function prepareCrossBaseConflicts(repo: string) {
+  const contents = Array.from({ length: 40 }, (_, i) => `line-${i}\n`).join("");
+  write(repo, ".gitattributes", "* merge=fixture\n");
+  write(repo, "shared.txt", contents);
+  write(repo, "deleted.txt", "base\n");
+  write(repo, "later.txt", "base\n");
+  const base = commit(repo, "old upstream");
+  write(repo, "shared.txt", contents.replace("line-5\n", "first carry\n"));
+  write(repo, "deleted.txt", "carried modification\n");
+  write(repo, "introduced.txt", "introduced by the first group\n");
+  const first = commit(
+    repo,
+    "first owner",
+    "Carry-Group: upstream-bugfixes\nCarry-Observation: retain the first behavior",
+  );
+  write(repo, "shared.txt", contents.replace("line-5\n", "second carry\n"));
+  const second = commit(
+    repo,
+    "overlapping owner",
+    "Carry-Group: upstream-bugfixes\nCarry-Observation: retain the second behavior",
+  );
+  write(
+    repo,
+    "shared.txt",
+    contents.replace("line-5\n", "second carry\n").replace("line-30\n", "distant carry\n"),
+  );
+  const distant = commit(repo, "distant owner", "Carry-Group: upstream-bugfixes");
+  write(repo, "later.txt", "tooling\n");
+  write(
+    repo,
+    "shared.txt",
+    contents.replace("line-5\n", "tooling carry\n").replace("line-30\n", "distant carry\n"),
+  );
+  write(repo, "introduced.txt", "extended by the later group\n");
+  const later = commit(repo, "later group owner", "Carry-Group: tooling");
+  write(
+    repo,
+    "shared.txt",
+    NodeFS.readFileSync(NodePath.join(repo, "shared.txt"), "utf8").replace(
+      "distant carry",
+      "later distant carry",
+    ),
+  );
+  const source = commit(repo, "later distant owner", "Carry-Group: tooling");
+  const sourceRef = `refs/lastcode/carry-sources/pr-1/${source}`;
+  git(repo, ["update-ref", sourceRef, source]);
+  const compact = compileCarrySetSameBase({
+    repo,
+    worktree: repo,
+    base,
+    source,
+    preparedPartition: { base, source, head: source },
+  }).head;
+  checkout(repo, "new-upstream", base);
+  write(repo, "shared.txt", contents.replace("line-5\n", "upstream\n"));
+  git(repo, ["rm", "--quiet", "deleted.txt"]);
+  write(repo, "later.txt", "upstream\n");
+  const onto = commit(repo, "new upstream changes both groups");
+  checkout(repo, "replay", compact);
+  return { base, compact, onto, first, second, distant, later, source, sourceRef };
+}
+
+function gitWrapper(
+  repo: string,
+  body: string,
+  source: string,
+): NodeChildProcess.SpawnSyncReturns<string> {
+  const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "carry-git-wrapper-"));
+  try {
+    const realGit = NodeChildProcess.execFileSync("/bin/sh", ["-c", "command -v git"], {
+      encoding: "utf8",
+    }).trim();
+    NodeFS.writeFileSync(
+      NodePath.join(directory, "git"),
+      `#!/bin/sh\n${body}\nexec "$FIXTURE_REAL_GIT" "$@"\n`,
+      { mode: 0o700 },
+    );
+    return NodeChildProcess.spawnSync(process.execPath, ["--input-type=module", "-e", source], {
+      cwd: repo,
+      encoding: "utf8",
+      timeout: 12_000,
+      killSignal: "SIGKILL",
+      maxBuffer: 16 * 1024 * 1024,
+      env: {
+        ...process.env,
+        PATH: `${directory}${NodePath.delimiter}${process.env.PATH}`,
+        FIXTURE_REAL_GIT: realGit,
+        FIXTURE_GIT_MARKER: NodePath.join(directory, "marker"),
+      },
+    });
+  } finally {
+    NodeFS.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+function dossierJson(summaryPath: string): CarryConflictDossier {
+  return JSON.parse(
+    NodeFS.readFileSync(summaryPath.replace(/\.txt$/u, ".json"), "utf8"),
+  ) as CarryConflictDossier;
+}
+
 function makePartitionedSquash(
   repo: string,
   base: string,
@@ -164,6 +266,471 @@ function makePartitionedSquash(
   return { head, squash, sourceRef };
 }
 
+describe("carry conflict dossier", () => {
+  it("preserves the replay error when dossier git ignores SIGTERM", () => {
+    const { repo, cleanup } = initRepo();
+    try {
+      const fixture = prepareCrossBaseConflicts(repo);
+      const input = {
+        repo,
+        worktree: repo,
+        sourceBase: fixture.base,
+        compactHead: fixture.compact,
+        onto: fixture.onto,
+      };
+      const result = gitWrapper(
+        repo,
+        `
+if [ -f "$FIXTURE_GIT_MARKER" ]; then trap '' TERM; exec sleep 30; fi
+"$FIXTURE_REAL_GIT" "$@"
+status=$?
+case " $* " in *" rebase --interactive "*) touch "$FIXTURE_GIT_MARKER";; esac
+exit "$status"`,
+        `
+import assert from 'node:assert/strict';
+import { replayCarrySetOnto } from ${JSON.stringify(new URL("./lastcode-carry-replay.ts", import.meta.url).href)};
+assert.throws(() => replayCarrySetOnto(${JSON.stringify(input)}), /could not apply/i);
+`,
+      );
+      // The outer guard proves that an ignored SIGTERM cannot hold the eight-second failure path.
+      assert.equal(result.error, undefined);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(
+        git(repo, ["rev-parse", "REBASE_HEAD"]),
+        readCarryGroupChain(repo, fixture.compact, fixture.base)[0]!.commit,
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it.each([false, true])(
+    "keeps stopped details when forecast fails=%s and ignores merge helpers",
+    (failForecast) => {
+      const { repo, cleanup } = initRepo();
+      try {
+        const fixture = prepareCrossBaseConflicts(repo);
+        const input = {
+          repo,
+          worktree: repo,
+          sourceBase: fixture.base,
+          compactHead: fixture.compact,
+          onto: fixture.onto,
+        };
+        assert.throws(() => replayCarrySetOnto(input));
+        const marker = NodePath.join(repo, ".git", "external-merge-ran");
+        git(repo, ["config", "merge.fixture.driver", `touch '${marker}'; exit 1`]);
+        NodeFS.writeFileSync(
+          NodePath.join(repo, ".git", "info", "attributes"),
+          "* merge=fixture\n",
+        );
+        const result = gitWrapper(
+          repo,
+          failForecast
+            ? 'case " $* " in *" merge-tree "*) echo "fixture forecast failure" >&2; exit 128;; esac'
+            : "",
+          `
+import { readCarryGroupChain } from ${JSON.stringify(new URL("./lastcode-carry-replay.ts", import.meta.url).href)};
+import { writeCarryConflictDossier } from ${JSON.stringify(new URL("./lastcode-carry-dossier.ts", import.meta.url).href)};
+writeCarryConflictDossier(${JSON.stringify(input)}, readCarryGroupChain(${JSON.stringify(repo)}, ${JSON.stringify(fixture.compact)}, ${JSON.stringify(fixture.base)}));
+`,
+        );
+        assert.equal(result.status, 0, result.stderr);
+        assert.equal(NodeFS.existsSync(marker), false);
+        const summaryPath = NodePath.join(
+          git(repo, ["rev-parse", "--absolute-git-dir"]),
+          "lastcode-carry-conflict-dossier.txt",
+        );
+        const dossier = dossierJson(summaryPath);
+        assert.equal(dossier.stopped.files.length, 2);
+        assert.equal(
+          dossier.forecast.groups.some(({ group }) => group === "upstream-bugfixes"),
+          false,
+        );
+        assert.equal(
+          dossier.warnings.some((warning) => warning.includes("forecast unavailable")),
+          failForecast,
+        );
+        assert.equal(dossier.forecast.groups.length, failForecast ? 0 : 5);
+        assert.match(
+          NodeFS.readFileSync(summaryPath, "utf8"),
+          new RegExp(`REBASE_HEAD: ${dossier.stopped.commit}`, "u"),
+        );
+      } finally {
+        cleanup();
+      }
+    },
+  );
+
+  it.each([false, true])("attributes deletion partitions using explicit paths=%s", (explicit) => {
+    const { repo, cleanup } = initRepo();
+    try {
+      const fixture = prepareCrossBaseConflicts(repo);
+      const input = {
+        repo,
+        worktree: repo,
+        sourceBase: fixture.base,
+        compactHead: fixture.compact,
+        onto: fixture.onto,
+      };
+      assert.throws(() => replayCarrySetOnto(input));
+      const groups = readCarryGroupChain(repo, fixture.compact, fixture.base);
+      const original = groups[0]!.contributions[0]!;
+      const partition = {
+        ...original,
+        ...(explicit ? { deletedPaths: ["deleted.txt"] } : {}),
+        metadata: {
+          ...original.metadata,
+          "Carry-Observation": [
+            "Deletion partition follows the tooling introduction of deleted.txt.",
+          ],
+          "Carry-Supersedes": [`${fixture.first} (deleted.txt)`],
+        },
+      };
+      const originalStop = groups.map((group, index) =>
+        index === 1 ? { ...group, contributions: [partition] } : group,
+      );
+      const first = dossierJson(writeCarryConflictDossier(input, originalStop)!);
+      assert.equal(
+        first.stopped.files.find(({ path }) => path === "deleted.txt")!.ownership.candidates.length,
+        0,
+      );
+      assert.ok(
+        first.stopped.files
+          .find(({ path }) => path === "shared.txt")!
+          .ownership.candidates.some(({ sourceCommit }) => sourceCommit === fixture.first),
+      );
+      const partitionStop = groups.map((group, index) =>
+        index === 0
+          ? { ...group, contributions: [partition] }
+          : index === 1
+            ? { ...group, contributions: [original] }
+            : group,
+      );
+      const second = dossierJson(writeCarryConflictDossier(input, partitionStop)!);
+      assert.deepEqual(
+        second.stopped.files.find(({ path }) => path === "shared.txt")!.ownership.candidates,
+        [],
+      );
+      assert.deepEqual(
+        second.stopped.files
+          .find(({ path }) => path === "deleted.txt")!
+          .ownership.candidates.map(({ sourceCommit }) => sourceCommit),
+        [fixture.first],
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("bounds the summary and stores upstream commits once", () => {
+    const { repo, cleanup } = initRepo();
+    try {
+      const fixture = prepareCrossBaseConflicts(repo);
+      checkout(repo, "more-upstream", fixture.onto);
+      for (let index = 0; index < 8; index += 1) {
+        write(
+          repo,
+          "shared.txt",
+          NodeFS.readFileSync(NodePath.join(repo, "shared.txt"), "utf8") +
+            `upstream addition ${index}\n`,
+        );
+        commit(repo, `upstream context ${index}`);
+      }
+      const onto = git(repo, ["rev-parse", "HEAD"]);
+      checkout(repo, "replay", fixture.compact);
+      const input = {
+        repo,
+        worktree: repo,
+        sourceBase: fixture.base,
+        compactHead: fixture.compact,
+        onto,
+      };
+      assert.throws(() => replayCarrySetOnto(input));
+      const groups = readCarryGroupChain(repo, fixture.compact, fixture.base).map((group) => ({
+        ...group,
+        contributions: group.contributions.map((source) => ({
+          ...source,
+          metadata: { ...source.metadata, "Carry-Observation": ["long note ".repeat(10_000)] },
+        })),
+      }));
+      const summaryPath = writeCarryConflictDossier(input, groups)!;
+      const summary = NodeFS.readFileSync(summaryPath, "utf8");
+      const dossier = dossierJson(summaryPath);
+      const shared = dossier.stopped.files.find(({ path }) => path === "shared.txt")!;
+      assert.equal(shared.upstreamCommits.length, 9);
+      assert.equal(dossier.upstreamCommits.length, 9);
+      assert.ok(
+        shared.upstreamCommits.every((sha) =>
+          dossier.upstreamCommits.some(({ commit }) => commit === sha),
+        ),
+      );
+      assert.equal(summary.split("    upstream ").length - 1, 6); // Five for shared.txt; one for deleted.txt.
+      assert.match(summary, /4 more upstream commits in JSON/u);
+      assert.match(summary, /\[truncated\]/u);
+      assert.ok(Buffer.byteLength(summary) <= 64 * 1024);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("labels rename stages as conflicts rather than add/add", () => {
+    const { repo, cleanup } = initRepo();
+    try {
+      write(repo, "old.txt", "rename this content\n");
+      const base = commit(repo, "old upstream");
+      git(repo, ["mv", "old.txt", "carried.txt"]);
+      const source = commit(repo, "carry rename", "Carry-Group: tooling");
+      const compact = compileCarrySetSameBase({
+        repo,
+        worktree: repo,
+        base,
+        source,
+        preparedPartition: { base, source, head: source },
+      }).head;
+      checkout(repo, "upstream", base);
+      git(repo, ["mv", "old.txt", "upstream.txt"]);
+      const onto = commit(repo, "upstream rename");
+      checkout(repo, "replay", compact);
+      let summaryPath: string | undefined;
+      try {
+        replayCarrySetOnto({ repo, worktree: repo, sourceBase: base, compactHead: compact, onto });
+      } catch (error) {
+        summaryPath = (error as Error & { conflictDossierPath?: string }).conflictDossierPath;
+      }
+      assert.ok(summaryPath);
+      const dossier = dossierJson(summaryPath);
+      assert.equal(dossier.stopped.files.length, 3);
+      assert.ok(dossier.stopped.files.every(({ kind }) => kind === "conflict"));
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("keeps file-level owners when overlap ranking cannot read a source parent", () => {
+    const { repo, cleanup } = initRepo();
+    try {
+      const fixture = prepareCrossBaseConflicts(repo);
+      const input = {
+        repo,
+        worktree: repo,
+        sourceBase: fixture.base,
+        compactHead: fixture.compact,
+        onto: fixture.onto,
+      };
+      assert.throws(() => replayCarrySetOnto(input));
+      const groups = readCarryGroupChain(repo, fixture.compact, fixture.base).map((group, index) =>
+        index === 0
+          ? {
+              ...group,
+              contributions: [{ ...group.contributions[0]!, sourceCommit: fixture.base }],
+            }
+          : group,
+      );
+      const indexBefore = NodeFS.readFileSync(
+        NodePath.join(git(repo, ["rev-parse", "--absolute-git-dir"]), "index"),
+      );
+      const dossierPath = writeCarryConflictDossier(input, groups);
+      assert.ok(dossierPath);
+      const dossier = JSON.parse(
+        NodeFS.readFileSync(dossierPath.replace(/\.txt$/u, ".json"), "utf8"),
+      ) as CarryConflictDossier;
+      const shared = dossier.stopped.files.find(({ path }) => path === "shared.txt")!;
+      assert.deepEqual(
+        shared.ownership.candidates.map(({ sourceCommit }) => sourceCommit),
+        [fixture.base],
+      );
+      assert.deepEqual(shared.ownership.candidates[0]!.observations, ["retain the first behavior"]);
+      assert.equal(shared.ownership.candidates[0]!.overlapLines, null);
+      assert.equal(shared.ownership.ranking, "file-only");
+      assert.ok(dossier.warnings.length > 0);
+      assert.deepEqual(
+        dossier.forecast.groups
+          .find(({ group }) => group === "tooling")!
+          .files.map(({ path }) => path),
+        ["later.txt", "shared.txt"],
+      );
+      assert.deepEqual(
+        NodeFS.readFileSync(NodePath.join(git(repo, ["rev-parse", "--absolute-git-dir"]), "index")),
+        indexBefore,
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it.each([false, true])(
+    "retains cross-base recovery with dossier write failure=%s",
+    (failDossier) => {
+      const { repo, cleanup } = initRepo();
+      try {
+        const fixture = prepareCrossBaseConflicts(repo);
+        const gitDirectory = git(repo, ["rev-parse", "--absolute-git-dir"]);
+        const dossierPath = NodePath.join(gitDirectory, "lastcode-carry-conflict-dossier.txt");
+        if (failDossier) NodeFS.mkdirSync(dossierPath);
+        let failure: unknown;
+        try {
+          replayCarrySetOnto({
+            repo,
+            worktree: repo,
+            sourceBase: fixture.base,
+            compactHead: fixture.compact,
+            onto: fixture.onto,
+          });
+        } catch (error) {
+          failure = error;
+        }
+        assert.ok(failure instanceof Error);
+        assert.match(failure.message, /could not apply/iu);
+        const recordedPath = (failure as Error & { conflictDossierPath?: string })
+          .conflictDossierPath;
+        if (failDossier) {
+          assert.equal(recordedPath, undefined);
+        } else {
+          assert.equal(recordedPath, dossierPath);
+          const dossier = JSON.parse(
+            NodeFS.readFileSync(dossierPath.replace(/\.txt$/u, ".json"), "utf8"),
+          ) as CarryConflictDossier;
+          assert.equal(dossier.stopped.group, "upstream-bugfixes");
+          assert.deepEqual(
+            dossier.stopped.files.map(({ path, kind }: { path: string; kind: string }) => ({
+              path,
+              kind,
+            })),
+            [
+              { path: "deleted.txt", kind: "deleted upstream" },
+              { path: "shared.txt", kind: "content" },
+            ],
+          );
+          const shared = dossier.stopped.files.find(({ path }) => path === "shared.txt")!;
+          assert.equal(shared.ownership.ambiguous, true);
+          assert.deepEqual(
+            shared.ownership.candidates.map(
+              ({ sourceCommit }: { sourceCommit: string }) => sourceCommit,
+            ),
+            [fixture.first, fixture.second, fixture.distant],
+          );
+          assert.ok(shared.ownership.candidates[0]!.overlapLines! > 0);
+          assert.ok(shared.ownership.candidates[1]!.overlapLines! > 0);
+          assert.equal(shared.ownership.candidates[2]!.overlapLines, 0);
+          assert.deepEqual(shared.ownership.candidates[0]!.observations, [
+            "retain the first behavior",
+          ]);
+          assert.deepEqual(shared.ownership.candidates[0]!.sourceRefs, [fixture.sourceRef]);
+          assert.equal(
+            dossier.stopped.files.find(({ path }) => path === "deleted.txt")!.ownership.ambiguous,
+            false,
+          );
+          assert.deepEqual(shared.upstreamCommits, [fixture.onto]);
+          assert.equal(dossier.forecast.advisory, true);
+          assert.deepEqual(
+            dossier.forecast.groups
+              .find(({ group }) => group === "tooling")!
+              .files.map(({ path }) => path),
+            ["later.txt", "shared.txt"],
+          );
+          assert.deepEqual(
+            dossier.forecast.groups.find(({ group }) => group === "build-ci")!.files,
+            [],
+          );
+          assert.ok(
+            NodeFS.existsSync(NodePath.join(gitDirectory, "lastcode-carry-conflict-dossier.txt")),
+          );
+          const retained = [
+            "index",
+            "HEAD",
+            "ORIG_HEAD",
+            "REBASE_HEAD",
+            ...NodeFS.readdirSync(NodePath.join(gitDirectory, "rebase-merge")).map(
+              (name) => `rebase-merge/${name}`,
+            ),
+          ];
+          const before = retained.map((path) =>
+            NodeFS.readFileSync(NodePath.join(gitDirectory, path)),
+          );
+          writeCarryConflictDossier(
+            {
+              repo,
+              worktree: repo,
+              sourceBase: fixture.base,
+              compactHead: fixture.compact,
+              onto: fixture.onto,
+            },
+            readCarryGroupChain(repo, fixture.compact, fixture.base),
+          );
+          assert.deepEqual(
+            retained.map((path) => NodeFS.readFileSync(NodePath.join(gitDirectory, path))),
+            before,
+          );
+        }
+        assert.equal(git(repo, ["rev-parse", "HEAD"]), fixture.onto);
+        const groups = readCarryGroupChain(repo, fixture.compact, fixture.base);
+        assert.equal(git(repo, ["rev-parse", "REBASE_HEAD"]), groups[0]?.commit);
+        assert.equal(git(repo, ["rev-parse", "ORIG_HEAD"]), fixture.compact);
+        assert.equal(readCarryReplayPlan(repo)?.status, "running");
+        assert.equal(NodeFS.existsSync(NodePath.join(gitDirectory, "rebase-merge")), true);
+        assert.deepEqual(git(repo, ["diff", "--name-only", "--diff-filter=U"]).split("\n"), [
+          "deleted.txt",
+          "shared.txt",
+        ]);
+        write(
+          repo,
+          "shared.txt",
+          git(repo, ["show", `${groups[0]!.commit}:shared.txt`]).replace(
+            "second carry",
+            "resolved first group",
+          ) + "\n",
+        );
+        git(repo, ["rm", "--quiet", "deleted.txt"]);
+        git(repo, ["add", "shared.txt"]);
+        assert.throws(() => git(repo, ["-c", "core.editor=true", "rebase", "--continue"]));
+        assert.equal(git(repo, ["rev-parse", "REBASE_HEAD"]), groups[1]?.commit);
+        if (failDossier) NodeFS.rmdirSync(dossierPath);
+        const ours = git(repo, ["rev-parse", "HEAD"]);
+        const later = dossierJson(
+          writeCarryConflictDossier(
+            {
+              repo,
+              worktree: repo,
+              sourceBase: fixture.base,
+              compactHead: fixture.compact,
+              onto: fixture.onto,
+            },
+            groups,
+          )!,
+        );
+        assert.equal(later.ours, ours);
+        assert.notEqual(later.ours, fixture.onto);
+        assert.equal(later.stopped.group, "tooling");
+        assert.equal(
+          later.forecast.groups.some(
+            ({ group }) => group === "tooling" || group === "upstream-bugfixes",
+          ),
+          false,
+        );
+        // The earlier group's already-applied introduction is absent from the remaining delta.
+        const laterOwners = later.stopped.files.find(({ path }) => path === "shared.txt")!.ownership
+          .candidates;
+        assert.equal(
+          laterOwners.find(({ sourceCommit }) => sourceCommit === fixture.later)!.overlapLines,
+          1,
+        );
+        assert.equal(
+          laterOwners.find(({ sourceCommit }) => sourceCommit === fixture.source)!.overlapLines,
+          0,
+        );
+
+        assert.deepEqual(git(repo, ["diff", "--name-only", "--diff-filter=U"]).split("\n"), [
+          "later.txt",
+          "shared.txt",
+        ]);
+      } finally {
+        cleanup();
+      }
+    },
+  );
+});
+
 describe("carry replay core", () => {
   it("compiles large provenance without passing commit messages as process arguments", () => {
     const { repo, cleanup } = initRepo();
@@ -182,13 +749,16 @@ describe("carry replay core", () => {
       );
       git(repo, ["checkout", "--quiet", "--detach", source]);
 
-      const result = compileCarrySetSameBase({
+      const child = gitWrapper(
         repo,
-        worktree: repo,
-        base,
-        source,
-        preparedPartition: { base, source, head: source },
-      });
+        'case " $* " in *" commit-tree "*" -F - "*) echo "stdin commit messages are disabled" >&2; exit 99;; esac',
+        `
+import { compileCarrySetSameBase } from ${JSON.stringify(new URL("./lastcode-carry-replay.ts", import.meta.url).href)};
+console.log(JSON.stringify(compileCarrySetSameBase(${JSON.stringify({ repo, worktree: repo, base, source, preparedPartition: { base, source, head: source } })})));
+`,
+      );
+      assert.equal(child.status, 0, child.stderr);
+      const result = JSON.parse(child.stdout) as ReturnType<typeof compileCarrySetSameBase>;
       assert.equal(git(repo, ["rev-parse", `${result.head}^{tree}`]), tree);
       assert.equal(
         result.groups?.find((group) => group.group === "incubator")?.contributions[0]?.metadata[

@@ -11,6 +11,7 @@ import {
   isCheckpointMessageRewrite,
   normalizeCheckpointCommits,
 } from "./lastcode-quiet-references.ts";
+import { writeCarryConflictDossier } from "./lastcode-carry-dossier.ts";
 
 export const CARRY_REPLAY_GROUPS = [
   "upstream-bugfixes",
@@ -48,6 +49,7 @@ export interface CarryContributionMetadata {
   readonly sourceCommit: string;
   readonly subject: string;
   readonly group: CarryReplayGroup;
+  readonly deletedPaths?: ReadonlyArray<string>;
   readonly metadata: Readonly<Record<PublicMetadataTrailer, ReadonlyArray<string>>>;
 }
 
@@ -119,6 +121,7 @@ interface GitOptions {
   readonly allowFailure?: boolean;
   readonly environment?: NodeJS.ProcessEnv;
   readonly input?: string;
+  readonly timeout?: number;
 }
 
 interface ReplayItem {
@@ -140,6 +143,8 @@ function runGit(cwd: string, args: ReadonlyArray<string>, options: GitOptions = 
     encoding: "utf8",
     env: options.environment ?? cleanGitEnvironment(process.env),
     input: options.input,
+    timeout: options.timeout ?? 30_000,
+    killSignal: "SIGKILL",
     maxBuffer: 64 * 1024 * 1024,
     stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
   });
@@ -157,6 +162,29 @@ function runGit(cwd: string, args: ReadonlyArray<string>, options: GitOptions = 
     );
   }
   return options.raw ? result.stdout : result.stdout.trim();
+}
+
+function createCommit(
+  repo: string,
+  tree: string,
+  parent: string,
+  message: string,
+  environment: NodeJS.ProcessEnv = cleanGitEnvironment(process.env),
+): string {
+  const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-carry-message-"));
+  const path = NodePath.join(directory, "message");
+  try {
+    NodeFS.writeFileSync(path, message, { mode: 0o600 });
+    return runGit(
+      repo,
+      ["-c", "commit.gpgSign=false", "commit-tree", tree, "-p", parent, "-F", path],
+      {
+        environment,
+      },
+    );
+  } finally {
+    NodeFS.rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 function resolveCommit(repo: string, ref: string): string {
@@ -444,9 +472,7 @@ function normalizeCarryDeletions(
         const tree = runGit(repo, ["write-tree"], { environment });
         return tree === resolveTree(repo, parent)
           ? undefined
-          : runGit(repo, ["commit-tree", tree, "-p", parent, "-F", "-"], {
-              input: commitMessage(repo, item.commit),
-            });
+          : createCommit(repo, tree, parent, commitMessage(repo, item.commit));
       };
       try {
         // A deletion follows the carried introduction, so regrouping cannot re-add it.
@@ -472,6 +498,7 @@ function normalizeCarryDeletions(
           const metadata: CarryContributionMetadata = {
             ...item.metadata,
             group,
+            deletedPaths: paths,
             metadata: {
               ...item.metadata.metadata,
               "Carry-Observation": [
@@ -671,10 +698,7 @@ function createAnchor(
     GIT_COMMITTER_NAME: "LastCode carry replay",
     GIT_COMMITTER_EMAIL: "carry-replay@localhost",
   };
-  return runGit(repo, ["commit-tree", resolveTree(repo, base), "-p", base, "-F", "-"], {
-    environment,
-    input: message,
-  });
+  return createCommit(repo, resolveTree(repo, base), base, message, environment);
 }
 
 function groupMessage(
@@ -734,7 +758,7 @@ function runInteractiveReplay(input: {
         "--empty=keep",
         "--reapply-cherry-picks",
       ],
-      { environment },
+      { environment, timeout: 10 * 60_000 },
     );
   } finally {
     NodeFS.rmSync(temporaryRoot, { recursive: true, force: true });
@@ -1150,12 +1174,28 @@ export function replayCarrySetOnto(input: ReplayCarrySetInput): CarryReplayResul
     sourceBase,
     onto,
   });
-  runInteractiveReplay({
-    worktree: input.worktree,
-    upstream: sourceBase,
-    onto,
-    todo: groups.map(({ commit, group }) => `pick ${commit} carry(${group})`),
-  });
+  try {
+    runInteractiveReplay({
+      worktree: input.worktree,
+      upstream: sourceBase,
+      onto,
+      todo: groups.map(({ commit, group }) => `pick ${commit} carry(${group})`),
+    });
+  } catch (error) {
+    try {
+      const conflictDossierPath = writeCarryConflictDossier(
+        { ...input, sourceBase, compactHead, onto },
+        groups,
+      );
+      if (conflictDossierPath && error instanceof Error)
+        Object.assign(error, { conflictDossierPath });
+    } catch (dossierError) {
+      console.warn(
+        `[lastcode:checkpoint] Could not write conflict dossier: ${dossierError instanceof Error ? dossierError.message : String(dossierError)}`,
+      );
+    }
+    throw error;
+  }
   return completeCarryReplay(input.worktree);
 }
 

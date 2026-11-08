@@ -30,10 +30,12 @@ describe("checkpoint run history", () => {
     const revisionHistoryPath = NodePath.join(directory, "checkpoint-revision-runs.jsonl");
     const nightlyFailure = checkpointFailureRecord({
       commitsRebased: 14,
-      error: new Error("nightly replay needs repair"),
       failurePhase: "rebase",
       recoveryBranch: "sync/nightly/v0.0.1-nightly.20260813.2",
       recoveryFingerprint: "nightly-fingerprint",
+      error: Object.assign(new Error("nightly replay needs repair"), {
+        conflictDossierPath: "/recovery/git/conflict-dossier.txt",
+      }),
       startedAtMs: 1_000,
       upstreamTag: "v0.0.1-nightly.20260813.2",
     });
@@ -58,6 +60,7 @@ describe("checkpoint run history", () => {
 
     try {
       expect(appendCheckpointRun(nightlyFailure, checkpointHistoryPath)).toBe(true);
+      expect(nightlyFailure.conflictDossierPath).toBe("/recovery/git/conflict-dossier.txt");
       expect(appendCheckpointRevisionRun(revisionSuccess, revisionHistoryPath)).toBe(true);
       expect(readLatestCheckpointRun(checkpointHistoryPath)).toEqual(nightlyFailure);
       expect(appendCheckpointRevisionRun(revisionFailure, revisionHistoryPath)).toBe(true);
