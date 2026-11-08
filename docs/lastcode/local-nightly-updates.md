@@ -58,18 +58,15 @@ picker.
 
 ## User flow
 
-1. The desktop checks the local repository at startup, every four hours, when
-   a local package build finishes, and when the sidebar update button is
-   clicked. A manual check from the sidebar,
-   Settings, or application menu also requests an immediate checkpoint when the
-   checkpoint service is installed on this Mac, including on a daily schedule.
-   If an interval run is already active, the request waits for a follow-up run
-   without interrupting the current one.
-   The check still discovers releases that are already ready. If no newer release
-   is ready, the app confirms the request while the service runs in the background;
-   check again later to pick up its result.
-   Startup and periodic checks only inspect existing tags. Without the service,
-   manual checks continue to inspect existing tags.
+1. The desktop checks the local repository at startup, every four hours, when a
+   local package build finishes, and when you check for updates from the
+   sidebar, Settings, or the application menu. These checks inspect existing tags.
+   To start a new checkpoint, choose **Request checkpoint** in Settings → LastCode.
+   It asks the checkpoint service to run immediately, even when the service is on
+   a daily schedule. If a run is already active, the service queues a follow-up.
+   The request also discovers releases that are already ready. If none is newer,
+   the app confirms the request and you can check again after the run finishes.
+   If the checkpoint service is unavailable, the request only inspects existing tags.
 2. If a checkpoint or revision is newer than the installed LastCode version,
    the sidebar button changes state. Its hover card separates new downstream
    work under **LastCode changes** from upstream work grouped by the nightly

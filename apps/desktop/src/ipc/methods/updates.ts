@@ -80,10 +80,10 @@ export const installUpdate = DesktopIpc.makeIpcMethod({
 
 export const checkForUpdate = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.UPDATE_CHECK_CHANNEL,
-  payload: Schema.Void,
+  payload: Schema.UndefinedOr(Schema.Struct({ requestCheckpoint: Schema.Boolean })),
   result: DesktopUpdateCheckResultSchema,
-  handler: Effect.fn("desktop.ipc.updates.check")(function* () {
+  handler: Effect.fn("desktop.ipc.updates.check")(function* (options) {
     const updates = yield* DesktopUpdates.DesktopUpdates;
-    return yield* updates.check("web-ui");
+    return yield* updates.check(options?.requestCheckpoint ? "checkpoint-request" : "web-ui");
   }),
 });
