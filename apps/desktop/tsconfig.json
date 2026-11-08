@@ -9,6 +9,7 @@
     "src",
     "vite.config.ts",
     "../../scripts/lib",
+    "../../packages/contracts/src/lastcodePullRequestWatchQuietMinutes.ts",
     "../../packages/contracts/src/lastcodePullRequestWatchSettings.ts"
   ]
 }
