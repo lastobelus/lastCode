@@ -112,14 +112,29 @@ export function persistentThreadRepairStatus(config, threads) {
   };
 }
 
+// Reads open the live database, so they use the installed app's own CLI build.
+function runInstalledThreadCli(home, command, args) {
+  const cliPath = NodePath.join(home, ".lastcode", "bin", "t3");
+  if (!NodeFS.existsSync(cliPath)) return null;
+  const lastCodeRoot = NodePath.join(home, ".lastcode");
+  return NodeChildProcess.spawnSync(
+    cliPath,
+    [
+      "thread",
+      command,
+      "--base-dir",
+      lastCodeRoot,
+      "--state-dir",
+      NodePath.join(lastCodeRoot, "userdata"),
+      ...args,
+    ],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 10_000 },
+  );
+}
+
 function readLastCodeThreads(home) {
-  const toolPath = NodePath.join(home, ".lastcode", "userdata", "bin", "lastcode-thread");
-  if (!NodeFS.existsSync(toolPath)) return null;
-  const result = NodeChildProcess.spawnSync(toolPath, ["list", "--json"], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
-    timeout: 10_000,
-  });
+  const result = runInstalledThreadCli(home, "list", ["--json"]);
+  if (result === null) return null;
   if (result.error || result.status !== 0) return null;
   try {
     const parsed = JSON.parse(result.stdout);
@@ -130,17 +145,8 @@ function readLastCodeThreads(home) {
 }
 
 function readLastCodeThread(home, threadId) {
-  const toolPath = NodePath.join(home, ".lastcode", "userdata", "bin", "lastcode-thread");
-  if (!NodeFS.existsSync(toolPath)) return null;
-  const result = NodeChildProcess.spawnSync(
-    toolPath,
-    ["read", threadId, "--turn-limit", "1", "--json"],
-    {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 10_000,
-    },
-  );
+  const result = runInstalledThreadCli(home, "read", [threadId, "--turn-limit", "1", "--json"]);
+  if (result === null) return null;
   if (result.error || result.status !== 0) return null;
   try {
     const parsed = JSON.parse(result.stdout);
