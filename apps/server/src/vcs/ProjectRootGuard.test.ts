@@ -68,6 +68,9 @@ it.live("keeps a project's main checkout on its default branch", () =>
       // Checkout rewrites files before HEAD; a refused switch must not leave them behind.
       assert.equal((yield* git(root, ["status", "--porcelain"])).stdout, "");
       assert.notEqual((yield* git(root, ["checkout", "--detach"])).exitCode, 0);
+      // A rename deletes the checked-out branch before moving HEAD; refuse it up front.
+      assert.notEqual((yield* git(root, ["branch", "-m", "renamed"])).exitCode, 0);
+      assert.equal((yield* git(root, ["rev-parse", "--verify", "-q", "trunk"])).exitCode, 0);
       const fromApp = yield* GitVcsDriver.GitVcsDriver.pipe(
         Effect.flatMap((driver) => driver.switchRef({ cwd: root, refName: "existing" })),
         Effect.flip,

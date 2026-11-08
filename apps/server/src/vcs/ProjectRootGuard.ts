@@ -15,10 +15,41 @@ export const PROJECT_ROOT_GUARD_OVERRIDE_ENV = "LASTCODE_ALLOW_ROOT_BRANCH_CHANG
 const PROJECT_ROOT_GUARD_SCRIPT = `#!/bin/sh
 # Installed by LastCode: keeps this project's main checkout on its default branch.
 [ "$1" = prepared ] || exit 0
-grep ' HEAD$' >/dev/null || exit 0
+updates=$(cat)
 [ -z "$${PROJECT_ROOT_GUARD_OVERRIDE_ENV}" ] || exit 0
+printf '%s\\n' "$updates" | grep -Eq ' HEAD$|^[^ ]+ 0+ ' || exit 0
+common_dir=$(git rev-parse --path-format=absolute --git-common-dir) || exit 0
+# Remote-tracking refs, unlike local branches, cannot appear mid-switch. Without one
+# there is no upstream to keep this checkout on.
+default=$(git symbolic-ref -q refs/remotes/origin/HEAD) && default=\${default#refs/remotes/origin/}
+if [ -z "$default" ]; then
+  if git show-ref -q --verify refs/remotes/origin/main; then default=main
+  elif git show-ref -q --verify refs/remotes/origin/master; then default=master
+  else exit 0; fi
+fi
+refuse() {
+  cat >&2 <<EOF
+lastcode-root-guard: refused to $1
+This is a LastCode project's main checkout. It stays on $default so it can auto-pull.
+Do branch work in a worktree instead:
+  git worktree add <path> -b <branch> origin/$default
+  (if Git already created the branch: git worktree add <path> <branch>)
+In a LastCode thread, t3_worktree_handoff moves the thread into a new worktree.
+To switch here on purpose: ${PROJECT_ROOT_GUARD_OVERRIDE_ENV}=1 git switch <branch>
+To turn the guard off for this repository: git config hook.${PROJECT_ROOT_GUARD_HOOK}.enabled false
+EOF
+  exit 1
+}
+# A rename deletes the old ref before it moves HEAD; refusing only the HEAD move would
+# leave the main checkout on a branch that no longer exists.
+main_branch=$(sed -n 's/^ref: //p' "$common_dir/HEAD")
+if [ -n "$main_branch" ] && printf '%s\\n' "$updates" |
+  awk -v ref="$main_branch" '$3 == ref && $2 ~ /^0+$/ { found = 1 } END { exit !found }'; then
+  refuse "delete or rename \${main_branch#refs/heads/}, the branch \${common_dir%/.git} is on."
+fi
+printf '%s\\n' "$updates" | grep -q ' HEAD$' || exit 0
 git_dir=$(git rev-parse --path-format=absolute --git-dir) || exit 0
-[ "$git_dir" = "$(git rev-parse --path-format=absolute --git-common-dir)" ] || exit 0
+[ "$git_dir" = "$common_dir" ] || exit 0
 next=$(cat "$git_dir/HEAD.lock" 2>/dev/null) || exit 0
 for state in rebase-merge rebase-apply BISECT_START; do
   [ ! -e "$git_dir/$state" ] || exit 0
@@ -29,14 +60,6 @@ case "$next" in
 esac
 current=$(git symbolic-ref -q HEAD) || current=
 [ "$target" != "$current" ] || exit 0
-# Remote-tracking refs, unlike local branches, cannot appear mid-switch. Without one
-# there is no upstream to keep this checkout on.
-default=$(git symbolic-ref -q refs/remotes/origin/HEAD) && default=\${default#refs/remotes/origin/}
-if [ -z "$default" ]; then
-  if git show-ref -q --verify refs/remotes/origin/main; then default=main
-  elif git show-ref -q --verify refs/remotes/origin/master; then default=master
-  else exit 0; fi
-fi
 [ "$target" != "refs/heads/$default" ] || exit 0
 wanted=\${target#refs/heads/}
 [ -n "$target" ] || wanted="a detached HEAD"
@@ -48,17 +71,7 @@ if [ "$from" != "$(git rev-parse -q --verify HEAD)" ]; then
   git read-tree -m -u "$from" HEAD ||
     restore=" Git had already changed files here toward $wanted; check git status before continuing."
 fi
-cat >&2 <<EOF
-lastcode-root-guard: refused to move $(pwd) to $wanted.$restore
-This is a LastCode project's main checkout. It stays on $default so it can auto-pull.
-Do branch work in a worktree instead:
-  git worktree add <path> -b <branch> origin/$default
-  (if Git already created the branch: git worktree add <path> <branch>)
-In a LastCode thread, t3_worktree_handoff moves the thread into a new worktree.
-To switch here on purpose: ${PROJECT_ROOT_GUARD_OVERRIDE_ENV}=1 git switch <branch>
-To turn the guard off for this repository: git config hook.${PROJECT_ROOT_GUARD_HOOK}.enabled false
-EOF
-exit 1
+refuse "move $(pwd) to $wanted.$restore"
 `;
 
 const shellQuote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
