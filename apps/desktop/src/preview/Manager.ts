@@ -135,6 +135,9 @@ const PICTURE_IN_PICTURE_JPEG_QUALITY = 80;
 const CAPTURE_PAGE_RETRY_ATTEMPTS = 3;
 const CAPTURE_PAGE_RETRY_DELAY_MS = 120;
 const CAPTURE_PAGE_ATTEMPT_TIMEOUT_MS = 1_000;
+// Opening a session holds the session map's lock; a closing guest can leave CDP unanswered.
+// Giving up costs one guest its automation session; never giving up blocked every tab.
+const CONTROL_SESSION_INIT_TIMEOUT_MS = 30_000;
 const PICTURE_IN_PICTURE_INITIAL_WIDTH = 480;
 const PICTURE_IN_PICTURE_INITIAL_HEIGHT = 320;
 const PICTURE_IN_PICTURE_MIN_WIDTH = 240;
@@ -960,7 +963,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
 
   // Closes a session already removed from `controlSessionsRef`. The server can
   // only drive a tab while the desktop holds its debugger.
-  const releaseControlSession = Effect.fnUntraced(function* (
+  const releaseControlSession = Effect.fn("PreviewManager.releaseControlSession")(function* (
     control: BrowserControlSession,
     closedServerTab?: PreviewTabState["serverTab"],
   ) {
@@ -1085,12 +1088,20 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
               wcDebugger.attach("1.3");
             });
             // Set an opaque base before first paint or background-less dark pages retain white-on-white text.
-            yield* attemptPromise(
-              { operation: "initializeDebugger.defaultBackground", webContentsId: wc.id },
-              () =>
-                wcDebugger.sendCommand("Emulation.setDefaultBackgroundColorOverride", {
-                  color: { r: 255, g: 255, b: 255, a: 1 },
-                }),
+            const defaultBackground = {
+              operation: "initializeDebugger.defaultBackground",
+              webContentsId: wc.id,
+            };
+            yield* attemptPromise(defaultBackground, () =>
+              wcDebugger.sendCommand("Emulation.setDefaultBackgroundColorOverride", {
+                color: { r: 255, g: 255, b: 255, a: 1 },
+              }),
+            ).pipe(
+              Effect.timeout(CONTROL_SESSION_INIT_TIMEOUT_MS),
+              Effect.catchTags({
+                TimeoutError: (cause) =>
+                  Effect.fail(new PreviewOperationError({ ...defaultBackground, cause })),
+              }),
             );
             return [
               control,
@@ -2353,7 +2364,8 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       );
       if (!removed) return;
       yield* releaseControlSession(detached);
-      if (wc.isDestroyed()) return;
+      // Closing the window detaches every guest's debugger; re-attaching then only stalls teardown.
+      if (wc.isDestroyed() || wc.hostWebContents?.isDestroyed() !== false) return;
       const tabId = yield* tabIdForWebContents(wc.id);
       if (tabId === null) return;
       yield* restoreControlSession(tabId, wc);

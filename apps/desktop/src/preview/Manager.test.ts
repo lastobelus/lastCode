@@ -9,6 +9,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import { parseKeybindingShortcut } from "@t3tools/shared/keybindings";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
@@ -1117,8 +1118,10 @@ describe("PreviewManager", () => {
     const detachListeners = new Set<() => void>();
     let chromiumDetaches = 0;
     let destroyed = false;
+    let hostDestroyed = false;
     const wc = {
       id,
+      hostWebContents: { isDestroyed: () => hostDestroyed },
       isDestroyed: () => destroyed,
       isDevToolsOpened: () => {
         if (destroyed) throw new TypeError("Object has been destroyed");
@@ -1167,6 +1170,9 @@ describe("PreviewManager", () => {
       detach,
       sendCommand,
       chromiumDetach,
+      closeHost: () => {
+        hostDestroyed = true;
+      },
       destroy: () => {
         destroyed = true;
         listeners.get("destroyed")?.();
@@ -1174,7 +1180,10 @@ describe("PreviewManager", () => {
     };
   };
 
-  effectIt.effect("reattaches a debugger that Chromium dropped on its own", () =>
+  effectIt.effect.each([
+    { name: "while its window is open", hostClosed: false, attaches: 2 },
+    { name: "never once its window has closed", hostClosed: true, attaches: 1 },
+  ])("reattaches a debugger that Chromium dropped on its own $name", ({ hostClosed, attaches }) =>
     withManager((manager) =>
       Effect.gen(function* () {
         const guest = makeAttachingGuest(48);
@@ -1184,10 +1193,31 @@ describe("PreviewManager", () => {
         yield* Effect.yieldNow;
         expect(guest.attach).toHaveBeenCalledTimes(1);
 
+        if (hostClosed) guest.closeHost();
         guest.chromiumDetach();
         yield* Effect.yieldNow;
         yield* Effect.yieldNow;
-        expect(guest.attach).toHaveBeenCalledTimes(2);
+        expect(guest.attach).toHaveBeenCalledTimes(attaches);
+      }),
+    ),
+  );
+
+  effectIt.effect("abandons a debugger session that never finishes opening", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const guest = makeAttachingGuest(49);
+        guest.sendCommand.mockImplementation(() => new Promise<unknown>(() => {}));
+        fromId.mockReturnValue(guest.wc);
+        yield* manager.createTab("tab_stalled");
+        yield* manager.registerWebview("tab_stalled", 49);
+        yield* Effect.yieldNow;
+        expect(guest.attach).toHaveBeenCalledTimes(1);
+
+        yield* TestClock.adjust(Duration.seconds(30));
+        yield* Effect.yieldNow;
+        expect(guest.detach).toHaveBeenCalledTimes(1);
+        // The session map's lock is free again, so closing the tab completes.
+        yield* manager.closeTab("tab_stalled");
       }),
     ),
   );
