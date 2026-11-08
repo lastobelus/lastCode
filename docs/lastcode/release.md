@@ -292,7 +292,8 @@ this order:
    checks also belong alongside Full CI. A successful CI result does not prove
    client QA passed. If either finds a defect, follow the repair procedure below.
 
-If you finish a retained carry rebase with manual `git rebase --continue` calls,
+If you finish a retained carry rebase with manual
+`git -c rerere.enabled=false -c rerere.autoupdate=false rebase --continue` calls,
 select its clean six-group head once before appending repair commits. This records
 the completed replay plan so a later selection can fold those repairs into their
 owning groups.
