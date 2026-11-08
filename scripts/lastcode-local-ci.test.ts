@@ -137,6 +137,11 @@ describe("lastcode-local-ci", () => {
         text: `  typecheck: node check.cjs\n${listing}`,
         error: "unsupported root typecheck task",
       },
+      {
+        reason: "a root wrapper followed by another command",
+        text: `  test: vp run -r test\nnode extra-check.cjs\n${listing}`,
+        error: "unsupported root test task",
+      },
     ])("rejects $reason", ({ text, error, names: expectedNames }) => {
       expect(() => parseViteTaskListing(text, expectedNames ?? names)).toThrow(error);
     });

@@ -465,26 +465,31 @@ export function parseViteTaskListing(
   listing: string,
   workspaceNames: ReadonlyMap<string, ReadonlySet<string>>,
 ): WorkspaceCiTask[] {
-  const tasks: WorkspaceCiTask[] = [];
-  const seen = new Set<string>();
-  let hasTaskRow = false;
+  const rows: { specifier: string; command: string }[] = [];
   for (const line of listing.split(/\r?\n/)) {
     if (!line.trim()) continue;
     const match = /^ {2}(\S+):(?: (.*)|$)/.exec(line);
+    const current = rows.at(-1);
     if (!match) {
       // Commands are printed raw, including unindented lines after a newline.
-      if (hasTaskRow && !line.startsWith("  ")) continue;
+      if (current && !line.startsWith("  ")) {
+        current.command += `\n${line}`;
+        continue;
+      }
       throw new Error(
         "Full CI cannot read the Vite+ task listing; check the `vp run` output format.",
       );
     }
-    hasTaskRow = true;
-    const specifier = match[1]!;
+    rows.push({ specifier: match[1]!, command: match[2] ?? "" });
+  }
+  const tasks: WorkspaceCiTask[] = [];
+  const seen = new Set<string>();
+  for (const { specifier, command } of rows) {
     const separator = specifier.indexOf("#");
     if (separator < 0) {
       if (
         (specifier === "typecheck" || specifier === "test") &&
-        match[2] !== ROOT_CI_WRAPPERS[specifier]
+        command !== ROOT_CI_WRAPPERS[specifier]
       ) {
         throw new Error(
           `Full CI found an unsupported root ${specifier} task; collect it explicitly.`,
