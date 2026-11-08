@@ -245,15 +245,64 @@ disabled, report that setup problem rather than reverting to a sleep loop.
 
 ### Resuming a repaired checkpoint
 
-When a retained nightly rebase is complete but validation required additional
-commits, do not delete the worktree and rely on rerere: Git only remembers
-conflict resolutions, not subsequent repairs. Commit the repairs and incorporate
-any downstream merges made since that attempt before selecting its exact head.
+Preserve the retained worktree, including resolutions and subsequent repairs.
+The checkpoint command enables rerere in repository configuration for
+historical, non-carry rebases; carry replay overrides it on its own rebase
+commands only. Continue a carry replay manually with
+`git -c rerere.enabled=false -c rerere.autoupdate=false rebase --continue`.
+The retained recovery worktree is the only checkout that receives committed
+repairs. Incorporate any downstream merges made since that attempt before
+selecting its exact head.
 
-If you finish a retained carry rebase with manual `git rebase --continue` calls,
-select its clean six-group head once before appending repair commits. This records
-the completed replay plan so a later selection can fold those repairs into their
-owning groups.
+Record the exact pre-replay head (`<pre-replay-head>`), the replay's upstream
+commit (`<replay-upstream-head>`, the `onto` in the retained replay plan), and
+the repository-relative conflicted paths from every replay group, plus any other
+repaired paths. Keep the newline-delimited path list outside the checkout or in
+an ignored path. After replay completes, use this order:
+
+**Step 0, only if you continued a carry replay manually:** before appending any
+repair commits, select the clean six-group head with the selection command below.
+This records the completed replay plan so the final selection can fold repairs
+into their owning groups. This selection is bookkeeping: never request `run-now`
+after it. Only step 3's final selection leads to `run-now`.
+
+1. Run the gate and client QA in one separate checkout, always; the service
+   validates the retained recovery worktree, so neither runs there. Create the
+   separate checkout at the completed retained HEAD before preparing dependencies
+   once through the owning Project Action,
+   and prepare again only if a repair changes dependency manifests or the lockfile.
+2. Before every gate run, refresh the separate checkout to the retained recovery
+   worktree's current HEAD (`<retained-head>`), then run the focused gate there:
+
+   ```bash
+   git checkout --detach <retained-head>
+   vp run check:changed --checkpoint-recovery-files <conflicted-and-repaired-paths-file> --baseline <pre-replay-head> --onto <replay-upstream-head>
+   ```
+
+   This checks format and lint of those paths, typechecks affected packages and
+   their consumers, and runs tests beside the conflicted or repaired files.
+   It requires a clean, completed replay and both `--baseline` and `--onto`, which
+   prove legitimate deletions: a listed path absent from HEAD passes only if it
+   exists in the `<pre-replay-head>` or `<replay-upstream-head>` tree, so deleting
+   a file the new upstream nightly introduced also passes. Tests that survive
+   beside a deleted file still run. Fix concrete failures by committing in the
+   retained worktree, update the path list, then refresh the separate checkout and
+   rerun the gate. Broader checks remain in the service's unchanged Full CI; this preflight
+   does not create a Full CI stamp or a PR Quick CI receipt.
+
+3. Record the passing gate checkout's HEAD as `<gated-head>`. If repairs moved
+   the retained HEAD since that run, refresh the separate checkout and rerun the
+   gate first. Then run the final selection and the tree comparison below, and
+   request `run-now` only after the comparison succeeds. Selection recompiles the
+   carry groups and already verifies that the tree is preserved, so it may record
+   a different commit with the same tree: compare trees, not commits. Use the full
+   head the selection prints as `<selected-head>`, not the commit you passed in.
+   Aim to start Full CI within about five minutes of replay completion; measure
+   preparation and the gate if it takes longer.
+4. Run the required integrated client QA alongside Full CI, using `test-t3-app`
+   or `test-t3-mobile` as applicable. Additional investigation and broader focused
+   checks also belong alongside Full CI. A successful CI result does not prove
+   client QA passed. If either finds a defect, follow the repair procedure below.
 
 In carry mode, append the incorporated PR's partitioned source commits and any
 repair commits to the retained head. Each appended commit must name its owning
@@ -263,8 +312,31 @@ is unchanged. Ordinary retries cannot refresh a completed carry plan.
 
 ```bash
 pnpm lastcode:checkpoint -- --select-recovery <full-repaired-head> --recovery-source <full-current-main-commit>
-pnpm lastcode:checkpoint:service run-now
 ```
+
+For either selection, `<full-repaired-head>` is the retained worktree's current
+HEAD. If selection rewrites it, that HEAD becomes the printed `<selected-head>`;
+use it for a retry after gating the selected tree.
+
+Its normal output names the selected full head in the `Selected repaired ... at ...`
+line; use that value as `<selected-head>`. After the final selection, compare its
+tree with `<gated-head>` before starting the service:
+
+```bash
+if gated_tree=$(git rev-parse '<gated-head>^{tree}') &&
+   selected_tree=$(git rev-parse '<selected-head>^{tree}') &&
+   test "$selected_tree" = "$gated_tree"; then
+  pnpm lastcode:checkpoint:service run-now
+else
+  echo "Stop: refresh the gate checkout to the selected head and gate it before run-now."
+  false
+fi
+```
+
+If the trees differ or Git cannot resolve either one, stop before `run-now`.
+Refresh the gate checkout to `<selected-head>`, rerun the gate there, then repeat
+the final selection and tree comparison. A different commit with the same tree
+needs no new gate run.
 
 `--recovery-source` is the operator's assertion that the repaired tree includes
 that exact LastCode main revision. Inspect the replay and subsequent commits
@@ -293,14 +365,36 @@ validation or be automatically superseded. A changed head,
 or a main that no longer descends from the selected source, requires inspection
 and selection again. Failed validation retains the worktree and selection.
 
-Use **Wait for Checkpoint** immediately after requesting the service run, and
-end the turn. After publication, use **Build Local Package** on the exact new
+Once concurrent QA and other useful work are finished, use **Wait for Checkpoint**
+for a service run that is still active, then end the turn; do not poll its status.
+After publication, use **Build Local Package** on the exact new
 installable tag; selection and publication do not install or restart the app.
 Selected recovery processes only its selected nightly. Later nightlies belong
 to a separately admitted run after the selected repair is reconciled.
 If publication succeeded but cleanup was interrupted, a retry recognizes the
 matching immutable tag represented on main and finishes cleanup without
 republishing.
+
+#### Repairing a defect found during concurrent QA or checks
+
+`run-now` requests another pass without interrupting the current one. Selection
+shares the checkpoint operation lock, so a running pass cannot be superseded by
+selecting a different head. If QA or another check finds a defect, let the active
+pass finish untouched and wait on it with **Wait for Checkpoint**; its retained
+checkout stays unedited while it validates. What happens next depends on the result:
+
+- **Failed without publishing:** fix and commit the defect in the retained worktree
+  with its owning `Carry-Group`, and update the path list. Refresh the gate/QA
+  checkout to the new retained HEAD, prepare dependencies again only if the repair
+  changed manifests or the lockfile, and rerun the focused gate. Then select the
+  repaired head and request another service pass.
+- **Published:** leave the immutable tag intact and fix the defect through
+  [Publishing a revision while newer nightlies are on hold](#publishing-a-revision-while-newer-nightlies-are-on-hold).
+  A successful promotion releases the recovery selection and worktree. If promotion
+  is still pending, preserve the retained selection and finish that promotion first,
+  as described above.
+
+Keep the client QA result separate from service publication and final acceptance.
 
 ### Publishing a revision while newer nightlies are on hold
 
