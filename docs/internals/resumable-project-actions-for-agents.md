@@ -12,7 +12,8 @@ frequent agent decisions should stay in the agent turn.
 Do not use an Action to wait on a pull request. `watch_pull_request` already wakes the thread when
 checks finish, someone else comments or reacts to the agent's comment, or the branch conflicts; a second waiter for the same PR wakes the
 thread twice and disagrees about timing. Put any readiness rules in a one-shot check that the agent
-runs on each wake, as LastCode does with `pnpm lastcode:pr-gates`.
+runs on each wake, as LastCode does with
+`pnpm --config.verify-deps-before-run=false lastcode:pr-gates`.
 
 For a worked example, see `scripts/lastcode-wait-for-checkpoint.ts`, behind the **Wait for
 Checkpoint** Action: it binds to one service run, reports coarse progress, and returns one result,

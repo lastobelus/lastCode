@@ -15,7 +15,7 @@ import {
   LASTCODE_ORIGIN_REMOTE,
   resolveRepoRoot,
   runGit,
-} from "./lastcode-local-ci.ts";
+} from "./lib/lastcode-git.ts";
 import { type GithubCiEvidence, readGithubCi } from "./lastcode-github-ci.ts";
 import { readReviewData, validateReviewForMerge } from "./lastcode-pr-gates.ts";
 import { acquireMainWriteLock } from "./lastcode-main-write-lock.ts";
@@ -93,7 +93,7 @@ export function validateGithubCiForMerge(evidence: GithubCiEvidence): {
     throw new Error(`GitHub CI is not merge-ready: ${evidence.detail}`);
   }
   throw new Error(
-    `GitHub CI is not merge-ready (${evidence.state}/${evidence.reason}); check again with pnpm lastcode:pr-gates once CI settles.`,
+    `GitHub CI is not merge-ready (${evidence.state}/${evidence.reason}); check again with pnpm --config.verify-deps-before-run=false lastcode:pr-gates once CI settles.`,
   );
 }
 
@@ -109,7 +109,9 @@ export function parseMergeOptions(argv: ReadonlyArray<string>) {
     ) ||
     (argv.includes("--skip-checkpoint") && argv.includes("--checkpoint"))
   ) {
-    throw new Error("Usage: pnpm lastcode:merge [--dry-run] [--skip-checkpoint | --checkpoint]");
+    throw new Error(
+      "Usage: pnpm --config.verify-deps-before-run=false lastcode:merge [--dry-run] [--skip-checkpoint | --checkpoint]",
+    );
   }
   return { dryRun: argv.includes("--dry-run"), skipCheckpoint: !argv.includes("--checkpoint") };
 }

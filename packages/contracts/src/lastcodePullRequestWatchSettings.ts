@@ -1,6 +1,8 @@
 import * as Schema from "effect/Schema";
 
-export const DEFAULT_LASTCODE_PULL_REQUEST_WATCH_QUIET_MINUTES = 45;
+import { LASTCODE_PULL_REQUEST_WATCH_QUIET_MINUTES_RANGE } from "./lastcodePullRequestWatchQuietMinutes.ts";
+
+export { DEFAULT_LASTCODE_PULL_REQUEST_WATCH_QUIET_MINUTES } from "./lastcodePullRequestWatchQuietMinutes.ts";
 export const LastCodePullRequestWatchQuietMinutes = Schema.Int.check(
-  Schema.isBetween({ minimum: 1, maximum: 1440 }),
+  Schema.isBetween(LASTCODE_PULL_REQUEST_WATCH_QUIET_MINUTES_RANGE),
 );

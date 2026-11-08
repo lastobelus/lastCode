@@ -4,11 +4,10 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import {
   DEFAULT_LASTCODE_PULL_REQUEST_WATCH_QUIET_MINUTES,
-  LastCodePullRequestWatchQuietMinutes,
-} from "../../packages/contracts/src/lastcodePullRequestWatchSettings.ts";
-import * as Schema from "effect/Schema";
+  LASTCODE_PULL_REQUEST_WATCH_QUIET_MINUTES_RANGE,
+} from "../../packages/contracts/src/lastcodePullRequestWatchQuietMinutes.ts";
 
-const decodeQuietMinutes = Schema.decodeUnknownSync(LastCodePullRequestWatchQuietMinutes);
+const { minimum, maximum } = LASTCODE_PULL_REQUEST_WATCH_QUIET_MINUTES_RANGE;
 
 export async function readPullRequestWatchQuietMinutes(env = process.env) {
   const settingsPath =
@@ -38,11 +37,9 @@ export async function readPullRequestWatchQuietMinutes(env = process.env) {
     throw new Error("Invalid PR watch settings: the settings file must contain an object.");
   const value = (settings as Record<string, unknown>).lastcodePullRequestWatchQuietMinutes;
   if (value === undefined) return DEFAULT_LASTCODE_PULL_REQUEST_WATCH_QUIET_MINUTES;
-  try {
-    return decodeQuietMinutes(value);
-  } catch {
-    throw new Error(
-      "Invalid PR watch settings: lastcodePullRequestWatchQuietMinutes must be an integer from 1 to 1440.",
-    );
-  }
+  if (typeof value === "number" && Number.isInteger(value) && value >= minimum && value <= maximum)
+    return value;
+  throw new Error(
+    `Invalid PR watch settings: lastcodePullRequestWatchQuietMinutes must be an integer from ${minimum} to ${maximum}.`,
+  );
 }

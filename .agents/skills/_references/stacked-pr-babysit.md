@@ -30,7 +30,7 @@ evidence of its relationship to the intended PR.
 Check any member from the coordinator's checkout:
 
 ```sh
-pnpm lastcode:pr-gates --pr PR_NUMBER
+pnpm --config.verify-deps-before-run=false lastcode:pr-gates --pr PR_NUMBER
 ```
 
 Each run takes one confirmed GitHub snapshot, rebuilds the same-repository parent chain live down
@@ -61,7 +61,7 @@ does not redirect Quick CI. Remote waiting alone does not require this change.
 1. Start with the oldest unmerged authorized member. Handle current findings,
    release a draft only when its existing approval boundary permits, and request
    exact-head Codex review. Call `watch_pull_request` with the PR's explicit URL,
-   then run `pnpm lastcode:pr-gates` once (add `--pr PR_NUMBER` for a stack or a PR
+   then run `pnpm --config.verify-deps-before-run=false lastcode:pr-gates` once (add `--pr PR_NUMBER` for a stack or a PR
    outside a clean matching checkout), and on `pending` end the turn.
 2. On each wake, take a fresh snapshot and rerun the check for the member.
    Handle findings or drift before ending the turn again. Passing against a topic base is

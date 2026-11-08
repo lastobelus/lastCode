@@ -148,7 +148,7 @@ suites on whichever CI node runs the gate.
 
 PR waits use the native pull-request watch, not a Project Action. Call
 `watch_pull_request` with the PR URL, then run the one-shot
-`pnpm lastcode:pr-gates [--pr PR_NUMBER]` check; when it reports `pending`, end
+`pnpm --config.verify-deps-before-run=false lastcode:pr-gates [--pr PR_NUMBER]` check; when it reports `pending`, end
 the turn. On each wake, run the check again. It reads the exact GitHub pull-request workflow run,
 whose identity records the PR number, head, base, and synthetic merge commit
 behind one stable aggregate `CI Gate`, together with exact-head Codex review
@@ -190,8 +190,12 @@ covers how to check that and run the review.
 Merge the current ready PR with:
 
 ```bash
-pnpm lastcode:merge
+pnpm --config.verify-deps-before-run=false lastcode:merge
 ```
+
+The gate check and the merge need only Node, `git` and `gh`, so they run in a
+checkout without `node_modules`. The flag stops pnpm installing dependencies
+before the script.
 
 The merge wrapper refuses dirty worktrees, missing or stale exact GitHub CI,
 exact-head Codex review that is missing or pending, unresolved review threads,

@@ -3,7 +3,7 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
-import { cleanGitEnvironment } from "./lastcode-nightly.ts";
+import { cleanGitEnvironment } from "./lib/lastcode-git.ts";
 
 const LOCAL_REPOSITORY = "lastobelus/lastcode";
 

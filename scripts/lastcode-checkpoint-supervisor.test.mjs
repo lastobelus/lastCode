@@ -2099,7 +2099,7 @@ describe("LastCode checkpoint supervisor", () => {
     // A new watch ignores comments posted before it starts, so the gate check must follow it.
     expect(message).toContain("call watch_pull_request");
     expect(message.indexOf("call watch_pull_request")).toBeLessThan(
-      message.indexOf("run pnpm lastcode:pr-gates"),
+      message.indexOf("run pnpm --config.verify-deps-before-run=false lastcode:pr-gates"),
     );
   });
 
