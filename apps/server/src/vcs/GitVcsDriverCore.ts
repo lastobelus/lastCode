@@ -1621,6 +1621,8 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   });
 
   const statusRemoteRefreshFailures = new Map<string, { count: number; retryAt: number }>();
+  // Only cwds whose last status fetch failed or is still running; a fetched cwd is removed.
+  const unconfirmedStatusFetches = new Map<string, "failed" | "pending">();
   const statusRemoteRefreshFailureKey = (cacheKey: StatusRemoteRefreshCacheKey) =>
     `${cacheKey.gitCommonDir}\0${cacheKey.remoteName}`;
   const recordStatusRemoteRefreshFailure = Effect.fn(
@@ -1662,6 +1664,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   const refreshStatusUpstreamIfStale = Effect.fn("refreshStatusUpstreamIfStale")(function* (
     cwd: string,
   ) {
+    unconfirmedStatusFetches.delete(cwd);
     const headRef = yield* runGitStdout(
       "GitVcsDriver.refreshStatusUpstreamIfStale.headRef",
       cwd,
@@ -1678,10 +1681,12 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     // Empty means no upstream; `.` means the upstream is a local branch.
     if (remoteName.length === 0 || remoteName === ".") return;
     const gitCommonDir = yield* resolveGitCommonDir(cwd);
-    yield* Cache.get(
-      statusRemoteRefreshCache,
-      new StatusRemoteRefreshCacheKey({ gitCommonDir, remoteName }),
-    ).pipe(Effect.ignore);
+    const cacheKey = new StatusRemoteRefreshCacheKey({ gitCommonDir, remoteName });
+    yield* Cache.get(statusRemoteRefreshCache, cacheKey).pipe(Effect.ignore);
+    const key = statusRemoteRefreshFailureKey(cacheKey);
+    if (statusRemoteRefreshFailures.has(key)) unconfirmedStatusFetches.set(cwd, "failed");
+    else if (statusFetches.has(key)) unconfirmedStatusFetches.set(cwd, "pending");
+    else unconfirmedStatusFetches.delete(cwd);
   });
 
   const resolveDefaultBranchName = (
@@ -2382,6 +2387,12 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     "statusDetailsLocal",
   )(function* (cwd, options) {
     return yield* readStatusDetailsLocal(cwd, options);
+  });
+
+  const statusFetchState: GitVcsDriver.GitVcsDriver["Service"]["statusFetchState"] = Effect.fn(
+    "statusFetchState",
+  )(function* (cwd) {
+    return unconfirmedStatusFetches.get(cwd) ?? "fetched";
   });
 
   const statusDetails: GitVcsDriver.GitVcsDriver["Service"]["statusDetails"] = Effect.fn(
@@ -5112,6 +5123,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     execute,
     status,
     statusDetails,
+    statusFetchState,
     statusDetailsLocal,
     statusDetailsRemote,
     prepareCommitContext,

@@ -343,6 +343,7 @@ describe("VcsStatusBroadcaster", () => {
       let pullCalls = 0;
       let configuredWorkspaceRoot = "";
       const statusStore = AutoPullStatus.make();
+      let fetchState: "fetched" | "failed" = "fetched";
       let localStatus: VcsStatusLocalResult = {
         ...baseLocalStatus,
         isDefaultRef: true,
@@ -355,6 +356,7 @@ describe("VcsStatusBroadcaster", () => {
         Layer.provide(
           Layer.succeed(VcsStatusBroadcaster.VcsAutoPullPolicy, {
             isEnabled: (cwd) => Effect.succeed(cwd === configuredWorkspaceRoot),
+            fetchState: () => Effect.succeed(fetchState),
           }),
         ),
         Layer.provide(
@@ -406,6 +408,15 @@ describe("VcsStatusBroadcaster", () => {
         assert.equal(skipped?.result, "skipped");
         assert.equal(skipped?.reason, "on branch lastcode/telemetry-copy, not the default branch");
         assert.isNotNull(skipped?.lastSuccessAt);
+
+        // Old remote refs from a failed fetch must not read as up to date.
+        localStatus = { ...localStatus, isDefaultRef: true, refName: "main" };
+        fetchState = "failed";
+        yield* broadcaster.refreshStatus(configuredWorkspaceRoot);
+        const unfetched = yield* statusStore.get(configuredWorkspaceRoot);
+        assert.equal(unfetched?.result, "failed");
+        assert.equal(unfetched?.reason, AutoPullStatus.AUTO_PULL_FETCH_FAILED);
+        assert.equal(unfetched?.lastSuccessAt, skipped?.lastSuccessAt);
       }).pipe(Effect.provide(layerTest));
     },
   );
@@ -928,6 +939,7 @@ describe("VcsStatusBroadcaster", () => {
         Layer.provide(
           Layer.succeed(VcsStatusBroadcaster.VcsAutoPullPolicy, {
             isEnabled: () => Effect.succeed(autoPull),
+            fetchState: () => Effect.succeed("fetched"),
           }),
         ),
       );

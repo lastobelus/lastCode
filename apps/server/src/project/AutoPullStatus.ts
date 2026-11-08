@@ -30,6 +30,8 @@ export function autoPullSkipReason(state: AutoPullCheckoutState): string | null 
   return null;
 }
 
+export const AUTO_PULL_FETCH_FAILED = "could not fetch from the remote";
+
 export function autoPullFailureReason(error: { readonly message: string }): string {
   const firstLine = error.message.trim().split("\n", 1)[0]?.trim() ?? "";
   if (firstLine.length === 0) return "unknown error";

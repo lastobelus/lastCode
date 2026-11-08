@@ -31,6 +31,7 @@ import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as AutoPullStatus from "../project/AutoPullStatus.ts";
+import * as GitVcsDriver from "./GitVcsDriver.ts";
 import * as ServerSettings from "../serverSettings.ts";
 
 const VCS_STATUS_REFRESH_FAILURE_BASE_DELAY = Duration.seconds(30);
@@ -166,8 +167,12 @@ export const layerAutomaticFetchInterval = Layer.effect(
 
 export class VcsAutoPullPolicy extends Context.Reference<{
   readonly isEnabled: (cwd: string) => Effect.Effect<boolean, never>;
+  readonly fetchState: (cwd: string) => Effect.Effect<GitVcsDriver.GitStatusFetchState>;
 }>("t3/vcs/VcsAutoPullPolicy", {
-  defaultValue: () => ({ isEnabled: () => Effect.succeed(false) }),
+  defaultValue: () => ({
+    isEnabled: () => Effect.succeed(false),
+    fetchState: () => Effect.succeed("fetched"),
+  }),
 }) {}
 
 export const layerAutoPullPolicy = Layer.effect(
@@ -175,7 +180,9 @@ export const layerAutoPullPolicy = Layer.effect(
   Effect.gen(function* () {
     const projects = yield* ProjectStore.ProjectStoreV2;
     const serverSettings = yield* ServerSettings.ServerSettingsService;
+    const git = yield* GitVcsDriver.GitVcsDriver;
     return {
+      fetchState: git.statusFetchState,
       isEnabled: Effect.fn("VcsAutoPullPolicy.isEnabled")(
         function* (cwd: string) {
           const project = yield* projects.findActiveByWorkspaceRoot(cwd);
@@ -448,9 +455,10 @@ export const make = Effect.gen(function* () {
       if (remote === null || enabledCwds.length === 0) return null;
 
       const canPull = remote.hasUpstream && remote.aheadCount === 0 && remote.behindCount > 0;
-      // Only a pull needs a fresh read; a skip reason can come from the cached status.
+      // Only a pull needs a fresh read; a skip reason can come from the status already cached.
       if (canPull) yield* workflow.invalidateLocalStatus(cwd);
-      const local = yield* workflow.localStatus({ cwd });
+      const cachedLocal = canPull ? null : ((yield* getCachedStatus(cwd))?.local?.value ?? null);
+      const local = cachedLocal ?? (yield* workflow.localStatus({ cwd }));
       if (local.refName !== remoteRead?.branch) return null;
       const skipReason = AutoPullStatus.autoPullSkipReason({
         isRepo: local.isRepo,
@@ -465,19 +473,26 @@ export const make = Effect.gen(function* () {
         return null;
       }
       if (!canPull) {
-        yield* record({ result: "up-to-date" });
+        // Status reads old remote refs when its fetch fails, so only a fetch proves currency.
+        const fetchState = yield* autoPullPolicy.fetchState(cwd);
+        if (fetchState !== "pending")
+          yield* record(
+            fetchState === "failed"
+              ? { result: "failed", reason: AutoPullStatus.AUTO_PULL_FETCH_FAILED }
+              : { result: "up-to-date" },
+          );
         return null;
       }
 
       pullAttempted = true;
-      yield* workflow
+      const pull = yield* workflow
         .pullCurrentBranch(cwd)
         .pipe(
           Effect.tapError((error) =>
             record({ result: "failed", reason: AutoPullStatus.autoPullFailureReason(error) }),
           ),
         );
-      yield* record({ result: "pulled" });
+      yield* record({ result: pull.status === "pulled" ? "pulled" : "up-to-date" });
       yield* workflow.invalidateStatus(cwd);
       yield* refreshLocalStatusCore(cwd);
       const refreshedRemote = yield* readRemoteStatus(cwd, { refreshUpstream: false });

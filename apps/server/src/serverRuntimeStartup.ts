@@ -218,11 +218,21 @@ export const autoPullProjects = Effect.fn("autoPullProjects")(function* (
         }
 
         if (status.behindCount <= 0) {
-          return yield* autoPullStatus.record(cwd, { result: "up-to-date" });
+          // Status reads old remote refs when its fetch fails, so only a fetch proves currency.
+          const fetchState = yield* git.statusFetchState(cwd);
+          if (fetchState === "pending") return;
+          return yield* autoPullStatus.record(
+            cwd,
+            fetchState === "failed"
+              ? { result: "failed", reason: AutoPullStatus.AUTO_PULL_FETCH_FAILED }
+              : { result: "up-to-date" },
+          );
         }
 
         const result = yield* git.pullCurrentBranch(cwd);
-        yield* autoPullStatus.record(cwd, { result: "pulled" });
+        yield* autoPullStatus.record(cwd, {
+          result: result.status === "pulled" ? "pulled" : "up-to-date",
+        });
         yield* Effect.logDebug("Automatic project pull completed", {
           cwd,
           status: result.status,

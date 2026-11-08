@@ -321,8 +321,10 @@ it.effect("automatic pull only updates enabled, behind, clean default-branch che
           hasUpstream: true,
           hasWorkingTreeChanges: dirty.has(cwd),
           aheadCount: cwd === "/ahead" ? 3 : 0,
-          behindCount: cwd === "/current" ? 0 : 1,
+          behindCount: cwd === "/current" || cwd === "/offline" ? 0 : 1,
         } as never),
+      statusFetchState: (cwd: string) =>
+        Effect.succeed(cwd === "/offline" ? ("failed" as const) : ("fetched" as const)),
       pullCurrentBranch: (cwd: string) =>
         cwd === "/broken"
           ? Effect.fail({ message: "fatal: Not possible to fast-forward, aborting.\nmore" })
@@ -365,6 +367,7 @@ it.effect("automatic pull only updates enabled, behind, clean default-branch che
         project("/ahead"),
         project("/feature"),
         project("/broken"),
+        project("/offline"),
         project("/disabled"),
       ],
       overrides({
@@ -374,6 +377,7 @@ it.effect("automatic pull only updates enabled, behind, clean default-branch che
         "/ahead": true,
         "/feature": true,
         "/broken": true,
+        "/offline": true,
         "/disabled": false,
       }),
     );
@@ -396,6 +400,10 @@ it.effect("automatic pull only updates enabled, behind, clean default-branch che
     assert.deepStrictEqual(yield* outcome("/broken"), {
       result: "failed",
       reason: "fatal: Not possible to fast-forward, aborting.",
+    });
+    assert.deepStrictEqual(yield* outcome("/offline"), {
+      result: "failed",
+      reason: AutoPullStatus.AUTO_PULL_FETCH_FAILED,
     });
     assert.isNull(yield* statusStore.get("/disabled"));
 
