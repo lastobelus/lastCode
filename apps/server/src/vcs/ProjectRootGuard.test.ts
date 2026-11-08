@@ -115,7 +115,7 @@ it.live("keeps a project's main checkout on its default branch", () =>
   ).pipe(Effect.provide(layerTest)),
 );
 
-it.live("moves submodules back after refusing a recursive switch", () =>
+it.live("names, but never moves, submodules a refused switch may have moved", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -146,7 +146,12 @@ it.live("moves submodules back after refusing a recursive switch", () =>
       const refused = yield* git(root, ["switch", "--recurse-submodules", "bumped"]);
       assert.notEqual(refused.exitCode, 0);
       assert.equal(yield* head(root), "main");
-      assert.equal((yield* git(root, ["status", "--porcelain"])).stdout, "");
+      assert.include(refused.stderr, "git submodule update -- module");
+
+      // A person's own submodule checkout survives a refused plain switch.
+      const pinned = (yield* git(module, ["rev-parse", "HEAD"])).stdout;
+      assert.notEqual((yield* git(root, ["switch", "bumped"])).exitCode, 0);
+      assert.equal((yield* git(module, ["rev-parse", "HEAD"])).stdout, pinned);
     }),
   ).pipe(Effect.provide(layerTest)),
 );

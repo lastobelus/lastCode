@@ -70,12 +70,14 @@ from=$(git rev-parse -q --verify "\${target:-$next}^{commit}") || from=$(git has
 if [ "$from" != "$(git rev-parse -q --verify HEAD)" ]; then
   git read-tree -m -u "$from" HEAD ||
     restore=" Git had already changed files here toward $wanted; check git status before continuing."
-  # --recurse-submodules also moved (clean) submodules to the target's commits; move them back.
-  git diff --raw --no-abbrev "$from" HEAD | awk -F '\\t' '$1 ~ /^:160000 160000 / {
-    split($1, f, " "); print f[3], f[4], $2 }' | while read -r moved back path; do
-    (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX; cd "$path" 2>/dev/null &&
-      [ "$(git rev-parse -q --verify HEAD)" = "$moved" ] && git checkout -q --detach "$back")
-  done
+  # The hook can't tell whether --recurse-submodules moved a submodule or a person had already
+  # checked it out there, so it names such submodules instead of moving them.
+  restore="$restore$(git diff --raw --no-abbrev "$from" HEAD | awk -F '\\t' '$1 ~ /^:160000 160000 / {
+    split($1, f, " "); print f[3], $2 }' | while read -r moved path; do
+    [ "$(cd "$path" 2>/dev/null && env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \\
+      git rev-parse -q --verify HEAD)" = "$moved" ] &&
+      printf ' Submodule %s is at the commit %s records; if this switch moved it, run: git submodule update -- %s.' "$path" "$wanted" "$path"
+  done)"
 fi
 refuse "move $(pwd) to $wanted.$restore"
 `;
