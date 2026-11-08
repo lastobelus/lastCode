@@ -334,7 +334,9 @@ export const make = Effect.gen(function* () {
     ).pipe(
       Effect.tap(() => woke(target)),
       Effect.catch((error) =>
-        target.watch.generation === undefined ? record(target, null) : Effect.fail(error),
+        target.watch.generation === undefined
+          ? record(target, null, undefined, { ...target.watch, unreadable: true })
+          : Effect.fail(error),
       ),
       Effect.tap(() => ended(target, "unreadable")),
     );
