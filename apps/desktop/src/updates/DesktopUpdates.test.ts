@@ -73,9 +73,14 @@ describe("DesktopUpdates", () => {
       Effect.gen(function* () {
         const updates = yield* DesktopUpdates.DesktopUpdates;
         yield* updates.configure;
+        const configured = yield* updates.getState;
+        yield* TestClock.adjust(Duration.millis(1));
         const requested = yield* updates.check("menu");
         assert.equal(requested.state.status, "idle");
         assert.include(requested.state.message ?? "", "Checkpoint requested");
+        // Requesting a checkpoint inspected nothing, so the last successful check stands.
+        assert.isDefined(configured.checkSucceededAt);
+        assert.equal(requested.state.checkSucceededAt, configured.checkSucceededAt);
         const inspected = yield* updates.check("poll");
         assert.equal(inspected.state.status, "up-to-date");
         assert.isNull(inspected.state.message);

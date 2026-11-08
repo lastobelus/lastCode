@@ -716,10 +716,9 @@ export const make = Effect.gen(function* () {
                   errorContext: null,
                   canRetry: false,
                 }
-              : state;
-          return setState(
-            applyRequest(recordSuccessfulDesktopUpdateCheck(pending, checkedAt)),
-          ).pipe(Effect.as(result));
+              : { ...state, checkedAt };
+          // Requesting a checkpoint inspects nothing, so the offer's freshness stays as it was.
+          return setState(applyRequest(pending)).pipe(Effect.as(result));
         }
         if (inspection.status === "up-to-date") {
           return Ref.set(localCheckpointTagRef, Option.none()).pipe(

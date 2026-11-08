@@ -93,7 +93,7 @@ export function SidebarUpdateFreshness({ state }: { readonly state: DesktopUpdat
         </div>
       ) : null}
       {state.refreshFailure ? (
-        <div className="mt-0.5 break-words text-2xs leading-4 text-warning">
+        <div className="mt-0.5 max-h-16 overflow-y-auto break-words text-2xs leading-4 text-warning">
           Latest check failed: {state.refreshFailure}
         </div>
       ) : null}
