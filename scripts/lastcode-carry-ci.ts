@@ -22,6 +22,7 @@ import {
 } from "./lastcode-carry-delivery.ts";
 import {
   CARRY_REPLAY_GROUPS,
+  CarryReplayConflictError,
   compileCarrySetSameBase,
   parseCarryTrailers,
   readCarryGroupChain,
@@ -296,8 +297,12 @@ export function validateCarryPullRequest(
     };
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
+    const action =
+      error instanceof CarryReplayConflictError
+        ? "Apply the likely fix above, push the corrected head,"
+        : "Reconcile the source contributions with their owning groups";
     throw new Error(
-      `PR #${pullRequest.number} same-base carry compilation failed for ${base}..${head}: ${detail} Reconcile the source contributions with their owning groups and rerun carry validation before merging.`,
+      `PR #${pullRequest.number} same-base carry compilation failed for ${base}..${head}: ${detail}\n${action} and rerun carry validation before merging.`,
       { cause: error },
     );
   }

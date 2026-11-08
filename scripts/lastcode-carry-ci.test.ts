@@ -66,7 +66,7 @@ function compactFixture(repo: string) {
     source,
     preparedPartition: { base: upstream, source, head: source },
   }).head;
-  return { upstream, base };
+  return { upstream, base, partition };
 }
 
 function snapshot(repo: string) {
@@ -317,6 +317,39 @@ describe("LastCode carry CI", () => {
       expect(snapshot(repo)).toEqual(before);
       expect(NodeFS.readFileSync(NodePath.join(repo, "untracked.txt"), "utf8")).toBe(
         "keep this work\n",
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("names the later carry groups whose changes a regrouped commit conflicts with", () => {
+    const { repo, cleanup } = fixture();
+    try {
+      const { base, partition } = compactFixture(repo);
+      write(repo, "shared.txt", "action behavior\nsidebar\n");
+      const sidebar = commit(repo, "show sidebar state", "Carry-Group: legacy-sidebar");
+      write(repo, "shared.txt", "action behavior\nsidebar\ntooling\n");
+      const head = commit(repo, "extend sidebar tooling", "Carry-Group: tooling");
+      let message = "";
+      try {
+        validateCarryPullRequest(repo, { base, head, number: 219 });
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      const short = (commit: string) => commit.slice(0, 12);
+      expect(message).toContain(
+        [
+          `Carry replay conflicted in shared.txt while replaying ${short(head)} "extend sidebar tooling" (Carry-Group: tooling).`,
+          "These commits in later carry groups change the same files earlier in history, so the replay has not applied them yet:",
+          `- ${short(partition)} "action modification" (Carry-Group: resumable-actions): shared.txt`,
+          `- ${short(sidebar)} "show sidebar state" (Carry-Group: legacy-sidebar): shared.txt`,
+          `Likely fix: retag ${short(head)}'s Carry-Group to legacy-sidebar so it replays after them, or split its changes to shared.txt into a separate legacy-sidebar commit.`,
+          "Git output:",
+        ].join("\n"),
+      );
+      expect(message).toMatch(
+        /\nApply the likely fix above, push the corrected head, and rerun carry validation before merging\.$/u,
       );
     } finally {
       cleanup();
