@@ -158,7 +158,7 @@ export function attachTimelineViewport(scrollNode: HTMLElement): TimelineViewpor
         )
           return false;
         const area = scrollNode.closest('[data-workspace-area="conversation"]');
-        if (!area || event.target !== area) return false;
+        if (!area || (event.target !== area && event.target !== scrollNode)) return false;
         emit({ source: "key", key: event.key, direction: event.key === "PageUp" ? "up" : "down" });
         const distance = getTimelinePageScrollDistancePx(
           scrollNode,
