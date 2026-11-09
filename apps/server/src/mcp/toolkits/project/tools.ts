@@ -4,6 +4,7 @@ import {
   ModelSelection,
   TrimmedNonEmptyString,
   ThreadId,
+  RemoteDelegationSelector,
   RunId,
   OrchestrationV2DelegatedFrom,
   OrchestrationV2RunStatus,
@@ -124,10 +125,11 @@ const ProjectCloneTool = Tool.make("t3_project_clone", {
 const ThreadLaunchTool = Tool.make("t3_thread_launch", {
   ...shared,
   description:
-    "Create one new top-level thread, bound to its workspace before the agent starts. Task in `message`. Omit `projectId`, model and modes to inherit yours (outside a thread, pass `projectId` or `scratch`); modes cannot exceed yours. After an error or lost reply, retry with the same `clientRequestId`. Follow it with `t3_thread_read` or `t3_thread_wait`. To mention it, paste the `link` that `t3_thread_read` returns, exactly; it includes the owning environment.",
+    "Create one interactive thread, bound to its workspace before the agent starts. Task in `message`; omit message and attachments for an empty parent (no model turn). groupedUnderThreadId defaults to your thread when it shares the project; null means top level. Omit `projectId`, model and modes to inherit yours (outside a thread, pass `projectId` or `scratch`); modes cannot exceed yours. After an error or lost reply, retry with the same `clientRequestId`. Follow it with `t3_thread_read` or `t3_thread_wait`. To mention it, paste the `link` that `t3_thread_read` returns, exactly; it includes the owning environment.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     projectId: Schema.optional(ProjectId),
+    groupedUnderThreadId: Schema.optional(Schema.NullOr(ThreadId)),
     scratch: Schema.optional(
       Schema.Boolean.annotate({
         description:
@@ -153,12 +155,21 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
     /** Set by a linked environment launching its agent's delegated task here; ignored otherwise. */
     delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
+    remotePreparation: Schema.optional(
+      Schema.Struct({
+        parentEnvironmentId: RemoteDelegationSelector.fields.parentEnvironmentId,
+        parentThreadId: ThreadId,
+        sourceTaskId: RemoteDelegationSelector.fields.sourceTaskId,
+        existingThreadId: Schema.optional(ThreadId),
+      }),
+    ),
   }),
   success: Schema.Struct({
     threadId: ThreadId,
     link: Schema.optional(Schema.String),
     projectId: ProjectId,
     modelSelection: ModelSelection,
+    delegation: Schema.optional(RemoteDelegationSelector),
     runId: Schema.NullOr(RunId),
     status: Schema.NullOr(OrchestrationV2RunStatus),
   }),

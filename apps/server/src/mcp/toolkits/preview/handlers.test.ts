@@ -27,7 +27,7 @@ import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as McpToolAccessTestkit from "../../McpToolAccess.testkit.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
-import { toolkitRegistration } from "../../McpHttpServer.ts";
+import { layerInProcessMcpServer, toolkitRegistration } from "../../McpHttpServer.ts";
 import { claimPreviewRecording, layerStandard } from "./handlers.ts";
 import { PreviewStandardToolkit } from "./tools.ts";
 
@@ -100,9 +100,11 @@ it.effect("preview_open navigates the opened tab to a dev server in one tool cal
         issuedAt: 1,
       }),
       Effect.provide(
-        Layer.mergeAll(PreviewAutomationBroker.layer, McpToolAccessTestkit.liveThreadsLayer).pipe(
-          Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
-        ),
+        Layer.mergeAll(
+          PreviewAutomationBroker.layer,
+          McpToolAccessTestkit.liveThreadsLayer,
+          Layer.mock(PublishedDocumentPreview.PublishedDocumentPreview)({}),
+        ).pipe(Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
       ),
     ),
   ),
@@ -139,7 +141,9 @@ it.effect.each([
         },
         getClient: Effect.die("unused"),
       });
-      const broker = yield* PreviewAutomationBroker.make.pipe(Effect.provide(NodeServices.layer));
+      const broker = yield* PreviewAutomationBroker.make.pipe(
+        Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+      );
       const hostId = "https://workstation.example/private-host";
       const events = yield* broker.connect({
         clientId: hostId,
@@ -177,9 +181,10 @@ it.effect.each([
           Layer.provide(NodeServices.layer),
         ),
         NodeServices.layer,
+        NodeCrypto.layer,
       );
       const registration = toolkitRegistration(PreviewStandardToolkit, layerStandard).pipe(
-        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provideMerge(layerInProcessMcpServer),
         Layer.provide(dependencies),
       );
       yield* Effect.gen(function* () {

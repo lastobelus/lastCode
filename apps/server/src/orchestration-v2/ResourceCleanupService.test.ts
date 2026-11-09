@@ -39,7 +39,7 @@ const summary = (threadId: string, terminalId: string): TerminalSummary => ({
   updatedAt: "2026-10-03T00:00:00.000Z",
 });
 
-it.effect("archive cleanup closes ordinary terminals but retains preview-owned terminals", () =>
+it.effect("archive cleanup removes owned previews before closing ordinary terminals", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const root = yield* fs.makeTempDirectoryScoped({ prefix: "resource-cleanup-archive-" });
@@ -84,6 +84,12 @@ it.effect("archive cleanup closes ordinary terminals but retains preview-owned t
           }),
           Layer.mock(PreviewHosting.PreviewHosting)({
             list: (threadId) => Effect.succeed(threadId === "thread-1" ? [previewLease] : []),
+            removeThread: (threadId) =>
+              Ref.update(closeCalls, (values) => [...values, `preview:${threadId}`]),
+            cleanupArchivedThread: (threadId, closeTerminals) =>
+              Ref.update(closeCalls, (values) => [...values, `preview:${threadId}`]).pipe(
+                Effect.andThen(closeTerminals),
+              ),
           }),
         ),
       ),
@@ -93,70 +99,74 @@ it.effect("archive cleanup closes ordinary terminals but retains preview-owned t
       const cleanup = yield* ResourceCleanupService.ResourceCleanupService;
       yield* cleanup.cleanupArchivedTerminals("thread-1");
       assert.deepStrictEqual(yield* Ref.get(closed), []);
-      assert.deepStrictEqual(yield* Ref.get(closeCalls), ["thread-1:preview-terminal"]);
+      assert.deepStrictEqual(yield* Ref.get(closeCalls), ["preview:thread-1", "thread-1:"]);
     }).pipe(Effect.provide(layer));
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
-it.effect(
-  "archive cleanup runs despite failed lease lookup and retains the preview namespace",
-  () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "resource-cleanup-archive-" });
-      const config = yield* Effect.provide(
-        ServerConfig.ServerConfig,
-        ServerConfig.layerTest(process.cwd(), root),
-      );
-      const closed = yield* Ref.make<ReadonlyArray<string>>([]);
-      const closeCalls = yield* Ref.make<ReadonlyArray<string>>([]);
-      const layer = layerResourceCleanup.pipe(
-        Layer.provide(
-          Layer.mergeAll(
-            NodeServices.layer,
-            Layer.mock(PreviewManager.PreviewManager)({
-              close: () => Effect.die("Archived cleanup must preserve browser tabs"),
-            }),
-            ServerConfig.layer(config),
-            Layer.mock(TerminalManager.TerminalManager)({
-              metadata: Effect.succeed([
-                summary("thread-1", "preview-terminal"),
-                summary("thread-1", "shell-terminal"),
+it.effect("archive cleanup leaves terminals alone when preview cancellation fails", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const root = yield* fs.makeTempDirectoryScoped({ prefix: "resource-cleanup-archive-" });
+    const config = yield* Effect.provide(
+      ServerConfig.ServerConfig,
+      ServerConfig.layerTest(process.cwd(), root),
+    );
+    const closed = yield* Ref.make<ReadonlyArray<string>>([]);
+    const closeCalls = yield* Ref.make<ReadonlyArray<string>>([]);
+    const layer = layerResourceCleanup.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          NodeServices.layer,
+          Layer.mock(PreviewManager.PreviewManager)({
+            close: () => Effect.die("Archived cleanup must preserve browser tabs"),
+          }),
+          ServerConfig.layer(config),
+          Layer.mock(TerminalManager.TerminalManager)({
+            metadata: Effect.succeed([
+              summary("thread-1", "preview-terminal"),
+              summary("thread-1", "shell-terminal"),
+            ]),
+            close: ({ terminalId, deleteHistory }) =>
+              Ref.update(closed, (values) => [...values, `${terminalId}:${String(deleteHistory)}`]),
+            closeThreadExcept: (threadId, retainedTerminalIds, prefixes) =>
+              Ref.update(closeCalls, (values) => [
+                ...values,
+                `${threadId}:${retainedTerminalIds.join(",")}:${prefixes?.join(",")}`,
               ]),
-              close: ({ terminalId, deleteHistory }) =>
-                Ref.update(closed, (values) => [
-                  ...values,
-                  `${terminalId}:${String(deleteHistory)}`,
-                ]),
-              closeThreadExcept: (threadId, retainedTerminalIds, prefixes) =>
-                Ref.update(closeCalls, (values) => [
-                  ...values,
-                  `${threadId}:${retainedTerminalIds.join(",")}:${prefixes?.join(",")}`,
-                ]),
-            }),
-            Layer.mock(PreviewHosting.PreviewHosting)({
-              list: () =>
-                Effect.fail(
-                  new PreviewHosting.PreviewHostingError({
-                    operation: "persist",
-                    statePath: "/state/preview-hosting.json",
-                    cause: new Error("unreadable lease state"),
-                  }),
-                ),
-            }),
-          ),
+          }),
+          Layer.mock(PreviewHosting.PreviewHosting)({
+            list: () => Effect.succeed([]),
+            removeThread: () =>
+              Effect.fail(
+                new PreviewHosting.PreviewHostingError({
+                  operation: "persist",
+                  statePath: "/state/preview-hosting.json",
+                  cause: new Error("unreadable lease state"),
+                }),
+              ),
+            cleanupArchivedThread: () =>
+              Effect.fail(
+                new PreviewHosting.PreviewHostingError({
+                  operation: "persist",
+                  statePath: "/state/preview-hosting.json",
+                  cause: new Error("unreadable lease state"),
+                }),
+              ),
+          }),
         ),
-      );
+      ),
+    );
 
-      yield* Effect.gen(function* () {
-        const cleanup = yield* ResourceCleanupService.ResourceCleanupService;
-        const result = yield* Effect.result(cleanup.cleanupArchivedTerminals("thread-1"));
-        assert.equal(result._tag, "Failure");
-        if (result._tag === "Failure") assert.equal(result.failure.operation, "preview");
-        assert.deepStrictEqual(yield* Ref.get(closed), []);
-        assert.deepStrictEqual(yield* Ref.get(closeCalls), ["thread-1::preview-"]);
-      }).pipe(Effect.provide(layer));
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    yield* Effect.gen(function* () {
+      const cleanup = yield* ResourceCleanupService.ResourceCleanupService;
+      const result = yield* Effect.result(cleanup.cleanupArchivedTerminals("thread-1"));
+      assert.equal(result._tag, "Failure");
+      if (result._tag === "Failure") assert.equal(result.failure.operation, "preview");
+      assert.deepStrictEqual(yield* Ref.get(closed), []);
+      assert.deepStrictEqual(yield* Ref.get(closeCalls), []);
+    }).pipe(Effect.provide(layer));
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
 it.effect(
@@ -310,6 +320,7 @@ it.effect("deletion closes every browser tab, preserves other threads, and is re
           Layer.mock(PreviewHosting.PreviewHosting)({
             list: () => Effect.succeed([]),
             removeThread: () => Effect.void,
+            cleanupArchivedThread: (_threadId, closeTerminals) => closeTerminals,
           }),
         ),
       ),

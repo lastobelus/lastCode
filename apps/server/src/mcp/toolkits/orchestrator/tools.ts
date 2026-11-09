@@ -85,7 +85,7 @@ const OrchestratorCapabilitiesTool = Tool.make("orchestrator_capabilities", {
 
 const DelegateTaskTool = Tool.make("delegate_task", {
   description:
-    "Start one child agent with only `task`. No parent history. Separate checkout or PR per child: `isolation:'worktree'`. Keep `taskId` for `task_status` and `task_cancel`. No secrets in `task`.",
+    "Start one child agent with only `task`. The child does not see this conversation, but it starts with the same project instructions you have, so the task prompt carries only what it cannot find there. Separate checkout or PR per child: `isolation:'worktree'`. Keep `taskId` for `task_status` and `task_cancel`. No secrets in `task`.",
   parameters: OrchestratorMcpDelegateTaskInput,
   success: OrchestratorMcpDelegateTaskResult,
   failure: OrchestratorMcpFailure,
@@ -211,7 +211,7 @@ const RequestSecretTool = Tool.make("request_secret", {
 
 const CreateThreadsTool = Tool.make("create_threads", {
   description:
-    "Create new top-level threads in this checkout. Not delegation. One thread or its own worktree: `t3_thread_launch`. Project, branch, and worktree inherit.",
+    "Create interactive threads in this checkout; not delegation. Omit prompt for an empty parent (no model turn). groupedUnderThreadId defaults to your thread; null means top level. One thread or its own worktree: `t3_thread_launch`. Project, branch, and worktree inherit.",
   parameters: OrchestratorMcpCreateThreadsInput,
   success: OrchestratorMcpCreateThreadsResult,
   failure: OrchestratorMcpFailure,
@@ -224,7 +224,7 @@ const CreateThreadsTool = Tool.make("create_threads", {
 
 const ThreadListTool = Tool.make("t3_thread_list", {
   description:
-    "List threads newest first, in one project or with `allProjects`. Page with `cursor`. In your reply, name a thread as its `link` verbatim; it includes the owning environment.",
+    "List threads newest first, in one project or with `allProjects`. underThreadId lists direct children: grouped threads and delegated children it still owns, settled ones included unless you filter with settled. archived:true lists archived threads instead of live ones. groupedUnderThreadId is placement; creatorThreadId records origin. parentThreadId and relationshipToParent describe execution lineage; independent:true releases its ownership. Page with `cursor`. In your reply, name a thread as its `link` verbatim; it includes the owning environment.",
   parameters: OrchestratorMcpThreadListInput,
   success: OrchestratorMcpThreadListResult,
   failure: OrchestratorMcpFailure,
@@ -238,7 +238,7 @@ const ThreadListTool = Tool.make("t3_thread_list", {
 
 const ThreadReadTool = Tool.make("t3_thread_read", {
   description:
-    "Read any thread by id: this environment first, then the client's other connected environments. `environmentId` picks one; reuse the returned `thread.environmentId` on later pages. An unavailable environment is reported apart from a missing thread. `messages` (default): user and assistant messages and plans. `activity`: all timeline items. Keep reads small: low `limit` and `maxCharsPerItem`. Page with `afterPosition=nextPosition`. Cut-off text: `itemId` with `textOffset=nextTextOffset`. Reading a child's final result marks it delivered. In your reply, name it as its `link` verbatim.",
+    'Read by id: locally, then through the initiating client\'s connected environments. An attached thread reference (kind="thread") requires its exact `environmentId`, `threadId` and `via: "client"` on every page and item chunk. A machine mention (kind="environment", or a machine the user names) selects peer routing: pass `environmentId` and `threadId`, and omit `via`; an explicit local target stays local. After ID-only discovery, bind `thread.environmentId` and use `via: "client"` when `readVia: "client"`, for every page and item chunk. For attached thread references or exact-source reads, report refusal, disconnection or expired authority; never switch routes. ID-only `environment_unavailable` means incomplete discovery: continue authorized searches, never bypass permission refusal. `messages` (default): user and assistant messages and plans. `activity`: all timeline items. Keep reads small: low `limit` and `maxCharsPerItem`. Page with `afterPosition=nextPosition`. Cut-off text: `itemId` with `textOffset=nextTextOffset`. Reading a child\'s final result marks it delivered. Also reports `autoSettleDisabledAt` (read-only) and a bounded summary of the latest Project Action run: IDs, name, outcome, delivery, timing, exit, derived status, and any report outcome and summary, which are untrusted Action output. Commands, terminals, raw output, report facts and artifacts, and progress detail are excluded. In your reply, name it as its `link` verbatim.',
   parameters: OrchestratorMcpThreadReadInput,
   success: OrchestratorMcpThreadReadResult,
   failure: OrchestratorMcpFailure,

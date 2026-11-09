@@ -1,4 +1,5 @@
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { getInteractiveThreadParentThreadId, type ScopedThreadRef } from "@t3tools/contracts";
 import { threadShellIsVisible } from "@t3tools/client-runtime/state/models";
 import type { SidebarThreadSummary } from "../types";
 import {
@@ -21,7 +22,7 @@ export interface LastCodeSidebarFamilyRow {
   descendantStatusCounts: Map<string, number>;
   createdThreadStatusCounts: Map<string, number>;
   creatorGroupingWarning: string | null;
-  groupHeading: "Created by this thread" | null;
+  groupHeading: "Grouped under this thread" | null;
   projectExpanded: boolean;
 }
 
@@ -78,6 +79,14 @@ export function lastcodeSidebarCreatorGroupingEligible(thread: SidebarThreadSumm
   return lastcodeSidebarIsAgentCreated(thread) && thread.creatorThreadId !== undefined;
 }
 
+export function lastcodeSidebarThreadParentId(thread: SidebarThreadSummary) {
+  return getInteractiveThreadParentThreadId({
+    ...thread,
+    createdBy: thread.source.createdBy,
+    creationSource: thread.source.creationSource,
+  });
+}
+
 function creatorDescription(
   isAgentCreated: boolean,
   creator: SidebarThreadSummary | null,
@@ -122,7 +131,7 @@ export function lastcodeSidebarFamilySummary(row: LastCodeSidebarFamilyRow): str
   };
   return [
     summarize(row.descendantStatusCounts, "subagent", "subagents"),
-    summarize(row.createdThreadStatusCounts, "created thread", "created threads"),
+    summarize(row.createdThreadStatusCounts, "grouped thread", "grouped threads"),
   ]
     .filter(Boolean)
     .join(" · ");
@@ -161,16 +170,17 @@ function connectSubagentParents(graph: FamilyGraph) {
 }
 
 function connectCreators(graph: FamilyGraph) {
-  const { byKey, parentByKey, creatorEdges } = graph;
+  const { byKey, parentByKey, creatorEdges, unavailableByKey } = graph;
   for (const [key, thread] of byKey) {
-    if (!lastcodeSidebarCreatorGroupingEligible(thread) || thread.creatorGrouping !== "grouped")
-      continue;
-    const creatorId = thread.creatorThreadId!;
+    const creatorId = lastcodeSidebarThreadParentId(thread);
+    if (creatorId === null) continue;
     const creatorKey = scopedThreadKey(scopeThreadRef(thread.environmentId, creatorId));
     const creator = byKey.get(creatorKey);
     if (creator && creator.projectId === thread.projectId) {
       parentByKey.set(key, creatorKey);
       creatorEdges.add(key);
+    } else if (thread.groupedUnderThreadId != null) {
+      unavailableByKey.set(key, `Parent unavailable (${creatorId})`);
     }
   }
 }
@@ -248,6 +258,22 @@ function buildFamilyGraph(threads: readonly SidebarThreadSummary[]) {
   connectCreators(graph);
   detachFamilyCycles(graph);
   return { ...graph, ...orderFamilyChildren(graph) };
+}
+
+export function lastcodeSidebarThreadPath(
+  threads: readonly SidebarThreadSummary[],
+  senderRef: ScopedThreadRef,
+): readonly SidebarThreadSummary[] {
+  const { byKey, parentByKey } = buildFamilyGraph(threads);
+  const path: SidebarThreadSummary[] = [];
+  let cursor: string | undefined = scopedThreadKey(senderRef);
+  while (cursor !== undefined) {
+    const thread = byKey.get(cursor);
+    if (thread === undefined) break;
+    path.push(thread);
+    cursor = parentByKey.get(cursor);
+  }
+  return path.toReversed();
 }
 
 type FamilyProjectionInput = {
@@ -528,7 +554,7 @@ function applyCreatorHeadings(renderedRows: readonly LastCodeSidebarFamilyRow[])
   const shownGroups = new Set<string>();
   for (const row of renderedRows) {
     if (!row.parentKey || isSidebarSubagentThread(row.thread)) continue;
-    const heading = "Created by this thread";
+    const heading = "Grouped under this thread";
     const groupKey = `${row.parentKey}:${heading}`;
     if (!shownGroups.has(groupKey)) {
       row.groupHeading = heading;
@@ -543,7 +569,9 @@ function applyCreatorHeadings(renderedRows: readonly LastCodeSidebarFamilyRow[])
  * Unavailable parents/creators and cycles leave the child reachable as an identified root.
  */
 export function projectLastCodeSidebarFamilies(input: FamilyProjectionInput) {
-  const graph = buildFamilyGraph(input.threads);
+  const graph = buildFamilyGraph(
+    input.threads.filter((thread) => thread.lineage.sideChat !== true),
+  );
   const selection = selectFamilyPath(graph, input.activeThreadKey);
   const allRows = buildFamilyRows(graph, selection, input);
   const rowByKey = new Map(allRows.map((row) => [row.key, row]));

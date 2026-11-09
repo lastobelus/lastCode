@@ -686,7 +686,7 @@ it.effect.each([
     }),
 );
 
-it("does not wake a settled run for work left by a session that already stopped", () => {
+it("wakes settled runs only for lost provider-owned background work", () => {
   const base = makeProjection();
   const projection = {
     ...base,
@@ -695,6 +695,16 @@ it("does not wake a settled run for work left by a session that already stopped"
     turnItems: [backgroundSubagent.turnItem],
   } as unknown as OrchestrationV2ThreadProjection;
   assert.equal(restartContinuationRun(projection, now)?.id, runId);
+  for (const childThreadId of [ThreadId.make("thread:local-child"), null])
+    assert.isUndefined(
+      restartContinuationRun(
+        {
+          ...projection,
+          turnItems: [{ ...backgroundSubagent.turnItem, origin: "app_owned", childThreadId }],
+        } as unknown as OrchestrationV2ThreadProjection,
+        now,
+      ),
+    );
   for (const status of ["stopped", "error"])
     assert.isUndefined(
       restartContinuationRun(

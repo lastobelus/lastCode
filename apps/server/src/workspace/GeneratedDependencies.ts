@@ -7,7 +7,7 @@ import {
 import * as HostProcess from "@t3tools/shared/HostProcess";
 // @effect-diagnostics nodeBuiltinImport:off - FileSystem lacks lstat; dependency
 // installs contain links, which must be measured and removed without following them.
-import * as NodeFSP from "node:fs/promises";
+import { promises as NodeFSP } from "@t3tools/shared/nativeFileSystem";
 import * as NodePath from "node:path";
 import * as NodeChildProcess from "node:child_process";
 import * as Context from "effect/Context";
@@ -695,7 +695,6 @@ const make = Effect.gen(function* () {
             catch: (cause) =>
               new GeneratedDependenciesError({ path: inspection.dependencyPath, cause }),
           }).pipe(
-            Effect.uninterruptible,
             Effect.tap((removed) =>
               decide(
                 inspection,
@@ -705,6 +704,8 @@ const make = Effect.gen(function* () {
                   : "Dependency install removed",
               ),
             ),
+            // Record successful deletion before releasing leases on cancellation.
+            Effect.uninterruptible,
           );
         }).pipe(
           Effect.catch((error) =>

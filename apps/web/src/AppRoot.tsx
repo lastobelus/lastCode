@@ -1,3 +1,4 @@
+import { openBrowserThreadLink } from "./browser/useOpenBrowserThreadLink";
 import { RouterProvider } from "@tanstack/react-router";
 
 import { ElectronBrowserHost } from "./browser/ElectronBrowserHost";
@@ -10,7 +11,9 @@ export function AppRoot({ router }: { readonly router: AppRouter }) {
   return (
     <AppAtomRegistryProvider>
       <RouterProvider router={router} />
-      <ElectronBrowserHost />
+      <ElectronBrowserHost
+        onThreadLink={(href, environmentId) => openBrowserThreadLink(router, href, environmentId)}
+      />
       <QuitHoldOverlay />
     </AppAtomRegistryProvider>
   );

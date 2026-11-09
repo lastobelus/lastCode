@@ -325,3 +325,32 @@ export function relabelThreadLinks(
     );
   });
 }
+
+/** Browser links keep explicit destinations so the app can show unavailable or missing threads. */
+export function browserThreadLinkTarget(
+  href: string,
+  sourceEnvironmentId: EnvironmentId,
+  refs: ReadonlyArray<ScopedThreadRef>,
+): ScopedThreadRef | null {
+  const reference = parseThreadLinkReference(href);
+  if (reference === null) return null;
+  const resolved = resolveThreadLinkReference(reference, (threadId, environmentId) =>
+    refs.find(
+      (ref) =>
+        ref.threadId === threadId && ref.environmentId === (environmentId ?? sourceEnvironmentId),
+    ),
+  );
+  if (resolved.value) return resolved.value;
+  const link = {
+    environmentId: reference.environmentId ?? null,
+    threadId: reference.threadId,
+    version: reference.version,
+    legacyThreadId: reference.legacyThreadId,
+  };
+  return (
+    guessThreadLinkRef(link, refs) ?? {
+      environmentId: resolved.environmentId ?? sourceEnvironmentId,
+      threadId: resolved.threadId,
+    }
+  );
+}

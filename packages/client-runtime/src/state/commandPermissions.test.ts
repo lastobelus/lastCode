@@ -15,6 +15,8 @@ import {
   AuthPreviewOperateScope,
   AuthProvidersManageScope,
   AuthSettingsWriteScope,
+  AuthFilesystemReadScope,
+  AuthFilesystemWriteScope,
   AuthSourceControlWriteScope,
   ThreadId,
   EnvironmentId,
@@ -103,29 +105,201 @@ describe("command permissions", () => {
     ),
   );
 
-  it.effect("requires the destination preview grant to close a browser tab", () =>
+  it.effect("requires maintenance only for orphan checkout hold release", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const registry = yield* setup;
-        const close = createCommandPermissions(runtime, WS_METHODS.previewClose);
+        const command = createCommandPermissions(runtime, WS_METHODS.serverSetKeepWorkspace);
+        const orphan = { checkoutId: "orphan-checkout", keep: false };
         registry.set(sessions(env), AsyncResult.success(grant(true)));
-        expect(registry.get(close.permissionAtom(env))).toBe(false);
-        expect((yield* close.authorize(registry, env).pipe(Effect.flip))._tag).toBe(
+        expect(registry.get(command.permissionAtom(env, orphan))).toBe(false);
+        expect(
+          (yield* command.authorize(registry, env, orphan).pipe(Effect.flip)).requiredPermission,
+        ).toBe(AuthEnvironmentMaintainScope);
+        yield* command.authorize(registry, env, { threadId: "live-thread", keep: true });
+        const scopes = [AuthOrchestrationOperateScope, AuthEnvironmentMaintainScope];
+        registry.set(
+          sessions(env),
+          AsyncResult.success({ ...grant(true), scopes, permissions: scopes }),
+        );
+        expect(registry.get(command.permissionAtom(env, orphan))).toBe(true);
+        yield* command.authorize(registry, env, orphan);
+        expect(() =>
+          command.permissionAtom(env, { checkoutId: "orphan-checkout", keep: true }),
+        ).toThrow();
+      }),
+    ),
+  );
+
+  it.effect.each([
+    ORCHESTRATION_V2_WS_METHODS.dispatchCommand,
+    WS_METHODS.projectsMutate,
+    WS_METHODS.serverDeleteThreads,
+  ])("requires all disposal grants at execution for %s", (method) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const registry = yield* setup;
+        const command = createCommandPermissions(runtime, method);
+        const input = {
+          commandId: "bulk-delete",
+          threads: [{ threadId: "first" }, { threadId: "second" }],
+          savedWorkspace: { mode: "discard", previewToken: "exact-copy-consent" },
+        };
+        const scopes = [
+          AuthEnvironmentMaintainScope,
+          AuthFilesystemReadScope,
+          AuthFilesystemWriteScope,
+          AuthSourceControlWriteScope,
+          AuthOrchestrationOperateScope,
+        ];
+        registry.set(
+          sessions(env),
+          AsyncResult.success({ ...grant(false), scopes, permissions: scopes }),
+        );
+        yield* command.authorize(registry, env, input);
+        for (const missing of scopes) {
+          const partial = scopes.filter((scope) => scope !== missing);
+          registry.set(
+            sessions(env),
+            AsyncResult.success({ ...grant(false), scopes: partial, permissions: partial }),
+          );
+          expect(registry.get(command.permissionAtom(env, input))).toBe(false);
+          expect(
+            (yield* command.authorize(registry, env, input).pipe(Effect.flip)).requiredPermission,
+          ).toBe(missing);
+        }
+      }),
+    ),
+  );
+
+  it.effect("requires source-control write permission for a bulk live worktree removal", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const registry = yield* setup;
+        const command = createCommandPermissions(runtime, WS_METHODS.serverDeleteThreads);
+        const input = {
+          commandId: "bulk-remove",
+          threads: [{ threadId: "first", deleteWorktree: true }],
+          savedWorkspace: { mode: "retain" },
+        };
+        registry.set(sessions(env), AsyncResult.success(grant(true)));
+        expect(registry.get(command.permissionAtom(env, input))).toBe(false);
+        expect(
+          (yield* command.authorize(registry, env, input).pipe(Effect.flip)).requiredPermission,
+        ).toBe(AuthSourceControlWriteScope);
+        registry.set(
+          sessions(env),
+          AsyncResult.success({
+            ...grant(true),
+            scopes: [AuthOrchestrationOperateScope, AuthSourceControlWriteScope],
+            permissions: [AuthOrchestrationOperateScope, AuthSourceControlWriteScope],
+          }),
+        );
+        yield* command.authorize(registry, env, input);
+      }),
+    ),
+  );
+
+  it.effect.each([
+    [WS_METHODS.promptSnippetsSave, [AuthOrchestrationOperateScope]],
+    [WS_METHODS.promptSnippetsRecordUse, [AuthOrchestrationOperateScope]],
+    [WS_METHODS.promptSnippetsRestore, [AuthOrchestrationOperateScope]],
+    [WS_METHODS.promptSnippetsDismiss, [AuthOrchestrationOperateScope]],
+    [WS_METHODS.promptSnippetsDiscover, [AuthOrchestrationOperateScope]],
+    [WS_METHODS.serverListSavedWorkspaces, [AuthFilesystemReadScope, AuthOrchestrationReadScope]],
+    [
+      WS_METHODS.serverPreviewWorkspaceLifecycle,
+      [AuthFilesystemReadScope, AuthOrchestrationReadScope],
+    ],
+    [
+      WS_METHODS.serverPreviewWorktreeSuspension,
+      [
+        AuthEnvironmentMaintainScope,
+        AuthFilesystemReadScope,
+        AuthFilesystemWriteScope,
+        AuthSourceControlWriteScope,
+        AuthOrchestrationOperateScope,
+      ],
+    ],
+    [
+      WS_METHODS.serverSuspendWorktree,
+      [
+        AuthEnvironmentMaintainScope,
+        AuthFilesystemReadScope,
+        AuthFilesystemWriteScope,
+        AuthSourceControlWriteScope,
+        AuthOrchestrationOperateScope,
+      ],
+    ],
+    [
+      WS_METHODS.serverRestoreWorktree,
+      [
+        AuthFilesystemReadScope,
+        AuthFilesystemWriteScope,
+        AuthSourceControlWriteScope,
+        AuthOrchestrationOperateScope,
+      ],
+    ],
+    [
+      WS_METHODS.serverPreviewWorktreeDiscard,
+      [
+        AuthEnvironmentMaintainScope,
+        AuthFilesystemReadScope,
+        AuthFilesystemWriteScope,
+        AuthSourceControlWriteScope,
+        AuthOrchestrationOperateScope,
+      ],
+    ],
+    [
+      WS_METHODS.serverDiscardWorktreeSnapshots,
+      [
+        AuthEnvironmentMaintainScope,
+        AuthFilesystemReadScope,
+        AuthFilesystemWriteScope,
+        AuthSourceControlWriteScope,
+        AuthOrchestrationOperateScope,
+      ],
+    ],
+    [WS_METHODS.serverSetKeepWorkspace, [AuthOrchestrationOperateScope]],
+    [
+      WS_METHODS.serverCreateFreshWorktree,
+      [
+        AuthFilesystemReadScope,
+        AuthFilesystemWriteScope,
+        AuthSourceControlWriteScope,
+        AuthOrchestrationOperateScope,
+      ],
+    ],
+  ] as const)("requires every destination workspace grant for %s", ([tag, scopes]) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const registry = yield* setup;
+        const command = createCommandPermissions(runtime, tag);
+        registry.set(sessions(env), AsyncResult.success(grant(false)));
+        expect(registry.get(command.permissionAtom(env))).toBe(false);
+        expect((yield* command.authorize(registry, env).pipe(Effect.flip))._tag).toBe(
           "EnvironmentAuthorizationError",
         );
         registry.set(
           sessions(env),
-          AsyncResult.success({
-            ...grant(false),
-            scopes: [AuthPreviewOperateScope],
-            permissions: [AuthPreviewOperateScope],
-          }),
+          AsyncResult.success({ ...grant(false), scopes, permissions: scopes }),
         );
-        expect(registry.get(close.permissionAtom(env))).toBe(true);
-        yield* close.authorize(registry, env);
+        expect(registry.get(command.permissionAtom(env))).toBe(true);
+        yield* command.authorize(registry, env);
+        for (const missing of scopes) {
+          const partial = scopes.filter((scope) => scope !== missing);
+          registry.set(
+            sessions(env),
+            AsyncResult.success({ ...grant(false), scopes: partial, permissions: partial }),
+          );
+          expect(registry.get(command.permissionAtom(env))).toBe(false);
+          expect((yield* command.authorize(registry, env).pipe(Effect.flip))._tag).toBe(
+            "EnvironmentAuthorizationError",
+          );
+        }
         registry.set(sessions(other), AsyncResult.success(grant(false)));
-        expect(registry.get(close.permissionAtom(other))).toBe(false);
-        expect((yield* close.authorize(registry, other).pipe(Effect.flip))._tag).toBe(
+        expect(registry.get(command.permissionAtom(other))).toBe(false);
+        expect((yield* command.authorize(registry, other).pipe(Effect.flip))._tag).toBe(
           "EnvironmentAuthorizationError",
         );
       }),
@@ -156,6 +330,37 @@ describe("command permissions", () => {
         expect(registry.get(remove.permissionAtom(other))).toBe(false);
       }),
     ),
+  );
+
+  it.effect.each([WS_METHODS.previewClose, WS_METHODS.previewHostingActivity])(
+    "requires the destination preview grant for %s",
+    (method) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const registry = yield* setup;
+          const close = createCommandPermissions(runtime, method);
+          registry.set(sessions(env), AsyncResult.success(grant(true)));
+          expect(registry.get(close.permissionAtom(env))).toBe(false);
+          expect((yield* close.authorize(registry, env).pipe(Effect.flip))._tag).toBe(
+            "EnvironmentAuthorizationError",
+          );
+          registry.set(
+            sessions(env),
+            AsyncResult.success({
+              ...grant(false),
+              scopes: [AuthPreviewOperateScope],
+              permissions: [AuthPreviewOperateScope],
+            }),
+          );
+          expect(registry.get(close.permissionAtom(env))).toBe(true);
+          yield* close.authorize(registry, env);
+          registry.set(sessions(other), AsyncResult.success(grant(false)));
+          expect(registry.get(close.permissionAtom(other))).toBe(false);
+          expect((yield* close.authorize(registry, other).pipe(Effect.flip))._tag).toBe(
+            "EnvironmentAuthorizationError",
+          );
+        }),
+      ),
   );
 
   it.effect.each([
@@ -516,28 +721,30 @@ it.effect(
     ),
 );
 
-it.effect("requires access management to answer a link request", () =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const registry = yield* setup;
-      registry.set(sessions(env), AsyncResult.success(grant(true)));
-      const answer = createCommandPermissions(runtime, WS_METHODS.peerLinksAnswerRequest);
-      expect(registry.get(answer.permissionAtom(env))).toBe(false);
-      expect((yield* answer.authorize(registry, env).pipe(Effect.flip)).requiredPermission).toBe(
-        AuthAccessWriteScope,
-      );
-      registry.set(
-        sessions(env),
-        AsyncResult.success({
-          ...grant(false),
-          scopes: [AuthAccessWriteScope],
-          permissions: [AuthAccessWriteScope],
-        }),
-      );
-      expect(registry.get(answer.permissionAtom(env))).toBe(true);
-      yield* answer.authorize(registry, env);
-    }),
-  ),
+it.effect.each([WS_METHODS.peerLinksAnswerRequest, WS_METHODS.peerLinksPreflight])(
+  "requires access management for %s",
+  (method) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const registry = yield* setup;
+        registry.set(sessions(env), AsyncResult.success(grant(true)));
+        const answer = createCommandPermissions(runtime, method);
+        expect(registry.get(answer.permissionAtom(env))).toBe(false);
+        expect((yield* answer.authorize(registry, env).pipe(Effect.flip)).requiredPermission).toBe(
+          AuthAccessWriteScope,
+        );
+        registry.set(
+          sessions(env),
+          AsyncResult.success({
+            ...grant(false),
+            scopes: [AuthAccessWriteScope],
+            permissions: [AuthAccessWriteScope],
+          }),
+        );
+        expect(registry.get(answer.permissionAtom(env))).toBe(true);
+        yield* answer.authorize(registry, env);
+      }),
+    ),
 );
 
 it.effect("honors exact empty permissions and preserves legacy parent grants", () =>
@@ -594,4 +801,27 @@ it.effect("rejects protected unary and streamed RPCs outside a guarded command",
     expect(streamed._tag).toBe("EnvironmentAuthorizationError");
     expect(writes).toBe(0);
   }),
+);
+
+it.effect.each([
+  WS_METHODS.serverPauseEnvironment,
+  WS_METHODS.serverRetryEnvironmentPause,
+  WS_METHODS.serverResumeEnvironment,
+  WS_METHODS.actionResumeResume,
+  WS_METHODS.actionResumeDiscard,
+] as const)("checks destination grants for %s", (tag) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const registry = yield* setup;
+      registry.set(sessions(env), AsyncResult.success(grant(true)));
+      registry.set(sessions(other), AsyncResult.success(grant(false)));
+      const pause = createCommandPermissions(runtime, tag);
+      expect(registry.get(pause.permissionAtom(env))).toBe(true);
+      expect(registry.get(pause.permissionAtom(other))).toBe(false);
+      yield* pause.authorize(registry, env, {});
+      expect(
+        (yield* pause.authorize(registry, other, {}).pipe(Effect.flip)).requiredPermission,
+      ).toBe(AuthOrchestrationOperateScope);
+    }),
+  ),
 );

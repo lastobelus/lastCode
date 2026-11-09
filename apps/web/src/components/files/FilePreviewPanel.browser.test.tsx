@@ -21,7 +21,12 @@ vi.mock(import("~/state/session"), async (original) => ({
 }));
 vi.mock(import("~/state/filesystem"), async (original) => ({
   ...(await original()),
-  useFilesystemReadAccess: () => ({ canReadFiles: true, isPending: false, error: null }),
+  useFilesystemReadAccess: () => ({
+    canReadFiles: true,
+    canReadThreadFiles: true,
+    isPending: false,
+    error: null,
+  }),
 }));
 vi.mock(import("~/state/use-atom-command"), async (original) => ({
   ...(await original()),

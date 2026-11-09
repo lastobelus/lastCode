@@ -54,6 +54,7 @@ import {
 import { makeIsServerInternalPath } from "../auth/serverInternalPaths.ts";
 import * as ServerConfig from "../config.ts";
 import { sourceControlDefinitions } from "../sourceControl/sourceControlDefinitions.ts";
+import { registerWorkspaceLeaseRoot, withWorkspaceLease } from "../workspace/workspaceLease.ts";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 /** T3's record of the branch, named as on the host, that a branch was cut from. */
@@ -453,6 +454,7 @@ const GIT_FAILURE_REASON_PATTERNS: ReadonlyArray<readonly [RegExp, GitCommandFai
     "authentication_failed",
   ],
   [/host key verification failed/i, "host_key_unverified"],
+  [/update aborted by the reference-transaction hook/i, "ref_update_rejected_by_hook"],
   [
     /(?:could not read from remote repository|does not appear to be a git repository|repository .+ not found)/i,
     "remote_unreachable",
@@ -484,6 +486,8 @@ const GIT_FAILURE_REASON_DETAILS: Partial<Record<GitCommandFailureReason, string
     "The remote has commits this branch doesn't have. Pull or rebase, then push again.",
   config_locked:
     "Another Git process kept the repository's config locked. Wait for it to finish, then retry.",
+  ref_update_rejected_by_hook:
+    "A Git hook refused this change; run the command in a terminal to see why. A LastCode project's main checkout stays on its default branch, so do branch work in a worktree.",
 };
 
 function gitFailureDetail(reason: GitCommandFailureReason | null): string {
@@ -1182,7 +1186,11 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
           new GitCommandError({
             ...gitCommandContext({ operation, cwd, args }),
             ...(reason === null ? {} : { reason }),
-            detail: options.fallbackErrorDetail ?? gitFailureDetail(reason),
+            // A known reason explains more than a call site's generic fallback.
+            detail:
+              (reason === null ? undefined : GIT_FAILURE_REASON_DETAILS[reason]) ??
+              options.fallbackErrorDetail ??
+              gitFailureDetail(reason),
             ...(result.exitCode === null ? {} : { exitCode: result.exitCode }),
             stdoutLength: result.stdout.length,
             stderrLength: result.stderr.length,
@@ -1626,6 +1634,8 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   });
 
   const statusRemoteRefreshFailures = new Map<string, { count: number; retryAt: number }>();
+  // Only cwds whose last status fetch failed or is still running; a fetched cwd is removed.
+  const unconfirmedStatusFetches = new Map<string, "failed" | "pending">();
   const statusRemoteRefreshFailureKey = (cacheKey: StatusRemoteRefreshCacheKey) =>
     `${cacheKey.gitCommonDir}\0${cacheKey.remoteName}`;
   const recordStatusRemoteRefreshFailure = Effect.fn(
@@ -1667,6 +1677,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   const refreshStatusUpstreamIfStale = Effect.fn("refreshStatusUpstreamIfStale")(function* (
     cwd: string,
   ) {
+    unconfirmedStatusFetches.delete(cwd);
     const headRef = yield* runGitStdout(
       "GitVcsDriver.refreshStatusUpstreamIfStale.headRef",
       cwd,
@@ -1683,10 +1694,13 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     // Empty means no upstream; `.` means the upstream is a local branch.
     if (remoteName.length === 0 || remoteName === ".") return;
     const gitCommonDir = yield* resolveGitCommonDir(cwd);
-    yield* Cache.get(
-      statusRemoteRefreshCache,
-      new StatusRemoteRefreshCacheKey({ gitCommonDir, remoteName }),
-    ).pipe(Effect.ignore);
+    const cacheKey = new StatusRemoteRefreshCacheKey({ gitCommonDir, remoteName });
+    yield* Cache.get(statusRemoteRefreshCache, cacheKey).pipe(Effect.ignore);
+    const key = statusRemoteRefreshFailureKey(cacheKey);
+    // A retry still running outranks the failure it may yet clear.
+    if (statusFetches.has(key)) unconfirmedStatusFetches.set(cwd, "pending");
+    else if (statusRemoteRefreshFailures.has(key)) unconfirmedStatusFetches.set(cwd, "failed");
+    else unconfirmedStatusFetches.delete(cwd);
   });
 
   const resolveDefaultBranchName = (
@@ -2387,6 +2401,12 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     "statusDetailsLocal",
   )(function* (cwd, options) {
     return yield* readStatusDetailsLocal(cwd, options);
+  });
+
+  const statusFetchState: GitVcsDriver.GitVcsDriver["Service"]["statusFetchState"] = Effect.fn(
+    "statusFetchState",
+  )(function* (cwd) {
+    return unconfirmedStatusFetches.get(cwd) ?? "fetched";
   });
 
   const statusDetails: GitVcsDriver.GitVcsDriver["Service"]["statusDetails"] = Effect.fn(
@@ -4256,197 +4276,232 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       const directoryName = `${prefix}-${Hex.encode(hash).slice(0, 16)}`;
       worktreePath = path.join(parentDir, repoName, directoryName);
     }
-    const newRefName = input.newRefName;
-    if (newRefName) {
-      // Kept apart from the checkout so the shared-config lock only covers the tracking write.
-      yield* createBranchAt(
-        "GitVcsDriver.createWorktree.createBranch",
-        { cwd: input.cwd, branch: newRefName, startPoint: input.refName },
-        "git worktree add failed",
-      );
-    }
-    const checkoutRef = newRefName ?? input.refName;
-    const progress = options?.progress;
-    const onCheckoutProgress = progress?.onCheckoutProgress;
-
-    // Both reads leave the repository alone, so they share one round trip before the checkout.
-    const [configuredCheckoutWorkers, base] = yield* Effect.all(
-      [
-        readConfigValue(input.cwd, "checkout.workers"),
-        input.newRefName && input.baseRefName
-          ? resolveBranchBase(input.cwd, input.baseRefName)
-          : Effect.succeed(null),
-      ],
-      { concurrency: "unbounded" },
-    );
-    const checkoutWorkers = configuredCheckoutWorkers ?? "0";
-    const fastCheckout = checkoutCache !== undefined && options?.fastCheckout === true;
-    const cacheGeneration = fastCheckout ? yield* checkoutCache.currentGeneration : 0;
-    const stockCheckout = executeGitWithStableDiagnostics(
-      "GitVcsDriver.createWorktree",
-      input.cwd,
-      [
-        "-c",
-        `checkout.workers=${checkoutWorkers}`,
-        "worktree",
-        "add",
-        "--",
-        worktreePath,
-        checkoutRef,
-      ],
-      {
-        fallbackErrorDetail: "git worktree add failed",
-        // Large checkouts and post-checkout hooks can legitimately run for many
-        // minutes; a fixed deadline kills them and leaves an orphaned worktree.
-        timeoutMs: null,
-        ...(onCheckoutProgress
-          ? {
-              // Git only prints checkout progress when stderr is a tty or the
-              // delay elapsed. GIT_PROGRESS_DELAY=0 forces it through the pipe.
-              env: { GIT_PROGRESS_DELAY: "0" },
-              progress: {
-                onStderrLine: (line) => {
-                  const parsed = parseGitCheckoutProgressLine(line);
-                  return parsed ? onCheckoutProgress(parsed) : Effect.void;
-                },
-              },
+    const allocatedPath = path.resolve(input.cwd, worktreePath);
+    yield* registerWorkspaceLeaseRoot(allocatedPath);
+    return yield* withWorkspaceLease(
+      allocatedPath,
+      Effect.gen(function* () {
+        let worktreePath = allocatedPath;
+        if (options?.acquireDestination !== undefined)
+          worktreePath = yield* options.acquireDestination(allocatedPath);
+        yield* registerWorkspaceLeaseRoot(worktreePath);
+        return yield* withWorkspaceLease(
+          worktreePath,
+          Effect.gen(function* () {
+            // Reuse verified stale metadata without deleting files that appeared since inspection.
+            const reuseRegistration = options?.reuseMissingRegistrationAt === worktreePath;
+            const newRefName = input.newRefName;
+            if (newRefName) {
+              // Kept apart from the checkout so the shared-config lock only covers the tracking write.
+              yield* createBranchAt(
+                "GitVcsDriver.createWorktree.createBranch",
+                { cwd: input.cwd, branch: newRefName, startPoint: input.refName },
+                "git worktree add failed",
+              );
             }
-          : {}),
-      },
-    );
-    yield* (
-      fastCheckout
-        ? checkoutCache
-            .create({ cwd: input.cwd, worktreePath, refName: checkoutRef, checkoutWorkers })
-            .pipe(Effect.flatMap((cloned) => (cloned ? Effect.void : stockCheckout)))
-        : stockCheckout
-    ).pipe(
-      Effect.onError(() =>
-        newRefName
-          ? deleteLocalBranch({ cwd: input.cwd, refName: newRefName, force: true }).pipe(
-              Effect.catch((cause) =>
-                Effect.logWarning("could not remove the branch of a failed worktree", { cause }),
-              ),
-            )
-          : Effect.void,
-      ),
-    );
-    if (fastCheckout) {
-      yield* checkoutCache.schedule(worktreePath, cacheGeneration);
-    }
+            const checkoutRef = newRefName ?? input.refName;
+            const progress = options?.progress;
+            const onCheckoutProgress = progress?.onCheckoutProgress;
 
-    if (progress?.onWorktreeClaimed) {
-      yield* progress.onWorktreeClaimed(worktreePath);
-    }
-
-    // worktree add leaves submodules empty, potentially omitting project skills, tools or source.
-    const hasSubmodules = yield* fileSystem
-      .exists(path.join(worktreePath, ".gitmodules"))
-      .pipe(Effect.orElseSucceed(() => false));
-    const submoduleMode = !hasSubmodules
-      ? { value: "none" as const, source: "environment" as const }
-      : resolveProjectFileBackedSetting(
-          "worktreeSubmodules",
-          options?.submodules ?? null,
-          options?.submodules != null
-            ? null
-            : yield* fileSystem.readFileString(path.join(worktreePath, T3_PROJECT_FILE_NAME)).pipe(
-                Effect.flatMap((contents) => {
-                  const file = parseT3ProjectFile(contents);
-                  return file === null
-                    ? Effect.logWarning("t3.json is invalid; initializing submodules recursively", {
-                        worktreePath,
-                      }).pipe(Effect.as(null))
-                    : Effect.succeed(file);
-                }),
-                Effect.orElseSucceed(() => null),
-              ),
-        );
-    if (hasSubmodules && submoduleMode.value === "none" && progress?.onSubmodulesDisabled) {
-      yield* progress.onSubmodulesDisabled({
-        source: submoduleMode.source === "t3.json" ? "t3.json" : "settings",
-      });
-    }
-    if (submoduleMode.value !== "none") {
-      if (progress?.onSubmodulesStarted) {
-        yield* progress.onSubmodulesStarted();
-      }
-      const onSubmoduleLine = progress?.onSubmoduleLine;
-      // Registering submodule URLs writes the shared config; the clones that follow do not.
-      yield* runGit(
-        "GitVcsDriver.createWorktree.initSubmodules",
-        worktreePath,
-        ["submodule", "init"],
-        { writesSharedConfig: true },
-      ).pipe(
-        Effect.andThen(
-          runGit(
-            "GitVcsDriver.createWorktree.updateSubmodules",
-            worktreePath,
-            submoduleMode.value === "recursive"
-              ? ["submodule", "update", "--init", "--recursive"]
-              : ["submodule", "update", "--init"],
-            {
-              // Cloning scales with remote size; let it finish or be cancelled, like worktree add.
-              timeoutMs: null,
-              ...(onSubmoduleLine
-                ? {
-                    env: { LANGUAGE: "C" },
-                    progress: { onStdoutLine: onSubmoduleLine, onStderrLine: onSubmoduleLine },
-                  }
-                : {}),
-            },
-          ),
-        ),
-        Effect.matchEffect({
-          onFailure: (cause) =>
-            Effect.logWarning("worktree submodule checkout failed; submodules may be incomplete", {
-              worktreePath,
-              cause,
-            }).pipe(
-              Effect.andThen(
-                progress?.onSubmodulesFinished
-                  ? progress.onSubmodulesFinished({ ok: false, detail: cause.message })
+            // Both reads leave the repository alone, so they share one round trip before the checkout.
+            const [configuredCheckoutWorkers, base] = yield* Effect.all(
+              [
+                readConfigValue(input.cwd, "checkout.workers"),
+                input.newRefName && input.baseRefName
+                  ? resolveBranchBase(input.cwd, input.baseRefName)
+                  : Effect.succeed(null),
+              ],
+              { concurrency: "unbounded" },
+            );
+            const checkoutWorkers = configuredCheckoutWorkers ?? "0";
+            const fastCheckout =
+              checkoutCache !== undefined && options?.fastCheckout === true && !reuseRegistration;
+            const cacheGeneration = fastCheckout ? yield* checkoutCache.currentGeneration : 0;
+            const stockCheckout = executeGitWithStableDiagnostics(
+              "GitVcsDriver.createWorktree",
+              input.cwd,
+              [
+                "-c",
+                `checkout.workers=${checkoutWorkers}`,
+                "worktree",
+                "add",
+                ...(reuseRegistration && !input.newRefName ? ["--force"] : []),
+                "--",
+                worktreePath,
+                checkoutRef,
+              ],
+              {
+                fallbackErrorDetail: "git worktree add failed",
+                // Large checkouts and post-checkout hooks can legitimately run for many
+                // minutes; a fixed deadline kills them and leaves an orphaned worktree.
+                timeoutMs: null,
+                ...(onCheckoutProgress
+                  ? {
+                      // Git only prints checkout progress when stderr is a tty or the
+                      // delay elapsed. GIT_PROGRESS_DELAY=0 forces it through the pipe.
+                      env: { GIT_PROGRESS_DELAY: "0" },
+                      progress: {
+                        onStderrLine: (line) => {
+                          const parsed = parseGitCheckoutProgressLine(line);
+                          return parsed ? onCheckoutProgress(parsed) : Effect.void;
+                        },
+                      },
+                    }
+                  : {}),
+              },
+            );
+            yield* (
+              fastCheckout
+                ? checkoutCache
+                    .create({ cwd: input.cwd, worktreePath, refName: checkoutRef, checkoutWorkers })
+                    .pipe(Effect.flatMap((cloned) => (cloned ? Effect.void : stockCheckout)))
+                : stockCheckout
+            ).pipe(
+              Effect.onError(() =>
+                newRefName
+                  ? deleteLocalBranch({ cwd: input.cwd, refName: newRefName, force: true }).pipe(
+                      Effect.catch((cause) =>
+                        Effect.logWarning("could not remove the branch of a failed worktree", {
+                          cause,
+                        }),
+                      ),
+                    )
                   : Effect.void,
               ),
-            ),
-          onSuccess: () =>
-            progress?.onSubmodulesFinished
-              ? progress.onSubmodulesFinished({ ok: true, detail: null })
-              : Effect.void,
-        }),
-      );
-    }
+            );
+            if (fastCheckout) {
+              yield* checkoutCache.schedule(worktreePath, cacheGeneration);
+            }
 
-    if (newRefName && base) {
-      yield* Effect.gen(function* () {
-        yield* writeConfigValue({
-          cwd: input.cwd,
-          key: branchBaseConfigKey(newRefName),
-          value: base.branchName,
-        });
-        if (base.baseRef.startsWith("refs/remotes/")) {
-          // The base key names a branch on the host; this one keeps the remote it came from.
-          yield* writeConfigValue({
-            cwd: input.cwd,
-            key: `branch.${newRefName}.t3-merge-base-ref`,
-            value: base.baseRef,
-          });
-        }
-      }).pipe(
-        Effect.catchTags({
-          GitCommandError: () =>
-            Effect.logWarning("worktree base-ref configuration failed; using base-branch fallback"),
-        }),
-      );
-    }
+            if (progress?.onWorktreeClaimed) {
+              yield* progress.onWorktreeClaimed(worktreePath);
+            }
 
-    return {
-      worktree: {
-        path: worktreePath,
-        refName: targetBranch,
-      },
-    };
+            // worktree add leaves submodules empty, potentially omitting project skills, tools or source.
+            const hasSubmodules = yield* fileSystem
+              .exists(path.join(worktreePath, ".gitmodules"))
+              .pipe(Effect.orElseSucceed(() => false));
+            const submoduleMode = !hasSubmodules
+              ? { value: "none" as const, source: "environment" as const }
+              : resolveProjectFileBackedSetting(
+                  "worktreeSubmodules",
+                  options?.submodules ?? null,
+                  options?.submodules != null
+                    ? null
+                    : yield* fileSystem
+                        .readFileString(path.join(worktreePath, T3_PROJECT_FILE_NAME))
+                        .pipe(
+                          Effect.flatMap((contents) => {
+                            const file = parseT3ProjectFile(contents);
+                            return file === null
+                              ? Effect.logWarning(
+                                  "t3.json is invalid; initializing submodules recursively",
+                                  {
+                                    worktreePath,
+                                  },
+                                ).pipe(Effect.as(null))
+                              : Effect.succeed(file);
+                          }),
+                          Effect.orElseSucceed(() => null),
+                        ),
+                );
+            if (hasSubmodules && submoduleMode.value === "none" && progress?.onSubmodulesDisabled) {
+              yield* progress.onSubmodulesDisabled({
+                source: submoduleMode.source === "t3.json" ? "t3.json" : "settings",
+              });
+            }
+            if (submoduleMode.value !== "none") {
+              if (progress?.onSubmodulesStarted) {
+                yield* progress.onSubmodulesStarted();
+              }
+              const onSubmoduleLine = progress?.onSubmoduleLine;
+              // Registering submodule URLs writes the shared config; the clones that follow do not.
+              yield* runGit(
+                "GitVcsDriver.createWorktree.initSubmodules",
+                worktreePath,
+                ["submodule", "init"],
+                { writesSharedConfig: true },
+              ).pipe(
+                Effect.andThen(
+                  runGit(
+                    "GitVcsDriver.createWorktree.updateSubmodules",
+                    worktreePath,
+                    submoduleMode.value === "recursive"
+                      ? ["submodule", "update", "--init", "--recursive"]
+                      : ["submodule", "update", "--init"],
+                    {
+                      // Cloning scales with remote size; let it finish or be cancelled, like worktree add.
+                      timeoutMs: null,
+                      ...(onSubmoduleLine
+                        ? {
+                            env: { LANGUAGE: "C" },
+                            progress: {
+                              onStdoutLine: onSubmoduleLine,
+                              onStderrLine: onSubmoduleLine,
+                            },
+                          }
+                        : {}),
+                    },
+                  ),
+                ),
+                Effect.matchEffect({
+                  onFailure: (cause) =>
+                    Effect.logWarning(
+                      "worktree submodule checkout failed; submodules may be incomplete",
+                      {
+                        worktreePath,
+                        cause,
+                      },
+                    ).pipe(
+                      Effect.andThen(
+                        progress?.onSubmodulesFinished
+                          ? progress.onSubmodulesFinished({ ok: false, detail: cause.message })
+                          : Effect.void,
+                      ),
+                    ),
+                  onSuccess: () =>
+                    progress?.onSubmodulesFinished
+                      ? progress.onSubmodulesFinished({ ok: true, detail: null })
+                      : Effect.void,
+                }),
+              );
+            }
+
+            if (newRefName && base) {
+              yield* Effect.gen(function* () {
+                yield* writeConfigValue({
+                  cwd: input.cwd,
+                  key: branchBaseConfigKey(newRefName),
+                  value: base.branchName,
+                });
+                if (base.baseRef.startsWith("refs/remotes/")) {
+                  // The base key names a branch on the host; this one keeps the remote it came from.
+                  yield* writeConfigValue({
+                    cwd: input.cwd,
+                    key: `branch.${newRefName}.t3-merge-base-ref`,
+                    value: base.baseRef,
+                  });
+                }
+              }).pipe(
+                Effect.catchTags({
+                  GitCommandError: () =>
+                    Effect.logWarning(
+                      "worktree base-ref configuration failed; using base-branch fallback",
+                    ),
+                }),
+              );
+            }
+
+            return {
+              worktree: {
+                path: worktreePath,
+                refName: targetBranch,
+              },
+            };
+          }),
+        );
+      }),
+    );
   });
 
   const fetchRefIntoBranch: GitVcsDriver.GitVcsDriver["Service"]["fetchRefIntoBranch"] = Effect.fn(
@@ -5098,6 +5153,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     execute,
     status,
     statusDetails,
+    statusFetchState,
     statusDetailsLocal,
     statusDetailsRemote,
     prepareCommitContext,

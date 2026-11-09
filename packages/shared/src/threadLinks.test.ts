@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId, ThreadId, type ScopedThreadRef } from "@t3tools/contracts";
 
 import {
+  browserThreadLinkTarget,
   formatHostedThreadLink,
   formatThreadLink,
   guessThreadLinkRef,
@@ -148,9 +149,9 @@ describe("legacy and scoped thread links", () => {
       value: undefined,
     });
     expect(relabelThreadLinks(markdown, local, () => undefined)).toBe(markdown);
-    expect(
-      relabelThreadLinks("<t3-thread://v1/team/thread%3Aone>", local, () => undefined),
-    ).toBe("Thread no longer available");
+    expect(relabelThreadLinks("<t3-thread://v1/team/thread%3Aone>", local, () => undefined)).toBe(
+      "Thread no longer available",
+    );
     const link = parseThreadLinkHref("t3-thread://v1/team/thread%3Aone")!;
     expect(threadLinkCandidates(link, local)).toEqual([
       ref("team", "thread%3Aone"),
@@ -174,7 +175,9 @@ describe("legacy and scoped thread links", () => {
   it("leaves scoped V2 links in code spans and fences untouched", () => {
     const markdown =
       "[Old](t3-thread://v2/env/id) `[Old](t3-thread://v2/env/id)`\n```md\n[Old](t3-thread://v2/env/id)\n```";
-    expect(relabelThreadLinks(markdown, local, () => "New")).toBe(markdown.replace("[Old]", "[New]"));
+    expect(relabelThreadLinks(markdown, local, () => "New")).toBe(
+      markdown.replace("[Old]", "[New]"),
+    );
   });
   it("takes the thread id verbatim, percent escapes included", () => {
     expect(parseThreadLinkHref("t3-thread://v1/mcp:1234")).toEqual(v1("mcp:1234"));
@@ -303,7 +306,9 @@ describe("legacy and scoped thread links", () => {
   });
 
   it("formats a label that would otherwise break the Markdown link", () => {
-    expect(formatThreadLink(v1("t1"), "Fix [ci] \\ build")).toBe("[Fix ci build](t3-thread://v1/t1)");
+    expect(formatThreadLink(v1("t1"), "Fix [ci] \\ build")).toBe(
+      "[Fix ci build](t3-thread://v1/t1)",
+    );
     expect(formatThreadLink(v1("t1"), " ] ")).toBe("<t3-thread://v1/t1>");
   });
 });
@@ -535,5 +540,27 @@ describe("hosted thread links", () => {
     expect(threadLinkRefs("Open https://app.t3.codes/threads/there/t%3A1", local)).toEqual([
       ref("there", "t:1"),
     ]);
+  });
+});
+
+describe("Browser link destinations", () => {
+  it("keeps missing explicit targets and reuses legacy resolution", () => {
+    const environmentId = EnvironmentId.make("source");
+    const target = {
+      environmentId: EnvironmentId.make("linked"),
+      threadId: ThreadId.make("mcp:thread"),
+    };
+    expect(
+      browserThreadLinkTarget("t3-thread://v2/linked/unknown", environmentId, [target]),
+    ).toEqual({ environmentId: "linked", threadId: "unknown" });
+    expect(browserThreadLinkTarget("t3-thread://v1/mcp:thread", environmentId, [target])).toEqual(
+      target,
+    );
+    expect(browserThreadLinkTarget("t3-thread://v1/unknown", environmentId, [target])).toEqual({
+      environmentId,
+      threadId: "unknown",
+    });
+    expect(browserThreadLinkTarget("https://app.t3.codes/settings", environmentId, [])).toBeNull();
+    expect(browserThreadLinkTarget("t3-thread://v2/linked/%ZZ", environmentId, [])).toBeNull();
   });
 });

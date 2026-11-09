@@ -28,11 +28,28 @@ import {
 import { CiCommandFailure, runCiProcess } from "./lib/lastcode-ci-process.ts";
 import { runCollectedCiSteps, type CiStepResult } from "./lib/lastcode-ci-collection.ts";
 import { pruneCiDiagnostics } from "./lib/lastcode-ci-diagnostics.ts";
+import {
+  assertBaseIsAncestor,
+  assertCleanWorktree,
+  assertSupportedNodeVersion,
+  LASTCODE_BASE_BRANCH,
+  LASTCODE_ORIGIN_REMOTE,
+  resolveRepoRoot,
+  runGit,
+  runProcess,
+} from "./lib/lastcode-git.ts";
 import { recordDependencyUse } from "../packages/shared/src/dependencyActivity.ts";
 import { createGeneratedBuildStage } from "../packages/shared/src/generatedBuildOwnership.ts";
 
-export const LASTCODE_BASE_BRANCH = "lastcode/main";
-export const LASTCODE_ORIGIN_REMOTE = "origin";
+export {
+  assertBaseIsAncestor,
+  assertCleanWorktree,
+  assertSupportedNodeVersion,
+  LASTCODE_BASE_BRANCH,
+  LASTCODE_ORIGIN_REMOTE,
+  resolveRepoRoot,
+  runGit,
+};
 export const UPSTREAM_BASE_BRANCH = "main";
 export const UPSTREAM_REMOTE = "upstream";
 
@@ -149,16 +166,6 @@ export function formatLocalCiFailureSummary(error: unknown): string {
     .replace(/\s+/g, " ")
     .trim();
   return `[lastcode:ci] Summary: failed: ${message || "Unknown error."}`;
-}
-
-export function assertSupportedNodeVersion(version = process.versions.node): void {
-  const [major = 0, minor = 0, patch = 0] = version.split(".").map(Number);
-  const supported = major === 24 && (minor > 13 || (minor === 13 && patch >= 1));
-  if (!supported) {
-    throw new Error(
-      `LastCode local CI requires Node ^24.13.1, received ${version}. Run it through the package script so mise selects the project runtime.`,
-    );
-  }
 }
 
 const QUICK_STEPS: ReadonlyArray<LocalCiStep> = [
@@ -828,45 +835,6 @@ export function assertCheckpointCiStamp(
   return stamp;
 }
 
-function runProcess(
-  repoRoot: string,
-  command: string,
-  args: ReadonlyArray<string>,
-  options: {
-    readonly capture?: boolean;
-    readonly env?: NodeJS.ProcessEnv;
-    readonly failureHelp?: string;
-  } = {},
-): string {
-  const inheritedEnv = cleanGitEnvironment(options.env ?? process.env);
-  const result = NodeChildProcess.spawnSync(command, args, {
-    cwd: repoRoot,
-    encoding: "utf8",
-    env: {
-      ...inheritedEnv,
-      PATH: `${NodePath.resolve(repoRoot, "node_modules/.bin")}${NodePath.delimiter}${inheritedEnv.PATH ?? ""}`,
-    },
-    stdio: options.capture ? ["ignore", "pipe", "pipe"] : "inherit",
-  });
-
-  if (result.error) throw result.error;
-  if (result.status !== 0) {
-    const stderr = options.capture ? result.stderr.trim() : "";
-    const details = [
-      `${command} ${args.join(" ")} failed with exit code ${result.status ?? "unknown"}.`,
-      stderr,
-      options.failureHelp ?? "",
-    ].filter(Boolean);
-    throw new CiCommandFailure(details.join("\n"));
-  }
-
-  return options.capture ? result.stdout.trim() : "";
-}
-
-export function runGit(repoRoot: string, args: ReadonlyArray<string>): string {
-  return runProcess(repoRoot, "git", args, { capture: true });
-}
-
 async function runGitWithCancellation(
   repoRoot: string,
   args: ReadonlyArray<string>,
@@ -919,10 +887,6 @@ async function runGitWithCancellation(
     signal.addEventListener("abort", abort, { once: true });
     if (signal.aborted) abort();
   });
-}
-
-export function resolveRepoRoot(cwd = process.cwd()): string {
-  return runGit(cwd, ["rev-parse", "--show-toplevel"]);
 }
 
 export function resolveCommonGitDir(repoRoot: string): string {
@@ -1092,13 +1056,6 @@ export async function writeVerifiedQuickCiReceipt(
   return writeQuickCiReceipt(integrity.commonGitDir, receipt);
 }
 
-export function assertCleanWorktree(repoRoot: string): void {
-  const status = runGit(repoRoot, ["status", "--porcelain", "--untracked-files=all"]);
-  if (status) {
-    throw new Error(`Working tree must be clean for local CI.\n${status}`);
-  }
-}
-
 async function assertCleanWorktreeWithCancellation(
   repoRoot: string,
   signal: AbortSignal,
@@ -1110,25 +1067,6 @@ async function assertCleanWorktreeWithCancellation(
   );
   if (status) {
     throw new Error(`Working tree must be clean for local CI.\n${status}`);
-  }
-}
-
-export function assertBaseIsAncestor(
-  repoRoot: string,
-  baseCommit: string,
-  commit: string,
-  baseRef = LASTCODE_BASE_BRANCH,
-): void {
-  const result = NodeChildProcess.spawnSync(
-    "git",
-    ["merge-base", "--is-ancestor", baseCommit, commit],
-    { cwd: repoRoot, env: cleanGitEnvironment(process.env), stdio: "ignore" },
-  );
-  if (result.error) throw result.error;
-  if (result.status !== 0) {
-    throw new Error(
-      `Current branch is not based on ${baseRef} at ${baseCommit}. Rebase it before running local CI.`,
-    );
   }
 }
 

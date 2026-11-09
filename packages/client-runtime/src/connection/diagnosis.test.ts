@@ -3,18 +3,39 @@ import {
   type RelayProtectedError,
 } from "@t3tools/contracts/relay";
 import { describe, expect, it } from "@effect/vitest";
+import { EnvironmentId } from "@t3tools/contracts";
+import * as Option from "effect/Option";
 
 import { presentConnectionDiagnosis } from "./diagnosis.ts";
 import { mapManagedRelayError, mapRemoteEnvironmentError } from "./errors.ts";
 import {
   AVAILABLE_CONNECTION_STATE,
+  BearerConnectionTarget,
   ConnectionBlockedError,
   ConnectionTransientError,
+  PrimaryConnectionTarget,
+  SshConnectionTarget,
   type ConnectionAttemptError,
   type SupervisorConnectionState,
 } from "./model.ts";
 import { ManagedRelayRequestFailedError } from "../relay/managedRelay.ts";
 import { RemoteEnvironmentAuthFetchError } from "../rpc/http.ts";
+import { BearerConnectionProfile, type ConnectionCatalogEntry } from "./catalog.ts";
+
+const environmentId = EnvironmentId.make("mac-mini");
+const pairedEntry: ConnectionCatalogEntry = {
+  enabled: true,
+  target: new BearerConnectionTarget({ environmentId, label: "Mac mini", connectionId: "pair" }),
+  profile: Option.some(
+    new BearerConnectionProfile({
+      environmentId,
+      label: "Mac mini",
+      connectionId: "pair",
+      httpBaseUrl: "https://workstation.example",
+      wsBaseUrl: "wss://workstation.example",
+    }),
+  ),
+};
 
 const backoff = (lastFailure: ConnectionAttemptError): SupervisorConnectionState => ({
   ...AVAILABLE_CONNECTION_STATE,
@@ -46,8 +67,11 @@ const unavailable = (endpointFailure: "tunnel_down" | "origin_unreachable") =>
     }),
   );
 
-const diagnose = (state: SupervisorConnectionState, via: "relay" | "direct" = "relay") =>
-  presentConnectionDiagnosis({ hostLabel: "Mac mini", state, via });
+const diagnose = (
+  state: SupervisorConnectionState,
+  via: "relay" | "direct" = "relay",
+  entry = pairedEntry,
+) => presentConnectionDiagnosis({ hostLabel: "Mac mini", state, via, entry });
 
 const results = (state: SupervisorConnectionState, via?: "relay" | "direct") =>
   diagnose(state, via)?.hops.map((hop) => `${hop.hop}:${hop.result}`);
@@ -115,6 +139,7 @@ describe("presentConnectionDiagnosis", () => {
 
   it("uses the relay health check before any connect attempt fails", () => {
     const diagnosis = presentConnectionDiagnosis({
+      entry: pairedEntry,
       hostLabel: "Mac mini",
       state: AVAILABLE_CONNECTION_STATE,
       via: "relay",
@@ -122,6 +147,7 @@ describe("presentConnectionDiagnosis", () => {
     });
     expect(diagnosis?.headline).toBe("Mac mini's tunnel is offline");
     const origin = presentConnectionDiagnosis({
+      entry: pairedEntry,
       hostLabel: "Mac mini",
       state: AVAILABLE_CONNECTION_STATE,
       via: "direct",
@@ -146,12 +172,56 @@ describe("presentConnectionDiagnosis", () => {
     );
   });
 
-  it("does not report hops as working when the failure names none", () => {
+  it.each([
+    ["direct", "Your cloud sign-in changed. Sign in again to authorize the environment."],
+    ["relay", "Your cloud sign-in changed. Sign in again to authorize the environment."],
+    ["direct", "SSH setup was cancelled."],
+  ] as const)("keeps recovery neutral when a %s failure names no hop: %s", (via, detail) => {
+    const failure = new ConnectionBlockedError({ reason: "authentication", detail });
+    const diagnosis = diagnose(backoff(failure), via);
+    expect(results(backoff(failure), via)).not.toContainEqual(expect.stringMatching(/:ok$/));
+    expect(diagnosis?.headline).toBe(detail);
+    expect(diagnosis?.steps).toEqual(["Retry. If it keeps failing, copy the diagnostics."]);
+  });
+
+  it.each(["direct", "relay"] as const)(
+    "offers the right access recovery for a rejected %s connection",
+    (via) => {
+      const failure = new ConnectionBlockedError({
+        reason: "authentication",
+        detail: "The environment credential is invalid.",
+        hop: "server",
+        via,
+      });
+      const diagnosis = diagnose(backoff(failure), via);
+      expect(diagnosis?.hops.at(-1)).toMatchObject({ hop: "server", result: "failed" });
+      expect(diagnosis?.steps[0]).toContain(via === "direct" ? "Pair this device" : "T3 Connect");
+      expect(diagnosis?.steps.join(" ")).not.toContain("Make sure T3 Code is running");
+    },
+  );
+
+  it.each([
+    new PrimaryConnectionTarget({
+      environmentId,
+      label: "Mac mini",
+      httpBaseUrl: "http://localhost:3773",
+      wsBaseUrl: "ws://localhost:3773",
+    }),
+    new SshConnectionTarget({ environmentId, label: "Mac mini", connectionId: "ssh" }),
+  ])("keeps managed $_tag credentials out of saved-pairing recovery", (target) => {
     const failure = new ConnectionBlockedError({
       reason: "authentication",
-      detail: "Your cloud sign-in changed. Sign in again to authorize the environment.",
+      detail: "The environment credential is invalid.",
+      hop: "server",
+      via: "direct",
     });
-    expect(results(backoff(failure))).not.toContainEqual(expect.stringMatching(/:ok$/));
+    const diagnosis = diagnose(backoff(failure), "direct", {
+      enabled: true,
+      target,
+      profile: Option.none(),
+    });
+    expect(diagnosis?.headline).not.toContain("saved pairing");
+    expect(diagnosis?.steps).toEqual(["Retry. If it keeps failing, copy the diagnostics."]);
   });
 
   it("keeps the relay health status out of a failure that has its own cause", () => {
@@ -159,6 +229,7 @@ describe("presentConnectionDiagnosis", () => {
       new RemoteEnvironmentAuthFetchError({ message: "Failed to fetch", cause: new TypeError() }),
     );
     const diagnosis = presentConnectionDiagnosis({
+      entry: pairedEntry,
       hostLabel: "Mac mini",
       state: backoff(failure),
       via: "direct",

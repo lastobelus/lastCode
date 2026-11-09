@@ -1,6 +1,6 @@
 import * as HostProcess from "@t3tools/shared/HostProcess";
 // @effect-diagnostics nodeBuiltinImport:off - Process links, maps, and lstat are native safety boundaries.
-import * as NodeFSP from "node:fs/promises";
+import { promises as NodeFSP } from "@t3tools/shared/nativeFileSystem";
 import * as NodePath from "node:path";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeBuffer from "node:buffer";
@@ -9,6 +9,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import { PersistedServerRuntimeState, isProcessAlive } from "../serverRuntimeState.ts";
+import * as ResourceMonitorBinary from "../resourceTelemetry/ResourceMonitorBinary.ts";
 import * as DependencyMounts from "./DependencyMounts.ts";
 
 const MAX_INVENTORY_BYTES = 16 * 1024 * 1024;
@@ -166,23 +167,49 @@ const decodeLsofPath = (printed: string): string | null => {
   return decoded.toString("utf8");
 };
 
-const lsofPaths = (output: string): ReadonlyArray<string> | null => {
+const lsofPaths = (
+  output: string,
+  emptyFdPids: ReadonlySet<number> = new Set(),
+): ReadonlyArray<string> | null => {
   if (!output.endsWith("\0\n") || output.includes("\uFFFD")) return null;
   const paths: string[] = [];
   const identities: CapturedObject[] = [];
   let processes = 0;
+  let pid = 0;
+  const recovered = new Set<number>();
+  const numericPids = new Set<number>();
   let cwdSeen = false;
   let file:
     | { descriptor: string; type?: string; name?: string; device?: string; inode?: string }
     | undefined;
   const finishFile = () => {
     if (!file) return true;
+    // Darwin's "err" record also covers successful empty FD lists with stale
+    // errno (darwin/libproc/dproc.c process_fds). Its text cannot distinguish
+    // that from a failed enumeration; accepting it needs independent OS proof.
+    if (file.descriptor === "err") {
+      if (
+        file.type !== undefined ||
+        file.device !== undefined ||
+        file.inode !== undefined ||
+        file.name !== "FD info error: Invalid argument" ||
+        !emptyFdPids.has(pid) ||
+        recovered.has(pid)
+      )
+        return false;
+      recovered.add(pid);
+      return true;
+    }
     // Darwin lsof emits this exact marker when its numeric-FD vnode-path query
     // returns ENOENT. It is a no-current-path observation, like a vanished Linux
     // fd, not proof of revocation. Keep cwd/text, fileport and other missing-type
     // evidence protected. Vendor source: lsof-org/lsof, darwin/dfile.c process_vnode.
     if (!file.type)
       return file.type === undefined && /^\d+$/.test(file.descriptor) && file.name === "(revoked)";
+    // POSIX shared-memory names belong to a kernel namespace, even when they
+    // start with '/'. Darwin reports these numeric descriptors without vnode D/i.
+    if (file.type === "PSXSHM")
+      return /^\d+$/.test(file.descriptor) && file.device === undefined && file.inode === undefined;
     if (file.name?.startsWith("/")) {
       // Hex escapes represent UTF-8 bytes, not individual Unicode characters.
       // Decode once so doubled backslashes keep literal escape-looking names.
@@ -221,7 +248,6 @@ const lsofPaths = (output: string): ReadonlyArray<string> | null => {
       "NEXUS",
       "KQUEUE",
       "PSXSEM",
-      "PSXSHM",
       "systm",
     ].includes(file.type);
   };
@@ -233,11 +259,13 @@ const lsofPaths = (output: string): ReadonlyArray<string> | null => {
       case "p":
         if (!/^\d+$/.test(value) || !finishFile() || (processes > 0 && !cwdSeen)) return null;
         if (++processes > MAX_PROCESS_PATHS) return null;
+        pid = Number(value);
         cwdSeen = false;
         file = undefined;
         break;
       case "f":
         if (processes === 0 || value === "" || !finishFile()) return null;
+        if (/^\d+$/.test(value)) numericPids.add(pid);
         file = { descriptor: value };
         break;
       case "t":
@@ -261,28 +289,85 @@ const lsofPaths = (output: string): ReadonlyArray<string> | null => {
     }
   }
   if (!finishFile() || !cwdSeen || processes === 0) return null;
+  if (recovered.size !== emptyFdPids.size || [...recovered].some((pid) => numericPids.has(pid)))
+    return null;
   Object.defineProperty(paths, nativeIdentities, { value: Object.freeze(identities) });
   return Object.freeze(paths);
 };
 
-const captureProcessPaths = async (platform: NodeJS.Platform, uid: number) => {
+const helperPaths = (output: string, uid: number): ReadonlyArray<string> | null => {
+  const boundary = output.indexOf("\n");
+  if (boundary < 0 || boundary > MAX_PROCESS_PATHS * 12 + 128) return null;
+  try {
+    const header = JSON.parse(output.slice(0, boundary)) as {
+      version?: unknown;
+      type?: unknown;
+      uid?: unknown;
+      emptyFdPids?: unknown;
+    } | null;
+    if (
+      header === null ||
+      header.version !== 1 ||
+      header.type !== "lsofCapture" ||
+      header.uid !== uid ||
+      !Array.isArray(header.emptyFdPids) ||
+      header.emptyFdPids.length > MAX_PROCESS_PATHS ||
+      header.emptyFdPids.some(
+        (pid) => !Number.isSafeInteger(pid) || pid <= 0 || pid > 2_147_483_647,
+      )
+    )
+      return null;
+    const pids = new Set<number>(header.emptyFdPids);
+    if (pids.size !== header.emptyFdPids.length) return null;
+    const capture = output.slice(boundary + 1);
+    if (NodeBuffer.Buffer.byteLength(capture) > MAX_INVENTORY_BYTES) return null;
+    return lsofPaths(capture, pids);
+  } catch {
+    return null;
+  }
+};
+
+const captureProcessPaths = async (
+  platform: NodeJS.Platform,
+  uid: number,
+  binary: string | null,
+) => {
   if (platform === "linux") return linuxPaths(uid);
   if (platform !== "darwin") return null;
   return await new Promise<ReadonlyArray<string> | null>((resolve) => {
     NodeChildProcess.execFile(
-      "lsof",
-      ["-a", "-u", String(uid), "-F0pftnDi", "-n", "-P"],
-      { timeout: 10_000, maxBuffer: MAX_INVENTORY_BYTES },
-      (error, stdout, stderr) => resolve(error || stderr.trim() !== "" ? null : lsofPaths(stdout)),
+      binary ?? "lsof",
+      binary === null
+        ? ["-a", "-u", String(uid), "-F0pftnDi", "-n", "-P"]
+        : ["capture-lsof-v1", String(uid)],
+      {
+        timeout: 10_000,
+        maxBuffer:
+          binary === null
+            ? MAX_INVENTORY_BYTES
+            : MAX_INVENTORY_BYTES + MAX_PROCESS_PATHS * 12 + 128,
+      },
+      (error, stdout, stderr) =>
+        resolve(
+          error || stderr.trim() !== ""
+            ? null
+            : binary === null
+              ? lsofPaths(stdout)
+              : helperPaths(stdout, uid),
+        ),
     );
   });
 };
 
-const processPaths = async (platform: NodeJS.Platform, uid: number | undefined) => {
+const processPaths = async (
+  platform: NodeJS.Platform,
+  uid: number | undefined,
+  binary: string | null,
+) => {
   if (uid === undefined || (platform !== "linux" && platform !== "darwin")) return null;
   const capture = async () => {
     try {
-      return await captureProcessPaths(platform, uid);
+      return await captureProcessPaths(platform, uid, binary);
     } catch {
       return null;
     }
@@ -300,8 +385,12 @@ export class ProcessPaths extends Context.Reference<Effect.Effect<ReadonlyArray<
     defaultValue: Effect.fn("defaultValue")(function* () {
       const platform = yield* HostProcess.Platform;
       const uid = yield* HostProcess.UserId;
+      const binary =
+        platform === "darwin" && uid !== undefined
+          ? yield* yield* ResourceMonitorBinary.ProcessCaptureBinary
+          : null;
       return yield* Effect.tryPromise({
-        try: () => processPaths(platform, uid),
+        try: () => processPaths(platform, uid, binary),
         catch: () => null,
       }).pipe(Effect.orElseSucceed(() => null));
     }),
@@ -480,16 +569,25 @@ export const processPathsUseRoot = async (
   canonicalRoot: string,
   paths: ReadonlyArray<string>,
   observation?: TargetObservation,
+  completeProof = false,
 ): Promise<boolean> => {
   if (!NodePath.isAbsolute(canonicalRoot)) throw new Error("Consumer target root is not absolute");
   const captured = (paths as CapturedPaths)[nativeIdentities];
   const unresolved: ObjectIdentity[] = [];
   let vanishedSocket = false;
+  let matched = false;
   for (const [index, path] of paths.entries()) {
     if (!NodePath.isAbsolute(path)) throw new Error("Process consumer path is not absolute");
-    if (within(canonicalRoot, path)) return true;
+    if (within(canonicalRoot, path)) {
+      if (!completeProof) return true;
+      matched = true;
+      continue;
+    }
     try {
-      if (within(canonicalRoot, await NodeFSP.realpath(path))) return true;
+      if (within(canonicalRoot, await NodeFSP.realpath(path))) {
+        if (!completeProof) return true;
+        matched = true;
+      }
     } catch (error) {
       if (
         !gone(error) &&
@@ -523,7 +621,7 @@ export const processPathsUseRoot = async (
       unresolved.push(identity);
     }
   }
-  if (unresolved.length === 0 && !vanishedSocket) return false;
+  if (unresolved.length === 0 && !vanishedSocket) return matched;
   const identities = await targetEvidence(
     canonicalRoot,
     paths,
@@ -533,6 +631,7 @@ export const processPathsUseRoot = async (
     throw new ObjectProofUnavailable("Consumer target inventory could not be verified", { cause });
   });
   return (
+    matched ||
     (vanishedSocket && identities.hasSockets) ||
     unresolved.some((identity) =>
       identity.device === null
@@ -576,6 +675,35 @@ const runtimeKeptReason = async (root: string): Promise<string | null> => {
   }
   return null;
 };
+
+/** Check whether consumer evidence is complete before stopping owned previews. */
+export const worktreeConsumerPreflightReason = Effect.fn(
+  "WorktreeConsumers.worktreeConsumerPreflightReason",
+)(function* (canonicalRoot: string) {
+  const paths = yield* yield* ProcessPaths;
+  if (paths === null) return "Process file-consumer inventory is unavailable.";
+  const mounts = yield* yield* DependencyMounts.MountPoints;
+  if (mounts === null) return "Mount inventory is unavailable.";
+  if (DependencyMounts.containsMount(canonicalRoot, mounts))
+    return "A mounted path is inside the worktree.";
+  return yield* Effect.tryPromise({
+    try: async (): Promise<string | null> => {
+      if (
+        !NodePath.isAbsolute(canonicalRoot) ||
+        (await NodeFSP.realpath(canonicalRoot)) !== canonicalRoot
+      )
+        return "Worktree root is not canonical.";
+      // An owned preview may itself be the runtime; the final removal guard
+      // checks runtime descriptors again after preview shutdown.
+      await processPathsUseRoot(canonicalRoot, paths, undefined, true);
+      return null;
+    },
+    catch: (cause) =>
+      cause instanceof ObjectProofUnavailable
+        ? "Process object identity or target inventory could not be verified."
+        : "Worktree consumer protection could not be verified.",
+  }).pipe(Effect.catch((reason) => Effect.succeed(reason)));
+});
 
 /** Call under the canonical workspace lease immediately before removing generated files or a checkout. */
 export const worktreeConsumerReason = Effect.fn("WorktreeConsumers.worktreeConsumerReason")(
