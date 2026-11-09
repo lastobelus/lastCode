@@ -4255,6 +4255,53 @@ const scratchCleanupFixture = (realSuspension = false) =>
   });
 
 describe("scratch workspace cleanup", () => {
+  it.effect("keeps deleted branchless Git threads outside scratch cleanup", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const fixture = yield* cleanupFixture();
+        fixture.setThreads([]);
+        fixture.setDeletedThreads([
+          shell({ branch: null, worktreePath: fixture.worktree, deletedAt: at(-10 * DAY_MS) }),
+        ]);
+        const report = yield* fixture.service.runNow;
+        expect(report.entries.some((entry) => entry.path === fixture.worktree)).toBe(false);
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(true);
+      }),
+    ),
+  );
+
+  it.effect.each(["use", "restore"] as const)(
+    "keeps scratch after recent workspace %s until the inactivity limit passes",
+    (activity) =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const fixture = yield* scratchCleanupFixture(true);
+          if (activity === "restore") yield* fixture.service.runNow;
+          yield* fixture.acquisition!.acquire({
+            path: fixture.scratch,
+            threadId: fixture.owner.id,
+            purpose: "editor",
+          });
+          const report = yield* fixture.service.runNow;
+          expect(report.entries).toContainEqual(
+            expect.objectContaining({
+              path: fixture.scratch,
+              outcome: "kept",
+              reason: "Scratch workspace is still within the inactivity limit",
+            }),
+          );
+          expect(yield* fixture.fs.readFileString(`${fixture.scratch}/notes.txt`)).toBe(
+            "keep these notes\n",
+          );
+          yield* TestClock.adjust("9 days");
+          expect((yield* fixture.service.runNow).entries).toContainEqual(
+            expect.objectContaining({ path: fixture.scratch, outcome: "removed" }),
+          );
+        }),
+      ),
+  );
+
   it.effect("identifies an idle scratch folder without reporting it as running", () =>
     runCleanupTest(
       Effect.gen(function* () {

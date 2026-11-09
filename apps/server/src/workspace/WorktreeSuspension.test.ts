@@ -37,6 +37,7 @@ import * as Stream from "effect/Stream";
 import { expect } from "vite-plus/test";
 import { it } from "@effect/vitest";
 import { ChildProcessSpawner } from "effect/process";
+import { TestClock } from "effect/testing";
 
 import * as ServerConfig from "../config.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
@@ -2263,6 +2264,46 @@ const untouchedOwners = (threads: Map<ThreadId, OrchestrationV2ThreadShell>) => 
       workspaceUserAdopted: false,
     });
 };
+
+it.effect.each([false, true])(
+  "keeps scratch outside Git suspension policy with preview %s",
+  (preview) =>
+    realScratch((f) =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse("2026-06-10T12:00:00.000Z"));
+        const h = yield* harness(f, {
+          scratch: true,
+          cleanupThreads: true,
+          settings: automaticSettings,
+          previews: preview ? [{ threadId: firstId, workspacePath: f.workspace }] : [],
+        });
+        untouchedOwners(h.threads);
+        yield* h.service.sweep;
+        expect(
+          yield* Effect.promise(() =>
+            NodeFSP.readFile(NodePath.join(f.workspace, "draft.txt"), "utf8"),
+          ),
+        ).toBe("scratch draft\n");
+        expect(h.previewReleases).toEqual([]);
+      }),
+    ),
+);
+
+it.live("refuses manual scratch suspension outside storage cleanup", () =>
+  realScratch((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, { scratch: true });
+      expect(
+        (yield* h.service.previewSuspend({ threadId: firstId }).pipe(Effect.flip)).reason,
+      ).toBe("protected");
+      expect(
+        yield* Effect.promise(() =>
+          NodeFSP.readFile(NodePath.join(f.workspace, "draft.txt"), "utf8"),
+        ),
+      ).toBe("scratch draft\n");
+    }),
+  ),
+);
 
 it.live("automatically saves a shared workspace after unsettled archived owners age out", () =>
   realGit((f) =>

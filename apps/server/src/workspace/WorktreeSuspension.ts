@@ -1269,6 +1269,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
   const automaticallyEligible = Effect.fn("WorktreeSuspension.automaticallyEligible")(function* (
     record: CheckoutAuthority,
   ) {
+    if (record.kind === "scratch") return false;
     if (record.captureFailure !== undefined && record.captureFailure.retryOnce !== true)
       return false;
     const currentSettings = yield* settings.getSettings;
@@ -2183,6 +2184,8 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       Effect.suspend(() =>
         Effect.gen(function* () {
           const fresh = yield* assertFresh(initial);
+          if (fresh.kind === "scratch")
+            return yield* failure("protected", "Only managed linked worktrees can be suspended.");
           yield* guard(fresh);
           if (
             liveOperations.has(fresh.checkoutId) ||
@@ -2327,6 +2330,8 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
     input: Input<typeof PreviewWorktreeSuspensionInput>,
   ) {
     const initial = yield* identify(input.threadId);
+    if (initial.kind === "scratch")
+      return yield* failure("protected", "Only managed linked worktrees can be suspended.");
     const record = yield* withWorkspaceLease(initial.path, reconcile(initial));
     if (record.summary.state !== "active" || record.operation !== undefined)
       return yield* failure("busy", "This workspace is not ready to suspend.");
@@ -3149,14 +3154,20 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
     );
     const candidates = new Map<string, ThreadId>();
     for (const thread of [...shell.threads, ...shell.archivedThreads]) {
-      if (thread.worktreePath === null || thread.deletedAt !== null) continue;
+      if (
+        thread.worktreePath === null ||
+        thread.deletedAt !== null ||
+        path.dirname(thread.worktreePath) === configuredScratchRoot
+      )
+        continue;
       const record =
         thread.worktreeSuspension === undefined
           ? byPath.get(thread.worktreePath)
           : byId.get(thread.worktreeSuspension.checkoutId);
       if (
         record !== undefined &&
-        (record.detached ||
+        (record.kind === "scratch" ||
+          record.detached ||
           record.summary.state !== "active" ||
           record.operation !== undefined ||
           record.pendingProjection !== undefined ||

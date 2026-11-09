@@ -2928,6 +2928,7 @@ const make = Effect.gen(function* () {
         return "not a linked worktree";
       return null;
     });
+    const scratchRoot = path.resolve(config.baseDir, "scratch");
     const deletedRows = yield* sql<{ payload_json: string; workspaceRoot: string }>`
           SELECT t.payload_json, p.workspace_root AS "workspaceRoot"
           FROM orchestration_v2_projection_threads t
@@ -2938,7 +2939,11 @@ const make = Effect.gen(function* () {
       decodeCleanupThread(row.payload_json).pipe(
         Effect.map((thread) => ({ ...thread, workspaceRoot: row.workspaceRoot })),
       ),
-    )).filter((thread) => thread.worktreePath !== null);
+    )).filter(
+      (thread) =>
+        thread.worktreePath !== null &&
+        (thread.branch !== null || path.dirname(path.resolve(thread.worktreePath)) === scratchRoot),
+    );
     const snapshot = yield* readThreads();
     const threadsById = new Map(snapshot.threads.map((thread) => [thread.id, thread]));
     const previewLeases = yield* previewsProtectingWorktrees();
@@ -3119,7 +3124,6 @@ const make = Effect.gen(function* () {
         if (!(yield* fs.exists(worktreePath))) return;
         const savedProtection = yield* savedWorkspaceProtection(worktreePath);
         if (savedProtection !== null) return keep(savedProtection);
-        const scratchRoot = path.resolve(config.baseDir, "scratch");
         const scratch =
           thread.branch === null &&
           owners.some((owner) => path.dirname(owner.recordedPath) === scratchRoot);
@@ -3155,10 +3159,23 @@ const make = Effect.gen(function* () {
                 )
               )
                 return "scratch workspace belongs to a thread that is not archived or deleted";
+              const savedActivityAt = Math.max(
+                0,
+                ...(yield* suspensionRegistry.list)
+                  .filter(
+                    (record) =>
+                      record.kind === "scratch" &&
+                      !record.detached &&
+                      [record.path, ...record.aliases].includes(worktreePath),
+                  )
+                  .flatMap((record) => [record.lastWorkspaceUseAt, record.summary.lastRestoredAt])
+                  .filter((value): value is string => value != null)
+                  .map((value) => Date.parse(value)),
+              );
               if (
                 owners.some(
                   (owner) =>
-                    scratchActivityAt >=
+                    Math.max(scratchActivityAt, savedActivityAt) >=
                     now -
                       resolveWorktreeCleanup(serverSettings, owner.thread.projectId)
                         .worktreeAfterDays! *
