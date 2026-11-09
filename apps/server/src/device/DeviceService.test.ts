@@ -2412,11 +2412,26 @@ it.effect.each([true, false])(
 
 describe("agent-booted device shutdown", () => {
   const sshHostId = "remote-mac";
+  interface Gate {
+    readonly reached: Deferred.Deferred<void>;
+    readonly release: Deferred.Deferred<void>;
+  }
+  const makeGate = Effect.all({ reached: Deferred.make<void>(), release: Deferred.make<void>() });
+  const pause = (gate: Gate) =>
+    Deferred.succeed(gate.reached, undefined).pipe(Effect.andThen(Deferred.await(gate.release)));
   /** A host whose devices boot and stop in memory; the test flips `booted` for outside changes. */
   const bootingHost = (id: string, initial: Record<string, boolean>) => {
     const booted = new Map(Object.entries(initial));
     const shutdowns: Array<string> = [];
-    const faults = { listingAfterBoot: false, listing: false, shutdowns: 0, bootAttach: false };
+    const faults = {
+      listingAfterBoot: false,
+      listing: false,
+      shutdowns: 0,
+      bootAttach: false,
+      // Pause the next boot before it starts, or the next listing after it reads.
+      bootGate: undefined as Gate | undefined,
+      listingGate: undefined as Gate | undefined,
+    };
     const fault = new DeviceOperationError({
       operation: "test",
       reason: "request_failed",
@@ -2426,28 +2441,38 @@ describe("agent-booted device shutdown", () => {
       nodePath: process.execPath,
       hub: { origin: "http://device.test" },
       devices: {
-        list: Effect.suspend(() =>
-          faults.listing
-            ? Effect.fail(fault)
-            : Effect.succeed({
-                devices: [...booted].map(([deviceId, on]) => ({
-                  id: deviceId,
-                  name: deviceId,
-                  platform: "ios" as const,
-                  version: "test",
-                  booted: on,
-                  physical: false,
-                })),
-                detail: undefined,
-              }),
-        ),
+        list: Effect.suspend(() => {
+          if (faults.listing) return Effect.fail(fault);
+          const listing = {
+            devices: [...booted].map(([deviceId, on]) => ({
+              id: deviceId,
+              name: deviceId,
+              platform: "ios" as const,
+              version: "test",
+              booted: on,
+              physical: false,
+            })),
+            detail: undefined,
+          };
+          const gate = faults.listingGate;
+          faults.listingGate = undefined;
+          return gate ? pause(gate).pipe(Effect.as(listing)) : Effect.succeed(listing);
+        }),
         boot: (device) =>
           Effect.suspend(() => {
-            booted.set(device.id, true);
-            faults.listing = faults.listingAfterBoot;
-            // The simulator started, but attaching its stream failed.
-            return faults.bootAttach ? Effect.fail(fault) : Effect.succeed(device.id);
-          }),
+            const gate = faults.bootGate;
+            faults.bootGate = undefined;
+            return gate ? pause(gate) : Effect.void;
+          }).pipe(
+            Effect.andThen(
+              Effect.suspend(() => {
+                booted.set(device.id, true);
+                faults.listing = faults.listingAfterBoot;
+                // The simulator started, but attaching its stream failed.
+                return faults.bootAttach ? Effect.fail(fault) : Effect.succeed(device.id);
+              }),
+            ),
+          ),
         attach: () => Effect.void,
         shutdown: (device) =>
           faults.shutdowns > 0
@@ -2619,6 +2644,28 @@ describe("agent-booted device shutdown", () => {
         yield* TestClock.adjust("1 hour");
         yield* service.shutdownIdleDevices;
         expect(local.shutdowns).toEqual([]);
+      }),
+    ),
+  );
+
+  it.effect("keeps a claim made while an older listing was still running", () =>
+    withService(({ service, local, open }) =>
+      Effect.gen(function* () {
+        const boot = yield* makeGate;
+        const listing = yield* makeGate;
+        local.faults.bootGate = boot;
+        const opening = yield* Effect.forkChild(open("AGENT-SIM"));
+        yield* Deferred.await(boot.reached);
+        // This listing sees the simulator stopped, then applies after the boot claims it.
+        local.faults.listingGate = listing;
+        const staleList = yield* Effect.forkChild(service.list);
+        yield* Deferred.await(listing.reached);
+        yield* Deferred.succeed(boot.release, undefined);
+        yield* Deferred.succeed(listing.release, undefined);
+        yield* Fiber.join(staleList);
+        yield* Fiber.join(opening);
+        yield* service.shutdownAgentBootedDevices;
+        expect(local.shutdowns).toEqual(["AGENT-SIM"]);
       }),
     ),
   );

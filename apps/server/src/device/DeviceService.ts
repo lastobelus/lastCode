@@ -667,6 +667,8 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       Effect.gen(function* () {
         if (hosts.get(ready.hostId) !== host) return (yield* SynchronizedRef.get(stateRef)).state;
         const before = new Set((yield* SynchronizedRef.get(stateRef)).state.sessions);
+        // A claim made while this listing ran is newer than what it saw.
+        const claimedBefore = new Set(agentBooted.values());
         const {
           devices: discovered,
           detail,
@@ -733,6 +735,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
             // A device seen stopped or gone is forgotten, so a later boot by the user is never shut down.
             for (const [key, booted] of agentBooted)
               if (
+                claimedBefore.has(booted) &&
                 booted.hostId === ready.hostId &&
                 !incompletePlatforms.includes(booted.platform) &&
                 !devices.some((device) => device.id === booted.deviceId && device.booted)
