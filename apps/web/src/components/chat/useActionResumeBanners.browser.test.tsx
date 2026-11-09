@@ -241,7 +241,9 @@ it("does not promise automatic continuation when the environment state is unknow
     action: { ...running, outcome: "succeeded", delivery: "pending" },
     unknown: true,
   });
-  await expect.element(screen.getByText("Check work • Succeeded • Status unknown")).toBeVisible();
+  await expect
+    .element(screen.getByText("Check work • Succeeded • Status unavailable"))
+    .toBeVisible();
   expect(screen.container.textContent).not.toContain("pick up its result automatically");
 });
 
