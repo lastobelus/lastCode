@@ -62,7 +62,7 @@ import {
 import { environmentIdsKey } from "~/state/environmentAtomList";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 
-import { resolveSidebarMode, toggleUpstreamSidebar, useSidebarModeStore } from "../sidebarMode";
+import { resolveSidebarMode, useSidebarModeStore } from "../sidebarMode";
 
 const CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE = "[CLIENT_SETTINGS]";
 
@@ -434,22 +434,12 @@ export function useEnvironmentIdentificationMode(): EnvironmentIdentificationMod
   });
 }
 
-/** Legacy sidebar opt-ins still count, so those users land in the boring sidebar. */
-export function useBoringSidebarEnabled(): boolean {
-  return useClientSettings(
-    (settings) => settings.boringSidebarEnabled || settings.legacySidebarEnabled,
-  );
-}
-
 /** Resolve navigation only after persisted client preferences hydrate. */
 export function useSidebarMode() {
   const hydrated = useClientSettingsHydrated();
-  const settings = useClientSettings((settings) => ({
-    lastcodeSidebarEnabled: settings.lastcodeSidebarEnabled,
-    legacySidebarEnabled: settings.legacySidebarEnabled,
-  }));
+  const lastcodeSidebarEnabled = useClientSettings((settings) => settings.lastcodeSidebarEnabled);
   const lastcodeHidden = useSidebarModeStore((state) => state.lastcodeHidden);
-  return resolveSidebarMode(settings, hydrated, lastcodeHidden);
+  return resolveSidebarMode({ lastcodeSidebarEnabled }, hydrated, lastcodeHidden);
 }
 
 export function toggleSidebarMode(): void {
@@ -459,7 +449,8 @@ export function toggleSidebarMode(): void {
     useSidebarModeStore.setState((state) => ({ lastcodeHidden: !state.lastcodeHidden }));
     return;
   }
-  void updateClientSettings(toggleUpstreamSidebar(settings));
+  // LastCode is the only alternative to the v2 sidebar, so switching to it opts in.
+  void updateClientSettings({ lastcodeSidebarEnabled: true });
 }
 
 export async function prepareModelPreferencesPatch(

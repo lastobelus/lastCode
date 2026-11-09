@@ -176,10 +176,9 @@ through the pages you have visited, like a browser's back and forward buttons.
 
 `sidebar.mode.toggle` has no default shortcut; add one in **Settings → Keybindings**
 under **Sidebar: Toggle Presentation**. With **Settings → LastCode → Appearance →
-LastCode sidebar** enabled, it switches between LastCode and the v2 sidebar without
-changing either saved sidebar preference. With LastCode off, it switches between
-the upstream inbox and legacy sidebars using the preference in **Settings → General →
-Legacy features → Sidebar (legacy)**. The tree button uses the same behavior.
+LastCode sidebar** enabled, it switches between LastCode and the v2 sidebar for this
+session without changing the setting. With LastCode off, it turns that setting on.
+The tree button uses the same behavior.
 
 ## Reserved shortcuts
 

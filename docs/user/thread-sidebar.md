@@ -328,9 +328,8 @@ selection; threads with no completed reply cannot be marked unread.
 On web and desktop, enable **Settings → LastCode → Appearance → LastCode sidebar**
 for the LastCode project tree, annotations, and family controls. It is off by default.
 While enabled, use the tree button or the **Sidebar: Toggle Presentation** shortcut to switch
-between LastCode and the v2 sidebar without changing either saved sidebar preference.
-Turn it off to return to the sidebar selected by **Settings → General → Legacy features → Sidebar (legacy)**.
-With LastCode off, the same control switches between the upstream legacy and v2 sidebars.
+between LastCode and the v2 sidebar for this session without changing the setting.
+With LastCode off, the same control turns the setting on. Turn the setting off to return to the v2 sidebar.
 
 **Family status subheaders**, in the same Appearance settings, is on by default. Turn it off
 to show the family status and child count in the parent row while keeping the child tree.

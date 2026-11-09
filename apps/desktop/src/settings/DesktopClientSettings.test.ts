@@ -71,7 +71,6 @@ const clientSettings: ClientSettings = {
   threadDetailsUsageEnabled: false,
   threadDetailsItems: {},
   sidebarThreadPreviewCount: 6,
-  legacySidebarEnabled: true,
   lastcodeSidebarEnabled: true,
   sidebarWorkingShelfEnabled: false,
   loadBalancingEnabled: false,

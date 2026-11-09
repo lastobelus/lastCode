@@ -46,7 +46,6 @@ import {
   useSidebarMode,
   toggleSidebarMode,
 } from "../hooks/useSettings";
-import LegacyThreadSidebar from "./LegacySidebar";
 import { SidebarPresentation } from "./sidebar/SidebarPresentation";
 import ThreadSidebar from "./Sidebar";
 import { SidebarBrandWidthProbe, SidebarChromeHeader } from "./sidebar/SidebarChrome";
@@ -444,7 +443,6 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
         <LastCodeSidebar />
       </Suspense>
     ),
-    legacy: <LegacyThreadSidebar routeReveal={sidebarRouteReveal} />,
     inbox: <ThreadSidebar routeReveal={sidebarRouteReveal} />,
   }));
   const { active: panelAnimationsActive, durationMs: panelAnimationDurationMs } =

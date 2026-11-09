@@ -947,7 +947,6 @@ describe("ClientSettings LastCode sidebar preferences", () => {
     expect(settings.showThreadWorktreeIndicators).toBe(true);
     expect(settings.legacySidebarScale).toBe(100);
     expect(settings.legacySidebarThreadGroupingStyle).toBe("minimal");
-    expect(settings.legacySidebarEnabled).toBe(false);
     expect(settings.lastcodeSidebarEnabled).toBe(false);
   });
 
@@ -962,15 +961,14 @@ describe("ClientSettings LastCode sidebar preferences", () => {
     ).toBe("minimal");
   });
 
-  it.each([false, true])(
-    "decodes the independent LastCode choice with legacy=%s",
-    (legacySidebarEnabled) => {
-      const input = { lastcodeSidebarEnabled: true, legacySidebarEnabled, legacySidebarScale: 75 };
-      expect(decodeClientSettings(input)).toMatchObject(input);
-      expect(decodeClientSettingsPatch(input)).toEqual(input);
-      expect(decodeClientSettings({ legacySidebarEnabled }).lastcodeSidebarEnabled).toBe(false);
-    },
-  );
+  it("decodes the LastCode choice and drops a saved retired legacy opt-in", () => {
+    const input = { lastcodeSidebarEnabled: true, legacySidebarScale: 75 };
+    expect(decodeClientSettings(input)).toMatchObject(input);
+    expect(decodeClientSettingsPatch(input)).toEqual(input);
+    const retired = decodeClientSettings({ legacySidebarEnabled: true });
+    expect(retired.lastcodeSidebarEnabled).toBe(false);
+    expect(retired).not.toHaveProperty("legacySidebarEnabled");
+  });
 
   it.each(["yes", 1, null])(
     "rejects an invalid LastCode sidebar choice: %s",
@@ -982,9 +980,6 @@ describe("ClientSettings LastCode sidebar preferences", () => {
 
   it("defaults family status subheaders on and preserves an explicit opt-out", () => {
     expect(decodeClientSettings({}).lastcodeSidebarFamilyStatusSubheaders).toBe(true);
-    expect(
-      decodeClientSettings({ legacySidebarEnabled: true }).lastcodeSidebarFamilyStatusSubheaders,
-    ).toBe(true);
     expect(
       decodeClientSettings({ lastcodeSidebarFamilyStatusSubheaders: false })
         .lastcodeSidebarFamilyStatusSubheaders,
