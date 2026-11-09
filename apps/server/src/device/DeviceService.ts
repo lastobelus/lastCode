@@ -1272,7 +1272,6 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       )
       .pipe(
         Effect.catch((cause) => {
-          // Retry on later sweeps, but stop retrying a device that keeps failing.
           // Kept until a shutdown succeeds or discovery sees it stopped; warn once.
           booted.failedShutdowns++;
           return (booted.failedShutdowns === 1 ? Effect.logWarning : Effect.logDebug)(
