@@ -1644,6 +1644,13 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       return yield* requireRecord(record.checkoutId);
     }
     if (record.operation?.kind !== "capture") return yield* refreshActiveOwners(record);
+    const job = liveOperations.get(record.checkoutId);
+    if (
+      job !== undefined &&
+      !(job.cancelled && !job.started) &&
+      stoppedCaptureId !== record.operation.id
+    )
+      return yield* failure("busy", "Finish the current workspace operation first.");
     // Legacy intents get one attempt with the current capture implementation.
     // Keep cleanup protection even while that attempt is waiting for the sweep.
     const settledCapture = (current: CheckoutAuthority, legacyRetry = true): CheckoutAuthority => {
@@ -1669,13 +1676,6 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       path.join(registry.root, "snapshots", id, "journal.json"),
     );
     if (!journalExists) {
-      const job = liveOperations.get(record.checkoutId);
-      if (
-        job !== undefined &&
-        !(job.cancelled && !job.started) &&
-        stoppedCaptureId !== record.operation.id
-      )
-        return yield* failure("busy", "Finish the current workspace operation first.");
       yield* assertFresh(record);
       if (record.history.includes(id) || record.snapshots?.some((saved) => saved.snapshotId === id))
         return yield* failure(
@@ -1746,20 +1746,42 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
     }
     if (["capturing", "verifying", "ready", "active"].includes(journal.phase)) {
       yield* originalStillOwned(record);
+      let retainedTrial = false;
       if (journal.trialPath !== undefined) {
-        yield* native(() => store.trialRestore(id));
+        if (record.captureFailure?.operationId === record.operation.id) {
+          retainedTrial = Option.isNone(
+            yield* native(() => store.trialRestore(id)).pipe(Effect.option),
+          );
+        } else yield* native(() => store.trialRestore(id));
         journal = yield* native(() => store.readJournal(id));
-        if (journal.trialPath !== undefined)
+        if (!retainedTrial && journal.trialPath !== undefined)
           return yield* failure(
             "protected",
             "The owned trial restore still needs recovery. Its operation has been retained.",
           );
       }
       const manifest = yield* native(() => store.read(id)).pipe(Effect.option);
+      if (
+        retainedTrial &&
+        (Option.isNone(manifest) ||
+          manifest.value.ownerBinding !== record.checkoutId ||
+          manifest.value.operationId !== record.operation.id ||
+          manifest.value.sourcePath !== record.path)
+      )
+        return yield* failure(
+          "protected",
+          "The owned trial restore still needs recovery. Its operation has been retained.",
+        );
       if (Option.isSome(manifest) && !record.history.includes(id))
         record = yield* remember(record, manifest.value);
+      if (retainedTrial) {
+        // A failed trial is not proof of a suspended checkout. Keep its complete
+        // journal and snapshot authority, but do not trap the verified original.
+        yield* originalStillOwned(record);
+        yield* assertFresh(record);
+      }
       if (journal.phase !== "active") yield* native(() => store.keepOriginal(id));
-      const active = yield* publish(record, settledCapture(record), {
+      const active = yield* publish(record, settledCapture(record, !retainedTrial), {
         ...record.summary,
         state: "active",
         snapshotId: null,
@@ -2196,6 +2218,15 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       const saved = yield* native(() => store.read(id));
       if (saved.ownerBinding !== record.checkoutId)
         return yield* failure("changed", "A saved copy belongs to another checkout.");
+      const journal = yield* native(() => store.readJournal(id));
+      if (
+        (journal.trialPath !== undefined && (yield* fs.exists(journal.trialPath))) ||
+        (journal.isolatedPath !== undefined && (yield* fs.exists(journal.isolatedPath)))
+      )
+        return yield* failure(
+          "protected",
+          "The saved copy is still needed by an unfinished operation.",
+        );
     }
   });
   const previewDiscard = Effect.fn("WorktreeSuspension.previewDiscard")(function* (
