@@ -530,6 +530,7 @@ const cleanupFixture = (
     let providerEventSequence = 0;
     let onSessionLiveRead: (() => void) | null = null;
     let fullStatusCalls = 0;
+    let unscopedRefReads = 0;
     let staleProofs = 0;
     let rejectMetadataUpdates = false;
     const metadataCommands: Array<
@@ -607,6 +608,12 @@ const cleanupFixture = (
               input.args.includes("--contains")
             )
               staleProofs++;
+            if (
+              input.operation === "StorageCleanup.staleBranches" &&
+              input.args[0] === "for-each-ref" &&
+              input.args.length === 2
+            )
+              unscopedRefReads++;
             // Repository inventories are independent of checkout eligibility checks.
             if (
               ![
@@ -1309,6 +1316,7 @@ const cleanupFixture = (
       gitInspections: () => gitInspections,
       snapshotReads: () => snapshotReads,
       fullStatusCalls: () => fullStatusCalls,
+      unscopedRefReads: () => unscopedRefReads,
     };
   });
 /** The fixture, with the size walk of its worktree held until `resume` succeeds. */
@@ -2225,6 +2233,11 @@ describe("renamed branch cleanup", () => {
           "pushed",
           "detached",
           "nested-ref",
+          "null-named",
+          "null-detached",
+          "null-detached-dirty",
+          "null-detached-unpushed",
+          "null-detached-missing-remote",
           "missing-remote",
           "old-ref",
           "dirty",
@@ -2250,26 +2263,36 @@ describe("renamed branch cleanup", () => {
           "refs/remotes/origin/renamed",
           "HEAD",
         ]);
-        if (state === "detached") {
+        const nullRecords = state.startsWith("null-");
+        const removable = [
+          "pushed",
+          "detached",
+          "nested-ref",
+          "null-named",
+          "null-detached",
+        ].includes(state);
+        if (state === "detached" || state.startsWith("null-detached")) {
           yield* fixture.command(fixture.worktree, ["checkout", "--detach"]);
           yield* fixture.command(fixture.worktree, ["branch", "-D", "renamed"]);
         }
         if (state === "nested-ref")
           yield* fixture.command(fixture.worktree, ["branch", "feature/nested"]);
-        if (state === "missing-remote")
+        if (state === "missing-remote" || state === "null-detached-missing-remote")
           yield* fixture.command(fixture.worktree, [
             "update-ref",
             "-d",
             "refs/remotes/origin/renamed",
           ]);
         if (state === "old-ref") yield* fixture.command(fixture.worktree, ["branch", "feature"]);
-        if (state === "dirty" || state === "unpushed") {
+        if (
+          ["dirty", "unpushed", "null-detached-dirty", "null-detached-unpushed"].includes(state)
+        ) {
           yield* fixture.fs.writeFileString(`${fixture.worktree}/tracked.txt`, "new work\n");
-          if (state === "unpushed")
+          if (state === "unpushed" || state === "null-detached-unpushed")
             yield* fixture.command(fixture.worktree, ["commit", "-am", "unpushed"]);
         }
         const root = shell({
-          branch: "renamed",
+          branch: nullRecords ? null : "renamed",
           worktreePath: fixture.worktree,
           archivedAt: fixture.at(-1),
         });
@@ -2278,7 +2301,7 @@ describe("renamed branch cleanup", () => {
           ...Array.from({ length: 24 }, (_, index) =>
             shell({
               id: ThreadId.make(`family-${index}`),
-              branch: index < 15 ? "feature" : "renamed",
+              branch: nullRecords ? null : index < 15 ? "feature" : "renamed",
               worktreePath: fixture.worktree,
               archivedAt: resource === "worktree" && state === "pushed" ? null : fixture.at(-1),
               lineage: {
@@ -2291,7 +2314,7 @@ describe("renamed branch cleanup", () => {
           ),
         ]);
         let report = yield* fixture.service.runNow;
-        if (resource === "worktree" && ["pushed", "detached", "nested-ref"].includes(state)) {
+        if (resource === "worktree" && removable) {
           expect(checkoutEntries(report)[0]).toMatchObject({ outcome: "kept" });
           report = yield* fixture.service.runNow;
         }
@@ -2305,10 +2328,7 @@ describe("renamed branch cleanup", () => {
               );
         expect(entries).toMatchObject([
           {
-            outcome:
-              state === "pushed" || state === "detached" || state === "nested-ref"
-                ? "removed"
-                : "kept",
+            outcome: removable ? "removed" : "kept",
           },
         ]);
         expect(
@@ -2317,7 +2337,8 @@ describe("renamed branch cleanup", () => {
               ? fixture.worktree
               : `${fixture.worktree}/${resource === "builds" ? "apps/web/dist" : "node_modules"}`,
           ),
-        ).toBe(state !== "pushed" && state !== "detached" && state !== "nested-ref");
+        ).toBe(!removable);
+        expect(fixture.unscopedRefReads()).toBe(0);
       }),
     ),
   );

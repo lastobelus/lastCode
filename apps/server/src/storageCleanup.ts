@@ -966,7 +966,7 @@ const make = Effect.gen(function* () {
     head: { branch: string | null; commitSha: string },
     clean = false,
   ) {
-    if (recorded.every((branch) => branch === head.branch)) return true;
+    if (head.branch !== null && recorded.every((branch) => branch === head.branch)) return true;
     const stale = [
       ...new Set(
         recorded.filter((branch): branch is string => branch !== null && branch !== head.branch),
@@ -995,20 +995,22 @@ const make = Effect.gen(function* () {
       )
         return false;
     }
-    const refs = yield* read([
-      "for-each-ref",
-      "--format=%(refname)",
-      ...stale.map((branch) => `refs/heads/${branch}`),
-    ]);
-    if (
-      refs.exitCode !== 0 ||
-      refs.stdoutTruncated ||
-      refs.stderrTruncated ||
-      refs.stdout
-        .split(/\r?\n/)
-        .some((ref) => stale.some((branch) => ref === `refs/heads/${branch}`))
-    )
-      return false;
+    if (stale.length > 0) {
+      const refs = yield* read([
+        "for-each-ref",
+        "--format=%(refname)",
+        ...stale.map((branch) => `refs/heads/${branch}`),
+      ]);
+      if (
+        refs.exitCode !== 0 ||
+        refs.stdoutTruncated ||
+        refs.stderrTruncated ||
+        refs.stdout
+          .split(/\r?\n/)
+          .some((ref) => stale.some((branch) => ref === `refs/heads/${branch}`))
+      )
+        return false;
+    }
     const remote = yield* read([
       "for-each-ref",
       "--contains",
