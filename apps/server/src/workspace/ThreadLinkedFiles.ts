@@ -24,6 +24,7 @@ import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as WorkspaceFileSystem from "./WorkspaceFileSystem.ts";
 import * as WorkspacePaths from "./WorkspacePaths.ts";
 import * as WorkspaceEntries from "./WorkspaceEntries.ts";
+import * as WorkspaceAcquisition from "./WorkspaceAcquisition.ts";
 
 export class ThreadLinkedFileDeniedError extends Schema.TaggedError<ThreadLinkedFileDeniedError>()(
   "ThreadLinkedFileDeniedError",
@@ -84,6 +85,7 @@ const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
   const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+  const workspaceAcquisition = yield* WorkspaceAcquisition.WorkspaceAcquisition;
   const resolvePublishedPath = (filePath: string, cwd: string) =>
     path.resolve(
       cwd,
@@ -170,19 +172,19 @@ const make = Effect.gen(function* () {
       );
     if (Option.isNone(project))
       return yield* new ThreadLinkedFileDeniedError({ threadId: input.threadId });
-    const cwd = path.resolve(visible.thread.worktreePath ?? project.value.workspaceRoot);
+    let cwd = path.resolve(visible.thread.worktreePath ?? project.value.workspaceRoot);
     if (input.cwd !== undefined && path.resolve(input.cwd) !== cwd)
       return yield* new ThreadLinkedFileDeniedError({ threadId: input.threadId });
     const requested = input.path;
     if (!requested || requested.includes("\0"))
       return yield* new ThreadLinkedFileDeniedError({ threadId: input.threadId });
-    const requestedPath = resolvePublishedPath(requested, cwd);
+    let requestedPath = resolvePublishedPath(requested, cwd);
     const outside = (relative: string) =>
       !relative ||
       relative === ".." ||
       relative.startsWith(`..${path.sep}`) ||
       path.isAbsolute(relative);
-    const requestedOutside = outside(path.relative(cwd, requestedPath));
+    let requestedOutside = outside(path.relative(cwd, requestedPath));
 
     // Cards, including inherited ones, render in the active conversation's cwd.
     // Only current visible item bodies publish files; retained rollback records do not.
@@ -203,6 +205,34 @@ const make = Effect.gen(function* () {
       )
         evictPublication(key);
     }
+
+    // Opening a publication is workspace use. Check its authored destination
+    // before restoring, then resolve and check the file in the acquired folder.
+    if (
+      !publications.some((publication) =>
+        publicationReferences(publication, input.threadId, cwd).some((linked) =>
+          linked.bareFilename
+            ? !requestedOutside &&
+              path.basename(requestedPath).toLowerCase() === linked.path.toLowerCase()
+            : resolvePublishedPath(linked.path, cwd) === requestedPath,
+        ),
+      )
+    )
+      return yield* new ThreadLinkedFileDeniedError({ threadId: input.threadId });
+    const acquired = yield* workspaceAcquisition
+      .acquire({
+        path: cwd,
+        threadId: input.threadId,
+        purpose: "editor",
+      })
+      .pipe(
+        Effect.mapError(
+          (cause) => new ThreadLinkedFileResolutionError({ threadId: input.threadId, cause }),
+        ),
+      );
+    cwd = path.resolve(acquired.path);
+    requestedPath = resolvePublishedPath(requested, cwd);
+    requestedOutside = outside(path.relative(cwd, requestedPath));
 
     let absolutePath: string | undefined;
     let explicitOutside = false;

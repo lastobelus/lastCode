@@ -92,6 +92,7 @@ const withWorkspace = <E>(
       deletedAt: null,
     } satisfies ProjectStore.ProjectRow;
     const layerLinked = ThreadLinkedFiles.layer.pipe(
+      Layer.provide(WorkspaceAcquisitionTestkit.layer),
       Layer.provideMerge(projectionLayer),
       Layer.provide(layerFiles),
       Layer.provide(WorkspaceEntries.layer.pipe(Layer.provide(WorkspacePaths.layer))),
