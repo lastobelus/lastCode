@@ -21,6 +21,8 @@ export function isRegenerableIgnoredPath(relativePath: string): boolean {
   if (components.some((name) => name === ".codex" || name === ".local" || name.startsWith(".env")))
     return false;
   if (components.at(-1)?.endsWith(".tsbuildinfo")) return true;
+  // Vite hook shims ignore their own files, so Git reports them individually.
+  if (components.at(-3) === ".vite-hooks" && components.at(-2) === "_") return true;
   // Only Git-reported ignored roots are disposable; an ignored backup beneath tracked output is not.
   if (!relativePath.endsWith("/")) return false;
   const directories = components.slice(0, -1);
