@@ -10,6 +10,7 @@ import * as Path from "effect/Path";
 import * as Context from "effect/Context";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
@@ -2224,6 +2225,8 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       ServerActivation.ServerActivation,
       workerLifecycle ? Effect.void : Effect.never,
     ),
+    // Worker lifecycle cases exercise bursts during the first automatic sweep.
+    Effect.provideService(StorageCleanup.FirstAutomaticSweepDelay, Duration.zero),
   );
   const worker = Context.get(cleanupContext, StorageCleanup.StorageCleanup);
   // Clean worktrees exercise removal or shared-owner protection without research guards.
