@@ -61,6 +61,7 @@ import * as DependencyMounts from "./workspace/DependencyMounts.ts";
 import * as WorktreeConsumers from "./workspace/WorktreeConsumers.ts";
 import * as SuspensionTestkit from "./workspace/WorktreeSuspension.testkit.ts";
 import * as SuspensionRegistry from "./workspace/WorktreeSuspensionRegistry.ts";
+import { withProjectRootLease } from "./workspace/projectRootLease.ts";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const original = await importOriginal<typeof NodeFSP>();
@@ -490,6 +491,7 @@ const cleanupFixture = (
     let failHistoricalOwners = false;
     let projectRoots = [{ id: ProjectId.make("project-1"), workspaceRoot: repo }];
     let editBeforeRemoval = false;
+    let beforeWorktreeRemoval: Effect.Effect<void> | null = null;
     let onDependencyInspection: (() => void) | null = null;
     let onWorktreeInventory: (() => void) | null = null;
     let worktreeInventoryCalls = 0;
@@ -619,6 +621,15 @@ const cleanupFixture = (
               (input.args.includes("remove") || input.args.includes("--porcelain"))
             )
               yield* fs.writeFileString(`${worktree}/tracked.txt`, "late edit\n");
+            if (
+              beforeWorktreeRemoval !== null &&
+              input.operation === "StorageCleanup.cleanupGit" &&
+              input.args.includes("remove")
+            ) {
+              const hook = beforeWorktreeRemoval;
+              beforeWorktreeRemoval = null;
+              yield* hook;
+            }
             if (input.operation === "GeneratedDependencies.inspect" && onDependencyInspection) {
               const callback = onDependencyInspection;
               onDependencyInspection = null;
@@ -973,6 +984,9 @@ const cleanupFixture = (
         }),
       editBeforeRemoval: () => {
         editBeforeRemoval = true;
+      },
+      onBeforeWorktreeRemoval: (hook: Effect.Effect<void>) => {
+        beforeWorktreeRemoval = hook;
       },
       fs,
       get worktree() {
@@ -1506,6 +1520,7 @@ describe("cleanup ownership event revalidation", () => {
     "owner unarchived",
     "project metadata",
     "project root",
+    "project root without event",
     "project addition",
   ] as const)("revalidates dependency ownership after %s", (change) =>
     runCleanupTest(
@@ -1536,10 +1551,11 @@ describe("cleanup ownership event revalidation", () => {
               const roots = projectShells(
                 change === "project addition"
                   ? [fixture.repo, fixture.repo]
-                  : [change === "project root" ? fixture.worktree : fixture.repo],
+                  : [change.startsWith("project root") ? fixture.worktree : fixture.repo],
               );
               fixture.setProjectRoots(roots);
-              yield* append("project.updated", roots[0], "project-1", "project");
+              if (change !== "project root without event")
+                yield* append("project.updated", roots[0], "project-1", "project");
               return;
             }
             if (change === "unrelated PR link") {
@@ -1584,6 +1600,7 @@ describe("cleanup ownership event revalidation", () => {
           "owner active",
           "owner unarchived",
           "project root",
+          "project root without event",
           "project addition",
         ].includes(change);
         expect(
@@ -1592,6 +1609,26 @@ describe("cleanup ownership event revalidation", () => {
         expect(yield* fixture.fs.exists(`${fixture.worktree}/node_modules`)).toBe(kept);
         expect(report.counts.failed).toBe(0);
       }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+    ),
+  );
+
+  it.live("keeps ownerless dependencies when their worktree becomes a project root", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture();
+        yield* fixture.enableDependencies;
+        fixture.setThreads([]);
+        fixture.onDependencyInspection(
+          Effect.sync(() =>
+            fixture.setProjectRoots(projectShells([fixture.repo, fixture.worktree])),
+          ),
+        );
+        const report = yield* fixture.service.runNow;
+        expect(
+          report.entries.filter((entry) => entry.worktreeResource === "dependencies"),
+        ).toMatchObject([{ outcome: "kept" }]);
+        expect(yield* fixture.fs.exists(`${fixture.worktree}/node_modules`)).toBe(true);
+      }),
     ),
   );
 
@@ -3017,6 +3054,160 @@ describe("provider protection during storage cleanup", () => {
 });
 
 describe("dependency cleanup reports", () => {
+  it.live.each(["dependencies", "worktree"] as const)(
+    "cleans an owned %s when an unrelated project directory is unavailable",
+    (resource) =>
+      runCleanupTest(
+        isolatedDependencies(
+          Effect.gen(function* () {
+            const fixture = yield* cleanupFixture();
+            if (resource === "dependencies") yield* fixture.enableDependencies;
+            fixture.setProjectRoots(
+              projectShells([fixture.repo, `${fixture.config.baseDir}/missing-project`]),
+            );
+            fixture.setThreads([
+              shell({
+                branch: "feature",
+                worktreePath: fixture.worktree,
+                archivedAt: fixture.at(-DAY_MS),
+              }),
+            ]);
+            const report = yield* fixture.service.runNow;
+            const target =
+              resource === "dependencies" ? `${fixture.worktree}/node_modules` : fixture.worktree;
+            expect(report.entries.find((entry) => entry.path === target)).toMatchObject({
+              outcome: "removed",
+            });
+            expect(yield* fixture.fs.exists(target)).toBe(false);
+          }),
+        ),
+      ),
+  );
+
+  it.live.each(["dependencies", "worktree"] as const)(
+    "keeps an owned %s when a project root cannot be resolved",
+    (resource) =>
+      runCleanupTest(
+        isolatedDependencies(
+          Effect.gen(function* () {
+            const fixture = yield* cleanupFixture();
+            if (resource === "dependencies") yield* fixture.enableDependencies;
+            const loop = `${fixture.config.baseDir}/unresolved-project`;
+            yield* fixture.fs.symlink(loop, loop);
+            fixture.setProjectRoots(projectShells([fixture.repo, loop]));
+            fixture.setThreads([
+              shell({
+                branch: "feature",
+                worktreePath: fixture.worktree,
+                archivedAt: fixture.at(-DAY_MS),
+              }),
+            ]);
+            yield* fixture.service.runNow;
+            const target =
+              resource === "dependencies" ? `${fixture.worktree}/node_modules` : fixture.worktree;
+            expect(yield* fixture.fs.exists(target)).toBe(true);
+          }),
+        ),
+      ),
+  );
+  it.live.each(["dependencies", "worktree"] as const)(
+    "serializes a project-root claim with %s removal",
+    (resource) =>
+      runCleanupTest(
+        isolatedDependencies(
+          Effect.gen(function* () {
+            const fixture = yield* cleanupFixture();
+            if (resource === "dependencies") yield* fixture.enableDependencies;
+            fixture.setThreads([
+              shell({
+                branch: "feature",
+                worktreePath: fixture.worktree,
+                archivedAt: fixture.at(-DAY_MS),
+              }),
+            ]);
+            const scope = yield* Effect.scope;
+            const completed = yield* Deferred.make<boolean>();
+            let entered = false;
+            const claim = Effect.gen(function* () {
+              yield* Effect.forkIn(
+                withProjectRootLease(
+                  Effect.gen(function* () {
+                    entered = true;
+                    const exists = yield* fixture.fs.exists(fixture.worktree);
+                    if (exists)
+                      fixture.setProjectRoots(projectShells([fixture.repo, fixture.worktree]));
+                    yield* Deferred.succeed(completed, exists);
+                  }),
+                ),
+                scope,
+                { startImmediately: true },
+              );
+              expect(entered).toBe(resource === "dependencies");
+            });
+            if (resource === "dependencies") fixture.onDependencyInspection(claim);
+            else fixture.onBeforeWorktreeRemoval(claim);
+            const report = yield* fixture.service.runNow;
+            expect(
+              report.entries.find(
+                (entry) =>
+                  entry.path ===
+                  (resource === "dependencies"
+                    ? `${fixture.worktree}/node_modules`
+                    : fixture.worktree),
+              ),
+            ).toMatchObject({ outcome: resource === "dependencies" ? "kept" : "removed" });
+            expect(yield* Deferred.await(completed)).toBe(resource === "dependencies");
+          }),
+        ),
+      ),
+  );
+
+  it.live("cleans owned dependencies beside a separately registered linked worktree", () =>
+    runCleanupTest(
+      isolatedDependencies(
+        Effect.gen(function* () {
+          const fixture = yield* cleanupFixture();
+          yield* fixture.enableDependencies;
+          const registered = `${fixture.config.worktreesDir}/registered-project`;
+          yield* fixture.command(fixture.repo, [
+            "worktree",
+            "add",
+            "-b",
+            "registered",
+            registered,
+            "feature",
+          ]);
+          yield* fixture.fs.makeDirectory(`${registered}/node_modules`, { recursive: true });
+          yield* fixture.fs.writeFileString(
+            `${registered}/node_modules/.package-lock.json`,
+            "{}\n",
+          );
+          fixture.setProjectRoots(projectShells([fixture.repo, registered]));
+          fixture.setThreads([
+            shell({
+              branch: "feature",
+              worktreePath: fixture.worktree,
+              archivedAt: fixture.at(-DAY_MS),
+            }),
+            shell({
+              id: ThreadId.make("registered-owner"),
+              projectId: ProjectId.make("project-2"),
+              branch: "registered",
+              worktreePath: registered,
+              archivedAt: fixture.at(-DAY_MS),
+            }),
+          ]);
+          const report = yield* fixture.service.runNow;
+          expect(
+            report.entries.find((entry) => entry.path === `${fixture.worktree}/node_modules`),
+          ).toMatchObject({ outcome: "removed" });
+          expect(yield* fixture.fs.exists(`${fixture.worktree}/node_modules`)).toBe(false);
+          expect(yield* fixture.fs.exists(`${registered}/node_modules`)).toBe(true);
+        }),
+      ),
+    ),
+  );
+
   it.live.each(["owned", "ownerless"] as const)(
     "remembers installed-file consumers with cwd elsewhere for %s dependencies",
     (ownership) =>
@@ -5165,6 +5356,38 @@ describe("storage cleanup reports and local file policies", () => {
         expect(checkoutEntries(yield* fixture.service.runNow)[0]).toMatchObject({
           outcome: "removed",
         });
+      }),
+    ),
+  );
+  it.live("cleans an owned checkout beside a separately registered linked worktree", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture();
+        const registered = `${fixture.config.worktreesDir}/registered-project`;
+        yield* fixture.command(fixture.repo, ["worktree", "add", "-b", "registered", registered]);
+        fixture.setProjectRoots(projectShells([fixture.repo, registered]));
+        fixture.setThreads([
+          shell({
+            branch: "feature",
+            worktreePath: fixture.worktree,
+            archivedAt: fixture.at(-DAY_MS),
+          }),
+          shell({
+            id: ThreadId.make("registered-owner"),
+            projectId: ProjectId.make("project-2"),
+            branch: "registered",
+            worktreePath: registered,
+            archivedAt: fixture.at(-DAY_MS),
+          }),
+        ]);
+        const report = yield* fixture.service.runNow;
+        expect(
+          checkoutEntries(report).find((entry) => entry.path === fixture.worktree),
+        ).toMatchObject({
+          outcome: "removed",
+        });
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(false);
+        expect(yield* fixture.fs.exists(registered)).toBe(true);
       }),
     ),
   );

@@ -681,6 +681,7 @@ const layerResourceCleanupTest = ResourceCleanupService.layer.pipe(
       Layer.mock(PreviewHosting.PreviewHosting)({
         removeThread: () => Effect.void,
         list: () => Effect.succeed([]),
+        cleanupArchivedThread: (_threadId, closeTerminals) => closeTerminals,
       }),
       Layer.mock(PreviewManager.PreviewManager)({ close: () => Effect.void }),
       Layer.mock(TerminalManager.TerminalManager)({

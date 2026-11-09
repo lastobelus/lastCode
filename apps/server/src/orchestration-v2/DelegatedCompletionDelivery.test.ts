@@ -15,6 +15,7 @@ import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as WorkspaceAcquisitionTestkit from "../workspace/WorkspaceAcquisition.testkit.ts";
+import * as SuspensionRegistryTestkit from "../workspace/WorktreeSuspensionRegistry.testkit.ts";
 import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { EnvironmentId, type TerminalEvent } from "@t3tools/contracts";
@@ -202,6 +203,7 @@ const layerTest = Layer.mergeAll(
   Layer.provide(layerServerConfig),
   Layer.provideMerge(ServerSettings.layerTest()),
   Layer.provide(layerTestProviderInstanceRegistry),
+  Layer.provide(SuspensionRegistryTestkit.layer),
   Layer.provideMerge(layerPlatformTest),
 );
 

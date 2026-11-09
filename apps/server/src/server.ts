@@ -517,6 +517,7 @@ const layerTerminal = TerminalManager.layer.pipe(
 );
 
 const layerPreviewHosting = PreviewHosting.layer.pipe(
+  Layer.provide(ProjectionStoreV2.layer),
   Layer.provideMerge(layerTerminal),
   Layer.provideMerge(layerPortScanner),
 );

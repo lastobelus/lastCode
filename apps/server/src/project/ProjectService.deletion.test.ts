@@ -55,6 +55,7 @@ import { planThreadDeletion } from "../orchestration-v2/ThreadDeletion.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as UpdateDrainAdmissionTestkit from "../updateDrain/UpdateDrainAdmission.testkit.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+import * as SuspensionRegistryTestkit from "../workspace/WorktreeSuspensionRegistry.testkit.ts";
 import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
 import * as ProjectFaviconResolver from "./ProjectFaviconResolver.ts";
 import * as ProjectService from "./ProjectService.ts";
@@ -70,6 +71,7 @@ const layerEventPersistence = EventSink.layer.pipe(
 );
 const layerServices = Layer.mergeAll(
   UpdateDrainAdmissionTestkit.layerOpen,
+  SuspensionRegistryTestkit.layer,
   LegacyV1ThreadImporter.layer.pipe(Layer.provideMerge(layerEventPersistence)),
   ProjectionReplay.layer.pipe(Layer.provide(layerEventPersistence)),
   ProjectStore.layer,

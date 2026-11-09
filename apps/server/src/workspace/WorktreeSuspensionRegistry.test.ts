@@ -37,9 +37,25 @@ it.effect("persists authority privately and rejects a stale generation write", (
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     assert.deepStrictEqual(yield* registry.list, []);
+    yield* registry.recordUnverifiedUse("/managed/feature", "2026-01-02T00:00:00.000Z");
+    yield* registry.recordUnverifiedUse("/managed/feature", "2026-01-01T00:00:00.000Z");
     yield* registry.put(record, null);
+    assert.strictEqual(
+      yield* registry.unverifiedUse(["/managed/feature"]),
+      "2026-01-02T00:00:00.000Z",
+    );
     const restored = yield* registry.list;
     assert.deepStrictEqual(restored, [record]);
+    const duplicate = {
+      ...record,
+      checkoutId: "fixture-duplicate",
+      summary: { ...record.summary, checkoutId: "fixture-duplicate" },
+    };
+    assert.strictEqual(
+      (yield* registry.put(duplicate, null).pipe(Effect.flip)).operation,
+      "ownership-changed",
+    );
+    assert.deepStrictEqual(yield* registry.list, [record]);
     yield* registry.dependenciesRemoved("/managed/feature");
     yield* registry.dependenciesRemoved("/unknown");
     assert.deepStrictEqual(yield* registry.list, [record]);
@@ -92,6 +108,156 @@ it.effect("persists authority privately and rejects a stale generation write", (
     );
     yield* registry.dependenciesRemoved("/managed/feature");
     assert.deepStrictEqual(yield* registry.list, [legacy]);
+    yield* registry.put({ ...legacy, lastWorkspaceUseAt: "2026-01-02T00:00:00.000Z" }, legacy);
+    assert.isNull(yield* registry.unverifiedUse(["/managed/feature"]));
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("reserves recovery destinations against other checkout claims", () =>
+  Effect.gen(function* () {
+    const registry = yield* Registry.WorktreeSuspensionRegistry;
+    yield* registry.put(record, null);
+    const operation = {
+      id: "fixture-recovery",
+      kind: "recovery" as const,
+      snapshotIds: [],
+      manual: true,
+      acceptedAt: "2026-01-01T00:00:00.000Z",
+      destinationPath: "/managed/recovered",
+    };
+    const pending = { ...record, operation };
+    yield* registry.put(pending, record);
+    for (const target of [operation.destinationPath, `${operation.destinationPath}/node_modules`]) {
+      assert.strictEqual(
+        yield* registry.automaticProtection(target),
+        "The workspace is protected by a saved-workspace operation.",
+      );
+      assert.strictEqual(
+        yield* registry.automaticProtection(target, "dependencies"),
+        "The workspace is protected by a saved-workspace operation.",
+      );
+    }
+    const recovered = {
+      ...record,
+      checkoutId: operation.id,
+      sourceCheckoutId: record.checkoutId,
+      path: operation.destinationPath,
+      aliases: [operation.destinationPath],
+      summary: { ...record.summary, checkoutId: operation.id },
+      operation,
+    };
+    const unrelated = {
+      ...record,
+      checkoutId: "unrelated",
+      path: operation.destinationPath,
+      aliases: [operation.destinationPath],
+      summary: { ...recovered.summary, checkoutId: "unrelated" },
+    };
+    assert.strictEqual(
+      (yield* registry.put(unrelated, null).pipe(Effect.flip)).operation,
+      "ownership-changed",
+    );
+    yield* registry.put(recovered, null);
+    assert.lengthOf(yield* registry.list, 2);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("protects recovery destinations through canonical directory aliases", () =>
+  Effect.gen(function* () {
+    const registry = yield* Registry.WorktreeSuspensionRegistry;
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* fs.makeTempDirectoryScoped({ prefix: "recovery-alias-" });
+    const real = path.join(root, "real");
+    const alias = path.join(root, "alias");
+    yield* fs.makeDirectory(real);
+    yield* fs.symlink(real, alias);
+    yield* registry.put(
+      {
+        ...record,
+        operation: {
+          id: "fixture-recovery",
+          kind: "recovery",
+          snapshotIds: [],
+          manual: true,
+          acceptedAt: "2026-01-01T00:00:00.000Z",
+          destinationPath: path.join(alias, "recovered"),
+        },
+      },
+      null,
+    );
+    assert.strictEqual(
+      yield* registry.automaticProtection(path.join(real, "recovered")),
+      "The workspace is protected by a saved-workspace operation.",
+    );
+    assert.strictEqual(
+      yield* registry.recoveryDestinationProtection(real),
+      "The workspace is protected by a saved-workspace operation.",
+    );
+    assert.isNull(yield* registry.recoveryDestinationProtection(path.join(root, "other")));
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("rejects an ordinary restore into another checkout's reserved path", () =>
+  Effect.gen(function* () {
+    const registry = yield* Registry.WorktreeSuspensionRegistry;
+    const other = {
+      ...record,
+      checkoutId: "other-checkout",
+      path: "/managed/other",
+      aliases: ["/managed/other"],
+      summary: { ...record.summary, checkoutId: "other-checkout", state: "suspended" as const },
+    };
+    yield* registry.put(record, null);
+    yield* registry.put(other, null);
+    const restoring = {
+      ...record,
+      aliases: [...record.aliases, other.path],
+      operation: {
+        id: "restore-operation",
+        kind: "restore" as const,
+        snapshotIds: [],
+        manual: true,
+        acceptedAt: "2026-01-01T00:00:00.000Z",
+        destinationPath: other.path,
+      },
+    };
+    assert.strictEqual(
+      (yield* registry.put(restoring, record).pipe(Effect.flip)).operation,
+      "ownership-changed",
+    );
+    assert.deepStrictEqual(yield* registry.list, [record, other]);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("reserves the destination of a detached historical recovery", () =>
+  Effect.gen(function* () {
+    const registry = yield* Registry.WorktreeSuspensionRegistry;
+    const operation = {
+      id: "fixture-detached-recovery",
+      kind: "recovery" as const,
+      snapshotIds: [],
+      manual: true,
+      acceptedAt: "2026-01-01T00:00:00.000Z",
+      destinationPath: "/managed/recovered",
+    };
+    const detached = { ...record, detached: true, operation };
+    yield* registry.put(detached, null);
+    assert.strictEqual(
+      yield* registry.automaticProtection(operation.destinationPath),
+      "The workspace is protected by a saved-workspace operation.",
+    );
+    const other = {
+      ...record,
+      checkoutId: "other-checkout",
+      path: operation.destinationPath,
+      aliases: [operation.destinationPath],
+      summary: { ...record.summary, checkoutId: "other-checkout" },
+    };
+    assert.strictEqual(
+      (yield* registry.put(other, null).pipe(Effect.flip)).operation,
+      "ownership-changed",
+    );
   }).pipe(Effect.provide(layer)),
 );
 

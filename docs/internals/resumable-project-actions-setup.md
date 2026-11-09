@@ -135,18 +135,29 @@ out.
 
 ### Choose the target
 
-A listed, eligible Action shows only that it exists and is opted in. Use `t3_project_read` to
-inspect the registered workspace and saved scripts, and `t3_thread_read` to check the parent's
-checkout. Before launching for a child, verify the saved command, opt-in, effective working
-directory, environment, and worktree-local package or build selection against the child's exact
-checkout and head. Use **Settings → Projects** when importing, changing, or opting in an Action;
-reading its definition does not itself need a UI visit.
+A listed, eligible Action shows only that it exists and is opted in, not where its saved command
+runs. An Action starts in its calling thread's worktree, or in the project root when that thread
+has no worktree. A mediated Action is called by the parent, so it starts from the parent's thread
+even when it serves a child; its saved command may select another directory.
+
+Choose the working directory through the calling thread or the saved command. Projects are durable
+registry records: register a separate project for a workspace that belongs in the registry on its
+own, not to give one Action a different cwd. For QA or other work in an existing linked worktree,
+use a thread in the existing project already bound to that worktree. If the user requests a new
+top-level thread, `t3_thread_launch` can bind it with `workspaceStrategy: existing_worktree`.
+
+Use `t3_project_read` to inspect the registered workspace and saved scripts, and `t3_thread_read`
+to check the parent's checkout. Before launching for a child, verify the saved command, opt-in,
+effective working directory, environment, and worktree-local package or build selection against
+the child's exact checkout and head. Use **Settings → Projects** when importing, changing, or
+opting in an Action; reading its definition does not itself need a UI visit.
 
 - **Shared checkout.** When the child works in the parent's checkout, the parent's saved Action
   usually targets it already; verify it as above. Serialize changes to that checkout while the
   Action runs.
-- **Separate child worktree.** The parent needs a saved Action explicitly targeted at that
-  worktree and opted in, set up as in [Let the agent complete the UI setup](#let-the-agent-complete-the-ui-setup).
+- **Separate child worktree.** The parent stays bound to its own checkout, so it needs a saved
+  Action explicitly targeted at that worktree and opted in, set up as in
+  [Let the agent complete the UI setup](#let-the-agent-complete-the-ui-setup).
   Its setup must not depend on packages the child's worktree is still missing. Keep concrete
   paths and selections in the environment's settings, not in repository files.
 

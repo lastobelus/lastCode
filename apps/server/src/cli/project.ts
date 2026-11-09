@@ -59,6 +59,7 @@ import * as UpdateDrain from "../updateDrain/UpdateDrain.ts";
 import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
 import * as UpdateDrainRepository from "../persistence/UpdateDrainRepository.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+import * as WorktreeSuspensionRegistry from "../workspace/WorktreeSuspensionRegistry.ts";
 import { type CliAuthLocationFlags, projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
 
 type ProjectMutationTarget = {
@@ -256,6 +257,7 @@ const makeProjectCliRuntimeLayer = (layerProjectService: typeof RuntimeLayer.lay
       ),
     ),
     Layer.provideMerge(WorkspacePaths.layer),
+    Layer.provideMerge(WorktreeSuspensionRegistry.layer),
     Layer.provideMerge(
       ServerSettings.layer.pipe(
         Layer.provide(Layer.merge(ServerSecretStore.layer, ManagedPolicy.layer)),
