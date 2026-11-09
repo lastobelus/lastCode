@@ -1298,7 +1298,22 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
     ]);
     yield* Effect.forEach(
       candidates,
-      (booted) => shutdownAgentBooted(booted, (holding) => holding.length === 0),
+      (booted) =>
+        shutdownAgentBooted(booted, (holding) => holding.length === 0).pipe(
+          Effect.andThen(
+            SynchronizedRef.get(stateRef).pipe(
+              Effect.map(({ state }) => {
+                // A failed release leaves it to the next sweep rather than 30 idle minutes.
+                const key = bootKey(booted.hostId, booted.deviceId);
+                const held = state.sessions.some(
+                  (session) =>
+                    session.hostId === booted.hostId && session.deviceId === booted.deviceId,
+                );
+                if (agentBooted.get(key) === booted && !held) booted.lastActivity = -Infinity;
+              }),
+            ),
+          ),
+        ),
       { discard: true },
     );
   });

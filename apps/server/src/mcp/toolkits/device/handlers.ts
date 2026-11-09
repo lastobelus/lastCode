@@ -57,7 +57,7 @@ export function agentDeviceQuickStart(
               ? "First use builds an XCTest runner and can take a couple of minutes; later commands are fast."
               : "The Android snapshot helper installs itself on first use.",
             host?.kind === "own" && host.wasRunning
-              ? "It was already running when you opened it, so close it with plain device_close when you are done."
+              ? "You did not boot it, or another thread also has it open, so close it with plain device_close when you are done."
               : "When you are done, call device_close with shutdown: true; a plain device_close leaves it running and using the machine's CPU. Do not leave it running for later or for another thread. T3 Code shuts down a local simulator you booted after 30 minutes without device commands, or when this thread settles.",
           ].join(" ");
   return [
@@ -314,14 +314,21 @@ const handlers = {
                 : {
                     kind: "own",
                     // The server tracks local boots, which covers a reopen by the booting thread.
+                    // A shutdown would also end another thread's session on the device.
                     wasRunning:
-                      hostKind === "local"
+                      after.sessions.some(
+                        (other) =>
+                          other.threadId !== scope.thread.threadId &&
+                          other.hostId === session.hostId &&
+                          other.deviceId === session.deviceId,
+                      ) ||
+                      (hostKind === "local"
                         ? !(yield* devices.bootedByThread({
                             threadId: scope.thread.threadId,
                             hostId: session.hostId,
                             deviceId: session.deviceId,
                           }))
-                        : target.booted,
+                        : target.booted),
                   },
           ),
         };

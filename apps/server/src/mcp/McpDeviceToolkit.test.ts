@@ -331,17 +331,39 @@ it.effect.each([
     platform: "ios" as const,
     refreshed: true,
   },
+  {
+    name: "iOS simulator it booted that another thread also has open",
+    selected: "UDID-1",
+    opened: "UDID-1",
+    platform: "ios" as const,
+    refreshed: true,
+    shared: true,
+  },
 ])(
   "issues the device credential for the opened $name",
-  ({ selected, opened, platform, refreshed }) => {
+  ({ selected, opened, platform, refreshed, shared = false }) => {
     const selectedDevice = { ...device, id: selected, platform, booted: selected === opened };
     const openedDevice = { ...selectedDevice, id: opened, booted: true };
     const operations: string[] = [];
     const scopedArgs = ["--config", "/host.json", "--session", "opened-device-session"];
     const layerOpening = Layer.mock(DeviceService.DeviceService)({
-      bootedByThread: () => Effect.succeed(false),
+      bootedByThread: () => Effect.succeed(true),
       list: Effect.succeed({ ...state, devices: [selectedDevice] }),
-      state: Effect.succeed({ ...state, devices: [refreshed ? openedDevice : selectedDevice] }),
+      state: Effect.succeed({
+        ...state,
+        devices: [refreshed ? openedDevice : selectedDevice],
+        sessions: shared
+          ? [
+              {
+                threadId: ThreadId.make("other-thread"),
+                hostId: "local",
+                deviceId: DeviceId.make(opened),
+                platform,
+                openedAt: "2026-09-08T00:00:00.000Z",
+              },
+            ]
+          : [],
+      }),
       agentReadinessIfSupported: (hostId, enabled) =>
         Effect.sync(() => {
           expect(hostId).toBe("local");
@@ -397,6 +419,12 @@ it.effect.each([
         device: { id: opened, platform },
         agentDevice: { targetArgs: ["--platform", platform, selector, opened, ...scopedArgs] },
         quickStart: expect.stringContaining("It is bound to this device and session"),
+      });
+      // Shutting down a shared device would end the other thread's session too.
+      expect(result.structuredContent).toMatchObject({
+        quickStart: expect.stringContaining(
+          shared ? "with plain device_close" : "call device_close with shutdown: true",
+        ),
       });
     }).pipe(
       Effect.scoped,

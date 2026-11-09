@@ -2583,7 +2583,12 @@ describe("agent-booted device shutdown", () => {
           }),
         ).toBe(true);
         yield* service.close({ threadId: ThreadId.make("closer") });
+        // A failed release is retried by the next sweep, not after 30 idle minutes.
+        local.faults.shutdowns = 1;
         yield* service.releaseThread(ThreadId.make("closer"));
+        expect(local.shutdowns).toEqual(["AGENT-SIM"]);
+        yield* TestClock.adjust("1 minute");
+        yield* service.shutdownIdleDevices;
         expect(local.shutdowns).toEqual(["AGENT-SIM", "SECOND-SIM"]);
       }),
     ),
