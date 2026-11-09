@@ -36,8 +36,8 @@ Keep two versions apart:
   line gives the local server's version when the server recorded one, but the bug
   may have happened on another build. Step 4 settles it.
 
-The installed LastCode launcher is \`~/.lastcode/bin/t3 triage\`, or
-\`<T3CODE_HOME>/bin/t3 triage\` for a custom home. \`npx t3 triage\` runs upstream
+The installed LastCode launcher is \`~/.lastcode/bin/t3 triage --base-dir "$HOME/.lastcode"\`, or
+\`"<T3CODE_HOME>/bin/t3" triage --base-dir "<T3CODE_HOME>"\` for a custom home. \`npx t3 triage\` runs upstream
 T3 Code, which has different source and state.
 
 ## 3. Check for a newer playbook
@@ -66,6 +66,11 @@ https://github.com/lastobelus/lastCode. Checkpoints use
 \`lastcode/revision/v<version>\` (for example,
 \`lastcode/revision/v1.2.3-nightly.20260101.7.2\`). A bare \`v<version>\` tag is
 upstream's source and does not include LastCode's changes.
+
+Try the exact \`lastcode/revision/v<version>\` tag first, then the exact
+\`lastcode/checkpoint/v<version>\` tag. Use the commit that tag points to as
+\`<hash>\` in the source-cache path: for an annotated tag, that is the peeled
+commit, not the tag object's own hash.
 
 Clone at the matching tag into the source cache directory named in the context
 file, one subdirectory per commit hash:

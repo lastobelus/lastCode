@@ -26,13 +26,19 @@ function launcherCommand(launcherPath: string) {
     : `'${launcherPath.replaceAll("'", `'"'"'`)}'`;
 }
 
-/** Desktop can name its exact launcher; other clients use LastCode's default install. */
+/** Desktop can name its exact launcher and home; other clients use the terminal's home. */
 export async function resolveTriageCommand(bridge: DesktopBridge | undefined) {
   try {
     const state = await bridge?.cliCommand.getState();
     // Windows reports onPath from its PATH entry alone; only an existing launcher proves it runs.
     if (state?.launcherPath) {
-      return state.onPath ? "t3 triage" : `${launcherCommand(state.launcherPath)} triage`;
+      if (state.launcherPath.endsWith(".cmd")) {
+        return state.onPath ? "t3 triage" : `${launcherCommand(state.launcherPath)} triage`;
+      }
+      if (state.launcherPath.endsWith("/bin/t3")) {
+        const baseDir = state.launcherPath.slice(0, -"/bin/t3".length) || "/";
+        return `${launcherCommand(state.launcherPath)} triage --base-dir ${launcherCommand(baseDir)}`;
+      }
     }
   } catch (error) {
     console.warn("Could not read the desktop CLI state.", error);

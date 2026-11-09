@@ -30,13 +30,13 @@ LastCode server, so it gives you any restart steps and does not do them itself.
 If the app does not start, or triage does not work in the app, run:
 
 ```sh
-~/.lastcode/bin/t3 triage
+~/.lastcode/bin/t3 triage --base-dir "$HOME/.lastcode"
 ```
 
 The installed LastCode app creates this launcher the first time it opens. If you
-use a custom `T3CODE_HOME`, run `bin/t3 triage` from that folder instead.
+use a custom `T3CODE_HOME`, run `bin/t3 triage --base-dir "$PWD"` from that folder instead.
 Installing the **t3 command** from **Settings → About** also lets you run
-`t3 triage`. If upstream T3 Code's `t3` is also on your `PATH`, use the full
+`t3 triage --base-dir "$HOME/.lastcode"`. If upstream T3 Code's `t3` is also on your `PATH`, use the full
 launcher path: `npx t3 triage` and upstream's `t3` investigate upstream T3 Code
 and report to its tracker, not LastCode's.
 

@@ -4,6 +4,7 @@ import {
   type ServerPrepareTriageInput,
   type ServerPrepareTriageResult,
 } from "@t3tools/contracts";
+import { DESKTOP_CLI_SHIM_MARKER } from "@t3tools/shared/desktopDistribution";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -86,14 +87,21 @@ const make = Effect.gen(function* () {
   const stagingDir = `${sourceDir}-staging`;
   const serverVersion = packageJson.version;
 
-  const getCliCommand = Effect.fn("TriageService.getCliCommand")(function* () {
-    const launcher = path.join(config.baseDir, "bin", "t3");
-    if (!(yield* fs.exists(launcher).pipe(Effect.orElseSucceed(() => false)))) {
-      return Option.none<string>();
-    }
-    const quote = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
-    return Option.some(`${quote(launcher)} triage --base-dir ${quote(config.baseDir)}`);
-  });
+  const getCliCommand = Effect.fn("TriageService.getCliCommand")(
+    function* () {
+      const launcher = path.join(config.baseDir, "bin", "t3");
+      const info = yield* fs.stat(launcher);
+      if (info.type !== "File" || (info.mode & 0o111) === 0 || Number(info.size) > 16_384) {
+        return Option.none<string>();
+      }
+      if (!(yield* fs.readFileString(launcher)).includes(DESKTOP_CLI_SHIM_MARKER)) {
+        return Option.none<string>();
+      }
+      const quote = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
+      return Option.some(`${quote(launcher)} triage --base-dir ${quote(config.baseDir)}`);
+    },
+    Effect.orElseSucceed(() => Option.none<string>()),
+  );
 
   const runGit = (operation: string, cwd: string, args: ReadonlyArray<string>, timeoutMs: number) =>
     git.execute({ operation: `TriageService.${operation}`, cwd, args, timeoutMs, env: GIT_ENV });

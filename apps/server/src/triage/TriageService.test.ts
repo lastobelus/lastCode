@@ -104,7 +104,7 @@ const readContext = Effect.gen(function* () {
   return yield* fs.readFileString(`${sessions}/${session}/context.md`);
 });
 
-it.live("offers this environment's custom-home launcher only when it exists", () =>
+it.live("offers this environment's custom-home launcher only when it is owned and executable", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const config = yield* ServerConfig.ServerConfig;
@@ -112,9 +112,22 @@ it.live("offers this environment's custom-home launcher only when it exists", ()
     assert.isTrue(Option.isNone(yield* triage.getCliCommand()));
 
     yield* fs.makeDirectory(`${config.baseDir}/bin`, { recursive: true });
-    yield* fs.writeFileString(`${config.baseDir}/bin/t3`, '#!/bin/sh\nprintf "%s\\n" "$@"\n', {
+    const launcher = `${config.baseDir}/bin/t3`;
+    yield* fs.makeDirectory(launcher);
+    assert.isTrue(Option.isNone(yield* triage.getCliCommand()));
+    yield* fs.remove(launcher, { recursive: true });
+    yield* fs.writeFileString(launcher, "#!/bin/sh\n# A launcher from another application.\n", {
       mode: 0o755,
     });
+    assert.isTrue(Option.isNone(yield* triage.getCliCommand()));
+    yield* fs.remove(launcher);
+    yield* fs.writeFileString(
+      launcher,
+      '#!/bin/sh\n# Written by T3 Code: runs the desktop app\'s bundled t3 CLI.\nprintf "%s\\n" "$@"\n',
+      { mode: 0o644 },
+    );
+    assert.isTrue(Option.isNone(yield* triage.getCliCommand()));
+    yield* fs.chmod(launcher, 0o755);
     const command = Option.getOrThrow(yield* triage.getCliCommand());
     const result = NodeChildProcess.spawnSync("/bin/sh", ["-c", command], {
       env: { ...process.env, T3CODE_HOME: "/home/user/a-different-home" },
