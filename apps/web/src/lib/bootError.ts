@@ -1,8 +1,11 @@
 import type { DesktopBridge, DesktopUpdateState } from "@t3tools/contracts";
+import {
+  LASTCODE_TRIAGE_CLI_COMMAND as TRIAGE_CLI_COMMAND,
+  LASTCODE_TRIAGE_CUSTOM_HOME_HINT,
+} from "@t3tools/shared/desktopDistribution";
 
-const FALLBACK_TRIAGE_COMMAND = "npx t3 triage";
 const DOWNLOAD_URL = "https://t3.codes/download";
-const ISSUE_URL = "https://github.com/pingdotgg/t3code/issues/new";
+const ISSUE_URL = "https://github.com/lastobelus/lastCode/issues/new";
 const LAST_FAILURE_KEY = "t3code:boot-failed-at";
 const REPEAT_FAILURE_MS = 5 * 60_000;
 const MAX_CAUSES = 3;
@@ -23,18 +26,24 @@ function launcherCommand(launcherPath: string) {
     : `'${launcherPath.replaceAll("'", `'"'"'`)}'`;
 }
 
-/** Desktop can run its bundled launcher without Node; everything else falls back to npx. */
+/** Desktop can name its exact launcher and home; other clients use the terminal's home. */
 export async function resolveTriageCommand(bridge: DesktopBridge | undefined) {
   try {
     const state = await bridge?.cliCommand.getState();
     // Windows reports onPath from its PATH entry alone; only an existing launcher proves it runs.
     if (state?.launcherPath) {
-      return state.onPath ? "t3 triage" : `${launcherCommand(state.launcherPath)} triage`;
+      if (state.launcherPath.endsWith(".cmd")) {
+        return state.onPath ? "t3 triage" : `${launcherCommand(state.launcherPath)} triage`;
+      }
+      if (state.launcherPath.endsWith("/bin/t3")) {
+        const baseDir = state.launcherPath.slice(0, -"/bin/t3".length) || "/";
+        return `${launcherCommand(state.launcherPath)} triage --base-dir ${launcherCommand(baseDir)}`;
+      }
     }
   } catch (error) {
     console.warn("Could not read the desktop CLI state.", error);
   }
-  return FALLBACK_TRIAGE_COMMAND;
+  return TRIAGE_CLI_COMMAND;
 }
 
 /** The update button only appears when the desktop updater has a newer build to offer. */
@@ -293,7 +302,8 @@ export function showBootError(error: unknown) {
   const updateNote = element("p", { id: "boot-error-update-note", hidden: true });
   if (bridge) mountUpdateButton(bridge, update, updateNote, announce);
 
-  const command = element("code", { textContent: FALLBACK_TRIAGE_COMMAND });
+  const command = element("code", { textContent: TRIAGE_CLI_COMMAND });
+  const customHomeHint = element("p", { textContent: LASTCODE_TRIAGE_CUSTOM_HOME_HINT });
   const copyCommand = element("button", {
     className: "boot-error-icon",
     type: "button",
@@ -318,7 +328,10 @@ export function showBootError(error: unknown) {
       },
     ),
   );
-  void resolveTriageCommand(bridge).then((value) => (command.textContent = value));
+  void resolveTriageCommand(bridge).then((value) => {
+    command.textContent = value;
+    customHomeHint.hidden = value !== TRIAGE_CLI_COMMAND;
+  });
 
   let report = "(no error message)";
   try {
@@ -370,6 +383,7 @@ export function showBootError(error: unknown) {
           "Run this on the computer that runs T3 Code. Your agent can check the local logs and help you file a bug report.",
       }),
       element("div", { id: "boot-error-command" }, [command, copyCommand]),
+      customHomeHint,
     ]),
     element("div", {}, [
       details,

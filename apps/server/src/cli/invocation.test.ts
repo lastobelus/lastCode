@@ -100,6 +100,17 @@ it.layer(NodeServices.layer)("root CLI commands", (it) => {
       expect(yield* rootCommand({ ...desktop, path: linked })).toBe(
         'sudo env "PATH=$PATH" t3 browser setup',
       );
+      expect(
+        (yield* resolveHostCliCommand("triage", ["--base-dir", home], {
+          preferLauncher: true,
+        }).pipe(
+          Effect.provideService(HostProcess.ExecutablePath, desktop.node),
+          Effect.provideService(HostProcess.Arguments, [desktop.node, desktop.entry]),
+          Effect.provideService(HostProcess.IsExecutable, false),
+          Effect.provideService(HostProcess.Platform, "linux"),
+          Effect.provideService(HostProcess.Environment, { PATH: linked, ...desktop.env }),
+        )).command,
+      ).toBe(`'${shim}' triage --base-dir ${home}`);
 
       expect(
         yield* rootCommand({
