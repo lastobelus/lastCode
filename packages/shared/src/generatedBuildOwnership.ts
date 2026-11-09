@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Also used by dependency-free build runners.
 import { fs as NodeFS } from "./nativeFileSystem.ts";
+import { isGeneratedBuildRoot } from "./regenerableIgnoredPath.ts";
 import * as NodePath from "node:path";
 import * as NodeCrypto from "node:crypto";
 import {
@@ -23,8 +24,6 @@ const signature = (stat: import("node:fs").Stats) =>
 const allocation = (stat: import("node:fs").Stats) =>
   JSON.stringify([stat.dev, stat.ino, stat.birthtimeMs]);
 const missing = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT";
-const allowedRoot = (root: string) =>
-  /^apps\/[a-zA-Z0-9_-]+\/dist$/.test(root) || root === "native/resource-monitor/target/debug";
 const safeRelative = (path: string) =>
   path.length > 0 &&
   !/[\\:\x00-\x1f]/.test(path) &&
@@ -32,7 +31,7 @@ const safeRelative = (path: string) =>
   path.split("/").every((part) => part !== "" && part !== "." && part !== "..");
 
 function context(worktreePath: string, root: string) {
-  if (!allowedRoot(root)) throw new Error("Unrecognized generated build root");
+  if (!isGeneratedBuildRoot(root)) throw new Error("Unrecognized generated build root");
   const cwd = NodeFS.realpathSync(worktreePath);
   const gitFile = NodePath.join(cwd, ".git");
   let stat;
@@ -1410,7 +1409,7 @@ export function generatedBuildReviewProtection(worktreePath: string, relativeCan
       const value = JSON.parse(NodeFS.readFileSync(path, "utf8")) as { root?: unknown };
       if (
         typeof value?.root !== "string" ||
-        !allowedRoot(value.root) ||
+        !isGeneratedBuildRoot(value.root) ||
         digest(value.root) !== match[1]
       )
         return true;

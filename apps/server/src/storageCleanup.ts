@@ -913,6 +913,7 @@ const make = Effect.gen(function* () {
 
   const localChangesReason = Effect.fn("StorageCleanup.localChangesReason")(function* (
     cwd: string,
+    worktreeRoot = cwd,
   ) {
     if (generatedBuildReviewProtection(cwd)) return "reviewed build content protects this worktree";
     const status = yield* git.execute({
@@ -943,8 +944,11 @@ const make = Effect.gen(function* () {
     }
     if (count > 0) return `has uncommitted changes (${count} ${count === 1 ? "file" : "files"})`;
     // Ignore rules alone do not authorize erasing configuration or unique notes.
+    const relativeCwd = path.relative(worktreeRoot, cwd);
     for (const file of ignoredFiles) {
-      if (isRegenerableIgnoredPath(file)) continue;
+      // Submodule .t3 folders are not the worktree's seeded development state.
+      const relativePath = relativeCwd === "" ? file : `${relativeCwd}/${file}`;
+      if (isRegenerableIgnoredPath(relativePath)) continue;
       // Finder metadata is disposable, but a directory or link with this name
       // is not evidence that its contents belong to Finder. Tracked edits have
       // already been rejected by status above.
@@ -1038,7 +1042,7 @@ const make = Effect.gen(function* () {
       }
       // Check files after walking stored history to shorten the gap before forced removal.
       for (const submodule of paths) {
-        const changes = yield* localChangesReason(submodule);
+        const changes = yield* localChangesReason(submodule, cwd);
         if (changes !== null) return { force: false, reason: `submodule ${changes}` };
       }
       const force = stored || paths.length > 0;

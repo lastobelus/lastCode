@@ -1390,6 +1390,17 @@ it.live("keeps nested submodule files protected by the current keep rule", () =>
       expect(yield* fs.readFileString(`${child}/.env`)).toBe("local secret\n");
 
       yield* fs.remove(`${child}/.env`);
+      for (const repository of [submodule, child]) {
+        yield* fs.makeDirectory(`${repository}/.t3`);
+        yield* fs.writeFileString(`${repository}/.t3/notes.txt`, "retained submodule state\n");
+        expect(
+          (yield* service.runNow).entries.find((entry) => entry.path === worktree),
+        ).toMatchObject({ outcome: "kept" });
+        expect(yield* fs.readFileString(`${repository}/.t3/notes.txt`)).toBe(
+          "retained submodule state\n",
+        );
+        yield* fs.remove(`${repository}/.t3`, { recursive: true });
+      }
       yield* command(submodule, ["submodule", "deinit", "child"]);
       yield* fs.writeFileString(`${child}/.env`, "secret after deinit\n");
       const report = yield* service.runNow;
@@ -5560,6 +5571,7 @@ describe("storage cleanup reports and local file policies", () => {
     { relative: "research/retained.txt", disposable: false },
     { relative: "tmp/notes.txt", disposable: false },
     { relative: "build/notes.txt", disposable: false },
+    { relative: "dist/source.js.orig", disposable: false },
     { relative: "native/resource-monitor/target/debug/binary", disposable: false },
     { relative: ".codex/node_modules/notes.txt", disposable: false },
     { relative: "prototype/example/.local/dist/notes.txt", disposable: false },
@@ -5579,6 +5591,15 @@ describe("storage cleanup reports and local file policies", () => {
           `${fixture.repo}/.git/info/exclude`,
           ".generated/\n.vite-hooks/\n*.tsbuildinfo\n.astro/\n.tanstack/\ndist-electron/\nbuild/\n.env*\n.codex/\n.local/\nresearch/\ntmp/\n",
         );
+        if (relative === "dist/source.js.orig") {
+          yield* fixture.fs.makeDirectory(`${fixture.worktree}/dist`);
+          yield* fixture.fs.writeFileString(
+            `${fixture.worktree}/dist/source.js`,
+            "tracked output\n",
+          );
+          yield* fixture.command(fixture.worktree, ["add", "-f", "dist/source.js"]);
+          yield* fixture.command(fixture.worktree, ["commit", "-m", "record tracked output"]);
+        }
         yield* fixture.fs.makeDirectory(
           `${fixture.worktree}/${relative.split("/").slice(0, -1).join("/")}`,
           { recursive: true },
