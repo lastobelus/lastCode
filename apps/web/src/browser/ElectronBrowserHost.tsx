@@ -1,4 +1,3 @@
-import { useOpenBrowserThreadLink } from "./useOpenBrowserThreadLink";
 import { useConnectedEnvironmentIds } from "~/state/environments";
 import { DesktopCdpRelay } from "./DesktopCdpRelay";
 
@@ -181,7 +180,11 @@ export function startElectronBrowserHost(): () => void {
   };
 }
 
-export function ElectronBrowserHost() {
+export function ElectronBrowserHost({
+  onThreadLink,
+}: {
+  readonly onThreadLink: (href: string, environmentId: EnvironmentId) => void;
+}) {
   const previewByThreadKey = useActivePreviewSessions();
   const primaryEnvironmentId = useAtomValue(primaryEnvironmentIdAtom);
   useDesktopHostedPreviewSessions(primaryEnvironmentId);
@@ -203,13 +206,12 @@ export function ElectronBrowserHost() {
       .catch((cause) => console.error("Native browser environment binding failed", cause));
   }, [primaryEnvironmentId, hasLocalDesktopBrowser]);
   const connectedEnvironmentIds = useConnectedEnvironmentIds();
-  const openThreadLink = useOpenBrowserThreadLink();
   const threadLinkOpened = useEffectEvent((desktopHostId: string, href: string) => {
     const environmentId =
       desktopHostId === "local"
         ? primaryEnvironmentId
         : connectedEnvironmentIds.find((id) => getDesktopBrowserHostId(id) === desktopHostId);
-    if (environmentId) openThreadLink(href, environmentId);
+    if (environmentId) onThreadLink(href, environmentId);
   });
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Receives native Browser link gestures from the owning desktop channel.
   useEffect(

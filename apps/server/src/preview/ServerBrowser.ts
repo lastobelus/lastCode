@@ -1,6 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off globalDate:off globalTimers:off - Playwright callbacks run outside the Effect runtime.
 import { parseThreadLinkHref } from "@t3tools/shared/threadLinks";
 import { installThreadLinkNavigation } from "./ThreadLinkNavigation.ts";
-// @effect-diagnostics nodeBuiltinImport:off globalDate:off globalTimers:off - Playwright callbacks run outside the Effect runtime.
 // Screencasts ignore emulated device scale; real 2x keeps captures sharp.
 // --disable-gpu uses cheaper software compositing while preserving SwiftShader WebGL.
 import {
@@ -324,6 +324,7 @@ interface ServerTab {
   readonly actionTimeline: Array<PreviewAutomationActionEvent>;
   readonly control: SessionControl;
   agentOperating: boolean;
+  threadLinkViewer: ViewerState | null;
   pageActivity: number;
   readonly hostingActivityId: string;
   frozen: boolean;
@@ -1280,7 +1281,7 @@ const make = Effect.gen(function* () {
     const page = adopted?.page ?? desktop?.page ?? (await context.newPage());
     if (!desktop) opened.push(() => page.close());
     const cdp = await context.newCDPSession(page);
-    await installPdfDocumentNavigation(cdp);
+    const documentPatterns = await installPdfDocumentNavigation(cdp);
     // The desktop's page is already a normal browser. A popup's first request
     // went out before it became a tab; everything after presents as Chrome.
     if (!desktop) await presentAsChrome(cdp, host);
@@ -1307,6 +1308,7 @@ const make = Effect.gen(function* () {
       actionTimeline: [],
       control,
       agentOperating: false,
+      threadLinkViewer: null,
       pageActivity: 0,
       hostingActivityId: `server-browser-page:${tabKey(snapshot.threadId, snapshot.tabId)}:${NodeCrypto.randomUUID()}`,
       frozen: false,
@@ -1352,19 +1354,22 @@ const make = Effect.gen(function* () {
       captureLock: Promise.resolve(),
       capturing: 0,
     };
+    const ignoredThreadNavigations = new Set<string>();
     await installThreadLinkNavigation(
       page,
       cdp,
       desktop !== null,
-      (href) => {
+      (href, kind) => {
+        if (!desktop && kind === "navigation" && href.startsWith("https:"))
+          ignoredThreadNavigations.add(href);
         if (tab.closing || tab.agentOperating) return;
-        const controller = [...tab.viewers].find((viewer) => viewer.id === tab.control.controller);
-        if (controller) controller.push({ _tag: "threadLink", href });
+        if (tab.threadLinkViewer) tab.threadLinkViewer.push({ _tag: "threadLink", href });
         else if (desktop && tab.nativePresented) runFork(desktopChannel.openThreadLink(tab, href));
       },
       (popup) => {
         blockedThreadPopups.add(popup);
       },
+      documentPatterns,
     );
     if (!desktop) {
       await page.setViewportSize(fixedViewportSize(tab.setting) ?? UNATTACHED_FILL_VIEWPORT);
@@ -1392,7 +1397,7 @@ const make = Effect.gen(function* () {
     }) =>
       request.isNavigationRequest() &&
       request.frame() === page.mainFrame() &&
-      parseThreadLinkHref(request.url()) === null;
+      !ignoredThreadNavigations.has(request.url());
     const navigationGenerations = new WeakMap<object, number>();
     page.on("request", (request) => {
       if (!isMainNavigation(request)) return;
@@ -1426,6 +1431,7 @@ const make = Effect.gen(function* () {
     // An adopted popup's frames may have loaded before the tab listened.
     if (adopted) for (const frame of page.frames()) void recordFrameCopies(tab, frame);
     page.on("requestfailed", (request) => {
+      if (ignoredThreadNavigations.delete(request.url())) return;
       const errorText = request.failure()?.errorText ?? "";
       pushBounded(tab.networkEntries, {
         url: ServerBrowserPage.withoutDataPayload(request.url()),
@@ -4959,8 +4965,14 @@ const make = Effect.gen(function* () {
                   : {}),
               });
             } else {
-              const dispatch = (input: Record<string, unknown>) =>
-                dispatchViewerInput(tab, session, viewer, input);
+              const dispatch = async (input: Record<string, unknown>) => {
+                tab.threadLinkViewer = viewer;
+                try {
+                  await dispatchViewerInput(tab, session, viewer, input);
+                } finally {
+                  tab.threadLinkViewer = null;
+                }
+              };
               if (
                 message.type === "mouse" &&
                 message.action === "move" &&

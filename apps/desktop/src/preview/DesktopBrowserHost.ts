@@ -1,7 +1,6 @@
-import { DESKTOP_BROWSER_EVENT_CHANNEL } from "../ipc/channels.ts";
-import { createBrowserThreadLinkNavigation } from "@t3tools/shared/threadLinks";
-import { parseThreadLinkHref } from "@t3tools/shared/threadLinks";
 // @effect-diagnostics nodeBuiltinImport:off - Names download files on the shared disk.
+import { createBrowserThreadLinkNavigation } from "./ThreadLinkGesture.ts";
+import { parseThreadLinkHref } from "@t3tools/shared/threadLinks";
 /** The manager owns the single debugger attachment; the relay shares it. */
 import {
   DESKTOP_BROWSER_DOWNLOAD_MAX_BYTES,
@@ -37,6 +36,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as DesktopClientSettings from "../settings/DesktopClientSettings.ts";
 import type { resolvePartitionScope } from "./BrowserProfileScope.ts";
 import {
+  DESKTOP_BROWSER_EVENT_CHANNEL,
   DESKTOP_BROWSER_SURFACE_REQUEST_CHANNEL,
   DESKTOP_BROWSER_RENDERER_REQUEST_CHANNEL,
 } from "../ipc/channels.ts";
@@ -146,6 +146,7 @@ interface AttachedTab {
     sessionId: string,
   ) => void;
   readonly onNewDocument: () => void;
+  readonly restoreThreadLinks: () => Promise<void>;
 }
 
 interface NativePopup {
@@ -869,7 +870,10 @@ export const make = Effect.gen(function* () {
   };
 
   const dropRelay = (tab: AttachedTab) => {
+    const hadRelay = tab.relay !== null;
     tab.relay = null;
+    if (hadRelay && !tab.debuggee.webContents.isDestroyed())
+      void tab.restoreThreadLinks().catch(() => undefined);
     tab.screencasts.clear();
     tab.agentUsed = false;
     dropFocusHolds(tab);
@@ -1143,8 +1147,10 @@ export const make = Effect.gen(function* () {
       focusReleasing: false,
       screencasts: new Set(),
       remoteDownloadDirectory: null,
+      restoreThreadLinks: () =>
+        navigation.install((method, params) => debuggee.debugger.sendCommand(method, params)),
       onMessage: (_event, method, params, sessionId) => {
-        if (!sessionId) void navigation.receive(method, params).catch(() => undefined);
+        if (!sessionId) navigation.receive(method, params);
         if (method === "Page.downloadWillBegin") {
           const guid = (params as { guid?: unknown } | undefined)?.guid;
           tab.pendingDownloadGuid = typeof guid === "string" ? guid : null;
@@ -1189,9 +1195,7 @@ export const make = Effect.gen(function* () {
     syncNativeLifetime();
     scheduleNativeLifetime();
     debuggee.debugger.on("message", tab.onMessage);
-    void navigation
-      .install((method, params) => debuggee.debugger.sendCommand(method, params))
-      .catch(() => undefined);
+    void tab.restoreThreadLinks().catch(() => undefined);
     debuggee.webContents.on("did-navigate", tab.onNewDocument);
     emit(
       {

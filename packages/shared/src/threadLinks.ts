@@ -340,105 +340,16 @@ export function browserThreadLinkTarget(
     ),
   );
   if (resolved.value) return resolved.value;
-  const link = parseThreadLinkHref(href)!;
+  const link = {
+    environmentId: reference.environmentId ?? null,
+    threadId: reference.threadId,
+    version: reference.version,
+    legacyThreadId: reference.legacyThreadId,
+  };
   return (
     guessThreadLinkRef(link, refs) ?? {
       environmentId: resolved.environmentId ?? sourceEnvironmentId,
       threadId: resolved.threadId,
     }
   );
-}
-
-type Send = (method: string, params?: Record<string, unknown>) => Promise<unknown>;
-
-export function createBrowserThreadLinkNavigation(
-  open: (href: string) => void,
-  world = "t3-thread-link-activation",
-) {
-  let mainFrameId: string | undefined;
-  let send: Send;
-  const activeFrames = new Set<string>();
-  const contexts = new Map<number, string>();
-  return {
-    async install(command: Send) {
-      send = command;
-      const tree = (await send("Page.getFrameTree")) as { frameTree: { frame: { id: string } } };
-      mainFrameId = tree.frameTree.frame.id;
-      await send("Runtime.enable");
-      await send("Runtime.addBinding", {
-        name: "t3ThreadLinkGesture",
-        executionContextName: world,
-      });
-      await send("Page.enable");
-      // External protocols consume activation before the navigation event reaches the host.
-      await send("Page.addScriptToEvaluateOnNewDocument", {
-        worldName: world,
-        runImmediately: true,
-        source: `for (const name of ["click", "auxclick", "keydown"]) {
-          addEventListener(name, (event) => {
-            if (!event.isTrusted || !navigator.userActivation.isActive) return;
-            t3ThreadLinkGesture("active");
-            setTimeout(() => t3ThreadLinkGesture("inactive"), 0);
-          }, true);
-        }`,
-      });
-    },
-    async receive(method: string, params: unknown) {
-      if (method === "Runtime.executionContextsCleared") {
-        contexts.clear();
-        activeFrames.clear();
-      } else if (method === "Runtime.executionContextCreated") {
-        const { context } = params as {
-          context: { name: string; id: number; auxData?: { frameId?: string } };
-        };
-        if (context.name === world && context.auxData?.frameId)
-          contexts.set(context.id, context.auxData.frameId);
-      } else if (method === "Runtime.executionContextDestroyed") {
-        const { executionContextId } = params as { executionContextId: number };
-        const frameId = contexts.get(executionContextId);
-        if (frameId) activeFrames.delete(frameId);
-        contexts.delete(executionContextId);
-      } else if (method === "Runtime.bindingCalled") {
-        const { name, payload, executionContextId } = params as {
-          name: string;
-          payload: string;
-          executionContextId: number;
-        };
-        const frameId = contexts.get(executionContextId);
-        if (name !== "t3ThreadLinkGesture" || frameId === undefined) return;
-        if (payload === "active") activeFrames.add(frameId);
-        else activeFrames.delete(frameId);
-      } else if (method === "Page.windowOpen") {
-        const { url, userGesture } = params as { url: string; userGesture: boolean };
-        if (userGesture && parseThreadLinkHref(url)) open(url);
-      } else if (method === "Page.frameRequestedNavigation") {
-        const { frameId, disposition, url } = params as {
-          frameId: string;
-          disposition: string;
-          url: string;
-        };
-        if (frameId !== mainFrameId || disposition !== "currentTab" || !parseThreadLinkHref(url))
-          return;
-        if (activeFrames.size > 0) {
-          open(url);
-          return;
-        }
-        try {
-          // Isolated worlds preserve Chromium's activation even if the page replaces navigator properties.
-          const { executionContextId } = (await send("Page.createIsolatedWorld", {
-            frameId,
-            worldName: world,
-          })) as { executionContextId: number };
-          const { result } = (await send("Runtime.evaluate", {
-            contextId: executionContextId,
-            expression: "navigator.userActivation.isActive",
-            returnByValue: true,
-          })) as { result: { value?: unknown } };
-          if (result.value === true) open(url);
-        } catch {
-          // A destroyed initiating document cannot authorize opening a thread.
-        }
-      }
-    },
-  };
 }

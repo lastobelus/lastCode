@@ -1,27 +1,40 @@
-import { createBrowserThreadLinkNavigation } from "@t3tools/shared/threadLinks";
 import { parseThreadLinkHref } from "@t3tools/shared/threadLinks";
-import type { CDPSession, Frame, Page, Route } from "playwright-core";
+import { DEFAULT_HOSTED_APP_URL } from "@t3tools/shared/connectAuth";
+import type { CDPSession, Page } from "playwright-core";
 
-/** Native navigation is canceled by Electron before a network request can start. */
+import { createBrowserThreadLinkNavigation } from "./ThreadLinkGesture.ts";
+
+const HOSTED_THREAD_DOCUMENT = {
+  urlPattern: `${DEFAULT_HOSTED_APP_URL}/threads/*/*`,
+  resourceType: "Document" as const,
+  requestStage: "Request" as const,
+};
+
 export async function installThreadLinkNavigation(
   page: Page,
   cdp: CDPSession,
   native: boolean,
-  open: (href: string) => void,
-  blockPopup: (popup: Page) => void = () => {},
+  open: (href: string, kind: "navigation" | "window") => void,
+  blockPopup: (popup: Page) => void,
+  extraPatterns: ReadonlyArray<{
+    urlPattern: string;
+    resourceType: "Document";
+    requestStage: "Response";
+  }> = [],
 ) {
-  const navigation = createBrowserThreadLinkNavigation(open);
-  const windows = new Map<string, number>();
-  cdp.on("Page.windowOpen", (event) => {
-    if (!native && event.url.startsWith("https:") && parseThreadLinkHref(event.url))
-      windows.set(event.url, (windows.get(event.url) ?? 0) + 1);
-    return navigation.receive("Page.windowOpen", event);
+  const announced = new Set<string>();
+  const windows = new Set<string>();
+  const navigation = createBrowserThreadLinkNavigation((href, kind) => {
+    if (kind === "window") windows.add(href);
+    else announced.add(href);
+    open(href, kind);
   });
   for (const event of [
     "Runtime.executionContextCreated",
     "Runtime.executionContextDestroyed",
     "Runtime.executionContextsCleared",
     "Runtime.bindingCalled",
+    "Page.windowOpen",
     "Page.frameRequestedNavigation",
   ] as const)
     cdp.on(event, (params) => navigation.receive(event, params));
@@ -29,34 +42,27 @@ export async function installThreadLinkNavigation(
     cdp.send(method as Parameters<CDPSession["send"]>[0], params),
   );
   if (native) return;
-  const matches = (url: URL) => parseThreadLinkHref(url.href) !== null;
-  const intercept = async (route: Route) => {
-    const request = route.request();
-    if (!request.isNavigationRequest()) return route.fallback();
-    let frame: Frame;
-    try {
-      frame = request.frame();
-    } catch {
-      // Initial popup requests precede their frame; the opener's CDP event identifies the destination.
-      const count = windows.get(request.url()) ?? 0;
-      if (count === 0) return route.fallback();
-      if (count === 1) windows.delete(request.url());
-      else windows.set(request.url(), count - 1);
-      await route.abort("aborted");
-      return;
-    }
-    const destination = frame.page();
-    if (frame !== destination.mainFrame()) return route.fallback();
-    if (destination !== page && (await destination.opener()) !== page) return route.fallback();
-    if (destination !== page) blockPopup(destination);
-    await route.abort("aborted");
-    if (destination !== page) await destination.close().catch(() => undefined);
-  };
-  await page.context().route(matches, intercept);
-  page.once("close", () => {
-    void page
-      .context()
-      .unroute(matches, intercept)
+
+  cdp.on("Fetch.requestPaused", (event) => {
+    if (event.responseStatusCode !== undefined) return;
+    const { requestId, request, resourceType } = event;
+    const intercepted =
+      resourceType === "Document" &&
+      parseThreadLinkHref(request.url) !== null &&
+      announced.delete(request.url);
+    return cdp
+      .send(intercepted ? "Fetch.failRequest" : "Fetch.continueRequest", {
+        requestId,
+        ...(intercepted ? { errorReason: "Aborted" as const } : {}),
+      })
       .catch(() => undefined);
+  });
+  await cdp.send("Fetch.enable", { patterns: [HOSTED_THREAD_DOCUMENT, ...extraPatterns] });
+
+  // Popup requests can precede their frame. Close an announced thread popup before the host adopts it.
+  page.on("popup", (popup) => {
+    if (!windows.delete(popup.url())) return;
+    blockPopup(popup);
+    void popup.close().catch(() => undefined);
   });
 }

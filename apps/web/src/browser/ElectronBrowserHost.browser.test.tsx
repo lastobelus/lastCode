@@ -210,7 +210,7 @@ async function renderHost() {
   const screen = stack.use(
     await render(
       <AppAtomRegistryProvider>
-        <ElectronBrowserHost />
+        <ElectronBrowserHost onThreadLink={() => {}} />
       </AppAtomRegistryProvider>,
     ),
   );

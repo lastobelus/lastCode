@@ -140,6 +140,7 @@ const makeDebuggee = (
             "Runtime.addBinding",
             "Page.enable",
             "Page.addScriptToEvaluateOnNewDocument",
+            "Page.removeScriptToEvaluateOnNewDocument",
           ].includes(method)
         ) {
           resolve({});
@@ -214,7 +215,16 @@ it.effect("opens a thread from a standalone native tab without a server relay", 
     host.attach(key, debuggee.tab, "native-thread-link");
     debuggee.emit("Page.windowOpen", { url: "t3-thread://v2/linked/thread", userGesture: false });
     debuggee.emit("Page.windowOpen", { url: "https://app.t3.codes/settings", userGesture: true });
+    debuggee.emit("Page.windowOpen", { url: "t3-thread://v2/linked/thread", userGesture: true });
     expect(send).not.toHaveBeenCalled();
+    debuggee.emit("Runtime.executionContextCreated", {
+      context: { id: 1, name: "t3-native-thread-link-activation", auxData: { frameId: "main" } },
+    });
+    debuggee.emit("Runtime.bindingCalled", {
+      name: "t3ThreadLinkGesture",
+      executionContextId: 1,
+      payload: "active",
+    });
     debuggee.emit("Page.windowOpen", { url: "t3-thread://v2/linked/thread", userGesture: true });
     expect(send).toHaveBeenCalledExactlyOnceWith("desktop:browser:event", {
       desktopHostId: "local",
@@ -4484,4 +4494,64 @@ it.effect("cleans host rendering after a missing guest and refuses unavailable a
     });
     expect(debuggee.hostContents.throttleChanges).toEqual([false, true]);
   }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "restores native thread-link gestures after a relay resets Runtime and releases the tab",
+  () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const debuggee = makeDebuggee();
+      const initial = Promise.withResolvers<void>();
+      const restored = Promise.withResolvers<void>();
+      const runtimeReset = Promise.withResolvers<void>();
+      let installs = 0;
+      const original = debuggee.tab.debugger.sendCommand.bind(debuggee.tab.debugger);
+      const protocol = vi
+        .spyOn(debuggee.tab.debugger, "sendCommand")
+        .mockImplementation(async (method, params, sessionId) => {
+          const pending = original(method, params, sessionId);
+          if (method === "Runtime.disable") {
+            runtimeReset.resolve();
+            debuggee.release();
+          }
+          const result = await pending;
+          if (method === "Page.addScriptToEvaluateOnNewDocument") {
+            installs += 1;
+            (installs === 1 ? initial : restored).resolve();
+          }
+          return result;
+        });
+      const send = vi.spyOn(debuggee.hostContents, "send");
+      host.attach(key, debuggee.tab, "restored-thread-link");
+      yield* Effect.promise(() => initial.promise);
+      yield* host.handleCommandLine(
+        JSON.stringify({
+          type: "cdp",
+          ...key,
+          message: JSON.stringify({ id: 1, method: "Target.setAutoAttach", params: {} }),
+        }),
+      );
+      yield* Effect.promise(() => runtimeReset.promise);
+      yield* host.handleCommandLine(JSON.stringify({ type: "release", ...key }));
+      yield* Effect.promise(() => restored.promise);
+      expect(protocol.mock.calls.some(([method]) => method === "Runtime.disable")).toBe(true);
+      debuggee.emit("Runtime.executionContextCreated", {
+        context: { id: 1, name: "t3-native-thread-link-activation", auxData: { frameId: "main" } },
+      });
+      debuggee.emit("Runtime.bindingCalled", {
+        name: "t3ThreadLinkGesture",
+        executionContextId: 1,
+        payload: "active",
+      });
+      debuggee.emit("Page.windowOpen", { url: "t3-thread://v2/local/restored", userGesture: true });
+      expect(send).toHaveBeenCalledWith(
+        "desktop:browser:event",
+        expect.objectContaining({
+          event: expect.objectContaining({ href: "t3-thread://v2/local/restored" }),
+        }),
+      );
+    }).pipe(Effect.scoped),
 );

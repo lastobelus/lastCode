@@ -359,8 +359,6 @@ function makeContext(onClose?: (context: BrowserContext) => void, initialUrl = "
     }),
   };
   const context = {
-    route: page.route,
-    unroute: page.unroute,
     cookies,
     request: {
       post: vi.fn(async (url: string, _options: unknown) => {
@@ -500,6 +498,8 @@ const desktopRenders = (tabId: string) => {
   return desktopTabs.has(tabId);
 };
 const shownDesktopTabs = new Set<string>();
+const nativeThreadLinks: string[] = [];
+let nativeThreadLinkCaptured: PromiseWithResolvers<void> | null = null;
 const releasedDesktopTabs: Array<string> = [];
 const desktopTurns = new NodeEvents.EventEmitter();
 const desktopConnections: Array<{ endpoint: string; context: ReturnType<typeof makeContext> }> = [];
@@ -882,7 +882,11 @@ const baseDependencies = Layer.mergeAll(
           desktopReleased.resolve();
         }),
       ),
-    openThreadLink: () => Effect.void,
+    openThreadLink: (_key, href) =>
+      Effect.sync(() => {
+        nativeThreadLinks.push(href);
+        nativeThreadLinkCaptured?.resolve();
+      }),
     pointer: () => Effect.void,
     turn: (threadId, active) => Effect.sync(() => desktopTurns.emit("turn", threadId, active)),
   }),
@@ -1039,6 +1043,8 @@ beforeEach(() => {
   pageCopy = "";
   keyCopy = "";
   focusedFrame = null;
+  nativeThreadLinks.length = 0;
+  nativeThreadLinkCaptured = null;
   desktopTabs.clear();
   shownDesktopTabs.clear();
   desktopDetachSubscribed = Promise.withResolvers<void>();
@@ -9785,6 +9791,54 @@ it.live("does not open a remote profile when the environment URL cannot be resol
       expect(desktopConnections).toHaveLength(0);
       const manager = yield* Manager.PreviewManager;
       expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.effect("thread links follow the activating input instead of an auto-controlling viewer", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { tabId, viewer, context, cdp } = yield* openDesktopViewer;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      presentedDesktopTabs.add(tabId);
+      yield* broker.invoke({
+        scope,
+        tabId: PreviewTabId.make(tabId),
+        operation: "status",
+        input: {},
+      });
+      const activate = () => {
+        cdp.emit("Runtime.executionContextCreated", {
+          context: { id: 21, name: "t3-thread-link-activation", auxData: { frameId: "main" } },
+        });
+        cdp.emit("Runtime.bindingCalled", {
+          name: "t3ThreadLinkGesture",
+          payload: "active",
+          executionContextId: 21,
+        });
+      };
+      activate();
+      nativeThreadLinkCaptured = Promise.withResolvers<void>();
+      cdp.emit("Page.windowOpen", { url: "t3-thread://v2/local/native", userGesture: true });
+      yield* Effect.promise(() => nativeThreadLinkCaptured!.promise);
+      expect(nativeThreadLinks).toEqual(["t3-thread://v2/local/native"]);
+      expect((yield* Queue.takeAll(viewer.output)).some((item) => item._tag === "threadLink")).toBe(
+        false,
+      );
+      const session = context.sessions.at(-1)!;
+      const original = session.send.getMockImplementation()!;
+      session.send.mockImplementation(async (method, input) => {
+        if (method === "Input.dispatchMouseEvent") {
+          activate();
+          cdp.emit("Page.windowOpen", { url: "t3-thread://v2/local/streamed", userGesture: true });
+        }
+        return original(method, input);
+      });
+      yield* viewer.input({ type: "mouse", action: "up", button: "left", x: 1, y: 1 });
+      expect(
+        (yield* Queue.takeAll(viewer.output)).filter((item) => item._tag === "threadLink"),
+      ).toEqual([{ _tag: "threadLink", href: "t3-thread://v2/local/streamed" }]);
+      expect(nativeThreadLinks).toEqual(["t3-thread://v2/local/native"]);
     }),
   ).pipe(Effect.provide(layer)),
 );

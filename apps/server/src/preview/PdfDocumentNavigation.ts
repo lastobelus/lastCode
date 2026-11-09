@@ -14,12 +14,13 @@ export async function installPdfDocumentNavigation(cdp: CDPSession) {
     expression: "navigator.pdfViewerEnabled",
     returnByValue: true,
   });
-  if (nativeViewer.result?.value === true) return;
+  if (nativeViewer.result?.value === true) return [];
   const { frameTree } = await cdp.send("Page.getFrameTree");
   // The shell cannot open PDFs. Commit a document at the original URL so the
   // client can embed its signed bytes while Back and Forward keep working.
   cdp.on("Fetch.requestPaused", (event) => {
     const { requestId, request, frameId } = event;
+    if (!isPdfAssetUrl(request.url) || event.responseStatusCode === undefined) return;
     const proceed = () => cdp.send("Fetch.continueRequest", { requestId });
     void (async () => {
       if (
@@ -64,9 +65,13 @@ export async function installPdfDocumentNavigation(cdp: CDPSession) {
     })().catch(() => proceed().catch(constVoid));
   });
   // Only document navigations pause; the client's PDF fetch gets the original bytes.
-  await cdp.send("Fetch.enable", {
-    patterns: [
-      { urlPattern: "*/api/assets/*", resourceType: "Document", requestStage: "Response" },
-    ],
-  });
+  const patterns = [
+    {
+      urlPattern: "*/api/assets/*",
+      resourceType: "Document" as const,
+      requestStage: "Response" as const,
+    },
+  ];
+  await cdp.send("Fetch.enable", { patterns });
+  return patterns;
 }
