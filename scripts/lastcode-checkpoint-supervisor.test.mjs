@@ -20,6 +20,7 @@ import {
   initializedGitlink,
   latestFailedCheckpointRun,
   projectActionTrustAllowlist,
+  pruneCheckpointQaCheckouts,
   reconcilePrimaryProjectActions,
   refreshPrimaryCheckout,
   refreshInstalledSupervisor,
@@ -49,6 +50,7 @@ function fixture(overrides = {}) {
     loadState: () => state,
     now: () => new Date(Date.UTC(2026, 7, 26, 0, 0, now++)).toISOString(),
     notify: vi.fn(),
+    pruneQaCheckouts: vi.fn(),
     reconcileProjectActions: vi.fn(),
     refreshPrimaryCheckout: vi.fn(),
     refreshSupervisor: vi.fn(),
@@ -900,6 +902,45 @@ describe("LastCode checkpoint supervisor", () => {
     expect(execute.mock.calls.some(([, , , args]) => args[0] === "fetch")).toBe(false);
   });
 
+  it("removes only unlocked checkpoint QA checkouts whose commit is over a week old", () => {
+    const day = 24 * 60 * 60;
+    const now = 100 * day;
+    const commitTimes = { a: now - 8 * day, b: now - 6 * day, c: now - 30 * day, d: now - 9 * day };
+    const removed = [];
+    const execute = vi.fn((_phase, _cwd, _command, args) => {
+      if (args[0] === "worktree" && args[1] === "list") {
+        return [
+          "worktree /srv/example/lastCode\nHEAD a\nbranch refs/heads/lastcode/main",
+          "worktree /srv/example/lastCode-worktrees/lastcode-automation\nHEAD a\ndetached",
+          "worktree /srv/example/lastCode-worktrees/lastcode-checkpoint-4016-qa\nHEAD a\ndetached",
+          "worktree /srv/example/lastCode-worktrees/lastcode-checkpoint-4301-qa\nHEAD b\ndetached",
+          "worktree /srv/example/lastCode-worktrees/lastcode-checkpoint-3969-qa\nHEAD c\ndetached\nlocked keep for bisect",
+          "worktree /srv/example/lastCode-worktrees/lastcode-checkpoint-3682.1-qa\nHEAD d\nbranch refs/heads/qa/checkpoint-3682",
+          "worktree /srv/example/lastCode-worktrees/lastcode-checkpoint-3604-qa\nHEAD c\ndetached",
+        ].join("\n\n");
+      }
+      if (args[0] === "show") return String(commitTimes[args.at(-1)]);
+      if (args[0] === "worktree" && args[1] === "remove") {
+        if (args.at(-1).endsWith("3604-qa")) {
+          throw new Error("cannot remove: Permission denied");
+        }
+        removed.push(args.at(-1));
+      }
+      return "";
+    });
+
+    expect(() =>
+      pruneCheckpointQaCheckouts("/srv/example/lastCode", {}, now * 1000, execute),
+    ).toThrow("lastcode-checkpoint-3604-qa: cannot remove: Permission denied");
+    expect(removed).toEqual([
+      "/srv/example/lastCode-worktrees/lastcode-checkpoint-4016-qa",
+      "/srv/example/lastCode-worktrees/lastcode-checkpoint-3682.1-qa",
+    ]);
+    expect(
+      execute.mock.calls.find(([, , , args]) => args[1] === "remove")?.[3].slice(0, 3),
+    ).toEqual(["worktree", "remove", "--force"]);
+  });
+
   it("keeps checkpoint success when the primary checkout refresh fails", () => {
     const test = fixture({
       dependencies: {
@@ -921,6 +962,7 @@ describe("LastCode checkpoint supervisor", () => {
     expect(test.state.incident).toBeUndefined();
     expect(test.messages).toEqual([]);
     expect(test.dependencies.reconcileProjectActions).not.toHaveBeenCalled();
+    expect(test.dependencies.pruneQaCheckouts).toHaveBeenCalledOnce();
     expect(test.activities).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -939,6 +981,9 @@ describe("LastCode checkpoint supervisor", () => {
         refreshPrimaryCheckout: () => "/srv/example/lastCode",
         reconcileProjectActions: () => {
           throw new Error("Project Action reconciliation failed");
+        },
+        pruneQaCheckouts: () => {
+          throw new Error("Could not remove stale checkpoint QA checkouts");
         },
       },
     });
