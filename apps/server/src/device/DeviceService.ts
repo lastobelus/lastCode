@@ -125,6 +125,7 @@ export interface DeviceScreenshot {
 }
 
 interface AgentBootedDevice {
+  readonly threadId: ThreadId;
   readonly hostId: DeviceHostId;
   readonly deviceId: DeviceId;
   readonly platform: DevicePlatform;
@@ -169,6 +170,12 @@ export class DeviceService extends Context.Service<
     readonly retireThreadAgentAccess: (threadId: ThreadId) => Effect.Effect<void, DeviceError>;
     /** Closes a finished thread's devices and shuts down agent-booted ones nothing else uses. */
     readonly releaseThread: (threadId: ThreadId) => Effect.Effect<void, DeviceError>;
+    /** Whether this thread's agent booted the device, so it should shut it down when done. */
+    readonly bootedByThread: (input: {
+      readonly threadId: ThreadId;
+      readonly hostId: DeviceHostId;
+      readonly deviceId: DeviceId;
+    }) => Effect.Effect<boolean>;
     /** Marks a device as in use, deferring its idle shutdown. */
     readonly recordActivity: (hostId: DeviceHostId, deviceId: DeviceId) => Effect.Effect<void>;
     /** Shuts down agent-booted devices with no device command for `AGENT_DEVICE_IDLE_TIMEOUT`. */
@@ -1019,6 +1026,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
           Clock.currentTimeMillis.pipe(
             Effect.map((lastActivity) => {
               const owned: AgentBootedDevice = {
+                threadId: input.threadId,
                 hostId: host.id,
                 deviceId,
                 platform,
@@ -1265,14 +1273,12 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       .pipe(
         Effect.catch((cause) => {
           // Retry on later sweeps, but stop retrying a device that keeps failing.
+          // Kept until a shutdown succeeds or discovery sees it stopped; warn once.
           booted.failedShutdowns++;
-          if (booted.failedShutdowns >= 3 && agentBooted.get(key) === booted)
-            agentBooted.delete(key);
-          return Effect.logWarning("Could not shut down an agent-booted device", {
-            hostId: booted.hostId,
-            deviceId: booted.deviceId,
-            cause,
-          }).pipe(Effect.as(false));
+          return (booted.failedShutdowns === 1 ? Effect.logWarning : Effect.logDebug)(
+            "Could not shut down an agent-booted device",
+            { hostId: booted.hostId, deviceId: booted.deviceId, cause },
+          ).pipe(Effect.as(false));
         }),
       );
     if (stopped) yield* refreshAfterShutdown(ready);
@@ -1282,16 +1288,18 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
     "DeviceService.releaseThread",
   )(function* (threadId) {
     const sessions = yield* sessionsForThread(threadId);
-    if (sessions.length === 0) return;
-    yield* close({ threadId });
-    yield* Effect.forEach(
-      sessions,
-      (session) => {
+    if (sessions.length > 0) yield* close({ threadId });
+    // Devices it had open, and ones it booted and then closed without shutting down.
+    const candidates = new Set([
+      ...sessions.flatMap((session) => {
         const booted = agentBooted.get(bootKey(session.hostId, session.deviceId));
-        return booted
-          ? shutdownAgentBooted(booted, (holding) => holding.length === 0)
-          : Effect.void;
-      },
+        return booted ? [booted] : [];
+      }),
+      ...[...agentBooted.values()].filter((booted) => booted.threadId === threadId),
+    ]);
+    yield* Effect.forEach(
+      candidates,
+      (booted) => shutdownAgentBooted(booted, (holding) => holding.length === 0),
       { discard: true },
     );
   });
@@ -1442,6 +1450,9 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
         lifecycleLock.withPermit(retireThreadAgentAccess(threadId)),
       ),
       releaseThread,
+      bootedByThread: Effect.fn("DeviceService.bootedByThread")(({ threadId, hostId, deviceId }) =>
+        Effect.sync(() => agentBooted.get(bootKey(hostId, deviceId))?.threadId === threadId),
+      ),
       recordActivity,
       shutdownIdleDevices,
       shutdownAgentBootedDevices,

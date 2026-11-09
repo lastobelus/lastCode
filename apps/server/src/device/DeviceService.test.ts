@@ -2573,6 +2573,18 @@ describe("agent-booted device shutdown", () => {
         yield* service.releaseThread(ThreadId.make("second"));
         expect(local.shutdowns).toEqual(["AGENT-SIM"]);
         expect((yield* service.state).sessions).toEqual([]);
+        // A plain close keeps it running, but the booting thread still owns its shutdown.
+        yield* open("SECOND-SIM", { thread: "closer" });
+        expect(
+          yield* service.bootedByThread({
+            threadId: ThreadId.make("closer"),
+            hostId: LOCAL_DEVICE_HOST_ID,
+            deviceId: DeviceId.make("SECOND-SIM"),
+          }),
+        ).toBe(true);
+        yield* service.close({ threadId: ThreadId.make("closer") });
+        yield* service.releaseThread(ThreadId.make("closer"));
+        expect(local.shutdowns).toEqual(["AGENT-SIM", "SECOND-SIM"]);
       }),
     ),
   );
@@ -2622,15 +2634,17 @@ describe("agent-booted device shutdown", () => {
     ),
   );
 
-  it.effect("retries a failed shutdown on the next sweep", () =>
+  it.effect("retries a failed shutdown on later sweeps until it succeeds", () =>
     withService(({ service, local, open }) =>
       Effect.gen(function* () {
         yield* open("AGENT-SIM");
-        local.faults.shutdowns = 1;
+        local.faults.shutdowns = 4;
         yield* TestClock.adjust("30 minutes");
-        yield* service.shutdownIdleDevices;
+        for (let sweep = 0; sweep < 4; sweep++) {
+          yield* service.shutdownIdleDevices;
+          yield* TestClock.adjust("1 minute");
+        }
         expect(local.shutdowns).toEqual([]);
-        yield* TestClock.adjust("1 minute");
         yield* service.shutdownIdleDevices;
         expect(local.shutdowns).toEqual(["AGENT-SIM"]);
       }),

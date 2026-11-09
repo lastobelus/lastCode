@@ -140,6 +140,7 @@ const agentReady: DeviceService.DeviceAgentReadiness = {
 };
 
 const layerDeviceServiceMock = Layer.mock(DeviceService.DeviceService)({
+  bootedByThread: () => Effect.succeed(false),
   state: Effect.succeed(state),
   list: Effect.succeed(state),
   completeOpen: () => Effect.void,
@@ -338,6 +339,7 @@ it.effect.each([
     const operations: string[] = [];
     const scopedArgs = ["--config", "/host.json", "--session", "opened-device-session"];
     const layerOpening = Layer.mock(DeviceService.DeviceService)({
+      bootedByThread: () => Effect.succeed(false),
       list: Effect.succeed({ ...state, devices: [selectedDevice] }),
       state: Effect.succeed({ ...state, devices: [refreshed ? openedDevice : selectedDevice] }),
       agentReadinessIfSupported: (hostId, enabled) =>
@@ -417,6 +419,7 @@ it.effect.each([
 
 it.effect("does not boot or issue a credential when agent readiness is unsupported", () => {
   const layerUnsupported = Layer.mock(DeviceService.DeviceService)({
+    bootedByThread: () => Effect.succeed(false),
     list: Effect.succeed(state),
     agentReadinessIfSupported: () => Effect.succeed(null),
     open: () => Effect.die("Must not boot without agent readiness"),
@@ -459,6 +462,7 @@ it.effect("does not boot or issue a credential when agent readiness is unsupport
 
 it.effect("rejects unavailable agent access before booting or opening a device", () => {
   const layerUnavailable = Layer.mock(DeviceService.DeviceService)({
+    bootedByThread: () => Effect.succeed(false),
     list: Effect.succeed(state),
     agentReadinessIfSupported: () =>
       Effect.fail(
@@ -568,6 +572,7 @@ describe("device targeting across hosts", () => {
     const opened: Array<{ hostId: string; deviceId: string }> = [];
     const closed: Array<{ hostId?: string | undefined; deviceId?: string | undefined }> = [];
     const layerDevices = Layer.mock(DeviceService.DeviceService)({
+      bootedByThread: () => Effect.succeed(false),
       state: Effect.succeed(multiHostState),
       list: Effect.succeed(multiHostState),
       agentReadinessIfSupported: () => Effect.succeed(readiness),
@@ -872,6 +877,7 @@ it.effect.each([
       });
       const operations: string[] = [];
       const observedService = Layer.mock(DeviceService.DeviceService)({
+        bootedByThread: () => Effect.succeed(false),
         state: Effect.succeed(state),
         list: Effect.sync(() => {
           operations.push("list");
@@ -1012,6 +1018,7 @@ it.effect.each([
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         return Layer.mock(DeviceService.DeviceService)({
+          bootedByThread: () => Effect.succeed(false),
           list: Effect.succeed(state),
           state: Effect.succeed(state),
           agentReadinessIfSupported: () => Effect.succeed(agentReady),
@@ -1139,6 +1146,7 @@ it.effect("rolls back the opened session when post-open credential issuance is i
     };
     const aborted: DeviceSession[] = [];
     const delayedDevices = Layer.mock(DeviceService.DeviceService)({
+      bootedByThread: () => Effect.succeed(false),
       list: Effect.succeed(state),
       agentReadinessIfSupported: () => Effect.succeed(agentReady),
       open: () => Effect.succeed(openedSession),
@@ -1201,6 +1209,7 @@ it.effect.each([
       const sessions = yield* Ref.make<ReadonlyArray<DeviceSession>>([]);
       let bootCalls = 0;
       const devices = Layer.mock(DeviceService.DeviceService)({
+        bootedByThread: () => Effect.succeed(false),
         list: Effect.succeed(state),
         state: Ref.get(sessions).pipe(Effect.map((sessions) => ({ ...state, sessions }))),
         agentReadinessIfSupported: () =>

@@ -311,7 +311,18 @@ const handlers = {
                 }
               : hostKind === "eas"
                 ? { kind: "eas" }
-                : { kind: "own", wasRunning: target.booted },
+                : {
+                    kind: "own",
+                    // The server tracks local boots, which covers a reopen by the booting thread.
+                    wasRunning:
+                      hostKind === "local"
+                        ? !(yield* devices.bootedByThread({
+                            threadId: scope.thread.threadId,
+                            hostId: session.hostId,
+                            deviceId: session.deviceId,
+                          }))
+                        : target.booted,
+                  },
           ),
         };
       }).pipe(
