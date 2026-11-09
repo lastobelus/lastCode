@@ -1,10 +1,19 @@
-import { parseThreadLinkHref } from "../threadLinks.ts";
+import { parseThreadLinkHref, THREAD_LINK_PROTOCOL } from "../threadLinks.ts";
 
 type Send = (method: string, params?: Record<string, unknown>) => Promise<unknown>;
+
+export function matchesThreadLinkPopup(announced: string | undefined, url: string) {
+  return (
+    announced !== undefined &&
+    (announced === url ||
+      (announced.startsWith(`${THREAD_LINK_PROTOCOL}:`) && [":", "", "about:blank"].includes(url)))
+  );
+}
 
 export function createBrowserThreadLinkNavigation(
   open: (href: string, kind: "navigation" | "window") => void,
   world = "t3-thread-link-activation",
+  declined: (href: string, kind: "navigation" | "window") => void = () => {},
 ) {
   let mainFrameId: string | undefined;
   let scriptId: string | undefined;
@@ -69,7 +78,9 @@ export function createBrowserThreadLinkNavigation(
         else activeFrames.delete(frameId);
       } else if (method === "Page.windowOpen") {
         const { url, userGesture } = params as { url: string; userGesture: boolean };
-        if (userGesture && activeFrames.size > 0 && parseThreadLinkHref(url)) open(url, "window");
+        if (!parseThreadLinkHref(url)) return;
+        if (userGesture && activeFrames.size > 0) open(url, "window");
+        else declined(url, "window");
       } else if (method === "Page.frameRequestedNavigation") {
         const { frameId, disposition, url } = params as {
           frameId: string;
@@ -79,6 +90,7 @@ export function createBrowserThreadLinkNavigation(
         if (frameId !== mainFrameId || disposition !== "currentTab" || !parseThreadLinkHref(url))
           return;
         if (activeFrames.size > 0) open(url, "navigation");
+        else declined(url, "navigation");
       }
     },
   };

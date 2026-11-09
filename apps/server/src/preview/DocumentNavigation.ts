@@ -3,6 +3,7 @@ import type { CDPSession } from "playwright-core";
 
 export interface PausedDocumentRequest {
   requestId: string;
+  networkId?: string;
   frameId: string;
   resourceType: string;
   request: { url: string; method: string };

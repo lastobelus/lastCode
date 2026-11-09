@@ -238,6 +238,45 @@ it.effect("opens a thread from a standalone native tab without a server relay", 
   }).pipe(Effect.scoped),
 );
 
+it.effect("resumes declined standalone hosted links and intercepts only accepted popups", () =>
+  Effect.gen(function* () {
+    const host = yield* DesktopBrowserHost.make.pipe(
+      Effect.provide(DesktopClientSettings.layerTest()),
+    );
+    const debuggee = makeDebuggee();
+    const loadURL = vi.fn(async () => {});
+    Object.assign(debuggee.webContents, { loadURL });
+    const send = vi.spyOn(debuggee.hostContents, "send");
+    host.attach(key, debuggee.tab, "declined-thread-link");
+    yield* settle;
+    const href = "https://app.t3.codes/threads/linked/thread";
+    debuggee.emit("Page.frameRequestedNavigation", {
+      frameId: "main",
+      disposition: "currentTab",
+      url: href,
+    });
+    expect(loadURL).toHaveBeenCalledExactlyOnceWith(href);
+    expect(send).not.toHaveBeenCalled();
+    debuggee.emit("Page.windowOpen", { url: href, userGesture: false });
+    const declined = makePopup();
+    host.registerPopup(key, declined.window, href);
+    expect(declined.window.isDestroyed()).toBe(false);
+    debuggee.emit("Runtime.executionContextCreated", {
+      context: { id: 1, name: "t3-native-thread-link-activation", auxData: { frameId: "main" } },
+    });
+    debuggee.emit("Runtime.bindingCalled", {
+      name: "t3ThreadLinkGesture",
+      executionContextId: 1,
+      payload: "active",
+    });
+    debuggee.emit("Page.windowOpen", { url: href, userGesture: true });
+    const accepted = makePopup();
+    host.registerPopup(key, accepted.window, href);
+    expect(accepted.window.isDestroyed()).toBe(true);
+    expect(send).toHaveBeenCalledOnce();
+  }).pipe(Effect.scoped),
+);
+
 it.effect.each([
   { destroyed: "guest", visible: true },
   { destroyed: "guest", visible: false },
@@ -790,7 +829,7 @@ it.effect.each(["foreground-tab", "background-tab"] as const)(
       });
       const child = makeRoot();
       Object.assign(child.contents, { setIgnoreMenuShortcuts: () => undefined });
-      root.contents.emit("did-create-window", child.window);
+      root.contents.emit("did-create-window", child.window, { url: child.contents.getURL() });
       const createdChild = yield* Queue.take(events);
       if (createdChild.type !== "popupCreated") throw new Error("Expected child popup");
       expect(createdChild).toMatchObject({ ...key });
@@ -824,7 +863,9 @@ it.effect.each(["foreground-tab", "background-tab"] as const)(
       });
       const grandchild = makeRoot();
       Object.assign(grandchild.contents, { setIgnoreMenuShortcuts: () => undefined });
-      child.contents.emit("did-create-window", grandchild.window);
+      child.contents.emit("did-create-window", grandchild.window, {
+        url: grandchild.contents.getURL(),
+      });
       expect(yield* Queue.take(events)).toMatchObject({ type: "popupCreated", ...childKey });
       expect(grandchild.attachCount()).toBe(1);
     }),
@@ -1670,7 +1711,7 @@ it.effect("main-window closure destroys published automation roots and their chi
     yield* send({ type: "publishRoot", ...attempt });
     const child = makeRoot();
     Object.assign(child.contents, { setIgnoreMenuShortcuts: () => undefined });
-    root.contents.emit("did-create-window", child.window);
+    root.contents.emit("did-create-window", child.window, { url: child.contents.getURL() });
     expect((yield* Queue.take(events)).type).toBe("popupCreated");
     const sharedKey = { ...key, tabId: "human-tab", desktopHostId: "host-a" };
     host.attach(sharedKey, makeDebuggee().tab, "human-runtime");
@@ -1697,7 +1738,7 @@ it.effect("main-window closure destroys published automation roots and their chi
     expect(closed.map((event) => event.type).sort()).toEqual(["detached", "dormant", "dormant"]);
     // A child delivered after owner closure is destroyed before registration.
     const lateChild = makeRoot();
-    root.contents.emit("did-create-window", lateChild.window);
+    root.contents.emit("did-create-window", lateChild.window, { url: lateChild.contents.getURL() });
     expect(lateChild.window.isDestroyed()).toBe(true);
     expect(lateChild.attachCount()).toBe(0);
   }),

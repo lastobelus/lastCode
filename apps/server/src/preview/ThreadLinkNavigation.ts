@@ -1,6 +1,9 @@
 import { parseThreadLinkHref } from "@t3tools/shared/threadLinks";
 import { DEFAULT_HOSTED_APP_URL } from "@t3tools/shared/connectAuth";
-import { createBrowserThreadLinkNavigation } from "@t3tools/shared/server/threadLinkGesture";
+import {
+  createBrowserThreadLinkNavigation,
+  matchesThreadLinkPopup,
+} from "@t3tools/shared/server/threadLinkGesture";
 import type { CDPSession, Page } from "playwright-core";
 
 import { installDocumentNavigation, type DocumentNavigationHandler } from "./DocumentNavigation.ts";
@@ -20,13 +23,27 @@ export async function installThreadLinkNavigation(
   documentHandlers: ReadonlyArray<DocumentNavigationHandler> = [],
 ) {
   const announced = new Set<string>();
+  const dispatched = new Map<string, string>();
   const intercepted = new Set<string>();
-  const windows = new Set<string>();
-  const navigation = createBrowserThreadLinkNavigation((href, kind) => {
-    if (!open(href, kind)) return;
-    if (kind === "window") windows.add(href);
-    else announced.add(href);
-  });
+  let windowHref: string | undefined;
+  const resumeDeclined = (href: string, kind: "navigation" | "window") => {
+    // Electron cancels renderer navigations synchronously. A programmatic load
+    // bypasses will-frame-navigate when the server cannot deliver the app-open.
+    if (native && kind === "navigation" && href.startsWith("https:"))
+      void page.goto(href).catch(() => undefined);
+  };
+  const navigation = createBrowserThreadLinkNavigation(
+    (href, kind) => {
+      if (!open(href, kind)) {
+        resumeDeclined(href, kind);
+        return;
+      }
+      if (kind === "window") windowHref = href;
+      else announced.add(href);
+    },
+    "t3-thread-link-activation",
+    resumeDeclined,
+  );
   for (const event of [
     "Runtime.executionContextCreated",
     "Runtime.executionContextDestroyed",
@@ -36,7 +53,7 @@ export async function installThreadLinkNavigation(
     "Page.frameRequestedNavigation",
   ] as const)
     cdp.on(event, (params) => {
-      if (event === "Page.windowOpen") windows.clear();
+      if (event === "Page.windowOpen") windowHref = undefined;
       navigation.receive(event, params);
       // A cancelled navigation must not authorise a later address-bar or agent load.
       if (!navigation.active) announced.clear();
@@ -44,6 +61,16 @@ export async function installThreadLinkNavigation(
   await navigation.install((method, params) =>
     cdp.send(method as Parameters<CDPSession["send"]>[0], params),
   );
+  cdp.on("Network.requestWillBeSent", ({ requestId, request, type }) => {
+    if (type === "Document" && announced.delete(request.url))
+      dispatched.set(requestId, request.url);
+  });
+  const complete = ({ requestId }: { requestId: string }) => {
+    dispatched.delete(requestId);
+  };
+  cdp.on("Network.loadingFailed", complete);
+  cdp.on("Network.loadingFinished", complete);
+  await cdp.send("Network.enable");
   await installDocumentNavigation(cdp, [
     ...documentHandlers,
     ...(native
@@ -56,8 +83,11 @@ export async function installThreadLinkNavigation(
               event.responseErrorReason === undefined &&
               event.resourceType === "Document" &&
               parseThreadLinkHref(event.request.url) !== null,
-            async handle({ requestId, request }) {
-              if (announced.delete(request.url)) {
+            async handle({ requestId, request, networkId }) {
+              if (
+                (networkId !== undefined && dispatched.delete(networkId)) ||
+                announced.delete(request.url)
+              ) {
                 intercepted.add(request.url);
                 await cdp.send("Fetch.failRequest", { requestId, errorReason: "Aborted" });
               } else {
@@ -69,14 +99,15 @@ export async function installThreadLinkNavigation(
   ]);
 
   // Popup requests can precede their frame. Close an announced thread popup before the host adopts it.
-  if (!native)
-    page.on("popup", (popup) => {
-      if (!windows.delete(popup.url())) return;
-      blockPopup(popup);
-      void popup.close().catch(() => undefined);
-    });
+  page.on("popup", (popup) => {
+    if (!matchesThreadLinkPopup(windowHref, popup.url())) return;
+    windowHref = undefined;
+    blockPopup(popup);
+    void popup.close().catch(() => undefined);
+  });
   return {
-    isThreadNavigation: (url: string) => announced.has(url) || intercepted.has(url),
+    isThreadNavigation: (url: string) =>
+      announced.has(url) || intercepted.has(url) || [...dispatched.values()].includes(url),
     consumeFailedNavigation: (url: string) => intercepted.delete(url),
   };
 }

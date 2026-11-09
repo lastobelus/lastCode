@@ -9903,3 +9903,63 @@ it.effect("thread links follow the activating input instead of an auto-controlli
     }),
   ).pipe(Effect.provide(layer)),
 );
+
+it.effect.each(["agent-operating", "no-gesture"] as const)(
+  "resumes a declined native hosted navigation (%s)",
+  (reason) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { tabId, viewer, context, cdp } = yield* openDesktopViewer;
+        const broker = yield* Broker.PreviewAutomationBroker;
+        presentedDesktopTabs.add(tabId);
+        yield* broker.invoke({
+          scope,
+          tabId: PreviewTabId.make(tabId),
+          operation: "status",
+          input: {},
+        });
+        yield* viewer.input({ type: "releaseControl" });
+        const href = "https://app.t3.codes/threads/linked/thread";
+        const click = async () => {
+          if (reason === "agent-operating") {
+            cdp.emit("Runtime.executionContextCreated", {
+              context: { id: 21, name: "t3-thread-link-activation", auxData: { frameId: "main" } },
+            });
+            cdp.emit("Runtime.bindingCalled", {
+              name: "t3ThreadLinkGesture",
+              payload: "active",
+              executionContextId: 21,
+            });
+          }
+          cdp.emit("Page.frameRequestedNavigation", {
+            frameId: "main",
+            disposition: "currentTab",
+            url: href,
+          });
+        };
+        if (reason === "agent-operating") {
+          const send = cdp.send.getMockImplementation()!;
+          cdp.send.mockImplementation(async (method, input) => {
+            if (
+              method === "Runtime.evaluate" &&
+              (input as { expression?: string })?.expression === "clickThreadLink()"
+            )
+              await click();
+            return send(method, input);
+          });
+          yield* broker.invoke({
+            scope,
+            tabId: PreviewTabId.make(tabId),
+            operation: "evaluate",
+            input: { expression: "clickThreadLink()" },
+          });
+        } else yield* Effect.promise(click);
+        expect(context.page.goto).toHaveBeenCalledExactlyOnceWith(href);
+        expect(context.page.url()).toBe(href);
+        expect(nativeThreadLinks).toEqual([]);
+        expect(
+          (yield* Queue.takeAll(viewer.output)).filter((item) => item._tag === "threadLink"),
+        ).toEqual([]);
+      }),
+    ).pipe(Effect.provide(layer)),
+);

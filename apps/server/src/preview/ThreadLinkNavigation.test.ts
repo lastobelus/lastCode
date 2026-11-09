@@ -25,19 +25,37 @@ async function fulfillHosted(cdp: CDPSession) {
 }
 
 it("keeps clicked thread navigations in the app, including hosted new windows", async () => {
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({ headless: true, channel: "chromium" });
   try {
     const context = await browser.newContext();
     const page = await context.newPage();
     const cdp = await context.newCDPSession(page);
+    const browserCdp = await browser.newBrowserCDPSession();
+    const { targetInfo: sourceTarget } = await cdp.send("Target.getTargetInfo");
+    let closeProtocolPopup = false;
+    browserCdp.on("Target.targetCreated", ({ targetInfo }) => {
+      if (
+        closeProtocolPopup &&
+        targetInfo.type === "page" &&
+        targetInfo.targetId !== sourceTarget.targetId
+      )
+        void browserCdp.send("Target.closeTarget", { targetId: targetInfo.targetId });
+    });
+    await browserCdp.send("Target.setDiscoverTargets", { discover: true });
     await context.route(hosted, (route) =>
       route.fulfill({ contentType: "text/html", body: "Hosted popup fixture" }),
     );
     let opened = Promise.withResolvers<string>();
     const requests: string[] = [];
-    await page.setContent(
-      `<a id="custom" href="${href}">Custom</a><a id="hosted" href="${hosted}">Hosted</a><button id="location" onclick="location.href='${hosted}'">Navigate</button><button id="popup" onclick="window.open('${href}')">Popup</button><a id="hostedPopup" href="${hosted}" target="_blank">Hosted popup</a>`,
+    const blockPopup = vi.fn();
+    const source = "https://source.example.test/";
+    await context.route(source, (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<a id="custom" href="${href}">Custom</a><a id="hosted" href="${hosted}">Hosted</a><button id="location" onclick="location.href='${hosted}'">Navigate</button><button id="popup" onclick="window.open('${href}')">Popup</button><a id="customPopup" href="${href}" target="_blank">Custom popup</a><a id="hostedPopup" href="${hosted}" target="_blank">Hosted popup</a>`,
+      }),
     );
+    await page.goto(source);
     await installThreadLinkNavigation(
       page,
       cdp,
@@ -47,31 +65,35 @@ it("keeps clicked thread navigations in the app, including hosted new windows", 
         opened.resolve(url);
         return true;
       },
-      () => {},
+      blockPopup,
     );
     for (const [selector, expected] of [
       ["#custom", href],
       ["#hosted", hosted],
       ["#location", hosted],
       ["#popup", href],
+      ["#customPopup", href],
       ["#hostedPopup", hosted],
     ]) {
       opened = Promise.withResolvers<string>();
-      const detached =
-        selector === "#hostedPopup"
-          ? new Promise<void>((resolve) =>
-              page.once("popup", (popup) => popup.once("close", () => resolve())),
-            )
-          : undefined;
+      // A custom-protocol target has no document to finish initialising. Close
+      // the real Chromium target to exercise its uncommitted, already-closed popup event.
+      closeProtocolPopup = selector === "#popup" || selector === "#customPopup";
+      const detached = ["#popup", "#customPopup", "#hostedPopup"].includes(selector!)
+        ? new Promise<Page>((resolve) => page.once("popup", resolve))
+        : undefined;
       await page.locator(selector!).click();
       expect(await opened.promise).toBe(expected);
       if (detached) {
-        await detached;
+        const popup = await detached;
+        expect(blockPopup).toHaveBeenCalledWith(popup);
+        if (!popup.isClosed())
+          await new Promise<void>((resolve) => popup.once("close", () => resolve()));
         expect(context.pages()).toEqual([page]);
       }
-      expect(page.url()).toBe("about:blank");
+      expect(page.url()).toBe(source);
     }
-    expect(requests).toEqual([href, hosted, hosted, href, hosted]);
+    expect(requests).toEqual([href, hosted, hosted, href, href, hosted]);
   } finally {
     await browser.close();
   }
@@ -184,12 +206,14 @@ it("continues dropped opens and expires announcements before a later typed navig
   );
   const cdp = Object.assign(events, { send }) as unknown as CDPSession;
   const open = vi.fn(() => false);
+  const page = new NodeEvents.EventEmitter();
+  const blockPopup = vi.fn();
   const navigation = await installThreadLinkNavigation(
-    new NodeEvents.EventEmitter() as unknown as Page,
+    page as unknown as Page,
     cdp,
     false,
     open,
-    () => {},
+    blockPopup,
   );
   events.emit("Runtime.executionContextCreated", {
     context: { id: 1, name: "t3-thread-link-activation", auxData: { frameId: "main" } },
@@ -215,6 +239,11 @@ it("continues dropped opens and expires announcements before a later typed navig
       ...response,
     });
   gesture("active");
+  events.emit("Page.windowOpen", { url: href, userGesture: true });
+  const popup = { url: () => ":", close: vi.fn() };
+  page.emit("popup", popup);
+  expect(blockPopup).not.toHaveBeenCalled();
+  expect(popup.close).not.toHaveBeenCalled();
   announce();
   pause("dropped-open");
   expect(navigation.isThreadNavigation(hosted)).toBe(false);
@@ -225,11 +254,24 @@ it("continues dropped opens and expires announcements before a later typed navig
   expect(navigation.isThreadNavigation(hosted)).toBe(false);
   pause("typed-after-cancelled-click");
   pause("failed-response", { responseErrorReason: "Failed" });
+  gesture("active");
+  announce();
+  events.emit("Network.requestWillBeSent", {
+    requestId: "sent",
+    type: "Document",
+    request: { url: hosted },
+  });
+  gesture("inactive");
+  expect(navigation.isThreadNavigation(hosted)).toBe(true);
+  pause("dispatched-during-click", { networkId: "sent" });
+  expect(navigation.consumeFailedNavigation(hosted)).toBe(true);
+  expect(navigation.isThreadNavigation(hosted)).toBe(false);
   expect(
     send.mock.calls.filter(([method]) => method.startsWith("Fetch.") && method !== "Fetch.enable"),
   ).toEqual([
     ["Fetch.continueRequest", { requestId: "dropped-open" }],
     ["Fetch.continueRequest", { requestId: "typed-after-cancelled-click" }],
     ["Fetch.continueRequest", { requestId: "failed-response" }],
+    ["Fetch.failRequest", { requestId: "dispatched-during-click", errorReason: "Aborted" }],
   ]);
 });

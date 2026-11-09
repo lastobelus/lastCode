@@ -425,6 +425,7 @@ export const previewWindowOpenAction = (details: {
   readonly postBody?: Electron.PostBody;
 }): "popup" | "new-tab" | "navigate" | "deny" => {
   const protocol = URL.parse(details.url)?.protocol;
+  if (parseThreadLinkHref(details.url)) return protocol === "https:" ? "popup" : "deny";
   // MSAL redirects on a denied blank popup; navigating the tab would destroy that fallback.
   if (protocol === undefined || IN_PLACE_DENIED_PROTOCOLS.has(protocol)) return "deny";
   if (!POPUP_PROTOCOLS.has(protocol)) return "navigate";
@@ -1421,7 +1422,10 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       );
     };
     // Popups inherit Electron's unrestricted window handler; block nested popups to bound the chain.
-    const windowCreated = (window: Electron.BrowserWindow): void => {
+    const windowCreated = (
+      window: Electron.BrowserWindow,
+      details: Electron.DidCreateWindowDetails,
+    ): void => {
       window.webContents.setIgnoreMenuShortcuts(true);
       window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
       window.webContents.on("before-input-event", (_event, input) => {
@@ -1432,7 +1436,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
           Effect.map((tabs) => {
             const tab = tabs.get(tabId);
             if (tab?.webContentsId === wc.id && tab.serverTab)
-              browserHost.registerPopup(tab.serverTab, window);
+              browserHost.registerPopup(tab.serverTab, window, details.url);
           }),
         ),
       );
@@ -1517,6 +1521,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     const threadLinkNavigation = (
       event: Electron.Event<Electron.WebContentsWillFrameNavigateEventParams>,
     ) => {
+      // CDP resumes hosted URLs with a programmatic load when app navigation is declined.
       if (event.isMainFrame && parseThreadLinkHref(event.url)) event.preventDefault();
     };
     const install = Effect.fn("PreviewManager.installWebContentsListeners")(function* () {
@@ -1538,7 +1543,6 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         detachPasskeys = passkeys.attachGuest(wc);
         wc.on("will-frame-navigate", threadLinkNavigation);
         wc.setWindowOpenHandler((details) => {
-          if (parseThreadLinkHref(details.url)) return { action: "deny" };
           const action = previewWindowOpenAction(details);
           if (action === "popup") {
             return { action: "allow", overrideBrowserWindowOptions: POPUP_WINDOW_OPTIONS };

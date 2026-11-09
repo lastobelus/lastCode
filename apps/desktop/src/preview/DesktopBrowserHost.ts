@@ -1,5 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off - Names download files on the shared disk.
-import { createBrowserThreadLinkNavigation } from "@t3tools/shared/server/threadLinkGesture";
+import {
+  createBrowserThreadLinkNavigation,
+  matchesThreadLinkPopup,
+} from "@t3tools/shared/server/threadLinkGesture";
 import { parseThreadLinkHref } from "@t3tools/shared/threadLinks";
 /** The manager owns the single debugger attachment; the relay shares it. */
 import {
@@ -147,6 +150,7 @@ interface AttachedTab {
   ) => void;
   readonly onNewDocument: () => void;
   readonly restoreThreadLinks: () => Promise<void>;
+  threadLinkWindow: string | undefined;
 }
 
 interface NativePopup {
@@ -210,7 +214,11 @@ export class DesktopBrowserHost extends Context.Service<
     readonly reserveTab: (runtimeTabId: string, key: DesktopBrowserTabKey) => boolean;
     readonly releaseReservation: (runtimeTabId: string) => void;
     /** Registers only the actual child window delivered by Electron's did-create-window. */
-    readonly registerPopup: (source: DesktopBrowserTabKey, window: Electron.BrowserWindow) => void;
+    readonly registerPopup: (
+      source: DesktopBrowserTabKey,
+      window: Electron.BrowserWindow,
+      url?: string,
+    ) => void;
     readonly surfaceResponse: (response: DesktopBrowserSurfaceResponse, senderId: number) => void;
     readonly setPresentation: (input: DesktopBrowserPresentationInput, senderId: number) => void;
     readonly setMainWindow: (window: Electron.BrowserWindow) => void;
@@ -330,7 +338,7 @@ export const make = Effect.gen(function* () {
   let mainWindow: Electron.BrowserWindow | null = null;
   const sendThreadLink = (key: DesktopBrowserTabKey, href: string) => {
     const tab = tabs.get(keyOf(key));
-    if (!tab) return;
+    if (!tab) return false;
     const renderer =
       liveHostWebContents(tab.debuggee.webContents) ??
       (mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents : undefined);
@@ -338,6 +346,7 @@ export const make = Effect.gen(function* () {
       desktopHostId: key.desktopHostId ?? "local",
       event: { type: "threadLink", threadId: key.threadId, tabId: key.tabId, href },
     });
+    return renderer !== undefined;
   };
   const sendRendererRequest = (key: DesktopBrowserTabKey, action: "wake" | "unload") => {
     const desktopHostId = key.desktopHostId ?? "local";
@@ -1116,9 +1125,27 @@ export const make = Effect.gen(function* () {
     if (existing?.debuggee.webContents === debuggee.webContents) return;
     if (existing?.popup?.kind === "root" && existing.popup !== popup) return;
     detach(key);
-    const navigation = createBrowserThreadLinkNavigation((href) => {
-      if (tabs.get(id) === tab && tab.relay === null) sendThreadLink(key, href);
-    }, "t3-native-thread-link-activation");
+    const resumeDeclined = (href: string, kind: "navigation" | "window") => {
+      if (
+        tabs.get(id) === tab &&
+        tab.relay === null &&
+        kind === "navigation" &&
+        href.startsWith("https:")
+      )
+        void debuggee.webContents.loadURL(href).catch(() => undefined);
+    };
+    const navigation = createBrowserThreadLinkNavigation(
+      (href, kind) => {
+        if (tabs.get(id) !== tab || tab.relay !== null) return;
+        if (!sendThreadLink(key, href)) {
+          resumeDeclined(href, kind);
+          return;
+        }
+        if (kind === "window") tab.threadLinkWindow = href;
+      },
+      "t3-native-thread-link-activation",
+      resumeDeclined,
+    );
     const tab: AttachedTab = {
       key,
       debuggee,
@@ -1147,9 +1174,11 @@ export const make = Effect.gen(function* () {
       focusReleasing: false,
       screencasts: new Set(),
       remoteDownloadDirectory: null,
+      threadLinkWindow: undefined,
       restoreThreadLinks: () =>
         navigation.install((method, params) => debuggee.debugger.sendCommand(method, params)),
       onMessage: (_event, method, params, sessionId) => {
+        if (!sessionId && method === "Page.windowOpen") tab.threadLinkWindow = undefined;
         if (!sessionId) navigation.receive(method, params);
         if (method === "Page.downloadWillBegin") {
           const guid = (params as { guid?: unknown } | undefined)?.guid;
@@ -1229,10 +1258,20 @@ export const make = Effect.gen(function* () {
     source: DesktopBrowserTabKey,
     window: Electron.BrowserWindow,
     creation?: NonNullable<NativePopup["creation"]>,
+    requestedUrl?: string,
   ) => {
     if ((!creation && !tabs.has(keyOf(source))) || window.isDestroyed()) return;
     const contents = window.webContents;
     if (contents.isDestroyed()) return;
+    const opener = tabs.get(keyOf(source));
+    if (
+      !creation &&
+      matchesThreadLinkPopup(opener?.threadLinkWindow, requestedUrl ?? contents.getURL())
+    ) {
+      if (opener) opener.threadLinkWindow = undefined;
+      window.destroy();
+      return;
+    }
     if ([...popups.values()].some((popup) => popup.contents === contents)) return;
     const debuggee = contents.debugger;
     // Do not take over a debugger owned by DevTools or another controller.
@@ -1380,8 +1419,12 @@ export const make = Effect.gen(function* () {
       );
     return popup;
   };
-  const registerPopup = (source: DesktopBrowserTabKey, window: Electron.BrowserWindow) => {
-    registerNativePage(source, window);
+  const registerPopup = (
+    source: DesktopBrowserTabKey,
+    window: Electron.BrowserWindow,
+    url?: string,
+  ) => {
+    registerNativePage(source, window, undefined, url);
   };
   const discardNativePage = (page: NativePopup) => {
     page.closing = true;
@@ -1396,12 +1439,14 @@ export const make = Effect.gen(function* () {
       if (event.isMainFrame && parseThreadLinkHref(event.url)) event.preventDefault();
     });
     page.contents.setWindowOpenHandler((details) => {
-      if (parseThreadLinkHref(details.url)) return { action: "deny" };
+      const threadLink = parseThreadLinkHref(details.url);
+      if (threadLink && !details.url.startsWith("https:")) return { action: "deny" };
       // Auth callers may obtain their URL after creating a blank child with an opener.
       try {
         if (
           details.url === "" ||
           details.url === "about:blank" ||
+          threadLink ||
           (["new-window", "foreground-tab", "background-tab"].includes(details.disposition) &&
             ["https:", "http:"].includes(new URL(details.url).protocol))
         )
@@ -1424,12 +1469,17 @@ export const make = Effect.gen(function* () {
       void page.contents.loadURL(details.url).catch(() => undefined);
       return { action: "deny" };
     });
-    page.contents.on("did-create-window", (child) => {
+    page.contents.on("did-create-window", (child, details) => {
       if (!ownAutomationWindow(lifetime, child)) return;
       child.webContents.setIgnoreMenuShortcuts(true);
-      const registered = registerNativePage(page.boundKey ?? page.source, child);
+      const registered = registerNativePage(
+        page.boundKey ?? page.source,
+        child,
+        undefined,
+        details.url,
+      );
       if (registered) configureAutomationPage(registered, lifetime);
-      else child.destroy();
+      else if (!child.isDestroyed()) child.destroy();
     });
   };
 
