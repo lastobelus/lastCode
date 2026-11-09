@@ -2416,7 +2416,7 @@ describe("agent-booted device shutdown", () => {
   const bootingHost = (id: string, initial: Record<string, boolean>) => {
     const booted = new Map(Object.entries(initial));
     const shutdowns: Array<string> = [];
-    const faults = { listingAfterBoot: false, listing: false, shutdowns: 0 };
+    const faults = { listingAfterBoot: false, listing: false, shutdowns: 0, bootAttach: false };
     const fault = new DeviceOperationError({
       operation: "test",
       reason: "request_failed",
@@ -2442,10 +2442,11 @@ describe("agent-booted device shutdown", () => {
               }),
         ),
         boot: (device) =>
-          Effect.sync(() => {
+          Effect.suspend(() => {
             booted.set(device.id, true);
             faults.listing = faults.listingAfterBoot;
-            return device.id;
+            // The simulator started, but attaching its stream failed.
+            return faults.bootAttach ? Effect.fail(fault) : Effect.succeed(device.id);
           }),
         attach: () => Effect.void,
         shutdown: (device) =>
@@ -2636,15 +2637,17 @@ describe("agent-booted device shutdown", () => {
     ),
   );
 
-  it.effect("shuts down a device it booted even when the open then fails", () =>
-    withService(({ service, local, open }) =>
-      Effect.gen(function* () {
-        local.faults.listingAfterBoot = true;
-        expect(Exit.isFailure(yield* Effect.exit(open("AGENT-SIM")))).toBe(true);
-        expect(local.booted.get("AGENT-SIM")).toBe(true);
-        yield* service.shutdownAgentBootedDevices;
-        expect(local.shutdowns).toEqual(["AGENT-SIM"]);
-      }),
-    ),
+  it.effect.each(["listingAfterBoot", "bootAttach"] as const)(
+    "shuts down a device it booted even when the open then fails (%s)",
+    (failure) =>
+      withService(({ service, local, open }) =>
+        Effect.gen(function* () {
+          local.faults[failure] = true;
+          expect(Exit.isFailure(yield* Effect.exit(open("AGENT-SIM")))).toBe(true);
+          expect(local.booted.get("AGENT-SIM")).toBe(true);
+          yield* service.shutdownAgentBootedDevices;
+          expect(local.shutdowns).toEqual(["AGENT-SIM"]);
+        }),
+      ),
   );
 });

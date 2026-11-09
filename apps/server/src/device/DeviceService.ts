@@ -1013,6 +1013,23 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
             booting,
           ],
         }));
+        const agentOwned = setup?.agentOwned === true && host.id === LOCAL_DEVICE_HOST_ID;
+        const platform = device.platform;
+        const claim = (deviceId: DeviceId) =>
+          Clock.currentTimeMillis.pipe(
+            Effect.map((lastActivity) => {
+              const owned: AgentBootedDevice = {
+                hostId: host.id,
+                deviceId,
+                platform,
+                lastActivity,
+                failedShutdowns: 0,
+              };
+              agentBooted.set(bootKey(host.id, deviceId), owned);
+              return owned;
+            }),
+          );
+        const requested = device.id;
         const bootedId = yield* ready.devices.boot(device, setup).pipe(
           Effect.ensuring(
             publish((current) => ({
@@ -1022,19 +1039,20 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
               ),
             })),
           ),
+          // A boot can start the simulator and then fail, such as attaching its stream.
+          Effect.tapError(() =>
+            agentOwned
+              ? refresh(ready).pipe(
+                  Effect.flatMap((after) =>
+                    findDevice(after, host.id, requested)?.booted ? claim(requested) : Effect.void,
+                  ),
+                  Effect.ignore,
+                )
+              : Effect.void,
+          ),
         );
         // Recorded before discovery, so a later failure of this open still leaves it shut down.
-        const owned: AgentBootedDevice | undefined =
-          setup?.agentOwned && host.id === LOCAL_DEVICE_HOST_ID
-            ? {
-                hostId: host.id,
-                deviceId: bootedId,
-                platform: device.platform,
-                lastActivity: yield* Clock.currentTimeMillis,
-                failedShutdowns: 0,
-              }
-            : undefined;
-        if (owned) agentBooted.set(bootKey(host.id, bootedId), owned);
+        const owned = agentOwned ? yield* claim(bootedId) : undefined;
         state = yield* refresh(ready);
         // Retained entries predate the boot, so only a complete listing confirms the booted device.
         device = state.hostStatuses[host.id]?.incompletePlatforms?.includes(device.platform)
