@@ -140,7 +140,7 @@ export function useWorktreeSuspensionActions() {
     } else if (action === "workspace-create-fresh") {
       if (
         await api.dialogs.confirm(
-          "The saved workspace was deliberately discarded. Create a fresh checkout from the current branch? Discarded local files and notes cannot be recovered by this action.",
+          "The saved workspace was deliberately discarded. Create a fresh workspace? Discarded local files and notes cannot be recovered by this action.",
         )
       ) {
         reportOperation(

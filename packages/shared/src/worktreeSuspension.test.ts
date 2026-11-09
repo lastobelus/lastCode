@@ -88,6 +88,438 @@ const fixture = async ({
   };
 };
 
+const scratchFixture = async () => {
+  const root = await NodeFSP.realpath(
+    await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "scratch-suspension-")),
+  );
+  const workspace = NodePath.join(root, "scratch");
+  const storeRoot = NodePath.join(root, "saved");
+  await NodeFSP.mkdir(workspace, { mode: 0o750 });
+  await NodeFSP.mkdir(NodePath.join(workspace, "empty"), { mode: 0o751 });
+  await NodeFSP.writeFile(NodePath.join(workspace, "private"), "all scratch bytes\n", {
+    mode: 0o640,
+  });
+  await NodeFSP.link(NodePath.join(workspace, "private"), NodePath.join(workspace, "alias"));
+  await NodeFSP.symlink("../outside", NodePath.join(workspace, "link"));
+  const store = createWorktreeSuspensionStore({ storeRoot });
+  return {
+    root,
+    workspace,
+    storeRoot,
+    store,
+    capture: () =>
+      store.capture({
+        kind: "scratch",
+        sourcePath: workspace,
+        snapshotId: "scratch",
+        operationId: "scratch-op",
+        ownerBinding: "scratch-owner",
+      }),
+    async [Symbol.asyncDispose]() {
+      await NodeFSP.rm(root, { recursive: true, force: true });
+    },
+  };
+};
+
+it("round-trips a complete native scratch folder without Git identity or payload shortcuts", async () => {
+  await using test = await scratchFixture();
+  const original = await test.store.inspectScratchSource(test.workspace);
+  const snapshot = await test.capture();
+  expect(snapshot).toMatchObject({
+    version: 4,
+    kind: "scratch",
+    head: null,
+    branch: null,
+    sourceIdentity: original.sourceIdentity,
+  });
+  for (const name of [
+    "gitDirectory",
+    "commonDirectory",
+    "gitFiles",
+    "gitRefs",
+    "indexTree",
+    "headRef",
+    "indexRef",
+  ])
+    expect(snapshot).not.toHaveProperty(name);
+  const file = snapshot.entries.find((entry) => entry.kind === "file");
+  if (file?.kind !== "file") throw new Error("scratch file missing");
+  expect(
+    NodeZlib.gunzipSync(
+      await NodeFSP.readFile(
+        NodePath.join(test.storeRoot, snapshot.id, "objects", `${file.hash}.gz`),
+      ),
+    ).toString(),
+  ).toBe("all scratch bytes\n");
+  await test.store.trialRestore(snapshot.id);
+  await test.store.suspend(snapshot.id, {
+    quarantineParent: NodePath.join(test.root, "quarantine"),
+    guard: async () => undefined,
+  });
+  await expect(NodeFSP.lstat(test.workspace)).rejects.toMatchObject({ code: "ENOENT" });
+  const restarted = createWorktreeSuspensionStore({ storeRoot: test.storeRoot });
+  expect(await restarted.restore(snapshot.id, { destinationPath: test.workspace })).toMatchObject({
+    path: test.workspace,
+    head: null,
+    branch: null,
+  });
+  expect(await restarted.verifyRestored(snapshot.id)).toMatchObject({ head: null, branch: null });
+  expect(await NodeFSP.readFile(NodePath.join(test.workspace, "private"), "utf8")).toBe(
+    "all scratch bytes\n",
+  );
+  expect((await NodeFSP.lstat(test.workspace)).mode & 0o777).toBe(0o750);
+  expect((await NodeFSP.lstat(NodePath.join(test.workspace, "empty"))).mode & 0o777).toBe(0o751);
+  expect((await NodeFSP.lstat(NodePath.join(test.workspace, "private"))).mode & 0o777).toBe(0o640);
+  expect((await NodeFSP.lstat(NodePath.join(test.workspace, "private"))).ino).toBe(
+    (await NodeFSP.lstat(NodePath.join(test.workspace, "alias"))).ino,
+  );
+  expect(await NodeFSP.readlink(NodePath.join(test.workspace, "link"))).toBe("../outside");
+  await restarted.finalizeRestore(snapshot.id);
+  await restarted.beginDiscard(snapshot.id);
+  await restarted.cancelDiscardIntent(snapshot.id);
+  const interruptedDiscard = createWorktreeSuspensionStore({
+    storeRoot: test.storeRoot,
+    onBoundary: async (phase) => {
+      if (phase === "discarding") throw new Error("discard interrupted");
+    },
+  });
+  await expect(
+    interruptedDiscard.discard(snapshot.id, { commit: async () => undefined }),
+  ).rejects.toThrow("discard interrupted");
+  await NodeFSP.unlink(NodePath.join(test.storeRoot, snapshot.id, "manifest.json"));
+  await restarted.purgeDiscard(snapshot.id);
+  expect((await restarted.readJournal(snapshot.id)).phase).toBe("discarded");
+  expect(await NodeFSP.readFile(NodePath.join(test.workspace, "private"), "utf8")).toBe(
+    "all scratch bytes\n",
+  );
+});
+
+it.each([".git", "nested/.git"])(
+  "keeps scratch folders containing unsupported %s",
+  async (name) => {
+    await using test = await scratchFixture();
+    await NodeFSP.mkdir(NodePath.join(test.workspace, name), { recursive: true });
+    await expect(test.capture()).rejects.toThrow("repositories are unsupported");
+    expect((await NodeFSP.lstat(NodePath.join(test.workspace, name))).isDirectory()).toBe(true);
+    expect(await NodeFSP.readFile(NodePath.join(test.workspace, "private"), "utf8")).toBe(
+      "all scratch bytes\n",
+    );
+  },
+);
+
+it.each(["nested bare repository", "external hardlink", "special file", "file limit"] as const)(
+  "keeps scratch sources with unsupported %s",
+  async (kind) => {
+    await using test = await scratchFixture();
+    if (kind === "nested bare repository") {
+      const nested = NodePath.join(test.workspace, "bare");
+      await NodeFSP.mkdir(NodePath.join(nested, "objects"), { recursive: true });
+      await NodeFSP.mkdir(NodePath.join(nested, "refs"));
+      await NodeFSP.writeFile(NodePath.join(nested, "HEAD"), "ref: refs/heads/main\n");
+    } else if (kind === "external hardlink") {
+      await NodeFSP.link(
+        NodePath.join(test.workspace, "private"),
+        NodePath.join(test.root, "external"),
+      );
+    } else if (kind === "special file") {
+      await execute("mkfifo", [NodePath.join(test.workspace, "pipe")]);
+    }
+    const store = createWorktreeSuspensionStore({
+      storeRoot: test.storeRoot,
+      ...(kind === "file limit" ? { limits: { maxFileBytes: 4 } } : {}),
+    });
+    await expect(
+      store.capture({
+        kind: "scratch",
+        sourcePath: test.workspace,
+        snapshotId: "scratch",
+        operationId: "scratch-op",
+        ownerBinding: "scratch-owner",
+      }),
+    ).rejects.toThrow();
+    expect(await NodeFSP.readFile(NodePath.join(test.workspace, "private"), "utf8")).toBe(
+      "all scratch bytes\n",
+    );
+  },
+);
+
+it("keeps a scratch original when .git appears after capture or during removal preparation", async () => {
+  await using test = await scratchFixture();
+  const snapshot = await test.capture();
+  await test.store.trialRestore(snapshot.id);
+  await NodeFSP.writeFile(NodePath.join(test.workspace, ".git"), "new repository");
+  await expect(
+    test.store.isolate(snapshot.id, { quarantineParent: NodePath.join(test.root, "quarantine") }),
+  ).rejects.toThrow("repositories are unsupported");
+  await NodeFSP.unlink(NodePath.join(test.workspace, ".git"));
+  const isolated = await test.store.isolate(snapshot.id, {
+    quarantineParent: NodePath.join(test.root, "quarantine"),
+  });
+  await test.store.prepareRemoval(snapshot.id);
+  await NodeFSP.writeFile(NodePath.join(isolated.isolatedPath!, ".git"), "late repository");
+  await expect(test.store.finishRemoval(snapshot.id)).rejects.toThrow("changed before removal");
+  await test.store.reconcileRemoval(snapshot.id);
+  expect(await NodeFSP.readFile(NodePath.join(test.workspace, ".git"), "utf8")).toBe(
+    "late repository",
+  );
+});
+
+it("records scratch kind before a failed capture and cleans it up after restart", async () => {
+  await using test = await scratchFixture();
+  const interrupted = createWorktreeSuspensionStore({
+    storeRoot: test.storeRoot,
+    onBoundary: async (phase) => {
+      if (phase === "capturing") throw new Error("capture interrupted");
+    },
+  });
+  await expect(
+    interrupted.capture({
+      kind: "scratch",
+      sourcePath: test.workspace,
+      snapshotId: "scratch",
+      operationId: "scratch-op",
+      ownerBinding: "scratch-owner",
+    }),
+  ).rejects.toThrow("capture interrupted");
+  expect(await test.store.readJournal("scratch")).toMatchObject({
+    kind: "scratch",
+    phase: "capturing",
+  });
+  await expect(
+    test.store.cleanupIncompleteCapture("scratch", { operationId: "wrong" }),
+  ).rejects.toThrow("operation changed");
+  await test.store.cleanupIncompleteCapture("scratch", { operationId: "scratch-op" });
+  expect((await test.store.readJournal("scratch")).phase).toBe("capture-cancelled");
+  expect(await NodeFSP.readFile(NodePath.join(test.workspace, "private"), "utf8")).toBe(
+    "all scratch bytes\n",
+  );
+});
+
+it("retains a scratch folder when root .git is introduced during capture", async () => {
+  await using test = await scratchFixture();
+  const store = createWorktreeSuspensionStore({
+    storeRoot: test.storeRoot,
+    onBoundary: async (phase) => {
+      if (phase === "capturing")
+        await NodeFSP.writeFile(NodePath.join(test.workspace, ".git"), "introduced during capture");
+    },
+  });
+  await expect(
+    store.capture({
+      kind: "scratch",
+      sourcePath: test.workspace,
+      snapshotId: "scratch",
+      operationId: "scratch-op",
+      ownerBinding: "scratch-owner",
+    }),
+  ).rejects.toThrow("repositories are unsupported");
+  await test.store.cleanupIncompleteCapture("scratch", { operationId: "scratch-op" });
+  expect(await NodeFSP.readFile(NodePath.join(test.workspace, ".git"), "utf8")).toBe(
+    "introduced during capture",
+  );
+});
+
+it("validates scratch manifest version and durable journal kind before using its payload", async () => {
+  await using test = await scratchFixture();
+  const snapshot = await test.capture();
+  const filename = NodePath.join(test.storeRoot, snapshot.id, "manifest.json");
+  await NodeFSP.writeFile(filename, JSON.stringify({ ...snapshot, kind: "git" }));
+  await expect(test.store.read(snapshot.id)).rejects.toThrow("format is unsupported");
+  await NodeFSP.writeFile(filename, JSON.stringify({ ...snapshot, headRef: "fabricated" }));
+  await expect(test.store.read(snapshot.id)).rejects.toThrow("contains Git identity");
+  await NodeFSP.writeFile(filename, JSON.stringify(snapshot));
+  const journalFilename = NodePath.join(test.storeRoot, snapshot.id, "journal.json");
+  const journal = await test.store.readJournal(snapshot.id);
+  await NodeFSP.writeFile(journalFilename, JSON.stringify({ ...journal, kind: "git" }));
+  await expect(test.store.read(snapshot.id)).rejects.toThrow("operation does not match");
+  expect(await NodeFSP.readFile(NodePath.join(test.workspace, "private"), "utf8")).toBe(
+    "all scratch bytes\n",
+  );
+});
+
+it("refuses scratch removal and restoration when the full payload is lost", async () => {
+  await using test = await scratchFixture();
+  const snapshot = await test.capture();
+  await test.store.trialRestore(snapshot.id);
+  const payloads = NodePath.join(test.storeRoot, snapshot.id, "objects");
+  const payload = NodePath.join(payloads, (await NodeFSP.readdir(payloads))[0]!);
+  const bytes = await NodeFSP.readFile(payload);
+  await NodeFSP.unlink(payload);
+  await expect(
+    test.store.isolate(snapshot.id, { quarantineParent: NodePath.join(test.root, "quarantine") }),
+  ).rejects.toMatchObject({ code: "ENOENT" });
+  expect(await NodeFSP.readFile(NodePath.join(test.workspace, "private"), "utf8")).toBe(
+    "all scratch bytes\n",
+  );
+  await NodeFSP.writeFile(payload, bytes, { mode: 0o600 });
+  await test.store.suspend(snapshot.id, {
+    quarantineParent: NodePath.join(test.root, "quarantine"),
+    guard: async () => undefined,
+  });
+  await NodeFSP.unlink(payload);
+  await expect(
+    test.store.restore(snapshot.id, { destinationPath: test.workspace }),
+  ).rejects.toMatchObject({ code: "ENOENT" });
+  expect((await test.store.readJournal(snapshot.id)).phase).toBe("suspended");
+  await expect(NodeFSP.lstat(test.workspace)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it.each(["isolating", "isolated", "removing", "suspended"] as const)(
+  "recovers scratch suspension interrupted at %s",
+  async (boundary) => {
+    await using test = await scratchFixture();
+    const snapshot = await test.capture();
+    await test.store.trialRestore(snapshot.id);
+    const interrupted = createWorktreeSuspensionStore({
+      storeRoot: test.storeRoot,
+      onBoundary: async (phase) => {
+        if (phase === boundary) throw new Error("suspension interrupted");
+      },
+    });
+    const isolate = () =>
+      interrupted.isolate(snapshot.id, {
+        quarantineParent: NodePath.join(test.root, "quarantine"),
+      });
+    if (boundary === "isolating" || boundary === "isolated")
+      await expect(isolate()).rejects.toThrow("suspension interrupted");
+    else {
+      await isolate();
+      if (boundary === "removing")
+        await expect(interrupted.prepareRemoval(snapshot.id)).rejects.toThrow(
+          "suspension interrupted",
+        );
+      else
+        await expect(interrupted.removeIsolated(snapshot.id)).rejects.toThrow(
+          "suspension interrupted",
+        );
+    }
+    const restarted = createWorktreeSuspensionStore({ storeRoot: test.storeRoot });
+    if (boundary === "suspended") {
+      await expect(NodeFSP.lstat(test.workspace)).rejects.toMatchObject({ code: "ENOENT" });
+      await restarted.restore(snapshot.id, { destinationPath: test.workspace });
+    } else expect((await restarted.reconcileRemoval(snapshot.id)).status).toBe("original-kept");
+    expect(await NodeFSP.readFile(NodePath.join(test.workspace, "private"), "utf8")).toBe(
+      "all scratch bytes\n",
+    );
+  },
+);
+
+it.each([1, 2, 3, 4])("resumes scratch restoration after durable boundary %s", async (boundary) => {
+  await using test = await scratchFixture();
+  const snapshot = await test.capture();
+  await test.store.trialRestore(snapshot.id);
+  await test.store.suspend(snapshot.id, {
+    quarantineParent: NodePath.join(test.root, "quarantine"),
+    guard: async () => undefined,
+  });
+  let boundaries = 0;
+  const interrupted = createWorktreeSuspensionStore({
+    storeRoot: test.storeRoot,
+    onBoundary: async (phase) => {
+      if (phase === "restoring" && ++boundaries === boundary)
+        throw new Error("restore interrupted");
+    },
+  });
+  await expect(
+    interrupted.restore(snapshot.id, { destinationPath: test.workspace }),
+  ).rejects.toThrow("restore interrupted");
+  const journal = await test.store.readJournal(snapshot.id);
+  if (boundary === 3)
+    await NodeFSP.writeFile(NodePath.join(journal.restorePath!, "alias"), "all", { mode: 0o600 });
+  const restarted = createWorktreeSuspensionStore({ storeRoot: test.storeRoot });
+  expect(await restarted.resumeRestore(snapshot.id)).toMatchObject({
+    path: test.workspace,
+    head: null,
+    branch: null,
+  });
+  expect(await NodeFSP.readFile(NodePath.join(test.workspace, "private"), "utf8")).toBe(
+    "all scratch bytes\n",
+  );
+  await restarted.finalizeRestore(snapshot.id);
+});
+
+it("resumes a scratch trial after recording its owned root", async () => {
+  await using test = await scratchFixture();
+  const snapshot = await test.capture();
+  const interrupted = createWorktreeSuspensionStore({
+    storeRoot: test.storeRoot,
+    onBoundary: async (phase, id) => {
+      if (phase === "verifying" && (await test.store.readJournal(id)).trialIdentity !== undefined)
+        throw new Error("trial interrupted");
+    },
+  });
+  await expect(interrupted.trialRestore(snapshot.id)).rejects.toThrow("trial interrupted");
+  const journal = await test.store.readJournal(snapshot.id);
+  await NodeFSP.writeFile(NodePath.join(journal.trialPath!, "alias"), "all", { mode: 0o600 });
+  await test.store.trialRestore(snapshot.id);
+  expect((await test.store.readJournal(snapshot.id)).phase).toBe("ready");
+  await expect(NodeFSP.lstat(journal.trialPath!)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it("reconciles a scratch removal completed before its final journal write", async () => {
+  await using test = await scratchFixture();
+  const snapshot = await test.capture();
+  await test.store.trialRestore(snapshot.id);
+  const isolated = await test.store.isolate(snapshot.id, {
+    quarantineParent: NodePath.join(test.root, "quarantine"),
+  });
+  await test.store.prepareRemoval(snapshot.id);
+  await NodeFSP.rm(isolated.isolatedPath!, { recursive: true });
+  const restarted = createWorktreeSuspensionStore({ storeRoot: test.storeRoot });
+  expect((await restarted.reconcileRemoval(snapshot.id)).status).toBe("suspended");
+  expect(await restarted.restore(snapshot.id, { destinationPath: test.workspace })).toMatchObject({
+    head: null,
+    branch: null,
+  });
+});
+
+it("retains scratch removal remnants and refuses replaced restore staging", async () => {
+  await using test = await scratchFixture();
+  const snapshot = await test.capture();
+  await test.store.trialRestore(snapshot.id);
+  const isolated = await test.store.isolate(snapshot.id, {
+    quarantineParent: NodePath.join(test.root, "quarantine"),
+  });
+  await test.store.prepareRemoval(snapshot.id);
+  await NodeFSP.unlink(NodePath.join(isolated.isolatedPath!, "private"));
+  const restarted = createWorktreeSuspensionStore({ storeRoot: test.storeRoot });
+  expect((await restarted.reconcileRemoval(snapshot.id)).status).toBe("restore-required");
+  const destination = NodePath.join(test.root, "recovered");
+  await restarted.stageRestore(snapshot.id, { destinationPath: destination });
+  const journal = await restarted.readJournal(snapshot.id);
+  await NodeFSP.rename(
+    NodePath.dirname(journal.restorePath!),
+    `${NodePath.dirname(journal.restorePath!)}-kept`,
+  );
+  await NodeFSP.mkdir(NodePath.dirname(journal.restorePath!), { mode: 0o700 });
+  await expect(restarted.publishRestore(snapshot.id)).rejects.toThrow("container identity changed");
+  expect(await NodeFSP.readFile(NodePath.join(isolated.isolatedPath!, "alias"), "utf8")).toBe(
+    "all scratch bytes\n",
+  );
+  await expect(NodeFSP.lstat(destination)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it("creates and resumes an empty fresh scratch folder without Git authority", async () => {
+  await using test = await scratchFixture();
+  const destinationPath = NodePath.join(test.root, "fresh");
+  const input = { kind: "scratch" as const, operationId: "fresh-scratch", destinationPath };
+  expect(await test.store.createFresh(input)).toEqual({
+    path: destinationPath,
+    head: null,
+    branch: null,
+  });
+  expect(await NodeFSP.readdir(destinationPath)).toEqual([]);
+  const restarted = createWorktreeSuspensionStore({ storeRoot: test.storeRoot });
+  expect(await restarted.createFresh(input)).toEqual({
+    path: destinationPath,
+    head: null,
+    branch: null,
+  });
+  await NodeFSP.writeFile(NodePath.join(destinationPath, "new"), "user data");
+  await expect(restarted.createFresh(input)).rejects.toThrow("unknown contents");
+  expect(await NodeFSP.readFile(NodePath.join(destinationPath, "new"), "utf8")).toBe("user data");
+});
+
 it.each([
   ["ordinary names", "repository", "workspace"],
   ["spaces", "repository space", "workspace space"],

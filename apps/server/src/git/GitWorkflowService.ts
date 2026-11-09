@@ -224,7 +224,11 @@ export const make = Effect.gen(function* () {
         return yield* fileSystem.realPath(common);
       });
       const repository = yield* commonRepository(cwd);
-      for (const root of new Set(protectedEntries.map((entry) => entry.repositoryRoot)))
+      for (const root of new Set(
+        protectedEntries.flatMap((entry) =>
+          entry.repositoryRoot === null ? [] : [entry.repositoryRoot],
+        ),
+      ))
         if ((yield* commonRepository(root)) === repository) return yield* fail();
     }).pipe(Effect.mapError((cause) => fail(cause)));
   });

@@ -149,6 +149,9 @@ it("loads a project-filtered page and explicitly loads the next page", async () 
   setup();
   const history = {
     ...saved,
+    kind: "scratch" as const,
+    head: null,
+    branch: null,
     snapshotId: "history-copy",
     current: false,
     title: "Earlier work",
@@ -162,6 +165,7 @@ it("loads a project-filtered page and explicitly loads the next page", async () 
   expect(state.list).toHaveBeenNthCalledWith(1, { environmentId, input: { projectId } });
   await screen.getByRole("button", { name: "Load more saved workspaces" }).click();
   await expect.element(screen.getByText("Earlier work", { exact: true })).toBeVisible();
+  await expect.element(screen.getByText("Scratch workspace", { exact: true })).toBeVisible();
   expect(state.list).toHaveBeenNthCalledWith(2, {
     environmentId,
     input: { projectId, cursor: 100 },

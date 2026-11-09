@@ -15,6 +15,8 @@ import * as Schema from "effect/Schema";
 import { threadHasUnfinishedWork } from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
+import { WorkspaceAcquisition } from "../workspace/WorkspaceAcquisition.ts";
+import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import * as ManagedProjectFolders from "./ManagedProjectFolders.ts";
 import * as ProjectService from "./ProjectService.ts";
 
@@ -48,6 +50,7 @@ const make = Effect.gen(function* () {
   const projects = yield* ProjectService.ProjectService;
   const threads = yield* ThreadManagementService.ThreadManagementService;
   const scheduledTasks = yield* ScheduledTaskService.ScheduledTaskService;
+  const acquisition = yield* WorkspaceAcquisition;
   const random = yield* SecureRandom.SecureRandom;
   const path = yield* Path.Path;
 
@@ -84,46 +87,54 @@ const make = Effect.gen(function* () {
       });
     }
 
-    const snapshot = yield* Effect.flatten(
-      threads.readShellSnapshot({ worktreePath: folder }),
-    ).pipe(Effect.mapError(fail("Could not read the threads in this folder.")));
-    const moveSet = new Map<ThreadId, OrchestrationV2ThreadShell>();
-    if (isScratch) moveSet.set(thread.id, thread);
-    for (const candidate of [...snapshot.threads, ...snapshot.archivedThreads]) {
-      if (yield* managedFolders.isScratchProject(candidate.projectId)) {
-        moveSet.set(candidate.id, candidate);
-      }
-    }
-
-    for (const candidate of moveSet.values()) {
-      const records = yield* threads
-        .getThreadRecords(candidate.id, ["runs", "runtimeRequests"], { turnItemTypes: [] })
-        .pipe(Effect.mapError(fail(`Could not read "${candidate.title}".`)));
-      if (threadHasUnfinishedWork(records)) {
-        return yield* new ScratchThreadPromotionError({
-          reason: `"${candidate.title}" is still working. Finish or stop it first.`,
-        });
-      }
-    }
-
-    return yield* Effect.uninterruptible(
+    return yield* withWorkspaceLease(
+      folder,
       Effect.gen(function* () {
-        const projectId = yield* createProject(thread.title, folder);
-        yield* scheduledTasks
-          .moveThreadTasks({ threadIds: [...moveSet.keys()], projectId })
-          .pipe(Effect.mapError(fail("Could not move the thread's scheduled tasks.")));
-        for (const candidate of moveSet.values()) {
-          const commandId = CommandId.make(`scratch-promotion:${yield* randomId}`);
-          yield* threads
-            .dispatch({
-              type: "thread.project.adopt-folder",
-              commandId,
-              threadId: candidate.id,
-              projectId,
-            })
-            .pipe(Effect.mapError(fail(`Could not move "${candidate.title}". Try again.`)));
+        yield* acquisition
+          .acquire({ path: folder, threadId: thread.id, purpose: "file-write" })
+          .pipe(Effect.mapError(fail("Could not restore the thread's folder.")));
+        const snapshot = yield* Effect.flatten(
+          threads.readShellSnapshot({ worktreePath: folder }),
+        ).pipe(Effect.mapError(fail("Could not read the threads in this folder.")));
+        const moveSet = new Map<ThreadId, OrchestrationV2ThreadShell>();
+        if (isScratch) moveSet.set(thread.id, thread);
+        for (const candidate of [...snapshot.threads, ...snapshot.archivedThreads]) {
+          if (yield* managedFolders.isScratchProject(candidate.projectId)) {
+            moveSet.set(candidate.id, candidate);
+          }
         }
-        return { projectId };
+
+        for (const candidate of moveSet.values()) {
+          const records = yield* threads
+            .getThreadRecords(candidate.id, ["runs", "runtimeRequests"], { turnItemTypes: [] })
+            .pipe(Effect.mapError(fail(`Could not read "${candidate.title}".`)));
+          if (threadHasUnfinishedWork(records)) {
+            return yield* new ScratchThreadPromotionError({
+              reason: `"${candidate.title}" is still working. Finish or stop it first.`,
+            });
+          }
+        }
+
+        return yield* Effect.uninterruptible(
+          Effect.gen(function* () {
+            const projectId = yield* createProject(thread.title, folder);
+            yield* scheduledTasks
+              .moveThreadTasks({ threadIds: [...moveSet.keys()], projectId })
+              .pipe(Effect.mapError(fail("Could not move the thread's scheduled tasks.")));
+            for (const candidate of moveSet.values()) {
+              const commandId = CommandId.make(`scratch-promotion:${yield* randomId}`);
+              yield* threads
+                .dispatch({
+                  type: "thread.project.adopt-folder",
+                  commandId,
+                  threadId: candidate.id,
+                  projectId,
+                })
+                .pipe(Effect.mapError(fail(`Could not move "${candidate.title}". Try again.`)));
+            }
+            return { projectId };
+          }),
+        );
       }),
     );
   });

@@ -25,7 +25,9 @@ import { canonicalProjectRoot } from "./projectRootLease.ts";
 
 export const CheckoutAuthority = Schema.Struct({
   checkoutId: TrimmedNonEmptyString,
-  repositoryRoot: TrimmedNonEmptyString,
+  kind: Schema.optionalKey(Schema.Literals(["git", "scratch"])),
+  repositoryRoot: Schema.NullOr(TrimmedNonEmptyString),
+  scratchRoot: Schema.optionalKey(TrimmedNonEmptyString),
   path: TrimmedNonEmptyString,
   aliases: Schema.Array(TrimmedNonEmptyString),
   owners: Schema.Array(WorktreeSuspensionOwner),
@@ -36,7 +38,7 @@ export const CheckoutAuthority = Schema.Struct({
       Schema.Struct({
         snapshotId: TrimmedNonEmptyString,
         savedAt: IsoDateTime,
-        head: TrimmedNonEmptyString,
+        head: Schema.NullOr(TrimmedNonEmptyString),
         branch: Schema.NullOr(Schema.String),
         bytes: Schema.Number,
         fileCount: Schema.Number,
@@ -53,18 +55,24 @@ export const CheckoutAuthority = Schema.Struct({
     }),
   ),
   lastWorkspaceUseAt: Schema.optionalKey(IsoDateTime),
-  lastHead: Schema.optionalKey(TrimmedNonEmptyString),
+  lastHead: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
   sourceCheckoutId: Schema.optionalKey(TrimmedNonEmptyString),
   detached: Schema.optionalKey(Schema.Boolean),
   pendingProjection: Schema.optionalKey(WorktreeSuspensionTransitionInput),
   nativeIdentity: Schema.optionalKey(
-    Schema.Struct({
-      sourceIdentity: Schema.Struct({ dev: Schema.Number, ino: Schema.Number }),
-      gitDirectory: Schema.String,
-      gitDirectoryIdentity: Schema.Struct({ dev: Schema.Number, ino: Schema.Number }),
-      commonDirectory: Schema.String,
-      commonIdentity: Schema.Struct({ dev: Schema.Number, ino: Schema.Number }),
-    }),
+    Schema.Union([
+      Schema.Struct({
+        kind: Schema.Literal("scratch"),
+        sourceIdentity: Schema.Struct({ dev: Schema.Number, ino: Schema.Number }),
+      }),
+      Schema.Struct({
+        sourceIdentity: Schema.Struct({ dev: Schema.Number, ino: Schema.Number }),
+        gitDirectory: Schema.String,
+        gitDirectoryIdentity: Schema.Struct({ dev: Schema.Number, ino: Schema.Number }),
+        commonDirectory: Schema.String,
+        commonIdentity: Schema.Struct({ dev: Schema.Number, ino: Schema.Number }),
+      }),
+    ]),
   ),
   recoveryThread: Schema.optionalKey(
     Schema.Struct({
@@ -81,6 +89,7 @@ export const CheckoutAuthority = Schema.Struct({
       snapshotIds: Schema.Array(TrimmedNonEmptyString),
       manual: Schema.Boolean,
       acceptedAt: IsoDateTime,
+      originalOwners: Schema.optionalKey(Schema.Array(WorktreeSuspensionOwner)),
       destinationPath: Schema.optionalKey(TrimmedNonEmptyString),
       recoveryProjectId: Schema.optionalKey(ProjectId),
       recoveryThreadId: Schema.optionalKey(ThreadId),
@@ -119,6 +128,21 @@ const decodeCatalog = Schema.decodeUnknownEffect(Schema.fromJsonString(Catalog))
 const encodeCatalog = Schema.encodeEffect(Schema.fromJsonString(Catalog));
 const encodeAuthority = Schema.encodeSync(Schema.fromJsonString(CheckoutAuthority));
 const MAX_CATALOG_BYTES = 8 * 1024 * 1024;
+const validAuthorityKind = (entry: CheckoutAuthority) =>
+  entry.kind === "scratch"
+    ? entry.repositoryRoot === null &&
+      entry.scratchRoot !== undefined &&
+      entry.nativeIdentity !== undefined &&
+      "kind" in entry.nativeIdentity &&
+      entry.nativeIdentity.kind === "scratch" &&
+      entry.lastHead === null &&
+      entry.owners.every((owner) => owner.branch === null) &&
+      (entry.snapshots ?? []).every(
+        (snapshot) => snapshot.head === null && snapshot.branch === null,
+      )
+    : entry.repositoryRoot !== null &&
+      entry.scratchRoot === undefined &&
+      (entry.nativeIdentity === undefined || !("kind" in entry.nativeIdentity));
 
 export class SuspensionRegistryError extends Schema.TaggedError<SuspensionRegistryError>()(
   "SuspensionRegistryError",
@@ -223,7 +247,9 @@ const make = Effect.gen(function* () {
     const value = yield* decodeCatalog(yield* fs.readFileString(catalogPath));
     if (
       new Set(value.checkouts.map((entry) => entry.checkoutId)).size !== value.checkouts.length ||
-      value.checkouts.some((entry) => entry.checkoutId !== entry.summary.checkoutId)
+      value.checkouts.some(
+        (entry) => entry.checkoutId !== entry.summary.checkoutId || !validAuthorityKind(entry),
+      )
     ) {
       return yield* new SuspensionRegistryError({ operation: "read" });
     }
@@ -257,6 +283,8 @@ const make = Effect.gen(function* () {
   });
   const put = Effect.fn("WorktreeSuspensionRegistry.put")(
     function* (next: CheckoutAuthority, expected: CheckoutAuthority | null) {
+      if (!validAuthorityKind(next))
+        return yield* new SuspensionRegistryError({ operation: "write" });
       return yield* mutex.withPermits(1)(
         Effect.gen(function* () {
           const current = yield* catalog;
