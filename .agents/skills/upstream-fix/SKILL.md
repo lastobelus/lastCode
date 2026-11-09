@@ -62,8 +62,8 @@ does not count.
    and link the upstream PR in both descriptions.
 6. Before merge, require a current-head clean Codex review, zero unresolved
    review threads, and successful exact-head/base GitHub CI and `CI Gate`. Merge
-   through `pnpm --config.verify-deps-before-run=false lastcode:merge`. If the base changes, refresh the branch as
-   needed and obtain fresh validation against the new base before merging.
+   through `pnpm --config.verify-deps-before-run=false lastcode:merge`. A base that moved needs no
+   rebase unless the merge reports a conflict; follow `lastcode-pr` for that.
 
 The LastCode PR does not wait for upstream acceptance. The upstream PR does not
 depend on LastCode. When upstream later lands the change, let the nightly rebase
