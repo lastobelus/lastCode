@@ -576,7 +576,7 @@ const cleanupFixture = (
       Effect.sync(() => {
         suspensionSweeps++;
       }),
-      registry,
+      { unverifiedUse: () => Effect.succeed(null), ...registry },
     );
     const scratchServices = StorageCleanup.layer.pipe(
       Layer.provideMerge(
@@ -1057,6 +1057,9 @@ const cleanupFixture = (
       },
       service: Context.get(context, StorageCleanup.StorageCleanup),
       savedWorkspaces: realSuspension ? Context.get(context, Suspension.WorktreeSuspension) : null,
+      savedWorkspaceRegistry: realSuspension
+        ? Context.get(context, SuspensionRegistry.WorktreeSuspensionRegistry)
+        : null,
       acquisition: realSuspension ? Context.get(context, Acquisition.WorkspaceAcquisition) : null,
       onScratchBoundary: (callback: (phase: string) => void) => {
         onScratchBoundary = callback;
@@ -4255,34 +4258,59 @@ const scratchCleanupFixture = (realSuspension = false) =>
   });
 
 describe("scratch workspace cleanup", () => {
-  it.effect("keeps deleted branchless Git threads outside scratch cleanup", () =>
-    runCleanupTest(
-      Effect.gen(function* () {
-        yield* TestClock.setTime(NOW_MS);
-        const fixture = yield* cleanupFixture();
-        fixture.setThreads([]);
-        fixture.setDeletedThreads([
-          shell({ branch: null, worktreePath: fixture.worktree, deletedAt: at(-10 * DAY_MS) }),
-        ]);
-        const report = yield* fixture.service.runNow;
-        expect(report.entries.some((entry) => entry.path === fixture.worktree)).toBe(false);
-        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(true);
-      }),
-    ),
+  it.effect.each([false, true])(
+    "keeps deleted branchless Git threads outside scratch cleanup (overlapping root: %s)",
+    (overlap) =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          yield* TestClock.setTime(NOW_MS);
+          const fixture = yield* cleanupFixture(
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            Duration.zero,
+            true,
+          );
+          const worktree = overlap ? `${fixture.config.baseDir}/scratch/topic` : fixture.worktree;
+          if (overlap) {
+            yield* fixture.fs.makeDirectory(`${fixture.config.baseDir}/scratch`);
+            yield* fixture.command(fixture.repo, ["worktree", "move", fixture.worktree, worktree]);
+            fixture.setManagedWorktreeDirectories(fixture.config.baseDir, []);
+          }
+          fixture.setThreads([]);
+          fixture.setDeletedThreads([
+            shell({ branch: null, worktreePath: worktree, deletedAt: at(-10 * DAY_MS) }),
+          ]);
+          const report = yield* fixture.service.runNow;
+          expect(
+            report.entries
+              .filter((entry) => entry.path === worktree)
+              .every((entry) => entry.outcome === "kept"),
+          ).toBe(true);
+          expect(yield* fixture.fs.exists(worktree)).toBe(true);
+        }),
+      ),
   );
 
-  it.effect.each(["use", "restore"] as const)(
+  it.effect.each(["use", "restore", "unverified use"] as const)(
     "keeps scratch after recent workspace %s until the inactivity limit passes",
     (activity) =>
       runCleanupTest(
         Effect.gen(function* () {
           const fixture = yield* scratchCleanupFixture(true);
           if (activity === "restore") yield* fixture.service.runNow;
-          yield* fixture.acquisition!.acquire({
-            path: fixture.scratch,
-            threadId: fixture.owner.id,
-            purpose: "editor",
-          });
+          if (activity === "unverified use")
+            yield* fixture.savedWorkspaceRegistry!.recordUnverifiedUse(
+              fixture.scratch,
+              DateTime.formatIso(at(0)),
+            );
+          else
+            yield* fixture.acquisition!.acquire({
+              path: fixture.scratch,
+              threadId: fixture.owner.id,
+              purpose: "editor",
+            });
           const report = yield* fixture.service.runNow;
           expect(report.entries).toContainEqual(
             expect.objectContaining({
@@ -4310,7 +4338,11 @@ describe("scratch workspace cleanup", () => {
         const scratch = `${fixture.config.baseDir}/scratch/2026-06-01-notes`;
         yield* fixture.fs.makeDirectory(scratch, { recursive: true });
         yield* fixture.fs.writeFileString(`${scratch}/notes.txt`, "keep these notes\n");
-        fixture.setThreads([shell({ worktreePath: scratch })]);
+        const owner = shell({ worktreePath: scratch });
+        fixture.setThreads([owner]);
+        fixture.setProjectRoots([
+          { id: owner.projectId, workspaceRoot: `${fixture.config.baseDir}/scratch` },
+        ]);
         const report = yield* fixture.service.runNow;
         expect(report.entries).toContainEqual(
           expect.objectContaining({

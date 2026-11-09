@@ -60,8 +60,11 @@ project in the heading.
 Each thread without a project works in its own folder under `~/.t3/scratch` (the
 `scratch` folder of your T3 data directory), named after its date, the first words
 of its first message, and a short id, like
-`2026-09-25-convert-these-pngs-to-webp-a1b2c3d4`. Deleting a thread keeps its
-folder, so the files the agent wrote stay until you delete them. Branch, worktree, and diff controls stay hidden because
+`2026-09-25-convert-these-pngs-to-webp-a1b2c3d4`. Deleting a thread initially keeps
+its folder. When the inactivity rule in [automatic worktree cleanup](project-settings.md#permanent-deletion-and-generated-files)
+is enabled, a scratch folder is saved and removed after every thread using it is
+archived or deleted and the inactivity delay has passed. You can restore it from
+Saved workspaces in Settings. Branch, worktree, and diff controls stay hidden because
 these folders are not Git repositories. This is unavailable when the data
 directory itself sits inside a Git checkout.
 

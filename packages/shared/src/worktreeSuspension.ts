@@ -2406,7 +2406,7 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       }
       if (actual !== stamp) refuse("the prepared workspace changed before removal");
     }
-    NodeFS.rmSync(root, { recursive: true });
+    await NodeFSP.rm(root, { recursive: true });
   };
   const trialRestore = async (id: string) => {
     const snapshot = await verify(id);
@@ -2588,7 +2588,7 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       refuse("the isolated workspace was replaced");
     preparedRemovals.delete(id);
     if (snapshot.version === 4) {
-      NodeFS.rmSync(journal.isolatedPath!, { recursive: true });
+      await NodeFSP.rm(journal.isolatedPath!, { recursive: true });
       if (await exists(journal.isolatedPath!))
         refuse("the isolated workspace was not completely removed");
       await syncDirectory(NodePath.dirname(journal.isolatedPath!));

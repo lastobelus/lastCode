@@ -784,6 +784,67 @@ it.live("saves scratch synchronously and restores on use without Git", () =>
   ),
 );
 
+it.live.each(["branch", "repository", "restored branch"] as const)(
+  "releases active scratch acquisition after gaining a %s",
+  (change) =>
+    realScratch((f) =>
+      Effect.gen(function* () {
+        const h = yield* harness(f, { scratch: true });
+        yield* h.acquisition.acquire({ path: f.workspace, purpose: "editor", threadId: firstId });
+        if (change === "restored branch") {
+          yield* h.service.suspendScratch({
+            path: f.workspace,
+            owners: [...h.threads.values()],
+            recheck: () => Effect.succeed(null),
+          });
+          yield* h.acquisition.acquire({ path: f.workspace, purpose: "editor", threadId: firstId });
+        }
+        if (change === "repository")
+          yield* Effect.promise(() => NodeFSP.mkdir(NodePath.join(f.workspace, ".git")));
+        else h.threads.set(firstId, { ...h.threads.get(firstId)!, branch: "main" });
+        for (const threadId of [firstId, secondId])
+          expect(
+            yield* h.acquisition.acquire({ path: f.workspace, purpose: "editor", threadId }),
+          ).toEqual({ path: f.workspace, branch: null, restored: false });
+        expect((yield* h.registry.list)[0]).toMatchObject({ detached: true, owners: [] });
+        if (change === "restored branch")
+          expect((yield* h.service.list({}, { allowOrphans: true })).entries).toMatchObject([
+            { kind: "scratch", current: false, orphaned: true },
+          ]);
+        expect(
+          yield* Effect.promise(() =>
+            NodeFSP.readFile(NodePath.join(f.workspace, "draft.txt"), "utf8"),
+          ),
+        ).toBe("scratch draft\n");
+        expect(h.gitRequests).toEqual([]);
+      }),
+    ),
+);
+
+it.live("keeps scratch recovery bound when branch metadata changes while suspended", () =>
+  realScratch((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, { scratch: true });
+      yield* h.service.suspendScratch({
+        path: f.workspace,
+        owners: [...h.threads.values()],
+        recheck: () => Effect.succeed(null),
+      });
+      h.threads.set(firstId, { ...h.threads.get(firstId)!, branch: "main" });
+      expect(
+        (yield* h.acquisition
+          .acquire({ path: f.workspace, purpose: "editor", threadId: firstId })
+          .pipe(Effect.flip)).reason,
+      ).toBe("snapshot-unavailable");
+      const saved = (yield* h.registry.list)[0]!;
+      expect(saved.summary.state).toBe("suspended");
+      expect((yield* Effect.promise(() => h.store.verify(saved.summary.snapshotId!))).kind).toBe(
+        "scratch",
+      );
+    }),
+  ),
+);
+
 it.live("retains deleted scratch owners in receipts and creates a new recovery thread", () =>
   realScratch((f) =>
     Effect.gen(function* () {
@@ -2301,6 +2362,45 @@ it.live("refuses manual scratch suspension outside storage cleanup", () =>
           NodeFSP.readFile(NodePath.join(f.workspace, "draft.txt"), "utf8"),
         ),
       ).toBe("scratch draft\n");
+    }),
+  ),
+);
+
+it.effect("does not require scratch registration when Git suspension policy is on", () =>
+  realScratch((f) =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse("2026-06-10T12:00:00.000Z"));
+      const h = yield* harness(f, { scratch: true, settings: automaticSettings });
+      h.threads.set(firstId, { ...h.threads.get(firstId)!, branch: "main" });
+      expect(
+        yield* h.acquisition.acquire({ path: f.workspace, purpose: "terminal", threadId: firstId }),
+      ).toEqual({ path: f.workspace, branch: null, restored: false });
+      expect(yield* h.registry.list).toEqual([]);
+      expect(yield* h.registry.unverifiedUse([f.workspace])).not.toBeNull();
+    }),
+  ),
+);
+
+it.effect("keeps Git acquisition and suspension under a scratch-named managed directory", () =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse("2026-06-10T12:00:00.000Z"));
+      const workspace = NodePath.join(f.root, "scratch", "topic");
+      yield* Effect.promise(() => NodeFSP.mkdir(NodePath.dirname(workspace)));
+      yield* Effect.promise(() => git(f.repository, "worktree", "move", f.workspace, workspace));
+      const h = yield* harness(
+        { ...f, workspace },
+        { cleanupThreads: true, settings: { ...automaticSettings, worktreesDirectory: f.root } },
+      );
+      untouchedOwners(h.threads);
+      expect(
+        yield* h.acquisition.acquire({ path: workspace, purpose: "editor", threadId: firstId }),
+      ).toMatchObject({ path: workspace, restored: false });
+      const record = (yield* h.registry.list)[0]!;
+      expect(record.repositoryRoot).toBe(f.repository);
+      yield* h.registry.put({ ...record, lastWorkspaceUseAt: DateTime.formatIso(at) }, record);
+      yield* h.service.sweep;
+      expect((yield* h.registry.list)[0]!.summary.state).toBe("suspended");
     }),
   ),
 );

@@ -481,7 +481,17 @@ it("retains scratch removal remnants and refuses replaced restore staging", asyn
     quarantineParent: NodePath.join(test.root, "quarantine"),
   });
   await test.store.prepareRemoval(snapshot.id);
-  await NodeFSP.unlink(NodePath.join(isolated.isolatedPath!, "private"));
+  const remove = NodeFSP.rm;
+  using _failure = vi.spyOn(NodeFSP, "rm").mockImplementation(async (target, options) => {
+    if (target === isolated.isolatedPath) {
+      await NodeFSP.unlink(NodePath.join(isolated.isolatedPath!, "private"));
+      throw new Error("asynchronous removal interrupted");
+    }
+    return remove(target, options);
+  });
+  await expect(test.store.finishRemoval(snapshot.id)).rejects.toThrow(
+    "asynchronous removal interrupted",
+  );
   const restarted = createWorktreeSuspensionStore({ storeRoot: test.storeRoot });
   expect((await restarted.reconcileRemoval(snapshot.id)).status).toBe("restore-required");
   const destination = NodePath.join(test.root, "recovered");

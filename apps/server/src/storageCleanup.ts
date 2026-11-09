@@ -2942,7 +2942,9 @@ const make = Effect.gen(function* () {
     )).filter(
       (thread) =>
         thread.worktreePath !== null &&
-        (thread.branch !== null || path.dirname(path.resolve(thread.worktreePath)) === scratchRoot),
+        (thread.branch !== null ||
+          (path.dirname(path.resolve(thread.worktreePath)) === scratchRoot &&
+            path.resolve(thread.workspaceRoot) === scratchRoot)),
     );
     const snapshot = yield* readThreads();
     const threadsById = new Map(snapshot.threads.map((thread) => [thread.id, thread]));
@@ -3126,6 +3128,8 @@ const make = Effect.gen(function* () {
         if (savedProtection !== null) return keep(savedProtection);
         const scratch =
           thread.branch === null &&
+          project !== undefined &&
+          path.resolve(project.workspaceRoot) === scratchRoot &&
           owners.some((owner) => path.dirname(owner.recordedPath) === scratchRoot);
         if (scratch) {
           const scratchActivityAt = Math.max(
@@ -3159,8 +3163,13 @@ const make = Effect.gen(function* () {
                 )
               )
                 return "scratch workspace belongs to a thread that is not archived or deleted";
+              const unverifiedUse = yield* suspensionRegistry.unverifiedUse([
+                worktreePath,
+                ...owners.map((owner) => owner.recordedPath),
+              ]);
               const savedActivityAt = Math.max(
                 0,
+                unverifiedUse === null ? 0 : Date.parse(unverifiedUse),
                 ...(yield* suspensionRegistry.list)
                   .filter(
                     (record) =>

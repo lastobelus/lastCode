@@ -254,11 +254,13 @@ project deletion let you discard saved data or keep it for recovery. Discarding 
 does not require restoring it first, and permanently loses its saved uncommitted work and notes.
 Git branches and ordinary checkpoints remain. After discarding, use **Create fresh worktree**
 to continue from Git rather than recover the discarded changes.
+For a discarded scratch copy, **Create fresh worktree** creates an empty scratch folder.
 Copies kept after deleting their threads remain in Saved workspaces; an environment administrator
 can release their hold and discard them there.
 
 Saved workspaces have no automatic expiry. They are local recovery, not a backup: restoration
-depends on both this environment's saved data and the repository's Git data.
+of a saved scratch workspace needs only this environment's saved data. A saved Git worktree
+also needs the repository's Git data.
 
 On Linux, suspension needs `getfattr`, `getfacl`, and `lsattr` to check file metadata before
 removing a checkout. Install your distribution's `attr`, `acl`, and `e2fsprogs` packages if
@@ -283,6 +285,9 @@ prevent removal. Shared families qualify only when every owner is archived and e
 has cleanup enabled. Edits, untracked files and unknown ignored files—including notes, `.env`
 and local runtime state—always preserve a checkout. Branches and thread history stay;
 starting another turn recreates the checkout.
+Scratch workspaces are eligible after every thread using the folder is archived or deleted
+and the inactivity delay has passed. Their contents are saved first and can be restored
+from Saved workspaces.
 Merge cleanup requires a merged pull request whose commits are included in the remote default
 branch. A squash or rebase merge on GitHub also counts when the pull request targeted the default
 branch and the worktree is still at the pull request's last commit.

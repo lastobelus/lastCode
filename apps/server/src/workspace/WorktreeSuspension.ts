@@ -256,6 +256,19 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
     generation: thread.worktreeSuspension?.generation ?? null,
   });
   const configuredScratchRoot = path.resolve(config.baseDir, "scratch");
+  const isScratchWorkspaceOwner = Effect.fnUntraced(function* (
+    thread: Pick<OrchestrationV2ThreadShell, "projectId" | "worktreePath">,
+  ) {
+    if (
+      thread.worktreePath === null ||
+      path.dirname(path.resolve(thread.worktreePath)) !== configuredScratchRoot
+    )
+      return false;
+    const project = yield* projects.get(thread.projectId);
+    return (
+      Option.isSome(project) && path.resolve(project.value.workspaceRoot) === configuredScratchRoot
+    );
+  });
   const verifyScratchPath = Effect.fn("WorktreeSuspension.verifyScratchPath")(function* (
     destination: string,
     expectedRoot = configuredScratchRoot,
@@ -444,7 +457,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
         "The private recovery catalog is missing. Workspace commands are blocked to preserve recovery data.",
       );
     const actual = yield* fs.realPath(thread.worktreePath);
-    if (path.dirname(thread.worktreePath) === configuredScratchRoot) {
+    if (yield* isScratchWorkspaceOwner(thread)) {
       if (actual !== thread.worktreePath)
         return yield* failure("protected", "Scratch workspace symlinks cannot be saved.");
       return yield* registerScratch(actual, yield* ownersFor([actual]));
@@ -922,6 +935,18 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       }
     }
     const sharing = yield* ownersFor(record.aliases, record);
+    if (
+      record.kind === "scratch" &&
+      record.summary.state === "active" &&
+      record.summary.snapshotId === null &&
+      (sharing.some((thread) => thread.branch !== null) ||
+        (yield* fs.exists(path.join(record.path, ".git"))))
+    ) {
+      yield* originalStillOwned(record);
+      const detached = { ...record, owners: [], detached: true, blockedReason: null };
+      yield* registry.put(detached, record);
+      return detached;
+    }
     const expected = record.owners.every((owner) => owner.generation === null)
       ? null
       : record.summary;
@@ -3154,12 +3179,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
     );
     const candidates = new Map<string, ThreadId>();
     for (const thread of [...shell.threads, ...shell.archivedThreads]) {
-      if (
-        thread.worktreePath === null ||
-        thread.deletedAt !== null ||
-        path.dirname(thread.worktreePath) === configuredScratchRoot
-      )
-        continue;
+      if (thread.worktreePath === null || thread.deletedAt !== null) continue;
       const record =
         thread.worktreeSuspension === undefined
           ? byPath.get(thread.worktreePath)
@@ -3175,6 +3195,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
           liveOperations.has(record.checkoutId))
       )
         continue;
+      if (yield* isScratchWorkspaceOwner(thread)) continue;
       if (
         !automaticEligibility(
           thread,
@@ -3313,10 +3334,23 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
             const thread = yield* projections.getThreadShell(binding.threadId);
             if (thread?.worktreeSuspension !== undefined) {
               const rebound = catalog.find(
-                (entry) =>
-                  entry.checkoutId === thread.worktreeSuspension!.checkoutId && !entry.detached,
+                (entry) => entry.checkoutId === thread.worktreeSuspension!.checkoutId,
               );
-              if (rebound?.summary.state === "active" && rebound.operation === undefined) {
+              if (
+                rebound?.kind === "scratch" &&
+                rebound.detached &&
+                rebound.summary.state === "active" &&
+                rebound.summary.snapshotId === null &&
+                rebound.operation === undefined &&
+                rebound.pendingProjection === undefined
+              )
+                continue;
+              if (
+                rebound !== undefined &&
+                !rebound.detached &&
+                rebound.summary.state === "active" &&
+                rebound.operation === undefined
+              ) {
                 record = rebound;
                 break;
               }
@@ -3332,7 +3366,11 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
                   yield* settings.getSettings,
                   thread.projectId,
                 );
-                if (policy.mode === "off" || !Object.values(policy.scopes).some(Boolean)) {
+                if (
+                  (yield* isScratchWorkspaceOwner(thread)) ||
+                  policy.mode === "off" ||
+                  !Object.values(policy.scopes).some(Boolean)
+                ) {
                   const identified = yield* identify(thread.id, undefined, "activity").pipe(
                     Effect.option,
                   );
