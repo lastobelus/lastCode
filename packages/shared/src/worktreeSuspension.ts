@@ -662,7 +662,9 @@ const metadataCheck = async (
 ): Promise<SuspensionMetadata> => {
   // Inspect exactly the retained inventory when generated trees were pruned;
   // recursive platform tools would otherwise walk the discarded install again.
-  const retainedPaths = [root, ...entries.map((entry) => NodePath.join(root, entry.path))];
+  const retainedPaths = pruned
+    ? [root, ...entries.map((entry) => NodePath.join(root, entry.path))]
+    : [];
   if (pruned && (await exists(NodePath.join(root, ".git"))))
     retainedPaths.push(NodePath.join(root, ".git"));
   const inspectRetained = async (program: string, args: readonly string[]) => {
@@ -1781,7 +1783,9 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       JSON.stringify(currentInventory.hiddenPaths ?? []) !==
         JSON.stringify(snapshot.hiddenPaths ?? []) ||
       JSON.stringify(currentInventory.attributes ?? []) !==
-        JSON.stringify((snapshot.attributes ?? []).filter((item) => !disposableAttribute(item.name))) ||
+        JSON.stringify(
+          (snapshot.attributes ?? []).filter((item) => !disposableAttribute(item.name)),
+        ) ||
       JSON.stringify(currentInventory.entries) !== JSON.stringify(snapshot.entries) ||
       JSON.stringify(currentInventory.hardlinks ?? []) !== JSON.stringify(snapshot.hardlinks ?? [])
     )
@@ -2082,7 +2086,15 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       sourceIdentity: identity(sourceStat),
     };
     journal = await transition(journal, "capturing");
-    const before = await inventory(sourcePath, limits, undefined, undefined, undefined, false, true);
+    const before = await inventory(
+      sourcePath,
+      limits,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      true,
+    );
     const metadataBefore = await inventory(
       repository.gitDirectory,
       gitLimits,
