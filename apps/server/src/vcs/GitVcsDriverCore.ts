@@ -68,6 +68,18 @@ const gitProcesses = Semaphore.makeUnsafe(8);
 const backgroundGitProcesses = Semaphore.makeUnsafe(2);
 const WORKTREE_REMOVE_TIMEOUT_MS = Duration.toMillis(Duration.minutes(5));
 const DEFAULT_MAX_OUTPUT_BYTES = 1_000_000;
+
+const OPTIONS_WITH_VALUES = new Set(["-c", "-C", "--git-dir", "--work-tree", "--namespace"]);
+
+const gitSubcommand = (args: ReadonlyArray<string>): string | null => {
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!;
+    if (OPTIONS_WITH_VALUES.has(arg)) index++;
+    else if (!arg.startsWith("-")) return arg;
+  }
+  return null;
+};
+
 const OUTPUT_TRUNCATED_MARKER = "\n\n[truncated]";
 const PREPARED_COMMIT_PATCH_MAX_OUTPUT_BYTES = 49_000;
 const RANGE_COMMIT_SUMMARY_MAX_OUTPUT_BYTES = 19_000;
@@ -969,6 +981,11 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       const appendTruncationMarker = input.appendTruncationMarker ?? false;
 
       const runGitCommand = Effect.fn("runGitCommand")(function* () {
+        // Full args can carry remote URLs or config values, so record only the subcommand.
+        yield* Effect.annotateCurrentSpan({
+          "git.operation": input.operation,
+          "git.subcommand": gitSubcommand(commandInput.args),
+        });
         const trace2Monitor = yield* createTrace2Monitor(commandInput, input.progress).pipe(
           Effect.provideService(Path.Path, path),
           Effect.provideService(FileSystem.FileSystem, fileSystem),
