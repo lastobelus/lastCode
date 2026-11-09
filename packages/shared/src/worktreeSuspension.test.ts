@@ -844,7 +844,7 @@ it.runIf(HostProcess.Platform.defaultValue() === "darwin").each(["outside", "mal
 );
 
 it.runIf(HostProcess.Platform.defaultValue() === "darwin")(
-  "roundtrips FinderInfo on the root, directories and .DS_Store without losing raw bytes",
+  "drops benign system attributes while preserving user metadata and file bytes",
   async () => {
     await using test = await fixture();
     await NodeFSP.writeFile(NodePath.join(test.workspace, ".DS_Store"), "finder data");
@@ -860,36 +860,41 @@ it.runIf(HostProcess.Platform.defaultValue() === "darwin")(
         NodePath.join(test.workspace, item.path),
       ]);
     const value = "0123456789abcdef".repeat(4);
+    const benign = [
+      "com.apple.FinderInfo",
+      "com.apple.lastuseddate#PS",
+      "com.apple.fileprovider.ignore#P",
+    ];
     for (const name of ["", "notes", ".DS_Store", "tracked.txt", "link"])
-      await execute("/usr/bin/xattr", [
-        "-swx",
-        "com.apple.FinderInfo",
-        value,
-        NodePath.join(test.workspace, name),
-      ]);
+      for (const attribute of benign)
+        await execute("/usr/bin/xattr", [
+          "-swx",
+          attribute,
+          value,
+          NodePath.join(test.workspace, name),
+        ]);
     const snapshot = await test.store.capture({
       sourcePath: test.workspace,
       operationId: "finder",
       ownerBinding: "fixture-owner",
     });
+    const manifest = NodePath.join(test.root, "saved", snapshot.id, "manifest.json");
+    const legacy = {
+      ...snapshot,
+      attributes: [
+        ...(snapshot.attributes ?? []),
+        { path: "tracked.txt", name: "com.apple.FinderInfo", hex: value },
+      ],
+    };
+    delete legacy.omitsRegenerableDirectories;
+    await NodeFSP.writeFile(manifest, JSON.stringify(legacy));
     await test.store.trialRestore(snapshot.id);
     await test.store.isolate(snapshot.id, {
       quarantineParent: NodePath.join(test.root, "quarantine"),
     });
     await test.store.removeIsolated(snapshot.id);
     await test.store.restore(snapshot.id, { destinationPath: test.workspace });
-    for (const name of ["", "notes", ".DS_Store", "tracked.txt", "link"])
-      expect(
-        (
-          await execute("/usr/bin/xattr", [
-            "-spx",
-            "com.apple.FinderInfo",
-            NodePath.join(test.workspace, name),
-          ])
-        ).stdout
-          .replace(/\s/gu, "")
-          .toLowerCase(),
-      ).toBe(value);
+    expect(snapshot.attributes?.some((item) => benign.includes(item.name))).not.toBe(true);
     for (const item of extra)
       expect(
         (
@@ -1003,9 +1008,9 @@ it.runIf(HostProcess.Platform.defaultValue() === "darwin")(
     await using test = await fixture();
     await execute("/usr/bin/xattr", [
       "-swx",
-      "com.apple.FinderInfo",
+      "com.apple.ResourceFork",
       "01".repeat(32),
-      test.workspace,
+      NodePath.join(test.workspace, "tracked.txt"),
     ]);
     const snapshot = await test.store.capture({
       sourcePath: test.workspace,
@@ -1396,7 +1401,9 @@ it.each([false, true])(
         operationId: "operation",
         ownerBinding: "fixture-owner",
       }),
-    ).rejects.toThrow("hardlinked");
+    ).rejects.toThrow(
+      `hardlinked files extend outside the workspace (${JSON.stringify(NodePath.join(test.workspace, mixed ? "notes/installed" : "tracked.txt"))})`,
+    );
     expect(
       reads.mock.calls.filter(
         ([name]) =>
@@ -1432,6 +1439,124 @@ it.each([false, true])(
     );
   },
 );
+
+it.each(["ignored", "unignored", "tracked", "removed-from-index"] as const)(
+  "excludes only ignored untracked generated directories (%s)",
+  async (kind) => {
+    await using test = await fixture();
+    const relative = "apps/web/node_modules";
+    const directory = NodePath.join(test.workspace, relative);
+    await NodeFSP.mkdir(directory, { recursive: true });
+    const file = NodePath.join(directory, "payload");
+    await NodeFSP.writeFile(file, "x".repeat(8192));
+    if (kind !== "unignored")
+      await NodeFSP.appendFile(NodePath.join(test.workspace, ".gitignore"), "node_modules/\n");
+    if (kind === "tracked" || kind === "removed-from-index")
+      await git(test.workspace, "add", "--force", `${relative}/payload`);
+    if (kind === "removed-from-index") {
+      await git(
+        test.workspace,
+        "commit",
+        "--only",
+        "-m",
+        "tracked generated file",
+        "--",
+        `${relative}/payload`,
+      );
+      await git(test.workspace, "rm", "--cached", "--", `${relative}/payload`);
+    }
+    const store = createWorktreeSuspensionStore({
+      storeRoot: NodePath.join(test.root, "bounded"),
+      limits: { maxBytes: 4096, maxFileBytes: 4096 },
+    });
+    using reads = vi.spyOn(NodeFSP, "readdir");
+    const capture = store.capture({
+      sourcePath: test.workspace,
+      operationId: "generated",
+      ownerBinding: "fixture-owner",
+    });
+    if (kind === "ignored") {
+      const snapshot = await capture;
+      expect(snapshot.entries.some((entry) => entry.path.startsWith(`${relative}/`))).toBe(false);
+      expect(reads.mock.calls.some(([name]) => name === directory)).toBe(false);
+      // Unknown metadata in an excluded tree must not be recursively inspected.
+      if (HostProcess.Platform.defaultValue() === "darwin")
+        await execute("/usr/bin/xattr", [
+          "-sw",
+          "com.example.user-note",
+          "retained elsewhere",
+          file,
+        ]);
+      await store.trialRestore(snapshot.id);
+      await store.suspend(snapshot.id, {
+        quarantineParent: NodePath.join(test.root, "quarantine"),
+        guard: async () => {},
+      });
+      await store.restore(snapshot.id, { destinationPath: test.workspace });
+      await expect(NodeFSP.lstat(directory)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(await NodeFSP.readFile(NodePath.join(test.workspace, "notes/private"), "utf8")).toBe(
+        "ignored note\n",
+      );
+    } else {
+      await expect(capture).rejects.toThrow(
+        `Workspace needs review: a file exceeds the preservation limit (${JSON.stringify(file)})`,
+      );
+      expect(await NodeFSP.readFile(file, "utf8")).toBe("x".repeat(8192));
+    }
+  },
+);
+
+it.each([
+  { name: "unsafe filename", relative: "unsafe\nname", limits: {} },
+  { name: "file size", relative: "oversized", limits: { maxFileBytes: 32 } },
+  { name: "workspace size", relative: "oversized", limits: { maxBytes: 32 } },
+])("reports the offending path for $name", async ({ relative, limits }) => {
+  await using test = await fixture();
+  const path = NodePath.join(test.workspace, relative);
+  await NodeFSP.writeFile(path, "a".repeat(64));
+  const store = createWorktreeSuspensionStore({
+    storeRoot: NodePath.join(test.root, "bounded"),
+    limits,
+  });
+  await expect(
+    store.capture({
+      sourcePath: test.workspace,
+      operationId: "review",
+      ownerBinding: "fixture-owner",
+    }),
+  ).rejects.toThrow("Workspace needs review:");
+  // The aggregate bound is crossed by binary after the earlier sorted entries.
+  const offending = limits.maxBytes ? NodePath.join(test.workspace, "binary") : path;
+  await expect(
+    store.capture({
+      sourcePath: test.workspace,
+      operationId: "review-again",
+      ownerBinding: "fixture-owner",
+    }),
+  ).rejects.toThrow(JSON.stringify(offending));
+  expect(await NodeFSP.readFile(path, "utf8")).toBe("a".repeat(64));
+});
+
+it("reports the private index path and unsupported extension without removing source", async () => {
+  await using test = await fixture();
+  await git(test.workspace, "update-index", "--untracked-cache");
+  const indexPath = NodePath.join(
+    await git(test.workspace, "rev-parse", "--absolute-git-dir"),
+    "index",
+  );
+  await expect(
+    test.store.capture({
+      sourcePath: test.workspace,
+      operationId: "index-extension",
+      ownerBinding: "fixture-owner",
+    }),
+  ).rejects.toThrow(
+    `Workspace needs review: the Git index has unsupported extensions: UNTR (${JSON.stringify(indexPath)})`,
+  );
+  expect(await NodeFSP.readFile(NodePath.join(test.workspace, "tracked.txt"), "utf8")).toBe(
+    "unstaged\n",
+  );
+});
 
 it("refuses complete hardlink groups in private Git metadata before hashing workspace content", async () => {
   await using test = await fixture();
@@ -1478,11 +1603,10 @@ it.each(["payload", "journal"])("refuses hardlinked private snapshot %s files", 
 });
 
 it.each([1, 2])(
-  "roundtrips a pnpm-style internal hardlink group with %i installed aliases",
+  "roundtrips an unignored pnpm-style internal hardlink group with %i installed aliases",
   async (aliases) => {
     await using test = await fixture();
     const installed = "node_modules/.pnpm/package/node_modules/package";
-    await NodeFSP.appendFile(NodePath.join(test.workspace, ".gitignore"), "node_modules/\n");
     await NodeFSP.mkdir(NodePath.join(test.workspace, installed), { recursive: true });
     const paths = [
       "tracked.txt",

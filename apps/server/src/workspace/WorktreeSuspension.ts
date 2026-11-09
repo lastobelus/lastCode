@@ -134,6 +134,25 @@ const failure = (reason: WorktreeSuspensionRequestError["reason"], message: stri
   new WorktreeSuspensionRequestError({ reason, message });
 const isRequestError = Schema.is(WorktreeSuspensionRequestError);
 const isWorkspaceUnavailable = Schema.is(WorkspaceUnavailableError);
+const needsCapturePolicyRetry = (record: CheckoutAuthority) => {
+  const reason = record.captureFailure?.reason;
+  if (reason === undefined) return false;
+  // Recheck saves blocked by the former capture policy once. A new permanent
+  // refusal has a path-bearing review prefix, so it cannot enter this retry again.
+  return [
+    "a file exceeds the preservation limit",
+    "the workspace exceeds the byte limit",
+    "the workspace exceeds the path limit",
+    "a filename cannot be represented safely",
+    "a filename is not UTF-8",
+    "the Git index has unsupported extensions",
+    "hardlinked files are unsupported",
+    "hardlinked files extend outside the workspace",
+    "extended attributes are unsupported (com.apple.FinderInfo at ",
+    "extended attributes are unsupported (com.apple.lastuseddate#PS at ",
+    "extended attributes are unsupported (com.apple.fileprovider.ignore#P at ",
+  ].some((legacy) => reason.startsWith(`Workspace kept: ${legacy}`));
+};
 const safeFailure = (cause: unknown) =>
   isRequestError(cause)
     ? cause
@@ -1342,7 +1361,11 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
     record: CheckoutAuthority,
   ) {
     if (record.kind === "scratch") return false;
-    if (record.captureFailure !== undefined && record.captureFailure.retryOnce !== true)
+    if (
+      record.captureFailure !== undefined &&
+      record.captureFailure.retryOnce !== true &&
+      !needsCapturePolicyRetry(record)
+    )
       return false;
     const currentSettings = yield* settings.getSettings;
     const timestamp = yield* milliseconds;
@@ -3258,7 +3281,9 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
           record.summary.state !== "active" ||
           record.operation !== undefined ||
           record.pendingProjection !== undefined ||
-          (record.captureFailure !== undefined && record.captureFailure.retryOnce !== true) ||
+          (record.captureFailure !== undefined &&
+            record.captureFailure.retryOnce !== true &&
+            !needsCapturePolicyRetry(record)) ||
           liveOperations.has(record.checkoutId))
       )
         continue;

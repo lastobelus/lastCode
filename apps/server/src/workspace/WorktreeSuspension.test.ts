@@ -2618,13 +2618,61 @@ it.live("automatically saves a shared workspace after unsettled archived owners 
 );
 
 it.live(
-  "automatically saves retained source after an oversized dependency install is removed",
+  "saves local work without preserving oversized ignored dependency and build directories",
   () =>
     realGit((f) =>
       Effect.gen(function* () {
         const h = yield* harness(f, { cleanupThreads: true, settings: automaticSettings });
         untouchedOwners(h.threads);
-        const dependencyPath = NodePath.join(f.workspace, "node_modules");
+        const generated = ["node_modules", "apps/web/node_modules", "apps/web/dist"];
+        yield* Effect.promise(async () => {
+          await NodeFSP.appendFile(
+            NodePath.join(f.workspace, ".gitignore"),
+            "node_modules/\ndist/\n",
+          );
+          for (const relative of generated) {
+            const directory = NodePath.join(f.workspace, relative);
+            await NodeFSP.mkdir(directory, { recursive: true });
+            await using large = await NodeFSP.open(NodePath.join(directory, "large-binary"), "w");
+            await large.truncate(512 * 1024 * 1024 + 1);
+          }
+        });
+        yield* h.service.previewSuspend({ threadId: firstId });
+        const initial = (yield* h.registry.list)[0]!;
+        yield* h.registry.put({ ...initial, lastWorkspaceUseAt: DateTime.formatIso(at) }, initial);
+        yield* h.service.sweep;
+        const saved = (yield* h.registry.list)[0]!;
+        expect(saved.summary.state).toBe("suspended");
+        expect(saved.captureFailure).toBeUndefined();
+        yield* h.acquisition.acquire({
+          path: f.workspace,
+          purpose: "file-write",
+          threadId: firstId,
+        });
+        yield* Effect.promise(async () => {
+          expect(await NodeFSP.readFile(NodePath.join(f.workspace, "tracked"), "utf8")).toBe(
+            "working\n",
+          );
+          expect(await NodeFSP.readFile(NodePath.join(f.workspace, "notes/private"), "utf8")).toBe(
+            "ignored note\n",
+          );
+          for (const relative of generated)
+            await expect(NodeFSP.lstat(NodePath.join(f.workspace, relative))).rejects.toMatchObject(
+              { code: "ENOENT" },
+            );
+        });
+      }),
+    ),
+);
+
+it.live.each(["removed", "regenerable"] as const)(
+  "automatically saves retained source after an oversized local artifact is %s",
+  (resolution) =>
+    realGit((f) =>
+      Effect.gen(function* () {
+        const h = yield* harness(f, { cleanupThreads: true, settings: automaticSettings });
+        untouchedOwners(h.threads);
+        const dependencyPath = NodePath.join(f.workspace, "local-artifact");
         yield* Effect.promise(async () => {
           await NodeFSP.mkdir(dependencyPath);
           await using large = await NodeFSP.open(
@@ -2640,7 +2688,9 @@ it.live(
         const failed = (yield* h.registry.list)[0]!;
         expect(failed.summary.state).toBe("active");
         expect(failed.operation).toBeUndefined();
-        expect(failed.captureFailure?.reason).toContain("a file exceeds the preservation limit");
+        expect(failed.captureFailure?.reason).toContain(
+          `Workspace needs review: a file exceeds the preservation limit (${JSON.stringify(NodePath.join(dependencyPath, "large-binary"))})`,
+        );
         expect(failed.captureFailure?.retryOnce).toBeUndefined();
         const journals = yield* Effect.promise(() =>
           NodeFSP.readdir(NodePath.join(h.registry.root, "snapshots")),
@@ -2649,21 +2699,39 @@ it.live(
         expect(
           yield* Effect.promise(() => NodeFSP.readdir(NodePath.join(h.registry.root, "snapshots"))),
         ).toEqual(journals);
-        // The cleanup integration proves removal eligibility separately; this
-        // service test verifies the resulting automatic save and recovery.
-        yield* withWorkspaceLease(
-          f.workspace,
-          Effect.gen(function* () {
-            yield* Effect.promise(() => NodeFSP.rm(dependencyPath, { recursive: true }));
-            yield* h.registry.dependenciesRemoved(f.workspace);
-          }),
-        );
-        expect((yield* h.registry.list)[0]).toEqual({
-          ...failed,
-          captureFailure: { ...failed.captureFailure!, retryOnce: true },
-        });
-        expect(yield* h.registry.automaticProtection(f.workspace)).not.toBeNull();
-        yield* h.service.sweep;
+        if (resolution === "regenerable") {
+          yield* Effect.promise(async () => {
+            await NodeFSP.rename(dependencyPath, NodePath.join(f.workspace, "node_modules"));
+            await NodeFSP.appendFile(NodePath.join(f.workspace, ".gitignore"), "node_modules/\n");
+          });
+          const legacyReason =
+            "Workspace kept: a file exceeds the preservation limit. Existing files and recovery data have been retained.";
+          yield* h.registry.put(
+            {
+              ...failed,
+              blockedReason: legacyReason,
+              captureFailure: { ...failed.captureFailure!, reason: legacyReason },
+            },
+            failed,
+          );
+          yield* h.service.sweep;
+        } else {
+          // The cleanup integration proves removal eligibility separately; this
+          // service test verifies the resulting automatic save and recovery.
+          yield* withWorkspaceLease(
+            f.workspace,
+            Effect.gen(function* () {
+              yield* Effect.promise(() => NodeFSP.rm(dependencyPath, { recursive: true }));
+              yield* h.registry.dependenciesRemoved(f.workspace);
+            }),
+          );
+          expect((yield* h.registry.list)[0]).toEqual({
+            ...failed,
+            captureFailure: { ...failed.captureFailure!, retryOnce: true },
+          });
+          expect(yield* h.registry.automaticProtection(f.workspace)).not.toBeNull();
+          yield* h.service.sweep;
+        }
         const saved = (yield* h.registry.list)[0]!;
         expect(saved.summary.state).toBe("suspended");
         expect(saved.operation).toBeUndefined();
@@ -2697,7 +2765,7 @@ it.live(
     ),
 );
 
-it.live.each(["manual", "activity"] as const)(
+it.live.each(["manual", "activity", "policy"] as const)(
   "settles unsupported captures and allows %s retry after restart",
   (retry) =>
     realGit((f) =>
@@ -2734,6 +2802,35 @@ it.live.each(["manual", "activity"] as const)(
         expect(
           yield* Effect.promise(() => NodeFSP.readdir(NodePath.join(h.registry.root, "snapshots"))),
         ).toEqual(journals);
+        if (retry === "policy") {
+          const blocked = (yield* restarted.registry.list)[0]!;
+          const legacyReason =
+            "Workspace kept: hardlinked files extend outside the workspace. Existing files and recovery data have been retained.";
+          yield* restarted.registry.put(
+            {
+              ...blocked,
+              blockedReason: legacyReason,
+              captureFailure: { ...blocked.captureFailure!, reason: legacyReason },
+            },
+            blocked,
+          );
+          yield* restarted.service.sweep;
+          const reviewed = (yield* restarted.registry.list)[0]!;
+          expect(reviewed.captureFailure?.reason).toContain(
+            `Workspace needs review: hardlinked files extend outside the workspace (${JSON.stringify(NodePath.join(f.workspace, "tracked"))})`,
+          );
+          const retriedJournals = yield* Effect.promise(() =>
+            NodeFSP.readdir(NodePath.join(h.registry.root, "snapshots")),
+          );
+          expect(retriedJournals).toHaveLength(2);
+          yield* restarted.service.sweep;
+          expect(
+            yield* Effect.promise(() =>
+              NodeFSP.readdir(NodePath.join(h.registry.root, "snapshots")),
+            ),
+          ).toEqual(retriedJournals);
+          return;
+        }
         yield* Effect.promise(() => NodeFSP.unlink(NodePath.join(f.root, "external-hardlink")));
         if (retry === "activity") {
           yield* restarted.acquisition.acquire({

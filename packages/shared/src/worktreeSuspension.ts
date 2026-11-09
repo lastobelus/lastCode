@@ -8,6 +8,7 @@ import * as NodeStream from "node:stream";
 import * as NodeStreamPromises from "node:stream/promises";
 import * as NodeZlib from "node:zlib";
 import * as HostProcess from "./HostProcess.ts";
+import { isRegenerableIgnoredPath } from "./regenerableIgnoredPath.ts";
 
 const DEFAULT_WORKTREE_SUSPENSION_LIMITS = {
   maxEntries: 100_000,
@@ -23,11 +24,17 @@ export interface WorktreeSuspensionLimits {
   readonly reserveBytes: number;
 }
 
+export const WORKSPACE_REVIEW_REQUIRED_PREFIX = "Workspace needs review:";
+
 // @effect-diagnostics-next-line extendsNativeError:off -- This native Promise store exposes errors that the server maps at its Effect boundary.
 export class WorktreeSuspensionError extends Error {
   readonly reason: string;
-  constructor(reason: string) {
-    super(`Workspace kept: ${reason}`);
+  constructor(reason: string, reviewPath?: string) {
+    super(
+      reviewPath === undefined
+        ? `Workspace kept: ${reason}`
+        : `${WORKSPACE_REVIEW_REQUIRED_PREFIX} ${reason} (${JSON.stringify(reviewPath)})`,
+    );
     this.reason = reason;
     this.name = "WorktreeSuspensionError";
   }
@@ -48,6 +55,16 @@ interface SuspensionAttribute {
 const MAX_ATTRIBUTE_BYTES = 64 * 1024;
 const MAX_METADATA_BYTES = 4 * 1024 * 1024;
 const MAX_ATTRIBUTES = 4096;
+// FinderInfo, last-used dates, File Provider ignore hints and provenance are
+// OS-managed metadata, not user payloads. Drop only these exact names; retain
+// ResourceFork, TextEncoding and user metadata, and refuse all unknown names.
+const disposableAttribute = (name: string) =>
+  [
+    "com.apple.FinderInfo",
+    "com.apple.lastuseddate#PS",
+    "com.apple.fileprovider.ignore#P",
+    "com.apple.provenance",
+  ].includes(name);
 const supportedAttribute = (name: string) =>
   [
     "com.apple.FinderInfo",
@@ -95,6 +112,7 @@ interface SuspensionFilesystemSnapshot {
   readonly rootMode: number;
   readonly rootUid: number;
   readonly rootGid: number;
+  readonly omitsRegenerableDirectories?: true;
   readonly entries: ReadonlyArray<SuspensionEntry>;
   readonly rawBytes: number;
   readonly savedBytes: number;
@@ -194,8 +212,8 @@ export interface WorktreeSuspensionStoreOptions {
   readonly onBoundary?: (phase: WorktreeSuspensionPhase, snapshotId: string) => Promise<void>;
 }
 
-function refuse(reason: string): never {
-  throw new WorktreeSuspensionError(reason);
+function refuse(reason: string, reviewPath?: string): never {
+  throw new WorktreeSuspensionError(reason, reviewPath);
 }
 const identity = (stat: { dev: number; ino: number }): FileIdentity => ({
   dev: stat.dev,
@@ -208,7 +226,7 @@ const validId = (id: string) => {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,95}$/.test(id)) refuse("invalid snapshot identity");
   return id;
 };
-const validRelativePath = (name: string) => {
+const validRelativePath = (name: string, root?: string) => {
   if (
     name === "" ||
     NodePath.isAbsolute(name) ||
@@ -221,7 +239,10 @@ const validRelativePath = (name: string) => {
     ) ||
     Buffer.from(name).toString("utf8") !== name
   ) {
-    refuse("a filename cannot be represented safely");
+    refuse(
+      "a filename cannot be represented safely",
+      root === undefined ? name : NodePath.join(root, name),
+    );
   }
 };
 const exists = async (name: string) => {
@@ -318,7 +339,7 @@ const matchingGitPayload = (
 const verifyGitObjects = async (
   snapshot: Pick<
     GitWorktreeSuspensionSnapshot,
-    "commonDirectory" | "head" | "indexTree" | "gitRefs" | "entries"
+    "commonDirectory" | "sourcePath" | "head" | "indexTree" | "gitRefs" | "entries"
   >,
   limits: WorktreeSuspensionLimits,
 ) => {
@@ -366,7 +387,10 @@ const verifyGitObjects = async (
         stagedBytes > limits.maxBytes ||
         entryCount > limits.maxEntries
       )
-        refuse("the staging area exceeds preservation limits");
+        refuse(
+          "the staging area exceeds preservation limits",
+          NodePath.join(snapshot.sourcePath, match![5]!),
+        );
       if (match![2] === "commit") {
         if (match![1] !== "160000") refuse("the staged tree contains unsupported entries");
       } else {
@@ -467,16 +491,22 @@ const verifyGitObjects = async (
           oid !== expected[0] ||
           type !== expected[1] ||
           !Number.isSafeInteger(size) ||
-          size < 0 ||
-          size > limits.maxFileBytes ||
-          totalBytes > limits.maxBytes * 2 + 64 * 1024 * 1024
+          size < 0
         )
-          refuse("Git objects are missing, corrupt, or exceed limits");
+          refuse("Git objects are missing or corrupt");
+        if (size > limits.maxFileBytes || totalBytes > limits.maxBytes * 2 + 64 * 1024 * 1024)
+          refuse(
+            `Git object ${oid} exceeds preservation limits`,
+            NodePath.join(snapshot.commonDirectory, "objects"),
+          );
         const hash = NodeCrypto.createHash(oid!.length === 40 ? "sha1" : "sha256");
         hash.update(`${type} ${size}\0`);
         const retain = type === "blob" && indexBlobs.has(oid!);
         if (retain && retainedBytes + size > limits.maxBytes)
-          refuse("the Git-backed payloads exceed preservation limits");
+          refuse(
+            "the Git-backed payloads exceed preservation limits",
+            NodePath.join(snapshot.sourcePath, indexBlobs.get(oid!)![0]!.path),
+          );
         current = { remaining: size, hash, oid: oid!, size, ...(retain ? { chunks: [] } : {}) };
         if (size === 0) {
           finishObject();
@@ -557,7 +587,7 @@ const syncGitObjects = async (
       await noLinkedAncestors(packRoot);
       const names = await NodeFSP.readdir(packRoot);
       if (names.length > limits.maxEntries)
-        refuse("the Git pack inventory exceeds preservation limits");
+        refuse("the Git pack inventory exceeds preservation limits", packRoot);
       for (const name of names) {
         const filename = NodePath.join(packRoot, name);
         if (!(await NodeFSP.lstat(filename)).isFile())
@@ -628,9 +658,43 @@ const metadataCheck = async (
   entries: ReadonlyArray<SuspensionEntry>,
   recursive = true,
   attributeLimits?: WorktreeSuspensionLimits,
+  pruned = false,
 ): Promise<SuspensionMetadata> => {
+  // Inspect exactly the retained inventory when generated trees were pruned;
+  // recursive platform tools would otherwise walk the discarded install again.
+  const retainedPaths = [root, ...entries.map((entry) => NodePath.join(root, entry.path))];
+  if (pruned && (await exists(NodePath.join(root, ".git"))))
+    retainedPaths.push(NodePath.join(root, ".git"));
+  const inspectRetained = async (program: string, args: readonly string[]) => {
+    const output: Buffer[] = [];
+    let outputBytes = 0;
+    const inspectBatch = async (batch: readonly string[]) => {
+      const result = await command(program, [...args, ...batch]);
+      outputBytes += result.length;
+      if (outputBytes > 64 * 1024 * 1024)
+        refuse("metadata inspection exceeds its output limit", root);
+      output.push(result);
+    };
+    let batch: string[] = [];
+    let bytes = 0;
+    for (const name of retainedPaths) {
+      const size = Buffer.byteLength(name) + 1;
+      if (size > 32 * 1024) refuse("a metadata path exceeds inspection limits", name);
+      if (batch.length === 128 || bytes + size > 32 * 1024) {
+        await inspectBatch(batch);
+        batch = [];
+        bytes = 0;
+      }
+      batch.push(name);
+      bytes += size;
+    }
+    if (batch.length) await inspectBatch(batch);
+    return Buffer.concat(output);
+  };
   if (HostProcess.Platform.defaultValue() === "darwin") {
-    const attributes = await command("/usr/bin/xattr", [recursive ? "-rs" : "-s", root]);
+    const attributes = pruned
+      ? await inspectRetained("/usr/bin/xattr", ["-sv"])
+      : await command("/usr/bin/xattr", [recursive ? "-rs" : "-s", root]);
     const captured: Array<SuspensionAttribute> = [];
     const paths = new Set(["", ...entries.map((entry) => entry.path)]);
     let metadataBytes = 0;
@@ -649,13 +713,11 @@ const metadataCheck = async (
         path.startsWith(`..${NodePath.sep}`)
       )
         refuse("extended attribute paths could not be verified");
-      // macOS manages this application-identity tag, including on private Git
-      // and store files. Writes may succeed without changing it; leave it to
-      // the OS rather than replaying a saved application's provenance identity.
-      if (name === "com.apple.provenance") continue;
+      if (disposableAttribute(name)) continue;
       if (attributeLimits === undefined || !paths.has(path) || !supportedAttribute(name))
         refuse(`extended attributes are unsupported (${name} at ${absolute})`);
-      if (captured.length >= MAX_ATTRIBUTES) refuse("extended attributes exceed the record limit");
+      if (captured.length >= MAX_ATTRIBUTES)
+        refuse("extended attributes exceed the record limit", absolute);
       const value = await command(
         "/usr/bin/xattr",
         ["-spx", name, absolute],
@@ -666,14 +728,18 @@ const metadataCheck = async (
       );
       const hex = value.toString("ascii").replace(/\s/gu, "").toLowerCase();
       if (!/^(?:[a-f0-9]{2})*$/u.test(hex) || hex.length > MAX_ATTRIBUTE_BYTES * 2)
-        refuse("extended attributes exceed the value limit or are invalid");
+        refuse("extended attributes exceed the value limit or are invalid", absolute);
       metadataBytes += hex.length / 2 + Buffer.byteLength(name) + Buffer.byteLength(path);
       if (metadataBytes > Math.min(MAX_METADATA_BYTES, attributeLimits!.maxBytes))
-        refuse("extended attributes exceed the byte limit");
+        refuse("extended attributes exceed the byte limit", absolute);
       captured.push({ path, name, hex });
     }
-    const listing = recursive ? await command("/bin/ls", ["-lAnReO", "--", root]) : Buffer.alloc(0);
-    const rootListing = await command("/bin/ls", ["-ldneO", "--", root]);
+    const listing = pruned
+      ? await inspectRetained("/bin/ls", ["-ldneO", "--"])
+      : recursive
+        ? await command("/bin/ls", ["-lAnReO", "--", root])
+        : Buffer.alloc(0);
+    const rootListing = pruned ? Buffer.alloc(0) : await command("/bin/ls", ["-ldneO", "--", root]);
     let hasHidden = false;
     for (const line of Buffer.concat([listing, rootListing]).toString("utf8").split("\n")) {
       if (!/^[bcdlps-][rwxStTs-]{9}/u.test(line)) continue;
@@ -724,26 +790,30 @@ const metadataCheck = async (
   }
   if (HostProcess.Platform.defaultValue() === "linux") {
     // Missing platform inspection utilities deliberately keep the original.
-    const attributes = await command("getfattr", [
-      "-h",
-      ...(recursive ? ["-R"] : []),
-      "-d",
-      "-m",
-      "-",
-      "--absolute-names",
-      "--",
-      root,
-    ]);
+    const attributes = pruned
+      ? await inspectRetained("getfattr", ["-h", "-d", "-m", "-", "--absolute-names", "--"])
+      : await command("getfattr", [
+          "-h",
+          ...(recursive ? ["-R"] : []),
+          "-d",
+          "-m",
+          "-",
+          "--absolute-names",
+          "--",
+          root,
+        ]);
     if (attributes.length !== 0) refuse("extended attributes are unsupported");
-    const acls = await command("getfacl", [
-      ...(recursive ? ["-R"] : []),
-      "-P",
-      "-c",
-      "-p",
-      "-n",
-      "--",
-      root,
-    ]);
+    const acls = pruned
+      ? await inspectRetained("getfacl", ["-P", "-c", "-p", "-n", "--"])
+      : await command("getfacl", [
+          ...(recursive ? ["-R"] : []),
+          "-P",
+          "-c",
+          "-p",
+          "-n",
+          "--",
+          root,
+        ]);
     if (
       acls
         .toString("utf8")
@@ -796,6 +866,7 @@ const inventory = async (
   selected?: ReadonlySet<string>,
   gitPayloads?: ReadonlyMap<string, GitPayload>,
   scratch = false,
+  omitRegenerable = false,
 ): Promise<Inventory> => {
   await noLinkedAncestors(root);
   const rootStat = await NodeFSP.lstat(root);
@@ -806,11 +877,42 @@ const inventory = async (
   const files: Array<() => Promise<void>> = [];
   const linkGroups = new Map<string, { count: number; paths: string[] }>();
   const hardlinks: SuspensionHardlink[] = [];
+  let trackedDirectories: Set<string> | undefined;
+  const canOmit = async (relative: string) => {
+    if (!omitRegenerable || !isRegenerableIgnoredPath(`${relative}/`)) return false;
+    if (trackedDirectories === undefined) {
+      trackedDirectories = new Set();
+      const tracked = await git(root, ["ls-files", "--cached", "--with-tree=HEAD", "-z"]);
+      if (!Buffer.from(tracked.toString("utf8")).equals(tracked))
+        refuse("a tracked filename is not UTF-8", NodePath.join(root, ".git"));
+      for (const name of tracked.toString("utf8").split("\0").filter(Boolean)) {
+        trackedDirectories.add(name);
+        let parent = NodePath.posix.dirname(name);
+        while (parent !== ".") {
+          trackedDirectories.add(parent);
+          parent = NodePath.posix.dirname(parent);
+        }
+      }
+    }
+    if (trackedDirectories.has(relative)) return false;
+    // A Git query failure preserves the directory, just like a nonignored path.
+    try {
+      await git(root, ["check-ignore", "--quiet", "--", `${relative}/`]);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  let pruned = false;
   const inspect = async (directory: string, prefix: string): Promise<void> => {
     const names = (await NodeFSP.readdir(directory, { encoding: "buffer" }))
       .map((name) => {
         const text = name.toString("utf8");
-        if (!Buffer.from(text).equals(name)) refuse("a filename is not UTF-8");
+        if (!Buffer.from(text).equals(name))
+          refuse(
+            `a filename is not UTF-8 (name bytes: ${name.toString("hex")})`,
+            NodePath.join(directory, text),
+          );
         return text;
       })
       .sort();
@@ -822,15 +924,20 @@ const inventory = async (
       const relative = prefix === "" ? name : `${prefix}/${name}`;
       if (selected !== undefined && !selected.has(relative)) continue;
       if (name === ".git") refuse("nested repositories are unsupported");
-      validRelativePath(relative);
-      if (entries.length >= limits.maxEntries) refuse("the workspace exceeds the path limit");
+      validRelativePath(relative, root);
       const absolute = NodePath.join(directory, name);
       const before = await NodeFSP.lstat(absolute);
-      versions.set(absolute, version(before));
       if (before.dev !== rootStat.dev) refuse("a filesystem boundary crosses the workspace");
       if (before.uid !== rootStat.uid || before.gid !== rootStat.gid)
         refuse("mixed ownership is unsupported");
       if ((before.mode & 0o7000) !== 0) refuse("special permission bits are unsupported");
+      if (before.isDirectory() && (await canOmit(relative))) {
+        pruned = true;
+        continue;
+      }
+      if (entries.length >= limits.maxEntries)
+        refuse("the workspace exceeds the path limit", absolute);
+      versions.set(absolute, version(before));
       if (before.isDirectory()) {
         if (
           (await exists(NodePath.join(absolute, "HEAD"))) &&
@@ -854,7 +961,7 @@ const inventory = async (
           // Selected inventories cover private Git files; they cannot certify
           // a complete workspace group and retain the single-link requirement.
           if (selected !== undefined || !Number.isSafeInteger(before.nlink) || before.nlink < 2)
-            refuse("hardlinked files are unsupported");
+            refuse("hardlinked files are unsupported", absolute);
           const key = `${before.dev}:${before.ino}`;
           const group = linkGroups.get(key) ?? { count: before.nlink, paths: [] };
           if (group.count !== before.nlink) refuse("hardlinked files changed during capture");
@@ -862,9 +969,10 @@ const inventory = async (
           linkGroups.set(key, group);
           if (group.paths.length > 1) hardlinks.push({ path: relative, target: group.paths[0]! });
         }
-        if (before.size > limits.maxFileBytes) refuse("a file exceeds the preservation limit");
+        if (before.size > limits.maxFileBytes)
+          refuse("a file exceeds the preservation limit", absolute);
         rawBytes += before.size;
-        if (rawBytes > limits.maxBytes) refuse("the workspace exceeds the byte limit");
+        if (rawBytes > limits.maxBytes) refuse("the workspace exceeds the byte limit", absolute);
         const entryIndex = entries.length;
         entries.push({
           path: relative,
@@ -956,12 +1064,16 @@ const inventory = async (
     await inspect(root, "");
     for (const group of linkGroups.values())
       if (group.paths.length !== group.count)
-        refuse("hardlinked files extend outside the workspace");
+        refuse(
+          "hardlinked files extend outside the workspace",
+          NodePath.join(root, group.paths[0]!),
+        );
     const metadata = await metadataCheck(
       root,
       entries,
       true,
       selected === undefined ? limits : undefined,
+      pruned,
     );
     attributes = metadata.attributes;
     hiddenPaths = metadata.hiddenPaths;
@@ -977,15 +1089,16 @@ const inventory = async (
         0,
       );
     if (metadataBytes > Math.min(MAX_METADATA_BYTES, limits.maxBytes))
-      refuse("workspace metadata exceeds the byte limit");
+      refuse("workspace metadata exceeds the byte limit", root);
     rawBytes += metadataBytes;
-    if (rawBytes > limits.maxBytes) refuse("the workspace exceeds the byte limit");
+    if (rawBytes > limits.maxBytes) refuse("the workspace exceeds the byte limit", root);
     for (const captureFile of files) await captureFile();
     const afterMetadata = await metadataCheck(
       root,
       entries,
       true,
       selected === undefined ? limits : undefined,
+      pruned,
     );
     if (JSON.stringify(attributes) !== JSON.stringify(afterMetadata.attributes))
       refuse("extended attributes changed during capture");
@@ -1011,10 +1124,10 @@ const inventory = async (
 };
 
 // Extended index entries carry skip-worktree/intent-to-add state that write-tree loses.
-const checkIndex = (data: Buffer, objectHashBytes: number) => {
+const checkIndex = (data: Buffer, objectHashBytes: number, indexPath: string) => {
   if (data.toString("ascii", 0, 4) !== "DIRC") refuse("the Git index is unsupported");
   const format = data.readUInt32BE(4);
-  if (format !== 2 && format !== 3) refuse("this Git index format is unsupported");
+  if (format !== 2 && format !== 3) refuse("this Git index format is unsupported", indexPath);
   const count = data.readUInt32BE(8);
   let cursor = 12;
   for (let index = 0; index < count; index += 1) {
@@ -1022,7 +1135,8 @@ const checkIndex = (data: Buffer, objectHashBytes: number) => {
     const flagsAt = cursor + 40 + objectHashBytes;
     if (flagsAt + 2 > data.length) refuse("the Git index is incomplete");
     const flags = data.readUInt16BE(flagsAt);
-    if ((flags & 0xf000) !== 0) refuse("conflicted or extended Git index entries are unsupported");
+    if ((flags & 0xf000) !== 0)
+      refuse("conflicted or extended Git index entries are unsupported", indexPath);
     cursor = data.indexOf(0, flagsAt + 2);
     if (cursor < 0) refuse("the Git index is incomplete");
     cursor = start + Math.ceil((cursor + 1 - start) / 8) * 8;
@@ -1030,7 +1144,8 @@ const checkIndex = (data: Buffer, objectHashBytes: number) => {
   while (cursor < data.length - objectHashBytes) {
     if (cursor + 8 > data.length - objectHashBytes) refuse("the Git index is incomplete");
     const extension = data.toString("ascii", cursor, cursor + 4);
-    if (extension !== "TREE") refuse("the Git index has unsupported extensions");
+    if (extension !== "TREE")
+      refuse(`the Git index has unsupported extensions: ${extension}`, indexPath);
     cursor += 8 + data.readUInt32BE(cursor + 4);
   }
   if (cursor !== data.length - objectHashBytes) refuse("the Git index is incomplete");
@@ -1203,6 +1318,8 @@ const assertSnapshot = (value: unknown, id: string): WorktreeSuspensionSnapshot 
     (snapshot.version === 1 &&
       (snapshot.attributes !== undefined || snapshot.hiddenPaths !== undefined)) ||
     snapshot.id !== id ||
+    (snapshot.omitsRegenerableDirectories !== undefined &&
+      snapshot.omitsRegenerableDirectories !== true) ||
     !Array.isArray(snapshot.entries)
   )
     refuse("the snapshot format is unsupported");
@@ -1664,7 +1781,7 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       JSON.stringify(currentInventory.hiddenPaths ?? []) !==
         JSON.stringify(snapshot.hiddenPaths ?? []) ||
       JSON.stringify(currentInventory.attributes ?? []) !==
-        JSON.stringify(snapshot.attributes ?? []) ||
+        JSON.stringify((snapshot.attributes ?? []).filter((item) => !disposableAttribute(item.name))) ||
       JSON.stringify(currentInventory.entries) !== JSON.stringify(snapshot.entries) ||
       JSON.stringify(currentInventory.hardlinks ?? []) !== JSON.stringify(snapshot.hardlinks ?? [])
     )
@@ -1730,7 +1847,11 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       refuse("the source workspace identity changed");
     const objectFormat = await gitText(root, ["rev-parse", "--show-object-format"]);
     const index = await NodeFSP.readFile(NodePath.join(current.gitDirectory, "index"));
-    checkIndex(index, objectFormat === "sha1" ? 20 : 32);
+    checkIndex(
+      index,
+      objectFormat === "sha1" ? 20 : 32,
+      NodePath.join(current.gitDirectory, "index"),
+    );
     const temporary = NodePath.join(
       snapshotDirectory(snapshot.id),
       `index-${NodeCrypto.randomUUID()}`,
@@ -1748,7 +1869,15 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     } finally {
       await NodeFSP.unlink(temporary);
     }
-    const currentInventory = await inventory(root, limits);
+    const currentInventory = await inventory(
+      root,
+      limits,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      snapshot.omitsRegenerableDirectories === true,
+    );
     const gitInventory = await inventory(
       current.gitDirectory,
       gitLimits,
@@ -1793,7 +1922,8 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
             refuse("private Git commit metadata is unsupported");
           if (/^0+$/u.test(object!)) continue;
           candidates.set(object!, (candidates.get(object!) ?? false) || name === "ORIG_HEAD");
-          if (candidates.size > 4096) refuse("private Git history exceeds preservation limits");
+          if (candidates.size > 4096)
+            refuse("private Git history exceeds preservation limits", filename);
         }
       }
     }
@@ -1952,7 +2082,7 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       sourceIdentity: identity(sourceStat),
     };
     journal = await transition(journal, "capturing");
-    const before = await inventory(sourcePath, limits);
+    const before = await inventory(sourcePath, limits, undefined, undefined, undefined, false, true);
     const metadataBefore = await inventory(
       repository.gitDirectory,
       gitLimits,
@@ -1970,7 +2100,7 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     const indexPath = NodePath.join(repository.gitDirectory, "index");
     const index = await NodeFSP.readFile(indexPath);
     const objectFormat = await gitText(sourcePath, ["rev-parse", "--show-object-format"]);
-    checkIndex(index, objectFormat === "sha1" ? 20 : 32);
+    checkIndex(index, objectFormat === "sha1" ? 20 : 32, indexPath);
     const isolatedIndex = NodePath.join(snapshotDirectory(id), "capture-index");
     await NodeFSP.writeFile(isolatedIndex, index, { flag: "wx", mode: 0o600 });
     await assertEmptyGitlinks(
@@ -1980,7 +2110,7 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     const indexTree = await gitText(sourcePath, ["write-tree"], { GIT_INDEX_FILE: isolatedIndex });
     await NodeFSP.unlink(isolatedIndex);
     const gitPayloads = await verifyGitObjects(
-      { ...repository, indexTree, gitRefs: [], entries: before.entries },
+      { ...repository, sourcePath, indexTree, gitRefs: [], entries: before.entries },
       limits,
     );
     const captured = await inventory(
@@ -1989,6 +2119,8 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       objectsPath(id),
       undefined,
       gitPayloads.indexPayloads,
+      false,
+      true,
     );
     const metadata = await inventory(
       repository.gitDirectory,
@@ -2018,6 +2150,7 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       savedBytes += (await NodeFSP.stat(NodePath.join(objectsPath(id), object))).size;
     const snapshot: GitWorktreeSuspensionSnapshot = {
       version: captured.hardlinks === undefined ? 2 : 3,
+      omitsRegenerableDirectories: true,
       id,
       operationId: input.operationId,
       ownerBinding: input.ownerBinding,
@@ -2247,7 +2380,7 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       const indexPath = NodePath.join(gitDirectory, "index");
       if (resume && (await exists(indexPath))) {
         const index = await NodeFSP.readFile(indexPath);
-        checkIndex(index, snapshot.head.length === 40 ? 20 : 32);
+        checkIndex(index, snapshot.head.length === 40 ? 20 : 32, indexPath);
         const temporary = NodePath.join(
           snapshotDirectory(snapshot.id),
           `index-${NodeCrypto.randomUUID()}`,
@@ -2710,7 +2843,7 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
         const indexPath = NodePath.join(snapshot.gitDirectory, "index");
         if (await exists(indexPath)) {
           const index = await NodeFSP.readFile(indexPath);
-          checkIndex(index, snapshot.head.length === 40 ? 20 : 32);
+          checkIndex(index, snapshot.head.length === 40 ? 20 : 32, indexPath);
           const temporary = NodePath.join(
             snapshotDirectory(id),
             `index-${NodeCrypto.randomUUID()}`,

@@ -5222,6 +5222,47 @@ const disposableEntries = (report: import("@t3tools/contracts").StorageCleanupRe
   );
 
 describe("saved workspace retention across cleanup resources", () => {
+  it.live.each([
+    ["Workspace needs review: unrepresentable filename at /workspace/bad-name", true],
+    ["Workspace needs review: unsupported Git index extension at /workspace/.git/index", true],
+    ["Workspace needs review: external hardlink at /workspace/linked.txt", true],
+    ["Workspace needs review: unsupported hardlink at /workspace/linked.txt", true],
+    ["Workspace needs review: preservation limit at /workspace/large.bin", true],
+    ["Workspace kept: file changed during capture at /workspace/changing.txt", false],
+    ["Workspace kept: file changed after capture at /workspace/changing.txt", false],
+  ] as const)(
+    "reports the stable save failure category while protecting sibling resources: %s",
+    ([reason, needsReview]) =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const fixture = yield* cleanupFixture();
+          yield* fixture.enableDependencies;
+          fixture.setDependencyRetention(3);
+          fixture.setRetention(8);
+          yield* seedCompilerOutput(fixture, "apps/web/dist", fixture.now - 4 * DAY_MS);
+          fixture.protectSavedWorkspace(fixture.worktree, reason);
+          const report = yield* fixture.service.runNow;
+          const checkout = report.entries.find(
+            (entry) => entry.path === fixture.worktree && entry.worktreeResource === undefined,
+          );
+          expect(checkout).toMatchObject({ outcome: needsReview ? "failed" : "kept", reason });
+          expect(report.counts.failed).toBe(needsReview ? 1 : 0);
+          expect(disposableEntries(report)).toHaveLength(2);
+          expect(disposableEntries(report).every((entry) => entry.outcome === "kept")).toBe(true);
+          expect(yield* fixture.fs.exists(`${fixture.worktree}/node_modules`)).toBe(true);
+          expect(yield* fixture.fs.exists(`${fixture.worktree}/apps/web/dist`)).toBe(true);
+          expect(yield* fixture.fs.readFileString(`${fixture.worktree}/tracked.txt`)).toBe(
+            "original\n",
+          );
+          const firstDisposable = report.entries.findIndex(
+            (entry) => entry.worktreeResource !== undefined,
+          );
+          expect(firstDisposable).toBeGreaterThanOrEqual(0);
+          expect(report.entries.indexOf(checkout!) < firstDisposable).toBe(needsReview);
+        }),
+      ),
+  );
+
   it.live.each(["removed", "recent", "failed"] as const)(
     "permits an automatic capture retry only after dependencies are %s",
     (outcome) =>
