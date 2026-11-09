@@ -941,6 +941,39 @@ describe("Observation-scoped target evidence", () => {
     }),
   );
 
+  it.effect("answers a nested root from an ancestor walk of the same inventory", () =>
+    Effect.gen(function* () {
+      socketFixture();
+      targetFixture().set(`${root}/link`, { ...objectStat(3n), isSocket: () => true });
+      const paths = (yield* inventory("darwin"))!;
+      const observation = WorktreeConsumers.createTargetObservation();
+      expect(yield* prove(paths, observation)).toBe(true);
+      expect(native.opendir).toHaveBeenCalledTimes(2);
+      native.lstat.mockClear();
+      expect(yield* prove(paths, observation, `${root}/dist`)).toBe(false);
+      expect(native.opendir).toHaveBeenCalledTimes(2);
+      expect(regularFileReads()).toBe(0);
+      expect(native.lstat).toHaveBeenCalledWith(`${root}/dist`, { bigint: true });
+      expect(yield* prove(paths, undefined, `${root}/dist`)).toBe(false);
+      expect(native.opendir).toHaveBeenCalledTimes(3);
+    }),
+  );
+
+  it.effect("resolves each repeated inventory path once per query", () =>
+    Effect.gen(function* () {
+      darwinFixture(
+        "p123\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+          "f7\0tREG\0D0x12\0i5\0n/system/example/library\0\n" +
+          "f8\0tREG\0D0x12\0i5\0n/system/example/library\0\n",
+      );
+      const paths = (yield* inventory("darwin"))!;
+      expect(yield* prove(paths)).toBe(false);
+      expect(
+        native.realpath.mock.calls.filter(([path]) => path === "/system/example/library"),
+      ).toHaveLength(1);
+    }),
+  );
+
   it.effect("does not share a target walk with another native capture or observation", () =>
     Effect.gen(function* () {
       socketFixture();

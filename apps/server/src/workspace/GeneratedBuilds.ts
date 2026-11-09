@@ -390,8 +390,16 @@ const make = Effect.gen(function* () {
           reasons.add("Process file-consumer inventory is unavailable; build files were retained.");
           return false;
         }
+        // Query the worktree before the output root so one walk answers both.
+        const targets = WorktreeConsumers.createTargetObservation();
+        failureReason = "Build cleanup worktree consumer check failed; files were retained.";
+        const consumerReason = yield* WorktreeConsumers.worktreeConsumerReason(
+          input.worktreePath,
+          processes,
+          targets,
+        );
         failureReason = "Build cleanup output-consumer identity check failed; files were retained.";
-        if (yield* actualOutputUse(input.worktreePath, root, processes)) {
+        if (yield* actualOutputUse(input.worktreePath, root, processes, targets)) {
           failureReason = "Build cleanup usage renewal check failed; files were retained.";
           yield* Effect.try({
             try: () => {
@@ -401,11 +409,6 @@ const make = Effect.gen(function* () {
             catch: (cause) => new GeneratedBuildsError({ path: input.worktreePath, cause }),
           });
         }
-        failureReason = "Build cleanup worktree consumer check failed; files were retained.";
-        const consumerReason = yield* WorktreeConsumers.worktreeConsumerReason(
-          input.worktreePath,
-          processes,
-        );
         if (consumerReason !== null) {
           reasons.add(`Build files were retained: ${consumerReason}`);
           return false;
