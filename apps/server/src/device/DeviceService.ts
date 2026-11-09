@@ -1041,6 +1041,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
             }),
           );
         const requested = device.id;
+        const requestedName = device.name;
         const bootedId = yield* ready.devices.boot(device, setup).pipe(
           Effect.ensuring(
             publish((current) => ({
@@ -1054,9 +1055,23 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
           Effect.tapError(() =>
             agentOwned
               ? refresh(ready).pipe(
-                  Effect.flatMap((after) =>
-                    findDevice(after, host.id, requested)?.booted ? claim(requested) : Effect.void,
-                  ),
+                  Effect.flatMap((after) => {
+                    // A stopped AVD runs under a new serial; one AVD runs at most once, so a
+                    // running emulator of it now is the one this boot started.
+                    const started = findDevice(after, host.id, requested)?.booted
+                      ? requested
+                      : platform === "android"
+                        ? after.devices.find(
+                            (candidate) =>
+                              candidate.hostId === host.id &&
+                              candidate.platform === "android" &&
+                              !candidate.physical &&
+                              candidate.booted &&
+                              candidate.name === requestedName,
+                          )?.id
+                        : undefined;
+                    return started ? claim(started) : Effect.void;
+                  }),
                   Effect.ignore,
                 )
               : Effect.void,

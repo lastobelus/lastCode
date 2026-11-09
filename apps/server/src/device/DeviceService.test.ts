@@ -2419,6 +2419,8 @@ describe("agent-booted device shutdown", () => {
   const makeGate = Effect.all({ reached: Deferred.make<void>(), release: Deferred.make<void>() });
   const pause = (gate: Gate) =>
     Deferred.succeed(gate.reached, undefined).pipe(Effect.andThen(Deferred.await(gate.release)));
+  /** A stopped AVD the hub lists by name, and by this serial once it runs. */
+  const avd = { name: "Pixel_AVD", serial: "emulator-5554" };
   /** A host whose devices boot and stop in memory; the test flips `booted` for outside changes. */
   const bootingHost = (id: string, initial: Record<string, boolean>) => {
     const booted = new Map(Object.entries(initial));
@@ -2446,8 +2448,11 @@ describe("agent-booted device shutdown", () => {
           const listing = {
             devices: [...booted].map(([deviceId, on]) => ({
               id: deviceId,
-              name: deviceId,
-              platform: "ios" as const,
+              name: deviceId === avd.serial ? avd.name : deviceId,
+              platform:
+                deviceId === avd.name || deviceId === avd.serial
+                  ? ("android" as const)
+                  : ("ios" as const),
               version: "test",
               booted: on,
               physical: false,
@@ -2466,10 +2471,12 @@ describe("agent-booted device shutdown", () => {
           }).pipe(
             Effect.andThen(
               Effect.suspend(() => {
-                booted.set(device.id, true);
+                const runtimeId = device.id === avd.name ? avd.serial : device.id;
+                if (runtimeId !== device.id) booted.delete(device.id);
+                booted.set(runtimeId, true);
                 faults.listing = faults.listingAfterBoot;
-                // The simulator started, but attaching its stream failed.
-                return faults.bootAttach ? Effect.fail(fault) : Effect.succeed(device.id);
+                // The simulator started, but attaching its stream or answering failed.
+                return faults.bootAttach ? Effect.fail(fault) : Effect.succeed(runtimeId);
               }),
             ),
           ),
@@ -2486,7 +2493,8 @@ describe("agent-booted device shutdown", () => {
               }),
         screenshot: () => Effect.succeed(new Uint8Array()),
       },
-      run: () => Effect.succeed({ code: 0, stdout: "", stderr: "" }),
+      // Opening an emulator checks its host for ffmpeg's H.264 encoder.
+      run: () => Effect.succeed({ code: 0, stdout: " V....D libx264", stderr: "" }),
       helpers: { serveSimAxSettings: null, serveSimCli: null },
     };
     const host: DeviceHost.DeviceHost["Service"] = {
@@ -2496,7 +2504,10 @@ describe("agent-booted device shutdown", () => {
         id,
         label: id,
         kind: id === LOCAL_DEVICE_HOST_ID ? "local" : "ssh",
-        platforms: [{ platform: "ios", available: true }],
+        platforms: [
+          { platform: "ios", available: true },
+          { platform: "android", available: true },
+        ],
         hubInstalled: true,
         agentDeviceInstalled: false,
       }),
@@ -2526,6 +2537,7 @@ describe("agent-booted device shutdown", () => {
         "SECOND-SIM": false,
         "USER-SIM": true,
         "PANEL-SIM": false,
+        [avd.name]: false,
       });
       const remote = bootingHost(sshHostId, { "REMOTE-SIM": false });
       const service = yield* DeviceService.makeWithHosts(
@@ -2548,7 +2560,7 @@ describe("agent-booted device shutdown", () => {
             threadId: ThreadId.make(options.thread ?? "qa-thread"),
             hostId: options.hostId ?? LOCAL_DEVICE_HOST_ID,
             deviceId: DeviceId.make(deviceId),
-            platform: "ios",
+            platform: deviceId === avd.name ? "android" : "ios",
           },
           options.agent === false ? {} : { agentOwned: true },
         );
@@ -2703,16 +2715,20 @@ describe("agent-booted device shutdown", () => {
     ),
   );
 
-  it.effect.each(["listingAfterBoot", "bootAttach"] as const)(
-    "shuts down a device it booted even when the open then fails (%s)",
-    (failure) =>
+  it.effect.each([
+    { failure: "listingAfterBoot", requested: "AGENT-SIM", runtime: "AGENT-SIM" },
+    { failure: "bootAttach", requested: "AGENT-SIM", runtime: "AGENT-SIM" },
+    { failure: "bootAttach", requested: avd.name, runtime: avd.serial },
+  ] as const)(
+    "shuts down a device it booted even when the open then fails ($failure, $requested)",
+    ({ failure, requested, runtime }) =>
       withService(({ service, local, open }) =>
         Effect.gen(function* () {
           local.faults[failure] = true;
-          expect(Exit.isFailure(yield* Effect.exit(open("AGENT-SIM")))).toBe(true);
-          expect(local.booted.get("AGENT-SIM")).toBe(true);
+          expect(Exit.isFailure(yield* Effect.exit(open(requested)))).toBe(true);
+          expect(local.booted.get(runtime)).toBe(true);
           yield* service.shutdownAgentBootedDevices;
-          expect(local.shutdowns).toEqual(["AGENT-SIM"]);
+          expect(local.shutdowns).toEqual([runtime]);
         }),
       ),
   );
