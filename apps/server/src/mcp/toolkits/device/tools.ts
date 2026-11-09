@@ -91,7 +91,7 @@ export const DeviceScreenshotTool = Tool.make("device_screenshot", {
 
 const DeviceCloseTool = Tool.make("device_close", {
   description:
-    "Close a device in this thread's Device panel. When you are done with a device, pass `shutdown: true` to turn it off. Omit it only to leave running a device that was already running before this thread opened it, or one the user asked to keep.",
+    "Close a device in this thread. Pass `shutdown=true` to turn off one you booted.",
   parameters: DeviceToolCloseInput,
   success: Schema.Record(Schema.String, Schema.Never),
   failure: DeviceToolFailure,
