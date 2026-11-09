@@ -6,6 +6,7 @@ import {
   recordDependencyUse,
   dependencyActivitySnapshot,
 } from "@t3tools/shared/dependencyActivity";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Path from "effect/Path";
 import * as Context from "effect/Context";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
@@ -37,8 +38,9 @@ import {
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
-// @effect-diagnostics-next-line nodeBuiltinImport:off - Observe native measurement reads without exposing a test-only service API.
+// @effect-diagnostics nodeBuiltinImport:off - Observe native reads and lsof captures without a test-only service API.
 import * as NodeFSP from "node:fs/promises";
+import * as NodeChildProcess from "node:child_process";
 
 import * as ServerConfig from "../config.ts";
 import { PersistedServerRuntimeState } from "../serverRuntimeState.ts";
@@ -47,6 +49,7 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GeneratedDependencies from "./GeneratedDependencies.ts";
 import * as DependencyMounts from "./DependencyMounts.ts";
 import * as WorktreeConsumers from "./WorktreeConsumers.ts";
+import * as ResourceMonitorBinary from "../resourceTelemetry/ResourceMonitorBinary.ts";
 import * as WorktreeCleanup from "../orchestration-v2/WorktreeCleanupService.ts";
 import * as StorageCleanup from "../storageCleanup.ts";
 import * as SuspensionTestkit from "./WorktreeSuspension.testkit.ts";
@@ -64,6 +67,10 @@ import * as ServerActivation from "../serverActivation.ts";
 vi.mock("node:fs/promises", async (importOriginal) => {
   const original = await importOriginal<typeof NodeFSP>();
   return { ...original, opendir: vi.fn(original.opendir), rm: vi.fn(original.rm) };
+});
+vi.mock("node:child_process", async (importOriginal) => {
+  const original = await importOriginal<typeof NodeChildProcess>();
+  return { ...original, execFile: vi.fn(original.execFile) };
 });
 
 const encodeRuntimeState = Schema.encodeSync(Schema.fromJsonString(PersistedServerRuntimeState));
@@ -349,6 +356,47 @@ it.effect("measures an install once across inspection and removal", () =>
     assert.isFalse(yield* fs.exists(dependencyPath));
   }).pipe(Effect.scoped, Effect.provide(testLayer())),
 );
+
+it.effect("walks each consumer root at most once per native inventory during removal", () => {
+  const execFile = vi.mocked(NodeChildProcess.execFile);
+  const opendir = vi.mocked(NodeFSP.opendir);
+  // A vanished vnode cannot be resolved by name, so every query needs a target walk.
+  const lsof = "p123\0\nfcwd\0tDIR\0n/\0\nf8\0tREG\0D0x12\0i5\0n/t3-absent/vanished.js\0\n";
+  const capture = WorktreeConsumers.ProcessPaths.defaultValue().pipe(
+    Effect.provideService(HostProcess.Platform, "darwin"),
+    Effect.provideService(HostProcess.UserId, 1000),
+    Effect.provideService(ResourceMonitorBinary.ProcessCaptureBinary, Effect.succeed(null)),
+  );
+  const previous = execFile.getMockImplementation();
+  return Effect.gen(function* () {
+    const { fs, cleanup, input, dependencyPath } = yield* fixture();
+    const inspected = yield* cleanup.inspect(input);
+    assert.isNotNull(inspected);
+    opendir.mockClear();
+    execFile.mockClear();
+    execFile.mockImplementation(((_file, _args, _options, callback) => {
+      (callback as (error: null, stdout: string, stderr: string) => void)(null, lsof, "");
+      return {} as NodeChildProcess.ChildProcess;
+    }) as typeof NodeChildProcess.execFile);
+    assert.isNotNull(yield* cleanup.remove(inspected!, Effect.succeed(true)));
+    assert.isFalse(yield* fs.exists(dependencyPath));
+    const captures = execFile.mock.invocationCallOrder;
+    const walks = opendir.mock.calls.flatMap(([target], index) =>
+      target === input.worktreePath || target === dependencyPath
+        ? [
+            `${captures.filter((order) => order < opendir.mock.invocationCallOrder[index]!).length}:${String(target)}`,
+          ]
+        : [],
+    );
+    assert.isAbove(captures.length, 1);
+    assert.isAbove(walks.length, 0);
+    assert.deepEqual([...new Set(walks)], walks);
+  }).pipe(
+    Effect.ensuring(Effect.sync(() => execFile.mockImplementation(previous!))),
+    Effect.scoped,
+    Effect.provide(testLayer(undefined, undefined, undefined, false, undefined, capture)),
+  );
+});
 
 it.effect.each(["tracked-content", "untracked-lock", "unignored"] as const)(
   "retains an install when Git ownership changes after inspection (%s)",

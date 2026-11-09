@@ -460,9 +460,10 @@ const make = Effect.gen(function* () {
   const rememberConsumed = Effect.fn("GeneratedDependencies.rememberConsumed")(function* (
     current: Pick<DependencyInspection, "worktreePath" | "dependencyPath">,
     paths: ReadonlyArray<string>,
+    targets?: WorktreeConsumers.TargetObservation,
   ) {
     const consumed = yield* Effect.tryPromise({
-      try: () => consumesPath(current.dependencyPath, paths),
+      try: () => consumesPath(current.dependencyPath, paths, targets),
       catch: (cause) => new GeneratedDependenciesError({ path: current.dependencyPath, cause }),
     });
     if (consumed) {
@@ -549,21 +550,23 @@ const make = Effect.gen(function* () {
       );
       return [];
     }
+    // Query each worktree before its node_modules so one walk answers both.
+    const pathTargets = WorktreeConsumers.createTargetObservation();
     const eligible = (yield* Effect.forEach(
       validated,
       ({ current, inspection, canRemove, isStillEligible, usageSnapshot }) =>
         Effect.gen(function* () {
-          // Preserve the captured native object evidence on the path observation.
-          // Plain cwd evidence remains an independent conservative check.
-          yield* rememberConsumed(current, paths);
-          yield* rememberConsumed(current, processes);
           const rootConsumed = yield* Effect.tryPromise({
             try: async () =>
-              (await consumesPath(current.worktreePath, paths)) ||
+              (await consumesPath(current.worktreePath, paths, pathTargets)) ||
               (await consumesPath(current.worktreePath, processes)),
             catch: (cause) =>
               new GeneratedDependenciesError({ path: current.dependencyPath, cause }),
           });
+          // Preserve the captured native object evidence on the path observation.
+          // Plain cwd evidence remains an independent conservative check.
+          yield* rememberConsumed(current, paths, pathTargets);
+          yield* rememberConsumed(current, processes);
           if (rootConsumed) {
             yield* decide(inspection, "kept", "An active process owns the worktree");
             return null;
@@ -663,8 +666,14 @@ const make = Effect.gen(function* () {
           const consumerReason = Effect.gen(function* () {
             const paths = yield* processPaths;
             if (paths === null) return "Process file-consumer inspection is unavailable";
-            yield* rememberConsumed(current, paths);
-            return yield* WorktreeConsumers.worktreeConsumerReason(current.worktreePath, paths);
+            const targets = WorktreeConsumers.createTargetObservation();
+            const reason = yield* WorktreeConsumers.worktreeConsumerReason(
+              current.worktreePath,
+              paths,
+              targets,
+            );
+            yield* rememberConsumed(current, paths, targets);
+            return reason;
           });
           const beforeEligibility = yield* consumerReason;
           if (beforeEligibility !== null)
