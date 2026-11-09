@@ -84,7 +84,7 @@ export function pendingActionBanner({
     role: "status",
     variant: presentation.tone,
     icon: <TerminalIcon aria-hidden className="size-4" />,
-    title: `${action.actionName} · ${presentation.label}`,
+    title: `${action.actionName} • ${result.label} • ${presentation.label}`,
     description: `${resultCopy}${/[.!?]$/.test(resultCopy) ? " " : ". "}${presentation.detail}`,
     actions: canRead ? (
       <Button size="xs" variant="ghost" onClick={onOpenTerminal}>
