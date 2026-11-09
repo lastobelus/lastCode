@@ -34,7 +34,8 @@ export function agentDeviceQuickStart(
   command = "agent-device",
   host?:
     | { readonly kind: "eas" }
-    | { readonly kind: "simlock"; readonly installDirectory?: string },
+    | { readonly kind: "simlock"; readonly installDirectory?: string }
+    | { readonly kind: "own"; readonly wasRunning: boolean },
 ): string {
   const executable = shellWord(command);
   const target = targetArgs.map(shellWord).join(" ");
@@ -51,9 +52,14 @@ export function agentDeviceQuickStart(
           .join(" ")
       : host?.kind === "eas"
         ? "This is an EAS Simulator session in the cloud. It bills the Expo account per minute until it stops, so call device_close with shutdown: true when you are done. It starts with no apps installed: install-from-source <url> installs a build from a URL (iOS needs a .tar.gz containing a .app), and install uploads one from this machine."
-        : device.platform === "ios"
-          ? "First use builds an XCTest runner and can take a couple of minutes; later commands are fast."
-          : "The Android snapshot helper installs itself on first use.";
+        : [
+            device.platform === "ios"
+              ? "First use builds an XCTest runner and can take a couple of minutes; later commands are fast."
+              : "The Android snapshot helper installs itself on first use.",
+            host?.kind === "own" && host.wasRunning
+              ? "It was already running when you opened it, so close it with plain device_close when you are done, unless this thread booted it earlier."
+              : "When you are done, call device_close with shutdown: true; a plain device_close leaves it running and using the machine's CPU. Do not leave it running for later or for another thread. T3 Code shuts down a local simulator you booted after 30 minutes without device commands, or when this thread settles.",
+          ].join(" ");
   return [
     `The user is watching ${device.name} (${device.version}) in the Device panel.`,
     target === ""
@@ -76,12 +82,13 @@ export function agentDeviceQuickStart(
     `Prefer snapshot refs over coordinates. Run ${executable} help <command> for flags and ${executable} help workflow for guides.`,
     "Do not use simctl, idb, adb or ssh for those actions. They stay fine for builds, installs, code sync, Metro, port forwards, logs, test runners and what this command cannot do; come back to it for every UI action and screenshot so the user can watch.",
     "Each device_open returns its own command; opening another device does not retarget this one.",
+    "If a command fails with DEVICE_IN_USE, another thread holds this device. Ask the user, or wait and retry; do not boot or open a different simulator to get around it.",
     ...(target === ""
       ? [
           "The command is removed when the device closes or T3 Code restarts. If it is missing, call device_open again.",
         ]
       : []),
-    "Power off with device_close({ shutdown: true }). Use explicit commands or batch steps; replay/test scripts are unavailable through this scoped session.",
+    "Use explicit commands or batch steps; replay/test scripts are unavailable through this scoped session.",
     platformNotes,
   ].join("\n");
 }
@@ -251,6 +258,7 @@ const handlers = {
         },
         {
           rollbackOnFailure: true,
+          agentOwned: true,
           workspaceRoot: yield* threadWorkspaceRoot(scope.thread.threadId),
         },
       );
@@ -303,7 +311,7 @@ const handlers = {
                 }
               : hostKind === "eas"
                 ? { kind: "eas" }
-                : undefined,
+                : { kind: "own", wasRunning: target.booted },
           ),
         };
       }).pipe(

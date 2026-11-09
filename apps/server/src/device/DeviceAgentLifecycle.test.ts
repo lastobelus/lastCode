@@ -25,6 +25,7 @@ import * as ProcessRunner from "../processRunner.ts";
 import * as DeviceHost from "./DeviceHost.ts";
 import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import * as ServerConfig from "../config.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
@@ -180,9 +181,9 @@ it.effect(
                     return 10;
                   }),
                 stream: (input) => {
-                  if (input === undefined) throw new Error("Expected a filtered deletion stream");
+                  if (input === undefined) throw new Error("Expected a filtered event stream");
                   expect(input.afterSequence).toBe(10);
-                  expect(input.eventType).toBe("thread.deleted");
+                  if (input.eventType !== "thread.deleted") return Stream.empty;
                   return Stream.fromIterable(stored).pipe(
                     Stream.concat(Stream.fromEffectDrain(Deferred.succeed(processed, undefined))),
                   );
@@ -434,4 +435,83 @@ it.effect.each([
     ),
     Effect.scoped,
   ),
+);
+
+it.effect(
+  "releases devices when a thread ends, sweeps idle ones, and shuts them down on stop",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const stateDir = yield* fs.makeTempDirectoryScoped({ prefix: "device-release-lifecycle-" });
+      const released: Array<string> = [];
+      const allReleased = yield* Deferred.make<void>();
+      const swept = yield* Deferred.make<void>();
+      let sweeps = 0;
+      let stopped = 0;
+      const ended = {
+        "thread.settled": "settled-thread",
+        "thread.archived": "archived-thread",
+        "thread.deleted": "deleted-thread",
+      } as const;
+      const lifecycle = DeviceAgentLifecycle.layer.pipe(
+        Layer.provide(
+          Layer.mock(DeviceService.DeviceService)({
+            retireThreadAgentAccess: () => Effect.void,
+            releaseThread: (threadId) =>
+              Effect.gen(function* () {
+                released.push(threadId);
+                if (released.length === 3) yield* Deferred.succeed(allReleased, undefined);
+              }),
+            shutdownIdleDevices: Effect.suspend(() => {
+              sweeps++;
+              return Deferred.succeed(swept, undefined);
+            }),
+            shutdownAgentBootedDevices: Effect.sync(() => void stopped++),
+          }),
+        ),
+        Layer.provide(Layer.mock(ProjectionStore.ProjectionStoreV2)({})),
+        Layer.provide(Layer.mock(ProjectStore.ProjectStoreV2)({})),
+        Layer.provide(
+          Layer.mock(ServerSettings.ServerSettingsService)({
+            getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+          }),
+        ),
+        Layer.provide(
+          Layer.succeed(ServerConfig.ServerConfig, {
+            stateDir,
+          } as ServerConfig.ServerConfig["Service"]),
+        ),
+        Layer.provide(
+          Layer.mock(EventSink.EventSinkV2)({
+            latestSequence: () => Effect.succeed(0),
+            stream: (input) => {
+              const eventType = input?.eventType;
+              return eventType === undefined || !(eventType in ended)
+                ? Stream.empty
+                : Stream.make({
+                    sequence: 1,
+                    event: {
+                      type: eventType,
+                      payload: { id: ThreadId.make(ended[eventType as keyof typeof ended]) },
+                    },
+                  } as OrchestrationV2StoredEvent);
+            },
+          }),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        yield* Deferred.await(allReleased);
+        expect(released.toSorted()).toEqual([
+          "archived-thread",
+          "deleted-thread",
+          "settled-thread",
+        ]);
+        yield* Deferred.await(swept);
+        expect(sweeps).toBe(1);
+        yield* TestClock.adjust("1 minute");
+        expect(sweeps).toBe(2);
+        expect(stopped).toBe(0);
+      }).pipe(Effect.provide(lifecycle), Effect.scoped);
+      expect(stopped).toBe(1);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );

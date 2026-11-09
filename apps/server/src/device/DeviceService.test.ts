@@ -2409,3 +2409,183 @@ it.effect.each([true, false])(
       expect(yield* fs.exists(legacy)).toBe(!stopSucceeds);
     }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
+
+describe("agent-booted device shutdown", () => {
+  const sshHostId = "remote-mac";
+  /** A host whose devices boot and stop in memory; the test flips `booted` for outside changes. */
+  const bootingHost = (id: string, initial: Record<string, boolean>) => {
+    const booted = new Map(Object.entries(initial));
+    const shutdowns: Array<string> = [];
+    const ready: DeviceHost.DeviceHostReady = {
+      nodePath: process.execPath,
+      hub: { origin: "http://device.test" },
+      devices: {
+        list: Effect.sync(() => ({
+          devices: [...booted].map(([deviceId, on]) => ({
+            id: deviceId,
+            name: deviceId,
+            platform: "ios" as const,
+            version: "test",
+            booted: on,
+            physical: false,
+          })),
+          detail: undefined,
+        })),
+        boot: (device) =>
+          Effect.sync(() => {
+            booted.set(device.id, true);
+            return device.id;
+          }),
+        attach: () => Effect.void,
+        shutdown: (device) =>
+          Effect.sync(() => {
+            booted.set(device.id, false);
+            shutdowns.push(device.id);
+          }),
+        screenshot: () => Effect.succeed(new Uint8Array()),
+      },
+      run: () => Effect.succeed({ code: 0, stdout: "", stderr: "" }),
+      helpers: { serveSimAxSettings: null, serveSimCli: null },
+    };
+    const host: DeviceHost.DeviceHost["Service"] = {
+      id,
+      label: id,
+      summary: Effect.succeed({
+        id,
+        label: id,
+        kind: id === LOCAL_DEVICE_HOST_ID ? "local" : "ssh",
+        platforms: [{ platform: "ios", available: true }],
+        hubInstalled: true,
+        agentDeviceInstalled: false,
+      }),
+      platformAvailability: (platform) => Effect.succeed({ platform, available: true }),
+      ensureReady: () => Effect.succeed(ready),
+      ensureAgentReady: () => Effect.die("Agent access is not used in this test"),
+      current: Effect.succeed(ready),
+      stopAgent: Effect.void,
+      stop: Effect.void,
+    };
+    return { host, booted, shutdowns };
+  };
+  const withService = <A, E>(
+    test: (fixture: {
+      readonly service: DeviceService.DeviceService["Service"];
+      readonly local: ReturnType<typeof bootingHost>;
+      readonly remote: ReturnType<typeof bootingHost>;
+      readonly open: (
+        deviceId: string,
+        options?: { readonly thread?: string; readonly hostId?: string; readonly agent?: boolean },
+      ) => Effect.Effect<unknown, DeviceError>;
+    }) => Effect.Effect<A, E>,
+  ) =>
+    Effect.gen(function* () {
+      const local = bootingHost(LOCAL_DEVICE_HOST_ID, {
+        "AGENT-SIM": false,
+        "SECOND-SIM": false,
+        "USER-SIM": true,
+        "PANEL-SIM": false,
+      });
+      const remote = bootingHost(sshHostId, { "REMOTE-SIM": false });
+      const service = yield* DeviceService.makeWithHosts(
+        new Map([
+          [LOCAL_DEVICE_HOST_ID, local.host],
+          [sshHostId, remote.host],
+        ]),
+      ).pipe(Effect.provide(NodeCrypto.layer));
+      yield* service.list;
+      const open = (
+        deviceId: string,
+        options: {
+          readonly thread?: string;
+          readonly hostId?: string;
+          readonly agent?: boolean;
+        } = {},
+      ) =>
+        service.open(
+          {
+            threadId: ThreadId.make(options.thread ?? "qa-thread"),
+            hostId: options.hostId ?? LOCAL_DEVICE_HOST_ID,
+            deviceId: DeviceId.make(deviceId),
+            platform: "ios",
+          },
+          options.agent === false ? {} : { agentOwned: true },
+        );
+      return yield* test({ service, local, remote, open });
+    }).pipe(Effect.provide(ServerSettings.layerTest({ enableDeviceSupport: true })), Effect.scoped);
+
+  it.effect("shuts down only what an agent booted, after 30 minutes without device commands", () =>
+    withService(({ service, local, open }) =>
+      Effect.gen(function* () {
+        yield* open("AGENT-SIM");
+        // Already running when the agent opened it, so the user's.
+        yield* open("USER-SIM");
+        // Booted from the Device panel rather than by an agent.
+        yield* open("PANEL-SIM", { agent: false });
+        yield* TestClock.adjust("20 minutes");
+        yield* service.recordActivity(LOCAL_DEVICE_HOST_ID, DeviceId.make("AGENT-SIM"));
+        yield* TestClock.adjust("29 minutes");
+        yield* service.shutdownIdleDevices;
+        expect(local.shutdowns).toEqual([]);
+        yield* TestClock.adjust("1 minute");
+        yield* service.shutdownIdleDevices;
+        expect(local.shutdowns).toEqual(["AGENT-SIM"]);
+        const state = yield* service.state;
+        expect(state.sessions.map((session) => session.deviceId).toSorted()).toEqual([
+          "PANEL-SIM",
+          "USER-SIM",
+        ]);
+        expect(state.devices.find((device) => device.id === "AGENT-SIM")?.booted).toBe(false);
+        // Shut down once; a later sweep has nothing left to stop.
+        yield* TestClock.adjust("1 hour");
+        yield* service.shutdownIdleDevices;
+        expect(local.shutdowns).toEqual(["AGENT-SIM"]);
+      }),
+    ),
+  );
+
+  it.effect("releases a finished thread's devices and shuts one down once no thread holds it", () =>
+    withService(({ service, local, open }) =>
+      Effect.gen(function* () {
+        yield* open("AGENT-SIM", { thread: "first" });
+        yield* open("AGENT-SIM", { thread: "second" });
+        yield* service.releaseThread(ThreadId.make("first"));
+        expect(local.shutdowns).toEqual([]);
+        expect((yield* service.state).sessions.map((session) => session.threadId)).toEqual([
+          "second",
+        ]);
+        yield* service.releaseThread(ThreadId.make("second"));
+        expect(local.shutdowns).toEqual(["AGENT-SIM"]);
+        expect((yield* service.state).sessions).toEqual([]);
+      }),
+    ),
+  );
+
+  it.effect("shuts down every local device an agent booted when the server stops", () =>
+    withService(({ service, local, remote, open }) =>
+      Effect.gen(function* () {
+        yield* open("AGENT-SIM");
+        yield* open("SECOND-SIM", { thread: "other" });
+        yield* open("USER-SIM");
+        yield* open("REMOTE-SIM", { hostId: sshHostId });
+        yield* service.shutdownAgentBootedDevices;
+        expect(local.shutdowns.toSorted()).toEqual(["AGENT-SIM", "SECOND-SIM"]);
+        expect(remote.shutdowns).toEqual([]);
+      }),
+    ),
+  );
+
+  it.effect("never shuts down a device the user rebooted after it was seen stopped", () =>
+    withService(({ service, local, open }) =>
+      Effect.gen(function* () {
+        yield* open("AGENT-SIM");
+        local.booted.set("AGENT-SIM", false);
+        yield* service.list;
+        local.booted.set("AGENT-SIM", true);
+        yield* service.list;
+        yield* TestClock.adjust("1 hour");
+        yield* service.shutdownIdleDevices;
+        expect(local.shutdowns).toEqual([]);
+      }),
+    ),
+  );
+});
