@@ -1158,9 +1158,9 @@ it.live("cancels every exact deletion intent if preparation fails before dispatc
   ),
 );
 
-it.live(
-  "retains an interrupted owned trial until it can resume safely, then permits disposal",
-  () =>
+it.live.each([false, true])(
+  "retains an interrupted owned trial without trapping a verified original (failed: %s)",
+  (failed) =>
     realGit((f) =>
       Effect.gen(function* () {
         const h = yield* harness(f);
@@ -1184,6 +1184,9 @@ it.live(
             manual: true,
             acceptedAt: DateTime.formatIso(at),
           },
+          ...(failed
+            ? { captureFailure: { operationId: id, reason: "fixture stopped capture" } }
+            : {}),
         };
         for (const [ownerId, thread] of h.threads)
           h.threads.set(ownerId, { ...thread, worktreeSuspension: summary });
@@ -1205,10 +1208,70 @@ it.live(
           });
           await expect(interrupted.trialRestore(id)).rejects.toThrow("fixture trial interrupted");
           const trial = (await interrupted.readJournal(id)).trialPath!;
-          await NodeFSP.writeFile(NodePath.join(trial, "unknown-note"), "keep trial addition\n");
+          await NodeFSP.writeFile(
+            NodePath.join(trial, failed ? ".DS_Store" : "unknown-note"),
+            "keep trial addition\n",
+          );
           return trial;
         });
         yield* h.service.sweep;
+        if (failed) {
+          const active = (yield* h.registry.list)[0]!;
+          expect(active.summary.state).toBe("active");
+          expect(active.operation).toBeUndefined();
+          expect(active.captureFailure?.operationId).toBe(id);
+          expect(active.captureFailure?.retryOnce).toBeUndefined();
+          expect(active.history).toContain(id);
+          expect(yield* h.registry.automaticProtection(f.workspace)).not.toBeNull();
+          const retained = yield* Effect.promise(() => h.store.readJournal(id));
+          expect(retained.phase).toBe("active");
+          expect(retained.trialPath).toBe(trial);
+          expect(retained.trialIdentity).toBeDefined();
+          expect(retained.trialGitDirectory).toBeDefined();
+          const restarted = yield* harness(f);
+          for (const [threadId, thread] of h.threads) restarted.threads.set(threadId, thread);
+          expect(
+            (yield* restarted.acquisition.acquire({ path: f.workspace, purpose: "git" })).path,
+          ).toBe(f.workspace);
+          yield* restarted.service.sweep;
+          const refusal = yield* restarted.service
+            .previewDiscard({ checkoutId: active.checkoutId, snapshotIds: [id] })
+            .pipe(Effect.flip);
+          expect(refusal.reason).toBe("protected");
+          expect((yield* restarted.registry.list)[0]!.operation).toBeUndefined();
+          yield* Effect.promise(async () => {
+            expect(await NodeFSP.readFile(NodePath.join(trial, ".DS_Store"), "utf8")).toBe(
+              "keep trial addition\n",
+            );
+            expect(
+              await NodeFSP.readFile(NodePath.join(f.workspace, "notes", "private"), "utf8"),
+            ).toBe("ignored note\n");
+            expect((await restarted.store.readJournal(id)).trialPath).toBe(trial);
+            await expect(restarted.store.beginDiscard(id)).rejects.toThrow(
+              "trial recovery still needs reconciliation",
+            );
+            expect(await NodeFSP.readdir(NodePath.join(h.registry.root, "snapshots"))).toEqual([
+              id,
+            ]);
+          });
+          const saved = yield* restarted.suspend;
+          expect(saved.summary.state).toBe("suspended");
+          expect(saved.summary.snapshotId).not.toBe(id);
+          expect(saved.captureFailure).toBeUndefined();
+          expect(saved.history).toContain(id);
+          expect(
+            (yield* restarted.service
+              .previewDiscard({ checkoutId: active.checkoutId, snapshotIds: [id] })
+              .pipe(Effect.flip)).reason,
+          ).toBe("protected");
+          expect((yield* restarted.registry.list)[0]!.operation).toBeUndefined();
+          yield* Effect.promise(async () =>
+            expect(await NodeFSP.readFile(NodePath.join(trial, ".DS_Store"), "utf8")).toBe(
+              "keep trial addition\n",
+            ),
+          );
+          return;
+        }
         expect((yield* h.registry.list)[0]!.operation?.kind).toBe("capture");
         yield* Stream.fromQueue(h.updates).pipe(
           Stream.filter((record) => record.blockedReason !== null),
