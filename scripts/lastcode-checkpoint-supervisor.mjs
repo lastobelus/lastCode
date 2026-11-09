@@ -438,6 +438,39 @@ export function refreshInstalledSupervisor(repoRoot, installedPath) {
   NodeFS.renameSync(temporaryPath, installedPath);
 }
 
+const QA_CHECKOUT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const QA_CHECKOUT_NAME = /^lastcode-checkpoint-[0-9.]+-qa$/u;
+
+export function pruneCheckpointQaCheckouts(
+  repoRoot,
+  environment,
+  nowMs = Date.now(),
+  execute = runCommand,
+) {
+  const git = (args) =>
+    execute("qa-checkout-cleanup", repoRoot, "git", args, environment, { capture: true });
+  const failures = [];
+  for (const entry of git(["worktree", "list", "--porcelain"]).split(/\n\s*\n/u)) {
+    const lines = entry.split("\n");
+    const worktree = lines.find((line) => line.startsWith("worktree "))?.slice(9);
+    const head = lines.find((line) => line.startsWith("HEAD "))?.slice(5);
+    if (!worktree || !head || !QA_CHECKOUT_NAME.test(NodePath.basename(worktree))) continue;
+    if (lines.some((line) => /^(?:locked|prunable)(?: |$)/u.test(line))) continue;
+    try {
+      const committedAtMs = Number(git(["show", "-s", "--format=%ct", head])) * 1000;
+      if (nowMs - committedAtMs <= QA_CHECKOUT_RETENTION_MS) continue;
+      // Repairs are committed in the retained recovery worktree, never in a QA checkout.
+      git(["worktree", "remove", "--force", worktree]);
+    } catch (error) {
+      const detail = error instanceof CommandFailure ? error.diagnostic : undefined;
+      failures.push(`${NodePath.basename(worktree)}: ${detail ?? error.message}`);
+    }
+  }
+  if (failures.length > 0) {
+    throw new Error(`Could not remove stale checkpoint QA checkouts: ${failures.join("; ")}`);
+  }
+}
+
 export function checkpointIncidentFingerprint(failure) {
   return NodeCrypto.createHash("sha256")
     .update(
@@ -935,6 +968,7 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
     supervisorPid: process.pid,
     launchdPid: checkpointSchedulerPid(options.environment ?? process.env) ?? process.pid,
     notify: (title, message) => notify(title, message, environment),
+    pruneQaCheckouts: () => pruneCheckpointQaCheckouts(repoRoot, environment),
     reconcileProjectActions: (primaryWorktree, trustedProjectActionIds) =>
       reconcilePrimaryProjectActions(primaryWorktree, home, trustedProjectActionIds, environment),
     refreshPrimaryCheckout: () => refreshPrimaryCheckout(repoRoot, environment),
@@ -1171,6 +1205,20 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
   }
 
   let maintenanceWarning;
+  // Publication already succeeded; checkout maintenance cannot invalidate that checkpoint.
+  const warnMaintenance = (error) => {
+    const warning = {
+      phase: error instanceof CommandFailure ? error.phase : phase,
+      error: boundedCommandDiagnostic(error instanceof Error ? error.message : String(error)),
+      ...(error instanceof CommandFailure && error.diagnostic
+        ? { diagnostic: error.diagnostic }
+        : {}),
+    };
+    maintenanceWarning ??= warning;
+    console.error(
+      `[lastcode:checkpoint-supervisor] Post-checkpoint maintenance warning (${warning.phase}): ${warning.diagnostic ?? warning.error}`,
+    );
+  };
   try {
     phase = "checkout-refresh";
     const primaryWorktree = measure(phase, () => dependencies.refreshPrimaryCheckout());
@@ -1179,17 +1227,13 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
       dependencies.reconcileProjectActions(primaryWorktree, projectActionTrustAllowlist(config)),
     );
   } catch (error) {
-    // Publication already succeeded; checkout maintenance cannot invalidate that checkpoint.
-    maintenanceWarning = {
-      phase: error instanceof CommandFailure ? error.phase : phase,
-      error: boundedCommandDiagnostic(error instanceof Error ? error.message : String(error)),
-      ...(error instanceof CommandFailure && error.diagnostic
-        ? { diagnostic: error.diagnostic }
-        : {}),
-    };
-    console.error(
-      `[lastcode:checkpoint-supervisor] Post-checkpoint maintenance warning (${maintenanceWarning.phase}): ${maintenanceWarning.diagnostic ?? maintenanceWarning.error}`,
-    );
+    warnMaintenance(error);
+  }
+  try {
+    phase = "qa-checkout-cleanup";
+    measure(phase, () => dependencies.pruneQaCheckouts());
+  } catch (error) {
+    warnMaintenance(error);
   }
 
   const finishedAt = dependencies.now();

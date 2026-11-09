@@ -276,6 +276,9 @@ after it. Only step 3's final selection leads to `run-now`.
    separate checkout at the completed retained HEAD before preparing dependencies
    once through the owning Project Action,
    and prepare again only if a repair changes dependency manifests or the lockfile.
+   Name it `lastcode-checkpoint-<build>-qa`. After each successful service run, the
+   supervisor force-removes such worktrees whose HEAD commit is more than seven days
+   old, so nothing in one outlives that week; `git worktree lock` keeps one.
 2. Before every gate run, refresh the separate checkout to the retained recovery
    worktree's current HEAD (`<retained-head>`), then run the focused gate there:
 
