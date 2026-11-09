@@ -142,14 +142,14 @@ it("shows an unknown pause without an Action or retained session, then hides kno
     </RegistryContext.Provider>
   );
   await using screen = await render(view());
-  await expect.element(screen.getByText("QA environment · Status unknown")).toBeVisible();
+  await expect.element(screen.getByText("QA environment · Status unavailable")).toBeVisible();
   await act(() =>
     h.registry.set(
       h.query,
       AsyncResult.success({ ...unpaused, observation: "unknown" }, { timestamp: 2 }),
     ),
   );
-  await expect.element(screen.getByText("QA environment · Status unknown")).toBeVisible();
+  await expect.element(screen.getByText("QA environment · Status unavailable")).toBeVisible();
   await act(() => h.registry.set(h.query, AsyncResult.success(unpaused, { timestamp: 3 })));
   await expect.element(screen.getByRole("status")).not.toBeInTheDocument();
   mocks.environment = {

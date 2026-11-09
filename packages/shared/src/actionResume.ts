@@ -180,9 +180,9 @@ const ACTION_WAIT_COPY = {
       "The command was interrupted and the agent won't continue automatically. Resume agent and Discard handle the follow-up; neither reruns the command.",
   },
   unknown: {
-    label: "Status unknown",
+    label: "Status unavailable",
     detail:
-      "This environment's pause and connection status can't be checked, so automatic continuation isn't certain.",
+      "T3 Code can't check whether work in this environment is paused or will continue on its own. Check the connection banner or Settings > Environments.",
   },
 } as const;
 
