@@ -3,7 +3,7 @@
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
+import * as Schema from "effect/Schema";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import { Argument, Command, Flag } from "effect/cli";
@@ -12,7 +12,11 @@ import {
   WEB_ASSET_CHANNELS,
   type WebAssetBrand,
 } from "./lib/brand-assets.ts";
-import { resolveLastCodeWebIconOverrides } from "./lib/lastcode-brand-assets.ts";
+import { applyWebBrandAssetsToDirectory } from "./lib/apply-web-brand-assets.ts";
+
+class WebBrandAssetsError extends Schema.TaggedError<WebBrandAssetsError>()("WebBrandAssetsError", {
+  cause: Schema.Defect(),
+}) {}
 
 const WEB_ASSET_BRANDS = [
   "development",
@@ -24,16 +28,12 @@ export const applyWebBrandAssets = Effect.fn("applyWebBrandAssets")(function* (
   brand: WebAssetBrand,
   targetDirectory: string,
 ) {
-  const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const repoRoot = yield* path.fromFileUrl(new URL("..", import.meta.url));
-
-  yield* Effect.forEach(
-    resolveLastCodeWebIconOverrides(brand, path.resolve(repoRoot, targetDirectory)),
-    (override) =>
-      fs.copyFile(path.join(repoRoot, override.sourceRelativePath), override.targetRelativePath),
-    { concurrency: "unbounded" },
-  );
+  yield* Effect.try({
+    try: () => applyWebBrandAssetsToDirectory(repoRoot, brand, targetDirectory),
+    catch: (cause) => new WebBrandAssetsError({ cause }),
+  });
 });
 
 export const applyWebBrandAssetsCommand = Command.make(

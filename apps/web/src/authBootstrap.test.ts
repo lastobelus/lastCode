@@ -191,10 +191,16 @@ describe("resolveInitialServerAuthGateState", () => {
       request,
       new Response("Internal Server Error", { status: 500 }),
     );
+    const prompts = Array.from({ length: 2 }, () => ({
+      started: createSignal(),
+      finished: createSignal(),
+    }));
     const runner: PrimaryHttpEffectRunner = async <A>() => {
       attempts += 1;
       if (attempts < 3) {
-        await new Promise((resolve) => setTimeout(resolve, 20_000));
+        const prompt = prompts[attempts - 1]!;
+        prompt.started.resolve();
+        await prompt.finished.promise;
         throw new HttpClientError.HttpClientError({
           reason: new HttpClientError.StatusCodeError({ request, response }),
         });
@@ -206,7 +212,14 @@ describe("resolveInitialServerAuthGateState", () => {
     const { fetchSessionState } = await import("./environments/primary");
 
     const sessionPromise = fetchSessionState();
-    await vi.advanceTimersByTimeAsync(41_000);
+    await prompts[0]!.started.promise;
+    await vi.advanceTimersByTimeAsync(20_000);
+    prompts[0]!.finished.resolve();
+    await vi.advanceTimersByTimeAsync(500);
+    await prompts[1]!.started.promise;
+    await vi.advanceTimersByTimeAsync(20_000);
+    prompts[1]!.finished.resolve();
+    await vi.advanceTimersByTimeAsync(500);
 
     await expect(sessionPromise).resolves.toEqual(unauthenticatedSession(DESKTOP_AUTH));
     expect(attempts).toBe(3);
@@ -216,9 +229,12 @@ describe("resolveInitialServerAuthGateState", () => {
     vi.useFakeTimers();
     installDesktopBootstrap();
     let attempts = 0;
+    const started = createSignal();
+    const finished = createSignal();
     const runner: PrimaryHttpEffectRunner = async () => {
       attempts += 1;
-      await new Promise((resolve) => setTimeout(resolve, 20_000));
+      started.resolve();
+      await finished.promise;
       throw new EnvironmentInternalError({
         code: "internal_error",
         reason: "internal_error",
@@ -232,7 +248,9 @@ describe("resolveInitialServerAuthGateState", () => {
 
     const sessionPromise = fetchSessionState();
     const rejection = expect(sessionPromise).rejects.toBeInstanceOf(PrimaryEnvironmentRequestError);
+    await started.promise;
     await vi.advanceTimersByTimeAsync(20_000);
+    finished.resolve();
 
     await rejection;
     expect(attempts).toBe(1);
