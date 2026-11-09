@@ -75,7 +75,7 @@ function exactCommit(value: string, name: string): string {
   return value;
 }
 
-function manifestAtCommit(repoRoot: string, commit: string): CarryReplayManifest | undefined {
+function assertCommitAvailable(repoRoot: string, commit: string): void {
   if (
     git(repoRoot, ["rev-parse", "--verify", `${commit}^{commit}`], { allowFailure: true }) !==
     commit
@@ -84,15 +84,34 @@ function manifestAtCommit(repoRoot: string, commit: string): CarryReplayManifest
       `Pull-request commit ${commit} is unavailable. Fetch the complete base-to-head history before validating carry groups.`,
     );
   }
-  const contents = git(repoRoot, ["show", `${commit}:${CARRY_MANIFEST_PATH}`], {
+}
+
+function manifestAt(repoRoot: string, treeish: string): CarryReplayManifest | undefined {
+  const contents = git(repoRoot, ["show", `${treeish}:${CARRY_MANIFEST_PATH}`], {
     allowFailure: true,
   });
   if (contents === undefined) return undefined;
   const manifest: unknown = JSON.parse(contents);
   if (manifest === null || typeof manifest !== "object" || Array.isArray(manifest)) {
-    throw new Error(`${CARRY_MANIFEST_PATH} at ${commit} must contain a JSON object.`);
+    throw new Error(`${CARRY_MANIFEST_PATH} at ${treeish} must contain a JSON object.`);
   }
   return manifest as CarryReplayManifest;
+}
+
+// The squash GitHub publishes for a PR behind its base: the PR's changes since its fork point,
+// merged onto the current base tip.
+function landingTree(repoRoot: string, mergeBase: string, target: string, head: string): string {
+  const tree = git(
+    repoRoot,
+    ["merge-tree", "--write-tree", "--no-messages", `--merge-base=${mergeBase}`, target, head],
+    { allowFailure: true },
+  );
+  if (tree === undefined || !/^[0-9a-f]{40}$/u.test(tree)) {
+    throw new Error(
+      `Head ${head} conflicts with base ${target}. Rebase onto the current base and push.`,
+    );
+  }
+  return tree;
 }
 
 function compactBase(repoRoot: string, sourceBase: string) {
@@ -164,8 +183,9 @@ function compilePullRequest(
   repoRoot: string,
   source: CarrySourceDelivery,
   manifest: CarryReplayManifest,
+  target: string,
 ): NonNullable<CarryCiResult["compilation"]> {
-  const compact = compactBase(repoRoot, source.base);
+  const compact = compactBase(repoRoot, target);
   const bootstrap = parseManifestReplayConfiguration(manifest)?.bootstrap;
   if (!compact && !bootstrap) {
     throw new Error("No compact carry chain or prepared bootstrap is available at the PR base.");
@@ -223,17 +243,21 @@ function compilePullRequest(
     ]);
     if (retained) git(isolated, ["update-ref", "--stdin"], { input: `${retained}\n` });
     git(isolated, ["update-ref", source.ref, source.head]);
-    const sourceTree = git(repoRoot, ["rev-parse", `${source.head}^{tree}`])!;
     // Model the exact squash that guarded merge will publish, without publishing its source ref.
+    // Behind its base, that squash lands on the current tip, whose tail replays on its own.
+    const behind = source.base !== target;
+    const sourceTree = behind
+      ? landingTree(isolated, source.base, target, source.head)
+      : git(repoRoot, ["rev-parse", `${source.head}^{tree}`])!;
     const squash = git(isolated, [
       "-c",
       "commit.gpgSign=false",
       "commit-tree",
       sourceTree,
       "-p",
-      compilationSource.base,
+      behind ? target : compilationSource.base,
       "-m",
-      carrySquashBody("Carry admission candidate", compilationSource),
+      carrySquashBody("Carry admission candidate", behind ? source : compilationSource),
     ])!;
     // Materialize every tracked file even when an existing index already matches this tree.
     git(isolated, ["checkout", "--quiet", "--force", "--detach", squash]);
@@ -265,12 +289,19 @@ export function validateCarryPullRequest(
   repoRoot: string,
   pullRequest: CarryCiPullRequest,
 ): CarryCiResult {
-  const base = exactCommit(pullRequest.base, "base");
+  const target = exactCommit(pullRequest.base, "base");
   const head = exactCommit(pullRequest.head, "head");
   if (!Number.isSafeInteger(pullRequest.number) || pullRequest.number <= 0) {
     throw new Error("Carry CI requires a positive pull-request number.");
   }
-  const manifests = [manifestAtCommit(repoRoot, base), manifestAtCommit(repoRoot, head)];
+  assertCommitAvailable(repoRoot, target);
+  assertCommitAvailable(repoRoot, head);
+  // A PR may be behind its base; its own source range starts where it forked.
+  const base = git(repoRoot, ["merge-base", target, head])!;
+  const manifests = [
+    manifestAt(repoRoot, target),
+    manifestAt(repoRoot, base === target ? head : landingTree(repoRoot, base, target, head)),
+  ];
   const active = manifests.some(
     (manifest) => manifest !== undefined && shouldRetainCarrySources(manifest),
   );
@@ -294,7 +325,7 @@ export function validateCarryPullRequest(
     return {
       active: true,
       source,
-      compilation: compilePullRequest(repoRoot, source, manifest),
+      compilation: compilePullRequest(repoRoot, source, manifest, target),
     };
   } catch (error) {
     const detail =

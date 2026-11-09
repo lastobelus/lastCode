@@ -496,6 +496,45 @@ describe("LastCode carry CI", () => {
     }
   });
 
+  it("compiles a PR behind its base as the squash that lands on the current tip", () => {
+    const { repo, cleanup } = fixture();
+    try {
+      const { upstream, base: compact } = compactFixture(repo);
+      write(repo, "pr.txt", "proposed contribution\n");
+      const head = commit(repo, "proposed contribution", "Carry-Group: build-ci");
+      const squashOnto = (path: string, number: number) => {
+        git(repo, ["checkout", "--quiet", "--detach", compact]);
+        write(repo, path, "newer main contribution\n");
+        const prior = commit(repo, "newer main contribution", "Carry-Group: tooling");
+        const source = validateCarrySourceRange(repo, number, compact, prior);
+        git(repo, ["update-ref", source.ref, prior]);
+        return git(repo, [
+          "commit-tree",
+          `${prior}^{tree}`,
+          "-p",
+          compact,
+          "-m",
+          carrySquashBody("newer main squash", source),
+        ]);
+      };
+      const base = squashOnto("prior.txt", 224);
+      const before = snapshot(repo);
+      const result = validateCarryPullRequest(repo, { base, head, number: 225 });
+      const landed = git(repo, ["merge-tree", "--write-tree", base, head]);
+      expect(git(repo, ["ls-tree", "--name-only", landed])).toContain("prior.txt");
+      expect(result.compilation).toEqual({ upstream, sourceTree: landed, compiledTree: landed });
+      expect(result.source).toMatchObject({ base: compact, head });
+      expect(snapshot(repo)).toEqual(before);
+
+      const conflicting = squashOnto("pr.txt", 226);
+      expect(() =>
+        validateCarryPullRequest(repo, { base: conflicting, head, number: 225 }),
+      ).toThrow(`Head ${head} conflicts with base ${conflicting}.`);
+    } finally {
+      cleanup();
+    }
+  });
+
   it("compiles a child PR together with its unsquashed parent contributions", () => {
     const { repo, cleanup } = fixture();
     try {

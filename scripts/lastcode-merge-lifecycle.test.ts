@@ -40,17 +40,46 @@ function fixtureNodeExecutable(): string {
 
 describe("guarded merge lifecycle", () => {
   it.each([
-    { scenario: "base advances", advanceBase: true, carryGroup: undefined },
-    { scenario: "base stays unchanged", advanceBase: false, carryGroup: undefined },
-    { scenario: "carry regrouping conflicts", advanceBase: false, carryGroup: "build-ci" },
+    { scenario: "base advances", advanceBase: true, carryGroup: undefined, behind: undefined },
+    {
+      scenario: "base stays unchanged",
+      advanceBase: false,
+      carryGroup: undefined,
+      behind: undefined,
+    },
+    {
+      scenario: "carry regrouping conflicts",
+      advanceBase: false,
+      carryGroup: "build-ci",
+      behind: undefined,
+    },
     {
       scenario: "carry compiles successfully",
       advanceBase: false,
       carryGroup: "resumable-actions",
+      behind: undefined,
+    },
+    {
+      scenario: "PR is behind main",
+      advanceBase: false,
+      carryGroup: undefined,
+      behind: "unrelated",
+    },
+    {
+      scenario: "PR conflicts with newer main",
+      advanceBase: false,
+      carryGroup: undefined,
+      behind: "conflict",
+    },
+    {
+      scenario: "checkpoint rewrote the tested base",
+      advanceBase: false,
+      carryGroup: undefined,
+      behind: "rewritten",
     },
   ] as const)(
     "guards the final write without requesting a checkpoint: $scenario",
-    ({ advanceBase, carryGroup }) => {
+    ({ advanceBase, carryGroup, behind }) => {
       const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-merge-lifecycle-"));
       try {
         const repo = NodePath.join(root, "repo");
@@ -137,11 +166,31 @@ describe("guarded merge lifecycle", () => {
         if (carryGroup) {
           git(repo, ["rm", "shared.txt"]);
           git(repo, ["commit", "-m", "remove modified file", "-m", `Carry-Group: ${carryGroup}`]);
-        } else git(repo, ["commit", "--allow-empty", "-m", "feature"]);
+        } else {
+          NodeFS.writeFileSync(NodePath.join(repo, "feature.txt"), "feature\n");
+          git(repo, ["add", "feature.txt"]);
+          git(repo, ["commit", "-m", "feature"]);
+        }
         const head = git(repo, ["rev-parse", "HEAD"]);
         const source = carryGroup ? validateCarrySourceRange(repo, 1, base, head) : undefined;
-        const tree = git(repo, ["rev-parse", `${base}^{tree}`]);
-        const advanced = git(repo, ["commit-tree", tree, "-p", base, "-m", "checkpoint"]);
+        let main = base;
+        if (behind) {
+          git(repo, ["checkout", "--quiet", "-b", "other", base]);
+          NodeFS.writeFileSync(
+            NodePath.join(repo, behind === "conflict" ? "feature.txt" : "other.txt"),
+            "other\n",
+          );
+          git(repo, ["add", "."]);
+          git(repo, ["commit", "-m", "other"]);
+          const other = git(repo, ["rev-parse", "HEAD"]);
+          git(repo, ["checkout", "--quiet", "feature"]);
+          if (behind === "rewritten") {
+            main = git(repo, ["commit-tree", `${base}^{tree}`, "-m", "rewritten"]);
+          } else main = other;
+          git(repo, ["push", "--force", "origin", `${main}:refs/heads/lastcode/main`]);
+        }
+        const tree = git(repo, ["rev-parse", `${main}^{tree}`]);
+        const advanced = git(repo, ["commit-tree", tree, "-p", main, "-m", "checkpoint"]);
         git(repo, ["push", "origin", `${advanced}:refs/test/advanced`]);
         NodeFS.writeFileSync(
           NodePath.join(origin, "hooks", "pre-receive"),
@@ -151,7 +200,7 @@ while read old new ref; do
     printf 'called\\n' >> "$TEST_LOCK_MARKER"
     if [ "${advanceBase}" = "true" ]; then
       unset GIT_QUARANTINE_PATH
-      git update-ref refs/heads/lastcode/main ${advanced} ${base} || exit 1
+      git update-ref refs/heads/lastcode/main ${advanced} ${main} || exit 1
     fi
   fi
   case "$ref" in
@@ -234,10 +283,18 @@ const args = process.argv.slice(2);
 const endpoint = args.find(arg => arg.startsWith('repos/'));
 let result;
 if (args[0] === 'pr' && args[1] === 'merge') {
-  fs.writeFileSync(process.env.TEST_MERGE_MARKER, 'called');
-  cp.execFileSync('git', ['push', '--no-verify', 'origin', responses.pr.headRefOid + ':refs/heads/lastcode/main']);
+  const git = (...gitArgs) => cp.execFileSync('git', gitArgs, { encoding: 'utf8' }).trim();
+  git('fetch', 'origin', 'lastcode/main');
+  const parent = git('rev-parse', 'FETCH_HEAD');
+  const tree = git('merge-tree', '--write-tree', parent, responses.pr.headRefOid);
+  const squash = git('commit-tree', tree, '-p', parent, '-F', args[args.indexOf('--body-file') + 1]);
+  git('push', '--no-verify', 'origin', squash + ':refs/heads/lastcode/main');
+  fs.writeFileSync(process.env.TEST_MERGE_MARKER, squash);
   process.exit(0);
-} else if (args[0] === 'pr' && args[1] === 'view') result = {...responses.pr, state: fs.existsSync(process.env.TEST_MERGE_MARKER) ? 'MERGED' : 'OPEN'};
+} else if (args[0] === 'pr' && args[1] === 'view') {
+  const merged = fs.existsSync(process.env.TEST_MERGE_MARKER);
+  result = {...responses.pr, state: merged ? 'MERGED' : 'OPEN', mergeCommit: merged ? { oid: fs.readFileSync(process.env.TEST_MERGE_MARKER, 'utf8') } : null};
+}
 else if (args[0] === 'api' && args[1] === 'graphql') result = responses.reviewThreads;
 else if (endpoint?.endsWith('/pulls/1/reviews?per_page=100')) result = responses.reviews;
 else if (endpoint?.endsWith('/comments?per_page=100')) result = [[]];
@@ -274,9 +331,13 @@ process.stdout.write(JSON.stringify(result));
           },
         );
         const compilationConflict = carryGroup === "build-ci";
-        const merged = !advanceBase && !compilationConflict;
+        const refused = behind === "conflict" || behind === "rewritten";
+        const merged = !advanceBase && !compilationConflict && !refused;
         expect(result.status, result.stderr).toBe(merged ? 0 : 1);
-        if (advanceBase) expect(result.stderr).toContain(`moved from ${base} to ${advanced}`);
+        if (advanceBase) expect(result.stderr).toContain(`moved from ${main} to ${advanced}`);
+        else if (behind === "conflict") expect(result.stderr).toContain("conflicts with origin");
+        else if (behind === "rewritten")
+          expect(result.stderr).toContain(`tested against ${base}, which is no longer in`);
         else if (compilationConflict) {
           expect(result.stderr).toContain(
             `same-base carry compilation failed for ${base}..${head}`,
@@ -286,12 +347,21 @@ process.stdout.write(JSON.stringify(result));
           expect(git(repo, ["status", "--porcelain"])).toBe("");
         } else expect(result.stdout).toContain("Merge complete. No checkpoint requested.");
         expect(NodeFS.existsSync(marker)).toBe(merged);
-        expect(NodeFS.existsSync(lockMarker)).toBe(!compilationConflict);
+        expect(NodeFS.existsSync(lockMarker)).toBe(!compilationConflict && !refused);
         expect(NodeFS.existsSync(sourceMarker)).toBe(Boolean(source) && merged);
         expect(NodeFS.existsSync(checkpointMarker)).toBe(false);
-        expect(git(root, ["--git-dir", origin, "rev-parse", "refs/heads/lastcode/main"])).toBe(
-          advanceBase ? advanced : merged ? head : base,
-        );
+        const landed = git(root, ["--git-dir", origin, "rev-parse", "refs/heads/lastcode/main"]);
+        if (merged) {
+          const squash = NodeFS.readFileSync(marker, "utf8");
+          expect(landed).toBe(squash);
+          expect(result.stdout).toContain(`Merged as ${squash}.`);
+          expect(git(repo, ["rev-parse", `${squash}^`])).toBe(main);
+          if (source) {
+            expect(git(repo, ["show", "-s", "--format=%B", squash])).toContain(
+              `Carry-Source-Base: ${base}\nCarry-Source-Head: ${head}`,
+            );
+          }
+        } else expect(landed).toBe(advanceBase ? advanced : main);
         if (source) {
           for (const args of [[], ["--git-dir", origin]]) {
             expect(git(repo, [...args, "for-each-ref", "--format=%(objectname)", source.ref])).toBe(

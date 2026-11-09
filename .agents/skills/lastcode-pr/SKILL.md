@@ -100,9 +100,11 @@ Failure to acquire the promotion lock still fails the run after tag publication.
 Inspect its owner and the connection error before retrying; a lock ref alone
 does not prove an active merge.
 
-When `lastcode/main` advances, obtain fresh validation against the new base
-before merging. Refresh the PR branch as needed; validation from the previous
-base does not remain valid merely because the PR head is unchanged.
+A PR behind `lastcode/main` merges without a rebase or new CI once CI passed
+on its head: GitHub no longer requires branches to be up to date, and
+`lastcode:merge` checks the PR against the current tip itself. Rebase and push
+only when the merge reports a conflict, a carry failure, or a tested base that a
+checkpoint rewrote. If main moves while the merge runs, run it again.
 
 ## Build Repairs
 
@@ -178,16 +180,24 @@ current GitHub thread and review-query mechanics.
    own checkout; do not bypass the guarded merge in the GitHub UI.
    The wrapper independently revalidates a successful exact-head/base GitHub CI
    run and aggregate `CI Gate`, strict exact-head review readiness with zero
-   unresolved review threads, a clean current PR, and an unchanged fetched
-   base under the shared remote main-write lock immediately before its exact-head
-   squash merge. Checkpoint promotion uses the same lock; open PRs and CI waits
+   unresolved review threads, a clean current PR that merges without conflicts
+   onto the current tip, carry groups recompiled against that tip, and an
+   unchanged fetched base under the shared remote main-write lock immediately
+   before its exact-head squash merge. Checkpoint promotion uses the same lock; open PRs and CI waits
    never hold it. Use the updated guarded command rather than the GitHub UI or
    old worktree scripts, which do not participate in this coordination. Preserve
    an uncertain remote lock until its owner and operation outcome are verified.
-6. Verify the PR is merged, the merged tree matches the reviewed head, and
-   `origin/lastcode/main` contains the merge result. Ordinary PRs have no Full CI
-   action or local Full-CI stamp; checkpoint and release Full CI are a separate
-   workflow.
+6. Verify the PR is merged and `origin/lastcode/main` contains the merge commit
+   the wrapper prints. Then confirm main's push CI for that commit: a PR merged
+   behind main is first tested as merged there. Start the command the wrapper
+   prints as a background command whose exit wakes you; it waits for the run to
+   register, then exits with its result. Finish cleanup and end the turn. `watch_pull_request` cannot see this run. If your harness cannot wake
+   on a background command, keep the turn open on that command instead. If the
+   run fails, compare it with the previous main run. When your merge caused it,
+   alone or together with a concurrent merge, open a fix-forward PR at once, or
+   a revert PR if no quick fix exists. When it did not, rerun the failed jobs
+   once and report it. Ordinary PRs have no Full CI action or local Full-CI
+   stamp; checkpoint and release Full CI are a separate workflow.
    For a whole-stack merge request, restack and validate the next authorized
    member using the stack reference; one merged PR does not finish the request.
 7. If the work is tracked by Markover, confirm the GitHub terminal state and

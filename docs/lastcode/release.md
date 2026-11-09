@@ -152,9 +152,9 @@ PR waits use the native pull-request watch, not a Project Action. Call
 the turn. On each wake, run the check again. It reads the exact GitHub pull-request workflow run,
 whose identity records the PR number, head, base, and synthetic merge commit
 behind one stable aggregate `CI Gate`, together with exact-head Codex review
-and unresolved review threads. Head or base drift invalidates earlier evidence
-and requires the agent to decide whether to rebase, republish, and request
-review again. Review waits end at a configurable quiet deadline, 45 minutes by
+and unresolved review threads. A new head push invalidates earlier evidence.
+Main advancing does not: the guarded merge rechecks the PR against the current
+tip. Review waits end at a configurable quiet deadline, 45 minutes by
 default: once the newest exact-head review request is older than the deadline,
 the check reports `review-stalled` attention, even if Codex has reacted with
 eyes. The timeout never counts as approval, permits a merge, or substitutes for
@@ -199,11 +199,14 @@ before the script.
 
 The merge wrapper refuses dirty worktrees, missing or stale exact GitHub CI,
 exact-head Codex review that is missing or pending, unresolved review threads,
-stale bases, draft or non-clean PRs, and PRs that do not target
-`lastcode/main`. The wrapper and checkpoint publisher share a short exclusive
+draft or non-clean PRs, and PRs that do not target `lastcode/main`. A PR behind
+main may merge; the wrapper refuses it only when it conflicts with the current
+tip, fails carry compilation against it, or was tested against a base that a
+checkpoint rewrote. The wrapper and checkpoint publisher share a short exclusive
 Git ref lock on the remote. After acquiring it, the wrapper checks the exact PR
-head, base, CI result, and review readiness again, then squash-merges with the
-exact-head guard. The lock protects only the final main write, not preparation or CI waits.
+head, unchanged base, CI result, and review readiness again, then squash-merges
+with the exact-head guard and prints the merge commit whose main CI the lander
+confirms. The lock protects only the final main write, not preparation or CI waits.
 Ordinary merges request no checkpoint; `--skip-checkpoint` explicitly selects
 that default. Use `--checkpoint` only with separate user authorization for an
 extra service run. Permission to merge or a request for a dependent feature is

@@ -128,10 +128,10 @@ Checkpoint metadata records the exact source as `Source-Commit`. If publication
 succeeds but promotion does not happen while the source remains unchanged, a
 later run promotes the published candidate.
 
-Open PRs must obtain fresh validation against the current base before merging.
-After a checkpoint changes `lastcode/main`, refresh the PR branch as needed and
-rerun validation; results for the previous base do not authorize a merge. Use
-the guarded merge command, which checks the exact head and current base.
+Open PRs behind `lastcode/main` may merge without a rebase; the guarded merge
+command checks the exact head, a clean merge onto the current tip, and carry
+compilation against it. A checkpoint rewrites `lastcode/main`, so a PR whose CI
+base is no longer in main must rebase and rerun CI.
 
 The guarded merge command and checkpoint publisher use
 `refs/lastcode/main-write-lock` to serialize their final updates across machines.
@@ -206,7 +206,9 @@ regardless of changed circumstances. Avoid private infrastructure or raw logs.
 
 PR CI and guarded merge compile the existing carry groups plus the proposed
 contributions on the same upstream base and require the compiled tree to equal
-the exact PR head tree. A conflict blocks merge while the owning PR can still
+the tree the squash will land: the exact PR head tree, or, for a PR behind its
+base, its changes merged onto the current tip. Guarded merge reruns this against
+the current tip, since a newer merge can change the result. A conflict blocks merge while the owning PR can still
 reconcile its contribution. This proves regrouping, not compatibility with a
 future nightly. Validation uses a disposable repository and leaves the source
 checkout untouched.
