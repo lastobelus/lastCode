@@ -21,14 +21,11 @@ export function isRegenerableIgnoredPath(relativePath: string): boolean {
   if (components.some((name) => name === ".codex" || name === ".local" || name.startsWith(".env")))
     return false;
   if (components.at(-1)?.endsWith(".tsbuildinfo")) return true;
-  // The last component is a file or empty for Git's collapsed directory entries.
+  // Only Git-reported ignored roots are disposable; an ignored backup beneath tracked output is not.
+  if (!relativePath.endsWith("/")) return false;
   const directories = components.slice(0, -1);
-  if (isGeneratedDependencyPath(directories.join("/"))) return true;
-  for (let depth = 1; depth <= directories.length; depth++) {
-    if (isGeneratedBuildRoot(directories.slice(0, depth).join("/"))) return true;
-  }
+  const name = directories.at(-1) ?? "";
+  if (isGeneratedDependencyPath(name) || isGeneratedBuildRoot(directories.join("/"))) return true;
   // Root .t3 is seeded, disposable development state.
-  return (
-    directories[0] === ".t3" || directories.some((name) => generatedToolDirectories.includes(name))
-  );
+  return (directories.length === 1 && name === ".t3") || generatedToolDirectories.includes(name);
 }
