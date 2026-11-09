@@ -1,5 +1,4 @@
 // @effect-diagnostics nodeBuiltinImport:off globalDate:off globalTimers:off - Playwright callbacks run outside the Effect runtime.
-import { parseThreadLinkHref } from "@t3tools/shared/threadLinks";
 import { installThreadLinkNavigation } from "./ThreadLinkNavigation.ts";
 // Screencasts ignore emulated device scale; real 2x keeps captures sharp.
 // --disable-gpu uses cheaper software compositing while preserving SwiftShader WebGL.
@@ -1930,7 +1929,7 @@ const make = Effect.gen(function* () {
   };
 
   const adoptPopup = async (opener: ServerTab, popup: Page) => {
-    if (opener.closing || blockedThreadPopups.has(popup) || parseThreadLinkHref(popup.url())) {
+    if (opener.closing || blockedThreadPopups.has(popup)) {
       await popup.close().catch(constVoid);
       return;
     }

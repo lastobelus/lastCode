@@ -3111,6 +3111,67 @@ it.live.each(["agent", "viewer"] as const)(
     ).pipe(Effect.provide(layer)),
 );
 
+it.effect.each(["agent-operating", "no-viewer"] as const)(
+  "retains a hosted thread popup when the app-open is declined (%s)",
+  (reason) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { broker, tabId } = yield* ready;
+        const manager = yield* Manager.PreviewManager;
+        const events = yield* manager.subscribeEvents;
+        const context = contexts[0]!;
+        const opener = context.page;
+        const cdp = context.sessions[0]!;
+        const href = "https://app.t3.codes/threads/linked-environment/missing-thread";
+        const popup = makeContext(undefined, href);
+        const click = async () => {
+          cdp.emit("Runtime.executionContextCreated", {
+            context: { id: 21, name: "t3-thread-link-activation", auxData: { frameId: "main" } },
+          });
+          cdp.emit("Runtime.bindingCalled", {
+            name: "t3ThreadLinkGesture",
+            payload: "active",
+            executionContextId: 21,
+          });
+          cdp.emit("Page.windowOpen", { url: href, userGesture: true });
+          opener.emit("popup", popup.page);
+        };
+        if (reason === "agent-operating") {
+          opener.locator.mockReturnValueOnce({
+            scrollIntoViewIfNeeded: async () => {},
+            boundingBox: async () => ({ x: 20, y: 20, width: 80, height: 30 }),
+            click,
+          } as never);
+          yield* broker.invoke({ scope, tabId, operation: "click", input: { locator: "a" } });
+        } else {
+          yield* Effect.promise(click);
+        }
+        expect(popup.page.isClosed()).toBe(false);
+        const event = Option.getOrThrow(
+          yield* Stream.fromSubscription(events).pipe(
+            Stream.filter((event) => event.type === "opened" && event.tabId !== tabId),
+            Stream.runHead,
+          ),
+        );
+        const status = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId: event.tabId,
+          operation: "status",
+          input: {},
+        });
+        expect(status).toMatchObject({ browserHost: "environment", url: href });
+        expect(status.tabs).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ tabId: event.tabId, openerTabId: tabId }),
+          ]),
+        );
+        expect(opener.url()).toBe("about:blank");
+        expect(popup.page.close).not.toHaveBeenCalled();
+        expect(popup.page.goto).not.toHaveBeenCalled();
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
 it.live.each([false, true])(
   "a popup keeps its agent, profile, and opener page (native: %s)",
   (native) =>
