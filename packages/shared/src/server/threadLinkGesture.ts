@@ -1,4 +1,4 @@
-import { parseThreadLinkHref } from "@t3tools/shared/threadLinks";
+import { parseThreadLinkHref } from "../threadLinks.ts";
 
 type Send = (method: string, params?: Record<string, unknown>) => Promise<unknown>;
 
@@ -7,9 +7,13 @@ export function createBrowserThreadLinkNavigation(
   world = "t3-thread-link-activation",
 ) {
   let mainFrameId: string | undefined;
+  let scriptId: string | undefined;
   const activeFrames = new Set<string>();
   const contexts = new Map<number, string>();
   return {
+    get active() {
+      return activeFrames.size > 0;
+    },
     async install(command: Send) {
       const send = command;
       const tree = (await send("Page.getFrameTree")) as { frameTree: { frame: { id: string } } };
@@ -21,7 +25,9 @@ export function createBrowserThreadLinkNavigation(
       });
       await send("Page.enable");
       // External protocols consume activation before the navigation event reaches the host.
-      await send("Page.addScriptToEvaluateOnNewDocument", {
+      if (scriptId)
+        await send("Page.removeScriptToEvaluateOnNewDocument", { identifier: scriptId });
+      const script = await send("Page.addScriptToEvaluateOnNewDocument", {
         worldName: world,
         runImmediately: true,
         source: `if (!globalThis.t3ThreadLinkGestureInstalled) {
@@ -34,6 +40,7 @@ export function createBrowserThreadLinkNavigation(
           }, true);
         }}`,
       });
+      scriptId = (script as { identifier?: string }).identifier;
     },
     receive(method: string, params: unknown) {
       if (method === "Runtime.executionContextsCleared") {

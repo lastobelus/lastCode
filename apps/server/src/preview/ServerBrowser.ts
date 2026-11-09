@@ -100,7 +100,7 @@ import * as PreviewBrowser from "./PreviewBrowser.ts";
 import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
 import { presentAsChrome, ServerBrowserContexts } from "./ServerBrowserContexts.ts";
 import { BrowserControlInterrupted, SessionControl } from "./SessionControl.ts";
-import { installPdfDocumentNavigation, isPdfAssetUrl } from "./PdfDocumentNavigation.ts";
+import { createPdfDocumentNavigation, isPdfAssetUrl } from "./PdfDocumentNavigation.ts";
 
 const SERVER_HOST_CLIENT_ID = SERVER_BROWSER_AUTOMATION_CLIENT_ID;
 const RENDER_SCALE = 2;
@@ -1281,7 +1281,7 @@ const make = Effect.gen(function* () {
     const page = adopted?.page ?? desktop?.page ?? (await context.newPage());
     if (!desktop) opened.push(() => page.close());
     const cdp = await context.newCDPSession(page);
-    const documentPatterns = await installPdfDocumentNavigation(cdp);
+    const pdfNavigation = await createPdfDocumentNavigation(cdp);
     // The desktop's page is already a normal browser. A popup's first request
     // went out before it became a tab; everything after presents as Chrome.
     if (!desktop) await presentAsChrome(cdp, host);
@@ -1354,22 +1354,21 @@ const make = Effect.gen(function* () {
       captureLock: Promise.resolve(),
       capturing: 0,
     };
-    const ignoredThreadNavigations = new Set<string>();
-    await installThreadLinkNavigation(
+    const threadNavigation = await installThreadLinkNavigation(
       page,
       cdp,
       desktop !== null,
-      (href, kind) => {
-        if (!desktop && kind === "navigation" && href.startsWith("https:"))
-          ignoredThreadNavigations.add(href);
-        if (tab.closing || tab.agentOperating) return;
+      (href) => {
+        if (tab.closing || tab.agentOperating) return false;
         if (tab.threadLinkViewer) tab.threadLinkViewer.push({ _tag: "threadLink", href });
         else if (desktop && tab.nativePresented) runFork(desktopChannel.openThreadLink(tab, href));
+        else return false;
+        return true;
       },
       (popup) => {
         blockedThreadPopups.add(popup);
       },
-      documentPatterns,
+      pdfNavigation ? [pdfNavigation] : [],
     );
     if (!desktop) {
       await page.setViewportSize(fixedViewportSize(tab.setting) ?? UNATTACHED_FILL_VIEWPORT);
@@ -1397,7 +1396,7 @@ const make = Effect.gen(function* () {
     }) =>
       request.isNavigationRequest() &&
       request.frame() === page.mainFrame() &&
-      !ignoredThreadNavigations.has(request.url());
+      !threadNavigation.isThreadNavigation(request.url());
     const navigationGenerations = new WeakMap<object, number>();
     page.on("request", (request) => {
       if (!isMainNavigation(request)) return;
@@ -1431,7 +1430,7 @@ const make = Effect.gen(function* () {
     // An adopted popup's frames may have loaded before the tab listened.
     if (adopted) for (const frame of page.frames()) void recordFrameCopies(tab, frame);
     page.on("requestfailed", (request) => {
-      if (ignoredThreadNavigations.delete(request.url())) return;
+      if (threadNavigation.consumeFailedNavigation(request.url())) return;
       const errorText = request.failure()?.errorText ?? "";
       pushBounded(tab.networkEntries, {
         url: ServerBrowserPage.withoutDataPayload(request.url()),

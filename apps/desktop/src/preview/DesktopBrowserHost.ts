@@ -1,5 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off - Names download files on the shared disk.
-import { createBrowserThreadLinkNavigation } from "./ThreadLinkGesture.ts";
+import { createBrowserThreadLinkNavigation } from "@t3tools/shared/server/threadLinkGesture";
 import { parseThreadLinkHref } from "@t3tools/shared/threadLinks";
 /** The manager owns the single debugger attachment; the relay shares it. */
 import {

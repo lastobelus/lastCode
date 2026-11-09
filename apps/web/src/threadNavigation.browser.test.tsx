@@ -1,10 +1,19 @@
 import { browserThreadLinkTarget } from "@t3tools/shared/threadLinks";
-import { createMemoryHistory } from "@tanstack/react-router";
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+  Outlet,
+  RouterProvider,
+} from "@tanstack/react-router";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { expect, it } from "vite-plus/test";
 
 import { getRouter } from "./router";
 import { safeThreadRouteParams } from "./threadRoutes";
+import { Route as HostedThreadRoute } from "./routes/threads.$environmentId.$threadId";
+import { render } from "../test/render";
 
 it("never resolves an untrusted thread reference to a static app route", () => {
   const router = getRouter(createMemoryHistory());
@@ -40,4 +49,30 @@ it("never resolves an untrusted thread reference to a static app route", () => {
       threadId: ThreadId.make("unknown-thread"),
     }),
   ).toEqual({ environmentId: "unknown-environment", threadId: "unknown-thread" });
+});
+
+it("shows the existing not-found fallback when a hosted redirect is rejected", async () => {
+  const component = HostedThreadRoute.options.component;
+  if (!component) throw new Error("The hosted thread route must provide its redirect component");
+  const root = createRootRoute({
+    component: Outlet,
+    notFoundComponent: () => <p>Page not found</p>,
+  });
+  const hosted = createRoute({
+    getParentRoute: () => root,
+    path: "threads/$environmentId/$threadId",
+    component,
+  });
+  const settings = createRoute({ getParentRoute: () => root, path: "settings/secrets" });
+  const router = createRouter({
+    routeTree: root.addChildren([hosted, settings]),
+    history: createMemoryHistory({ initialEntries: ["/threads/settings/secrets"] }),
+  });
+  await router.load();
+  await using screen = await render(<RouterProvider router={router} />, {
+    // Exercise the real redirect within the router that supplies its not-found boundary.
+    router: false,
+  });
+  await expect.element(screen.getByText("Page not found")).toBeVisible();
+  expect(router.state.location.pathname).toBe("/threads/settings/secrets");
 });
