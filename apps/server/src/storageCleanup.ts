@@ -133,6 +133,7 @@ type OwnershipScope = {
   readonly cwd: string;
   readonly projectId: ProjectId;
   readonly branch: string | null;
+  readonly branches?: ReadonlyArray<string | null>;
   readonly threads: ReadonlyArray<
     Pick<OrchestrationV2ThreadShell, "id" | "projectId" | "branch" | "worktreePath">
   >;
@@ -910,6 +911,118 @@ const make = Effect.gen(function* () {
     return (name?.startsWith("(") ? null : name) !== branch;
   });
 
+  // A stale record is disposable only when no old local ref survives and an
+  // existing remote-tracking ref contains this exact HEAD. Never fetch for proof.
+  const cleanupHead = Effect.fn("StorageCleanup.cleanupHead")(function* (cwd: string) {
+    const index = yield* git.execute({
+      operation: "StorageCleanup.cleanupHead",
+      cwd,
+      args: ["rev-parse", "--git-path", "index"],
+    });
+    if (index.stdoutTruncated || index.stderrTruncated) return null;
+    if (yield* fs.exists(`${path.resolve(cwd, index.stdout.trim())}.lock`))
+      return yield* new GitCommandError({
+        operation: "StorageCleanup.cleanupHead",
+        command: "git",
+        cwd,
+        detail: "Git index is locked. Status will resume when the index lock is removed.",
+      });
+    const ref = yield* git.execute({
+      operation: "StorageCleanup.cleanupHead",
+      cwd,
+      args: ["symbolic-ref", "--quiet", "HEAD"],
+      allowNonZeroExit: true,
+    });
+    const head = yield* git.execute({
+      operation: "StorageCleanup.cleanupHead",
+      cwd,
+      args: ["rev-parse", "HEAD"],
+      allowNonZeroExit: true,
+    });
+    if (
+      ref.stdoutTruncated ||
+      ref.stderrTruncated ||
+      head.stdoutTruncated ||
+      head.stderrTruncated ||
+      (ref.exitCode !== 0 && ref.exitCode !== 1) ||
+      head.exitCode !== 0 ||
+      !/^[a-f0-9]{40,64}$/.test(head.stdout.trim()) ||
+      (ref.exitCode === 0 && !ref.stdout.trim().startsWith("refs/heads/"))
+    )
+      return null;
+    return {
+      branch:
+        ref.exitCode === 1 || ref.stdout.trim().slice(11).startsWith("(")
+          ? null
+          : ref.stdout.trim().slice(11),
+      commitSha: head.stdout.trim(),
+    };
+  });
+  const staleBranchesSafe = Effect.fn("StorageCleanup.staleBranchesSafe")(function* (
+    cwd: string,
+    recorded: ReadonlyArray<string | null>,
+    head: { branch: string | null; commitSha: string },
+    clean = false,
+  ) {
+    if (recorded.every((branch) => branch === head.branch)) return true;
+    const stale = [
+      ...new Set(
+        recorded.filter((branch): branch is string => branch !== null && branch !== head.branch),
+      ),
+    ];
+    const read = (args: string[]) =>
+      git.execute({
+        operation: "StorageCleanup.staleBranches",
+        cwd,
+        args,
+        maxOutputBytes: 64 * 1024,
+      });
+    if (!clean) {
+      const status = yield* read([
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--ignore-submodules=none",
+        "--untracked-files=all",
+      ]);
+      if (
+        status.exitCode !== 0 ||
+        status.stdoutTruncated ||
+        status.stderrTruncated ||
+        status.stdout !== ""
+      )
+        return false;
+    }
+    const refs = yield* read([
+      "for-each-ref",
+      "--format=%(refname)",
+      ...stale.map((branch) => `refs/heads/${branch}`),
+    ]);
+    if (
+      refs.exitCode !== 0 ||
+      refs.stdoutTruncated ||
+      refs.stderrTruncated ||
+      refs.stdout
+        .split(/\r?\n/)
+        .some((ref) => stale.some((branch) => ref === `refs/heads/${branch}`))
+    )
+      return false;
+    const remote = yield* read([
+      "for-each-ref",
+      "--contains",
+      head.commitSha,
+      "--count=1",
+      "--format=%(refname)",
+      "refs/remotes",
+    ]);
+    return (
+      remote.exitCode === 0 &&
+      !remote.stdoutTruncated &&
+      !remote.stderrTruncated &&
+      remote.stdout.trim().startsWith("refs/remotes/")
+    );
+  });
+
   const localChangesReason = Effect.fn("StorageCleanup.localChangesReason")(function* (
     cwd: string,
   ) {
@@ -1203,9 +1316,9 @@ const make = Effect.gen(function* () {
         // Ownerless cleanup also requires that no thread history claims this
         // project/branch, even if that thread records a different checkout.
         if (
-          scope.branch !== null &&
+          row.branch !== null &&
           row.projectId === scope.projectId &&
-          row.branch === scope.branch
+          [scope.branch, ...(scope.branches ?? [])].includes(row.branch)
         )
           return true;
         for (const recordedPath of [before?.worktreePath, row.worktreePath]) {
@@ -1643,11 +1756,17 @@ const make = Effect.gen(function* () {
     );
     const legacyOwners = yield* worktreeCleanup.historicalWorktreeOwners;
     const ownershipThreads = [...historicalOwners, ...snapshot.threads, ...deletedOwners];
-    const workspaceOwnershipChanged = (cwd: string, projectId: ProjectId, branch: string | null) =>
+    const workspaceOwnershipChanged = (
+      cwd: string,
+      projectId: ProjectId,
+      branch: string | null,
+      branches?: ReadonlyArray<string | null>,
+    ) =>
       ownershipChangedSince(sequence, {
         cwd,
         projectId,
         branch,
+        ...(branches === undefined ? {} : { branches }),
         threads: ownershipThreads,
         projects: snapshot.projects,
       });
@@ -2225,7 +2344,7 @@ const make = Effect.gen(function* () {
             if (days === null) entry.reason = "Project dependency cleanup is off";
           }
         }
-        if (days === null || thread.worktreePath === null || thread.branch === null) return [];
+        if (days === null || thread.worktreePath === null) return [];
         const deleted = "dependencyActivityAt" in thread;
         const activityAt = deleted ? thread.dependencyActivityAt : storageCleanupActivityAt(thread);
         const worktreePath = thread.cleanupPath;
@@ -2378,10 +2497,7 @@ const make = Effect.gen(function* () {
                   if (yield* hasLiveProviderSession(worktreePath, owner.id))
                     return keep("A provider session is still open");
                   if (owner.id === thread.id) continue;
-                  if (
-                    owner.branch !== thread.branch ||
-                    !(yield* pathIdentityUnchanged(owner.recordedWorktreePath, worktreePath))
-                  )
+                  if (!(yield* pathIdentityUnchanged(owner.recordedWorktreePath, worktreePath)))
                     return keep("Shared worktree identity or branch changed");
                   const latest = yield* projections.getThreadShell(owner.id);
                   if ("dependencyActivityAt" in owner) {
@@ -2425,6 +2541,11 @@ const make = Effect.gen(function* () {
                   )
                     return keep("A shared owner's project could not be verified safely");
                   if (
+                    !(
+                      owner.projectId === thread.projectId &&
+                      path.resolve(ownerProject.workspaceRoot) ===
+                        path.resolve(project.workspaceRoot)
+                    ) &&
                     (yield* observe(
                       {
                         managedWorktreesRoot,
@@ -2448,7 +2569,7 @@ const make = Effect.gen(function* () {
                 );
               });
               const candidateStillIdle = Effect.fn("StorageCleanup.dependencyCandidateStillIdle")(
-                function* () {
+                function* (actualBranch: string | null = thread.branch) {
                   const savedProtection = yield* savedWorkspaceProtection(
                     worktreePath,
                     protectionResource,
@@ -2482,7 +2603,12 @@ const make = Effect.gen(function* () {
                   if (yield* terminalUsesDependencies(worktreePath, recordedWorktreePath))
                     return keep("A terminal is still using this worktree");
                   if (
-                    yield* workspaceOwnershipChanged(worktreePath, thread.projectId, thread.branch)
+                    yield* workspaceOwnershipChanged(
+                      worktreePath,
+                      thread.projectId,
+                      actualBranch,
+                      owners.map((owner) => owner.branch),
+                    )
                   )
                     return keep("Workspace ownership changed during cleanup");
                   if (
@@ -2539,23 +2665,37 @@ const make = Effect.gen(function* () {
                     !(yield* workspaceOwnershipChanged(
                       worktreePath,
                       thread.projectId,
-                      thread.branch,
+                      actualBranch,
+                      owners.map((owner) => owner.branch),
                     )) &&
                     allOwnerPoliciesUnchanged(yield* settingsService.getSettings)
                   );
                 },
               );
+              let actualBranch = thread.branch;
+              let capturedHead: string | null = null;
               const revalidate = Effect.fn("StorageCleanup.revalidateDependencies")(function* () {
                 if (!(yield* candidateStillIdle())) return false;
                 if (yield* hasLiveProviderSession(worktreePath, thread.id))
                   return keep("A provider session is still open");
-                const status = yield* git.statusDetailsLocal(worktreePath);
-                if (!status.isRepo || status.branch !== thread.branch)
+                const status = yield* cleanupHead(worktreePath);
+                if (
+                  status === null ||
+                  (capturedHead !== null &&
+                    (status.commitSha !== capturedHead || status.branch !== actualBranch)) ||
+                  !(yield* staleBranchesSafe(
+                    worktreePath,
+                    owners.map((owner) => owner.branch),
+                    status,
+                  ))
+                )
                   return keep("Repository or branch changed");
+                actualBranch = status.branch;
+                capturedHead = status.commitSha;
                 // Re-read policy, activity, roots, leases and durable pending state
                 // after Git/session calls as well as after dependency inspection.
                 return (
-                  (yield* candidateStillIdle()) &&
+                  (yield* candidateStillIdle(actualBranch)) &&
                   !(yield* hasLiveProviderSession(worktreePath, thread.id))
                 );
               });
@@ -2566,7 +2706,7 @@ const make = Effect.gen(function* () {
                 return yield* revalidate();
               });
               const isStillEligible = Effect.gen(function* () {
-                if (!(yield* candidateStillIdle())) return false;
+                if (!(yield* candidateStillIdle(actualBranch))) return false;
                 if (
                   eligibilitySequence === null ||
                   (yield* terminalUsesDependencies(worktreePath, recordedWorktreePath)) ||
@@ -2581,7 +2721,14 @@ const make = Effect.gen(function* () {
                     .worktreeDependenciesAfterDays !== days
                 )
                   return false;
-                if (yield* workspaceOwnershipChanged(worktreePath, thread.projectId, thread.branch))
+                if (
+                  yield* workspaceOwnershipChanged(
+                    worktreePath,
+                    thread.projectId,
+                    actualBranch,
+                    owners.map((owner) => owner.branch),
+                  )
+                )
                   return keep("Workspace ownership changed during cleanup");
                 // Siblings and mount inventory may take time. Late runtime or
                 // core mutations for any known owner invalidate prepared state;
@@ -2993,18 +3140,9 @@ const make = Effect.gen(function* () {
           return keep("historical thread ownership could not be resolved");
         if (owners.length > 1 && !allArchived && familyOwner === undefined)
           return keep(`shared by ${owners.length} threads`);
-        if (familyOwner !== undefined && group.some((member) => member.branch !== thread.branch))
-          return keep("a subagent thread's branch differs from this worktree's branch");
-        if (
-          owners.some(
-            (owner) =>
-              owner.thread.branch !== thread.branch || owner.thread.projectId !== thread.projectId,
-          )
-        )
+        if (owners.some((owner) => owner.thread.projectId !== thread.projectId))
           return keep("shared repository or project ownership is ambiguous");
         if (project === undefined) return keep("project is unavailable");
-        if (thread.branch === null)
-          return keep(waitForStop("thread is running or has pending work"));
         for (const owner of owners) {
           if (
             !("workspaceRoot" in owner.thread) &&
@@ -3078,11 +3216,13 @@ const make = Effect.gen(function* () {
             return keep("worktree path is a symlink or its location changed");
         }
         if (!(yield* sameRepository())) return keep("repository and project mapping changed");
-        if (yield* branchChanged(worktreePath, thread.branch))
-          return keep("repository or branch changed");
+        const head = yield* cleanupHead(worktreePath);
+        if (head === null) return keep("repository or branch changed");
+        const recordedBranches = owners.map((owner) => owner.thread.branch);
         const changes = yield* localChangesReason(worktreePath);
         if (changes !== null) return keep(changes);
-        const head = yield* git.resolveCommit({ cwd: worktreePath, revision: "HEAD" });
+        if (!(yield* staleBranchesSafe(worktreePath, recordedBranches, head, true)))
+          return keep("repository or branch changed");
         if (!eligible) {
           const repositoryCwd = path.resolve(project.workspaceRoot);
           const remotes = yield* git.execute({
@@ -3163,13 +3303,13 @@ const make = Effect.gen(function* () {
               remote === null
                 ? "no commits beyond the project branch"
                 : "no commits beyond the default branch";
-          if (!eligible && remote !== null && settings.worktreeOnMerge && thread.branch !== null) {
+          if (!eligible && remote !== null && settings.worktreeOnMerge && head.branch !== null) {
             const pullRequest = yield* gitManager.branchPullRequest(
-              { cwd: worktreePath, branch: thread.branch },
+              { cwd: worktreePath, branch: head.branch },
               { refresh: true },
             );
             eligible = storageCleanupPullRequestMerged(pullRequest, {
-              branch: thread.branch,
+              branch: head.branch,
               defaultBranch: branch,
               headSha: head.commitSha,
               integrated,
@@ -3192,7 +3332,8 @@ const make = Effect.gen(function* () {
             yield* ownershipChangedSince(sequence, {
               cwd: worktreePath,
               projectId: thread.projectId,
-              branch: thread.branch,
+              branch: head.branch,
+              branches: recordedBranches,
               threads: [...snapshot.threads, ...deletedThreads],
               projects: snapshot.projects,
             })
@@ -3243,7 +3384,7 @@ const make = Effect.gen(function* () {
           const latestOwner = worktreeOwner(deleted ? [thread, ...latest] : latest);
           if (
             (familyOwner !== undefined &&
-              (latestOwner?.id !== familyOwner.id || latestOwner?.branch !== thread.branch)) ||
+              (latestOwner?.id !== familyOwner.id || latestOwner?.branch !== familyOwner.branch)) ||
             latest.length !== liveOwners.length ||
             liveOwners.some((owner) => {
               const current = latest.find((entry) => entry.id === owner.thread.id);
@@ -3315,13 +3456,6 @@ const make = Effect.gen(function* () {
           if (pathReason !== null) return keep(pathReason);
           const blockedWhileMeasuring = yield* blockedSinceCheck();
           if (blockedWhileMeasuring !== null) return keep(blockedWhileMeasuring);
-          if (yield* branchChanged(worktreePath, thread.branch))
-            return keep("repository or branch changed since check");
-          if (
-            (yield* git.resolveCommit({ cwd: worktreePath, revision: "HEAD" })).commitSha !==
-            head.commitSha
-          )
-            return keep("commit changed since check");
           const finalChanges = yield* localChangesReason(worktreePath);
           if (finalChanges !== null) return keep(finalChanges);
           const currentSettings = yield* settingsService.getSettings;
@@ -3344,6 +3478,14 @@ const make = Effect.gen(function* () {
               if (finalBlocked !== null) return keep(finalBlocked);
               const finalFiles = yield* localChangesReason(worktreePath);
               if (finalFiles !== null) return keep(finalFiles);
+              const finalHead = yield* cleanupHead(worktreePath);
+              if (
+                finalHead === null ||
+                finalHead.branch !== head.branch ||
+                finalHead.commitSha !== head.commitSha ||
+                !(yield* staleBranchesSafe(worktreePath, recordedBranches, finalHead, true))
+              )
+                return keep("repository or stale branch safety changed since check");
               // Read settings after all awaited guards, including every shared owner.
               if (!policiesUnchanged(yield* settingsService.getSettings))
                 return keep("settings changed since check");
