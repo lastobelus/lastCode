@@ -519,6 +519,7 @@ describe("environment query lifecycle", () => {
         type: "closed",
         threadId: input.threadId,
         terminalId: input.terminalId,
+        deleteHistory: false,
       });
       yield* Deferred.await(received);
 
