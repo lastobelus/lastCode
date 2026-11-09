@@ -107,7 +107,7 @@ LastCode supports macOS and Linux only. Windows is unsupported and will stay tha
 - Sharing over the tailnet is three steps: run `vp run dev --share` in the background, wait for the `pairingUrl:` line in its output, then give that full URL to an unpaired browser. Do not wire up `tailscale serve` by hand, open the URL yourself, or consume the user's pairing link. A browser with the reusable dev cookie can use the bare origin. If a normal one-time token was consumed, mint a fresh one with `node apps/server/src/bin.ts pair`. It carries standard scopes, while the startup URL carries admin scopes needed for Connections settings.
 - To reuse web dev auth across worktrees, configure one fixed `T3CODE_DEV_AUTH_TOKEN` in the main checkout's gitignored `.env`. The `t3.json` setup links that file into worktrees. Never commit or publish the token or a startup URL. See [Reusable dev credential](docs/operations/development.md#reusable-dev-credential).
 - Stop what you started, by the PID you tracked. See rule 1.
-- Need a second checkout? `git worktree add` it next to this worktree, not in `/tmp`. Remove it when done.
+- Need a second checkout? Get one a thread owns: `delegate_task` with `isolation:"worktree"`, or a new thread with a worktree `workspaceStrategy` when the user asks for one. Storage cleanup can remove a worktree a thread owns; one no thread owns stays on disk until someone removes it. Reading another ref needs no checkout: `git show <ref>:<path>`. If you must run code at another ref yourself, `git worktree add` it next to this worktree and `git worktree remove` it before you report your result.
 
 ## Test data
 
