@@ -61,7 +61,7 @@ describe("completed Action result awaiting continuation", () => {
     const banner = pendingBanner(heldAction);
     expect(banner).toMatchObject({
       id: "action-follow-up:run-1",
-      title: "Wait for PR · Environment paused",
+      title: "Wait for PR • Succeeded • Environment paused",
     });
     expect(banner?.description).toContain("Succeeded: Documentation preview ready.");
     expect(banner?.description).toContain("Resume the environment");
@@ -89,13 +89,13 @@ describe("completed Action result awaiting continuation", () => {
     ["cancelled_by_shutdown", "success", "Cancelled"],
     ["process_lost", "success", "Interrupted"],
   ] as const)("preserves %s / %s result meaning", (outcome, reportOutcome, label) => {
-    expect(
-      pendingBanner({
-        ...heldAction,
-        outcome,
-        report: { ...heldAction.report!, outcome: reportOutcome },
-      })?.description,
-    ).toContain(`${label}: Documentation preview ready.`);
+    const banner = pendingBanner({
+      ...heldAction,
+      outcome,
+      report: { ...heldAction.report!, outcome: reportOutcome },
+    });
+    expect(banner?.title).toBe(`Wait for PR • ${label} • Environment paused`);
+    expect(banner?.description).toContain(`${label}: Documentation preview ready.`);
   });
 
   it("identifies the result even without a retained report", () => {
@@ -114,12 +114,14 @@ describe("completed Action result awaiting continuation", () => {
   );
 
   it("uses current pause truth independently of retained intent after Resume", () => {
-    expect(pendingBanner(heldAction, false)?.title).toBe("Wait for PR · Sending result");
+    expect(pendingBanner(heldAction, false)?.title).toBe(
+      "Wait for PR • Succeeded • Sending result",
+    );
     expect(pendingBanner({ ...heldAction, heldByEnvironmentPause: false })?.title).toBe(
-      "Wait for PR · Environment paused",
+      "Wait for PR • Succeeded • Environment paused",
     );
     expect(pendingBanner({ ...heldAction, delivery: "delivered" }, false)?.title).toBe(
-      "Wait for PR · Result sent",
+      "Wait for PR • Succeeded • Result sent",
     );
   });
 });
