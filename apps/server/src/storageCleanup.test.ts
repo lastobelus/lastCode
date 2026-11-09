@@ -5589,8 +5589,18 @@ describe("storage cleanup reports and local file policies", () => {
         ]);
         yield* fixture.fs.writeFileString(
           `${fixture.repo}/.git/info/exclude`,
-          ".generated/\n.vite-hooks/\n*.tsbuildinfo\n.astro/\n.tanstack/\ndist-electron/\nbuild/\n.env*\n.codex/\n.local/\nresearch/\ntmp/\n",
+          ".generated/\n*.tsbuildinfo\n.astro/\n.tanstack/\ndist-electron/\nbuild/\n.env*\n.codex/\n.local/\nresearch/\ntmp/\n",
         );
+        if (relative === ".vite-hooks/_/pre-commit") {
+          yield* fixture.fs.makeDirectory(`${fixture.worktree}/.vite-hooks/_`, { recursive: true });
+          yield* fixture.fs.writeFileString(
+            `${fixture.worktree}/.vite-hooks/pre-commit`,
+            "tracked hook\n",
+          );
+          yield* fixture.command(fixture.worktree, ["add", ".vite-hooks/pre-commit"]);
+          yield* fixture.command(fixture.worktree, ["commit", "-m", "record hook source"]);
+          yield* fixture.fs.writeFileString(`${fixture.worktree}/.vite-hooks/_/.gitignore`, "*\n");
+        }
         if (relative === "dist/source.js.orig") {
           yield* fixture.fs.makeDirectory(`${fixture.worktree}/dist`);
           yield* fixture.fs.writeFileString(
