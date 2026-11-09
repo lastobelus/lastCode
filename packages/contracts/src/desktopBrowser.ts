@@ -1,7 +1,7 @@
 import * as Schema from "effect/Schema";
 
 import { PreviewAutomationProfiles } from "./previewAutomation.ts";
-import { PreviewViewportSetting, PreviewZoomFactor } from "./preview.ts";
+import { PreviewViewportSetting, PreviewZoomFactor, PreviewThreadLink } from "./preview.ts";
 
 import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 
@@ -77,6 +77,7 @@ export const DESKTOP_BROWSER_DOWNLOAD_MAX_BYTES = 64 * 1024 * 1024;
 export const DESKTOP_BROWSER_DOWNLOAD_CHUNK_BYTES = 192 * 1024;
 
 export const DesktopBrowserEvent = Schema.Union([
+  Schema.Struct({ type: Schema.Literal("threadLink"), ...TabKey, ...PreviewThreadLink.fields }),
   Schema.Struct({
     type: Schema.Literal("dormant"),
     ...TabKey,
@@ -167,6 +168,7 @@ export const DesktopBrowserEvent = Schema.Union([
 export type DesktopBrowserEvent = typeof DesktopBrowserEvent.Type;
 
 export const DesktopBrowserCommand = Schema.Union([
+  Schema.Struct({ type: Schema.Literal("threadLink"), ...TabKey, ...PreviewThreadLink.fields }),
   Schema.Struct({ type: Schema.Literal("wake"), ...TabKey }),
   /** Authoritative root requests for this owner; older epochs and omitted requests are retired. */
   Schema.Struct({

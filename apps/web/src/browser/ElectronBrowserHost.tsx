@@ -1,3 +1,5 @@
+import { useOpenBrowserThreadLink } from "./useOpenBrowserThreadLink";
+import { useConnectedEnvironmentIds } from "~/state/environments";
 import { DesktopCdpRelay } from "./DesktopCdpRelay";
 
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
@@ -200,6 +202,24 @@ export function ElectronBrowserHost() {
       })
       .catch((cause) => console.error("Native browser environment binding failed", cause));
   }, [primaryEnvironmentId, hasLocalDesktopBrowser]);
+  const connectedEnvironmentIds = useConnectedEnvironmentIds();
+  const openThreadLink = useOpenBrowserThreadLink();
+  const threadLinkOpened = useEffectEvent((desktopHostId: string, href: string) => {
+    const environmentId =
+      desktopHostId === "local"
+        ? primaryEnvironmentId
+        : connectedEnvironmentIds.find((id) => getDesktopBrowserHostId(id) === desktopHostId);
+    if (environmentId) openThreadLink(href, environmentId);
+  });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Receives native Browser link gestures from the owning desktop channel.
+  useEffect(
+    () =>
+      window.desktopBridge?.preview?.onBrowserEvent((input) => {
+        if (input.event.type === "threadLink")
+          threadLinkOpened(input.desktopHostId, input.event.href);
+      }),
+    [],
+  );
   const sessions = hostedBrowserSessions(previewByThreadKey, primaryEnvironmentId);
   const visibleTabIds = useBrowserSurfaceStore(
     useShallow((state) =>

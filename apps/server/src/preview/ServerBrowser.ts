@@ -1,3 +1,5 @@
+import { parseThreadLinkHref } from "@t3tools/shared/threadLinks";
+import { installThreadLinkNavigation } from "./ThreadLinkNavigation.ts";
 // @effect-diagnostics nodeBuiltinImport:off globalDate:off globalTimers:off - Playwright callbacks run outside the Effect runtime.
 // Screencasts ignore emulated device scale; real 2x keeps captures sharp.
 // --disable-gpu uses cheaper software compositing while preserving SwiftShader WebGL.
@@ -223,6 +225,7 @@ export type ServerBrowserViewerOutput =
     }
   | { readonly _tag: "fileChooserClosed"; readonly id: string }
   | { readonly _tag: "popup"; readonly tabId: string }
+  | { readonly _tag: "threadLink"; readonly href: string }
   | {
       readonly _tag: "download";
       readonly id: string;
@@ -1349,6 +1352,20 @@ const make = Effect.gen(function* () {
       captureLock: Promise.resolve(),
       capturing: 0,
     };
+    await installThreadLinkNavigation(
+      page,
+      cdp,
+      desktop !== null,
+      (href) => {
+        if (tab.closing || tab.agentOperating) return;
+        const controller = [...tab.viewers].find((viewer) => viewer.id === tab.control.controller);
+        if (controller) controller.push({ _tag: "threadLink", href });
+        else if (desktop && tab.nativePresented) runFork(desktopChannel.openThreadLink(tab, href));
+      },
+      (popup) => {
+        blockedThreadPopups.add(popup);
+      },
+    );
     if (!desktop) {
       await page.setViewportSize(fixedViewportSize(tab.setting) ?? UNATTACHED_FILL_VIEWPORT);
     }
@@ -1368,8 +1385,14 @@ const make = Effect.gen(function* () {
       });
       await cdp.send("Page.enable");
     }
-    const isMainNavigation = (request: { isNavigationRequest(): boolean; frame(): unknown }) =>
-      request.isNavigationRequest() && request.frame() === page.mainFrame();
+    const isMainNavigation = (request: {
+      isNavigationRequest(): boolean;
+      frame(): unknown;
+      url(): string;
+    }) =>
+      request.isNavigationRequest() &&
+      request.frame() === page.mainFrame() &&
+      parseThreadLinkHref(request.url()) === null;
     const navigationGenerations = new WeakMap<object, number>();
     page.on("request", (request) => {
       if (!isMainNavigation(request)) return;
@@ -1827,6 +1850,7 @@ const make = Effect.gen(function* () {
         : Option.some({ path: download.path, fileName: download.fileName });
     });
 
+  const blockedThreadPopups = new WeakSet<Page>();
   const preparedContexts = new WeakSet<BrowserContext>();
   const prepareContext = async (context: BrowserContext) => {
     if (preparedContexts.has(context)) return;
@@ -1901,7 +1925,7 @@ const make = Effect.gen(function* () {
   };
 
   const adoptPopup = async (opener: ServerTab, popup: Page) => {
-    if (opener.closing) {
+    if (opener.closing || blockedThreadPopups.has(popup) || parseThreadLinkHref(popup.url())) {
       await popup.close().catch(constVoid);
       return;
     }

@@ -1,3 +1,5 @@
+import { createBrowserThreadLinkNavigation } from "./threadLinks.ts";
+import { browserThreadLinkTarget } from "./threadLinks.ts";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId, ThreadId, type ScopedThreadRef } from "@t3tools/contracts";
 
@@ -525,4 +527,69 @@ describe("hosted thread links", () => {
       ref("there", "t:1"),
     ]);
   });
+});
+
+describe("Browser link destinations", () => {
+  it("keeps missing explicit targets and reuses legacy resolution", () => {
+    const environmentId = EnvironmentId.make("source");
+    const target = {
+      environmentId: EnvironmentId.make("linked"),
+      threadId: ThreadId.make("mcp:thread"),
+    };
+    expect(
+      browserThreadLinkTarget("t3-thread://v2/linked/unknown", environmentId, [target]),
+    ).toEqual({ environmentId: "linked", threadId: "unknown" });
+    expect(browserThreadLinkTarget("t3-thread://v1/mcp:thread", environmentId, [target])).toEqual(
+      target,
+    );
+    expect(browserThreadLinkTarget("t3-thread://v1/unknown", environmentId, [target])).toEqual({
+      environmentId,
+      threadId: "unknown",
+    });
+    expect(browserThreadLinkTarget("https://app.t3.codes/settings", environmentId, [])).toBeNull();
+    expect(browserThreadLinkTarget("t3-thread://v2/linked/%ZZ", environmentId, [])).toBeNull();
+  });
+});
+
+it("ignores forged page-world activation and clears isolated gesture state on navigation", async () => {
+  const opened: string[] = [];
+  const guard = createBrowserThreadLinkNavigation((href) => opened.push(href));
+  await guard.install(async (method) => {
+    if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "main" } } };
+    if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+    return { result: { value: false } };
+  });
+  const navigation = {
+    frameId: "main",
+    disposition: "currentTab",
+    url: "t3-thread://v2/linked/thread",
+  };
+  await guard.receive("Runtime.executionContextCreated", {
+    context: { name: "", id: 1, auxData: { frameId: "main" } },
+  });
+  await guard.receive("Runtime.bindingCalled", {
+    name: "t3ThreadLinkGesture",
+    executionContextId: 1,
+    payload: "active",
+  });
+  await guard.receive("Page.frameRequestedNavigation", navigation);
+  expect(opened).toEqual([]);
+  await guard.receive("Runtime.executionContextCreated", {
+    context: { name: "t3-thread-link-activation", id: 2, auxData: { frameId: "main" } },
+  });
+  await guard.receive("Runtime.bindingCalled", {
+    name: "t3ThreadLinkGesture",
+    executionContextId: 2,
+    payload: "active",
+  });
+  await guard.receive("Page.frameRequestedNavigation", navigation);
+  expect(opened).toEqual([navigation.url]);
+  await guard.receive("Runtime.executionContextsCleared", {});
+  await guard.receive("Runtime.bindingCalled", {
+    name: "t3ThreadLinkGesture",
+    executionContextId: 2,
+    payload: "active",
+  });
+  await guard.receive("Page.frameRequestedNavigation", navigation);
+  expect(opened).toEqual([navigation.url]);
 });

@@ -130,6 +130,21 @@ const makeDebuggee = (
           reject(new Error("Refused"));
           return;
         }
+        if (method === "Page.getFrameTree") {
+          resolve({ frameTree: { frame: { id: "main" } } });
+          return;
+        }
+        if (
+          [
+            "Runtime.enable",
+            "Runtime.addBinding",
+            "Page.enable",
+            "Page.addScriptToEvaluateOnNewDocument",
+          ].includes(method)
+        ) {
+          resolve({});
+          return;
+        }
         if (method === "Target.getTargetInfo") {
           resolve({ targetInfo: { targetId: "GUEST" } });
           return;
@@ -188,6 +203,30 @@ const makeDebuggee = (
 /** Commands wait behind a focus emulation change; it settles within a macrotask. */
 // oxlint-disable-next-line t3code/no-real-time-wait-in-tests -- a zero-delay macrotask boundary, not a wait for time
 const settle = Effect.promise(() => new Promise<void>((resolve) => setImmediate(resolve)));
+
+it.effect("opens a thread from a standalone native tab without a server relay", () =>
+  Effect.gen(function* () {
+    const host = yield* DesktopBrowserHost.make.pipe(
+      Effect.provide(DesktopClientSettings.layerTest()),
+    );
+    const debuggee = makeDebuggee();
+    const send = vi.spyOn(debuggee.hostContents, "send");
+    host.attach(key, debuggee.tab, "native-thread-link");
+    debuggee.emit("Page.windowOpen", { url: "t3-thread://v2/linked/thread", userGesture: false });
+    debuggee.emit("Page.windowOpen", { url: "https://app.t3.codes/settings", userGesture: true });
+    expect(send).not.toHaveBeenCalled();
+    debuggee.emit("Page.windowOpen", { url: "t3-thread://v2/linked/thread", userGesture: true });
+    expect(send).toHaveBeenCalledExactlyOnceWith("desktop:browser:event", {
+      desktopHostId: "local",
+      event: {
+        type: "threadLink",
+        threadId: key.threadId,
+        tabId: key.tabId,
+        href: "t3-thread://v2/linked/thread",
+      },
+    });
+  }).pipe(Effect.scoped),
+);
 
 it.effect.each([
   { destroyed: "guest", visible: true },

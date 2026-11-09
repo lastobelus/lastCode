@@ -1,3 +1,7 @@
+import { browserThreadLinkTarget } from "@t3tools/shared/threadLinks";
+import { appAtomRegistry } from "../../state/atom-registry";
+import { environmentThreadShells } from "../../state/threads";
+import { useOpenLinkedThread } from "../threads/useOpenLinkedThread";
 import { Button } from "../../components/ui/Button";
 import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import * as Dialog from "../../components/ui/Dialog";
@@ -53,6 +57,7 @@ type NativeStreamBridge = {
   /** Asks for fresh access after a refusal, once `delayMs` has passed. */
   readonly onRefused: (delayMs: number) => void;
   readonly onGone?: () => void;
+  readonly onThreadLink?: (href: string) => void;
   readonly onViewport?: (viewport: { readonly width: number; readonly height: number }) => void;
   readonly onControl?: (control: PreviewStreamControl | null) => void;
   readonly onPictureInPicture?: (state: PreviewPictureInPictureState, detail?: string) => void;
@@ -118,12 +123,22 @@ export function PreviewStreamWebView(
       readonly paused?: boolean;
     },
 ) {
+  const openLinkedThread = useOpenLinkedThread();
+  const openThreadLink = (href: string) => {
+    const target = browserThreadLinkTarget(
+      href,
+      props.environmentId,
+      appAtomRegistry.get(environmentThreadShells.threadRefsAtom),
+    );
+    if (target) openLinkedThread(target);
+  };
   const { access, error, refresh, retryAfter } = usePreviewStreamAccess(props.environmentId);
   if (access && !props.paused) {
     return (
       <AuthorizedPreviewStream
         {...props}
         access={access}
+        onThreadLink={openThreadLink}
         onUnauthorized={refresh}
         onRefused={retryAfter}
       />
@@ -218,6 +233,7 @@ function PreviewStreamDocumentView({
   pdfUri,
   onUnauthorized,
   onGone,
+  onThreadLink,
   onViewport,
   onControl,
   onPictureInPicture,
@@ -399,6 +415,9 @@ function PreviewStreamDocumentView({
               case "hostSetup":
                 setHostSetup({ need: message.need, command: message.command });
                 fail(previewStreamHostSetupMessage(message));
+                return;
+              case "threadLink":
+                onThreadLink?.(message.href);
                 return;
               case "viewport":
                 onViewport?.(message);

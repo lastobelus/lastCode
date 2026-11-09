@@ -1,3 +1,4 @@
+import { parseThreadLinkHref } from "@t3tools/shared/threadLinks";
 import * as NodeZlib from "node:zlib";
 import {
   DesktopPreviewAnnotationVoiceEventSchema,
@@ -1504,6 +1505,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         wc.off("dom-ready", restoreRecordingCursor);
         wc.off("did-fail-load", failed as never);
         wc.off("audio-state-changed", audioStateChanged);
+        wc.off("will-frame-navigate", threadLinkNavigation);
         wc.off("did-create-window", windowCreated);
         wc.off("before-input-event", beforeInput);
         wc.ipc.off(HUMAN_INPUT_CHANNEL, humanInput);
@@ -1512,6 +1514,11 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         detachPasskeys();
       }).pipe(Effect.ignore),
     );
+    const threadLinkNavigation = (
+      event: Electron.Event<Electron.WebContentsWillFrameNavigateEventParams>,
+    ) => {
+      if (event.isMainFrame && parseThreadLinkHref(event.url)) event.preventDefault();
+    };
     const install = Effect.fn("PreviewManager.installWebContentsListeners")(function* () {
       yield* attempt({ operation: "attachListeners", tabId, webContentsId: wc.id }, () => {
         wc.setIgnoreMenuShortcuts(true);
@@ -1529,7 +1536,9 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         wc.ipc.on(RECORDING_INPUT_CHANNEL, recordingInput);
         wc.ipc.on(MOUSE_NAVIGATE_CHANNEL, mouseNavigate);
         detachPasskeys = passkeys.attachGuest(wc);
+        wc.on("will-frame-navigate", threadLinkNavigation);
         wc.setWindowOpenHandler((details) => {
+          if (parseThreadLinkHref(details.url)) return { action: "deny" };
           const action = previewWindowOpenAction(details);
           if (action === "popup") {
             return { action: "allow", overrideBrowserWindowOptions: POPUP_WINDOW_OPTIONS };

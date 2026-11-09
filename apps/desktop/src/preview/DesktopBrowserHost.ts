@@ -1,3 +1,6 @@
+import { DESKTOP_BROWSER_EVENT_CHANNEL } from "../ipc/channels.ts";
+import { createBrowserThreadLinkNavigation } from "@t3tools/shared/threadLinks";
+import { parseThreadLinkHref } from "@t3tools/shared/threadLinks";
 // @effect-diagnostics nodeBuiltinImport:off - Names download files on the shared disk.
 /** The manager owns the single debugger attachment; the relay shares it. */
 import {
@@ -324,6 +327,17 @@ export const make = Effect.gen(function* () {
   const emit = (event: DesktopBrowserEventType, desktopHostId = "local") =>
     runFork(PubSub.publish(outbox, { desktopHostId, event }));
   let mainWindow: Electron.BrowserWindow | null = null;
+  const sendThreadLink = (key: DesktopBrowserTabKey, href: string) => {
+    const tab = tabs.get(keyOf(key));
+    if (!tab) return;
+    const renderer =
+      liveHostWebContents(tab.debuggee.webContents) ??
+      (mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents : undefined);
+    renderer?.send(DESKTOP_BROWSER_EVENT_CHANNEL, {
+      desktopHostId: key.desktopHostId ?? "local",
+      event: { type: "threadLink", threadId: key.threadId, tabId: key.tabId, href },
+    });
+  };
   const sendRendererRequest = (key: DesktopBrowserTabKey, action: "wake" | "unload") => {
     const desktopHostId = key.desktopHostId ?? "local";
     const binding = environmentBindings.get(desktopHostId);
@@ -1098,6 +1112,9 @@ export const make = Effect.gen(function* () {
     if (existing?.debuggee.webContents === debuggee.webContents) return;
     if (existing?.popup?.kind === "root" && existing.popup !== popup) return;
     detach(key);
+    const navigation = createBrowserThreadLinkNavigation((href) => {
+      if (tabs.get(id) === tab && tab.relay === null) sendThreadLink(key, href);
+    }, "t3-native-thread-link-activation");
     const tab: AttachedTab = {
       key,
       debuggee,
@@ -1127,6 +1144,7 @@ export const make = Effect.gen(function* () {
       screencasts: new Set(),
       remoteDownloadDirectory: null,
       onMessage: (_event, method, params, sessionId) => {
+        if (!sessionId) void navigation.receive(method, params).catch(() => undefined);
         if (method === "Page.downloadWillBegin") {
           const guid = (params as { guid?: unknown } | undefined)?.guid;
           tab.pendingDownloadGuid = typeof guid === "string" ? guid : null;
@@ -1171,6 +1189,9 @@ export const make = Effect.gen(function* () {
     syncNativeLifetime();
     scheduleNativeLifetime();
     debuggee.debugger.on("message", tab.onMessage);
+    void navigation
+      .install((method, params) => debuggee.debugger.sendCommand(method, params))
+      .catch(() => undefined);
     debuggee.webContents.on("did-navigate", tab.onNewDocument);
     emit(
       {
@@ -1367,7 +1388,11 @@ export const make = Effect.gen(function* () {
     page: NativePopup,
     lifetime: ReturnType<typeof makeAutomationLifetime>,
   ) => {
+    page.contents.on("will-frame-navigate", (event) => {
+      if (event.isMainFrame && parseThreadLinkHref(event.url)) event.preventDefault();
+    });
     page.contents.setWindowOpenHandler((details) => {
+      if (parseThreadLinkHref(details.url)) return { action: "deny" };
       // Auth callers may obtain their URL after creating a blank child with an opener.
       try {
         if (
@@ -1697,6 +1722,11 @@ export const make = Effect.gen(function* () {
               .then((path) => NodeFSP.rm(path, { recursive: true, force: true }))
               .catch(() => undefined);
         }
+        return Effect.void;
+      }
+      if (command.type === "threadLink") {
+        if (parseThreadLinkHref(command.href))
+          sendThreadLink({ ...command, desktopHostId }, command.href);
         return Effect.void;
       }
       if (command.type === "profiles") {

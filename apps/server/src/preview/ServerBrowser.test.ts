@@ -359,6 +359,8 @@ function makeContext(onClose?: (context: BrowserContext) => void, initialUrl = "
     }),
   };
   const context = {
+    route: page.route,
+    unroute: page.unroute,
     cookies,
     request: {
       post: vi.fn(async (url: string, _options: unknown) => {
@@ -880,6 +882,7 @@ const baseDependencies = Layer.mergeAll(
           desktopReleased.resolve();
         }),
       ),
+    openThreadLink: () => Effect.void,
     pointer: () => Effect.void,
     turn: (threadId, active) => Effect.sync(() => desktopTurns.emit("turn", threadId, active)),
   }),
