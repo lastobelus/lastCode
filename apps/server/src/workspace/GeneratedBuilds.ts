@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Canonical lstat boundaries for selective generated-file removal.
 import { promises as NodeFSP } from "@t3tools/shared/nativeFileSystem";
+import { isGeneratedBuildRoot } from "@t3tools/shared/regenerableIgnoredPath";
 import * as NodePath from "node:path";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -177,12 +178,7 @@ const make = Effect.gen(function* () {
     const cwd = NodePath.resolve(input.worktreePath);
     const managed = NodePath.resolve(input.managedWorktreesRoot);
     const output = NodePath.join(cwd, root);
-    if (
-      !inside(managed, cwd) ||
-      (!/^apps\/[a-zA-Z0-9_-]+\/dist$/.test(root) &&
-        root !== "native/resource-monitor/target/debug")
-    )
-      return false;
+    if (!inside(managed, cwd) || !isGeneratedBuildRoot(root)) return false;
     if (
       !(yield* io(
         output,

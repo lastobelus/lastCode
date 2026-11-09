@@ -593,6 +593,10 @@
       "types": "./src/generatedBuildOwnership.ts",
       "import": "./src/generatedBuildOwnership.ts"
     },
+    "./regenerableIgnoredPath": {
+      "types": "./src/regenerableIgnoredPath.ts",
+      "import": "./src/regenerableIgnoredPath.ts"
+    },
     "./worktreeSuspension": {
       "types": "./src/worktreeSuspension.ts",
       "import": "./src/worktreeSuspension.ts"

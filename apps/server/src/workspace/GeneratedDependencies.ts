@@ -1,4 +1,5 @@
 import { generatedBuildReviewProtection } from "@t3tools/shared/generatedBuildOwnership";
+import { isGeneratedDependencyPath } from "@t3tools/shared/regenerableIgnoredPath";
 import {
   observeDependencyActivity,
   recordDependencyUse,
@@ -360,7 +361,7 @@ const make = Effect.gen(function* () {
     if (
       !trackedPaths.includes("package.json") ||
       !trackedPaths.includes(candidate.lock) ||
-      trackedPaths.some((entry) => entry === "node_modules" || entry.startsWith("node_modules/"))
+      trackedPaths.some(isGeneratedDependencyPath)
     )
       return null;
     const ignored = yield* runGit(["check-ignore", "--quiet", "--", "node_modules/"]);

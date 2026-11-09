@@ -76,6 +76,7 @@ import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { isNetworkPath } from "@t3tools/shared/path";
 import * as GeneratedDependencies from "./workspace/GeneratedDependencies.ts";
 import * as GeneratedBuilds from "./workspace/GeneratedBuilds.ts";
+import { isRegenerableIgnoredPath } from "@t3tools/shared/regenerableIgnoredPath";
 import * as WorktreeConsumers from "./workspace/WorktreeConsumers.ts";
 import { physicalCleanupFileSystem } from "./workspace/physicalCleanupFileSystem.ts";
 import { WorktreeSuspension } from "./workspace/WorktreeSuspension.ts";
@@ -1029,42 +1030,42 @@ const make = Effect.gen(function* () {
 
   const localChangesReason = Effect.fn("StorageCleanup.localChangesReason")(function* (
     cwd: string,
+    worktreeRoot = cwd,
   ) {
     if (generatedBuildReviewProtection(cwd)) return "reviewed build content protects this worktree";
     const status = yield* git.execute({
       operation: "StorageCleanup.localChanges",
       cwd,
-      args: ["status", "--porcelain=v1", "-z", "--ignore-submodules=none", "--untracked-files=all"],
+      // Matching ignored roots retain nested output names instead of collapsing to apps/.
+      args: [
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--ignore-submodules=none",
+        "--untracked-files=all",
+        "--ignored=matching",
+      ],
       maxOutputBytes: 64 * 1024,
     });
-    if (status.stdoutTruncated) return "local changes exceed the inspection limit";
+    if (status.stdoutTruncated) return "local or ignored files exceed the inspection limit";
     const records = status.stdout.split("\0").filter(Boolean);
+    const ignoredFiles: string[] = [];
     let count = 0;
     for (let i = 0; i < records.length; i++) {
+      if (records[i]!.startsWith("!! ")) {
+        ignoredFiles.push(records[i]!.slice(3));
+        continue;
+      }
       count++;
       if (/^[RC]|^.[RC]/.test(records[i]!)) i++;
     }
     if (count > 0) return `has uncommitted changes (${count} ${count === 1 ? "file" : "files"})`;
-    // A checkout is disposable only after its known generated files have been
-    // reclaimed separately. Ignore rules and a permissive local-change setting
-    // cannot authorize erasing notes, runtime state or retained review receipts.
-    const ignored = yield* git.execute({
-      operation: "StorageCleanup.ignoredFiles",
-      cwd,
-      args: [
-        "ls-files",
-        "--others",
-        "--ignored",
-        "--exclude-standard",
-        "--directory",
-        "--no-empty-directory",
-        "-z",
-      ],
-      maxOutputBytes: 64 * 1024,
-    });
-    if (ignored.stdoutTruncated) return "ignored files exceed the inspection limit";
-    for (const file of ignored.stdout.split("\0")) {
-      if (file === "") continue;
+    // Ignore rules alone do not authorize erasing configuration or unique notes.
+    const relativeCwd = path.relative(worktreeRoot, cwd);
+    for (const file of ignoredFiles) {
+      // Submodule .t3 folders are not the worktree's seeded development state.
+      const relativePath = relativeCwd === "" ? file : `${relativeCwd}/${file}`;
+      if (isRegenerableIgnoredPath(relativePath)) continue;
       // Finder metadata is disposable, but a directory or link with this name
       // is not evidence that its contents belong to Finder. Tracked edits have
       // already been rejected by status above.
@@ -1158,7 +1159,7 @@ const make = Effect.gen(function* () {
       }
       // Check files after walking stored history to shorten the gap before forced removal.
       for (const submodule of paths) {
-        const changes = yield* localChangesReason(submodule);
+        const changes = yield* localChangesReason(submodule, cwd);
         if (changes !== null) return { force: false, reason: `submodule ${changes}` };
       }
       const force = stored || paths.length > 0;

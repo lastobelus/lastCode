@@ -1450,6 +1450,17 @@ it.live("keeps nested submodule files protected by the current keep rule", () =>
       expect(yield* fs.readFileString(`${child}/.env`)).toBe("local secret\n");
 
       yield* fs.remove(`${child}/.env`);
+      for (const repository of [submodule, child]) {
+        yield* fs.makeDirectory(`${repository}/.t3`);
+        yield* fs.writeFileString(`${repository}/.t3/notes.txt`, "retained submodule state\n");
+        expect(
+          (yield* service.runNow).entries.find((entry) => entry.path === worktree),
+        ).toMatchObject({ outcome: "kept" });
+        expect(yield* fs.readFileString(`${repository}/.t3/notes.txt`)).toBe(
+          "retained submodule state\n",
+        );
+        yield* fs.remove(`${repository}/.t3`, { recursive: true });
+      }
       yield* command(submodule, ["submodule", "deinit", "child"]);
       yield* fs.writeFileString(`${child}/.env`, "secret after deinit\n");
       const report = yield* service.runNow;
@@ -6063,9 +6074,9 @@ describe("storage cleanup reports and local file policies", () => {
               Effect.gen(function* () {
                 if (directory === measuredRoot && !additionWritten) {
                   additionWritten = true;
-                  yield* fs.makeDirectory(`${directory}/.t3`, { recursive: true });
+                  yield* fs.makeDirectory(`${directory}/.codex`, { recursive: true });
                   yield* fs.writeFileString(
-                    `${directory}/.t3/retained-notes.txt`,
+                    `${directory}/.codex/retained-notes.txt`,
                     "new unique notes\n",
                   );
                 }
@@ -6074,6 +6085,7 @@ describe("storage cleanup reports and local file policies", () => {
           }),
         );
         measuredRoot = yield* fs.realPath(fixture.worktree);
+        yield* fs.writeFileString(`${fixture.repo}/.git/info/exclude`, ".codex/\n");
         fixture.setThreads([
           shell({ branch: "feature", worktreePath: fixture.worktree, archivedAt: fixture.at(-1) }),
         ]);
@@ -6081,51 +6093,91 @@ describe("storage cleanup reports and local file policies", () => {
           outcome: "kept",
           bytes: null,
         });
-        expect(yield* fs.readFileString(`${fixture.worktree}/.t3/retained-notes.txt`)).toBe(
+        expect(yield* fs.readFileString(`${fixture.worktree}/.codex/retained-notes.txt`)).toBe(
           "new unique notes\n",
         );
       }),
     ),
   );
-  it.live.each([".t3/notes.txt", "research/retained.txt", "node_modules/manual.txt"])(
-    "preserves unknown ignored %s even for an archived checkout and permissive setting",
-    (relative) =>
-      runCleanupTest(
-        Effect.gen(function* () {
-          const fixture = yield* cleanupFixture();
-          fixture.setPolicy("tracked-changes");
-          fixture.setThreads([
-            shell({
-              branch: "feature",
-              worktreePath: fixture.worktree,
-              archivedAt: fixture.at(-1),
-            }),
-          ]);
-          if (relative.startsWith("research/"))
-            yield* fixture.command(fixture.worktree, [
-              "config",
-              "core.excludesFile",
-              `${fixture.repo}/ignore-rules`,
-            ]);
-          if (relative.startsWith("research/"))
-            yield* fixture.fs.writeFileString(`${fixture.repo}/ignore-rules`, "research/\n");
-          yield* fixture.fs.makeDirectory(
-            `${fixture.worktree}/${relative.split("/").slice(0, -1).join("/")}`,
-            { recursive: true },
-          );
+  it.live.each([
+    { relative: "node_modules/package/index.js", disposable: true },
+    { relative: "apps/desktop/node_modules/package/index.js", disposable: true },
+    { relative: ".generated/types.ts", disposable: true },
+    { relative: ".vite-hooks/_/pre-commit", disposable: true },
+    { relative: "apps/web/dist/index.js", disposable: true },
+    { relative: "prototype/example/dist/index.js", disposable: true },
+    { relative: "apps/web/tsconfig.tsbuildinfo", disposable: true },
+    { relative: "apps/marketing/.astro/types.d.ts", disposable: true },
+    { relative: "apps/web/.tanstack/cache.json", disposable: true },
+    { relative: "apps/desktop/dist-electron/boot.cjs", disposable: true },
+    { relative: ".t3/userdata/statev2.sqlite", disposable: true },
+    { relative: ".env.local", disposable: false },
+    { relative: ".codex/config.toml", disposable: false },
+    { relative: "prototype/example/.local/notes.txt", disposable: false },
+    { relative: "research/retained.txt", disposable: false },
+    { relative: "tmp/notes.txt", disposable: false },
+    { relative: "build/notes.txt", disposable: false },
+    { relative: "dist/source.js.orig", disposable: false },
+    { relative: "native/resource-monitor/target/debug/binary", disposable: false },
+    { relative: ".codex/node_modules/notes.txt", disposable: false },
+    { relative: "prototype/example/.local/dist/notes.txt", disposable: false },
+  ])("classifies ignored $relative for whole-worktree removal", ({ relative, disposable }) =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture();
+        fixture.setPolicy("tracked-changes");
+        fixture.setThreads([
+          shell({
+            branch: "feature",
+            worktreePath: fixture.worktree,
+            archivedAt: fixture.at(-1),
+          }),
+        ]);
+        yield* fixture.fs.writeFileString(
+          `${fixture.repo}/.git/info/exclude`,
+          ".generated/\n*.tsbuildinfo\n.astro/\n.tanstack/\ndist-electron/\nbuild/\n.env*\n.codex/\n.local/\nresearch/\ntmp/\n",
+        );
+        if (relative === ".vite-hooks/_/pre-commit") {
+          yield* fixture.fs.makeDirectory(`${fixture.worktree}/.vite-hooks/_`, { recursive: true });
           yield* fixture.fs.writeFileString(
-            `${fixture.worktree}/${relative}`,
-            "unique retained bytes\n",
+            `${fixture.worktree}/.vite-hooks/pre-commit`,
+            "tracked hook\n",
           );
-          const report = yield* fixture.service.runNow;
-          expect(checkoutEntries(report)[0]).toMatchObject({ outcome: "kept", bytes: null });
+          yield* fixture.command(fixture.worktree, ["add", ".vite-hooks/pre-commit"]);
+          yield* fixture.command(fixture.worktree, ["commit", "-m", "record hook source"]);
+          yield* fixture.fs.writeFileString(`${fixture.worktree}/.vite-hooks/_/.gitignore`, "*\n");
+        }
+        if (relative === "dist/source.js.orig") {
+          yield* fixture.fs.makeDirectory(`${fixture.worktree}/dist`);
+          yield* fixture.fs.writeFileString(
+            `${fixture.worktree}/dist/source.js`,
+            "tracked output\n",
+          );
+          yield* fixture.command(fixture.worktree, ["add", "-f", "dist/source.js"]);
+          yield* fixture.command(fixture.worktree, ["commit", "-m", "record tracked output"]);
+        }
+        yield* fixture.fs.makeDirectory(
+          `${fixture.worktree}/${relative.split("/").slice(0, -1).join("/")}`,
+          { recursive: true },
+        );
+        yield* fixture.fs.writeFileString(
+          `${fixture.worktree}/${relative}`,
+          "unique retained bytes\n",
+        );
+        const report = yield* fixture.service.runNow;
+        expect(checkoutEntries(report)[0]).toMatchObject({
+          outcome: disposable ? "removed" : "kept",
+        });
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(!disposable);
+        if (!disposable) expect(checkoutEntries(report)[0]?.reason).toContain("Has ignored files");
+        if (!disposable)
           expect(yield* fixture.fs.readFileString(`${fixture.worktree}/${relative}`)).toBe(
             "unique retained bytes\n",
           );
-        }),
-      ),
+      }),
+    ),
   );
-  it.live("preserves unrecognized ignored installs without following their links", () =>
+  it.live("removes ignored installs without following their links", () =>
     runCleanupTest(
       Effect.gen(function* () {
         const { service, fs, worktree, setPolicy } = yield* cleanupFixture();
@@ -6143,13 +6195,9 @@ describe("storage cleanup reports and local file policies", () => {
         const report = yield* service.runNow;
         expect(sizes.length).toBeGreaterThan(0);
         expect(checkoutEntries(report)[0]).toMatchObject({
-          outcome: "kept",
-          bytes: null,
-          files: null,
+          outcome: "removed",
         });
-        expect(checkoutEntries(report)[0]?.reason).toContain("ignored files (node_modules/)");
-        expect(report.bytesFreed).toBe(0);
-        expect(yield* fs.exists(`${worktree}/node_modules/nested/file`)).toBe(true);
+        expect(yield* fs.exists(worktree)).toBe(false);
         expect(yield* fs.readFileString(`${outside}/external`)).toBe("must not count");
       }),
     ),
