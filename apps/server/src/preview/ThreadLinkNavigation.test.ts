@@ -25,7 +25,7 @@ async function fulfillHosted(cdp: CDPSession) {
 }
 
 it("keeps clicked thread navigations in the app, including hosted new windows", async () => {
-  const browser = await chromium.launch({ headless: true, channel: "chromium" });
+  const browser = await chromium.launch({ headless: true });
   try {
     const context = await browser.newContext();
     const page = await context.newPage();
@@ -87,9 +87,11 @@ it("keeps clicked thread navigations in the app, including hosted new windows", 
       if (detached) {
         const popup = await detached;
         expect(blockPopup).toHaveBeenCalledWith(popup);
+        if (closeProtocolPopup) expect([":", "", "about:blank"]).toContain(popup.url());
         if (!popup.isClosed())
           await new Promise<void>((resolve) => popup.once("close", () => resolve()));
-        expect(context.pages()).toEqual([page]);
+        // An already-closed popup can be added to Playwright's page list after its close event.
+        expect(context.pages().filter((page) => !page.isClosed())).toEqual([page]);
       }
       expect(page.url()).toBe(source);
     }
