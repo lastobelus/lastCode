@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Opaque server-resolved build review identifiers.
 import * as NodeCrypto from "node:crypto";
+import { randomUuidV4 } from "@t3tools/provider-core/server/randomUuid";
 import {
   legacyBuildActivity,
   generatedBuildActivity,
@@ -9,6 +10,7 @@ import {
   BuildReviewError,
   BUILD_REVIEW_PAGE_SIZE,
   GitCommandError,
+  CommandId,
   OrchestrationV2AppThreadJson,
   OrchestrationV2ProviderSessionJson,
 } from "@t3tools/contracts";
@@ -2674,24 +2676,30 @@ const make = Effect.gen(function* () {
               );
               let actualBranch = thread.branch;
               let capturedHead: string | null = null;
+              const revalidateGit = Effect.fn("StorageCleanup.revalidateDependencyGit")(
+                function* () {
+                  const status = yield* cleanupHead(worktreePath);
+                  if (
+                    status === null ||
+                    (capturedHead !== null &&
+                      (status.commitSha !== capturedHead || status.branch !== actualBranch)) ||
+                    !(yield* staleBranchesSafe(
+                      worktreePath,
+                      owners.map((owner) => owner.branch),
+                      status,
+                    ))
+                  )
+                    return keep("Repository or branch changed");
+                  actualBranch = status.branch;
+                  capturedHead = status.commitSha;
+                  return true;
+                },
+              );
               const revalidate = Effect.fn("StorageCleanup.revalidateDependencies")(function* () {
                 if (!(yield* candidateStillIdle())) return false;
                 if (yield* hasLiveProviderSession(worktreePath, thread.id))
                   return keep("A provider session is still open");
-                const status = yield* cleanupHead(worktreePath);
-                if (
-                  status === null ||
-                  (capturedHead !== null &&
-                    (status.commitSha !== capturedHead || status.branch !== actualBranch)) ||
-                  !(yield* staleBranchesSafe(
-                    worktreePath,
-                    owners.map((owner) => owner.branch),
-                    status,
-                  ))
-                )
-                  return keep("Repository or branch changed");
-                actualBranch = status.branch;
-                capturedHead = status.commitSha;
+                if (!(yield* revalidateGit())) return false;
                 // Re-read policy, activity, roots, leases and durable pending state
                 // after Git/session calls as well as after dependency inspection.
                 return (
@@ -2706,6 +2714,7 @@ const make = Effect.gen(function* () {
                 return yield* revalidate();
               });
               const isStillEligible = Effect.gen(function* () {
+                if (!(yield* revalidateGit())) return false;
                 if (!(yield* candidateStillIdle(actualBranch))) return false;
                 if (
                   eligibilitySequence === null ||
@@ -3489,6 +3498,61 @@ const make = Effect.gen(function* () {
               // Read settings after all awaited guards, including every shared owner.
               if (!policiesUnchanged(yield* settingsService.getSettings))
                 return keep("settings changed since check");
+              const resumableOwners = owners.filter((owner) => !("workspaceRoot" in owner.thread));
+              if (
+                resumableOwners.some(
+                  (owner) => head.branch === null || owner.thread.branch !== head.branch,
+                )
+              ) {
+                let restoreBranch = head.branch;
+                if (restoreBranch === null) {
+                  restoreBranch = `lastcode/recovery/${head.commitSha}`;
+                  // Git creates this ref exclusively. An existing branch, even at
+                  // the same commit, is someone else's recovery target.
+                  const attached = yield* git.execute({
+                    operation: "StorageCleanup.recoveryBranch",
+                    cwd: worktreePath,
+                    args: ["switch", "-c", restoreBranch],
+                    allowNonZeroExit: true,
+                  });
+                  if (
+                    attached.exitCode !== 0 ||
+                    attached.stdoutTruncated ||
+                    attached.stderrTruncated
+                  )
+                    return keep("a restore branch could not be created safely");
+                  const recoveryHead = yield* cleanupHead(worktreePath);
+                  if (
+                    recoveryHead === null ||
+                    recoveryHead.branch !== restoreBranch ||
+                    recoveryHead.commitSha !== head.commitSha ||
+                    !(yield* staleBranchesSafe(worktreePath, recordedBranches, recoveryHead))
+                  )
+                    return keep("restore branch safety changed since check");
+                }
+                for (const owner of resumableOwners) {
+                  if (owner.thread.branch === restoreBranch) continue;
+                  const recorded = yield* engine
+                    .dispatch({
+                      type: "thread.metadata.update",
+                      commandId: CommandId.make(yield* randomUuidV4),
+                      threadId: owner.thread.id,
+                      branch: restoreBranch,
+                      expectedBranch: owner.thread.branch,
+                      expectedWorktreePath: owner.thread.worktreePath,
+                      expectedProjectId: owner.thread.projectId,
+                    })
+                    .pipe(
+                      Effect.as(true),
+                      Effect.orElseSucceed(() => false),
+                    );
+                  if (!recorded)
+                    return keep("the restore branch could not be recorded for every owner");
+                }
+                // Metadata changed the ownership snapshots. A fresh sweep must
+                // validate them before this checkout can be removed.
+                return keep("restore branches recorded; waiting for a fresh cleanup check");
+              }
               // Ordinary removals let Git reject late changes. Submodules require force
               // after the recursive history and file checks; unknown files are never cleaned.
               yield* removeLinkedWorktree({

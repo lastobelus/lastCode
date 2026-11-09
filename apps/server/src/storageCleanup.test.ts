@@ -530,6 +530,11 @@ const cleanupFixture = (
     let providerEventSequence = 0;
     let onSessionLiveRead: (() => void) | null = null;
     let fullStatusCalls = 0;
+    let staleProofs = 0;
+    let rejectMetadataUpdates = false;
+    const metadataCommands: Array<
+      Parameters<Orchestrator.OrchestratorV2["Service"]["dispatch"]>[0]
+    > = [];
     const prLookups: string[] = [];
     let mergedPrHead: string | null = null;
     let gitInspections = 0;
@@ -597,6 +602,11 @@ const cleanupFixture = (
         ...git,
         execute: (input) =>
           Effect.gen(function* () {
+            if (
+              input.operation === "StorageCleanup.staleBranches" &&
+              input.args.includes("--contains")
+            )
+              staleProofs++;
             // Repository inventories are independent of checkout eligibility checks.
             if (
               ![
@@ -782,6 +792,31 @@ const cleanupFixture = (
       } as unknown as ProjectionStore.ProjectionStoreV2["Service"]),
       Effect.provideService(Orchestrator.OrchestratorV2, {
         streamDomainEvents: Stream.suspend(() => events),
+        dispatch: (command: Parameters<Orchestrator.OrchestratorV2["Service"]["dispatch"]>[0]) =>
+          Effect.gen(function* () {
+            metadataCommands.push(command);
+            if (command.type !== "thread.metadata.update")
+              throw new Error("Unexpected cleanup command");
+            const owner = threads.find((thread) => thread.id === command.threadId);
+            if (
+              rejectMetadataUpdates ||
+              owner === undefined ||
+              owner.branch !== command.expectedBranch ||
+              owner.worktreePath !== command.expectedWorktreePath ||
+              owner.projectId !== command.expectedProjectId
+            )
+              return yield* new Orchestrator.OrchestratorDispatchError({
+                commandId: command.commandId,
+                commandType: command.type,
+                cause: "Owner changed",
+              });
+            threads = threads.map((thread) =>
+              thread.id === command.threadId
+                ? { ...thread, branch: command.branch ?? null }
+                : thread,
+            );
+            return { sequence: 0, storedEvents: [] };
+          }),
       } as unknown as Orchestrator.OrchestratorV2["Service"]),
       Effect.provideService(
         SqlClient.SqlClient,
@@ -948,6 +983,12 @@ const cleanupFixture = (
       },
       service: Context.get(context, StorageCleanup.StorageCleanup),
       resourceGitCalls,
+      metadataCommands,
+      staleProofs: () => staleProofs,
+      getThreads: () => threads,
+      rejectMetadataUpdates: () => {
+        rejectMetadataUpdates = true;
+      },
       prLookups,
       setMergedPrHead: (head: string) => {
         mergedPrHead = head;
@@ -1823,6 +1864,215 @@ describe("cleanup ownership event revalidation", () => {
 });
 
 describe("renamed branch cleanup", () => {
+  it.live.each(["named", "detached", "null"] as const)(
+    "preserves a durable restore target before removing %s HEAD",
+    (state) =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const fixture = yield* cleanupFixture();
+          yield* fixture.command(fixture.worktree, ["commit", "--allow-empty", "-m", "owner tip"]);
+          const tip = (yield* fixture.command(fixture.worktree, [
+            "rev-parse",
+            "HEAD",
+          ])).stdout.trim();
+          yield* fixture.command(fixture.worktree, ["branch", "-m", "renamed"]);
+          yield* fixture.command(fixture.worktree, [
+            "update-ref",
+            "refs/remotes/origin/renamed",
+            tip,
+          ]);
+          if (state !== "named") {
+            yield* fixture.command(fixture.worktree, ["checkout", "--detach"]);
+            yield* fixture.command(fixture.worktree, ["branch", "-D", "renamed"]);
+          }
+          const owners = [
+            shell({
+              branch: state === "null" ? null : "feature",
+              worktreePath: fixture.worktree,
+              archivedAt: fixture.at(-1),
+            }),
+            shell({
+              id: ThreadId.make("archived-owner"),
+              branch: "feature",
+              worktreePath: fixture.worktree,
+              archivedAt: fixture.at(-1),
+            }),
+          ];
+          fixture.setThreads(owners);
+          expect(checkoutEntries(yield* fixture.service.runNow)[0]).toMatchObject({
+            outcome: "kept",
+          });
+          const target = state === "named" ? "renamed" : `lastcode/recovery/${tip}`;
+          expect(fixture.metadataCommands).toEqual(
+            owners.map((owner) =>
+              expect.objectContaining({
+                type: "thread.metadata.update",
+                threadId: owner.id,
+                branch: target,
+                expectedBranch: owner.branch,
+                expectedWorktreePath: fixture.worktree,
+                expectedProjectId: owner.projectId,
+              }),
+            ),
+          );
+          expect(fixture.getThreads().map((owner) => owner.branch)).toEqual([target, target]);
+          expect(checkoutEntries(yield* fixture.service.runNow)[0]).toMatchObject({
+            outcome: "removed",
+          });
+          for (const owner of fixture.getThreads()) {
+            yield* fixture.command(fixture.repo, [
+              "worktree",
+              "add",
+              fixture.worktree,
+              owner.branch!,
+            ]);
+            expect(
+              (yield* fixture.command(fixture.worktree, ["rev-parse", "HEAD"])).stdout.trim(),
+            ).toBe(tip);
+            yield* fixture.command(fixture.repo, ["worktree", "remove", fixture.worktree]);
+          }
+        }),
+      ),
+  );
+
+  it.live.each(["rejected-command", "existing-recovery-ref"] as const)(
+    "retains the checkout when restore repair has %s",
+    (failure) =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const fixture = yield* cleanupFixture();
+          yield* fixture.command(fixture.worktree, ["commit", "--allow-empty", "-m", "owner tip"]);
+          const tip = (yield* fixture.command(fixture.worktree, [
+            "rev-parse",
+            "HEAD",
+          ])).stdout.trim();
+          yield* fixture.command(fixture.worktree, ["branch", "-m", "renamed"]);
+          yield* fixture.command(fixture.worktree, [
+            "update-ref",
+            "refs/remotes/origin/renamed",
+            tip,
+          ]);
+          fixture.setThreads([
+            shell({
+              branch: "feature",
+              worktreePath: fixture.worktree,
+              archivedAt: fixture.at(-1),
+            }),
+          ]);
+          if (failure === "rejected-command") fixture.rejectMetadataUpdates();
+          else {
+            yield* fixture.command(fixture.worktree, ["checkout", "--detach"]);
+            yield* fixture.command(fixture.worktree, ["branch", "-D", "renamed"]);
+            yield* fixture.command(fixture.repo, ["branch", `lastcode/recovery/${tip}`, "main"]);
+          }
+          expect(checkoutEntries(yield* fixture.service.runNow)[0]).toMatchObject({
+            outcome: "kept",
+          });
+          expect(fixture.getThreads()[0]?.branch).toBe("feature");
+          expect(
+            (yield* fixture.command(fixture.worktree, ["rev-parse", "HEAD"])).stdout.trim(),
+          ).toBe(tip);
+          if (failure === "existing-recovery-ref") {
+            expect(fixture.metadataCommands).toEqual([]);
+            expect(
+              (yield* fixture.command(fixture.repo, [
+                "rev-parse",
+                `refs/heads/lastcode/recovery/${tip}`,
+              ])).stdout.trim(),
+            ).not.toBe(tip);
+          }
+        }),
+      ),
+  );
+
+  it.live.each(["dependencies", "builds"] as const)(
+    "repeats Git proof after canRemove for %s",
+    (resource) =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          for (const mutation of ["dirty", "old-ref", "head", "branch", "remote"] as const) {
+            let mutate: Effect.Effect<void> = Effect.void;
+            let changed = false;
+            let fixture: Effect.Success<ReturnType<typeof cleanupFixture>>;
+            const mutateAfterCanRemove = Effect.suspend(() =>
+              fixture !== undefined && fixture.staleProofs() >= 2 && !changed
+                ? Effect.gen(function* () {
+                    changed = true;
+                    yield* mutate;
+                    return [];
+                  })
+                : Effect.succeed([]),
+            );
+            fixture = yield* cleanupFixture().pipe(
+              Effect.provideService(
+                DependencyMounts.MountPoints,
+                resource === "dependencies" ? mutateAfterCanRemove : Effect.succeed([]),
+              ),
+              Effect.provideService(
+                WorktreeConsumers.ProcessPaths,
+                resource === "builds" ? mutateAfterCanRemove : Effect.succeed([]),
+              ),
+            );
+            if (resource === "dependencies") yield* fixture.enableDependencies;
+            else {
+              fixture.setDependencyRetention(3);
+              yield* seedCompilerOutput(fixture, "apps/web/dist", fixture.now - 4 * DAY_MS);
+            }
+            fixture.setThreads([
+              shell({
+                branch: "feature",
+                worktreePath: fixture.worktree,
+                archivedAt: fixture.at(-1),
+              }),
+            ]);
+            yield* fixture.command(fixture.worktree, ["branch", "-m", "renamed"]);
+            yield* fixture.command(fixture.worktree, [
+              "update-ref",
+              "refs/remotes/origin/renamed",
+              "HEAD",
+            ]);
+            mutate = Effect.gen(function* () {
+              if (mutation === "dirty")
+                yield* fixture.fs.writeFileString(`${fixture.worktree}/tracked.txt`, "late edit");
+              if (mutation === "old-ref")
+                yield* fixture.command(fixture.worktree, ["branch", "feature"]);
+              if (mutation === "head")
+                yield* fixture.command(fixture.worktree, [
+                  "commit",
+                  "--allow-empty",
+                  "-m",
+                  "late commit",
+                ]);
+              if (mutation === "branch")
+                yield* fixture.command(fixture.worktree, ["branch", "-m", "other"]);
+              if (mutation === "remote")
+                yield* fixture.command(fixture.worktree, [
+                  "update-ref",
+                  "-d",
+                  "refs/remotes/origin/renamed",
+                ]);
+            }).pipe(Effect.orDie);
+            const report = yield* fixture.service.runNow;
+            expect(changed, mutation).toBe(true);
+            expect(
+              report.entries.filter(
+                (entry) =>
+                  entry.worktreeResource ===
+                  (resource === "builds" ? "generated-builds" : "dependencies"),
+              ),
+              mutation,
+            ).toMatchObject([{ outcome: "kept" }]);
+            expect(
+              yield* fixture.fs.exists(
+                `${fixture.worktree}/${resource === "builds" ? "apps/web/dist" : "node_modules"}`,
+              ),
+              mutation,
+            ).toBe(true);
+          }
+        }),
+      ),
+  );
+
   it.live("looks up the actual renamed branch for squash-merged cleanup", () =>
     runCleanupTest(
       Effect.gen(function* () {
@@ -1852,9 +2102,12 @@ describe("renamed branch cleanup", () => {
           (yield* fixture.command(fixture.worktree, ["rev-parse", "HEAD"])).stdout.trim(),
         );
         expect(checkoutEntries(yield* fixture.service.runNow)[0]).toMatchObject({
+          outcome: "kept",
+        });
+        expect(checkoutEntries(yield* fixture.service.runNow)[0]).toMatchObject({
           outcome: "removed",
         });
-        expect(fixture.prLookups).toEqual(["renamed"]);
+        expect(fixture.prLookups).toEqual(["renamed", "renamed"]);
       }),
     ),
   );
@@ -2037,7 +2290,11 @@ describe("renamed branch cleanup", () => {
             }),
           ),
         ]);
-        const report = yield* fixture.service.runNow;
+        let report = yield* fixture.service.runNow;
+        if (resource === "worktree" && ["pushed", "detached", "nested-ref"].includes(state)) {
+          expect(checkoutEntries(report)[0]).toMatchObject({ outcome: "kept" });
+          report = yield* fixture.service.runNow;
+        }
         const entries =
           resource === "worktree"
             ? checkoutEntries(report)
@@ -2446,7 +2703,7 @@ describe("deleted thread worktrees", () => {
       ...overrides,
     });
 
-  it.effect.each(["no subagents", "native subagent"] as const)(
+  it.effect.each(["no subagents", "native subagent", "renamed", "detached"] as const)(
     "removes a deleted thread's worktree with %s",
     (scenario) =>
       Effect.gen(function* () {
@@ -2459,7 +2716,20 @@ describe("deleted thread worktrees", () => {
         const owner = parent(fixture.worktree);
         fixture.setDeletedThreads([owner]);
         fixture.setThreads(scenario === "native subagent" ? [subagent(owner)] : []);
+        if (scenario === "renamed" || scenario === "detached") {
+          yield* fixture.command(fixture.worktree, ["branch", "-m", "renamed"]);
+          yield* fixture.command(fixture.worktree, [
+            "update-ref",
+            "refs/remotes/origin/renamed",
+            "HEAD",
+          ]);
+          if (scenario === "detached") {
+            yield* fixture.command(fixture.worktree, ["checkout", "--detach"]);
+            yield* fixture.command(fixture.worktree, ["branch", "-D", "renamed"]);
+          }
+        }
         const report = yield* fixture.service.runNow;
+        expect(fixture.metadataCommands).toEqual([]);
         expect(report.entries[0]).toMatchObject({
           threadId: owner.id,
           outcome: "removed",
