@@ -131,9 +131,16 @@ function assertMergesOntoBase(
 }
 
 function postMergeCiInstructions(mergeCommit: string): string {
+  const repo = `--repo ${LASTCODE_GITHUB_REPOSITORY}`;
+  // Waits up to five minutes for the push run to register, then exits with its result.
+  const watch = [
+    `run=""; for _ in $(seq 20); do run=$(gh run list ${repo} --workflow ${LASTCODE_CI_WORKFLOW} --event push --commit ${mergeCommit} --json databaseId -q '.[0].databaseId'); [ -n "$run" ] && break; sleep 15; done;`,
+    `if [ -z "$run" ]; then echo "No main CI run registered for ${mergeCommit}"; exit 1; fi;`,
+    `gh run watch "$run" ${repo} --exit-status --interval 60`,
+  ].join(" ");
   return [
-    `[lastcode:merge] Merged as ${mergeCommit}. Main CI now runs on it; confirm it passes:`,
-    `  gh run list --repo ${LASTCODE_GITHUB_REPOSITORY} --workflow ${LASTCODE_CI_WORKFLOW} --event push --commit ${mergeCommit} --json databaseId,status,conclusion,url`,
+    `[lastcode:merge] Merged as ${mergeCommit}. Confirm main CI for it with this background command:`,
+    `  ${watch}`,
   ].join("\n");
 }
 
@@ -364,7 +371,7 @@ function main(argv: ReadonlyArray<string>): void {
   console.log(
     merged
       ? postMergeCiInstructions(merged)
-      : "[lastcode:merge] Merged, but GitHub did not report the merge commit; confirm main CI for the new lastcode/main tip.",
+      : `[lastcode:merge] Merged, but GitHub did not report the merge commit. Read it with \`gh pr view ${pullRequest.number} --repo ${LASTCODE_GITHUB_REPOSITORY} --json mergeCommit\` and confirm main CI for that exact commit.`,
   );
   const checkpointArguments = postMergeCheckpointArguments(skipCheckpoint);
   if (checkpointArguments === null) {

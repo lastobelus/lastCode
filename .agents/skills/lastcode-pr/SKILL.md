@@ -189,11 +189,9 @@ current GitHub thread and review-query mechanics.
    an uncertain remote lock until its owner and operation outcome are verified.
 6. Verify the PR is merged and `origin/lastcode/main` contains the merge commit
    the wrapper prints. Then confirm main's push CI for that commit: a PR merged
-   behind main is first tested as merged there. Find the run with the
-   `gh run list` command the wrapper prints, start
-   `gh run watch RUN_ID --repo lastobelus/lastCode --exit-status --interval 60`
-   as a background command whose exit wakes you, finish cleanup, and end the
-   turn. `watch_pull_request` cannot see this run. If your harness cannot wake
+   behind main is first tested as merged there. Start the command the wrapper
+   prints as a background command whose exit wakes you; it waits for the run to
+   register, then exits with its result. Finish cleanup and end the turn. `watch_pull_request` cannot see this run. If your harness cannot wake
    on a background command, keep the turn open on that command instead. If the
    run fails, compare it with the previous main run. When your merge caused it,
    alone or together with a concurrent merge, open a fix-forward PR at once, or
