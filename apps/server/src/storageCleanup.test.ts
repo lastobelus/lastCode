@@ -12,6 +12,7 @@ import * as Effect from "effect/Effect";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -416,6 +417,8 @@ const cleanupFixture = (
   eventSql?: SqlClient.SqlClient,
   logsDir?: string,
   registry?: SuspensionRegistry.WorktreeSuspensionRegistry["Service"],
+  // Most tests exercise the sweep itself, so they start it on activation.
+  firstSweepDelay: Duration.Duration = Duration.zero,
 ) =>
   Effect.gen(function* () {
     const fixtureNow = yield* Clock.currentTimeMillis;
@@ -921,6 +924,7 @@ const cleanupFixture = (
           }),
       } as unknown as TerminalManager.TerminalManager["Service"]),
       Effect.provideService(ServerActivation, Deferred.await(activation)),
+      Effect.provideService(StorageCleanup.FirstAutomaticSweepDelay, firstSweepDelay),
     );
     return {
       protectSavedWorkspace: (workspacePath: string, reason: string) => {
@@ -4937,11 +4941,17 @@ describe("storage cleanup reports and local file policies", () => {
         }),
       ),
   );
-  it.effect("automatically removes an eligible archived thread checkout", () =>
+  it.effect("automatically removes an eligible archived thread checkout an hour after launch", () =>
     runCleanupTest(
       Effect.gen(function* () {
         yield* TestClock.setTime(NOW_MS);
-        const fixture = yield* cleanupFixture();
+        const fixture = yield* cleanupFixture(
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          Duration.hours(1),
+        );
         fixture.setThreads([
           shell({
             branch: "feature",
@@ -4950,6 +4960,12 @@ describe("storage cleanup reports and local file policies", () => {
           }),
         ]);
         yield* fixture.activate(Stream.empty);
+        yield* TestClock.adjust("59 minutes");
+        yield* fixture.service.drain;
+        expect(yield* fixture.service.latestReport).toBeNull();
+        expect(fixture.worktreeInventoryCalls()).toBe(0);
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(true);
+        yield* TestClock.adjust("1 minute");
         const [report] = yield* fixture.service.reports.pipe(
           Stream.filter((report) => report !== null),
           Stream.take(1),

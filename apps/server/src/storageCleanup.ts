@@ -36,6 +36,7 @@ import { resolveWorktreeCleanup } from "@t3tools/shared/projectSettings";
 import { makeDrainableWorker, type DrainableWorker } from "@t3tools/shared/DrainableWorker";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Layer from "effect/Layer";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
@@ -378,6 +379,14 @@ export class StorageCleanup extends Context.Service<
     readonly drain: Effect.Effect<void>;
   }
 >()("t3/storageCleanup") {}
+
+const SWEEP_INTERVAL = Duration.hours(1);
+
+/** Wait before the first automatic sweep. Launch already does heavy Git work, and relaunching must not restart a full sweep. */
+export class FirstAutomaticSweepDelay extends Context.Reference<Duration.Duration>(
+  "t3/storageCleanup/FirstAutomaticSweepDelay",
+  { defaultValue: () => SWEEP_INTERVAL },
+) {}
 
 const make = Effect.gen(function* () {
   const savedWorkspaces = yield* WorktreeSuspension;
@@ -4017,10 +4026,12 @@ const make = Effect.gen(function* () {
     const changes = yield* settingsService.subscribeChanges;
     const events = engine.streamDomainEvents;
     let lastSettings = yield* settingsService.getSettings.pipe(Effect.orDie);
+    const firstSweepDelay = yield* FirstAutomaticSweepDelay;
     yield* forkParked(
       requestSweep(false, { full: true }).pipe(
         Effect.andThen(worker.drain),
-        Effect.repeat(Schedule.spaced("1 hour")),
+        Effect.repeat(Schedule.spaced(SWEEP_INTERVAL)),
+        Effect.delay(firstSweepDelay),
         Effect.asVoid,
       ),
     );
