@@ -556,18 +556,21 @@ const make = Effect.gen(function* () {
       validated,
       ({ current, inspection, canRemove, isStillEligible, usageSnapshot }) =>
         Effect.gen(function* () {
-          const rootConsumed = yield* Effect.tryPromise({
-            try: async () =>
-              (await consumesPath(current.worktreePath, paths, pathTargets)) ||
-              (await consumesPath(current.worktreePath, processes)),
-            catch: (cause) =>
-              new GeneratedDependenciesError({ path: current.dependencyPath, cause }),
-          });
+          const rootConsumed = yield* Effect.exit(
+            Effect.tryPromise({
+              try: async () =>
+                (await consumesPath(current.worktreePath, paths, pathTargets)) ||
+                (await consumesPath(current.worktreePath, processes)),
+              catch: (cause) =>
+                new GeneratedDependenciesError({ path: current.dependencyPath, cause }),
+            }),
+          );
           // Preserve the captured native object evidence on the path observation.
-          // Plain cwd evidence remains an independent conservative check.
+          // Plain cwd evidence remains an independent conservative check. Both
+          // still record use when the broader worktree proof fails.
           yield* rememberConsumed(current, paths, pathTargets);
           yield* rememberConsumed(current, processes);
-          if (rootConsumed) {
+          if (yield* rootConsumed) {
             yield* decide(inspection, "kept", "An active process owns the worktree");
             return null;
           }

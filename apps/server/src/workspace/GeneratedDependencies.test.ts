@@ -357,30 +357,40 @@ it.effect("measures an install once across inspection and removal", () =>
   }).pipe(Effect.scoped, Effect.provide(testLayer())),
 );
 
-it.effect("walks each consumer root at most once per native inventory during removal", () => {
-  const execFile = vi.mocked(NodeChildProcess.execFile);
-  const opendir = vi.mocked(NodeFSP.opendir);
-  // A vanished vnode cannot be resolved by name, so every query needs a target walk.
-  const lsof = "p123\0\nfcwd\0tDIR\0n/\0\nf8\0tREG\0D0x12\0i5\0n/t3-absent/vanished.js\0\n";
-  const capture = WorktreeConsumers.ProcessPaths.defaultValue().pipe(
-    Effect.provideService(HostProcess.Platform, "darwin"),
-    Effect.provideService(HostProcess.UserId, 1000),
-    Effect.provideService(ResourceMonitorBinary.ProcessCaptureBinary, Effect.succeed(null)),
+const darwinCapture = WorktreeConsumers.ProcessPaths.defaultValue().pipe(
+  Effect.provideService(HostProcess.Platform, "darwin"),
+  Effect.provideService(HostProcess.UserId, 1000),
+  Effect.provideService(ResourceMonitorBinary.ProcessCaptureBinary, Effect.succeed(null)),
+);
+// Each capture parses this lsof output afresh; a path that cannot be resolved by
+// name makes every consumer query prove its captured vnode with a target walk.
+const fakeLsof = (output: string) =>
+  Effect.acquireRelease(
+    Effect.sync(() => {
+      const execFile = vi.mocked(NodeChildProcess.execFile);
+      const previous = execFile.getMockImplementation();
+      execFile.mockClear();
+      execFile.mockImplementation(((_file, _args, _options, callback) => {
+        (callback as (error: null, stdout: string, stderr: string) => void)(null, output, "");
+        return {} as NodeChildProcess.ChildProcess;
+      }) as typeof NodeChildProcess.execFile);
+      return previous!;
+    }),
+    (previous) =>
+      Effect.sync(() => vi.mocked(NodeChildProcess.execFile).mockImplementation(previous)),
   );
-  const previous = execFile.getMockImplementation();
-  return Effect.gen(function* () {
+
+it.effect("walks each consumer root at most once per native inventory during removal", () =>
+  Effect.gen(function* () {
     const { fs, cleanup, input, dependencyPath } = yield* fixture();
     const inspected = yield* cleanup.inspect(input);
     assert.isNotNull(inspected);
+    const opendir = vi.mocked(NodeFSP.opendir);
     opendir.mockClear();
-    execFile.mockClear();
-    execFile.mockImplementation(((_file, _args, _options, callback) => {
-      (callback as (error: null, stdout: string, stderr: string) => void)(null, lsof, "");
-      return {} as NodeChildProcess.ChildProcess;
-    }) as typeof NodeChildProcess.execFile);
+    yield* fakeLsof("p123\0\nfcwd\0tDIR\0n/\0\nf8\0tREG\0D0x12\0i5\0n/t3-absent/vanished.js\0\n");
     assert.isNotNull(yield* cleanup.remove(inspected!, Effect.succeed(true)));
     assert.isFalse(yield* fs.exists(dependencyPath));
-    const captures = execFile.mock.invocationCallOrder;
+    const captures = vi.mocked(NodeChildProcess.execFile).mock.invocationCallOrder;
     const walks = opendir.mock.calls.flatMap(([target], index) =>
       target === input.worktreePath || target === dependencyPath
         ? [
@@ -392,11 +402,39 @@ it.effect("walks each consumer root at most once per native inventory during rem
     assert.isAbove(walks.length, 0);
     assert.deepEqual([...new Set(walks)], walks);
   }).pipe(
-    Effect.ensuring(Effect.sync(() => execFile.mockImplementation(previous!))),
     Effect.scoped,
-    Effect.provide(testLayer(undefined, undefined, undefined, false, undefined, capture)),
-  );
-});
+    Effect.provide(testLayer(undefined, undefined, undefined, false, undefined, darwinCapture)),
+  ),
+);
+
+it.effect("records dependency use even when the broader worktree proof cannot complete", () =>
+  Effect.gen(function* () {
+    yield* TestClock.setTime(NOW);
+    const { fs, path, cleanup, input, dependencyPath } = yield* fixture();
+    const inspected = yield* cleanup.inspect(input);
+    assert.isNotNull(inspected);
+    const used = yield* Effect.promise(() =>
+      NodeFSP.stat(path.join(dependencyPath, "package/index.js"), { bigint: true }),
+    );
+    const unreadable = path.join(input.worktreePath, "unreadable");
+    yield* fs.makeDirectory(unreadable);
+    yield* Effect.acquireRelease(
+      Effect.promise(() => NodeFSP.chmod(unreadable, 0o000)),
+      () => Effect.promise(() => NodeFSP.chmod(unreadable, 0o700)),
+    );
+    const before = dependencyActivitySnapshot(input.worktreePath);
+    yield* fakeLsof(
+      "p123\0\nfcwd\0tDIR\0n/\0\n" +
+        `f8\0tREG\0D0x${used.dev.toString(16)}\0i${used.ino}\0n/t3-absent/index.js\0\n`,
+    );
+    assert.isNull(yield* cleanup.remove(inspected!, Effect.succeed(true)));
+    assert.isTrue(yield* fs.exists(dependencyPath));
+    assert.notEqual(dependencyActivitySnapshot(input.worktreePath), before);
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(testLayer(undefined, undefined, undefined, false, undefined, darwinCapture)),
+  ),
+);
 
 it.effect.each(["tracked-content", "untracked-lock", "unignored"] as const)(
   "retains an install when Git ownership changes after inspection (%s)",
