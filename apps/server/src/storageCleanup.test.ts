@@ -4950,7 +4950,7 @@ describe("storage cleanup reports and local file policies", () => {
           undefined,
           undefined,
           undefined,
-          Duration.hours(1),
+          yield* StorageCleanup.FirstAutomaticSweepDelay,
         );
         fixture.setThreads([
           shell({

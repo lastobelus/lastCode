@@ -69,13 +69,21 @@ const backgroundGitProcesses = Semaphore.makeUnsafe(2);
 const WORKTREE_REMOVE_TIMEOUT_MS = Duration.toMillis(Duration.minutes(5));
 const DEFAULT_MAX_OUTPUT_BYTES = 1_000_000;
 
-const OPTIONS_WITH_VALUES = new Set(["-c", "-C", "--git-dir", "--work-tree", "--namespace"]);
+const OPTIONS_WITH_VALUES = new Set([
+  "-c",
+  "-C",
+  "--config-env",
+  "--git-dir",
+  "--work-tree",
+  "--namespace",
+]);
 
 const gitSubcommand = (args: ReadonlyArray<string>): string | null => {
   for (let index = 0; index < args.length; index++) {
     const arg = args[index]!;
     if (OPTIONS_WITH_VALUES.has(arg)) index++;
-    else if (!arg.startsWith("-")) return arg;
+    // Anything not shaped like a subcommand may be an option value, so never record it.
+    else if (!arg.startsWith("-")) return /^[a-z][a-z0-9-]*$/.test(arg) ? arg : null;
   }
   return null;
 };
