@@ -635,10 +635,6 @@ export const ClientSettingsSchema = Schema.Struct({
   threadDetailsItems: Schema.Record(Schema.String, Schema.Boolean).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
-  // Opt-in for the removed legacy sidebar. Still read so those users land in
-  // the boring sidebar; the boring sidebar toggle clears it.
-  legacySidebarEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
-  // LastCode overrides either upstream sidebar without changing the fallback preference.
   lastcodeSidebarEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   sidebarWorkingShelfEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   lastcodeSidebarFamilyStatusSubheaders: Schema.Boolean.pipe(
@@ -2177,7 +2173,6 @@ export const ClientSettingsPatch = Schema.Struct({
   hoverCurrentWorkDetails: Schema.optionalKey(Schema.Boolean),
   lastcodeStatusIcons: Schema.optionalKey(LastCodeStatusIcons),
   legacySidebarThreadGroupingStyle: Schema.optionalKey(LegacySidebarThreadGroupingStyle),
-  legacySidebarEnabled: Schema.optionalKey(Schema.Boolean),
   lastcodeSidebarEnabled: Schema.optionalKey(Schema.Boolean),
   sidebarWorkingShelfEnabled: Schema.optionalKey(Schema.Boolean),
   legacySidebarScale: Schema.optionalKey(LegacySidebarScale),

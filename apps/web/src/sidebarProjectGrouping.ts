@@ -143,7 +143,7 @@ interface SidebarProjectGroupingInput {
 function buildSidebarProjectGroups(
   input: SidebarProjectGroupingInput,
 ): ReadonlyArray<ProjectGroup<Project>> {
-  // The legacy sidebar supplies roots to build its persistent "No project" row.
+  // The LastCode sidebar supplies roots to build its persistent "No project" row.
   // An explicit scratch-grouping choice still controls filter/settings callers.
   if (
     input.groupScratchProjects !== undefined ||

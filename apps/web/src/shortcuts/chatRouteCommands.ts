@@ -124,7 +124,7 @@ export function installChatRouteCommands(router: AnyRouter): () => void {
         void scratch.startScratchThread(environmentId);
       },
       "chat.new": (event) => {
-        // Pre-hydration settings are the defaults, where the legacy sidebar is off.
+        // Pre-hydration settings are the defaults, where the LastCode sidebar is off.
         const settings = getClientSettings();
         const sidebarMode = resolveSidebarMode(
           settings,

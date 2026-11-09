@@ -1418,12 +1418,6 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["navigation project tree override upstream legacy inbox"],
   },
   {
-    id: "legacy-sidebar",
-    title: "Sidebar (legacy)",
-    to: "/settings/lastcode",
-    searchTerms: ["navigation project tree upstream legacy inbox"],
-  },
-  {
     id: "scale-legacy-sidebar",
     title: "Scale LastCode sidebar",
     searchTerms: ["scale legacy sidebar zoom compact rows"],

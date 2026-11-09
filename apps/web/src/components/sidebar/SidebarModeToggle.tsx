@@ -2,7 +2,6 @@ import { ListTreeIcon } from "lucide-react";
 
 import {
   useClientSettingsHydrated,
-  useClientSetting,
   useSidebarMode,
   toggleSidebarMode,
 } from "../../hooks/useSettings";
@@ -12,16 +11,14 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 export function SidebarModeToggle({ onBackdrop = false }: { onBackdrop?: boolean }) {
   const sidebarMode = useSidebarMode();
   const hydrated = useClientSettingsHydrated();
-  const lastcodeEnabled = useClientSetting("lastcodeSidebarEnabled");
-  const label = lastcodeEnabled ? "LastCode" : "Legacy";
-  const active = sidebarMode === (lastcodeEnabled ? "lastcode" : "legacy");
+  const active = sidebarMode === "lastcode";
 
   return (
     <Tooltip>
       <TooltipTrigger
         render={
           <Button
-            aria-label={`${label} sidebar`}
+            aria-label="LastCode sidebar"
             aria-pressed={active}
             disabled={!hydrated}
             size="titlebar-icon"
@@ -42,7 +39,7 @@ export function SidebarModeToggle({ onBackdrop = false }: { onBackdrop?: boolean
           </Button>
         }
       />
-      <TooltipPopup side="bottom">{`Switch to ${active ? "v2" : label} sidebar`}</TooltipPopup>
+      <TooltipPopup side="bottom">{`Switch to ${active ? "v2" : "LastCode"} sidebar`}</TooltipPopup>
     </Tooltip>
   );
 }
