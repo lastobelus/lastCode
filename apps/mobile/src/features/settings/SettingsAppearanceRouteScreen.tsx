@@ -1,6 +1,10 @@
 import { Platform } from "react-native";
 import { AndroidNavigationAppearanceSection } from "./appearance/sections/AndroidNavigationAppearanceSection";
+import { useAtomSet, useAtomValue } from "@effect/atom-react";
+import { AsyncResult } from "effect/reactivity";
+
 import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
+import { mobilePreferencesAtom, updateMobilePreferencesAtom } from "../../state/preferences";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { SettingsScreen } from "./components/SettingsScreen";
@@ -9,9 +13,17 @@ import { TerminalAppearanceSection } from "./appearance/sections/TerminalAppeara
 import { TextAppearanceSection } from "./appearance/sections/TextAppearanceSection";
 import { ThemeAppearanceSection } from "./appearance/sections/ThemeAppearanceSection";
 import { ToolCallsAppearanceSection } from "./appearance/sections/ToolCallsAppearanceSection";
+import { SettingsSection } from "./components/SettingsSection";
+import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 
 export function SettingsAppearanceRouteScreen() {
   const insets = useSafeAreaInsets();
+  const preferencesResult = useAtomValue(mobilePreferencesAtom);
+  const savePreferences = useAtomSet(updateMobilePreferencesAtom);
+  const preferencesReady = AsyncResult.isSuccess(preferencesResult) && !preferencesResult.waiting;
+  const roundedProjectIcons =
+    AsyncResult.isSuccess(preferencesResult) &&
+    preferencesResult.value.roundedProjectIcons === true;
 
   return (
     <SettingsScreen title="Appearance">
@@ -26,6 +38,16 @@ export function SettingsAppearanceRouteScreen() {
       >
         <ThemeAppearanceSection />
         {Platform.OS === "android" ? <AndroidNavigationAppearanceSection /> : null}
+        <SettingsSection title="Project icons">
+          <SettingsSwitchRow
+            disabled={!preferencesReady}
+            icon="folder"
+            label="Rounded project icons"
+            subtitle="Round favicon corners instead of preserving each icon's original shape."
+            value={roundedProjectIcons}
+            onValueChange={(value) => savePreferences({ roundedProjectIcons: value })}
+          />
+        </SettingsSection>
         <TextAppearanceSection />
         <TerminalAppearanceSection />
         <CodeAppearanceSection />

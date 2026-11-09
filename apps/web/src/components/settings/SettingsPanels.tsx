@@ -748,6 +748,29 @@ function AutoSettleDaysInput({
   );
 }
 
+export function LegacyFeaturesSection() {
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+
+  return (
+    <SettingsSection id="legacy-features" title="Legacy">
+      <SettingsRow
+        {...searchableSetting("legacy-sidebar")}
+        description="Choose the upstream per-project thread tree instead of the v2 inbox. Applies when LastCode sidebar is off."
+        control={
+          <Switch
+            checked={settings.legacySidebarEnabled}
+            onCheckedChange={(checked) =>
+              updateSettings({ legacySidebarEnabled: Boolean(checked) })
+            }
+            aria-label="Sidebar (legacy)"
+          />
+        }
+      />
+    </SettingsSection>
+  );
+}
+
 export function GeneralSettingsPanel() {
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
