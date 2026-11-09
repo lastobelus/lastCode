@@ -1,3 +1,4 @@
+import { useOpenBrowserThreadLink } from "./useOpenBrowserThreadLink";
 import {
   createPreviewFramePainter,
   createPreviewStreamClient,
@@ -179,6 +180,8 @@ export function ServerBrowserSurface(props: {
     document.addEventListener("visibilitychange", changed);
     return () => document.removeEventListener("visibilitychange", changed);
   }, []);
+  const openThreadLink = useOpenBrowserThreadLink();
+  const threadLinkOpened = useEffectEvent((href: string) => openThreadLink(href, environmentId));
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const keySentRef = useRef(false);
@@ -387,6 +390,7 @@ export function ServerBrowserSurface(props: {
     const client = createPreviewStreamClient(
       { access, threadId, tabId, maxWidth: cap.width, maxHeight: cap.height },
       {
+        onThreadLink: threadLinkOpened,
         onFrame: (jpeg) => {
           unauthorizedRef.current = 0;
           painter.paint(jpeg);

@@ -119,7 +119,8 @@ function EnvironmentRelay({ environmentId }: { environmentId: EnvironmentId }) {
   useEffect(() => {
     const bridge = window.desktopBridge!.preview!;
     const unsubscribe = bridge.onBrowserEvent((input) => {
-      if (input.desktopHostId === desktopHostId) void sendEvent({ environmentId, input });
+      if (input.event.type !== "threadLink" && input.desktopHostId === desktopHostId)
+        void sendEvent({ environmentId, input });
     });
     return () => {
       unsubscribe();

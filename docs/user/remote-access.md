@@ -263,6 +263,8 @@ picker, and a finished download is offered for you to save. Popups such as
 sign-in windows open as their own tabs. Downloads stay on the host until the
 tab closes. Audio does not play on your device.
 
+Click a thread link to open that thread in the app without leaving the Browser page.
+
 On a phone, tap the floating preview's corner dot to show its controls, then
 **Pop into separate window** to keep watching in picture-in-picture over other
 apps.

@@ -67,6 +67,25 @@ describe("preview stream control", () => {
     dialog: null,
   };
 
+  it("forwards only recognized thread links from the authenticated Browser stream", () => {
+    const onThreadLink = vi.fn();
+    const client = createPreviewStreamClient(target, {
+      onFrame: vi.fn(),
+      onViewport: vi.fn(),
+      onConnectedChange: vi.fn(),
+      onUnauthorized: vi.fn(),
+      onThreadLink,
+    });
+    for (const href of ["https://app.t3.codes/settings", "t3-thread://v2/environment/%ZZ", 42])
+      FakeSocket.current.message(JSON.stringify({ type: "threadLink", href }));
+    expect(onThreadLink).not.toHaveBeenCalled();
+    FakeSocket.current.message(
+      JSON.stringify({ type: "threadLink", href: "t3-thread://v2/linked/thread" }),
+    );
+    expect(onThreadLink).toHaveBeenCalledExactlyOnceWith("t3-thread://v2/linked/thread");
+    client.stop();
+  });
+
   it("does not grant control from malformed dialog metadata", () => {
     const { client, socket, onControl } = connect();
     socket.message(

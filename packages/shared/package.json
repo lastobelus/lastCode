@@ -303,6 +303,12 @@
       "types": "./src/threadLinks.ts",
       "import": "./src/threadLinks.ts"
     },
+    "./server/threadLinkGesture": {
+      "browser": null,
+      "react-native": null,
+      "types": "./src/server/threadLinkGesture.ts",
+      "import": "./src/server/threadLinkGesture.ts"
+    },
     "./composerContextReferences": {
       "types": "./src/composerContextReferences.ts",
       "import": "./src/composerContextReferences.ts"

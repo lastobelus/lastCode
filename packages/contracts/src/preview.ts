@@ -510,3 +510,6 @@ export const PreviewError = Schema.Union([
   PreviewProfileHostError,
 ]);
 export type PreviewError = typeof PreviewError.Type;
+
+export const PreviewThreadLink = Schema.Struct({ href: TrimmedNonEmptyString });
+export type PreviewThreadLink = typeof PreviewThreadLink.Type;

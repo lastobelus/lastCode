@@ -1,3 +1,4 @@
+import { parseThreadLinkHref } from "@t3tools/shared/threadLinks";
 // @effect-diagnostics globalTimers:off globalFetch:off - This browser and WebView transport runs without an Effect runtime.
 import { type DeviceHubAccess, withDeviceHubQuery } from "../device/hubAccess.ts";
 import {
@@ -192,6 +193,7 @@ export interface PreviewStreamEvents {
   readonly onControl?: (control: PreviewStreamControl) => void;
   readonly onClipboard?: (text: string) => void;
   readonly onDownload?: (download: PreviewStreamDownload) => void;
+  readonly onThreadLink?: (href: string) => void;
   readonly onPopup?: (tabId: string) => void;
   readonly onFileChooser?: (chooser: PreviewStreamFileChooser | null) => void;
   readonly onConnectedChange: (connected: boolean) => void;
@@ -280,6 +282,7 @@ export function createPreviewStreamClient(
         phase,
         sequence,
         tabId,
+        href,
       } = message as Record<string, unknown>;
       if (
         type === "fileChooser" &&
@@ -306,6 +309,8 @@ export function createPreviewStreamClient(
         typeof sequence === "number"
       ) {
         events.onPointer?.({ phase, x, y, sequence });
+      } else if (type === "threadLink" && typeof href === "string" && parseThreadLinkHref(href)) {
+        events.onThreadLink?.(href);
       } else if (type === "popup" && typeof tabId === "string") {
         events.onPopup?.(tabId);
       } else if (type === "clipboard" && typeof text === "string") {

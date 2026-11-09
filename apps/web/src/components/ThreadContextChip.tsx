@@ -1,6 +1,8 @@
+import type { AppRouter } from "~/router";
+import { safeThreadRouteParams } from "~/threadRoutes";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { AuthOrchestrationReadScope, type ThreadContextRecord } from "@t3tools/contracts";
-import { Link } from "@tanstack/react-router";
+import { Link, useRouter } from "@tanstack/react-router";
 import { MessagesSquareIcon } from "lucide-react";
 import { useThreadSearch } from "~/state/queries";
 import { useEnvironmentPresentation } from "~/state/presentation";
@@ -19,6 +21,7 @@ export function ThreadContextChip(props: {
   unavailableReason?: ThreadReferenceUnavailableReason | null;
 }) {
   const { environmentId, threadId } = props.record;
+  const params = safeThreadRouteParams(useRouter<AppRouter>(), { environmentId, threadId });
   const shell = useThreadShell({ environmentId, threadId });
   const project = useProject(shell ? scopeProjectRef(environmentId, shell.projectId) : null);
   const { presentation } = useEnvironmentPresentation(environmentId);
@@ -46,10 +49,10 @@ export function ThreadContextChip(props: {
         render={
           <ContextChip
             kind="thread"
-            {...(props.unreadable || props.unavailableReason || confirmedMissing
+            {...(!params || props.unreadable || props.unavailableReason || confirmedMissing
               ? { state: "invalid" as const }
               : {})}
-            render={<Link to="/$environmentId/$threadId" params={{ environmentId, threadId }} />}
+            render={params ? <Link to="/$environmentId/$threadId" params={params} /> : <span />}
             aria-label={`Thread, ${title}`}
             data-markdown-copy={props.copyMarkdown}
             className="no-underline"
