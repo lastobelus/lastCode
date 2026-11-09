@@ -307,8 +307,8 @@ after it. Only step 3's final selection leads to `run-now`.
    head the selection prints as `<selected-head>`, not the commit you passed in.
    Aim to start Full CI within about five minutes of replay completion; measure
    preparation and the gate if it takes longer.
-4. Run the required integrated client QA alongside Full CI, using `test-t3-app`
-   or `test-t3-mobile` as applicable. Additional investigation and broader focused
+4. Run the required integrated client QA alongside Full CI, as
+   [Verifying](../../AGENTS.md#verifying) describes. Additional investigation and broader focused
    checks also belong alongside Full CI. A successful CI result does not prove
    client QA passed. If either finds a defect, follow the repair procedure below.
 
