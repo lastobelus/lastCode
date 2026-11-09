@@ -929,7 +929,7 @@ const make = Effect.gen(function* () {
       ],
       maxOutputBytes: 64 * 1024,
     });
-    if (status.stdoutTruncated) return "local changes exceed the inspection limit";
+    if (status.stdoutTruncated) return "local or ignored files exceed the inspection limit";
     const records = status.stdout.split("\0").filter(Boolean);
     const ignoredFiles: string[] = [];
     let count = 0;
