@@ -134,7 +134,9 @@ export const triageCommand = Command.make("triage", {
         entry: {
           kind: "cli",
           cliVersion: packageJson.version,
-          launchedAs: (yield* resolveHostCliCommand("triage", ["--base-dir", baseDir])).command,
+          launchedAs: (yield* resolveHostCliCommand("triage", ["--base-dir", baseDir], {
+            preferLauncher: true,
+          })).command,
         },
         server: yield* describeServerProcess(paths.serverRuntimeStatePath),
       });
