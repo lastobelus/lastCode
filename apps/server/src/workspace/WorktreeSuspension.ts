@@ -51,6 +51,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import * as ManagedFolders from "../project/ManagedProjectFolders.ts";
 import * as CommandReceipts from "../orchestration-v2/CommandReceiptStore.ts";
 import * as WorkspaceLifecycle from "./WorkspaceLifecycle.ts";
 import * as ProviderSessions from "../orchestration-v2/ProviderSessionManager.ts";
@@ -167,6 +168,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
   const receipts = yield* CommandReceipts.CommandReceiptStoreV2;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const projects = yield* ProjectStore.ProjectStoreV2;
+  const managedFolders = yield* ManagedFolders.ManagedProjectFolders;
   const orchestrator = yield* Orchestrator.OrchestratorV2;
   const sessions = yield* ProviderSessions.ProviderSessionManagerV2;
   const cleanup = yield* Cleanup.WorktreeCleanupService;
@@ -256,6 +258,12 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
     generation: thread.worktreeSuspension?.generation ?? null,
   });
   const configuredScratchRoot = path.resolve(config.baseDir, "scratch");
+  const currentScratchProjectId = Effect.gen(function* () {
+    const project = yield* projects.findActiveByWorkspaceRoot(configuredScratchRoot);
+    return Option.isSome(project)
+      ? project.value.projectId
+      : (yield* managedFolders.ensureScratchProject).projectId;
+  });
   const isScratchWorkspaceOwner = Effect.fnUntraced(function* (
     thread: Pick<OrchestrationV2ThreadShell, "projectId" | "worktreePath">,
   ) {
@@ -377,6 +385,8 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
     owners: Parameters<WorktreeSuspension["Service"]["suspendScratch"]>[0]["owners"],
   ) {
     yield* verifyScratchPath(sourcePath);
+    if (yield* fs.exists(path.join(sourcePath, ".git")))
+      return yield* failure("protected", "Only managed linked worktrees can be suspended.");
     const template = owners[0];
     if (
       template === undefined ||
@@ -2490,7 +2500,10 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
             input.projectId ??
             record.snapshots?.find((entry) => entry.snapshotId === input.snapshotId)?.owners[0]
               ?.projectId;
-          if (projectId === undefined || record.recoveryThread === undefined)
+          if (
+            (projectId === undefined && record.kind !== "scratch") ||
+            record.recoveryThread === undefined
+          )
             return yield* failure(
               "protected",
               "Choose a project in the original repository for this recovery.",
@@ -2509,6 +2522,10 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
               "Historical recovery needs a separate managed destination.",
             );
           yield* verifyDestination(record, destinationPath);
+          const recoveryProjectId =
+            record.kind === "scratch" && input.projectId === undefined
+              ? yield* currentScratchProjectId
+              : projectId!;
           const pending: CheckoutAuthority = {
             ...record,
             operation: {
@@ -2518,7 +2535,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
               manual: true,
               acceptedAt: yield* now,
               destinationPath,
-              recoveryProjectId: projectId,
+              recoveryProjectId,
               recoveryThreadId: ThreadId.make(`suspension:${id}`),
               ...(branch === undefined ? {} : { branch }),
             },
@@ -3357,17 +3374,17 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
               return yield* new WorkspaceUnavailableError({ reason: "snapshot-unavailable" });
             }
             if (thread !== null && matchesPath && positiveUse(input.purpose)) {
+              const scratchOwner = yield* isScratchWorkspaceOwner(thread);
               if (
                 (yield* fs.exists(binding.worktreePath)) &&
-                (path.dirname(binding.worktreePath) === configuredScratchRoot ||
-                  (yield* isManaged(binding.worktreePath)))
+                (scratchOwner || (yield* isManaged(binding.worktreePath)))
               ) {
                 const policy = resolveWorktreeSuspension(
                   yield* settings.getSettings,
                   thread.projectId,
                 );
                 if (
-                  (yield* isScratchWorkspaceOwner(thread)) ||
+                  scratchOwner ||
                   policy.mode === "off" ||
                   !Object.values(policy.scopes).some(Boolean)
                 ) {

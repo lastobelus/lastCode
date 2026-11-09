@@ -43,6 +43,7 @@ import * as ServerConfig from "../config.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import * as ManagedFolders from "../project/ManagedProjectFolders.ts";
 import * as CommandReceipts from "../orchestration-v2/CommandReceiptStore.ts";
 import * as ProviderSessions from "../orchestration-v2/ProviderSessionManager.ts";
 import * as Cleanup from "../orchestration-v2/WorktreeCleanupService.ts";
@@ -391,7 +392,30 @@ const harness = (
                 : [],
             ),
           }),
+          Layer.mock(ManagedFolders.ManagedProjectFolders)({
+            namedProjectsRoot: NodePath.join(fixture.root, "projects"),
+            ensureScratchProject: Effect.sync(() => {
+              const existing = projects.find(
+                (entry) => entry.deletedAt === null && entry.workspaceRoot === fixture.repository,
+              );
+              if (existing !== undefined) return { projectId: existing.projectId };
+              const recovered = {
+                ...project,
+                projectId: ProjectId.make("fixture:scratch-recovered"),
+              };
+              projects.push(recovered);
+              return { projectId: recovered.projectId };
+            }),
+          }),
           Layer.mock(ProjectStore.ProjectStoreV2)({
+            findActiveByWorkspaceRoot: (root) =>
+              Effect.sync(() =>
+                Option.fromUndefinedOr(
+                  projects.find(
+                    (entry) => entry.deletedAt === null && entry.workspaceRoot === root,
+                  ),
+                ),
+              ),
             get: (id) =>
               Effect.sync(() =>
                 Option.fromUndefinedOr(projects.find((entry) => entry.projectId === id)),
@@ -538,6 +562,10 @@ const harness = (
       },
       setSettings: (next: SettingsValue) => {
         settings = next;
+      },
+      removeProject: (id: ProjectId) => {
+        const index = projects.findIndex((entry) => entry.projectId === id);
+        if (index >= 0) projects.splice(index, 1);
       },
       registerProjectRoot: (workspaceRoot: string) => {
         projects.push({
@@ -778,7 +806,9 @@ it.live("saves scratch synchronously and restores on use without Git", () =>
       expect(
         yield* h.acquisition.acquire({ path: f.workspace, purpose: "editor", threadId: firstId }),
       ).toEqual({ path: f.workspace, branch: null, restored: false });
-      expect((yield* h.registry.list)[0]).toMatchObject({ detached: true, owners: [] });
+      const records = yield* h.registry.list;
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({ detached: true, owners: [] });
       expect(h.gitRequests).toEqual([]);
     }),
   ),
@@ -806,7 +836,9 @@ it.live.each(["branch", "repository", "restored branch"] as const)(
           expect(
             yield* h.acquisition.acquire({ path: f.workspace, purpose: "editor", threadId }),
           ).toEqual({ path: f.workspace, branch: null, restored: false });
-        expect((yield* h.registry.list)[0]).toMatchObject({ detached: true, owners: [] });
+        const records = yield* h.registry.list;
+        expect(records).toHaveLength(1);
+        expect(records[0]).toMatchObject({ detached: true, owners: [] });
         if (change === "restored branch")
           expect((yield* h.service.list({}, { allowOrphans: true })).entries).toMatchObject([
             { kind: "scratch", current: false, orphaned: true },
@@ -845,51 +877,63 @@ it.live("keeps scratch recovery bound when branch metadata changes while suspend
   ),
 );
 
-it.live("retains deleted scratch owners in receipts and creates a new recovery thread", () =>
-  realScratch((f) =>
-    Effect.gen(function* () {
-      const h = yield* harness(f, { scratch: true });
-      yield* h.acquisition.acquire({ path: f.workspace, purpose: "editor" });
-      for (const [id, thread] of h.threads) h.threads.set(id, { ...thread, deletedAt: at });
-      yield* h.service.suspendScratch({
-        path: f.workspace,
-        owners: [...h.threads.values()],
-        recheck: () => Effect.succeed(null),
-      });
-      const saved = (yield* h.registry.list)[0]!;
-      expect(saved.owners).toEqual([]);
-      expect(saved.snapshots![0]!.owners.map((owner) => owner.threadId)).toEqual([
-        firstId,
-        secondId,
-      ]);
-      expect((yield* h.service.list({})).entries).toEqual([]);
-      const entry = (yield* h.service.list({}, { allowOrphans: true })).entries[0]!;
-      expect(entry).toMatchObject({ kind: "scratch", head: null, branch: null, orphaned: true });
-      expect(
-        (yield* h.service
-          .restore({ checkoutId: saved.checkoutId, snapshotId: entry.snapshotId })
-          .pipe(Effect.flip)).reason,
-      ).toBe("protected");
-      yield* h.service.restore(
-        { checkoutId: saved.checkoutId, snapshotId: entry.snapshotId },
-        { allowOrphans: true },
-      );
-      const active = yield* h.awaitRecord(
-        (record) => record.sourceCheckoutId === saved.checkoutId && record.operation === undefined,
-      );
-      const recovered = h.threads.get(active.owners[0]!.threadId)!;
-      expect(recovered.branch).toBeNull();
-      expect(NodePath.dirname(recovered.worktreePath!)).toBe(f.repository);
-      expect(recovered.id).not.toBe(firstId);
-      expect(h.threads.get(firstId)!.deletedAt).not.toBeNull();
-      expect(
-        yield* Effect.promise(() =>
-          NodeFSP.readFile(NodePath.join(active.path, "draft.txt"), "utf8"),
-        ),
-      ).toBe("scratch draft\n");
-      expect(h.gitRequests).toEqual([]);
-    }),
-  ),
+it.live.each(["retained", "removed", "recreated"] as const)(
+  "retains deleted scratch owners in receipts and recovers after project %s",
+  (projectState) =>
+    realScratch((f) =>
+      Effect.gen(function* () {
+        const h = yield* harness(f, { scratch: true });
+        yield* h.acquisition.acquire({ path: f.workspace, purpose: "editor" });
+        for (const [id, thread] of h.threads) h.threads.set(id, { ...thread, deletedAt: at });
+        yield* h.service.suspendScratch({
+          path: f.workspace,
+          owners: [...h.threads.values()],
+          recheck: () => Effect.succeed(null),
+        });
+        const saved = (yield* h.registry.list)[0]!;
+        expect(saved.owners).toEqual([]);
+        expect(saved.snapshots![0]!.owners.map((owner) => owner.threadId)).toEqual([
+          firstId,
+          secondId,
+        ]);
+        expect((yield* h.service.list({})).entries).toEqual([]);
+        const entry = (yield* h.service.list({}, { allowOrphans: true })).entries[0]!;
+        expect(entry).toMatchObject({ kind: "scratch", head: null, branch: null, orphaned: true });
+        if (projectState !== "retained") h.removeProject(projectId);
+        if (projectState === "recreated") h.registerProjectRoot(f.repository);
+        expect(
+          (yield* h.service
+            .restore({ checkoutId: saved.checkoutId, snapshotId: entry.snapshotId })
+            .pipe(Effect.flip)).reason,
+        ).toBe("protected");
+        yield* h.service.restore(
+          { checkoutId: saved.checkoutId, snapshotId: entry.snapshotId },
+          { allowOrphans: true },
+        );
+        const active = yield* h.awaitRecord(
+          (record) =>
+            record.sourceCheckoutId === saved.checkoutId && record.operation === undefined,
+        );
+        const recovered = h.threads.get(active.owners[0]!.threadId)!;
+        expect(recovered.projectId).toBe(
+          projectState === "retained"
+            ? projectId
+            : projectState === "recreated"
+              ? ProjectId.make("fixture:registered")
+              : ProjectId.make("fixture:scratch-recovered"),
+        );
+        expect(recovered.branch).toBeNull();
+        expect(NodePath.dirname(recovered.worktreePath!)).toBe(f.repository);
+        expect(recovered.id).not.toBe(firstId);
+        expect(h.threads.get(firstId)!.deletedAt).not.toBeNull();
+        expect(
+          yield* Effect.promise(() =>
+            NodeFSP.readFile(NodePath.join(active.path, "draft.txt"), "utf8"),
+          ),
+        ).toBe("scratch draft\n");
+        expect(h.gitRequests).toEqual([]);
+      }),
+    ),
 );
 
 it.live("preserves an isolated scratch folder when the boundary recheck blocks removal", () =>
@@ -2379,6 +2423,23 @@ it.effect("does not require scratch registration when Git suspension policy is o
       expect(yield* h.registry.unverifiedUse([f.workspace])).not.toBeNull();
     }),
   ),
+);
+
+it.live(
+  "keeps unmanaged acquisition under a scratch-named directory outside scratch admission",
+  () =>
+    realGit((f) =>
+      Effect.gen(function* () {
+        const workspace = NodePath.join(f.root, "scratch", "notes");
+        yield* Effect.promise(() => NodeFSP.mkdir(workspace, { recursive: true }));
+        const h = yield* harness({ ...f, workspace }, { settings: automaticSettings });
+        expect(
+          yield* h.acquisition.acquire({ path: workspace, purpose: "editor", threadId: firstId }),
+        ).toEqual({ path: workspace, branch: null, restored: false });
+        expect(yield* h.registry.list).toEqual([]);
+        expect(h.gitRequests).toEqual([]);
+      }),
+    ),
 );
 
 it.effect("keeps Git acquisition and suspension under a scratch-named managed directory", () =>

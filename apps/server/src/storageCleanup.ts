@@ -3163,6 +3163,8 @@ const make = Effect.gen(function* () {
                 )
               )
                 return "scratch workspace belongs to a thread that is not archived or deleted";
+              if (yield* fs.exists(path.join(physicalPath, ".git")))
+                return "scratch workspace contains Git metadata";
               const unverifiedUse = yield* suspensionRegistry.unverifiedUse([
                 worktreePath,
                 ...owners.map((owner) => owner.recordedPath),
@@ -3284,7 +3286,8 @@ const make = Effect.gen(function* () {
             outcome: "removed",
             reason:
               "Scratch workspace has no Git history, so a copy was saved before removal. Restore it from Saved Workspaces.",
-            bytes: removed.bytes,
+            // Preserved payload size is not a measure of reclaimed disk space.
+            bytes: null,
             files: removed.files,
           });
           return;

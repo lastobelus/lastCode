@@ -67,6 +67,7 @@ import * as Suspension from "./workspace/WorktreeSuspension.ts";
 import * as Acquisition from "./workspace/WorkspaceAcquisition.ts";
 import * as WorkspaceLifecycle from "./workspace/WorkspaceLifecycle.ts";
 import * as CommandReceipts from "./orchestration-v2/CommandReceiptStore.ts";
+import * as ManagedFolders from "./project/ManagedProjectFolders.ts";
 import { withProjectRootLease } from "./workspace/projectRootLease.ts";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -589,6 +590,11 @@ const cleanupFixture = (
           Layer.provideMerge(SuspensionRegistry.layer),
           Layer.provideMerge(Acquisition.layer),
           Layer.provide(WorkspaceLifecycle.layer),
+          Layer.provide(
+            Layer.mock(ManagedFolders.ManagedProjectFolders)({
+              namedProjectsRoot: `${config.baseDir}/projects`,
+            }),
+          ),
           Layer.provide(Layer.mock(CommandReceipts.CommandReceiptStoreV2)({})),
         ),
       ),
@@ -4373,6 +4379,7 @@ describe("scratch workspace cleanup", () => {
             expect.objectContaining({
               path: fixture.scratch,
               outcome: "removed",
+              bytes: null,
               reason:
                 "Scratch workspace has no Git history, so a copy was saved before removal. Restore it from Saved Workspaces.",
             }),
@@ -4411,17 +4418,19 @@ describe("scratch workspace cleanup", () => {
     "outside root",
     "pending work",
     "disabled",
+    "Git metadata",
   ] as const)("keeps scratch contents with %s", (scenario) =>
     runCleanupTest(
       Effect.gen(function* () {
         let processPaths: string[] = [];
-        const fixture = yield* scratchCleanupFixture().pipe(
+        const fixture = yield* scratchCleanupFixture(scenario === "Git metadata").pipe(
           Effect.provideService(
             WorktreeConsumers.ProcessPaths,
             Effect.sync(() => processPaths),
           ),
         );
         let owner = fixture.owner;
+        if (scenario === "Git metadata") yield* fixture.fs.makeDirectory(`${fixture.scratch}/.git`);
         if (scenario === "under the limit") owner = { ...owner, latestUserMessageAt: at(-DAY_MS) };
         if (scenario === "recent archive") owner = { ...owner, archivedAt: at(-DAY_MS) };
         if (scenario === "active")
@@ -4465,6 +4474,8 @@ describe("scratch workspace cleanup", () => {
           expect.objectContaining({ path: retained, outcome: "kept" }),
         );
         expect(report.entries.some((entry) => entry.outcome === "failed")).toBe(false);
+        if (scenario === "Git metadata")
+          expect(yield* fixture.savedWorkspaceRegistry!.list).toEqual([]);
         expect(yield* fixture.fs.readFileString(`${retained}/notes.txt`)).toBe(
           "keep these notes\n",
         );
