@@ -768,7 +768,7 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(ServerSecretStore.ServerSecretStore)({}),
   Layer.mock(WorkspacePaths.WorkspacePaths)({}),
   Layer.mock(TraceDiagnostics.TraceDiagnostics)({}),
-  Layer.mock(TriageService.TriageService)({}),
+  Layer.mock(TriageService.TriageService)({ getCliCommand: () => Effect.succeedNone }),
   Layer.mock(ProjectFaviconResolver.ProjectFaviconResolver)({}),
   Layer.mock(ProjectEnrichment.ProjectEnrichmentService)({}),
   Layer.mock(AcpRegistryRuntimeCoordinator.AcpRegistryRuntimeCoordinator)({}),
