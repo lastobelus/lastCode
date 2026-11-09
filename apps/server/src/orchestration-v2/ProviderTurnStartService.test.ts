@@ -315,6 +315,7 @@ it.each([
 
 function makeLocalCommandHarness(input: {
   readonly text: string;
+  readonly branch?: string;
   readonly worktreePath?: string;
   readonly worktreesDir?: string;
   readonly workspaceRoot?: string;
@@ -435,7 +436,7 @@ function makeLocalCommandHarness(input: {
       runtimeMode: "full-access",
       interactionMode: "default",
       activeProviderThreadId: providerThreadId,
-      branch: input.worktreePath === undefined ? null : "feature/restore",
+      branch: input.worktreePath === undefined ? null : (input.branch ?? "feature/restore"),
       worktreePath: input.worktreePath ?? null,
       lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
       forkedFrom: null,
@@ -1284,8 +1285,8 @@ effectIt.effect(
         driver
           .execute({ operation: "test.worktreeRecovery", cwd, args })
           .pipe(Effect.map((result) => result.stdout.trim()));
-      const branchConfig = (key: string) =>
-        git(workspaceRoot, ["config", "--get", `branch.feature/restore.${key}`]).pipe(
+      const branchConfig = (key: string, branch = "feature/restore") =>
+        git(workspaceRoot, ["config", "--get", `branch.${branch}.${key}`]).pipe(
           Effect.orElseSucceed(() => ""),
         );
       yield* git(root, ["init", "--bare", "-b", "main", originRoot]);
@@ -1318,6 +1319,8 @@ effectIt.effect(
 
       const expectedTips = {
         retained: { tip: threadTip, file: "thread.txt", upstream: null, base: "" },
+        renamed: { tip: threadTip, file: "thread.txt", upstream: null, base: "" },
+        recovery: { tip: threadTip, file: "thread.txt", upstream: null, base: "" },
         deleted: { tip: projectTip, file: "project.txt", upstream: null, base: "project-current" },
         pushed: {
           tip: threadTip,
@@ -1351,13 +1354,22 @@ effectIt.effect(
         if (scenario === "detached-no-remote") {
           yield* git(workspaceRoot, ["remote", "remove", "origin"]);
         }
+        const restoreBranch =
+          scenario === "renamed"
+            ? "renamed"
+            : scenario === "recovery"
+              ? `lastcode/recovery/${threadTip}`
+              : "feature/restore";
+        if (scenario === "renamed" || scenario === "recovery")
+          yield* git(worktreePath, ["branch", "-m", restoreBranch]);
         yield* fileSystem.remove(worktreePath, { recursive: true });
-        if (scenario !== "retained") {
+        if (scenario !== "retained" && scenario !== "renamed" && scenario !== "recovery") {
           yield* git(workspaceRoot, ["worktree", "prune"]);
           yield* git(workspaceRoot, ["branch", "-D", "feature/restore"]);
         }
         const harness = makeLocalCommandHarness({
           text: "Continue",
+          branch: restoreBranch,
           workspaceRoot,
           worktreePath,
           worktreesDir,
@@ -1368,14 +1380,14 @@ effectIt.effect(
         const open = harness.open.getMockImplementation()!;
         harness.open.mockImplementation((input) =>
           Effect.gen(function* () {
-            expect(yield* git(worktreePath, ["branch", "--show-current"])).toBe("feature/restore");
+            expect(yield* git(worktreePath, ["branch", "--show-current"])).toBe(restoreBranch);
             expect(yield* git(worktreePath, ["rev-parse", "HEAD"])).toBe(expected.tip);
             for (const file of ["thread.txt", "project.txt"]) {
               expect(yield* fileSystem.exists(path.join(worktreePath, file))).toBe(
                 file === expected.file,
               );
             }
-            expect(yield* branchConfig("merge")).toBe(
+            expect(yield* branchConfig("merge", restoreBranch)).toBe(
               expected.upstream === null ? "" : "refs/heads/feature/restore",
             );
             if (expected.upstream !== null) {
@@ -1383,7 +1395,7 @@ effectIt.effect(
                 yield* git(worktreePath, ["rev-parse", "--symbolic-full-name", "@{upstream}"]),
               ).toBe(expected.upstream);
             }
-            expect(yield* branchConfig("t3-merge-base")).toBe(expected.base);
+            expect(yield* branchConfig("t3-merge-base", restoreBranch)).toBe(expected.base);
             if (expected.file !== null) {
               expect(yield* fileSystem.readFileString(path.join(worktreePath, expected.file))).toBe(
                 expected.file === "thread.txt" ? "thread work" : "new project code",
@@ -1402,6 +1414,8 @@ effectIt.effect(
           }),
         );
         expect(harness.projection().runs.at(-1)?.status).toBe("running");
+        if (scenario === "renamed" || scenario === "recovery")
+          yield* git(worktreePath, ["branch", "-m", "feature/restore"]);
       }
     }).pipe(Effect.scoped, Effect.provide(layerRealGit)),
 );
