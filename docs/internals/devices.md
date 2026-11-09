@@ -54,8 +54,8 @@ thread settles, archives or is deleted and no other session holds it, after 30
 minutes without device commands, and when the server stops. Every request
 through the agent-device proxy, plus screenshots and Device panel actions,
 counts as a command. Devices the user booted, or that were running when an
-agent opened them, are never recorded, and a device seen stopped is forgotten
-so a later user boot of it is safe. The record is in memory: a server that
+agent opened them, are never recorded. A device seen stopped is forgotten, and
+turning off device support forgets them all, so a later user boot is safe. The record is in memory: a server that
 stops cleanly shuts down what it booted, and one that crashes leaves those
 simulators running.
 

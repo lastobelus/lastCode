@@ -2416,32 +2416,48 @@ describe("agent-booted device shutdown", () => {
   const bootingHost = (id: string, initial: Record<string, boolean>) => {
     const booted = new Map(Object.entries(initial));
     const shutdowns: Array<string> = [];
+    const faults = { listingAfterBoot: false, listing: false, shutdowns: 0 };
+    const fault = new DeviceOperationError({
+      operation: "test",
+      reason: "request_failed",
+      cause: undefined,
+    });
     const ready: DeviceHost.DeviceHostReady = {
       nodePath: process.execPath,
       hub: { origin: "http://device.test" },
       devices: {
-        list: Effect.sync(() => ({
-          devices: [...booted].map(([deviceId, on]) => ({
-            id: deviceId,
-            name: deviceId,
-            platform: "ios" as const,
-            version: "test",
-            booted: on,
-            physical: false,
-          })),
-          detail: undefined,
-        })),
+        list: Effect.suspend(() =>
+          faults.listing
+            ? Effect.fail(fault)
+            : Effect.succeed({
+                devices: [...booted].map(([deviceId, on]) => ({
+                  id: deviceId,
+                  name: deviceId,
+                  platform: "ios" as const,
+                  version: "test",
+                  booted: on,
+                  physical: false,
+                })),
+                detail: undefined,
+              }),
+        ),
         boot: (device) =>
           Effect.sync(() => {
             booted.set(device.id, true);
+            faults.listing = faults.listingAfterBoot;
             return device.id;
           }),
         attach: () => Effect.void,
         shutdown: (device) =>
-          Effect.sync(() => {
-            booted.set(device.id, false);
-            shutdowns.push(device.id);
-          }),
+          faults.shutdowns > 0
+            ? Effect.suspend(() => {
+                faults.shutdowns--;
+                return Effect.fail(fault);
+              })
+            : Effect.sync(() => {
+                booted.set(device.id, false);
+                shutdowns.push(device.id);
+              }),
         screenshot: () => Effect.succeed(new Uint8Array()),
       },
       run: () => Effect.succeed({ code: 0, stdout: "", stderr: "" }),
@@ -2465,7 +2481,7 @@ describe("agent-booted device shutdown", () => {
       stopAgent: Effect.void,
       stop: Effect.void,
     };
-    return { host, booted, shutdowns };
+    return { host, booted, shutdowns, faults };
   };
   const withService = <A, E>(
     test: (fixture: {
@@ -2585,6 +2601,49 @@ describe("agent-booted device shutdown", () => {
         yield* TestClock.adjust("1 hour");
         yield* service.shutdownIdleDevices;
         expect(local.shutdowns).toEqual([]);
+      }),
+    ),
+  );
+
+  it.effect("keeps no claim on devices after device support is turned off", () =>
+    withService(({ service, local, open }) =>
+      Effect.gen(function* () {
+        yield* open("AGENT-SIM");
+        yield* service.configure({ enabled: false });
+        // The user stops and restarts it while support is off.
+        yield* service.configure({ enabled: true });
+        yield* service.list;
+        yield* TestClock.adjust("1 hour");
+        yield* service.shutdownIdleDevices;
+        yield* service.shutdownAgentBootedDevices;
+        expect(local.shutdowns).toEqual([]);
+      }),
+    ),
+  );
+
+  it.effect("retries a failed shutdown on the next sweep", () =>
+    withService(({ service, local, open }) =>
+      Effect.gen(function* () {
+        yield* open("AGENT-SIM");
+        local.faults.shutdowns = 1;
+        yield* TestClock.adjust("30 minutes");
+        yield* service.shutdownIdleDevices;
+        expect(local.shutdowns).toEqual([]);
+        yield* TestClock.adjust("1 minute");
+        yield* service.shutdownIdleDevices;
+        expect(local.shutdowns).toEqual(["AGENT-SIM"]);
+      }),
+    ),
+  );
+
+  it.effect("shuts down a device it booted even when the open then fails", () =>
+    withService(({ service, local, open }) =>
+      Effect.gen(function* () {
+        local.faults.listingAfterBoot = true;
+        expect(Exit.isFailure(yield* Effect.exit(open("AGENT-SIM")))).toBe(true);
+        expect(local.booted.get("AGENT-SIM")).toBe(true);
+        yield* service.shutdownAgentBootedDevices;
+        expect(local.shutdowns).toEqual(["AGENT-SIM"]);
       }),
     ),
   );
