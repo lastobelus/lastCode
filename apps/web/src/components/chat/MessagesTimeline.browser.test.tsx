@@ -362,6 +362,8 @@ describe("MessagesTimeline messages", () => {
       </>
     );
     await using screen = await renderElement(conversation([]));
+    // Keep the conversation and composer visible so input does not scroll the test document.
+    screen.container.style.height = "min(600px, 100vh)";
     const focus = createWorkspaceFocusController(document);
     using cleanup = new DisposableStack();
     cleanup.defer(focus.dispose);
@@ -370,6 +372,9 @@ describe("MessagesTimeline messages", () => {
     expect(document.activeElement?.getAttribute("data-workspace-area")).toBe("conversation");
     await screen.rerender(conversation(entries));
     const viewport = props.listRef.current!.getScrollableNode()!;
+    // Reserve viewport padding that cannot hit a virtual row or one of its controls.
+    viewport.style.paddingRight = "32px";
+    await expect.element(screen.getByText("Turn 39:")).toHaveStyle({ pointerEvents: "auto" });
     await vi.waitFor(() => expect(viewport.scrollTop).toBeGreaterThan(0));
     const atEnd = viewport.scrollTop;
     await userEvent.keyboard("{ArrowUp}");
@@ -379,8 +384,8 @@ describe("MessagesTimeline messages", () => {
     focus.move(-1);
     expect(document.activeElement).toBe(viewport);
     screen.button("Send").focus();
-    // Click the blank lane between the minimap and the right-aligned message controls.
-    await userEvent.click(viewport, { position: { x: 100, y: 1 } });
+    await userEvent.click(viewport, { position: { x: viewport.clientWidth - 16, y: 1 } });
+    await vi.waitFor(() => expect(document.activeElement).toBe(viewport));
     await userEvent.keyboard("{Home}");
     await vi.waitFor(() => expect(viewport.scrollTop).toBe(0));
     await userEvent.keyboard("{ArrowDown}");

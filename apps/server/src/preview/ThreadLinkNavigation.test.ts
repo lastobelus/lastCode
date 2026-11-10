@@ -33,13 +33,14 @@ it("keeps clicked thread navigations in the app, including hosted new windows", 
     const browserCdp = await browser.newBrowserCDPSession();
     const { targetInfo: sourceTarget } = await cdp.send("Target.getTargetInfo");
     let closeProtocolPopup = false;
+    let created = Promise.withResolvers<string>();
     browserCdp.on("Target.targetCreated", ({ targetInfo }) => {
       if (
         closeProtocolPopup &&
         targetInfo.type === "page" &&
         targetInfo.targetId !== sourceTarget.targetId
       )
-        void browserCdp.send("Target.closeTarget", { targetId: targetInfo.targetId });
+        created.resolve(targetInfo.targetId);
     });
     await browserCdp.send("Target.setDiscoverTargets", { discover: true });
     await context.route(hosted, (route) =>
@@ -76,6 +77,7 @@ it("keeps clicked thread navigations in the app, including hosted new windows", 
       ["#hostedPopup", hosted],
     ]) {
       opened = Promise.withResolvers<string>();
+      created = Promise.withResolvers<string>();
       // A custom-protocol target has no document to finish initialising. Close
       // the real Chromium target to exercise its uncommitted, already-closed popup event.
       closeProtocolPopup = selector === "#popup" || selector === "#customPopup";
@@ -83,6 +85,9 @@ it("keeps clicked thread navigations in the app, including hosted new windows", 
         ? new Promise<Page>((resolve) => page.once("popup", resolve))
         : undefined;
       await page.locator(selector!).click();
+      // Closing during window.open can strand Chromium's source input dispatch.
+      if (closeProtocolPopup)
+        await browserCdp.send("Target.closeTarget", { targetId: await created.promise });
       expect(await opened.promise).toBe(expected);
       if (detached) {
         const popup = await detached;
@@ -201,7 +206,7 @@ it("preserves HTTP caching and lets typed or agent-loaded hosted documents load"
   }
 });
 
-it("continues dropped opens and expires announcements before a later typed navigation", async () => {
+it("handles closed thread popups, dropped opens, and expired announcements", async () => {
   const events = new NodeEvents.EventEmitter();
   const send = vi.fn(async (method: string) =>
     method === "Page.getFrameTree" ? { frameTree: { frame: { id: "main" } } } : {},
@@ -250,6 +255,14 @@ it("continues dropped opens and expires announcements before a later typed navig
   pause("dropped-open");
   expect(navigation.isThreadNavigation(hosted)).toBe(false);
   open.mockReturnValue(true);
+  const closedPopup = { url: () => ":", isClosed: () => true, close: vi.fn(async () => {}) };
+  blockPopup.mockImplementationOnce((received: Page) => {
+    expect(received.isClosed()).toBe(true);
+  });
+  events.emit("Page.windowOpen", { url: href, userGesture: true });
+  page.emit("popup", closedPopup);
+  expect(blockPopup).toHaveBeenCalledWith(closedPopup);
+  expect(closedPopup.close).toHaveBeenCalledOnce();
   announce();
   expect(navigation.isThreadNavigation(hosted)).toBe(true);
   gesture("inactive");
