@@ -1,3 +1,4 @@
+import { THREAD_LINK_PROTOCOL } from "@t3tools/shared/threadLinks";
 import type { Session, WebContents } from "electron";
 import { BrowserWindow, session } from "electron";
 import * as Context from "effect/Context";
@@ -43,6 +44,7 @@ const NEVER_EXTERNAL_PROTOCOLS: ReadonlySet<string> = new Set([
   "https:",
   "javascript:",
   "view-source:",
+  `${THREAD_LINK_PROTOCOL}:`,
 ]);
 
 const externalProtocolPromptUrl = (rawUrl: string | undefined): string | null => {

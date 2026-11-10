@@ -4,10 +4,14 @@ import * as Schema from "effect/Schema";
 import {
   OrchestratorMcpDelegateTaskInput,
   OrchestratorMcpDelegateTaskResult,
+  OrchestratorMcpThreadReadInput,
+  ThreadReadResponse,
 } from "./orchestratorMcp.ts";
 
 const decodeDelegateTaskInput = Schema.decodeUnknownSync(OrchestratorMcpDelegateTaskInput);
 const decodeDelegateTaskResult = Schema.decodeUnknownSync(OrchestratorMcpDelegateTaskResult);
+const decodeThreadReadInput = Schema.decodeSync(OrchestratorMcpThreadReadInput);
+const decodeThreadReadResponse = Schema.decodeSync(ThreadReadResponse);
 
 describe("orchestrator MCP contracts", () => {
   it("decodes cross-provider delegated task requests and durable results", () => {
@@ -65,5 +69,35 @@ describe("orchestrator MCP contracts", () => {
         pendingApproval: { ...pendingApproval, kind: "user_input" },
       }),
     ).toThrow();
+  });
+});
+
+describe("thread reference read routes", () => {
+  it("preserves the explicit client route and owner for history pagination", () => {
+    const read = decodeThreadReadInput({
+      threadId: "thread-reference",
+      environmentId: "environment-source",
+      via: "client",
+      afterPosition: 42,
+    });
+    expect(read).toMatchObject({
+      threadId: "thread-reference",
+      environmentId: "environment-source",
+      via: "client",
+      afterPosition: 42,
+    });
+  });
+
+  it("preserves a sanitized exact-source permission refusal", () => {
+    const response = decodeThreadReadResponse({
+      connectionId: "connection-requester",
+      requestId: "request-reference",
+      result: null,
+      unavailableEnvironmentIds: [],
+      failure: { environmentId: "environment-source", reason: "permission_denied" },
+    });
+    expect(response).toMatchObject({
+      failure: { environmentId: "environment-source", reason: "permission_denied" },
+    });
   });
 });

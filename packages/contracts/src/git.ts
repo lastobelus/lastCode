@@ -365,6 +365,7 @@ export const GitCommandFailureReason = Schema.Literals([
   "push_rejected_by_remote",
   "push_rejected_non_fast_forward",
   "ref_not_found",
+  "ref_update_rejected_by_hook",
   "remote_unreachable",
   "tag_would_be_clobbered",
 ]);
@@ -393,6 +394,7 @@ export class TextGenerationError extends Schema.TaggedError<TextGenerationError>
   "TextGenerationError",
   {
     operation: Schema.String,
+    reason: Schema.optional(Schema.Literal("prompt-mining-unsupported")),
     detail: Schema.String,
     cause: Schema.optional(Schema.Defect()),
   },

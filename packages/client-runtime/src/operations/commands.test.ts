@@ -36,8 +36,18 @@ import * as RpcSession from "../rpc/session.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import { v2Now, v2Projection, v2ThreadId } from "../state/orchestrationV2TestFixtures.ts";
 import {
+  setThreadPersistence,
+  upsertThreadAnnotation,
+  resolveThreadAnnotation,
+  reopenThreadAnnotation,
+  deleteThread,
+  retryThreadWorktreeCleanup,
+  abandonThreadWorktreeCleanup,
   archiveThread,
+  unarchiveThread,
   updateThreadMetadata,
+  requestSubagentPromotion,
+  cancelSubagentPromotion,
   interruptThreadTurn,
   revertThreadCheckpoint,
   resumeThreadQueue,
@@ -154,6 +164,150 @@ describe("V2 environment commands", () => {
     }).pipe(Effect.provide(layerTestRandom)),
   );
 
+  it.effect("requests promotion on the source thread and cancels the same request", () =>
+    Effect.gen(function* () {
+      const commands: OrchestrationV2Command[] = [];
+      const supervisor = yield* makeSupervisor({ commands, projects: [] });
+      const provide = Effect.provideService(
+        EnvironmentSupervisor.EnvironmentSupervisor,
+        supervisor,
+      );
+      const requestId = CommandId.make("subagent-promotion");
+      const targetThreadId = ThreadId.make(`${requestId}:interactive`);
+      yield* requestSubagentPromotion({
+        commandId: requestId,
+        threadId: v2ThreadId,
+        creationSource: "mobile",
+      }).pipe(provide);
+      yield* cancelSubagentPromotion({
+        commandId: CommandId.make("cancel-promotion"),
+        threadId: v2ThreadId,
+        requestId,
+      }).pipe(provide);
+      expect(commands).toEqual([
+        {
+          type: "subagent.promote.request",
+          commandId: requestId,
+          threadId: v2ThreadId,
+          targetThreadId,
+          createdBy: "user",
+          creationSource: "mobile",
+        },
+        {
+          type: "subagent.promote.cancel",
+          commandId: CommandId.make("cancel-promotion"),
+          threadId: v2ThreadId,
+          requestId,
+        },
+      ]);
+    }).pipe(Effect.provide(layerTestRandom)),
+  );
+
+  it.effect.each(["web", "mobile"] as const)(
+    "offers fresh promotion destinations for %s retries, preserving transport idempotency",
+    (creationSource) =>
+      Effect.gen(function* () {
+        const commands: OrchestrationV2Command[] = [];
+        const occupiedTargetId = ThreadId.make("occupied-interactive-thread");
+        const supervisor = yield* makeSupervisor({
+          commands,
+          projects: [],
+          projection: {
+            ...v2Projection,
+            thread: {
+              ...v2Projection.thread,
+              subagentPromotion: {
+                requestId: CommandId.make("previous-promotion"),
+                targetThreadId: occupiedTargetId,
+                status: "failed",
+                createdBy: "user",
+                creationSource,
+                requestedAt: v2Now,
+                updatedAt: v2Now,
+                error: "The destination thread already exists",
+              },
+            },
+          },
+        });
+        const provide = Effect.provideService(
+          EnvironmentSupervisor.EnvironmentSupervisor,
+          supervisor,
+        );
+        const retry = {
+          commandId: CommandId.make("retry-promotion"),
+          threadId: v2ThreadId,
+          creationSource,
+        };
+        yield* requestSubagentPromotion(retry).pipe(provide);
+        yield* requestSubagentPromotion(retry).pipe(provide);
+        yield* requestSubagentPromotion({
+          ...retry,
+          commandId: CommandId.make("next-retry-promotion"),
+        }).pipe(provide);
+        const destinations = commands
+          .filter((command) => command.type === "subagent.promote.request")
+          .map((command) => command.targetThreadId);
+        expect(destinations).toEqual([
+          ThreadId.make("retry-promotion:interactive"),
+          ThreadId.make("retry-promotion:interactive"),
+          ThreadId.make("next-retry-promotion:interactive"),
+        ]);
+        expect(destinations).not.toContain(occupiedTargetId);
+      }).pipe(Effect.provide(layerTestRandom)),
+  );
+
+  it.effect("dispatches durable LastCode controls through V2 without fetching history", () =>
+    Effect.gen(function* () {
+      const commands: OrchestrationV2Command[] = [];
+      const projectionRequests: ThreadId[] = [];
+      const supervisor = yield* makeSupervisor({ commands, projects: [], projectionRequests });
+      yield* Effect.all([
+        setThreadPersistence({ threadId: v2ThreadId, persistent: true }),
+        upsertThreadAnnotation({
+          threadId: v2ThreadId,
+          body: "Keep this review open",
+          createNew: true,
+        }),
+        upsertThreadAnnotation({
+          threadId: v2ThreadId,
+          body: "Edit old note",
+          annotationId: "note-1",
+        }),
+        resolveThreadAnnotation({ threadId: v2ThreadId, annotationId: "note-1" }),
+        reopenThreadAnnotation({ threadId: v2ThreadId, annotationId: "note-1" }),
+        deleteThread({ threadId: v2ThreadId, deleteWorktree: true, repositoryKey: "repository-1" }),
+        retryThreadWorktreeCleanup({ threadId: v2ThreadId }),
+        abandonThreadWorktreeCleanup({ threadId: v2ThreadId }),
+      ]).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+      expect(commands.map(({ commandId: _id, ...command }) => command)).toEqual([
+        { type: "thread.persistence.set", threadId: v2ThreadId, persistent: true },
+        {
+          type: "thread.annotation.upsert",
+          threadId: v2ThreadId,
+          body: "Keep this review open",
+          createNew: true,
+        },
+        {
+          type: "thread.annotation.upsert",
+          threadId: v2ThreadId,
+          body: "Edit old note",
+          annotationId: "note-1",
+        },
+        { type: "thread.annotation.resolve", threadId: v2ThreadId, annotationId: "note-1" },
+        { type: "thread.annotation.reopen", threadId: v2ThreadId, annotationId: "note-1" },
+        {
+          type: "thread.delete",
+          threadId: v2ThreadId,
+          deleteWorktree: true,
+          repositoryKey: "repository-1",
+        },
+        { type: "thread.worktree-cleanup.retry", threadId: v2ThreadId },
+        { type: "thread.worktree-cleanup.abandon", threadId: v2ThreadId },
+      ]);
+      expect(projectionRequests).toEqual([]);
+    }).pipe(Effect.provide(layerTestRandom)),
+  );
+
   it.effect("preserves caller command ids for idempotent V2 commands", () =>
     Effect.gen(function* () {
       const commands: OrchestrationV2Command[] = [];
@@ -166,6 +320,53 @@ describe("V2 environment commands", () => {
 
       expect(commands).toEqual([
         { type: "thread.archive", commandId: "queued-command", threadId: "thread-1" },
+      ]);
+    }).pipe(Effect.provide(layerTestRandom)),
+  );
+
+  it.effect("forwards the explicit archive decision, reviewed child set and failed attempt", () =>
+    Effect.gen(function* () {
+      const commands: OrchestrationV2Command[] = [];
+      const supervisor = yield* makeSupervisor({ commands, projects: [] });
+      yield* archiveThread({
+        commandId: CommandId.make("archive-family"),
+        threadId: ThreadId.make("parent"),
+        childDisposition: "archive_after_review",
+        expectedChildThreadIds: [ThreadId.make("child")],
+        expectedArchiveCommandId: CommandId.make("failed-attempt"),
+      }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+      expect(commands).toEqual([
+        {
+          type: "thread.archive",
+          commandId: "archive-family",
+          threadId: "parent",
+          childDisposition: "archive_after_review",
+          expectedChildThreadIds: ["child"],
+          expectedArchiveCommandId: "failed-attempt",
+        },
+      ]);
+    }).pipe(Effect.provide(layerTestRandom)),
+  );
+
+  it.effect("preserves the observed failed archive attempt without changing ordinary Restore", () =>
+    Effect.gen(function* () {
+      const commands: OrchestrationV2Command[] = [];
+      const supervisor = yield* makeSupervisor({ commands, projects: [] });
+      for (const expectedArchiveCommandId of [undefined, CommandId.make("failed-attempt")]) {
+        yield* unarchiveThread({
+          commandId: CommandId.make(expectedArchiveCommandId ?? "restore"),
+          threadId: ThreadId.make("owner"),
+          ...(expectedArchiveCommandId === undefined ? {} : { expectedArchiveCommandId }),
+        }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+      }
+      expect(commands).toEqual([
+        { type: "thread.unarchive", commandId: "restore", threadId: "owner" },
+        {
+          type: "thread.unarchive",
+          commandId: "failed-attempt",
+          threadId: "owner",
+          expectedArchiveCommandId: "failed-attempt",
+        },
       ]);
     }).pipe(Effect.provide(layerTestRandom)),
   );
@@ -576,15 +777,29 @@ describe("V2 environment commands", () => {
             creatorGrouping,
           }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
         }
-        expect(commands).toEqual(
-          ["independent", "grouped"].map((creatorGrouping) => ({
+        const placements = [ThreadId.make("organization:parent"), null];
+        for (const [index, groupedUnderThreadId] of placements.entries()) {
+          yield* updateThreadMetadata({
+            commandId: CommandId.make(`explicit-placement:${index}`),
+            threadId: v2ThreadId,
+            groupedUnderThreadId,
+          }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+        }
+        expect(commands).toEqual([
+          ...["independent", "grouped"].map((creatorGrouping) => ({
             type: "thread.metadata.update",
             commandId: `creator-placement:${creatorGrouping}`,
             threadId: v2ThreadId,
             creatorGrouping,
           })),
-        );
+          ...placements.map((groupedUnderThreadId, index) => ({
+            type: "thread.metadata.update",
+            commandId: `explicit-placement:${index}`,
+            threadId: v2ThreadId,
+            groupedUnderThreadId,
+          })),
+        ]);
         expect(projectionRequests).toEqual([]);
-      }).pipe(Effect.provide(layerTestCrypto)),
+      }).pipe(Effect.provide(layerTestRandom)),
   );
 });

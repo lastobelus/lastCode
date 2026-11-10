@@ -95,6 +95,13 @@ describe("ExpandedImageDialog", () => {
     const viewportLocator = screen.getByRole("region", { name: "large.png, zoomable image" });
     const viewport = viewportLocator.element() as HTMLElement;
     const image = screen.getByRole("img", { name: "large.png" }).element() as HTMLElement;
+    using cleanup = new DisposableStack();
+    const nextScrollEnd = () =>
+      new Promise<void>((resolve) => {
+        const onScrollEnd = () => resolve();
+        viewport.addEventListener("scrollend", onScrollEnd, { once: true });
+        cleanup.defer(() => viewport.removeEventListener("scrollend", onScrollEnd));
+      });
     await vi.waitFor(() => expect(image.style.width).not.toBe(""));
     const fitWidth = image.getBoundingClientRect().width;
     const wheels: { ctrlKey: boolean; canceled: boolean }[] = [];
@@ -119,7 +126,10 @@ describe("ExpandedImageDialog", () => {
       await userEvent.keyboard("{/Control}");
     };
 
-    await userEvent.wheel(viewportLocator, { delta: { y: 120 } });
+    // At fit there is nothing to pan; do not leave a native gesture running into the zoom.
+    viewport.dispatchEvent(
+      new WheelEvent("wheel", { deltaY: 120, bubbles: true, cancelable: true }),
+    );
     expect(wheels.at(-1)).toEqual({ ctrlKey: false, canceled: false });
     expect(image.getBoundingClientRect().width).toBe(fitWidth);
 
@@ -130,11 +140,13 @@ describe("ExpandedImageDialog", () => {
 
     const pan = async (delta: { x: number; y: number }) => {
       const { scrollLeft, scrollTop } = viewport;
+      const scrolled = nextScrollEnd();
       await userEvent.wheel(viewportLocator, { delta });
       await vi.waitFor(() => {
         expect(Math.sign(viewport.scrollLeft - scrollLeft)).toBe(Math.sign(delta.x));
         expect(Math.sign(viewport.scrollTop - scrollTop)).toBe(Math.sign(delta.y));
       });
+      await scrolled;
     };
     await pan({ x: 60, y: 0 });
     await pan({ x: 0, y: 60 });

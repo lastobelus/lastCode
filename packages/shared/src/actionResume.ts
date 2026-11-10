@@ -1,12 +1,239 @@
 import {
   ActionReport,
   ActionResumeOutcome,
+  type ActionCheckoutHead,
+  type ActionRunCheckout,
   type ActionReport as ActionReportType,
   type ActionResumeOutcome as ActionResumeOutcomeType,
   type ActionResumeState,
+  type ActionResumeStatus,
+  type ActionRunSummary,
+  type OrchestrationV2Run,
+  type UpdateDrainBlocker,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+
+export function environmentPauseBlockerLabel(blocker: UpdateDrainBlocker) {
+  switch (blocker.type) {
+    case "thread-turn":
+      return "Agent turn";
+    case "thread-background":
+      return "Background work";
+    case "terminal-process":
+      return blocker.label || "Terminal process";
+    case "provider-runtime":
+      return "Provider activity";
+    case "thread-cleanup":
+      return "Thread cleanup";
+    case "provider-teardown":
+      return "Provider shutdown";
+  }
+}
+
+export function actionResumeStatus(input: {
+  readonly action: Pick<ActionResumeState, "outcome" | "delivery">;
+  readonly environmentPaused: boolean;
+  /** Only the continuation corresponding to this Action, never unrelated thread work. */
+  readonly followUp?: Pick<OrchestrationV2Run, "status" | "queueHeld"> | null | undefined;
+  readonly hasPendingRequest: boolean;
+}): ActionResumeStatus {
+  const { action, environmentPaused, followUp, hasPendingRequest } = input;
+  const status = (
+    state: ActionResumeStatus["state"],
+    automaticResumeArmed = false,
+    attentionRequired = false,
+  ): ActionResumeStatus => ({ state, environmentPaused, automaticResumeArmed, attentionRequired });
+
+  if (action.delivery === "disposed") return status("disposed");
+  if (action.delivery === "available") {
+    return status(
+      action.outcome === "process_lost" || action.outcome.startsWith("cancelled_")
+        ? "interrupted"
+        : "attention_required",
+      false,
+      true,
+    );
+  }
+  if (followUp) {
+    switch (followUp.status) {
+      case "completed":
+      case "failed":
+      case "interrupted":
+      case "cancelled":
+      case "rolled_back":
+        return status("follow_up_ended", false, followUp.status !== "completed");
+      case "preparing":
+      case "starting":
+      case "running":
+      case "waiting":
+        return hasPendingRequest
+          ? status("waiting_for_input", false, true)
+          : status("follow_up_active");
+      case "queued":
+        if (followUp.queueHeld) return status("attention_required", false, true);
+        if (environmentPaused) return status("environment_paused", false, true);
+        if (hasPendingRequest) return status("waiting_for_input", false, true);
+        return status("follow_up_queued", true);
+    }
+  }
+  if (action.outcome === "running") {
+    return status(
+      "running",
+      action.delivery === "armed" && !environmentPaused && !hasPendingRequest,
+      environmentPaused || hasPendingRequest,
+    );
+  }
+  if (action.delivery === "delivered") return status("follow_up_dispatched");
+  if (environmentPaused) return status("environment_paused", false, true);
+  if (hasPendingRequest) return status("waiting_for_input", false, true);
+  return status("pending_delivery", true);
+}
+
+export function actionResumeSummary(
+  action: ActionResumeState,
+  status: ActionResumeStatus,
+): ActionRunSummary {
+  return {
+    runId: action.runId,
+    actionId: action.actionId,
+    actionName: action.actionName,
+    outcome: action.outcome,
+    delivery: action.delivery,
+    startedAt: action.startedAt,
+    finishedAt: action.finishedAt,
+    exitCode: action.exitCode,
+    exitSignal: action.exitSignal,
+    status,
+    ...(action.report
+      ? {
+          report: {
+            outcome: action.report.outcome,
+            summary: action.report.summary,
+            untrusted: true,
+          },
+        }
+      : {}),
+  };
+}
+
+export const actionResumeControlCopy = {
+  open_terminal: {
+    label: "Open terminal",
+    detail: "Show the command's output.",
+  },
+  cancel: {
+    label: "Cancel",
+    detail: "Stop the command.",
+  },
+  resume_agent: {
+    label: "Resume agent",
+    detail: "Let the agent continue with what's available. The command doesn't run again.",
+  },
+  discard: {
+    label: "Discard",
+    detail: "Drop this follow-up. The command doesn't run again.",
+  },
+  manage_pause: {
+    label: "Manage pause",
+    detail: "Open this environment's pause controls.",
+  },
+} as const;
+
+const ACTION_WAIT_COPY = {
+  running: {
+    label: "Running",
+    detail: "The agent continues automatically when the command ends.",
+  },
+  pending_delivery: {
+    label: "Sending result",
+    detail: "The command ended. The agent will pick up its result automatically.",
+  },
+  follow_up_queued: {
+    label: "Queued",
+    detail: "The agent's follow-up is queued behind other work and starts automatically.",
+  },
+  follow_up_active: {
+    label: "Agent continuing",
+    detail: "The command ended and the agent is working on its result.",
+  },
+  follow_up_dispatched: {
+    label: "Result sent",
+    detail: "The result was sent. Its follow-up status is not available here.",
+  },
+  waiting_for_input: {
+    label: "Needs your input",
+    detail: "Answer the agent's pending request so it can continue.",
+  },
+  environment_paused: {
+    label: "Environment paused",
+    detail:
+      "Automatic wake-ups are held, so the agent waits even if the command finishes. Resume the environment to let it continue.",
+  },
+  attention_required: {
+    label: "Needs attention",
+    detail: "The agent won't continue on its own. Check the thread's queue or this result.",
+  },
+  interrupted: {
+    label: "Interrupted",
+    detail:
+      "The command was interrupted and the agent won't continue automatically. Resume agent and Discard handle the follow-up; neither reruns the command.",
+  },
+  unknown: {
+    label: "Status unavailable",
+    detail:
+      "T3 Code can't check whether work in this environment is paused or will continue on its own. Check the connection banner or Settings > Environments.",
+  },
+} as const;
+
+const ENVIRONMENT_PAUSE_COPY = {
+  pause_pausing: {
+    label: "Pausing",
+    detail:
+      "Threads in this environment are pausing. Automatic wake-ups are held until you resume.",
+  },
+  pause_paused: {
+    label: "Paused",
+    detail: "Automatic wake-ups in this environment are held until you resume.",
+  },
+  pause_resuming: {
+    label: "Resuming",
+    detail: "Automatic wake-ups are back on. Held messages may still be processing.",
+  },
+} as const;
+
+export const actionResumeUnknownPresentation = ACTION_WAIT_COPY.unknown;
+
+export function environmentPausePresentation(phase: "pausing" | "paused" | "resuming") {
+  return ENVIRONMENT_PAUSE_COPY[`pause_${phase}`];
+}
+
+export function actionWaitPresentation(
+  action: Pick<ActionResumeState, "outcome" | "delivery">,
+  status: ActionResumeStatus | null,
+) {
+  if (
+    action.delivery === "disposed" ||
+    status?.state === "disposed" ||
+    status?.state === "follow_up_ended"
+  )
+    return null;
+  const state =
+    status === null
+      ? "unknown"
+      : status.state === "running" && status.environmentPaused
+        ? "environment_paused"
+        : status.state === "running" && !status.automaticResumeArmed
+          ? "waiting_for_input"
+          : status.state;
+  const copy = ACTION_WAIT_COPY[state];
+  return {
+    ...copy,
+    tone:
+      status?.attentionRequired || state === "unknown" ? ("warning" as const) : ("info" as const),
+    automaticResumeArmed: status?.automaticResumeArmed ?? false,
+  };
+}
 
 const ACTION_FOLLOW_UP_HEADER = "Automated Project Action follow-up.";
 const ACTION_OUTPUT_HEADER =
@@ -57,8 +284,14 @@ export function formatActionResumeFollowUp(input: {
   readonly exitCode: number | null;
   readonly report: ActionReportType | undefined;
   readonly output: string | undefined;
+  readonly checkout?: {
+    readonly launched: ActionRunCheckout;
+    readonly current: ActionCheckoutHead | null;
+  };
 }): string {
   const outputSummary = summarizeActionOutput(input.output);
+  const checkout = input.checkout;
+  const moved = checkout !== undefined && actionHeadMoved(checkout.launched, checkout.current);
   return [
     ACTION_FOLLOW_UP_HEADER,
     `Action identity: ${JSON.stringify({ name: input.actionName, id: input.actionId })}`,
@@ -68,8 +301,48 @@ export function formatActionResumeFollowUp(input: {
     `Exit code: ${input.exitCode ?? "unavailable"}`,
     `${ACTION_COMPACT_RESULT_PREFIX}${JSON.stringify(input.report ?? { summary: outputSummary })}`,
     `${ACTION_INSPECTION_PREFIX}${JSON.stringify({ tool: "inspect_action_run", runId: input.runId })}`,
-    "Continue the originating task using this result.",
+    // Parsers read the fixed lines above by position; checkout lines must stay after them.
+    ...(checkout === undefined ? [] : checkoutLines(checkout.launched, checkout.current)),
+    moved
+      ? "This result may not describe the current head. Relaunch on the current head before relying on it."
+      : "Continue the originating task using this result.",
   ].join("\n");
+}
+
+/** Whether the checkout's HEAD commit differs from the one the Action launched on. */
+export function actionHeadMoved(
+  launched: Pick<ActionCheckoutHead, "head">,
+  current: Pick<ActionCheckoutHead, "head"> | null,
+): boolean {
+  return current !== null && current.head !== launched.head;
+}
+
+function describeHead(checkout: ActionCheckoutHead): string {
+  return `${checkout.head} (${checkout.branch === null ? "detached HEAD" : `branch ${checkout.branch}`})`;
+}
+
+function checkoutLines(launched: ActionRunCheckout, current: ActionCheckoutHead | null) {
+  const launchLine = `Launch checkout: ${JSON.stringify({
+    head: launched.head,
+    branch: launched.branch,
+    ...(launched.pullRequest === undefined ? {} : { pullRequest: launched.pullRequest }),
+  })}`;
+  if (current === null) {
+    return [
+      launchLine,
+      "Current checkout: unavailable, so this result can't be matched to the current head.",
+    ];
+  }
+  if (actionHeadMoved(launched, current)) {
+    return [
+      launchLine,
+      `WARNING: HEAD moved since launch. This Action ran on ${describeHead(launched)}; when this result was sent, the checkout was at ${describeHead(current)}.`,
+    ];
+  }
+  return [
+    launchLine,
+    `Current checkout: unchanged at ${describeHead(current)} when this result was sent.`,
+  ];
 }
 
 export function parseActionResumeFollowUp(text: string): ActionResumeFollowUp | null {

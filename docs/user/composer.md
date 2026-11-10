@@ -12,30 +12,67 @@ becomes an attachment when inserting it would exceed the message limit. On a
 hardware keyboard, use `Cmd+Shift+V` on Apple devices or `Ctrl+Shift+V` elsewhere
 to keep a large paste editable in the composer instead.
 
+## Common prompts
+
+Common prompts are instructions you send often, ready to insert without
+retyping. Open **Prompts** in the composer, choose **Insert a common prompt** in
+the command palette, or press **Ctrl+.**, which you can change in
+**Settings → Keyboard shortcuts**. On mobile, open **Common Prompts** from the
+plus menu. The prompt goes in at the cursor and waits for you to edit or send it.
+
+If the cursor is right after a letter, the search starts with the word you were
+typing. Choosing a prompt replaces that word; cancelling leaves your draft as it
+was. After a space, punctuation, or a digit, the search starts empty.
+
+On web and desktop, hold **Cmd** on Mac, or **Ctrl** elsewhere, to number the
+first five results, then press **1** to **5** to insert one. Nothing is sent
+until you send it.
+
+Your environment builds the list from your conversations once a day, using the
+model configured for thread titles, so you don't need to maintain it. Close
+rewordings of one instruction merge into a single entry, while prompts that
+differ in a detail stay separate. **Find new prompts** runs discovery now.
+Discovery keeps your shorthand instead of expanding it. The picker remembers
+what you typed before choosing a prompt and ranks that prompt higher when you
+type it again.
+
+Choose **Edit prompts** or press **Ctrl+,** to open the editor. Search the list,
+select a prompt, and save changes to its title or text. **Cmd+1** to **5** or
+**Ctrl+1** to **5** selects a result here instead of inserting it. Use **New
+prompt** to add your own. Saved edits keep their learned searches and are left
+unchanged by daily discovery. **Search prompts** returns to the picker, keeping
+your selection and any unsaved edits. On mobile, switch between **Search** and
+**Edit** at the bottom of the sheet.
+
+Dismiss a prompt you don't want and discovery
+won't add it back; choose **Undo** right away to restore it with its history.
+
 ## Formatting
 
-The composer writes Markdown and shows it styled as you type. When your cursor
-is on styled text, its Markdown shows instead, such as `**bold**`, and the
-markers edit like any other text: delete them to remove the style, or change
-`**` to `*` for italic. The style updates when your cursor leaves. To write
-plain Markdown with no styling, turn off **Settings → Chat → Rich text
-composer**. Lines starting with `- `, `1. `, `- [ ] `, `> `, `# ` or `---`
-become lists, task lists, quotes, headings and rules; ` ``` ` followed by Enter
-opens a code block. What you typed is what the agent receives, markers and
-numbering included, and `#1234` without a space still looks up a pull request.
+The composer keeps the Markdown you type, including every delimiter. With
+**Settings → General → Rich text composer** enabled, formatting appears while markers
+hide away from the cursor. Move the cursor into a formatted span to edit its
+markers directly. Backticks keep names such as `_build` and `node_modules`
+literal. What you typed is what the agent receives.
 
-Some styled text containing or touching literal Markdown characters, such as a
-bold `path\` or `2*3`, keeps its styling without showing markers. Use formatting
-shortcuts or turn off rich text to edit the formatting of those ranges.
+Lines starting with `- `, `1. `, `- [ ] `, `> `, `# ` or `---` show as lists,
+tasks, quotes, headings and rules. Click a task checkbox to change `[ ]` to
+`[x]`. Formatting shortcuts wrap or unwrap the selection: **Cmd+B / Ctrl+B**
+for bold, **Cmd+I / Ctrl+I** for italics, **Cmd+E / Ctrl+E** for inline code,
+and **Cmd+Shift+S / Ctrl+Shift+S** for strikethrough.
+Use Cmd on Mac and Ctrl elsewhere. Strikethrough takes priority over the
+settle-thread shortcut while the Rich text composer is focused.
 
-Enter sends. In a list or quote, **Shift+Enter** continues it, and Shift+Enter
-on an empty line moves out one level, then leaves it; **Tab** nests a list item
-under the one above and **Shift+Tab** moves it back out. In a code block, Enter
-starts a new line at the current indentation, **Tab** and **Shift+Tab** indent
-the selected lines, and a closing ` ``` ` followed by Enter, or two blank lines
-at the end, leave the block. **Backspace** at the start of a code block turns it
-back into plain lines. Choose the language in a code block's corner to change
-it. Very large code blocks are shown without syntax highlighting.
+Enter sends. **Shift+Enter** continues a list or quote; on an empty item it
+moves out one level, then leaves it; **Tab** nests a list item under the one above and **Shift+Tab** moves it back out. Typing a code fence such as ` ```ts `
+and pressing Enter adds a matching closing fence. Inside the fence, Enter
+adds a line with the current indentation; **Tab** and **Shift+Tab** indent
+or outdent code. To write after the block, move beyond its closing fence.
+Choose its language while the cursor is outside the block. Formatting shortcuts,
+checkbox changes and code-block actions can each be undone in one step.
+
+Drafts above 12,000 characters show plain Markdown for responsiveness. `#1234`
+without a space still looks up a pull request.
 
 ## Attach files
 
@@ -89,6 +126,19 @@ other action for a single message. From a hardware keyboard, `Cmd+Return`
 (`Ctrl+Return` on Android) uses the other action, or `Cmd+Shift+Return`
 (`Ctrl+Shift+Return`) when Return inserts a new line. The button only offers
 Steer when the running agent supports it.
+
+## Recover a thread
+
+LastCode checks Codex and Claude threads when their updates stop being recorded.
+Long thinking or tool calls alone do not trigger recovery. When the provider confirms
+that the affected turn ended, LastCode reconciles its status automatically without
+repeating the work. The recovery notice tells you when some output may be missing.
+
+Use **Check now** or **Recover** in the thread's notice to check again. If automatic
+recovery cannot finish, **Open repair thread** starts a separate investigation using
+the project's default provider and model. Your original conversation stays in place;
+**View repair thread** returns to the same investigation. Configure a project model
+default first if LastCode asks for one.
 
 ## Queue messages offline on mobile
 
@@ -338,22 +388,9 @@ by any part of its pull request numbers. A complete number is also resolved dire
 pull request is older than the recent list. Type a single word after `#` to search pull requests in
 the repository by text. Choose a result to insert it as a chip.
 
-Another thread can be context too. Type `@` followed by part of its title to pick one from
-the same server, or from a machine it links to while the Linked environments beta is on; those
-show the machine's name. On web and desktop you can also drag a thread out of the sidebar and
-drop it on the composer; a multi-selection drops together. On any client, **Copy thread** copies a
-link to the thread that pastes into a composer as its chip. The chip shows the thread's
-current title and opens it when selected. Your prompt only carries a reference: the agent reads the thread's
-history on demand, so attaching a long thread costs nothing until the agent looks. Attaching a
-thread does not change it, and the agent cannot send messages to it unless you ask.
+Another thread can be context too. Type `@` followed by part of its title, project or environment name to find threads across projects and connected environments. Archived threads and completed subagents can be references too. Bare `@` opens the file picker. On web and desktop, drag threads from the sidebar onto the composer, or use **Copy thread** and paste on any client.
 
-A thread from a linked machine, picked, pasted or dropped, stays a reference that the agent reads
-on that machine. A pasted link to a thread on any other machine stays a link. Dropping a thread
-from any other environment attaches a saved transcript file. The source
-environment must be connected and up to date. The transcript includes the visible history and
-saved text context at the time of the drop; later messages and the contents of attached files
-are not copied. The agent can read the saved transcript after the source disconnects. Normal
-file attachment limits apply.
+The agent reads a thread's history on demand through your connected client. A reference does not message or change that thread, link machines, or grant write access. For references across environments, both must run a T3 Code version that supports thread references, and your client needs read permission for both. Keep the client you sent from connected while the agent reads. If access is unavailable, check the connections, read permissions and server updates for both environments, or remove the reference from your draft. References are live; they do not save an offline transcript.
 
 Type `@` and part of a model or provider name, such as `@opus`, to name that model for the
 agent, for example when delegating. It does not change the thread's model. Join words with
@@ -393,6 +430,13 @@ If nothing on the device can show a format, save or share it to open it elsewher
 50 MB opens as a folder list on every surface; on mobile, select a file inside it to preview,
 save, or add it to chat.
 
+In LastCode, enter `/annotate` to open the current thread's annotation editor. Enter `/annotate`
+followed by Markdown to save the annotation directly without sending a message to the agent.
+Annotations become available after the first message turns a draft into a saved thread.
+They start expanded above the composer. Collapse one to keep it collapsed until you expand or edit
+it. Turn off **Settings → LastCode → Expand thread annotations by default** to start added or
+edited annotations collapsed.
+
 ## Images and videos in messages
 
 Select an image or video attachment or link to preview it. Playback support depends
@@ -405,6 +449,18 @@ return to the thumbnail to open this menu after watching a full-screen video.
 File links refer to the environment's machine, including when you connect remotely.
 Previews use the original file, even outside the workspace. Moving or deleting it
 can break the preview, so save a copy if you need to keep it.
+
+## Preview links
+
+Managed QA preview servers sleep after 24 hours of inactivity; opening a retained link restarts
+the server. Archiving the thread or automatically suspending its workspace ends
+the preview, so its old link cannot restart it. Open a retained link from its
+thread so LastCode can restore it before opening either browser. Remote viewing
+still requires the server to be reachable from your device.
+
+If a link opened in the integrated browser cannot connect, choose **Ask agent to
+restore preview**. The failed link and error go to the thread that owns the
+preview. After the agent restores it, reload the page.
 
 ## Files outside the workspace
 

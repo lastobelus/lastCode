@@ -11,6 +11,10 @@
       "types": "./src/authScopeOptions.ts",
       "import": "./src/authScopeOptions.ts"
     },
+    "./userMessage": {
+      "types": "./src/userMessage.ts",
+      "import": "./src/userMessage.ts"
+    },
     "./threadAnnotation": {
       "types": "./src/threadAnnotation.ts",
       "import": "./src/threadAnnotation.ts"
@@ -299,6 +303,12 @@
       "types": "./src/threadLinks.ts",
       "import": "./src/threadLinks.ts"
     },
+    "./server/threadLinkGesture": {
+      "browser": null,
+      "react-native": null,
+      "types": "./src/server/threadLinkGesture.ts",
+      "import": "./src/server/threadLinkGesture.ts"
+    },
     "./composerContextReferences": {
       "types": "./src/composerContextReferences.ts",
       "import": "./src/composerContextReferences.ts"
@@ -511,6 +521,10 @@
       "types": "./src/markdownPipeline.ts",
       "import": "./src/markdownPipeline.ts"
     },
+    "./lastcodeMarkdownSourceRanges": {
+      "types": "./src/lastcodeMarkdownSourceRanges.ts",
+      "import": "./src/lastcodeMarkdownSourceRanges.ts"
+    },
     "./threadFindText": {
       "types": "./src/threadFindText.ts",
       "import": "./src/threadFindText.ts"
@@ -559,6 +573,18 @@
       "types": "./src/speech.ts",
       "import": "./src/speech.ts"
     },
+    "./markdownImages": {
+      "types": "./src/markdownImages.ts",
+      "import": "./src/markdownImages.ts"
+    },
+    "./assistantMarkdownFiles": {
+      "types": "./src/assistantMarkdownFiles.ts",
+      "import": "./src/assistantMarkdownFiles.ts"
+    },
+    "./workspaceBasenameLookup": {
+      "types": "./src/workspaceBasenameLookup.ts",
+      "import": "./src/workspaceBasenameLookup.ts"
+    },
     "./dependencyActivity": {
       "types": "./src/dependencyActivity.ts",
       "import": "./src/dependencyActivity.ts"
@@ -566,6 +592,26 @@
     "./generatedBuildOwnership": {
       "types": "./src/generatedBuildOwnership.ts",
       "import": "./src/generatedBuildOwnership.ts"
+    },
+    "./regenerableIgnoredPath": {
+      "types": "./src/regenerableIgnoredPath.ts",
+      "import": "./src/regenerableIgnoredPath.ts"
+    },
+    "./worktreeSuspension": {
+      "types": "./src/worktreeSuspension.ts",
+      "import": "./src/worktreeSuspension.ts"
+    },
+    "./worktreeSuspensionPolicy": {
+      "types": "./src/worktreeSuspensionPolicy.ts",
+      "import": "./src/worktreeSuspensionPolicy.ts"
+    },
+    "./nativeFileSystem": {
+      "types": "./src/nativeFileSystem.ts",
+      "import": "./src/nativeFileSystem.ts"
+    },
+    "./promptSnippetSearch": {
+      "types": "./src/promptSnippetSearch.ts",
+      "import": "./src/promptSnippetSearch.ts"
     }
   },
   "scripts": {

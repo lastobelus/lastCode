@@ -116,15 +116,6 @@ export function threadRuntimeIsActive(runtime: ThreadStructureRuntime | null | u
   return runtime !== null && runtime !== undefined && threadRunStatusIsActive(runtime.status);
 }
 
-export function threadRuntimeCanArchive(runtime: ThreadRuntimeSummary | null | undefined): boolean {
-  if (runtime?.status === "queued") return runtime.activeRunId === null;
-  return (
-    runtime?.status !== "preparing" &&
-    runtime?.status !== "starting" &&
-    runtime?.status !== "running"
-  );
-}
-
 function threadRunStatusIsActive(status: ThreadRuntimeSummary["status"]): boolean {
   return (
     status === "preparing" ||
@@ -138,6 +129,7 @@ function threadRunStatusIsActive(status: ThreadRuntimeSummary["status"]): boolea
 export interface EnvironmentThreadShell {
   readonly creatorThreadId?: ThreadId;
   readonly creatorGrouping?: "grouped" | "independent";
+  readonly groupedUnderThreadId?: ThreadId | null;
   readonly environmentId: EnvironmentId;
   readonly id: ThreadId;
   readonly projectId: ProjectId;
@@ -205,7 +197,6 @@ export interface EnvironmentThreadShell {
   readonly deletedAt: string | null;
   readonly persistent?: boolean;
   readonly annotation?: import("@t3tools/contracts").ThreadAnnotation | null;
-  readonly attention?: import("@t3tools/contracts").ThreadAttention | null;
   readonly dashboardItems?: ReadonlyArray<import("@t3tools/contracts").ThreadDashboardItem>;
   readonly actionResume?: import("@t3tools/contracts").ActionResumeState | null;
   readonly worktreeCleanup?: import("@t3tools/contracts").ThreadWorktreeCleanup | null;
@@ -315,6 +306,9 @@ export function presentThreadShell(
   return {
     ...(thread.creatorThreadId === undefined ? {} : { creatorThreadId: thread.creatorThreadId }),
     ...(thread.creatorGrouping === undefined ? {} : { creatorGrouping: thread.creatorGrouping }),
+    ...(thread.groupedUnderThreadId === undefined
+      ? {}
+      : { groupedUnderThreadId: thread.groupedUnderThreadId }),
     environmentId,
     id: thread.id,
     projectId: thread.projectId,
@@ -395,7 +389,6 @@ export function presentThreadShell(
     deletedAt: nullableIso(thread.deletedAt),
     ...(thread.persistent === undefined ? {} : { persistent: thread.persistent }),
     annotation: threadAnnotationOf(thread),
-    attention: thread.attention ?? null,
     dashboardItems: thread.dashboardItems ?? [],
     // Cached shells and retained events can still carry a parent's Action.
     actionResume: thread.actionResume?.threadId === thread.id ? thread.actionResume : null,

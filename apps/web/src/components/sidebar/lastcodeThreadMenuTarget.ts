@@ -12,7 +12,7 @@ import {
   NO_PROJECT_GROUP_KEY,
   resolveSidebarProjectSettingsKey,
 } from "../../sidebarProjectGrouping";
-import type { ProjectGroupingSettings } from "../../logicalProject";
+import type { ProjectGroupingSettings } from "@t3tools/client-runtime/state/project-grouping";
 import type { SidebarThreadSummary } from "../../types";
 import {
   readProject,
@@ -23,7 +23,10 @@ import {
 import { readEnvironmentScope } from "../../state/session";
 import { readThreadHandoffs } from "../../handoffs/handoffsStore";
 import { describeHandoff } from "../../handoffs/handoffMenu";
-import { lastcodeSidebarCreatorDetails } from "../lastcodeSidebarFamilies.logic";
+import {
+  lastcodeSidebarCreatorDetails,
+  lastcodeSidebarThreadParentId,
+} from "../lastcodeSidebarFamilies.logic";
 import { buildLastCodeThreadMenu } from "./lastcodeThreadMenu";
 
 /** Resolve the exact physical project before reading thread-menu capabilities. */
@@ -67,12 +70,18 @@ export function readLastCodeThreadMenuTarget(
   );
   const handoffs = readThreadHandoffs(threadRef);
   const descriptors = handoffs.slice(0, handoffsLimit).map(describeHandoff);
+  const parentThreadId =
+    thread.groupedUnderThreadId === undefined && !creator.groupingEligible
+      ? null
+      : lastcodeSidebarThreadParentId(thread);
   const items = buildLastCodeThreadMenu({
     thread,
+    parentThreadId,
     creator,
     canAnnotate:
       readEnvironmentSupportsThreadAnnotations(thread.environmentId) &&
       thread.latestUserMessageAt !== null,
+    hasActiveAnnotation: thread.annotation?.resolvedAt === null,
     supportsPersistence: readEnvironmentSupportsPersistence(thread.environmentId),
     hasStoppableProcesses,
     projectSettingsKey,
@@ -85,6 +94,7 @@ export function readLastCodeThreadMenuTarget(
   return {
     thread,
     threadRef,
+    parentThreadId,
     projectSettingsKey,
     workspacePath,
     creator: { ...creator, ref: creatorRef },

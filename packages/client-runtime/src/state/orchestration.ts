@@ -8,6 +8,7 @@ import {
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
+import * as Semaphore from "effect/Semaphore";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import type { HttpClient } from "effect/http";
 import { Atom } from "effect/reactivity";
@@ -44,6 +45,7 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
     >;
   } = {},
 ) {
+  const mentionSearches = Semaphore.makeUnsafe(4);
   const onCheckpointDiffAnswer =
     options.onCheckpointDiffAnswer === undefined
       ? {}
@@ -213,6 +215,14 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
       tag: ORCHESTRATION_V2_WS_METHODS.searchThreads,
       staleTimeMs: 30_000,
       idleTtlMs: 60_000,
+    }),
+    threadMentionSearch: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:orchestration:thread-mention-search",
+      tag: ORCHESTRATION_V2_WS_METHODS.searchThreads,
+      staleTimeMs: 30_000,
+      idleTtlMs: 0,
+      execute: (input) =>
+        request(ORCHESTRATION_V2_WS_METHODS.searchThreads, input).pipe(mentionSearches.withPermit),
     }),
     archivedShellSnapshot: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:orchestration:archived-shell-snapshot",
