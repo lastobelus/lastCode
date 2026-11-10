@@ -69,6 +69,29 @@ describe("LastCode GitHub CI evidence", () => {
     ]);
   });
 
+  it("ignores a newer metadata-only run while retaining real exact-head CI", () => {
+    const realRun = input().workflowRuns[0]!;
+    for (const status of ["in_progress", "completed"]) {
+      expect(
+        evaluateGithubCi(
+          input({
+            workflowRuns: [
+              {
+                ...realRun,
+                id: 457,
+                display_title: `Metadata only: ${TITLE}`,
+                created_at: "2026-08-27T11:00:00Z",
+                status: "completed",
+                conclusion: "skipped",
+              },
+              { ...realRun, status },
+            ],
+          }),
+        ),
+      ).toMatchObject({ state: status === "completed" ? "satisfied" : "pending", runId: 456 });
+    }
+  });
+
   it("reads workflow, rule, exact run, and aggregate job evidence through one shared path", () => {
     const calls: string[] = [];
     const responses = new Map<string, unknown>([
