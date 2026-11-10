@@ -324,8 +324,9 @@ export function SavedWorkspacesLaunch({
     >
       <p className="pt-2 pb-3 text-xs leading-relaxed text-muted-foreground">
         <em>
-          Saved workspaces are local recovery: they depend on this environment’s saved data and the
-          repository’s Git data. They are not an off-machine backup.
+          Saved workspaces are local recovery, not an off-machine backup. A saved scratch workspace
+          needs only this environment’s saved data. A saved Git worktree also needs the repository’s
+          Git data.
         </em>
       </p>
     </SettingsRow>

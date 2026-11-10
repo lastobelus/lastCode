@@ -8823,6 +8823,7 @@ it.layer(layerTest)("snooze queued runs", (it) => {
 const SCRATCH_ROOT = "/tmp/runtime-layer-promotion-scratch";
 const SCRATCH_PROJECT_ID = ProjectId.make("runtime-layer-promotion-scratch");
 const layerScratchPromotionTest = ScratchThreadPromotion.layer.pipe(
+  Layer.provide(WorkspaceAcquisitionTestkit.layer),
   Layer.provide(
     Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
       scratchRoot: Effect.succeedSome(SCRATCH_ROOT),

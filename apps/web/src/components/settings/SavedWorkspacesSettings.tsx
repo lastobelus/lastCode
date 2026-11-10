@@ -80,6 +80,7 @@ export function SavedWorkspacesManager({
   const [recoveryPath, setRecoveryPath] = useState("");
   const [queuedCheckouts, setQueuedCheckouts] = useState<readonly string[]>([]);
   const restoresCurrent = recovery?.current === true && !recovery.orphaned;
+  const needsRecoveryPath = restoresCurrent || recovery?.kind !== "scratch";
   const orphanRecoveryUnavailable = recovery?.orphaned === true && !canMaintainEnvironment;
   const orphanDiscardUnavailable =
     preview?.snapshots.some((entry) => entry.orphaned) === true && !canMaintainEnvironment;
@@ -172,8 +173,9 @@ export function SavedWorkspacesManager({
       working ||
       !canRestore ||
       recovery === null ||
-      recoveryPath.trim() === "" ||
+      (needsRecoveryPath && recoveryPath.trim() === "") ||
       (!restoresCurrent &&
+        recovery.kind !== "scratch" &&
         (recoveryProject === null ||
           !projects.some((project) => project.id === recoveryProject))) ||
       (recovery.orphaned && !readEnvironmentScope(environmentId, AuthEnvironmentMaintainScope))
@@ -186,8 +188,10 @@ export function SavedWorkspacesManager({
       input: {
         checkoutId: recovery.checkoutId,
         snapshotId: recovery.snapshotId,
-        ...(!restoresCurrent && recoveryProject !== null ? { projectId: recoveryProject } : {}),
-        destinationPath: recoveryPath.trim(),
+        ...(!restoresCurrent && recovery.kind !== "scratch" && recoveryProject !== null
+          ? { projectId: recoveryProject }
+          : {}),
+        ...(recoveryPath.trim() === "" ? {} : { destinationPath: recoveryPath.trim() }),
       },
     });
     setWorking(false);
@@ -307,7 +311,13 @@ export function SavedWorkspacesManager({
               </p>
               <p>
                 <code>
-                  {entry.branch ?? "Detached HEAD"} · {entry.head.slice(0, 12)}
+                  {entry.kind === "scratch" ? (
+                    "Scratch workspace"
+                  ) : (
+                    <>
+                      {entry.branch ?? "Detached HEAD"} · {entry.head?.slice(0, 12) ?? "Unverified"}
+                    </>
+                  )}
                 </code>
               </p>
               <p>
@@ -428,19 +438,25 @@ export function SavedWorkspacesManager({
         <DialogPopup>
           <DialogHeader>
             <DialogTitle>
-              {restoresCurrent
-                ? "Restore at another location"
-                : "Restore a separate recovery worktree"}
+              {recovery?.kind === "scratch"
+                ? "Restore scratch workspace"
+                : restoresCurrent
+                  ? "Restore at another location"
+                  : "Restore a separate recovery worktree"}
             </DialogTitle>
             <DialogDescription>
-              {restoresCurrent
-                ? "Restore this exact saved copy at an unused managed worktree path for its existing threads. Choose another location when the original path is occupied. Keep workspace starts on."
-                : "Create a new recovery thread and checkout from this exact saved copy. Choose an existing project and an unused path inside a managed worktree location. The active checkout stays unchanged. Keep workspace starts on."}
+              {recovery?.kind === "scratch"
+                ? restoresCurrent
+                  ? "Restore the saved files for this workspace's existing threads. Choose an unused folder directly inside the managed scratch location."
+                  : "Restore the saved files into a new No project thread. Enter an unused folder directly inside the managed scratch location, or leave the path empty to choose one automatically."
+                : restoresCurrent
+                  ? "Restore this exact saved copy at an unused managed worktree path for its existing threads. Choose another location when the original path is occupied. Keep workspace starts on."
+                  : "Create a new recovery thread and checkout from this exact saved copy. Choose an existing project and an unused path inside a managed worktree location. The active checkout stays unchanged. Keep workspace starts on."}
             </DialogDescription>
           </DialogHeader>
           <DialogPanel>
             <p className="text-xs wrap-anywhere select-text">Saved copy: {recovery?.snapshotId}</p>
-            {!restoresCurrent && (
+            {!restoresCurrent && recovery?.kind !== "scratch" && (
               <Select value={recoveryProject} onValueChange={setRecoveryProject} disabled={working}>
                 <SelectTrigger aria-label="Recovery project">
                   <SelectValue placeholder="Choose a project">
@@ -465,7 +481,11 @@ export function SavedWorkspacesManager({
               spellCheck={false}
               disabled={working || orphanRecoveryUnavailable}
               value={recoveryPath}
-              placeholder="Unused managed worktree path"
+              placeholder={
+                recovery?.kind === "scratch"
+                  ? "Unused managed scratch path"
+                  : "Unused managed worktree path"
+              }
               onChange={(event) => setRecoveryPath(event.currentTarget.value)}
             />
           </DialogPanel>
@@ -478,8 +498,10 @@ export function SavedWorkspacesManager({
                 working ||
                 !canRestore ||
                 orphanRecoveryUnavailable ||
-                recoveryPath.trim() === "" ||
-                (!restoresCurrent && !projects.some((project) => project.id === recoveryProject))
+                (needsRecoveryPath && recoveryPath.trim() === "") ||
+                (!restoresCurrent &&
+                  recovery?.kind !== "scratch" &&
+                  !projects.some((project) => project.id === recoveryProject))
               }
               onClick={() => void restoreRecovery()}
             >

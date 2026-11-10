@@ -2928,6 +2928,7 @@ const make = Effect.gen(function* () {
         return "not a linked worktree";
       return null;
     });
+    const scratchRoot = path.resolve(config.baseDir, "scratch");
     const deletedRows = yield* sql<{ payload_json: string; workspaceRoot: string }>`
           SELECT t.payload_json, p.workspace_root AS "workspaceRoot"
           FROM orchestration_v2_projection_threads t
@@ -2938,7 +2939,13 @@ const make = Effect.gen(function* () {
       decodeCleanupThread(row.payload_json).pipe(
         Effect.map((thread) => ({ ...thread, workspaceRoot: row.workspaceRoot })),
       ),
-    )).filter((thread) => thread.worktreePath !== null && thread.branch !== null);
+    )).filter(
+      (thread) =>
+        thread.worktreePath !== null &&
+        (thread.branch !== null ||
+          (path.dirname(path.resolve(thread.worktreePath)) === scratchRoot &&
+            path.resolve(thread.workspaceRoot) === scratchRoot)),
+    );
     const snapshot = yield* readThreads();
     const threadsById = new Map(snapshot.threads.map((thread) => [thread.id, thread]));
     const previewLeases = yield* previewsProtectingWorktrees();
@@ -3119,6 +3126,172 @@ const make = Effect.gen(function* () {
         if (!(yield* fs.exists(worktreePath))) return;
         const savedProtection = yield* savedWorkspaceProtection(worktreePath);
         if (savedProtection !== null) return keep(savedProtection);
+        const scratch =
+          thread.branch === null &&
+          project !== undefined &&
+          path.resolve(project.workspaceRoot) === scratchRoot &&
+          owners.some((owner) => path.dirname(owner.recordedPath) === scratchRoot);
+        if (scratch) {
+          const scratchActivityAt = Math.max(
+            ...owners.map(({ thread: owner }) =>
+              "workspaceRoot" in owner
+                ? (storageCleanupDeletedActivityAt(owner, null) ?? now)
+                : Math.max(
+                    storageCleanupActivityAt(owner),
+                    owner.archivedAt === null ? 0 : DateTime.toEpochMillis(owner.archivedAt),
+                  ),
+            ),
+          );
+          // Re-run the same eligibility proof at every preservation/removal boundary.
+          // Saving publishes its own summary, so compare activity and ownership fields,
+          // rather than treating that expected publication as new user activity.
+          const scratchBlocked = Effect.fnUntraced(
+            function* (physicalPath = worktreePath) {
+              if (!policiesUnchanged(yield* settingsService.getSettings))
+                return "scratch workspace cleanup settings changed";
+              if (
+                owners.some(
+                  (owner) =>
+                    resolveWorktreeCleanup(serverSettings, owner.thread.projectId)
+                      .worktreeAfterDays === null,
+                )
+              )
+                return "scratch workspace cleanup is disabled for an owner";
+              if (
+                owners.some(
+                  (owner) => owner.thread.archivedAt === null && owner.thread.deletedAt === null,
+                )
+              )
+                return "scratch workspace belongs to a thread that is not archived or deleted";
+              if (yield* fs.exists(path.join(physicalPath, ".git")))
+                return "scratch workspace contains Git metadata";
+              const unverifiedUse = yield* suspensionRegistry.unverifiedUse([
+                worktreePath,
+                ...owners.map((owner) => owner.recordedPath),
+              ]);
+              const savedActivityAt = Math.max(
+                0,
+                unverifiedUse === null ? 0 : Date.parse(unverifiedUse),
+                ...(yield* suspensionRegistry.list)
+                  .filter(
+                    (record) =>
+                      record.kind === "scratch" &&
+                      !record.detached &&
+                      [record.path, ...record.aliases].includes(worktreePath),
+                  )
+                  .flatMap((record) => [record.lastWorkspaceUseAt, record.summary.lastRestoredAt])
+                  .filter((value): value is string => value != null)
+                  .map((value) => Date.parse(value)),
+              );
+              if (
+                owners.some(
+                  (owner) =>
+                    Math.max(scratchActivityAt, savedActivityAt) >=
+                    now -
+                      resolveWorktreeCleanup(serverSettings, owner.thread.projectId)
+                        .worktreeAfterDays! *
+                        DAY_MS,
+                )
+              )
+                return "scratch workspace is still within the inactivity limit";
+              const realRoot = yield* fs.realPath(scratchRoot);
+              if (
+                realRoot !== path.join(yield* fs.realPath(config.baseDir), "scratch") ||
+                path.dirname(worktreePath) !== realRoot
+              )
+                return "scratch workspace is outside the managed scratch folder or is a symbolic link";
+              for (const owner of owners) {
+                if (
+                  owner.thread.branch !== null ||
+                  owner.thread.projectId !== thread.projectId ||
+                  (physicalPath === worktreePath &&
+                    (yield* fs.realPath(owner.recordedPath)) !== worktreePath) ||
+                  (physicalPath !== worktreePath && (yield* fs.exists(owner.recordedPath))) ||
+                  path.join(
+                    yield* fs.realPath(path.dirname(owner.recordedPath)),
+                    path.basename(owner.recordedPath),
+                  ) !== worktreePath
+                )
+                  return "scratch workspace ownership or location is ambiguous";
+                if (
+                  !("workspaceRoot" in owner.thread) &&
+                  !storageCleanupThreadIdle(owner.thread, now, serverSettings)
+                )
+                  return "scratch workspace owner is running or has pending work";
+                if (yield* hasPendingWorkspaceWork(owner.thread.id))
+                  return "scratch workspace owner has pending workspace work";
+                const current = yield* projections.getThreadShell(owner.thread.id);
+                if ("workspaceRoot" in owner.thread) {
+                  if (current !== null) return "scratch workspace owner changed since check";
+                  const pending = yield* sql<{ status: string }>`
+                  SELECT status FROM orchestration_v2_effect_outbox
+                  WHERE thread_id = ${owner.thread.id} AND status NOT IN ('succeeded', 'cancelled')
+                `.pipe(NodeSqliteClient.readOnly);
+                  if (pending.length > 0) return "scratch workspace deletion is still pending";
+                } else if (
+                  current === null ||
+                  !storageCleanupThreadIdle(current, now, serverSettings) ||
+                  current.worktreePath !== owner.thread.worktreePath ||
+                  current.branch !== null ||
+                  current.projectId !== owner.thread.projectId ||
+                  !Equal.equals(current.archivedAt, owner.thread.archivedAt) ||
+                  storageCleanupActivityAt(current) !== storageCleanupActivityAt(owner.thread)
+                )
+                  return "scratch workspace owner changed since check";
+                if (yield* hasLiveProviderSession(worktreePath, owner.thread.id))
+                  return "scratch workspace has a live provider session";
+                if (hasTerminal(owner.recordedPath))
+                  return "scratch workspace has an open terminal";
+              }
+              if (
+                historicalPaths.some(
+                  (owner) =>
+                    owner.cwd === worktreePath &&
+                    !owners.some((known) => known.thread.id === owner.id),
+                ) ||
+                (yield* ownershipChangedSince(sequence, {
+                  cwd: worktreePath,
+                  projectId: thread.projectId,
+                  branch: null,
+                  threads: [...snapshot.threads, ...deletedThreads],
+                  projects: snapshot.projects,
+                }))
+              )
+                return "scratch workspace ownership changed since check";
+              if (yield* containsProjectRoot(physicalPath, yield* projectStore.listShells()))
+                return "scratch workspace contains a project checkout";
+              const protectedPaths = yield* previewsProtectingWorktrees();
+              if (
+                previewUsesWorktree(worktreePath, protectedPaths) ||
+                previewUsesWorktree(physicalPath, protectedPaths)
+              )
+                return "preview is still using the scratch workspace";
+              if (hasTerminal(worktreePath) || hasTerminal(physicalPath))
+                return "scratch workspace has an open terminal";
+              return yield* WorktreeConsumers.worktreeConsumerReason(physicalPath);
+            },
+            Effect.orElseSucceed(
+              () => "scratch workspace safety checks could not be verified; files were retained",
+            ),
+          );
+          const blocked = yield* scratchBlocked();
+          if (blocked !== null) return keep(blocked);
+          const removed = yield* savedWorkspaces.suspendScratch({
+            path: worktreePath,
+            owners: owners.map((owner) => owner.thread),
+            recheck: scratchBlocked,
+          });
+          entries.push({
+            ...entry,
+            outcome: "removed",
+            reason:
+              "Scratch workspace has no Git history, so a copy was saved before removal. Restore it from Saved Workspaces.",
+            // Preserved payload size is not a measure of reclaimed disk space.
+            bytes: null,
+            files: removed.files,
+          });
+          return;
+        }
         if (
           deleted &&
           !settings.worktreeOnDelete &&

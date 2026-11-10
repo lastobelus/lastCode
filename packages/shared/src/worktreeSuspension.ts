@@ -82,23 +82,13 @@ interface SuspensionHardlink {
   readonly target: string;
 }
 
-export interface WorktreeSuspensionSnapshot {
-  readonly version: 1 | 2 | 3;
+interface SuspensionFilesystemSnapshot {
   readonly id: string;
   readonly operationId: string;
   readonly ownerBinding: string;
   readonly createdAt: string;
   readonly sourcePath: string;
   readonly sourceIdentity: FileIdentity;
-  readonly gitDirectory: string;
-  readonly gitDirectoryIdentity: FileIdentity;
-  readonly commonDirectory: string;
-  readonly commonIdentity: FileIdentity;
-  readonly head: string;
-  readonly branch: string | null;
-  readonly indexTree: string;
-  readonly headRef: string;
-  readonly indexRef: string;
   readonly attributes?: ReadonlyArray<SuspensionAttribute>;
   readonly hiddenPaths?: ReadonlyArray<string>;
   readonly hardlinks?: ReadonlyArray<SuspensionHardlink>;
@@ -108,6 +98,20 @@ export interface WorktreeSuspensionSnapshot {
   readonly entries: ReadonlyArray<SuspensionEntry>;
   readonly rawBytes: number;
   readonly savedBytes: number;
+}
+
+export interface GitWorktreeSuspensionSnapshot extends SuspensionFilesystemSnapshot {
+  readonly version: 1 | 2 | 3;
+  readonly kind?: "git";
+  readonly gitDirectory: string;
+  readonly gitDirectoryIdentity: FileIdentity;
+  readonly commonDirectory: string;
+  readonly commonIdentity: FileIdentity;
+  readonly head: string;
+  readonly branch: string | null;
+  readonly indexTree: string;
+  readonly headRef: string;
+  readonly indexRef: string;
   readonly gitFiles: ReadonlyArray<SuspensionEntry>;
   readonly gitRefs: ReadonlyArray<
     { readonly ref: string; readonly object: string } & (
@@ -115,6 +119,30 @@ export interface WorktreeSuspensionSnapshot {
       | { readonly type: "tree"; readonly source: "AUTO_MERGE" }
     )
   >;
+}
+
+export interface ScratchWorktreeSuspensionSnapshot extends SuspensionFilesystemSnapshot {
+  readonly version: 4;
+  readonly kind: "scratch";
+  readonly head: null;
+  readonly branch: null;
+}
+
+export type WorktreeSuspensionSnapshot =
+  | GitWorktreeSuspensionSnapshot
+  | ScratchWorktreeSuspensionSnapshot;
+
+type SnapshotRefs = Pick<
+  GitWorktreeSuspensionSnapshot,
+  "commonDirectory" | "commonIdentity" | "headRef" | "head" | "indexRef" | "indexTree" | "gitRefs"
+>;
+
+interface CaptureInput {
+  readonly sourcePath: string;
+  readonly snapshotId?: string;
+  readonly operationId: string;
+  readonly ownerBinding: string;
+  readonly kind?: "scratch";
 }
 
 export type WorktreeSuspensionPhase =
@@ -137,6 +165,7 @@ export type WorktreeSuspensionPhase =
 export interface WorktreeSuspensionJournal {
   readonly version: 1;
   readonly snapshotId: string;
+  readonly kind?: "git" | "scratch";
   readonly operationId: string;
   readonly phase: WorktreeSuspensionPhase;
   readonly sourcePath?: string;
@@ -154,14 +183,8 @@ export interface WorktreeSuspensionJournal {
   readonly requestedBranchExplicit?: boolean;
   readonly branch?: string;
   readonly discardPreviousPhase?: "active" | "suspended";
-  readonly captureRefs?: Pick<
-    WorktreeSuspensionSnapshot,
-    "commonDirectory" | "commonIdentity" | "headRef" | "head" | "indexRef" | "indexTree" | "gitRefs"
-  >;
-  readonly discard?: Pick<
-    WorktreeSuspensionSnapshot,
-    "commonDirectory" | "commonIdentity" | "headRef" | "head" | "indexRef" | "indexTree" | "gitRefs"
-  >;
+  readonly captureRefs?: SnapshotRefs;
+  readonly discard?: SnapshotRefs | { readonly kind: "scratch" };
 }
 
 export interface WorktreeSuspensionStoreOptions {
@@ -294,7 +317,7 @@ const matchingGitPayload = (
 
 const verifyGitObjects = async (
   snapshot: Pick<
-    WorktreeSuspensionSnapshot,
+    GitWorktreeSuspensionSnapshot,
     "commonDirectory" | "head" | "indexTree" | "gitRefs" | "entries"
   >,
   limits: WorktreeSuspensionLimits,
@@ -772,6 +795,7 @@ const inventory = async (
   objects?: string,
   selected?: ReadonlySet<string>,
   gitPayloads?: ReadonlyMap<string, GitPayload>,
+  scratch = false,
 ): Promise<Inventory> => {
   await noLinkedAncestors(root);
   const rootStat = await NodeFSP.lstat(root);
@@ -791,7 +815,10 @@ const inventory = async (
       })
       .sort();
     for (const name of names) {
-      if (prefix === "" && name === ".git") continue;
+      if (prefix === "" && name === ".git") {
+        if (scratch) refuse("scratch repositories are unsupported");
+        continue;
+      }
       const relative = prefix === "" ? name : `${prefix}/${name}`;
       if (selected !== undefined && !selected.has(relative)) continue;
       if (name === ".git") refuse("nested repositories are unsupported");
@@ -1165,17 +1192,26 @@ const assertSnapshot = (value: unknown, id: string): WorktreeSuspensionSnapshot 
     return refuse("the snapshot manifest is invalid");
   const snapshot = value as WorktreeSuspensionSnapshot;
   if (
-    (snapshot.version !== 1 && snapshot.version !== 2 && snapshot.version !== 3) ||
-    (snapshot.version !== 3 && snapshot.hardlinks !== undefined) ||
+    (snapshot.version !== 1 &&
+      snapshot.version !== 2 &&
+      snapshot.version !== 3 &&
+      snapshot.version !== 4) ||
+    (snapshot.version === 4
+      ? snapshot.kind !== "scratch"
+      : snapshot.kind !== undefined && snapshot.kind !== "git") ||
+    (snapshot.version !== 3 && snapshot.version !== 4 && snapshot.hardlinks !== undefined) ||
     (snapshot.version === 1 &&
       (snapshot.attributes !== undefined || snapshot.hiddenPaths !== undefined)) ||
     snapshot.id !== id ||
     !Array.isArray(snapshot.entries)
   )
     refuse("the snapshot format is unsupported");
-  if (!Array.isArray(snapshot.gitFiles) || !Array.isArray(snapshot.gitRefs))
+  if (
+    snapshot.version !== 4 &&
+    (!Array.isArray(snapshot.gitFiles) || !Array.isArray(snapshot.gitRefs))
+  )
     refuse("the private Git snapshot is invalid");
-  for (const entry of [...snapshot.entries, ...snapshot.gitFiles]) {
+  for (const entry of [...snapshot.entries, ...(snapshot.version === 4 ? [] : snapshot.gitFiles)]) {
     validRelativePath(entry.path);
     if (
       !["directory", "file", "symlink"].includes(entry.kind) ||
@@ -1234,7 +1270,7 @@ const assertSnapshot = (value: unknown, id: string): WorktreeSuspensionSnapshot 
     )
       refuse("the saved filesystem flags are invalid");
   }
-  if (snapshot.version === 3) {
+  if (snapshot.version === 3 || (snapshot.version === 4 && snapshot.hardlinks !== undefined)) {
     if (!Array.isArray(snapshot.hardlinks) || snapshot.hardlinks.length > snapshot.entries.length)
       refuse("the saved hardlinks are invalid");
     const entries = new Map(snapshot.entries.map((entry, index) => [entry.path, { entry, index }]));
@@ -1275,6 +1311,53 @@ const assertSnapshot = (value: unknown, id: string): WorktreeSuspensionSnapshot 
         0,
       );
     if (bytes > MAX_METADATA_BYTES) refuse("the saved hardlinks exceed the metadata byte limit");
+  }
+  if (snapshot.version === 4) {
+    if (
+      snapshot.head !== null ||
+      snapshot.branch !== null ||
+      [
+        "gitDirectory",
+        "gitDirectoryIdentity",
+        "commonDirectory",
+        "commonIdentity",
+        "indexTree",
+        "headRef",
+        "indexRef",
+        "gitFiles",
+        "gitRefs",
+      ].some((key) => key in snapshot)
+    )
+      refuse("the scratch snapshot contains Git identity");
+    if (
+      typeof snapshot.sourcePath !== "string" ||
+      !NodePath.isAbsolute(snapshot.sourcePath) ||
+      !snapshot.sourceIdentity ||
+      !Number.isSafeInteger(snapshot.sourceIdentity.dev) ||
+      !Number.isSafeInteger(snapshot.sourceIdentity.ino) ||
+      typeof snapshot.operationId !== "string" ||
+      typeof snapshot.ownerBinding !== "string" ||
+      !Number.isInteger(snapshot.rootMode) ||
+      snapshot.rootMode < 0 ||
+      snapshot.rootMode > 0o777 ||
+      !Number.isSafeInteger(snapshot.rootUid) ||
+      snapshot.rootUid < 0 ||
+      !Number.isSafeInteger(snapshot.rootGid) ||
+      snapshot.rootGid < 0 ||
+      !Number.isSafeInteger(snapshot.rawBytes) ||
+      snapshot.rawBytes < 0 ||
+      !Number.isSafeInteger(snapshot.savedBytes) ||
+      snapshot.savedBytes < 0
+    )
+      refuse("the scratch snapshot filesystem identity is invalid");
+    const paths = new Map<string, SuspensionEntry>();
+    for (const entry of snapshot.entries) {
+      const parent = NodePath.posix.dirname(entry.path);
+      if (paths.has(entry.path) || (parent !== "." && paths.get(parent)?.kind !== "directory"))
+        refuse("the scratch snapshot paths are invalid");
+      paths.set(entry.path, entry);
+    }
+    return snapshot;
   }
   if (
     snapshot.headRef !== `refs/lastcode/suspension/${id}/head` ||
@@ -1379,6 +1462,8 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       const journal = JSON.parse(await file.readFile("utf8")) as WorktreeSuspensionJournal;
       if (
         journal.version !== 1 ||
+        (journal.kind !== undefined && journal.kind !== "git" && journal.kind !== "scratch") ||
+        (journal.kind === "scratch" && journal.captureRefs !== undefined) ||
         journal.snapshotId !== id ||
         typeof journal.operationId !== "string" ||
         ![
@@ -1436,6 +1521,11 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       const snapshot = assertSnapshot(JSON.parse(await file.readFile("utf8")), id);
       if (
         snapshot.operationId !== journal.operationId ||
+        (snapshot.kind ?? "git") !== (journal.kind ?? "git") ||
+        (snapshot.version === 4 &&
+          (snapshot.sourcePath !== journal.sourcePath ||
+            journal.sourceIdentity === undefined ||
+            !sameIdentity(snapshot.sourceIdentity, journal.sourceIdentity))) ||
         snapshot.entries.length > limits.maxEntries ||
         snapshot.rawBytes > limits.maxBytes
       )
@@ -1451,6 +1541,8 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       refuse("insufficient space for verified preservation");
   };
   const validateRepository = async (snapshot: WorktreeSuspensionSnapshot) => {
+    if (snapshot.version === 4)
+      return { objects: [], indexPayloads: new Map<string, GitPayload>() };
     await noLinkedAncestors(snapshot.commonDirectory);
     if (
       !sameIdentity(identity(await NodeFSP.stat(snapshot.commonDirectory)), snapshot.commonIdentity)
@@ -1549,19 +1641,54 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     const snapshot = await read(id);
     await privateDirectory(objectsPath(id));
     const gitObjects = await validateRepository(snapshot);
-    if (input.durable) await syncGitObjects(snapshot.commonDirectory, gitObjects.objects, limits);
+    if (input.durable && snapshot.version !== 4)
+      await syncGitObjects(snapshot.commonDirectory, gitObjects.objects, limits);
     for (const entry of snapshot.entries)
       if (entry.kind === "file")
         await verifyPayload(snapshot, entry, undefined, false, gitObjects.indexPayloads);
-    for (const entry of snapshot.gitFiles)
-      if (entry.kind === "file") await verifyPayload(snapshot, entry);
+    if (snapshot.version !== 4)
+      for (const entry of snapshot.gitFiles)
+        if (entry.kind === "file") await verifyPayload(snapshot, entry);
     return snapshot;
+  };
+  const compareFilesystem = async (
+    snapshot: WorktreeSuspensionSnapshot,
+    root: string,
+    currentInventory: Inventory,
+  ) => {
+    const rootStat = await NodeFSP.lstat(root);
+    if (
+      rootStat.uid !== snapshot.rootUid ||
+      rootStat.gid !== snapshot.rootGid ||
+      currentInventory.rootMode !== snapshot.rootMode ||
+      JSON.stringify(currentInventory.hiddenPaths ?? []) !==
+        JSON.stringify(snapshot.hiddenPaths ?? []) ||
+      JSON.stringify(currentInventory.attributes ?? []) !==
+        JSON.stringify(snapshot.attributes ?? []) ||
+      JSON.stringify(currentInventory.entries) !== JSON.stringify(snapshot.entries) ||
+      JSON.stringify(currentInventory.hardlinks ?? []) !== JSON.stringify(snapshot.hardlinks ?? [])
+    )
+      refuse("the workspace contents changed after capture");
   };
   const compare = async (
     snapshot: WorktreeSuspensionSnapshot,
     root: string,
     requireSourceIdentity: boolean,
   ) => {
+    if (snapshot.version === 4) {
+      const current = await inspectScratchSource(root);
+      if (requireSourceIdentity && !sameIdentity(current.sourceIdentity, snapshot.sourceIdentity))
+        refuse("the source workspace identity changed");
+      const currentInventory = await inventory(root, limits, undefined, undefined, undefined, true);
+      await compareFilesystem(snapshot, root, currentInventory);
+      return {
+        snapshot,
+        versions: new Map<string, string | null>([
+          ...currentInventory.versions,
+          [NodePath.join(root, ".git"), null],
+        ]),
+      };
+    }
     const versions = new Map<string, string | null>();
     const saveVersion = async (file: string) =>
       versions.set(
@@ -1630,24 +1757,12 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     );
     if (JSON.stringify(gitInventory.entries) !== JSON.stringify(snapshot.gitFiles))
       refuse("private Git metadata changed after capture");
-    const rootStat = await NodeFSP.lstat(root);
-    if (
-      rootStat.uid !== snapshot.rootUid ||
-      rootStat.gid !== snapshot.rootGid ||
-      currentInventory.rootMode !== snapshot.rootMode ||
-      JSON.stringify(currentInventory.hiddenPaths ?? []) !==
-        JSON.stringify(snapshot.hiddenPaths ?? []) ||
-      JSON.stringify(currentInventory.attributes ?? []) !==
-        JSON.stringify(snapshot.attributes ?? []) ||
-      JSON.stringify(currentInventory.entries) !== JSON.stringify(snapshot.entries) ||
-      JSON.stringify(currentInventory.hardlinks ?? []) !== JSON.stringify(snapshot.hardlinks ?? [])
-    )
-      refuse("the workspace contents changed after capture");
+    await compareFilesystem(snapshot, root, currentInventory);
     for (const [file, stamp] of [...currentInventory.versions, ...gitInventory.versions])
       if (!versions.has(file)) versions.set(file, stamp);
     return { snapshot, versions };
   };
-  const syncRefs = async (snapshot: WorktreeSuspensionSnapshot) => {
+  const syncRefs = async (snapshot: GitWorktreeSuspensionSnapshot) => {
     const directories = new Set<string>();
     for (const ref of [
       snapshot.headRef,
@@ -1704,7 +1819,7 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       .toString("utf8")
       .trim()
       .split("\n");
-    const refs: Array<WorktreeSuspensionSnapshot["gitRefs"][number]> = [];
+    const refs: Array<GitWorktreeSuspensionSnapshot["gitRefs"][number]> = [];
     for (const line of responses) {
       const [object, type] = line.split(" ");
       if (!candidates.has(object!)) refuse("private Git objects could not be verified");
@@ -1721,17 +1836,104 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     }
     return refs;
   };
-  const capture = async (input: {
-    readonly sourcePath: string;
-    readonly snapshotId?: string;
-    readonly operationId: string;
-    readonly ownerBinding: string;
-  }) => {
+  const inspectScratchSource = async (sourcePath: string) => {
+    const source = NodePath.resolve(sourcePath);
+    await noLinkedAncestors(source);
+    const stat = await NodeFSP.lstat(source);
+    if (stat.uid !== process.getuid?.() || (stat.mode & 0o7000) !== 0)
+      refuse("the workspace root has unsupported ownership or permissions");
+    return { sourceIdentity: identity(stat) };
+  };
+  const captureScratch = async (input: CaptureInput, sourcePath: string, id: string) => {
+    const { sourceIdentity } = await inspectScratchSource(sourcePath);
+    if (await exists(NodePath.join(sourcePath, ".git")))
+      refuse("scratch repositories are unsupported");
+    const sourceStat = await NodeFSP.lstat(sourcePath);
+    if (await exists(snapshotDirectory(id))) refuse("the snapshot identity already exists");
+    await privateDirectory(snapshotDirectory(id));
+    await privateDirectory(objectsPath(id));
+    let journal: WorktreeSuspensionJournal = {
+      version: 1,
+      kind: "scratch",
+      snapshotId: id,
+      operationId: input.operationId,
+      phase: "capturing",
+      sourcePath,
+      sourceIdentity,
+    };
+    journal = await transition(journal, "capturing");
+    const before = await inventory(sourcePath, limits, undefined, undefined, undefined, true);
+    if (!sameIdentity(before.rootIdentity, sourceIdentity))
+      refuse("the source workspace identity changed");
+    await freeSpace(storeRoot, before.rawBytes * 2 + 64 * 1024 * 1024, before.entries.length * 2);
+    await freeSpace(
+      NodePath.dirname(sourcePath),
+      before.rawBytes + 64 * 1024 * 1024,
+      before.entries.length,
+    );
+    const captured = await inventory(
+      sourcePath,
+      limits,
+      objectsPath(id),
+      undefined,
+      undefined,
+      true,
+    );
+    let savedBytes = 0;
+    for (const object of await NodeFSP.readdir(objectsPath(id)))
+      savedBytes += (await NodeFSP.stat(NodePath.join(objectsPath(id), object))).size;
+    const snapshot: ScratchWorktreeSuspensionSnapshot = {
+      version: 4,
+      kind: "scratch",
+      id,
+      operationId: input.operationId,
+      ownerBinding: input.ownerBinding,
+      createdAt: new Date().toISOString(),
+      sourcePath,
+      sourceIdentity,
+      head: null,
+      branch: null,
+      ...(captured.attributes === undefined ? {} : { attributes: captured.attributes }),
+      ...(captured.hiddenPaths === undefined ? {} : { hiddenPaths: captured.hiddenPaths }),
+      ...(captured.hardlinks === undefined ? {} : { hardlinks: captured.hardlinks }),
+      rootMode: captured.rootMode,
+      rootUid: sourceStat.uid,
+      rootGid: sourceStat.gid,
+      entries: captured.entries,
+      rawBytes: captured.rawBytes,
+      savedBytes:
+        savedBytes +
+        Buffer.byteLength(
+          JSON.stringify({
+            attributes: captured.attributes,
+            hiddenPaths: captured.hiddenPaths,
+            hardlinks: captured.hardlinks,
+          }),
+        ),
+    };
+    await compareFilesystem(snapshot, sourcePath, before);
+    if (!sameIdentity(captured.rootIdentity, sourceIdentity))
+      refuse("the source workspace identity changed");
+    await atomicJson(snapshotPath(id), snapshot);
+    journal = await transition(journal, "verifying");
+    await verify(id, { durable: true });
+    await compare(snapshot, sourcePath, true);
+    return snapshot;
+  };
+  function capture(
+    input: CaptureInput & { readonly kind: "scratch" },
+  ): Promise<ScratchWorktreeSuspensionSnapshot>;
+  function capture(
+    input: CaptureInput & { readonly kind?: undefined },
+  ): Promise<GitWorktreeSuspensionSnapshot>;
+  function capture(input: CaptureInput): Promise<WorktreeSuspensionSnapshot>;
+  async function capture(input: CaptureInput): Promise<WorktreeSuspensionSnapshot> {
     await initialize();
     const sourcePath = NodePath.resolve(input.sourcePath);
     const id = validId(input.snapshotId ?? NodeCrypto.randomUUID());
     if (within(sourcePath, storeRoot) || within(storeRoot, sourcePath))
       refuse("the snapshot store overlaps the workspace");
+    if (input.kind === "scratch") return captureScratch(input, sourcePath, id);
     const repository = await gitIdentity(sourcePath);
     if (within(repository.commonDirectory, storeRoot))
       refuse("private payloads cannot be stored in Git metadata");
@@ -1814,7 +2016,7 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     let savedBytes = 0;
     for (const object of objects)
       savedBytes += (await NodeFSP.stat(NodePath.join(objectsPath(id), object))).size;
-    const snapshot: WorktreeSuspensionSnapshot = {
+    const snapshot: GitWorktreeSuspensionSnapshot = {
       version: captured.hardlinks === undefined ? 2 : 3,
       id,
       operationId: input.operationId,
@@ -1874,9 +2076,9 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     await verify(id, { durable: true });
     await compare(snapshot, sourcePath, true);
     return snapshot;
-  };
+  }
   const materializeGitFiles = async (
-    snapshot: WorktreeSuspensionSnapshot,
+    snapshot: GitWorktreeSuspensionSnapshot,
     gitDirectory: string,
     durable = true,
   ) => {
@@ -1987,7 +2189,16 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     durableRestore = true,
   ) => {
     const { indexPayloads } = await validateRepository(snapshot);
-    const present = resume ? await inventory(destination, limits) : undefined;
+    const present = resume
+      ? await inventory(
+          destination,
+          limits,
+          undefined,
+          undefined,
+          undefined,
+          snapshot.version === 4,
+        )
+      : undefined;
     if (
       present?.attributes !== undefined &&
       present.attributes.some(
@@ -2030,27 +2241,30 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
           );
       }
     }
-    const gitDirectory = (await gitIdentity(destination)).gitDirectory;
-    const indexPath = NodePath.join(gitDirectory, "index");
-    if (resume && (await exists(indexPath))) {
-      const index = await NodeFSP.readFile(indexPath);
-      checkIndex(index, snapshot.head.length === 40 ? 20 : 32);
-      const temporary = NodePath.join(
-        snapshotDirectory(snapshot.id),
-        `index-${NodeCrypto.randomUUID()}`,
-      );
-      await NodeFSP.writeFile(temporary, index, { flag: "wx", mode: 0o600 });
-      try {
-        if (
-          (await gitText(destination, ["write-tree"], { GIT_INDEX_FILE: temporary })) !==
-          snapshot.indexTree
-        )
-          refuse("the partial restore staging area changed");
-      } finally {
-        await NodeFSP.unlink(temporary);
+    let gitDirectory: string | undefined;
+    if (snapshot.version !== 4) {
+      gitDirectory = (await gitIdentity(destination)).gitDirectory;
+      const indexPath = NodePath.join(gitDirectory, "index");
+      if (resume && (await exists(indexPath))) {
+        const index = await NodeFSP.readFile(indexPath);
+        checkIndex(index, snapshot.head.length === 40 ? 20 : 32);
+        const temporary = NodePath.join(
+          snapshotDirectory(snapshot.id),
+          `index-${NodeCrypto.randomUUID()}`,
+        );
+        await NodeFSP.writeFile(temporary, index, { flag: "wx", mode: 0o600 });
+        try {
+          if (
+            (await gitText(destination, ["write-tree"], { GIT_INDEX_FILE: temporary })) !==
+            snapshot.indexTree
+          )
+            refuse("the partial restore staging area changed");
+        } finally {
+          await NodeFSP.unlink(temporary);
+        }
       }
+      await git(destination, ["read-tree", snapshot.indexTree]);
     }
-    await git(destination, ["read-tree", snapshot.indexTree]);
     await NodeFSP.chown(destination, snapshot.rootUid, snapshot.rootGid);
     const durable = durabilityBatch();
     try {
@@ -2116,14 +2330,18 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       }
     }
     await NodeFSP.chmod(destination, snapshot.rootMode);
-    await materializeGitFiles(snapshot, gitDirectory, durableRestore);
+    if (snapshot.version !== 4) {
+      await materializeGitFiles(snapshot, gitDirectory!, durableRestore);
+      if (durableRestore) {
+        await syncFile(NodePath.join(gitDirectory!, "index"));
+        await syncFile(NodePath.join(gitDirectory!, "HEAD"));
+        await syncFile(NodePath.join(destination, ".git"));
+        await syncDirectory(gitDirectory!);
+        await syncDirectory(NodePath.dirname(gitDirectory!));
+        await syncDirectory(snapshot.commonDirectory);
+      }
+    }
     if (durableRestore) {
-      await syncFile(NodePath.join(gitDirectory, "index"));
-      await syncFile(NodePath.join(gitDirectory, "HEAD"));
-      await syncFile(NodePath.join(destination, ".git"));
-      await syncDirectory(gitDirectory);
-      await syncDirectory(NodePath.dirname(gitDirectory));
-      await syncDirectory(snapshot.commonDirectory);
       await syncDirectory(destination);
       await syncDirectory(NodePath.dirname(destination));
     }
@@ -2132,7 +2350,7 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
   const materialize = async (
     snapshot: WorktreeSuspensionSnapshot,
     destination: string,
-    onCreated?: (root: FileIdentity, gitDirectory: string) => Promise<void>,
+    onCreated?: (root: FileIdentity, gitDirectory?: string) => Promise<void>,
     durableRestore = true,
   ) => {
     if (await exists(destination)) refuse("the restore destination is occupied");
@@ -2140,8 +2358,18 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     await freeSpace(
       NodePath.dirname(destination),
       snapshot.rawBytes + 64 * 1024 * 1024,
-      snapshot.entries.length + snapshot.gitFiles.length,
+      snapshot.entries.length + (snapshot.version === 4 ? 0 : snapshot.gitFiles.length),
     );
+    if (snapshot.version === 4) {
+      await NodeFSP.mkdir(destination, { mode: 0o700 });
+      if (durableRestore) {
+        await syncDirectory(destination);
+        await syncDirectory(NodePath.dirname(destination));
+      }
+      await onCreated?.(identity(await NodeFSP.lstat(destination)));
+      await populate(snapshot, destination, false, durableRestore);
+      return;
+    }
     await git(snapshot.commonDirectory, [
       "worktree",
       "add",
@@ -2159,6 +2387,26 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     const created = await gitIdentity(destination);
     await onCreated?.(identity(await NodeFSP.lstat(destination)), created.gitDirectory);
     await populate(snapshot, destination, false, durableRestore);
+  };
+  const removeScratch = async (
+    snapshot: ScratchWorktreeSuspensionSnapshot,
+    root: string,
+    expected: FileIdentity,
+  ) => {
+    const checked = await compare(snapshot, root, false);
+    if (!sameIdentity(identity(NodeFS.lstatSync(root)), expected))
+      refuse("the owned workspace was replaced");
+    for (const [path, stamp] of checked.versions) {
+      let actual: string | null;
+      try {
+        actual = version(NodeFS.lstatSync(path));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        actual = null;
+      }
+      if (actual !== stamp) refuse("the prepared workspace changed before removal");
+    }
+    await NodeFSP.rm(root, { recursive: true });
   };
   const trialRestore = async (id: string) => {
     const snapshot = await verify(id);
@@ -2187,41 +2435,61 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       refuse("the trial restore path is invalid");
     journal = await transition(journal, journal.phase, { trialPath: temporary });
     if (await exists(temporary)) {
-      const current = await gitIdentity(temporary);
-      if (
-        current.commonDirectory !== snapshot.commonDirectory ||
-        current.head !== snapshot.head ||
-        current.branch !== null
-      )
-        refuse("the trial restore Git identity changed");
-      if (
-        journal.trialIdentity !== undefined &&
-        (!sameIdentity(identity(await NodeFSP.lstat(temporary)), journal.trialIdentity) ||
-          journal.trialGitDirectory !== current.gitDirectory)
-      )
-        refuse("the trial restore identity changed");
-      journal = await transition(journal, journal.phase, {
-        trialIdentity: identity(await NodeFSP.lstat(temporary)),
-        trialGitDirectory: current.gitDirectory,
-      });
+      if (snapshot.version === 4) {
+        await inspectScratchSource(temporary);
+        if (journal.trialIdentity === undefined && (await NodeFSP.readdir(temporary)).length !== 0)
+          refuse("the trial restore has no durable ownership record");
+        if (
+          journal.trialIdentity !== undefined &&
+          !sameIdentity(identity(await NodeFSP.lstat(temporary)), journal.trialIdentity)
+        )
+          refuse("the trial restore identity changed");
+        journal = await transition(journal, journal.phase, {
+          trialIdentity: identity(await NodeFSP.lstat(temporary)),
+        });
+      } else {
+        const current = await gitIdentity(temporary);
+        if (
+          current.commonDirectory !== snapshot.commonDirectory ||
+          current.head !== snapshot.head ||
+          current.branch !== null
+        )
+          refuse("the trial restore Git identity changed");
+        if (
+          journal.trialIdentity !== undefined &&
+          (!sameIdentity(identity(await NodeFSP.lstat(temporary)), journal.trialIdentity) ||
+            journal.trialGitDirectory !== current.gitDirectory)
+        )
+          refuse("the trial restore identity changed");
+        journal = await transition(journal, journal.phase, {
+          trialIdentity: identity(await NodeFSP.lstat(temporary)),
+          trialGitDirectory: current.gitDirectory,
+        });
+      }
       await populate(snapshot, temporary, true, durableTrial);
     } else
       await materialize(
         snapshot,
         temporary,
         async (trialIdentity, trialGitDirectory) => {
-          journal = await transition(journal, journal.phase, { trialIdentity, trialGitDirectory });
+          journal = await transition(journal, journal.phase, {
+            trialIdentity,
+            ...(trialGitDirectory === undefined ? {} : { trialGitDirectory }),
+          });
         },
         durableTrial,
       );
     await compare(snapshot, temporary, false);
     if (!sameIdentity(identity(await NodeFSP.lstat(temporary)), journal.trialIdentity!))
       refuse("the trial restore was replaced");
-    await git(snapshot.commonDirectory, ["worktree", "remove", "--force", "--", temporary]);
+    if (snapshot.version === 4) await removeScratch(snapshot, temporary, journal.trialIdentity!);
+    else {
+      await git(snapshot.commonDirectory, ["worktree", "remove", "--force", "--", temporary]);
+      if (await exists(NodePath.dirname(journal.trialGitDirectory!)))
+        await syncDirectory(NodePath.dirname(journal.trialGitDirectory!));
+      await syncDirectory(snapshot.commonDirectory);
+    }
     await syncDirectory(snapshotDirectory(id));
-    if (await exists(NodePath.dirname(journal.trialGitDirectory!)))
-      await syncDirectory(NodePath.dirname(journal.trialGitDirectory!));
-    await syncDirectory(snapshot.commonDirectory);
     const finished = { ...journal };
     delete finished.trialPath;
     delete finished.trialIdentity;
@@ -2246,19 +2514,22 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     const isolatedPath = NodePath.join(quarantineParent, id);
     if (await exists(isolatedPath)) refuse("the isolation destination is occupied");
     journal = await transition(journal, "isolating", { isolatedPath });
-    await git(snapshot.commonDirectory, [
-      "worktree",
-      "move",
-      "--",
-      snapshot.sourcePath,
-      isolatedPath,
-    ]);
-    await syncFile(NodePath.join(isolatedPath, ".git"));
-    await syncFile(NodePath.join(snapshot.gitDirectory, "gitdir"));
-    await syncDirectory(snapshot.gitDirectory);
-    if (await exists(NodePath.dirname(snapshot.gitDirectory)))
-      await syncDirectory(NodePath.dirname(snapshot.gitDirectory));
-    await syncDirectory(snapshot.commonDirectory);
+    if (snapshot.version === 4) await NodeFSP.rename(snapshot.sourcePath, isolatedPath);
+    else {
+      await git(snapshot.commonDirectory, [
+        "worktree",
+        "move",
+        "--",
+        snapshot.sourcePath,
+        isolatedPath,
+      ]);
+      await syncFile(NodePath.join(isolatedPath, ".git"));
+      await syncFile(NodePath.join(snapshot.gitDirectory, "gitdir"));
+      await syncDirectory(snapshot.gitDirectory);
+      if (await exists(NodePath.dirname(snapshot.gitDirectory)))
+        await syncDirectory(NodePath.dirname(snapshot.gitDirectory));
+      await syncDirectory(snapshot.commonDirectory);
+    }
     await syncDirectory(NodePath.dirname(snapshot.sourcePath));
     await syncDirectory(quarantineParent);
     return transition(journal, "isolated");
@@ -2294,7 +2565,7 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     if (prepared === undefined) refuse("removal needs fresh preparation in this process");
     const { snapshot, journal, versions } = prepared!;
     // The caller runs its final native/owner guard before this bounded scan. Keep
-    // the scan and Git spawn in one turn so an application writer cannot interleave.
+    // the scan and removal in one turn so an application writer cannot interleave.
     for (const [file, expected] of versions) {
       let actual: string | null;
       try {
@@ -2308,26 +2579,34 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     if (
       NodeFS.existsSync(snapshot.sourcePath) ||
       !sameIdentity(identity(NodeFS.lstatSync(journal.isolatedPath!)), snapshot.sourceIdentity) ||
-      !sameIdentity(
-        identity(NodeFS.lstatSync(snapshot.gitDirectory)),
-        snapshot.gitDirectoryIdentity,
-      )
+      (snapshot.version !== 4 &&
+        !sameIdentity(
+          identity(NodeFS.lstatSync(snapshot.gitDirectory)),
+          snapshot.gitDirectoryIdentity,
+        ))
     )
       refuse("the isolated workspace was replaced");
     preparedRemovals.delete(id);
-    await git(snapshot.commonDirectory, [
-      "worktree",
-      "remove",
-      "--force",
-      "--",
-      journal.isolatedPath!,
-    ]);
-    if (await exists(journal.isolatedPath!))
-      refuse("the isolated workspace was not completely removed");
-    await syncDirectory(NodePath.dirname(journal.isolatedPath!));
-    if (await exists(NodePath.dirname(snapshot.gitDirectory)))
-      await syncDirectory(NodePath.dirname(snapshot.gitDirectory));
-    await syncDirectory(snapshot.commonDirectory);
+    if (snapshot.version === 4) {
+      await NodeFSP.rm(journal.isolatedPath!, { recursive: true });
+      if (await exists(journal.isolatedPath!))
+        refuse("the isolated workspace was not completely removed");
+      await syncDirectory(NodePath.dirname(journal.isolatedPath!));
+    } else {
+      await git(snapshot.commonDirectory, [
+        "worktree",
+        "remove",
+        "--force",
+        "--",
+        journal.isolatedPath!,
+      ]);
+      if (await exists(journal.isolatedPath!))
+        refuse("the isolated workspace was not completely removed");
+      await syncDirectory(NodePath.dirname(journal.isolatedPath!));
+      if (await exists(NodePath.dirname(snapshot.gitDirectory)))
+        await syncDirectory(NodePath.dirname(snapshot.gitDirectory));
+      await syncDirectory(snapshot.commonDirectory);
+    }
     return transition(journal, "suspended");
   };
   const removeIsolated = async (id: string) => {
@@ -2340,21 +2619,31 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     if (!["isolating", "isolated"].includes(journal.phase) || journal.isolatedPath === undefined)
       refuse("this operation cannot safely roll back isolation");
     if (await exists(snapshot.sourcePath)) refuse("the original path is occupied");
-    const moved = await gitIdentity(journal.isolatedPath!);
-    if (
-      moved.gitDirectory !== snapshot.gitDirectory ||
-      !sameIdentity(moved.gitDirectoryIdentity, snapshot.gitDirectoryIdentity) ||
-      !sameIdentity(identity(await NodeFSP.lstat(journal.isolatedPath!)), snapshot.sourceIdentity)
-    )
-      refuse("the isolation identity changed");
-    await git(snapshot.commonDirectory, [
-      "worktree",
-      "move",
-      "--",
-      journal.isolatedPath!,
-      snapshot.sourcePath,
-    ]);
-    await syncFile(NodePath.join(snapshot.gitDirectory, "gitdir"));
+    if (snapshot.version === 4) {
+      await noLinkedAncestors(NodePath.dirname(snapshot.sourcePath));
+      await noLinkedAncestors(journal.isolatedPath!);
+      if (
+        !sameIdentity(identity(await NodeFSP.lstat(journal.isolatedPath!)), snapshot.sourceIdentity)
+      )
+        refuse("the isolation identity changed");
+      await NodeFSP.rename(journal.isolatedPath!, snapshot.sourcePath);
+    } else {
+      const moved = await gitIdentity(journal.isolatedPath!);
+      if (
+        moved.gitDirectory !== snapshot.gitDirectory ||
+        !sameIdentity(moved.gitDirectoryIdentity, snapshot.gitDirectoryIdentity) ||
+        !sameIdentity(identity(await NodeFSP.lstat(journal.isolatedPath!)), snapshot.sourceIdentity)
+      )
+        refuse("the isolation identity changed");
+      await git(snapshot.commonDirectory, [
+        "worktree",
+        "move",
+        "--",
+        journal.isolatedPath!,
+        snapshot.sourcePath,
+      ]);
+      await syncFile(NodePath.join(snapshot.gitDirectory, "gitdir"));
+    }
     await syncDirectory(NodePath.dirname(snapshot.sourcePath));
     await syncDirectory(NodePath.dirname(journal.isolatedPath!));
     return transition(journal, "ready");
@@ -2376,9 +2665,10 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     const sourcePresent = await exists(snapshot.sourcePath);
     const isolatedPresent = await exists(journal.isolatedPath!);
     if (sourcePresent && !isolatedPresent && journal.phase === "isolating") {
-      const current = await gitIdentity(snapshot.sourcePath);
+      await noLinkedAncestors(snapshot.sourcePath);
+      const current = snapshot.version === 4 ? undefined : await gitIdentity(snapshot.sourcePath);
       if (
-        current.gitDirectory !== snapshot.gitDirectory ||
+        (snapshot.version !== 4 && current!.gitDirectory !== snapshot.gitDirectory) ||
         !sameIdentity(identity(await NodeFSP.lstat(snapshot.sourcePath)), snapshot.sourceIdentity)
       )
         refuse("the original recovery identity changed");
@@ -2388,7 +2678,7 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     if (sourcePresent) refuse("the original recovery path is occupied");
     if (!isolatedPresent) {
       if (journal.phase !== "removing") refuse("the removal registration needs reconciliation");
-      if (await exists(snapshot.gitDirectory)) {
+      if (snapshot.version !== 4 && (await exists(snapshot.gitDirectory))) {
         await noLinkedAncestors(snapshot.gitDirectory);
         if (
           !sameIdentity(
@@ -2455,7 +2745,7 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
         ]);
       }
       await syncDirectory(NodePath.dirname(journal.isolatedPath!));
-      await syncDirectory(snapshot.commonDirectory);
+      if (snapshot.version !== 4) await syncDirectory(snapshot.commonDirectory);
       journal = await transition(journal, "suspended");
       return { status: "suspended" as const, journal };
     }
@@ -2525,6 +2815,8 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     let journal = await readJournal(id);
     if (!["suspended", "active", "removing"].includes(journal.phase))
       refuse("the operation is not ready for restoration");
+    if (snapshot.version === 4 && input.branchName !== undefined)
+      refuse("scratch restores cannot select a Git branch");
     const destinationPath = NodePath.resolve(input.destinationPath);
     if (within(storeRoot, destinationPath) || within(destinationPath, storeRoot))
       refuse("the restore destination overlaps the private store");
@@ -2557,7 +2849,10 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       restoreContainerIdentity: identity(await NodeFSP.lstat(container)),
     });
     await materialize(snapshot, temporary, async (restoreIdentity, restoreGitDirectory) => {
-      journal = await transition(journal, "restoring", { restoreIdentity, restoreGitDirectory });
+      journal = await transition(journal, "restoring", {
+        restoreIdentity,
+        ...(restoreGitDirectory === undefined ? {} : { restoreGitDirectory }),
+      });
     });
     return journal;
   };
@@ -2568,10 +2863,14 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
   ) => {
     if (
       journal.restoreIdentity === undefined ||
-      journal.restoreGitDirectory === undefined ||
+      (snapshot.version !== 4 && journal.restoreGitDirectory === undefined) ||
       !sameIdentity(identity(await NodeFSP.lstat(candidate)), journal.restoreIdentity)
     )
       refuse("the owned restore identity is missing or changed");
+    if (snapshot.version === 4) {
+      await inspectScratchSource(candidate);
+      return { head: null, branch: null };
+    }
     const current = await gitIdentity(candidate);
     if (
       current.gitDirectory !== journal.restoreGitDirectory ||
@@ -2607,6 +2906,40 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       refuse("the operation has no staged restore");
     const temporary = journal.restorePath!;
     const destinationPath = journal.destinationPath!;
+    if (snapshot.version === 4) {
+      const container = restoreContainer(id, journal);
+      if (await exists(container)) {
+        await verifyPrivateDirectory(container);
+        if (
+          journal.restoreContainerIdentity === undefined ||
+          !sameIdentity(identity(await NodeFSP.lstat(container)), journal.restoreContainerIdentity)
+        )
+          refuse("the restore container identity changed");
+      } else if (await exists(temporary)) refuse("the restore container is missing");
+      if (await exists(temporary)) {
+        if (await exists(destinationPath)) refuse("the restore destination became occupied");
+        await restoreCandidate(snapshot, journal, temporary);
+        await compare(snapshot, temporary, false);
+        await noLinkedAncestors(NodePath.dirname(destinationPath));
+        if (
+          (await NodeFSP.lstat(NodePath.dirname(destinationPath))).dev !==
+          journal.restoreIdentity!.dev
+        )
+          refuse("publication requires the same filesystem");
+        await NodeFSP.rename(temporary, destinationPath);
+        await syncDirectory(container);
+        await syncDirectory(NodePath.dirname(destinationPath));
+        journal = await transition(journal, "restoring");
+      }
+      await restoreCandidate(snapshot, journal, destinationPath);
+      await compare(snapshot, destinationPath, false);
+      if (await exists(container)) {
+        await NodeFSP.rmdir(container);
+        await syncDirectory(NodePath.dirname(destinationPath));
+      }
+      journal = await transition(journal, "restored");
+      return { path: destinationPath, branch: null, head: null, journal };
+    }
     if (!(await exists(temporary)) && (await exists(destinationPath))) {
       const current = await restoreCandidate(snapshot, journal, destinationPath);
       await compare(snapshot, destinationPath, false);
@@ -2677,8 +3010,11 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     await git(snapshot.commonDirectory, ["worktree", "move", "--", temporary, destinationPath]);
     await syncFile(NodePath.join(destinationPath, ".git"));
     const restoredGit = await restoreCandidate(snapshot, journal, destinationPath);
-    await syncFile(NodePath.join(restoredGit.gitDirectory, "gitdir"));
-    await syncDirectory(restoredGit.gitDirectory);
+    const restoredGitDirectory =
+      "gitDirectory" in restoredGit ? restoredGit.gitDirectory : undefined;
+    if (typeof restoredGitDirectory !== "string") refuse("the restored Git identity is missing");
+    await syncFile(NodePath.join(restoredGitDirectory, "gitdir"));
+    await syncDirectory(restoredGitDirectory);
     await syncDirectory(NodePath.dirname(destinationPath));
     journal = await transition(journal, "restoring");
     await compare(snapshot, destinationPath, false);
@@ -2717,17 +3053,26 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     });
     if (await exists(journal.restorePath!)) {
       if (journal.restoreIdentity === undefined) {
-        const created = await gitIdentity(journal.restorePath!);
-        if (
-          created.commonDirectory !== snapshot.commonDirectory ||
-          created.head !== snapshot.head ||
-          created.branch !== null
-        )
-          refuse("the incomplete restore Git identity changed");
-        journal = await transition(journal, "restoring", {
-          restoreIdentity: identity(await NodeFSP.lstat(journal.restorePath!)),
-          restoreGitDirectory: created.gitDirectory,
-        });
+        if (snapshot.version === 4) {
+          await inspectScratchSource(journal.restorePath!);
+          if ((await NodeFSP.readdir(journal.restorePath!)).length !== 0)
+            refuse("the incomplete restore has no durable ownership record");
+          journal = await transition(journal, "restoring", {
+            restoreIdentity: identity(await NodeFSP.lstat(journal.restorePath!)),
+          });
+        } else {
+          const created = await gitIdentity(journal.restorePath!);
+          if (
+            created.commonDirectory !== snapshot.commonDirectory ||
+            created.head !== snapshot.head ||
+            created.branch !== null
+          )
+            refuse("the incomplete restore Git identity changed");
+          journal = await transition(journal, "restoring", {
+            restoreIdentity: identity(await NodeFSP.lstat(journal.restorePath!)),
+            restoreGitDirectory: created.gitDirectory,
+          });
+        }
       }
       await restoreCandidate(snapshot, journal, journal.restorePath!);
       await populate(snapshot, journal.restorePath!, true);
@@ -2738,7 +3083,7 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
         async (restoreIdentity, restoreGitDirectory) => {
           journal = await transition(journal, "restoring", {
             restoreIdentity,
-            restoreGitDirectory,
+            ...(restoreGitDirectory === undefined ? {} : { restoreGitDirectory }),
           });
         },
       );
@@ -2757,14 +3102,14 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     if (
       !["restored", "active"].includes(journal.phase) ||
       journal.destinationPath === undefined ||
-      journal.branch === undefined
+      (snapshot.version !== 4 && journal.branch === undefined)
     )
       refuse("the restore has no published destination");
     await restoreCandidate(snapshot, journal, journal.destinationPath!);
     await compare(snapshot, journal.destinationPath!, false);
     return {
       path: journal.destinationPath!,
-      branch: journal.branch!,
+      branch: snapshot.version === 4 ? null : journal.branch!,
       head: snapshot.head,
       journal,
     };
@@ -2774,6 +3119,7 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     const journal = await readJournal(id);
     if (journal.phase !== "restored" || journal.destinationPath === undefined)
       refuse("the restore has not been verified");
+    if (snapshot.version === 4) await restoreCandidate(snapshot, journal, journal.destinationPath!);
     await compare(snapshot, journal.destinationPath!, false);
     return transition(journal, "active");
   };
@@ -2786,6 +3132,11 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       refuse("isolated recovery remnants still need reconciliation");
     if (journal.trialPath !== undefined && (await exists(journal.trialPath)))
       refuse("trial recovery still needs reconciliation");
+    if (snapshot.version === 4)
+      return transition(journal, "discard-intent", {
+        discardPreviousPhase: journal.phase === "active" ? "active" : "suspended",
+        discard: { kind: "scratch" },
+      });
     const { commonDirectory, commonIdentity, headRef, head, indexRef, indexTree, gitRefs } =
       snapshot;
     return transition(journal, "discard-intent", {
@@ -2818,10 +3169,7 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
       refuse("there is no exact saved-data disposal intent");
     return transition(journal, "discarding");
   };
-  const releaseSnapshotRefs = async (
-    id: string,
-    saved: NonNullable<WorktreeSuspensionJournal["discard"]>,
-  ) => {
+  const releaseSnapshotRefs = async (id: string, saved: SnapshotRefs) => {
     if (
       saved.headRef !== `refs/lastcode/suspension/${id}/head` ||
       saved.indexRef !== `refs/lastcode/suspension/${id}/index`
@@ -2913,11 +3261,11 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
           await admitFile(NodePath.join(objectsPath(id), object));
         }
       } else {
-        if (
-          !/^(?:capture-index|index-[a-f0-9-]{36}|(?:journal|manifest)\.json\.[a-f0-9-]{36}\.tmp)$/u.test(
-            name,
-          )
-        )
+        const temporaryName =
+          journal.kind === "scratch"
+            ? /^(?:journal|manifest)\.json\.[a-f0-9-]{36}\.tmp$/u
+            : /^(?:capture-index|index-[a-f0-9-]{36}|(?:journal|manifest)\.json\.[a-f0-9-]{36}\.tmp)$/u;
+        if (!temporaryName.test(name))
           refuse("unknown additions in an incomplete capture are retained");
         await admitFile(NodePath.join(root, name));
       }
@@ -2945,7 +3293,13 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     const journal = await readJournal(id);
     if (journal.phase !== "discarding" || journal.discard === undefined)
       refuse("saved-data disposal has not been committed");
-    await releaseSnapshotRefs(id, journal.discard);
+    if (journal.kind === "scratch") {
+      if (!("kind" in journal.discard) || journal.discard.kind !== "scratch")
+        refuse("the scratch disposal kind changed");
+    } else {
+      if ("kind" in journal.discard) refuse("the disposal repository identity is missing");
+      await releaseSnapshotRefs(id, journal.discard);
+    }
     if (await exists(objectsPath(id))) {
       await privateDirectory(objectsPath(id));
       await NodeFSP.rm(objectsPath(id), { recursive: true });
@@ -2953,12 +3307,11 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     if (await exists(snapshotPath(id))) await NodeFSP.unlink(snapshotPath(id));
     for (const name of await NodeFSP.readdir(snapshotDirectory(id))) {
       if (name === "journal.json") continue;
-      if (
-        !/^(index-[a-f0-9-]{36}|capture-index|(journal|manifest)\.json\.[a-f0-9-]{36}\.tmp)$/u.test(
-          name,
-        )
-      )
-        refuse("extra saved artifacts still need reconciliation");
+      const temporaryName =
+        journal.kind === "scratch"
+          ? /^(?:journal|manifest)\.json\.[a-f0-9-]{36}\.tmp$/u
+          : /^(index-[a-f0-9-]{36}|capture-index|(journal|manifest)\.json\.[a-f0-9-]{36}\.tmp)$/u;
+      if (!temporaryName.test(name)) refuse("extra saved artifacts still need reconciliation");
       const filename = NodePath.join(snapshotDirectory(id), name);
       const stat = await NodeFSP.lstat(filename);
       if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid?.())
@@ -2974,13 +3327,144 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
     await commitDiscard(id);
     return purgeDiscard(id);
   };
-  const createFresh = async (input: {
+  const createFreshScratch = async (input: {
     readonly operationId: string;
-    readonly repositoryRoot: string;
     readonly destinationPath: string;
-    readonly head: string;
-    readonly branchName: string;
   }) => {
+    await initialize();
+    const operationId = validId(input.operationId);
+    const directory = snapshotDirectory(`fresh-${operationId}`);
+    await privateDirectory(directory);
+    const filename = NodePath.join(directory, "fresh.json");
+    const destination = NodePath.resolve(input.destinationPath);
+    if (within(storeRoot, destination) || within(destination, storeRoot))
+      refuse("the fresh scratch destination overlaps the private store");
+    await noLinkedAncestors(NodePath.dirname(destination));
+    const container = NodePath.join(
+      NodePath.dirname(destination),
+      `.suspension-fresh-${operationId}`,
+    );
+    const checkout = NodePath.join(container, "checkout");
+    type FreshScratchJournal = {
+      version: 2;
+      kind: "scratch";
+      operationId: string;
+      destination: string;
+      containerIdentity?: FileIdentity;
+      checkoutIdentity?: FileIdentity;
+      published?: boolean;
+    };
+    let journal: FreshScratchJournal;
+    if (await exists(filename)) {
+      const file = await NodeFSP.open(
+        filename,
+        NodeFS.constants.O_RDONLY | NodeFS.constants.O_NOFOLLOW,
+      );
+      try {
+        const stat = await file.stat();
+        if (
+          !stat.isFile() ||
+          stat.nlink !== 1 ||
+          stat.size > 64 * 1024 ||
+          stat.uid !== process.getuid?.() ||
+          (stat.mode & 0o077) !== 0
+        )
+          refuse("the fresh scratch journal is invalid");
+        journal = JSON.parse(await file.readFile("utf8")) as FreshScratchJournal;
+      } finally {
+        await file.close();
+      }
+      if (
+        journal!.version !== 2 ||
+        journal!.kind !== "scratch" ||
+        journal!.operationId !== operationId ||
+        journal!.destination !== destination
+      )
+        refuse("the fresh scratch authority changed");
+    } else {
+      if ((await exists(destination)) || (await exists(container)))
+        refuse("the fresh scratch destination is occupied");
+      journal = { version: 2, kind: "scratch", operationId, destination };
+      await atomicJson(filename, journal);
+    }
+    const checkEmpty = async (root: string) => {
+      await inspectScratchSource(root);
+      const current = await inventory(root, limits, undefined, undefined, undefined, true);
+      if (
+        current.entries.length !== 0 ||
+        current.attributes !== undefined ||
+        current.hiddenPaths !== undefined ||
+        current.rootMode !== 0o700
+      )
+        refuse("the fresh scratch folder contains unknown contents or metadata");
+      if (
+        journal!.checkoutIdentity !== undefined &&
+        !sameIdentity(current.rootIdentity, journal!.checkoutIdentity)
+      )
+        refuse("the fresh scratch identity changed");
+      return current.rootIdentity;
+    };
+    if (await exists(container)) {
+      await verifyPrivateDirectory(container);
+      if (
+        journal!.containerIdentity !== undefined &&
+        !sameIdentity(identity(await NodeFSP.lstat(container)), journal!.containerIdentity)
+      )
+        refuse("the fresh scratch staging area changed");
+      if (
+        journal!.containerIdentity === undefined &&
+        (await NodeFSP.readdir(container)).length !== 0
+      )
+        refuse("the fresh scratch staging area has no ownership proof");
+    }
+    if (await exists(destination)) {
+      if (journal!.checkoutIdentity === undefined || (await exists(checkout)))
+        refuse("the fresh scratch destination is occupied");
+      await checkEmpty(destination);
+    } else {
+      if (!(await exists(container))) await privateDirectory(container);
+      journal = { ...journal!, containerIdentity: identity(await NodeFSP.lstat(container)) };
+      await atomicJson(filename, journal);
+      await freeSpace(NodePath.dirname(destination), 0, 1);
+      if (!(await exists(checkout))) await NodeFSP.mkdir(checkout, { mode: 0o700 });
+      const checkoutIdentity = await checkEmpty(checkout);
+      journal = { ...journal!, checkoutIdentity };
+      await syncDirectory(checkout);
+      await syncDirectory(container);
+      await atomicJson(filename, journal);
+      if ((await NodeFSP.lstat(NodePath.dirname(destination))).dev !== checkoutIdentity.dev)
+        refuse("publication requires the same filesystem");
+      if (await exists(destination)) refuse("the fresh scratch destination became occupied");
+      await NodeFSP.rename(checkout, destination);
+      await syncDirectory(container);
+      await syncDirectory(NodePath.dirname(destination));
+      await checkEmpty(destination);
+    }
+    if (await exists(container)) {
+      await NodeFSP.rmdir(container);
+      await syncDirectory(NodePath.dirname(destination));
+    }
+    journal = { ...journal!, published: true };
+    await atomicJson(filename, journal);
+    return { path: destination, head: null, branch: null };
+  };
+  const createFresh = async (
+    input:
+      | {
+          readonly kind: "scratch";
+          readonly operationId: string;
+          readonly destinationPath: string;
+        }
+      | {
+          readonly kind?: undefined;
+          readonly operationId: string;
+          readonly repositoryRoot: string;
+          readonly destinationPath: string;
+          readonly head: string;
+          readonly branchName: string;
+        },
+  ) => {
+    if (input.kind === "scratch") return createFreshScratch(input);
     await initialize();
     const operationId = validId(input.operationId);
     const directory = snapshotDirectory(`fresh-${operationId}`);
@@ -3289,6 +3773,7 @@ export const createWorktreeSuspensionStore = (options: WorktreeSuspensionStoreOp
   return {
     capture,
     inspectSource,
+    inspectScratchSource,
     inspectActiveSource: (sourcePath: string) => inspectSource(sourcePath, "activity"),
     createFresh,
     read,

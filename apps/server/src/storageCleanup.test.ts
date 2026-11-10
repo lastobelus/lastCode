@@ -63,6 +63,11 @@ import * as DependencyMounts from "./workspace/DependencyMounts.ts";
 import * as WorktreeConsumers from "./workspace/WorktreeConsumers.ts";
 import * as SuspensionTestkit from "./workspace/WorktreeSuspension.testkit.ts";
 import * as SuspensionRegistry from "./workspace/WorktreeSuspensionRegistry.ts";
+import * as Suspension from "./workspace/WorktreeSuspension.ts";
+import * as Acquisition from "./workspace/WorkspaceAcquisition.ts";
+import * as WorkspaceLifecycle from "./workspace/WorkspaceLifecycle.ts";
+import * as CommandReceipts from "./orchestration-v2/CommandReceiptStore.ts";
+import * as ManagedFolders from "./project/ManagedProjectFolders.ts";
 import { withProjectRootLease } from "./workspace/projectRootLease.ts";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -419,6 +424,7 @@ const cleanupFixture = (
   registry?: SuspensionRegistry.WorktreeSuspensionRegistry["Service"],
   // Most tests exercise the sweep itself, so they start it on activation.
   firstSweepDelay: Duration.Duration = Duration.zero,
+  realSuspension = false,
 ) =>
   Effect.gen(function* () {
     const fixtureNow = yield* Clock.currentTimeMillis;
@@ -552,31 +558,61 @@ const cleanupFixture = (
     const terminalListeners: Parameters<
       TerminalManager.TerminalManager["Service"]["subscribeMetadata"]
     >[0][] = [];
+    let terminalRecords: TerminalSummary[] = [];
+    let onScratchBoundary: ((phase: string) => void) | undefined;
     const settingsChanges = yield* Queue.unbounded<{
       settings: typeof settings;
       handled: Deferred.Deferred<void>;
     }>();
-    const context = yield* Layer.build(StorageCleanup.layer).pipe(
+    const suspensionTestkit = SuspensionTestkit.layerWith(
+      (workspacePath, resource) =>
+        Effect.suspend(() => {
+          const reason = savedWorkspaceProtection.get(workspacePath);
+          return reason === "unavailable"
+            ? Effect.fail(new SuspensionRegistry.SuspensionRegistryError({ operation: "read" }))
+            : reason !== undefined
+              ? Effect.succeed(reason)
+              : (registry?.automaticProtection(workspacePath, resource) ?? Effect.succeed(null));
+        }),
+      Effect.sync(() => {
+        suspensionSweeps++;
+      }),
+      { unverifiedUse: () => Effect.succeed(null), ...registry },
+    );
+    const scratchServices = StorageCleanup.layer.pipe(
+      Layer.provideMerge(
+        Layer.effect(
+          Suspension.WorktreeSuspension,
+          Suspension.makeWithStoreOptions({
+            onBoundary: async (phase) => onScratchBoundary?.(phase),
+          }),
+        ).pipe(
+          Layer.provideMerge(SuspensionRegistry.layer),
+          Layer.provideMerge(Acquisition.layer),
+          Layer.provide(WorkspaceLifecycle.layer),
+          Layer.provide(
+            Layer.mock(ManagedFolders.ManagedProjectFolders)({
+              namedProjectsRoot: `${config.baseDir}/projects`,
+            }),
+          ),
+          Layer.provide(Layer.mock(CommandReceipts.CommandReceiptStoreV2)({})),
+        ),
+      ),
+    );
+    const services: Layer.Layer<
+      Layer.Success<typeof scratchServices>,
+      Layer.Error<typeof scratchServices>,
+      Layer.Services<typeof scratchServices>
+    > = realSuspension
+      ? scratchServices
+      : StorageCleanup.layer.pipe(
+          Layer.provideMerge(suspensionTestkit),
+          Layer.provideMerge(Acquisition.layer),
+        );
+    const context = yield* Layer.build(services).pipe(
       Effect.provide(
         Layer.merge(
-          SuspensionTestkit.layerWith(
-            (workspacePath, resource) =>
-              Effect.suspend(() => {
-                const reason = savedWorkspaceProtection.get(workspacePath);
-                return reason === "unavailable"
-                  ? Effect.fail(
-                      new SuspensionRegistry.SuspensionRegistryError({ operation: "read" }),
-                    )
-                  : reason !== undefined
-                    ? Effect.succeed(reason)
-                    : (registry?.automaticProtection(workspacePath, resource) ??
-                      Effect.succeed(null));
-              }),
-            Effect.sync(() => {
-              suspensionSweeps++;
-            }),
-            registry,
-          ),
+          suspensionTestkit,
           Layer.mock(WorktreeCleanup.WorktreeCleanupService)({
             historicalWorktreeOwners: Effect.suspend(() =>
               failHistoricalOwners
@@ -752,6 +788,16 @@ const cleanupFixture = (
         ),
       } as unknown as Settings.ServerSettingsService["Service"]),
       Effect.provideService(ProjectStore.ProjectStoreV2, {
+        get: (id: ProjectId) =>
+          Effect.sync(() =>
+            Option.map(
+              Option.fromUndefinedOr(projectRoots.find((entry) => entry.id === id)),
+              (entry) => ({
+                projectId: entry.id,
+                workspaceRoot: entry.workspaceRoot,
+              }),
+            ),
+          ),
         list: () => Effect.sync(() => projectRoots),
         listShells: () =>
           failProjectInventory
@@ -795,7 +841,17 @@ const cleanupFixture = (
             ),
           ),
         getThreadShell: (threadId: ThreadId) =>
-          Effect.sync(() => threads.find((thread) => thread.id === threadId) ?? null),
+          Effect.sync(
+            () =>
+              threads.find((thread) => thread.id === threadId && thread.deletedAt === null) ?? null,
+          ),
+        getThread: (threadId: ThreadId) =>
+          Effect.suspend(() => {
+            const thread = [...threads, ...deletedThreads].find((entry) => entry.id === threadId);
+            return thread === undefined
+              ? Effect.fail(new ProjectionStore.ProjectionStoreThreadNotFoundError({ threadId }))
+              : Effect.succeed(thread);
+          }),
       } as unknown as ProjectionStore.ProjectionStoreV2["Service"]),
       Effect.provideService(Orchestrator.OrchestratorV2, {
         streamDomainEvents: Stream.suspend(() => events),
@@ -823,6 +879,20 @@ const cleanupFixture = (
                 : thread,
             );
             return { sequence: 0, storedEvents: [] };
+          }),
+        transitionWorktreeSuspension: (
+          input: import("@t3tools/contracts").WorktreeSuspensionTransitionInput,
+        ) =>
+          Effect.sync(() => {
+            threads = threads.map((thread) =>
+              input.expectedOwners.some((owner) => owner.threadId === thread.id)
+                ? {
+                    ...thread,
+                    worktreeSuspension: input.next,
+                    ...input.workspace,
+                  }
+                : thread,
+            );
           }),
       } as unknown as Orchestrator.OrchestratorV2["Service"]),
       Effect.provideService(
@@ -899,7 +969,9 @@ const cleanupFixture = (
                       ...deletedDependencyRows,
                       ...deletedThreads.map((thread) => ({
                         payload_json: JSON.stringify(thread),
-                        workspaceRoot: repo,
+                        workspaceRoot:
+                          projectRoots.find((project) => project.id === thread.projectId)
+                            ?.workspaceRoot ?? repo,
                       })),
                     ];
               if (query.includes('AS "threadId"') && query.includes('AS "worktreePath"'))
@@ -966,6 +1038,7 @@ const cleanupFixture = (
           }),
       } as unknown as GitManager.GitManager["Service"]),
       Effect.provideService(TerminalManager.TerminalManager, {
+        refreshMetadata: Effect.sync(() => terminalRecords),
         subscribeMetadata: (listener: (typeof terminalListeners)[number]) =>
           Effect.sync(() => {
             terminalListeners.push(listener);
@@ -989,6 +1062,14 @@ const cleanupFixture = (
         failHistoricalOwners = true;
       },
       service: Context.get(context, StorageCleanup.StorageCleanup),
+      savedWorkspaces: realSuspension ? Context.get(context, Suspension.WorktreeSuspension) : null,
+      savedWorkspaceRegistry: realSuspension
+        ? Context.get(context, SuspensionRegistry.WorktreeSuspensionRegistry)
+        : null,
+      acquisition: realSuspension ? Context.get(context, Acquisition.WorkspaceAcquisition) : null,
+      onScratchBoundary: (callback: (phase: string) => void) => {
+        onScratchBoundary = callback;
+      },
       resourceGitCalls,
       metadataCommands,
       staleProofs: () => staleProofs,
@@ -1053,9 +1134,19 @@ const cleanupFixture = (
         onSessionLiveRead = callback;
       },
       setTerminals: (terminals: TerminalSummary[]) =>
-        Effect.forEach(terminalListeners, (listener) => listener({ type: "snapshot", terminals }), {
-          discard: true,
-        }),
+        Effect.sync(() => {
+          terminalRecords = terminals;
+        }).pipe(
+          Effect.andThen(
+            Effect.forEach(
+              terminalListeners,
+              (listener) => listener({ type: "snapshot", terminals }),
+              {
+                discard: true,
+              },
+            ),
+          ),
+        ),
       editBeforeRemoval: () => {
         editBeforeRemoval = true;
       },
@@ -4146,6 +4237,269 @@ describe("dependency cleanup reports", () => {
         });
         expect(report.bytesFreed).toBe(0);
         expect(yield* fixture.fs.exists(`${fixture.worktree}/node_modules`)).toBe(true);
+      }),
+    ),
+  );
+});
+
+const scratchCleanupFixture = (realSuspension = false) =>
+  Effect.gen(function* () {
+    yield* TestClock.setTime(NOW_MS);
+    const fixture = yield* cleanupFixture(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      Duration.zero,
+      realSuspension,
+    );
+    const scratchRoot = `${fixture.config.baseDir}/scratch`;
+    const scratch = `${scratchRoot}/2026-06-01-notes`;
+    yield* fixture.fs.makeDirectory(scratch, { recursive: true });
+    yield* fixture.fs.writeFileString(`${scratch}/notes.txt`, "keep these notes\n");
+    const owner = shell({ worktreePath: scratch, archivedAt: at(-10 * DAY_MS) });
+    fixture.setThreads([owner]);
+    fixture.setProjectRoots([{ id: owner.projectId, workspaceRoot: scratchRoot }]);
+    return { ...fixture, scratchRoot, scratch, owner };
+  });
+
+describe("scratch workspace cleanup", () => {
+  it.effect.each([false, true])(
+    "keeps deleted branchless Git threads outside scratch cleanup (overlapping root: %s)",
+    (overlap) =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          yield* TestClock.setTime(NOW_MS);
+          const fixture = yield* cleanupFixture(
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            Duration.zero,
+            true,
+          );
+          const worktree = overlap ? `${fixture.config.baseDir}/scratch/topic` : fixture.worktree;
+          if (overlap) {
+            yield* fixture.fs.makeDirectory(`${fixture.config.baseDir}/scratch`);
+            yield* fixture.command(fixture.repo, ["worktree", "move", fixture.worktree, worktree]);
+            fixture.setManagedWorktreeDirectories(fixture.config.baseDir, []);
+          }
+          fixture.setThreads([]);
+          fixture.setDeletedThreads([
+            shell({ branch: null, worktreePath: worktree, deletedAt: at(-10 * DAY_MS) }),
+          ]);
+          const report = yield* fixture.service.runNow;
+          expect(
+            report.entries
+              .filter((entry) => entry.path === worktree)
+              .every((entry) => entry.outcome === "kept"),
+          ).toBe(true);
+          expect(yield* fixture.fs.exists(worktree)).toBe(true);
+        }),
+      ),
+  );
+
+  it.effect.each(["use", "restore", "unverified use"] as const)(
+    "keeps scratch after recent workspace %s until the inactivity limit passes",
+    (activity) =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const fixture = yield* scratchCleanupFixture(true);
+          if (activity === "restore") yield* fixture.service.runNow;
+          if (activity === "unverified use")
+            yield* fixture.savedWorkspaceRegistry!.recordUnverifiedUse(
+              fixture.scratch,
+              DateTime.formatIso(at(0)),
+            );
+          else
+            yield* fixture.acquisition!.acquire({
+              path: fixture.scratch,
+              threadId: fixture.owner.id,
+              purpose: "editor",
+            });
+          const report = yield* fixture.service.runNow;
+          expect(report.entries).toContainEqual(
+            expect.objectContaining({
+              path: fixture.scratch,
+              outcome: "kept",
+              reason: "Scratch workspace is still within the inactivity limit",
+            }),
+          );
+          expect(yield* fixture.fs.readFileString(`${fixture.scratch}/notes.txt`)).toBe(
+            "keep these notes\n",
+          );
+          yield* TestClock.adjust("9 days");
+          expect((yield* fixture.service.runNow).entries).toContainEqual(
+            expect.objectContaining({ path: fixture.scratch, outcome: "removed" }),
+          );
+        }),
+      ),
+  );
+
+  it.effect("identifies an idle scratch folder without reporting it as running", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const fixture = yield* cleanupFixture();
+        const scratch = `${fixture.config.baseDir}/scratch/2026-06-01-notes`;
+        yield* fixture.fs.makeDirectory(scratch, { recursive: true });
+        yield* fixture.fs.writeFileString(`${scratch}/notes.txt`, "keep these notes\n");
+        const owner = shell({ worktreePath: scratch });
+        fixture.setThreads([owner]);
+        fixture.setProjectRoots([
+          { id: owner.projectId, workspaceRoot: `${fixture.config.baseDir}/scratch` },
+        ]);
+        const report = yield* fixture.service.runNow;
+        expect(report.entries).toContainEqual(
+          expect.objectContaining({
+            path: scratch,
+            outcome: "kept",
+            reason: "Scratch workspace belongs to a thread that is not archived or deleted",
+          }),
+        );
+        expect(yield* fixture.fs.readFileString(`${scratch}/notes.txt`)).toBe("keep these notes\n");
+      }),
+    ),
+  );
+
+  it.effect.each(["archived", "deleted"] as const)(
+    "saves and removes an old %s scratch workspace through the real recovery service",
+    (state) =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const fixture = yield* scratchCleanupFixture(true);
+          if (state === "deleted") {
+            fixture.setThreads([]);
+            fixture.setDeletedThreads([
+              { ...fixture.owner, deletedAt: at(-10 * DAY_MS), updatedAt: at(-10 * DAY_MS) },
+            ]);
+          }
+          const report = yield* fixture.service.runNow;
+          expect(report.entries).toContainEqual(
+            expect.objectContaining({
+              path: fixture.scratch,
+              outcome: "removed",
+              bytes: null,
+              reason:
+                "Scratch workspace has no Git history, so a copy was saved before removal. Restore it from Saved Workspaces.",
+            }),
+          );
+          expect(yield* fixture.fs.exists(fixture.scratch)).toBe(false);
+          const saved = yield* fixture.savedWorkspaces!.list({}, { allowOrphans: true });
+          expect(saved.entries).toMatchObject([
+            { kind: "scratch", state: "suspended", head: null, ownerThreadIds: [fixture.owner.id] },
+          ]);
+          if (state === "archived") {
+            expect(
+              yield* fixture.acquisition!.acquire({
+                path: `${fixture.scratch}/notes.txt`,
+                threadId: fixture.owner.id,
+                purpose: "file-write",
+              }),
+            ).toMatchObject({ path: `${fixture.scratch}/notes.txt`, restored: true, branch: null });
+            expect(yield* fixture.fs.readFileString(`${fixture.scratch}/notes.txt`)).toBe(
+              "keep these notes\n",
+            );
+          }
+        }),
+      ),
+  );
+
+  it.effect.each([
+    "under the limit",
+    "recent archive",
+    "active",
+    "preview",
+    "process",
+    "terminal",
+    "provider",
+    "shared active owner",
+    "symlink",
+    "outside root",
+    "pending work",
+    "disabled",
+    "Git metadata",
+  ] as const)("keeps scratch contents with %s", (scenario) =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        let processPaths: string[] = [];
+        const fixture = yield* scratchCleanupFixture(scenario === "Git metadata").pipe(
+          Effect.provideService(
+            WorktreeConsumers.ProcessPaths,
+            Effect.sync(() => processPaths),
+          ),
+        );
+        let owner = fixture.owner;
+        if (scenario === "Git metadata") yield* fixture.fs.makeDirectory(`${fixture.scratch}/.git`);
+        if (scenario === "under the limit") owner = { ...owner, latestUserMessageAt: at(-DAY_MS) };
+        if (scenario === "recent archive") owner = { ...owner, archivedAt: at(-DAY_MS) };
+        if (scenario === "active")
+          owner = { ...owner, activeRunId: RunId.make("active-scratch"), status: "running" };
+        if (scenario === "preview") fixture.setPreviewPaths([fixture.scratch]);
+        if (scenario === "terminal") yield* fixture.setTerminalCwd(fixture.scratch);
+        if (scenario === "provider") fixture.setOpenSessionCwd(fixture.scratch);
+        if (scenario === "pending work")
+          owner = {
+            ...owner,
+            pendingBackgroundTasks: [{ taskId: "pending-scratch", kind: "command" }],
+          };
+        if (scenario === "process") processPaths = [`${fixture.scratch}/notes.txt`];
+        if (scenario === "disabled") fixture.setRetention(null);
+        let retained = fixture.scratch;
+        if (scenario === "symlink") {
+          retained = `${fixture.config.baseDir}/kept-scratch`;
+          yield* fixture.fs.rename(fixture.scratch, retained);
+          yield* fixture.fs.symlink(retained, fixture.scratch);
+        }
+        if (scenario === "outside root") {
+          retained = `${fixture.config.baseDir}/outside-scratch`;
+          yield* fixture.fs.rename(fixture.scratch, retained);
+          owner = { ...owner, worktreePath: retained };
+        }
+        fixture.setThreads([
+          owner,
+          ...(scenario === "shared active owner"
+            ? [
+                shell({
+                  id: ThreadId.make("scratch-other-owner"),
+                  worktreePath: fixture.scratch,
+                  status: "running",
+                  archivedAt: at(-10 * DAY_MS),
+                }),
+              ]
+            : []),
+        ]);
+        const report = yield* fixture.service.runNow;
+        expect(report.entries).toContainEqual(
+          expect.objectContaining({ path: retained, outcome: "kept" }),
+        );
+        expect(report.entries.some((entry) => entry.outcome === "failed")).toBe(false);
+        if (scenario === "Git metadata")
+          expect(yield* fixture.savedWorkspaceRegistry!.list).toEqual([]);
+        expect(yield* fixture.fs.readFileString(`${retained}/notes.txt`)).toBe(
+          "keep these notes\n",
+        );
+      }),
+    ),
+  );
+
+  it.effect("keeps scratch files when activity starts after their saved copy is captured", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* scratchCleanupFixture(true);
+        fixture.onScratchBoundary((phase) => {
+          if (phase === "verifying")
+            fixture.setThreads([
+              { ...fixture.owner, status: "running", activeRunId: RunId.make("late-run") },
+            ]);
+        });
+        const report = yield* fixture.service.runNow;
+        expect(report.entries).toContainEqual(
+          expect.objectContaining({ path: fixture.scratch, outcome: "failed" }),
+        );
+        expect(yield* fixture.fs.readFileString(`${fixture.scratch}/notes.txt`)).toBe(
+          "keep these notes\n",
+        );
       }),
     ),
   );

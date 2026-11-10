@@ -678,8 +678,9 @@ export function WorktreeCleanupSection({
       {showWorktreeRules && (
         <SettingsSection id="storage-worktrees" title="Permanent deletion">
           <p className="px-3 py-3 text-xs leading-relaxed text-muted-foreground sm:px-4">
-            These rules remove eligible checkouts without creating a saved workspace. They are
-            separate from suspension. Branches and thread history are kept.
+            These rules are separate from suspension. They delete eligible Git worktrees without
+            saving a copy; branches and thread history are kept. Scratch workspaces are always saved
+            first and can be restored from Saved workspaces.
           </p>
           <SettingsRow
             title="Delete worktrees with deleted threads"
@@ -715,7 +716,7 @@ export function WorktreeCleanupSection({
             status={ruleStatus("worktreeAfterDays")}
             description={
               preservationSupported
-                ? "Clean archived worktrees are eligible immediately when enabled. Unarchived worktrees use the configured delay. Branches and thread history are kept."
+                ? "Clean archived worktrees are eligible immediately; others use this delay. Scratch workspaces wait for every thread to be archived or deleted and the delay to pass, then are saved before removal."
                 : anyPreservationSupported
                   ? "Updated environments make clean archived worktrees eligible immediately when enabled and delay unarchived ones. Older environments keep their inactivity rule. Branches and thread history are kept."
                   : "Remove worktrees using the selected environment’s inactivity rule. Branches and thread history are kept."

@@ -31,6 +31,45 @@ const record: Registry.CheckoutAuthority = {
   blockedReason: null,
 };
 
+it.effect("persists scratch authority without Git metadata and rejects conflicting kinds", () =>
+  Effect.gen(function* () {
+    const registry = yield* Registry.WorktreeSuspensionRegistry;
+    const scratch: Registry.CheckoutAuthority = {
+      ...record,
+      kind: "scratch",
+      repositoryRoot: null,
+      scratchRoot: "/managed/scratch",
+      path: "/managed/scratch/notes",
+      aliases: ["/managed/scratch/notes"],
+      lastHead: null,
+      nativeIdentity: { kind: "scratch", sourceIdentity: { dev: 1, ino: 2 } },
+      snapshots: [
+        {
+          snapshotId: "saved",
+          savedAt: "2026-01-01T00:00:00.000Z",
+          head: null,
+          branch: null,
+          bytes: 1,
+          fileCount: 1,
+          owners: [],
+        },
+      ],
+    };
+    yield* registry.put(scratch, null);
+    assert.deepStrictEqual(yield* registry.list, [scratch]);
+    assert.strictEqual(
+      (yield* registry.put({ ...scratch, repositoryRoot: "/project" }, scratch).pipe(Effect.flip))
+        .operation,
+      "write",
+    );
+    assert.strictEqual(
+      (yield* registry.put({ ...scratch, kind: "git" }, scratch).pipe(Effect.flip)).operation,
+      "write",
+    );
+    assert.deepStrictEqual(yield* registry.list, [scratch]);
+  }).pipe(Effect.provide(layer)),
+);
+
 it.effect("persists authority privately and rejects a stale generation write", () =>
   Effect.gen(function* () {
     const registry = yield* Registry.WorktreeSuspensionRegistry;

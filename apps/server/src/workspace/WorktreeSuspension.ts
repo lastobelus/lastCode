@@ -51,6 +51,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import * as ManagedFolders from "../project/ManagedProjectFolders.ts";
 import * as CommandReceipts from "../orchestration-v2/CommandReceiptStore.ts";
 import * as WorkspaceLifecycle from "./WorkspaceLifecycle.ts";
 import * as ProviderSessions from "../orchestration-v2/ProviderSessionManager.ts";
@@ -58,6 +59,7 @@ import * as Cleanup from "../orchestration-v2/WorktreeCleanupService.ts";
 import * as PreviewHosting from "../preview/Hosting.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as ServerConfig from "../config.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { makeIsManagedWorktreePath } from "../worktreesDirectory.ts";
 import { WorkspaceAcquisition, WorkspaceUnavailableError } from "./WorkspaceAcquisition.ts";
@@ -91,6 +93,22 @@ export class WorktreeSuspension extends Context.Service<
       input: Input<typeof PreviewWorktreeSuspensionInput>,
     ) => Request<WorktreeSuspensionPreview>;
     readonly suspend: (input: Input<typeof SuspendWorktreeInput>) => Request<WorkspaceOperation>;
+    readonly suspendScratch: (input: {
+      readonly path: string;
+      readonly owners: readonly Pick<
+        OrchestrationV2ThreadShell,
+        | "id"
+        | "projectId"
+        | "title"
+        | "worktreePath"
+        | "branch"
+        | "deletedAt"
+        | "modelSelection"
+        | "runtimeMode"
+        | "interactionMode"
+      >[];
+      readonly recheck: (physicalPath: string) => Effect.Effect<string | null>;
+    }) => Request<{ bytes: number; files: number }>;
     readonly restore: (
       input: Input<typeof RestoreWorktreeInput>,
       access?: SavedWorkspaceAccess,
@@ -150,12 +168,14 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
   const receipts = yield* CommandReceipts.CommandReceiptStoreV2;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const projects = yield* ProjectStore.ProjectStoreV2;
+  const managedFolders = yield* ManagedFolders.ManagedProjectFolders;
   const orchestrator = yield* Orchestrator.OrchestratorV2;
   const sessions = yield* ProviderSessions.ProviderSessionManagerV2;
   const cleanup = yield* Cleanup.WorktreeCleanupService;
   const terminals = yield* TerminalManager.TerminalManager;
   const previews = yield* PreviewHosting.PreviewHosting;
   const settings = yield* ServerSettings.ServerSettingsService;
+  const config = yield* ServerConfig.ServerConfig;
   const git = yield* GitVcsDriver.GitVcsDriver;
   const acquisition = yield* WorkspaceAcquisition;
   const fs = yield* FileSystem.FileSystem;
@@ -192,10 +212,14 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       cancelled: boolean;
     }
   >();
-  const native = <A>(run: () => Promise<A>) => Effect.tryPromise({ try: run, catch: safeFailure });
+  const native = <A>(run: () => Promise<A>) =>
+    Effect.tryPromise({
+      try: run,
+      catch: safeFailure,
+    });
   const now = DateTime.now.pipe(Effect.map(DateTime.formatIso));
   const milliseconds = DateTime.now.pipe(Effect.map(DateTime.toEpochMillis));
-  const shortBranch = (branch: string) => branch.replace(/^refs\/heads\//u, "");
+  const shortBranch = (branch: string | null) => branch?.replace(/^refs\/heads\//u, "") ?? null;
   const clearOperation = (record: CheckoutAuthority): CheckoutAuthority => {
     const next = { ...record, blockedReason: null };
     delete next.operation;
@@ -223,12 +247,60 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`))
     );
   };
-  const ownerOf = (thread: OrchestrationV2ThreadShell): WorktreeSuspensionOwner => ({
+  const ownerOf = (
+    thread: Pick<OrchestrationV2ThreadShell, "id" | "projectId" | "worktreePath" | "branch"> &
+      Partial<Pick<OrchestrationV2ThreadShell, "worktreeSuspension">>,
+  ): WorktreeSuspensionOwner => ({
     threadId: thread.id,
     projectId: thread.projectId,
     worktreePath: thread.worktreePath!,
     branch: thread.branch,
     generation: thread.worktreeSuspension?.generation ?? null,
+  });
+  const configuredScratchRoot = path.resolve(config.baseDir, "scratch");
+  const currentScratchProjectId = Effect.gen(function* () {
+    const project = yield* projects.findActiveByWorkspaceRoot(configuredScratchRoot);
+    return Option.isSome(project)
+      ? project.value.projectId
+      : (yield* managedFolders.ensureScratchProject).projectId;
+  });
+  const isScratchWorkspaceOwner = Effect.fnUntraced(function* (
+    thread: Pick<OrchestrationV2ThreadShell, "projectId" | "worktreePath">,
+  ) {
+    if (
+      thread.worktreePath === null ||
+      path.dirname(path.resolve(thread.worktreePath)) !== configuredScratchRoot
+    )
+      return false;
+    const project = yield* projects.get(thread.projectId);
+    return (
+      Option.isSome(project) && path.resolve(project.value.workspaceRoot) === configuredScratchRoot
+    );
+  });
+  const verifyScratchPath = Effect.fn("WorktreeSuspension.verifyScratchPath")(function* (
+    destination: string,
+    expectedRoot = configuredScratchRoot,
+  ) {
+    if (
+      expectedRoot !== configuredScratchRoot ||
+      !path.isAbsolute(destination) ||
+      path.resolve(destination) !== destination ||
+      path.dirname(destination) !== expectedRoot ||
+      (yield* fs.realPath(expectedRoot)) !== expectedRoot ||
+      (yield* canonicalProjectRoot(destination)) !== destination
+    )
+      return yield* failure(
+        "protected",
+        "Choose a folder directly inside the managed scratch location.",
+      );
+  });
+  const verifyDestination = Effect.fn("WorktreeSuspension.verifyDestination")(function* (
+    record: CheckoutAuthority,
+    destination: string,
+  ) {
+    if (record.kind === "scratch") return yield* verifyScratchPath(destination, record.scratchRoot);
+    if (!(yield* isManaged(destination)))
+      return yield* failure("protected", "Choose a managed worktree destination.");
   });
   const ownersFor = Effect.fn("WorktreeSuspension.ownersFor")(function* (
     aliases: readonly string[],
@@ -308,6 +380,73 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       previousAliases.filter((alias) => !record.aliases.includes(alias)),
     );
   });
+  const registerScratch = Effect.fn("WorktreeSuspension.registerScratch")(function* (
+    sourcePath: string,
+    owners: Parameters<WorktreeSuspension["Service"]["suspendScratch"]>[0]["owners"],
+  ) {
+    yield* verifyScratchPath(sourcePath);
+    if (yield* fs.exists(path.join(sourcePath, ".git")))
+      return yield* failure("protected", "Only managed linked worktrees can be suspended.");
+    const template = owners[0];
+    if (
+      template === undefined ||
+      owners.some((owner) => owner.worktreePath !== sourcePath || owner.branch !== null)
+    )
+      return yield* failure(
+        "changed",
+        "The threads using this scratch workspace changed. Try again.",
+      );
+    const live = yield* ownersFor([sourcePath]);
+    const suppliedLive = owners.filter((owner) => owner.deletedAt === null);
+    if (
+      live.length !== suppliedLive.length ||
+      live.some(
+        (owner) =>
+          !suppliedLive.some(
+            (supplied) => supplied.id === owner.id && supplied.projectId === owner.projectId,
+          ),
+      )
+    )
+      return yield* failure(
+        "changed",
+        "The threads using this scratch workspace changed. Try again.",
+      );
+    const inspected = yield* native(() => store.inspectScratchSource(sourcePath));
+    const checkoutId = yield* random.uuidV4();
+    const unverifiedUse = yield* registry.unverifiedUse([sourcePath]);
+    const record: CheckoutAuthority = {
+      checkoutId,
+      kind: "scratch",
+      repositoryRoot: null,
+      scratchRoot: configuredScratchRoot,
+      path: sourcePath,
+      aliases: [sourcePath],
+      owners: live.map(ownerOf),
+      history: [],
+      snapshots: [],
+      blockedReason: null,
+      lastHead: null,
+      ...(unverifiedUse === null ? {} : { lastWorkspaceUseAt: unverifiedUse }),
+      nativeIdentity: { kind: "scratch", sourceIdentity: inspected.sourceIdentity },
+      recoveryThread: {
+        title: template.title,
+        modelSelection: template.modelSelection,
+        runtimeMode: template.runtimeMode,
+        interactionMode: template.interactionMode,
+      },
+      summary: {
+        checkoutId,
+        generation: 0,
+        state: "active",
+        snapshotId: null,
+        lastRestoredAt: null,
+        keepWorkspace: false,
+      },
+    };
+    yield* registry.put(record, null);
+    yield* registerWorkspaceLeaseRoot(sourcePath);
+    return record;
+  });
   const identify = Effect.fn("WorktreeSuspension.identify")(function* (
     threadId: ThreadId,
     catalog?: readonly CheckoutAuthority[],
@@ -328,6 +467,11 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
         "The private recovery catalog is missing. Workspace commands are blocked to preserve recovery data.",
       );
     const actual = yield* fs.realPath(thread.worktreePath);
+    if (yield* isScratchWorkspaceOwner(thread)) {
+      if (actual !== thread.worktreePath)
+        return yield* failure("protected", "Scratch workspace symlinks cannot be saved.");
+      return yield* registerScratch(actual, yield* ownersFor([actual]));
+    }
     if (catalog !== undefined) {
       const registered = (yield* registry.list).find(
         (entry) =>
@@ -517,8 +661,10 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       const project = yield* projects.get(owner.projectId);
       if (
         Option.isNone(project) ||
-        (yield* commonDirectory(project.value.workspaceRoot)) !==
-          (yield* commonDirectory(physicalPath))
+        (record.kind === "scratch"
+          ? project.value.workspaceRoot !== record.scratchRoot
+          : (yield* commonDirectory(project.value.workspaceRoot)) !==
+            (yield* commonDirectory(physicalPath)))
       )
         return yield* failure("protected", "The owning project repository changed.");
     }
@@ -615,8 +761,14 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
   });
   const reconcileDeletedOwners = Effect.fn("WorktreeSuspension.reconcileDeletedOwners")(function* (
     record: CheckoutAuthority,
+    includeInactive = false,
   ) {
-    if (record.operation === undefined && record.pendingProjection === undefined) return record;
+    if (
+      !includeInactive &&
+      record.operation === undefined &&
+      record.pendingProjection === undefined
+    )
+      return record;
     const candidates = [
       ...new Set(
         [...record.owners, ...(record.pendingProjection?.expectedOwners ?? [])].map(
@@ -793,17 +945,42 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       }
     }
     const sharing = yield* ownersFor(record.aliases, record);
+    if (
+      record.kind === "scratch" &&
+      record.summary.state === "active" &&
+      record.summary.snapshotId === null &&
+      (sharing.some((thread) => thread.branch !== null) ||
+        (yield* fs.exists(path.join(record.path, ".git"))))
+    ) {
+      yield* originalStillOwned(record);
+      const detached = { ...record, owners: [], detached: true, blockedReason: null };
+      yield* registry.put(detached, record);
+      return detached;
+    }
     const expected = record.owners.every((owner) => owner.generation === null)
       ? null
       : record.summary;
-    const attached = sharing.filter((thread) =>
-      equivalentSummary(thread.worktreeSuspension ?? null, expected),
+    const promoted = new Set<ThreadId>();
+    if (record.kind === "scratch" && record.summary.state === "active")
+      for (const thread of sharing) {
+        if (thread.worktreePath !== null) continue;
+        const project = yield* projects.get(thread.projectId);
+        if (Option.isSome(project) && project.value.workspaceRoot === record.path)
+          promoted.add(thread.id);
+      }
+    const attached = sharing.filter(
+      (thread) =>
+        !promoted.has(thread.id) && equivalentSummary(thread.worktreeSuspension ?? null, expected),
     );
     let departed = false;
     for (const owner of record.owners.filter(
       (owner) => !attached.some((thread) => thread.id === owner.threadId),
     )) {
       const current = yield* projections.getThread(owner.threadId);
+      if (promoted.has(owner.threadId)) {
+        departed = true;
+        continue;
+      }
       if (current.deletedAt !== null) {
         departed = true;
         continue;
@@ -834,7 +1011,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       return detached;
     }
     if (
-      attached.length !== sharing.length ||
+      attached.length !== sharing.length - promoted.size ||
       attached.some(
         (thread) =>
           thread.worktreePath === null ||
@@ -856,6 +1033,30 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       blockedReason: record.captureFailure?.reason ?? null,
     };
     if (record.summary.state === "active" && attached.length > 0) {
+      if (record.kind === "scratch") {
+        yield* verifyScratchPath(destination, record.scratchRoot);
+        if (attached.some((thread) => thread.branch !== null))
+          return yield* failure(
+            "changed",
+            "This scratch workspace is now linked to a different thread or folder.",
+          );
+        for (const thread of attached) {
+          const project = yield* projects.get(thread.projectId);
+          if (Option.isNone(project) || project.value.workspaceRoot !== record.scratchRoot)
+            return yield* failure(
+              "changed",
+              "This scratch workspace now belongs to a different project.",
+            );
+        }
+        // A different inode is a new folder, never an implicit ownership transfer.
+        yield* originalStillOwned(record, destination);
+        next = { ...next, path: destination, aliases: yield* liveAliases(record, destination) };
+        if (!sameAuthority(record, next)) {
+          yield* registry.put(next, record);
+          yield* registerPublishedRoots(next, record.aliases);
+        }
+        return next;
+      }
       const actualDestination = yield* canonical(destination);
       if (actualDestination !== record.path && !(yield* isManaged(actualDestination)))
         return yield* failure("protected", "The rebound checkout is outside managed worktrees.");
@@ -881,13 +1082,17 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
           if (
             Option.isSome(project) &&
             record.nativeIdentity !== undefined &&
+            "commonDirectory" in record.nativeIdentity &&
             (yield* commonDirectory(project.value.workspaceRoot)) !==
               record.nativeIdentity.commonDirectory
           )
             return yield* failure("changed", "The rebound project belongs to another repository.");
         if (Option.isSome(info)) {
           const inspected = yield* native(() => store.inspectActiveSource(actualDestination));
-          const expected = record.nativeIdentity;
+          const expected =
+            record.nativeIdentity !== undefined && "commonDirectory" in record.nativeIdentity
+              ? record.nativeIdentity
+              : undefined;
           // Device numbers are allocated again at boot. Rebind only an unchanged,
           // canonical checkout and both unchanged Git directories on one volume.
           // Keep record.path as that historical anchor; resolving a saved alias
@@ -970,11 +1175,17 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
   });
   const assertFresh = Effect.fn("WorktreeSuspension.assertFresh")(function* (
     expected: CheckoutAuthority,
+    requireFinished = false,
   ) {
     const actual = yield* requireRecord(expected.checkoutId);
     if (!sameAuthority(actual, expected))
       return yield* failure("changed", "The workspace changed. Refresh before continuing.");
-    yield* checkOwners(actual);
+    const owners = yield* checkOwners(actual);
+    if (requireFinished && owners.some(ownerHasUnfinishedWork))
+      return yield* failure(
+        "protected",
+        "A workspace owner acquired unfinished work or attention during verification.",
+      );
     return actual;
   });
   const receiptFor = (
@@ -1001,7 +1212,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       history: [...new Set([...record.history, snapshot.id])],
       snapshots: [
         ...(record.snapshots ?? []).filter((entry) => entry.snapshotId !== snapshot.id),
-        receiptFor(snapshot, record.owners),
+        receiptFor(snapshot, record.operation?.originalOwners ?? record.owners),
       ],
     };
     yield* registry.put(next, record);
@@ -1009,7 +1220,12 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
   });
   const restoredIdentity = Effect.fn("WorktreeSuspension.restoredIdentity")(function* (
     destination: string,
+    record?: CheckoutAuthority,
   ) {
+    if (record?.kind === "scratch") {
+      const inspected = yield* native(() => store.inspectScratchSource(destination));
+      return { kind: "scratch" as const, sourceIdentity: inspected.sourceIdentity };
+    }
     const inspected = yield* native(() => store.inspectSource(destination));
     return {
       sourceIdentity: inspected.sourceIdentity,
@@ -1023,18 +1239,21 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
     record: CheckoutAuthority,
     physicalPath = record.path,
   ) {
-    const actual = yield* restoredIdentity(physicalPath);
+    const actual = yield* restoredIdentity(physicalPath, record);
     const expected = record.nativeIdentity;
     if (
       expected === undefined ||
       actual.sourceIdentity.dev !== expected.sourceIdentity.dev ||
       actual.sourceIdentity.ino !== expected.sourceIdentity.ino ||
-      actual.gitDirectory !== expected.gitDirectory ||
-      actual.gitDirectoryIdentity.dev !== expected.gitDirectoryIdentity.dev ||
-      actual.gitDirectoryIdentity.ino !== expected.gitDirectoryIdentity.ino ||
-      actual.commonDirectory !== expected.commonDirectory ||
-      actual.commonIdentity.dev !== expected.commonIdentity.dev ||
-      actual.commonIdentity.ino !== expected.commonIdentity.ino
+      "kind" in actual !== "kind" in expected ||
+      (!("kind" in actual) &&
+        !("kind" in expected) &&
+        (actual.gitDirectory !== expected.gitDirectory ||
+          actual.gitDirectoryIdentity.dev !== expected.gitDirectoryIdentity.dev ||
+          actual.gitDirectoryIdentity.ino !== expected.gitDirectoryIdentity.ino ||
+          actual.commonDirectory !== expected.commonDirectory ||
+          actual.commonIdentity.dev !== expected.commonIdentity.dev ||
+          actual.commonIdentity.ino !== expected.commonIdentity.ino))
     )
       return yield* failure(
         "changed",
@@ -1088,6 +1307,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
   const automaticallyEligible = Effect.fn("WorktreeSuspension.automaticallyEligible")(function* (
     record: CheckoutAuthority,
   ) {
+    if (record.kind === "scratch") return false;
     if (record.captureFailure !== undefined && record.captureFailure.retryOnce !== true)
       return false;
     const currentSettings = yield* settings.getSettings;
@@ -1129,6 +1349,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
     return {
       snapshotId,
       checkoutId: record.checkoutId,
+      ...(record.kind === "scratch" ? { kind: "scratch" as const } : {}),
       title: owners[0]?.title ?? record.recoveryThread?.title ?? "Saved workspace",
       path: details?.owners[0]?.worktreePath ?? record.path,
       projectIds: [...new Set(originalOwners.map((owner) => owner.projectId))],
@@ -1138,7 +1359,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
         record.operation?.acceptedAt ??
         record.lastWorkspaceUseAt ??
         "1970-01-01T00:00:00.000Z",
-      head: details?.head ?? record.lastHead ?? "unverified",
+      head: record.kind === "scratch" ? null : (details?.head ?? record.lastHead ?? "unverified"),
       branch: details?.branch == null ? null : shortBranch(details.branch),
       bytes: details?.bytes ?? 0,
       fileCount: details?.fileCount ?? 0,
@@ -1352,14 +1573,16 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
         journal.restorePath === undefined &&
         journal.restoreIdentity === undefined &&
         journal.destinationPath === undefined;
-      // Native staging records "restoring" before allocating a checkout. Active
-      // metadata for another unique branch therefore predates this recovery.
+      // Native staging records "restoring" before allocating a workspace. Active
+      // metadata for another scratch destination or unique Git branch predates it.
       const priorCompletedRecovery =
         operation.kind === "recovery" &&
-        operation.branch === `suspension/recovered-${operation.id}` &&
         journal.phase === "active" &&
-        journal.branch !== `refs/heads/${operation.branch}` &&
-        journal.requestedBranch !== `refs/heads/${operation.branch}`;
+        (record.kind === "scratch"
+          ? journal.destinationPath !== operation.destinationPath
+          : operation.branch === `suspension/recovered-${operation.id}` &&
+            journal.branch !== `refs/heads/${operation.branch}` &&
+            journal.requestedBranch !== `refs/heads/${operation.branch}`);
       if (!suspended && !priorCompletedRecovery) return false;
       await store.verify(id);
       return JSON.stringify(journal) === JSON.stringify(await store.readJournal(id));
@@ -1393,8 +1616,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       operation.destinationPath === undefined
     )
       return yield* failure("changed", "The restore operation has no exact saved-copy binding.");
-    if (!(yield* isManaged(operation.destinationPath)))
-      return yield* failure("protected", "Choose a managed worktree destination.");
+    yield* verifyDestination(record, operation.destinationPath);
     yield* checkOwners(record);
     const restored = yield* withProjectRootLease(
       Effect.gen(function* () {
@@ -1426,7 +1648,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
         record,
         {
           ...record,
-          nativeIdentity: yield* restoredIdentity(restored.path),
+          nativeIdentity: yield* restoredIdentity(restored.path, record),
           lastHead: restored.head,
         },
         {
@@ -1462,18 +1684,19 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
         "Separate recovery needs a verified project and thread template.",
       );
     const project = yield* projects.get(operation.recoveryProjectId);
+    const saved = yield* native(() => store.read(id));
     if (
       Option.isNone(project) ||
-      (yield* commonDirectory(project.value.workspaceRoot)) !==
-        (yield* native(() => store.read(id))).commonDirectory
+      (initial.kind === "scratch"
+        ? project.value.workspaceRoot !== initial.scratchRoot || saved.kind !== "scratch"
+        : saved.kind === "scratch" ||
+          (yield* commonDirectory(project.value.workspaceRoot)) !== saved.commonDirectory)
     )
       return yield* failure(
         "protected",
         "Map this recovery to a project in the original repository.",
       );
-    if (!(yield* isManaged(operation.destinationPath)))
-      return yield* failure("protected", "Choose a managed worktree destination.");
-    const saved = yield* native(() => store.read(id));
+    yield* verifyDestination(initial, operation.destinationPath);
     if (saved.ownerBinding !== initial.checkoutId)
       return yield* failure("changed", "The historical copy belongs to a different checkout.");
     yield* guardRecoveryDestination(initial, operation.destinationPath, operation.id);
@@ -1485,13 +1708,13 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
           journal.phase === "suspended" ||
           (journal.phase === "active" &&
             (journal.destinationPath !== operation.destinationPath ||
-              journal.branch !== `refs/heads/${operation.branch}`))
+              (initial.kind !== "scratch" && journal.branch !== `refs/heads/${operation.branch}`)))
         ) {
           yield* guardProjectRoots([operation.destinationPath!]);
           yield* native(() =>
             store.stageRestore(id, {
               destinationPath: operation.destinationPath!,
-              branchName: operation.branch!,
+              ...(initial.kind === "scratch" ? {} : { branchName: operation.branch! }),
             }),
           ).pipe(Effect.onError(() => cancelUnstartedRestore(initial).pipe(Effect.ignoreCause)));
           journal = yield* native(() => store.readJournal(id));
@@ -1510,14 +1733,17 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
     );
     if (
       result.path !== operation.destinationPath ||
-      shortBranch(result.branch) !== operation.branch
+      shortBranch(result.branch) !== (operation.branch ?? null)
     )
       return yield* failure("changed", "The separate recovery destination changed.");
     let recovered = (yield* registry.list).find((entry) => entry.checkoutId === operation.id);
     if (recovered === undefined) {
       recovered = {
         checkoutId: operation.id,
-        repositoryRoot: project.value.workspaceRoot,
+        repositoryRoot: initial.kind === "scratch" ? null : project.value.workspaceRoot,
+        ...(initial.kind === "scratch"
+          ? { kind: "scratch", scratchRoot: initial.scratchRoot }
+          : {}),
         path: result.path,
         aliases: [result.path],
         owners: [],
@@ -1525,7 +1751,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
         snapshots: [],
         blockedReason: null,
         sourceCheckoutId: initial.checkoutId,
-        nativeIdentity: yield* restoredIdentity(result.path),
+        nativeIdentity: yield* restoredIdentity(result.path, initial),
         lastHead: result.head,
         lastWorkspaceUseAt: yield* now,
         recoveryThread: initial.recoveryThread,
@@ -1610,20 +1836,37 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
     if (
       operation?.kind !== "fresh" ||
       operation.destinationPath === undefined ||
-      operation.branch === undefined ||
-      record.lastHead === undefined
+      (record.kind !== "scratch" &&
+        (operation.branch === undefined ||
+          record.lastHead == null ||
+          record.repositoryRoot === null))
     )
       return yield* failure("unavailable", "The fresh-worktree operation has no verified base.");
     yield* checkOwners(record);
-    const result = yield* native(() =>
-      store.createFresh({
-        operationId: operation.id,
-        repositoryRoot: record.repositoryRoot,
-        destinationPath: operation.destinationPath!,
-        head: record.lastHead!,
-        branchName: operation.branch!,
-      }),
-    );
+    const result = yield* record.kind === "scratch"
+      ? withProjectRootLease(
+          Effect.gen(function* () {
+            yield* verifyDestination(record, operation.destinationPath!);
+            yield* guardProjectRoots([operation.destinationPath!]);
+            yield* guardRecoveryDestination(record, operation.destinationPath!);
+            return yield* native(() =>
+              store.createFresh({
+                kind: "scratch",
+                operationId: operation.id,
+                destinationPath: operation.destinationPath!,
+              }),
+            );
+          }),
+        )
+      : native(() =>
+          store.createFresh({
+            operationId: operation.id,
+            repositoryRoot: record.repositoryRoot!,
+            destinationPath: operation.destinationPath!,
+            head: record.lastHead!,
+            branchName: operation.branch!,
+          }),
+        );
     const active =
       record.summary.state === "active"
         ? record
@@ -1631,7 +1874,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
             record,
             {
               ...record,
-              nativeIdentity: yield* restoredIdentity(result.path),
+              nativeIdentity: yield* restoredIdentity(result.path, record),
               lastWorkspaceUseAt: yield* now,
               lastHead: result.head,
             },
@@ -1744,6 +1987,8 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
           if (journal.isolatedPath === undefined)
             return yield* failure("protected", "The isolated workspace path is unavailable.");
           yield* guardProjectRoots([...record.aliases, record.path, journal.isolatedPath]);
+          if (record.kind === "scratch" && (yield* fs.exists(journal.isolatedPath)))
+            yield* guard(record, journal.isolatedPath);
           return yield* native(() => store.reconcileRemoval(id));
         }),
       );
@@ -1822,6 +2067,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
   const capture = Effect.fn("WorktreeSuspension.capture")(function* (
     initial: CheckoutAuthority,
     automatic: boolean,
+    recheck?: (physicalPath: string) => Effect.Effect<string | null>,
   ) {
     return yield* withWorkspaceLease(
       initial.path,
@@ -1831,23 +2077,36 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
           const id = record.operation?.snapshotIds[0];
           if (record.operation?.kind !== "capture" || id === undefined)
             return yield* failure("changed", "The durable save intent is missing.");
-          yield* guard(record);
+          const verify = Effect.fn("WorktreeSuspension.capture.verify")(function* (
+            physicalPath = record.path,
+            checkAutomatic = false,
+          ) {
+            if (recheck === undefined) return yield* guard(record, physicalPath, checkAutomatic);
+            const reason = yield* recheck(physicalPath).pipe(Effect.mapError(safeFailure));
+            if (reason !== null) return yield* failure("protected", reason);
+            yield* assertFresh(record, true);
+            yield* originalStillOwned(record, physicalPath);
+          });
+          if (recheck === undefined) yield* verify();
           if (automatic && !(yield* automaticallyEligible(record))) {
             yield* reconcile(record, record.operation.id);
             return;
           }
           return yield* Effect.acquireUseRelease(
-            Effect.try({
-              try: () => acquireGeneratedWorktreeMutation(record.path),
-              catch: safeFailure,
-            }),
+            record.kind === "scratch"
+              ? Effect.succeed(() => {})
+              : Effect.try({
+                  try: () => acquireGeneratedWorktreeMutation(record.path),
+                  catch: safeFailure,
+                }),
             () =>
               Effect.gen(function* () {
                 const snapshot = yield* withProjectRootLease(
                   Effect.gen(function* () {
-                    yield* guard(record, record.path, automatic);
+                    yield* verify(record.path, automatic);
                     return yield* native(() =>
                       store.capture({
+                        ...(record.kind === "scratch" ? { kind: "scratch" as const } : {}),
                         sourcePath: record.path,
                         snapshotId: id,
                         operationId: record.operation!.id,
@@ -1860,7 +2119,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
                 yield* native(() => store.trialRestore(id));
                 const isolatedPath = yield* withProjectRootLease(
                   Effect.gen(function* () {
-                    yield* guard(record);
+                    yield* verify();
                     const journal = yield* native(() =>
                       store.isolate(id, {
                         quarantineParent: path.join(
@@ -1874,14 +2133,14 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
                         "unavailable",
                         "The isolated workspace could not be verified.",
                       );
-                    yield* guard(record, journal.isolatedPath);
+                    yield* verify(journal.isolatedPath);
                     return journal.isolatedPath;
                   }),
                 );
-                yield* native(() => store.prepareRemoval(id));
                 yield* withProjectRootLease(
                   Effect.gen(function* () {
-                    yield* guard(record, isolatedPath, automatic);
+                    yield* native(() => store.prepareRemoval(id));
+                    yield* verify(isolatedPath, automatic);
                     yield* native(() => store.finishRemoval(id));
                     yield* publish(record, clearOperation(record), {
                       ...record.summary,
@@ -1889,6 +2148,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
                     });
                   }),
                 );
+                return { bytes: snapshot.savedBytes, files: snapshot.entries.length };
               }),
             (release) => Effect.sync(release),
           );
@@ -1964,6 +2224,8 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       Effect.suspend(() =>
         Effect.gen(function* () {
           const fresh = yield* assertFresh(initial);
+          if (fresh.kind === "scratch")
+            return yield* failure("protected", "Only managed linked worktrees can be suspended.");
           yield* guard(fresh);
           if (
             liveOperations.has(fresh.checkoutId) ||
@@ -2006,6 +2268,85 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       ),
     );
   });
+  const suspendScratch: WorktreeSuspension["Service"]["suspendScratch"] = Effect.fn(
+    "WorktreeSuspension.suspendScratch",
+  )(function* (input) {
+    return yield* withWorkspaceLease(
+      input.path,
+      Effect.gen(function* () {
+        yield* verifyScratchPath(input.path);
+        const existing = (yield* registry.list).find(
+          (record) => !record.detached && [record.path, ...record.aliases].includes(input.path),
+        );
+        const record =
+          existing === undefined
+            ? yield* registerScratch(input.path, input.owners)
+            : yield* reconcileDeletedOwners(existing, true);
+        if (record.kind !== "scratch")
+          return yield* failure("protected", "The scratch workspace is protected.");
+        if (record.summary.keepWorkspace)
+          return yield* failure(
+            "protected",
+            "Keep workspace is on for this scratch workspace, so it can't be saved and removed.",
+          );
+        if (
+          record.operation !== undefined ||
+          record.pendingProjection !== undefined ||
+          record.summary.state !== "active" ||
+          liveOperations.has(record.checkoutId)
+        )
+          return yield* failure("busy", "Finish the current workspace operation first.");
+        yield* assertFresh(record);
+        yield* originalStillOwned(record);
+        const id = yield* random.uuidV4();
+        const retrying = { ...record };
+        delete retrying.captureFailure;
+        const pending = yield* publish(
+          record,
+          {
+            ...retrying,
+            aliases: [
+              ...new Set([
+                ...record.aliases,
+                path.join(path.dirname(record.path), ".suspended-workspaces", id),
+              ]),
+            ],
+            operation: {
+              id,
+              kind: "capture",
+              snapshotIds: [id],
+              manual: false,
+              acceptedAt: yield* now,
+              originalOwners: input.owners.map(ownerOf),
+            },
+            blockedReason: null,
+          },
+          {
+            ...record.summary,
+            generation: record.summary.generation + 1,
+            state: "capturing",
+            snapshotId: id,
+          },
+        );
+        const result = yield* saves
+          .withPermits(1)(capture(pending, false, input.recheck))
+          .pipe(
+            Effect.onError((cause) =>
+              markBlocked(
+                record.checkoutId,
+                safeFailure(Option.getOrUndefined(Cause.findErrorOption(cause))),
+              ).pipe(Effect.ignore),
+            ),
+          );
+        if (result === undefined)
+          return yield* failure(
+            "changed",
+            "The scratch workspace changed before it could be saved. Try again.",
+          );
+        return result;
+      }),
+    );
+  }, Effect.mapError(safeFailure));
   const list = Effect.fn("WorktreeSuspension.list")(function* (
     input: Input<typeof ListSavedWorkspacesInput>,
     access?: SavedWorkspaceAccess,
@@ -2029,6 +2370,8 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
     input: Input<typeof PreviewWorktreeSuspensionInput>,
   ) {
     const initial = yield* identify(input.threadId);
+    if (initial.kind === "scratch")
+      return yield* failure("protected", "Only managed linked worktrees can be suspended.");
     const record = yield* withWorkspaceLease(initial.path, reconcile(initial));
     if (record.summary.state !== "active" || record.operation !== undefined)
       return yield* failure("busy", "This workspace is not ready to suspend.");
@@ -2071,8 +2414,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       record.operation !== undefined
     )
       return yield* failure("protected", "This copy is not the current suspended workspace.");
-    if (!(yield* isManaged(destinationPath)))
-      return yield* failure("protected", "Choose a managed worktree destination.");
+    yield* verifyDestination(record, destinationPath);
     const id = yield* random.uuidV4();
     return yield* withProjectRootLease(
       Effect.gen(function* () {
@@ -2163,24 +2505,32 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
             input.projectId ??
             record.snapshots?.find((entry) => entry.snapshotId === input.snapshotId)?.owners[0]
               ?.projectId;
-          if (projectId === undefined || record.recoveryThread === undefined)
+          if (
+            (projectId === undefined && record.kind !== "scratch") ||
+            record.recoveryThread === undefined
+          )
             return yield* failure(
               "protected",
               "Choose a project in the original repository for this recovery.",
             );
           const id = yield* random.uuidV4();
-          const branch = `suspension/recovered-${id}`;
+          const branch = record.kind === "scratch" ? undefined : `suspension/recovered-${id}`;
           const destinationPath =
             input.destinationPath ?? path.join(path.dirname(record.path), `recovered-${id}`);
           if (
             destinationPath === record.path ||
             record.aliases.includes(destinationPath) ||
-            !(yield* isManaged(destinationPath))
+            (record.kind !== "scratch" && !(yield* isManaged(destinationPath)))
           )
             return yield* failure(
               "protected",
               "Historical recovery needs a separate managed destination.",
             );
+          yield* verifyDestination(record, destinationPath);
+          const recoveryProjectId =
+            record.kind === "scratch" && input.projectId === undefined
+              ? yield* currentScratchProjectId
+              : projectId!;
           const pending: CheckoutAuthority = {
             ...record,
             operation: {
@@ -2190,9 +2540,9 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
               manual: true,
               acceptedAt: yield* now,
               destinationPath,
-              recoveryProjectId: projectId,
+              recoveryProjectId,
               recoveryThreadId: ThreadId.make(`suspension:${id}`),
-              branch,
+              ...(branch === undefined ? {} : { branch }),
             },
             blockedReason: null,
           };
@@ -2205,6 +2555,14 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
                 );
               yield* guardProjectRoots([destinationPath]);
               yield* guardRecoveryDestination(record, destinationPath);
+              if (record.kind === "scratch") {
+                const project = yield* projects.get(recoveryProjectId);
+                if (Option.isNone(project) || project.value.workspaceRoot !== record.scratchRoot)
+                  return yield* failure(
+                    "protected",
+                    "Map this recovery to a project in the original repository.",
+                  );
+              }
               yield* registry.put(pending, record).pipe(
                 Effect.catchIf(
                   (error) => error.operation === "ownership-changed",
@@ -2400,28 +2758,31 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
               "Fresh creation is available after deliberate saved-workspace disposal.",
             );
           yield* checkOwners(record);
-          if (!(yield* isManaged(record.path)) || (yield* fs.exists(record.path)))
+          yield* verifyDestination(record, record.path);
+          if (yield* fs.exists(record.path))
             return yield* failure(
               "protected",
               "The managed destination is occupied or no longer managed.",
             );
           const branch = record.owners[0]?.branch;
           const tip =
-            branch === null || branch === undefined
-              ? record.lastHead
-              : yield* git
-                  .execute({
-                    operation: "fresh workspace base",
-                    cwd: record.repositoryRoot,
-                    args: ["rev-parse", "--verify", `refs/heads/${branch}^{commit}`],
-                    allowNonZeroExit: true,
-                  })
-                  .pipe(
-                    Effect.map((result) =>
-                      result.exitCode === 0 ? result.stdout.trim() : record.lastHead,
-                    ),
-                  );
-          if (tip === undefined || !/^[a-f0-9]{40,64}$/u.test(tip))
+            record.kind === "scratch"
+              ? null
+              : branch === null || branch === undefined
+                ? record.lastHead
+                : yield* git
+                    .execute({
+                      operation: "fresh workspace base",
+                      cwd: record.repositoryRoot!,
+                      args: ["rev-parse", "--verify", `refs/heads/${branch}^{commit}`],
+                      allowNonZeroExit: true,
+                    })
+                    .pipe(
+                      Effect.map((result) =>
+                        result.exitCode === 0 ? result.stdout.trim() : record.lastHead,
+                      ),
+                    );
+          if (record.kind !== "scratch" && (tip == null || !/^[a-f0-9]{40,64}$/u.test(tip)))
             return yield* failure(
               "unavailable",
               "The original branch and base commit are unavailable. Choose a new branch explicitly.",
@@ -2429,7 +2790,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
           const id = yield* random.uuidV4();
           const pending: CheckoutAuthority = {
             ...record,
-            lastHead: tip,
+            lastHead: tip ?? null,
             blockedReason: null,
             operation: {
               id,
@@ -2438,7 +2799,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
               manual: true,
               acceptedAt: yield* now,
               destinationPath: record.path,
-              branch: `suspension/fresh-${id}`,
+              ...(record.kind === "scratch" ? {} : { branch: `suspension/fresh-${id}` }),
             },
           };
           yield* registry.put(pending, record);
@@ -2855,7 +3216,8 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
           : byId.get(thread.worktreeSuspension.checkoutId);
       if (
         record !== undefined &&
-        (record.detached ||
+        (record.kind === "scratch" ||
+          record.detached ||
           record.summary.state !== "active" ||
           record.operation !== undefined ||
           record.pendingProjection !== undefined ||
@@ -2863,6 +3225,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
           liveOperations.has(record.checkoutId))
       )
         continue;
+      if (yield* isScratchWorkspaceOwner(thread)) continue;
       if (
         !automaticEligibility(
           thread,
@@ -3001,25 +3364,43 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
             const thread = yield* projections.getThreadShell(binding.threadId);
             if (thread?.worktreeSuspension !== undefined) {
               const rebound = catalog.find(
-                (entry) =>
-                  entry.checkoutId === thread.worktreeSuspension!.checkoutId && !entry.detached,
+                (entry) => entry.checkoutId === thread.worktreeSuspension!.checkoutId,
               );
-              if (rebound?.summary.state === "active" && rebound.operation === undefined) {
+              if (
+                rebound?.kind === "scratch" &&
+                rebound.detached &&
+                rebound.summary.state === "active" &&
+                rebound.summary.snapshotId === null &&
+                rebound.operation === undefined &&
+                rebound.pendingProjection === undefined
+              )
+                continue;
+              if (
+                rebound !== undefined &&
+                !rebound.detached &&
+                rebound.summary.state === "active" &&
+                rebound.operation === undefined
+              ) {
                 record = rebound;
                 break;
               }
               return yield* new WorkspaceUnavailableError({ reason: "snapshot-unavailable" });
             }
             if (thread !== null && matchesPath && positiveUse(input.purpose)) {
+              const scratchOwner = yield* isScratchWorkspaceOwner(thread);
               if (
                 (yield* fs.exists(binding.worktreePath)) &&
-                (yield* isManaged(binding.worktreePath))
+                (scratchOwner || (yield* isManaged(binding.worktreePath)))
               ) {
                 const policy = resolveWorktreeSuspension(
                   yield* settings.getSettings,
                   thread.projectId,
                 );
-                if (policy.mode === "off" || !Object.values(policy.scopes).some(Boolean)) {
+                if (
+                  scratchOwner ||
+                  policy.mode === "off" ||
+                  !Object.values(policy.scopes).some(Boolean)
+                ) {
                   const identified = yield* identify(thread.id, undefined, "activity").pipe(
                     Effect.option,
                   );
@@ -3066,39 +3447,42 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
               }
               return {
                 path: path.join(current.path, suffix),
-                branch: !(yield* fs.exists(current.path))
-                  ? (current.owners[0]?.branch ?? null)
-                  : yield* git
-                      .execute({
-                        operation: "suspension active branch",
-                        cwd: current.path,
-                        args: ["rev-parse", "--symbolic-full-name", "HEAD"],
-                      })
-                      .pipe(
-                        Effect.map((result) =>
-                          result.stdout.trim().startsWith("refs/heads/")
-                            ? shortBranch(result.stdout.trim())
-                            : null,
-                        ),
-                        Effect.catch((error) =>
-                          Effect.gen(function* () {
-                            const configured = yield* settings.getSettings;
-                            const disabled =
-                              owners.length > 0 &&
-                              owners.every((owner) => {
-                                const policy = resolveWorktreeSuspension(
-                                  configured,
-                                  owner.projectId,
-                                );
-                                return (
-                                  policy.mode === "off" ||
-                                  !Object.values(policy.scopes).some(Boolean)
-                                );
-                              });
-                            return disabled ? null : yield* error;
-                          }),
-                        ),
-                      ),
+                branch:
+                  current.kind === "scratch"
+                    ? null
+                    : !(yield* fs.exists(current.path))
+                      ? (current.owners[0]?.branch ?? null)
+                      : yield* git
+                          .execute({
+                            operation: "suspension active branch",
+                            cwd: current.path,
+                            args: ["rev-parse", "--symbolic-full-name", "HEAD"],
+                          })
+                          .pipe(
+                            Effect.map((result) =>
+                              result.stdout.trim().startsWith("refs/heads/")
+                                ? shortBranch(result.stdout.trim())
+                                : null,
+                            ),
+                            Effect.catch((error) =>
+                              Effect.gen(function* () {
+                                const configured = yield* settings.getSettings;
+                                const disabled =
+                                  owners.length > 0 &&
+                                  owners.every((owner) => {
+                                    const policy = resolveWorktreeSuspension(
+                                      configured,
+                                      owner.projectId,
+                                    );
+                                    return (
+                                      policy.mode === "off" ||
+                                      !Object.values(policy.scopes).some(Boolean)
+                                    );
+                                  });
+                                return disabled ? null : yield* error;
+                              }),
+                            ),
+                          ),
                 restored: false,
               };
             }
@@ -3127,6 +3511,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
     list,
     previewSuspend,
     suspend,
+    suspendScratch,
     restore,
     previewDiscard,
     discard,
