@@ -1,5 +1,5 @@
-# Owned-watch acceptance fixture
+# Owned watch acceptance fixture
 
-Disposable validation fixture. Never merge this pull request.
+Draft test fixture. Never merge.
 
-State: registration ordering, first host event.
+Corrected registration boundary observation.
