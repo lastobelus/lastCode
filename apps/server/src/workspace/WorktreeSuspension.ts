@@ -285,11 +285,16 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
     record: CheckoutAuthority,
     destination = record.path,
   ) {
+    const actualDestination = yield* canonical(destination);
     const occupied = yield* Effect.forEach(
-      record.aliases.filter(
-        (alias) => alias !== destination && alias.split(path.sep).includes(".suspended-workspaces"),
-      ),
-      (alias) => fs.exists(alias).pipe(Effect.map((exists) => (exists ? [alias] : []))),
+      record.aliases.filter((alias) => alias !== destination),
+      (alias) =>
+        alias.split(path.sep).includes(".suspended-workspaces")
+          ? fs.exists(alias).pipe(Effect.map((exists) => (exists ? [alias] : [])))
+          : fs.realPath(alias).pipe(
+              Effect.map((actual) => (actual === actualDestination ? [alias] : [])),
+              Effect.orElseSucceed(() => []),
+            ),
     );
     return [...new Set([destination, ...occupied.flat()])];
   });
@@ -851,7 +856,8 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       blockedReason: record.captureFailure?.reason ?? null,
     };
     if (record.summary.state === "active" && attached.length > 0) {
-      if (destination !== record.path && !(yield* isManaged(destination)))
+      const actualDestination = yield* canonical(destination);
+      if (actualDestination !== record.path && !(yield* isManaged(actualDestination)))
         return yield* failure("protected", "The rebound checkout is outside managed worktrees.");
       const info = yield* fs.stat(destination).pipe(Effect.option);
       const nativeChanged =
@@ -865,7 +871,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
           record.owners.find((owner) => owner.threadId === thread.id)?.projectId !==
           thread.projectId,
       );
-      if (nativeChanged || destination !== record.path || projectsChanged) {
+      if (nativeChanged || actualDestination !== record.path || projectsChanged) {
         const projectRows = yield* Effect.forEach(attached, (thread) =>
           projects.get(thread.projectId),
         );
@@ -880,14 +886,15 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
           )
             return yield* failure("changed", "The rebound project belongs to another repository.");
         if (Option.isSome(info)) {
-          const actualDestination = yield* canonical(destination);
           const inspected = yield* native(() => store.inspectActiveSource(actualDestination));
           const expected = record.nativeIdentity;
           // Device numbers are allocated again at boot. Rebind only an unchanged,
           // canonical checkout and both unchanged Git directories on one volume.
+          // Keep record.path as that historical anchor; resolving a saved alias
+          // today cannot prove where it pointed when the identity was recorded.
           const deviceRenumbered =
             expected !== undefined &&
-            actualDestination === (yield* canonical(record.path)) &&
+            actualDestination === record.path &&
             inspected.sourceIdentity.ino === expected.sourceIdentity.ino &&
             inspected.gitDirectory === expected.gitDirectory &&
             inspected.gitDirectoryIdentity.ino === expected.gitDirectoryIdentity.ino &&
@@ -921,12 +928,15 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
         }
         next = {
           ...next,
-          path: destination,
-          aliases: yield* liveAliases(record, destination),
           repositoryRoot:
             projectRows.find(Option.isSome)?.value.workspaceRoot ?? record.repositoryRoot,
         };
       }
+      next = {
+        ...next,
+        path: actualDestination,
+        aliases: [...new Set([...(yield* liveAliases(record, actualDestination)), destination])],
+      };
     }
     if (!sameAuthority(record, next)) {
       yield* registry.put(next, record);
