@@ -33,13 +33,14 @@ it("keeps clicked thread navigations in the app, including hosted new windows", 
     const browserCdp = await browser.newBrowserCDPSession();
     const { targetInfo: sourceTarget } = await cdp.send("Target.getTargetInfo");
     let closeProtocolPopup = false;
+    let created = Promise.withResolvers<string>();
     browserCdp.on("Target.targetCreated", ({ targetInfo }) => {
       if (
         closeProtocolPopup &&
         targetInfo.type === "page" &&
         targetInfo.targetId !== sourceTarget.targetId
       )
-        void browserCdp.send("Target.closeTarget", { targetId: targetInfo.targetId });
+        created.resolve(targetInfo.targetId);
     });
     await browserCdp.send("Target.setDiscoverTargets", { discover: true });
     await context.route(hosted, (route) =>
@@ -76,6 +77,7 @@ it("keeps clicked thread navigations in the app, including hosted new windows", 
       ["#hostedPopup", hosted],
     ]) {
       opened = Promise.withResolvers<string>();
+      created = Promise.withResolvers<string>();
       // A custom-protocol target has no document to finish initialising. Close
       // the real Chromium target to exercise its uncommitted, already-closed popup event.
       closeProtocolPopup = selector === "#popup" || selector === "#customPopup";
@@ -83,6 +85,9 @@ it("keeps clicked thread navigations in the app, including hosted new windows", 
         ? new Promise<Page>((resolve) => page.once("popup", resolve))
         : undefined;
       await page.locator(selector!).click();
+      // Closing during window.open can strand Chromium's source input dispatch.
+      if (closeProtocolPopup)
+        await browserCdp.send("Target.closeTarget", { targetId: await created.promise });
       expect(await opened.promise).toBe(expected);
       if (detached) {
         const popup = await detached;
