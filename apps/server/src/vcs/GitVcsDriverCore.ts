@@ -55,6 +55,8 @@ import { makeIsServerInternalPath } from "../auth/serverInternalPaths.ts";
 import * as ServerConfig from "../config.ts";
 import { sourceControlDefinitions } from "../sourceControl/sourceControlDefinitions.ts";
 import { registerWorkspaceLeaseRoot, withWorkspaceLease } from "../workspace/workspaceLease.ts";
+import { canonicalProjectRoot } from "../workspace/projectRootLease.ts";
+import { isDisposableFinderMetadata } from "../workspace/disposableFinderMetadata.ts";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 /** T3's record of the branch, named as on the host, that a branch was cut from. */
@@ -4841,8 +4843,8 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     ).pipe(retryWhileConfigLocked, Effect.asVoid);
 
   /**
-   * Unlinks links under `target` without following them and removes the
-   * directories that leaves empty. Returns false when anything else remains.
+   * Unlinks links without following them, discards regular Finder metadata,
+   * and removes directories left empty. Returns false when anything else remains.
    */
   // Recursive filesystem traversal can visit many entries; removeWorktree owns the operation span.
   const removeLeftoverLinks = Effect.fnUntraced(function* (
@@ -4852,7 +4854,17 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       yield* fileSystem.remove(target);
       return true;
     }
+    if (
+      yield* isDisposableFinderMetadata(target).pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, path),
+      )
+    ) {
+      yield* fileSystem.remove(target);
+      return true;
+    }
     if ((yield* fileSystem.stat(target)).type !== "Directory") return false;
+    if (path.basename(target) === ".DS_Store") return false;
     let empty = true;
     for (const name of yield* fileSystem.readDirectory(target)) {
       if (!(yield* removeLeftoverLinks(path.join(target, name)))) empty = false;
@@ -4868,6 +4880,12 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     // folder than this path. Resolving it once keeps Git, the Windows deletion
     // in removeLinkedWorktree, and the leftover cleanup below on one directory.
     const target = path.resolve(input.cwd, input.path);
+    const gitFile = path.join(target, ".git");
+    // Do not turn a rejected path to an unrelated folder into leftover cleanup.
+    const hadGitFile = yield* fileSystem.stat(gitFile).pipe(
+      Effect.map((stat) => stat.type === "File"),
+      Effect.orElseSucceed(() => false),
+    );
     const result = yield* removeLinkedWorktree({
       operation: "GitVcsDriver.removeWorktree",
       cwd: input.cwd,
@@ -4883,10 +4901,45 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       Effect.provideService(FileSystem.FileSystem, fileSystem),
       Effect.provideService(Path.Path, path),
     );
-    if (result.exitCode === 0) {
-      // Git for Windows reports success without removing NTFS junctions or their parent directories.
+    const targetExists = yield* fileSystem.exists(target).pipe(Effect.orElseSucceed(() => false));
+    // A refusal leaves .git intact; partial deletion removes it before the final rmdir.
+    const gitFileRemoved =
+      result.exitCode !== 0 &&
+      hadGitFile &&
+      !(yield* fileSystem.exists(gitFile).pipe(Effect.orElseSucceed(() => true)));
+    const unregistered =
+      gitFileRemoved && targetExists
+        ? yield* Effect.gen(function* () {
+            // Recovery requires unquoted paths. Older Git without -z fails closed.
+            const listing = yield* executeGit(
+              "GitVcsDriver.removeWorktree.worktreeList",
+              input.cwd,
+              ["worktree", "list", "--porcelain", "-z"],
+              {
+                allowNonZeroExit: true,
+                maxOutputBytes: 16 * 1024 * 1024,
+              },
+            );
+            if (listing.exitCode !== 0 || listing.stdoutTruncated) return false;
+            const canonicalTarget = yield* canonicalProjectRoot(target);
+            const registeredPaths = listing.stdout
+              .split("\0")
+              .filter((field) => field.startsWith("worktree "));
+            if (registeredPaths.length === 0) return false;
+            for (const field of registeredPaths) {
+              if (
+                (yield* canonicalProjectRoot(field.slice("worktree ".length))) === canonicalTarget
+              )
+                return false;
+            }
+            return true;
+          }).pipe(Effect.orElseSucceed(() => false))
+        : false;
+    if (result.exitCode === 0 || unregistered) {
+      // Git can unregister a worktree even when Finder prevents the final rmdir.
+      // Successful removals can also leave links or metadata behind.
       // Log leftover cleanup failures: Git already unregistered the worktree, so removal cannot be retried.
-      if (yield* fileSystem.exists(target).pipe(Effect.orElseSucceed(() => false))) {
+      if (targetExists) {
         const removed = yield* removeLeftoverLinks(target).pipe(
           Effect.catch((error) =>
             Effect.logWarning("GitVcsDriver.removeWorktree: failed to delete leftover links", {
@@ -4897,7 +4950,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         );
         if (!removed) {
           yield* Effect.logWarning(
-            "GitVcsDriver.removeWorktree: kept files written after git removed the worktree",
+            "GitVcsDriver.removeWorktree: kept files after git unregistered the worktree",
             { path: target },
           );
         }
