@@ -22,15 +22,15 @@ describe("lastcode project action arguments", () => {
         "--base-dir",
         "/srv/example/t3-home",
         "--trusted-source-id",
-        "lc-wait-for-pr",
+        "lc-wait-for-checkpoint",
         "--trusted-source-id",
-        "lc-wait-for-pr",
+        "lc-wait-for-checkpoint",
       ]),
     ).toEqual({
       command: "reconcile",
       repoRoot: "/srv/example/lastCode",
       baseDir: "/srv/example/t3-home",
-      trustedSourceIds: ["lc-wait-for-pr"],
+      trustedSourceIds: ["lc-wait-for-checkpoint"],
     });
   });
 
@@ -52,7 +52,7 @@ describe("lastcode project action arguments", () => {
         "--base-dir",
         "/srv/example/t3-home",
         "--trusted-source-id",
-        "wait-for-pr",
+        "wait-for-checkpoint",
       ]),
     ).toThrow("stable lc-*");
   });
@@ -150,7 +150,7 @@ describe("managed LastCode anchor", () => {
       if (command === "git" && args[0] === "rev-parse") return repoRoot;
       if (command === "git" && args[0] === "branch") return "lastcode/main";
       if (command === "git" && args[0] === "remote") return "git@github.com:pingdotgg/t3code.git";
-      return JSON.stringify({ mode: "offline", created: ["lc-wait-for-pr"] });
+      return JSON.stringify({ mode: "offline", created: ["lc-wait-for-checkpoint"] });
     };
 
     expect(
@@ -158,18 +158,18 @@ describe("managed LastCode anchor", () => {
         {
           repoRoot,
           baseDir,
-          trustedSourceIds: ["lc-wait-for-pr"],
+          trustedSourceIds: ["lc-wait-for-checkpoint"],
         },
         { acquireLock, execute },
       ),
-    ).toEqual({ mode: "offline", created: ["lc-wait-for-pr"] });
+    ).toEqual({ mode: "offline", created: ["lc-wait-for-checkpoint"] });
     const invocation = calls.at(-1);
     expect(invocation.command).toBe(process.execPath);
     expect(invocation.args).toContain("reconcile-actions");
     expect(invocation.args).toContain(
       managedProjectActionStateFile(baseDir, NodeFS.realpathSync(repoRoot)),
     );
-    expect(invocation.args).toContain("lc-wait-for-pr");
+    expect(invocation.args).toContain("lc-wait-for-checkpoint");
     expect(acquireLock).toHaveBeenCalledWith(
       managedProjectActionStateFile(baseDir, NodeFS.realpathSync(repoRoot)),
     );
