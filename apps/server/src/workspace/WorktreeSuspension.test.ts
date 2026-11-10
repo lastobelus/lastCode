@@ -573,6 +573,65 @@ const realGit = <A, E, R>(test: (fixture: Fixture) => Effect.Effect<A, E, R>) =>
     (fixture) => Effect.promise(() => fixture[Symbol.asyncDispose]()),
   );
 
+it.effect.each([
+  "device-only",
+  "source-inode",
+  "git-inode",
+  "common-inode",
+  "git-path",
+  "common-path",
+  "source-device",
+  "git-device",
+] as const)("revalidates an active checkout after device renumbering: %s", (change) =>
+  realGit((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f);
+      yield* h.service.previewSuspend({ threadId: firstId });
+      const record = (yield* h.registry.list)[0]!;
+      const original = record.nativeIdentity!;
+      const stale = {
+        ...original,
+        sourceIdentity: {
+          dev: original.sourceIdentity.dev + (change === "source-device" ? 2 : 1),
+          ino: original.sourceIdentity.ino + (change === "source-inode" ? 1 : 0),
+        },
+        gitDirectory: original.gitDirectory + (change === "git-path" ? "-other" : ""),
+        gitDirectoryIdentity: {
+          dev: original.gitDirectoryIdentity.dev + (change === "git-device" ? 0 : 1),
+          ino: original.gitDirectoryIdentity.ino + (change === "git-inode" ? 1 : 0),
+        },
+        commonIdentity: {
+          dev: original.commonIdentity.dev + 1,
+          ino: original.commonIdentity.ino + (change === "common-inode" ? 1 : 0),
+        },
+        commonDirectory: original.commonDirectory + (change === "common-path" ? "-other" : ""),
+      };
+      yield* h.registry.put({ ...record, nativeIdentity: stale }, record);
+      const acquired = yield* h.acquisition
+        .acquire({ path: f.workspace, threadId: firstId, purpose: "provider" })
+        .pipe(Effect.result);
+      if (change === "device-only") {
+        expect(acquired).toMatchObject({ _tag: "Success", success: { path: f.workspace } });
+        expect((yield* h.registry.list)[0]!.nativeIdentity).toEqual(original);
+        expect((yield* h.registry.list)[0]!.summary).toEqual(record.summary);
+        expect(
+          yield* h.acquisition.acquire({
+            path: f.workspace,
+            threadId: firstId,
+            purpose: "provider",
+          }),
+        ).toEqual({ path: f.workspace, branch: "topic", restored: false });
+      } else {
+        expect(acquired).toMatchObject({
+          _tag: "Failure",
+          failure: { _tag: "WorkspaceUnavailableError" },
+        });
+        expect((yield* h.registry.list)[0]!.nativeIdentity).toEqual(stale);
+      }
+    }),
+  ),
+);
+
 it.live("suspends exact historical migration duplicates of current owners", () =>
   realGit((f) =>
     Effect.gen(function* () {

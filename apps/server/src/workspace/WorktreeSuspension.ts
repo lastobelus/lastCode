@@ -881,11 +881,27 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
             return yield* failure("changed", "The rebound project belongs to another repository.");
         if (Option.isSome(info)) {
           const inspected = yield* native(() => store.inspectActiveSource(destination));
+          const expected = record.nativeIdentity;
+          // Device numbers are allocated again at boot. Rebind only an unchanged,
+          // canonical checkout and both unchanged Git directories on one volume.
+          const deviceRenumbered =
+            expected !== undefined &&
+            destination === record.path &&
+            (yield* canonical(destination)) === record.path &&
+            inspected.sourceIdentity.ino === expected.sourceIdentity.ino &&
+            inspected.gitDirectory === expected.gitDirectory &&
+            inspected.gitDirectoryIdentity.ino === expected.gitDirectoryIdentity.ino &&
+            inspected.commonDirectory === expected.commonDirectory &&
+            inspected.commonIdentity.ino === expected.commonIdentity.ino &&
+            expected.sourceIdentity.dev === expected.commonIdentity.dev &&
+            expected.gitDirectoryIdentity.dev === expected.commonIdentity.dev &&
+            inspected.sourceIdentity.dev === inspected.commonIdentity.dev &&
+            inspected.gitDirectoryIdentity.dev === inspected.commonIdentity.dev;
           if (
-            record.nativeIdentity !== undefined &&
-            (inspected.commonDirectory !== record.nativeIdentity.commonDirectory ||
-              inspected.commonIdentity.dev !== record.nativeIdentity.commonIdentity.dev ||
-              inspected.commonIdentity.ino !== record.nativeIdentity.commonIdentity.ino)
+            expected !== undefined &&
+            (inspected.commonDirectory !== expected.commonDirectory ||
+              (inspected.commonIdentity.dev !== expected.commonIdentity.dev && !deviceRenumbered) ||
+              inspected.commonIdentity.ino !== expected.commonIdentity.ino)
           )
             return yield* failure(
               "changed",
