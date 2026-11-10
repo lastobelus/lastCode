@@ -413,6 +413,7 @@ export const layer: Layer.Layer<
       },
       nativeStart: StartDeliveryEvidence,
       acquired?: WorkspaceAcquisition.AcquiredWorkspace,
+      acquisitionFailure?: WorkspaceAcquisition.WorkspaceUnavailableError,
     ) {
       const { runId } = input;
       const current = yield* projectionStore.getTurnStartContext(input.threadId, runId);
@@ -637,6 +638,15 @@ export const layer: Layer.Layer<
           });
         },
       );
+      if (acquisitionFailure !== undefined) {
+        if (input.willRetry === true) return yield* acquisitionFailure;
+        yield* settleStartFailure({
+          signal: "workspace-acquisition-failure",
+          title: "Couldn't open thread workspace",
+          error: acquisitionFailure,
+        });
+        return;
+      }
       if (message.attachments.length === 0 && message.text.trimStart().startsWith("/")) {
         const isEmptyCompaction =
           message.text.trim().toLowerCase() === "/compact" && !projection.hasConversation;
@@ -1845,14 +1855,18 @@ export const layer: Layer.Layer<
             : withWorkspaceLease(
                 path.resolve(workspacePath),
                 Effect.gen(function* () {
-                  const acquired = yield* workspaceAcquisition.acquire({
-                    path: workspacePath,
-                    threadId: input.threadId,
-                    purpose: "provider",
-                  });
+                  const acquired = yield* workspaceAcquisition
+                    .acquire({
+                      path: workspacePath,
+                      threadId: input.threadId,
+                      purpose: "provider",
+                    })
+                    .pipe(Effect.result);
+                  if (acquired._tag === "Failure")
+                    return yield* start(input, nativeStart, undefined, acquired.failure);
                   return yield* withWorkspaceLease(
-                    acquired.path,
-                    start(input, nativeStart, acquired),
+                    acquired.success.path,
+                    start(input, nativeStart, acquired.success),
                   );
                 }),
               );

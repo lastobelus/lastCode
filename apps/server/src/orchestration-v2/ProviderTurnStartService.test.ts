@@ -228,7 +228,7 @@ function startWithMissingWorktree(
 
   const start = Effect.gen(function* () {
     return yield* (yield* ProviderTurnStart.ProviderTurnStartServiceV2)
-      .start({ threadId, runId })
+      .start({ threadId, runId, willRetry: true })
       .pipe(Effect.flip);
   }).pipe(Effect.provide(layer), Effect.runPromise);
   return {
@@ -357,6 +357,7 @@ function makeLocalCommandHarness(input: {
   readonly initialRunStatus?: OrchestrationV2ThreadProjection["runs"][number]["status"];
   readonly skipStartAt?: "load" | "running-write" | "preparation" | "last-check" | "handoff";
   readonly failFinalization?: boolean;
+  readonly acquireWorkspace?: WorkspaceAcquisition.WorkspaceAcquisition["Service"]["acquire"];
   readonly onMessageDelivery?: (messageId: MessageId, delivered: boolean) => Effect.Effect<void>;
 }) {
   const settledRuns: Array<string> = [];
@@ -1101,7 +1102,11 @@ function makeLocalCommandHarness(input: {
     }),
   );
   const layer = ProviderTurnStart.layer.pipe(
-    Layer.provide(WorkspaceAcquisitionTestkit.layer),
+    Layer.provide(
+      input.acquireWorkspace === undefined
+        ? WorkspaceAcquisitionTestkit.layer
+        : WorkspaceAcquisitionTestkit.layerWith(input.acquireWorkspace),
+    ),
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({
@@ -1418,6 +1423,46 @@ effectIt.effect(
           yield* git(worktreePath, ["branch", "-m", "feature/restore"]);
       }
     }).pipe(Effect.scoped, Effect.provide(layerRealGit)),
+);
+
+effectIt.effect.each(["snapshot-unavailable", "discarded", "blocked"] as const)(
+  "settles a final workspace acquisition failure before provider start: %s",
+  (reason) =>
+    Effect.gen(function* () {
+      const delivery = vi.fn(() => Effect.void);
+      const failure = new WorkspaceAcquisition.WorkspaceUnavailableError({ reason });
+      const acquireWorkspace = vi.fn(() => Effect.fail(failure));
+      acquireWorkspace.mockImplementationOnce(() => Effect.interrupt);
+      const harness = makeLocalCommandHarness({
+        text: "Continue",
+        worktreePath: `${managedWorktreesDir}/project/saved`,
+        acquireWorkspace,
+        onMessageDelivery: delivery,
+      });
+      const interrupted = yield* Effect.exit(harness.start);
+      expect(interrupted._tag).toBe("Failure");
+      if (interrupted._tag === "Failure")
+        expect(Cause.hasInterruptsOnly(interrupted.cause)).toBe(true);
+      expect(harness.events).toEqual([]);
+      const retry = yield* Effect.result(harness.startWithRetry);
+      expect(retry).toMatchObject({ _tag: "Failure", failure: { cause: failure } });
+      expect(harness.events).toEqual([]);
+      expect(delivery).not.toHaveBeenCalled();
+      expect(harness.projection().runs.at(-1)?.status).toBe("starting");
+
+      yield* harness.start;
+      expect(harness.projection().runs.at(-1)).toMatchObject({ status: "failed", startedAt: null });
+      expect(harness.projection().attempts[0]).toMatchObject({ status: "failed", startedAt: null });
+      expect(harness.projection().nodes[0]).toMatchObject({ status: "failed", startedAt: null });
+      expect(harness.projection().turnItems.at(-1)).toMatchObject({
+        type: "error",
+        failure: { message: failure.message },
+      });
+      expect(delivery).toHaveBeenCalledExactlyOnceWith(harness.messageId, false);
+      expect(harness.open).not.toHaveBeenCalled();
+      expect(harness.createWorktree).not.toHaveBeenCalled();
+      expect(harness.startRootRun).not.toHaveBeenCalled();
+    }),
 );
 
 effectIt.effect(
