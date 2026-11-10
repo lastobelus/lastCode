@@ -1,5 +1,5 @@
 import "vite-plus/test/config";
-import { defineConfig } from "vite-plus";
+import { defaultInclude, defineConfig } from "vite-plus";
 import * as NodeURL from "node:url";
 import { remoteCacheUrl } from "./infra/task-cache/src/remoteCache.ts";
 import { cachedTestTasks } from "./scripts/lib/cached-tests.ts";
@@ -145,10 +145,21 @@ export default defineConfig({
             {
               extends: true,
               test: {
+                name: "scripts",
+                include: defaultInclude.map((pattern) => `scripts/${pattern}`),
+                // Match the subprocess fixture deadlines in scripts/package.json.
+                testTimeout: 180_000,
+                hookTimeout: 180_000,
+              },
+            },
+            {
+              extends: true,
+              test: {
                 name: "root",
                 exclude: [
                   ...TEST_EXCLUDE,
                   ...TEST_CONFIG_PACKAGES.map((dir) => `${dir}/**`),
+                  "scripts/**",
                   "native/kde-snap-shot/**",
                 ],
               },

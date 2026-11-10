@@ -34,8 +34,8 @@ const state = vi.hoisted(() => ({
     title: string;
     worktreePath: string | null;
     lineage: { parentThreadId: ThreadId | null; sideChat?: boolean };
-    session: { status: "ready" | "stopped" } | null;
-    latestTurn: null;
+    runtime: { status: "idle" } | null;
+    latestRun: null;
   }[],
   familyThreads: [] as {
     id: ThreadId;
@@ -123,6 +123,7 @@ vi.mock("../state/vcs", () => ({
 }));
 vi.mock("../state/entities", () => ({
   readEnvironmentServerConfigLoaded: () => true,
+  readEnvironmentSupportsWorktreeCleanup: () => false,
   readThreadShell: (ref: ScopedThreadRef) =>
     state.threads.find(
       (thread) => thread.environmentId === ref.environmentId && thread.id === ref.threadId,
@@ -159,6 +160,7 @@ vi.mock("../uiStateStore", () => ({
     }),
 }));
 vi.mock("../lib/archivedThreadsState", () => ({
+  loadArchivedThreadsForEnvironment: async () => [],
   refreshArchivedThreadsForEnvironment: () => state.localEffects.push("refresh-archive"),
 }));
 vi.mock("../lib/composerDraftUploads", () => ({
@@ -167,6 +169,9 @@ vi.mock("../lib/composerDraftUploads", () => ({
 }));
 vi.mock("../localApi", () => ({
   readLocalApi: () => ({ dialogs: { confirm: state.confirm } }),
+}));
+vi.mock("../components/ThreadArchiveDialog", () => ({
+  requestThreadArchiveDialog: vi.fn(async () => null),
 }));
 vi.mock("../threadRoutes", () => ({
   resolveThreadRouteRef: () => null,
@@ -266,8 +271,8 @@ beforeEach(() => {
       title: "Thread",
       worktreePath: null,
       lineage: { parentThreadId: null },
-      session: null,
-      latestTurn: null,
+      runtime: null,
+      latestRun: null,
     },
   ];
   state.requests = [];
@@ -396,7 +401,7 @@ describe("thread action permissions", () => {
 
   it("stops before delete and local cleanup when permission is revoked during session stop", async () => {
     state.scopes.get(secondary)!.add(AuthOrchestrationOperateScope);
-    state.threads[0]!.session = { status: "ready" };
+    state.threads[0]!.runtime = { status: "idle" };
     state.afterRequest = () => state.scopes.get(secondary)!.clear();
     seedThreadPanelState(target);
     expect((await useThreadActions().deleteThread(target))._tag).toBe("Failure");
@@ -411,6 +416,7 @@ describe("thread action permissions", () => {
   ])("deletes a worktree thread and keeps its worktree $reason", async ({ sessionLookupFails }) => {
     state.scopes.get(secondary)!.add(AuthOrchestrationOperateScope);
     state.threads[0]!.worktreePath = "/worktrees/thread";
+    state.threads[0]!.runtime = { status: "idle" };
     state.sessionLookupFails = sessionLookupFails;
     seedThreadPanelState(target);
     expect((await useThreadActions().deleteThread(target))._tag).toBe("Success");
@@ -444,7 +450,10 @@ describe("thread action permissions", () => {
       .add(AuthOrchestrationOperateScope)
       .add(AuthSourceControlWriteScope);
     state.threads[0]!.worktreePath = "/worktrees/thread";
-    state.afterRequest = () => state.scopes.get(secondary)!.delete(AuthSourceControlWriteScope);
+    state.threads[0]!.runtime = { status: "idle" };
+    state.afterRequest = (action) => {
+      if (action === "delete") state.scopes.get(secondary)!.delete(AuthSourceControlWriteScope);
+    };
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const result = await useThreadActions().deleteThread(target);

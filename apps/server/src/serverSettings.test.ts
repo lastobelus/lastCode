@@ -43,6 +43,10 @@ import { resolveProviderInstanceTerminalEnvironment } from "./terminal/Manager.t
 const decodeServerSettings = Schema.decodeUnknownEffect(ServerSettings);
 const decodeServerSettingsJson = Schema.decodeUnknownEffect(Schema.fromJsonString(ServerSettings));
 const decodeServerSettingsPatch = Schema.decodeUnknownEffect(ServerSettingsPatch);
+const encodeModelSelectionJson = Schema.encodeEffect(Schema.fromJsonString(ModelSelection));
+const encodeProjectScriptsJson = Schema.encodeEffect(
+  Schema.fromJsonString(Schema.Array(ProjectScript)),
+);
 
 const layerServerSettings = (policy?: ManagedPolicyDocument) =>
   ServerSettingsModule.layer.pipe(
@@ -218,6 +222,34 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("server settings"
       }),
     ).pipe(Effect.provide(layerServerSettings())),
   );
+  it.effect("persists CI limits through settings patches without resetting omitted limits", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      yield* service.updateSettings({
+        lastcodeLocalCi: {
+          quickCiMode: "github",
+          maxConcurrentRuns: 2,
+          packageConcurrency: 3,
+          backgroundPriority: false,
+        },
+      });
+      yield* service.updateSettings({ lastcodeLocalCi: { compilerThreads: 4 } });
+      const persisted = yield* decodeServerSettingsJson(
+        yield* fs.readFileString(config.settingsPath),
+      );
+      assert.deepEqual(persisted.lastcodeLocalCi, {
+        quickCiMode: "github",
+        maxConcurrentRuns: 2,
+        packageConcurrency: 3,
+        compilerThreads: 4,
+        backgroundPriority: false,
+      });
+      assert.deepEqual((yield* service.getSettings).lastcodeLocalCi, persisted.lastcodeLocalCi);
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
   it.effect("migrates saved token delivery to paragraph buffering without resetting settings", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
@@ -2287,14 +2319,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("server settings"
         runOnWorktreeCreate: false,
       };
       const model = createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.5");
-      const encodeModelSelection = Schema.encodeEffect(Schema.fromJsonString(ModelSelection));
-
-      const modelJson = yield* encodeModelSelection(model);
-      const encodeProjectScripts = Schema.encodeEffect(
-        Schema.fromJsonString(Schema.Array(ProjectScript)),
-      );
-
-      const scriptsJson = yield* encodeProjectScripts([script]);
+      const modelJson = yield* encodeModelSelectionJson(model);
+      const scriptsJson = yield* encodeProjectScriptsJson([script]);
       for (const [projectId, modelColumn, envMode, autoPull, scripts] of [
         [legacyProject, modelJson, "worktree", 1, scriptsJson],
         [scriptedProject, null, null, 0, scriptsJson],
