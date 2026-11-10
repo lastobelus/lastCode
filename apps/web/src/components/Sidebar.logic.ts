@@ -1195,10 +1195,10 @@ export function resolveThreadStatusPill(input: {
 export function getFallbackThreadIdAfterDelete<
   T extends Pick<
     Thread,
-    "id" | "projectId" | "createdAt" | "updatedAt" | "settledOverride" | "lineage"
+    "id" | "projectId" | "createdAt" | "updatedAt" | "settledOverride" | "lineage" | "archivedAt"
   > &
     ThreadSortInput &
-    ThreadSnoozeShell,
+    ThreadSnoozeShell & { readonly worktreeCleanup?: unknown },
 >(input: {
   threads: readonly T[];
   deletedThreadId: T["id"];
@@ -1218,6 +1218,8 @@ export function getFallbackThreadIdAfterDelete<
         (thread) =>
           thread.projectId === deletedThread.projectId &&
           thread.id !== deletedThreadId &&
+          thread.archivedAt === null &&
+          thread.worktreeCleanup == null &&
           !deletedThreadIds?.has(thread.id) &&
           thread.settledOverride !== "settled" &&
           !effectiveSnoozed(thread, { now }) &&
