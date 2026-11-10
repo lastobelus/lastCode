@@ -81,24 +81,70 @@ it("reclaims unchanged staged emissions, retains additions/modified files, and r
   );
 });
 
-it("never claims preexisting matching output or overwrites unknown collisions", () => {
-  const { cwd, emit } = fixture();
-  const root = "apps/server/dist";
-  emit(NodePath.join(cwd, root), "same.js", "same emission");
-  emit(NodePath.join(cwd, root), "notes.js", "unknown addition");
-  const stage = createGeneratedBuildStage(cwd, root)!;
-  emit(stage.directory, "same.js", "same emission");
-  stage.publish(100);
-  assert.deepEqual(inspectGeneratedBuildOwnership(cwd, root)!.files, []);
-  const collision = createGeneratedBuildStage(cwd, root)!;
-  emit(collision.directory, "notes.js", "different emission");
-  assert.throws(() => collision.publish(200), "requires file review");
-  collision.discard();
-  assert.equal(
-    NodeFS.readFileSync(NodePath.join(cwd, root, "notes.js"), "utf8"),
-    "unknown addition",
-  );
-});
+it.each(["absent", "device", "inode", "birthtime", "path"] as const)(
+  "never claims preexisting matching output or overwrites unknown collisions (prior owner: %s)",
+  (identityChange) => {
+    const { cwd, metadata, emit } = fixture();
+    const root = "apps/server/dist";
+    if (identityChange !== "absent") {
+      const prior = createGeneratedBuildStage(cwd, root)!;
+      emit(prior.directory, "same.js", "same emission");
+      emit(prior.directory, "notes.js", "unknown addition");
+      emit(prior.directory, "obsolete.js", "prior output");
+      prior.publish(50);
+      const previous = inspectGeneratedBuildOwnership(cwd, root)!;
+      const recordPath = NodePath.join(
+        metadata,
+        NodeFS.readdirSync(metadata).find(
+          (file) => file.startsWith("t3-build-") && file.endsWith(".json"),
+        )!,
+      );
+      const record = JSON.parse(NodeFS.readFileSync(recordPath, "utf8"));
+      const stat = NodeFS.lstatSync(cwd);
+      const allocation = [stat.dev, stat.ino, stat.birthtimeMs];
+      if (identityChange !== "path") {
+        const index = { device: 0, inode: 1, birthtime: 2 }[identityChange];
+        allocation[index]! += 1;
+      }
+      record.worktreeIdentity = `${identityChange === "path" ? `${cwd}-prior` : cwd}:${JSON.stringify(allocation)}`;
+      const stale = JSON.stringify(record);
+      NodeFS.writeFileSync(recordPath, stale);
+      assert.isNull(inspectGeneratedBuildOwnership(cwd, root));
+      assert.isFalse(recordGeneratedBuildUse(cwd, root, 75));
+      assert.equal(NodeFS.readFileSync(recordPath, "utf8"), stale);
+      assert.throws(
+        () => removeGeneratedBuildFiles(cwd, root, previous.token, ["same.js"]),
+        "ownership changed",
+      );
+    }
+    emit(NodePath.join(cwd, root), "same.js", "same emission");
+    emit(NodePath.join(cwd, root), "notes.js", "unknown addition");
+    const stage = createGeneratedBuildStage(cwd, root)!;
+    emit(stage.directory, "same.js", "same emission");
+    emit(stage.directory, "fresh.js", "fresh emission");
+    stage.publish(100);
+    const after = inspectGeneratedBuildOwnership(cwd, root)!;
+    assert.equal(after.lastUsedAt, 100);
+    assert.deepEqual(
+      after.files.map((file) => file.path),
+      ["fresh.js"],
+    );
+    if (identityChange !== "absent") {
+      assert.equal(
+        NodeFS.readFileSync(NodePath.join(cwd, root, "obsolete.js"), "utf8"),
+        "prior output",
+      );
+    }
+    const collision = createGeneratedBuildStage(cwd, root)!;
+    emit(collision.directory, "notes.js", "different emission");
+    assert.throws(() => collision.publish(200), "requires file review");
+    collision.discard();
+    assert.equal(
+      NodeFS.readFileSync(NodePath.join(cwd, root, "notes.js"), "utf8"),
+      "unknown addition",
+    );
+  },
+);
 
 it("rejects linked or hardlinked destinations and forged roots; ordinary checkout builds keep their behavior", () => {
   const { cwd, temporary, emit } = fixture();
@@ -180,6 +226,14 @@ it("positive compiled-output use renews tokens, while malformed provenance is ne
   const record = NodeFS.readdirSync(metadata).find(
     (file) => file.startsWith("t3-build-") && file.endsWith(".json"),
   )!;
+  const recordPath = NodePath.join(metadata, record);
+  const malformed = JSON.parse(NodeFS.readFileSync(recordPath, "utf8"));
+  malformed.worktreeIdentity = `${cwd}:stale`;
+  malformed.files[0].path = "../retained";
+  const invalid = JSON.stringify(malformed);
+  NodeFS.writeFileSync(recordPath, invalid);
+  assert.throws(() => createGeneratedBuildStage(cwd, root), "Invalid owned build file");
+  assert.equal(NodeFS.readFileSync(recordPath, "utf8"), invalid);
   NodeFS.writeFileSync(NodePath.join(metadata, record), "invalid record");
   assert.throws(() => recordGeneratedBuildUse(cwd, root, 300));
   assert.equal(NodeFS.readFileSync(NodePath.join(metadata, record), "utf8"), "invalid record");

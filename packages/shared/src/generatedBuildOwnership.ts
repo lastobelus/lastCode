@@ -187,23 +187,30 @@ function readRecord(ctx: Context, allowPending = false) {
     throw new Error("Unsafe build ownership record");
   const raw = NodeFS.readFileSync(ctx.recordPath, "utf8");
   const value: unknown = JSON.parse(raw);
-  validateRecord(ctx, value);
+  validateRecord(ctx, value, false);
   if (signature(NodeFS.lstatSync(ctx.recordPath)) !== signature(stat))
     throw new Error("Build ownership changed during observation");
+  // Native identities can go stale across boots; stale provenance grants no ownership.
+  if (value.worktreeIdentity !== ctx.worktreeIdentity) return null;
   return {
     record: value as BuildRecord,
     recordIdentity: signature(stat),
     token: NodeCrypto.createHash("sha256").update(raw).update(signature(stat)).digest("hex"),
   };
 }
-function validateRecord(ctx: Context, value: unknown): asserts value is BuildRecord {
+function validateRecord(
+  ctx: Context,
+  value: unknown,
+  requireCurrentOwner = true,
+): asserts value is BuildRecord {
   if (
     typeof value !== "object" ||
     value === null ||
     !("version" in value) ||
     value.version !== 1 ||
     !("worktreeIdentity" in value) ||
-    value.worktreeIdentity !== ctx.worktreeIdentity ||
+    typeof value.worktreeIdentity !== "string" ||
+    (requireCurrentOwner && value.worktreeIdentity !== ctx.worktreeIdentity) ||
     !("root" in value) ||
     value.root !== ctx.root ||
     !("lastUsedAt" in value) ||
