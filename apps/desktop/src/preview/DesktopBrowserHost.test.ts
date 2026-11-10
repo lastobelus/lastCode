@@ -130,6 +130,22 @@ const makeDebuggee = (
           reject(new Error("Refused"));
           return;
         }
+        if (method === "Page.getFrameTree") {
+          resolve({ frameTree: { frame: { id: "main" } } });
+          return;
+        }
+        if (
+          [
+            "Runtime.enable",
+            "Runtime.addBinding",
+            "Page.enable",
+            "Page.addScriptToEvaluateOnNewDocument",
+            "Page.removeScriptToEvaluateOnNewDocument",
+          ].includes(method)
+        ) {
+          resolve({});
+          return;
+        }
         if (method === "Target.getTargetInfo") {
           resolve({ targetInfo: { targetId: "GUEST" } });
           return;
@@ -188,6 +204,78 @@ const makeDebuggee = (
 /** Commands wait behind a focus emulation change; it settles within a macrotask. */
 // oxlint-disable-next-line t3code/no-real-time-wait-in-tests -- a zero-delay macrotask boundary, not a wait for time
 const settle = Effect.promise(() => new Promise<void>((resolve) => setImmediate(resolve)));
+
+it.effect("opens a thread from a standalone native tab without a server relay", () =>
+  Effect.gen(function* () {
+    const host = yield* DesktopBrowserHost.make.pipe(
+      Effect.provide(DesktopClientSettings.layerTest()),
+    );
+    const debuggee = makeDebuggee();
+    const send = vi.spyOn(debuggee.hostContents, "send");
+    host.attach(key, debuggee.tab, "native-thread-link");
+    debuggee.emit("Page.windowOpen", { url: "t3-thread://v2/linked/thread", userGesture: false });
+    debuggee.emit("Page.windowOpen", { url: "https://app.t3.codes/settings", userGesture: true });
+    debuggee.emit("Page.windowOpen", { url: "t3-thread://v2/linked/thread", userGesture: true });
+    expect(send).not.toHaveBeenCalled();
+    debuggee.emit("Runtime.executionContextCreated", {
+      context: { id: 1, name: "t3-native-thread-link-activation", auxData: { frameId: "main" } },
+    });
+    debuggee.emit("Runtime.bindingCalled", {
+      name: "t3ThreadLinkGesture",
+      executionContextId: 1,
+      payload: "active",
+    });
+    debuggee.emit("Page.windowOpen", { url: "t3-thread://v2/linked/thread", userGesture: true });
+    expect(send).toHaveBeenCalledExactlyOnceWith("desktop:browser:event", {
+      desktopHostId: "local",
+      event: {
+        type: "threadLink",
+        threadId: key.threadId,
+        tabId: key.tabId,
+        href: "t3-thread://v2/linked/thread",
+      },
+    });
+  }).pipe(Effect.scoped),
+);
+
+it.effect("resumes declined standalone hosted links and intercepts only accepted popups", () =>
+  Effect.gen(function* () {
+    const host = yield* DesktopBrowserHost.make.pipe(
+      Effect.provide(DesktopClientSettings.layerTest()),
+    );
+    const debuggee = makeDebuggee();
+    const loadURL = vi.fn(async () => {});
+    Object.assign(debuggee.webContents, { loadURL });
+    const send = vi.spyOn(debuggee.hostContents, "send");
+    host.attach(key, debuggee.tab, "declined-thread-link");
+    yield* settle;
+    const href = "https://app.t3.codes/threads/linked/thread";
+    debuggee.emit("Page.frameRequestedNavigation", {
+      frameId: "main",
+      disposition: "currentTab",
+      url: href,
+    });
+    expect(loadURL).toHaveBeenCalledExactlyOnceWith(href);
+    expect(send).not.toHaveBeenCalled();
+    debuggee.emit("Page.windowOpen", { url: href, userGesture: false });
+    const declined = makePopup();
+    host.registerPopup(key, declined.window, href);
+    expect(declined.window.isDestroyed()).toBe(false);
+    debuggee.emit("Runtime.executionContextCreated", {
+      context: { id: 1, name: "t3-native-thread-link-activation", auxData: { frameId: "main" } },
+    });
+    debuggee.emit("Runtime.bindingCalled", {
+      name: "t3ThreadLinkGesture",
+      executionContextId: 1,
+      payload: "active",
+    });
+    debuggee.emit("Page.windowOpen", { url: href, userGesture: true });
+    const accepted = makePopup();
+    host.registerPopup(key, accepted.window, href);
+    expect(accepted.window.isDestroyed()).toBe(true);
+    expect(send).toHaveBeenCalledOnce();
+  }).pipe(Effect.scoped),
+);
 
 it.effect.each([
   { destroyed: "guest", visible: true },
@@ -741,7 +829,7 @@ it.effect.each(["foreground-tab", "background-tab"] as const)(
       });
       const child = makeRoot();
       Object.assign(child.contents, { setIgnoreMenuShortcuts: () => undefined });
-      root.contents.emit("did-create-window", child.window);
+      root.contents.emit("did-create-window", child.window, { url: child.contents.getURL() });
       const createdChild = yield* Queue.take(events);
       if (createdChild.type !== "popupCreated") throw new Error("Expected child popup");
       expect(createdChild).toMatchObject({ ...key });
@@ -775,7 +863,9 @@ it.effect.each(["foreground-tab", "background-tab"] as const)(
       });
       const grandchild = makeRoot();
       Object.assign(grandchild.contents, { setIgnoreMenuShortcuts: () => undefined });
-      child.contents.emit("did-create-window", grandchild.window);
+      child.contents.emit("did-create-window", grandchild.window, {
+        url: grandchild.contents.getURL(),
+      });
       expect(yield* Queue.take(events)).toMatchObject({ type: "popupCreated", ...childKey });
       expect(grandchild.attachCount()).toBe(1);
     }),
@@ -1621,7 +1711,7 @@ it.effect("main-window closure destroys published automation roots and their chi
     yield* send({ type: "publishRoot", ...attempt });
     const child = makeRoot();
     Object.assign(child.contents, { setIgnoreMenuShortcuts: () => undefined });
-    root.contents.emit("did-create-window", child.window);
+    root.contents.emit("did-create-window", child.window, { url: child.contents.getURL() });
     expect((yield* Queue.take(events)).type).toBe("popupCreated");
     const sharedKey = { ...key, tabId: "human-tab", desktopHostId: "host-a" };
     host.attach(sharedKey, makeDebuggee().tab, "human-runtime");
@@ -1648,7 +1738,7 @@ it.effect("main-window closure destroys published automation roots and their chi
     expect(closed.map((event) => event.type).sort()).toEqual(["detached", "dormant", "dormant"]);
     // A child delivered after owner closure is destroyed before registration.
     const lateChild = makeRoot();
-    root.contents.emit("did-create-window", lateChild.window);
+    root.contents.emit("did-create-window", lateChild.window, { url: lateChild.contents.getURL() });
     expect(lateChild.window.isDestroyed()).toBe(true);
     expect(lateChild.attachCount()).toBe(0);
   }),
@@ -4445,4 +4535,64 @@ it.effect("cleans host rendering after a missing guest and refuses unavailable a
     });
     expect(debuggee.hostContents.throttleChanges).toEqual([false, true]);
   }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "restores native thread-link gestures after a relay resets Runtime and releases the tab",
+  () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const debuggee = makeDebuggee();
+      const initial = Promise.withResolvers<void>();
+      const restored = Promise.withResolvers<void>();
+      const runtimeReset = Promise.withResolvers<void>();
+      let installs = 0;
+      const original = debuggee.tab.debugger.sendCommand.bind(debuggee.tab.debugger);
+      const protocol = vi
+        .spyOn(debuggee.tab.debugger, "sendCommand")
+        .mockImplementation(async (method, params, sessionId) => {
+          const pending = original(method, params, sessionId);
+          if (method === "Runtime.disable") {
+            runtimeReset.resolve();
+            debuggee.release();
+          }
+          const result = await pending;
+          if (method === "Page.addScriptToEvaluateOnNewDocument") {
+            installs += 1;
+            (installs === 1 ? initial : restored).resolve();
+          }
+          return result;
+        });
+      const send = vi.spyOn(debuggee.hostContents, "send");
+      host.attach(key, debuggee.tab, "restored-thread-link");
+      yield* Effect.promise(() => initial.promise);
+      yield* host.handleCommandLine(
+        JSON.stringify({
+          type: "cdp",
+          ...key,
+          message: JSON.stringify({ id: 1, method: "Target.setAutoAttach", params: {} }),
+        }),
+      );
+      yield* Effect.promise(() => runtimeReset.promise);
+      yield* host.handleCommandLine(JSON.stringify({ type: "release", ...key }));
+      yield* Effect.promise(() => restored.promise);
+      expect(protocol.mock.calls.some(([method]) => method === "Runtime.disable")).toBe(true);
+      debuggee.emit("Runtime.executionContextCreated", {
+        context: { id: 1, name: "t3-native-thread-link-activation", auxData: { frameId: "main" } },
+      });
+      debuggee.emit("Runtime.bindingCalled", {
+        name: "t3ThreadLinkGesture",
+        executionContextId: 1,
+        payload: "active",
+      });
+      debuggee.emit("Page.windowOpen", { url: "t3-thread://v2/local/restored", userGesture: true });
+      expect(send).toHaveBeenCalledWith(
+        "desktop:browser:event",
+        expect.objectContaining({
+          event: expect.objectContaining({ href: "t3-thread://v2/local/restored" }),
+        }),
+      );
+    }).pipe(Effect.scoped),
 );

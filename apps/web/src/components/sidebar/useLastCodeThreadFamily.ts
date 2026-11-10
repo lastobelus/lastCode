@@ -25,9 +25,7 @@ export function useLastCodeThreadFamily(
     thread.lineage.relationshipToParent === "subagent" && thread.lineage.independent !== true
       ? `Subagent · ${lastcodeSidebarSubagentStatusLabel(thread, status)}${family.unavailableParentLabel ? ` · ${family.unavailableParentLabel}` : ""}`
       : null;
-  const relationshipDescription = creatorDescription
-    ? `Agent-created · ${creatorDescription}`
-    : subagentLabel;
+  const relationshipDescription = creatorDescription ?? subagentLabel;
   const relationshipLabel = subagentLabel ?? (isAgentCreated ? "Agent-created" : null);
   const relationshipUnavailableLabel =
     family.unavailableParentLabel ??

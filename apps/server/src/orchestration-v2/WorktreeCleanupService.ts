@@ -29,6 +29,7 @@ import * as ProjectStore from "./ProjectStore.ts";
 import * as ProviderSessions from "./ProviderSessionManager.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
+import { canonicalProjectRoot, withProjectRootLease } from "../workspace/projectRootLease.ts";
 import * as SuspensionRegistry from "../workspace/WorktreeSuspensionRegistry.ts";
 
 type PendingCleanup = Exclude<ThreadWorktreeCleanup, { readonly status: "failed" }>;
@@ -173,14 +174,6 @@ const make = Effect.gen(function* () {
           );
           if (retainedPreviewPaths.some((protectedPath) => containsPath(normalized, protectedPath)))
             return yield* Effect.fail("The worktree is retained by another active preview.");
-          const projectOwners = yield* Effect.forEach(
-            yield* projects.listShells(),
-            (project) =>
-              canonical(project.workspaceRoot).pipe(Effect.map((root) => ({ project, root }))),
-            { concurrency: 8 },
-          );
-          if (projectOwners.some(({ root }) => root === normalized))
-            return yield* Effect.fail("The worktree is now an active project root.");
           const threadOwners = yield* Effect.forEach(
             (yield* projections.getThreadWorktreePaths({ includeArchived: true })).filter(
               (thread) => thread.threadId !== job.threadId,
@@ -195,12 +188,30 @@ const make = Effect.gen(function* () {
             return yield* Effect.fail(
               "Saved workspace data or Keep workspace protection retains this worktree.",
             );
-          yield* git.removeWorktree({
-            cwd: currentCleanup.repositoryRoot,
-            path: currentCleanup.worktreePath,
-            force: true,
-            allowMissing: true,
-          });
+          yield* withProjectRootLease(
+            Effect.gen(function* () {
+              const projectRoots = yield* Effect.forEach(
+                yield* projects.listShells(),
+                (project) =>
+                  canonicalProjectRoot(project.workspaceRoot).pipe(
+                    Effect.map(normalizeProjectPathForComparison),
+                  ),
+                { concurrency: 8 },
+              );
+              if (projectRoots.some((root) => containsPath(normalized, root)))
+                return yield* Effect.fail("The worktree contains an active project root.");
+              if ((yield* suspensionRegistry.automaticProtection(normalized)) !== null)
+                return yield* Effect.fail(
+                  "Saved workspace data or Keep workspace protection retains this worktree.",
+                );
+              yield* git.removeWorktree({
+                cwd: currentCleanup.repositoryRoot,
+                path: currentCleanup.worktreePath,
+                force: true,
+                allowMissing: true,
+              });
+            }),
+          );
           // Persist completion before the queue advances. A restart after physical
           // removal is safe because allowMissing turns replay into the same success.
           yield* update(job.threadId, currentCleanup, null);

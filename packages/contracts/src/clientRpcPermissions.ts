@@ -4,12 +4,12 @@ import * as Schema from "effect/Schema";
 import { GitPreparePullRequestThreadInput, GitRunStackedActionInput } from "./git.ts";
 import {
   AuthAccessWriteScope,
+  AuthEnvironmentMaintainScope,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   AuthPreviewOperateScope,
   AuthProvidersManageScope,
   AuthSettingsWriteScope,
-  AuthEnvironmentMaintainScope,
   AuthFilesystemReadScope,
   AuthFilesystemWriteScope,
   AuthSourceControlWriteScope,
@@ -27,6 +27,8 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.previewStopLocalServer]: AuthTerminalOperateScope,
   [WS_METHODS.previewHostingActivity]: AuthPreviewOperateScope,
   [WS_METHODS.serverRunStorageCleanup]: AuthSettingsWriteScope,
+  // Restarts the server, as an update does.
+  [WS_METHODS.serverReclaimDatabaseSpace]: AuthEnvironmentMaintainScope,
   [WS_METHODS.serverListSavedWorkspaces]: AuthFilesystemReadScope,
   [WS_METHODS.serverPreviewWorkspaceLifecycle]: AuthFilesystemReadScope,
   [WS_METHODS.serverDeleteThreads]: AuthOrchestrationOperateScope,

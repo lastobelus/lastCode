@@ -25,6 +25,7 @@ import {
 } from "@t3tools/contracts";
 import {
   createWorktreeSuspensionStore,
+  type WorktreeSuspensionStoreOptions,
   WorktreeSuspensionError,
   type WorktreeSuspensionSnapshot,
 } from "@t3tools/shared/worktreeSuspension";
@@ -66,6 +67,7 @@ import {
   type CheckoutAuthority,
 } from "./WorktreeSuspensionRegistry.ts";
 import * as WorktreeConsumers from "./WorktreeConsumers.ts";
+import { canonicalProjectRoot, withProjectRootLease } from "./projectRootLease.ts";
 import {
   withWorkspaceLease,
   registerWorkspaceLeaseRoot,
@@ -140,7 +142,9 @@ const equivalentSummary = Schema.toEquivalence(
   ),
 );
 
-export const make = Effect.gen(function* () {
+export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreOptions")(function* (
+  options: Omit<WorktreeSuspensionStoreOptions, "storeRoot"> = {},
+) {
   const registry = yield* WorktreeSuspensionRegistry;
   const lifecycle = yield* WorkspaceLifecycle.WorkspaceLifecycle;
   const receipts = yield* CommandReceipts.CommandReceiptStoreV2;
@@ -160,7 +164,10 @@ export const make = Effect.gen(function* () {
   const scope = yield* Scope.Scope;
   const saves = yield* Semaphore.make(1);
   const isManaged = yield* makeIsManagedWorktreePath;
-  const store = createWorktreeSuspensionStore({ storeRoot: path.join(registry.root, "snapshots") });
+  const store = createWorktreeSuspensionStore({
+    ...options,
+    storeRoot: path.join(registry.root, "snapshots"),
+  });
   const previewsByToken = new Map<
     string,
     { authority: CheckoutAuthority; snapshotIds?: readonly string[]; expiresAt: number }
@@ -336,14 +343,20 @@ export const make = Effect.gen(function* () {
     const common = yield* commonDirectory(actual);
     if (common !== (yield* commonDirectory(repositoryRoot)))
       return yield* failure("protected", "The worktree belongs to a different repository.");
-    for (const candidate of yield* projects.list()) {
-      if (overlaps(actual, yield* canonical(candidate.workspaceRoot)))
-        return yield* failure("protected", "A registered project uses this workspace.");
-    }
+    if (purpose === "capture")
+      for (const candidate of yield* projects.list()) {
+        if (overlaps(actual, yield* canonical(candidate.workspaceRoot)))
+          return yield* failure("protected", "A registered project uses this workspace.");
+      }
     const checkoutId = yield* random.uuidV4();
     const inspected = yield* native(() =>
       purpose === "activity" ? store.inspectActiveSource(actual) : store.inspectSource(actual),
     );
+    const unverifiedUse = yield* registry.unverifiedUse([
+      actual,
+      thread.worktreePath,
+      ...allOwners.map((owner) => owner.worktreePath!),
+    ]);
     const record: CheckoutAuthority = {
       checkoutId,
       repositoryRoot,
@@ -353,6 +366,7 @@ export const make = Effect.gen(function* () {
       history: [],
       snapshots: [],
       blockedReason: null,
+      ...(unverifiedUse === null ? {} : { lastWorkspaceUseAt: unverifiedUse }),
       lastHead: inspected.head,
       nativeIdentity: {
         sourceIdentity: inspected.sourceIdentity,
@@ -376,9 +390,29 @@ export const make = Effect.gen(function* () {
         keepWorkspace: false,
       },
     };
-    yield* registry.put(record, null);
-    yield* registerWorkspaceLeaseRoot(record.path, record.aliases);
-    return record;
+    const registered = yield* registry.put(record, null).pipe(
+      Effect.as(record),
+      Effect.catchIf(
+        (error) => error.operation === "ownership-changed",
+        (error) =>
+          registry.list.pipe(
+            Effect.flatMap((entries) => {
+              const same = entries.find(
+                (entry) =>
+                  !entry.detached &&
+                  [entry.path, ...entry.aliases].some((alias) =>
+                    record.aliases.some(
+                      (candidate) => path.resolve(candidate) === path.resolve(alias),
+                    ),
+                  ),
+              );
+              return same === undefined ? Effect.fail(error) : Effect.succeed(same);
+            }),
+          ),
+      ),
+    );
+    yield* registerWorkspaceLeaseRoot(registered.path, registered.aliases);
+    return registered;
   });
   const requireRecord = Effect.fn("WorktreeSuspension.requireRecord")(function* (
     checkoutId: string,
@@ -413,25 +447,64 @@ export const make = Effect.gen(function* () {
       );
     return owners;
   });
-  const guard = Effect.fn("WorktreeSuspension.guard")(function* (
+  const guardProjectRoots = Effect.fn("WorktreeSuspension.guardProjectRoots")(function* (
+    paths: readonly string[],
+  ) {
+    for (const project of yield* projects.list()) {
+      const roots = [
+        path.resolve(project.workspaceRoot),
+        yield* canonicalProjectRoot(project.workspaceRoot).pipe(Effect.mapError(safeFailure)),
+      ];
+      if (roots.some((root) => paths.some((workspace) => overlaps(workspace, root))))
+        return yield* failure("protected", "A registered project uses this workspace.");
+    }
+  });
+  const guardRecoveryDestination = Effect.fn("WorktreeSuspension.guardRecoveryDestination")(
+    function* (source: CheckoutAuthority, destination: string, operationId?: string) {
+      const target = yield* canonicalProjectRoot(destination).pipe(Effect.mapError(safeFailure));
+      for (const entry of yield* registry.list) {
+        if (
+          entry.checkoutId === source.checkoutId ||
+          (entry.sourceCheckoutId === source.checkoutId && entry.checkoutId === operationId)
+        )
+          continue;
+        const candidates = [
+          ...(entry.detached ? [] : [entry.path, ...entry.aliases]),
+          ...((entry.operation?.kind === "recovery" || entry.operation?.kind === "restore") &&
+          entry.operation.destinationPath !== undefined
+            ? [entry.operation.destinationPath]
+            : []),
+        ];
+        for (const candidate of candidates)
+          if (
+            (yield* canonicalProjectRoot(candidate).pipe(Effect.mapError(safeFailure))) === target
+          )
+            return yield* failure(
+              "protected",
+              "Another saved workspace reserves this destination.",
+            );
+      }
+    },
+  );
+  const ownerHasUnfinishedWork = (owner: OrchestrationV2ThreadShell) =>
+    owner.activeRunId !== null ||
+    owner.pendingRuntimeRequest !== null ||
+    (owner.pendingBackgroundTasks?.length ?? 0) > 0 ||
+    hasOpenActionableDashboardItems(owner.dashboardItems) ||
+    owner.archivePending != null ||
+    (owner.actionResume != null &&
+      !["delivered", "disposed"].includes(owner.actionResume.delivery));
+  const guardBeforePreviews = Effect.fn("WorktreeSuspension.guardBeforePreviews")(function* (
     record: CheckoutAuthority,
     physicalPath = record.path,
-    automatic = false,
   ) {
     const owners = yield* checkOwners(record);
     yield* originalStillOwned(record, physicalPath);
+    yield* guardProjectRoots([...record.aliases, physicalPath]);
     if (record.summary.keepWorkspace)
       return yield* failure("protected", "Keep workspace is enabled.");
     for (const owner of owners) {
-      if (
-        owner.activeRunId !== null ||
-        owner.pendingRuntimeRequest !== null ||
-        (owner.pendingBackgroundTasks?.length ?? 0) > 0 ||
-        hasOpenActionableDashboardItems(owner.dashboardItems) ||
-        owner.archivePending != null ||
-        (owner.actionResume != null &&
-          !["delivered", "disposed"].includes(owner.actionResume.delivery))
-      )
+      if (ownerHasUnfinishedWork(owner))
         return yield* failure(
           "protected",
           "A workspace owner has unfinished work or needs attention.",
@@ -466,9 +539,6 @@ export const make = Effect.gen(function* () {
       if (!migratedDuplicate)
         return yield* failure("protected", "Historical workspace ownership needs review.");
     }
-    const previewPaths = yield* previews.protectedWorkspacePaths();
-    if (previewPaths.some((cwd) => record.aliases.some((alias) => overlaps(alias, cwd))))
-      return yield* failure("protected", "A retained preview uses the workspace.");
     const runtimeOwners = yield* sessions.workspaceOwnership;
     if (
       runtimeOwners.some(
@@ -478,6 +548,43 @@ export const make = Effect.gen(function* () {
       )
     )
       return yield* failure("protected", "A provider still owns the workspace.");
+    const activeTerminals = (yield* terminals.refreshMetadata).filter(
+      (terminal) =>
+        ["starting", "running"].includes(terminal.status) &&
+        record.aliases.some((alias) => overlaps(alias, terminal.cwd)),
+    );
+    if (activeTerminals.length > 0) {
+      const leases = yield* previews.list();
+      if (
+        activeTerminals.some(
+          (terminal) =>
+            !leases.some(
+              (lease) =>
+                lease.threadId === terminal.threadId &&
+                lease.terminalId === terminal.terminalId &&
+                record.owners.some((owner) => owner.threadId === lease.threadId),
+            ),
+        )
+      )
+        return yield* failure("protected", "A terminal uses the workspace.");
+    }
+    if (
+      yield* Effect.try({
+        try: () => generatedBuildReviewProtection(physicalPath),
+        catch: safeFailure,
+      })
+    )
+      return yield* failure("protected", "Reviewed generated files retain this workspace.");
+  });
+  const guard = Effect.fn("WorktreeSuspension.guard")(function* (
+    record: CheckoutAuthority,
+    physicalPath = record.path,
+    automatic = false,
+  ) {
+    yield* guardBeforePreviews(record, physicalPath);
+    const previewPaths = yield* previews.protectedWorkspacePaths();
+    if (previewPaths.some((cwd) => record.aliases.some((alias) => overlaps(alias, cwd))))
+      return yield* failure("protected", "A retained preview uses the workspace.");
     const terminalMetadata = yield* terminals.refreshMetadata;
     if (
       terminalMetadata.some(
@@ -487,28 +594,10 @@ export const make = Effect.gen(function* () {
       )
     )
       return yield* failure("protected", "A terminal uses the workspace.");
-    if (
-      yield* Effect.try({
-        try: () => generatedBuildReviewProtection(physicalPath),
-        catch: safeFailure,
-      })
-    )
-      return yield* failure("protected", "Reviewed generated files retain this workspace.");
     const consumer = yield* WorktreeConsumers.worktreeConsumerReason(physicalPath);
     if (consumer !== null) return yield* failure("protected", consumer);
     const latestOwners = yield* checkOwners(record);
-    if (
-      latestOwners.some(
-        (owner) =>
-          owner.activeRunId !== null ||
-          owner.pendingRuntimeRequest !== null ||
-          (owner.pendingBackgroundTasks?.length ?? 0) > 0 ||
-          hasOpenActionableDashboardItems(owner.dashboardItems) ||
-          owner.archivePending != null ||
-          (owner.actionResume != null &&
-            !["delivered", "disposed"].includes(owner.actionResume.delivery)),
-      )
-    )
+    if (latestOwners.some(ownerHasUnfinishedWork))
       return yield* failure(
         "protected",
         "A workspace owner acquired unfinished work or attention during verification.",
@@ -572,7 +661,10 @@ export const make = Effect.gen(function* () {
       generation: transition.next.generation,
       ...(transition.workspace === undefined
         ? {}
-        : { worktreePath: transition.workspace.worktreePath, branch: transition.workspace.branch }),
+        : {
+            worktreePath: transition.workspace.worktreePath,
+            branch: transition.workspace.branch,
+          }),
     }));
     const matches = (
       expected: readonly WorktreeSuspensionOwner[],
@@ -935,6 +1027,9 @@ export const make = Effect.gen(function* () {
     lastUse: string | null,
     held: boolean,
   ) => {
+    // Archived threads are excluded from automatic settlement, so their archive
+    // time is the inactivity anchor when they have never settled.
+    const settledOrArchivedAt = thread.settledAt ?? thread.archivedAt;
     const adopted =
       thread.workspaceUserAdopted === true ||
       thread.createdBy === "user" ||
@@ -955,7 +1050,7 @@ export const make = Effect.gen(function* () {
               ? false
               : null,
         humanParticipation: adopted ? true : thread.workspaceUserAdopted === false ? false : null,
-        settledAt: thread.settledAt === null ? null : DateTime.formatIso(thread.settledAt),
+        settledAt: settledOrArchivedAt === null ? null : DateTime.formatIso(settledOrArchivedAt),
         lastWorkspaceUseAt: lastUse,
         active: thread.activeRunId !== null,
         pendingWork:
@@ -972,6 +1067,12 @@ export const make = Effect.gen(function* () {
     const currentSettings = yield* settings.getSettings;
     const timestamp = yield* milliseconds;
     const owners = yield* checkOwners(record);
+    const unverifiedUse = yield* registry.unverifiedUse([record.path, ...record.aliases]);
+    const lastUse =
+      [latestWorkspaceUse(record), unverifiedUse]
+        .filter((value): value is string => value !== null)
+        .sort()
+        .at(-1) ?? null;
     return (
       owners.length > 0 &&
       owners.every(
@@ -980,7 +1081,7 @@ export const make = Effect.gen(function* () {
             thread,
             resolveWorktreeSuspension(currentSettings, thread.projectId),
             timestamp,
-            latestWorkspaceUse(record),
+            lastUse,
             record.summary.keepWorkspace,
           ).eligible,
       )
@@ -1269,17 +1370,29 @@ export const make = Effect.gen(function* () {
     if (!(yield* isManaged(operation.destinationPath)))
       return yield* failure("protected", "Choose a managed worktree destination.");
     yield* checkOwners(record);
-    let journal = yield* native(() => store.readJournal(id));
-    if (journal.phase === "suspended" || journal.phase === "removing") {
-      yield* native(() =>
-        store.stageRestore(id, { destinationPath: operation.destinationPath! }),
-      ).pipe(Effect.onError(() => cancelUnstartedRestore(record).pipe(Effect.ignoreCause)));
-      journal = yield* native(() => store.readJournal(id));
-    }
-    const restored =
-      journal.phase === "restoring"
-        ? yield* native(() => store.resumeRestore(id))
-        : yield* native(() => store.verifyRestored(id));
+    const restored = yield* withProjectRootLease(
+      Effect.gen(function* () {
+        let journal = yield* native(() => store.readJournal(id));
+        let staged = false;
+        if (journal.phase === "suspended" || journal.phase === "removing") {
+          yield* guardProjectRoots([operation.destinationPath!]);
+          yield* native(() =>
+            store.stageRestore(id, { destinationPath: operation.destinationPath! }),
+          ).pipe(Effect.onError(() => cancelUnstartedRestore(record).pipe(Effect.ignoreCause)));
+          journal = yield* native(() => store.readJournal(id));
+          staged = true;
+        }
+        if (journal.phase !== "restoring") return yield* native(() => store.verifyRestored(id));
+        if (journal.restorePath === undefined)
+          return yield* failure("protected", "The staged restore path is unavailable.");
+        if (
+          (yield* fs.exists(journal.restorePath)) ||
+          !(yield* fs.exists(operation.destinationPath!))
+        )
+          yield* guardProjectRoots([operation.destinationPath!, journal.restorePath]);
+        return yield* native(() => (staged ? store.publishRestore(id) : store.resumeRestore(id)));
+      }),
+    );
     if (restored.path !== operation.destinationPath)
       return yield* failure("changed", "The restore destination changed.");
     if (record.summary.state !== "active")
@@ -1299,7 +1412,7 @@ export const make = Effect.gen(function* () {
         },
         { worktreePath: restored.path, branch: shortBranch(restored.branch) },
       );
-    journal = yield* native(() => store.readJournal(id));
+    const journal = yield* native(() => store.readJournal(id));
     if (journal.phase === "restored") yield* native(() => store.finalizeRestore(id));
     const finished = clearOperation(record);
     yield* registry.put(finished, record);
@@ -1337,25 +1450,38 @@ export const make = Effect.gen(function* () {
     const saved = yield* native(() => store.read(id));
     if (saved.ownerBinding !== initial.checkoutId)
       return yield* failure("changed", "The historical copy belongs to a different checkout.");
-    let journal = yield* native(() => store.readJournal(id));
-    if (
-      journal.phase === "suspended" ||
-      (journal.phase === "active" &&
-        (journal.destinationPath !== operation.destinationPath ||
-          journal.branch !== `refs/heads/${operation.branch}`))
-    ) {
-      yield* native(() =>
-        store.stageRestore(id, {
-          destinationPath: operation.destinationPath!,
-          branchName: operation.branch!,
-        }),
-      ).pipe(Effect.onError(() => cancelUnstartedRestore(initial).pipe(Effect.ignoreCause)));
-      journal = yield* native(() => store.readJournal(id));
-    }
-    const result =
-      journal.phase === "restoring"
-        ? yield* native(() => store.resumeRestore(id))
-        : yield* native(() => store.verifyRestored(id));
+    yield* guardRecoveryDestination(initial, operation.destinationPath, operation.id);
+    const result = yield* withProjectRootLease(
+      Effect.gen(function* () {
+        let journal = yield* native(() => store.readJournal(id));
+        let staged = false;
+        if (
+          journal.phase === "suspended" ||
+          (journal.phase === "active" &&
+            (journal.destinationPath !== operation.destinationPath ||
+              journal.branch !== `refs/heads/${operation.branch}`))
+        ) {
+          yield* guardProjectRoots([operation.destinationPath!]);
+          yield* native(() =>
+            store.stageRestore(id, {
+              destinationPath: operation.destinationPath!,
+              branchName: operation.branch!,
+            }),
+          ).pipe(Effect.onError(() => cancelUnstartedRestore(initial).pipe(Effect.ignoreCause)));
+          journal = yield* native(() => store.readJournal(id));
+          staged = true;
+        }
+        if (journal.phase !== "restoring") return yield* native(() => store.verifyRestored(id));
+        if (journal.restorePath === undefined)
+          return yield* failure("protected", "The staged restore path is unavailable.");
+        if (
+          (yield* fs.exists(journal.restorePath)) ||
+          !(yield* fs.exists(operation.destinationPath!))
+        )
+          yield* guardProjectRoots([operation.destinationPath!, journal.restorePath]);
+        return yield* native(() => (staged ? store.publishRestore(id) : store.resumeRestore(id)));
+      }),
+    );
     if (
       result.path !== operation.destinationPath ||
       shortBranch(result.branch) !== operation.branch
@@ -1518,6 +1644,13 @@ export const make = Effect.gen(function* () {
       return yield* requireRecord(record.checkoutId);
     }
     if (record.operation?.kind !== "capture") return yield* refreshActiveOwners(record);
+    const job = liveOperations.get(record.checkoutId);
+    if (
+      job !== undefined &&
+      !(job.cancelled && !job.started) &&
+      stoppedCaptureId !== record.operation.id
+    )
+      return yield* failure("busy", "Finish the current workspace operation first.");
     // Legacy intents get one attempt with the current capture implementation.
     // Keep cleanup protection even while that attempt is waiting for the sweep.
     const settledCapture = (current: CheckoutAuthority, legacyRetry = true): CheckoutAuthority => {
@@ -1543,13 +1676,6 @@ export const make = Effect.gen(function* () {
       path.join(registry.root, "snapshots", id, "journal.json"),
     );
     if (!journalExists) {
-      const job = liveOperations.get(record.checkoutId);
-      if (
-        job !== undefined &&
-        !(job.cancelled && !job.started) &&
-        stoppedCaptureId !== record.operation.id
-      )
-        return yield* failure("busy", "Finish the current workspace operation first.");
       yield* assertFresh(record);
       if (record.history.includes(id) || record.snapshots?.some((saved) => saved.snapshotId === id))
         return yield* failure(
@@ -1587,7 +1713,14 @@ export const make = Effect.gen(function* () {
       });
     }
     if (["isolating", "isolated", "removing"].includes(journal.phase)) {
-      const recovered = yield* native(() => store.reconcileRemoval(id));
+      const recovered = yield* withProjectRootLease(
+        Effect.gen(function* () {
+          if (journal.isolatedPath === undefined)
+            return yield* failure("protected", "The isolated workspace path is unavailable.");
+          yield* guardProjectRoots([...record.aliases, record.path, journal.isolatedPath]);
+          return yield* native(() => store.reconcileRemoval(id));
+        }),
+      );
       if (recovered.status === "restore-required") {
         const restoring = yield* publish(
           record,
@@ -1613,20 +1746,42 @@ export const make = Effect.gen(function* () {
     }
     if (["capturing", "verifying", "ready", "active"].includes(journal.phase)) {
       yield* originalStillOwned(record);
+      let retainedTrial = false;
       if (journal.trialPath !== undefined) {
-        yield* native(() => store.trialRestore(id));
+        if (record.captureFailure?.operationId === record.operation.id) {
+          retainedTrial = Option.isNone(
+            yield* native(() => store.trialRestore(id)).pipe(Effect.option),
+          );
+        } else yield* native(() => store.trialRestore(id));
         journal = yield* native(() => store.readJournal(id));
-        if (journal.trialPath !== undefined)
+        if (!retainedTrial && journal.trialPath !== undefined)
           return yield* failure(
             "protected",
             "The owned trial restore still needs recovery. Its operation has been retained.",
           );
       }
       const manifest = yield* native(() => store.read(id)).pipe(Effect.option);
+      if (
+        retainedTrial &&
+        (Option.isNone(manifest) ||
+          manifest.value.ownerBinding !== record.checkoutId ||
+          manifest.value.operationId !== record.operation.id ||
+          manifest.value.sourcePath !== record.path)
+      )
+        return yield* failure(
+          "protected",
+          "The owned trial restore still needs recovery. Its operation has been retained.",
+        );
       if (Option.isSome(manifest) && !record.history.includes(id))
         record = yield* remember(record, manifest.value);
+      if (retainedTrial) {
+        // A failed trial is not proof of a suspended checkout. Keep its complete
+        // journal and snapshot authority, but do not trap the verified original.
+        yield* originalStillOwned(record);
+        yield* assertFresh(record);
+      }
       if (journal.phase !== "active") yield* native(() => store.keepOriginal(id));
-      const active = yield* publish(record, settledCapture(record), {
+      const active = yield* publish(record, settledCapture(record, !retainedTrial), {
         ...record.summary,
         state: "active",
         snapshotId: null,
@@ -1662,35 +1817,52 @@ export const make = Effect.gen(function* () {
             }),
             () =>
               Effect.gen(function* () {
-                const snapshot = yield* native(() =>
-                  store.capture({
-                    sourcePath: record.path,
-                    snapshotId: id,
-                    operationId: record.operation!.id,
-                    ownerBinding: record.checkoutId,
+                const snapshot = yield* withProjectRootLease(
+                  Effect.gen(function* () {
+                    yield* guard(record, record.path, automatic);
+                    return yield* native(() =>
+                      store.capture({
+                        sourcePath: record.path,
+                        snapshotId: id,
+                        operationId: record.operation!.id,
+                        ownerBinding: record.checkoutId,
+                      }),
+                    );
                   }),
                 );
                 record = yield* remember(record, snapshot);
                 yield* native(() => store.trialRestore(id));
-                yield* guard(record);
-                const journal = yield* native(() =>
-                  store.isolate(id, {
-                    quarantineParent: path.join(path.dirname(record.path), ".suspended-workspaces"),
+                const isolatedPath = yield* withProjectRootLease(
+                  Effect.gen(function* () {
+                    yield* guard(record);
+                    const journal = yield* native(() =>
+                      store.isolate(id, {
+                        quarantineParent: path.join(
+                          path.dirname(record.path),
+                          ".suspended-workspaces",
+                        ),
+                      }),
+                    );
+                    if (journal.isolatedPath === undefined)
+                      return yield* failure(
+                        "unavailable",
+                        "The isolated workspace could not be verified.",
+                      );
+                    yield* guard(record, journal.isolatedPath);
+                    return journal.isolatedPath;
                   }),
                 );
-                if (journal.isolatedPath === undefined)
-                  return yield* failure(
-                    "unavailable",
-                    "The isolated workspace could not be verified.",
-                  );
-                yield* guard(record, journal.isolatedPath);
                 yield* native(() => store.prepareRemoval(id));
-                yield* guard(record, journal.isolatedPath, automatic);
-                yield* native(() => store.finishRemoval(id));
-                yield* publish(record, clearOperation(record), {
-                  ...record.summary,
-                  state: "suspended",
-                });
+                yield* withProjectRootLease(
+                  Effect.gen(function* () {
+                    yield* guard(record, isolatedPath, automatic);
+                    yield* native(() => store.finishRemoval(id));
+                    yield* publish(record, clearOperation(record), {
+                      ...record.summary,
+                      state: "suspended",
+                    });
+                  }),
+                );
               }),
             (release) => Effect.sync(release),
           );
@@ -1875,28 +2047,40 @@ export const make = Effect.gen(function* () {
       return yield* failure("protected", "This copy is not the current suspended workspace.");
     if (!(yield* isManaged(destinationPath)))
       return yield* failure("protected", "Choose a managed worktree destination.");
-    if (yield* fs.exists(destinationPath))
-      return yield* failure(
-        "protected",
-        "The restore destination is occupied. Choose another managed destination.",
-      );
     const id = yield* random.uuidV4();
-    return yield* publish(
-      record,
-      {
-        ...record,
-        aliases: [...new Set([...record.aliases, destinationPath])],
-        operation: {
-          id,
-          kind: "restore",
-          snapshotIds: [record.summary.snapshotId],
-          manual,
-          acceptedAt: yield* now,
-          destinationPath,
-        },
-        blockedReason: null,
-      },
-      { ...record.summary, state: "restoring" },
+    return yield* withProjectRootLease(
+      Effect.gen(function* () {
+        if (yield* fs.exists(destinationPath))
+          return yield* failure(
+            "protected",
+            "The restore destination is occupied. Choose another managed destination.",
+          );
+        yield* guardProjectRoots([destinationPath]);
+        yield* guardRecoveryDestination(record, destinationPath);
+        return yield* publish(
+          record,
+          {
+            ...record,
+            aliases: [...new Set([...record.aliases, destinationPath])],
+            operation: {
+              id,
+              kind: "restore",
+              snapshotIds: [record.summary.snapshotId!],
+              manual,
+              acceptedAt: yield* now,
+              destinationPath,
+            },
+            blockedReason: null,
+          },
+          { ...record.summary, state: "restoring" },
+        ).pipe(
+          Effect.catchIf(
+            (error) =>
+              error._tag === "SuspensionRegistryError" && error.operation === "ownership-changed",
+            () => failure("protected", "Another saved workspace reserves this destination."),
+          ),
+        );
+      }),
     );
   });
   const restore = Effect.fn("WorktreeSuspension.restore")(function* (
@@ -1971,11 +2155,6 @@ export const make = Effect.gen(function* () {
               "protected",
               "Historical recovery needs a separate managed destination.",
             );
-          if (yield* fs.exists(destinationPath))
-            return yield* failure(
-              "protected",
-              "The recovery destination is occupied. Choose another managed destination.",
-            );
           const pending: CheckoutAuthority = {
             ...record,
             operation: {
@@ -1991,7 +2170,23 @@ export const make = Effect.gen(function* () {
             },
             blockedReason: null,
           };
-          yield* registry.put(pending, record);
+          yield* withProjectRootLease(
+            Effect.gen(function* () {
+              if (yield* fs.exists(destinationPath))
+                return yield* failure(
+                  "protected",
+                  "The recovery destination is occupied. Choose another managed destination.",
+                );
+              yield* guardProjectRoots([destinationPath]);
+              yield* guardRecoveryDestination(record, destinationPath);
+              yield* registry.put(pending, record).pipe(
+                Effect.catchIf(
+                  (error) => error.operation === "ownership-changed",
+                  () => failure("protected", "Another saved workspace reserves this destination."),
+                ),
+              );
+            }),
+          );
           yield* registerWorkspaceLeaseRoot(destinationPath);
           return yield* queue(
             pending,
@@ -2023,6 +2218,15 @@ export const make = Effect.gen(function* () {
       const saved = yield* native(() => store.read(id));
       if (saved.ownerBinding !== record.checkoutId)
         return yield* failure("changed", "A saved copy belongs to another checkout.");
+      const journal = yield* native(() => store.readJournal(id));
+      if (
+        (journal.trialPath !== undefined && (yield* fs.exists(journal.trialPath))) ||
+        (journal.isolatedPath !== undefined && (yield* fs.exists(journal.isolatedPath)))
+      )
+        return yield* failure(
+          "protected",
+          "The saved copy is still needed by an unfinished operation.",
+        );
     }
   });
   const previewDiscard = Effect.fn("WorktreeSuspension.previewDiscard")(function* (
@@ -2423,7 +2627,9 @@ export const make = Effect.gen(function* () {
             "invalid-preview",
             "Refresh the saved-workspace confirmation before continuing.",
           );
-        const inventory = yield* lifecycleInventory(input, { allowOrphans: preview.allowOrphans });
+        const inventory = yield* lifecycleInventory(input, {
+          allowOrphans: preview.allowOrphans,
+        });
         if (
           inventory.records.length !== preview.records.length ||
           inventory.records.some(
@@ -2510,7 +2716,10 @@ export const make = Effect.gen(function* () {
                 );
               }
             }
-            const consent = { ...fresh, operation: { ...fresh.operation, consentCommitted: true } };
+            const consent = {
+              ...fresh,
+              operation: { ...fresh.operation, consentCommitted: true },
+            };
             yield* registry.put(consent, fresh);
             yield* finishDiscard(consent);
           }),
@@ -2650,12 +2859,79 @@ export const make = Effect.gen(function* () {
           liveOperations.has(identified.checkoutId)
         )
           return;
-        const record = yield* refreshActiveOwners(identified);
-        if (yield* automaticallyEligible(record)) {
-          yield* acceptCapture(record, true);
-          const running = liveOperations.get(record.checkoutId);
-          if (running !== undefined) yield* Deferred.await(running.completed);
+        let record = yield* refreshActiveOwners(identified);
+        if (!(yield* automaticallyEligible(record))) return;
+        const owners = yield* checkOwners(record);
+        if (owners.some(ownerHasUnfinishedWork)) return;
+        const leases = yield* previews.protectedWorkspaceLeases();
+        const previewOwners = new Set<string>();
+        for (const lease of leases) {
+          for (const previewPath of [lease.cwd, lease.worktreePath]) {
+            if (previewPath === null) continue;
+            const resolved = yield* canonical(previewPath);
+            if (!record.aliases.some((alias) => overlaps(alias, resolved))) continue;
+            if (!owners.some((owner) => owner.id === lease.threadId)) return;
+            previewOwners.add(lease.threadId);
+            break;
+          }
         }
+        if (previewOwners.size > 0) {
+          yield* previews.withThreadPreviewLocks(
+            owners.map((owner) => owner.id),
+            (remove) =>
+              withWorkspaceLease(
+                record.path,
+                Effect.gen(function* () {
+                  record = yield* requireRecord(record.checkoutId);
+                  if (!(yield* automaticallyEligible(record))) return;
+                  if (
+                    (yield* WorktreeConsumers.worktreeConsumerPreflightReason(record.path)) !== null
+                  )
+                    return;
+                  yield* withProjectRootLease(
+                    Effect.gen(function* () {
+                      record = yield* requireRecord(record.checkoutId);
+                      if (!(yield* automaticallyEligible(record))) return;
+                      const currentOwners = yield* checkOwners(record);
+                      if (
+                        currentOwners.length !== owners.length ||
+                        currentOwners.some(
+                          (owner) => !owners.some((original) => original.id === owner.id),
+                        )
+                      )
+                        return;
+                      if (currentOwners.some(ownerHasUnfinishedWork)) return;
+                      yield* guardBeforePreviews(record);
+                      const currentLeases = yield* previews.protectedWorkspaceLeases();
+                      for (const lease of currentLeases) {
+                        for (const previewPath of [lease.cwd, lease.worktreePath]) {
+                          if (previewPath === null) continue;
+                          const resolved = yield* canonical(previewPath);
+                          if (!record.aliases.some((alias) => overlaps(alias, resolved))) continue;
+                          if (!currentOwners.some((owner) => owner.id === lease.threadId)) return;
+                          previewOwners.add(lease.threadId);
+                          break;
+                        }
+                      }
+                      for (const owner of currentOwners) {
+                        if (!previewOwners.has(owner.id)) continue;
+                        record = yield* requireRecord(record.checkoutId);
+                        if (!(yield* automaticallyEligible(record))) return;
+                        if ((yield* checkOwners(record)).some(ownerHasUnfinishedWork)) return;
+                        yield* remove(owner.id, record.path);
+                      }
+                    }),
+                  );
+                }),
+              ),
+          );
+        }
+        record = yield* requireRecord(record.checkoutId);
+        if (!(yield* automaticallyEligible(record))) return;
+        if ((yield* checkOwners(record)).some(ownerHasUnfinishedWork)) return;
+        yield* acceptCapture(record, true);
+        const running = liveOperations.get(record.checkoutId);
+        if (running !== undefined) yield* Deferred.await(running.completed);
       }).pipe(Effect.ignoreCause);
     }
   }).pipe(
@@ -2709,18 +2985,22 @@ export const make = Effect.gen(function* () {
               return yield* new WorkspaceUnavailableError({ reason: "snapshot-unavailable" });
             }
             if (thread !== null && matchesPath && positiveUse(input.purpose)) {
-              const policy = resolveWorktreeSuspension(
-                yield* settings.getSettings,
-                thread.projectId,
-              );
               if (
-                policy.mode !== "off" &&
-                Object.values(policy.scopes).some(Boolean) &&
                 (yield* fs.exists(binding.worktreePath)) &&
                 (yield* isManaged(binding.worktreePath))
               ) {
-                record = yield* identify(thread.id, undefined, "activity");
-                break;
+                const policy = resolveWorktreeSuspension(
+                  yield* settings.getSettings,
+                  thread.projectId,
+                );
+                if (policy.mode === "off" || !Object.values(policy.scopes).some(Boolean)) {
+                  const identified = yield* identify(thread.id, undefined, "activity").pipe(
+                    Effect.option,
+                  );
+                  if (Option.isSome(identified)) record = identified.value;
+                  else yield* registry.recordUnverifiedUse(binding.worktreePath, yield* now);
+                } else record = yield* identify(thread.id, undefined, "activity");
+                if (record !== undefined) break;
               }
             }
           }
@@ -2750,7 +3030,7 @@ export const make = Effect.gen(function* () {
               return yield* new WorkspaceUnavailableError({ reason: "blocked" });
             const suffix = path.relative(alias, normalized);
             if (current.summary.state === "active") {
-              yield* checkOwners(current);
+              const owners = yield* checkOwners(current);
               if (positiveUse(input.purpose)) {
                 const used = { ...current, lastWorkspaceUseAt: yield* now };
                 if (used.captureFailure !== undefined)
@@ -2773,6 +3053,24 @@ export const make = Effect.gen(function* () {
                           result.stdout.trim().startsWith("refs/heads/")
                             ? shortBranch(result.stdout.trim())
                             : null,
+                        ),
+                        Effect.catch((error) =>
+                          Effect.gen(function* () {
+                            const configured = yield* settings.getSettings;
+                            const disabled =
+                              owners.length > 0 &&
+                              owners.every((owner) => {
+                                const policy = resolveWorktreeSuspension(
+                                  configured,
+                                  owner.projectId,
+                                );
+                                return (
+                                  policy.mode === "off" ||
+                                  !Object.values(policy.scopes).some(Boolean)
+                                );
+                              });
+                            return disabled ? null : yield* error;
+                          }),
                         ),
                       ),
                 restored: false,
@@ -2812,4 +3110,5 @@ export const make = Effect.gen(function* () {
   });
 });
 
+const make = makeWithStoreOptions();
 export const layer = Layer.effect(WorktreeSuspension, make);

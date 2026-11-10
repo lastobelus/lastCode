@@ -65,6 +65,7 @@ vi.mock(import("~/components/preview/previewBridge"), async (original) => {
   return {
     ...(await original()),
     previewBridge: createPreviewBridgeFixture({
+      onBrowserEvent: () => () => {},
       createTab: mocks.createTab,
       closeTab: mocks.closeTab,
       registerWebview: mocks.registerWebview,
@@ -209,7 +210,7 @@ async function renderHost() {
   const screen = stack.use(
     await render(
       <AppAtomRegistryProvider>
-        <ElectronBrowserHost />
+        <ElectronBrowserHost onThreadLink={() => {}} />
       </AppAtomRegistryProvider>,
     ),
   );
@@ -275,6 +276,7 @@ describe("ElectronBrowserHost", () => {
       using _desktopBridge = stubGlobal("desktopBridge", {
         getWindowZoomFactor: () => 1,
         preview: createPreviewBridgeFixture({
+          onBrowserEvent: () => () => {},
           refresh,
           navigate,
           browserPresentation: async () => undefined,
@@ -423,6 +425,7 @@ describe("ElectronBrowserHost", () => {
       using _desktopBridge = stubGlobal("desktopBridge", {
         getWindowZoomFactor: () => 1,
         preview: createPreviewBridgeFixture({
+          onBrowserEvent: () => () => {},
           navigate,
           refresh,
           browserPresentation: async () => undefined,
@@ -493,6 +496,7 @@ describe("ElectronBrowserHost", () => {
       using _desktopBridge = stubGlobal("desktopBridge", {
         getWindowZoomFactor: () => 1,
         preview: createPreviewBridgeFixture({
+          onBrowserEvent: () => () => {},
           refresh,
           navigate,
           browserPresentation: async () => undefined,
@@ -585,6 +589,7 @@ describe("ElectronBrowserHost", () => {
     using _desktopBridge = stubGlobal("desktopBridge", {
       getWindowZoomFactor: () => 1,
       preview: createPreviewBridgeFixture({
+        onBrowserEvent: () => () => {},
         navigate,
         refresh,
         browserPresentation: async () => undefined,
@@ -658,6 +663,7 @@ describe("ElectronBrowserHost", () => {
     using _desktopBridge = stubGlobal("desktopBridge", {
       getWindowZoomFactor: () => 1,
       preview: createPreviewBridgeFixture({
+        onBrowserEvent: () => () => {},
         onBrowserRendererRequest: (listener: typeof rendererRequest) => {
           rendererRequest = listener;
           return () => {

@@ -51,6 +51,7 @@ vi.mock(import("~/components/preview/previewBridge"), async (original) => {
   return {
     ...(await original()),
     previewBridge: createPreviewBridgeFixture({
+      onBrowserEvent: () => () => {},
       createTab: mocks.createTab,
       closeTab: mocks.closeTab,
       registerWebview: mocks.registerWebview,
@@ -228,7 +229,7 @@ describe("Electron browser hosting outside the selected thread", () => {
       await ensureClientSettingsHydrated();
       await render(
         <AppAtomRegistryProvider>
-          <ElectronBrowserHost />
+          <ElectronBrowserHost onThreadLink={() => {}} />
         </AppAtomRegistryProvider>,
       );
     });
@@ -274,6 +275,7 @@ describe("Electron browser hosting outside the selected thread", () => {
       vi.stubGlobal("desktopBridge", {
         getWindowZoomFactor: () => 1,
         preview: createPreviewBridgeFixture({
+          onBrowserEvent: () => () => {},
           onOpenLink: (listener: typeof onOpenLink) => {
             onOpenLink = listener;
             return () => undefined;
@@ -307,7 +309,7 @@ describe("Electron browser hosting outside the selected thread", () => {
         await ensureClientSettingsHydrated();
         await render(
           <AppAtomRegistryProvider>
-            <ElectronBrowserHost />
+            <ElectronBrowserHost onThreadLink={() => {}} />
           </AppAtomRegistryProvider>,
           44,
         );
@@ -365,6 +367,7 @@ describe("Electron browser hosting outside the selected thread", () => {
     vi.stubGlobal("desktopBridge", {
       getWindowZoomFactor: () => 1,
       preview: createPreviewBridgeFixture({
+        onBrowserEvent: () => () => {},
         onOpenLink: (listener: typeof onOpenLink) => {
           onOpenLink = listener;
           return () => undefined;
@@ -383,7 +386,7 @@ describe("Electron browser hosting outside the selected thread", () => {
       await ensureClientSettingsHydrated();
       await render(
         <AppAtomRegistryProvider>
-          <ElectronBrowserHost />
+          <ElectronBrowserHost onThreadLink={() => {}} />
         </AppAtomRegistryProvider>,
         44,
       );
@@ -461,7 +464,7 @@ describe("Electron browser hosting outside the selected thread", () => {
         await ensureClientSettingsHydrated();
         await render(
           <AppAtomRegistryProvider>
-            {origin === "primary" ? <ElectronBrowserHost /> : <ChatSync />}
+            {origin === "primary" ? <ElectronBrowserHost onThreadLink={() => {}} /> : <ChatSync />}
           </AppAtomRegistryProvider>,
           44,
         );
@@ -525,7 +528,7 @@ describe("Electron browser hosting outside the selected thread", () => {
       await ensureClientSettingsHydrated();
       await render(
         <AppAtomRegistryProvider>
-          <ElectronBrowserHost />
+          <ElectronBrowserHost onThreadLink={() => {}} />
           <ChatSync />
         </AppAtomRegistryProvider>,
         44,
@@ -630,7 +633,7 @@ describe("Electron browser hosting outside the selected thread", () => {
       await ensureClientSettingsHydrated();
       await render(
         <AppAtomRegistryProvider>
-          <ElectronBrowserHost />
+          <ElectronBrowserHost onThreadLink={() => {}} />
           <ChatSync />
         </AppAtomRegistryProvider>,
         45,
@@ -690,7 +693,7 @@ describe("Electron browser hosting outside the selected thread", () => {
       await ensureClientSettingsHydrated();
       await render(
         <AppAtomRegistryProvider>
-          <ElectronBrowserHost />
+          <ElectronBrowserHost onThreadLink={() => {}} />
         </AppAtomRegistryProvider>,
         43,
       );
@@ -755,7 +758,7 @@ describe("Electron browser hosting outside the selected thread", () => {
       await ensureClientSettingsHydrated();
       await render(
         <AppAtomRegistryProvider>
-          <ElectronBrowserHost />
+          <ElectronBrowserHost onThreadLink={() => {}} />
         </AppAtomRegistryProvider>,
         42,
       );
@@ -921,6 +924,7 @@ describe("HostedBrowserWebview settings hydration", () => {
     vi.stubGlobal("desktopBridge", {
       getWindowZoomFactor: () => 1,
       preview: createPreviewBridgeFixture({
+        onBrowserEvent: () => () => {},
         browserPresentation,
         setShown: vi.fn<DesktopPreviewBridge["setShown"]>(async () => undefined),
         onBrowserSurfaceRequest: () => () => undefined,

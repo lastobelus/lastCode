@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off globalDate:off globalTimers:off - Playwright callbacks run outside the Effect runtime.
+import { installThreadLinkNavigation } from "./ThreadLinkNavigation.ts";
 // Screencasts ignore emulated device scale; real 2x keeps captures sharp.
 // --disable-gpu uses cheaper software compositing while preserving SwiftShader WebGL.
 import {
@@ -98,7 +99,7 @@ import * as PreviewBrowser from "./PreviewBrowser.ts";
 import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
 import { presentAsChrome, ServerBrowserContexts } from "./ServerBrowserContexts.ts";
 import { BrowserControlInterrupted, SessionControl } from "./SessionControl.ts";
-import { installPdfDocumentNavigation, isPdfAssetUrl } from "./PdfDocumentNavigation.ts";
+import { createPdfDocumentNavigation, isPdfAssetUrl } from "./PdfDocumentNavigation.ts";
 
 const SERVER_HOST_CLIENT_ID = SERVER_BROWSER_AUTOMATION_CLIENT_ID;
 const RENDER_SCALE = 2;
@@ -223,6 +224,7 @@ export type ServerBrowserViewerOutput =
     }
   | { readonly _tag: "fileChooserClosed"; readonly id: string }
   | { readonly _tag: "popup"; readonly tabId: string }
+  | { readonly _tag: "threadLink"; readonly href: string }
   | {
       readonly _tag: "download";
       readonly id: string;
@@ -321,6 +323,7 @@ interface ServerTab {
   readonly actionTimeline: Array<PreviewAutomationActionEvent>;
   readonly control: SessionControl;
   agentOperating: boolean;
+  threadLinkViewer: ViewerState | null;
   pageActivity: number;
   readonly hostingActivityId: string;
   frozen: boolean;
@@ -1277,7 +1280,7 @@ const make = Effect.gen(function* () {
     const page = adopted?.page ?? desktop?.page ?? (await context.newPage());
     if (!desktop) opened.push(() => page.close());
     const cdp = await context.newCDPSession(page);
-    await installPdfDocumentNavigation(cdp);
+    const pdfNavigation = await createPdfDocumentNavigation(cdp);
     // The desktop's page is already a normal browser. A popup's first request
     // went out before it became a tab; everything after presents as Chrome.
     if (!desktop) await presentAsChrome(cdp, host);
@@ -1304,6 +1307,7 @@ const make = Effect.gen(function* () {
       actionTimeline: [],
       control,
       agentOperating: false,
+      threadLinkViewer: null,
       pageActivity: 0,
       hostingActivityId: `server-browser-page:${tabKey(snapshot.threadId, snapshot.tabId)}:${NodeCrypto.randomUUID()}`,
       frozen: false,
@@ -1349,6 +1353,22 @@ const make = Effect.gen(function* () {
       captureLock: Promise.resolve(),
       capturing: 0,
     };
+    const threadNavigation = await installThreadLinkNavigation(
+      page,
+      cdp,
+      desktop !== null,
+      (href) => {
+        if (tab.closing || tab.agentOperating) return false;
+        if (tab.threadLinkViewer) tab.threadLinkViewer.push({ _tag: "threadLink", href });
+        else if (desktop && tab.nativePresented) runFork(desktopChannel.openThreadLink(tab, href));
+        else return false;
+        return true;
+      },
+      (popup) => {
+        blockedThreadPopups.add(popup);
+      },
+      pdfNavigation ? [pdfNavigation] : [],
+    );
     if (!desktop) {
       await page.setViewportSize(fixedViewportSize(tab.setting) ?? UNATTACHED_FILL_VIEWPORT);
     }
@@ -1368,8 +1388,14 @@ const make = Effect.gen(function* () {
       });
       await cdp.send("Page.enable");
     }
-    const isMainNavigation = (request: { isNavigationRequest(): boolean; frame(): unknown }) =>
-      request.isNavigationRequest() && request.frame() === page.mainFrame();
+    const isMainNavigation = (request: {
+      isNavigationRequest(): boolean;
+      frame(): unknown;
+      url(): string;
+    }) =>
+      request.isNavigationRequest() &&
+      request.frame() === page.mainFrame() &&
+      !threadNavigation.isThreadNavigation(request.url());
     const navigationGenerations = new WeakMap<object, number>();
     page.on("request", (request) => {
       if (!isMainNavigation(request)) return;
@@ -1403,6 +1429,7 @@ const make = Effect.gen(function* () {
     // An adopted popup's frames may have loaded before the tab listened.
     if (adopted) for (const frame of page.frames()) void recordFrameCopies(tab, frame);
     page.on("requestfailed", (request) => {
+      if (threadNavigation.consumeFailedNavigation(request.url())) return;
       const errorText = request.failure()?.errorText ?? "";
       pushBounded(tab.networkEntries, {
         url: ServerBrowserPage.withoutDataPayload(request.url()),
@@ -1827,6 +1854,7 @@ const make = Effect.gen(function* () {
         : Option.some({ path: download.path, fileName: download.fileName });
     });
 
+  const blockedThreadPopups = new WeakSet<Page>();
   const preparedContexts = new WeakSet<BrowserContext>();
   const prepareContext = async (context: BrowserContext) => {
     if (preparedContexts.has(context)) return;
@@ -1901,7 +1929,7 @@ const make = Effect.gen(function* () {
   };
 
   const adoptPopup = async (opener: ServerTab, popup: Page) => {
-    if (opener.closing) {
+    if (opener.closing || blockedThreadPopups.has(popup)) {
       await popup.close().catch(constVoid);
       return;
     }
@@ -4935,8 +4963,14 @@ const make = Effect.gen(function* () {
                   : {}),
               });
             } else {
-              const dispatch = (input: Record<string, unknown>) =>
-                dispatchViewerInput(tab, session, viewer, input);
+              const dispatch = async (input: Record<string, unknown>) => {
+                tab.threadLinkViewer = viewer;
+                try {
+                  await dispatchViewerInput(tab, session, viewer, input);
+                } finally {
+                  tab.threadLinkViewer = null;
+                }
+              };
               if (
                 message.type === "mouse" &&
                 message.action === "move" &&

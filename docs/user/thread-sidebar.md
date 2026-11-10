@@ -31,9 +31,8 @@ cannot receive Resume.
 
 ## Start a thread
 
-On web and desktop, **New thread** opens the project picker when you have multiple
-projects in the default or project-grouped sidebar. The legacy sidebar always
-starts in the current project. **Shift-click** to start in
+On web and desktop, **New thread** opens the project picker when you have more than one
+open project in the default or project-grouped sidebar. Archived projects don't count. **Shift-click** to start in
 the current project, or use a project's own new-thread action. A new thread carries
 your model and mode selections, unless the destination project has its own model default.
 Its branch and workspace mode come from your configured defaults. To continue in
@@ -232,7 +231,8 @@ project's folder comes last and shows only while it has active threads. Click a 
 close it. A closed folder shows how many threads it holds, and a dot when one of them
 needs you. Use the pen button on a folder, or right-click it, to start a thread in that project.
 Pinned threads stay above the folders, and Snoozed and Settled stay below them. In this mode you
-cannot drag threads, and the Working section is off. Each device keeps its own choice.
+can drag a thread onto the composer to mention it, but not within the sidebar, and the Working
+section is off. Each device keeps its own choice.
 
 ## Settle finished work
 
@@ -328,9 +328,8 @@ selection; threads with no completed reply cannot be marked unread.
 On web and desktop, enable **Settings → LastCode → Appearance → LastCode sidebar**
 for the LastCode project tree, annotations, and family controls. It is off by default.
 While enabled, use the tree button or the **Sidebar: Toggle Presentation** shortcut to switch
-between LastCode and the v2 sidebar without changing either saved sidebar preference.
-Turn it off to return to the sidebar selected by **Settings → General → Legacy features → Sidebar (legacy)**.
-With LastCode off, the same control switches between the upstream legacy and v2 sidebars.
+between LastCode and the v2 sidebar for this session without changing the setting.
+With LastCode off, the same control turns the setting on. Turn the setting off to return to the v2 sidebar.
 
 **Family status subheaders**, in the same Appearance settings, is on by default. Turn it off
 to show the family status and child count in the parent row while keeping the child tree.

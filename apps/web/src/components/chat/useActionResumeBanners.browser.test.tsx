@@ -204,19 +204,21 @@ it("distinguishes current pause from a retained hold and a remaining request", a
     heldByEnvironmentPause: true,
   } as const;
   await show(screen, { action, environmentPaused: true });
-  await expect.element(screen.getByText("Check work · Environment paused")).toBeVisible();
+  await expect
+    .element(screen.getByText("Check work • Succeeded • Environment paused"))
+    .toBeVisible();
   await show(screen, { action, hasPendingRequest: true });
-  await expect.element(screen.getByText("Check work · Needs your input")).toBeVisible();
+  await expect.element(screen.getByText("Check work • Succeeded • Needs your input")).toBeVisible();
   expect(screen.container.textContent).not.toContain("Resume the environment");
   await show(screen, { action });
-  await expect.element(screen.getByText("Check work · Sending result")).toBeVisible();
+  await expect.element(screen.getByText("Check work • Succeeded • Sending result")).toBeVisible();
 });
 it("keeps a held exact follow-up visible and removes the notice when that run ends", async () => {
   setup();
   await using screen = await render(null);
   const action = { ...running, outcome: "succeeded", delivery: "delivered" } as const;
   await show(screen, { action, followUp: { status: "queued", queueHeld: true } });
-  await expect.element(screen.getByText("Check work · Needs attention")).toBeVisible();
+  await expect.element(screen.getByText("Check work • Succeeded • Needs attention")).toBeVisible();
   await show(screen, { action, followUp: { status: "completed", queueHeld: false } });
   expect(screen.container.textContent).toBe("");
 });
@@ -239,7 +241,9 @@ it("does not promise automatic continuation when the environment state is unknow
     action: { ...running, outcome: "succeeded", delivery: "pending" },
     unknown: true,
   });
-  await expect.element(screen.getByText("Check work · Status unknown")).toBeVisible();
+  await expect
+    .element(screen.getByText("Check work • Succeeded • Status unavailable"))
+    .toBeVisible();
   expect(screen.container.textContent).not.toContain("pick up its result automatically");
 });
 
@@ -491,7 +495,9 @@ describe("completed Action held by Pause", () => {
       report: { version: 1, outcome: "success", summary: "Documentation preview ready" },
     };
     await show(screen, { action: held, environmentPaused: true });
-    await expect.element(screen.getByText("Check work · Environment paused")).toBeVisible();
+    await expect
+      .element(screen.getByText("Check work • Succeeded • Environment paused"))
+      .toBeVisible();
     await expect
       .element(screen.getByText(/Documentation preview ready.*Automatic wake-ups are held/))
       .toBeVisible();
@@ -511,7 +517,7 @@ describe("completed Action held by Pause", () => {
       followUp: { status: "completed", queueHeld: false },
     });
     await expect
-      .element(screen.getByText("Check work · Environment paused"))
+      .element(screen.getByText("Check work • Succeeded • Environment paused"))
       .not.toBeInTheDocument();
     expect(screen.container.textContent).toBe("");
     await show(screen, { action: { ...held, delivery: "available" } });

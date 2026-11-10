@@ -71,7 +71,6 @@ async function setup(commands = false) {
                 isCompacting: false,
                 followUpBehavior: "queue",
                 isSoftwareKeyboardOpen: false,
-                planModeUiEnabled: false,
                 isLiteralPendingAnswer: false,
                 pendingUserInputs: [],
                 promptHistoryEntries: [],
@@ -92,7 +91,6 @@ async function setup(commands = false) {
                 setComposerTrigger: vi.fn(),
                 setComposerHighlightedItemId: vi.fn(),
                 dismissComposerTrigger: vi.fn(),
-                toggleInteractionMode: vi.fn(),
                 nudgeComposerMenuHighlight: vi.fn(),
                 onSelectComposerItem: vi.fn(),
                 resolveActiveComposerTrigger: () => ({ trigger: null }),
@@ -103,6 +101,8 @@ async function setup(commands = false) {
                   return true;
                 },
                 submitComposer,
+                promptSuggestion: null,
+                dismissPromptSuggestion: vi.fn(),
               }),
             }
           : {})}

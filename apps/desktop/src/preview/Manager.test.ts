@@ -86,6 +86,24 @@ describe("previewWindowOpenAction", () => {
     expect(
       PreviewManager.previewWindowOpenAction(details({ url: "http://localhost:5173/auth" })),
     ).toBe("popup");
+    for (const disposition of ["new-window", "foreground-tab", "background-tab"] as const) {
+      expect(
+        PreviewManager.previewWindowOpenAction(
+          details({
+            url: "https://app.t3.codes/threads/linked/thread",
+            disposition,
+          }),
+        ),
+      ).toBe("popup");
+      expect(
+        PreviewManager.previewWindowOpenAction(
+          details({
+            url: "t3-thread://v2/linked/thread",
+            disposition,
+          }),
+        ),
+      ).toBe("deny");
+    }
   });
 
   it("opens HTTP links in preview tabs", () => {

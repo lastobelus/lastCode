@@ -303,6 +303,12 @@
       "types": "./src/threadLinks.ts",
       "import": "./src/threadLinks.ts"
     },
+    "./server/threadLinkGesture": {
+      "browser": null,
+      "react-native": null,
+      "types": "./src/server/threadLinkGesture.ts",
+      "import": "./src/server/threadLinkGesture.ts"
+    },
     "./composerContextReferences": {
       "types": "./src/composerContextReferences.ts",
       "import": "./src/composerContextReferences.ts"
@@ -586,6 +592,10 @@
     "./generatedBuildOwnership": {
       "types": "./src/generatedBuildOwnership.ts",
       "import": "./src/generatedBuildOwnership.ts"
+    },
+    "./regenerableIgnoredPath": {
+      "types": "./src/regenerableIgnoredPath.ts",
+      "import": "./src/regenerableIgnoredPath.ts"
     },
     "./worktreeSuspension": {
       "types": "./src/worktreeSuspension.ts",

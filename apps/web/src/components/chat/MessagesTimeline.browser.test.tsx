@@ -379,7 +379,8 @@ describe("MessagesTimeline messages", () => {
     focus.move(-1);
     expect(document.activeElement).toBe(viewport);
     screen.button("Send").focus();
-    await userEvent.click(viewport);
+    // Click the blank lane between the minimap and the right-aligned message controls.
+    await userEvent.click(viewport, { position: { x: 100, y: 1 } });
     await userEvent.keyboard("{Home}");
     await vi.waitFor(() => expect(viewport.scrollTop).toBe(0));
     await userEvent.keyboard("{ArrowDown}");

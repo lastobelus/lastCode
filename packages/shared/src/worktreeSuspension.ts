@@ -794,8 +794,8 @@ const inventory = async (
       if (prefix === "" && name === ".git") continue;
       const relative = prefix === "" ? name : `${prefix}/${name}`;
       if (selected !== undefined && !selected.has(relative)) continue;
-      validRelativePath(relative);
       if (name === ".git") refuse("nested repositories are unsupported");
+      validRelativePath(relative);
       if (entries.length >= limits.maxEntries) refuse("the workspace exceeds the path limit");
       const absolute = NodePath.join(directory, name);
       const before = await NodeFSP.lstat(absolute);

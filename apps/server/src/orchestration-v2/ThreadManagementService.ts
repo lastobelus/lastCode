@@ -499,6 +499,7 @@ export interface ThreadManagementServiceShape {
   >;
   readonly getThreadShell: Orchestrator.OrchestratorV2["Service"]["getThreadShell"];
   readonly listAppOwnedChildThreadIds: Orchestrator.OrchestratorV2["Service"]["listAppOwnedChildThreadIds"];
+  readonly getThreadLinkMetadata: Orchestrator.OrchestratorV2["Service"]["getThreadLinkMetadata"];
   readonly getThreadTitles: Orchestrator.OrchestratorV2["Service"]["getThreadTitles"];
   readonly getThreadArchiveFamily: Orchestrator.OrchestratorV2["Service"]["getThreadArchiveFamily"];
   readonly setThreadParents: (
@@ -2103,6 +2104,7 @@ const make = Effect.gen(function* () {
       },
     ),
     getThreadTitles: orchestrator.getThreadTitles,
+    getThreadLinkMetadata: orchestrator.getThreadLinkMetadata,
     getThreadArchiveFamily: orchestrator.getThreadArchiveFamily,
     listProjectThreads,
     sendToThread,

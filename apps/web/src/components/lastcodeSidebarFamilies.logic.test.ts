@@ -730,7 +730,7 @@ describe("legacy sidebar creator grouping", () => {
     expect(independent.creatorThreadId).toBe(child.creatorThreadId);
     expect(lastcodeSidebarCreatorGroupingEligible(independent)).toBe(true);
     expect(lastcodeSidebarCreatorDetails(independent, thread("creator"))).toEqual({
-      description: "Created by creator",
+      description: "Creator: creator",
       unavailableLabel: null,
       groupingEligible: true,
       canOpen: true,
@@ -810,7 +810,7 @@ describe("legacy sidebar creator grouping", () => {
       expect(result.renderedRows[0]?.parentKey).toBeNull();
       expect(result.renderedRows[0]?.creatorGroupingWarning).toBeNull();
       expect(lastcodeSidebarCreatorDetails(child, creator)).toEqual({
-        description: "Created by creator",
+        description: "Creator: creator",
         unavailableLabel: null,
         groupingEligible: false,
         canOpen: true,

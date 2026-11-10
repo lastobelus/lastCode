@@ -1,5 +1,5 @@
-# Disposable PR-watch acceptance fixture
+# Owned-watch acceptance fixture
 
-Validation only. Do not merge.
+Generic draft validation fixture. Never merge this pull request.
 
-Stage: changed.
+State: changed for the next installed acceptance run.

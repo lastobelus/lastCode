@@ -11,8 +11,9 @@ const HOSTED_PREFIX = `${DEFAULT_HOSTED_APP_URL}/threads/`;
 const HOSTED_SEGMENT = "[A-Za-z0-9_%-]+";
 const HOSTED_LINK = `${HOSTED_PREFIX.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}${HOSTED_SEGMENT}/${HOSTED_SEGMENT}`;
 // Code comes first in the alternation so a link written inside a code span or fence is skipped.
+// A labeled link's destination may be angle-bracketed, as CommonMark allows: [label](<href>).
 const THREAD_LINK_OUTSIDE_CODE = new RegExp(
-  String.raw`(?<fence>(\`{3,}|~{3,})[\s\S]*?(?:\2|$))|(?<span>(\`+)[^\n]*?\4)|\[(?<label>[^\]\n]*)\]\((?<href>t3-thread:\/\/v[12]\/[^\s)]+|${HOSTED_LINK})\)|<(?<autolink>t3-thread:\/\/v[12]\/[^\s<>]+|${HOSTED_LINK})>|(?<bare>${HOSTED_LINK})(?![\w%/?#-])`,
+  String.raw`(?<fence>(\`{3,}|~{3,})[\s\S]*?(?:\2|$))|(?<span>(\`+)[^\n]*?\4)|\[(?<label>[^\]\n]*)\]\(<?(?<href>t3-thread:\/\/v[12]\/[^\s>)]+|${HOSTED_LINK})>?\)|<(?<autolink>t3-thread:\/\/v[12]\/[^\s<>]+|${HOSTED_LINK})>|(?<bare>${HOSTED_LINK})(?![\w%/?#-])`,
   "g",
 );
 
@@ -323,4 +324,33 @@ export function relabelThreadLinks(
       current.trim() || label || resolved.threadId,
     );
   });
+}
+
+/** Browser links keep explicit destinations so the app can show unavailable or missing threads. */
+export function browserThreadLinkTarget(
+  href: string,
+  sourceEnvironmentId: EnvironmentId,
+  refs: ReadonlyArray<ScopedThreadRef>,
+): ScopedThreadRef | null {
+  const reference = parseThreadLinkReference(href);
+  if (reference === null) return null;
+  const resolved = resolveThreadLinkReference(reference, (threadId, environmentId) =>
+    refs.find(
+      (ref) =>
+        ref.threadId === threadId && ref.environmentId === (environmentId ?? sourceEnvironmentId),
+    ),
+  );
+  if (resolved.value) return resolved.value;
+  const link = {
+    environmentId: reference.environmentId ?? null,
+    threadId: reference.threadId,
+    version: reference.version,
+    legacyThreadId: reference.legacyThreadId,
+  };
+  return (
+    guessThreadLinkRef(link, refs) ?? {
+      environmentId: resolved.environmentId ?? sourceEnvironmentId,
+      threadId: resolved.threadId,
+    }
+  );
 }

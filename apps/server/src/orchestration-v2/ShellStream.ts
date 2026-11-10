@@ -487,11 +487,7 @@ export function coalesceShellApplicationEvents(
 }
 
 /** Refresh every target of one stored event before the client advances its cursor. */
-export function attachRelatedThreadShellItems(
-  items: ReadonlyArray<
-    Exclude<OrchestrationV2ShellStreamItem, { readonly kind: "snapshot" | "synchronized" }>
-  >,
-) {
+export function attachRelatedThreadShellItems(items: ReadonlyArray<ShellDelta>) {
   const result: Array<(typeof items)[number]> = [];
   for (const item of items) {
     const previous = result.at(-1);

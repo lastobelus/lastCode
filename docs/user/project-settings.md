@@ -96,8 +96,9 @@ Under **Destination**, choose where runs go. **New thread each run** keeps every
 run separate. The two one-thread choices start a thread on the first run and post
 later runs there: one continues the same conversation, the other starts each run
 in a fresh session that doesn't see earlier runs, so the thread stays readable
-without the agent's context growing. Moving such a task to another project starts
-a new thread there on its next run.
+without the agent's context growing. To move a one-thread task, pick another
+thread in its project under **Destination**. Moving such a task to another
+project starts a new thread there on its next run.
 
 Deleting a thread also deletes tasks that post into that thread. Tasks that start
 a new thread on each run survive deletion of their previous threads.
@@ -206,6 +207,19 @@ such as another drive, set **Settings → Worktrees → Worktree location** to a
 `D:\worktrees` or `~/worktrees`. The setting is per machine. Existing worktrees stay where they
 are, and cleanup covers both the default folder and the custom one.
 
+## Fast worktree checkout on macOS
+
+Fast worktree checkout is a beta. Turn it on for each Mac in **Settings → Labs → Fast worktree
+checkout**. T3 Code then keeps a few recent checkouts of each repository in the `caches` folder of
+the T3 home directory. A new worktree is cloned from one of them with APFS copy-on-write, which is
+about twice as fast as writing every file and makes the first `git status` in it fast as well.
+Turning it off deletes the cache.
+
+The first worktree of a repository uses Git's normal checkout and fills the cache. It needs Git 2.42
+or newer. Git's normal checkout is also used for worktrees on a different drive from the T3 home
+directory, sparse checkouts, repositories whose attributes use filters such as Git LFS, and
+repositories whose checkout settings changed.
+
 ## Storage cleanup
 
 Open **Settings → Worktrees → Cleanup** to enable automatic cleanup on one machine or all connected
@@ -214,11 +228,14 @@ hourly. Offline machines keep their existing policies.
 
 ### Suspend worktrees
 
-Use **Suspend settled worktrees** to save local work and put away a checkout without archiving
+Use **Suspend inactive worktrees** to save local work and put away a checkout without archiving
 its conversation. Choose a delay and which threads may suspend: subagents, untouched
 agent-created children, or other threads. These choices start Off. A separate child checkout
 can suspend while its parent remains open; a shared checkout stays until every owner qualifies.
-The delay starts from settlement or the last workspace use or restore, whichever is later.
+The delay starts from settlement or the last workspace use or restore, whichever is later. An
+archived thread that never settled counts from its archive time instead of settlement.
+Automatic suspension closes the eligible owners' previews before saving the workspace.
+If another process is still using the checkout, or its safety cannot be verified, the checkout stays in place.
 Project **Off** pauses automatic suspension as well as cleanup.
 
 You can also choose **Suspend worktree** from a thread's menu. Staged changes, unstaged changes

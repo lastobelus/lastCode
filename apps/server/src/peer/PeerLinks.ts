@@ -5,6 +5,7 @@ import {
   EnvironmentHttpApi,
   EnvironmentId,
   type ExecutionEnvironmentCapabilities,
+  type ExecutionEnvironmentDescriptor,
   MCP_PEER_LINK_SOFTWARE_ID,
   type PeerLink,
   type PeerLinkCreateInput,
@@ -24,6 +25,7 @@ import * as Base64Url from "effect/encoding/Base64Url";
 import * as Hex from "effect/encoding/Hex";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Redacted from "effect/Redacted";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
@@ -52,6 +54,23 @@ const LINK_REDIRECT_URI = "http://127.0.0.1/t3code-peer-link";
  */
 const probeTimeout = (origin: string) =>
   isLocalLoopbackHost(new URL(origin).hostname) ? Duration.seconds(3) : Duration.seconds(10);
+
+/** Node's TLS verification code in a failed request's cause chain, if any. */
+export const certificateErrorCode = (error: unknown) => {
+  let current = error;
+  for (let depth = 0; depth < 6 && Predicate.isObject(current); depth++) {
+    if (
+      Predicate.hasProperty(current, "code") &&
+      typeof current.code === "string" &&
+      /CERT|SELF_SIGNED|UNABLE_TO_(GET|VERIFY)|INVALID_(CA|PURPOSE)|PATH_LENGTH_EXCEEDED|HOSTNAME_MISMATCH/.test(
+        current.code,
+      )
+    )
+      return current.code;
+    current = Predicate.hasProperty(current, "cause") ? current.cause : undefined;
+  }
+  return undefined;
+};
 
 /** A usable link: where to reach the peer and the token to send there. */
 export interface ResolvedPeerLink {
@@ -208,29 +227,52 @@ const make = Effect.gen(function* () {
       Effect.flatMap((client) => client.metadata.descriptor()),
       Effect.timeout(probeTimeout(origin)),
       Effect.mapError((cause) => {
+        const code = certificateErrorCode(cause);
         const status = HttpClientError.isHttpClientError(cause)
           ? cause.response?.status
           : undefined;
         return new PeerLinkError({
           reason: "unreachable",
           message:
-            status !== undefined && (status < 200 || status >= 300)
-              ? `${origin} returned HTTP ${status} while checking its environment descriptor.`
-              : cause._tag === "TimeoutError"
-                ? `${origin} timed out while checking its environment descriptor.`
-                : cause._tag === "SchemaError" ||
-                    (HttpClientError.isHttpClientError(cause) &&
-                      cause.reason._tag === "DecodeError")
-                  ? `${origin} did not return a valid T3 Code environment descriptor.`
-                  : `${origin} could not be contacted. Check its network address and TLS configuration.`,
+            code !== undefined
+              ? `${origin} presented a certificate this machine rejected (${code}).`
+              : status !== undefined && (status < 200 || status >= 300)
+                ? `${origin} returned HTTP ${status} while checking its environment descriptor.`
+                : cause._tag === "TimeoutError"
+                  ? `${origin} timed out while checking its environment descriptor.`
+                  : cause._tag === "SchemaError" ||
+                      (HttpClientError.isHttpClientError(cause) &&
+                        cause.reason._tag === "DecodeError")
+                    ? `${origin} did not return a valid T3 Code environment descriptor.`
+                    : `${origin} could not be contacted. Check its network address and TLS configuration.`,
           cause,
         });
       }),
     );
   });
 
-  /** Optional discovery does not need to surface a failed candidate. Linking does. */
-  const describe = (origin: string) => probe(origin).pipe(Effect.option);
+  /**
+   * The environment answering at `origin`, or nothing when it does not answer
+   * as T3 Code. A certificate this machine rejects fails instead, since
+   * the peer may well be there.
+   */
+  const describe = (origin: string) =>
+    probe(origin).pipe(
+      Effect.asSome,
+      Effect.catchIf(
+        (error) => certificateErrorCode(error) === undefined,
+        () => Effect.succeed(Option.none<ExecutionEnvironmentDescriptor>()),
+      ),
+    );
+
+  /** Whether `url` answers as `environmentId`, counting an untrusted certificate as no. */
+  const answersAs = Effect.fn("PeerLinks.answersAs")(function* (
+    url: string,
+    environmentId: EnvironmentId,
+  ) {
+    const found = yield* describe(url).pipe(Effect.orElseSucceed(() => Option.none()));
+    return Option.filter(found, (peer) => peer.environmentId === environmentId);
+  });
 
   const toLink = Effect.fn("PeerLinks.toLink")(function* (row: PeerLinkRow) {
     return {
@@ -547,11 +589,9 @@ const make = Effect.gen(function* () {
     if (DateTime.isLessThanOrEqualTo(link.expiresAt, now)) return { ...link, status: "expired" };
     let label = link.label;
     const answered = yield* Effect.findFirst(link.urls, (url) =>
-      describe(url).pipe(
+      answersAs(url, link.environmentId).pipe(
         Effect.map((found) => {
-          if (Option.isNone(found) || found.value.environmentId !== link.environmentId) {
-            return false;
-          }
+          if (Option.isNone(found)) return false;
           label = found.value.label;
           return true;
         }),
@@ -620,9 +660,9 @@ const make = Effect.gen(function* () {
       let fenced = true;
       let label = link.label;
       const url = yield* Effect.findFirst(link.urls, (candidate) =>
-        describe(candidate).pipe(
+        answersAs(candidate, environmentId).pipe(
           Effect.map((found) => {
-            if (Option.isNone(found) || found.value.environmentId !== environmentId) return false;
+            if (Option.isNone(found)) return false;
             fenced = linkLimitsHold(found.value);
             label = found.value.label;
             return true;

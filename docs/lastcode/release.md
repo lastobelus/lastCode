@@ -276,6 +276,9 @@ after it. Only step 3's final selection leads to `run-now`.
    separate checkout at the completed retained HEAD before preparing dependencies
    once through the owning Project Action,
    and prepare again only if a repair changes dependency manifests or the lockfile.
+   Name it `lastcode-checkpoint-<build>-qa`. After each successful service run, the
+   supervisor force-removes such worktrees whose HEAD commit is more than seven days
+   old, so nothing in one outlives that week; `git worktree lock` keeps one.
 2. Before every gate run, refresh the separate checkout to the retained recovery
    worktree's current HEAD (`<retained-head>`), then run the focused gate there:
 
@@ -304,8 +307,8 @@ after it. Only step 3's final selection leads to `run-now`.
    head the selection prints as `<selected-head>`, not the commit you passed in.
    Aim to start Full CI within about five minutes of replay completion; measure
    preparation and the gate if it takes longer.
-4. Run the required integrated client QA alongside Full CI, using `test-t3-app`
-   or `test-t3-mobile` as applicable. Additional investigation and broader focused
+4. Run the required integrated client QA alongside Full CI, as
+   [Verifying](../../AGENTS.md#verifying) describes. Additional investigation and broader focused
    checks also belong alongside Full CI. A successful CI result does not prove
    client QA passed. If either finds a defect, follow the repair procedure below.
 

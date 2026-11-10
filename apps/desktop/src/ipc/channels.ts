@@ -32,6 +32,7 @@ export const UPDATE_CHECK_CHANNEL = "desktop:update-check";
 export const CLI_COMMAND_GET_STATE_CHANNEL = "desktop:cli-command-get-state";
 export const CLI_COMMAND_INSTALL_CHANNEL = "desktop:cli-command-install";
 export const CLI_COMMAND_UNINSTALL_CHANNEL = "desktop:cli-command-uninstall";
+export const CLI_COMMAND_ADD_TO_PATH_CHANNEL = "desktop:cli-command-add-to-path";
 export const LASTCODE_SETTINGS_GET_CHANNEL = "desktop:lastcode-settings-get";
 export const LASTCODE_SETTINGS_SET_LOCAL_NIGHTLIES_CHANNEL =
   "desktop:lastcode-settings-set-local-nightlies";

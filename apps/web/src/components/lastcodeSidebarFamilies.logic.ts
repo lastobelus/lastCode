@@ -93,7 +93,7 @@ function creatorDescription(
   unavailableLabel: string | null,
 ) {
   if (!isAgentCreated) return null;
-  return creator ? `Created by ${creator.title}` : (unavailableLabel ?? "Creator unknown");
+  return creator ? `Creator: ${creator.title}` : (unavailableLabel ?? "Creator unknown");
 }
 
 function matchingCreator(thread: SidebarThreadSummary, creator: SidebarThreadSummary | null) {

@@ -1614,7 +1614,7 @@ export function useThreadActions() {
   ) => {
     const deletedThreadKeys = new Set<string>();
     let firstFailure: AtomCommandResult<unknown, unknown> | null = null;
-    for (const batch of confirmation.batches) {
+    batches: for (const batch of confirmation.batches) {
       if (batch.input.operation !== "delete" || batch.input.target.kind !== "threads") continue;
       const threadIds = batch.input.target.threadIds;
       const refs = threadIds.map((threadId) => scopeThreadRef(batch.environmentId, threadId));
@@ -1623,23 +1623,25 @@ export function useThreadActions() {
         exactTargets.length !== refs.length ||
         exactTargets.some((target) => !threadIds.includes(target.threadId))
       ) {
-        firstFailure = AsyncResult.failure(
-          Cause.fail(
-            new Error("The selected threads changed. Review the complete selection again."),
-          ),
-        );
+        firstFailure =
+          firstFailure ??
+          AsyncResult.failure(
+            Cause.fail(
+              new Error("The selected threads changed. Review the complete selection again."),
+            ),
+          );
         break;
       }
       if (!workspaceLifecycle.supported(batch.environmentId)) {
         for (const ref of refs) {
           const result = await deleteThread(ref, { deletedThreadKeys });
           if (result._tag === "Failure") {
-            firstFailure = result;
-            break;
+            if (isAtomCommandInterrupted(result)) break batches;
+            firstFailure = firstFailure ?? result;
+            continue;
           }
           deletedThreadKeys.add(scopedThreadKey(ref));
         }
-        if (firstFailure !== null) break;
         continue;
       }
       const prepared: NonNullable<
@@ -1650,10 +1652,12 @@ export function useThreadActions() {
       >[] = [];
       const requests: { threadId: ThreadId; deleteWorktree?: boolean }[] = [];
       const plannedKeys = new Set<string>();
+      let preparationFailed = false;
       for (const ref of refs) {
         const result = await prepareThreadDeletion(ref, { deletedThreadKeys: plannedKeys });
         if (result._tag === "Failure") {
-          firstFailure = result;
+          firstFailure = firstFailure ?? result;
+          preparationFailed = true;
           break;
         }
         if (result.value !== null) prepared.push(result.value);
@@ -1665,7 +1669,7 @@ export function useThreadActions() {
         });
         plannedKeys.add(scopedThreadKey(ref));
       }
-      if (firstFailure !== null) break;
+      if (preparationFailed) break;
       const navigationThreads = readEnvironmentThreadRefs(batch.environmentId).flatMap((ref) => {
         const thread = readThreadShell(ref);
         return thread ? [thread] : [];
@@ -1679,7 +1683,7 @@ export function useThreadActions() {
         },
       });
       if (result._tag === "Failure") {
-        firstFailure = result;
+        firstFailure = firstFailure ?? result;
         break;
       }
       for (const id of result.value.deletedThreadIds) {
@@ -1745,7 +1749,8 @@ export function useThreadActions() {
           );
       }
       if (result.value.failureMessage !== undefined) {
-        firstFailure = AsyncResult.failure(Cause.fail(new Error(result.value.failureMessage)));
+        firstFailure =
+          firstFailure ?? AsyncResult.failure(Cause.fail(new Error(result.value.failureMessage)));
         break;
       }
     }

@@ -170,6 +170,7 @@ export class DesktopBrowserChannel extends Context.Service<
       DesktopBrowserTransportError
     >;
     readonly endpoint: (key: DesktopTabKey) => Effect.Effect<string, never, Scope.Scope>;
+    readonly openThreadLink: (key: DesktopTabKey, href: string) => Effect.Effect<void>;
     readonly pointer: (
       key: DesktopTabKey,
       pointer: { readonly phase: "move" | "click"; readonly x: number; readonly y: number },
@@ -481,6 +482,8 @@ const make = Effect.gen(function* () {
         }
         return Deferred.succeed(pending.deferred, true).pipe(Effect.asVoid);
       }
+      case "threadLink":
+        return Effect.void;
       case "popupCreated": {
         // A bound child outlives its source window and may re-announce on reconnect.
         if (
@@ -1347,6 +1350,12 @@ const make = Effect.gen(function* () {
         ["local", ...hosts.keys()],
         (desktopHostId) => command({ type: "turn", threadId, active }, desktopHostId),
         { discard: true },
+      );
+    }),
+    openThreadLink: Effect.fn("DesktopBrowserChannel.openThreadLink")(function (key, href) {
+      return command(
+        { type: "threadLink", threadId: key.threadId, tabId: key.tabId, href },
+        key.desktopHostId,
       );
     }),
     pointer: Effect.fn("DesktopBrowserChannel.pointer")(function (key, pointer) {

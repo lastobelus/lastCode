@@ -38,7 +38,7 @@ export function LastCodeThreadHoverDetails({
   return (
     <>
       {familyPresentation.relationshipDescription ? (
-        <div className="mb-2 text-xs text-sidebar-muted-foreground">
+        <div className="px-(--floating-content-inset) pt-(--floating-content-inset) text-xs text-sidebar-muted-foreground">
           {familyPresentation.relationshipDescription}
         </div>
       ) : null}

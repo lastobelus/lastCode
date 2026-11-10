@@ -406,9 +406,7 @@ export const MarkdownFileLink = memo(function MarkdownFileLink({
         render={children ? link : <ContextChip kind={chipKind} dir="ltr" render={link} />}
       />
       <TooltipPopup side="top" variant="code">
-        <div className="overflow-x-auto whitespace-nowrap scrollbar-thumb-border/78 scrollbar-track-transparent [scrollbar-width:var(--app-native-scrollbar-width)] [&::-webkit-scrollbar]:h-[var(--app-compact-scrollbar-height)] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border/78 [&::-webkit-scrollbar-track]:bg-transparent">
-          <WorkspaceEntryTooltip path={iconPath} label={targetPath} environmentId={environmentId} />
-        </div>
+        <WorkspaceEntryTooltip path={iconPath} label={targetPath} environmentId={environmentId} />
       </TooltipPopup>
     </Tooltip>
   );

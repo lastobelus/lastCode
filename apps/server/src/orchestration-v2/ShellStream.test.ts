@@ -271,7 +271,11 @@ describe("atomic native shell refresh", () => {
     expect(items[0]?.kind === "thread.updated" && items[0].thread.id).toBe(parentId);
     const decoded = items.map((item) => decodeShellItem(encodeShellItem(item)));
     const next = decoded.reduce((snapshot, item) => {
-      if (item.kind === "snapshot" || item.kind === "synchronized")
+      if (
+        item.kind === "snapshot" ||
+        item.kind === "synchronized" ||
+        item.kind === "snapshot-required"
+      )
         throw new Error("Expected delta");
       return applyShellStreamEvent(snapshot, item);
     }, initial);

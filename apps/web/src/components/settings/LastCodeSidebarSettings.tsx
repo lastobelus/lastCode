@@ -223,7 +223,7 @@ export function LastCodeSidebarSettings() {
     <>
       <SettingsRow
         {...searchableSetting("lastcode-sidebar")}
-        description="Use the LastCode project and thread tree. The tree button switches between LastCode and v2 without changing this setting; turning it off restores your General → Legacy features sidebar preference."
+        description="Use the LastCode project and thread tree instead of the v2 sidebar. While on, the tree button switches between LastCode and v2 without changing this setting."
         control={
           <Switch
             aria-label="LastCode sidebar"
