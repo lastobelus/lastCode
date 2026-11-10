@@ -283,6 +283,8 @@ export const OrchestrationV2TurnCapabilities = Schema.Struct({
   emitsTurnCompleted: Schema.Boolean,
   supportsInterrupt: Schema.Boolean,
   supportsActiveSteering: Schema.Boolean,
+  // Native delivery rejects a settled target instead of queuing or starting another turn.
+  supportsStrictActiveSteering: Schema.optional(Schema.Boolean),
   // Some native steering mechanisms cancel pending tools before consuming the message.
   activeSteeringInterruptsTools: Schema.optional(Schema.Boolean),
   // Some take text only, so a steer with attachments restarts the turn instead.
@@ -2993,6 +2995,25 @@ export const OrchestrationV2Command = Schema.Union([
     threadId: ThreadId,
     /** Delete only a thread with no runs and no messages; otherwise succeed without a change. */
     onlyIfUnused: Schema.optional(Schema.Boolean),
+    deleteWorktree: Schema.optional(Schema.Boolean),
+    repositoryKey: Schema.optional(TrimmedNonEmptyString),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.worktree-cleanup.retry"),
+    commandId: CommandId,
+    threadId: ThreadId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.worktree-cleanup.abandon"),
+    commandId: CommandId,
+    threadId: ThreadId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.worktree-cleanup.update"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    expectedCleanup: ThreadWorktreeCleanup,
+    cleanup: Schema.NullOr(ThreadWorktreeCleanup),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.settle"),
@@ -3217,6 +3238,8 @@ export const OrchestrationV2Command = Schema.Union([
         workspaceStrategy: Schema.optional(OrchestrationV2ThreadLaunchWorkspaceStrategy),
       }),
       Schema.Struct({ type: Schema.Literal("steer_active"), targetRunId: RunId }),
+      /** Cooperative delivery only: never queue, restart, or interrupt tools. */
+      Schema.Struct({ type: Schema.Literal("steer_active_native"), targetRunId: RunId }),
       Schema.Struct({ type: Schema.Literal("restart_active"), targetRunId: RunId }),
       Schema.Struct({ type: Schema.Literal("queue_after_active") }),
       Schema.Struct({ type: Schema.Literal("start_immediately") }),
@@ -3444,6 +3467,23 @@ const OrchestrationV2InternalCommand = Schema.Union([
     threadId: ThreadId,
     projectId: ProjectId,
   }),
+  /** Records the workspace result of an accepted launch or preparation retry. */
+  Schema.Struct({
+    type: Schema.Literal("thread.workspace.complete"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: CommandId,
+    runId: Schema.NullOr(RunId),
+    expectedBranch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+    expectedWorktreePath: Schema.NullOr(TrimmedNonEmptyString),
+    worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+    branch: Schema.NullOr(TrimmedNonEmptyString),
+  }),
+  /**
+   * Records what a pull request watch saw, and wakes the agent in the same transaction when
+   * `wake` is set. Rejected once the watch started at `startedAt` has ended, and a wake is
+   * rejected on a settled or archived thread, so a read that raced either changes nothing.
+   */
   Schema.Struct({
     type: Schema.Literal("thread.pull-request-watch.sync"),
     commandId: CommandId,

@@ -2872,6 +2872,13 @@ describe("OrchestratorMcpService provider resolution", () => {
           Layer.mergeAll(
             NodeServices.layer,
             NodeCrypto.layer,
+            Layer.mock(ActionResume.ActionResume)({
+              readLatestSummary: () => Effect.succeed(null),
+            }),
+            Layer.mock(PeerForwarding.PeerForwarding)({}),
+            Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+              authorize: () => Effect.void,
+            }),
             Layer.mock(ThreadManagementService.ThreadManagementService)({
               getThreadShell: () => Effect.succeed(null),
             }),
