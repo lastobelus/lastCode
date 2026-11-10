@@ -142,10 +142,7 @@ it.live("MCP opens only its own current publication through signed HTTP in real 
         ),
       ),
     );
-    const documents = ThreadLinkedFiles.layer.pipe(
-      Layer.provide(WorkspaceAcquisitionTestkit.layer),
-      Layer.provideMerge(workspace),
-    );
+    const documents = ThreadLinkedFiles.layer.pipe(Layer.provideMerge(workspace));
     const services = Layer.mergeAll(
       ServerSettings.layerTest(),
       RepositoryIdentityResolver.layer,

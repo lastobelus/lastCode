@@ -11,12 +11,10 @@ import {
   CommandId,
   DEFAULT_SERVER_SETTINGS,
   GitCommandError,
-  MessageId,
   OrchestrationV2ThreadShell,
   ProjectId,
   RunId,
   ThreadId,
-  TurnItemId,
   type OrchestrationV2ServerCommand,
   type WorktreeSuspensionTransitionInput,
   type ServerSettings as SettingsValue,
@@ -26,7 +24,6 @@ import {
   type WorktreeSuspensionStoreOptions,
 } from "@t3tools/shared/worktreeSuspension";
 import * as Cause from "effect/Cause";
-import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -60,9 +57,6 @@ import * as Suspension from "./WorktreeSuspension.ts";
 import * as Registry from "./WorktreeSuspensionRegistry.ts";
 import * as Consumers from "./WorktreeConsumers.ts";
 import * as Mounts from "./DependencyMounts.ts";
-import * as ThreadLinkedFiles from "./ThreadLinkedFiles.ts";
-import * as WorkspaceFileSystem from "./WorkspaceFileSystem.ts";
-import * as WorkspaceEntries from "./WorkspaceEntries.ts";
 import { withWorkspaceLease, resolveWorkspaceLeaseRoot } from "./workspaceLease.ts";
 import { withProjectRootLease } from "./projectRootLease.ts";
 
@@ -753,164 +747,71 @@ const realScratch = <A, E, R>(test: (fixture: Fixture) => Effect.Effect<A, E, R>
     (fixture) => Effect.promise(() => fixture[Symbol.asyncDispose]()),
   );
 
-it.live.each(["editor", "linked file", "bare filename"] as const)(
-  "saves scratch synchronously and restores through %s without Git",
-  (entryPoint) =>
-    realScratch((f) =>
-      Effect.gen(function* () {
-        const h = yield* harness(f, { scratch: true });
-        const checks: string[] = [];
-        const result = yield* h.service.suspendScratch({
-          path: f.workspace,
-          owners: [...h.threads.values()],
-          recheck: (physicalPath) =>
-            Effect.sync(() => {
-              checks.push(physicalPath);
-              return null;
-            }),
-        });
-        expect(result.bytes).toBeGreaterThan(0);
-        expect(result.files).toBe(1);
-        const saved = (yield* h.registry.list)[0]!;
-        expect(saved.summary.state).toBe("suspended");
-        expect(saved.kind).toBe("scratch");
-        expect(saved.repositoryRoot).toBeNull();
-        expect(checks).toHaveLength(4);
-        expect(checks.slice(0, 2)).toEqual([f.workspace, f.workspace]);
-        expect(
-          checks.slice(2).every((candidate) => candidate.includes(".suspended-workspaces")),
-        ).toBe(true);
-        yield* Effect.promise(async () => {
-          await expect(NodeFSP.lstat(f.workspace)).rejects.toMatchObject({ code: "ENOENT" });
-        });
-        if (entryPoint === "editor") {
-          const acquired = yield* h.acquisition.acquire({
-            path: f.workspace,
-            purpose: "editor",
-            threadId: firstId,
-          });
-          expect(acquired).toEqual({ path: f.workspace, branch: null, restored: true });
-        } else {
-          const linked = yield* ThreadLinkedFiles.layer.pipe(
-            Layer.provide(
-              Layer.mock(ProjectionStore.ProjectionStoreV2)({
-                getVisiblePublications: () =>
-                  Effect.succeed({
-                    thread: { ...h.threads.get(firstId)!, lastVisitedAt: null },
-                    publications: [
-                      {
-                        sourceThreadId: firstId,
-                        sourceItemId: TurnItemId.make("fixture:publication"),
-                        item: {
-                          id: TurnItemId.make("fixture:publication"),
-                          threadId: firstId,
-                          runId: null,
-                          nodeId: null,
-                          providerThreadId: null,
-                          providerTurnId: null,
-                          nativeItemRef: null,
-                          parentItemId: null,
-                          ordinal: 0,
-                          status: "completed",
-                          title: null,
-                          startedAt: at,
-                          completedAt: at,
-                          updatedAt: at,
-                          type: "assistant_message",
-                          messageId: MessageId.make("fixture:message"),
-                          text:
-                            entryPoint === "linked file"
-                              ? "[Draft](./draft.txt)"
-                              : "[Draft](draft.txt)",
-                          streaming: false,
-                        },
-                      },
-                    ],
-                  }),
-              }),
-            ),
-            Layer.provide(
-              Layer.mock(ProjectStore.ProjectStoreV2)({
-                get: () =>
-                  Effect.succeedSome({
-                    projectId,
-                    title: "Scratch",
-                    workspaceRoot: f.repository,
-                    pinnedAt: null,
-                    archivedAt: null,
-                    defaultModelSelection: null,
-                    defaultThreadEnvMode: null,
-                    autoPull: false,
-                    faviconPath: null,
-                    projectIcon: null,
-                    scripts: [],
-                    createdAt: DateTime.formatIso(at),
-                    updatedAt: DateTime.formatIso(at),
-                    deletedAt: null,
-                  }),
-              }),
-            ),
-            Layer.provide(Layer.mock(WorkspaceFileSystem.WorkspaceFileSystem)({})),
-            Layer.provide(
-              Layer.mock(WorkspaceEntries.WorkspaceEntries)({
-                search: () => Effect.succeed({ entries: [], truncated: false }),
-              }),
-            ),
-            Layer.build,
-            Effect.map((context) => Context.get(context, ThreadLinkedFiles.ThreadLinkedFiles)),
-          );
-          expect(
-            (yield* linked
-              .resolveFile({
-                threadId: firstId,
-                cwd: f.workspace,
-                path: "unpublished.txt",
-              })
-              .pipe(Effect.flip))._tag,
-          ).toBe("ThreadLinkedFileDeniedError");
-          expect(yield* (yield* FileSystem.FileSystem).exists(f.workspace)).toBe(false);
-          expect(
-            yield* linked.resolveFile({
-              threadId: firstId,
-              cwd: f.workspace,
-              path: "draft.txt",
-            }),
-          ).toEqual({
-            cwd: f.workspace,
-            relativePath: "draft.txt",
-            absolutePath: NodePath.join(f.workspace, "draft.txt"),
-          });
-        }
-        expect(
-          yield* Effect.promise(() =>
-            NodeFSP.readFile(NodePath.join(f.workspace, "draft.txt"), "utf8"),
-          ),
-        ).toBe("scratch draft\n");
-        expect(h.gitRequests).toEqual([]);
-        // Starting a repository must not prevent normal use of the active folder.
-        yield* Effect.promise(() => NodeFSP.mkdir(NodePath.join(f.workspace, ".git")));
-        expect(
-          yield* h.acquisition.acquire({ path: f.workspace, purpose: "editor", threadId: firstId }),
-        ).toEqual({ path: f.workspace, branch: null, restored: false });
+it.live("saves scratch synchronously and restores on use without Git", () =>
+  realScratch((f) =>
+    Effect.gen(function* () {
+      const h = yield* harness(f, { scratch: true });
+      yield* h.acquisition.acquire({ path: f.workspace, purpose: "editor" });
+      const checks: string[] = [];
+      const result = yield* h.service.suspendScratch({
+        path: f.workspace,
+        owners: [...h.threads.values()],
+        recheck: (physicalPath) =>
+          Effect.sync(() => {
+            checks.push(physicalPath);
+            return null;
+          }),
+      });
+      expect(result.bytes).toBeGreaterThan(0);
+      expect(result.files).toBe(1);
+      const saved = (yield* h.registry.list)[0]!;
+      expect(saved.summary.state).toBe("suspended");
+      expect(saved.kind).toBe("scratch");
+      expect(saved.repositoryRoot).toBeNull();
+      expect(checks).toHaveLength(4);
+      expect(checks.slice(0, 2)).toEqual([f.workspace, f.workspace]);
+      expect(
+        checks.slice(2).every((candidate) => candidate.includes(".suspended-workspaces")),
+      ).toBe(true);
+      yield* Effect.promise(async () => {
+        await expect(NodeFSP.lstat(f.workspace)).rejects.toMatchObject({ code: "ENOENT" });
+      });
+      const acquired = yield* h.acquisition.acquire({
+        path: f.workspace,
+        purpose: "editor",
+        threadId: firstId,
+      });
+      expect(acquired).toEqual({ path: f.workspace, branch: null, restored: true });
+      expect(
         yield* Effect.promise(() =>
-          NodeFSP.rm(NodePath.join(f.workspace, ".git"), { recursive: true }),
-        );
-        h.registerProjectRoot(f.workspace);
-        for (const [id, thread] of h.threads)
-          h.threads.set(id, {
-            ...thread,
-            projectId: ProjectId.make("fixture:registered"),
-            worktreePath: null,
-          });
-        expect(
-          yield* h.acquisition.acquire({ path: f.workspace, purpose: "editor", threadId: firstId }),
-        ).toEqual({ path: f.workspace, branch: null, restored: false });
-        const records = yield* h.registry.list;
-        expect(records).toHaveLength(1);
-        expect(records[0]).toMatchObject({ detached: true, owners: [] });
-        expect(h.gitRequests).toEqual([]);
-      }),
-    ),
+          NodeFSP.readFile(NodePath.join(f.workspace, "draft.txt"), "utf8"),
+        ),
+      ).toBe("scratch draft\n");
+      expect(h.gitRequests).toEqual([]);
+      // Starting a repository must not prevent normal use of the active folder.
+      yield* Effect.promise(() => NodeFSP.mkdir(NodePath.join(f.workspace, ".git")));
+      expect(
+        yield* h.acquisition.acquire({ path: f.workspace, purpose: "editor", threadId: firstId }),
+      ).toEqual({ path: f.workspace, branch: null, restored: false });
+      yield* Effect.promise(() =>
+        NodeFSP.rm(NodePath.join(f.workspace, ".git"), { recursive: true }),
+      );
+      h.registerProjectRoot(f.workspace);
+      for (const [id, thread] of h.threads)
+        h.threads.set(id, {
+          ...thread,
+          projectId: ProjectId.make("fixture:registered"),
+          worktreePath: null,
+        });
+      expect(
+        yield* h.acquisition.acquire({ path: f.workspace, purpose: "editor", threadId: firstId }),
+      ).toEqual({ path: f.workspace, branch: null, restored: false });
+      const records = yield* h.registry.list;
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({ detached: true, owners: [] });
+      expect(h.gitRequests).toEqual([]);
+    }),
+  ),
 );
 
 it.live.each(["branch", "repository", "restored branch"] as const)(
