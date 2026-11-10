@@ -20,10 +20,12 @@ const THREAD_LINK_OUTSIDE_CODE = new RegExp(
 const decodeThreadId = Schema.decodeUnknownOption(ThreadId);
 const decodeEnvironmentId = Schema.decodeUnknownOption(EnvironmentId);
 
-/** A v1 link names no environment; the message's own, or a unique match, stands in. */
 export interface ThreadLink {
   readonly environmentId: EnvironmentId | null;
   readonly threadId: ThreadId;
+  // Scoped V1 paths also name a legacy local ID; keep that ambiguity through client resolution.
+  readonly version?: 1 | 2;
+  readonly legacyThreadId?: ThreadId | undefined;
 }
 
 // Escapes even URL-safe punctuation, so a sentence's closing period never reads as part of an id.
@@ -41,35 +43,122 @@ export function hostedThreadLink(ref: ScopedThreadRef, origin = DEFAULT_HOSTED_A
 
 const HOSTED_PATH = new RegExp(`^(${HOSTED_SEGMENT})/(${HOSTED_SEGMENT})$`);
 
-function parseHostedThreadLink(href: string): ThreadLink | null {
+function parseHostedThreadLink(href: string): ThreadLinkReference | null {
   const match = HOSTED_PATH.exec(href.slice(HOSTED_PREFIX.length));
   if (!match) return null;
   try {
     const environmentId = Option.getOrNull(decodeEnvironmentId(decodeURIComponent(match[1]!)));
     const threadId = Option.getOrNull(decodeThreadId(decodeURIComponent(match[2]!)));
-    return environmentId === null || threadId === null ? null : { environmentId, threadId };
+    return environmentId === null || threadId === null
+      ? null
+      : { environmentId, threadId, version: 2 };
   } catch {
     return null;
   }
 }
 
-/**
- * The ids as written. Thread ids can hold percent escapes of their own, so they are not decoded,
- * except in a hosted link, which escapes them itself.
- */
-export function parseThreadLinkHref(href: string): ThreadLink | null {
-  if (href.startsWith(HOSTED_PREFIX)) return parseHostedThreadLink(href);
-  if (href.startsWith(V1_PREFIX)) {
-    const threadId = Option.getOrNull(decodeThreadId(href.slice(V1_PREFIX.length)));
-    return threadId === null ? null : { environmentId: null, threadId };
+export interface ThreadLinkReference {
+  readonly threadId: ThreadId;
+  readonly environmentId?: EnvironmentId | undefined;
+  readonly version: 1 | 2;
+  readonly legacyThreadId?: ThreadId | undefined;
+}
+
+/** V2 segments decode once. V1 ids preserve their literal percent escapes. */
+export function parseThreadLinkReference(href: string): ThreadLinkReference | null {
+  if (href.startsWith(HOSTED_PREFIX)) {
+    return parseHostedThreadLink(href);
   }
-  if (!href.startsWith(V2_PREFIX)) return null;
-  const path = href.slice(V2_PREFIX.length);
-  const slash = path.indexOf("/");
-  if (slash < 0) return null;
-  const environmentId = Option.getOrNull(decodeEnvironmentId(path.slice(0, slash)));
-  const threadId = Option.getOrNull(decodeThreadId(path.slice(slash + 1)));
-  return environmentId === null || threadId === null ? null : { environmentId, threadId };
+  if (href.startsWith(V2_PREFIX)) {
+    const segments = href.slice(V2_PREFIX.length).split("/");
+    if (segments.length !== 2) return null;
+    try {
+      const environmentId = Option.getOrNull(decodeEnvironmentId(decodeURIComponent(segments[0]!)));
+      const threadId = Option.getOrNull(decodeThreadId(decodeURIComponent(segments[1]!)));
+      return environmentId === null || threadId === null
+        ? null
+        : { environmentId, threadId, version: 2 };
+    } catch {
+      return null;
+    }
+  }
+  if (!href.startsWith(V1_PREFIX)) return null;
+  const path = href.slice(V1_PREFIX.length);
+  const separator = path.indexOf("/");
+  const legacyThreadId = Option.getOrNull(decodeThreadId(path));
+  const threadId = Option.getOrNull(
+    decodeThreadId(separator === -1 ? path : path.slice(separator + 1)),
+  );
+  if (threadId === null) {
+    return legacyThreadId === null ? null : { threadId: legacyThreadId, version: 1 };
+  }
+  if (separator === -1) return { threadId, version: 1 };
+  const environmentId = Option.getOrNull(decodeEnvironmentId(path.slice(0, separator)));
+  return environmentId === null
+    ? legacyThreadId === null
+      ? null
+      : { threadId: legacyThreadId, version: 1 }
+    : {
+        environmentId,
+        threadId,
+        version: 1,
+        legacyThreadId: legacyThreadId ?? undefined,
+      };
+}
+
+function referenceCandidates(reference: ThreadLinkReference) {
+  const primary = { threadId: reference.threadId, environmentId: reference.environmentId };
+  const candidates = [primary];
+  if (reference.version === 1) {
+    const decoded = percentDecodedThreadLinkId(reference.threadId);
+    if (decoded !== null) candidates.push({ ...primary, threadId: decoded });
+    if (reference.legacyThreadId !== undefined) {
+      candidates.push({ threadId: reference.legacyThreadId, environmentId: undefined });
+      const decodedLegacy = percentDecodedThreadLinkId(reference.legacyThreadId);
+      if (decodedLegacy !== null)
+        candidates.push({ threadId: decodedLegacy, environmentId: undefined });
+    }
+  }
+  return candidates;
+}
+
+/** Prefer existing scoped V1 targets; unresolved ambiguous V1 paths retain their legacy local target. */
+export function resolveThreadLinkReference<T>(
+  reference: ThreadLinkReference,
+  lookup: (threadId: ThreadId, environmentId?: EnvironmentId) => T | undefined,
+): {
+  readonly threadId: ThreadId;
+  readonly environmentId?: EnvironmentId | undefined;
+  readonly value: T | undefined;
+} {
+  const primary = { threadId: reference.threadId, environmentId: reference.environmentId };
+  const candidates = referenceCandidates(reference);
+  for (const candidate of candidates) {
+    const value = lookup(candidate.threadId, candidate.environmentId);
+    if (value !== undefined) return { ...candidate, value };
+  }
+  if (reference.version === 1 && reference.legacyThreadId !== undefined) {
+    return { threadId: reference.legacyThreadId, environmentId: undefined, value: undefined };
+  }
+  return { ...primary, value: undefined };
+}
+
+export function parseThreadLinkHref(href: string): ThreadLink | null {
+  const reference = parseThreadLinkReference(href);
+  if (reference === null) return null;
+  const link = { environmentId: reference.environmentId ?? null, threadId: reference.threadId };
+  return reference.legacyThreadId === undefined
+    ? link
+    : { ...link, version: reference.version, legacyThreadId: reference.legacyThreadId };
+}
+
+function linkReference(link: ThreadLink): ThreadLinkReference {
+  return {
+    threadId: link.threadId,
+    environmentId: link.environmentId ?? undefined,
+    version: link.version ?? (link.environmentId === null ? 1 : 2),
+    legacyThreadId: link.legacyThreadId,
+  };
 }
 
 function percentDecodedThreadLinkId(threadId: ThreadId): ThreadId | null {
@@ -81,15 +170,15 @@ function percentDecodedThreadLinkId(threadId: ThreadId): ThreadId | null {
   }
 }
 
-/** The threads a link can name, in its own environment or else the message's: as written, then decoded. */
+/** V2 names one exact target. V1 tries literal, decoded, then legacy local slash IDs. */
 export function threadLinkCandidates(
   link: ThreadLink,
   messageEnvironmentId: EnvironmentId,
 ): ReadonlyArray<ScopedThreadRef> {
-  const environmentId = link.environmentId ?? messageEnvironmentId;
-  const decodedId = percentDecodedThreadLinkId(link.threadId);
-  const written = { environmentId, threadId: link.threadId };
-  return decodedId === null ? [written] : [written, { environmentId, threadId: decodedId }];
+  return referenceCandidates(linkReference(link)).map(({ environmentId, threadId }) => ({
+    environmentId: environmentId ?? messageEnvironmentId,
+    threadId,
+  }));
 }
 
 /** A v1 link its message's environment lacks opens a unique match elsewhere; a v2 link never does. */
@@ -97,9 +186,11 @@ export function guessThreadLinkRef(
   link: ThreadLink,
   refs: ReadonlyArray<ScopedThreadRef>,
 ): ScopedThreadRef | null {
-  if (link.environmentId !== null) return null;
-  const decodedId = percentDecodedThreadLinkId(link.threadId);
-  for (const threadId of decodedId === null ? [link.threadId] : [link.threadId, decodedId]) {
+  const reference = linkReference(link);
+  if (reference.version === 2) return null;
+  const legacyId = reference.legacyThreadId ?? reference.threadId;
+  const decodedId = percentDecodedThreadLinkId(legacyId);
+  for (const threadId of decodedId === null ? [legacyId] : [legacyId, decodedId]) {
     let match: ScopedThreadRef | null = null;
     for (const ref of refs) {
       if (ref.threadId !== threadId) continue;
@@ -111,10 +202,30 @@ export function guessThreadLinkRef(
   return null;
 }
 
+export function resolveThreadLinkRef(
+  source: ScopedThreadRef,
+  refs: ReadonlyArray<ScopedThreadRef>,
+): ScopedThreadRef | null {
+  const link = { environmentId: null, threadId: source.threadId };
+  for (const candidate of threadLinkCandidates(link, source.environmentId)) {
+    const local = refs.find(
+      (ref) => ref.environmentId === candidate.environmentId && ref.threadId === candidate.threadId,
+    );
+    if (local) return local;
+  }
+  return guessThreadLinkRef(link, refs);
+}
+
 function threadLinkHref(link: ThreadLink): string {
   return link.environmentId === null
     ? `${V1_PREFIX}${link.threadId}`
-    : `${V2_PREFIX}${link.environmentId}/${link.threadId}`;
+    : `${V2_PREFIX}${encodeLinkSegment(link.environmentId)}/${encodeLinkSegment(link.threadId)}`;
+}
+
+function encodeLinkSegment(id: string): string {
+  return encodeURIComponent(id).replace(/[()]/g, (character) =>
+    character === "(" ? "%28" : "%29",
+  );
 }
 
 const linkLabel = (label: string | undefined) =>
@@ -160,7 +271,7 @@ export function threadLinkRefs(
     const link = href === undefined ? null : parseThreadLinkHref(href);
     if (link === null) continue;
     for (const ref of threadLinkCandidates(link, messageEnvironmentId)) {
-      refs.set(`${ref.environmentId}/${ref.threadId}`, ref);
+      refs.set(JSON.stringify([ref.environmentId, ref.threadId]), ref);
     }
   }
   return [...refs.values()];
@@ -170,7 +281,9 @@ export function unknownThreadLinkLabel(
   link: ThreadLink,
   messageEnvironmentId: EnvironmentId,
 ): string {
-  return link.environmentId === null || link.environmentId === messageEnvironmentId
+  return link.legacyThreadId !== undefined ||
+    link.environmentId === null ||
+    link.environmentId === messageEnvironmentId
     ? "Thread no longer available"
     : "Thread on another machine";
 }
@@ -202,22 +315,18 @@ export function relabelThreadLinks(
   title: (ref: ScopedThreadRef) => string | undefined,
 ): string {
   return replaceThreadLinks(markdown, (written, label) => {
-    const environmentId = written.environmentId ?? messageEnvironmentId;
-    const decoded = percentDecodedThreadLinkId(written.threadId);
-    const threadId =
-      title({ environmentId, threadId: written.threadId }) === undefined &&
-      decoded !== null &&
-      title({ environmentId, threadId: decoded }) !== undefined
-        ? decoded
-        : written.threadId;
-    const current = title({ environmentId, threadId });
+    const reference = linkReference(written);
+    const resolved = resolveThreadLinkReference(reference, (threadId, environmentId) =>
+      title({ threadId, environmentId: environmentId ?? messageEnvironmentId }),
+    );
+    const current = resolved.value;
     if (current === undefined) {
-      if (label !== undefined && written.environmentId === null) return undefined;
+      if (label !== undefined && reference.version === 1) return undefined;
       return label?.trim() || unknownThreadLinkLabel(written, messageEnvironmentId);
     }
     return formatThreadLink(
-      { environmentId: written.environmentId, threadId },
-      current.trim() || label || threadId,
+      { environmentId: resolved.environmentId ?? null, threadId: resolved.threadId },
+      current.trim() || label || resolved.threadId,
     );
   });
 }
