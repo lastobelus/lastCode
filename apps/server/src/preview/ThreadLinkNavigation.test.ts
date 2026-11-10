@@ -206,7 +206,7 @@ it("preserves HTTP caching and lets typed or agent-loaded hosted documents load"
   }
 });
 
-it("continues dropped opens and expires announcements before a later typed navigation", async () => {
+it("handles closed thread popups, dropped opens, and expired announcements", async () => {
   const events = new NodeEvents.EventEmitter();
   const send = vi.fn(async (method: string) =>
     method === "Page.getFrameTree" ? { frameTree: { frame: { id: "main" } } } : {},
@@ -255,6 +255,14 @@ it("continues dropped opens and expires announcements before a later typed navig
   pause("dropped-open");
   expect(navigation.isThreadNavigation(hosted)).toBe(false);
   open.mockReturnValue(true);
+  const closedPopup = { url: () => ":", isClosed: () => true, close: vi.fn(async () => {}) };
+  blockPopup.mockImplementationOnce((received: Page) => {
+    expect(received.isClosed()).toBe(true);
+  });
+  events.emit("Page.windowOpen", { url: href, userGesture: true });
+  page.emit("popup", closedPopup);
+  expect(blockPopup).toHaveBeenCalledWith(closedPopup);
+  expect(closedPopup.close).toHaveBeenCalledOnce();
   announce();
   expect(navigation.isThreadNavigation(hosted)).toBe(true);
   gesture("inactive");
