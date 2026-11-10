@@ -1,6 +1,8 @@
 import { useAtomValue } from "@effect/atom-react";
 import * as Schema from "effect/Schema";
 import {
+  lazy,
+  Suspense,
   useEffect,
   useState,
   useSyncExternalStore,
@@ -31,7 +33,6 @@ import { selectActiveRightPanel, useRightPanelStore } from "../rightPanelStore";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { cn, isMacPlatform } from "../lib/utils";
 import { primaryServerKeybindingsAtom } from "../state/server";
-import { useEnvironmentIdentificationMode } from "../hooks/useSettings";
 import {
   PanelAnimationSuppressionProvider,
   usePanelAnimationSettings,
@@ -39,8 +40,16 @@ import {
 } from "../panelAnimations";
 import { BackgroundThreadAnnouncer } from "./BackgroundThreadAnnouncer";
 import { HistorySwipeNavigation } from "./HistorySwipeNavigation";
+import {
+  useClientSettingsHydrated,
+  useEnvironmentIdentificationMode,
+  useSidebarMode,
+  toggleSidebarMode,
+} from "../hooks/useSettings";
+import { SidebarPresentation } from "./sidebar/SidebarPresentation";
 import ThreadSidebar from "./Sidebar";
-import { SidebarBrandWidthProbe } from "./sidebar/SidebarChrome";
+import { SidebarBrandWidthProbe, SidebarChromeHeader } from "./sidebar/SidebarChrome";
+import { SidebarModeToggle } from "./sidebar/SidebarModeToggle";
 import { isAppModalPage } from "./sidebar/mainAppLocation";
 import type { SidebarRouteReveal } from "./sidebar/routeReveal";
 import { useSidebarStageBackdropVariant } from "./SidebarStageBackdrop";
@@ -66,6 +75,7 @@ import { registerCommands, registerMenuAction } from "../shortcuts/dispatcher";
 import { resolveThreadRouteRef } from "../threadRoutes";
 
 const MACOS_TRAFFIC_LIGHTS_LEFT_INSET = "var(--desktop-window-controls-inset, 90px)";
+const LastCodeSidebar = lazy(() => import("./LastCodeSidebar"));
 
 function subscribeToViewportWidth(onChange: () => void): () => void {
   window.addEventListener("resize", onChange);
@@ -317,6 +327,7 @@ function SidebarControl({ showSidebar }: { readonly showSidebar: boolean }) {
   const usagePageOpen = useLocation({ select: (location) => location.pathname === "/usage" });
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const { toggleSidebar, isMobile, mobileSheetMounted } = useSidebar();
+  const clientSettingsHydrated = useClientSettingsHydrated();
   const isSidebarVisible = useSidebarVisibility();
   const environmentIdentificationMode = useEnvironmentIdentificationMode();
   const stageBackdropVariant = useSidebarStageBackdropVariant(environmentIdentificationMode);
@@ -329,7 +340,7 @@ function SidebarControl({ showSidebar }: { readonly showSidebar: boolean }) {
     // A hidden sidebar would still save the toggle, so the shortcut does nothing without one.
     if (!showSidebar) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented) return;
+      if (event.defaultPrevented || event.repeat) return;
       if (
         event.target instanceof HTMLElement &&
         event.target.closest("[data-keybinding-capture]")
@@ -345,26 +356,40 @@ function SidebarControl({ showSidebar }: { readonly showSidebar: boolean }) {
         // the toggle stays available everywhere else.
         return;
       }
-      if (
-        resolveShortcutCommand(event, keybindings, { context: { usagePageOpen } }) !==
-        "sidebar.toggle"
-      )
-        return;
-
-      event.preventDefault();
-      event.stopPropagation();
-      toggleSidebar();
+      const command = resolveShortcutCommand(event, keybindings, {
+        context: {
+          usagePageOpen,
+          terminalFocus: isTerminalFocused(),
+          ...readRoutePanelsOpen(router),
+          previewFocus: isPreviewFocused(),
+          modelPickerOpen: isModelPickerOpen(),
+        },
+      });
+      switch (command) {
+        case "sidebar.toggle":
+          event.preventDefault();
+          event.stopPropagation();
+          toggleSidebar();
+          return;
+        case "sidebar.mode.toggle":
+          if (!clientSettingsHydrated) return;
+          event.preventDefault();
+          event.stopPropagation();
+          toggleSidebarMode();
+          return;
+      }
     };
 
     window.addEventListener("keydown", onKeyDown, true);
     const unsubscribe = window.desktopBridge?.onMenuAction((action) => {
       if (action === "sidebar.toggle") toggleSidebar();
+      if (action === "sidebar.mode.toggle") toggleSidebarMode();
     });
     return () => {
       window.removeEventListener("keydown", onKeyDown, true);
       unsubscribe?.();
     };
-  }, [keybindings, showSidebar, toggleSidebar, usagePageOpen]);
+  }, [clientSettingsHydrated, keybindings, router, showSidebar, toggleSidebar, usagePageOpen]);
 
   // The control lives as long as the shell, so it carries the shell's commands. Created
   // once so re-renders never re-register them.
@@ -387,7 +412,9 @@ function SidebarControl({ showSidebar }: { readonly showSidebar: boolean }) {
           <TooltipTrigger
             render={
               <SidebarTrigger
-                variant={isSidebarVisible && stageBackdropVariant ? "media-navigation" : "ghost"}
+                variant={
+                  isSidebarVisible && stageBackdropVariant ? "media-navigation" : "ghost-toggle"
+                }
                 className={cn(
                   "pointer-events-auto",
                   isSidebarVisible && stageBackdropVariant && "relative top-auto translate-y-0",
@@ -401,6 +428,9 @@ function SidebarControl({ showSidebar }: { readonly showSidebar: boolean }) {
           </TooltipPopup>
         </Tooltip>
       ) : null}
+      {showSidebar && isSidebarVisible && (
+        <SidebarModeToggle onBackdrop={stageBackdropVariant !== null} />
+      )}
     </div>
   );
 }
@@ -413,9 +443,19 @@ export function AppSidebarLayout({
   showSidebar?: boolean;
 }) {
   const sidebarArea = workspaceAreaProps("sidebar", 0, "Threads");
+  const sidebarMode = useSidebarMode();
+  const clientSettingsHydrated = useClientSettingsHydrated();
   const [sidebarRouteReveal] = useState<SidebarRouteReveal>(() => ({
     observedKey: null,
     pendingKey: null,
+  }));
+  const [threadSidebars] = useState(() => ({
+    lastcode: (
+      <Suspense fallback={<SidebarChromeHeader isElectron={isElectron} />}>
+        <LastCodeSidebar />
+      </Suspense>
+    ),
+    inbox: <ThreadSidebar routeReveal={sidebarRouteReveal} />,
   }));
   const { active: panelAnimationsActive, durationMs: panelAnimationDurationMs } =
     usePanelAnimationSettings();
@@ -481,7 +521,15 @@ export function AppSidebarLayout({
               }}
               style={windowControlsInsetStyle}
             >
-              <ThreadSidebar routeReveal={sidebarRouteReveal} />
+              {Object.entries(threadSidebars).map(([mode, sidebar]) => (
+                <SidebarPresentation
+                  key={mode}
+                  visible={sidebarMode === mode}
+                  retain={clientSettingsHydrated}
+                >
+                  {sidebar}
+                </SidebarPresentation>
+              ))}
               <SidebarRail onDoubleClick={resetSidebarWidth} />
             </Sidebar>
           </>
