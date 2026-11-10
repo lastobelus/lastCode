@@ -1,5 +1,5 @@
 name: CI
-run-name: "CI ${{ github.event_name }} PR #${{ github.event.pull_request.number }} head ${{ github.event.pull_request.head.sha }} base ${{ github.event.pull_request.base.sha }} merge ${{ github.sha }}"
+run-name: "${{ github.event.action == 'edited' && !github.event.changes.base && 'Metadata only: ' || '' }}CI ${{ github.event_name }} PR #${{ github.event.pull_request.number }} head ${{ github.event.pull_request.head.sha }} base ${{ github.event.pull_request.base.sha }} merge ${{ github.sha }}"
 
 on:
   pull_request:
@@ -15,7 +15,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.sha }}
+  # Metadata edits must not replace pending runs or cancel running source CI.
+  group: ci-${{ github.event.action == 'edited' && !github.event.changes.base && format('metadata-{0}', github.run_id) || github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -26,6 +27,7 @@ jobs:
   # their dependents. Pushes to main still run every Linux job. Detection fails
   # open: if the diff cannot be resolved, everything runs.
   changes:
+    if: ${{ (github.event.action != 'edited' || github.event.changes.base) }}
     name: Changes
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -65,6 +67,7 @@ jobs:
   # file, docs included. The `Check` job at the end of this file passes only
   # when every other job passes or was skipped by `changes`.
   lint:
+    if: ${{ (github.event.action != 'edited' || github.event.changes.base) }}
     permissions:
       contents: read
       id-token: write
@@ -131,7 +134,7 @@ jobs:
       id-token: write
     name: Build and Typecheck
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.build != 'false' || needs.changes.outputs.typecheck != 'false') }}
+    if: ${{ (github.event.action != 'edited' || github.event.changes.base) && !cancelled() && (needs.changes.outputs.build != 'false' || needs.changes.outputs.typecheck != 'false') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -281,7 +284,7 @@ jobs:
       id-token: write
     name: Test
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.test != 'false' }}
+    if: ${{ (github.event.action != 'edited' || github.event.changes.base) && !cancelled() && needs.changes.outputs.test != 'false' }}
     runs-on: ubuntu-24.04
     # Include dependency setup and the complete package test run in the deadline.
     timeout-minutes: 15
@@ -381,7 +384,7 @@ jobs:
       id-token: write
     name: Test Web
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.test_web != 'false' }}
+    if: ${{ (github.event.action != 'edited' || github.event.changes.base) && !cancelled() && needs.changes.outputs.test_web != 'false' }}
     runs-on: ubuntu-24.04
     # Include setup, the full browser suite, the production boot check, and cleanup.
     timeout-minutes: 20
@@ -437,6 +440,7 @@ jobs:
   # The shards are the longest jobs, so they gate themselves instead of waiting
   # ~15s for `changes`: a shard the change cannot affect stops after checkout.
   test_server:
+    if: ${{ (github.event.action != 'edited' || github.event.changes.base) }}
     permissions:
       contents: read
       id-token: write
@@ -566,7 +570,7 @@ jobs:
   rust:
     name: Rust
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' }}
+    if: ${{ (github.event.action != 'edited' || github.event.changes.base) && !cancelled() && needs.changes.outputs.rust != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -599,7 +603,7 @@ jobs:
   mobile_native_static_analysis:
     name: Mobile Native Static Analysis
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.mobile_native != 'false' }}
+    if: ${{ (github.event.action != 'edited' || github.event.changes.base) && !cancelled() && needs.changes.outputs.mobile_native != 'false' }}
     runs-on: macos-26
     timeout-minutes: 10
     steps:
@@ -632,7 +636,7 @@ jobs:
       id-token: write
     name: Release Smoke
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.release_smoke != 'false' }}
+    if: ${{ (github.event.action != 'edited' || github.event.changes.base) && !cancelled() && needs.changes.outputs.release_smoke != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -659,8 +663,8 @@ jobs:
   # `always()` rather than `!cancelled()`: a skipped job reports success to
   # branch protection, so a cancelled run must still produce a failing check.
   check:
-    name: Check
-    if: ${{ always() }}
+    name: ${{ github.event.action == 'edited' && !github.event.changes.base && 'Check (metadata edit)' || 'Check' }}
+    if: ${{ (github.event.action != 'edited' || github.event.changes.base) && always() }}
     needs:
       [
         changes,
@@ -701,8 +705,8 @@ jobs:
           path: ${{ runner.temp }}/thread-transfer
 
   ci_gate:
-    name: CI Gate
-    if: ${{ always() }}
+    name: ${{ github.event.action == 'edited' && !github.event.changes.base && 'CI Gate (metadata edit)' || 'CI Gate' }}
+    if: ${{ (github.event.action != 'edited' || github.event.changes.base) && always() }}
     needs:
       - check
     runs-on: ubuntu-24.04

@@ -6116,9 +6116,13 @@ describe("storage cleanup reports and local file policies", () => {
     { relative: "prototype/example/.local/notes.txt", disposable: false },
     { relative: "research/retained.txt", disposable: false },
     { relative: "tmp/notes.txt", disposable: false },
-    { relative: "build/notes.txt", disposable: false },
+    { relative: "build/notes.txt", disposable: true },
+    { relative: "prototype/example/_build/dev/output.beam", disposable: true },
+    { relative: "target", disposable: false },
+    { relative: "build", disposable: false },
+    { relative: "_build", disposable: false },
     { relative: "dist/source.js.orig", disposable: false },
-    { relative: "native/resource-monitor/target/debug/binary", disposable: false },
+    { relative: "native/resource-monitor/target/debug/binary", disposable: true },
     { relative: ".codex/node_modules/notes.txt", disposable: false },
     { relative: "prototype/example/.local/dist/notes.txt", disposable: false },
   ])("classifies ignored $relative for whole-worktree removal", ({ relative, disposable }) =>
@@ -6135,7 +6139,7 @@ describe("storage cleanup reports and local file policies", () => {
         ]);
         yield* fixture.fs.writeFileString(
           `${fixture.repo}/.git/info/exclude`,
-          ".generated/\n*.tsbuildinfo\n.astro/\n.tanstack/\ndist-electron/\nbuild/\n.env*\n.codex/\n.local/\nresearch/\ntmp/\n",
+          ".generated/\n*.tsbuildinfo\n.astro/\n.tanstack/\ndist-electron/\nbuild\ntarget\n_build\n.env*\n.codex/\n.local/\nresearch/\ntmp/\n",
         );
         if (relative === ".vite-hooks/_/pre-commit") {
           yield* fixture.fs.makeDirectory(`${fixture.worktree}/.vite-hooks/_`, { recursive: true });

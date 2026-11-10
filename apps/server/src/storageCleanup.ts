@@ -82,6 +82,7 @@ import { physicalCleanupFileSystem } from "./workspace/physicalCleanupFileSystem
 import { WorktreeSuspension } from "./workspace/WorktreeSuspension.ts";
 import { WorktreeSuspensionRegistry } from "./workspace/WorktreeSuspensionRegistry.ts";
 import { canonicalProjectRoot, withProjectRootLease } from "./workspace/projectRootLease.ts";
+import { isDisposableFinderMetadata } from "./workspace/disposableFinderMetadata.ts";
 
 const decodeCleanupThread = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2AppThreadJson),
@@ -1066,24 +1067,14 @@ const make = Effect.gen(function* () {
       // Submodule .t3 folders are not the worktree's seeded development state.
       const relativePath = relativeCwd === "" ? file : `${relativeCwd}/${file}`;
       if (isRegenerableIgnoredPath(relativePath)) continue;
-      // Finder metadata is disposable, but a directory or link with this name
-      // is not evidence that its contents belong to Finder. Tracked edits have
-      // already been rejected by status above.
-      if (path.basename(file) === ".DS_Store") {
-        const target = path.join(cwd, file);
-        const regularFile = yield* fs.readLink(target).pipe(
-          Effect.as(false),
-          Effect.catchIf(
-            (error) =>
-              error.cause instanceof Error &&
-              "code" in error.cause &&
-              error.cause.code === "EINVAL",
-            () => fs.stat(target).pipe(Effect.map((stat) => stat.type === "File")),
-          ),
-          Effect.orElseSucceed(() => false),
-        );
-        if (regularFile) continue;
-      }
+      // Tracked edits have already been rejected by status above.
+      if (
+        yield* isDisposableFinderMetadata(path.join(cwd, file)).pipe(
+          Effect.provideService(FileSystem.FileSystem, fs),
+          Effect.provideService(Path.Path, path),
+        )
+      )
+        continue;
       return `has ignored files (${file})`;
     }
     return null;

@@ -53,6 +53,7 @@ type IssueComment = {
   readonly author_association?: string;
   readonly body?: string;
   readonly created_at?: string;
+  readonly updated_at?: string;
 };
 
 type ReviewComment = {
@@ -222,6 +223,30 @@ const cleanReviewedCommitFromBody = (body: string | undefined): string | null =>
   return reviewedCommitFromBody(body);
 };
 
+const completedCodexSummary = (
+  body: string | undefined,
+  headSha: string,
+): { readonly clean: boolean } | null => {
+  const match =
+    /^<!-- codex-pull-request-review-summary -->\r?\n<!-- codex-review-state:v1 (.+) -->/u.exec(
+      body ?? "",
+    );
+  if (!match) return null;
+  try {
+    const state = JSON.parse(match[1]!)?.code_review;
+    if (
+      state?.commit_sha !== headSha ||
+      state.status !== "completed" ||
+      typeof state.has_any_findings !== "boolean" ||
+      typeof state.has_unresolved_findings !== "boolean"
+    )
+      return null;
+    return { clean: !state.has_any_findings && !state.has_unresolved_findings };
+  } catch {
+    return null;
+  }
+};
+
 const isGenericFormalReviewWrapper = (body: string | undefined): boolean =>
   (body ?? "").includes("### 💡 Codex Review") &&
   (body ?? "").includes("Here are some automated review suggestions for this pull request.");
@@ -266,6 +291,7 @@ export function deriveReviewState(input: {
 }): ReviewState {
   const artifacts: ReviewArtifact[] = [];
   const readyArtifacts = new Set<string>();
+  const summaryRevisions = new Map<string, number>();
 
   for (const review of input.formalReviews) {
     const machineReadableCleanCommit = cleanReviewedCommitFromBody(review.body);
@@ -304,6 +330,19 @@ export function deriveReviewState(input: {
   }
 
   for (const comment of input.issueComments) {
+    const summary =
+      comment.user?.login === CODEX_BOT_LOGIN
+        ? completedCodexSummary(comment.body, input.headSha)
+        : null;
+    if (summary) {
+      const key = `comment:${comment.id}`;
+      // Summary edits can update security review independently of code review.
+      // Only creation establishes ordering against a later manual code-review request.
+      artifacts.push({ key, observedAt: comment.created_at ?? "" });
+      summaryRevisions.set(key, timestamp(comment.updated_at ?? comment.created_at));
+      if (summary.clean) readyArtifacts.add(key);
+      continue;
+    }
     const reviewedCommit = reviewedCommitFromBody(comment.body);
     if (
       comment.user?.login === CODEX_BOT_LOGIN &&
@@ -340,7 +379,13 @@ export function deriveReviewState(input: {
   for (const comment of input.issueComments) {
     if (!TRUSTED_AUTHOR_ASSOCIATIONS.has(comment.author_association ?? "")) continue;
     const handledArtifact = handledArtifactFromBody(comment.body, input.headSha);
-    if (handledArtifact && artifactKeys.has(handledArtifact)) readyArtifacts.add(handledArtifact);
+    if (
+      handledArtifact &&
+      artifactKeys.has(handledArtifact) &&
+      (!summaryRevisions.has(handledArtifact) ||
+        timestamp(comment.created_at) > summaryRevisions.get(handledArtifact)!)
+    )
+      readyArtifacts.add(handledArtifact);
   }
 
   const newestReaction = (content: string): CommentReaction | null =>
