@@ -2,4 +2,4 @@
 
 Draft test fixture. Never merge.
 
-Corrected registration boundary observation.
+Corrected after registration observation.
