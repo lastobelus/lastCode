@@ -629,6 +629,8 @@ it.effect.each([
       yield* h.service.previewSuspend({ threadId: firstId });
       const record = (yield* h.registry.list)[0]!;
       const original = record.nativeIdentity!;
+      if (!("commonDirectory" in original))
+        return yield* Effect.die("Expected a Git checkout identity.");
       const aliased = [
         "owner-alias",
         "unproven-alias",
@@ -1341,13 +1343,22 @@ it.live(
     ),
 );
 
-it.live(
-  "retargets a historical recovery collision without mistaking prior restored metadata for a new stage",
-  () =>
-    realGit((f) =>
+it.live.each(["Git", "scratch"] as const)(
+  "retargets a %s historical recovery without mistaking prior restored metadata for a new stage",
+  (kind) =>
+    (kind === "scratch" ? realScratch : realGit)((f) =>
       Effect.gen(function* () {
-        const h = yield* harness(f, { occupyRecoveryOnBarrier: true });
-        const saved = yield* h.suspend;
+        const h = yield* harness(f, { scratch: kind === "scratch", occupyRecoveryOnBarrier: true });
+        let saved: Registry.CheckoutAuthority;
+        if (kind === "Git") saved = yield* h.suspend;
+        else {
+          yield* h.service.suspendScratch({
+            path: f.workspace,
+            owners: [...h.threads.values()],
+            recheck: () => Effect.succeed(null),
+          });
+          saved = (yield* h.registry.list)[0]!;
+        }
         const snapshotId = saved.summary.snapshotId!;
         yield* h.acquisition.acquire({ path: f.workspace, purpose: "file-write" });
         yield* Effect.promise(() =>
@@ -1356,6 +1367,27 @@ it.live(
         const journalBefore = yield* Effect.promise(() => h.store.readJournal(snapshotId));
         expect(journalBefore.phase).toBe("active");
         expect(journalBefore.destinationPath).toBe(f.workspace);
+        if (kind === "scratch") {
+          h.registerProjectRoot(NodePath.join(f.root, "unrelated-project"));
+          expect(
+            (yield* h.service
+              .restore({
+                checkoutId: saved.checkoutId,
+                snapshotId,
+                projectId: ProjectId.make("fixture:registered"),
+                destinationPath: NodePath.join(f.repository, "wrong-project"),
+              })
+              .pipe(Effect.flip)).reason,
+          ).toBe("protected");
+          expect((yield* h.registry.list)[0]!.operation).toBeUndefined();
+          expect(
+            (yield* h.acquisition.acquire({
+              path: f.workspace,
+              purpose: "editor",
+              threadId: firstId,
+            })).path,
+          ).toBe(f.workspace);
+        }
         const occupied = NodePath.join(NodePath.dirname(f.workspace), "history-occupied");
         yield* Effect.promise(() => NodeFSP.mkdir(occupied));
         expect(
@@ -1379,6 +1411,13 @@ it.live(
         expect(stopped.summary.state).toBe("active");
         expect(stopped.operation).toBeUndefined();
         expect(yield* Effect.promise(() => h.store.readJournal(snapshotId))).toEqual(journalBefore);
+        expect(
+          (yield* h.acquisition.acquire({
+            path: f.workspace,
+            purpose: "editor",
+            threadId: firstId,
+          })).path,
+        ).toBe(f.workspace);
         const alternate = NodePath.join(NodePath.dirname(f.workspace), "history-alternate");
         yield* h.service.restore({
           checkoutId: saved.checkoutId,
@@ -1404,10 +1443,17 @@ it.live(
           expect(await NodeFSP.readFile(NodePath.join(f.workspace, "current-note"), "utf8")).toBe(
             "keep active copy\n",
           );
-          expect(await NodeFSP.readFile(NodePath.join(alternate, "notes", "private"), "utf8")).toBe(
-            "ignored note\n",
-          );
-          expect(await git(alternate, "show", ":tracked")).toBe("staged");
+          if (kind === "Git") {
+            expect(
+              await NodeFSP.readFile(NodePath.join(alternate, "notes", "private"), "utf8"),
+            ).toBe("ignored note\n");
+            expect(await git(alternate, "show", ":tracked")).toBe("staged");
+          } else {
+            expect(await NodeFSP.readFile(NodePath.join(alternate, "draft.txt"), "utf8")).toBe(
+              "scratch draft\n",
+            );
+            expect(h.gitRequests).toEqual([]);
+          }
         });
       }),
     ),

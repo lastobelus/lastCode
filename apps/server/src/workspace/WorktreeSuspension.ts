@@ -1089,7 +1089,10 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
             return yield* failure("changed", "The rebound project belongs to another repository.");
         if (Option.isSome(info)) {
           const inspected = yield* native(() => store.inspectActiveSource(actualDestination));
-          const expected = record.nativeIdentity !== undefined && "commonDirectory" in record.nativeIdentity ? record.nativeIdentity : undefined;
+          const expected =
+            record.nativeIdentity !== undefined && "commonDirectory" in record.nativeIdentity
+              ? record.nativeIdentity
+              : undefined;
           // Device numbers are allocated again at boot. Rebind only an unchanged,
           // canonical checkout and both unchanged Git directories on one volume.
           // Keep record.path as that historical anchor; resolving a saved alias
@@ -1570,14 +1573,16 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
         journal.restorePath === undefined &&
         journal.restoreIdentity === undefined &&
         journal.destinationPath === undefined;
-      // Native staging records "restoring" before allocating a checkout. Active
-      // metadata for another unique branch therefore predates this recovery.
+      // Native staging records "restoring" before allocating a workspace. Active
+      // metadata for another scratch destination or unique Git branch predates it.
       const priorCompletedRecovery =
         operation.kind === "recovery" &&
-        operation.branch === `suspension/recovered-${operation.id}` &&
         journal.phase === "active" &&
-        journal.branch !== `refs/heads/${operation.branch}` &&
-        journal.requestedBranch !== `refs/heads/${operation.branch}`;
+        (record.kind === "scratch"
+          ? journal.destinationPath !== operation.destinationPath
+          : operation.branch === `suspension/recovered-${operation.id}` &&
+            journal.branch !== `refs/heads/${operation.branch}` &&
+            journal.requestedBranch !== `refs/heads/${operation.branch}`);
       if (!suspended && !priorCompletedRecovery) return false;
       await store.verify(id);
       return JSON.stringify(journal) === JSON.stringify(await store.readJournal(id));
@@ -2550,6 +2555,14 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
                 );
               yield* guardProjectRoots([destinationPath]);
               yield* guardRecoveryDestination(record, destinationPath);
+              if (record.kind === "scratch") {
+                const project = yield* projects.get(recoveryProjectId);
+                if (Option.isNone(project) || project.value.workspaceRoot !== record.scratchRoot)
+                  return yield* failure(
+                    "protected",
+                    "Map this recovery to a project in the original repository.",
+                  );
+              }
               yield* registry.put(pending, record).pipe(
                 Effect.catchIf(
                   (error) => error.operation === "ownership-changed",
