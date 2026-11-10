@@ -11,6 +11,9 @@ const generatedToolDirectories = [
   ".vite-hooks",
   "dist",
   "dist-electron",
+  "target",
+  "build",
+  "_build",
   ".astro",
   ".tanstack",
 ];
