@@ -75,6 +75,51 @@ it("starts a conservative first-observation clock, never adopts mtimes or compil
   assert.isFalse(generatedBuildReviewProtection(cwd, "node_modules"));
 });
 
+it.each(["observe", "rebuild"] as const)(
+  "stale compiler observations retain no consent across another identity change (%s)",
+  (operation) => {
+    const { cwd, metadata, output, receipt } = fixture();
+    const compiler = createGeneratedBuildStage(cwd, root)!;
+    NodeFS.writeFileSync(NodePath.join(compiler.directory, "owned.js"), "prior compiler output");
+    compiler.publish(100);
+    const recordPath = NodePath.join(
+      metadata,
+      NodeFS.readdirSync(metadata).find(
+        (name) => name.startsWith("t3-build-") && name.endsWith(".json"),
+      )!,
+    );
+    const record = JSON.parse(NodeFS.readFileSync(recordPath, "utf8"));
+    const stat = NodeFS.lstatSync(cwd);
+    record.worktreeIdentity = `${cwd}:${JSON.stringify([stat.dev + 1, stat.ino, stat.birthtimeMs])}`;
+    NodeFS.writeFileSync(recordPath, JSON.stringify(record));
+    const observation = observeLegacyBuild(cwd, root, 200)!;
+    assert.isFalse(generatedBuildReviewProtection(cwd));
+
+    const reviewPath = receipt();
+    const review = JSON.parse(NodeFS.readFileSync(reviewPath, "utf8"));
+    review.worktreeIdentity = `${cwd}:${JSON.stringify([stat.dev + 2, stat.ino, stat.birthtimeMs])}`;
+    NodeFS.writeFileSync(reviewPath, JSON.stringify(review));
+    assert.isFalse(generatedBuildReviewProtection(cwd));
+    assert.isNull(legacyBuildActivity(cwd, root));
+    if (operation === "observe") {
+      const refreshed = observeLegacyBuild(cwd, root, 300)!;
+      assert.equal(refreshed.lastUsedAt, 300);
+      assert.notEqual(refreshed.token, observation.token);
+      assert.isFalse(refreshed.hasSelection);
+    }
+    const rebuilt = createGeneratedBuildStage(cwd, root)!;
+    NodeFS.writeFileSync(NodePath.join(rebuilt.directory, "fresh.js"), "fresh compiler output");
+    rebuilt.publish(400);
+    const owned = inspectGeneratedBuildOwnership(cwd, root)!;
+    assert.equal(removeGeneratedBuildFiles(cwd, root, owned.token, ["fresh.js"]).files, 1);
+    assert.equal(
+      NodeFS.readFileSync(NodePath.join(output, "owned.js"), "utf8"),
+      "prior compiler output",
+    );
+    assert.isFalse(generatedBuildReviewProtection(cwd));
+  },
+);
+
 it("removes only unchanged selected files once and preserves changed, recreated, new and unselected files", async () => {
   const { cwd, emit, output, approve } = fixture();
   emit("edited.js");
@@ -179,6 +224,10 @@ it("malformed, unreadable and mismatched markers fail closed without any survivi
     valid.replace(/"worktreeIdentity":"[^"]+"/, '"worktreeIdentity":"replacement"'),
   );
   assert.isTrue(generatedBuildReviewProtection(cwd, "node_modules"));
+  const stale = JSON.parse(valid);
+  stale.worktreeIdentity = stale.worktreeIdentity.replace(cwd, `${cwd}-prior`);
+  NodeFS.writeFileSync(path, JSON.stringify(stale));
+  assert.isTrue(generatedBuildReviewProtection(cwd));
 });
 
 it("context changes and positive actual use revoke authority while preview/save do not renew age", async () => {

@@ -116,6 +116,15 @@ it.each(["absent", "device", "inode", "birthtime", "path"] as const)(
         () => removeGeneratedBuildFiles(cwd, root, previous.token, ["same.js"]),
         "ownership changed",
       );
+      const changed = createGeneratedBuildStage(cwd, root)!;
+      emit(changed.directory, "same.js", "changed compiler emission");
+      assert.throws(() => changed.publish(75), "requires file review");
+      changed.discard();
+      assert.equal(
+        NodeFS.readFileSync(NodePath.join(cwd, root, "same.js"), "utf8"),
+        "same emission",
+      );
+      assert.equal(NodeFS.readFileSync(recordPath, "utf8"), stale);
     }
     emit(NodePath.join(cwd, root), "same.js", "same emission");
     emit(NodePath.join(cwd, root), "notes.js", "unknown addition");
@@ -228,7 +237,20 @@ it("positive compiled-output use renews tokens, while malformed provenance is ne
   )!;
   const recordPath = NodePath.join(metadata, record);
   const malformed = JSON.parse(NodeFS.readFileSync(recordPath, "utf8"));
-  malformed.worktreeIdentity = `${cwd}:stale`;
+  for (const identity of [
+    "not-an-identity",
+    `${cwd}:[1,2]`,
+    `${cwd}:[1,"2",3]`,
+    `${cwd}:[1,2,null]`,
+    `${cwd}:[1,2,3,4]`,
+    "relative:[1,2,3]",
+  ]) {
+    const invalid = JSON.stringify({ ...malformed, worktreeIdentity: identity });
+    NodeFS.writeFileSync(recordPath, invalid);
+    assert.throws(() => createGeneratedBuildStage(cwd, root), "Invalid build ownership record");
+    assert.equal(NodeFS.readFileSync(recordPath, "utf8"), invalid);
+  }
+  malformed.worktreeIdentity = malformed.worktreeIdentity.replace(cwd, `${cwd}-prior`);
   malformed.files[0].path = "../retained";
   const invalid = JSON.stringify(malformed);
   NodeFS.writeFileSync(recordPath, invalid);
