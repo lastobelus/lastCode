@@ -1,7 +1,10 @@
+/* oxlint-disable t3code/no-global-process-runtime -- Vite loads task definitions before an Effect runtime exists. */
 // @effect-diagnostics nodeBuiltinImport:off - Vite loads this before dependency installation and service initialization.
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
+
+import { acquirePortableLock } from "../lastcode-lock.mjs";
 
 interface CachedTestTask {
   command: string;
@@ -11,8 +14,62 @@ interface CachedTestTask {
     | false
     | {
         input: Array<string | { auto: true }>;
+        env?: Array<string>;
         output: Array<string>;
       };
+}
+
+export function cacheSummaryPaths(cacheRoot: string) {
+  return NodeFS.existsSync(cacheRoot)
+    ? NodeFS.readdirSync(cacheRoot, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => NodePath.join(cacheRoot, entry.name, "last-summary.json"))
+        .filter((file) => NodeFS.existsSync(file))
+    : [];
+}
+
+export function isolateAdvisoryCache(cacheRoot: string) {
+  // Keep the launcher lease through receipt generation and worker leases through summary writes.
+  const release = acquirePortableLock(cacheRoot, "advisory.lock", "advisory cache");
+  try {
+    const releaseWorker = acquirePortableLock(
+      cacheRoot,
+      "advisory-worker.lock",
+      "advisory cache worker",
+    );
+    try {
+      const token = NodeCrypto.randomUUID();
+      NodeFS.writeFileSync(NodePath.join(cacheRoot, "advisory-run.json"), JSON.stringify(token));
+      for (const file of cacheSummaryPaths(cacheRoot)) NodeFS.unlinkSync(file);
+      return Object.assign(release, { token });
+    } finally {
+      releaseWorker();
+    }
+  } catch (error) {
+    release();
+    throw error;
+  }
+}
+
+if (import.meta.main) {
+  const [cacheRoot, token] = process.argv.slice(2);
+  if (!cacheRoot || !token) throw new Error("Missing advisory worker lease");
+  const release = acquirePortableLock(cacheRoot, "advisory-worker.lock", "advisory cache worker");
+  process.on("exit", release);
+  if (
+    JSON.parse(NodeFS.readFileSync(NodePath.join(cacheRoot, "advisory-run.json"), "utf8")) !== token
+  ) {
+    throw new Error("Advisory worker belongs to a superseded run");
+  }
+  process.argv.splice(2, 2);
+  // Load Vite+ in this process: spawning another wrapper would leave the writer unprotected.
+  await import("vite-plus/bin");
+}
+
+export function advisoryRuntimeIdentity(versions = process.versions) {
+  return NodeCrypto.createHash("sha256")
+    .update(JSON.stringify([process.platform, process.arch, process.execPath, versions]))
+    .digest("hex");
 }
 
 export function matchesTestPath(file: string, filters: Array<string>) {
@@ -39,6 +96,13 @@ export function cachedTestTasks(
     request.groupSize < 1
   ) {
     throw new Error("Invalid cached test request");
+  }
+  const advisoryRuntime = "advisoryRuntime" in request ? request.advisoryRuntime : undefined;
+  if (
+    advisoryRuntime !== undefined &&
+    (typeof advisoryRuntime !== "string" || !/^[a-f0-9]{64}$/.test(advisoryRuntime))
+  ) {
+    throw new Error("Invalid advisory runtime identity");
   }
   const uncached = "uncached" in request ? request.uncached : [];
   if (!Array.isArray(uncached) || !uncached.every((file) => typeof file === "string")) {
@@ -95,11 +159,12 @@ export function cachedTestTasks(
     for (const group of groups) {
       const key = NodeCrypto.createHash("sha256").update(group.join("\0")).digest("hex");
       tasks[`test-cache:${key}`] = {
-        command: `${command} ${group.map((file) => `'${NodePath.relative(directory, NodePath.join(root, file)).replaceAll("'", "'\"'\"'")}'`).join(" ")}`,
+        command: `${advisoryRuntime ? `env T3_ADVISORY_RUNTIME=${advisoryRuntime} ` : ""}${command} ${group.map((file) => `'${NodePath.relative(directory, NodePath.join(root, file)).replaceAll("'", "'\"'\"'")}'`).join(" ")}`,
         ...(directory === root ? {} : { cwd: NodePath.relative(root, directory) }),
         cache: uncached.includes(group[0]!)
           ? false
           : {
+              ...(advisoryRuntime ? { env: ["*", "!T3_CACHED_TESTS"] } : {}),
               // Vitest reads and rewrites these caches while running otherwise unchanged tests.
               input: [
                 { auto: true },

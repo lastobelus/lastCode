@@ -6,12 +6,14 @@ import { cn } from "~/lib/utils";
 
 type TextareaProps = React.ComponentProps<"textarea"> & {
   size?: "sm" | "default" | "lg" | number;
+  variant?: "default" | "code";
   unstyled?: boolean;
 };
 
 function Textarea({
   className,
   size = "default",
+  variant = "default",
   unstyled = false,
   rows,
   ...props
@@ -38,6 +40,7 @@ function Textarea({
               size === "sm" && rows === undefined && "min-h-16.5 max-sm:min-h-19.5",
               size === "lg" && "py-[calc(--spacing(2)-1px)]",
               size === "lg" && rows === undefined && "min-h-18.5 max-sm:min-h-21.5",
+              variant === "code" && "font-mono text-sm",
             )}
             // field-sizing: content ignores `rows`, so an explicit row count sets the minimum height.
             style={
