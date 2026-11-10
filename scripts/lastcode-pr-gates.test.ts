@@ -755,6 +755,154 @@ describe("lastcode-pr-gates", () => {
     expect(review.terminalArtifacts).toEqual([]);
   });
 
+  describe("automatic Codex summaries", () => {
+    const summaryBody = (overrides = {}) =>
+      `<!-- codex-pull-request-review-summary -->
+<!-- codex-review-state:v1 ${JSON.stringify({
+        code_review: {
+          commit_sha: HEAD,
+          has_any_findings: false,
+          has_unresolved_findings: false,
+          status: "completed",
+          ...overrides,
+        },
+        security_review: { commit_sha: null, status: null },
+      })} -->`;
+    const summary = {
+      id: 60,
+      user: { login: "chatgpt-codex-connector[bot]" },
+      body: summaryBody(),
+      created_at: "2026-08-24T09:00:00Z",
+      updated_at: "2026-08-24T10:03:00Z",
+    };
+    const request = {
+      id: 61,
+      user: { login: "maintainer" },
+      author_association: "OWNER",
+      body: reviewRequest(),
+      created_at: "2026-08-24T10:00:00Z",
+    };
+
+    it.each([
+      { name: "clean exact head", overrides: {}, present: true, ready: true },
+      { name: "findings", overrides: { has_any_findings: true }, present: true, ready: false },
+      {
+        name: "unresolved findings",
+        overrides: { has_unresolved_findings: true },
+        present: true,
+        ready: false,
+      },
+      { name: "stale head", overrides: { commit_sha: BASE }, present: false, ready: false },
+      {
+        name: "abbreviated head",
+        overrides: { commit_sha: HEAD.slice(0, 10) },
+        present: false,
+        ready: false,
+      },
+      { name: "running", overrides: { status: "running" }, present: false, ready: false },
+      {
+        name: "unknown findings",
+        overrides: { has_any_findings: null },
+        present: false,
+        ready: false,
+      },
+    ])("recognizes $name", ({ overrides, present, ready }) => {
+      const review = deriveReviewState({
+        headSha: HEAD,
+        formalReviews: [],
+        reviewComments: [],
+        latestTriggerReactions: [],
+        issueComments: [{ ...summary, body: summaryBody(overrides) }],
+      });
+      expect(review).toMatchObject({ requestPresent: present, pending: false, ready });
+      expect(review.terminalArtifacts).toHaveLength(present ? 1 : 0);
+    });
+
+    it.each(["outsider", "another-reviewer[bot]"])("ignores metadata from %s", (login) => {
+      expect(
+        deriveReviewState({
+          headSha: HEAD,
+          formalReviews: [],
+          reviewComments: [],
+          latestTriggerReactions: [],
+          issueComments: [{ ...summary, user: { login } }],
+        }),
+      ).toMatchObject({ requestPresent: false, ready: false });
+    });
+
+    it.each([
+      {
+        name: "manual request before unrelated summary edit",
+        comments: [request],
+        pending: true,
+        ready: true,
+      },
+      {
+        name: "newer manual request",
+        comments: [{ ...request, created_at: "2026-08-24T10:04:00Z" }],
+        pending: true,
+        ready: true,
+      },
+      {
+        name: "manual finding",
+        comments: [
+          {
+            ...summary,
+            id: 62,
+            body: `Codex Review: A finding.\n\n**Reviewed commit:** \`${HEAD}\``,
+            created_at: "2026-08-24T10:02:00Z",
+          },
+        ],
+        pending: false,
+        ready: false,
+      },
+    ])("combines summary with $name", ({ comments, pending, ready }) => {
+      expect(
+        deriveReviewState({
+          headSha: HEAD,
+          formalReviews: [],
+          reviewComments: [],
+          latestTriggerReactions: [],
+          issueComments: [summary, ...comments],
+        }),
+      ).toMatchObject({ requestPresent: true, pending, ready });
+    });
+
+    it("does not reuse handling when a summary is edited with new findings", () => {
+      expect(
+        deriveReviewState({
+          headSha: HEAD,
+          formalReviews: [],
+          reviewComments: [],
+          latestTriggerReactions: [],
+          issueComments: [
+            { ...summary, body: summaryBody({ has_any_findings: true }) },
+            { ...request, body: `<!-- lastcode-review-handled: comment:60 head: ${HEAD} -->` },
+          ],
+        }),
+      ).toMatchObject({ pending: false, ready: false });
+    });
+
+    it("lets a maintainer handle automatic findings using the existing marker", () => {
+      expect(
+        deriveReviewState({
+          headSha: HEAD,
+          formalReviews: [],
+          reviewComments: [],
+          latestTriggerReactions: [],
+          issueComments: [
+            { ...summary, body: summaryBody({ has_any_findings: true }) },
+            {
+              ...request,
+              created_at: "2026-08-24T10:04:00Z",
+              body: `<!-- lastcode-review-handled: comment:60 head: ${HEAD} -->`,
+            },
+          ],
+        }),
+      ).toMatchObject({ pending: false, ready: true });
+    });
+  });
+
   describe("versioned Codex review receipts", () => {
     const marker = "<!-- codex-review-receipt:v1 -->";
     const cleanBody = (head = HEAD): string =>
