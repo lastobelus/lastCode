@@ -1,5 +1,6 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- FileSystem.copyFile cannot request an exclusive copy.
 import * as NodeFSP from "node:fs/promises";
+import { parseThreadLinkHref } from "@t3tools/shared/threadLinks";
 import * as NodeZlib from "node:zlib";
 import {
   DesktopPreviewAnnotationVoiceEventSchema,
@@ -14,7 +15,6 @@ import type {
   DesktopPreviewFavicon,
   DesktopPreviewOpenLinkEvent,
   DesktopPreviewPointerEvent,
-  PreviewAnnotationPayload,
   PreviewAnnotationRect,
   PreviewAnnotationSubmissionResult,
   DesktopPreviewRecordingArtifact,
@@ -69,7 +69,9 @@ import {
 } from "../ipc/channels.ts";
 import * as DesktopBrowserHost from "./DesktopBrowserHost.ts";
 import * as PreviewPasskeys from "./Passkeys.ts";
+import { captureAnnotationImage } from "./AnnotationScreenshot.ts";
 import * as BrowserSession from "./BrowserSession.ts";
+import * as BrowserRootWindow from "./BrowserRootWindow.ts";
 import {
   ANNOTATION_CAPTURED_CHANNEL,
   ANNOTATION_SEND_ENABLED_CHANNEL,
@@ -116,7 +118,11 @@ export interface PreviewTabState {
   controller: "human" | "agent" | "none";
   capturing: boolean;
   favicon?: DesktopPreviewFavicon;
-  serverTab?: { readonly threadId: string; readonly tabId: string };
+  serverTab?: {
+    readonly threadId: string;
+    readonly tabId: string;
+    readonly desktopHostId?: string | undefined;
+  };
   updatedAt: string;
 }
 
@@ -133,6 +139,9 @@ const PICTURE_IN_PICTURE_JPEG_QUALITY = 80;
 const CAPTURE_PAGE_RETRY_ATTEMPTS = 3;
 const CAPTURE_PAGE_RETRY_DELAY_MS = 120;
 const CAPTURE_PAGE_ATTEMPT_TIMEOUT_MS = 1_000;
+// Opening a session holds the session map's lock; a closing guest can leave CDP unanswered.
+// Giving up costs one guest its automation session; never giving up blocked every tab.
+const CONTROL_SESSION_INIT_TIMEOUT_MS = 30_000;
 const PICTURE_IN_PICTURE_INITIAL_WIDTH = 480;
 const PICTURE_IN_PICTURE_INITIAL_HEIGHT = 320;
 const PICTURE_IN_PICTURE_MIN_WIDTH = 240;
@@ -274,58 +283,6 @@ const normalizeCaptureRect = (value: unknown): PreviewAnnotationRect | null => {
     return null;
   }
   return { x, y, width, height };
-};
-
-// capturePage returns a 1x NativeImage containing device pixels, so crop() uses
-// CSS coordinates scaled by the guest's devicePixelRatio (including page zoom).
-const cropAnnotationScreenshot = (
-  image: Electron.NativeImage,
-  cropRect: PreviewAnnotationRect | null,
-  devicePixelRatio: number,
-  targetRects: ReadonlyArray<PreviewAnnotationRect>,
-): PreviewAnnotationPayload["screenshot"] => {
-  const full = image.getSize();
-  if (full.width <= 0 || full.height <= 0) return null;
-  const scale = Number.isFinite(devicePixelRatio) && devicePixelRatio > 0 ? devicePixelRatio : 1;
-  // Padding or a union of offscreen targets can overlap an empty viewport area.
-  // A zero-width/height SVG line can still paint at the top or left edge.
-  if (
-    targetRects.length > 0 &&
-    !targetRects.some(
-      (rect) =>
-        (rect.width > 0 || rect.height > 0) &&
-        rect.x * scale < full.width &&
-        rect.y * scale < full.height &&
-        (rect.width === 0 ? rect.x >= 0 : rect.x + rect.width > 0) &&
-        (rect.height === 0 ? rect.y >= 0 : rect.y + rect.height > 0),
-    )
-  ) {
-    return null;
-  }
-  if (!cropRect) {
-    return {
-      dataUrl: image.toDataURL(),
-      width: full.width,
-      height: full.height,
-      cropRect: { x: 0, y: 0, width: full.width, height: full.height },
-    };
-  }
-  const x = Math.max(0, Math.floor(cropRect.x * scale));
-  const y = Math.max(0, Math.floor(cropRect.y * scale));
-  const right = Math.min(full.width, Math.ceil((cropRect.x + cropRect.width) * scale));
-  const bottom = Math.min(full.height, Math.ceil((cropRect.y + cropRect.height) * scale));
-  // A target scrolled out of view has no pixels in this capture. Clamping its
-  // origin onto the edge would attach an unrelated strip as a successful crop.
-  if (right <= x || bottom <= y) return null;
-  const cropped = image.crop({
-    x,
-    y,
-    width: right - x,
-    height: bottom - y,
-  });
-  const size = cropped.getSize();
-  if (size.width <= 0 || size.height <= 0) return null;
-  return { dataUrl: cropped.toDataURL(), width: size.width, height: size.height, cropRect };
 };
 
 // An invalid color space skips costly P3-to-sRGB conversion; fingerprints need no color accuracy.
@@ -471,6 +428,7 @@ export const previewWindowOpenAction = (details: {
   readonly postBody?: Electron.PostBody;
 }): "popup" | "new-tab" | "navigate" | "deny" => {
   const protocol = URL.parse(details.url)?.protocol;
+  if (parseThreadLinkHref(details.url)) return protocol === "https:" ? "popup" : "deny";
   // MSAL redirects on a denied blank popup; navigating the tab would destroy that fallback.
   if (protocol === undefined || IN_PLACE_DENIED_PROTOCOLS.has(protocol)) return "deny";
   if (!POPUP_PROTOCOLS.has(protocol)) return "navigate";
@@ -598,10 +556,11 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       try: evaluate,
       catch: (cause) => new PreviewOperationError({ ...errorContext, cause }),
     });
-  const capturePageWithRetry = Effect.fn("PreviewManager.capturePageWithRetry")(function* (
+  const captureWithRetry = Effect.fn("PreviewManager.captureWithRetry")(function* <A>(
     errorContext: PreviewOperationContext,
     tabId: string,
     wc: Electron.WebContents,
+    captureImage: () => Promise<A>,
   ) {
     const requireCurrentGuest = Effect.gen(function* () {
       const tabs = yield* SynchronizedRef.get(tabsRef);
@@ -612,7 +571,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     const capture = Effect.gen(function* () {
       yield* requireCurrentGuest;
       const image = yield* Effect.tryPromise({
-        try: (_signal) => wc.capturePage(),
+        try: (_signal) => captureImage(),
         catch: (cause) => new PreviewOperationError({ ...errorContext, cause }),
       }).pipe(
         Effect.timeout(CAPTURE_PAGE_ATTEMPT_TIMEOUT_MS),
@@ -1009,7 +968,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
 
   // Closes a session already removed from `controlSessionsRef`. The server can
   // only drive a tab while the desktop holds its debugger.
-  const releaseControlSession = Effect.fnUntraced(function* (
+  const releaseControlSession = Effect.fn("PreviewManager.releaseControlSession")(function* (
     control: BrowserControlSession,
     closedServerTab?: PreviewTabState["serverTab"],
   ) {
@@ -1134,12 +1093,20 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
               wcDebugger.attach("1.3");
             });
             // Set an opaque base before first paint or background-less dark pages retain white-on-white text.
-            yield* attemptPromise(
-              { operation: "initializeDebugger.defaultBackground", webContentsId: wc.id },
-              () =>
-                wcDebugger.sendCommand("Emulation.setDefaultBackgroundColorOverride", {
-                  color: { r: 255, g: 255, b: 255, a: 1 },
-                }),
+            const defaultBackground = {
+              operation: "initializeDebugger.defaultBackground",
+              webContentsId: wc.id,
+            };
+            yield* attemptPromise(defaultBackground, () =>
+              wcDebugger.sendCommand("Emulation.setDefaultBackgroundColorOverride", {
+                color: { r: 255, g: 255, b: 255, a: 1 },
+              }),
+            ).pipe(
+              Effect.timeout(CONTROL_SESSION_INIT_TIMEOUT_MS),
+              Effect.catchTags({
+                TimeoutError: (cause) =>
+                  Effect.fail(new PreviewOperationError({ ...defaultBackground, cause })),
+              }),
             );
             return [
               control,
@@ -1222,15 +1189,16 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         if (!current || current.webContentsId !== wc.id || webContents.fromId(wc.id) !== wc) {
           return [Option.none<PreviewTabState>(), tabs] as const;
         }
-        // did-stop-loading follows did-fail-load without proving successful navigation.
+        // Electron can commit its error document after did-fail-load, then emit
+        // navigation, stop and title updates without a successful retry. Keep
+        // the failure until a new main-frame navigation actually starts.
         const navStatus =
-          preserveLoadFailure &&
-          current.navStatus.kind === "LoadFailed" &&
-          computedNavStatus.kind === "Success"
+          preserveLoadFailure && current.navStatus.kind === "LoadFailed"
             ? current.navStatus
             : computedNavStatus;
         const clearFavicon =
           confirmedNavigation &&
+          navStatus.kind !== "LoadFailed" &&
           current.favicon !== undefined &&
           safeHttpOrigin(current.favicon.pageUrl) !==
             safeHttpOrigin(navStatus.kind === "Idle" ? wc.getURL() : navStatus.url);
@@ -1253,8 +1221,8 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       if (Option.isSome(next)) yield* emitIfCurrent(tabId, next.value);
     });
     const sync = () => runFork(syncState(true));
-    const syncNavigation = () => runFork(syncState(false, true));
-    const syncInPageNavigation = () => runFork(syncState(false));
+    const syncNavigation = () => runFork(syncState(true, true));
+    const syncInPageNavigation = () => runFork(syncState(true));
     const restoreRecordingCursor = () =>
       runFork(
         Effect.gen(function* () {
@@ -1273,7 +1241,10 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     const navigationStarted = (
       event: Electron.Event<Electron.WebContentsDidStartNavigationEventParams>,
     ) => {
-      if (event.isMainFrame && !event.isSameDocument) cancelFaviconCapture();
+      if (event.isMainFrame && !event.isSameDocument) {
+        cancelFaviconCapture();
+        runFork(syncState(false));
+      }
     };
     const audioStateChanged = (
       event: Electron.Event<Electron.WebContentsAudioStateChangedEventParams>,
@@ -1454,7 +1425,10 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       );
     };
     // Popups inherit Electron's unrestricted window handler; block nested popups to bound the chain.
-    const windowCreated = (window: Electron.BrowserWindow): void => {
+    const windowCreated = (
+      window: Electron.BrowserWindow,
+      details: Electron.DidCreateWindowDetails,
+    ): void => {
       window.webContents.setIgnoreMenuShortcuts(true);
       window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
       window.webContents.on("before-input-event", (_event, input) => {
@@ -1465,7 +1439,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
           Effect.map((tabs) => {
             const tab = tabs.get(tabId);
             if (tab?.webContentsId === wc.id && tab.serverTab)
-              browserHost.registerPopup(tab.serverTab, window);
+              browserHost.registerPopup(tab.serverTab, window, details.url);
           }),
         ),
       );
@@ -1538,6 +1512,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         wc.off("dom-ready", restoreRecordingCursor);
         wc.off("did-fail-load", failed as never);
         wc.off("audio-state-changed", audioStateChanged);
+        wc.off("will-frame-navigate", threadLinkNavigation);
         wc.off("did-create-window", windowCreated);
         wc.off("before-input-event", beforeInput);
         wc.ipc.off(HUMAN_INPUT_CHANNEL, humanInput);
@@ -1546,6 +1521,12 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         detachPasskeys();
       }).pipe(Effect.ignore),
     );
+    const threadLinkNavigation = (
+      event: Electron.Event<Electron.WebContentsWillFrameNavigateEventParams>,
+    ) => {
+      // CDP resumes hosted URLs with a programmatic load when app navigation is declined.
+      if (event.isMainFrame && parseThreadLinkHref(event.url)) event.preventDefault();
+    };
     const install = Effect.fn("PreviewManager.installWebContentsListeners")(function* () {
       yield* attempt({ operation: "attachListeners", tabId, webContentsId: wc.id }, () => {
         wc.setIgnoreMenuShortcuts(true);
@@ -1563,6 +1544,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         wc.ipc.on(RECORDING_INPUT_CHANNEL, recordingInput);
         wc.ipc.on(MOUSE_NAVIGATE_CHANNEL, mouseNavigate);
         detachPasskeys = passkeys.attachGuest(wc);
+        wc.on("will-frame-navigate", threadLinkNavigation);
         wc.setWindowOpenHandler((details) => {
           const action = previewWindowOpenAction(details);
           if (action === "popup") {
@@ -2207,37 +2189,39 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
           const cropRect = normalizeCaptureRect(args[1]);
           const submission =
             args[2] === "send" && annotationSendEnabled.get(tabId) === true ? "send" : "attach";
-          const devicePixelRatio = typeof args[3] === "number" ? args[3] : 1;
           const targetRects = [
             ...payload.elements.map((target) => target.rect),
             ...payload.regions.map((target) => target.rect),
             ...payload.strokes.map((target) => target.bounds),
           ];
           runFork(
-            capturePageWithRetry(
+            // Capture the full surface with bounded retries, then map and clip
+            // the CSS crop against the actual image and viewport dimensions.
+            captureWithRetry(
               { operation: "captureAnnotationScreenshot", tabId, webContentsId: wc.id },
               tabId,
               wc,
+              () => captureAnnotationImage(wc, cropRect, targetRects),
             ).pipe(
-              Effect.map((image) =>
-                cropAnnotationScreenshot(image, cropRect, devicePixelRatio, targetRects),
-              ),
               Effect.tapError((error) =>
                 Effect.logWarning("preview annotation screenshot failed").pipe(
                   Effect.annotateLogs({ tabId, webContentsId: wc.id, error: error.message }),
                 ),
               ),
               Effect.withSpan("PreviewManager.captureAnnotationScreenshot"),
+              // Preserve the annotation when capture fails, and tell the
+              // renderer why its screenshot is missing.
               Effect.match({
                 onFailure: (): PreviewAnnotationSubmissionResult => ({
                   annotation: payload,
                   submission,
                   screenshotFailed: true,
                 }),
-                onSuccess: (screenshot): PreviewAnnotationSubmissionResult =>
-                  screenshot === null
-                    ? { annotation: payload, submission, screenshotFailed: true }
-                    : { annotation: { ...payload, screenshot }, submission },
+                onSuccess: (screenshot): PreviewAnnotationSubmissionResult => ({
+                  annotation: { ...payload, screenshot },
+                  submission,
+                  ...(screenshot === null ? { screenshotFailed: true } : {}),
+                }),
               }),
               Effect.flatMap((result) => {
                 // Late captures must not signal an overlay that may now belong to a newer pick.
@@ -2411,7 +2395,8 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       );
       if (!removed) return;
       yield* releaseControlSession(detached);
-      if (wc.isDestroyed()) return;
+      // Closing the window detaches every guest's debugger; re-attaching then only stalls teardown.
+      if (wc.isDestroyed() || wc.hostWebContents?.isDestroyed() !== false) return;
       const tabId = yield* tabIdForWebContents(wc.id);
       if (tabId === null) return;
       yield* restoreControlSession(tabId, wc);
@@ -2487,7 +2472,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     const [createdAt, millis, image] = yield* Effect.all([
       currentIso,
       currentMillis,
-      capturePageWithRetry(
+      captureWithRetry(
         {
           operation: "captureScreenshot.capturePage",
           tabId,
@@ -2495,6 +2480,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         },
         tabId,
         wc,
+        () => wc.capturePage(),
       ),
     ]);
     const uuid = yield* random.uuidV4();
@@ -3287,7 +3273,11 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
 
   let pointerSequence = 0;
   const emitAgentPointer = Effect.fn("PreviewManager.emitAgentPointer")(function* (pointer: {
-    readonly key: { readonly threadId: string; readonly tabId: string };
+    readonly key: {
+      readonly threadId: string;
+      readonly tabId: string;
+      readonly desktopHostId?: string | undefined;
+    };
     readonly phase: "move" | "click";
     readonly x: number;
     readonly y: number;
@@ -3295,7 +3285,8 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     const tab = [...(yield* SynchronizedRef.get(tabsRef)).values()].find(
       (candidate) =>
         candidate.serverTab?.threadId === pointer.key.threadId &&
-        candidate.serverTab.tabId === pointer.key.tabId,
+        candidate.serverTab.tabId === pointer.key.tabId &&
+        (candidate.serverTab.desktopHostId ?? "local") === (pointer.key.desktopHostId ?? "local"),
     );
     if (!tab) return;
     const event: DesktopPreviewPointerEvent = {
@@ -3323,13 +3314,19 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   });
   const updateServerTabCapturing = Effect.fn("PreviewManager.updateServerTabCapturing")(
     function* (painting: {
-      readonly key: { readonly threadId: string; readonly tabId: string };
+      readonly key: {
+        readonly threadId: string;
+        readonly tabId: string;
+        readonly desktopHostId?: string | undefined;
+      };
       readonly active: boolean;
     }) {
       const tab = [...(yield* SynchronizedRef.get(tabsRef)).values()].find(
         (candidate) =>
           candidate.serverTab?.threadId === painting.key.threadId &&
-          candidate.serverTab.tabId === painting.key.tabId,
+          candidate.serverTab.tabId === painting.key.tabId &&
+          (candidate.serverTab.desktopHostId ?? "local") ===
+            (painting.key.desktopHostId ?? "local"),
       );
       if (tab && tab.capturing !== painting.active) {
         yield* update(tab.tabId, { capturing: painting.active });
@@ -3739,6 +3736,15 @@ export const make = Effect.gen(function* PreviewManagerMake() {
       });
     });
   };
+  browserHost.setRootFactory((input) =>
+    BrowserRootWindow.create(browserSession, input, input.partition).pipe(
+      Effect.tap((window) =>
+        Effect.sync(() => placeServerDownloads(window.webContents.session)).pipe(
+          Effect.onError(() => Effect.sync(() => window.destroy())),
+        ),
+      ),
+    ),
+  );
 
   const operations = yield* makeNativeOperations(
     environment.browserArtifactsDir,

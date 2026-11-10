@@ -2,6 +2,7 @@ import { threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
 import type { ToolCallDiffTarget } from "../../diffPanelStore";
 import { AudioPreviewUnmountContext } from "../files/AudioPreview";
+import type { ThreadAnnotation } from "@t3tools/contracts";
 import { ThreadFindTimelineContext } from "./ThreadFindProvider";
 import { MarkdownFindContext } from "./markdownFindContext";
 import { useChatCanvas } from "./ChatCanvasContext";
@@ -221,6 +222,11 @@ interface MessagesTimelineProps {
   respondingRequestIds?: TimelineRowSharedState["respondingRequestIds"];
   canOperateThread?: boolean;
   onRespondToApproval?: TimelineRowSharedState["onRespondToApproval"];
+  annotation?: ThreadAnnotation | null;
+  onAnnotationEdit?: (annotationId?: string) => void;
+  onAnnotationBodyChange?: (body: string, annotationId?: string) => Promise<boolean>;
+  onAnnotationResolve?: (annotationId?: string) => void;
+  onAnnotationReopen?: (annotationId?: string) => void;
   citationRequest?: AssistantCitationRequest | null;
   citationHistory?: CitedHistory;
   onCiteAssistantText?: (
@@ -337,6 +343,11 @@ const ConversationTimeline = memo(function ConversationTimeline({
   respondingRequestIds = EMPTY_RESPONDING_REQUEST_IDS,
   canOperateThread = false,
   onRespondToApproval,
+  annotation = null,
+  onAnnotationEdit,
+  onAnnotationBodyChange,
+  onAnnotationResolve,
+  onAnnotationReopen,
   citationRequest = null,
   citationHistory = CITED_HISTORY_LOADING,
   onCiteAssistantText,
@@ -519,7 +530,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   };
 
   const onToggleActionFollowUp = (rowId: string) => {
-    suspendEndScrollMaintenanceForDisclosure(rowId);
+    preserveDisclosurePosition(rowId);
     setExpandedActionMessageIds((existing) => {
       const next = new Set(existing);
       if (next.has(rowId)) {
@@ -1126,6 +1137,12 @@ const ConversationTimeline = memo(function ConversationTimeline({
   const setTimelineList = useStableCallback((list: LegendListRef | null) => {
     listRef.current = list;
     const scrollNode: HTMLElement | null = list?.getScrollableNode() ?? null;
+    if (scrollNode) {
+      const area = scrollNode.closest('[data-workspace-area="conversation"]');
+      if (area && scrollNode.ownerDocument.activeElement === area) {
+        scrollNode.focus({ preventScroll: true });
+      }
+    }
     registerTimeline?.(scrollNode);
     const viewport = scrollNode ? attachTimelineViewport(scrollNode) : null;
     viewportRef.current = viewport;
@@ -1343,6 +1360,9 @@ const ConversationTimeline = memo(function ConversationTimeline({
               maintainScrollAtEndThreshold={1}
               onScroll={handleScroll}
               onItemSizeChanged={scheduleMinimapRefresh}
+              // Keyboard scrolling only moves the focused element; F6 and clicks land here.
+              tabIndex={-1}
+              data-workspace-focus-default
               className={cn(
                 "messages-timeline-scroll scrollbar-gutter-both h-full min-h-0 overflow-x-hidden overscroll-y-contain [overflow-anchor:none]",
                 topFadeEnabled && "topbar-scroll-fade",
@@ -1351,6 +1371,13 @@ const ConversationTimeline = memo(function ConversationTimeline({
               ListFooterComponent={timelineListFooter}
             />
             <TimelineMinimap
+              annotation={annotation}
+              threadRef={parseScopedThreadKey(routeThreadKey)}
+              markdownCwd={markdownCwd}
+              onAnnotationEdit={onAnnotationEdit}
+              onAnnotationBodyChange={onAnnotationBodyChange}
+              onAnnotationResolve={onAnnotationResolve}
+              onAnnotationReopen={onAnnotationReopen}
               items={minimapItems}
               hasPersistentGutter={minimapHasPersistentGutter}
               hitStripWidth={minimapHitStripWidth}
@@ -1504,6 +1531,9 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
         <AssistantTimelineRow row={row} />
       ) : null}
       {row.kind === "assistant-meta" ? <AssistantMetaTimelineRow row={row} /> : null}
+      {row.kind === "message" && row.message.role === "system" ? (
+        <SystemTimelineRow row={row} />
+      ) : null}
       {row.kind === "proposed-plan" ? <ProposedPlanTimelineRow row={row} /> : null}
       {row.kind === "html-render" ? <HtmlRenderTimelineRow row={row} /> : null}
       {row.kind === "mcp-app" ? <McpAppTimelineRow row={row} /> : null}

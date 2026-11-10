@@ -1,5 +1,8 @@
 import { useAtomValue } from "@effect/atom-react";
-import { linkRequestFailureMessage } from "@t3tools/client-runtime/link-request";
+import {
+  linkRequestDefaultAccess,
+  linkRequestFailureMessage,
+} from "@t3tools/client-runtime/link-request";
 import {
   AuthAccessWriteScope,
   type AuthMcpClientAccess,
@@ -173,7 +176,7 @@ function LinkEnvironmentAction({ environmentId }: { readonly environmentId: Envi
   const [choice, setChoice] = useState<string | null>(null);
   const [address, setAddress] = useState("");
   const [pairingCode, setPairingCode] = useState("");
-  const [access, setAccess] = useState<AuthMcpClientAccess>("approval-required");
+  const [access, setAccess] = useState<AuthMcpClientAccess>(() => linkRequestDefaultAccess({}));
   const [busy, setBusy] = useState(false);
   // Machines whose minting already failed, so the dialog asks for a code instead.
   const [mintFailed, setMintFailed] = useState<ReadonlySet<EnvironmentId>>(new Set());
@@ -181,6 +184,11 @@ function LinkEnvironmentAction({ environmentId }: { readonly environmentId: Envi
   const inFlight = useRef(false);
   const formId = useId();
   const link = useAtomCommand(peerLinkEnvironment.link, { label: "link environment" });
+  const preflight = useAtomCommand(peerLinkEnvironment.preflight, {
+    label: "check link address",
+    reportFailure: false,
+    reportDefect: false,
+  });
   const selected = choice ?? (machines.length === 0 ? ANOTHER_ADDRESS : null);
   const machine = machines.find((candidate) => candidate.environmentId === selected) ?? null;
   // This client can mint a code there when it is connected to that
@@ -201,7 +209,7 @@ function LinkEnvironmentAction({ environmentId }: { readonly environmentId: Envi
       setChoice(null);
       setAddress("");
       setPairingCode("");
-      setAccess("approval-required");
+      setAccess(linkRequestDefaultAccess({}));
       setMintFailed(new Set());
     }
   };
@@ -220,6 +228,27 @@ function LinkEnvironmentAction({ environmentId }: { readonly environmentId: Envi
     if (inFlight.current || !ready || url === undefined) return;
     inFlight.current = true;
     setBusy(true);
+    const checked = await preflight({
+      environmentId,
+      input: {
+        url,
+        ...(alternateUrls.length > 0 ? { alternateUrls } : {}),
+        ...(machine === null
+          ? {}
+          : { expectedEnvironmentId: machine.environmentId, expectedLabel: machine.label }),
+      },
+    });
+    if (checked._tag === "Failure") {
+      inFlight.current = false;
+      setBusy(false);
+      if (!isAtomCommandInterrupted(checked)) {
+        failureToast(
+          "Could not link the environment",
+          linkRequestFailureMessage(squashAtomCommandFailure(checked)),
+        );
+      }
+      return;
+    }
     const code = await resolvePairingCode();
     const result =
       code === null

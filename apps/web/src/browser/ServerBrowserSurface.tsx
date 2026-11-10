@@ -1,3 +1,4 @@
+import { useOpenBrowserThreadLink } from "./useOpenBrowserThreadLink";
 import {
   createPreviewFramePainter,
   createPreviewStreamClient,
@@ -43,9 +44,9 @@ import { refreshPreviewStreamAccess, usePreviewStreamAccess } from "~/state/prev
 import { observeResize } from "~/lib/observeResize";
 
 export interface ServerBrowserHandle {
-  readonly navigate: (url: string) => void;
+  readonly navigate: (url: string) => boolean;
   readonly history: (delta: -1 | 1) => void;
-  readonly reload: (options?: { readonly ignoreCache?: boolean }) => void;
+  readonly reload: (options?: { readonly ignoreCache?: boolean }) => boolean;
   readonly viewport: (setting: PreviewViewportSetting) => void;
   readonly canvas: () => HTMLCanvasElement | null;
 }
@@ -169,6 +170,18 @@ export function ServerBrowserSurface(props: {
     pdfUrl = null,
     ref,
   } = props;
+  const [documentVisible, setDocumentVisible] = useState(
+    () => document.visibilityState === "visible",
+  );
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Subscribes to document visibility changes so the browser stream follows the mounted document visibility.
+  useEffect(() => {
+    const changed = () => setDocumentVisible(document.visibilityState === "visible");
+    changed();
+    document.addEventListener("visibilitychange", changed);
+    return () => document.removeEventListener("visibilitychange", changed);
+  }, []);
+  const openThreadLink = useOpenBrowserThreadLink();
+  const threadLinkOpened = useEffectEvent((href: string) => openThreadLink(href, environmentId));
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const keySentRef = useRef(false);
@@ -223,7 +236,7 @@ export function ServerBrowserSurface(props: {
 
   // Keep clearInput stable: a new identity reconnects the stream.
   const send = (input: PreviewStreamInput) => {
-    clientRef.current?.send(input);
+    return clientRef.current?.send(input) ?? false;
   };
 
   const clearInput = () => {
@@ -366,7 +379,8 @@ export function ServerBrowserSurface(props: {
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- opens the preview stream client and paints its frames onto the canvas while visible
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!visible || accessDenied || hostSetup || !access || !cap || !canvas) return;
+    if (!visible || !documentVisible || accessDenied || hostSetup || !access || !cap || !canvas)
+      return;
     let refreshTimer: ReturnType<typeof setTimeout> | null = null;
     const painter = createPreviewFramePainter(canvas, () => {
       if (hasFrameRef.current) return;
@@ -376,6 +390,7 @@ export function ServerBrowserSurface(props: {
     const client = createPreviewStreamClient(
       { access, threadId, tabId, maxWidth: cap.width, maxHeight: cap.height },
       {
+        onThreadLink: threadLinkOpened,
         onFrame: (jpeg) => {
           unauthorizedRef.current = 0;
           painter.paint(jpeg);
@@ -461,6 +476,7 @@ export function ServerBrowserSurface(props: {
     cap,
     clearInput,
     environmentId,
+    documentVisible,
     followSize,
     hostSetup,
     tabId,
@@ -761,10 +777,19 @@ export function ServerBrowserSurface(props: {
             size="xs"
             disabled={control.controller === "another-viewer"}
             onClick={() =>
-              send({ type: control.controller === "you" ? "releaseControl" : "takeControl" })
+              send({
+                type:
+                  control.controller === "you" || control.controller === "taking-control"
+                    ? "releaseControl"
+                    : "takeControl",
+              })
             }
           >
-            {control.controller === "you" ? "Release control" : "Take control"}
+            {control.controller === "you"
+              ? "Release control"
+              : control.controller === "taking-control"
+                ? "Cancel"
+                : "Take control"}
           </Button>
         ) : null}
       </div>
@@ -860,7 +885,7 @@ export function ServerBrowserSurface(props: {
             aria-label="Browser dialog"
           >
             <p className="break-words text-sm">{control.dialog.message}</p>
-            {control.controller === "you" ? (
+            {control.controller === "you" || control.controller === "taking-control" ? (
               <>
                 {control.dialog.type === "prompt" ? (
                   <Input

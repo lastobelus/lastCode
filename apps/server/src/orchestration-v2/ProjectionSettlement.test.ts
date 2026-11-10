@@ -1,16 +1,21 @@
 import { assert, it } from "@effect/vitest";
 import {
+  type ActionResumeState,
+  EnvironmentId,
   EventId,
   MessageId,
   NodeId,
   type OrchestrationV2AppThread,
   type OrchestrationV2Run,
   type OrchestrationV2RuntimeRequest,
+  type OrchestrationV2Subagent,
+  type RemoteDelegationAssociation,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderThreadId,
   RunId,
+  RunAttemptId,
   RuntimeRequestId,
   ThreadId,
   TurnItemId,
@@ -18,8 +23,10 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as ActionRunStore from "../actionResume/ActionRunStore.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import {
   isAutoSettlementCandidate,
@@ -27,7 +34,9 @@ import {
   resolveAutoSettlementAt,
 } from "./ThreadSettlementService.ts";
 
-const layerSql = ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory));
+const layerSql = Layer.mergeAll(ProjectionStore.layer, ActionRunStore.layer).pipe(
+  Layer.provideMerge(SqlitePersistence.layerMemory),
+);
 const now = DateTime.makeUnsafe("2026-09-04T12:00:00Z");
 const old = DateTime.subtract(now, { days: 10 });
 const providerInstanceId = ProviderInstanceId.make("codex");
@@ -77,6 +86,7 @@ const createRun = Effect.fn(function* (
   threadId: ThreadId,
   status: OrchestrationV2Run["status"] = "completed",
   ordinal = 1,
+  overrides: Partial<OrchestrationV2Run> = {},
 ) {
   const store = yield* ProjectionStore.ProjectionStoreV2;
   const runId = RunId.make(`run:${threadId}:${ordinal}`);
@@ -101,6 +111,7 @@ const createRun = Effect.fn(function* (
       completedAt: ["completed", "rolled_back", "failed"].includes(status) ? old : null,
       checkpointId: null,
       contextHandoffId: null,
+      ...overrides,
     },
   });
   return runId;
@@ -362,6 +373,360 @@ it.effect(
         (yield* store.getThread(ThreadId.make("missing")).pipe(Effect.flip))._tag,
         "ProjectionStoreThreadNotFoundError",
       );
+
+      const parent = yield* createThread("parent-owes-child-result");
+      const child = yield* createThread("child-awaits-action", {
+        lineage: { parentThreadId: parent, relationshipToParent: "subagent", rootThreadId: parent },
+      });
+      yield* createRun(parent);
+      yield* createRun(child);
+      const task: OrchestrationV2Subagent = {
+        id: NodeId.make("task:settlement:action-wait"),
+        threadId: parent,
+        runId: null,
+        parentNodeId: NodeId.make("node:settlement:parent"),
+        origin: "app_owned",
+        createdBy: "agent",
+        driver: ProviderDriverKind.make("codex"),
+        providerInstanceId,
+        providerThreadId: null,
+        childThreadId: child,
+        nativeTaskRef: null,
+        prompt: "Finish the delegated work after its Action returns.",
+        title: "Action wait",
+        model: "test-model",
+        status: "waiting",
+        result: null,
+        startedAt: old,
+        completedAt: null,
+        updatedAt: old,
+      };
+      const updateTask = (payload: OrchestrationV2Subagent, suffix: string) =>
+        store.apply({
+          id: EventId.make(`event:settlement:action-wait:${suffix}`),
+          type: "subagent.updated",
+          threadId: parent,
+          occurredAt: now,
+          payload,
+        });
+      yield* updateTask(task, "waiting");
+      assert.deepEqual(yield* store.getSettlementCandidates(parent), []);
+      assert.deepEqual(yield* store.getSettlementCandidates(child), []);
+      assert.isTrue(yield* store.hasOutstandingOwnedWork(parent));
+      assert.isTrue(yield* store.hasOutstandingOwnedWork(child));
+      yield* updateTask({ ...task, ownershipReleased: true }, "released");
+      assert.isFalse(yield* store.hasOutstandingOwnedWork(parent));
+      assert.isFalse(yield* store.hasOutstandingOwnedWork(child));
+
+      const watchThread = yield* createThread("watch-without-polling-link");
+      const watchRunId = RunId.make(`run:${watchThread}:1`);
+      const watchOwner = {
+        parentEnvironmentId: EnvironmentId.make("watch-parent"),
+        parentThreadId: parent,
+        taskId: task.id,
+        sourceRunId: watchRunId,
+      };
+      const watch = {
+        generation: "settlement-watch",
+        key: { host: "github.com", repository: "example/project", number: 1 },
+        owner: watchOwner,
+        sourceAttemptId: RunAttemptId.make("watch-source-attempt"),
+        state: "terminal-pending" as const,
+        pending: {
+          messageId: MessageId.make("settlement-watch-event"),
+          text: "PR merged",
+          notification: {
+            source: { kind: "monitor" as const },
+            outcome: "updated" as const,
+            summary: "Merged",
+          },
+        },
+      };
+      yield* createRun(watchThread, "completed", 1, { pullRequestWatchObligations: [watch] });
+      assert.isTrue(yield* store.hasOutstandingOwnedWork(watchThread));
+      assert.deepEqual(yield* store.getSettlementCandidates(watchThread), []);
+      assert.deepEqual(
+        (yield* store.getPendingPullRequestWatchDeliveries).filter(
+          (row) => row.threadId === watchThread,
+        ),
+        [
+          {
+            threadId: watchThread,
+            generation: watch.generation,
+            messageId: watch.pending.messageId,
+          },
+        ],
+      );
+      yield* createRun(watchThread, "completed", 1, {
+        pullRequestWatchObligations: [{ ...watch, state: "ended" }],
+      });
+      yield* createRun(watchThread, "queued", 2, {
+        queueHeld: true,
+        pullRequestWatchContinuation: {
+          generation: watch.generation,
+          owner: watchOwner,
+          messageId: MessageId.make(`message:run:${watchThread}:2`),
+        },
+      });
+      assert.isTrue(yield* store.hasOutstandingOwnedWork(watchThread));
+      yield* createRun(watchThread, "cancelled", 2, {
+        pullRequestWatchContinuation: {
+          generation: watch.generation,
+          owner: watchOwner,
+          messageId: MessageId.make(`message:run:${watchThread}:2`),
+        },
+      });
+      assert.isFalse(yield* store.hasOutstandingOwnedWork(watchThread));
+
+      const actionRuns = yield* ActionRunStore.ActionRunStore;
+      const actionState = (
+        threadId: ThreadId,
+        runId: string,
+        delivery: ActionResumeState["delivery"],
+      ): ActionResumeState => ({
+        runId,
+        threadId,
+        projectId: ProjectId.make("project:settlement"),
+        actionId: "qa",
+        actionName: "QA",
+        terminalId: `action-${runId}`,
+        outcome: delivery === "armed" ? "running" : "succeeded",
+        delivery,
+        startedAt: DateTime.formatIso(old),
+        finishedAt: delivery === "armed" ? null : DateTime.formatIso(old),
+        exitCode: delivery === "armed" ? null : 0,
+        exitSignal: null,
+      });
+      const publishAction = Effect.fn("test.publishAction")(function* (state: ActionResumeState) {
+        const thread = yield* store.getThread(state.threadId);
+        yield* store.apply({
+          id: EventId.make(`event:action:${state.runId}`),
+          type: "thread.metadata-updated",
+          threadId: state.threadId,
+          occurredAt: old,
+          payload: { ...thread, actionResume: state },
+        });
+      });
+      for (const source of ["shell", "ledger", "stale-shell"] as const) {
+        for (const delivery of [
+          "armed",
+          "pending",
+          "available",
+          "delivered",
+          "disposed",
+        ] as const) {
+          const threadId = yield* createThread(`ordinary-action-${source}-${delivery}`);
+          yield* createRun(threadId);
+          const state = actionState(threadId, `${source}-${delivery}`, delivery);
+          if (source !== "ledger") {
+            yield* publishAction(
+              source === "stale-shell"
+                ? { ...state, delivery: delivery === "disposed" ? "armed" : "disposed" }
+                : state,
+            );
+          }
+          if (source !== "shell") yield* actionRuns.save(state);
+          const held = delivery !== "disposed";
+          assert.equal(
+            yield* store.hasOutstandingOwnedWork(threadId),
+            held,
+            `${source}:${delivery}`,
+          );
+          assert.equal((yield* store.getSettlementCandidates(threadId)).length, held ? 0 : 1);
+        }
+      }
+      const copied = yield* createThread("copied-action", {
+        actionResume: actionState(parent, "parent-action", "armed"),
+      });
+      assert.isFalse(yield* store.hasOutstandingOwnedWork(copied));
+      assert.equal((yield* store.getSettlementCandidates(copied)).length, 1);
+
+      for (const status of [
+        "queued",
+        "preparing",
+        "starting",
+        "running",
+        "waiting",
+        "completed",
+        "failed",
+        "interrupted",
+        "cancelled",
+        "rolled_back",
+      ] as const) {
+        const threadId = yield* createThread(`retained-action-${status}`);
+        const state = actionState(threadId, `retained-${status}`, "delivered");
+        yield* actionRuns.save(state);
+        const messageId = MessageId.make(`action-resume:${state.runId}:follow-up`);
+        const runId = yield* createRun(threadId, status, 1, {
+          userMessageId: messageId,
+          queueHeld: true,
+        });
+        yield* store.apply({
+          id: EventId.make(`event:${messageId}`),
+          type: "message.updated",
+          threadId,
+          occurredAt: old,
+          payload: {
+            id: messageId,
+            threadId,
+            runId,
+            nodeId: null,
+            role: "user",
+            text: "Action result",
+            attachments: [],
+            streaming: false,
+            createdBy: "system",
+            creationSource: "server",
+            createdAt: old,
+            updatedAt: old,
+          },
+        });
+        yield* createRun(threadId, "completed", 2);
+        const newer = actionState(threadId, `newer-${status}`, "disposed");
+        yield* actionRuns.save(newer);
+        yield* publishAction(newer);
+        const held = ["queued", "preparing", "starting", "running", "waiting"].includes(status);
+        assert.equal(yield* store.hasOutstandingOwnedWork(threadId), held, `retained:${status}`);
+        assert.equal((yield* store.getSettlementCandidates(threadId)).length, held ? 0 : 1);
+        if (status === "queued") {
+          yield* actionRuns.save({ ...state, delivery: "disposed", revision: 1 });
+          assert.isFalse(yield* store.hasOutstandingOwnedWork(threadId));
+          assert.equal((yield* store.getSettlementCandidates(threadId)).length, 1);
+        }
+      }
+
+      const sql = yield* SqlClient.SqlClient;
+      for (const legacyState of [
+        "unknown",
+        "pending",
+        "started",
+        "completed",
+        "error",
+        "interrupted",
+      ] as const) {
+        const threadId = yield* createThread(`legacy-action-${legacyState}`);
+        const state = actionState(threadId, `legacy-${legacyState}`, "delivered");
+        yield* actionRuns.save(state);
+        const messageId = MessageId.make(`action-resume:${state.runId}:follow-up`);
+        // Imported V1 messages retain their IDs but have no V2 run association.
+        yield* store.apply({
+          id: EventId.make(`event:${messageId}`),
+          type: "message.updated",
+          threadId,
+          occurredAt: old,
+          payload: {
+            id: messageId,
+            threadId,
+            runId: null,
+            nodeId: null,
+            role: "user",
+            text: "Imported Action result",
+            attachments: [],
+            streaming: false,
+            createdBy: "system",
+            creationSource: "server",
+            createdAt: old,
+            updatedAt: old,
+          },
+        });
+        yield* createRun(threadId, "completed", 2);
+        const newer = actionState(threadId, `newer-legacy-${legacyState}`, "disposed");
+        yield* actionRuns.save(newer);
+        yield* publishAction(newer);
+        assert.isTrue(yield* store.hasOutstandingOwnedWork(threadId));
+        if (legacyState !== "unknown") {
+          yield* sql`
+            INSERT INTO projection_turn_request_correlations
+              (thread_id, message_id, turn_id, state, requested_at, resolved_at)
+            VALUES (${threadId}, ${messageId}, 'legacy-turn',
+              ${legacyState === "completed" ? "started" : legacyState},
+              ${DateTime.formatIso(old)}, ${legacyState === "pending" ? null : DateTime.formatIso(old)})
+          `;
+        }
+        if (legacyState === "completed") {
+          yield* sql`
+            INSERT INTO projection_turn_assistant_finalizations (thread_id, turn_id, finalized_at)
+            VALUES ('unrelated-thread', 'legacy-turn', ${DateTime.formatIso(old)}),
+              (${threadId}, 'unrelated-turn', ${DateTime.formatIso(old)})
+          `;
+          assert.isTrue(yield* store.hasOutstandingOwnedWork(threadId));
+          yield* sql`
+            INSERT INTO projection_turn_assistant_finalizations (thread_id, turn_id, finalized_at)
+            VALUES (${threadId}, 'legacy-turn', ${DateTime.formatIso(old)})
+          `;
+        }
+        const held = ["unknown", "pending", "started"].includes(legacyState);
+        assert.equal(yield* store.hasOutstandingOwnedWork(threadId), held, `legacy:${legacyState}`);
+        assert.equal((yield* store.getSettlementCandidates(threadId)).length, held ? 0 : 1);
+        if (legacyState === "completed") {
+          // A new native continuation takes precedence over historical completion evidence.
+          const runId = yield* createRun(threadId, "queued", 3, {
+            userMessageId: messageId,
+            queueHeld: true,
+          });
+          assert.isTrue(yield* store.hasOutstandingOwnedWork(threadId));
+          yield* store.apply({
+            id: EventId.make(`event:native:${messageId}`),
+            type: "message.updated",
+            threadId,
+            occurredAt: old,
+            payload: {
+              id: messageId,
+              threadId,
+              runId,
+              nodeId: null,
+              role: "user",
+              text: "Retained Action result",
+              attachments: [],
+              streaming: false,
+              createdBy: "system",
+              creationSource: "server",
+              createdAt: old,
+              updatedAt: old,
+            },
+          });
+          assert.isTrue(yield* store.hasOutstandingOwnedWork(threadId));
+          assert.equal((yield* store.getSettlementCandidates(threadId)).length, 0);
+        }
+      }
+
+      for (const stage of ["prepared", "active", "disposed", "settled"] as const) {
+        const remote = yield* createThread(`remote-${stage}`, {
+          remoteDelegations: [
+            {
+              parentEnvironmentId: EnvironmentId.make("environment:remote-parent"),
+              parentThreadId: ThreadId.make("thread:remote-parent"),
+              sourceTaskId: NodeId.make("task:remote-parent"),
+              delegationId: "delegation:remote-parent",
+              linkSessionId: "link:remote-parent",
+              stage,
+            } satisfies RemoteDelegationAssociation,
+          ],
+        });
+        yield* createRun(remote);
+        const unfinished = stage === "prepared" || stage === "active";
+        assert.equal(yield* store.hasOutstandingOwnedWork(remote), unfinished);
+        assert.equal((yield* store.getSettlementCandidates(remote)).length, unfinished ? 0 : 1);
+      }
+
+      const finished: OrchestrationV2Subagent = {
+        ...task,
+        status: "completed",
+        result: "The actual delegated work is finished.",
+        completedAt: now,
+        completionDelivery: { state: "pending", observedByRunId: null },
+      };
+      yield* updateTask(finished, "pending-delivery");
+      assert.deepEqual(yield* store.getSettlementCandidates(parent), []);
+      assert.isTrue(yield* store.hasOutstandingOwnedWork(parent));
+      yield* updateTask(
+        { ...finished, completionDelivery: { state: "delivered", observedByRunId: null } },
+        "delivered",
+      );
+      assert.equal((yield* store.getSettlementCandidates(parent)).length, 1);
+      assert.equal((yield* store.getSettlementCandidates(child)).length, 1);
+      assert.isFalse(yield* store.hasOutstandingOwnedWork(parent));
+      assert.isFalse(yield* store.hasOutstandingOwnedWork(child));
     }).pipe(Effect.provide(layerSql)),
 );
 

@@ -107,6 +107,8 @@ const LOGIN_SHELL_ENV_NAMES = [
   "SSL_CERT_FILE",
   "SSL_CERT_DIR",
   "NODE_EXTRA_CA_CERTS",
+  "LASTCODE_TELEMETRY_COPY_HOST",
+  "LASTCODE_TELEMETRY_COPY_KEY",
   "T3CODE_TELEMETRY_ENABLED",
   "T3CODE_GITHUB_APP_CLIENT_ID",
   "__MISE_DIFF",
@@ -484,6 +486,8 @@ const installPosixEnvironment = Effect.fn("desktop.shellEnvironment.installPosix
       "SSL_CERT_DIR",
       "NODE_EXTRA_CA_CERTS",
       "JAVA_HOME",
+      "LASTCODE_TELEMETRY_COPY_HOST",
+      "LASTCODE_TELEMETRY_COPY_KEY",
       "T3CODE_TELEMETRY_ENABLED",
       "T3CODE_GITHUB_APP_CLIENT_ID",
     ] as const) {

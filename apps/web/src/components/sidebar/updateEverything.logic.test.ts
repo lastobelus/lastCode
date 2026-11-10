@@ -357,7 +357,7 @@ describe("collectUpdateEverythingResult", () => {
 describe("describeUpdateEverything", () => {
   it("gives each machine one row with its T3 Code and provider updates", () => {
     const id = EnvironmentId.make;
-    const { rows } = describeUpdateEverything({
+    const { alsoUpdates, rows, summary } = describeUpdateEverything({
       localVersion: "1.1.0",
       localMachines: [
         { environmentId: id("local"), label: "Mainbook" },
@@ -391,6 +391,8 @@ describe("describeUpdateEverything", () => {
       ["alvin", null, "needs a manual update", ["Claude"]],
       ["TheoRoom", null, "not connected", []],
     ]);
+    expect(summary).toBe("Update this app, 1 server, and 4 providers");
+    expect(alsoUpdates).toBe("1 server update and 4 provider updates");
   });
 });
 

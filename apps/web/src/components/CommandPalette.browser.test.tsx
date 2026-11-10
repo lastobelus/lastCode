@@ -18,6 +18,21 @@ vi.mock("../state/entities", async (original) => ({
   useProjects: () => entities.projects,
   useVisibleThreadShells: () => entities.threads,
 }));
+vi.mock("../state/environments", async (original) => ({
+  ...(await original<typeof import("../state/environments")>()),
+  // New-thread project rows are selectable only while their environment is connected.
+  useEnvironments: () => ({
+    environments: [
+      {
+        environmentId: "local",
+        label: "Local",
+        connection: { phase: "connected" },
+        entry: { target: { _tag: "PrimaryConnectionTarget" } },
+        serverConfig: null,
+      },
+    ],
+  }),
+}));
 
 function setup(state: { projects?: ReadonlyArray<Project>; threads?: ReadonlyArray<Thread> } = {}) {
   useCommandPaletteStore.setState(useCommandPaletteStore.getInitialState(), true);

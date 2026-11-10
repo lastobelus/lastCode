@@ -230,6 +230,7 @@ const fixture = (cloud: boolean | "lease" = false) => {
       Layer.provideMerge(access),
       Layer.provideMerge(
         Layer.mock(DeviceService.DeviceService)({
+          recordActivity: () => Effect.void,
           refreshAgentDevice: (ready) =>
             Effect.suspend(() =>
               retireOnDiscovery ? retireDiscoveredDevice(ready.hostId) : Effect.void,

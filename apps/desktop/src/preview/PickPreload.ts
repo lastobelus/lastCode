@@ -19,6 +19,15 @@ import type {
 } from "@t3tools/contracts";
 
 import { createAnnotationIdSource } from "./AnnotationIds.ts";
+import {
+  hasInlineStyle,
+  isElement,
+  observeFrameDocuments,
+  pickInDocument,
+  topViewportPoint,
+  topViewportRect,
+} from "./FramePicking.ts";
+
 import { resolveAnnotationSubmission } from "./AnnotationKeyboard.ts";
 import { previewAnnotationStyles } from "./AnnotationStyles.generated.ts";
 import { installRecordingCursor } from "./RecordingCursor.ts";
@@ -184,10 +193,12 @@ const applyAnnotationTheme = (
 
 const reportHumanPointerInput = (event: PointerEvent): void => {
   if (!event.isTrusted) return;
+  const point = topViewportPoint(event);
+  if (!point) return;
   ipcRenderer.send(HUMAN_INPUT_CHANNEL, {
     kind: "pointer",
-    x: event.clientX,
-    y: event.clientY,
+    x: point.x,
+    y: point.y,
     button: event.button,
   });
 };
@@ -274,25 +285,24 @@ function unionRects(
   };
 }
 
-function isAnnotationNode(element: Element): boolean {
-  return element instanceof Element && element.closest(`[${OVERLAY_ATTRIBUTE}]`) !== null;
+function isAnnotationNode(element: unknown): boolean {
+  return isElement(element) && element.closest(`[${OVERLAY_ATTRIBUTE}]`) !== null;
 }
 
 function pickFromPoint(clientX: number, clientY: number): Element | null {
-  for (const candidate of document.elementsFromPoint(clientX, clientY)) {
-    if (!(candidate instanceof Element)) continue;
-    if (isAnnotationNode(candidate) || candidate.hasAttribute(INPUT_LAYER_ATTRIBUTE)) continue;
-    if (candidate === document.documentElement || candidate === document.body) continue;
-    return candidate;
-  }
-  return null;
+  return pickInDocument(
+    document,
+    clientX,
+    clientY,
+    (candidate) => isAnnotationNode(candidate) || candidate.hasAttribute(INPUT_LAYER_ATTRIBUTE),
+  );
 }
 
 function describeRawElement(element: Element): string {
   const tag = element.tagName.toLowerCase();
   const id = element.id ? `#${element.id}` : "";
   const classes =
-    element instanceof HTMLElement && typeof element.className === "string"
+    typeof element.className === "string"
       ? element.className
           .trim()
           .split(/\s+/)
@@ -331,13 +341,15 @@ function positionBox(node: HTMLElement, rect: PreviewAnnotationRect): void {
   node.style.height = `${rect.height}px`;
 }
 
-function visibleElementRect(element: Element): PreviewAnnotationRect {
-  const rect = element.getBoundingClientRect();
+function visibleElementRect(element: Element): PreviewAnnotationRect | null {
+  const rect = topViewportRect(element);
+  if (!rect) return null;
   let left = Math.max(0, rect.left);
   let top = Math.max(0, rect.top);
   let right = Math.min(document.documentElement.clientWidth, rect.right);
   let bottom = Math.min(document.documentElement.clientHeight, rect.bottom);
-  if (getComputedStyle(element).position !== "fixed") {
+  // Framed rectangles already include clipping in each document and frame ancestor.
+  if (element.ownerDocument === document && getComputedStyle(element).position !== "fixed") {
     for (let ancestor = element.parentElement; ancestor; ancestor = ancestor.parentElement) {
       if (ancestor === document.body || ancestor === document.documentElement) break;
       const style = getComputedStyle(ancestor);
@@ -373,17 +385,13 @@ function createLabel(): HTMLDivElement {
 }
 
 function updateSelectedVisual(target: SelectedElement): void {
-  if (!target.element.isConnected) {
+  const rect = visibleElementRect(target.element);
+  if (!rect || !isUsableRect(rect)) {
     target.outline.style.display = "none";
     target.label.style.display = "none";
     return;
   }
-  const rect = visibleElementRect(target.element);
   positionBox(target.outline, rect);
-  if (rect.width === 0 || rect.height === 0) {
-    target.label.style.display = "none";
-    return;
-  }
   target.label.textContent = describeRawElement(target.element);
   target.label.style.display = "block";
   target.label.style.transform = `translate(${Math.max(4, rect.x)}px, ${Math.max(4, rect.y - 22)}px)`;
@@ -416,11 +424,36 @@ function withCaptureTimeout<A>(promise: Promise<A>, millis: number): Promise<A |
 
 const HTML_PREVIEW_MAX_CHARS = 500;
 
+/** Locates each iframe within its parent document, including nested srcdoc documents. */
+function captureFramePath(element: Element): NonNullable<PickedElementPayload["framePath"]> {
+  const path: { pageUrl: string; selector: string }[] = [];
+  let owner = element.ownerDocument;
+  while (owner !== document) {
+    const frame = owner.defaultView?.frameElement;
+    if (!frame) break;
+    const selectors: string[] = [];
+    for (let node: Element | null = frame; node; node = node.parentElement) {
+      const parent = node.parentElement;
+      selectors.unshift(
+        parent
+          ? `${node.localName}:nth-child(${Array.from(parent.children).indexOf(node) + 1})`
+          : ":root",
+      );
+    }
+    owner = frame.ownerDocument;
+    path.unshift({ pageUrl: owner.URL, selector: selectors.join(" > ") });
+  }
+  return path;
+}
+
 /** Preserve the tag, HTML, and crop rect when React context lookup fails or stalls. */
 async function captureElement(element: Element): Promise<PickedElementPayload> {
+  const owner = element.ownerDocument;
+  const framePath = captureFramePath(element);
   const base = {
-    pageUrl: location.href,
-    pageTitle: document.title?.trim() || null,
+    pageUrl: owner.URL,
+    pageTitle: owner.title?.trim() || null,
+    ...(framePath.length > 0 ? { framePath } : {}),
     tagName: element.tagName.toLowerCase(),
     pickedAt: new Date().toISOString(),
   };
@@ -924,11 +957,13 @@ function startAnnotation(
     }
     if (tool !== "select") hoverOutline.style.display = "none";
     if (tool !== "marquee") marqueeBox.style.display = "none";
-    document.documentElement.setAttribute("data-t3code-annotation-tool", tool);
+    for (const owner of frameDocuments.documents()) {
+      owner.documentElement?.setAttribute("data-t3code-annotation-tool", tool);
+    }
   };
 
   const removeSelected = (target: SelectedElement): void => {
-    if (target.element instanceof HTMLElement || target.element instanceof SVGElement) {
+    if (hasInlineStyle(target.element)) {
       for (const [property, baseline] of target.baselineStyles) {
         if (baseline) target.element.style.setProperty(property, baseline);
         else target.element.style.removeProperty(property);
@@ -975,15 +1010,17 @@ function startAnnotation(
 
   const setStyleForSelected = (property: string, value: string): void => {
     for (const target of selected.values()) {
-      if (!(target.element instanceof HTMLElement || target.element instanceof SVGElement))
-        continue;
+      if (!hasInlineStyle(target.element)) continue;
       if (!target.baselineStyles.has(property)) {
         target.baselineStyles.set(property, target.element.style.getPropertyValue(property));
       }
       const key = `${target.id}:${property}`;
       const previousValue =
         styleChanges.get(key)?.previousValue ??
-        getComputedStyle(target.element).getPropertyValue(property).trim();
+        target.element.ownerDocument
+          .defaultView!.getComputedStyle(target.element)
+          .getPropertyValue(property)
+          .trim();
       target.element.style.setProperty(property, value, "important");
       styleChanges.set(key, {
         targetId: target.id,
@@ -1195,7 +1232,7 @@ function startAnnotation(
   const syncStyleControls = (): void => {
     const first = selected.values().next().value as SelectedElement | undefined;
     if (!first) return;
-    const computed = getComputedStyle(first.element);
+    const computed = first.element.ownerDocument.defaultView!.getComputedStyle(first.element);
     const rect = first.element.getBoundingClientRect();
     aspectRatio = rect.height > 0 ? rect.width / rect.height : 1;
     widthInput.value = String(Math.round(rect.width));
@@ -1263,9 +1300,10 @@ function startAnnotation(
   const getAnnotationBounds = (): PreviewAnnotationRect | null =>
     unionRects(
       [
-        ...Array.from(selected.values(), (target) => visibleElementRect(target.element)).filter(
-          (rect) => rect.width > 0 && rect.height > 0,
-        ),
+        ...Array.from(selected.values()).flatMap((target) => {
+          const rect = visibleElementRect(target.element);
+          return rect && isUsableRect(rect) ? [rect] : [];
+        }),
         ...regions.map((region) => region.rect),
         ...strokes.map((stroke) => stroke.bounds),
       ],
@@ -1373,7 +1411,12 @@ function startAnnotation(
   dragHandle.addEventListener("pointercancel", onEditorPointerUp);
 
   const repaint = (): void => {
-    for (const target of selected.values()) updateSelectedVisual(target);
+    clearHoverOutline();
+    for (const target of selected.values()) {
+      if (!topViewportRect(target.element)) removeSelected(target);
+      else updateSelectedVisual(target);
+    }
+    svg.setAttribute("viewBox", `0 0 ${window.innerWidth} ${window.innerHeight}`);
     queueEditorLayout();
   };
   // A scrollbar appearing narrows the viewport without a window resize.
@@ -1381,8 +1424,8 @@ function startAnnotation(
 
   const removeTargetAtPoint = (x: number, y: number): boolean => {
     for (const target of Array.from(selected.values()).toReversed()) {
-      const rect = target.element.getBoundingClientRect();
-      if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
+      const rect = topViewportRect(target.element);
+      if (rect && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
         removeSelected(target);
         updateStatus();
         return true;
@@ -1418,9 +1461,14 @@ function startAnnotation(
   };
 
   const selectElementsInRect = (rect: PreviewAnnotationRect): number => {
-    const candidates = Array.from(document.querySelectorAll("body *"))
+    const candidates = frameDocuments
+      .documents()
+      .flatMap((owner) => Array.from(owner.querySelectorAll("body *")))
       .filter((element) => !isAnnotationNode(element))
-      .map((element) => ({ element, rect: element.getBoundingClientRect() }))
+      .flatMap((element) => {
+        const rect = topViewportRect(element);
+        return rect ? [{ element, rect }] : [];
+      })
       .filter(({ rect: candidate }) => {
         if (candidate.width < 2 || candidate.height < 2) return false;
         return !(
@@ -1439,8 +1487,8 @@ function startAnnotation(
           centerY >= rect.y &&
           centerY <= rect.y + rect.height &&
           (element.children.length === 0 ||
-            element instanceof HTMLButtonElement ||
-            element instanceof HTMLAnchorElement ||
+            element.localName === "button" ||
+            element.localName === "a" ||
             element.getAttribute("role") === "button")
         );
       })
@@ -1457,29 +1505,26 @@ function startAnnotation(
   };
 
   const onPointerMove = (event: PointerEvent): void => {
+    const point = topViewportPoint(event);
+    if (!point) return;
     if (isAnnotationNode(event.target as Element)) {
       clearHoverOutline();
       return;
     }
     if (tool === "select" && dragStart === null) {
-      const target = pickFromPoint(event.clientX, event.clientY);
-      if (target) positionBox(hoverOutline, visibleElementRect(target));
+      const target = pickFromPoint(point.x, point.y);
+      const rect = target ? visibleElementRect(target) : null;
+      if (rect && isUsableRect(rect)) positionBox(hoverOutline, rect);
       else clearHoverOutline();
       return;
     }
     clearHoverOutline();
     if (tool === "marquee" && dragStart) {
-      positionBox(
-        marqueeBox,
-        normalizeRect(dragStart.x, dragStart.y, event.clientX, event.clientY),
-      );
+      positionBox(marqueeBox, normalizeRect(dragStart.x, dragStart.y, point.x, point.y));
       return;
     }
     if (tool === "draw" && activeStroke) {
-      activeStroke.target.points = [
-        ...activeStroke.target.points,
-        { x: event.clientX, y: event.clientY },
-      ];
+      activeStroke.target.points = [...activeStroke.target.points, { x: point.x, y: point.y }];
       activeStroke.target.bounds = strokeBounds(
         activeStroke.target.points,
         activeStroke.target.width,
@@ -1489,19 +1534,21 @@ function startAnnotation(
   };
 
   const onPointerDown = (event: PointerEvent): void => {
+    const point = topViewportPoint(event);
+    if (!point) return;
     if (event.button !== 0 || isAnnotationNode(event.target as Element)) return;
     event.preventDefault();
     event.stopPropagation();
     if (tool === "select") {
-      const target = pickFromPoint(event.clientX, event.clientY);
+      const target = pickFromPoint(point.x, point.y);
       if (target) toggleSelected(target, event.shiftKey);
       return;
     }
     if (tool === "erase") {
-      removeTargetAtPoint(event.clientX, event.clientY);
+      removeTargetAtPoint(point.x, point.y);
       return;
     }
-    dragStart = { x: event.clientX, y: event.clientY };
+    dragStart = { x: point.x, y: point.y };
     if (tool === "draw") {
       const stroke: PreviewAnnotationStrokeTarget = {
         id: nextId("stroke"),
@@ -1524,11 +1571,13 @@ function startAnnotation(
   };
 
   const onPointerUp = (event: PointerEvent): void => {
+    const point = topViewportPoint(event);
+    if (!point) return;
     if (!dragStart) return;
     event.preventDefault();
     event.stopPropagation();
     if (tool === "marquee") {
-      const rect = normalizeRect(dragStart.x, dragStart.y, event.clientX, event.clientY);
+      const rect = normalizeRect(dragStart.x, dragStart.y, point.x, point.y);
       marqueeBox.style.display = "none";
       if (isUsableRect(rect)) {
         const found = selectElementsInRect(rect);
@@ -1566,6 +1615,14 @@ function startAnnotation(
       event.stopPropagation();
   };
 
+  const cancelGesture = (): void => {
+    clearHoverOutline();
+    dragStart = null;
+    marqueeBox.style.display = "none";
+    activeStroke?.path.remove();
+    activeStroke = null;
+  };
+
   const onPointerOut = (event: PointerEvent): void => {
     if (event.relatedTarget === null) clearHoverOutline();
   };
@@ -1580,8 +1637,7 @@ function startAnnotation(
 
   const restoreStyles = (): void => {
     for (const target of selected.values()) {
-      if (!(target.element instanceof HTMLElement || target.element instanceof SVGElement))
-        continue;
+      if (!hasInlineStyle(target.element)) continue;
       for (const [property, baseline] of target.baselineStyles) {
         if (baseline) target.element.style.setProperty(property, baseline);
         else target.element.style.removeProperty(property);
@@ -1594,17 +1650,7 @@ function startAnnotation(
     finished = true;
     rootResizeObserver.disconnect();
     restoreStyles();
-    window.removeEventListener("pointermove", onPointerMove, true);
-    window.removeEventListener("pointerdown", onPointerDown, true);
-    window.removeEventListener("pointerup", onPointerUp, true);
-    window.removeEventListener("pointerout", onPointerOut, true);
-    window.removeEventListener("click", onClick, true);
-    window.removeEventListener("blur", onWindowBlur);
-    window.removeEventListener("focus", onWindowFocus);
-    window.removeEventListener("keydown", onKeyDown, true);
-    window.removeEventListener("keyup", onVoiceKeyUp, true);
-    window.removeEventListener("scroll", repaint, true);
-    window.removeEventListener("resize", repaint);
+    frameDocuments.dispose();
     dragHandle.removeEventListener("pointerdown", onEditorPointerDown);
     dragHandle.removeEventListener("pointermove", onEditorPointerMove);
     dragHandle.removeEventListener("pointerup", onEditorPointerUp);
@@ -1681,6 +1727,7 @@ function startAnnotation(
     }
     if (pendingCapture || (selected.size === 0 && regions.length === 0 && strokes.length === 0))
       return;
+    repaint();
     pendingCapture = true;
     submit.disabled = true;
     submit.textContent = "Capturing…";
@@ -1692,21 +1739,30 @@ function startAnnotation(
     void Promise.all(
       Array.from(selected.values()).map(async (target) => {
         const element = await captureElement(target.element);
-        for (const change of submittedStyleChanges) {
-          if (change.targetId === target.id && element.selector !== null) {
-            change.selector = element.selector;
-          }
-        }
-        return {
-          id: target.id,
-          element,
-          rect: rectFromDomRect(target.element.getBoundingClientRect()),
-        };
+        return { target, element };
       }),
     )
-      .then((elements) => {
+      .then((capturedElements) => {
+        const elements = capturedElements.flatMap(({ target, element }) => {
+          const rect = topViewportRect(target.element);
+          if (!rect || !isUsableRect(rect)) return [];
+          for (const change of submittedStyleChanges) {
+            if (change.targetId === target.id && element.selector !== null) {
+              change.selector = element.selector;
+            }
+          }
+          return [{ id: target.id, element, rect: rectFromDomRect(rect) }];
+        });
         // A late submit must not reach a replacement pick's listener.
         if (finished) return;
+        if (
+          elements.length === 0 &&
+          submittedRegions.length === 0 &&
+          submittedStrokes.length === 0
+        ) {
+          teardown(true);
+          return;
+        }
         const annotation: PreviewAnnotationPayload = {
           id: nextId("annotation"),
           pageUrl: location.href,
@@ -1715,7 +1771,9 @@ function startAnnotation(
           elements,
           regions: submittedRegions,
           strokes: submittedStrokes,
-          styleChanges: submittedStyleChanges,
+          styleChanges: submittedStyleChanges.filter((change) =>
+            elements.some((target) => target.id === change.targetId),
+          ),
           screenshot: null,
           createdAt: new Date().toISOString(),
         };
@@ -1751,17 +1809,44 @@ function startAnnotation(
     submitAnnotation(submission);
   });
 
-  window.addEventListener("pointermove", onPointerMove, { capture: true, passive: false });
-  window.addEventListener("pointerdown", onPointerDown, { capture: true, passive: false });
-  window.addEventListener("pointerup", onPointerUp, { capture: true, passive: false });
-  window.addEventListener("pointerout", onPointerOut, { capture: true, passive: true });
-  window.addEventListener("click", onClick, { capture: true, passive: false });
-  window.addEventListener("blur", onWindowBlur);
-  window.addEventListener("focus", onWindowFocus);
-  window.addEventListener("keydown", onKeyDown, { capture: true });
-  window.addEventListener("keyup", onVoiceKeyUp, { capture: true });
-  window.addEventListener("scroll", repaint, { capture: true, passive: true });
-  window.addEventListener("resize", repaint, { passive: true });
+  const frameDocuments = observeFrameDocuments(
+    document,
+    (owner) => {
+      const view = owner.defaultView;
+      if (!view) return () => {};
+      const childCursorStyle = owner === document ? null : cursorStyle.cloneNode(true);
+      if (childCursorStyle) owner.documentElement?.appendChild(childCursorStyle);
+      owner.documentElement?.setAttribute("data-t3code-annotation-tool", tool);
+      const controller = new AbortController();
+      const capture = { capture: true, passive: false, signal: controller.signal };
+      const passive = { capture: true, passive: true, signal: controller.signal };
+      if (owner !== document) {
+        view.addEventListener("pointerdown", reportHumanPointerInput, capture);
+        view.addEventListener("keydown", reportHumanKeyInput, capture);
+      }
+      view.addEventListener("pointermove", onPointerMove, capture);
+      view.addEventListener("pointerdown", onPointerDown, capture);
+      view.addEventListener("pointerup", onPointerUp, capture);
+      view.addEventListener("pointercancel", cancelGesture, capture);
+      view.addEventListener("pointerout", onPointerOut, passive);
+      view.addEventListener("click", onClick, capture);
+      view.addEventListener("blur", onWindowBlur, { signal: controller.signal });
+      view.addEventListener("focus", onWindowFocus, { signal: controller.signal });
+      view.addEventListener("keyup", onVoiceKeyUp, capture);
+      view.addEventListener("pagehide", cancelGesture, { signal: controller.signal });
+      view.addEventListener("keydown", onKeyDown, capture);
+      view.addEventListener("scroll", repaint, passive);
+      view.addEventListener("resize", repaint, passive);
+      return () => {
+        controller.abort();
+        cancelGesture();
+        owner.documentElement?.removeAttribute("data-t3code-annotation-tool");
+        childCursorStyle?.parentNode?.removeChild(childCursorStyle);
+      };
+    },
+    repaint,
+    isAnnotationNode,
+  );
   // Bubble phase, so the overlay's own handlers still see these events.
   for (const type of PAGE_ISOLATED_EVENTS)
     host.addEventListener(type, stopAtOverlay, { passive: true });

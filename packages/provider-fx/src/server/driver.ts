@@ -58,6 +58,16 @@ const unsupportedTextGeneration: ProviderTextGeneration = (() => {
     generateThreadTitle: () => unsupported("generateThreadTitle"),
     generateReviewGuide: () => unsupported("generateReviewGuide"),
     generateTranscriptionPostProcessing: () => unsupported("generateTranscriptionPostProcessing"),
+    generatePromptSnippets: () =>
+      Effect.fail(
+        new TextGenerationError({
+          operation: "generatePromptSnippets",
+          reason: "prompt-mining-unsupported",
+          detail:
+            "The configured text-generation model used for thread titles cannot discover prompts without tools. Choose a supported text-generation model in Settings.",
+        }),
+      ),
+    generateIncomingMessageSummary: () => unsupported("generateIncomingMessageSummary"),
   };
 })();
 

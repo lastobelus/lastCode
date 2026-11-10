@@ -3,11 +3,14 @@ import * as Schema from "effect/Schema";
 
 import {
   IsoDateTime,
+  MessageId,
+  RunAttemptId,
   NonNegativeInt,
   PositiveInt,
   ProjectId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
+import { ActionResumeOwner } from "./actionResume.ts";
 import {
   PullRequestActor,
   PullRequestChecksState,
@@ -79,8 +82,52 @@ export const ThreadPullRequestKey = Schema.Struct({
 });
 export type ThreadPullRequestKey = typeof ThreadPullRequestKey.Type;
 
+export const PullRequestWatchQuietTimeoutMinutes = PositiveInt.check(
+  Schema.isLessThanOrEqualTo(10080),
+);
+
+export const ThreadPullRequestWatchQuietDeadline = Schema.Struct({
+  timeoutMinutes: PullRequestWatchQuietTimeoutMinutes,
+  dueAt: Schema.NullOr(IsoDateTime),
+});
+
+export const PullRequestWatchContinuation = Schema.Struct({
+  generation: TrimmedNonEmptyString,
+  owner: ActionResumeOwner,
+  messageId: MessageId,
+});
+export type PullRequestWatchContinuation = typeof PullRequestWatchContinuation.Type;
+
+const PullRequestWatchEvent = Schema.Struct({
+  messageId: MessageId,
+  text: Schema.String.check(Schema.isMaxLength(64_000)),
+  notification: Schema.Struct({
+    source: Schema.Struct({ kind: Schema.Literal("monitor") }),
+    outcome: Schema.Literals(["completed", "failed", "cancelled", "updated", "unknown"]),
+    summary: TrimmedNonEmptyString,
+    detail: Schema.optional(Schema.String),
+  }),
+});
+
+export const PullRequestWatchObligation = Schema.Struct({
+  generation: TrimmedNonEmptyString,
+  key: ThreadPullRequestKey,
+  owner: ActionResumeOwner,
+  sourceAttemptId: RunAttemptId,
+  state: Schema.Literals(["active", "terminal-pending", "ended", "disposed"]),
+  disposalReason: Schema.optional(
+    Schema.Literals(["owner_unwatch", "lifecycle", "ownership_released"]),
+  ),
+  pending: Schema.optional(PullRequestWatchEvent),
+  terminalEvent: Schema.optional(PullRequestWatchEvent),
+});
+export type PullRequestWatchObligation = typeof PullRequestWatchObligation.Type;
+
 export const ThreadPullRequestWatch = Schema.Struct({
   startedAt: IsoDateTime,
+  generation: Schema.optional(TrimmedNonEmptyString),
+  /** Null dueAt records a delivered quiet wake until progress or an explicit rearm. */
+  quietDeadline: Schema.optional(ThreadPullRequestWatchQuietDeadline),
   headSha: Schema.NullOr(TrimmedNonEmptyString),
   failedChecks: Schema.Array(TrimmedNonEmptyString),
   passed: Schema.Boolean,
@@ -111,6 +158,8 @@ export const ThreadPullRequestWatch = Schema.Struct({
    * none did. Null once either happened; absent on watches saved before it existed.
    */
   checksAwaitedSince: Schema.optional(Schema.NullOr(IsoDateTime)),
+  /** Set on an ended watch that T3 stopped because it could not read the PR. */
+  unreadable: Schema.optional(Schema.Literal(true)),
 });
 export type ThreadPullRequestWatch = typeof ThreadPullRequestWatch.Type;
 
