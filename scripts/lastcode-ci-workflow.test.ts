@@ -133,6 +133,35 @@ describe("LastCode GitHub CI workflow", () => {
     expect(asRecord(triggers?.push)?.branches).toEqual(["lastcode/main"]);
   });
 
+  it("isolates metadata checks and skips metadata work and report publication", () => {
+    for (const filename of ["ci.yml", "mobile-fingerprint-check.yml"]) {
+      const source = NodeFS.readFileSync(
+        NodePath.resolve(import.meta.dirname, "../.github/workflows", filename),
+        "utf8",
+      );
+      const doc = asRecord(parse(source));
+      expect(asRecord(doc?.concurrency)?.group).toContain("format('metadata-{0}', github.run_id)");
+      for (const job of Object.values(asRecord(doc?.jobs) ?? {})) {
+        expect(asRecord(job)?.if).toContain(
+          "github.event.action != 'edited' || github.event.changes.base",
+        );
+      }
+    }
+    const jobs = asRecord(asRecord(parse(workflow))?.jobs);
+    expect(asRecord(jobs?.check)?.name).toBe(
+      "${{ github.event.action == 'edited' && !github.event.changes.base && 'Check (metadata edit)' || 'Check' }}",
+    );
+    const report = parse(
+      NodeFS.readFileSync(
+        NodePath.resolve(import.meta.dirname, "../.github/workflows/thread-transfer-report.yml"),
+        "utf8",
+      ),
+    );
+    expect(asRecord(asRecord(asRecord(report)?.jobs)?.publish)?.if).toContain(
+      "!startsWith(github.event.workflow_run.display_title, 'Metadata only: ')",
+    );
+  });
+
   it("rejects nonstandard and dynamic runners without matching comments or mirror files", () => {
     expect(
       hasNonstandardRunnerConfiguration(
@@ -212,7 +241,9 @@ describe("LastCode GitHub CI workflow", () => {
       "release_smoke",
     ]);
     expect(gate?.needs).toEqual(["check"]);
-    expect(gateBlock).toContain("name: CI Gate");
+    expect(gateBlock).toContain(
+      "name: ${{ github.event.action == 'edited' && !github.event.changes.base && 'CI Gate (metadata edit)' || 'CI Gate' }}",
+    );
     expect(gateBlock).toContain(
       "if: ${{ (github.event.action != 'edited' || github.event.changes.base) && always() }}",
     );

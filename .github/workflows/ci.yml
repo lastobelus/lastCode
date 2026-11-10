@@ -663,7 +663,7 @@ jobs:
   # `always()` rather than `!cancelled()`: a skipped job reports success to
   # branch protection, so a cancelled run must still produce a failing check.
   check:
-    name: Check
+    name: ${{ github.event.action == 'edited' && !github.event.changes.base && 'Check (metadata edit)' || 'Check' }}
     if: ${{ (github.event.action != 'edited' || github.event.changes.base) && always() }}
     needs:
       [
@@ -705,7 +705,7 @@ jobs:
           path: ${{ runner.temp }}/thread-transfer
 
   ci_gate:
-    name: CI Gate
+    name: ${{ github.event.action == 'edited' && !github.event.changes.base && 'CI Gate (metadata edit)' || 'CI Gate' }}
     if: ${{ (github.event.action != 'edited' || github.event.changes.base) && always() }}
     needs:
       - check
