@@ -1093,7 +1093,7 @@ export function createGeneratedBuildStage(worktreePath: string, root: string) {
             if (existing.hash === file.hash)
               return { file, destination, prior: undefined, skip: true };
             throw new Error(
-              `Build output collision requires file review: ${root}/${file.path}. The existing file differs from the new build output and no current build owns it, so it was left in place. Review it or move it aside, then rebuild.`,
+              `Build output collision requires file review: ${root}/${file.path}. The existing file differs from the new build output and no current build owns these bytes, so it was left in place. Review it or move it aside, then rebuild.`,
             );
           } catch (error) {
             if (missing(error)) return { file, destination, prior: undefined, skip: false };
