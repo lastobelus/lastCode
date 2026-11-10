@@ -575,6 +575,8 @@ const realGit = <A, E, R>(test: (fixture: Fixture) => Effect.Effect<A, E, R>) =>
 
 it.effect.each([
   "device-only",
+  "owner-alias",
+  "registered-alias",
   "source-inode",
   "git-inode",
   "common-inode",
@@ -589,6 +591,15 @@ it.effect.each([
       yield* h.service.previewSuspend({ threadId: firstId });
       const record = (yield* h.registry.list)[0]!;
       const original = record.nativeIdentity!;
+      const aliased = change === "owner-alias" || change === "registered-alias";
+      const destination = aliased
+        ? NodePath.join(NodePath.dirname(f.workspace), "alias")
+        : f.workspace;
+      if (aliased) {
+        yield* Effect.promise(() => NodeFSP.symlink(f.workspace, destination, "dir"));
+        for (const [id, thread] of h.threads)
+          h.threads.set(id, { ...thread, worktreePath: destination });
+      }
       const stale = {
         ...original,
         sourceIdentity: {
@@ -606,21 +617,29 @@ it.effect.each([
         },
         commonDirectory: original.commonDirectory + (change === "common-path" ? "-other" : ""),
       };
-      yield* h.registry.put({ ...record, nativeIdentity: stale }, record);
+      yield* h.registry.put(
+        {
+          ...record,
+          path: change === "registered-alias" ? destination : record.path,
+          aliases: [...new Set([...record.aliases, destination])],
+          nativeIdentity: stale,
+        },
+        record,
+      );
       const acquired = yield* h.acquisition
-        .acquire({ path: f.workspace, threadId: firstId, purpose: "provider" })
+        .acquire({ path: destination, threadId: firstId, purpose: "provider" })
         .pipe(Effect.result);
-      if (change === "device-only") {
-        expect(acquired).toMatchObject({ _tag: "Success", success: { path: f.workspace } });
+      if (change === "device-only" || aliased) {
+        expect(acquired).toMatchObject({ _tag: "Success", success: { path: destination } });
         expect((yield* h.registry.list)[0]!.nativeIdentity).toEqual(original);
         expect((yield* h.registry.list)[0]!.summary).toEqual(record.summary);
         expect(
           yield* h.acquisition.acquire({
-            path: f.workspace,
+            path: destination,
             threadId: firstId,
             purpose: "provider",
           }),
-        ).toEqual({ path: f.workspace, branch: "topic", restored: false });
+        ).toEqual({ path: destination, branch: "topic", restored: false });
       } else {
         expect(acquired).toMatchObject({
           _tag: "Failure",

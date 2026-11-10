@@ -880,14 +880,14 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
           )
             return yield* failure("changed", "The rebound project belongs to another repository.");
         if (Option.isSome(info)) {
-          const inspected = yield* native(() => store.inspectActiveSource(destination));
+          const actualDestination = yield* canonical(destination);
+          const inspected = yield* native(() => store.inspectActiveSource(actualDestination));
           const expected = record.nativeIdentity;
           // Device numbers are allocated again at boot. Rebind only an unchanged,
           // canonical checkout and both unchanged Git directories on one volume.
           const deviceRenumbered =
             expected !== undefined &&
-            destination === record.path &&
-            (yield* canonical(destination)) === record.path &&
+            actualDestination === (yield* canonical(record.path)) &&
             inspected.sourceIdentity.ino === expected.sourceIdentity.ino &&
             inspected.gitDirectory === expected.gitDirectory &&
             inspected.gitDirectoryIdentity.ino === expected.gitDirectoryIdentity.ino &&
