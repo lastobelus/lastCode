@@ -12,12 +12,16 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeEvents from "node:events";
 import * as NodeHttp from "node:http";
+import * as NodeURL from "node:url";
 
 import { npmReleaseDatabaseMigration } from "@t3tools/shared/cliRelease";
 
 import { buildNpmLauncher } from "./build-npm-launcher.ts";
 
+const launcherPath = process.env.PATH;
+
 const VERSION = "1.2.3";
+const RELEASE_TARGET = { platform: "linux", arch: "x64" } as const;
 const decodeManifest = Schema.decodeEffect(
   Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
 );
@@ -47,6 +51,22 @@ const run = Effect.fn("test.run")(function* (
   return { stdout, stderr, exitCode };
 }, Effect.scoped);
 
+const launcherHostOverride = Effect.fn("test.launcherHostOverride")(function* (
+  root: string,
+  platform: string,
+  arch: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const preload = path.join(root, "launcher-host.mjs");
+  yield* fs.writeFileString(
+    preload,
+    `Object.defineProperties(process, { platform: { value: ${JSON.stringify(platform)} }, arch: { value: ${JSON.stringify(arch)} } });\n`,
+  );
+  return { NODE_OPTIONS: `--import=${NodeURL.pathToFileURL(preload).href}` };
+});
+
+// The archive runs a POSIX shell stub, so a supported target needs no matching native CPU.
 const serveFakeRelease = Effect.fn("test.serveFakeRelease")(function* (
   root: string,
   executable = `#!/bin/sh
@@ -58,7 +78,7 @@ exit 7
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const key = `${yield* HostProcess.Platform}-${yield* HostProcess.Architecture}`;
+  const key = `${RELEASE_TARGET.platform}-${RELEASE_TARGET.arch}`;
   const stem = `t3-${VERSION}-${key}`;
   const archiveName = `${stem}.tar.gz`;
   yield* fs.makeDirectory(path.join(root, "release", stem, "node_modules/native"), {
@@ -143,8 +163,9 @@ it.layer(NodeServices.layer)("build-npm-launcher", (it) => {
           T3CODE_HOME: home,
           T3CODE_TEST_CALLS: path.join(root, "calls"),
           T3CODE_RELEASE_BASE_URL: release.baseUrl,
+          ...(yield* launcherHostOverride(root, RELEASE_TARGET.platform, RELEASE_TARGET.arch)),
         };
-        const launcher = path.join(packageDir, "bin/t3.mjs");
+        const launcher = yield* fs.realPath(path.join(packageDir, "bin/t3.mjs"));
         const first = yield* run(process.execPath, [launcher, "serve", "a b"], {
           cwd: root,
           env,
@@ -379,6 +400,7 @@ syncBuiltinESMExports();
             T3CODE_RELEASE_BASE_URL: release.baseUrl,
             T3CODE_TEST_READY: path.join(root, "probe-ready"),
             T3CODE_TEST_TERM: path.join(root, "probe-term"),
+            ...(yield* launcherHostOverride(root, RELEASE_TARGET.platform, RELEASE_TARGET.arch)),
           };
           const launcher = path.join(output.packageDir, "bin/t3.mjs");
           const failed = yield* run(
@@ -401,6 +423,40 @@ syncBuiltinESMExports();
             assert.include(failed.stderr, "musl");
           }
         }
+      }),
+  );
+
+  it.effect(
+    "rejects the unsupported Intel macOS CLI before downloading or creating runtime state",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-npm-launcher-unsupported-" });
+        const output = yield* buildNpmLauncher({
+          version: VERSION,
+          outputDir: path.join(root, "out"),
+        });
+        const release = yield* serveFakeRelease(root);
+        const home = path.join(root, "home");
+        const result = yield* run(
+          process.execPath,
+          [path.join(output.packageDir, "bin/t3.mjs"), "--version"],
+          {
+            cwd: root,
+            env: {
+              PATH: launcherPath,
+              T3CODE_HOME: home,
+              T3CODE_RELEASE_BASE_URL: release.baseUrl,
+              ...(yield* launcherHostOverride(root, "darwin", "x64")),
+            },
+          },
+        );
+        assert.equal(result.exitCode, 1);
+        assert.equal(result.stdout, "");
+        assert.include(result.stderr, "no T3 Code CLI build is available for darwin-x64");
+        assert.deepStrictEqual(release.requests, []);
+        assert.isFalse(yield* fs.exists(home));
       }),
   );
 });

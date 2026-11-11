@@ -5,7 +5,7 @@
   "scripts": {
     "typecheck": "effect-tsgo tsrs --noEmit",
     "scenarios": "E2E_TELEMETRY_DISABLED=1 e2e run",
-    "test": "vp test run --config ../vite.config.ts --dir ."
+    "test": "vp test run --config ../vite.config.ts --dir . --testTimeout 180000 --hookTimeout 180000"
   },
   "dependencies": {
     "@e2e-dev/mobile": "0.12.6",

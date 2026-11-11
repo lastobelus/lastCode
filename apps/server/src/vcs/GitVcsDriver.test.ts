@@ -72,7 +72,10 @@ const makeCaptureStore = Effect.fn("test.makeCaptureStore")(function* (
 
 type GitContractError = GitCommandError | PlatformError.PlatformError;
 
-runVcsDriverContractSuite<GitVcsDriver.GitVcsDriver, GitContractError>({
+runVcsDriverContractSuite<
+  GitVcsDriver.GitVcsDriver | FileSystem.FileSystem | Path.Path,
+  GitContractError
+>({
   name: "Git",
   kind: "git",
   layer: layerGitContract,
@@ -80,8 +83,13 @@ runVcsDriverContractSuite<GitVcsDriver.GitVcsDriver, GitContractError>({
     createRepo: (cwd) =>
       Effect.gen(function* () {
         yield* runGit(cwd, ["init"]);
-        yield* runGit(cwd, ["config", "user.email", "test@test.com"]);
-        yield* runGit(cwd, ["config", "user.name", "Test"]);
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        yield* fileSystem.writeFileString(
+          path.join(cwd, ".git", "config"),
+          "\n[user]\n\temail = test@test.com\n\tname = Test\n",
+          { flag: "a" },
+        );
       }),
     writeFile: (cwd, relativePath, contents) =>
       Effect.gen(function* () {
@@ -142,8 +150,11 @@ const makeCheckpointFixture = Effect.fn("makeCheckpointFixture")(function* (
   const git = (args: ReadonlyArray<string>) =>
     driver.execute({ operation: "checkpoint-test", cwd, args });
   yield* git(["init"]);
-  yield* git(["config", "user.name", "Test"]);
-  yield* git(["config", "user.email", "test@test.com"]);
+  yield* fileSystem.writeFileString(
+    path.join(cwd, ".git", "config"),
+    "\n[user]\n\tname = Test\n\temail = test@test.com\n",
+    { flag: "a" },
+  );
   yield* fileSystem.writeFileString(path.join(cwd, "file.txt"), "initial\n");
   yield* git(["add", "."]);
   yield* git(["commit", "-m", "initial"]);
