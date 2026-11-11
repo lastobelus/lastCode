@@ -402,9 +402,10 @@ describe("Pi tool discovery permissions", () => {
   });
 });
 
-async function loadRequestHook() {
-  const handlers = new Map<string, RequestHook>();
+async function loadExtensionHandlers() {
+  const handlers = new Map<string, unknown>();
   const commands = new Map<string, CommandHandler>();
+  // Execute the shipped extension with MCP disabled; this path needs no Typebox.
   const source = NodeModule.stripTypeScriptTypes(
     PI_T3_MCP_EXTENSION_SOURCE.replace(/^import .*;$/gm, "").replace(
       "export default async function",
@@ -414,12 +415,17 @@ async function loadRequestHook() {
   await NodeVM.runInNewContext(`${source}\nt3McpExtension(pi)`, {
     process: { env: {} },
     pi: {
-      on: (name: string, handler: RequestHook) => handlers.set(name, handler),
+      on: (name: string, handler: unknown) => handlers.set(name, handler),
       registerCommand: (name: string, options: { handler: CommandHandler }) =>
         commands.set(name, options.handler),
     },
   });
-  const hook = handlers.get("before_provider_request");
+  return { handlers, commands };
+}
+
+async function loadRequestHook() {
+  const { handlers, commands } = await loadExtensionHandlers();
+  const hook = handlers.get("before_provider_request") as RequestHook | undefined;
   const setServiceTier = commands.get(PI_T3_SERVICE_TIER_COMMAND);
   assert.isDefined(hook);
   assert.isDefined(setServiceTier);
@@ -582,5 +588,34 @@ describe("Pi skill references", () => {
     } finally {
       await NodeFSP.rm(directory, { recursive: true });
     }
+  });
+});
+
+describe("Pi T3 MCP instructions", () => {
+  it("adds background browser guidance through the attached bridge's system prompt", async () => {
+    const bridge = await loadMcpBridge();
+    const hook = bridge.handlers.get("before_agent_start");
+    assert.isDefined(hook);
+    const result = await hook!(
+      { systemPrompt: "Original instructions." },
+      { ui: { notify: () => undefined } },
+    );
+    assert.isDefined(result);
+    assert.include(result!.systemPrompt, "Original instructions.");
+    assert.include(result!.systemPrompt, "Use `delegate_task`");
+    assert.include(result!.systemPrompt, "without a separate browser-permission prompt");
+    assert.include(result!.systemPrompt, "preview_open({ open: false, reuseExistingTab: false })");
+  });
+
+  it("leaves the system prompt untouched without MCP credentials", async () => {
+    const { handlers } = await loadExtensionHandlers();
+    const hook = handlers.get("before_agent_start") as (
+      event: { systemPrompt: string },
+      ctx: { isProjectTrusted: () => boolean },
+    ) => unknown;
+    assert.isDefined(hook);
+    const event = { systemPrompt: "Original instructions." };
+    assert.isUndefined(await hook(event, { isProjectTrusted: () => true }));
+    assert.equal(event.systemPrompt, "Original instructions.");
   });
 });

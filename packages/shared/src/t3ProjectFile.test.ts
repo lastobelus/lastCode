@@ -11,12 +11,17 @@ describe("T3ProjectFileFromJson", () => {
       // team scripts
       "iconPath": "assets/logo.svg",
       "scripts": [
-        { "name": "Dev", "command": "pnpm dev", "stopOnSettle": true, },
+        { "id": "dev-server", "name": "Dev", "command": "pnpm dev", "stopOnSettle": true, },
       ],
     }`);
 
     expect(decoded.iconPath).toBe("assets/logo.svg");
-    expect(decoded.scripts?.[0]).toEqual({ name: "Dev", command: "pnpm dev", stopOnSettle: true });
+    expect(decoded.scripts?.[0]).toEqual({
+      id: "dev-server",
+      name: "Dev",
+      command: "pnpm dev",
+      stopOnSettle: true,
+    });
   });
 });
 
@@ -29,4 +34,10 @@ describe("parseT3ProjectFile", () => {
       }`),
     ).toEqual({ defaultThreadEnvMode: "worktree" });
   });
+});
+
+it("rejects an invalid stable script id from project JSON", () => {
+  expect(
+    parseT3ProjectFile('{"scripts":[{"id":"Dev Server","name":"Dev","command":"pnpm dev"}]}'),
+  ).toBeNull();
 });
