@@ -181,6 +181,7 @@ import { ComposerUsageLimits } from "./ComposerUsageLimits";
 import { PendingUserInputCard } from "./PendingUserInputCard";
 import { ProviderSubagentBar } from "./ProviderSubagentBar";
 import { ThreadCreationFailedCard } from "./ThreadCreationFailedCard";
+import { ActionResumeNotice } from "./ActionResumeNotice";
 import {
   FLOATING_WORKING_CONTROL_COVERAGE,
   FloatingWorkingControl,
@@ -1704,6 +1705,19 @@ function ThreadDetailBody(
                         <ComposerErrorNotice
                           message={composerError}
                           onDismiss={() => clearThreadComposerError(selectedThreadKey)}
+                        />
+                      </Animated.View>
+                    ) : null}
+                    {props.selectedThread.actionResume?.outcome === "running" ||
+                    props.selectedThread.actionResume?.delivery === "available" ? (
+                      <Animated.View
+                        className="shrink-0 px-4 pb-3"
+                        entering={FadeInDown.duration(220)}
+                        exiting={FadeOut.duration(140)}
+                      >
+                        <ActionResumeNotice
+                          environmentId={props.environmentId}
+                          thread={props.selectedThread}
                         />
                       </Animated.View>
                     ) : null}

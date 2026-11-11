@@ -48,7 +48,7 @@ const READ_FAILURE_LIMIT = 8;
 const GROUP_READS = 4;
 /** Without fingerprints, reread quiet PRs on snapshot changes or this interval to catch edits. */
 const QUIET_REREAD_MS = 10 * 60_000;
-/** Reread despite unchanged fingerprints; they miss review-thread comment edits. */
+/** Reread despite unchanged fingerprints; they miss review-thread edits and review/comment reactions. */
 const FINGERPRINT_REREAD_MS = 30 * 60_000;
 
 const isProviderError = Schema.is(PullRequestProviderError);
