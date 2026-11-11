@@ -14,12 +14,13 @@ import {
   resolveDefaultProjectRef,
 } from "../hooks/useHandleNewThread";
 import { createScratchProjectActions } from "../hooks/useScratchProject";
-import { getClientSettings } from "../hooks/useSettings";
+import { getClientSettings, getClientSettingsHydratedSnapshot } from "../hooks/useSettings";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { selectProjectGroupingSettings } from "@t3tools/client-runtime/state/project-grouping";
 import { selectActiveRightPanel, useRightPanelStore } from "../rightPanelStore";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { buildSidebarProjectSnapshots } from "../sidebarProjectGrouping";
+import { resolveSidebarMode, useSidebarModeStore } from "../sidebarMode";
 import { readProjects, readThreadShell } from "../state/entities";
 import { defaultProjectFallbackReadyAtom } from "../state/projects";
 import { environmentPresentations } from "../state/presentation";
@@ -131,8 +132,16 @@ export function installChatRouteCommands(router: AnyRouter): () => void {
         void scratch.startScratchThread(environmentId);
       },
       "chat.new": (event) => {
+        // Pre-hydration settings are the defaults, where the LastCode sidebar is off.
+        const settings = getClientSettings();
+        const sidebarMode = resolveSidebarMode(
+          settings,
+          getClientSettingsHydratedSnapshot(),
+          useSidebarModeStore.getState().lastcodeHidden,
+        );
         const groups = readProjectGroups();
         if (
+          sidebarMode === "inbox" &&
           !shouldCreateNewThreadInCurrentProject(
             false,
             groups.filter((group) => !group.archived).length,
