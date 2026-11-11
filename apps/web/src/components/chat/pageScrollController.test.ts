@@ -1,6 +1,6 @@
-import { describe, expect, test } from "vite-plus/test";
+import { describe, expect, test, vi } from "vite-plus/test";
 
-import { getTimelinePageScrollKey } from "./pageScrollController";
+import { createPageScrollController, getTimelinePageScrollKey } from "./pageScrollController";
 
 describe("page scroll helpers", () => {
   const composerPageScrollEvent = (
@@ -69,5 +69,35 @@ describe("page scroll helpers", () => {
     expect(
       getTimelinePageScrollKey(composerPageScrollEvent({ scrollHeight: 600, scrollTop: 399.5 })),
     ).toBe("PageDown");
+  });
+
+  test("stops an in-flight page when its viewport is removed or replaced", () => {
+    const original = {
+      clientHeight: 300,
+      scrollHeight: 2000,
+      scrollTop: 1700,
+      getBoundingClientRect: () => ({ height: 300 }),
+    };
+    let current: typeof original | null = original;
+    const frames: FrameRequestCallback[] = [];
+    const clearTimeout = vi.fn();
+    const controller = createPageScrollController({
+      getContainer: () => current,
+      getPageScrollDistancePx: () => 264,
+      env: {
+        now: () => 0,
+        requestAnimationFrame: (callback) => frames.push(callback),
+        cancelAnimationFrame: () => {},
+        setTimeout: () => 1,
+        clearTimeout,
+        prefersReducedMotion: () => false,
+      },
+    });
+    controller.handleKeyDown("PageUp");
+    current = null;
+    frames[0]!(150);
+    expect(original.scrollTop).toBe(1700);
+    expect(clearTimeout).toHaveBeenCalledWith(1);
+    controller.dispose();
   });
 });

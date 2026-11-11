@@ -913,6 +913,57 @@ describe("EnvironmentThreads", () => {
     }),
   );
 
+  it.effect.each([false, true])(
+    "loads a newly created thread and pending question after an earlier HTTP miss (socket-first: %s)",
+    (socketFirst) =>
+      Effect.gen(function* () {
+        const resumeCache: NonNullable<Parameters<typeof makeEnvironmentThreadState>[1]> = {
+          snapshot: undefined,
+          owner: undefined,
+        };
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const draft = yield* makeHarness({
+              httpSnapshot: { _tag: "missing" },
+              resumeCache,
+              ...(socketFirst ? { socketSnapshots: true as const, completionMarker: true } : {}),
+            });
+            if (socketFirst) {
+              yield* SubscriptionRef.changes(draft.subscriptionCount).pipe(
+                Stream.filter((count) => count === 1),
+                Stream.runHead,
+              );
+              expect(yield* Ref.get(draft.loaderCalls)).toBe(0);
+              yield* Queue.offer(draft.inputs, TEST_DEFECT);
+            }
+            yield* awaitThreadState(draft.observed, (value) => value.status === "deleted");
+            expect(yield* Ref.get(draft.loaderCalls)).toBe(1);
+          }),
+        );
+
+        const createdProjection = { ...BASE_PROJECTION, runtimeRequests: [PENDING_QUESTION] };
+        const created = yield* makeHarness({
+          httpSnapshot: {
+            _tag: "present",
+            snapshot: { snapshotSequence: 10, projection: createdProjection },
+          },
+          resumeCache,
+          ...(socketFirst ? { socketSnapshots: true as const, completionMarker: true } : {}),
+        });
+        if (socketFirst) {
+          yield* Queue.offer(created.inputs, snapshot(createdProjection, 10));
+          yield* Queue.offer(created.inputs, synchronized());
+        }
+        const state = yield* awaitThreadState(
+          created.observed,
+          (value) => value.status === "live" || value.status === "deleted",
+        );
+        expect(state.status).toBe("live");
+        expect(Option.getOrNull(state.data)).toEqual(createdProjection);
+        expect(yield* Ref.get(created.loaderCalls)).toBe(socketFirst ? 0 : 1);
+      }),
+  );
+
   it.effect("resumes a warm cache via afterSequence without an HTTP fetch", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness({ cached: BASE_PROJECTION });
