@@ -128,6 +128,13 @@ export function createProjectEnvironmentAtoms<R, E>(
           (result, isCurrent) => fileMetadata.rememberEntries(input.cwd, result.entries, isCurrent),
         ),
     }),
+    autoPullStatus: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:projects:auto-pull-status",
+      tag: WS_METHODS.projectsAutoPullStatus,
+      staleTimeMs: 15_000,
+      // Status checks rerun with automatic fetches, so an open settings page catches up.
+      refreshIntervalMs: 30_000,
+    }),
     listIgnoredFiles: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:projects:list-ignored-files",
       tag: WS_METHODS.projectsListIgnoredFiles,

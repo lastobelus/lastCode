@@ -18,6 +18,21 @@ vi.mock("../state/entities", async (original) => ({
   useProjects: () => entities.projects,
   useVisibleThreadShells: () => entities.threads,
 }));
+vi.mock("../state/environments", async (original) => ({
+  ...(await original<typeof import("../state/environments")>()),
+  // New-thread project rows are selectable only while their environment is connected.
+  useEnvironments: () => ({
+    environments: [
+      {
+        environmentId: "local",
+        label: "Local",
+        connection: { phase: "connected" },
+        entry: { target: { _tag: "PrimaryConnectionTarget" } },
+        serverConfig: null,
+      },
+    ],
+  }),
+}));
 
 function setup(state: { projects?: ReadonlyArray<Project>; threads?: ReadonlyArray<Thread> } = {}) {
   useCommandPaletteStore.setState(useCommandPaletteStore.getInitialState(), true);
@@ -107,11 +122,13 @@ describe("CommandPalette open intents", () => {
     await expect
       .element(page.getByPlaceholder("Search commands, projects, and threads..."))
       .toHaveFocus();
-    await userEvent.keyboard("{ArrowDown}");
     await expect
-      .element(page.getByRole("option", { name: /^New thread in\.\.\./ }))
+      .element(page.getByRole("option", { name: /^New thread in Acme/ }))
       .toHaveAttribute("data-highlighted");
-    await userEvent.keyboard("{Enter}");
+    const newThreadIn = page.getByRole("option", { name: /^New thread in\.\.\./ });
+    await userEvent.hover(newThreadIn);
+    await expect.element(newThreadIn).toHaveAttribute("data-highlighted");
+    await newThreadIn.click();
 
     await expect.element(page.getByPlaceholder("Search...")).toHaveFocus();
     await expect.element(page.getByRole("option").first()).toHaveAttribute("data-highlighted");

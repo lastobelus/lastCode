@@ -39,8 +39,10 @@ import {
   PullRequestListFailedError,
   PullRequestNotOpenError,
   type PullRequestTargetInput,
+  type WatchPullRequestInput,
   PullRequestWatchFailedError,
   PullRequestWatchFromSubagentError,
+  PullRequestWatchRestartRefusedError,
   PullRequestThreadRequiredError,
   PullRequestGuideFailedError,
   PullRequestProjectNotFoundError,
@@ -261,7 +263,7 @@ const make = Effect.gen(function* () {
         : Effect.fail(new Failure({ cause }));
 
   const setWatching = Effect.fn("PullRequestsToolkit.setWatching")(function* (
-    input: PullRequestTargetInput,
+    input: WatchPullRequestInput,
     watching: boolean,
   ) {
     const thread = yield* requireThread(PullRequestWatchFailedError, input.threadId);
@@ -271,12 +273,25 @@ const make = Effect.gen(function* () {
       threadPullRequestsOf(shell).find(
         (link) => link.source !== "stack-dismissed" && threadPullRequestKeysEqual(link, target),
       );
-    if (watching && thread.lineage.relationshipToParent === "subagent") {
+    const caller = yield* McpInvocationContext.McpInvocationContext;
+    if (
+      watching &&
+      thread.lineage.relationshipToParent === "subagent" &&
+      thread.lineage.independent !== true &&
+      caller.thread?.execution === undefined
+    ) {
       return yield* new PullRequestWatchFromSubagentError();
     }
     const before = watchedLink(thread);
     if (watching && before?.snapshot?.state === "merged") {
       return yield* new PullRequestNotOpenError({ state: "merged" });
+    }
+    if (watching && input.restart !== true) {
+      // A null dueAt means the quiet wake fired and nothing on the PR has restarted the timer since.
+      if (before?.watch?.quietDeadline?.dueAt === null && input.quietTimeoutMinutes !== null)
+        return yield* new PullRequestWatchRestartRefusedError({ reason: "quiet" });
+      if (before?.watch === undefined && before?.endedWatch?.unreadable === true)
+        return yield* new PullRequestWatchRestartRefusedError({ reason: "unreadable" });
     }
     yield* engine
       .dispatch({
@@ -287,6 +302,9 @@ const make = Effect.gen(function* () {
         repository: target.repository,
         number: target.number,
         watching,
+        ...(watching && input.quietTimeoutMinutes !== undefined
+          ? { quietTimeoutMinutes: input.quietTimeoutMinutes }
+          : {}),
         ...(watching ? { link: { url: target.url, source: "agent" as const } } : {}),
       })
       .pipe(Effect.catchCause(dispatchFailure(PullRequestWatchFailedError)));
@@ -356,7 +374,20 @@ const make = Effect.gen(function* () {
 
   const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A, E, R>(
     handle: (params: P) => Effect.Effect<A, E, R>,
-  ) => McpToolAccess.writesThreads((params: P) => [params.threadId], handle);
+  ) =>
+    McpToolAccess.writesThreads(
+      (params: P) => [params.threadId],
+      (params: P) =>
+        Effect.gen(function* () {
+          const scope = yield* McpInvocationContext.McpInvocationContext;
+          return yield* handle(params).pipe(
+            Effect.provideService(
+              Orchestrator.PullRequestWatchSourceAuthorization,
+              scope.thread?.execution ?? null,
+            ),
+          );
+        }),
+    );
 
   return {
     link_pull_request: writesThread((input) =>

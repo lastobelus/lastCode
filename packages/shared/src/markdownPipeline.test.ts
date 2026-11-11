@@ -119,6 +119,22 @@ it.each([
   }
 });
 
+it.each(["report.md", "test_utils.py", "__init__.py", "_config.yml", "2024-notes.md"])(
+  "preserves %s line positions through the shared Markdown sanitizer",
+  (filename) => {
+    const processor = unified()
+      .use(remarkParse)
+      .use(CHAT_MARKDOWN_REMARK_PLUGINS)
+      .use(remarkRehype, { allowDangerousHtml: true })
+      .use(CHAT_MARKDOWN_REHYPE_PLUGINS);
+    const tree = processor.runSync(processor.parse(`[Report](${filename}:66)`));
+    expect(tree.children[0]).toMatchObject({
+      tagName: "p",
+      children: [{ tagName: "a", properties: { href: `${filename}%3A66` } }],
+    });
+  },
+);
+
 it("preserves in-app thread links through the shared Markdown sanitizer", () => {
   const processor = unified()
     .use(remarkParse)

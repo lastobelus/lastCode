@@ -59,6 +59,42 @@ const ITEMS: ReadonlyArray<SettingsSearchItem> = [
 ];
 
 describe("searchSettings", () => {
+  it.each(["work details hover", "current work status", "full list info button"])(
+    "finds the current work hover preference for %s",
+    (query) => {
+      expect(searchSettings(query)).toContainEqual(
+        expect.objectContaining({ id: "hover-current-work-details", to: "/settings/lastcode" }),
+      );
+    },
+  );
+
+  it.each([
+    ["suspend settled worktrees", "storage-suspension-policy"],
+    ["LastCode restore saved workspace", "storage-saved-workspaces"],
+    ["permanent deletion", "storage-worktrees"],
+  ])("finds %s on the Worktrees page", (query, id) => {
+    expect(searchSettings(query)).toContainEqual(
+      expect.objectContaining({ id, to: "/settings/worktrees", scope: "project-defaults" }),
+    );
+  });
+
+  it.each(["incoming messages", "neutral fill", "outline"])(
+    "finds incoming message appearance for %s",
+    (query) => {
+      expect(searchSettings(query).map((item) => item.id)).toContain("incoming-message-style");
+    },
+  );
+
+  it("keeps the fill color search destination available when its row is hidden", () => {
+    expect(searchSettings("message color")).toContainEqual(
+      expect.objectContaining({
+        id: "incoming-message-fill-color",
+        to: "/settings/lastcode",
+        targetId: "incoming-message-style",
+      }),
+    );
+  });
+
   it.each(["quick ci mode", "github only", "always local"])(
     "finds the environment Quick CI mode for %s",
     (query) => {
@@ -137,6 +173,12 @@ describe("searchSettings", () => {
       isWslSettingsRowVisible: false,
       hasThreadAutoSettlement: false,
     });
+
+    expect(SETTINGS_NAV_GROUPS.flatMap((group) => group.paths)).toContain("/settings/connect");
+    expect(searchSettings("connect account sign in", available)).toContainEqual(
+      expect.objectContaining({ id: "connect-account", to: "/settings/connect" }),
+    );
+    expect(getSettingsSearchTargetScope("connect-account")?.scope).toBeNull();
 
     const gatedIds = new Set<string>([
       "follow-change-request-templates",
@@ -224,7 +266,7 @@ describe("searchSettings", () => {
 
   it("finds rows by the titles shown on their pages", () => {
     for (const [title, id] of [
-      ["Automatic worktree cleanup", "storage-worktrees"],
+      ["Permanent deletion", "storage-worktrees"],
       ["Delete settled worktrees", "storage-worktrees"],
       ["Delete old browser artifacts", "storage-artifacts"],
       ["Delete old rotated logs", "storage-artifacts"],
@@ -347,6 +389,13 @@ describe("auto-settlement search availability", () => {
   it("finds the independent LastCode sidebar override", () => {
     expect(searchSettings("LastCode sidebar")[0]).toMatchObject({
       id: "lastcode-sidebar",
+      to: "/settings/lastcode",
+    });
+  });
+
+  it("routes scrollbar sizing to LastCode settings", () => {
+    expect(searchSettings("scrollbar margin")[0]).toMatchObject({
+      id: "larger-scrollbars",
       to: "/settings/lastcode",
     });
   });

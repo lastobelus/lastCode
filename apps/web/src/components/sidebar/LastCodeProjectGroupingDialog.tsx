@@ -14,9 +14,9 @@ import { Button } from "../ui/button";
 import type { SidebarProjectGroupingMode } from "@t3tools/contracts";
 import { useClientSettings, updateClientSettings } from "~/hooks/useSettings";
 import {
-  deriveProjectGroupingOverrideKey,
+  derivePhysicalProjectKey as deriveProjectGroupingOverrideKey,
   selectProjectGroupingSettings,
-} from "../../logicalProject";
+} from "@t3tools/client-runtime/state/project-grouping";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 type DialogProps = { target: SidebarProjectGroupMember | null; onClose: () => void };
 function targetKey(target: SidebarProjectGroupMember | null) {
@@ -139,6 +139,12 @@ function ProjectGroupingForm({ target: projectGroupingTarget, onClose }: DialogP
   );
 }
 export function LastCodeProjectGroupingDialog({ target, onClose }: DialogProps) {
+  const currentTargetKey = targetKey(target);
+  const [formIdentity, setFormIdentity] = useState({ targetKey: currentTargetKey, generation: 0 });
+  // Closing popups retain their form; reopening the same target must create a fresh draft.
+  if (formIdentity.targetKey !== currentTargetKey) {
+    setFormIdentity({ targetKey: currentTargetKey, generation: formIdentity.generation + 1 });
+  }
   return (
     <Dialog
       open={target !== null}
@@ -147,7 +153,7 @@ export function LastCodeProjectGroupingDialog({ target, onClose }: DialogProps) 
       }}
     >
       <DialogPopup className="max-w-lg">
-        <ProjectGroupingForm key={targetKey(target)} target={target} onClose={onClose} />
+        <ProjectGroupingForm key={formIdentity.generation} target={target} onClose={onClose} />
       </DialogPopup>
     </Dialog>
   );

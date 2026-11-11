@@ -201,6 +201,7 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
   canInterrupt: boolean;
   followUpBehavior: "queue" | "steer";
   canSteer: boolean;
+  forceQueue: boolean;
   alternateShortcutLabel: string | null;
   voiceInputActive?: boolean;
   isSendBusy: boolean;
@@ -228,6 +229,7 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
         canInterrupt={props.canInterrupt}
         followUpBehavior={props.followUpBehavior}
         canSteer={props.canSteer}
+        forceQueue={props.forceQueue}
         alternateShortcutLabel={props.alternateShortcutLabel}
         voiceInputActive={props.voiceInputActive ?? false}
         isSendBusy={props.isSendBusy}

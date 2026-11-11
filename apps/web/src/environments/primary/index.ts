@@ -1,4 +1,5 @@
 export {
+  fetchSessionState,
   peekPairingTokenFromUrl,
   PrimaryEnvironmentPairingCredentialRejectedError,
   PrimaryEnvironmentRequestError,

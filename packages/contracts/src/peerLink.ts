@@ -50,6 +50,21 @@ export const PeerLinkCreateInput = Schema.Struct({
 });
 export type PeerLinkCreateInput = typeof PeerLinkCreateInput.Type;
 
+export const PeerLinkPreflightInput = Schema.Struct({
+  url: PeerLinkCreateInput.fields.url,
+  alternateUrls: PeerLinkCreateInput.fields.alternateUrls,
+  expectedEnvironmentId: PeerLinkCreateInput.fields.expectedEnvironmentId,
+  expectedLabel: PeerLinkCreateInput.fields.expectedLabel,
+});
+export type PeerLinkPreflightInput = typeof PeerLinkPreflightInput.Type;
+
+export const PeerLinkPreflightResult = Schema.Struct({
+  environmentId: EnvironmentId,
+  label: Schema.String,
+  urls: Schema.Array(TrimmedNonEmptyString),
+});
+export type PeerLinkPreflightResult = typeof PeerLinkPreflightResult.Type;
+
 export const PeerLinkRemoveInput = Schema.Struct({ environmentId: EnvironmentId });
 export type PeerLinkRemoveInput = typeof PeerLinkRemoveInput.Type;
 
