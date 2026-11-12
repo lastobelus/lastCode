@@ -1,5 +1,6 @@
 import { attachSidebarTree } from "../lib/sidebarTree";
 import { type EnvironmentId, type ScopedProjectRef } from "@t3tools/contracts";
+import { useSidebarProviderBadgePreferences } from "./sidebar/SidebarEnvironmentIcon";
 import type { EnvironmentServerConfig } from "@t3tools/client-runtime/connection";
 import {
   dropThreadContext,
@@ -81,6 +82,10 @@ import {
   type ReactNode,
 } from "react";
 import { type AnyRouter, useRouter } from "@tanstack/react-router";
+import { useRightPanelStore } from "../rightPanelStore";
+import { describeHandoff } from "../handoffs/handoffMenu";
+import { readThreadHandoffs } from "../handoffs/handoffsStore";
+import { useOpenHandoff } from "../handoffs/useOpenHandoff";
 
 import {
   isAtomCommandInterrupted,
@@ -121,6 +126,11 @@ import {
   useAcknowledgeThreadWoke,
   useThreadActions,
 } from "../hooks/useThreadActions";
+import {
+  markThreadsReadState,
+  canMarkThreadReadState,
+  withThreadReadPermissions,
+} from "../hooks/threadReadActions";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useOrderWhileOpen } from "../hooks/useOrderWhileOpen";
 import { useProjectPin } from "../hooks/useProjectGroupUpdate";
@@ -151,7 +161,9 @@ import { primaryServerKeybindingsAtom } from "../state/server";
 import { environmentProjects } from "../state/projects";
 import { threadEnvironment } from "../state/threads";
 import { useOlderSettledShelf, useOlderSettledShelfGrowth } from "../state/olderSettledShelf";
+import { terminalEnvironment } from "../state/terminal";
 import { useThreadSearch } from "../state/queries";
+import { useAtomCommand } from "../state/use-atom-command";
 import { useOrchestrationCommand } from "../state/use-orchestration-command";
 import { readEnvironmentScope, useEnvironmentScope } from "../state/session";
 import { appAtomRegistry } from "../rpc/atomRegistry";
@@ -179,6 +191,8 @@ import {
   sidebarFolderExpansionKeys,
   buildBulkTitleRegenerationContextMenuItem,
   buildBulkUnpinContextMenuItem,
+  buildBulkThreadDeleteContextMenuItem,
+  collectUnprotectedBulkThreadEntries,
   deleteSelectedThreadEntries,
   filterSidebarProjectScopeItems,
   firstValidTimestampMs,
@@ -570,7 +584,7 @@ function useSidebarThreads(input: {
       ...workingThreads,
       ...snoozedThreads,
       ...settledThreads,
-    ],
+    ].filter((thread) => thread.worktreeCleanup == null),
     settledVisibleCount,
     settledCount,
     olderSettledShelf,
@@ -594,7 +608,9 @@ function useSidebarThreads(input: {
     renderedSettledThreads,
     visibleSnoozedThreads,
     visibleWorkingThreads,
-    orderedThreadKeys: orderedThreads.map(threadShellKey),
+    orderedThreadKeys: orderedThreads
+      .filter((thread) => thread.worktreeCleanup == null)
+      .map(threadShellKey),
     threadByKey: new Map(orderedThreads.map((thread) => [threadShellKey(thread), thread] as const)),
     settledThreadKeys: new Set(settledThreads.map(threadShellKey)),
     snoozedThreadKeys: new Set(snoozedThreads.map(threadShellKey)),
@@ -640,6 +656,10 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
   });
   for (const thread of visible) {
     const configLoaded = serverConfigs.has(thread.environmentId);
+    if (thread.worktreeCleanup != null) {
+      active.push(thread);
+      continue;
+    }
     const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
     if (optimisticDrop?.key === threadKey) {
       const projected = applySidebarThreadDrop(
@@ -915,7 +935,12 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
+  const handoffsMenuLimit = useClientSettings((s) => s.handoffsMenuLimit);
+  const openHandoff = useOpenHandoff();
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
+  const environmentIconColors = useClientSettings((s) => s.environmentIconColors);
+  const showLocalEnvironmentIcon = useClientSettings((s) => s.showLocalEnvironmentIcon);
+  const providerBadgePreferences = useSidebarProviderBadgePreferences();
   const {
     settleThread,
     unsettleThread,
@@ -929,12 +954,15 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     reorderPinnedThread,
     reorderActiveThread,
     markThreadUnread,
+    markThreadRead,
     archiveThread,
     deleteThread,
+    setThreadPersistence,
   } = useThreadActions();
   const updateThreadMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
+  const closeTerminal = useAtomCommand(terminalEnvironment.close, "cancel Project Action");
   const { copyToClipboard: copyPathToClipboard } = useCopyToClipboard<{ path: string }>({
     onCopy: ({ path }) => {
       toastManager.add({
@@ -1353,6 +1381,19 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     keepEmptyFolders: (group) =>
       scopedProjectGroups.length > 0 || (group.pinned && !group.archived),
   });
+
+  useEffect(() => {
+    const bridge = window.desktopBridge;
+    if (!bridge?.reportRunningActionCount) return;
+    const localEnvironmentIds = new Set(
+      bridge.getLocalEnvironmentBootstraps().map((bootstrap) => bootstrap.id),
+    );
+    const runningActionCount = threads.filter(
+      (thread) =>
+        localEnvironmentIds.has(thread.environmentId) && thread.actionResume?.outcome === "running",
+    ).length;
+    void bridge.reportRunningActionCount(runningActionCount);
+  }, [threads]);
 
   // Ranked across environments as the palette ranks them, so one
   // environment's list does not sit above another's better matches; rows
@@ -2285,8 +2326,10 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       const api = readLocalApi();
       if (!api) return;
       const selectedThreadKeys = [...useThreadSelectionStore.getState().selectedThreadKeys];
-      const threadKeys = selectedThreadKeys.filter((threadKey) =>
-        threadByKeyRef.current.has(threadKey),
+      const threadKeys = selectedThreadKeys.filter(
+        (threadKey) =>
+          threadByKeyRef.current.has(threadKey) &&
+          threadByKeyRef.current.get(threadKey)?.worktreeCleanup == null,
       );
       if (threadKeys.length === 0) return;
       const count = threadKeys.length;
@@ -2319,6 +2362,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       const unpinMenuItem = buildBulkUnpinContextMenuItem({
         pinnedCount: pinnedSelectedThreads.length,
       });
+      const hasPersistentThread = selectedThreads.some((thread) => thread.persistent === true);
       // Presets sync across environments, so the first selected thread's stand for all.
       const menuOpenedAt = new Date();
       const snoozePresets = resolveSnoozePresets(
@@ -2370,12 +2414,23 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                   },
                 ]
               : []),
-            { id: "mark-unread", label: `Mark unread (${count})` },
             {
-              id: "delete",
-              label: `Delete (${count})`,
-              destructive: true,
-              disabled: !canOperateThreads(selectedThreads),
+              id: "mark-unread",
+              label: `Mark unread (${count})`,
+              disabled: !selectedThreads.every((thread) =>
+                canMarkThreadReadState(scopeThreadRef(thread.environmentId, thread.id)),
+              ),
+            },
+            {
+              id: "mark-read",
+              label: `Mark read (${count})`,
+              disabled: !selectedThreads.every((thread) =>
+                canMarkThreadReadState(scopeThreadRef(thread.environmentId, thread.id)),
+              ),
+            },
+            {
+              ...buildBulkThreadDeleteContextMenuItem({ count, hasPersistentThread }),
+              disabled: hasPersistentThread || !canOperateThreads(selectedThreads),
             },
           ],
           position,
@@ -2396,7 +2451,12 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 })
               : selectedThreads;
       if (clicked.value === "settle" && actionTargets.length === 0) return;
-      if (clicked.value !== "mark-unread" && !checkThreadOperations(actionTargets)) return;
+      if (
+        clicked.value !== "mark-unread" &&
+        clicked.value !== "mark-read" &&
+        !checkThreadOperations(actionTargets)
+      )
+        return;
       if (clicked.value?.startsWith("snooze:")) {
         const preset =
           clicked.value === "snooze:custom"
@@ -2479,15 +2539,21 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         clearSelection();
         return;
       }
-      if (clicked.value === "mark-unread") {
-        for (const threadKey of threadKeys) {
+      if (clicked.value === "mark-unread" || clicked.value === "mark-read") {
+        const refs = threadKeys.flatMap((threadKey) => {
           const thread = threadByKeyRef.current.get(threadKey);
-          if (thread) markThreadUnread(scopeThreadRef(thread.environmentId, thread.id));
-        }
-        clearSelection();
+          return thread ? [scopeThreadRef(thread.environmentId, thread.id)] : [];
+        });
+        await markThreadsReadState(
+          refs,
+          clicked.value === "mark-read" ? markThreadRead : markThreadUnread,
+        );
         return;
       }
       if (clicked.value !== "delete") return;
+      // Keep the handler safe if a platform context-menu implementation ever
+      // returns a disabled item.
+      if (hasPersistentThread) return;
       if (confirmThreadDelete) {
         const confirmed = await settlePromise(() =>
           api.dialogs.confirm(
@@ -2500,24 +2566,25 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         );
         if (confirmed._tag === "Failure" || !confirmed.value) return;
       }
-      if (
-        !checkThreadOperations(
-          threadKeys.flatMap((threadKey) => {
-            const thread = threadByKeyRef.current.get(threadKey);
-            return thread ? [thread] : [];
-          }),
-        )
-      )
-        return;
-      const { deletedThreadKeys, firstFailure } = await deleteSelectedThreadEntries({
-        entries: threadKeys.map((threadKey) => ({ threadKey })),
-        delete: async ({ threadKey }, deletedThreadKeys) => {
-          const thread = threadByKeyRef.current.get(threadKey);
-          if (!thread) return null;
-          return deleteThread(scopeThreadRef(thread.environmentId, thread.id), {
-            deletedThreadKeys,
-          });
+      // The menu and confirmation dialog may stay open while another client
+      // changes persistence. Rebuild from live shell state immediately before
+      // the destructive batch so an ordinary thread cannot be deleted before
+      // reaching a newly protected selection member.
+      const deleteEntries = collectUnprotectedBulkThreadEntries({
+        threadKeys,
+        getEntry: (threadKey) => {
+          const threadRef = parseScopedThreadKey(threadKey);
+          const thread = threadRef ? readThreadShell(threadRef) : null;
+          return thread ? { threadKey, thread } : undefined;
         },
+      });
+      if (!deleteEntries || !checkThreadOperations(deleteEntries.map(({ thread }) => thread)))
+        return;
+      if (deleteEntries.some(({ thread }) => thread.worktreeCleanup != null)) return;
+      const { deletedThreadKeys, firstFailure } = await deleteSelectedThreadEntries({
+        entries: deleteEntries,
+        delete: ({ thread }, deletedThreadKeys) =>
+          deleteThread(scopeThreadRef(thread.environmentId, thread.id), { deletedThreadKeys }),
       });
       if (firstFailure !== null) {
         const firstError = squashAtomCommandFailure(firstFailure);
@@ -2627,46 +2694,80 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 projectRef.projectId === thread.projectId,
             ),
           ) ?? null;
+        const handoffs = readThreadHandoffs(threadRef);
+        const handoffDescriptors = handoffs.slice(0, handoffsMenuLimit).map(describeHandoff);
         const clicked = await settlePromise(() =>
           api.contextMenu.show(
-            buildThreadActionMenuItems({
-              canOperate: readEnvironmentScope(
-                threadRef.environmentId,
-                AuthOrchestrationOperateScope,
+            [
+              { id: "open-dashboard" as const, label: "Open dashboard", icon: "layout-dashboard" },
+              ...withThreadReadPermissions(
+                buildThreadActionMenuItems({
+                  canOperate: readEnvironmentScope(
+                    threadRef.environmentId,
+                    AuthOrchestrationOperateScope,
+                  ),
+                  branch: thread.branch ?? null,
+                  projectFilter:
+                    threadProjectGroup && !threadProjectGroup.archived
+                      ? {
+                          label: threadProjectGroup.displayName,
+                          isActive: projectScopeKeys.includes(threadProjectGroup.projectKey),
+                        }
+                      : null,
+                  isPinned,
+                  isPersistent: thread.persistent === true,
+                  archiveFailed: thread.archivePending?.status === "failed",
+                  isSettled,
+                  autoSettleEnabled: thread.autoSettleDisabledAt == null,
+                  isSnoozed,
+                  canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
+                  isRegeneratingTitle,
+                  isRunning: !threadRuntimeCanArchive(thread.runtime),
+                  canShareWithGuest: appAtomRegistry.get(
+                    canShareWithGuestAtom(threadRef.environmentId),
+                  ),
+                  canTurnIntoProject: canTurnThreadIntoProject(threadRef),
+                  hasRunningAction: thread.actionResume?.outcome === "running",
+                  hasStoppableProcesses,
+                  supports: {
+                    settlement: configLoaded,
+                    autoSettleOptOut: supportsAutoSettleOptOut,
+                    snooze: configLoaded,
+                    pinning: configLoaded,
+                    persistence:
+                      serverConfigs.get(thread.environmentId)?.environment.capabilities
+                        .threadPersistence === true,
+                    titleRegeneration: configLoaded,
+                  },
+                  snoozePresets,
+                  handoffs: handoffDescriptors,
+                  handoffsOverflow: handoffs.length > handoffDescriptors.length,
+                }),
+                [threadRef],
               ),
-              branch: thread.branch ?? null,
-              // An archived project is not a filter choice.
-              projectFilter:
-                threadProjectGroup && !threadProjectGroup.archived
-                  ? {
-                      label: threadProjectGroup.displayName,
-                      isActive: projectScopeKeys.includes(threadProjectGroup.projectKey),
-                    }
-                  : null,
-              isPinned,
-              isSettled,
-              autoSettleEnabled: thread.autoSettleDisabledAt == null,
-              isSnoozed,
-              canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
-              isRegeneratingTitle,
-              isRunning: !threadRuntimeCanArchive(thread.runtime),
-              canShareWithGuest: appAtomRegistry.get(
-                canShareWithGuestAtom(threadRef.environmentId),
-              ),
-              canTurnIntoProject: canTurnThreadIntoProject(threadRef),
-              supports: {
-                settlement: configLoaded,
-                autoSettleOptOut: supportsAutoSettleOptOut,
-                snooze: configLoaded,
-                pinning: configLoaded,
-                titleRegeneration: configLoaded,
-              },
-              snoozePresets,
-            }),
+            ],
             position,
           ),
         );
         if (clicked._tag === "Failure" || clicked.value === null) return;
+        if (clicked.value === "handoff-show-all") {
+          await router.navigate({
+            to: "/$environmentId/$threadId",
+            params: { environmentId: thread.environmentId, threadId: thread.id },
+          });
+          useRightPanelStore.getState().open(threadRef, "handoffs");
+          return;
+        }
+        if (clicked.value?.startsWith("handoff:")) {
+          const entry = handoffs.find((candidate) => `handoff:${candidate.id}` === clicked.value);
+          if (!entry) return;
+          await router.navigate({
+            to: "/$environmentId/$threadId",
+            params: { environmentId: thread.environmentId, threadId: thread.id },
+          });
+          await openHandoff(threadRef, entry);
+          return;
+        }
         if (threadActionRequiresOperate(clicked.value) && !checkThreadOperations([thread])) return;
         if (clicked.value?.startsWith("snooze:")) {
           const preset =
@@ -2772,6 +2873,24 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             }
             return;
           }
+          case "mark-persistent":
+          case "disable-persistence": {
+            const result = await setThreadPersistence(
+              threadRef,
+              clicked.value === "mark-persistent",
+            );
+            if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+              const error = squashAtomCommandFailure(result);
+              toastManager.add(
+                stackedThreadToast({
+                  type: "error",
+                  title: "Failed to update persistent thread",
+                  description: error instanceof Error ? error.message : "An error occurred.",
+                }),
+              );
+            }
+            return;
+          }
           case "rename":
             startThreadRename(threadRef, thread.title);
             return;
@@ -2796,6 +2915,18 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             }
             return;
           }
+          case "cancel-action": {
+            const action = thread.actionResume;
+            if (action?.outcome !== "running") return;
+            await closeTerminal({
+              environmentId: thread.environmentId,
+              input: { threadId: thread.id, terminalId: action.terminalId },
+            });
+            return;
+          }
+          case "mark-read":
+            markThreadRead(threadRef);
+            return;
           case "mark-unread":
             markThreadUnread(threadRef);
             return;
@@ -3243,9 +3374,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             ) ?? null
                           }
                           environmentLabel={environmentLabelById.get(thread.environmentId) ?? null}
-                          environmentMachine={
-                            environmentMachineById.get(thread.environmentId) ?? "server"
-                          }
+                          environmentKnown={environmentLabelById.has(thread.environmentId)}
+                          configuredEnvironmentIconColor={environmentIconColors[thread.environmentId]}
+                          providerBadgePreferences={providerBadgePreferences}
                           providerEntryByInstanceId={
                             providerEntriesByEnvironment.get(thread.environmentId) ??
                             EMPTY_PROVIDER_ENTRIES
@@ -3394,6 +3525,12 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             currentEnvironmentId={primaryEnvironmentId}
                             environmentLabel={
                               environmentLabelById.get(thread.environmentId) ?? null
+                            }
+                            environmentKnown={environmentLabelById.has(thread.environmentId)}
+                            showLocalEnvironmentIcon={showLocalEnvironmentIcon}
+                            providerBadgePreferences={providerBadgePreferences}
+                            configuredEnvironmentIconColor={
+                              environmentIconColors[thread.environmentId]
                             }
                             environmentMachine={
                               environmentMachineById.get(thread.environmentId) ?? "server"
