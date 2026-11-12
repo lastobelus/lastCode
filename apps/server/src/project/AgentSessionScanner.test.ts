@@ -2471,7 +2471,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
         }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
     );
 
-    it.effect("still reads the git identity of repositories next to a blocked one", () =>
+    it.live("still reads the git identity of repositories next to a blocked one", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
         const fileSystem = yield* FileSystem.FileSystem;
@@ -2530,7 +2530,6 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
               yield* awaitGateReader(path.join(repos[1], ".git", "config"));
               yield* Queue.take(finishedNeighbourReads);
               yield* Queue.take(finishedNeighbourReads);
-              yield* TestClock.adjust("2 seconds");
               return yield* Fiber.join(scan);
             }),
           );

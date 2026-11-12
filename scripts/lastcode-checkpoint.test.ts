@@ -102,7 +102,7 @@ it("fingerprints tracked file lists larger than the default subprocess buffer", 
   } finally {
     NodeFS.rmSync(repo, { recursive: true, force: true });
   }
-}, 30000);
+});
 
 function linkedWorktreeFixture(prefix: string) {
   const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), prefix));
