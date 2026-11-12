@@ -1,5 +1,7 @@
 import { isClearComposerCommand, parseSideChatCommand } from "@t3tools/shared/composerTrigger";
 import { armFreshSession, disarmFreshSession, readFreshSessionArm } from "./freshSessionArms";
+import { readUnavailableThreadReference } from "../../lib/composerThreadReferences";
+import type { useChatThreadAnnotation } from "../thread-annotation/useChatThreadAnnotation";
 import {
   mergeDirectPreviewAnnotation,
   resolveBackgroundDraftWorkspaceOptions,
@@ -53,10 +55,7 @@ import {
   squashAtomCommandFailure,
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
-import {
-  type ComposerSubmissionIntent,
-  collapseExpandedComposerCursor,
-} from "../../composer-logic";
+import { type ComposerSubmissionIntent } from "../../composer-logic";
 import { type ChatMessage, DEFAULT_INTERACTION_MODE } from "../../types";
 import { recordPromptSent } from "../GitHubStarPrompt";
 import { stackedThreadToast, toastManager } from "../ui/toast";
@@ -103,7 +102,10 @@ import {
   referencedThreadContexts,
 } from "./composerSend.logic";
 import { useMultipleModelSend } from "./useMultipleModelSend";
-import { type ComposerDispatchMode } from "@t3tools/client-runtime/state/composer-dispatch";
+import {
+  applyComposerQueueConstraint,
+  type ComposerDispatchMode,
+} from "@t3tools/client-runtime/state/composer-dispatch";
 import {
   awaitAttachmentUploads,
   getUploadedAttachments,
@@ -114,13 +116,9 @@ import {
 } from "../../lib/attachmentUploadQueue";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { fileAttachmentCapabilityBlockReason } from "./composerAttachmentFiles";
-import { useLinkedEnvironments } from "../../state/peerLinks";
 import { readEnvironmentScope } from "../../state/session";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
-import {
-  ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
-  threadContextsOutsideEnvironment,
-} from "@t3tools/shared/composerContextReferences";
+import { ATTACHMENT_ONLY_BOOTSTRAP_PROMPT } from "@t3tools/shared/composerContextReferences";
 import {
   draftSendState,
   type MultipleModelTarget,
@@ -165,6 +163,9 @@ type UsageLimitsPanel = ReturnType<typeof useUsageLimitsPanel>;
 type TimelineFollow = ReturnType<typeof useTimelineFollow>;
 
 interface ComposerSendInput {
+  readonly forceQueueFollowUps: boolean;
+  readonly canAutoBalance: boolean;
+  readonly chatAnnotation: ReturnType<typeof useChatThreadAnnotation>;
   readonly environmentId: EnvironmentId;
   readonly routeThreadKey: string;
   readonly currentRouteThreadKeyRef: { readonly current: string | null };
@@ -264,6 +265,9 @@ interface ComposerSendInput {
  */
 export function useComposerSend(input: ComposerSendInput) {
   const {
+    forceQueueFollowUps,
+    canAutoBalance,
+    chatAnnotation,
     environmentId,
     routeThreadKey,
     currentRouteThreadKeyRef,
@@ -335,7 +339,6 @@ export function useComposerSend(input: ComposerSendInput) {
     persistThreadSettingsForNextTurn,
     linkCheckoutPullRequest,
   } = input;
-  const linkedEnvironments = useLinkedEnvironments(environmentId);
   const handleNewThread = useNewThreadHandler();
   const navigate = useNavigate();
   const clientSettingsHydrated = useClientSettingsHydrated();
@@ -374,7 +377,7 @@ export function useComposerSend(input: ComposerSendInput) {
 
   const onSend = async (
     e?: { preventDefault: () => void },
-    dispatchMode: ComposerDispatchMode = "auto",
+    rawDispatchMode: ComposerDispatchMode = "auto",
     submissionIntent: ComposerSubmissionIntent = "foreground",
     directAnnotation?: {
       annotation: PreviewAnnotationPayload;
@@ -382,6 +385,7 @@ export function useComposerSend(input: ComposerSendInput) {
     },
   ) => {
     e?.preventDefault();
+    const dispatchMode = applyComposerQueueConstraint(rawDispatchMode, forceQueueFollowUps);
     // What the user pressed send on; uploads below can take a while, and a redirect must not
     // decline approvals for a draft that changed meanwhile.
     const promptAtSend = promptRef.current;
@@ -449,10 +453,16 @@ export function useComposerSend(input: ComposerSendInput) {
         type: "warning",
         ...loadBalancingSendWarning({
           pending: loadBalancing.pending,
-          threadContexts: draft ? referencedThreadContexts(draft) : [],
-          candidateEnvironmentIds: logicalProjectEnvironments.map(
-            (candidate) => candidate.environmentId,
-          ),
+          hasReadableReferenceDestination:
+            !draft ||
+            logicalProjectEnvironments.some(
+              (candidate) =>
+                readUnavailableThreadReference(
+                  draft.prompt,
+                  referencedThreadContexts(draft),
+                  candidate.environmentId,
+                ) === undefined,
+            ),
         }),
       });
       return;
@@ -523,7 +533,30 @@ export function useComposerSend(input: ComposerSendInput) {
       onAdvanceActivePendingUserInput();
       return;
     }
-    if (!sendCtx?.providerAvailable) {
+    if (!sendCtx) {
+      notifyDirectAnnotationAttached();
+      return;
+    }
+    const submittedAnnotationPrompt = promptRef.current;
+    const annotationSubmission = chatAnnotation.interceptSubmission({
+      target: composerDraftTarget,
+      prompt: submittedAnnotationPrompt,
+      directAnnotation: directAnnotation !== undefined,
+      onDraftConsumed: () => {
+        if (
+          currentRouteThreadKeyRef.current !== routeThreadKey ||
+          promptRef.current !== submittedAnnotationPrompt
+        )
+          return;
+        promptRef.current = "";
+        composerRef.current?.resetCursorState();
+      },
+    });
+    if (annotationSubmission) {
+      await annotationSubmission;
+      return;
+    }
+    if (!sendCtx.providerAvailable) {
       notifyDirectAnnotationAttached();
       return;
     }
@@ -595,25 +628,35 @@ export function useComposerSend(input: ComposerSendInput) {
       replyTo && !collectInlineContextIds(draftPrompt).includes(replyTo.contextId)
         ? `${formatInlineContextReference(responseContextReference(replyTo))} ${draftPrompt}`
         : draftPrompt;
-    const strandedThread = threadContextsOutsideEnvironment({
-      text: promptForSend,
-      records: composerThreadContexts,
-      environmentId,
-      linkedEnvironments,
-    })[0];
-    if (strandedThread) {
-      const owner =
-        readEnvironmentPresentation(strandedThread.environmentId)?.entry.target.label ??
-        "its machine";
-      toastManager.add(
-        stackedThreadToast({
-          type: "warning",
-          title: "Attached thread is on another machine",
-          description: `This machine's agent can't read "${strandedThread.title}". Remove it, or switch back to ${owner} to send.`,
-        }),
+    const referencesUnavailable = () => {
+      const unavailableThread = readUnavailableThreadReference(
+        promptForSend,
+        composerThreadContexts,
+        environmentId,
       );
-      return;
-    }
+      if (unavailableThread) {
+        const { record: strandedThread, reason } = unavailableThread;
+        const owner =
+          readEnvironmentPresentation(strandedThread.environmentId)?.entry.target.label ??
+          "its machine";
+        const recovery =
+          reason === "permission-denied"
+            ? `Check that you have read access to ${owner} and to the machine you're sending to.`
+            : reason === "unsupported"
+              ? `Check for server updates on ${owner} and the machine you're sending to.`
+              : `Check the connections to ${owner} and the machine you're sending to before sending.`;
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Attached thread is unavailable",
+            description: `${recovery} The reference is still in your draft.`,
+          }),
+        );
+        return true;
+      }
+      return false;
+    };
+    if (!queuedRunEdit.isEditing && referencesUnavailable()) return;
     if (queuedRunEdit.isEditing) {
       // Edit mode repurposes the composer: sending saves the queued message
       // in place instead of dispatching a new turn.
@@ -777,7 +820,7 @@ export function useComposerSend(input: ComposerSendInput) {
       baseBranchForWorktree,
       compactBeforeSend,
       turnDispatchMode,
-      shouldQueueBehindActiveRun,
+      shouldQueueBehindActiveRun: plannedQueueBehindActiveRun,
     } = planComposerTurn({
       messageText: messageTextForSend,
       sendQueuesBehindSetup,
@@ -792,6 +835,8 @@ export function useComposerSend(input: ComposerSendInput) {
       dispatchMode,
       freshContext: freshArm !== undefined,
     });
+    const shouldQueueBehindActiveRun =
+      plannedQueueBehindActiveRun || (forceQueueFollowUps && dispatchMode === "queue");
     if (missingWorktreeBaseBranch) {
       setThreadError(threadIdForSend, "Select a base branch before sending in New worktree mode.");
       return;
@@ -910,6 +955,11 @@ export function useComposerSend(input: ComposerSendInput) {
       await dockStarted;
     }
 
+    if (referencesUnavailable()) {
+      sendInFlightRef.current = false;
+      setDockedDraftHeroThreadKey((current) => (current === activeThreadKey ? null : current));
+      return;
+    }
     const attachmentCapabilitiesBeforeDispatch = readLiveAttachmentCapabilities();
     if (
       !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope) ||
@@ -1307,6 +1357,8 @@ export function useComposerSend(input: ComposerSendInput) {
                 envMode: sendEnvMode,
                 branch: activeThreadBranch,
                 startFromOrigin,
+                canAutoBalance,
+                environmentSelection: draftThread?.environmentSelection,
               }),
             ),
           );
@@ -1403,10 +1455,7 @@ export function useComposerSend(input: ComposerSendInput) {
           composerFilesRef.current = composerFilesSnapshot;
           composerTerminalContextsRef.current = composerTerminalContextsSnapshot;
           composerRef.current?.resetCursorState({
-            cursor: collapseExpandedComposerCursor(
-              sendSnapshot.draftText,
-              sendSnapshot.draftText.length,
-            ),
+            cursor: sendSnapshot.draftText.length,
             prompt: sendSnapshot.draftText,
             detectTrigger: true,
           });

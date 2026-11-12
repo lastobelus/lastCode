@@ -1477,7 +1477,11 @@ describe("restorePlanFollowUpComposer source cursor", () => {
         reviewComments: [],
         previewAnnotations: [],
         threadContexts: [],
+        environmentContexts: [],
       },
+      draftHasUserContent: false,
+      routeIsCurrent: true,
+      writeComposerRefs: () => {},
       writePrompt: (value) => {
         restoredPrompt = value;
       },
@@ -1485,6 +1489,7 @@ describe("restorePlanFollowUpComposer source cursor", () => {
       writeReviewComments: () => {},
       writePreviewAnnotations: () => {},
       writeThreadContexts: () => {},
+      writeEnvironmentContexts: () => {},
       resetCursor: ({ cursor }) => {
         sourceCursor = cursor;
       },

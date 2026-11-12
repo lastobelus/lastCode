@@ -197,6 +197,16 @@ function selectOpenCodeRuntimeTextGeneration(
   v2: ProviderTextGeneration,
 ): ProviderTextGeneration {
   return {
+    generatePromptSnippets: (input) =>
+      byOpenCodeRuntime(resolve, {
+        v1: v1.generatePromptSnippets(input),
+        v2: v2.generatePromptSnippets(input),
+      }),
+    generateIncomingMessageSummary: (input) =>
+      byOpenCodeRuntime(resolve, {
+        v1: v1.generateIncomingMessageSummary(input),
+        v2: v2.generateIncomingMessageSummary(input),
+      }),
     generateCommitMessage: (input) =>
       byOpenCodeRuntime(resolve, {
         v1: v1.generateCommitMessage(input),

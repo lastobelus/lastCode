@@ -6,6 +6,7 @@ import * as Path from "effect/Path";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { runMigrations } from "../src/persistence/Migrations.ts";
+import { runDatabaseMigrations } from "../src/persistence/DatabaseMigrations.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { runMigrateDevDb } from "./migrate-dev-db.ts";
 
@@ -291,7 +292,7 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
     }),
   );
 
-  it.effect("seeds from a source that recorded another migration below V2", () =>
+  it.effect("refuses a source that recorded an unknown migration below V2", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const sourceDir = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-local-" });
@@ -301,27 +302,21 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
         source,
         Effect.gen(function* () {
           const sql = yield* SqlClient.SqlClient;
+          yield* runDatabaseMigrations();
           yield* sql`UPDATE effect_sql_migrations SET name = 'SiteLocalMigration'
             WHERE migration_id = 51`;
         }),
       );
 
-      const result = yield* runMigrateDevDb(
+      const error = yield* runMigrateDevDb(
         { baseDir: destDir, source, projects: 5, threadsPerProject: 2 },
         { sharedHome: sourceDir },
-      );
-      const threads = yield* withDatabase(
-        result.databasePath,
-        Effect.gen(function* () {
-          const sql = yield* SqlClient.SqlClient;
-          return yield* sql<{ thread_id: string }>`
-            SELECT thread_id FROM orchestration_v2_projection_threads ORDER BY thread_id`;
-        }),
-      );
-      assert.deepStrictEqual(
-        threads.map((row) => row.thread_id),
-        ["fork-thread", "settled-thread", "stopped-thread"],
-      );
+      ).pipe(Effect.flip);
+      assert.equal(error._tag, "MigrateDevDbPhaseError");
+      if (error._tag === "MigrateDevDbPhaseError") {
+        assert.equal(error.phase, "migrate");
+        assert.include(String(error.cause), "51_SiteLocalMigration");
+      }
     }),
   );
 
@@ -335,6 +330,7 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
         source,
         Effect.gen(function* () {
           const sql = yield* SqlClient.SqlClient;
+          yield* runDatabaseMigrations();
           yield* sql`UPDATE effect_sql_migrations SET name = 'OtherBuildMigration'
             WHERE migration_id = 60`;
         }),
@@ -351,7 +347,7 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
       assert.equal(error._tag, "MigrateDevDbPhaseError");
       if (error._tag === "MigrateDevDbPhaseError") {
         assert.equal(error.phase, "migrate");
-        assert.include(String(error.cause), "60_ThreadSnapshotWindowIndexes");
+        assert.include(String(error.cause), "60_OtherBuildMigration");
       }
       assert.deepStrictEqual(yield* fs.readFile(source), sourceBefore);
       assert.deepStrictEqual(yield* fs.readFile(destination), destinationBefore);

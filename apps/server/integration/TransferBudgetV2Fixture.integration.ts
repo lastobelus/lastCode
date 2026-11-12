@@ -60,6 +60,8 @@ export function threadCreated(
       createdAt: now,
       updatedAt: now,
       archivedAt: null,
+      archivedWith: null,
+      archivePending: null,
       settledOverride: null,
       settledAt: null,
       lastVisitedAt: null,

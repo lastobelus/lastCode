@@ -533,6 +533,11 @@ it.effect("maintains delegated candidate indexes across legacy rows and payload 
       SELECT payload_json FROM orchestration_v2_projection_threads WHERE thread_id = ${child}
     `;
     const original = JSON.parse(rows[0]!.payload_json);
+    // Model legacy corruption before traversal indexes began parsing thread JSON on writes.
+    // Keep the delegated candidate indexes installed to exercise their malformed-row guards.
+    yield* sql`DROP INDEX orchestration_v2_projection_threads_owned_parent_idx`;
+    yield* sql`DROP INDEX orchestration_v2_projection_threads_grouped_creator_idx`;
+    yield* sql`DROP INDEX orchestration_v2_projection_threads_interactive_parent_idx`;
     for (const payload of [
       "{broken",
       JSON.stringify({

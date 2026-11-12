@@ -23,7 +23,7 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
     sidebarProjectScopeKeys: [],
     threadLastVisitedAtById: {},
     threadChangedFilesExpandedById: {},
-    threadAnnotationExpandedById: {},
+    threadAnnotationExpansionById: {},
     defaultAdvertisedEndpointKey: null,
     pullRequestMergeMethod: "merge",
     ...overrides,
@@ -94,15 +94,23 @@ describe("uiStateStore pure functions", () => {
 
     expect(next.projectOrder).toEqual([keyB, keyC, keyALocal, keyARemote]);
   });
-  it("remembers expanded annotations by scoped thread and removes collapsed defaults", () => {
+  it("remembers explicit expansion and collapse for the current annotation edit", () => {
     const threadKey = "environment:thread-1";
-    const expanded = setThreadAnnotationExpanded(makeUiState(), threadKey, true);
-
-    expect(expanded.threadAnnotationExpandedById).toEqual({ [threadKey]: true });
-    expect(setThreadAnnotationExpanded(expanded, threadKey, true)).toBe(expanded);
+    const updatedAt = "2026-09-03T00:00:00.000Z";
+    const collapsed = setThreadAnnotationExpanded(makeUiState(), threadKey, updatedAt, false);
+    expect(collapsed.threadAnnotationExpansionById).toEqual({
+      [threadKey]: { updatedAt, expanded: false },
+    });
+    expect(setThreadAnnotationExpanded(collapsed, threadKey, updatedAt, false)).toBe(collapsed);
+    const expanded = setThreadAnnotationExpanded(collapsed, threadKey, updatedAt, true);
+    expect(expanded.threadAnnotationExpansionById).toEqual({
+      [threadKey]: { updatedAt, expanded: true },
+    });
+    const editedAt = "2026-09-04T00:00:00.000Z";
     expect(
-      setThreadAnnotationExpanded(expanded, threadKey, false).threadAnnotationExpandedById,
-    ).toEqual({});
+      setThreadAnnotationExpanded(expanded, threadKey, editedAt, false)
+        .threadAnnotationExpansionById,
+    ).toEqual({ [threadKey]: { updatedAt: editedAt, expanded: false } });
   });
 });
 
@@ -126,8 +134,8 @@ describe("parsePersistedState", () => {
           "turn-2": true,
         },
       },
-      threadAnnotationExpandedById: {
-        "environment:thread-1": true,
+      threadAnnotationExpansionById: {
+        "environment:thread-1": { updatedAt: "2026-09-03T00:00:00.000Z", expanded: false },
       },
     });
 
@@ -148,8 +156,8 @@ describe("parsePersistedState", () => {
           "turn-2": true,
         },
       },
-      threadAnnotationExpandedById: {
-        "environment:thread-1": true,
+      threadAnnotationExpansionById: {
+        "environment:thread-1": { updatedAt: "2026-09-03T00:00:00.000Z", expanded: false },
       },
     });
   });
@@ -231,8 +239,8 @@ describe("uiStateStore persistence", () => {
           "turn-2": true,
         },
       },
-      threadAnnotationExpandedById: {
-        "environment:thread-1": true,
+      threadAnnotationExpansionById: {
+        "environment:thread-1": { updatedAt: "2026-09-03T00:00:00.000Z", expanded: false },
       },
       defaultAdvertisedEndpointKey: "desktop-core:lan:http",
     });
@@ -261,8 +269,8 @@ describe("uiStateStore persistence", () => {
         },
       },
       pullRequestMergeMethod: "merge",
-      threadAnnotationExpandedById: {
-        "environment:thread-1": true,
+      threadAnnotationExpansionById: {
+        "environment:thread-1": { updatedAt: "2026-09-03T00:00:00.000Z", expanded: false },
       },
     });
     expect(parsePersistedState(persisted)).toEqual({

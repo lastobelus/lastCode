@@ -1,7 +1,7 @@
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { threadShellIsVisible } from "@t3tools/client-runtime/state/models";
 import type { SidebarThreadSortOrder } from "@t3tools/contracts/settings";
-import { sortThreads } from "../../lib/threadSort";
+import { sortThreads } from "@t3tools/client-runtime/state/thread-sort";
 import type { SidebarThreadSummary } from "../../types";
 import {
   resolveProjectStatusIndicator,

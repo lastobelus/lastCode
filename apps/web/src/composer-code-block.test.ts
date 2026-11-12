@@ -15,7 +15,7 @@ import StarterKit from "@tiptap/starter-kit";
 import {
   ComposerCodeBlockExtension,
   ComposerListExtensions,
-  serializeEditorDoc,
+  structuredSerializeEditorDoc as serializeEditorDoc,
 } from "./composer-rich-text-doc";
 
 const extensions = [

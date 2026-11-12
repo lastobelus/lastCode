@@ -1,9 +1,5 @@
-import type { ServerDirectEndpoint } from "@t3tools/contracts";
-import {
-  buildTailscaleHttpsBaseUrl,
-  probeTailscaleHttpsEndpoint,
-  readTailscaleStatus,
-} from "@t3tools/tailscale";
+import { EnvironmentHttpApi, type ServerDirectEndpoint } from "@t3tools/contracts";
+import { buildTailscaleHttpsBaseUrl, readTailscaleStatus } from "@t3tools/tailscale";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -11,11 +7,13 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import { HttpClient } from "effect/http";
+import * as HttpApiClient from "effect/http-api/HttpApiClient";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as ServerEnvironment from "./ServerEnvironment.ts";
 import {
   formatHostForUrl,
   isTailnetHost,
@@ -117,6 +115,7 @@ const probeCloudMetadata = Effect.callback<boolean>((resume) => {
 /** @public */
 export const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
+  const environment = yield* ServerEnvironment.ServerEnvironment;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const httpClient = yield* HttpClient.HttpClient;
   const platform = yield* HostProcess.Platform;
@@ -155,8 +154,15 @@ export const make = Effect.gen(function* () {
             magicDnsName,
             servePort: config.tailscaleServePort,
           });
-          return probeTailscaleHttpsEndpoint({ baseUrl: httpBaseUrl }).pipe(
-            Effect.map((reachable) => (reachable ? httpBaseUrl : null)),
+          return HttpApiClient.make(EnvironmentHttpApi, { baseUrl: httpBaseUrl }).pipe(
+            Effect.flatMap((client) => client.metadata.descriptor()),
+            Effect.flatMap((descriptor) =>
+              environment.getEnvironmentId.pipe(
+                Effect.map((environmentId) =>
+                  descriptor.environmentId === environmentId ? httpBaseUrl : null,
+                ),
+              ),
+            ),
           );
         }),
         Effect.timeoutOption(TAILSCALE_ENDPOINT_TIMEOUT),

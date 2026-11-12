@@ -1,8 +1,10 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentShellStatus } from "@t3tools/client-runtime/state/shell";
 import type { EnvironmentThreadState } from "@t3tools/client-runtime/state/threads";
-import type { EnvironmentId, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ThreadId, type ScopedThreadRef } from "@t3tools/contracts";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import type { AppRouter } from "./router";
 import type { DraftId } from "./composerDraftStore";
 
 export type ThreadRouteTarget =
@@ -126,4 +128,42 @@ export function resolveActiveThreadRouteRef(
     return null;
   }
   return draftThread.promotedTo;
+}
+
+const isEnvironmentId = Schema.is(EnvironmentId);
+const isThreadId = Schema.is(ThreadId);
+
+/** Thread ids from links must resolve to the thread route, rather than a static app screen. */
+export function safeThreadRouteParams(
+  router: Pick<AppRouter, "buildLocation" | "matchRoutes" | "routesById">,
+  ref: ScopedThreadRef,
+): ScopedThreadRef | null {
+  if (!isEnvironmentId(ref.environmentId) || !isThreadId(ref.threadId)) return null;
+  let firstSegment = ref.environmentId.split("/")[0];
+  try {
+    firstSegment = decodeURIComponent(ref.environmentId).split("/")[0];
+  } catch {
+    /* Literal legacy escapes remain subject to the route match below. */
+  }
+  if (
+    Object.values(router.routesById).some((route) => {
+      const segment = route.fullPath.split("/")[1];
+      return segment && !segment.startsWith("$") && segment === firstSegment;
+    })
+  )
+    return null;
+  if (
+    firstSegment === "." ||
+    firstSegment === ".." ||
+    ref.threadId === "." ||
+    ref.threadId === ".."
+  )
+    return null;
+  const location = router.buildLocation({ to: "/$environmentId/$threadId", params: ref });
+  const match = router.matchRoutes(location.pathname).at(-1);
+  return match?.routeId === "/_chat/$environmentId/$threadId" &&
+    match.params.environmentId === ref.environmentId &&
+    match.params.threadId === ref.threadId
+    ? ref
+    : null;
 }

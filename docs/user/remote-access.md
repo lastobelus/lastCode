@@ -7,7 +7,8 @@ machine. That machine must stay running and reachable while you work.
 
 T3 Connect makes an environment available to your other devices without setting
 up router forwarding. In the desktop app on the host, open **Settings →
-Sharing & access**, sign in, and enable **T3 Connect** for that environment.
+T3 Connect** to sign in, then **Settings → Sharing & access** and enable
+**T3 Connect** for that environment.
 
 For a command-line host, run:
 
@@ -57,7 +58,7 @@ Each T3 Connect account can link up to 3 machines. Phones and browsers do not
 count. A paid T3 Chat plan raises the limit to 10 machines with Pro, or 100 with
 Premier.
 
-To link T3 Chat, open your account menu on the web or desktop app, go to
+To link T3 Chat, open **Settings → T3 Connect → Manage account** on the web or desktop app, go to
 **T3 Chat**, and select **Link T3 Chat**. Sign in to T3 Chat in the window that
 opens and approve. The new limit applies the next time you add a machine. If you
 cancel or downgrade T3 Chat, machines you already linked stay linked, but you
@@ -261,6 +262,8 @@ picker, and a finished download is offered for you to save. Popups such as
 sign-in windows open as their own tabs. Downloads stay on the host until the
 tab closes. Audio does not play on your device.
 
+Click a thread link to open that thread in the app without leaving the Browser page.
+
 On a phone, tap the floating preview's corner dot to show its controls, then
 **Pop into separate window** to keep watching in picture-in-picture over other
 apps.
@@ -423,8 +426,13 @@ link to change a client's permissions.
 local changes. Add `filesystem:write` to allow editing files or saving plans to
 the workspace. These scopes control direct file access from the client.
 
-To remove an environment from T3 Connect, open your account menu's **T3 Connect**
-page, or **Settings → T3 Connect** on mobile, and choose **Deregister**. This
+Conversation readers can open individual files an assistant links in visible
+messages or proposed plans, including reports and images, without host-file
+browsing permission. This also covers linked files saved outside the project workspace.
+Opening other files or browsing their folders requires `filesystem:read`.
+
+To remove an environment from T3 Connect, open **Settings → T3 Connect → Manage account**
+on the web or desktop app, or **Settings → T3 Connect** on mobile, and choose **Deregister**. This
 revokes its cloud access and frees its host space even when the environment is
 offline or has been wiped. When T3 Connect rejects a host's link, the host
 shows that it was removed from T3 Connect. To link it again, turn on

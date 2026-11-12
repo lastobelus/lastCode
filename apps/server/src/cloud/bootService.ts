@@ -270,7 +270,7 @@ interface BootServiceStepBase {
 
 export type BootServiceStep = BootServiceStepBase &
   (
-    | { readonly command: string; readonly args: ReadonlyArray<string> } & (
+    | ({ readonly command: string; readonly args: ReadonlyArray<string> } & (
         | { readonly operation?: "command" }
         | {
             readonly operation: "launchd-bootout";
@@ -280,7 +280,7 @@ export type BootServiceStep = BootServiceStepBase &
               readonly notLoadedMessages: ReadonlyArray<string>;
             };
           }
-      )
+      ))
     /** A step no command can do, such as waiting for the Windows launcher to exit. */
     | { readonly run: Effect.Effect<void, BootServiceCommandError> }
   );

@@ -5,6 +5,7 @@ import { page, userEvent } from "vite-plus/test/browser";
 import { act, render } from "../../test/render";
 import { openCommandPalette } from "../commandPaletteBus";
 import { useCommandPaletteStore } from "../commandPaletteStore";
+import { LAST_USED_PROJECT_STORAGE_KEY } from "../hooks/useHandleNewThread";
 import { makeThreadFixture } from "../test-fixtures";
 import type { Project, Thread } from "../types";
 import { CommandPalette } from "./CommandPalette";
@@ -18,8 +19,24 @@ vi.mock("../state/entities", async (original) => ({
   useProjects: () => entities.projects,
   useVisibleThreadShells: () => entities.threads,
 }));
+vi.mock("../state/environments", async (original) => ({
+  ...(await original<typeof import("../state/environments")>()),
+  // New-thread project rows are selectable only while their environment is connected.
+  useEnvironments: () => ({
+    environments: [
+      {
+        environmentId: "local",
+        label: "Local",
+        connection: { phase: "connected" },
+        entry: { target: { _tag: "PrimaryConnectionTarget" } },
+        serverConfig: null,
+      },
+    ],
+  }),
+}));
 
 function setup(state: { projects?: ReadonlyArray<Project>; threads?: ReadonlyArray<Thread> } = {}) {
+  localStorage.removeItem(LAST_USED_PROJECT_STORAGE_KEY);
   useCommandPaletteStore.setState(useCommandPaletteStore.getInitialState(), true);
   entities.projects = state.projects ?? [];
   entities.threads = state.threads ?? [];
@@ -107,11 +124,13 @@ describe("CommandPalette open intents", () => {
     await expect
       .element(page.getByPlaceholder("Search commands, projects, and threads..."))
       .toHaveFocus();
-    await userEvent.keyboard("{ArrowDown}");
     await expect
-      .element(page.getByRole("option", { name: /^New thread in\.\.\./ }))
+      .element(page.getByRole("option", { name: /^New thread in Acme/ }))
       .toHaveAttribute("data-highlighted");
-    await userEvent.keyboard("{Enter}");
+    const newThreadIn = page.getByRole("option", { name: /^New thread in\.\.\./ });
+    await userEvent.hover(newThreadIn);
+    await expect.element(newThreadIn).toHaveAttribute("data-highlighted");
+    await newThreadIn.click();
 
     await expect.element(page.getByPlaceholder("Search...")).toHaveFocus();
     await expect.element(page.getByRole("option").first()).toHaveAttribute("data-highlighted");

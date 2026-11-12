@@ -30,6 +30,7 @@ export type {
   BranchNameGenerationResult,
   CommitMessageGenerationInput,
   CommitMessageGenerationResult,
+  IncomingMessageSummaryGenerationInput,
   PrContentGenerationInput,
   PrContentGenerationResult,
   ReviewGuideGenerationInput,
@@ -45,12 +46,14 @@ export class TextGeneration extends Context.Service<TextGeneration, ProviderText
 ) {}
 
 type TextGenerationOp =
+  | "generatePromptSnippets"
   | "generateCommitMessage"
   | "generatePrContent"
   | "generateBranchName"
   | "generateThreadTitle"
   | "generateReviewGuide"
-  | "generateTranscriptionPostProcessing";
+  | "generateTranscriptionPostProcessing"
+  | "generateIncomingMessageSummary";
 
 const resolveInstance = (
   registry: ProviderInstanceRegistry.ProviderInstanceRegistry["Service"],
@@ -156,6 +159,24 @@ export const make = Effect.gen(function* () {
     );
   });
   return TextGeneration.of({
+    generatePromptSnippets: Effect.fn("TextGeneration.generatePromptSnippets")(function (input) {
+      return resolveInstance(
+        registry,
+        "generatePromptSnippets",
+        input.modelSelection.instanceId,
+      ).pipe(Effect.flatMap((provider) => provider.generatePromptSnippets(input)));
+    }),
+    generateIncomingMessageSummary: Effect.fn("TextGeneration.generateIncomingMessageSummary")(
+      function (input) {
+        return resolveInstance(
+          registry,
+          "generateIncomingMessageSummary",
+          input.modelSelection.instanceId,
+        ).pipe(
+          Effect.flatMap((textGeneration) => textGeneration.generateIncomingMessageSummary(input)),
+        );
+      },
+    ),
     generateCommitMessage: Effect.fn("TextGeneration.generateCommitMessage")(function (input) {
       return generate(
         "generateCommitMessage",

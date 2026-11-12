@@ -8,13 +8,15 @@ import * as NodeChildProcess from "node:child_process";
 
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { it } from "@effect/vitest";
+import { afterAll, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as WorkspaceAcquisitionTestkit from "../workspace/WorkspaceAcquisition.testkit.ts";
+import * as SuspensionRegistryTestkit from "../workspace/WorktreeSuspensionRegistry.testkit.ts";
 import * as Option from "effect/Option";
 import * as PlatformError from "effect/PlatformError";
 import * as Result from "effect/Result";
@@ -205,7 +207,7 @@ function runGit(
   });
 }
 
-function initRepo(
+function createRepoTemplate(
   cwd: string,
 ): Effect.Effect<
   void,
@@ -223,6 +225,29 @@ function initRepo(
     yield* fs.writeFileString(NodePath.join(cwd, "README.md"), "hello\n");
     yield* runGit(cwd, ["add", "README.md"]);
     yield* runGit(cwd, ["commit", "-m", "Initial commit"]);
+  });
+}
+
+let repositoryTemplate: string | undefined;
+
+afterAll(() => {
+  if (repositoryTemplate) NodeFS.rmSync(repositoryTemplate, { recursive: true, force: true });
+});
+
+function initRepo(cwd: string) {
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    if (!repositoryTemplate) {
+      const template = yield* fs.makeTempDirectory({ prefix: "git-manager-template-" });
+      yield* createRepoTemplate(template).pipe(
+        Effect.onError(() =>
+          fs.remove(template, { recursive: true, force: true }).pipe(Effect.orDie),
+        ),
+      );
+      repositoryTemplate = template;
+    }
+    // Each case owns a complete copy, including its refs, config, index, objects, and hooks.
+    yield* fs.copy(repositoryTemplate, cwd);
   });
 }
 
@@ -271,6 +296,9 @@ function createTextGeneration(
   overrides: Partial<FakeGitTextGeneration> = {},
 ): TextGeneration.TextGeneration["Service"] {
   const implementation: FakeGitTextGeneration = {
+    generatePromptSnippets: () => Effect.die("unused"),
+    generateIncomingMessageSummary: () =>
+      Effect.die("Preview generation is not used by GitManager"),
     generateCommitMessage: (input) =>
       Effect.succeed({
         subject: "Implement stacked git actions",
@@ -297,6 +325,9 @@ function createTextGeneration(
   };
 
   return {
+    generatePromptSnippets: () => Effect.die("unused"),
+    generateIncomingMessageSummary: () =>
+      Effect.die("Preview generation is not used by GitManager"),
     generateCommitMessage: (input) =>
       implementation.generateCommitMessage(input).pipe(
         Effect.mapError(
@@ -732,7 +763,7 @@ function makeManager(input?: {
       yield* input.seed.pipe(Effect.provideContext(stores), Effect.orDie);
     }
     const manager = yield* GitManager.make.pipe(
-      Effect.provide(layerManager),
+      Effect.provide(Layer.merge(WorkspaceAcquisitionTestkit.layer, layerManager)),
       Effect.provideContext(stores),
     );
     return { manager, providerCalls };
@@ -775,6 +806,9 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           VcsStatusBroadcaster.layer.pipe(
             Layer.provide(
               GitWorkflowService.layer.pipe(
+                Layer.provide(
+                  Layer.merge(WorkspaceAcquisitionTestkit.layer, SuspensionRegistryTestkit.layer),
+                ),
                 Layer.provide(Layer.succeed(GitManager.GitManager, manager)),
                 Layer.provide(
                   VcsDriverRegistry.layer.pipe(
@@ -4841,6 +4875,9 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         const events: string[] = [];
         const workflows = yield* Effect.forEach([0, 1], () =>
           GitWorkflowService.make.pipe(
+            Effect.provide(
+              Layer.merge(WorkspaceAcquisitionTestkit.layer, SuspensionRegistryTestkit.layer),
+            ),
             // Cache the real filesystem result so startImmediately reaches lease acquisition.
             Effect.provideService(FileSystem.FileSystem, {
               ...fileSystem,

@@ -59,7 +59,9 @@ import * as Context from "effect/Context";
 import * as DeviceAgentAccess from "./DeviceAgentAccess.ts";
 import { HttpServer } from "effect/http";
 import * as Digest from "effect/crypto/Digest";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -89,6 +91,8 @@ import * as Exit from "effect/Exit";
 import * as LocalDeviceHost from "./LocalDeviceHost.ts";
 
 export const DEVICE_HUB_ROUTE_PREFIX = "/api/device-hub";
+const AGENT_DEVICE_IDLE_TIMEOUT = Duration.minutes(30);
+const AGENT_DEVICE_STOP_TIMEOUT = Duration.seconds(20);
 
 const isSshCommandError = Schema.is(SshCommandError);
 
@@ -133,6 +137,16 @@ export interface DeviceScreenshot {
   readonly png: Uint8Array;
 }
 
+interface AgentBootedDevice {
+  readonly threadId: ThreadId;
+  readonly hostId: DeviceHostId;
+  readonly deviceId: DeviceId;
+  readonly platform: DevicePlatform;
+  /** Epoch millis of the last device command. */
+  lastActivity: number;
+  failedShutdowns: number;
+}
+
 export interface DeviceReadiness extends DeviceHost.DeviceHostReady {
   readonly hostId: DeviceHostId;
 }
@@ -167,6 +181,20 @@ export class DeviceService extends Context.Service<
   DeviceService,
   {
     readonly retireThreadAgentAccess: (threadId: ThreadId) => Effect.Effect<void, DeviceError>;
+    /** Closes a finished thread's devices and shuts down agent-booted ones nothing else uses. */
+    readonly releaseThread: (threadId: ThreadId) => Effect.Effect<void, DeviceError>;
+    /** Whether this thread's agent booted the device, so it should shut it down when done. */
+    readonly bootedByThread: (input: {
+      readonly threadId: ThreadId;
+      readonly hostId: DeviceHostId;
+      readonly deviceId: DeviceId;
+    }) => Effect.Effect<boolean>;
+    /** Marks a device as in use, deferring its idle shutdown. */
+    readonly recordActivity: (hostId: DeviceHostId, deviceId: DeviceId) => Effect.Effect<void>;
+    /** Shuts down agent-booted devices with no device command for `AGENT_DEVICE_IDLE_TIMEOUT`. */
+    readonly shutdownIdleDevices: Effect.Effect<void>;
+    /** Shuts down every device an agent booted, for server stop. */
+    readonly shutdownAgentBootedDevices: Effect.Effect<void>;
     readonly testHost: (
       config: SshDeviceHostConfig,
     ) => Effect.Effect<DeviceHostSummary, DeviceError>;
@@ -217,7 +245,11 @@ export class DeviceService extends Context.Service<
     readonly retryHost: (hostId: DeviceHostId) => Effect.Effect<DeviceServiceState, DeviceError>;
     readonly open: (
       input: DeviceOpenInput,
-      setup?: DeviceHost.DeviceOpenContext & { readonly rollbackOnFailure?: true },
+      setup?: DeviceHost.DeviceOpenContext & {
+        readonly rollbackOnFailure?: true;
+        /** An agent opened it: a local device this boots is the server's to shut down. */
+        readonly agentOwned?: true;
+      },
     ) => Effect.Effect<DeviceSession, DeviceError>;
     readonly completeOpen: (openedSession: DeviceSession) => Effect.Effect<void>;
     readonly abortOpen: (openedSession: DeviceSession) => Effect.Effect<void, DeviceError>;
@@ -355,6 +387,10 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       revision: 0,
     },
   });
+
+  /** Local devices an agent's open booted, keyed by host and device. The user's own boots are never here. */
+  const agentBooted = new Map<string, AgentBootedDevice>();
+  const bootKey = (hostId: DeviceHostId, deviceId: DeviceId) => `${hostId}\u0000${deviceId}`;
 
   const launcherLock = yield* Semaphore.make(1);
   /** Launchers bound since startup, by agent-device session. */
@@ -638,6 +674,8 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       Effect.gen(function* () {
         if (hosts.get(ready.hostId) !== host) return (yield* SynchronizedRef.get(stateRef)).state;
         const before = new Set((yield* SynchronizedRef.get(stateRef)).state.sessions);
+        // A claim made while this listing ran is newer than what it saw.
+        const claimedBefore = new Set(agentBooted.values());
         const {
           devices: discovered,
           detail,
@@ -701,6 +739,15 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
                 current.physical !== previous.physical
               );
             });
+            // A device seen stopped or gone is forgotten, so a later boot by the user is never shut down.
+            for (const [key, booted] of agentBooted)
+              if (
+                claimedBefore.has(booted) &&
+                booted.hostId === ready.hostId &&
+                !incompletePlatforms.includes(booted.platform) &&
+                !devices.some((device) => device.id === booted.deviceId && device.booted)
+              )
+                agentBooted.delete(key);
             yield* Effect.forEach(
               retired,
               (device) => retireDeviceAgentAccess(device.hostId, device.id),
@@ -872,6 +919,8 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
               ),
             );
           if (!nextEnabled) {
+            // The user takes over every device; none they reboot meanwhile may be shut down.
+            agentBooted.clear();
             yield* Effect.forEach(hosts.keys(), retireHostAgentAccess, { discard: true });
             yield* Effect.forEach(hosts.values(), (host) => host.stop, { discard: true });
             activeAgentHosts.clear();
@@ -918,6 +967,14 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       });
     }
   });
+
+  // Untraced: the agent-device proxy calls this for every CLI request.
+  const recordActivity: DeviceService["Service"]["recordActivity"] = Effect.fnUntraced(
+    function* (hostId, deviceId) {
+      const booted = agentBooted.get(bootKey(hostId, deviceId));
+      if (booted) booted.lastActivity = yield* Clock.currentTimeMillis;
+    },
+  );
 
   // Only agent setup retains a predecessor, and its completion/failure releases it.
   const rollbackSessions = new WeakMap<
@@ -973,6 +1030,25 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
             booting,
           ],
         }));
+        const agentOwned = setup?.agentOwned === true && host.id === LOCAL_DEVICE_HOST_ID;
+        const platform = device.platform;
+        const claim = (deviceId: DeviceId) =>
+          Clock.currentTimeMillis.pipe(
+            Effect.map((lastActivity) => {
+              const owned: AgentBootedDevice = {
+                threadId: input.threadId,
+                hostId: host.id,
+                deviceId,
+                platform,
+                lastActivity,
+                failedShutdowns: 0,
+              };
+              agentBooted.set(bootKey(host.id, deviceId), owned);
+              return owned;
+            }),
+          );
+        const requested = device.id;
+        const requestedName = device.name;
         const bootedId = yield* ready.devices.boot(device, setup).pipe(
           Effect.ensuring(
             publish((current) => ({
@@ -982,7 +1058,34 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
               ),
             })),
           ),
+          // A boot can start the simulator and then fail, such as attaching its stream.
+          Effect.tapError(() =>
+            agentOwned
+              ? refresh(ready).pipe(
+                  Effect.flatMap((after) => {
+                    // A stopped AVD runs under a new serial; one AVD runs at most once, so a
+                    // running emulator of it now is the one this boot started.
+                    const started = findDevice(after, host.id, requested)?.booted
+                      ? requested
+                      : platform === "android"
+                        ? after.devices.find(
+                            (candidate) =>
+                              candidate.hostId === host.id &&
+                              candidate.platform === "android" &&
+                              !candidate.physical &&
+                              candidate.booted &&
+                              candidate.name === requestedName,
+                          )?.id
+                        : undefined;
+                    return started ? claim(started) : Effect.void;
+                  }),
+                  Effect.ignore,
+                )
+              : Effect.void,
+          ),
         );
+        // Recorded before discovery, so a later failure of this open still leaves it shut down.
+        const owned = agentOwned ? yield* claim(bootedId) : undefined;
         state = yield* refresh(ready);
         // Retained entries predate the boot, so only a complete listing confirms the booted device.
         device = state.hostStatuses[host.id]?.incompletePlatforms?.includes(device.platform)
@@ -991,8 +1094,11 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
         if (!device) {
           return yield* new DeviceNotFoundError({ hostId: host.id, deviceId: bootedId });
         }
+        if (owned && device.id !== bootedId && device.booted)
+          agentBooted.set(bootKey(host.id, device.id), { ...owned, deviceId: device.id });
       } else if (device.booted) {
         yield* ready.devices.attach(device);
+        yield* recordActivity(host.id, device.id);
       }
       const openedAt = DateTime.formatIso(yield* DateTime.now);
       const session: DeviceSession = {
@@ -1057,6 +1163,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
     platform: DevicePlatform,
   ) {
     yield* ready.devices.shutdown({ id: deviceId, platform });
+    agentBooted.delete(bootKey(ready.hostId, deviceId));
     // Android serials can be reused after shutdown, so revoke access before publishing.
     yield* retireDeviceAgentAccess(ready.hostId, deviceId);
     yield* publish((state) => ({
@@ -1066,6 +1173,46 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
           ? { ...device, booted: false }
           : device,
       ),
+    }));
+  });
+
+  /** Ends `ending` and powers off `devices`; the caller holds the lifecycle lock. */
+  const endSessions = Effect.fn("DeviceService.endSessions")(function* (
+    ending: ReadonlyArray<DeviceSession>,
+    devices: ReadonlyArray<Pick<DeviceSession, "hostId" | "deviceId" | "platform">>,
+  ) {
+    for (const session of ending) {
+      const host = yield* resolveHost(session.hostId);
+      const ready = yield* host.current;
+      // A lost SSH tunnel does not establish that the remote daemon stopped.
+      if (!ready && (yield* host.summary).kind === "ssh")
+        return yield* new DeviceHostUnavailableError({
+          hostId: session.hostId,
+          hostLabel: host.label,
+          reason: "Device host is reconnecting. Retry close after it reconnects.",
+        });
+      if (ready?.releaseAgentSession) {
+        const name = yield* agentDeviceSession(
+          session.threadId,
+          session.hostId,
+          session.deviceId,
+        ).pipe(Effect.provideService(Digest.Digest, digest));
+        yield* ready.releaseAgentSession(name, session.deviceId);
+      }
+    }
+    if (devices.length > 0) yield* releaseLaunchers(ending);
+    for (const device of devices) {
+      const ready = yield* currentReadiness(device.hostId);
+      if (!ready)
+        return yield* new DeviceHostUnavailableError({
+          hostId: device.hostId,
+          reason: "Device host is not running. Reconnect before retrying close.",
+        });
+      yield* shutdownDevice(ready, device.deviceId, device.platform);
+    }
+    yield* publish((current) => ({
+      ...current,
+      sessions: current.sessions.filter((session) => !ending.includes(session)),
     }));
   });
 
@@ -1089,41 +1236,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
                 ),
               )
             : closing;
-          for (const session of ending) {
-            const host = yield* resolveHost(session.hostId);
-            const ready = yield* host.current;
-            // A lost SSH tunnel does not establish that the remote daemon stopped.
-            if (!ready && (yield* host.summary).kind === "ssh")
-              return yield* new DeviceHostUnavailableError({
-                hostId: session.hostId,
-                hostLabel: host.label,
-                reason: "Device host is reconnecting. Retry close after it reconnects.",
-              });
-            if (ready?.releaseAgentSession) {
-              const name = yield* agentDeviceSession(
-                session.threadId,
-                session.hostId,
-                session.deviceId,
-              ).pipe(Effect.provideService(Digest.Digest, digest));
-              yield* ready.releaseAgentSession(name, session.deviceId);
-            }
-          }
-          if (input.shutdown) yield* releaseLaunchers(ending);
-          if (input.shutdown) {
-            for (const session of closing) {
-              const ready = yield* currentReadiness(session.hostId);
-              if (!ready)
-                return yield* new DeviceHostUnavailableError({
-                  hostId: session.hostId,
-                  reason: "Device host is not running. Reconnect before retrying close.",
-                });
-              yield* shutdownDevice(ready, session.deviceId, session.platform);
-            }
-          }
-          yield* publish((current) => ({
-            ...current,
-            sessions: current.sessions.filter((session) => !ending.includes(session)),
-          }));
+          yield* endSessions(ending, input.shutdown ? closing : []);
           return closing;
         }),
       );
@@ -1160,9 +1273,112 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
     },
   );
 
+  /** Powers off an agent-booted device if `due` still holds under the lifecycle lock. */
+  const shutdownAgentBooted = Effect.fn("DeviceService.shutdownAgentBooted")(function* (
+    booted: AgentBootedDevice,
+    due: (sessions: ReadonlyArray<DeviceSession>) => boolean,
+  ) {
+    const key = bootKey(booted.hostId, booted.deviceId);
+    // A stopped host keeps the record, so the next sweep retries.
+    const ready = yield* currentReadiness(booted.hostId);
+    if (!ready) return;
+    const stopped = yield* lifecycleLock
+      .withPermit(
+        Effect.gen(function* () {
+          if (agentBooted.get(key) !== booted) return false;
+          const { state } = yield* SynchronizedRef.get(stateRef);
+          const ending = state.sessions.filter(
+            (session) => session.hostId === booted.hostId && session.deviceId === booted.deviceId,
+          );
+          if (!due(ending)) return false;
+          yield* endSessions(ending, [booted]);
+          return true;
+        }),
+      )
+      .pipe(
+        Effect.catch((cause) => {
+          // Kept until a shutdown succeeds or discovery sees it stopped; warn once.
+          booted.failedShutdowns++;
+          return (booted.failedShutdowns === 1 ? Effect.logWarning : Effect.logDebug)(
+            "Could not shut down an agent-booted device",
+            { hostId: booted.hostId, deviceId: booted.deviceId, cause },
+          ).pipe(Effect.as(false));
+        }),
+      );
+    if (stopped) yield* refreshAfterShutdown(ready);
+  });
+
+  const releaseThread: DeviceService["Service"]["releaseThread"] = Effect.fn(
+    "DeviceService.releaseThread",
+  )(function* (threadId) {
+    const sessions = yield* sessionsForThread(threadId);
+    if (sessions.length > 0) yield* close({ threadId });
+    // Devices it had open, and ones it booted and then closed without shutting down.
+    const candidates = new Set([
+      ...sessions.flatMap((session) => {
+        const booted = agentBooted.get(bootKey(session.hostId, session.deviceId));
+        return booted ? [booted] : [];
+      }),
+      ...[...agentBooted.values()].filter((booted) => booted.threadId === threadId),
+    ]);
+    yield* Effect.forEach(
+      candidates,
+      (booted) =>
+        shutdownAgentBooted(booted, (holding) => holding.length === 0).pipe(
+          Effect.andThen(
+            SynchronizedRef.get(stateRef).pipe(
+              Effect.map(({ state }) => {
+                // A failed release leaves it to the next sweep rather than 30 idle minutes.
+                const key = bootKey(booted.hostId, booted.deviceId);
+                const held = state.sessions.some(
+                  (session) =>
+                    session.hostId === booted.hostId && session.deviceId === booted.deviceId,
+                );
+                if (agentBooted.get(key) === booted && !held) booted.lastActivity = -Infinity;
+              }),
+            ),
+          ),
+        ),
+      { discard: true },
+    );
+  });
+
+  const shutdownIdleDevices: DeviceService["Service"]["shutdownIdleDevices"] = Effect.gen(
+    function* () {
+      const now = yield* Clock.currentTimeMillis;
+      const idleBefore = now - Duration.toMillis(AGENT_DEVICE_IDLE_TIMEOUT);
+      yield* Effect.forEach(
+        [...agentBooted.values()].filter((booted) => booted.lastActivity <= idleBefore),
+        (booted) => shutdownAgentBooted(booted, () => booted.lastActivity <= idleBefore),
+        { discard: true },
+      );
+    },
+  ).pipe(Effect.withSpan("DeviceService.shutdownIdleDevices"));
+
+  const shutdownAgentBootedDevices: DeviceService["Service"]["shutdownAgentBootedDevices"] =
+    Effect.suspend(() =>
+      Effect.forEach(
+        [...agentBooted.values()],
+        (booted) =>
+          shutdownAgentBooted(booted, () => true).pipe(
+            Effect.timeout(AGENT_DEVICE_STOP_TIMEOUT),
+            Effect.catch((cause) =>
+              Effect.logWarning("Timed out shutting down an agent-booted device", {
+                hostId: booted.hostId,
+                deviceId: booted.deviceId,
+                cause,
+              }),
+            ),
+          ),
+        // One at a time: they share the lifecycle lock, so parallel timeouts would overlap.
+        { discard: true },
+      ),
+    ).pipe(Effect.withSpan("DeviceService.shutdownAgentBootedDevices"));
+
   const screenshot: DeviceService["Service"]["screenshot"] = Effect.fn("DeviceService.screenshot")(
     function* (input) {
       const { ready, device } = yield* resolveDevice(input.hostId, input.deviceId);
+      yield* recordActivity(ready.hostId, device.id);
       return { device, png: yield* ready.devices.screenshot(device) };
     },
   );
@@ -1197,6 +1413,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
   const action: DeviceService["Service"]["action"] = Effect.fn("DeviceService.action")(
     function* (input) {
       const { ready, device } = yield* resolveDevice(input.hostId, input.deviceId);
+      yield* recordActivity(ready.hostId, device.id);
       yield* runDeviceAction(ready, device.platform, input);
       return yield* detail({ hostId: ready.hostId, deviceId: device.id });
     },
@@ -1271,6 +1488,13 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       retireThreadAgentAccess: Effect.fn("DeviceService.retireThreadAgentAccess")((threadId) =>
         lifecycleLock.withPermit(retireThreadAgentAccess(threadId)),
       ),
+      releaseThread,
+      bootedByThread: Effect.fn("DeviceService.bootedByThread")(({ threadId, hostId, deviceId }) =>
+        Effect.sync(() => agentBooted.get(bootKey(hostId, deviceId))?.threadId === threadId),
+      ),
+      recordActivity,
+      shutdownIdleDevices,
+      shutdownAgentBootedDevices,
       updateTool: Effect.fn("DeviceService.updateTool")(function (tool) {
         return lifecycleLock.withPermit(
           Effect.gen(function* () {

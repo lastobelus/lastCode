@@ -4,7 +4,6 @@ import {
   DEFAULT_SERVER_SETTINGS,
   DeviceHostUnavailableError,
   DeviceOperationError,
-  DeviceToolUnavailableError,
   type DeviceSession,
   DeviceId,
   ProjectId,
@@ -17,6 +16,7 @@ import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as PlatformError from "effect/PlatformError";
+import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -140,6 +140,7 @@ const agentReady: DeviceService.DeviceAgentReadiness = {
 };
 
 const layerDeviceServiceMock = Layer.mock(DeviceService.DeviceService)({
+  bootedByThread: () => Effect.succeed(false),
   state: Effect.succeed(state),
   list: Effect.succeed(state),
   completeOpen: () => Effect.void,
@@ -211,7 +212,7 @@ const layerTest = McpHttpServer.layerDeviceToolkit.pipe(
   Layer.provide(layerAccess),
   Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-device-toolkit-test-" })),
   Layer.provide(layerProjectsMock),
-        Layer.provide(NodeServices.layer),
+  Layer.provide(NodeServices.layer),
 );
 
 it.effect("registers the device tools and returns the screenshot as image content", () =>
@@ -330,16 +331,39 @@ it.effect.each([
     platform: "ios" as const,
     refreshed: true,
   },
+  {
+    name: "iOS simulator it booted that another thread also has open",
+    selected: "UDID-1",
+    opened: "UDID-1",
+    platform: "ios" as const,
+    refreshed: true,
+    shared: true,
+  },
 ])(
   "issues the device credential for the opened $name",
-  ({ selected, opened, platform, refreshed }) => {
+  ({ selected, opened, platform, refreshed, shared = false }) => {
     const selectedDevice = { ...device, id: selected, platform, booted: selected === opened };
     const openedDevice = { ...selectedDevice, id: opened, booted: true };
     const operations: string[] = [];
     const scopedArgs = ["--config", "/host.json", "--session", "opened-device-session"];
     const layerOpening = Layer.mock(DeviceService.DeviceService)({
+      bootedByThread: () => Effect.succeed(true),
       list: Effect.succeed({ ...state, devices: [selectedDevice] }),
-      state: Effect.succeed({ ...state, devices: [refreshed ? openedDevice : selectedDevice] }),
+      state: Effect.succeed({
+        ...state,
+        devices: [refreshed ? openedDevice : selectedDevice],
+        sessions: shared
+          ? [
+              {
+                threadId: ThreadId.make("other-thread"),
+                hostId: "local",
+                deviceId: DeviceId.make(opened),
+                platform,
+                openedAt: "2026-09-08T00:00:00.000Z",
+              },
+            ]
+          : [],
+      }),
       agentReadinessIfSupported: (hostId, enabled) =>
         Effect.sync(() => {
           expect(hostId).toBe("local");
@@ -396,11 +420,17 @@ it.effect.each([
         agentDevice: { targetArgs: ["--platform", platform, selector, opened, ...scopedArgs] },
         quickStart: expect.stringContaining("It is bound to this device and session"),
       });
+      // Shutting down a shared device would end the other thread's session too.
+      expect(result.structuredContent).toMatchObject({
+        quickStart: expect.stringContaining(
+          shared ? "with plain device_close" : "call device_close with shutdown: true",
+        ),
+      });
     }).pipe(
       Effect.scoped,
       Effect.provide(
         McpHttpServer.layerDeviceToolkit.pipe(
-          Layer.provideMerge(McpServer.McpServer.layer),
+          Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
           Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
           Layer.provide(layerOpening),
           Layer.provide(layerAccess),
@@ -417,6 +447,7 @@ it.effect.each([
 
 it.effect("does not boot or issue a credential when agent readiness is unsupported", () => {
   const layerUnsupported = Layer.mock(DeviceService.DeviceService)({
+    bootedByThread: () => Effect.succeed(false),
     list: Effect.succeed(state),
     agentReadinessIfSupported: () => Effect.succeed(null),
     open: () => Effect.die("Must not boot without agent readiness"),
@@ -443,9 +474,12 @@ it.effect("does not boot or issue a credential when agent readiness is unsupport
     Effect.scoped,
     Effect.provide(
       McpHttpServer.layerDeviceToolkit.pipe(
-        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
         Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
         Layer.provide(layerUnsupported),
+        Layer.provide(
+          ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-device-unsupported-" }),
+        ),
         Layer.provide(layerAccess),
         Layer.provide(layerProjectsMock),
         Layer.provide(NodeServices.layer),
@@ -456,6 +490,7 @@ it.effect("does not boot or issue a credential when agent readiness is unsupport
 
 it.effect("rejects unavailable agent access before booting or opening a device", () => {
   const layerUnavailable = Layer.mock(DeviceService.DeviceService)({
+    bootedByThread: () => Effect.succeed(false),
     list: Effect.succeed(state),
     agentReadinessIfSupported: () =>
       Effect.fail(
@@ -540,6 +575,7 @@ it.effect("device_open reports a failed host's setup error instead of no devices
         Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
         Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
         Layer.provide(layerFailed),
+        Layer.provide(layerAccess),
         Layer.provide(layerProjectsMock),
         Layer.provide(
           ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-device-toolkit-test-" }),
@@ -617,6 +653,7 @@ describe("device targeting across hosts", () => {
     const opened: Array<{ hostId: string; deviceId: string }> = [];
     const closed: Array<{ hostId?: string | undefined; deviceId?: string | undefined }> = [];
     const layerDevices = Layer.mock(DeviceService.DeviceService)({
+      bootedByThread: () => Effect.succeed(false),
       state: Effect.succeed(multiHostState),
       list: Effect.succeed(multiHostState),
       agentReadinessIfSupported: () => Effect.succeed(readiness),
@@ -681,6 +718,7 @@ describe("device targeting across hosts", () => {
           Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
           Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
           Layer.provide(layerDevices),
+          Layer.provide(layerAccess),
           Layer.provide(layerProjectsMock),
           Layer.provide(
             ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-device-toolkit-test-" }),
@@ -725,7 +763,11 @@ describe("device targeting across hosts", () => {
         agentTarget: (target) =>
           Effect.sync(() => {
             targets.push(target.openedSession.deviceId);
-            return { agentDeviceId: target.openedSession.deviceId, session: "thread-device", args: [] };
+            return {
+              agentDeviceId: target.openedSession.deviceId,
+              session: "thread-device",
+              args: [],
+            };
           }),
         agentLauncher: (target) =>
           Effect.sync(() => {
@@ -747,7 +789,7 @@ describe("device targeting across hosts", () => {
             "The device was closed while device_open was preparing it. Call device_open again only if you still need it.",
           );
         }),
-      { agentLauncher: () => Effect.succeedNone },
+      { agentLauncher: () => Effect.succeedNone, abortOpen: () => Effect.void },
     ),
   );
 
@@ -929,6 +971,7 @@ it.effect.each([
       });
       const operations: string[] = [];
       const observedService = Layer.mock(DeviceService.DeviceService)({
+        bootedByThread: () => Effect.succeed(false),
         state: Effect.succeed(state),
         list: Effect.sync(() => {
           operations.push("list");
@@ -968,6 +1011,7 @@ it.effect.each([
           }),
       });
       const dependencies = Layer.mergeAll(
+        layerProjectsMock,
         observedService,
         McpToolAccessTestkit.liveThreadsLayer,
         McpToolAccessTestkit.liveThreadProjectionsLayer,
@@ -977,7 +1021,7 @@ it.effect.each([
       const server = yield* McpServer.McpServer.pipe(
         Effect.provide(
           McpHttpServer.layerDeviceToolkit.pipe(
-            Layer.provideMerge(McpServer.McpServer.layer),
+            Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
             Layer.provide(dependencies),
           ),
         ),
@@ -1014,11 +1058,7 @@ it.effect.each([
           expect.arrayContaining([
             expect.objectContaining({
               type: "text",
-              text: expect.stringContaining(
-                name === "device_screenshot"
-                  ? "Device screenshot failed."
-                  : "Agent device access is turned off",
-              ),
+              text: expect.stringContaining("Agent device access is turned off"),
             }),
           ]),
         );
@@ -1066,50 +1106,62 @@ it.effect.each([
                 : "Agent access was revoked during boot.",
           });
     let issued = false;
-    const failingDevices = Layer.mock(DeviceService.DeviceService)({
-      list: Effect.succeed(state),
-      state: Effect.succeed(state),
-      agentReadinessIfSupported: () => Effect.succeed(agentReady),
-      open: () => Effect.succeed(openedSession),
-      agentTarget: (input) =>
-        Effect.gen(function* () {
-          expect(input.openedSession).toBe(openedSession);
-          if (stage === "denied" || stage === "config") return yield* failure;
-          issued = true;
-          return {
-            agentDeviceId: openedSession.deviceId,
-            session: "opened-device-session",
-            args: ["--config", "/host.json", "--session", "opened-device-session"],
-          };
-        }),
-      agentLauncher: () =>
-        Effect.gen(function* () {
-          if (stage === "cli") return yield* failure;
-          const config = yield* ServerConfig.ServerConfig;
-          const directory = yield* ensureAgentDeviceShim({
-            entryPath: "/cli",
-            stateDir: config.stateDir,
-          }).pipe(
-            Effect.mapError((cause) =>
-              new DeviceToolUnavailableError({
-                reason: "Could not prepare the agent-device launcher.",
-                cause,
-              }),
-            ),
-          );
-          return Option.some(`${directory}/agent-device`);
-        }),
-      abortOpen: (session) =>
-        Effect.gen(function* () {
-          aborted.push(session);
-          if (cleanupFails)
-            return yield* new DeviceHostUnavailableError({
-              hostId: "local",
-              reason: "Synthetic cleanup failure.",
-            });
-        }),
-      close: () => Effect.die("Rollback must use exact session identity, not stable device IDs"),
-    });
+    const failingDevices = Layer.unwrap(
+      Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        return Layer.mock(DeviceService.DeviceService)({
+          bootedByThread: () => Effect.succeed(false),
+          list: Effect.succeed(state),
+          state: Effect.succeed(state),
+          agentReadinessIfSupported: () => Effect.succeed(agentReady),
+          open: () => Effect.succeed(openedSession),
+          agentTarget: (input) =>
+            Effect.gen(function* () {
+              expect(input.openedSession).toBe(openedSession);
+              if (stage === "denied" || stage === "config") return yield* failure;
+              issued = true;
+              return {
+                agentDeviceId: openedSession.deviceId,
+                session: "opened-device-session",
+                args: ["--config", "/host.json", "--session", "opened-device-session"],
+              };
+            }),
+          agentLauncher: () =>
+            Effect.gen(function* () {
+              if (stage === "cli") return yield* failure;
+              const directory = yield* ensureAgentDeviceShim({
+                entryPath: "/cli",
+                stateDir: config.stateDir,
+              }).pipe(
+                Effect.provideService(FileSystem.FileSystem, fs),
+                Effect.provideService(Path.Path, path),
+                Effect.mapError(
+                  (cause) =>
+                    new DeviceHostUnavailableError({
+                      hostId: "local",
+                      reason: "Could not prepare the agent-device launcher.",
+                      cause,
+                    }),
+                ),
+              );
+              return Option.some(`${directory}/agent-device`);
+            }),
+          abortOpen: (session) =>
+            Effect.gen(function* () {
+              aborted.push(session);
+              if (cleanupFails)
+                return yield* new DeviceHostUnavailableError({
+                  hostId: "local",
+                  reason: "Synthetic cleanup failure.",
+                });
+            }),
+          close: () =>
+            Effect.die("Rollback must use exact session identity, not stable device IDs"),
+        });
+      }),
+    );
     const failingShim = Layer.effect(
       FileSystem.FileSystem,
       Effect.gen(function* () {
@@ -1160,7 +1212,7 @@ it.effect.each([
       Effect.scoped,
       Effect.provide(
         McpHttpServer.layerDeviceToolkit.pipe(
-          Layer.provideMerge(McpServer.McpServer.layer),
+          Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
           Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
           Layer.provide(failingDevices),
           Layer.provide(layerAccess),
@@ -1188,6 +1240,7 @@ it.effect("rolls back the opened session when post-open credential issuance is i
     };
     const aborted: DeviceSession[] = [];
     const delayedDevices = Layer.mock(DeviceService.DeviceService)({
+      bootedByThread: () => Effect.succeed(false),
       list: Effect.succeed(state),
       agentReadinessIfSupported: () => Effect.succeed(agentReady),
       open: () => Effect.succeed(openedSession),
@@ -1215,9 +1268,12 @@ it.effect("rolls back the opened session when post-open credential issuance is i
       Effect.scoped,
       Effect.provide(
         McpHttpServer.layerDeviceToolkit.pipe(
-          Layer.provideMerge(McpServer.McpServer.layer),
+          Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
           Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
           Layer.provide(delayedDevices),
+          Layer.provide(
+            ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-device-delayed-" }),
+          ),
           Layer.provide(layerAccess),
           Layer.provide(layerProjectsMock),
           Layer.provide(NodeServices.layer),
@@ -1247,6 +1303,7 @@ it.effect.each([
       const sessions = yield* Ref.make<ReadonlyArray<DeviceSession>>([]);
       let bootCalls = 0;
       const devices = Layer.mock(DeviceService.DeviceService)({
+        bootedByThread: () => Effect.succeed(false),
         list: Effect.succeed(state),
         state: Ref.get(sessions).pipe(Effect.map((sessions) => ({ ...state, sessions }))),
         agentReadinessIfSupported: () =>
@@ -1272,6 +1329,7 @@ it.effect.each([
         abortOpen: () => Effect.die("No session should be opened for revoked access"),
       });
       const access = Layer.mergeAll(
+        layerProjectsMock,
         McpToolAccessTestkit.liveThreadsLayer,
         McpToolAccessTestkit.liveThreadProjectionsLayer,
         Layer.mock(ProjectStore.ProjectStoreV2)({
@@ -1305,9 +1363,13 @@ it.effect.each([
         Effect.scoped,
         Effect.provide(
           McpHttpServer.layerDeviceToolkit.pipe(
-            Layer.provideMerge(McpServer.McpServer.layer),
+            Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
             Layer.provide(devices),
             Layer.provide(access),
+            Layer.provide(
+              ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-device-revoke-readiness-" }),
+            ),
+            Layer.provide(NodeServices.layer),
           ),
         ),
       );

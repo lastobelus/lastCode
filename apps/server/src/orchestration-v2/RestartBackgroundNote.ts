@@ -195,8 +195,22 @@ export function delegatedTaskResultRun(
   const taskRuns = runs
     .filter((run) => run.delegatedTaskId === taskId)
     .toSorted((a, b) => b.ordinal - a.ordinal);
+  const actionContinuations = new Set(
+    taskRuns.flatMap(
+      (run) =>
+        run.actionObligations?.flatMap((row) =>
+          row.state === "transferred" && row.continuationRunId !== undefined
+            ? [row.continuationRunId]
+            : [],
+        ) ?? [],
+    ),
+  );
+  // Owned continuations retain the task's work and outcome even when held or cancelled before start.
   const awaited = taskRuns.filter(
-    (run) => !cancelledBeforeStart(run) && !(run.status === "queued" && run.queueHeld === true),
+    (run) =>
+      run.pullRequestWatchContinuation !== undefined ||
+      actionContinuations.has(run.id) ||
+      (!cancelledBeforeStart(run) && !(run.status === "queued" && run.queueHeld === true)),
   );
   // Executing work reports the task's state; a reordered queue can finish a newer run before an older one.
   const executing = awaited.find((run) =>

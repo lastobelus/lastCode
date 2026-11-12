@@ -162,6 +162,9 @@ const browserTestProject = {
         resetPointer: async ({ page }) => {
           await page.mouse.move(-1, -1);
         },
+        wheel: async ({ page }, deltaY: number) => {
+          await page.mouse.wheel(0, deltaY);
+        },
       },
     },
   },

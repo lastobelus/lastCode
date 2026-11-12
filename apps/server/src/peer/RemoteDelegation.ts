@@ -20,9 +20,11 @@ import {
 import * as Context from "effect/Context";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
+import * as Digest from "effect/crypto/Digest";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Hex from "effect/encoding/Hex";
 import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
@@ -82,6 +84,7 @@ export class RemoteDelegation extends Context.Service<
           readonly environmentId: EnvironmentId;
         };
       },
+      existingThreadId?: ThreadId,
     ) => Effect.Effect<{ readonly taskId: NodeId }, OrchestratorMcpFailure>;
     /**
      * A `t3_thread_send` there that started or queued a run on the thread of
@@ -127,6 +130,7 @@ const isModeRefusal = (error: OrchestratorMcpFailure) =>
  * machine asleep, a dropped route) is worth retrying.
  */
 const isFinal = (error: OrchestratorMcpFailure) =>
+  isModeRefusal(error) ||
   error.code === "capability_denied" ||
   error.code === "thread_not_found" ||
   error.code === "run_not_found";
@@ -140,6 +144,7 @@ const make = Effect.gen(function* () {
   const projects = yield* ProjectService.ProjectService;
   const repositoryIdentities = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
   const random = yield* SecureRandom.SecureRandom;
+  const digest = yield* Digest.Digest;
   const hereId = yield* ServerEnvironment.ServerEnvironment.pipe(
     Effect.flatMap((environment) => environment.getEnvironmentId),
   );
@@ -203,19 +208,37 @@ const make = Effect.gen(function* () {
   });
 
   const delegate: RemoteDelegation["Service"]["delegate"] = Effect.fn("RemoteDelegation.delegate")(
-    function* (scope, input) {
-      const parent = yield* threads.getThreadRecords(scope.thread.threadId, ["runs"]).pipe(
-        Effect.mapError(
-          () =>
-            new OrchestratorMcpFailure({
-              code: "thread_not_found",
-              message: "The calling thread was not found.",
-            }),
-        ),
-      );
-      const parentRun = parent.runs
-        .filter(ThreadManagement.isActiveRun)
-        .toSorted((left, right) => right.ordinal - left.ordinal)[0];
+    function* (scope, input, existingThreadId) {
+      const parent = yield* threads
+        .getThreadRecords(
+          scope.thread.threadId,
+          existingThreadId === undefined ? ["runs"] : ["runs", "subagents"],
+        )
+        .pipe(
+          Effect.mapError(
+            () =>
+              new OrchestratorMcpFailure({
+                code: "thread_not_found",
+                message: "The calling thread was not found.",
+              }),
+          ),
+        );
+      const followsUp =
+        existingThreadId !== undefined &&
+        parent.subagents.some(
+          (task) =>
+            task.origin === "app_owned" &&
+            task.result !== null &&
+            task.ownershipReleased !== true &&
+            task.remoteChild?.delegation !== undefined &&
+            task.remoteChild.environmentId === input.target.environmentId &&
+            task.remoteChild.threadId === existingThreadId,
+        );
+      const parentRun = followsUp
+        ? (followUpOwnerRun(parent.runs) ?? undefined)
+        : parent.runs
+            .filter(ThreadManagement.isActiveRun)
+            .toSorted((left, right) => right.ordinal - left.ordinal)[0];
       if (
         parentRun === undefined ||
         parentRun.rootNodeId === null ||
@@ -276,41 +299,23 @@ const make = Effect.gen(function* () {
       // the forwarder scopes the launch's, and the record's names it.
       const key = input.clientRequestId ?? (yield* random.uuidV4());
       const task = taskPrompt(input);
-      const title = input.title ?? parent.thread.title;
-      const launched = yield* forwarding.call(
-        scope,
-        ProjectToolkit.tools.t3_thread_launch,
-        target.environmentId,
-        {
-          projectId,
-          title,
-          modelSelection: { instanceId, model, ...(options === undefined ? {} : { options }) },
-          ...(runtimeMode === undefined ? {} : { runtimeMode }),
-          ...(interactionMode === undefined ? {} : { interactionMode }),
-          message: task,
-          clientRequestId: `delegate:${scope.thread.threadId}:${key}`,
-          // The thread there shows it is this thread's subagent, with a way back.
-          delegatedFrom: {
-            environmentId: hereId,
-            threadId: parent.thread.id,
-            title: parent.thread.title,
-          },
-        },
-      );
-      const link = yield* links.get(target.environmentId).pipe(
-        Effect.map(Option.getOrUndefined),
-        Effect.orElseSucceed(() => undefined),
-      );
+      const capabilities = yield* forwarding.capabilities(scope, target.environmentId);
+      if (
+        capabilities.features.remoteOwnedContinuationVersion !== 1 ||
+        capabilities.features.appOwnedActionContinuationVersion !== 1
+      ) {
+        return yield* new OrchestratorMcpFailure({
+          code: "capability_denied",
+          message: "This peer does not support owned remote continuations.",
+        });
+      }
+      if (runtimeMode !== undefined)
+        yield* resolveRuntimeMode(capabilities.runtimeMode, runtimeMode);
+      if (interactionMode !== undefined)
+        yield* resolveInteractionMode(capabilities.interactionMode, interactionMode);
       const commandId = CommandId.make(
         `command:mcp:${encodeURIComponent(scope.requestNamespace)}:remote-delegate:${encodeURIComponent(key)}`,
       );
-      const remoteChild: OrchestrationV2RemoteTaskChild = {
-        environmentId: target.environmentId,
-        threadId: launched.threadId,
-        label: link?.label ?? target.environmentId,
-        title,
-        ...(launched.runId === null ? {} : { runId: launched.runId }),
-      };
       const recorded = yield* threads
         .dispatch({
           type: "delegated_task.remote.request",
@@ -322,8 +327,19 @@ const make = Effect.gen(function* () {
           ...(input.title === undefined ? {} : { title: input.title }),
           // The driver runs there; this side only labels the task with it.
           driver: ProviderDriverKind.make("remote"),
-          modelSelection: launched.modelSelection,
-          remoteChild,
+          modelSelection: { instanceId, model, ...(options === undefined ? {} : { options }) },
+          remoteLaunch: {
+            environmentId: target.environmentId,
+            projectId,
+            ...(existingThreadId === undefined ? {} : { existingThreadId }),
+            requestNamespace: scope.requestNamespace,
+            requestKey: key,
+            title: input.title ?? parent.thread.title,
+            modelSelection: { instanceId, model, ...(options === undefined ? {} : { options }) },
+            ...(runtimeMode === undefined ? {} : { runtimeMode }),
+            ...(interactionMode === undefined ? {} : { interactionMode }),
+            stage: "pending",
+          },
           completionWake: input.mode === "wait" ? "settled_only" : "always",
         })
         .pipe(
@@ -341,14 +357,6 @@ const make = Effect.gen(function* () {
                 message: "Unable to record the delegated task.",
               }),
           ),
-          // Nothing here follows a thread the task was never recorded for, so stop it there.
-          // A crash between the launch and this record still leaves it running there
-          // until a retry with the same clientRequestId records it.
-          Effect.tapError(() =>
-            stopThere(followScope(scope.thread, remoteChild), remoteChild, "stop").pipe(
-              Effect.ignoreCause({ log: true }),
-            ),
-          ),
         );
       const taskEvent = recorded.storedEvents.find(
         (stored) => stored.event.type === "subagent.updated",
@@ -360,7 +368,11 @@ const make = Effect.gen(function* () {
             yield* threads.getThreadRecords(scope.thread.threadId, ["subagents"]).pipe(
               Effect.map(
                 ({ subagents }) =>
-                  subagents.find((task) => task.remoteChild?.threadId === launched.threadId)?.id,
+                  subagents.find(
+                    (task) =>
+                      task.remoteLaunch?.requestNamespace === scope.requestNamespace &&
+                      task.remoteLaunch?.requestKey === key,
+                  )?.id,
               ),
               Effect.orElseSucceed(() => undefined),
             );
@@ -378,7 +390,11 @@ const make = Effect.gen(function* () {
   const followUp: RemoteDelegation["Service"]["followUp"] = Effect.fn("RemoteDelegation.followUp")(
     function* (scope, environmentId, request, sent) {
       // A steer joins a run that is already some task's, or no one's.
-      if (scope.thread === undefined || (sent.delivery !== "started" && sent.delivery !== "queued"))
+      if (
+        sent.taskId !== undefined ||
+        scope.thread === undefined ||
+        (sent.delivery !== "started" && sent.delivery !== "queued")
+      )
         return sent;
       const parentThreadId = scope.thread.threadId;
       const parent = yield* threads
@@ -501,13 +517,13 @@ const make = Effect.gen(function* () {
    */
   const followScope = (
     parent: { readonly threadId: ThreadId; readonly providerInstanceId: ProviderInstanceId },
-    remote: OrchestrationV2RemoteTaskChild,
+    remote?: OrchestrationV2RemoteTaskChild,
   ): ThreadScope => ({
     environmentId: hereId,
     requestNamespace: `remote-task:${parent.threadId}`,
     thread: {
       threadId: parent.threadId,
-      providerSessionId: `remote-task:${remote.threadId}`,
+      providerSessionId: `remote-task:${remote?.threadId ?? parent.threadId}`,
       providerInstanceId: parent.providerInstanceId,
     },
     client: undefined,
@@ -530,6 +546,7 @@ const make = Effect.gen(function* () {
       .interruptThread(scope, remote.environmentId, {
         threadId: remote.threadId,
         stop: true,
+        ...(remote.delegation === undefined ? {} : { delegation: remote.delegation }),
         ...(reason === undefined ? {} : { reason }),
         clientRequestId: `${key}:${remote.threadId}`,
       })
@@ -648,7 +665,162 @@ const make = Effect.gen(function* () {
   ) {
     const sequence = yield* threads.getThreadEventSequence(parentThreadId);
     const { thread, task } = yield* readTask(parentThreadId, taskId);
-    if (task?.remoteChild === undefined) return true;
+    if (task === undefined) return true;
+    if (
+      task.remoteLaunch !== undefined &&
+      task.remoteLaunch.stage !== "active" &&
+      (task.result === null || task.remoteChild === undefined)
+    ) {
+      const intent = task.remoteLaunch;
+      const scope = followScope(
+        { threadId: parentThreadId, providerInstanceId: thread.providerInstanceId },
+        task.remoteChild,
+      );
+      // A cancelled prelaunch intent has no peer work to stop. An in-flight prepare must still be recorded and disposed.
+      if (task.result !== null && task.remoteChild === undefined && intent.stage === "pending")
+        return true;
+      if (intent.stage === "pending") {
+        yield* threads.dispatch({
+          type: "delegated_task.remote.begin",
+          commandId: CommandId.make(`remote:${taskId}:begin`),
+          parentThreadId,
+          taskId,
+        });
+        const current = yield* readTask(parentThreadId, taskId);
+        if (current.task?.remoteLaunch?.stage !== "preparing") return true;
+      }
+      const peerKey = yield* digest
+        .digest(Digest.sha256, new TextEncoder().encode(taskId))
+        .pipe(Effect.map(Hex.encode), Effect.orDie);
+      let remote = task.remoteChild;
+      if (remote === undefined) {
+        const prepared = yield* forwarding.call(
+          scope,
+          ProjectToolkit.tools.t3_thread_launch,
+          intent.environmentId,
+          {
+            projectId: intent.projectId,
+            title: intent.title,
+            modelSelection: intent.modelSelection,
+            ...(intent.runtimeMode === undefined ? {} : { runtimeMode: intent.runtimeMode }),
+            ...(intent.interactionMode === undefined
+              ? {}
+              : { interactionMode: intent.interactionMode }),
+            clientRequestId: `prepare:${peerKey}`,
+            delegatedFrom: { environmentId: hereId, threadId: parentThreadId, title: thread.title },
+            remotePreparation: {
+              parentEnvironmentId: hereId,
+              parentThreadId,
+              sourceTaskId: taskId,
+              ...(intent.existingThreadId === undefined
+                ? {}
+                : { existingThreadId: intent.existingThreadId }),
+            },
+          },
+        );
+        if (
+          prepared.delegation === undefined ||
+          prepared.delegation.parentEnvironmentId !== hereId ||
+          prepared.delegation.parentThreadId !== parentThreadId ||
+          prepared.delegation.sourceTaskId !== taskId
+        ) {
+          return yield* new OrchestratorMcpFailure({
+            code: "capability_denied",
+            message: "Peer did not return the exact prepared delegation identity.",
+          });
+        }
+        const link = yield* links.get(intent.environmentId);
+        remote = {
+          environmentId: intent.environmentId,
+          threadId: prepared.threadId,
+          label: Option.isSome(link) ? link.value.label : intent.environmentId,
+          title: intent.title,
+          delegation: prepared.delegation,
+        };
+        yield* threads.dispatch({
+          type: "delegated_task.remote.stage",
+          commandId: CommandId.make(`remote:${taskId}:prepared`),
+          parentThreadId,
+          taskId,
+          remoteChild: remote,
+          stage: "prepared",
+        });
+      }
+      const current = yield* readTask(parentThreadId, taskId);
+      if (current.task?.result !== null) return false;
+      if (remote.delegation === undefined) {
+        return yield* new OrchestratorMcpFailure({
+          code: "capability_denied",
+          message: "Peer did not return the exact prepared delegation identity.",
+        });
+      }
+      const destination = remote;
+      const activated = yield* forwarding
+        .sendThread(scope, intent.environmentId, {
+          threadId: remote.threadId,
+          delegation: remote.delegation,
+          message: task.prompt,
+          mode: "queue",
+          clientRequestId: `activate:${peerKey}`,
+        })
+        .pipe(
+          Effect.asSome,
+          Effect.catchIf(
+            (error) => error.code === "orchestration_error",
+            Effect.fn("RemoteDelegation.reconcileActivationRefusal")(function* (
+              error: OrchestratorMcpFailure,
+            ) {
+              // A local Stop may have committed after preparation. Only its authenticated,
+              // exact association outcome can distinguish that tombstone from a transient failure.
+              const outcome = yield* forwarding.waitForThread(scope, destination.environmentId, {
+                threadId: destination.threadId,
+                delegation: destination.delegation,
+                timeoutMs: 1,
+              });
+              const selected = outcome.delegation;
+              if (
+                outcome.threadId !== destination.threadId ||
+                selected === undefined ||
+                selected.delegationId !== destination.delegation!.delegationId ||
+                selected.sourceTaskId !== taskId ||
+                selected.parentEnvironmentId !== hereId ||
+                selected.parentThreadId !== parentThreadId ||
+                outcome.delegationOutcome === undefined
+              ) {
+                return yield* new OrchestratorMcpFailure({
+                  code: "capability_denied",
+                  message: "Peer did not acknowledge the exact delegation wait.",
+                });
+              }
+              if (outcome.delegationOutcome !== "disposed" || outcome.timedOut) return yield* error;
+              yield* complete(
+                parentThreadId,
+                taskId,
+                "cancelled",
+                "Remote delegation was disposed.",
+                "stopped",
+                destination.stopCount,
+              );
+              return Option.none();
+            }),
+          ),
+        );
+      if (Option.isNone(activated)) return yield* settled(parentThreadId, taskId);
+      yield* threads.dispatch({
+        type: "delegated_task.remote.stage",
+        commandId: CommandId.make(`remote:${taskId}:active`),
+        parentThreadId,
+        taskId,
+        remoteChild: {
+          ...remote,
+          runId: activated.value.runId,
+          activationMessageId: activated.value.messageId,
+        },
+        stage: "active",
+      });
+      return false;
+    }
+    if (task.remoteChild === undefined) return true;
     const remote = task.remoteChild;
     const scope = followScope(
       { threadId: parentThreadId, providerInstanceId: thread.providerInstanceId },
@@ -710,6 +882,8 @@ const make = Effect.gen(function* () {
       .waitForThread(scope, remote.environmentId, {
         threadId: remote.threadId,
         ...(remote.runId === undefined ? {} : { runId: remote.runId }),
+        ...(remote.delegation === undefined ? {} : { delegation: remote.delegation }),
+        ...(remote.interaction === undefined ? {} : { observedInteraction: remote.interaction }),
         timeoutMs: FOLLOW_WAIT_MS,
         // A thread there whose run ended may still be waiting on its own
         // tasks to wake it for the answer, which a task here waits for too.
@@ -720,6 +894,43 @@ const make = Effect.gen(function* () {
     // The next look reads the result and stops it there.
     if ("endedHere" in waited) return false;
     if (waited.timedOut) return false;
+    if (remote.delegation !== undefined) {
+      const selected = waited.delegation;
+      if (
+        selected === undefined ||
+        selected.delegationId !== remote.delegation.delegationId ||
+        selected.sourceTaskId !== taskId ||
+        selected.parentEnvironmentId !== hereId ||
+        selected.parentThreadId !== parentThreadId ||
+        waited.delegationOutcome === undefined
+      ) {
+        return yield* new OrchestratorMcpFailure({
+          code: "capability_denied",
+          message: "Peer did not acknowledge the exact delegation wait.",
+        });
+      }
+      if (waited.interaction !== undefined) {
+        yield* threads.dispatch({
+          type: "delegated_task.remote.interaction",
+          commandId: CommandId.make(`remote-interaction:${taskId}:${yield* random.uuidV4()}`),
+          parentThreadId,
+          taskId,
+          interaction: waited.interaction,
+        });
+      }
+      if (waited.delegationOutcome === "pending") return false;
+      if (waited.delegationOutcome === "disposed") {
+        yield* complete(
+          parentThreadId,
+          taskId,
+          "cancelled",
+          "Remote delegation was disposed.",
+          "stopped",
+        );
+        return yield* settled(parentThreadId, taskId);
+      }
+      if (waited.resultRun === undefined) return false;
+    }
     // A task recorded without its run waits on the thread's latest; a
     // thread there with none has nothing left to wait for.
     if (waited.runId === null) {
@@ -759,7 +970,10 @@ const make = Effect.gen(function* () {
       waited.resultRun !== undefined && !sharedThread
         ? waited.resultRun
         : { runId: waited.runId, status: waited.status };
-    const result = yield* lastReply(scope, remote, resultRun.runId, resultRun.status === "failed");
+    const result =
+      resultRun.status === "interrupted"
+        ? `Child task ended with status ${resultRun.status}.`
+        : yield* lastReply(scope, remote, resultRun.runId, resultRun.status === "failed");
     yield* complete(
       parentThreadId,
       taskId,
@@ -819,6 +1033,25 @@ const make = Effect.gen(function* () {
 
   const cancel: RemoteDelegation["Service"]["cancel"] = Effect.fn("RemoteDelegation.cancel")(
     function* (scope, task, input) {
+      if (task.result === null && task.remoteLaunch !== undefined) {
+        yield* complete(
+          task.threadId,
+          task.id,
+          "cancelled",
+          input.reason === undefined ? "Cancelled." : `Cancelled: ${input.reason}`,
+          undefined,
+        ).pipe(
+          Effect.mapError(
+            () =>
+              new OrchestratorMcpFailure({
+                code: "orchestration_error",
+                message: "Unable to record cancellation.",
+              }),
+          ),
+        );
+        yield* followOne(task.threadId, task.id).pipe(Effect.forkIn(followers));
+        return { taskId: task.id, status: "cancel_requested" };
+      }
       const remote = task.remoteChild;
       if (remote === undefined) {
         return yield* new OrchestratorMcpFailure({

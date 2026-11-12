@@ -3,7 +3,11 @@ import type { EditorState, Transaction } from "@tiptap/pm/state";
 import { TextSelection } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 
-import { isClosingFence, parseOpeningFence, serializeSelection } from "~/composer-rich-text-doc";
+import {
+  isClosingFence,
+  parseOpeningFence,
+  structuredSerializeSelection as serializeSelection,
+} from "~/composer-rich-text-doc";
 
 const CODE_BLOCK_INDENT = "  ";
 

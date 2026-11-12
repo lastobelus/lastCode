@@ -901,7 +901,12 @@ export function createEnvironmentCommand<R, ER, Input, A, E>(
     execute: (target, registry) =>
       runInEnvironment(
         target.environmentId,
-        options.execute(target.input, registry, target.environmentId),
+        options.execute(target.input, registry, target.environmentId).pipe(
+          Effect.provideService(RpcPermissionGuard, {
+            authorize: (id, method, payload) =>
+              createCommandPermissions(runtime, method).authorize(registry, id, payload),
+          }),
+        ),
       ),
   });
 }
@@ -1069,10 +1074,6 @@ export function createEnvironmentRpcCommand<
         Effect.andThen(() => {
           started = options.onStart?.(target, registry);
           return options.execute?.(input) ?? requestGuarded(options.tag, input);
-        }),
-        Effect.provideService(RpcPermissionGuard, {
-          authorize: (id, method, payload) =>
-            createCommandPermissions(runtime, method).authorize(registry, id, payload),
         }),
         Effect.tap(
           (result) => options.onSuccess?.(target, registry, result, started) ?? Effect.void,

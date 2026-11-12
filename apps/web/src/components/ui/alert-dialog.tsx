@@ -6,6 +6,7 @@ import {
   DIALOG_BACKDROP_CLASS,
   DIALOG_MOBILE_SHEET_CLASS,
   DIALOG_POPUP_CLASS,
+  resolveDialogBackdropStyle,
 } from "~/components/ui/dialog-styles";
 import {
   ControlledOpenContext,
@@ -24,12 +25,15 @@ function AlertDialog<Payload>(props: AlertDialogPrimitive.Root.Props<Payload>) {
 
 const AlertDialogPortal = AlertDialogPrimitive.Portal;
 
-function AlertDialogBackdrop({ className, ...props }: AlertDialogPrimitive.Backdrop.Props) {
+function AlertDialogBackdrop({ className, style, ...props }: AlertDialogPrimitive.Backdrop.Props) {
   return (
     <AlertDialogPrimitive.Backdrop
       forceRender
       className={cn(DIALOG_BACKDROP_CLASS, className)}
       data-slot="alert-dialog-backdrop"
+      style={(state) =>
+        resolveDialogBackdropStyle(state.open, typeof style === "function" ? style(state) : style)
+      }
       {...props}
     />
   );
