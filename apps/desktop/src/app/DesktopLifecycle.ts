@@ -16,6 +16,7 @@ import { makeComponentLogger } from "./DesktopObservability.ts";
 import * as DesktopShutdown from "./DesktopShutdown.ts";
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
+import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronTheme from "../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopState from "./DesktopState.ts";
@@ -39,6 +40,7 @@ export type DesktopLifecycleRuntimeServices =
   | DesktopState.DesktopState
   | DesktopWindow.DesktopWindow
   | ElectronApp.ElectronApp
+  | ElectronDialog.ElectronDialog
   | ElectronTheme.ElectronTheme;
 
 type DesktopLifecycleRegistrationServices =
@@ -46,7 +48,7 @@ type DesktopLifecycleRegistrationServices =
   | ElectronWindow.ElectronWindow;
 
 /**
- * @effect-expect-leaking DesktopEnvironment | DesktopShutdown | DesktopState | DesktopWindow | ElectronApp | ElectronTheme | ElectronWindow
+ * @effect-expect-leaking DesktopEnvironment | DesktopShutdown | DesktopState | DesktopWindow | ElectronApp | ElectronDialog | ElectronTheme | ElectronWindow
  */
 export class DesktopLifecycle extends Context.Service<
   DesktopLifecycle,
@@ -141,6 +143,8 @@ function handleBeforeQuit(
     effect: Effect.Effect<A, E, DesktopLifecycleRegistrationServices>,
   ) => Promise<A>,
   quit: QuitState,
+  isQuitRequestPending: () => boolean,
+  setQuitRequestPending: (pending: boolean) => void,
 ): void {
   if (quit.phase === "allowed") {
     void runEffect(
@@ -158,9 +162,31 @@ function handleBeforeQuit(
     void runEffect(exitIfShutdownStalled(quit, "before-quit"));
     return;
   }
+  if (isQuitRequestPending()) return;
+  setQuitRequestPending(true);
   void runEffect(
     Effect.gen(function* () {
+      const desktopWindow = yield* DesktopWindow.DesktopWindow;
       const state = yield* DesktopState.DesktopState;
+      // A committed install already confirmed the interruption and closed every window.
+      const quitAlreadyDecided = yield* Ref.get(state.installQuitCommitted);
+      const warningAcknowledged =
+        yield* desktopWindow.consumeRunningActionQuitWarningAcknowledgment;
+      const runningActionCount = yield* desktopWindow.runningActionCount;
+      if (runningActionCount > 0 && !warningAcknowledged && !quitAlreadyDecided) {
+        const dialog = yield* ElectronDialog.ElectronDialog;
+        const result = yield* dialog.showMessageBox({
+          type: "warning",
+          title: "Running Actions",
+          message: `Quit and cancel ${runningActionCount} running ${runningActionCount === 1 ? "Action" : "Actions"}?`,
+          detail: "The commands will not be restarted automatically.",
+          buttons: ["Quit and cancel", "Keep running"],
+          defaultId: 1,
+          cancelId: 1,
+          noLink: true,
+        });
+        if (result.response !== 0) return false;
+      }
       const electronWindow = yield* ElectronWindow.ElectronWindow;
       yield* startWaitingForShutdown(quit);
       yield* Ref.set(state.quitting, true);
@@ -172,16 +198,21 @@ function handleBeforeQuit(
           ),
         ),
       );
+      return true;
     }).pipe(Effect.withSpan("desktop.lifecycle.beforeQuit")),
-  ).finally(() => {
-    quit.phase = "allowed";
-    void runEffect(
-      Effect.gen(function* () {
-        const electronApp = yield* ElectronApp.ElectronApp;
-        yield* electronApp.quit;
-      }).pipe(Effect.withSpan("desktop.lifecycle.quitAfterShutdown")),
-    );
-  });
+  )
+    .then((shouldQuit) => {
+      if (!shouldQuit) return;
+      quit.phase = "allowed";
+      void runEffect(
+        Effect.gen(function* () {
+          const electronApp = yield* ElectronApp.ElectronApp;
+          yield* electronApp.quit;
+        }).pipe(Effect.withSpan("desktop.lifecycle.quitAfterShutdown")),
+      );
+    })
+    .catch(() => undefined)
+    .finally(() => setQuitRequestPending(false));
 }
 
 function quitFromSignal(
@@ -252,6 +283,7 @@ export const make = DesktopLifecycle.of({
     const context = yield* Effect.context<DesktopLifecycleRegistrationServices>();
     const runEffect = Effect.runPromiseWith(context);
     const quit: QuitState = { phase: "running", waitingSinceNanos: 0n };
+    let quitRequestPending = false;
     yield* electronTheme.onUpdated(() => {
       void runEffect(
         desktopWindow.syncAppearance.pipe(Effect.withSpan("desktop.lifecycle.themeUpdated")),
@@ -277,7 +309,15 @@ export const make = DesktopLifecycle.of({
       );
     });
     yield* electronApp.on("before-quit", (event: Electron.Event) => {
-      handleBeforeQuit(event, runEffect, quit);
+      handleBeforeQuit(
+        event,
+        runEffect,
+        quit,
+        () => quitRequestPending,
+        (pending) => {
+          quitRequestPending = pending;
+        },
+      );
     });
     yield* electronApp.on("activate", () => {
       void runEffect(

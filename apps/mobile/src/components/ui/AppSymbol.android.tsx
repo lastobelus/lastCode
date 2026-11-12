@@ -193,6 +193,8 @@ const ANDROID_ICON_BY_SF_SYMBOL = {
   tag: IconTag,
   ticket: IconTicket,
   cloud: IconCloud,
+  "clock.arrow.circlepath": IconRefresh,
+  cpu: IconRobot,
   cube: IconBox,
   "chevron.down": IconChevronDown,
   "chevron.left": IconChevronLeft,
