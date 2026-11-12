@@ -287,12 +287,25 @@ export const layerExecutor: Layer.Layer<
                 Effect.catch((error) =>
                   Effect.gen(function* () {
                     if (
+                      isProviderTurnControlError(error) &&
+                      effect.request.type === "provider-turn.steer" &&
+                      effect.request.nativeOnly === true &&
+                      error.deliveryRejected === true
+                    ) {
+                      // A provider's definite rejection is final non-delivery;
+                      // retrying it must not strand cleanup or start another turn.
+                      return;
+                    }
+                    if (
                       !isProviderTurnControlError(error) ||
                       (!error.turnCompleted && !error.steerDeclined) ||
                       effect.request.type !== "provider-turn.steer"
                     ) {
                       return yield* error;
                     }
+                    // The target already finished. Strict steering must neither start
+                    // a follow-up nor leave an expected delivery race blocking cleanup.
+                    if (effect.request.nativeOnly === true) return;
                     const projection = yield* threads.getThreadRecords(
                       effect.threadId,
                       ["messages", "runs"],
@@ -547,12 +560,14 @@ export const layerExecutor: Layer.Layer<
                   }),
               ),
             );
-          // Archive and delete queue this one per-thread teardown, so it also releases the
-          // thread's device claims; the devices stay booted for other threads.
+          // Both lifecycle paths release claims while keeping the devices booted.
+          case "terminal.archive-cleanup":
           case "terminal.cleanup":
             return Effect.partition(
               [
-                resourceCleanup.cleanupTerminals(effect.threadId),
+                effect.request.type === "terminal.archive-cleanup"
+                  ? resourceCleanup.cleanupArchivedTerminals(effect.threadId)
+                  : resourceCleanup.cleanupTerminals(effect.threadId),
                 resourceCleanup.cleanupDevices(effect.threadId),
               ],
               (cleanup) => cleanup,

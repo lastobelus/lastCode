@@ -4,6 +4,7 @@ import {
   CheckpointScopeId,
   CommandId,
   NodeId,
+  MessageId,
   ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
@@ -28,6 +29,7 @@ import * as CheckpointService from "./CheckpointService.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EffectWorker from "./EffectWorker.ts";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
+import * as ResourceCleanupService from "./ResourceCleanupService.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
 import * as ProviderTurnStartService from "./ProviderTurnStartService.ts";
@@ -85,6 +87,7 @@ function layerExecutorFor(input: {
   readonly interrupt?: ProviderTurnControlService.ProviderTurnControlServiceV2Shape["interrupt"];
   readonly rollback?: CheckpointRollbackService.CheckpointRollbackServiceV2Shape["execute"];
   readonly respond?: RuntimeRequestService.RuntimeRequestServiceV2["Service"]["respond"];
+  readonly steer?: ProviderTurnControlService.ProviderTurnControlServiceV2Shape["steer"];
 }) {
   const record = (event: string) => Ref.update(input.events, (events) => [...events, event]);
   const layerDependencies = Layer.mergeAll(
@@ -92,7 +95,7 @@ function layerExecutorFor(input: {
       ProviderTurnControlService.ProviderTurnControlServiceV2,
       ProviderTurnControlService.ProviderTurnControlServiceV2.of({
         interrupt: input.interrupt ?? (() => Effect.void),
-        steer: () => Effect.void,
+        steer: input.steer ?? (() => Effect.void),
         applyModelSelection: () => Effect.void,
         interruptAndAwaitTerminal: (request) =>
           record(
@@ -109,6 +112,8 @@ function layerExecutorFor(input: {
         open: () => Effect.die("unused open"),
         get: () => Effect.succeedNone,
         isLive: () => Effect.succeed(false),
+        pendingExecution: Effect.succeed([]),
+        ownershipRevision: Effect.succeed(0),
         close: () => Effect.void,
         closeInstance: () => Effect.void,
         release: () => record("release"),
@@ -171,6 +176,141 @@ function layerExecutorFor(input: {
     ),
   );
 }
+
+it.effect.each([
+  { type: "terminal.archive-cleanup", retained: "archive" },
+  { type: "terminal.cleanup", retained: "delete" },
+] as const)("$type releases devices even when terminal cleanup fails", (scenario) =>
+  Effect.gen(function* () {
+    const events = yield* Ref.make<ReadonlyArray<string>>([]);
+    const now = yield* DateTime.now;
+    const cleanupError = new ResourceCleanupService.ResourceCleanupError({
+      operation: "terminal",
+      threadId,
+      cause: "terminal cleanup failed",
+    });
+    const record = (event: string) => Ref.update(events, (current) => [...current, event]);
+    const terminal = (kind: string) => record(kind).pipe(Effect.andThen(Effect.fail(cleanupError)));
+    const cleanup = Layer.succeed(ResourceCleanupService.ResourceCleanupService, {
+      cleanupScheduledTasks: () => Effect.void,
+      cleanupTerminals: () => terminal("delete"),
+      cleanupArchivedTerminals: () => terminal("archive"),
+      cleanupDevices: () => record("devices"),
+      cleanupPreviews: () => Effect.die("Terminal cleanup owns the browser retention decision"),
+      cleanupAttachments: () => Effect.void,
+    });
+    const result = yield* EffectWorker.OrchestrationEffectExecutorV2.pipe(
+      Effect.flatMap((executor) =>
+        executor.execute({
+          ...restartEffect(now, { type: "detach" }),
+          request: { type: scenario.type },
+        }),
+      ),
+      Effect.provide(layerExecutorFor({ events }).pipe(Layer.provide(cleanup))),
+      Effect.result,
+    );
+    assert.deepEqual(yield* Ref.get(events), [scenario.retained, "devices"]);
+    assert.equal(result._tag, "Failure");
+    if (result._tag === "Failure") assert.strictEqual(result.failure.cause, cleanupError);
+  }),
+);
+
+it.effect.each([
+  { label: "the target completes", fields: { turnCompleted: true } },
+  {
+    label: "the active target rejects steering",
+    fields: { turnCompleted: false, deliveryRejected: true },
+  },
+])("settles native-only steering without a follow-up when $label", (rejection) =>
+  Effect.gen(function* () {
+    const events = yield* Ref.make<ReadonlyArray<string>>([]);
+    const layerExecutor = layerExecutorFor({
+      events,
+      steer: () =>
+        Effect.fail(
+          new ProviderTurnControlService.ProviderTurnControlError({
+            threadId,
+            operation: "steer",
+            providerTurnId,
+            ...rejection.fields,
+          }),
+        ),
+      threads: {
+        getThreadRecords: () => Effect.die("strict steering must not read follow-up state"),
+        dispatch: () => Effect.die("strict steering must not dispatch a follow-up"),
+      },
+    });
+    const now = yield* DateTime.now;
+    const effect: EffectOutbox.OrchestrationEffectV2 = {
+      ...restartEffect(now, { type: "detach" }),
+      request: {
+        type: "provider-turn.steer",
+        nativeOnly: true,
+        providerSessionId: oldSessionId,
+        providerThreadId,
+        providerTurnId,
+        messageId: MessageId.make("native-only-steer"),
+      },
+    };
+    const layerOutbox = Layer.mock(EffectOutbox.EffectOutboxV2)({
+      claimNext: () => Effect.succeedSome(effect),
+      get: () => Effect.succeedSome(effect),
+      awaitCancellation: () => Effect.never,
+      clearCancellation: () => Effect.void,
+      succeed: () =>
+        Ref.update(events, (existing) => [...existing, "succeeded"]).pipe(Effect.as(true)),
+      retry: () => Effect.die("a terminal non-delivery must not retry"),
+      fail: () => Effect.die("a terminal non-delivery must not leave a failed outbox row"),
+    });
+    yield* EffectWorker.OrchestrationEffectWorkerV2.pipe(
+      Effect.flatMap((worker) => worker.runOnce()),
+      Effect.provide(
+        EffectWorker.layerWithOptions({ workerId: "test-worker" }).pipe(
+          Layer.provide(Layer.merge(layerOutbox, layerExecutor)),
+        ),
+      ),
+    );
+    assert.deepEqual(yield* Ref.get(events), ["succeeded"]);
+  }),
+);
+
+it.effect("preserves an unclassified native steering failure", () =>
+  Effect.gen(function* () {
+    const events = yield* Ref.make<ReadonlyArray<string>>([]);
+    const executor = yield* EffectWorker.OrchestrationEffectExecutorV2.pipe(
+      Effect.provide(
+        layerExecutorFor({
+          events,
+          steer: () =>
+            Effect.fail(
+              new ProviderTurnControlService.ProviderTurnControlError({
+                threadId,
+                operation: "steer",
+                providerTurnId,
+                turnCompleted: false,
+                cause: "transient connection failure",
+              }),
+            ),
+        }),
+      ),
+    );
+    const error = yield* executor
+      .execute({
+        ...restartEffect(yield* DateTime.now, { type: "detach" }),
+        request: {
+          type: "provider-turn.steer",
+          nativeOnly: true,
+          providerSessionId: oldSessionId,
+          providerThreadId,
+          providerTurnId,
+          messageId: MessageId.make("native-transient-steer"),
+        },
+      })
+      .pipe(Effect.flip);
+    assert.instanceOf(error, EffectWorker.OrchestrationEffectExecutionError);
+    assert.deepEqual(yield* Ref.get(events), []);
+  }),
+);
 
 it.effect.each([
   {

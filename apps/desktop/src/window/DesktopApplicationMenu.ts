@@ -70,19 +70,26 @@ const checkForUpdatesFromMenu = Effect.gen(function* () {
   const result = yield* updates.check("menu");
   const updateState = result.state;
 
-  if (updateState.status === "up-to-date") {
-    yield* electronDialog.showMessageBox({
-      type: "info",
-      title: "You're up to date!",
-      message: `T3 Code ${updateState.currentVersion} is currently the newest version available.`,
-      buttons: ["OK"],
-    });
-  } else if (updateState.status === "error") {
+  if (result.error) {
     yield* electronDialog.showMessageBox({
       type: "warning",
       title: "Update check failed",
       message: "Could not check for updates.",
-      detail: updateState.message ?? "An unknown error occurred. Please try again later.",
+      detail: result.error,
+      buttons: ["OK"],
+    });
+  } else if (result.checkpointRequested) {
+    yield* electronDialog.showMessageBox({
+      type: "info",
+      title: "Checkpoint requested",
+      message: DesktopUpdates.checkpointRequestedMessage,
+      buttons: ["OK"],
+    });
+  } else if (updateState.status === "up-to-date") {
+    yield* electronDialog.showMessageBox({
+      type: "info",
+      title: "You're up to date!",
+      message: `T3 Code ${updateState.currentVersion} is currently the newest version available.`,
       buttons: ["OK"],
     });
   }
