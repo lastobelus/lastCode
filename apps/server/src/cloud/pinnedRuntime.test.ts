@@ -533,7 +533,9 @@ it.layer(NodeServices.layer)("prunePinnedRuntimes", (it) => {
       const binDir = path.join(baseDir, "bin");
       yield* fs.makeDirectory(binDir);
       yield* fs.symlink(path.join(versionsDir, "1.1.0", "t3"), path.join(binDir, "t3"));
-      const ownDir = path.join(versionsDir, "1.0.0");
+      const ownDir = linkedHome
+        ? yield* fs.realPath(path.join(versionsDir, "1.0.0"))
+        : path.join(versionsDir, "1.0.0");
       if (recorded) {
         yield* fs.writeFileString(
           path.join(baseDir, "runtime", "launchers"),

@@ -158,6 +158,7 @@ const classifyError = (cause: unknown, message: string, operation: string) => {
 // SQLite retains text/blob bindings until rebind or finalization; node:sqlite cannot clear them.
 const LARGE_BINDING_SIZE = 64 * 1024;
 
+// `node:sqlite` binds buffer views as blobs; raw buffers need Node 24.21 or 26.8+.
 const isBlob = (value: unknown): value is ArrayBufferView | ArrayBufferLike =>
   ArrayBuffer.isView(value) || NodeUtil.types.isAnyArrayBuffer(value);
 
@@ -630,17 +631,31 @@ const startCheckpointWorker = Effect.fnUntraced(function* (
     yield* warn("Node SQLite lacks transaction-state or statement-authorizer support");
     return undefined;
   }
-  // These are the writer's first statements, before callers set their own wait.
-  writer.exec("PRAGMA busy_timeout = 5000;");
-  const version = String(writer.prepare("SELECT sqlite_version() AS version").get()?.version);
-  const [major = 0, minor = 0] = version.split(".").map(Number);
+  const prepared = Result.try(() => {
+    // These are the writer's first statements, before callers set their own wait.
+    writer.exec("PRAGMA busy_timeout = 5000;");
+    const version = String(writer.prepare("SELECT sqlite_version() AS version").get()?.version);
+    const [major = 0, minor = 0] = version.split(".").map(Number);
+    const statements =
+      major < 3 || (major === 3 && minor < 51)
+        ? undefined
+        : {
+            frames: writer.prepare("PRAGMA wal_checkpoint(NOOP)"),
+            sizeLimit: writer.prepare("PRAGMA journal_size_limit"),
+          };
+    return { version, statements };
+  });
+  if (Result.isFailure(prepared)) {
+    yield* warn(String(prepared.failure));
+    return undefined;
+  }
+  const { version, statements } = prepared.success;
   // Older SQLite treats NOOP as PASSIVE, which would checkpoint on the writer.
-  if (major < 3 || (major === 3 && minor < 51)) {
+  if (statements === undefined) {
     yield* warn(`SQLite ${version} has no NOOP checkpoint`);
     return undefined;
   }
-  const frames = writer.prepare("PRAGMA wal_checkpoint(NOOP)");
-  const sizeLimit = writer.prepare("PRAGMA journal_size_limit");
+  const { frames, sizeLimit } = statements;
   const started = Result.try(
     () =>
       new NodeWorkerThreads.Worker(checkpointWorkerSource, {

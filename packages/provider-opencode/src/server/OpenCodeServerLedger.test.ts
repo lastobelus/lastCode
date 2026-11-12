@@ -107,13 +107,15 @@ const spawnGroup = (args: ReadonlyArray<string>, script = "sleep 600 & wait") =>
 
 const recordFromDeadServer = (stateDir: string, server: { readonly pid: number }) =>
   Effect.gen(function* () {
-    const previousServer = yield* spawnGroup([]);
-    const previousLedger = yield* OpenCodeServerLedger.make({
-      stateDir,
-      ownerPid: previousServer.pid,
-    });
-    yield* Effect.asVoid(previousLedger.track({ pid: server.pid, port: 4096, args: SERVE_ARGS }));
-    yield* killGroup(previousServer.pid);
+    const previousServer = yield* Effect.gen(function* () {
+      const previousServer = yield* spawnGroup([]);
+      const previousLedger = yield* OpenCodeServerLedger.make({
+        stateDir,
+        ownerPid: previousServer.pid,
+      });
+      yield* Effect.asVoid(previousLedger.track({ pid: server.pid, port: 4096, args: SERVE_ARGS }));
+      return previousServer;
+    }).pipe(Effect.scoped);
     yield* previousServer.exited;
   });
 

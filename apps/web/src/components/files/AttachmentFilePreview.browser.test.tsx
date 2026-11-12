@@ -1598,6 +1598,65 @@ it("keeps a workspace PDF's page, offset and zoom when a new revision reloads it
   }
 });
 
+it("keeps first-page PDF zoom on reload and resets a different file", async () => {
+  assetUrlState.mockReset();
+  pdfOpens.length = 0;
+  const { WorkspaceBrowserPreview } = await import("./FilePreviewPanel");
+  using _native = vi.spyOn(navigator, "pdfViewerEnabled", "get").mockReturnValue(false);
+  const original = URL.createObjectURL(planningPdf());
+  const preview = (src: string, mutation: string, path = "/repo/planning.pdf") => {
+    assetUrlState.mockReturnValue({
+      _tag: "Success",
+      url: `${src}#preview`,
+      expiresAt: Date.now() + 3_600_000,
+    });
+    return (
+      <div className="flex h-[600px] w-[320px]">
+        <WorkspaceBrowserPreview
+          environmentId={EnvironmentId.make("test")}
+          threadRef={{
+            environmentId: EnvironmentId.make("test"),
+            threadId: ThreadId.make(original),
+          }}
+          draft={false}
+          absolutePath={path}
+          workspaceRoot="/repo"
+          title="Planning PDF"
+          workspaceMutationId={mutation}
+        />
+      </div>
+    );
+  };
+  const reload = async (screen: Screen, element: ReactElement) => {
+    const loaded = nextPdfLoad();
+    await screen.rerender(element);
+    await loaded;
+  };
+  try {
+    const loaded = nextPdfLoad();
+    await using screen = await render(preview(original, "one"));
+    await loaded;
+    await expect.element(screen.getByText("1 / 3 pages", { exact: true })).toBeVisible();
+    using workers = vi.spyOn(window, "Worker");
+    const region = () => screen.getByRole("region", { name: "Planning PDF" }).element();
+    await screen.getByRole("button", { name: "Zoom in", exact: true }).click();
+    const firstPageZoom = screen.container.textContent!.match(/\d+%/)![0];
+    await reload(screen, preview(original, "first-page"));
+    await expect.element(screen.getByText("1 / 3 pages", { exact: true })).toBeVisible();
+    expect(screen.container.textContent).toContain(firstPageZoom);
+    await screen.getByRole("button", { name: "Next page", exact: true }).click();
+    await expect.element(screen.getByText("2 / 3 pages", { exact: true })).toBeVisible();
+    await reload(screen, preview(original, "one", "/repo/another.pdf"));
+    await expect.element(screen.getByText("1 / 3 pages", { exact: true })).toBeVisible();
+    expect(screen.container.textContent).toContain("Fit width");
+    expect(region().scrollTop).toBe(0);
+    expect(region().scrollLeft).toBe(0);
+    expect(workers).not.toHaveBeenCalled();
+  } finally {
+    URL.revokeObjectURL(original);
+  }
+});
+
 it("unwraps one text attachment without turning off the word wrap setting", async () => {
   const file = new Blob(["a long line"], { type: "text/plain" });
   await using screen = await render(
@@ -1640,10 +1699,10 @@ it("mounts a bounded set of saved notebook outputs as the reader scrolls", async
     </div>,
   );
   // The first outputs wait on the lazy notebook viewer and the conversion worker, not on a frame.
-  await vi.waitFor(
-    () => expect(screen.container.querySelectorAll("iframe").length).toBeGreaterThan(0),
-    { timeout: 10_000 },
-  );
+  await expect
+    .element(screen.getByTitle("Cell 1 HTML output", { exact: true }).first(), { timeout: 10_000 })
+    .toHaveAttribute("srcdoc", expect.stringContaining("saved 0-0"));
+  expect(screen.container.querySelectorAll("iframe").length).toBeGreaterThan(0);
   expect(screen.container.querySelectorAll("iframe").length).toBeLessThanOrEqual(16);
   const first = screen.container.querySelector("iframe")!;
   expect(first.srcdoc).toContain("saved 0-0");
@@ -1651,21 +1710,17 @@ it("mounts a bounded set of saved notebook outputs as the reader scrolls", async
   await act(() => {
     viewport.scrollTop = viewport.scrollHeight;
   });
-  await vi.waitFor(() => {
-    expect(
-      [...screen.container.querySelectorAll("iframe")].some((frame) =>
-        frame.srcdoc.includes("saved 19-99"),
-      ),
-    ).toBe(true);
-    expect(first.isConnected).toBe(false);
-  });
+  await expect
+    .element(screen.getByTitle("Cell 20 HTML output", { exact: true }).last())
+    .toHaveAttribute("srcdoc", expect.stringContaining("saved 19-99"));
+  expect(first.isConnected).toBe(false);
   expect(screen.container.querySelectorAll("iframe").length).toBeLessThanOrEqual(16);
   await act(() => {
     viewport.scrollTop = 0;
   });
-  await vi.waitFor(() =>
-    expect(screen.container.querySelector("iframe")?.srcdoc).toContain("saved 0-0"),
-  );
+  await expect
+    .element(screen.getByTitle("Cell 1 HTML output", { exact: true }).first())
+    .toHaveAttribute("srcdoc", expect.stringContaining("saved 0-0"));
 });
 
 it.each([
@@ -1796,22 +1851,24 @@ it.each(["rtf", "epub", "ods"] as const)(
         />
       </div>,
     );
-    await vi.waitFor(
-      () => {
-        if (kind === "ods") {
-          expect(screen.container.textContent).toContain("North");
-          expect(screen.container.textContent).toContain("150");
-          expect(screen.container.textContent).not.toContain("private note");
-          expect(screen.container.textContent).toContain("1 row · 2 columns");
-          expect(screen.container.textContent).not.toContain("Limited to 500");
-        } else {
-          const frame = screen.container.querySelector("iframe");
-          expect(frame?.srcdoc).toContain(kind === "rtf" ? "10–20" : "first<br>second<br>third");
-        }
-        // The viewer runs its own conversion worker behind lazy chunks.
-      },
-      { timeout: 10_000 },
-    );
+    // The viewer runs its own conversion worker behind lazy chunks.
+    if (kind === "ods") {
+      await expect
+        .element(screen.getByRole("cell", { name: "North", exact: true }), { timeout: 10_000 })
+        .toBeInTheDocument();
+      expect(screen.container.textContent).toContain("North");
+      expect(screen.container.textContent).toContain("150");
+      expect(screen.container.textContent).not.toContain("private note");
+      expect(screen.container.textContent).toContain("1 row · 2 columns");
+      expect(screen.container.textContent).not.toContain("Limited to 500");
+    } else {
+      await expect
+        .element(screen.getByTitle(new RegExp(`^report\\.${kind}: `)), { timeout: 10_000 })
+        .toHaveAttribute(
+          "srcdoc",
+          expect.stringContaining(kind === "rtf" ? "10–20" : "first<br>second<br>third"),
+        );
+    }
     expect(screen.container.querySelector('[role="alert"]')).toBeNull();
   },
 );

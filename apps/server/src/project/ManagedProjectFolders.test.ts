@@ -1,3 +1,4 @@
+import * as ServerSettings from "../serverSettings.ts";
 import { assert, it } from "@effect/vitest";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -73,6 +74,7 @@ const layer = (baseDir: string, options?: HarnessOptions) =>
           ),
     ),
     Layer.provideMerge(RuntimeLayer.layerProjectService),
+    Layer.provideMerge(ServerSettings.layerTest()),
     Layer.provideMerge(layerEnrichment),
     Layer.provideMerge(WorkspacePaths.layer),
     Layer.provideMerge(layerGitWorkflow(options?.vcsProcess)),
@@ -315,7 +317,7 @@ it.effect("still knows No project when its folder is the target of a symlinked S
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* requireRoot;
-      const target = path.join(baseDir, "visible-chats");
+      const target = path.join(yield* fileSystem.realPath(baseDir), "visible-chats");
       yield* fileSystem.makeDirectory(target);
       yield* fileSystem.symlink(target, root);
       const { projectId } = yield* scratch.ensureScratchProject;
