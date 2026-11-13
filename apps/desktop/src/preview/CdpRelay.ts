@@ -104,6 +104,14 @@ export function createCdpRelayConnection(
   /** Relay-created page sessions share one real debugger; child frame sessions retain their own ids. */
   const sessions = new Map<string, "browser" | "page">([[PAGE_SESSION_ID, "page"]]);
   let sessionSequence = 0;
+  // Chromium reports a binding call only to sessions that added that binding, and Playwright
+  // parses every report as its own. The shared debugger reports them all, so filter here.
+  const bindings = new Map<string, Set<string>>();
+  const reportsTo = (sessionId: string, method: string, params: unknown) => {
+    if (method !== "Runtime.bindingCalled") return true;
+    const { name } = params as { name: string };
+    return bindings.get(sessionId)?.has(name) ?? false;
+  };
   const newSession = (kind: "browser" | "page") => {
     const sessionId = `t3-preview-${kind}-${++sessionSequence}`;
     sessions.set(sessionId, kind);
@@ -184,6 +192,7 @@ export function createCdpRelayConnection(
         const sessionId = command.params?.["sessionId"];
         if (typeof sessionId === "string" && sessionId !== PAGE_SESSION_ID) {
           sessions.delete(sessionId);
+          bindings.delete(sessionId);
           target.sessionDetached?.(sessionId);
         }
         return {};
@@ -220,6 +229,13 @@ export function createCdpRelayConnection(
     }
     // Playwright asks for this on every page; the host emulates focus only while it is in use.
     if (command.method === "Emulation.setFocusEmulationEnabled") return Promise.resolve({});
+    const binding = command.params?.["name"];
+    if (typeof binding === "string" && command.method === "Runtime.addBinding") {
+      const added = bindings.get(command.sessionId!) ?? new Set<string>();
+      bindings.set(command.sessionId!, added.add(binding));
+    } else if (typeof binding === "string" && command.method === "Runtime.removeBinding") {
+      bindings.get(command.sessionId!)?.delete(binding);
+    }
     return target.send(command.method, command.params ?? {}, child, owner);
   };
 
@@ -269,11 +285,11 @@ export function createCdpRelayConnection(
       }
       // Electron reports the page's own events with an empty session id.
       if (sessionId) {
-        send({ method, params, sessionId });
+        if (reportsTo(sessionId, method, params)) send({ method, params, sessionId });
         return;
       }
       for (const [id, kind] of sessions) {
-        if (kind !== "page") continue;
+        if (kind !== "page" || !reportsTo(id, method, params)) continue;
         if (
           method === "Page.screencastFrame" &&
           !target.receivesScreencast(id === PAGE_SESSION_ID ? undefined : id)
