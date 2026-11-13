@@ -47,6 +47,9 @@ export interface CarryCiResult {
   };
 }
 
+// @effect-diagnostics-next-line extendsNativeError:off -- Plain Git orchestration; the message names the restack.
+class CarryRestackError extends Error {}
+
 function git(
   repoRoot: string,
   args: ReadonlyArray<string>,
@@ -139,8 +142,9 @@ function compactBase(repoRoot: string, sourceBase: string) {
   return undefined;
 }
 
-function includeTopicBase(repoRoot: string, source: CarrySourceDelivery, stop: string) {
-  let base = source.base;
+// Walks back over a topic branch's unsquashed parent contributions to where they start.
+function topicBase(repoRoot: string, start: string, stop: string): string {
+  let base = start;
   while (base !== stop) {
     const trailers = parseCarryTrailers(git(repoRoot, ["show", "-s", "--format=%B", base])!);
     if (!trailers.group || trailers.sourceRef || trailers.sourceBase || trailers.sourceHead) break;
@@ -148,7 +152,35 @@ function includeTopicBase(repoRoot: string, source: CarrySourceDelivery, stop: s
     if (parents.length !== 2) throw new Error(`Topic carry source ${base} must be single-parent.`);
     base = parents[1]!;
   }
-  return { ...source, base };
+  return base;
+}
+
+// A child retargeted after its parent squash-merged still holds the parent's original commits,
+// which the base already carries. Returns the newest such commit in the PR's range.
+function landedParentHead(
+  repoRoot: string,
+  base: string,
+  target: string,
+  head: string,
+): string | undefined {
+  if (base === target) return undefined;
+  const landed = new Set<string>();
+  const messages = git(repoRoot, [
+    "log",
+    "--format=%B%x00",
+    "-E",
+    "--grep=^Carry-(Source-Head|Contribution):",
+    `${base}..${target}`,
+  ])!;
+  for (const message of messages.split("\0")) {
+    const trailers = parseCarryTrailers(message);
+    if (trailers.sourceHead) landed.add(trailers.sourceHead);
+    for (const contribution of trailers.contributions) landed.add(contribution.sourceCommit);
+  }
+  if (landed.size === 0) return undefined;
+  return git(repoRoot, ["rev-list", `${base}..${head}`])!
+    .split("\n")
+    .find((commit) => landed.has(commit));
 }
 
 function fetchBootstrapObjects(repoRoot: string, bootstrap: CarryBootstrap): void {
@@ -210,11 +242,14 @@ function compilePullRequest(
   }
   // A topic base can end in unsquashed parent contributions. Model the whole
   // unpublished tail together, while retaining the child's actual delivery range.
-  const compilationSource = includeTopicBase(
-    repoRoot,
-    source,
-    compact?.head ?? representedSource ?? bootstrap!.source,
-  );
+  const stop = compact?.head ?? representedSource ?? bootstrap!.source;
+  const compilationSource = { ...source, base: topicBase(repoRoot, source.base, stop) };
+  const behind = source.base !== target;
+  if (behind && topicBase(repoRoot, target, stop) !== target) {
+    throw new CarryRestackError(
+      `forked from ${source.base}, behind its topic base ${target}, whose parent commits have not squash-merged yet. Rebase onto the topic base with \`git rebase --onto ${target} ${source.base}\` and push.`,
+    );
+  }
   const temporaryRoot = NodeFS.mkdtempSync(
     NodePath.join(NodeOS.tmpdir(), "lastcode-carry-admission-"),
   );
@@ -245,7 +280,6 @@ function compilePullRequest(
     git(isolated, ["update-ref", source.ref, source.head]);
     // Model the exact squash that guarded merge will publish, without publishing its source ref.
     // Behind its base, that squash lands on the current tip, whose tail replays on its own.
-    const behind = source.base !== target;
     const sourceTree = behind
       ? landingTree(isolated, source.base, target, source.head)
       : git(repoRoot, ["rev-parse", `${source.head}^{tree}`])!;
@@ -307,6 +341,13 @@ export function validateCarryPullRequest(
   );
   if (!active) return { active: false };
 
+  const landed = landedParentHead(repoRoot, base, target, head);
+  if (landed) {
+    throw new Error(
+      `PR #${pullRequest.number} still contains commits through ${landed} that already landed in base ${target} through a merged parent PR. Restack only its own commits with \`git rebase --onto ${target} ${landed}\` and push.`,
+    );
+  }
+
   let source: CarrySourceDelivery;
   try {
     source = validateCarrySourceRange(repoRoot, pullRequest.number, base, head);
@@ -328,6 +369,9 @@ export function validateCarryPullRequest(
       compilation: compilePullRequest(repoRoot, source, manifest, target),
     };
   } catch (error) {
+    if (error instanceof CarryRestackError) {
+      throw new Error(`PR #${pullRequest.number} ${error.message}`, { cause: error });
+    }
     const detail =
       error instanceof CarryReplayConflictError
         ? `${error.diagnosis}\n${error.advice}\nPush the corrected head and rerun carry validation before merging.\nGit output:\n${error.gitOutput}`
