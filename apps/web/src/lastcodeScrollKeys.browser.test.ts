@@ -36,13 +36,21 @@ const FIXTURE = `
   <section data-workspace-area="settings" data-testid="settings-area" tabindex="-1" style="position: absolute; left: 290px; top: 110px; width: 100px; height: 80px">
     <div data-testid="settings" style="height: 80px; overflow-y: auto"><div style="height: 400px"></div></div>
   </section>
-  <section data-workspace-area="terminal" style="position: absolute; left: 290px; top: 200px; width: 100px; height: 90px">
+  <section data-workspace-area="terminal" data-testid="terminal-area" tabindex="-1" style="position: absolute; left: 290px; top: 200px; width: 100px; height: 90px">
     <div data-terminal-owner="drawer" style="height: 90px; overflow-y: auto">
       <textarea data-testid="terminal" style="height: 20px"></textarea><div style="height: 400px"></div>
     </div>
   </section>
   <div data-slot="menu-popup" data-open role="menu" style="position: absolute; left: 0; top: 310px; width: 120px; height: 40px">
     <button role="menuitem" data-testid="menu-item">Item</button>
+  </div>
+  <div role="dialog" aria-modal="true" style="position: absolute; left: 130px; top: 310px; width: 260px; height: 80px">
+    <nav data-workspace-area="settings-nav" style="position: absolute; left: 0; width: 100px; height: 80px">
+      <input data-testid="dialog-search" style="width: 90px" />
+    </nav>
+    <section data-workspace-area="settings" style="position: absolute; left: 110px; width: 150px; height: 80px">
+      <div data-testid="dialog-content" style="height: 80px; overflow-y: auto"><div style="height: 400px"></div></div>
+    </section>
   </div>
 </div>`;
 
@@ -129,6 +137,12 @@ describe("LastCode scroll keys", () => {
     dom.get("sidebar-search").focus();
     dom.pointAt(sidebar);
     expect(dom.press("ArrowDown").defaultPrevented).toBe(false);
+    // Areas inside one dialog are separate panes.
+    const dialogContent = dom.get("dialog-content");
+    dom.get("dialog-search").focus();
+    dom.pointAt(dialogContent);
+    expect(dom.press("PageDown").defaultPrevented).toBe(true);
+    expect(dialogContent.scrollTop).toBe(80 * 0.9);
   });
 
   it("park the pointer for arrow keys after any other key until the mouse moves", () => {
@@ -222,6 +236,10 @@ describe("LastCode scroll keys", () => {
     card.scrollTop = card.scrollHeight;
     dom.pointAt(card);
     expect(dom.press("PageDown").defaultPrevented).toBe(true);
+    // A pane whose content fits still stops the key.
+    (card.firstElementChild as HTMLElement).style.height = "50px";
+    dom.pointAt(card);
+    expect(dom.press("ArrowDown").defaultPrevented).toBe(true);
     expect(dom.get("timeline").scrollTop).toBe(0);
   });
 
@@ -276,5 +294,14 @@ describe("LastCode scroll keys", () => {
     expect(dom.press("ArrowDown").defaultPrevented).toBe(false);
     dom.get("sidebar-row").focus();
     expect(dom.press("ArrowDown").defaultPrevented).toBe(false);
+    dom.get("terminal-area").focus();
+    expect(dom.press("PageDown").defaultPrevented).toBe(false);
+    // A touch tap forgets the mouse position.
+    dom.get("sidebar-row").focus();
+    dom.pointAt(dom.get("sidebar"));
+    document.body.dispatchEvent(
+      new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }),
+    );
+    expect(dom.press("PageDown").defaultPrevented).toBe(false);
   });
 });
