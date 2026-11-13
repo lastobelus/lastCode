@@ -332,21 +332,25 @@ export function validateCarryPullRequest(
   assertCommitAvailable(repoRoot, head);
   // A PR may be behind its base; its own source range starts where it forked.
   const base = git(repoRoot, ["merge-base", target, head])!;
+  const targetManifest = manifestAt(repoRoot, target);
+  // Before the landing merge, which a merged parent's stale commits can make conflict.
+  const landed =
+    targetManifest && shouldRetainCarrySources(targetManifest)
+      ? landedParentHead(repoRoot, base, target, head)
+      : undefined;
+  if (landed) {
+    throw new Error(
+      `PR #${pullRequest.number} still contains commits through ${landed} that already landed in base ${target} through a merged parent PR. Restack only its own commits with \`git rebase --onto ${target} ${landed}\` and push.`,
+    );
+  }
   const manifests = [
-    manifestAt(repoRoot, target),
+    targetManifest,
     manifestAt(repoRoot, base === target ? head : landingTree(repoRoot, base, target, head)),
   ];
   const active = manifests.some(
     (manifest) => manifest !== undefined && shouldRetainCarrySources(manifest),
   );
   if (!active) return { active: false };
-
-  const landed = landedParentHead(repoRoot, base, target, head);
-  if (landed) {
-    throw new Error(
-      `PR #${pullRequest.number} still contains commits through ${landed} that already landed in base ${target} through a merged parent PR. Restack only its own commits with \`git rebase --onto ${target} ${landed}\` and push.`,
-    );
-  }
 
   let source: CarrySourceDelivery;
   try {

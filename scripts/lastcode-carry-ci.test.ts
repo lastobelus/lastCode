@@ -588,15 +588,19 @@ describe("LastCode carry CI", () => {
     }
   });
 
-  it.each(["squash", "compiled carry chain"])(
-    "asks a child to restack once its parent has landed on main as a %s",
-    (shape) => {
+  it.each([
+    { shape: "squash", path: "child.txt" },
+    { shape: "compiled carry chain", path: "child.txt" },
+    { shape: "squash", path: "parent.txt" },
+  ])(
+    "asks a child to restack once its parent has landed on main as a $shape (child edits $path)",
+    ({ shape, path }) => {
       const { repo, cleanup } = fixture();
       try {
         const { upstream, base: compact } = compactFixture(repo);
         write(repo, "parent.txt", "parent contribution\n");
         const parent = commit(repo, "parent contribution", "Carry-Group: tooling");
-        write(repo, "child.txt", "child contribution\n");
+        write(repo, path, "child contribution\n");
         const head = commit(repo, "child contribution", "Carry-Group: build-ci");
         const parentSource = validateCarrySourceRange(repo, 230, compact, parent);
         git(repo, ["update-ref", parentSource.ref, parent]);
