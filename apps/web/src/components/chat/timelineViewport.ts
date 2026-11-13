@@ -3,6 +3,7 @@ import { readHtmlRenderContentHeight } from "@t3tools/shared/htmlRender";
 import { isInSideChatPane } from "../../lib/sideChatPane";
 import { registerCommands } from "../../shortcuts/dispatcher";
 import { getClientSettings } from "../../hooks/useSettings";
+import { registerScrollKeyOwner } from "../../lastcodeScrollKeys";
 import { getTimelinePageScrollDistancePx } from "./pageScrollController";
 import {
   eventPathContainsSelector,
@@ -178,39 +179,23 @@ export function attachTimelineViewport(
   scrollNode.addEventListener("touchmove", handleTouchMove, { passive: true });
   scrollNode.addEventListener("pointerdown", handlePointerDown, { passive: true });
   const unregisterKeyDown = registerCommands({}, { observe: handleKeyDown });
-  const unregisterPageKey = registerCommands(
-    {},
-    {
-      fallback: true,
-      onKeyDown: (event) => {
-        if (
-          (event.key !== "PageUp" && event.key !== "PageDown") ||
-          event.defaultPrevented ||
-          event.isComposing ||
-          event.keyCode === 229 ||
-          event.altKey ||
-          event.ctrlKey ||
-          event.metaKey ||
-          event.shiftKey
-        )
-          return false;
-        const area = scrollNode.closest('[data-workspace-area="conversation"]');
-        if (!area || (event.target !== area && event.target !== scrollNode)) return false;
-        emit({ source: "key", key: event.key, direction: event.key === "PageUp" ? "up" : "down" });
-        const distance = getTimelinePageScrollDistancePx(
-          scrollNode,
-          area.parentElement?.querySelector("[data-chat-composer-overlay]") ?? null,
-          getClientSettings().pageScrollOverlapEnabled,
-        );
-        event.preventDefault();
-        scrollNode.scrollBy({
-          top: (event.key === "PageUp" ? -1 : 1) * distance,
-          behavior: "instant",
-        });
-        return true;
-      },
-    },
-  );
+  // LastCode routes arrow and page keys here from elsewhere (docs/lastcode/keyboard-scrolling.md).
+  const unregisterScrollKeys = registerScrollKeyOwner(scrollNode, {
+    beforeScroll: (key) =>
+      emit({
+        source: "key",
+        key,
+        direction: key === "PageUp" || key === "ArrowUp" ? "up" : "down",
+      }),
+    pageDistancePx: () =>
+      getTimelinePageScrollDistancePx(
+        scrollNode,
+        scrollNode
+          .closest('[data-workspace-area="conversation"]')
+          ?.parentElement?.querySelector("[data-chat-composer-overlay]") ?? null,
+        getClientSettings().pageScrollOverlapEnabled,
+      ),
+  });
   return {
     scrollNode,
     subscribe: (listener) => {
@@ -243,7 +228,7 @@ export function attachTimelineViewport(
       scrollNode.removeEventListener("touchmove", handleTouchMove);
       scrollNode.removeEventListener("pointerdown", handlePointerDown);
       unregisterKeyDown();
-      unregisterPageKey();
+      unregisterScrollKeys();
     },
   };
 }
