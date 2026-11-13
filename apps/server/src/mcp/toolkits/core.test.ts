@@ -939,6 +939,8 @@ it.effect.each([
       McpHttpServer.layerThreadToolkit.pipe(
         Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
         Layer.provide(NodeCrypto.layer),
+        Layer.provide(Layer.mock(ThreadRecovery.ThreadRecoveryService)({})),
+        Layer.provide(Layer.mock(ThreadRecoveryRepair.ThreadRecoveryRepairService)({})),
         Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
         Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
         Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),

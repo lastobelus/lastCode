@@ -198,10 +198,24 @@ it.layer(NodeServices.layer)("DesktopCliCommand", (it) => {
       const launcher = path.join(home, ".t3", "bin", "t3");
       yield* fs.writeFileString(launcher, "npm's t3\n");
       env.PATH = path.dirname(launcher);
-      expect(yield* command.state).toMatchObject({ onPath: false, shadowedBy: launcher });
+      expect(yield* command.state).toMatchObject({
+        onPath: false,
+        shadowedBy: launcher,
+        launcherPath: null,
+      });
       expect((yield* Effect.flip(command.install)).message).toContain("Could not set up");
       yield* command.uninstall;
       expect(yield* fs.readFileString(launcher)).toBe("npm's t3\n");
+      yield* fs.remove(launcher);
+      yield* fs.makeDirectory(launcher);
+      expect((yield* command.state).launcherPath).toBeNull();
+      yield* fs.remove(launcher, { recursive: true });
+      yield* fs.writeFileString(launcher, `#!/bin/sh\n# ${DesktopCliShim.MARKER}\n`, {
+        mode: 0o644,
+      });
+      expect((yield* command.state).launcherPath).toBeNull();
+      yield* fs.chmod(launcher, 0o755);
+      expect((yield* command.state).launcherPath).toBe(launcher);
     }),
   );
 

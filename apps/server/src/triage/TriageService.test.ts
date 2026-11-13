@@ -1,3 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off - Exercises a scoped shell launcher fixture.
+import * as NodeChildProcess from "node:child_process";
+
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { GitCommandError } from "@t3tools/contracts";
@@ -6,6 +9,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import { ChildProcessSpawner } from "effect/process";
 
@@ -16,29 +20,40 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as TriageService from "./TriageService.ts";
 import { pickSourceRef } from "./TriageService.ts";
 
-const MAIN = "a1dc856ee61278d0199c36d4bcdef5fdea4d21fe\trefs/heads/main";
+const MAIN = "a1dc856ee61278d0199c36d4bcdef5fdea4d21fe\trefs/heads/lastcode/main";
 
-it("clones the server's release tag, peeling annotated tags to their commit", () => {
-  assert.deepEqual(pickSourceRef(`${MAIN}\n7027b1f\trefs/tags/v0.1.1\n`, "0.1.1"), {
-    ref: "v0.1.1",
-    commit: "7027b1f",
-  });
-  assert.deepEqual(
-    pickSourceRef(`${MAIN}\n1111111\trefs/tags/v0.1.1\n2222222\trefs/tags/v0.1.1^{}\n`, "0.1.1"),
-    { ref: "v0.1.1", commit: "2222222" },
-  );
+it("clones the server's LastCode tag, peeling annotated tags to their commit", () => {
+  for (const [version, tag] of [
+    ["1.2.3-nightly.20260101.7", "lastcode/checkpoint/v1.2.3-nightly.20260101.7"],
+    ["1.2.3-nightly.20260101.7.2", "lastcode/revision/v1.2.3-nightly.20260101.7.2"],
+  ] as const) {
+    const upstream = `9999999\trefs/tags/v${version}\n`;
+    assert.deepEqual(pickSourceRef(`${MAIN}\n${upstream}7027b1f\trefs/tags/${tag}\n`, version), {
+      ref: tag,
+      commit: "7027b1f",
+    });
+    assert.deepEqual(
+      pickSourceRef(
+        `${MAIN}\n${upstream}1111111\trefs/tags/${tag}\n2222222\trefs/tags/${tag}^{}\n`,
+        version,
+      ),
+      { ref: tag, commit: "2222222" },
+    );
+  }
 });
 
-it("falls back to main when the server's version has no tag", () => {
-  assert.deepEqual(pickSourceRef(`${MAIN}\n`, "0.1.2-dev"), {
-    ref: "main",
+it("falls back to lastcode/main when the server's version has no LastCode tag", () => {
+  const upstream = "9999999\trefs/heads/main\n8888888\trefs/tags/v0.1.1\n";
+  assert.deepEqual(pickSourceRef(`${MAIN}\n${upstream}`, "0.1.1"), {
+    ref: "lastcode/main",
     commit: "a1dc856ee61278d0199c36d4bcdef5fdea4d21fe",
   });
   assert.isUndefined(pickSourceRef("", "0.1.1"));
+  assert.isUndefined(pickSourceRef(upstream, "0.1.1"));
 });
 
 const TestLayer = GitVcsDriver.layer.pipe(
-  Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-triage-service-" })),
+  Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3 triage's service-" })),
   Layer.provideMerge(VcsProcess.layer),
   Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
 );
@@ -50,7 +65,7 @@ const makeTriage = (
   answer: (command: string) => Effect.Effect<string, GitCommandError> = (command) =>
     Effect.succeed(
       command === "ls-remote"
-        ? `${RELEASE_COMMIT}\trefs/tags/v${packageJson.version}\n`
+        ? `${RELEASE_COMMIT}\trefs/tags/lastcode/checkpoint/v${packageJson.version}\n`
         : command === "rev-parse"
           ? `${RELEASE_COMMIT}\n`
           : "",
@@ -89,6 +104,40 @@ const readContext = Effect.gen(function* () {
   return yield* fs.readFileString(`${sessions}/${session}/context.md`);
 });
 
+it.live("offers this environment's custom-home launcher only when it is owned and executable", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const config = yield* ServerConfig.ServerConfig;
+    const { triage } = yield* makeTriage();
+    assert.isTrue(Option.isNone(yield* triage.getCliCommand()));
+
+    yield* fs.makeDirectory(`${config.baseDir}/bin`, { recursive: true });
+    const launcher = `${config.baseDir}/bin/t3`;
+    yield* fs.makeDirectory(launcher);
+    assert.isTrue(Option.isNone(yield* triage.getCliCommand()));
+    yield* fs.remove(launcher, { recursive: true });
+    yield* fs.writeFileString(launcher, "#!/bin/sh\n# A launcher from another application.\n", {
+      mode: 0o755,
+    });
+    assert.isTrue(Option.isNone(yield* triage.getCliCommand()));
+    yield* fs.remove(launcher);
+    yield* fs.writeFileString(
+      launcher,
+      '#!/bin/sh\n# Written by T3 Code: runs the desktop app\'s bundled t3 CLI.\nprintf "%s\\n" "$@"\n',
+      { mode: 0o644 },
+    );
+    assert.isTrue(Option.isNone(yield* triage.getCliCommand()));
+    yield* fs.chmod(launcher, 0o755);
+    const command = Option.getOrThrow(yield* triage.getCliCommand());
+    const result = NodeChildProcess.spawnSync("/bin/sh", ["-c", command], {
+      env: { ...process.env, T3CODE_HOME: "/home/user/a-different-home" },
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0);
+    assert.deepEqual(result.stdout.trimEnd().split("\n"), ["triage", "--base-dir", config.baseDir]);
+  }).pipe(Effect.provide(TestLayer)),
+);
+
 it.effect("sessions started during a clone share it, and a release tag is looked up once", () =>
   Effect.gen(function* () {
     const fetches = yield* Queue.unbounded<void>();
@@ -96,7 +145,9 @@ it.effect("sessions started during a clone share it, and a release tag is looked
       command === "fetch"
         ? Queue.offer(fetches, undefined).pipe(Effect.andThen(Effect.never))
         : Effect.succeed(
-            command === "ls-remote" ? `${RELEASE_COMMIT}\trefs/tags/v${packageJson.version}\n` : "",
+            command === "ls-remote"
+              ? `${RELEASE_COMMIT}\trefs/tags/lastcode/checkpoint/v${packageJson.version}\n`
+              : "",
           ),
     );
 

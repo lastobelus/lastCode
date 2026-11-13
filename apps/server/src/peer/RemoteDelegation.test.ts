@@ -1045,7 +1045,7 @@ it.effect.each(["no active parent run", "a newer run owned by another provider"]
         const delegated = yield* delegateToBox(a);
 
         yield* Ref.set(thread.reply, "Remote result remains available.");
-        yield* Ref.set(thread.status, "completed");
+        yield* SubscriptionRef.set(thread.status, "completed");
         yield* Deferred.succeed(thread.finished, undefined);
         yield* taskResult(a, delegated.taskId);
         yield* SubscriptionRef.changes(offers).pipe(

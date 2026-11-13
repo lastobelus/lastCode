@@ -198,6 +198,7 @@ import {
 import { planThreadDeletion } from "./ThreadDeletion.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ServerSettings from "../serverSettings.ts";
+import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
 
 const isMessageQuestionAnswer = Schema.is(
   Schema.Union([TrimmedNonEmptyString, Schema.NonEmptyArray(TrimmedNonEmptyString)]),
@@ -652,6 +653,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.tag.set":
     case "thread.visit":
     case "thread.mark-unread":
+    case "thread.workspace.complete":
     case "thread.metadata.update":
     case "thread.pull-request.link":
     case "thread.pull-request.unlink":
@@ -1427,6 +1429,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const providerSessions = yield* ProviderSessionManagerV2;
   const providerSwitchService = yield* ProviderSwitchServiceV2;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const updateDrainAdmission = yield* UpdateDrainAdmission.UpdateDrainAdmission;
   const runtimePolicy = yield* RuntimePolicyV2;
   const threadForkService = yield* ThreadForkServiceV2;
   const threadDispatch = yield* ThreadCommandExecutor.ThreadCommandExecutor;
@@ -5210,10 +5213,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       yield* Ref.update(effects, (existing) => [
         ...existing,
         {
-          id: `effect:${command.commandId}:terminal.cleanup`,
+          id: `effect:${command.commandId}:terminal.archive-cleanup`,
           commandId: command.commandId,
           threadId: command.threadId,
-          request: { type: "terminal.cleanup" },
+          request: { type: "terminal.archive-cleanup" },
         } satisfies PendingOrchestrationEffectV2,
       ]);
     }
@@ -5733,6 +5736,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly delegatedCompletion?: OrchestrationV2ConversationMessage["delegatedCompletion"];
     readonly notification?: OrchestrationV2ConversationMessage["notification"];
     readonly forceRestart: boolean;
+    readonly nativeOnly?: boolean;
   }) {
     const targetRun = input.projection.runs.find((candidate) => candidate.id === input.targetRunId);
     if (targetRun === undefined) {
@@ -5826,6 +5830,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const selectionChanged = !modelSelectionsEqual(targetRun.modelSelection, input.modelSelection);
     const providerInstanceChanged =
       targetRun.providerInstanceId !== input.modelSelection.instanceId;
+    if (input.nativeOnly && selectionChanged) {
+      return yield* new OrchestratorDispatchError({
+        commandId: input.command.commandId,
+        commandType: input.command.type,
+        cause: "Cooperative steering cannot change the active turn's model selection.",
+      });
+    }
     const selectionTransition =
       selectionChanged && !providerInstanceChanged
         ? yield* providerAdapters.get(targetRun.providerInstanceId).pipe(
@@ -5963,11 +5974,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         threadId: input.command.threadId,
         providerInstanceId: targetRun.providerInstanceId,
         capabilities: session.providerSession.capabilities,
+        nativeOnly: input.nativeOnly === true,
         forceRestart: input.forceRestart || selectionMustApplyNow || attachmentsNeedRestart,
       }),
     );
 
     if (steeringPolicy === "active_steering") {
+      // The steer's selection becomes the saved next-turn choice, even when it
+      // matches the running run again. A delegated completion carries the
+      // run's selection, not a user choice, so it never replaces the saved one.
+      // Strict steering without an explicit selection also carries the run's choice.
+      // The saved choice may name another instance, so it moves with the steer.
       const instanceChanged =
         input.projection.thread.providerInstanceId !== input.modelSelection.instanceId;
       // Only a user's steer carries the picker's selection; the adapter applies it to the live turn.
@@ -5975,6 +5992,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         input.delegatedCompletion === undefined && input.notification === undefined;
       if (
         steerCarriesSelection &&
+        !(
+          input.nativeOnly &&
+          input.command.type === "message.dispatch" &&
+          input.command.modelSelection === undefined
+        ) &&
         (instanceChanged ||
           !modelSelectionsEqual(input.projection.thread.modelSelection, input.modelSelection))
       ) {
@@ -6006,6 +6028,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           threadId: input.command.threadId,
           request: {
             type: "provider-turn.steer",
+            ...(input.nativeOnly ? { nativeOnly: true as const } : {}),
             providerSessionId,
             providerThreadId: providerThread.id,
             providerTurnId: providerTurn.id,
@@ -7119,7 +7142,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         dispatchMode = { type: "queue_after_active" };
       }
     }
-    if (dispatchMode.type === "steer_active" || dispatchMode.type === "restart_active") {
+    if (
+      dispatchMode.type === "steer_active" ||
+      dispatchMode.type === "steer_active_native" ||
+      dispatchMode.type === "restart_active"
+    ) {
       yield* ensureGoalCommandSupported(command, command, modelSelection.instanceId);
       yield* dispatchSteerIntoRun({
         command,
@@ -7127,10 +7154,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         effects,
         projection,
         modelSelection:
-          delegatedCompletion === undefined && command.notification === undefined
-            ? modelSelection
-            : (projection.runs.find((run) => run.id === dispatchMode.targetRunId)?.modelSelection ??
-              modelSelection),
+          delegatedCompletion !== undefined ||
+          command.notification !== undefined ||
+          (dispatchMode.type === "steer_active_native" && command.modelSelection === undefined)
+            ? (projection.runs.find((run) => run.id === dispatchMode.targetRunId)?.modelSelection ??
+              modelSelection)
+            : modelSelection,
         delegatedCompletion,
         ...(command.notification === undefined ? {} : { notification: command.notification }),
         targetRunId: dispatchMode.targetRunId,
@@ -7147,6 +7176,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.linkedSender === undefined ? {} : { linkedSender: command.linkedSender }),
         ...(command.idleCompaction === undefined ? {} : { idleCompaction: command.idleCompaction }),
         forceRestart: dispatchMode.type === "restart_active",
+        nativeOnly: dispatchMode.type === "steer_active_native",
       });
       return;
     }
@@ -14675,6 +14705,94 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "notification.delivery.accept":
         updateDelegatedCompletionOnlyRunId = yield* dispatchNotificationAccepted(command, events);
         break;
+      case "thread.workspace.complete": {
+        const source = yield* commandReceipts
+          .getByCommandId(command.requestId)
+          .pipe(mapDispatchError(command));
+        if (
+          Option.isNone(source) ||
+          source.value.status !== "accepted" ||
+          source.value.threadId !== command.threadId
+        )
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "Workspace completion has no accepted preparation request for this thread.",
+          });
+        const thread = yield* projectionStore
+          .getThread(command.threadId)
+          .pipe(mapDispatchError(command));
+        if (command.runId !== null) {
+          const shell = yield* projectionStore
+            .getThreadShell(command.threadId)
+            .pipe(mapDispatchError(command));
+          const sourceEvents = yield* eventSink
+            .readByCommandId({ commandId: command.requestId })
+            .pipe(Stream.runCollect, mapDispatchError(command));
+          const { runs } = yield* projectionStore
+            .getThreadRecords(command.threadId, ["runs"], { runIds: [command.runId] })
+            .pipe(mapDispatchError(command));
+          const run = runs.find((candidate) => candidate.id === command.runId);
+          if (
+            !["message.dispatch", "prepared-run.retry"].includes(source.value.commandType) ||
+            !sourceEvents.some(
+              (stored) =>
+                (stored.event.type === "run.created" || stored.event.type === "run.updated") &&
+                stored.event.payload.id === command.runId,
+            ) ||
+            run?.workspacePreparation === undefined ||
+            (command.worktreePath !== thread.worktreePath &&
+              (command.worktreePath !== null
+                ? run.status !== "preparing" || shell?.activeRunId !== run.id
+                : !["preparing", "cancelled", "failed"].includes(run.status) ||
+                  (shell?.activeRunId !== null && shell?.activeRunId !== run.id)))
+          )
+            return yield* new OrchestratorDispatchError({
+              commandId: command.commandId,
+              commandType: command.type,
+              cause: "Workspace completion no longer owns this preparation run.",
+            });
+        } else {
+          if (!["thread.create", "thread.metadata.update"].includes(source.value.commandType))
+            return yield* new OrchestratorDispatchError({
+              commandId: command.commandId,
+              commandType: command.type,
+              cause: "Workspace completion has no accepted empty-thread launch.",
+            });
+          if (command.worktreePath !== null && command.worktreePath !== thread.worktreePath) {
+            const { runs } = yield* projectionStore
+              .getThreadRecords(command.threadId, ["runs"])
+              .pipe(mapDispatchError(command));
+            if (
+              runs.length > 0 ||
+              (yield* projectionStore
+                .getMessageCount(command.threadId)
+                .pipe(mapDispatchError(command))) > 0
+            )
+              return yield* new OrchestratorDispatchError({
+                commandId: command.commandId,
+                commandType: command.type,
+                cause: "Workspace completion cannot rebind a launch that is no longer empty.",
+              });
+          }
+        }
+        yield* dispatchThreadMutation(
+          {
+            type: "thread.metadata.update",
+            commandId: command.commandId,
+            threadId: command.threadId,
+            branch: command.branch,
+            worktreePath: command.worktreePath,
+            ...(command.expectedBranch === undefined
+              ? {}
+              : { expectedBranch: command.expectedBranch }),
+            expectedWorktreePath: command.expectedWorktreePath,
+          },
+          events,
+          effects,
+        );
+        break;
+      }
       case "prepared-run.release":
         yield* dispatchPreparedRunRelease(command, events, effects);
         break;
@@ -14942,6 +15060,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     command: OrchestrationV2ServerCommand,
     sideChatIds: ReadonlyArray<ThreadId> = [],
     cancelledTask?: OrchestrationV2Subagent,
+    metadataOnlyRefusal?: OrchestratorDispatchError,
   ): Effect.fn.Return<OrchestratorV2DispatchResult, OrchestratorV2Error> {
     yield* Effect.annotateCurrentSpan({
       "orchestration_v2.command_id": command.commandId,
@@ -15053,6 +15172,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }),
       ),
     );
+
+    // A late workspace completion may record an already-finished rename or
+    // removal after activation, but cannot transfer new work to the outbox.
+    // Keep this temporary refusal outside permanent rejection recording.
+    if (
+      metadataOnlyRefusal !== undefined &&
+      (plan.effects.length > 0 ||
+        plan.cancelUnsettledEffects !== undefined ||
+        (command.type === "thread.workspace.complete" &&
+          command.worktreePath !== null &&
+          command.worktreePath !== command.expectedWorktreePath))
+    )
+      return yield* metadataOnlyRefusal;
 
     if (plan.events.length === 0 && plan.effects.length === 0 && cancelledTask === undefined) {
       // A settle that ended nothing still records its receipt: a replayed Stop
@@ -15193,52 +15325,266 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     } satisfies OrchestratorV2DispatchResult;
   }, withCommandMetrics);
 
-  const withThreadDispatchLocks = <A, E, R>(
-    threadIds: Iterable<ThreadId>,
-    effect: Effect.Effect<A, E, R>,
-  ) =>
-    // Sending, archiving, follow-up intake, and Stop share one participant order.
-    Array.from(new Set(threadIds))
-      .toSorted()
-      .reduceRight((locked, threadId) => threadDispatch.withLock(threadId, locked), effect);
+  const withThreadDispatchLocks = Effect.fn("Orchestrator.withThreadDispatchLocks")(
+    function* <A, E, R>(threadIds: Iterable<ThreadId>, effect: Effect.Effect<A, E, R>) {
+      const participants = Array.from(new Set(threadIds));
+      if (participants.length < 2)
+        return yield* participants.reduceRight(
+          (locked, threadId) => threadDispatch.withLock(threadId, locked),
+          effect,
+        );
+      // Lineage is immutable. One ancestry order preserves parent-before-child
+      // cancellation and question cleanup without reversing cross-thread sends.
+      const parents = new Map<ThreadId, ThreadId | null>();
+      const paths: Array<{
+        readonly threadId: ThreadId;
+        readonly path: ReadonlyArray<ThreadId>;
+      }> = [];
+      for (const threadId of participants) {
+        const path: Array<ThreadId> = [];
+        let ancestor: ThreadId | null = threadId;
+        while (ancestor !== null) {
+          path.unshift(ancestor);
+          if (!parents.has(ancestor)) {
+            const thread = yield* findThread(ancestor);
+            parents.set(ancestor, thread?.lineage.parentThreadId ?? null);
+          }
+          ancestor = parents.get(ancestor) ?? null;
+        }
+        paths.push({ threadId, path });
+      }
+      const ordered = paths.toSorted((left, right) => {
+        for (let index = 0; index < Math.min(left.path.length, right.path.length); index++) {
+          const a = left.path[index]!;
+          const b = right.path[index]!;
+          if (a !== b) return a < b ? -1 : 1;
+        }
+        return left.path.length - right.path.length;
+      });
+      return yield* ordered.reduceRight(
+        (locked, { threadId }) => threadDispatch.withLock(threadId, locked),
+        effect,
+      );
+    },
+  );
 
-  // dispatchWithReceiptEffect owns the span; this wrapper selects the participant locks.
-  const dispatchWithReceipt = Effect.fnUntraced(function* (command: OrchestrationV2ServerCommand) {
-    const threadIds = new Set([commandThreadId(command)]);
-    if (command.type === "message.dispatch" && command.senderThreadId !== undefined) {
-      threadIds.add(command.senderThreadId);
-    }
-    if (command.type === "thread.fork" && command.sideChat === true) {
-      threadIds.add(command.sourceThreadId);
-    }
-    if (
-      command.type === "runtime-request.respond" ||
-      (command.type === "message.dispatch" && mayStartSubagentFollowup(command))
-    ) {
-      const parentThreadId = yield* appOwnedSubagentParentThreadId(command.threadId).pipe(
-        Effect.mapError(
-          (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+  const admitNewExecution = <A>(
+    command: OrchestrationV2ServerCommand,
+    kind: Parameters<UpdateDrainAdmission.UpdateDrainAdmissionShape["admit"]>[0],
+    dispatch: Effect.Effect<A, OrchestratorV2Error>,
+    completeMetadata?: (
+      refusal: OrchestratorDispatchError,
+    ) => Effect.Effect<A, OrchestratorV2Error>,
+  ) =>
+    Effect.gen(function* () {
+      // Replay still uses normal receipt validation under its command locks.
+      // Fresh intake takes admission first, then rechecks the receipt while locked.
+      const receipt = yield* commandReceipts
+        .getByCommandId(command.commandId)
+        .pipe(mapDispatchError(command));
+      if (Option.isSome(receipt)) return yield* dispatch;
+      return yield* updateDrainAdmission.admit(kind, dispatch).pipe(
+        Effect.catchTags({
+          UpdateDrainAdmissionError: (cause) =>
+            Effect.gen(function* () {
+              // Intake may have queued behind an original commit and then a drain.
+              // Its newly committed receipt must replay through the normal locks.
+              const recorded = yield* commandReceipts
+                .getByCommandId(command.commandId)
+                .pipe(mapDispatchError(command));
+              if (Option.isSome(recorded)) return yield* dispatch;
+              if (completeMetadata !== undefined)
+                return yield* completeMetadata(
+                  new OrchestratorDispatchError({
+                    commandId: command.commandId,
+                    commandType: command.type,
+                    cause,
+                  }),
+                );
+              return yield* cause;
+            }),
+        }),
+        Effect.mapError((cause) =>
+          cause._tag === "UpdateDrainAdmissionError" || cause._tag === "UpdateDrainError"
+            ? new OrchestratorDispatchError({
+                commandId: command.commandId,
+                commandType: command.type,
+                cause,
+              })
+            : cause,
         ),
       );
-      if (parentThreadId !== undefined) threadIds.add(parentThreadId);
+    });
+
+  const dispatchWithReceipt = Effect.fnUntraced(function (
+    command: OrchestrationV2ServerCommand,
+  ): Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error> {
+    if (command.type === "thread.stop")
+      return Effect.gen(function* () {
+        const ownership = yield* DelegatedTaskCancellation;
+        const participants = [
+          ...new Set([
+            command.threadId,
+            ...ownership.flatMap((edge) => [edge.parentThreadId, edge.childThreadId]),
+          ]),
+        ];
+        const lineage =
+          ownership.length === 0
+            ? null
+            : yield* delegatedCancellationLineage(command, participants);
+        const ids = [...new Set([...participants, ...(lineage?.keys() ?? [])])].toSorted();
+        const decide = Effect.gen(function* () {
+          if (ownership.length > 0) {
+            const current = yield* delegatedCancellationLineage(command, participants);
+            if ([...current.keys()].some((id) => !ids.includes(id))) return null;
+          }
+          return yield* dispatchWithReceiptEffect(command);
+        });
+        const result = yield* withThreadDispatchLocks(ids, decide);
+        return result === null ? yield* dispatchWithReceipt(command) : result;
+      });
+    if (
+      command.type === "thread.archive" ||
+      command.type === "thread.archive.complete" ||
+      command.type === "thread.archive.fail" ||
+      command.type === "thread.unarchive" ||
+      command.type === "thread.delete"
+    ) {
+      const dispatchFamily = (): Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error> =>
+        threadDispatch
+          .withPersistenceLock(
+            Effect.gen(function* () {
+              const family = yield* ownedThreadFamily(command);
+              const sideChatIds =
+                command.type === "thread.delete" ? yield* liveSideChatIds(command.threadId) : [];
+              const root = yield* projectionStore
+                .getThreadShell(command.threadId)
+                .pipe(mapDispatchError(command));
+              const ids = [
+                ...new Set([
+                  ...family,
+                  ...sideChatIds,
+                  ...(root?.archivedWith == null ? [] : [root.archivedWith.threadId]),
+                  ...(getThreadArchivePlan(root?.archivePending)?.archiveThreadIds ?? []),
+                  ...(getThreadArchivePlan(root?.archivePending)?.promoteThreadIds ?? []),
+                  ...(root?.lineage.parentThreadId == null ? [] : [root.lineage.parentThreadId]),
+                ]),
+              ].toSorted();
+              const decide = Effect.gen(function* () {
+                const currentFamily = yield* ownedThreadFamily(command);
+                // Creation holds its parent lock. If a child arrived while locks were
+                // acquired, release and collect the expanded family before deciding.
+                if (currentFamily.some((id) => !ids.includes(id))) return null;
+                const currentSideChatIds =
+                  command.type === "thread.delete" ? yield* liveSideChatIds(command.threadId) : [];
+                if (currentSideChatIds.some((id) => !ids.includes(id))) return null;
+                return yield* dispatchWithReceiptEffect(command, currentSideChatIds);
+              });
+              return yield* withThreadDispatchLocks(ids, decide);
+            }),
+          )
+          .pipe(
+            Effect.flatMap(
+              (result): Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error> =>
+                result === null ? dispatchFamily() : Effect.succeed(result),
+            ),
+          );
+      const dispatch = dispatchFamily();
+      if (command.type !== "thread.archive" && command.type !== "thread.delete") return dispatch;
+      // Admission precedes persistence/family locks and holds through durable effects.
+      return admitNewExecution(
+        command,
+        command.type === "thread.archive" ? "thread-archive" : "thread-delete",
+        dispatch,
+      );
     }
-    if (command.type === "thread.delete") {
-      // Discover outside the locks, then verify under the parent lock. A concurrent fork
-      // requires a fresh lock set, acquired in the same order as message participants.
-      while (true) {
-        const sideChatIds = yield* liveSideChatIds(command.threadId);
-        const result = yield* withThreadDispatchLocks(
-          [...threadIds, ...sideChatIds],
-          Effect.gen(function* () {
-            const currentSideChatIds = yield* liveSideChatIds(command.threadId);
-            if (currentSideChatIds.some((id) => !sideChatIds.includes(id))) return undefined;
-            return yield* dispatchWithReceiptEffect(command, currentSideChatIds);
-          }),
-        );
-        if (result !== undefined) return result;
+    if (command.type === "subagent.promote.complete") {
+      const operation = Effect.gen(function* () {
+        const thread = yield* projectionStore
+          .getThreadShell(command.threadId)
+          .pipe(mapDispatchError(command));
+        const notificationParent =
+          command.type === "subagent.promote.complete"
+            ? yield* promotionNotificationParent(thread?.lineage.parentThreadId ?? null).pipe(
+                mapDispatchError(command),
+              )
+            : null;
+        const ids = [
+          ...new Set([
+            command.threadId,
+            ...(command.type === "subagent.promote.complete" &&
+            command.providerThread.appThreadId !== null
+              ? [command.providerThread.appThreadId]
+              : []),
+            ...(thread?.lineage.parentThreadId == null ? [] : [thread.lineage.parentThreadId]),
+            ...(notificationParent === null ? [] : [notificationParent.id]),
+          ]),
+        ].toSorted();
+        return yield* withThreadDispatchLocks(ids, dispatchWithReceiptEffect(command));
+      });
+      return operation;
+    }
+    if (command.type === "thread.persistence.set") {
+      return threadDispatch.withPersistenceLock(
+        Effect.gen(function* () {
+          const owners = yield* projectionStore.getPersistentThreads.pipe(
+            mapDispatchError(command),
+          );
+          const ids = [
+            ...new Set([command.threadId, ...owners.map((owner) => owner.id)]),
+          ].toSorted();
+          // Lock every replacement participant before reading whole snapshots,
+          // so replacing protection cannot overwrite a concurrent metadata edit.
+          return yield* withThreadDispatchLocks(ids, dispatchWithReceiptEffect(command));
+        }),
+      );
+    }
+    const dispatch = Effect.gen(function* () {
+      // Sending, follow-up intake, and Stop serialize every participant once.
+      const threadIds = new Set([commandThreadId(command)]);
+      if (command.type === "message.dispatch" && command.senderThreadId !== undefined) {
+        threadIds.add(command.senderThreadId);
       }
-    }
-    return yield* withThreadDispatchLocks(threadIds, dispatchWithReceiptEffect(command));
+      if (command.type === "thread.fork" && command.sideChat === true) {
+        threadIds.add(command.sourceThreadId);
+      }
+      if (
+        command.type === "runtime-request.respond" ||
+        (command.type === "message.dispatch" && mayStartSubagentFollowup(command))
+      ) {
+        const parentThreadId = yield* appOwnedSubagentParentThreadId(command.threadId).pipe(
+          Effect.mapError(
+            (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+          ),
+        );
+        if (parentThreadId !== undefined) threadIds.add(parentThreadId);
+      }
+      return yield* withThreadDispatchLocks(threadIds, dispatchWithReceiptEffect(command));
+    });
+    if (command.type === "message.dispatch" || command.type === "delegated_task.request")
+      return admitNewExecution(command, "thread-turn", dispatch);
+    const operation = command.type.startsWith("thread.worktree-cleanup.")
+      ? threadDispatch.withPersistenceLock(dispatch)
+      : dispatch;
+    if (command.type === "thread.workspace.complete")
+      return admitNewExecution(command, "thread-settle", operation, (refusal) =>
+        threadDispatch.withLock(
+          command.threadId,
+          dispatchWithReceiptEffect(command, [], undefined, refusal),
+        ),
+      );
+    if (command.type === "thread.settle" || command.type === "thread.auto-settle")
+      return admitNewExecution(command, "thread-settle", operation);
+    if (
+      command.type === "provider-session.detach" ||
+      command.type === "thread.worktree-cleanup.retry" ||
+      command.type === "thread.runtime-mode.set" ||
+      command.type === "thread.model-selection.set" ||
+      command.type === "provider.switch" ||
+      (command.type === "thread.metadata.update" && command.worktreePath !== undefined)
+    )
+      return admitNewExecution(command, "thread-teardown", operation);
+    return operation;
   }, (effect, command) =>
     // Taken before the lineage read, so a message whose read yields keeps its
     // place ahead of later messages to the same thread.
@@ -15333,7 +15679,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         return { claimed, initialMessage: dispatched };
       }),
     );
-    return yield* dispatch;
+    return yield* admitNewExecution(initialMessage, "thread-turn", dispatch);
   }, (effect, input) => messageIntake.withLock(input.initialMessage.threadId, effect));
 
   const handleRunUpdate = Effect.fn("Orchestrator.handleRunUpdate")(
@@ -16018,6 +16364,7 @@ export const layer: Layer.Layer<
   | ProjectionStoreV2
   | RuntimePolicyV2
   | ServerSettings.ServerSettingsService
+  | UpdateDrainAdmission.UpdateDrainAdmission
   | ThreadForkServiceV2
 > = Layer.effect(OrchestratorV2, makeOrchestrator()).pipe(
   Layer.provide(ThreadCommandExecutor.layer),

@@ -1838,6 +1838,7 @@ export const layerWsRpc = (
         const environment = yield* serverEnvironment.getDescriptor;
         const auth = yield* serverAuth.getDescriptor();
         const scratchWorkspaceRoot = yield* managedFolders.scratchRoot;
+        const triageCliCommand = yield* triage.getCliCommand();
         const lastEventLoopStall = yield* eventLoopMonitor.latestNoticeableStall;
         const discovery = yield* resolveOpenDiscoveryForConfig({
           editors: externalLauncher.resolveAvailableEditors(),
@@ -1905,6 +1906,10 @@ export const layerWsRpc = (
           ...Option.match(scratchWorkspaceRoot, {
             onNone: () => ({}),
             onSome: (root) => ({ scratchWorkspaceRoot: root }),
+          }),
+          ...Option.match(triageCliCommand, {
+            onNone: () => ({}),
+            onSome: (command) => ({ triageCliCommand: command }),
           }),
           newProjectsRoot: managedFolders.namedProjectsRoot,
           ...(lastEventLoopStall === undefined ? {} : { lastEventLoopStall }),
@@ -2676,6 +2681,10 @@ export const layerWsRpc = (
           }),
         [WS_METHODS.serverRunStorageCleanup]: () => storageCleanup.runNow,
         [WS_METHODS.serverGetStorageCleanupReport]: () => storageCleanup.reports,
+        [WS_METHODS.serverGetBuildReviewTargets]: (input) =>
+          storageCleanup.buildReviewTargets(input),
+        [WS_METHODS.serverPreviewBuildReview]: (input) => storageCleanup.previewBuildReview(input),
+        [WS_METHODS.serverSelectBuildReview]: (input) => storageCleanup.selectBuildReview(input),
         [WS_METHODS.serverGetDatabaseStorage]: () => databaseStorage.status,
         [WS_METHODS.serverReclaimDatabaseSpace]: () => databaseStorage.requestReclaim,
         [WS_METHODS.peerLinksList]: (_input) =>
