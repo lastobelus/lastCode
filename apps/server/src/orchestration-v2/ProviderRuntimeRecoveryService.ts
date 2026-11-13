@@ -3,6 +3,7 @@ import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   CommandId,
   isProviderNativeSubagentThread,
+  ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   type OrchestrationV2DomainEvent,
   type ProviderThreadId,
   type OrchestrationV2RestartCancelledBackgroundWork,
@@ -11,6 +12,7 @@ import {
   isOrchestrationV2WorkActive,
   type RunId,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -27,6 +29,7 @@ import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts";
 import { restartContinuationRun } from "./RestartContinuation.ts";
+import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import { isBufferedProviderNotification } from "./NotificationMailbox.ts";
 import { queuedRunsInDeliveryOrder } from "./QueuedRunOrder.ts";
 import {
@@ -308,6 +311,69 @@ export const make = Effect.gen(function* () {
           ),
         );
       const events: Array<OrchestrationV2DomainEvent> = [];
+      const emptyClaim = projection.thread.emptyWorkspacePreparationClaim;
+      if (emptyClaim !== undefined) {
+        const failureCommandId = CommandId.make(`${emptyClaim.commandId}:interrupted`);
+        const failure = {
+          ...makeProviderFailure({
+            cause: detail,
+            message:
+              "Workspace preparation was interrupted. Retry the workspace preparation manually.",
+            class: "validation_error",
+            retryable: false,
+          }),
+          code: ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
+        };
+        const failed = projection.thread.worktreePath === null && projection.runs.length === 0;
+        events.push({
+          id: yield* allocateEventId(),
+          type: "thread.metadata-updated",
+          threadId: projection.thread.id,
+          occurredAt: now,
+          payload: {
+            ...projection.thread,
+            emptyWorkspacePreparationClaim: undefined,
+            ...(failed
+              ? {
+                  emptyWorkspacePreparation: {
+                    requestId: emptyClaim.requestId,
+                    workspaceStrategy: emptyClaim.workspaceStrategy,
+                    failureCommandId,
+                    resetAt: null,
+                    state: "failed" as const,
+                    failure,
+                  },
+                }
+              : {}),
+            updatedAt: now,
+          },
+        });
+        if (failed)
+          events.push({
+            id: yield* allocateEventId(),
+            type: "turn-item.updated",
+            threadId: projection.thread.id,
+            occurredAt: now,
+            payload: {
+              id: TurnItemId.make(`turn-item:empty-workspace:${failureCommandId}`),
+              threadId: projection.thread.id,
+              runId: null,
+              nodeId: null,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal: 0,
+              status: "failed",
+              title: "Workspace preparation failed",
+              startedAt: now,
+              completedAt: now,
+              updatedAt: now,
+              type: "error",
+              failure,
+            },
+          });
+      }
       const unfinishedRecovery = projection.thread.recovery;
       if (
         unfinishedRecovery !== undefined &&
@@ -588,6 +654,8 @@ export const make = Effect.gen(function* () {
         });
       }
       for (const run of runs) {
+        const interruptedPreparation =
+          run.status === "preparing" && run.workspacePreparationRetry !== undefined;
         events.push({
           id: yield* allocateEventId(),
           type: "run.updated",
@@ -595,7 +663,12 @@ export const make = Effect.gen(function* () {
           runId: run.id,
           providerInstanceId: run.providerInstanceId,
           occurredAt: now,
-          payload: { ...run, status: "cancelled", queuePosition: null, completedAt: now },
+          payload: {
+            ...run,
+            status: interruptedPreparation ? "failed" : "cancelled",
+            queuePosition: null,
+            completedAt: now,
+          },
         });
         for (const attempt of projection.attempts.filter(
           (candidate) =>
@@ -610,7 +683,11 @@ export const make = Effect.gen(function* () {
             nodeId: attempt.rootNodeId,
             providerInstanceId: run.providerInstanceId,
             occurredAt: now,
-            payload: { ...attempt, status: "cancelled", completedAt: now },
+            payload: {
+              ...attempt,
+              status: interruptedPreparation ? "failed" : "cancelled",
+              completedAt: now,
+            },
           });
         }
         for (const node of projection.nodes.filter(
@@ -630,7 +707,11 @@ export const make = Effect.gen(function* () {
             nodeId: node.id,
             providerInstanceId: run.providerInstanceId,
             occurredAt: now,
-            payload: { ...node, status: "cancelled", completedAt: now },
+            payload: {
+              ...node,
+              status: interruptedPreparation ? "failed" : "cancelled",
+              completedAt: now,
+            },
           });
         }
         for (const providerTurn of projection.providerTurns.filter(
@@ -692,6 +773,49 @@ export const make = Effect.gen(function* () {
             occurredAt: now,
             payload: cancelledItem(item, now),
           });
+        }
+        if (interruptedPreparation) {
+          const message =
+            "Automatic workspace preparation was interrupted. Retry the workspace preparation manually.";
+          events.push({
+            id: yield* allocateEventId(),
+            type: "turn-item.updated",
+            threadId: projection.thread.id,
+            runId: run.id,
+            ...(run.rootNodeId === null ? {} : { nodeId: run.rootNodeId }),
+            providerInstanceId: run.providerInstanceId,
+            occurredAt: now,
+            payload: {
+              id: ids.derive.runSignalTurnItem({
+                runId: run.id,
+                signal: "workspace-preparation-recovery",
+              }),
+              threadId: projection.thread.id,
+              runId: run.id,
+              nodeId: run.rootNodeId,
+              providerThreadId: run.providerThreadId,
+              providerTurnId: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal: 0,
+              status: "failed",
+              title: "Workspace preparation failed",
+              startedAt: now,
+              completedAt: now,
+              updatedAt: now,
+              type: "error",
+              failure: {
+                ...makeProviderFailure({
+                  cause: message,
+                  message,
+                  class: "validation_error",
+                  retryable: false,
+                }),
+                code: ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
+              },
+            },
+          });
+          continue;
         }
         // Queued runs and unsent resumes leave no visible turn behind, so there is nothing to explain.
         if (run.status === "queued" || unsentResumeRunIds.includes(run.id)) continue;

@@ -159,6 +159,12 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
       Schema.Struct({ runtimeMode: RuntimeMode, interactionMode: ProviderInteractionMode }),
     ),
   }),
+  /** The one delayed retry of a timed-out worktree fetch. */
+  Schema.Struct({
+    type: Schema.Literal("prepared-run.auto-retry"),
+    runId: Schema.NullOr(RunId),
+    resetAt: Schema.String,
+  }),
 ]);
 export type OrchestrationEffectRequestV2 = typeof OrchestrationEffectRequestV2.Type;
 
@@ -179,6 +185,7 @@ export const REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS = [
   "thread-title.generate",
   "incoming-message.summarize",
   "delegated-tasks.stop",
+  "prepared-run.auto-retry",
 ] as const satisfies ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
 
 export const PROCESS_BOUND_EFFECT_TYPES = [
@@ -393,7 +400,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
     `;
     const automaticEffect = (alias: "candidate" | "active") => sql`
       (
-        ${sql(alias)}.effect_type = 'provider-runtime.continue'
+        ${sql(alias)}.effect_type IN ('provider-runtime.continue', 'prepared-run.auto-retry')
         OR (
           ${sql(alias)}.effect_type IN (
             'provider-turn.start', 'provider-turn.restart', 'provider-turn.steer',
@@ -458,6 +465,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
     // Each thread runs lifecycle effects in rowid order, including retry backoff, so a failed
     // rollback finishes before a later turn starts. Claims excluding restart continuations ignore them.
     // Title and preview metadata have separate per-thread lanes so they cannot delay lifecycle work.
+    // A delayed preparation retry waits minutes, so it has its own lane too.
     const claimableCandidatePredicate = (
       availableBefore?: string,
       excludeRestartContinuations = false,
@@ -501,8 +509,17 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
               )
               OR
               (
-                candidate.effect_type NOT IN ('thread-title.generate', 'incoming-message.summarize')
-                AND active.effect_type NOT IN ('thread-title.generate', 'incoming-message.summarize')
+                candidate.effect_type = 'prepared-run.auto-retry'
+                AND active.effect_type = 'prepared-run.auto-retry'
+              )
+              OR
+              (
+                candidate.effect_type NOT IN (
+                  'thread-title.generate', 'incoming-message.summarize', 'prepared-run.auto-retry'
+                )
+                AND active.effect_type NOT IN (
+                  'thread-title.generate', 'incoming-message.summarize', 'prepared-run.auto-retry'
+                )
               )
             )
         )

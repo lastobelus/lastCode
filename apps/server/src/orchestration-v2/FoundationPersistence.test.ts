@@ -2976,6 +2976,54 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
     }),
   );
 
+  it.effect("keeps a delayed preparation retry from holding back later thread work", () =>
+    Effect.gen(function* () {
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const commandId = CommandId.make("command:foundation-auto-retry-lane");
+      const threadId = ThreadId.make("thread:foundation-auto-retry-lane");
+      const resetAt = DateTime.add(yield* DateTime.now, { minutes: 5 });
+      yield* outbox.enqueue([
+        {
+          id: "effect:foundation-auto-retry-lane:a-retry",
+          commandId,
+          threadId,
+          request: {
+            type: "prepared-run.auto-retry",
+            runId: RunId.make("run:foundation-auto-retry-lane"),
+            resetAt: DateTime.formatIso(resetAt),
+          },
+          availableAt: resetAt,
+        },
+        {
+          id: "effect:foundation-auto-retry-lane:b-provider",
+          commandId,
+          threadId,
+          request: {
+            type: "provider-turn.start",
+            runId: RunId.make("run:foundation-auto-retry-lane"),
+          },
+        },
+      ]);
+
+      const provider = yield* outbox.claimNext({ workerId: "auto-retry-lane-worker" });
+      assert.equal(
+        Option.getOrUndefined(provider)?.id,
+        "effect:foundation-auto-retry-lane:b-provider",
+      );
+      assert.isTrue(Option.isNone(yield* outbox.claimNext({ workerId: "auto-retry-lane-worker" })));
+
+      yield* TestClock.adjust(Duration.minutes(5));
+      const retry = yield* outbox.claimNext({ workerId: "auto-retry-lane-worker" });
+      assert.equal(Option.getOrUndefined(retry)?.id, "effect:foundation-auto-retry-lane:a-retry");
+      for (const effectId of [
+        "effect:foundation-auto-retry-lane:a-retry",
+        "effect:foundation-auto-retry-lane:b-provider",
+      ]) {
+        yield* outbox.succeed({ effectId, workerId: "auto-retry-lane-worker" });
+      }
+    }),
+  );
+
   it.effect("runs title generation beside critical work while serializing each lane", () =>
     Effect.gen(function* () {
       const outbox = yield* EffectOutbox.EffectOutboxV2;
@@ -3907,6 +3955,11 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
   it.effect.each([
     { type: "terminal.cleanup" },
     { type: "provider-runtime.continue", sourceRunId: RunId.make("run:restart-replay") },
+    {
+      type: "prepared-run.auto-retry",
+      runId: RunId.make("run:restart-retry"),
+      resetAt: "2026-01-01T00:05:00.000Z",
+    },
   ] as const)(
     "retires live provider effects and requeues $type after process loss",
     (replayRequest) =>

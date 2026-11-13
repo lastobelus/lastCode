@@ -12,6 +12,7 @@ import type { WorktreeSetupSnapshot } from "@t3tools/contracts";
 import { deriveTimelineMinimapItems } from "./timelineMinimapItems";
 import {
   type AssistantCitation,
+  type CommandId,
   type EnvironmentId,
   type MessageId,
   type OrchestrationV2TurnItem,
@@ -246,7 +247,8 @@ interface MessagesTimelineProps {
   worktreeSetup?: WorktreeSetupSnapshot | null;
   onCancelWorktreeSetup?: () => void;
   retryableWorkspacePreparationRunIds?: ReadonlySet<RunId>;
-  onRetryWorkspacePreparation?: (runId: RunId) => void;
+  retryableEmptyWorkspacePreparationFailureId?: CommandId | null;
+  onRetryWorkspacePreparation?: (runId: RunId | null, failureCommandId?: CommandId) => void;
   onWorktreeSetupWorkLocally?: () => void;
   onOpenWorktreeSetupTerminal?: (terminalId: string) => void;
   isPreparingWorktree?: boolean;
@@ -370,6 +372,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   footer = null,
   onCancelWorktreeSetup,
   retryableWorkspacePreparationRunIds = EMPTY_RUN_IDS,
+  retryableEmptyWorkspacePreparationFailureId = null,
   onRetryWorkspacePreparation,
   onWorktreeSetupWorkLocally,
   onOpenWorktreeSetupTerminal,
@@ -1179,6 +1182,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     },
     onCancelWorktreeSetup: onCancelWorktreeSetup ?? null,
     retryableWorkspacePreparationRunIds,
+    retryableEmptyWorkspacePreparationFailureId,
     onRetryWorkspacePreparation: onRetryWorkspacePreparation ?? null,
     onWorktreeSetupWorkLocally: onWorktreeSetupWorkLocally ?? null,
     onOpenWorktreeSetupTerminal: onOpenWorktreeSetupTerminal ?? null,

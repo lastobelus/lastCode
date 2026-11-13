@@ -478,6 +478,10 @@ export interface OrchestratorV2DispatchResult {
 
 export interface OrchestratorV2DispatchOptions {
   readonly workspaceUserAdopted?: true;
+  // Commit the empty launch and its owner together, before a response can arrive.
+  readonly emptyWorkspaceStrategy?: NonNullable<
+    OrchestrationV2AppThread["emptyWorkspacePreparationClaim"]
+  >["workspaceStrategy"];
 }
 
 export interface OrchestratorV2LaunchDispatchInput {
@@ -850,6 +854,10 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.visit":
     case "thread.mark-unread":
     case "thread.workspace.complete":
+    case "workspace-preparation.claim":
+    case "thread.preparation.fail":
+    case "thread.preparation.retry":
+    case "thread.preparation.finish":
     case "thread.worktree-suspension.transition":
     case "thread.metadata.update":
     case "thread.pull-request.link":
@@ -872,6 +880,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "prepared-run.release":
     case "prepared-run.progress":
     case "prepared-run.fail":
+    case "prepared-run.acknowledge":
     case "prepared-run.retry":
     case "subagent.stop":
     case "run.interrupt":
@@ -14312,7 +14321,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
 
   const loadProjectionForCommand = <K extends ProjectionRecordField>(
-    command: OrchestrationV2Command,
+    command: OrchestrationV2ServerCommand,
     fields: ReadonlyArray<K>,
     filter?: ProjectionRecordFilter,
   ) =>
@@ -14501,12 +14510,57 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const dispatchPreparedRunFail = Effect.fn("Orchestrator.dispatchPreparedRunFail")(function* (
     command: Extract<OrchestrationV2Command, { readonly type: "prepared-run.fail" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
   ) {
     const projection = yield* loadProjectionForCommand(
       command,
       ["runs", "attempts", "nodes", "providerThreads", "turnItems"],
-      { turnItemTypes: ["command_execution"], turnItemRunId: command.runId },
+      { turnItemTypes: ["command_execution", "error"], turnItemRunId: command.runId },
     );
+    if (command.expectedPendingRetry !== undefined) {
+      const run = projection.runs.find((candidate) => candidate.id === command.runId);
+      if (
+        run?.status !== "failed" ||
+        run.workspacePreparationRetry?.state !== "pending" ||
+        run.workspacePreparationRetry.failureCommandId !== command.expectedPendingRetry
+      )
+        return;
+      const failure = projection.turnItems.find(
+        (item) =>
+          item.type === "error" &&
+          item.runId === run.id &&
+          item.status === "failed" &&
+          item.failure.code === ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
+      );
+      if (failure === undefined || failure.type !== "error") return;
+      const now = yield* DateTime.now;
+      const emitEvent = emit(events, command);
+      yield* emitEvent({
+        type: "turn-item.updated",
+        threadId: command.threadId,
+        runId: run.id,
+        providerInstanceId: run.providerInstanceId,
+        occurredAt: now,
+        payload: {
+          ...failure,
+          failure: {
+            ...command.failure,
+            code: ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
+          },
+          updatedAt: now,
+        },
+      });
+      const { workspacePreparationRetry: _finished, ...remaining } = run;
+      yield* emitEvent({
+        type: "run.updated",
+        threadId: command.threadId,
+        runId: run.id,
+        providerInstanceId: run.providerInstanceId,
+        occurredAt: now,
+        payload: remaining,
+      });
+      return;
+    }
     const state = preparedRunState(command, projection);
     if (state === null) {
       return yield* new OrchestratorDispatchError({
@@ -14591,8 +14645,35 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       nodeId: state.rootNode.id,
       providerInstanceId: state.run.providerInstanceId,
       occurredAt: now,
-      payload: { ...state.run, status: "failed", completedAt: now },
+      payload: {
+        ...state.run,
+        status: "failed",
+        completedAt: now,
+        workspacePreparationRetry:
+          command.automaticRetryAt === undefined
+            ? undefined
+            : {
+                resetAt: command.automaticRetryAt,
+                failureCommandId: command.commandId,
+                state: "pending",
+              },
+      },
     });
+    // Only a worktree fetch timeout schedules this retry.
+    const resetAt = command.automaticRetryAt;
+    const retryAt = resetAt == null ? Option.none() : DateTime.make(resetAt);
+    if (resetAt != null && Option.isSome(retryAt)) {
+      yield* Ref.update(effects, (existing) => [
+        ...existing,
+        {
+          id: `effect:${command.commandId}:prepared-run.auto-retry:${state.run.id}`,
+          commandId: command.commandId,
+          threadId: command.threadId,
+          request: { type: "prepared-run.auto-retry", runId: state.run.id, resetAt },
+          availableAt: retryAt.value,
+        } satisfies PendingOrchestrationEffectV2,
+      ]);
+    }
   });
 
   const dispatchPreparedRunRetry = Effect.fn("Orchestrator.dispatchPreparedRunRetry")(function* (
@@ -14611,6 +14692,22 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         candidate.status === "failed" &&
         candidate.failure.code === ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
     );
+    if (command.automaticRetry !== undefined) {
+      // The pending marker is cleared by a response under this same thread lock.
+      if (
+        failureItem?.failure.resetAt !== command.automaticRetry.resetAt ||
+        state?.run.workspacePreparationRetry?.state !== "pending" ||
+        state.run.workspacePreparationRetry.resetAt !== command.automaticRetry.resetAt ||
+        state.run.workspacePreparationRetry.failureCommandId !==
+          command.automaticRetry.failureCommandId ||
+        state.run.workspacePreparation?.type !== "worktree" ||
+        projection.thread.worktreePath !== null ||
+        projection.thread.archivedAt !== null ||
+        projection.thread.deletedAt !== null ||
+        projection.thread.archivePending != null
+      )
+        return;
+    }
     if (
       state === null ||
       state.run.workspacePreparation === undefined ||
@@ -14666,10 +14763,24 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       type: "node.updated",
       payload: { ...state.rootNode, status: "pending", completedAt: null },
     });
+    const {
+      workspacePreparationRetry: _previousRetry,
+      workspacePreparationClaim: _previousClaim,
+      ...run
+    } = state.run;
     yield* emitEvent({
       ...scope,
       type: "run.updated",
-      payload: { ...state.run, status: "preparing", completedAt: null },
+      payload: {
+        ...run,
+        status: "preparing",
+        completedAt: null,
+        ...(command.automaticRetry === undefined
+          ? {}
+          : {
+              workspacePreparationRetry: { ...command.automaticRetry, state: "claimed" as const },
+            }),
+      },
     });
     // Messages held when this preparation failed follow the run again. A hold
     // from a later run (a stop, say) is not this failure's to release.
@@ -15569,6 +15680,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const waitingSources =
         child?.runs.filter(
           (source) =>
+            (source.delegatedTaskId === subagent.id &&
+              source.workspacePreparationRetry?.state === "pending") ||
             source.actionObligations?.some((row) => ownsObligation(source, row)) ||
             source.pullRequestWatchObligations?.some(
               (row) =>
@@ -15615,6 +15728,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               ...source,
               status: "cancelled",
               completedAt: now,
+              workspacePreparationRetry: undefined,
               actionObligations: source.actionObligations?.map((row) =>
                 ownsObligation(source, row) ? { ...row, state: "disposed" as const } : row,
               ),
@@ -17072,6 +17186,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (
         taskRuns.some(
           (run) =>
+            run.workspacePreparationRetry?.state === "pending" ||
             run.actionObligations?.some((row) => row.state === "waiting") ||
             run.pullRequestWatchObligations?.some(
               (row) => row.state === "active" || row.state === "terminal-pending",
@@ -19071,6 +19186,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               "provider-turn.steer",
               "runtime-request.respond",
               "thread-title.generate",
+              "prepared-run.auto-retry",
             ],
             reason: "Thread family is stopping before archive.",
           };
@@ -19249,6 +19365,79 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "notification.delivery.accept":
         updateDelegatedCompletionOnlyRunId = yield* dispatchNotificationAccepted(command, events);
         break;
+      case "workspace-preparation.claim": {
+        const projection = yield* loadProjectionForCommand(command, ["runs"]);
+        const source = yield* commandReceipts
+          .getByCommandId(command.requestId)
+          .pipe(mapDispatchError(command));
+        if (Option.isNone(source) || source.value.status !== "accepted") break;
+        const now = yield* DateTime.now;
+        if (command.runId !== null) {
+          const run = projection.runs.find((candidate) => candidate.id === command.runId);
+          const sourceEvents = yield* eventSink
+            .readByCommandId({ commandId: command.requestId })
+            .pipe(Stream.runCollect, mapDispatchError(command));
+          if (
+            run?.status !== "preparing" ||
+            run.workspacePreparation === undefined ||
+            run.workspacePreparationClaim !== undefined ||
+            !sourceEvents.some(
+              (stored) =>
+                stored.event.threadId === command.threadId &&
+                (stored.event.type === "run.created" || stored.event.type === "run.updated") &&
+                stored.event.payload.id === command.runId,
+            )
+          )
+            break;
+          yield* emit(
+            events,
+            command,
+          )({
+            type: "run.updated",
+            threadId: command.threadId,
+            runId: run.id,
+            providerInstanceId: run.providerInstanceId,
+            occurredAt: now,
+            payload: { ...run, workspacePreparationClaim: command.commandId },
+          });
+        } else {
+          if (
+            source.value.threadId !== command.threadId ||
+            !["thread.create", "thread.metadata.update", "remote_delegation.prepare"].includes(
+              source.value.commandType,
+            ) ||
+            projection.runs.length > 0 ||
+            projection.thread.worktreePath !== null ||
+            projection.thread.archivedAt !== null ||
+            projection.thread.deletedAt !== null ||
+            projection.thread.archivePending != null ||
+            projection.thread.emptyWorkspacePreparationClaim !== undefined ||
+            projection.thread.emptyWorkspacePreparation !== undefined ||
+            (yield* projectionStore
+              .getMessageCount(command.threadId)
+              .pipe(mapDispatchError(command))) > 0
+          )
+            break;
+          yield* emit(
+            events,
+            command,
+          )({
+            type: "thread.metadata-updated",
+            threadId: command.threadId,
+            occurredAt: now,
+            payload: {
+              ...projection.thread,
+              emptyWorkspacePreparationClaim: {
+                commandId: command.commandId,
+                requestId: command.requestId,
+                workspaceStrategy: command.workspaceStrategy,
+              },
+              updatedAt: now,
+            },
+          });
+        }
+        break;
+      }
       case "thread.workspace.complete": {
         const source = yield* commandReceipts
           .getByCommandId(command.requestId)
@@ -19308,7 +19497,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               cause: "Workspace completion no longer owns this preparation run.",
             });
         } else {
-          if (!["thread.create", "thread.metadata.update"].includes(source.value.commandType))
+          if (
+            !["thread.create", "thread.metadata.update", "remote_delegation.prepare"].includes(
+              source.value.commandType,
+            )
+          )
             return yield* new OrchestratorDispatchError({
               commandId: command.commandId,
               commandType: command.type,
@@ -19319,6 +19512,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               .getThreadRecords(command.threadId, ["runs"])
               .pipe(mapDispatchError(command));
             if (
+              (command.emptyClaimCommandId !== undefined &&
+                thread.emptyWorkspacePreparationClaim?.commandId !== command.emptyClaimCommandId &&
+                !(
+                  thread.emptyWorkspacePreparation?.state === "claimed" &&
+                  thread.emptyWorkspacePreparation.failureCommandId === command.emptyClaimCommandId
+                )) ||
               runs.length > 0 ||
               (yield* projectionStore
                 .getMessageCount(command.threadId)
@@ -19348,6 +19547,208 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         );
         break;
       }
+      case "thread.preparation.fail": {
+        const projection = yield* loadProjectionForCommand(command, ["runs", "turnItems"]);
+        const source = yield* commandReceipts
+          .getByCommandId(command.requestId)
+          .pipe(mapDispatchError(command));
+        if (
+          Option.isNone(source) ||
+          source.value.status !== "accepted" ||
+          source.value.threadId !== command.threadId ||
+          !["thread.create", "thread.metadata.update", "remote_delegation.prepare"].includes(
+            source.value.commandType,
+          ) ||
+          projection.thread.emptyWorkspacePreparationClaim?.commandId !== command.claimCommandId ||
+          projection.thread.emptyWorkspacePreparationClaim.requestId !== command.requestId ||
+          projection.runs.length > 0 ||
+          projection.thread.worktreePath !== null ||
+          projection.thread.archivedAt !== null ||
+          projection.thread.deletedAt !== null ||
+          (yield* projectionStore
+            .getMessageCount(command.threadId)
+            .pipe(mapDispatchError(command))) > 0
+        )
+          break;
+        const now = yield* DateTime.now;
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.metadata-updated",
+          threadId: command.threadId,
+          occurredAt: now,
+          payload: {
+            ...projection.thread,
+            emptyWorkspacePreparationClaim: undefined,
+            emptyWorkspacePreparation: {
+              requestId: command.requestId,
+              workspaceStrategy: command.workspaceStrategy,
+              failureCommandId: command.commandId,
+              resetAt: command.resetAt,
+              state: command.resetAt === null ? "failed" : "pending",
+              failure: {
+                ...command.failure,
+                code: ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
+              },
+            },
+            updatedAt: now,
+          },
+        });
+        const resetAt = command.resetAt;
+        if (resetAt !== null)
+          yield* Ref.update(effects, (existing) => [
+            ...existing,
+            {
+              id: `effect:${command.commandId}:prepared-run.auto-retry`,
+              commandId: command.commandId,
+              threadId: command.threadId,
+              request: { type: "prepared-run.auto-retry", runId: null, resetAt },
+              availableAt: DateTime.makeUnsafe(resetAt),
+            } satisfies PendingOrchestrationEffectV2,
+          ]);
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "turn-item.updated",
+          threadId: command.threadId,
+          occurredAt: now,
+          payload: {
+            id: TurnItemId.make(`turn-item:empty-workspace:${command.commandId}`),
+            threadId: command.threadId,
+            runId: null,
+            nodeId: null,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: yield* nextTurnItemOrdinal(projection),
+            status: "failed",
+            title: "Workspace preparation failed",
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            type: "error",
+            failure: {
+              ...command.failure,
+              code: ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
+            },
+          },
+        });
+        break;
+      }
+      case "thread.preparation.retry":
+      case "thread.preparation.finish": {
+        const projection = yield* loadProjectionForCommand(command, ["runs", "turnItems"]);
+        const preparation = projection.thread.emptyWorkspacePreparation;
+        const claim = projection.thread.emptyWorkspacePreparationClaim;
+        if (
+          command.type === "thread.preparation.finish" &&
+          claim?.commandId === command.failureCommandId &&
+          command.failure === undefined
+        ) {
+          yield* emit(
+            events,
+            command,
+          )({
+            type: "thread.metadata-updated",
+            threadId: command.threadId,
+            occurredAt: yield* DateTime.now,
+            payload: { ...projection.thread, emptyWorkspacePreparationClaim: undefined },
+          });
+          break;
+        }
+        if (preparation?.failureCommandId !== command.failureCommandId) break;
+        if (
+          command.type === "thread.preparation.retry" &&
+          ((command.automaticRetry === true
+            ? preparation.state !== "pending"
+            : preparation.state === "claimed") ||
+            projection.runs.length > 0 ||
+            projection.thread.worktreePath !== null ||
+            projection.thread.archivedAt !== null ||
+            projection.thread.deletedAt !== null ||
+            projection.thread.archivePending != null ||
+            (yield* projectionStore
+              .getMessageCount(command.threadId)
+              .pipe(mapDispatchError(command))) > 0)
+        )
+          break;
+        if (
+          command.type === "thread.preparation.finish" &&
+          preparation.state !== "claimed" &&
+          preparation.state !== "pending"
+        )
+          break;
+        const now = yield* DateTime.now;
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.metadata-updated",
+          threadId: command.threadId,
+          occurredAt: now,
+          payload: {
+            ...projection.thread,
+            ...(command.type === "thread.preparation.retry" && command.automaticRetry !== true
+              ? {
+                  emptyWorkspacePreparationClaim: {
+                    commandId: CommandId.make(`${command.commandId}:claim`),
+                    requestId: preparation.requestId,
+                    workspaceStrategy: preparation.workspaceStrategy,
+                  },
+                }
+              : {}),
+            emptyWorkspacePreparation:
+              command.type === "thread.preparation.retry"
+                ? command.automaticRetry === true
+                  ? { ...preparation, state: "claimed" }
+                  : undefined
+                : command.failure === undefined
+                  ? undefined
+                  : {
+                      ...preparation,
+                      state: "failed",
+                      failure: {
+                        ...command.failure,
+                        code: ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
+                      },
+                    },
+            updatedAt: now,
+          },
+        });
+        const failureItem = projection.turnItems.find(
+          (item) =>
+            item.id === TurnItemId.make(`turn-item:empty-workspace:${command.failureCommandId}`),
+        );
+        if (failureItem?.type === "error")
+          yield* emit(
+            events,
+            command,
+          )({
+            type: "turn-item.updated",
+            threadId: command.threadId,
+            occurredAt: now,
+            payload: {
+              ...failureItem,
+              status:
+                command.type === "thread.preparation.finish" && command.failure !== undefined
+                  ? "failed"
+                  : "cancelled",
+              failure:
+                command.type === "thread.preparation.finish" && command.failure !== undefined
+                  ? {
+                      ...command.failure,
+                      code: ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
+                    }
+                  : failureItem.failure,
+              updatedAt: now,
+              completedAt: now,
+            },
+          });
+        break;
+      }
       case "prepared-run.release":
         yield* dispatchPreparedRunRelease(command, events, effects);
         break;
@@ -19355,8 +19756,61 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         yield* dispatchPreparedRunProgress(command, events);
         break;
       case "prepared-run.fail":
-        yield* dispatchPreparedRunFail(command, events);
+        yield* dispatchPreparedRunFail(command, events, effects);
         break;
+      case "prepared-run.acknowledge": {
+        if (command.runId === null) {
+          const { thread } = yield* loadProjectionForCommand(command, []);
+          const preparation = thread.emptyWorkspacePreparation;
+          if (
+            preparation?.state === "pending" &&
+            preparation.failureCommandId === command.failureCommandId
+          ) {
+            const now = yield* DateTime.now;
+            yield* emit(
+              events,
+              command,
+            )({
+              type: "thread.metadata-updated",
+              threadId: command.threadId,
+              occurredAt: now,
+              payload: {
+                ...thread,
+                emptyWorkspacePreparation: { ...preparation, state: "acknowledged" },
+                updatedAt: now,
+              },
+            });
+          }
+          break;
+        }
+        const projection = yield* loadProjectionForCommand(command, ["runs"], {
+          runIds: [command.runId],
+        });
+        const run = projection.runs.find((candidate) => candidate.id === command.runId);
+        if (
+          run?.workspacePreparationRetry?.state === "pending" &&
+          run.workspacePreparationRetry.failureCommandId === command.failureCommandId
+        ) {
+          yield* emit(
+            events,
+            command,
+          )({
+            type: "run.updated",
+            threadId: command.threadId,
+            runId: run.id,
+            providerInstanceId: run.providerInstanceId,
+            occurredAt: yield* DateTime.now,
+            payload: {
+              ...run,
+              workspacePreparationRetry: {
+                ...run.workspacePreparationRetry,
+                state: "acknowledged",
+              },
+            },
+          });
+        }
+        break;
+      }
       case "prepared-run.retry":
         yield* dispatchPreparedRunRetry(command, events);
         break;
@@ -19879,6 +20333,25 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         : undefined;
     const participantLimit = completionLimit ?? limit;
     const execute = Effect.gen(function* () {
+      if (
+        command.type === "thread.metadata.update" &&
+        command.expectedEmpty === true &&
+        (command.branch !== undefined || command.worktreePath !== undefined) &&
+        options?.emptyWorkspaceStrategy === undefined
+      ) {
+        const thread = yield* projectionStore
+          .getThread(command.threadId)
+          .pipe(mapDispatchError(command));
+        if (
+          thread.emptyWorkspacePreparationClaim !== undefined ||
+          thread.emptyWorkspacePreparation !== undefined
+        )
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: `Thread ${command.threadId} is no longer empty.`,
+          });
+      }
       let plan = yield* dispatchOnce(command, sideChatIds).pipe(
         Effect.tap((planned) => refuseAboveRuntimeModeCeiling(command, planned.events)),
         Effect.flatMap((planned) =>
@@ -19916,6 +20389,144 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   threadId: id,
                   occurredAt: now,
                   payload: releaseCreatorGrouping(thread),
+                }),
+              );
+            }
+            return { ...planned, events };
+          }),
+        ),
+        Effect.flatMap((planned) =>
+          Effect.gen(function* () {
+            const responds =
+              command.type === "thread.stop" ||
+              command.type === "run.interrupt" ||
+              command.type === "thread.settle" ||
+              command.type === "thread.snooze" ||
+              command.type === "thread.archive" ||
+              command.type === "thread.delete" ||
+              (command.type === "message.dispatch" && command.createdBy === "user") ||
+              (command.type === "thread.metadata.update" &&
+                (command.worktreePath !== undefined ||
+                  command.branch !== undefined ||
+                  command.expectedEmpty === true));
+            if (!responds && command.type !== "message.dispatch") return planned;
+            const projection = yield* projectionStore
+              .getThreadRecords(commandThreadId(command), ["runs"])
+              .pipe(mapDispatchError(command));
+            if (
+              command.type === "thread.metadata.update" &&
+              command.expectedEmpty !== true &&
+              (command.worktreePath === undefined ||
+                command.worktreePath === projection.thread.worktreePath) &&
+              (command.branch === undefined || command.branch === projection.thread.branch)
+            )
+              return planned;
+            const events = [...planned.events];
+            const now = yield* DateTime.now;
+            if (
+              projection.thread.emptyWorkspacePreparationClaim !== undefined ||
+              projection.thread.emptyWorkspacePreparation?.state === "pending" ||
+              projection.thread.emptyWorkspacePreparation?.state === "claimed" ||
+              (command.type === "message.dispatch" &&
+                projection.thread.emptyWorkspacePreparation !== undefined)
+            ) {
+              const changed = events.findLast(
+                (event) =>
+                  event.threadId === projection.thread.id &&
+                  (event.type === "thread.metadata-updated" ||
+                    event.type === "thread.archived" ||
+                    event.type === "thread.deleted" ||
+                    event.type === "thread.settled" ||
+                    event.type === "thread.snoozed"),
+              );
+              const thread =
+                changed && isAppThread(changed.payload) ? changed.payload : projection.thread;
+              events.push(
+                yield* makeEvent(command, {
+                  type: "thread.metadata-updated",
+                  threadId: thread.id,
+                  occurredAt: now,
+                  payload: {
+                    ...thread,
+                    emptyWorkspacePreparationClaim: undefined,
+                    emptyWorkspacePreparation:
+                      command.type === "message.dispatch" ||
+                      projection.thread.emptyWorkspacePreparation === undefined
+                        ? undefined
+                        : {
+                            ...projection.thread.emptyWorkspacePreparation,
+                            state: "acknowledged",
+                          },
+                    updatedAt: now,
+                  },
+                }),
+              );
+            }
+            if (!responds) return { ...planned, events };
+            for (const original of projection.runs) {
+              if (
+                original.workspacePreparationRetry?.state !== "pending" ||
+                (command.type === "run.interrupt" && command.runId !== original.id)
+              )
+                continue;
+              const update = events.findLast(
+                (event) => event.type === "run.updated" && event.payload.id === original.id,
+              );
+              const run = update?.type === "run.updated" ? update.payload : original;
+              const { workspacePreparationRetry: _cancelled, ...remaining } = run;
+              events.push(
+                yield* makeEvent(command, {
+                  type: "run.updated",
+                  threadId: original.threadId,
+                  runId: original.id,
+                  providerInstanceId: original.providerInstanceId,
+                  occurredAt: now,
+                  payload: {
+                    ...remaining,
+                    ...(cancelledTask !== undefined && command.type === "thread.stop"
+                      ? { status: "cancelled" as const, completedAt: now }
+                      : {}),
+                  },
+                }),
+              );
+            }
+            return { ...planned, events };
+          }),
+        ),
+        Effect.flatMap((planned) =>
+          Effect.gen(function* () {
+            if (command.type === "message.dispatch") return planned;
+            const threadIds = new Set(
+              planned.events
+                .filter((event) => event.type === "run.created")
+                .map((event) => event.threadId),
+            );
+            const events = [...planned.events];
+            for (const threadId of threadIds) {
+              const changed = events.findLast(
+                (event) =>
+                  event.threadId === threadId &&
+                  (event.type === "thread.created" || event.type === "thread.metadata-updated"),
+              );
+              const thread =
+                changed?.type === "thread.created" || changed?.type === "thread.metadata-updated"
+                  ? changed.payload
+                  : yield* projectionStore.getThread(threadId).pipe(mapDispatchError(command));
+              const preparation = thread.emptyWorkspacePreparation;
+              if (thread.emptyWorkspacePreparationClaim === undefined && preparation === undefined)
+                continue;
+              const now = yield* DateTime.now;
+              events.push(
+                yield* makeEvent(command, {
+                  type: "thread.metadata-updated",
+                  threadId,
+                  occurredAt: now,
+                  payload: {
+                    ...thread,
+                    emptyWorkspacePreparationClaim: undefined,
+                    emptyWorkspacePreparation: undefined,
+                    updatedAt: now,
+                  },
                 }),
               );
             }
@@ -20002,6 +20613,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             command.type === "message.incoming-summary.complete" ||
             command.type === "thread.interrupt.unresponsive" ||
             command.type === "thread.stop" ||
+            (command.type === "prepared-run.retry" && command.automaticRetry !== undefined) ||
+            command.type === "prepared-run.acknowledge" ||
+            command.type === "thread.preparation.fail" ||
+            command.type === "thread.preparation.retry" ||
+            command.type === "thread.preparation.finish" ||
+            (command.type === "prepared-run.fail" && command.expectedPendingRetry !== undefined) ||
             command.type === "subagent.stop" ||
             command.type === "thread.archive" ||
             command.type === "thread.guest-share.close" ||
@@ -20082,6 +20699,41 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             command.worktreePath !== command.expectedWorktreePath))
       )
         return yield* metadataOnlyRefusal;
+
+      if (
+        options?.emptyWorkspaceStrategy !== undefined &&
+        (command.type === "thread.create" ||
+          command.type === "remote_delegation.prepare" ||
+          (command.type === "thread.metadata.update" && command.expectedEmpty === true))
+      ) {
+        const threadId = commandThreadId(command);
+        const plannedThread = plan.events.findLast(
+          (event) => event.threadId === threadId && isAppThread(event.payload),
+        )?.payload;
+        if (plannedThread !== undefined && isAppThread(plannedThread)) {
+          const now = yield* DateTime.now;
+          plan = {
+            ...plan,
+            events: [
+              ...plan.events,
+              yield* makeEvent(command, {
+                type: "thread.metadata-updated",
+                threadId,
+                occurredAt: now,
+                payload: {
+                  ...plannedThread,
+                  emptyWorkspacePreparationClaim: {
+                    commandId: CommandId.make(`${command.commandId}:claim`),
+                    requestId: command.commandId,
+                    workspaceStrategy: options.emptyWorkspaceStrategy,
+                  },
+                  updatedAt: now,
+                },
+              }),
+            ],
+          };
+        }
+      }
 
       if (options?.workspaceUserAdopted === true) {
         const threadId = commandThreadId(command);
@@ -21118,10 +21770,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (taskId !== undefined) {
         const runs = child.runs.filter((run) => run.delegatedTaskId === taskId);
         const run = delegatedTaskResultRun(runs, taskId);
+        if (runs.some((row) => row.workspacePreparationRetry?.state === "pending")) return true;
         if (delegatedTaskRoundProgress(child, taskId).state !== "result_available") return true;
         if (run === undefined || delegatedTaskTerminalStatus(run.status) === null) return true;
         return yield* childAwaitsRestartContinuation(runs, run);
       }
+      if (child.runs.some((run) => run.workspacePreparationRetry?.state === "pending")) return true;
       const progress = delegatedTaskProgress(child);
       if (progress.state !== "result_available") return true;
       if (progress.resultRun === undefined) return false;
@@ -21212,7 +21866,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             ? child.thread.forkedFrom?.type === "node" &&
               child.thread.forkedFrom.nodeId === input.taskId &&
               progressAfterTurn(child).state !== "result_available"
-            : delegatedTaskTerminalStatus(runOutcome(followUpRun)) === null ||
+            : followUpRun.workspacePreparationRetry?.state === "pending" ||
+              delegatedTaskTerminalStatus(runOutcome(followUpRun)) === null ||
               delegatedTaskRoundProgress(child, input.taskId).state !== "result_available";
         yield* threadDispatch.withLock(
           command.threadId,

@@ -2,11 +2,23 @@ import {
   ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   type OrchestrationV2Run,
   type OrchestrationV2TurnItem,
+  type OrchestrationV2AppThread,
 } from "@t3tools/contracts";
 
 import type { ThreadStructureTurnItem } from "./models.ts";
 
 const WORKSPACE_PREPARATION_INPUT = "Preparing workspace";
+
+export function emptyWorkspacePreparationRetryFailureId(
+  thread: Pick<OrchestrationV2AppThread, "emptyWorkspacePreparation" | "worktreePath">,
+) {
+  const preparation = thread.emptyWorkspacePreparation;
+  return thread.worktreePath === null &&
+    preparation !== undefined &&
+    preparation.state !== "claimed"
+    ? preparation.failureCommandId
+    : null;
+}
 
 export function turnItemIsWorkspacePreparation(item: OrchestrationV2TurnItem): boolean {
   return (

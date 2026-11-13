@@ -209,7 +209,11 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
   const { workEntry, workspaceRoot, displayLabel } = props;
   const ctx = use(TimelineRowCtx);
   const { threadRef, onImageExpand, timestampFormat } = ctx;
-  const { retryableWorkspacePreparationRunIds, onRetryWorkspacePreparation } = ctx;
+  const {
+    retryableWorkspacePreparationRunIds,
+    retryableEmptyWorkspacePreparationFailureId,
+    onRetryWorkspacePreparation,
+  } = ctx;
   const threadTarget = useThreadReadTarget(workEntry, ctx.activeThreadEnvironmentId);
   const createdThread =
     workEntry.projectedItem?.item.type === "thread_created"
@@ -262,6 +266,12 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
       failureItem.failure.code === ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE
         ? failureItem.runId
         : null;
+    const retryEmptyFailureId =
+      failureItem.runId === null &&
+      retryableEmptyWorkspacePreparationFailureId != null &&
+      failureItem.id === `turn-item:empty-workspace:${retryableEmptyWorkspacePreparationFailureId}`
+        ? retryableEmptyWorkspacePreparationFailureId
+        : undefined;
     return (
       <WorkLogRow
         data-v2-item-type="error"
@@ -292,13 +302,14 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
             {failureItem.failure.message}
           </p>
         ) : null}
-        {retryRunId !== null && onRetryWorkspacePreparation ? (
+        {(retryRunId !== null || retryEmptyFailureId !== undefined) &&
+        onRetryWorkspacePreparation ? (
           <div className="ms-7 pb-1">
             <Button
               type="button"
               size="xs"
               variant="outline"
-              onClick={() => onRetryWorkspacePreparation(retryRunId)}
+              onClick={() => onRetryWorkspacePreparation(retryRunId, retryEmptyFailureId)}
             >
               <RotateCcwIcon aria-hidden />
               Retry

@@ -67,6 +67,7 @@ import { ChatBannerLane } from "./chat/ChatBannerLane";
 import * as Schema from "effect/Schema";
 import {
   AuthOrchestrationOperateScope,
+  ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   AuthSourceControlWriteScope,
   AuthPreviewOperateScope,
   AuthTerminalOperateScope,
@@ -473,6 +474,9 @@ export default function ChatView(props: ChatViewProps) {
     {
       reportFailure: false,
     },
+  );
+  const acknowledgeWorkspacePreparation = useOrchestrationCommand(
+    threadEnvironment.acknowledgeWorkspacePreparation,
   );
   const updateThreadMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
@@ -977,11 +981,35 @@ export default function ChatView(props: ChatViewProps) {
   const threadError = isServerThread
     ? (localServerError ?? serverRuntime?.lastError ?? null)
     : localDraftError;
-  const threadErrorBannerKey = getThreadErrorBannerKey(routeThreadKey, threadError);
+  const pendingPreparationFailure =
+    localServerError === null &&
+    serverRuntime?.lastErrorCode === ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE
+      ? serverProjection?.runs.find(
+          (run) =>
+            run.id === serverLatestRun?.runId &&
+            (run.workspacePreparationRetry?.state === "pending" ||
+              run.workspacePreparationRetry?.state === "acknowledged"),
+        )
+      : undefined;
+  const emptyPreparation = serverProjection?.thread.emptyWorkspacePreparation;
+  const preparationRetry =
+    pendingPreparationFailure?.workspacePreparationRetry ??
+    (emptyPreparation?.state === "pending" || emptyPreparation?.state === "acknowledged"
+      ? emptyPreparation
+      : undefined);
+  const threadErrorKeyScope = preparationRetry
+    ? `${routeThreadKey}\u0000${preparationRetry.failureCommandId}`
+    : routeThreadKey;
+  const threadErrorBannerKey = getThreadErrorBannerKey(threadErrorKeyScope, threadError);
   const visibleThreadError = shouldShowThreadErrorBanner(
-    routeThreadKey,
+    threadErrorKeyScope,
     threadError,
     isThreadErrorBannerDismissedForSession(threadErrorBannerKey),
+    localServerError === null && preparationRetry?.state === "acknowledged"
+      ? pendingPreparationFailure !== undefined
+        ? (threadError ?? undefined)
+        : emptyPreparation?.failure.message
+      : undefined,
   )
     ? threadError
     : null;
@@ -1620,6 +1648,7 @@ export default function ChatView(props: ChatViewProps) {
     isPreparingWorktree,
     blocksSend: worktreeSetupBlocksSend,
     retryableRunIds: retryableWorkspacePreparationRunIds,
+    retryableEmptyFailureId: retryableEmptyWorkspacePreparationFailureId,
     begin: beginWorktreeSetup,
     cancel: cancelWorktreeSetup,
     retryPreparation: onRetryWorkspacePreparationStable,
@@ -3496,6 +3525,21 @@ export default function ChatView(props: ChatViewProps) {
               }
               threadErrorBannerKey={threadErrorBannerKey}
               setThreadError={setThreadError}
+              onAcknowledgePreparation={
+                preparationRetry?.state === "pending"
+                  ? async () => {
+                      const result = await acknowledgeWorkspacePreparation({
+                        environmentId: activeThread.environmentId,
+                        input: {
+                          threadId: activeThread.id,
+                          runId: pendingPreparationFailure?.id ?? null,
+                          failureCommandId: preparationRetry.failureCommandId,
+                        },
+                      });
+                      return result._tag === "Success";
+                    }
+                  : undefined
+              }
               setThreadErrorBannerDismissTick={setThreadErrorBannerDismissTick}
             />
             <div
@@ -3543,6 +3587,9 @@ export default function ChatView(props: ChatViewProps) {
                   worktreeSetup={worktreeSetup}
                   onCancelWorktreeSetup={onCancelWorktreeSetupStable}
                   retryableWorkspacePreparationRunIds={retryableWorkspacePreparationRunIds}
+                  retryableEmptyWorkspacePreparationFailureId={
+                    retryableEmptyWorkspacePreparationFailureId
+                  }
                   onRetryWorkspacePreparation={onRetryWorkspacePreparationStable}
                   {...(draftId
                     ? { onWorktreeSetupWorkLocally: onWorktreeSetupWorkLocallyStable }

@@ -27,6 +27,7 @@ export function ChatBannerLane(props: {
   threadErrorCode: string | null;
   threadErrorBannerKey: string | null;
   setThreadError: (threadId: ThreadId | null, error: string | null) => void;
+  onAcknowledgePreparation?: (() => Promise<boolean>) | undefined;
   setThreadErrorBannerDismissTick: Dispatch<SetStateAction<number>>;
 }) {
   const {
@@ -39,6 +40,7 @@ export function ChatBannerLane(props: {
     threadErrorCode,
     threadErrorBannerKey,
     setThreadError,
+    onAcknowledgePreparation,
     setThreadErrorBannerDismissTick,
   } = props;
   return (
@@ -54,9 +56,13 @@ export function ChatBannerLane(props: {
         errorClass={threadErrorClass}
         errorCode={threadErrorCode}
         onDismiss={() => {
-          setThreadError(threadId, null);
-          dismissThreadErrorBannerForSession(threadErrorBannerKey);
-          setThreadErrorBannerDismissTick((tick) => tick + 1);
+          void (async () => {
+            if (onAcknowledgePreparation !== undefined && !(await onAcknowledgePreparation()))
+              return;
+            setThreadError(threadId, null);
+            dismissThreadErrorBannerForSession(threadErrorBannerKey);
+            setThreadErrorBannerDismissTick((tick) => tick + 1);
+          })();
         }}
       />
     </div>

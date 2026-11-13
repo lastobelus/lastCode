@@ -538,7 +538,12 @@ export const layerProduction = Layer.mergeAll(
   layerThreadWaitProvided,
   layerActionResumeProvided,
   layerWorktreeCleanupWorkerProvided,
-  layer.pipe(Layer.provide(Layer.merge(layerProjectService, EnvironmentPauseStore.layer))),
+  // The effect executor runs delayed workspace preparation retries through thread launches.
+  layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(layerProjectService, EnvironmentPauseStore.layer, layerThreadLaunchProvided),
+    ),
+  ),
   layerProjectService,
   layerManagedProjectFoldersProvided,
   layerThreadLaunchProvided,

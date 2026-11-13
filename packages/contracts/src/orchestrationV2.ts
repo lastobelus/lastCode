@@ -589,6 +589,23 @@ export const RemoteLaunchIntent = Schema.Struct({
 export type RemoteLaunchIntent = typeof RemoteLaunchIntent.Type;
 
 export const OrchestrationV2AppThread = Schema.Struct({
+  emptyWorkspacePreparationClaim: Schema.optional(
+    Schema.Struct({
+      commandId: CommandId,
+      requestId: CommandId,
+      workspaceStrategy: Schema.suspend(() => OrchestrationV2ThreadLaunchWorkspaceStrategy),
+    }),
+  ),
+  emptyWorkspacePreparation: Schema.optional(
+    Schema.Struct({
+      requestId: CommandId,
+      workspaceStrategy: Schema.suspend(() => OrchestrationV2ThreadLaunchWorkspaceStrategy),
+      failureCommandId: CommandId,
+      resetAt: Schema.NullOr(IsoDateTime),
+      state: Schema.Literals(["pending", "claimed", "acknowledged", "failed"]),
+      failure: Schema.suspend(() => OrchestrationV2ProviderFailure),
+    }),
+  ),
   recovery: Schema.optional(OrchestrationV2ThreadRecovery),
   ...OrchestrationV2CreationFields,
   /** Immutable creator conversation, separate from fork/subagent ownership and sidebar placement. */
@@ -891,6 +908,15 @@ export const OrchestrationV2Run = Schema.Struct({
   ),
   delegatedCompletion: Schema.optional(OrchestrationV2DelegatedCompletionCohort),
   workspacePreparation: Schema.optional(OrchestrationV2ThreadLaunchWorkspaceStrategy),
+  // Reserves the initial fetch pair; only an explicit Retry clears it.
+  workspacePreparationClaim: Schema.optional(CommandId),
+  workspacePreparationRetry: Schema.optional(
+    Schema.Struct({
+      resetAt: IsoDateTime,
+      failureCommandId: CommandId,
+      state: Schema.Literals(["pending", "claimed", "acknowledged"]),
+    }),
+  ),
   /** Starts a new provider conversation; earlier runs stay visible but never reach the provider. */
   freshContext: Schema.optional(Schema.Boolean),
 });
@@ -3692,12 +3718,31 @@ export const OrchestrationV2Command = Schema.Union([
     threadId: ThreadId,
     runId: RunId,
     failure: OrchestrationV2ProviderFailure,
+    automaticRetryAt: Schema.optional(IsoDateTime),
+    expectedPendingRetry: Schema.optional(CommandId),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("prepared-run.acknowledge"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    runId: Schema.NullOr(RunId),
+    failureCommandId: CommandId,
   }),
   Schema.Struct({
     type: Schema.Literal("prepared-run.retry"),
     commandId: CommandId,
     threadId: ThreadId,
     runId: RunId,
+    automaticRetry: Schema.optional(
+      Schema.Struct({ resetAt: IsoDateTime, failureCommandId: CommandId }),
+    ),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.preparation.retry"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    failureCommandId: CommandId,
+    automaticRetry: Schema.optional(Schema.Literal(true)),
   }),
   Schema.Struct({
     type: Schema.Literal("subagent.stop"),
@@ -3874,6 +3919,31 @@ export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
 
 // Excluded from dispatchCommand so only the server can send these.
 const OrchestrationV2InternalCommand = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("workspace-preparation.claim"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    runId: Schema.NullOr(RunId),
+    requestId: CommandId,
+    workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.preparation.fail"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: CommandId,
+    workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy,
+    claimCommandId: CommandId,
+    resetAt: Schema.NullOr(IsoDateTime),
+    failure: OrchestrationV2ProviderFailure,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.preparation.finish"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    failureCommandId: CommandId,
+    failure: Schema.optional(OrchestrationV2ProviderFailure),
+  }),
   // Guest share commands the server issues after checking T3 Connect and the guest token.
   Schema.Struct({
     type: Schema.Literal("thread.guest-share.open"),
@@ -3926,6 +3996,7 @@ const OrchestrationV2InternalCommand = Schema.Union([
     threadId: ThreadId,
     requestId: CommandId,
     runId: Schema.NullOr(RunId),
+    emptyClaimCommandId: Schema.optional(CommandId),
     expectedBranch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
     expectedWorktreePath: Schema.NullOr(TrimmedNonEmptyString),
     worktreePath: Schema.NullOr(TrimmedNonEmptyString),
