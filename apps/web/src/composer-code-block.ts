@@ -29,11 +29,6 @@ function indentLines(lines: ReadonlyArray<string>, direction: "in" | "out"): str
   });
 }
 
-export function selectionInOneCodeBlock(state: EditorState): boolean {
-  const { $from, $to } = state.selection;
-  return $from.parent.type.spec.code === true && $from.sameParent($to);
-}
-
 function codeBlockRange(
   state: EditorState,
 ): { readonly from: number; readonly to: number; readonly text: string } | null {
