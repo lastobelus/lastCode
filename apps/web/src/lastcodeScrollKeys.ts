@@ -22,8 +22,9 @@ const ARROW_STEP_PX = 40;
 const AREA_SELECTOR = "[data-workspace-area]";
 const TERMINAL_SELECTOR = "[data-terminal-owner]";
 const LAYER_SELECTOR = `${TYPE_TO_FOCUS_FLOATING_LAYER_SELECTOR},[data-slot="popover-popup"],[data-slot="preview-card-popup"],[role="dialog"]`;
-// Focus that consumes arrows wherever the pointer is: open suggestion lists and the terminal.
-const FOCUS_OWNS_KEYS_SELECTOR = `[aria-activedescendant],[role="combobox"][aria-expanded="true"],${TERMINAL_SELECTOR}`;
+// Focus that consumes keys wherever the pointer is: open suggestion lists, the terminal and
+// shortcut recorders.
+const FOCUS_OWNS_KEYS_SELECTOR = `[aria-activedescendant],[role="combobox"][aria-expanded="true"],[data-keybinding-capture],${TERMINAL_SELECTOR}`;
 // Focus that consumes arrows while the pointer stays over its own pane.
 const PANE_OWNS_KEYS_SELECTOR = `${TYPE_TO_FOCUS_EDITABLE_SELECTOR},[role="listbox"],[role="menu"],[role="menubar"],[role="tree"],[role="grid"],[role="tablist"],[role="radiogroup"],[role="slider"],[role="spinbutton"]`;
 const MODIFIER_KEYS = new Set(["Shift", "Control", "Alt", "Meta", "CapsLock", "Fn", "OS"]);
@@ -71,7 +72,8 @@ function parentAcrossShadow(element: Element): Element | null {
   return root instanceof ShadowRoot ? root.host : null;
 }
 
-/** Scrollers from the hovered element outward, stopping at a floating layer's edge. */
+/** Scrollers from the hovered element outward, stopping where the wheel would: a floating layer's
+ * edge or a scroller that contains its overscroll. */
 function scrollersFrom(start: Element): HTMLElement[] {
   // The sidebar's resize rail overlaps the list edge but sits outside its scroll ancestry.
   const rail = start.closest("[data-sidebar='rail']");
@@ -85,7 +87,10 @@ function scrollersFrom(start: Element): HTMLElement[] {
     start;
   const scrollers: HTMLElement[] = [];
   for (let element: Element | null = origin; element; element = parentAcrossShadow(element)) {
-    if (isScrollContainer(element)) scrollers.push(element);
+    if (isScrollContainer(element)) {
+      scrollers.push(element);
+      if (getComputedStyle(element).overscrollBehaviorY !== "auto") break;
+    }
     if (element.matches(LAYER_SELECTOR)) break;
   }
   return scrollers;
@@ -200,10 +205,12 @@ export function startLastCodeScrollKeys(doc: Document = document): () => void {
       return;
     }
 
+    const target = chain.find((scroller) => canScroll(scroller, direction));
+    // With nothing to scroll here, focus inside this pane keeps the key (row and section arrows).
+    if (!target && focused && chain.some((scroller) => scroller.contains(focused))) return;
     // At the end of every scroller under the pointer the key stops; it must not move another pane.
     event.preventDefault();
     event.stopPropagation();
-    const target = chain.find((scroller) => canScroll(scroller, direction));
     if (target) scrollByKey(target, key);
   };
   doc.addEventListener("pointermove", onPointerMove, { passive: true });

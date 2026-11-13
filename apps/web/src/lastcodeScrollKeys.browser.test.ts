@@ -179,6 +179,12 @@ describe("LastCode scroll keys", () => {
     dom.get("menu-item").focus();
     dom.pointAt(sidebar);
     expect(dom.press("ArrowDown").defaultPrevented).toBe(false);
+    const recorder = document.createElement("input");
+    recorder.dataset.keybindingCapture = "";
+    dom.get("settings-area").append(recorder);
+    recorder.focus();
+    dom.pointAt(sidebar);
+    expect(dom.press("PageDown").defaultPrevented).toBe(false);
     dom.get("timeline").focus();
     dom.pointAt(sidebar);
     for (const options of [
@@ -233,6 +239,17 @@ describe("LastCode scroll keys", () => {
     sidebar.scrollTop = sidebar.scrollHeight;
     dom.pointAt(sidebar);
     expect(dom.press("ArrowDown").defaultPrevented).toBe(true);
+    // With nothing left to scroll, a focused row in that pane keeps its own arrow navigation.
+    dom.get("sidebar-row").focus({ preventScroll: true });
+    dom.pointAt(sidebar);
+    expect(dom.press("ArrowDown").defaultPrevented).toBe(false);
+    dom.get("timeline").focus();
+    // A scroller that contains its overscroll stops the key, like the wheel.
+    sidebar.scrollTop = 0;
+    inner.style.overscrollBehaviorY = "contain";
+    dom.pointAt(inner);
+    expect(dom.press("ArrowDown").defaultPrevented).toBe(true);
+    expect(sidebar.scrollTop).toBe(0);
     card.scrollTop = card.scrollHeight;
     dom.pointAt(card);
     expect(dom.press("PageDown").defaultPrevented).toBe(true);
