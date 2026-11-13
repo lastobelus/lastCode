@@ -590,6 +590,44 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           return { env: captured, vpArgs, tailscaleCalls };
         });
 
+      it.effect("defaults T3CODE_BUNDLED_DEV=1 for a shared run", () =>
+        Effect.gen(function* () {
+          const { env } = yield* shareSpawned({ ambientBundledDev: undefined });
+          assert.equal(env?.T3CODE_BUNDLED_DEV, "1");
+          assert.equal(env?.T3CODE_WEB_BIND_HOST, "127.0.0.1");
+        }),
+      );
+
+      it.effect("leaves T3CODE_BUNDLED_DEV unset without --share", () =>
+        Effect.gen(function* () {
+          let captured: Record<string, string | undefined> | undefined;
+          const spawnerLayer = Layer.succeed(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make((command) => {
+              captured = (
+                command as {
+                  readonly options?: { readonly env?: Record<string, string | undefined> };
+                }
+              ).options?.env;
+              return Effect.succeed(mockProcess(0));
+            }),
+          );
+
+          yield* runDevRunnerWithInput({
+            ...devServerInput,
+            mode: "dev",
+            port: undefined,
+          }).pipe(
+            Effect.provide(Layer.mergeAll(emptyConfigLayer, netServiceLayer, spawnerLayer)),
+            Effect.provideService(HostProcess.Platform, "linux"),
+            Effect.provideService(HostProcess.Environment, {}),
+          );
+
+          assert.equal(captured?.T3CODE_BUNDLED_DEV, undefined);
+          assert.equal(captured?.T3CODE_WEB_BIND_HOST, "");
+        }),
+      );
+
       it.effect("keeps an explicit T3CODE_BUNDLED_DEV=0 opt-out", () =>
         Effect.gen(function* () {
           const { env } = yield* shareSpawned({ ambientBundledDev: "0" });
@@ -636,7 +674,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           assert.notInclude(vpArgs, "dev:built");
           assert.equal(env?.T3CODE_BUNDLED_DEV, "1");
           const serve = tailscaleCalls.find((args) => args.includes("--bg"));
-          assert.equal(serve?.at(-1), `http://localhost:${env?.PORT}`);
+          assert.equal(serve?.at(-1), `http://127.0.0.1:${env?.PORT}`);
         }),
       );
     });

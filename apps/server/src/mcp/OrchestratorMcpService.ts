@@ -1,3 +1,4 @@
+import { ThreadReadAuthorization } from "../orchestration-v2/ThreadReadAuthorization.ts";
 import {
   CommandId,
   type RunId,
@@ -70,6 +71,7 @@ import { getProviderOptionCurrentValue, withLegacyUltracodeEffort } from "@t3too
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
+import * as ThreadReadBroker from "./ThreadReadBroker.ts";
 import {
   normalizeThreadPullRequestKey,
   visibleThreadPullRequests,
@@ -206,6 +208,10 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     input: OrchestratorMcpThreadListInput,
   ) => Effect.Effect<OrchestratorMcpThreadListResult, OrchestratorMcpFailure>;
+  readonly readThreadLocal: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpThreadReadInput,
+  ) => Effect.Effect<OrchestratorMcpThreadReadResult, OrchestratorMcpFailure>;
   readonly readThread: (
     scope: McpInvocationScope,
     input: OrchestratorMcpThreadReadInput,
@@ -859,6 +865,7 @@ function listItemFromShell(
   return {
     threadId: shell.id,
     projectId: shell.projectId,
+    environmentId: scope.environmentId,
     title: shell.title,
     link: threadLinkFor(scope, shell.id, shell.title),
     createdBy: shell.createdBy,
@@ -894,6 +901,7 @@ function threadDetail(
   const active = ThreadManagementService.latestActiveRun(projection);
   return {
     threadId: projection.thread.id,
+    environmentId: scope.environmentId,
     projectId: projection.thread.projectId,
     title: projection.thread.title,
     link: threadLinkFor(scope, projection.thread.id, projection.thread.title),
@@ -1166,6 +1174,7 @@ function timelineItemsWithinBudget(
 
 const make = Effect.gen(function* () {
   const random = yield* SecureRandom.SecureRandom;
+  const threadReadBroker = yield* ThreadReadBroker.ThreadReadBroker;
   const threadManagement = yield* ThreadManagementService.ThreadManagementService;
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
   const providerAdapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
@@ -1264,6 +1273,20 @@ const make = Effect.gen(function* () {
       },
     } as const;
   });
+
+  const resolveReadAuthority = (
+    source: Pick<OrchestrationV2ThreadProjection, "thread" | "runs">,
+    run: OrchestrationV2Run | undefined,
+  ) =>
+    Effect.gen(function* () {
+      const { contextTransfers } = yield* loadThreadRecords(source.thread.id, ["contextTransfers"]);
+      return yield* ThreadReadBroker.resolveAuthority(
+        threadReadBroker,
+        { ...source, contextTransfers },
+        run,
+        (threadId) => loadThreadRecords(threadId, ["runs", "contextTransfers"]),
+      );
+    });
 
   const loadThreadCaller = Effect.fn("OrchestratorMcpService.loadThreadCaller")(function* (
     scope: McpInvocationScope,
@@ -2108,6 +2131,136 @@ const make = Effect.gen(function* () {
       yield* resolveInteractionMode(limits.interactionMode, modes.interactionMode);
     }
     return task;
+  });
+
+  const readThreadLocal: OrchestratorMcpService["Service"]["readThreadLocal"] = Effect.fn(
+    "OrchestratorMcpService.readThreadLocal",
+  )(function* (scope, input) {
+    if (input.environmentId !== undefined && input.environmentId !== scope.environmentId) {
+      return yield* failure(
+        "thread_not_found",
+        "The requested thread belongs to another environment.",
+      );
+    }
+    const { parent, target, shell } = yield* loadReadableThread(scope, input.threadId);
+    const view = input.view ?? "messages";
+    const limit = input.limit ?? DEFAULT_THREAD_READ_LIMIT;
+    const maxChars = input.maxCharsPerItem ?? DEFAULT_THREAD_ITEM_MAX_CHARS;
+    // Client callers (the CLI, older linked environments) page forward from a cursorless read.
+    const newestFirst =
+      input.beforePosition !== undefined ||
+      (input.afterPosition === undefined && scope.thread !== undefined);
+    const timeline = yield* threadManagement
+      .getTimelinePage(input.threadId, {
+        ...(input.afterPosition === undefined ? {} : { afterPosition: input.afterPosition }),
+        ...(newestFirst
+          ? { beforePosition: input.beforePosition ?? Number.POSITIVE_INFINITY }
+          : {}),
+        limit,
+        view,
+        ...(input.itemId === undefined ? {} : { itemId: input.itemId }),
+      })
+      .pipe(Effect.mapError(threadManagementFailure));
+    const messageIdsByThread = new Map<ThreadId, Array<MessageId>>();
+    for (const row of timeline.items) {
+      if (row.item.type !== "user_message" && row.item.type !== "assistant_message") continue;
+      const ids = messageIdsByThread.get(row.sourceThreadId) ?? [];
+      ids.push(row.item.messageId);
+      messageIdsByThread.set(row.sourceThreadId, ids);
+    }
+    const sourceMessages = yield* Effect.forEach(
+      [...messageIdsByThread],
+      ([threadId, messageIds]) =>
+        threadManagement.getThreadRecords(threadId, ["messages"], { messageIds }).pipe(
+          Effect.map((records) => [threadId, records.messages] as const),
+          Effect.mapError(threadManagementFailure),
+        ),
+      { concurrency: 1 },
+    );
+    const messagesByThreadId = new Map(sourceMessages);
+    const thread = threadDetail(
+      scope,
+      target,
+      timeline.totalItems,
+      shell,
+      yield* Clock.currentTimeMillis,
+      input.afterPosition === undefined &&
+        input.beforePosition === undefined &&
+        input.itemId === undefined,
+    );
+    const recentRuns = target.runs
+      .toSorted((left, right) => right.ordinal - left.ordinal)
+      .slice(0, input.runLimit ?? DEFAULT_THREAD_RUN_LIMIT)
+      .map((run) => threadRun(target, run));
+    const { items, start } = timelineItemsWithinBudget(
+      { thread, recentRuns, nextPosition: null, hasMore: false, earlierPosition: null },
+      timeline.items.map((row) => ({
+        row,
+        maxChars,
+        messagesByThreadId,
+        ...(input.itemId === undefined ? {} : { textOffset: input.textOffset ?? 0 }),
+      })),
+      newestFirst,
+    );
+    const page = timeline.items.slice(start, start + items.length);
+    const returnedRunIds = new Set(
+      page.filter((row) => row.sourceThreadId === target.thread.id).map((row) => row.item.runId),
+    );
+    const tasks =
+      parent === undefined
+        ? []
+        : directAppOwnedChildTasks(
+            {
+              thread: parent.thread,
+              subagents: yield* loadTasks(
+                parent.thread.id,
+                directChildTaskIds(target, returnedRunIds),
+              ),
+            },
+            target,
+            returnedRunIds,
+          );
+    // A read past the end of an item's text shows the agent nothing to acknowledge.
+    const readPastEnd = (input.textOffset ?? 0) > 0 && items.every((item) => !item.text);
+    if (parent !== undefined && scope.thread !== undefined && tasks.length > 0 && !readPastEnd) {
+      for (const task of tasks) {
+        const transfer = taskResultTransfer(parent.thread.id, target, task);
+        const resultRunId = transfer?.sourcePoint.runId ?? delegatedTaskRun(target, task)?.id;
+        const resultRunIds = resultRunId === undefined ? [] : [resultRunId];
+        const resultRecords = yield* threadManagement
+          .getThreadRecords(target.thread.id, ["messages", "turnItems"], {
+            messageRoles: ["assistant"],
+            messageRunIds: resultRunIds,
+            turnItemRunIds: resultRunIds,
+            turnItemTypes: ["assistant_message", "error"],
+          })
+          .pipe(Effect.mapError(threadManagementFailure));
+        if (
+          pageIncludesTerminalTaskResult({
+            parentThreadId: parent.thread.id,
+            items,
+            task,
+            target: { ...target, ...resultRecords },
+          })
+        ) {
+          yield* readTask(
+            scope as McpThreadInvocationScope,
+            task.id,
+            false,
+            true,
+            "thread-read-acknowledge",
+          );
+        }
+      }
+    }
+    return {
+      thread,
+      recentRuns,
+      items,
+      nextPosition: items.at(-1)?.position ?? null,
+      hasMore: timeline.hasMore || (!newestFirst && items.length < timeline.items.length),
+      earlierPosition: timeline.hasEarlier || start > 0 ? (items[0]?.position ?? null) : null,
+    } satisfies OrchestratorMcpThreadReadResult;
   });
 
   return OrchestratorMcpService.of({
@@ -2960,59 +3113,67 @@ const make = Effect.gen(function* () {
                 title: request.title,
                 index,
               });
-              yield* threadManagement
-                .dispatch({
-                  type: "thread.create",
-                  createdBy: "agent",
-                  creationSource: "mcp",
-                  commandId,
-                  threadId,
-                  projectId: parent.thread.projectId,
-                  title,
-                  modelSelection: target.modelSelection,
-                  runtimeMode,
-                  interactionMode,
-                  branch: parent.thread.branch,
-                  worktreePath: parent.thread.worktreePath,
-                  ...(parent.thread.linkOrigin === undefined
-                    ? {}
-                    : { linkOrigin: parent.thread.linkOrigin }),
-                })
-                .pipe(
-                  Effect.mapError((error) =>
-                    failure(
-                      "orchestration_error",
-                      `Unable to create thread ${index + 1}: ${errorMessage(error)}`,
-                    ),
-                  ),
-                );
-              // A receipt can appear after target resolution; use the committed thread's selection.
-              const resolvedModelSelection = (yield* threadManagement
-                .getThreadRecords(threadId, [])
-                .pipe(Effect.mapError(threadManagementFailure))).thread.modelSelection;
-              if (request.prompt !== undefined) {
+              const claim = {
+                type: "thread.create",
+                createdBy: "agent",
+                creationSource: "mcp",
+                commandId,
+                threadId,
+                projectId: parent.thread.projectId,
+                title,
+                modelSelection: target.modelSelection,
+                runtimeMode,
+                interactionMode,
+                branch: parent.thread.branch,
+                worktreePath: parent.thread.worktreePath,
+                ...(parent.thread.linkOrigin === undefined
+                  ? {}
+                  : { linkOrigin: parent.thread.linkOrigin }),
+              } as const;
+              if (request.prompt === undefined) {
                 yield* threadManagement
-                  .dispatch({
-                    type: "message.dispatch",
-                    createdBy: "agent",
-                    creationSource: "mcp",
-                    commandId: stableCommandId({
-                      scope,
-                      requestKey: key,
-                      operation: "dispatch-thread",
-                      index,
-                    }),
-                    threadId,
-                    senderThreadId: scope.thread.threadId,
-                    messageId: stableMessageId({
-                      scope,
-                      requestKey: key,
-                      index,
-                    }),
-                    text: request.prompt,
-                    attachments: [],
-                    modelSelection: resolvedModelSelection,
-                    dispatchMode: { type: "start_immediately" },
+                  .dispatch(claim)
+                  .pipe(
+                    Effect.mapError((error) =>
+                      failure(
+                        "orchestration_error",
+                        `Unable to create thread ${index + 1}: ${errorMessage(error)}`,
+                      ),
+                    ),
+                  );
+              } else {
+                const messageId = stableMessageId({ scope, requestKey: key, index });
+                yield* threadManagement
+                  .dispatchLaunch({
+                    claim,
+                    beforeInitialMessage: Effect.gen(function* () {
+                      const authority = yield* resolveReadAuthority(parent, parentRun);
+                      if (authority === undefined) return;
+                      const existing = yield* loadThreadRecords(threadId, ["runs"]);
+                      yield* threadReadBroker.authorize({
+                        threadId,
+                        messageId,
+                        sessionId: authority.sessionId,
+                        alreadyStored: existing.runs.some((run) => run.userMessageId === messageId),
+                      });
+                    }).pipe(Effect.orDie),
+                    initialMessage: {
+                      type: "message.dispatch",
+                      createdBy: "agent",
+                      creationSource: "mcp",
+                      commandId: stableCommandId({
+                        scope,
+                        requestKey: key,
+                        operation: "dispatch-thread",
+                        index,
+                      }),
+                      threadId,
+                      senderThreadId: scope.thread.threadId,
+                      messageId,
+                      text: request.prompt,
+                      attachments: [],
+                      dispatchMode: { type: "start_immediately" },
+                    },
                   })
                   .pipe(
                     Effect.mapError((error) =>
@@ -3020,11 +3181,14 @@ const make = Effect.gen(function* () {
                         ? threadManagementFailure(error)
                         : failure(
                             "orchestration_error",
-                            `Unable to start thread ${index + 1}: ${errorMessage(error)}`,
+                            `Unable to ${"commandId" in error && error.commandId === claim.commandId ? "create" : "start"} thread ${index + 1}: ${errorMessage(error)}`,
                           ),
                     ),
                   );
               }
+              const resolvedModelSelection = (yield* threadManagement
+                .getThreadRecords(threadId, [])
+                .pipe(Effect.mapError(threadManagementFailure))).thread.modelSelection;
               const projection = yield* loadThreadRecords(threadId, ["runs"]);
               const run = projection.runs.at(-1);
               yield* threadManagement
@@ -3124,126 +3288,30 @@ const make = Effect.gen(function* () {
         total: filtered.length,
       } satisfies OrchestratorMcpThreadListResult;
     }),
+    readThreadLocal,
     readThread: Effect.fn("OrchestratorMcpService.readThread")(function* (scope, input) {
-      const { parent, target, shell } = yield* loadReadableThread(scope, input.threadId);
-      const view = input.view ?? "messages";
-      const limit = input.limit ?? DEFAULT_THREAD_READ_LIMIT;
-      const maxChars = input.maxCharsPerItem ?? DEFAULT_THREAD_ITEM_MAX_CHARS;
-      // Client callers (the CLI, older linked environments) page forward from a cursorless read.
-      const newestFirst =
-        input.beforePosition !== undefined ||
-        (input.afterPosition === undefined && scope.thread !== undefined);
-      const timeline = yield* threadManagement
-        .getTimelinePage(input.threadId, {
-          ...(input.afterPosition === undefined ? {} : { afterPosition: input.afterPosition }),
-          ...(newestFirst
-            ? { beforePosition: input.beforePosition ?? Number.POSITIVE_INFINITY }
-            : {}),
-          limit,
-          view,
-          ...(input.itemId === undefined ? {} : { itemId: input.itemId }),
-        })
-        .pipe(Effect.mapError(threadManagementFailure));
-      const messageIdsByThread = new Map<ThreadId, Array<MessageId>>();
-      for (const row of timeline.items) {
-        if (row.item.type !== "user_message" && row.item.type !== "assistant_message") continue;
-        const ids = messageIdsByThread.get(row.sourceThreadId) ?? [];
-        ids.push(row.item.messageId);
-        messageIdsByThread.set(row.sourceThreadId, ids);
-      }
-      const sourceMessages = yield* Effect.forEach(
-        [...messageIdsByThread],
-        ([threadId, messageIds]) =>
-          threadManagement.getThreadRecords(threadId, ["messages"], { messageIds }).pipe(
-            Effect.map((records) => [threadId, records.messages] as const),
-            Effect.mapError(threadManagementFailure),
-          ),
-        { concurrency: 1 },
+      // Validate the caller before allowing a miss to leave this environment.
+      const { parent } = yield* loadCaller(scope, ["runs"]);
+      return yield* readThreadLocal(scope, input).pipe(
+        Effect.catchIf(
+          (error) => error.code === "thread_not_found",
+          (error) =>
+            Effect.gen(function* () {
+              if (parent === undefined) return yield* error;
+              const run =
+                ThreadManagementService.latestActiveRun(parent) ??
+                ThreadManagementService.latestRun(parent);
+              const authority = yield* resolveReadAuthority(parent, run);
+              if (authority === undefined) {
+                return yield* failure(
+                  "environment_unavailable",
+                  "This run has no connected client authorized to read other environments. Send a new message from the client connected to those environments and retry.",
+                );
+              }
+              return yield* threadReadBroker.read(authority.threadId, authority.messageId, input);
+            }),
+        ),
       );
-      const messagesByThreadId = new Map(sourceMessages);
-      const thread = threadDetail(
-        scope,
-        target,
-        timeline.totalItems,
-        shell,
-        yield* Clock.currentTimeMillis,
-        input.afterPosition === undefined &&
-          input.beforePosition === undefined &&
-          input.itemId === undefined,
-      );
-      const recentRuns = target.runs
-        .toSorted((left, right) => right.ordinal - left.ordinal)
-        .slice(0, input.runLimit ?? DEFAULT_THREAD_RUN_LIMIT)
-        .map((run) => threadRun(target, run));
-      const { items, start } = timelineItemsWithinBudget(
-        { thread, recentRuns, nextPosition: null, hasMore: false, earlierPosition: null },
-        timeline.items.map((row) => ({
-          row,
-          maxChars,
-          messagesByThreadId,
-          ...(input.itemId === undefined ? {} : { textOffset: input.textOffset ?? 0 }),
-        })),
-        newestFirst,
-      );
-      const page = timeline.items.slice(start, start + items.length);
-      const returnedRunIds = new Set(
-        page.filter((row) => row.sourceThreadId === target.thread.id).map((row) => row.item.runId),
-      );
-      const tasks =
-        parent === undefined
-          ? []
-          : directAppOwnedChildTasks(
-              {
-                thread: parent.thread,
-                subagents: yield* loadTasks(
-                  parent.thread.id,
-                  directChildTaskIds(target, returnedRunIds),
-                ),
-              },
-              target,
-              returnedRunIds,
-            );
-      // A read past the end of an item's text shows the agent nothing to acknowledge.
-      const readPastEnd = (input.textOffset ?? 0) > 0 && items.every((item) => !item.text);
-      if (parent !== undefined && scope.thread !== undefined && tasks.length > 0 && !readPastEnd) {
-        for (const task of tasks) {
-          const transfer = taskResultTransfer(parent.thread.id, target, task);
-          const resultRunId = transfer?.sourcePoint.runId ?? delegatedTaskRun(target, task)?.id;
-          const resultRunIds = resultRunId === undefined ? [] : [resultRunId];
-          const resultRecords = yield* threadManagement
-            .getThreadRecords(target.thread.id, ["messages", "turnItems"], {
-              messageRoles: ["assistant"],
-              messageRunIds: resultRunIds,
-              turnItemRunIds: resultRunIds,
-              turnItemTypes: ["assistant_message", "error"],
-            })
-            .pipe(Effect.mapError(threadManagementFailure));
-          if (
-            pageIncludesTerminalTaskResult({
-              parentThreadId: parent.thread.id,
-              items,
-              task,
-              target: { ...target, ...resultRecords },
-            })
-          ) {
-            yield* readTask(
-              scope as McpThreadInvocationScope,
-              task.id,
-              false,
-              true,
-              "thread-read-acknowledge",
-            );
-          }
-        }
-      }
-      return {
-        thread,
-        recentRuns,
-        items,
-        nextPosition: items.at(-1)?.position ?? null,
-        hasMore: timeline.hasMore || (!newestFirst && items.length < timeline.items.length),
-        earlierPosition: timeline.hasEarlier || start > 0 ? (items[0]?.position ?? null) : null,
-      } satisfies OrchestratorMcpThreadReadResult;
     }),
     sendToThread: Effect.fn("OrchestratorMcpService.sendToThread")(function* (scope, input) {
       const { parent, limits, target } = yield* loadScopedThread(scope, input.threadId, ["runs"]);
@@ -3281,6 +3349,25 @@ const make = Effect.gen(function* () {
           creationSource: "mcp",
         })
         .pipe(
+          Effect.provideService(ThreadReadAuthorization, {
+            authorize: (threadId, messageId) =>
+              Effect.gen(function* () {
+                if (parent === undefined) return;
+                const authority = yield* resolveReadAuthority(
+                  parent,
+                  ThreadManagementService.latestActiveRun(parent) ??
+                    ThreadManagementService.latestRun(parent),
+                );
+                if (authority === undefined) return;
+                const existing = yield* loadThreadRecords(threadId, ["runs"]);
+                yield* threadReadBroker.authorize({
+                  threadId,
+                  messageId,
+                  sessionId: authority.sessionId,
+                  alreadyStored: existing.runs.some((run) => run.userMessageId === messageId),
+                });
+              }).pipe(Effect.catch(() => Effect.void)),
+          }),
           Effect.mapError((error) =>
             isThreadManagementError(error)
               ? threadManagementFailure(error)
@@ -3444,6 +3531,7 @@ export const layer: Layer.Layer<
   OrchestratorMcpService,
   never,
   | SecureRandom.SecureRandom
+  | ThreadReadBroker.ThreadReadBroker
   | ThreadManagementService.ThreadManagementService
   | ThreadLaunchService.ThreadLaunchService
   | GitVcsDriver.GitVcsDriver

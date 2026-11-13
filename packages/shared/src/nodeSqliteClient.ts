@@ -158,6 +158,7 @@ const classifyError = (cause: unknown, message: string, operation: string) => {
 // SQLite retains text/blob bindings until rebind or finalization; node:sqlite cannot clear them.
 const LARGE_BINDING_SIZE = 64 * 1024;
 
+// `node:sqlite` binds buffer views as blobs; raw buffers need Node 24.21 or 26.8+.
 const isBlob = (value: unknown): value is ArrayBufferView | ArrayBufferLike =>
   ArrayBuffer.isView(value) || NodeUtil.types.isAnyArrayBuffer(value);
 
@@ -599,7 +600,12 @@ const startCheckpointWorker = Effect.fnUntraced(function* (filename: string) {
     Effect.logWarning("SQLite checkpoint worker unavailable; the writer checkpoints its own WAL", {
       reason,
     });
-  const version = sqliteVersion();
+  const prepared = Result.try(sqliteVersion);
+  if (Result.isFailure(prepared)) {
+    yield* warn(String(prepared.failure));
+    return undefined;
+  }
+  const version = prepared.success;
   const [major = 0, minor = 0] = version.split(".").map(Number);
   // Older SQLite treats NOOP as PASSIVE, so counting frames would checkpoint on every write.
   if (major < 3 || (major === 3 && minor < 51)) {

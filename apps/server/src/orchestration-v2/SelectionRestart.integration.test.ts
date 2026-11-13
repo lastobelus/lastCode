@@ -213,6 +213,7 @@ function makeRestartAdapter(
               } satisfies OrchestrationV2ProviderThread;
             }),
           resumeThread: ({ providerThread }) => Effect.succeed(providerThread),
+          unloadThread: () => Effect.void,
           startTurn: (input) =>
             Effect.gen(function* () {
               yield* Ref.update(state, (current) => ({

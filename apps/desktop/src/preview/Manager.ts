@@ -698,7 +698,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   ) {
     if (window.isDestroyed()) return;
     yield* attempt({ operation: "frameCapture.setBackgroundThrottling" }, () =>
-      window.webContents.setBackgroundThrottling(enabled),
+      browserHost.setBackgroundThrottling(window.webContents, enabled),
     );
   });
   const setFrameCaptureBackgroundThrottling = Effect.fnUntraced(function* (enabled: boolean) {
@@ -716,7 +716,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         operation: "frameCapture.setBackgroundThrottling",
         webContentsId: wc.id,
       },
-      () => wc.setBackgroundThrottling(enabled),
+      () => browserHost.setBackgroundThrottling(wc, enabled),
     );
   });
   const restoreFrameCaptureWebContentsBackgroundThrottling = Effect.fnUntraced(function* (
@@ -1522,6 +1522,15 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       window.webContents.on("before-input-event", (_event, input) => {
         syncMenuShortcuts(window.webContents, input);
       });
+      runFork(
+        SynchronizedRef.get(tabsRef).pipe(
+          Effect.map((tabs) => {
+            const tab = tabs.get(tabId);
+            if (tab?.webContentsId === wc.id && tab.serverTab)
+              browserHost.registerPopup(tab.serverTab, window);
+          }),
+        ),
+      );
     };
     const findForwardedShortcut = (keys: Parameters<typeof matchesKeybindingShortcut>[0]) =>
       !(
@@ -1685,6 +1694,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         }
         yield* Ref.set(mainWindowRef, Option.some(window));
         currentMainWindow = window;
+        browserHost.setMainWindow(window);
         frameCaptureWindowOpen = true;
         window.once("closed", () => {
           if (currentMainWindow !== window) return;
@@ -2477,11 +2487,15 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         return;
       }
       if (afterAttach.serverTab) {
-        browserHost.attach(afterAttach.serverTab, {
-          webContents: wc,
-          debugger: control.debugger,
-          cookiesCleared: () => runPromise(browserSession.cookiesCleared(wc.session)),
-        });
+        browserHost.attach(
+          afterAttach.serverTab,
+          {
+            webContents: wc,
+            debugger: control.debugger,
+            cookiesCleared: () => runPromise(browserSession.cookiesCleared(wc.session)),
+          },
+          tabId,
+        );
         // CDP cannot recover a failure that happened before it attached.
         const { navStatus } = afterAttach;
         if (navStatus.kind === "LoadFailed") {
@@ -2887,6 +2901,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       ] as const;
     });
     if (!removed) return;
+    browserHost.setPictureInPictureWindow(tabId, null);
     yield* Deferred.interrupt(expectedSession.ready);
     yield* Scope.close(expectedSession.initializationScope, Exit.void).pipe(Effect.ignore);
     yield* Ref.update(pictureInPictureAspectRatiosRef, (aspectRatios) =>
@@ -3068,6 +3083,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
             copy.set(tabId, session);
           }),
         );
+        browserHost.setPictureInPictureWindow(tabId, pictureInPictureWindow);
         return { kind: "created" as const, session };
       }),
     );

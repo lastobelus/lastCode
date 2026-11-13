@@ -177,6 +177,10 @@ export function createCdpRelayConnection(
       case "Target.setAutoAttach": {
         if (attached) return {};
         attached = true;
+        // The real debugger survives relay reconnects. Runtime.enable is a
+        // no-op while its domain is already enabled, so reset old reporting
+        // before the new client can initialize its announced root session.
+        await target.send("Runtime.disable", {}, undefined);
         const info = await targetInfo();
         return {
           [ANNOUNCE]: {
@@ -190,8 +194,6 @@ export function createCdpRelayConnection(
     }
   };
 
-  let runtimeReset: Promise<unknown> | undefined;
-
   const pageCommand = (command: CdpCommand): Promise<unknown> => {
     const child = sessions.get(command.sessionId!) === "page" ? undefined : command.sessionId;
     const owner =
@@ -202,14 +204,6 @@ export function createCdpRelayConnection(
     }
     // Playwright asks for this on every page; the host emulates focus only while it is in use.
     if (command.method === "Emulation.setFocusEmulationEnabled") return Promise.resolve({});
-    // The shared debugger keeps Runtime enabled after an earlier connection, and a repeated
-    // enable reports no existing contexts; Playwright waits for them, so reset once per connection.
-    if (command.method === "Runtime.enable" && child === undefined) {
-      runtimeReset ??= target.send("Runtime.disable", {}, undefined, owner).catch(() => undefined);
-      return runtimeReset.then(() =>
-        target.send(command.method, command.params ?? {}, undefined, owner),
-      );
-    }
     return target.send(command.method, command.params ?? {}, child, owner);
   };
 
