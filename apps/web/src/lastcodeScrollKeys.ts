@@ -2,7 +2,10 @@ import {
   TYPE_TO_FOCUS_EDITABLE_SELECTOR,
   TYPE_TO_FOCUS_FLOATING_LAYER_SELECTOR,
 } from "./components/chat/composerFocusRedirect";
+import { resolveShortcutCommand } from "./keybindings";
+import { appAtomRegistry } from "./rpc/atomRegistry";
 import { hasCommandForKeyDown } from "./shortcuts/dispatcher";
+import { primaryServerKeybindingsAtom } from "./state/server";
 
 // LastCode: arrow and page keys scroll the pane under the mouse pointer. Upstream sends them
 // to the focused element only. The rules and the upstream seams they rest on are in
@@ -129,14 +132,14 @@ function pointerTakesKey(focus: Element | null, scroller: HTMLElement): boolean 
 }
 
 /** The scroller a focused workspace region stands for; the region itself cannot scroll. */
-function areaScroller(area: HTMLElement): HTMLElement | null {
+function areaScroller(area: HTMLElement, accept = isScroller): HTMLElement | null {
   const preferred = area.querySelector<HTMLElement>("[data-workspace-focus-default]");
   const candidates = preferred
     ? [preferred, ...area.querySelectorAll("*")]
     : area.querySelectorAll("*");
   for (const element of candidates) {
     if (
-      isScroller(element) &&
+      accept(element) &&
       element.closest(AREA_SELECTOR) === area &&
       !element.closest(TERMINAL_SELECTOR) &&
       element.checkVisibility({ visibilityProperty: true })
@@ -186,7 +189,9 @@ export function startLastCodeScrollKeys(doc: Document = document): () => void {
       event.defaultPrevented ||
       event.isComposing ||
       event.keyCode === 229 ||
-      hasCommandForKeyDown(event)
+      hasCommandForKeyDown(event) ||
+      // Some bound commands (thread navigation) listen outside the dispatcher.
+      resolveShortcutCommand(event, appAtomRegistry.get(primaryServerKeybindingsAtom)) !== null
     )
       return;
     const focus = event.composedPath()[0];
@@ -203,7 +208,8 @@ export function startLastCodeScrollKeys(doc: Document = document): () => void {
         // Chrome inside a pane, such as a header beside its list, scrolls that pane's list.
         const area = hovered.closest<HTMLElement>(AREA_SELECTOR);
         const layer = hovered.closest(LAYER_SELECTOR);
-        const scroller = area && (!layer || layer.contains(area)) ? areaScroller(area) : null;
+        const scroller =
+          area && (!layer || layer.contains(area)) ? areaScroller(area, isScrollContainer) : null;
         if (scroller) chain = [scroller];
       }
       if (chain.length === 0 || !pointerTakesKey(focused, chain[0]!)) return;

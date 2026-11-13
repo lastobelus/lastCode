@@ -3,7 +3,17 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import { attachTimelineViewport } from "./components/chat/timelineViewport";
 import * as settings from "./hooks/useSettings";
 import { startLastCodeScrollKeys } from "./lastcodeScrollKeys";
+import { appAtomRegistry } from "./rpc/atomRegistry";
 import { registerCommands } from "./shortcuts/dispatcher";
+import { primaryServerKeybindingsAtom } from "./state/server";
+import { compileResolvedKeybindingsConfig } from "@t3tools/shared/keybindings";
+import type { ResolvedKeybindingsConfig } from "@t3tools/contracts";
+import type { Atom } from "effect/reactivity";
+
+vi.mock(import("./state/server"), async (original) => {
+  const { Atom } = await import("effect/reactivity");
+  return { ...(await original()), primaryServerKeybindingsAtom: Atom.make([]) };
+});
 
 const FIXTURE = `
 <div style="position: fixed; inset: 0; width: 400px; height: 400px; font: 16px/20px sans-serif">
@@ -243,6 +253,17 @@ describe("LastCode scroll keys", () => {
     dom.press("PageDown");
     expect(command).toHaveBeenCalledOnce();
     expect(sidebar.scrollTop).toBe(0);
+    // Bindings whose handlers listen outside the dispatcher (thread navigation) also win.
+    // The mock above makes the keybindings atom writable.
+    const keybindings = primaryServerKeybindingsAtom as Atom.Writable<ResolvedKeybindingsConfig>;
+    appAtomRegistry.set(
+      keybindings,
+      compileResolvedKeybindingsConfig([{ key: "arrowdown", command: "thread.next" }]),
+    );
+    dom.stack.defer(() => appAtomRegistry.set(keybindings, []));
+    dom.pointAt(sidebar);
+    expect(dom.press("ArrowDown").defaultPrevented).toBe(false);
+    expect(sidebar.scrollTop).toBe(0);
   });
 
   it("stop at the end of the pane under the pointer instead of moving another pane", () => {
@@ -272,7 +293,13 @@ describe("LastCode scroll keys", () => {
     card.scrollTop = card.scrollHeight;
     dom.pointAt(card);
     expect(dom.press("PageDown").defaultPrevented).toBe(true);
-    // A pane whose content fits still stops the key.
+    // A pane whose content fits still stops the key, from its header too.
+    const sidebarContent = sidebar.firstElementChild as HTMLElement;
+    sidebarContent.style.height = "100px";
+    (inner.firstElementChild as HTMLElement).style.height = "40px";
+    dom.pointAt(dom.get("sidebar-search"));
+    expect(dom.press("ArrowDown").defaultPrevented).toBe(true);
+    sidebarContent.style.height = "2000px";
     (card.firstElementChild as HTMLElement).style.height = "50px";
     dom.pointAt(card);
     expect(dom.press("ArrowDown").defaultPrevented).toBe(true);
