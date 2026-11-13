@@ -47,9 +47,18 @@ import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
+import * as PeerForwarding from "../peer/PeerForwarding.ts";
+import * as PeerLinks from "../peer/PeerLinks.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
+import * as ActionResume from "../actionResume/ActionResume.ts";
+import * as ThreadReadBroker from "./ThreadReadBroker.ts";
 
 const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
+  Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
+  Layer.provide(Layer.mock(PeerLinks.PeerLinks)({ get: () => Effect.succeedNone })),
+  Layer.provide(
+    Layer.mock(ActionResume.ActionResume)({ readLatestSummary: () => Effect.succeed(null) }),
+  ),
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
 );
@@ -210,6 +219,7 @@ const cancelBackgroundOnlyTask = (
         ),
       );
       const layerTest = layerOrchestratorService.pipe(
+        Layer.provide(ThreadReadBroker.layer),
         Layer.provideMerge(layerOrchestration),
         Layer.provide(
           Layer.mergeAll(
@@ -502,7 +512,8 @@ const cancelBackgroundOnlyTask = (
         if (cancelAt === "monitor") {
           // A monitor notification then ran and completed while the shell kept running.
           const { runs, messages } = yield* orchestrator.getThreadProjection(task.childThreadId!);
-          const run = { ...runs[0]!, id: RunId.make("run:monitor"), ordinal: 2 };
+          const { delegatedTaskId: _delegatedTaskId, ...completedRun } = runs[0]!;
+          const run = { ...completedRun, id: RunId.make("run:monitor"), ordinal: 2 };
           const source = { kind: "monitor" } as const;
           const notification = { source, outcome: "updated", summary: "Ran" } as const;
           const user = { ...messages[0]!, id: MessageId.make("message:monitor"), runId: run.id };

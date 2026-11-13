@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId, ThreadId, type ScopedThreadRef } from "@t3tools/contracts";
 
 import {
+  browserThreadLinkTarget,
   formatHostedThreadLink,
   formatThreadLink,
   guessThreadLinkRef,
@@ -148,9 +149,9 @@ describe("legacy and scoped thread links", () => {
       value: undefined,
     });
     expect(relabelThreadLinks(markdown, local, () => undefined)).toBe(markdown);
-    expect(
-      relabelThreadLinks("<t3-thread://v1/team/thread%3Aone>", local, () => undefined),
-    ).toBe("Thread no longer available");
+    expect(relabelThreadLinks("<t3-thread://v1/team/thread%3Aone>", local, () => undefined)).toBe(
+      "Thread no longer available",
+    );
     const link = parseThreadLinkHref("t3-thread://v1/team/thread%3Aone")!;
     expect(threadLinkCandidates(link, local)).toEqual([
       ref("team", "thread%3Aone"),
@@ -174,7 +175,9 @@ describe("legacy and scoped thread links", () => {
   it("leaves scoped V2 links in code spans and fences untouched", () => {
     const markdown =
       "[Old](t3-thread://v2/env/id) `[Old](t3-thread://v2/env/id)`\n```md\n[Old](t3-thread://v2/env/id)\n```";
-    expect(relabelThreadLinks(markdown, local, () => "New")).toBe(markdown.replace("[Old]", "[New]"));
+    expect(relabelThreadLinks(markdown, local, () => "New")).toBe(
+      markdown.replace("[Old]", "[New]"),
+    );
   });
   it("takes the thread id verbatim, percent escapes included", () => {
     expect(parseThreadLinkHref("t3-thread://v1/mcp:1234")).toEqual(v1("mcp:1234"));
@@ -303,7 +306,9 @@ describe("legacy and scoped thread links", () => {
   });
 
   it("formats a label that would otherwise break the Markdown link", () => {
-    expect(formatThreadLink(v1("t1"), "Fix [ci] \\ build")).toBe("[Fix ci build](t3-thread://v1/t1)");
+    expect(formatThreadLink(v1("t1"), "Fix [ci] \\ build")).toBe(
+      "[Fix ci build](t3-thread://v1/t1)",
+    );
     expect(formatThreadLink(v1("t1"), " ] ")).toBe("<t3-thread://v1/t1>");
   });
 });
@@ -402,15 +407,18 @@ describe("thread links", () => {
       relabelThreadLinks("[Kept label](<t3-thread://v2/local/t1>)", local, () => undefined),
     ).toBe("Kept label");
     expect(threadLinkRefs("[a](<t3-thread://v2/there/t2>)", local)).toEqual([ref("there", "t2")]);
-    for (const threadId of ["mcp:launch:qa(1)", "mcp:launch:qa)"]) {
+    for (const [threadId, destination] of [
+      ["mcp:launch:qa(1)", "t3-thread://v2/there/mcp%3Alaunch%3Aqa%281%29"],
+      ["mcp:launch:qa)", "t3-thread://v2/there/mcp%3Alaunch%3Aqa%29"],
+    ]) {
       const thread = ref("there", threadId);
-      const link = formatThreadLink(thread, "Original");
-      expect(link).toBe(`[Original](<t3-thread://v2/there/${threadId}>)`);
-      expect(threadLinkRefs(link, local)).toEqual([thread]);
-      expect(relabelThreadLinks(link, local, () => "Renamed")).toBe(
-        `[Renamed](<t3-thread://v2/there/${threadId}>)`,
-      );
-      expect(relabelThreadLinks(link, local, () => undefined)).toBe("Original");
+      const formatted = formatThreadLink(thread, "Original");
+      expect(formatted).toBe(`[Original](${destination})`);
+      for (const link of [formatted, `[Original](<t3-thread://v2/there/${threadId}>)`]) {
+        expect(threadLinkRefs(link, local)).toEqual([thread]);
+        expect(relabelThreadLinks(link, local, () => "Renamed")).toBe(`[Renamed](${destination})`);
+        expect(relabelThreadLinks(link, local, () => undefined)).toBe("Original");
+      }
     }
   });
 
@@ -545,5 +553,27 @@ describe("hosted thread links", () => {
     expect(threadLinkRefs("Open https://app.t3.codes/threads/there/t%3A1", local)).toEqual([
       ref("there", "t:1"),
     ]);
+  });
+});
+
+describe("Browser link destinations", () => {
+  it("keeps missing explicit targets and reuses legacy resolution", () => {
+    const environmentId = EnvironmentId.make("source");
+    const target = {
+      environmentId: EnvironmentId.make("linked"),
+      threadId: ThreadId.make("mcp:thread"),
+    };
+    expect(
+      browserThreadLinkTarget("t3-thread://v2/linked/unknown", environmentId, [target]),
+    ).toEqual({ environmentId: "linked", threadId: "unknown" });
+    expect(browserThreadLinkTarget("t3-thread://v1/mcp:thread", environmentId, [target])).toEqual(
+      target,
+    );
+    expect(browserThreadLinkTarget("t3-thread://v1/unknown", environmentId, [target])).toEqual({
+      environmentId,
+      threadId: "unknown",
+    });
+    expect(browserThreadLinkTarget("https://app.t3.codes/settings", environmentId, [])).toBeNull();
+    expect(browserThreadLinkTarget("t3-thread://v2/linked/%ZZ", environmentId, [])).toBeNull();
   });
 });

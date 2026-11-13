@@ -235,6 +235,7 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
     process: (event: A) => Effect.Effect<void, E2, R2>,
     after: Effect.Effect<boolean, E2, R2>,
     canBatch: Effect.Effect<boolean, never, R2> = Effect.succeed(true),
+    batchableSnapshot: (event: A) => boolean = isSnapshot,
   ) {
     if (!enabled)
       return yield* source.pipe(
@@ -258,7 +259,7 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
           // EOF only acknowledges prior work; it can share a commit with other consumers.
           const snapshot =
             signal._tag === "End" ||
-            (event !== undefined && isSnapshot(event) && (yield* canBatch));
+            (event !== undefined && batchableSnapshot(event) && (yield* canBatch));
           const bytes =
             snapshot && event !== undefined ? Buffer.byteLength(yield* encodeQueue(event)) : 0;
           const work: Effect.Effect<boolean, E | E2, R2> =

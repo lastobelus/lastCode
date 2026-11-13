@@ -195,9 +195,10 @@ const hasLargeBinding = (params: ReadonlyArray<unknown>): boolean => {
 };
 
 // Inline worker source also runs in bundles and single-executable builds without module files.
+// Workers inherit --input-type, so builtin loading must also work in ESM eval mode.
 const workerSource = `
-const { parentPort, workerData } = require("node:worker_threads");
-const { DatabaseSync } = require("node:sqlite");
+const { parentPort, workerData } = process.getBuiltinModule("node:worker_threads");
+const { DatabaseSync } = process.getBuiltinModule("node:sqlite");
 const describe = (error) => ({
   message: String(error && error.message ? error.message : error),
   code: error && error.code,
@@ -545,8 +546,8 @@ const CHECKPOINT_IDLE_MS = 100;
 const WRITER_BACKSTOP_FRAMES = 10_000;
 
 const checkpointWorkerSource = `
-const { parentPort, workerData } = require("node:worker_threads");
-const { DatabaseSync } = require("node:sqlite");
+const { parentPort, workerData } = process.getBuiltinModule("node:worker_threads");
+const { DatabaseSync } = process.getBuiltinModule("node:sqlite");
 let db;
 let frames;
 let passive;

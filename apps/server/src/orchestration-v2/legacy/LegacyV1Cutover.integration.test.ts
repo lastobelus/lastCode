@@ -82,7 +82,12 @@ const codexModelSelection = {
   model: "gpt-5.4",
 };
 
-/** Slot 41 models site-local migrations sharing production ids; the V2 runner applies only ids above the recorded maximum. */
+/**
+ * A V1 database as it exists on disk before a V2 server first opens it: schema
+ * through migration 49, with an additional app table that migration does not
+ * own. The verified upstream ledger retains its original identities and the
+ * cutover preserves both known V1 state and unrelated application tables.
+ */
 const seedV1Database = (fixturePath: string, workspace: string) =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -90,11 +95,7 @@ const seedV1Database = (fixturePath: string, workspace: string) =>
       yield* sql`PRAGMA busy_timeout = 5000;`;
       yield* sql`PRAGMA foreign_keys = ON;`;
       yield* sql`PRAGMA journal_mode = WAL;`;
-      yield* runMigrations({ toMigrationInclusive: 40 });
-      yield* sql`
-        INSERT INTO effect_sql_migrations (migration_id, name)
-        VALUES (41, 'ThreadSummaryTimeline')
-      `;
+      yield* runMigrations({ toMigrationInclusive: 41 });
       yield* sql`
         CREATE TABLE thread_summary_timeline_entries (
           entry_id TEXT PRIMARY KEY,
@@ -971,7 +972,11 @@ describe("orchestration v2 legacy v1 cutover", () => {
             const authSessionColumns = yield* sql<{ readonly name: string }>`
               PRAGMA table_info(auth_sessions)
             `;
+            const extraTables = yield* sql<{ readonly name: string }>`
+              SELECT name FROM sqlite_master WHERE name = 'thread_summary_timeline_entries'
+            `;
             return {
+              extraTableNames: extraTables.map((table) => table.name),
               migrationEventCount: migrationEventCount[0]?.count ?? 0,
               importRows,
               legacyProjects,
@@ -994,16 +999,11 @@ describe("orchestration v2 legacy v1 cutover", () => {
           ),
         );
 
-        const divergenceLog = boot1Logs.find((log) =>
-          String(log.message).includes("migration history diverges"),
-        );
-        assert.deepStrictEqual(divergenceLog?.annotations.divergent, [
-          "41:ThreadSummaryTimeline (this build: AuthSessionClientConnection)",
-        ]);
-        assert.equal(firstBoot.migration41Name, "ThreadSummaryTimeline");
+        assert.deepStrictEqual(firstBoot.extraTableNames, ["thread_summary_timeline_entries"]);
 
-        assert.notInclude(firstBoot.authSessionColumnNames, "client_surface");
-        assert.notInclude(firstBoot.authSessionColumnNames, "client_app_version");
+        assert.equal(firstBoot.migration41Name, "AuthSessionClientConnection");
+        assert.include(firstBoot.authSessionColumnNames, "client_surface");
+        assert.include(firstBoot.authSessionColumnNames, "client_app_version");
 
         // Full row contents of the legacy recovery tables survive migration
         // and continuation unchanged, not just their counts.
@@ -1127,7 +1127,7 @@ describe("orchestration v2 legacy v1 cutover", () => {
           ),
         );
 
-        assert.isTrue(
+        assert.isFalse(
           boot2Logs.some((log) => String(log.message).includes("migration history diverges")),
         );
 

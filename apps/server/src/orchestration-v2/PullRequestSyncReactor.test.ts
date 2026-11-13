@@ -1832,6 +1832,8 @@ describe("PullRequestSyncReactor", () => {
         passedChecks: ["test"],
         remarksThrough: NOW,
         remarkIds: [],
+        reactionKeys: [],
+        reactionCounts: {},
         conflicting: false,
         wakes: 0,
       };

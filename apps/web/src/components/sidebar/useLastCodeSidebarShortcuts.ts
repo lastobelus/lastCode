@@ -4,16 +4,10 @@ import { useAtomValue } from "@effect/atom-react";
 import type { ResolvedKeybindingsConfig } from "@t3tools/contracts";
 import type { SidebarThreadSummary } from "../../types";
 import { primaryServerKeybindingsAtom } from "../../state/server";
-import {
-  resolveShortcutCommand,
-  shortcutLabelForCommand,
-  shouldShowThreadJumpHintsForModifiers,
-} from "../../keybindings";
+import { resolveShortcutCommand, shortcutLabelForCommand } from "../../keybindings";
 import { isTerminalFocused } from "../../lib/terminalFocus";
-import { useTerminalFocus } from "../../hooks/useTerminalFocus";
 import { isModelPickerOpen } from "../../modelPickerVisibility";
 import { isCommandPaletteOpen } from "../../commandPaletteBus";
-import { useShortcutModifierState } from "../../shortcutModifierState";
 import { useThreadSelectionStore } from "../../threadSelectionStore";
 import { useSidebar } from "../ui/sidebar";
 import { useThreadJumpHintsVisible, shouldClearThreadSelectionOnMouseDown } from "../Sidebar.logic";
@@ -34,6 +28,7 @@ function useKeyboardNavigation(
   const navigateToThread = useLastCodeNavigateToThread(useRouter());
   const platform = navigator.platform;
   const { routeThreadKey, routeTerminalOpen } = route;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- registers the window keyboard listener with the current sidebar navigation targets and removes it on cleanup
   useEffect(() => {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       const context = {
@@ -58,6 +53,7 @@ function useKeyboardNavigation(
 }
 function useSelectionDismissal() {
   const clearSelection = useThreadSelectionStore((state) => state.clearSelection);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- registers the window mouse listener to dismiss thread selection on outside clicks and removes it on cleanup
   useEffect(() => {
     const onMouseDown = (event: globalThis.MouseEvent) => {
       if (!useThreadSelectionStore.getState().hasSelection()) return;
@@ -77,20 +73,10 @@ export function useLastCodeSidebarShortcuts(
   const keybindings = useAtomValue(primaryServerKeybindingsAtom),
     platform = navigator.platform;
   const { isMobile } = useSidebar();
-  const terminalFocus = useTerminalFocus(),
-    modifiers = useShortcutModifierState();
   const commands = lastCodeThreadJumpCommands(keys);
   const { routeTerminalOpen } = route;
   const labels = lastCodeThreadJumpLabels(commands, keybindings, routeTerminalOpen, platform);
-  const shouldShow = shouldShowThreadJumpHintsForModifiers(modifiers, keybindings, {
-    platform,
-    context: {
-      terminalFocus,
-      terminalOpen: routeTerminalOpen,
-      modelPickerOpen: isModelPickerOpen(),
-    },
-  });
-  const showThreadJumpHints = useThreadJumpHintsVisible(shouldShow);
+  const showThreadJumpHints = useThreadJumpHintsVisible(keybindings, route.routeThreadRef);
   useKeyboardNavigation(keys, threads, route, keybindings);
   useSelectionDismissal();
   const options = { platform, context: { terminalFocus: false, terminalOpen: false } };

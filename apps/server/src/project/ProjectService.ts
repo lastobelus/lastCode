@@ -1,3 +1,4 @@
+import { getInteractiveThreadParentThreadId } from "@t3tools/contracts";
 import {
   CommandId,
   type OrchestrationProjectShell,
@@ -8,7 +9,10 @@ import {
   type ProjectSnapshot,
   type ProjectScript,
   type ThreadId,
+  type SavedWorkspaceDisposition,
+  WorktreeSuspensionRequestError,
 } from "@t3tools/contracts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -16,13 +20,21 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 
 import { withCommandMetrics } from "../observability/Metrics.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
-import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import {
+  isGroupedCreatorThread,
+  releaseCreatorGrouping,
+} from "../orchestration-v2/CreatorGrouping.ts";
+import {
+  DispatchModeLimit,
+  exceededDispatchModeLimit,
+} from "../orchestration-v2/DispatchModeLimit.ts";
 import * as LegacyV1ThreadImporter from "../orchestration-v2/legacy/LegacyV1ThreadImporter.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import {
@@ -35,9 +47,16 @@ import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import { planThreadDeletion } from "../orchestration-v2/ThreadDeletion.ts";
 import { makeIsManagedWorktreePath } from "../worktreesDirectory.ts";
+import * as AutoPullStatus from "./AutoPullStatus.ts";
 import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
 import { UpdateDrainAdmission } from "../updateDrain/UpdateDrainAdmission.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+import * as WorkspaceLifecycle from "../workspace/WorkspaceLifecycle.ts";
+import * as ProjectRootGuard from "../vcs/ProjectRootGuard.ts";
+import { canonicalProjectRoot, withProjectRootLease } from "../workspace/projectRootLease.ts";
+import * as SuspensionRegistry from "../workspace/WorktreeSuspensionRegistry.ts";
+
+const isWorktreeSuspensionRequestError = Schema.is(WorktreeSuspensionRequestError);
 
 export interface ProjectCreateInput extends ProjectCreatePayload {
   readonly commandId: CommandId;
@@ -55,6 +74,7 @@ export interface ProjectDeleteInput {
   readonly commandId: CommandId;
   readonly projectId: ProjectId;
   readonly force?: boolean;
+  readonly savedWorkspace?: SavedWorkspaceDisposition;
 }
 
 export class ProjectNotFoundError extends Schema.TaggedError<ProjectNotFoundError>()(
@@ -109,6 +129,7 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
       "delete-thread",
       "delete-project-settings",
       "dispatch-project-command",
+      "saved-workspace-lifecycle",
     ]),
     projectId: Schema.optional(ProjectId),
     workspaceRoot: Schema.optional(Schema.String),
@@ -116,6 +137,8 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
   },
 ) {
   override get message(): string {
+    if (this.operation === "saved-workspace-lifecycle")
+      return "Saved workspace data changed or is protected. Review the saved-data choice before deleting this project.";
     if (this.operation === "delete-project-settings")
       return `Project deletion committed, but settings cleanup failed${this.projectId === undefined ? "" : ` for ${this.projectId}`}. Retry using the original command ID to finish cleanup.`;
     return `Project operation '${this.operation}' failed${this.projectId === undefined ? "" : ` for ${this.projectId}`}.`;
@@ -189,7 +212,10 @@ export const make = Effect.gen(function* () {
   const settings = yield* ServerSettings.ServerSettingsService;
   const admission = yield* UpdateDrainAdmission;
   const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
+  const autoPullStatus = yield* AutoPullStatus.AutoPullStatus;
+  const rootGuard = yield* ProjectRootGuard.ProjectRootGuard;
   const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
+  const suspensionRegistry = yield* SuspensionRegistry.WorktreeSuspensionRegistry;
   const threadProjections = yield* ProjectionStore.ProjectionStoreV2;
   const eventSink = yield* EventSink.EventSinkV2;
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
@@ -197,6 +223,7 @@ export const make = Effect.gen(function* () {
   const threadCommands = yield* ThreadCommandExecutor.ThreadCommandExecutor;
   const fileSystem = yield* FileSystem.FileSystem;
   const isManagedWorktreePath = yield* makeIsManagedWorktreePath;
+  const workspaceLifecycle = yield* Effect.serviceOption(WorkspaceLifecycle.WorkspaceLifecycle);
   // Commands for one project run in order. Commands that claim a workspace root
   // also hold that root, so two projects cannot both claim it.
   const projectLocks = yield* KeyedLock.make<ProjectId>();
@@ -228,7 +255,10 @@ export const make = Effect.gen(function* () {
       row.deletedAt === null
         ? yield* projectEnrichment.getAvailable(row.workspaceRoot)
         : yield* projectEnrichment.peek(row.workspaceRoot);
-    return toProject(row, enrichment);
+    return {
+      ...toProject(row, enrichment),
+      autoPullStatus: yield* autoPullStatus.get(row.workspaceRoot),
+    };
   });
 
   const readRow = (projectId: ProjectId, options?: { readonly includeDeleted?: boolean }) =>
@@ -393,21 +423,99 @@ export const make = Effect.gen(function* () {
     return Option.isNone(row) ? Option.none() : Option.some(yield* hydrate(row.value));
   });
 
+  const guardRecoveryDestination = Effect.fn("ProjectService.guardRecoveryDestination")(function* (
+    projectId: ProjectId,
+    workspaceRoot: string,
+  ) {
+    const protection = yield* suspensionRegistry.recoveryDestinationProtection(workspaceRoot).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProjectOperationError({
+            operation: "normalize-workspace",
+            projectId,
+            workspaceRoot,
+            cause,
+          }),
+      ),
+    );
+    if (protection !== null)
+      return yield* new ProjectInvalidError({ projectId, detail: protection });
+  });
+
   const create: ProjectService["Service"]["create"] = Effect.fn("ProjectService.create")(
     function* (input) {
-      const workspaceRoot = yield* normalizeWorkspaceRoot({
-        projectId: input.projectId,
-        workspaceRoot: input.workspaceRoot,
-        createIfMissing: input.createWorkspaceRootIfMissing ?? false,
-      });
-      yield* commit({
-        type: "project.create",
-        commandId: input.commandId,
-        projectId: input.projectId,
-        title: input.title,
-        workspaceRoot,
-        ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
-      });
+      const workspaceRoot = yield* withProjectRootLease(
+        Effect.gen(function* () {
+          let root: string;
+          if (input.createWorkspaceRootIfMissing) {
+            const existing = yield* workspacePaths
+              .normalizeWorkspaceRoot(input.workspaceRoot)
+              .pipe(Effect.result);
+            if (Result.isSuccess(existing)) {
+              root = existing.success;
+            } else if (existing.failure._tag === "WorkspaceRootNotExistsError") {
+              const candidate = existing.failure.normalizedWorkspaceRoot;
+              const protect = (value: string) =>
+                suspensionRegistry.automaticProtection(value).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ProjectOperationError({
+                        operation: "normalize-workspace",
+                        projectId: input.projectId,
+                        workspaceRoot: input.workspaceRoot,
+                        cause,
+                      }),
+                  ),
+                );
+              const resolved = yield* canonicalProjectRoot(candidate).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProjectOperationError({
+                      operation: "normalize-workspace",
+                      projectId: input.projectId,
+                      workspaceRoot: input.workspaceRoot,
+                      cause,
+                    }),
+                ),
+              );
+              const protection = (yield* protect(candidate)) ?? (yield* protect(resolved));
+              if (protection !== null)
+                return yield* new ProjectInvalidError({
+                  projectId: input.projectId,
+                  detail: protection,
+                });
+              root = yield* normalizeWorkspaceRoot({
+                projectId: input.projectId,
+                workspaceRoot: input.workspaceRoot,
+                createIfMissing: true,
+              });
+            } else {
+              return yield* new ProjectOperationError({
+                operation: "normalize-workspace",
+                projectId: input.projectId,
+                workspaceRoot: input.workspaceRoot,
+                cause: existing.failure,
+              });
+            }
+          } else {
+            root = yield* normalizeWorkspaceRoot({
+              projectId: input.projectId,
+              workspaceRoot: input.workspaceRoot,
+            });
+          }
+          yield* guardRecoveryDestination(input.projectId, root);
+          yield* commit({
+            type: "project.create",
+            commandId: input.commandId,
+            projectId: input.projectId,
+            title: input.title,
+            workspaceRoot: root,
+            ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
+          });
+          return root;
+        }),
+      );
+      yield* rootGuard.protect(workspaceRoot);
       yield* projectEnrichment.invalidate([workspaceRoot]);
       return yield* readCommitted(input.projectId);
     },
@@ -415,41 +523,50 @@ export const make = Effect.gen(function* () {
 
   const update: ProjectService["Service"]["update"] = Effect.fn("ProjectService.update")(
     function* (input) {
-      const existing = yield* readRow(input.projectId);
-      if (Option.isNone(existing)) {
-        return yield* new ProjectNotFoundError({ projectId: input.projectId });
-      }
-      const previousRoot = existing.value.workspaceRoot;
-      const workspaceRoot =
-        input.workspaceRoot === undefined
-          ? previousRoot
-          : yield* normalizeWorkspaceRoot({
-              projectId: input.projectId,
-              workspaceRoot: input.workspaceRoot,
-            });
-      yield* commit({
-        type: "project.meta.update",
-        commandId: input.commandId,
-        projectId: input.projectId,
-        ...(input.title === undefined ? {} : { title: input.title }),
-        ...(workspaceRoot === previousRoot ? {} : { workspaceRoot }),
-        ...(input.defaultModelSelection === undefined
-          ? {}
-          : { defaultModelSelection: input.defaultModelSelection }),
-        ...(input.autoPull === undefined ? {} : { autoPull: input.autoPull }),
-        ...(input.projectIcon === undefined ? {} : { projectIcon: input.projectIcon }),
-        ...(input.faviconPath === undefined ? {} : { faviconPath: input.faviconPath }),
-        ...(input.defaultThreadEnvMode === undefined
-          ? {}
-          : { defaultThreadEnvMode: input.defaultThreadEnvMode }),
-        ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
-        ...(input.pinned === undefined ? {} : { pinned: input.pinned }),
-        ...(input.archived === undefined ? {} : { archived: input.archived }),
+      const run = Effect.gen(function* () {
+        const existing = yield* readRow(input.projectId);
+        if (Option.isNone(existing)) {
+          return yield* new ProjectNotFoundError({ projectId: input.projectId });
+        }
+        const previousRoot = existing.value.workspaceRoot;
+        const workspaceRoot =
+          input.workspaceRoot === undefined
+            ? previousRoot
+            : yield* normalizeWorkspaceRoot({
+                projectId: input.projectId,
+                workspaceRoot: input.workspaceRoot,
+              });
+        if (workspaceRoot !== previousRoot) {
+          yield* guardRecoveryDestination(input.projectId, workspaceRoot);
+        }
+        yield* commit({
+          type: "project.meta.update",
+          commandId: input.commandId,
+          projectId: input.projectId,
+          ...(input.title === undefined ? {} : { title: input.title }),
+          ...(workspaceRoot === previousRoot ? {} : { workspaceRoot }),
+          ...(input.defaultModelSelection === undefined
+            ? {}
+            : { defaultModelSelection: input.defaultModelSelection }),
+          ...(input.autoPull === undefined ? {} : { autoPull: input.autoPull }),
+          ...(input.projectIcon === undefined ? {} : { projectIcon: input.projectIcon }),
+          ...(input.faviconPath === undefined ? {} : { faviconPath: input.faviconPath }),
+          ...(input.defaultThreadEnvMode === undefined
+            ? {}
+            : { defaultThreadEnvMode: input.defaultThreadEnvMode }),
+          ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
+          ...(input.pinned === undefined ? {} : { pinned: input.pinned }),
+          ...(input.archived === undefined ? {} : { archived: input.archived }),
+        });
+        if (workspaceRoot !== previousRoot) {
+          yield* rootGuard.protect(workspaceRoot);
+        }
+        if (workspaceRoot !== previousRoot || input.faviconPath !== undefined) {
+          yield* projectEnrichment.invalidate([previousRoot, workspaceRoot]);
+        }
+        return yield* readCommitted(input.projectId);
       });
-      if (workspaceRoot !== previousRoot || input.faviconPath !== undefined) {
-        yield* projectEnrichment.invalidate([previousRoot, workspaceRoot]);
-      }
-      return yield* readCommitted(input.projectId);
+      return yield* input.workspaceRoot === undefined ? run : withProjectRootLease(run);
     },
   );
 
@@ -472,49 +589,110 @@ export const make = Effect.gen(function* () {
     input: ProjectDeleteInput,
     threadId: ThreadId,
   ) {
-    yield* legacyImporter.ensureTranscript(threadId);
-    const projection = yield* threadProjections.getThreadRecords(threadId, [
-      "runs",
-      "attempts",
-      "nodes",
-      "runtimeRequests",
-      "subagents",
-      "providerSessions",
-    ]);
-    if (projection.thread.deletedAt !== null || projection.thread.projectId !== input.projectId) {
-      return;
-    }
-    const command = {
-      type: "thread.delete" as const,
-      commandId: CommandId.make(`${input.commandId}:delete-thread:${threadId}`),
-      threadId,
-    };
-    const now = yield* DateTime.now;
-    const plan = yield* planThreadDeletion({
-      command,
-      projection,
-      attachmentIds: yield* threadProjections.getThreadAttachmentIds(threadId),
-      now,
-      idAllocator,
-    });
-    const committed = yield* eventSink.commitCommand({
-      commandId: command.commandId,
-      commandType: command.type,
-      threadId,
-      acceptedAt: now,
-      events: plan.events,
-      effects: plan.effects,
-    });
-    if (
-      committed.receipt.threadId !== command.threadId ||
-      committed.receipt.commandType !== command.type
-    ) {
-      return yield* Effect.fail("The thread deletion command ID belongs to a different command.");
-    }
-    if (committed.receipt.status === "rejected") {
-      return yield* Effect.fail(
-        committed.receipt.error ?? "Thread deletion was previously rejected.",
+    // Project deletion already holds persistence. Take the creator and every
+    // ordinary grouped conversation in the same order as thread lifecycle commands.
+    while (true) {
+      const groupedIds = yield* threadProjections.getGroupedCreatorThreadIds([threadId]);
+      const ids = [...new Set([threadId, ...groupedIds])].toSorted();
+      const completed = yield* ids.reduceRight(
+        (effect, id) => threadCommands.withLock(id, effect),
+        Effect.gen(function* () {
+          yield* legacyImporter.ensureTranscript(threadId);
+          const projection = yield* threadProjections.getThreadRecords(threadId, [
+            "runs",
+            "attempts",
+            "nodes",
+            "runtimeRequests",
+            "subagents",
+            "providerSessions",
+            "providerThreads",
+          ]);
+          if (
+            projection.thread.deletedAt !== null ||
+            projection.thread.projectId !== input.projectId
+          )
+            return true;
+          const currentGroupedIds = yield* threadProjections.getGroupedCreatorThreadIds([threadId]);
+          // A creator-linked conversation can arrive while these locks are acquired.
+          // Release the locks and collect again before planning any changes.
+          if (currentGroupedIds.some((id) => !ids.includes(id))) return false;
+          const grouped = (yield* Effect.forEach(currentGroupedIds, (id) =>
+            threadProjections.getThread(id),
+          )).filter(
+            (thread) =>
+              thread.id !== threadId &&
+              getInteractiveThreadParentThreadId(thread) === threadId &&
+              isGroupedCreatorThread(thread),
+          );
+          const limit = yield* DispatchModeLimit;
+          if (limit !== undefined) {
+            for (const thread of [projection.thread, ...grouped]) {
+              const mode = exceededDispatchModeLimit(limit, thread);
+              if (mode === undefined) continue;
+              if (limit.refused !== undefined)
+                yield* Ref.set(limit.refused, {
+                  threadId: thread.id,
+                  mode,
+                  runtimeMode: thread.runtimeMode,
+                  interactionMode: thread.interactionMode,
+                });
+              return yield* Effect.fail(
+                `Thread '${thread.id}' exceeds the permitted ${mode} mode for project deletion.`,
+              );
+            }
+          }
+          const command = {
+            type: "thread.delete" as const,
+            commandId: CommandId.make(`${input.commandId}:delete-thread:${threadId}`),
+            threadId,
+          };
+          const now = yield* DateTime.now;
+          const plan = yield* planThreadDeletion({
+            command,
+            projection,
+            attachmentIds: yield* threadProjections.getThreadAttachmentIds(threadId),
+            now,
+            idAllocator,
+          });
+          const releases = yield* Effect.forEach(grouped, (thread) =>
+            Effect.gen(function* () {
+              return {
+                id: yield* idAllocator.allocate.event({
+                  threadId: thread.id,
+                  commandId: command.commandId,
+                }),
+                type: "thread.metadata-updated" as const,
+                threadId: thread.id,
+                occurredAt: now,
+                payload: releaseCreatorGrouping(thread),
+              };
+            }),
+          );
+          const committed = yield* eventSink.commitCommand({
+            commandId: command.commandId,
+            commandType: command.type,
+            threadId,
+            acceptedAt: now,
+            events: [...plan.events, ...releases],
+            effects: plan.effects,
+          });
+          if (
+            committed.receipt.threadId !== command.threadId ||
+            committed.receipt.commandType !== command.type
+          ) {
+            return yield* Effect.fail(
+              "The thread deletion command ID belongs to a different command.",
+            );
+          }
+          if (committed.receipt.status === "rejected") {
+            return yield* Effect.fail(
+              committed.receipt.error ?? "Thread deletion was previously rejected.",
+            );
+          }
+          return true;
+        }),
       );
+      if (completed) return;
     }
   });
 
@@ -549,6 +727,16 @@ export const make = Effect.gen(function* () {
         projectId,
         cause: `Persistent thread '${persistent.id}' must be released before deleting its project.`,
       });
+    const unresolvedArchive = projectThreads.find((thread) => thread.archivePending != null);
+    if (unresolvedArchive !== undefined)
+      return yield* new ProjectOperationError({
+        operation: "delete-thread",
+        projectId,
+        cause:
+          unresolvedArchive.archivePending?.status === "failed"
+            ? "This thread is part of a failed archive, so retry or dismiss that archive before deleting the thread."
+            : "A conversation in this family is still stopping before archive. Wait for its archive to finish.",
+      });
     const unfinishedCleanup = (yield* threadProjections.getWorktreeCleanupThreads.pipe(
       Effect.mapError(
         (cause) => new ProjectOperationError({ operation: "list-threads", projectId, cause }),
@@ -564,14 +752,11 @@ export const make = Effect.gen(function* () {
     yield* Effect.forEach(
       projectThreads,
       (thread) =>
-        threadCommands
-          .withLock(thread.id, deleteChildThread(input, thread.id))
-          .pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProjectOperationError({ operation: "delete-thread", projectId, cause }),
-            ),
+        deleteChildThread(input, thread.id).pipe(
+          Effect.mapError(
+            (cause) => new ProjectOperationError({ operation: "delete-thread", projectId, cause }),
           ),
+        ),
       { concurrency: 1, discard: true },
     );
   });
@@ -616,8 +801,45 @@ export const make = Effect.gen(function* () {
       // Completed receipt replay has no child cleanup to admit. Fresh cascades
       // take admission before persistence and child locks, just like thread.delete.
       const existing = yield* readRow(input.projectId, { includeDeleted: true });
-      if (Option.isSome(existing) && existing.value.deletedAt !== null) return yield* operation;
-      return yield* admission.admit("thread-delete", operation).pipe(
+      const lifecycleOperation = Option.isSome(workspaceLifecycle)
+        ? workspaceLifecycle.value
+            .run(
+              {
+                operation: "delete",
+                target: { kind: "project", projectId: input.projectId },
+                commandId: input.commandId,
+                ...(input.savedWorkspace === undefined
+                  ? {}
+                  : { savedWorkspace: input.savedWorkspace }),
+              },
+              operation,
+            )
+            .pipe(
+              Effect.mapError((cause) =>
+                isWorktreeSuspensionRequestError(cause)
+                  ? new ProjectOperationError({
+                      operation: "saved-workspace-lifecycle",
+                      projectId: input.projectId,
+                      cause,
+                    })
+                  : cause,
+              ),
+            )
+        : input.savedWorkspace?.mode === "discard"
+          ? Effect.fail(
+              new ProjectOperationError({
+                operation: "saved-workspace-lifecycle",
+                projectId: input.projectId,
+                cause: new WorktreeSuspensionRequestError({
+                  reason: "unavailable",
+                  message: "Saved workspace disposal is unavailable.",
+                }),
+              }),
+            )
+          : operation;
+      if (Option.isSome(existing) && existing.value.deletedAt !== null)
+        return yield* lifecycleOperation;
+      return yield* admission.admit("thread-delete", lifecycleOperation).pipe(
         Effect.catchTags({
           UpdateDrainAdmissionError: Effect.fn("ProjectService.deleteThread.admissionRefused")(
             function* (cause) {
@@ -625,7 +847,7 @@ export const make = Effect.gen(function* () {
               // behind it and the drain. Commit validates the replay under its locks.
               const recorded = yield* readRow(input.projectId, { includeDeleted: true });
               if (Option.isSome(recorded) && recorded.value.deletedAt !== null)
-                return yield* operation;
+                return yield* lifecycleOperation;
               return yield* cause;
             },
           ),

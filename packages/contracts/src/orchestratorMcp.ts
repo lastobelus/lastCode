@@ -1,6 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
+import { ActionRunSummary } from "./actionResume.ts";
 
 import { AuthMcpClientAccess } from "./auth.ts";
 import {
@@ -36,8 +37,11 @@ import { secretRequestPageUrl } from "./secretRequest.ts";
 import { hasOnlyPairedSurrogates } from "./threadMetadataMcp.ts";
 import { LastThreadTitleRegeneration, ThreadTitleRegeneration } from "./threadTitle.ts";
 import {
+  RemoteDelegationSelector,
+  RemoteTaskInteraction,
   OrchestrationV2Actor,
   OrchestrationV2AppThread,
+  OrchestrationV2ThreadRecovery,
   OrchestrationV2CreationSource,
   OrchestrationV2RunStatus,
   OrchestrationV2TurnItemStatus,
@@ -268,6 +272,7 @@ export const OrchestratorMcpTaskCancelResult = Schema.Struct({
 export type OrchestratorMcpTaskCancelResult = typeof OrchestratorMcpTaskCancelResult.Type;
 
 export const OrchestratorMcpCreateThreadRequest = Schema.Struct({
+  groupedUnderThreadId: OrchestrationV2AppThread.fields.groupedUnderThreadId,
   prompt: Schema.optional(OrchestratorMcpPrompt),
   title: Schema.optional(OrchestratorMcpTitle),
   target: Schema.optional(OrchestratorMcpTarget),
@@ -304,6 +309,7 @@ export const OrchestratorMcpCreatedThread = Schema.Struct({
   creationSource: OrchestrationV2CreationSource,
   creatorThreadId: Schema.optional(ThreadId),
   creatorGrouping: OrchestrationV2AppThread.fields.creatorGrouping,
+  groupedUnderThreadId: OrchestrationV2AppThread.fields.groupedUnderThreadId,
   providerInstanceId: ProviderInstanceId,
   model: Schema.String,
 });
@@ -334,7 +340,7 @@ const OrchestratorMcpProjectTarget = Schema.optional(
 export const OrchestratorMcpEnvironmentTarget = Schema.optional(
   EnvironmentId.annotate({
     description:
-      "Linked environment to act in. Omit for this one. Ids are then that environment's.",
+      'Environment to act in. Omit for this one. Ids belong to that environment. Other environments need a peer link, except t3_thread_read with via: "client".',
   }),
 );
 
@@ -342,6 +348,8 @@ export const OrchestratorMcpThreadListInput = Schema.Struct({
   environmentId: OrchestratorMcpEnvironmentTarget,
   projectId: OrchestratorMcpProjectTarget,
   allProjects: Schema.optional(Schema.Boolean),
+  underThreadId: Schema.optional(ThreadId),
+  archived: Schema.optional(Schema.Boolean),
   statuses: Schema.optional(
     Schema.Array(OrchestratorMcpThreadStatus).check(Schema.isMaxLength(10)),
   ),
@@ -386,6 +394,7 @@ export const OrchestratorMcpThreadListItem = Schema.Struct({
   creationSource: OrchestrationV2CreationSource,
   creatorThreadId: Schema.optional(ThreadId),
   creatorGrouping: OrchestrationV2AppThread.fields.creatorGrouping,
+  groupedUnderThreadId: OrchestrationV2AppThread.fields.groupedUnderThreadId,
   status: OrchestratorMcpThreadStatus,
   latestRunId: Schema.NullOr(RunId),
   providerInstanceId: ProviderInstanceId,
@@ -406,6 +415,8 @@ export const OrchestratorMcpThreadListItem = Schema.Struct({
   pendingBackgroundTasks: Schema.optional(Schema.Array(OrchestratorMcpThreadBackgroundTask)),
   parentThreadId: Schema.NullOr(ThreadId),
   relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent"])),
+  independent: Schema.optional(Schema.Boolean),
+  archived: Schema.optional(Schema.Boolean),
   itemCount: NonNegativeInt,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -438,10 +449,13 @@ const clampedPositiveInt = (maximum: number) =>
 
 export const OrchestratorMcpThreadReadInput = Schema.Struct({
   threadId: ThreadId,
-  environmentId: Schema.optional(EnvironmentId).annotate({
-    description:
-      "Optional owning environment. Omit to try this environment, then the client’s other connected environments. Use the returned environmentId for subsequent pages.",
-  }),
+  environmentId: OrchestratorMcpEnvironmentTarget,
+  via: Schema.optional(
+    Schema.Literal("client").annotate({
+      description:
+        'Use via: "client" for attached references or a prior readVia: "client" result. Requires the exact environmentId and captured client authority. Reuse for every page and item chunk; never switch routes after refusal, disconnection or expired authority. Omit for machine-directed peer reads.',
+    }),
+  ),
   itemId: Schema.optional(TurnItemId),
   textOffset: Schema.optional(NonNegativeInt),
   view: Schema.optional(Schema.Literals(["messages", "activity"])),
@@ -465,6 +479,7 @@ export const OrchestratorMcpThreadDetail = Schema.Struct({
   creationSource: OrchestrationV2CreationSource,
   creatorThreadId: Schema.optional(ThreadId),
   creatorGrouping: OrchestrationV2AppThread.fields.creatorGrouping,
+  groupedUnderThreadId: OrchestrationV2AppThread.fields.groupedUnderThreadId,
   status: OrchestratorMcpThreadStatus,
   latestRunId: Schema.NullOr(RunId),
   activeRunId: Schema.NullOr(RunId),
@@ -476,12 +491,18 @@ export const OrchestratorMcpThreadDetail = Schema.Struct({
   /** Open linked pull requests, on the first page only; list_thread_pull_requests has all of them. */
   pullRequests: Schema.optional(Schema.Array(OrchestratorMcpThreadPullRequest)),
   pullRequestCount: Schema.optional(NonNegativeInt),
+  actionResume: Schema.optional(Schema.NullOr(ActionRunSummary)),
+  autoSettleDisabledAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  recovery: Schema.optional(
+    Schema.Struct({ ...OrchestrationV2ThreadRecovery.fields, updatedAt: IsoDateTime }),
+  ),
   titleRegeneration: Schema.NullOr(ThreadTitleRegeneration),
   lastTitleRegeneration: Schema.optional(Schema.NullOr(LastThreadTitleRegeneration)),
   branch: Schema.NullOr(Schema.String),
   worktreePath: Schema.NullOr(Schema.String),
   parentThreadId: Schema.NullOr(ThreadId),
   relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent"])),
+  independent: Schema.optional(Schema.Boolean),
   runCount: NonNegativeInt,
   itemCount: NonNegativeInt,
   pendingRequestCount: NonNegativeInt,
@@ -534,6 +555,7 @@ export const OrchestratorMcpThreadTimelineItem = Schema.Struct({
 export type OrchestratorMcpThreadTimelineItem = typeof OrchestratorMcpThreadTimelineItem.Type;
 
 export const OrchestratorMcpThreadReadResult = Schema.Struct({
+  readVia: Schema.optional(Schema.Literal("client")),
   thread: OrchestratorMcpThreadDetail,
   recentRuns: Schema.Array(OrchestratorMcpThreadRun),
   items: Schema.Array(OrchestratorMcpThreadTimelineItem),
@@ -552,15 +574,31 @@ export const ThreadReadRequest = Schema.Struct({
 });
 export type ThreadReadRequest = typeof ThreadReadRequest.Type;
 
+export const ThreadReadFailureReason = Schema.Literals([
+  "permission_denied",
+  "unsupported",
+  "unavailable",
+]);
+export type ThreadReadFailureReason = typeof ThreadReadFailureReason.Type;
+
 export const ThreadReadResponse = Schema.Struct({
   connectionId: TrimmedNonEmptyString,
   requestId: TrimmedNonEmptyString,
   result: Schema.NullOr(OrchestratorMcpThreadReadResult),
   unavailableEnvironmentIds: Schema.Array(EnvironmentId),
-});
+  failure: Schema.optional(
+    Schema.Struct({
+      environmentId: EnvironmentId,
+      reason: ThreadReadFailureReason,
+    }),
+  ),
+}).check(
+  Schema.makeFilter((response) => response.failure === undefined || response.result === null),
+);
 export type ThreadReadResponse = typeof ThreadReadResponse.Type;
 
 export const OrchestratorMcpThreadSendInput = Schema.Struct({
+  delegation: Schema.optional(RemoteDelegationSelector),
   environmentId: OrchestratorMcpEnvironmentTarget,
   threadId: ThreadId,
   message: OrchestratorMcpPrompt,
@@ -587,6 +625,8 @@ export const OrchestratorMcpThreadSendResult = Schema.Struct({
 export type OrchestratorMcpThreadSendResult = typeof OrchestratorMcpThreadSendResult.Type;
 
 export const OrchestratorMcpThreadWaitInput = Schema.Struct({
+  delegation: Schema.optional(RemoteDelegationSelector),
+  observedInteraction: Schema.optional(RemoteTaskInteraction),
   environmentId: OrchestratorMcpEnvironmentTarget,
   threadId: ThreadId,
   runId: Schema.optional(RunId),
@@ -601,6 +641,9 @@ export const OrchestratorMcpThreadWaitInput = Schema.Struct({
 export type OrchestratorMcpThreadWaitInput = typeof OrchestratorMcpThreadWaitInput.Type;
 
 export const OrchestratorMcpThreadWaitResult = Schema.Struct({
+  delegation: Schema.optional(RemoteDelegationSelector),
+  interaction: Schema.optional(RemoteTaskInteraction),
+  delegationOutcome: Schema.optional(Schema.Literals(["pending", "settled", "disposed"])),
   threadId: ThreadId,
   runId: Schema.NullOr(RunId),
   status: OrchestratorMcpThreadStatus,
@@ -612,6 +655,7 @@ export const OrchestratorMcpThreadWaitResult = Schema.Struct({
 export type OrchestratorMcpThreadWaitResult = typeof OrchestratorMcpThreadWaitResult.Type;
 
 export const OrchestratorMcpThreadInterruptInput = Schema.Struct({
+  delegation: Schema.optional(RemoteDelegationSelector),
   environmentId: OrchestratorMcpEnvironmentTarget,
   threadId: ThreadId,
   runId: Schema.optional(RunId),
@@ -706,6 +750,9 @@ export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
   providers: Schema.Array(OrchestratorMcpProviderCapability),
   features: Schema.Struct({
     appOwnedSubagents: Schema.Boolean,
+    appOwnedActionContinuationVersion: Schema.optional(Schema.Literal(1)),
+    appOwnedPullRequestWatchContinuationVersion: Schema.optional(Schema.Literal(1)),
+    remoteOwnedContinuationVersion: Schema.optional(Schema.Literal(1)),
     asyncPolling: Schema.Boolean,
     cancellation: Schema.Boolean,
     batchThreadCreation: Schema.Boolean,
@@ -883,7 +930,7 @@ export const OrchestratorMcpEnvironmentLinkInput = Schema.Struct({
     description: "One sentence for the card.",
   }),
   requestedAccess: Schema.optional(AuthMcpClientAccess).annotate({
-    description: "Suggested access. The user picks; default approval-required.",
+    description: "Suggested access. The user picks; default full-access.",
   }),
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
 });
@@ -952,6 +999,7 @@ export type OrchestratorMcpDeleteScheduledTaskResult =
 export class OrchestratorMcpFailure extends Schema.TaggedError<OrchestratorMcpFailure>()(
   "OrchestratorMcpFailure",
   {
+    threadReadReason: Schema.optional(ThreadReadFailureReason),
     code: Schema.Literals([
       "environment_unavailable",
       "capability_denied",

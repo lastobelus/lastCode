@@ -68,6 +68,7 @@ import { useThreadJumpShortcuts } from "../keyboard/threadKeyboardShortcuts";
 import { usePendingThreadOrder } from "../../state/thread-order";
 import { threadListEnvironmentsAtom } from "../../state/presentation";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
+import { threadShellIsVisible } from "@t3tools/client-runtime/state/models";
 import { useQueuedThreadKeys } from "../../state/use-thread-outbox";
 import {
   ThreadListV2PendingRow,
@@ -400,6 +401,7 @@ export function HomeScreen(props: HomeScreenProps) {
     pinReorderEnvironmentIds,
     activeReorderEnvironmentIds,
     titleRegenerationEnvironmentIds,
+    persistenceEnvironmentIds,
   } = listEnvironments;
   const resolveProviderInstance = useThreadRowProviderInstanceResolver(providersByEnvironmentId);
   const pendingOrder = usePendingThreadOrder();
@@ -562,6 +564,7 @@ export function HomeScreen(props: HomeScreenProps) {
         onRenameThread={handleRenameThread}
         onRegenerateThreadTitle={handleRegenerateThreadTitle}
         titleRegenerationSupported={titleRegenerationEnvironmentIds.has(thread.environmentId)}
+        persistenceSupported={persistenceEnvironmentIds.has(thread.environmentId)}
         settlementSupported={settlementEnvironmentIds.has(thread.environmentId)}
         onSettleThread={handleSettleThread}
         snoozeSupported={snoozeEnvironmentIds.has(thread.environmentId)}
@@ -605,7 +608,7 @@ export function HomeScreen(props: HomeScreenProps) {
   };
 
   const hasAnyThreads =
-    props.threads.some((thread) => thread.archivedAt === null) ||
+    props.threads.some(threadShellIsVisible) ||
     props.pendingTasks.length > 0 ||
     threadListV2Layout.settledCount > 0;
   // A hidden list gets no layout, so it never reports its rows as laid out.

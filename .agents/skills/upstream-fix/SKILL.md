@@ -62,8 +62,8 @@ does not count.
    and link the upstream PR in both descriptions.
 6. Before merge, require a current-head clean Codex review, zero unresolved
    review threads, and successful exact-head/base GitHub CI and `CI Gate`. Merge
-   through `pnpm lastcode:merge`. If the base changes, refresh the branch as
-   needed and obtain fresh validation against the new base before merging.
+   through `pnpm --config.verify-deps-before-run=false lastcode:merge`. A base that moved needs no
+   rebase unless the merge reports a conflict; follow `lastcode-pr` for that.
 
 The LastCode PR does not wait for upstream acceptance. The upstream PR does not
 depend on LastCode. When upstream later lands the change, let the nightly rebase
@@ -74,5 +74,6 @@ existing checkpoint workflow.
 
 Report both branch names and any PR URLs, their bases and current heads, validation
 performed for each, review status, and whether either delivery remains local.
-Call out that an open LastCode PR pauses branch promotion while immutable nightly
-checkpoint tags continue.
+Open LastCode PRs do not pause checkpoint creation, repaired-checkpoint
+publication, or branch promotion. Report any validation that needs refreshing
+after the LastCode base changes.

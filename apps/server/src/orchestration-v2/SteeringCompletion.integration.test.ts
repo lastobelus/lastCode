@@ -1371,9 +1371,7 @@ it.effect("starts a steer that missed the turn on the saved next-turn selection"
         commandId: CommandId.make("archive:late-steer-sender"),
         threadId: senderThreadId,
       });
-      assert.isNotNull(
-        (yield* orchestrator.getThreadProjection(senderThreadId)).thread.archivedAt,
-      );
+      assert.isNotNull((yield* orchestrator.getThreadProjection(senderThreadId)).thread.archivedAt);
       const accepted = (yield* orchestrator.getThreadProjection(threadId)).messages.find(
         (message) => message.id === MessageId.make("message:steer"),
       )!;
@@ -2613,7 +2611,7 @@ it.effect("queues a plain send behind the stopped queue and releases its hold", 
         runId: started[0]!.runId,
         holdQueue: true,
       });
-      // The provider has not stopped yet, so a plain send still resolves to a steer.
+      // Stop has not reached the provider yet; plain send must queue instead of steering.
       yield* send("sent", "auto");
       // Once the stop settles, the run-update reactor promotes the queue on
       // its own fiber, so read the queue while the provider is still stopping.

@@ -42,9 +42,13 @@ import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import { Etag, HttpRouter } from "effect/http";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as DocumentText from "../provider/DocumentText.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
 import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.ts";
+import * as ServerConfig from "../config.ts";
+import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
+import * as ThreadWait from "../threadTools/ThreadWait.ts";
 import { subscribeOrchestrationV2Thread } from "../ws.ts";
 import * as OrchestrationHttp from "./http.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -409,6 +413,10 @@ const withHttp = <A>(use: (get: (path: string) => Promise<Response>) => Promise<
       Layer.provide(OrchestrationHttp.layer),
       Layer.provide(auth),
       Layer.provide(Layer.succeedContext(context)),
+      Layer.provide(Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({})),
+      Layer.provide(Layer.mock(ThreadWait.ThreadWait)({})),
+      Layer.provide(DocumentText.layer.pipe(Layer.provide(NodeServices.layer))),
+      Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-bounded-http-" })),
       Layer.provide(NodeHttpPlatform.layer),
       Layer.provide(Etag.layerWeak),
       Layer.provide(NodeServices.layer),

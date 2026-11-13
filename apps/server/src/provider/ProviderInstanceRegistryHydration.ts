@@ -1,9 +1,6 @@
 import {
-  defaultInstanceIdForDriver,
   ProviderDriverKind,
   ProviderInstanceId,
-  providerInstanceConfigEnabledFlag,
-  resolveProviderInstanceEnabled,
   type ProviderInstanceConfig,
   type ProviderInstanceConfigMap,
   ServerSettings,
@@ -21,6 +18,7 @@ import * as Stream from "effect/Stream";
 
 import * as ManagedProviders from "../policy/managedProviders.ts";
 import * as Settings from "../serverSettings.ts";
+import { deriveProviderInstanceConfigMap } from "./providerInstanceConfig.ts";
 import * as SecretResolver from "../secrets/SecretResolver.ts";
 import { BUILT_IN_DRIVERS, type BuiltInDriversEnv } from "./builtInDrivers.ts";
 import * as ProviderInstanceRegistry from "./ProviderInstanceRegistry.ts";
@@ -51,40 +49,6 @@ type ProviderInstanceRegistryHydrationEnv =
   | PortScanner.PortDiscovery
   // Adapter ids read which subagent threads predate short ids.
   | SqlClient.SqlClient;
-
-export const deriveProviderInstanceConfigMap = (
-  settings: ServerSettings,
-): ProviderInstanceConfigMap => {
-  const merged: Record<string, ProviderInstanceConfig> = { ...settings.providerInstances };
-
-  for (const driver of BUILT_IN_DRIVERS) {
-    if (driver.metadata.hasDefaultInstance === false) continue;
-    const instanceId = defaultInstanceIdForDriver(driver.driverKind);
-    if (instanceId in merged) continue;
-    merged[instanceId] = { driver: driver.driverKind };
-  }
-
-  // Probe project-enabled instances even if disabled machine-wide; project threads can still route to them.
-  for (const overrides of Object.values(settings.projectSettingsOverrides)) {
-    for (const [rawInstanceId, projectOverride] of Object.entries(
-      overrides?.providerInstances ?? {},
-    )) {
-      if (projectOverride.enabled !== true) continue;
-      const instanceId = rawInstanceId as ProviderInstanceId;
-      const existing = merged[instanceId];
-      if (existing === undefined || resolveProviderInstanceEnabled(existing)) continue;
-      merged[instanceId] = {
-        ...existing,
-        enabled: true,
-        ...(providerInstanceConfigEnabledFlag(existing.config) === false
-          ? { config: { ...(existing.config as Record<string, unknown>), enabled: true } }
-          : {}),
-      };
-    }
-  }
-
-  return merged as ProviderInstanceConfigMap;
-};
 
 export const DEV_REPLAY_INSTANCE_ID = ProviderInstanceId.make("devReplay");
 

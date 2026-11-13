@@ -48,6 +48,7 @@ import { projectThreadAwarenessV2 } from "@t3tools/shared/agentAwareness";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import { loadSubscriberShellSnapshot } from "./ShellStream.ts";
 import {
   buildBoundedThreadProjection,
   decodeThreadHistoryCursor,
@@ -755,7 +756,7 @@ it.effect("idle compaction filters keep the latest run, live work and the newest
       })
       .pipe(Effect.withTracer(command.tracer));
     for (const [table, seeks] of [
-      ["turn_items", ["turn_items_thread_type_idx (thread_id=? AND type=?)"]],
+      ["turn_items", ["turn_items_command_history_idx (thread_id=?)"]],
       ["nodes", ["nodes_settled_leaf_idx (thread_id=? AND <expr>=?)"]],
       ["subagents", ["USING COVERING INDEX orchestration_v2_projection_subagents_settled_idx"]],
       [
@@ -1420,6 +1421,200 @@ it.effect("shells flag a latest run triggered by a provider background wake", ()
       yield* assertShellIndexCoversShells();
     }
   }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("command history uses its ordered partial index without losing completed errors", () =>
+  Effect.gen(function* () {
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const sql = yield* SqlClient.SqlClient;
+    const threadId = yield* addRolledBackRecoveryCandidate("command-history-index");
+    const initial = yield* store.getThreadProjection(threadId);
+    const source = initial.turnItems.find((item) => item.type === "command_execution")!;
+    const itemBase = {
+      ...source,
+      providerThreadId: source.providerThreadId ?? null,
+      providerTurnId: source.providerTurnId ?? null,
+      nativeItemRef: source.nativeItemRef ?? null,
+      parentItemId: source.parentItemId ?? null,
+    };
+    const now = yield* DateTime.now;
+    const ids = [
+      "history-user-old",
+      "history-error-completed",
+      "history-error-failed",
+      "history-user-new",
+    ];
+    const fixtures = [
+      { id: ids[0]!, ordinal: 2, type: "user_message", status: "completed" },
+      { id: ids[1]!, ordinal: 4, type: "error", status: "completed" },
+      { id: ids[2]!, ordinal: 4, type: "error", status: "failed" },
+      { id: ids[3]!, ordinal: 6, type: "user_message", status: "completed" },
+    ] as const;
+    for (const fixture of fixtures) {
+      const payload: OrchestrationV2TurnItem =
+        fixture.type === "user_message"
+          ? {
+              ...itemBase,
+              ...fixture,
+              id: TurnItemId.make(fixture.id),
+              runId: null,
+              type: "user_message",
+              createdBy: "user",
+              creationSource: "web",
+              messageId: MessageId.make(fixture.id),
+              inputIntent: "turn_start",
+              text: fixture.id,
+              attachments: [],
+              completedAt: now,
+              updatedAt: now,
+            }
+          : {
+              ...itemBase,
+              ...fixture,
+              id: TurnItemId.make(fixture.id),
+              type: "error",
+              completedAt: now,
+              updatedAt: now,
+              failure: {
+                class: "provider_error",
+                message: fixture.id,
+                code: null,
+                retryable: null,
+              },
+            };
+      yield* store.apply({
+        id: EventId.make("event:" + fixture.id),
+        type: "turn-item.updated",
+        threadId,
+        occurredAt: now,
+        payload,
+      });
+    }
+    const readIds = (filter: ProjectionStore.ProjectionRecordFilter) =>
+      store
+        .getThreadRecords(threadId, ["turnItems"], filter)
+        .pipe(Effect.map((records) => records.turnItems.map((item) => item.id)));
+    assert.deepEqual(yield* readIds({ turnItemTypes: ["error"] }), ids.slice(1, 3));
+    assert.deepEqual(yield* readIds({ turnItemTypes: [] }), []);
+    assert.deepEqual(
+      yield* readIds({ turnItemTypes: ["error", "user_message", "command_execution"] }),
+      [source.id, ...ids],
+    );
+    assert.deepEqual(
+      yield* readIds({ turnItemTypes: ["user_message", "error"], turnItemStatuses: ["failed"] }),
+      [ids[2]],
+    );
+    assert.deepEqual(
+      yield* readIds({ turnItemTypes: ["user_message", "error"], turnItemRunIds: [null] }),
+      [ids[0], ids[3]],
+    );
+    assert.deepEqual(
+      yield* readIds({
+        turnItemTypes: ["user_message", "error"],
+        turnItemMessageIds: [MessageId.make(ids[0]!)],
+      }),
+      [ids[0]],
+    );
+    for (const turnItemTypes of [
+      ["user_message", "error"],
+      ["error", "user_message"],
+    ] as const) {
+      const { statements, tracer } = traceSqlStatements();
+      assert.deepEqual(yield* readIds({ turnItemTypes }).pipe(Effect.withTracer(tracer)), ids);
+      const query = statements.find(
+        (statement) =>
+          statement.includes("FROM orchestration_v2_projection_turn_items") &&
+          statement.includes("ORDER BY ordinal ASC"),
+      );
+      assert.isDefined(query);
+      const plan = (yield* sql.unsafe<{ readonly detail: string }>(
+        "EXPLAIN QUERY PLAN " + query!,
+      )).map((row) => row.detail);
+      assert.isTrue(
+        plan.some((detail) =>
+          detail.includes("orchestration_v2_projection_turn_items_command_history_idx"),
+        ),
+        plan.join("\n"),
+      );
+      assert.isFalse(
+        plan.some((detail) => detail.includes("USE TEMP B-TREE")),
+        plan.join("\n"),
+      );
+    }
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
+  "indexed subscriber snapshots retain idle cleanup children and deleted archive recovery",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const sql = yield* SqlClient.SqlClient;
+      const parentId = yield* addRolledBackRecoveryCandidate("cleanup-index-parent");
+      const now = yield* DateTime.now;
+      const kept: Array<ThreadId> = [parentId];
+      for (const [suffix, deleted, cleanup] of [
+        ["active", false, true],
+        ["deleted", true, true],
+        ["idle", false, false],
+        ["removed", true, false],
+      ] as const) {
+        const threadId = yield* addRolledBackRecoveryCandidate("cleanup-index-" + suffix);
+        const projection = yield* store.getThreadProjection(threadId);
+        yield* store.apply({
+          id: EventId.make("event:cleanup-index:complete:" + suffix),
+          type: "turn-item.updated",
+          threadId,
+          occurredAt: now,
+          payload: { ...projection.turnItems[0]!, status: "completed", completedAt: now },
+        });
+        yield* store.apply({
+          id: EventId.make("event:cleanup-index:thread:" + suffix),
+          type: "thread.metadata-updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            ...projection.thread,
+            lineage: {
+              parentThreadId: parentId,
+              relationshipToParent: "subagent",
+              rootThreadId: parentId,
+            },
+            archivedAt: deleted ? now : null,
+            deletedAt: deleted ? now : null,
+            ...(cleanup
+              ? {
+                  worktreeCleanup: {
+                    status: "deleting" as const,
+                    repositoryRoot: "/example/repository",
+                    worktreePath: "/example/worktree",
+                    startedAt: DateTime.formatIso(now),
+                  },
+                }
+              : {}),
+          },
+        });
+        if (cleanup) kept.push(threadId);
+      }
+      yield* assertShellIndexCoversShells();
+      const { snapshot } = yield* loadSubscriberShellSnapshot({
+        sql,
+        listShellIndex: store.listActiveShellIndex(),
+        readThreads: (threadIds) =>
+          store.readShellSnapshot({
+            location: "active",
+            ...(threadIds === undefined ? {} : { threadIds }),
+          }),
+        listProjects: Effect.succeed([]),
+        latestSequence: Effect.succeed(0),
+        options: { omitIdleSubagents: true, omitOlderSettled: true },
+      });
+      assert.sameMembers(
+        snapshot.threads.map((thread) => thread.id),
+        kept,
+      );
+      assert.isNotNull(snapshot.threads.find((thread) => thread.deletedAt !== null)?.archivedAt);
+    }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect("SQL queue readiness skips held runs without bypassing active work", () =>
@@ -3643,60 +3838,63 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
     }),
   );
 
-  it.effect("reads a fixed SQL turn-item window for long histories and repeated clients", () =>
-    Effect.gen(function* () {
-      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
-      const sql = yield* SqlClient.SqlClient;
-      const now = yield* DateTime.now;
-      const nowIso = DateTime.formatIso(now);
-      const threadId = ThreadId.make("thread:bounded-sql-history");
-      // The raw SQL edits below stand in for committed writes, which always append a thread event.
-      let revision = 0;
-      const committed = <A, E, R>(read: Effect.Effect<A, E, R>) =>
-        sql`INSERT INTO orchestration_events (
+  // quarantine: #691 Node 24 lacks the SQLite VM-step counter required by this case.
+  it.effect.skipIf(typeof NodeSqlite.StatementSync.prototype.stat !== "function")(
+    "reads a fixed SQL turn-item window for long histories and repeated clients",
+    () =>
+      Effect.gen(function* () {
+        const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+        const sql = yield* SqlClient.SqlClient;
+        const now = yield* DateTime.now;
+        const nowIso = DateTime.formatIso(now);
+        const threadId = ThreadId.make("thread:bounded-sql-history");
+        // The raw SQL edits below stand in for committed writes, which always append a thread event.
+        let revision = 0;
+        const committed = <A, E, R>(read: Effect.Effect<A, E, R>) =>
+          sql`INSERT INTO orchestration_events (
           event_id, aggregate_kind, stream_id, stream_version, event_type,
           occurred_at, actor_kind, payload_json, metadata_json, application_event_version
         ) VALUES (
           ${`event:bounded-sql-history:revision:${++revision}`}, 'thread', ${threadId}, ${revision},
           'turn-item.updated', ${nowIso}, 'user', '{}', '{}', 2
         )`.pipe(Effect.andThen(read));
-      const historyPage = (...args: Parameters<typeof projectionStore.getThreadHistoryPage>) =>
-        committed(projectionStore.getThreadHistoryPage(...args));
-      yield* projectionStore.apply({
-        id: EventId.make("event:bounded-sql-history:thread"),
-        type: "thread.created",
-        threadId,
-        occurredAt: now,
-        payload: {
-          createdBy: "user",
-          creationSource: "web",
-          id: threadId,
-          projectId: ProjectId.make("project:bounded-sql-history"),
-          title: "Bounded SQL history",
-          providerInstanceId,
-          modelSelection,
-          runtimeMode: "full-access",
-          interactionMode: "default",
-          branch: null,
-          worktreePath: null,
-          activeProviderThreadId: null,
-          lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
-          forkedFrom: null,
-          createdAt: now,
-          updatedAt: now,
-          archivedAt: null,
-          settledOverride: null,
-          settledAt: null,
-          lastVisitedAt: null,
-          deletedAt: null,
-        },
-      });
+        const historyPage = (...args: Parameters<typeof projectionStore.getThreadHistoryPage>) =>
+          committed(projectionStore.getThreadHistoryPage(...args));
+        yield* projectionStore.apply({
+          id: EventId.make("event:bounded-sql-history:thread"),
+          type: "thread.created",
+          threadId,
+          occurredAt: now,
+          payload: {
+            createdBy: "user",
+            creationSource: "web",
+            id: threadId,
+            projectId: ProjectId.make("project:bounded-sql-history"),
+            title: "Bounded SQL history",
+            providerInstanceId,
+            modelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            activeProviderThreadId: null,
+            lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+            forkedFrom: null,
+            createdAt: now,
+            updatedAt: now,
+            archivedAt: null,
+            settledOverride: null,
+            settledAt: null,
+            lastVisitedAt: null,
+            deletedAt: null,
+          },
+        });
 
-      for (let ordinal = 1; ordinal <= 1_000; ordinal += 1) {
-        const id = `turn-item:bounded-sql-history:${ordinal}`;
-        const runId = `run:bounded-sql-history:${ordinal}`;
-        const message = ordinal === 1 || ordinal === 1_000;
-        yield* sql`
+        for (let ordinal = 1; ordinal <= 1_000; ordinal += 1) {
+          const id = `turn-item:bounded-sql-history:${ordinal}`;
+          const runId = `run:bounded-sql-history:${ordinal}`;
+          const message = ordinal === 1 || ordinal === 1_000;
+          yield* sql`
           INSERT INTO orchestration_v2_projection_runs (
             run_id, thread_id, ordinal, provider, provider_thread_id, status,
             requested_at, completed_at, payload_json
@@ -3721,7 +3919,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
             })}
           )
         `;
-        yield* sql`
+          yield* sql`
           INSERT INTO orchestration_v2_projection_turn_items (
             turn_item_id, thread_id, run_id, node_id, provider_thread_id, provider_turn_id,
             parent_item_id, ordinal, type, status, updated_at, payload_json
@@ -3760,162 +3958,162 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
             })}
           )
         `;
-      }
+        }
 
-      for (const ordinal of [1, 1_000]) {
+        for (const ordinal of [1, 1_000]) {
+          yield* projectionStore.apply({
+            id: EventId.make(`event:bounded-sql-history:message:${ordinal}`),
+            type: "message.updated",
+            threadId,
+            occurredAt: now,
+            payload: {
+              createdBy: "user",
+              creationSource: "web",
+              id: MessageId.make(`message:bounded-sql-history:${ordinal}`),
+              threadId,
+              runId: RunId.make(`run:bounded-sql-history:${ordinal}`),
+              nodeId: NodeId.make(`node:bounded-sql-history:${ordinal}`),
+              role: "user",
+              text: `Turn ${ordinal}`,
+              attachments: [],
+              streaming: false,
+              createdAt: now,
+              updatedAt: now,
+            },
+          });
+        }
+        const scopeId = CheckpointScopeId.make("scope:bounded-sql-history:root");
+        const baselineId = CheckpointId.make("checkpoint:bounded-sql-history:baseline");
         yield* projectionStore.apply({
-          id: EventId.make(`event:bounded-sql-history:message:${ordinal}`),
-          type: "message.updated",
+          id: EventId.make("event:bounded-sql-history:scope"),
+          type: "checkpoint-scope.created",
           threadId,
           occurredAt: now,
           payload: {
-            createdBy: "user",
-            creationSource: "web",
-            id: MessageId.make(`message:bounded-sql-history:${ordinal}`),
+            id: scopeId,
             threadId,
-            runId: RunId.make(`run:bounded-sql-history:${ordinal}`),
-            nodeId: NodeId.make(`node:bounded-sql-history:${ordinal}`),
-            role: "user",
-            text: `Turn ${ordinal}`,
-            attachments: [],
-            streaming: false,
+            runId: RunId.make("run:bounded-sql-history:1000"),
+            nodeId: NodeId.make("node:bounded-sql-history:1000"),
+            parentScopeId: null,
+            providerThreadId: null,
+            kind: "root_run",
+            ordinalWithinParent: 0,
+            advancesAppRunCount: true,
+            cwd: "/repo/worktree",
             createdAt: now,
-            updatedAt: now,
           },
         });
-      }
-      const scopeId = CheckpointScopeId.make("scope:bounded-sql-history:root");
-      const baselineId = CheckpointId.make("checkpoint:bounded-sql-history:baseline");
-      yield* projectionStore.apply({
-        id: EventId.make("event:bounded-sql-history:scope"),
-        type: "checkpoint-scope.created",
-        threadId,
-        occurredAt: now,
-        payload: {
-          id: scopeId,
+        // A reused root scope can retain its original baseline on a node outside the window.
+        yield* projectionStore.apply({
+          id: EventId.make("event:bounded-sql-history:baseline"),
+          type: "checkpoint.captured",
           threadId,
-          runId: RunId.make("run:bounded-sql-history:1000"),
-          nodeId: NodeId.make("node:bounded-sql-history:1000"),
-          parentScopeId: null,
-          providerThreadId: null,
-          kind: "root_run",
-          ordinalWithinParent: 0,
-          advancesAppRunCount: true,
-          cwd: "/repo/worktree",
-          createdAt: now,
-        },
-      });
-      // A reused root scope can retain its original baseline on a node outside the window.
-      yield* projectionStore.apply({
-        id: EventId.make("event:bounded-sql-history:baseline"),
-        type: "checkpoint.captured",
-        threadId,
-        occurredAt: now,
-        payload: {
-          id: baselineId,
-          threadId,
-          scopeId,
-          runId: null,
-          nodeId: NodeId.make("node:bounded-sql-history:1"),
-          parentCheckpointId: null,
-          ordinalWithinScope: 0,
-          appRunOrdinal: null,
-          ref: CheckpointRef.make("refs/t3/bounded-sql-history/0"),
-          status: "ready",
-          files: [],
-          capturedAt: now,
-        },
-      });
-
-      const snapshots = yield* Effect.all(
-        Array.from({ length: 4 }, () =>
-          projectionStore.getThreadSnapshotWindow(threadId, { rowLimit: 76 }),
-        ),
-        { concurrency: 4 },
-      );
-      for (const snapshot of snapshots) {
-        assert.lengthOf(snapshot.projection.turnItems, 76);
-        assert.lengthOf(snapshot.projection.runs, 76);
-        assert.lengthOf(snapshot.projection.visibleTurnItems, 76);
-        assert.strictEqual(snapshot.projection.turnItems[0]?.ordinal, 925);
-        assert.strictEqual(snapshot.projection.turnItems.at(-1)?.ordinal, 1_000);
-        assert.deepEqual(
-          snapshot.projection.messages.map((message) => message.id),
-          [MessageId.make("message:bounded-sql-history:1000")],
-        );
-        assert.deepEqual(
-          snapshot.projection.checkpointScopes.map((scope) => scope.id),
-          [scopeId],
-        );
-        assert.deepEqual(
-          snapshot.projection.checkpoints.map((checkpoint) => checkpoint.id),
-          [baselineId],
-        );
-      }
-      const humanWindow = () =>
-        projectionStore.getThreadSnapshotWindow(threadId, {
-          rowLimit: 77,
-          userTurnLimit: THREAD_HISTORY_PAGE_POLICY.maxUserTurns,
+          occurredAt: now,
+          payload: {
+            id: baselineId,
+            threadId,
+            scopeId,
+            runId: null,
+            nodeId: NodeId.make("node:bounded-sql-history:1"),
+            parentCheckpointId: null,
+            ordinalWithinScope: 0,
+            appRunOrdinal: null,
+            ref: CheckpointRef.make("refs/t3/bounded-sql-history/0"),
+            status: "ready",
+            files: [],
+            capturedAt: now,
+          },
         });
-      assert.lengthOf(
-        (yield* humanWindow()).projection.turnItems,
-        THREAD_HISTORY_TURN_SNAPSHOT_ROW_LIMIT,
-      );
-      // With the newest user turn 1,000 rows back, the window pages from inside it.
-      const setNewestTurnType = (type: "command_execution" | "user_message") => sql`
+
+        const snapshots = yield* Effect.all(
+          Array.from({ length: 4 }, () =>
+            projectionStore.getThreadSnapshotWindow(threadId, { rowLimit: 76 }),
+          ),
+          { concurrency: 4 },
+        );
+        for (const snapshot of snapshots) {
+          assert.lengthOf(snapshot.projection.turnItems, 76);
+          assert.lengthOf(snapshot.projection.runs, 76);
+          assert.lengthOf(snapshot.projection.visibleTurnItems, 76);
+          assert.strictEqual(snapshot.projection.turnItems[0]?.ordinal, 925);
+          assert.strictEqual(snapshot.projection.turnItems.at(-1)?.ordinal, 1_000);
+          assert.deepEqual(
+            snapshot.projection.messages.map((message) => message.id),
+            [MessageId.make("message:bounded-sql-history:1000")],
+          );
+          assert.deepEqual(
+            snapshot.projection.checkpointScopes.map((scope) => scope.id),
+            [scopeId],
+          );
+          assert.deepEqual(
+            snapshot.projection.checkpoints.map((checkpoint) => checkpoint.id),
+            [baselineId],
+          );
+        }
+        const humanWindow = () =>
+          projectionStore.getThreadSnapshotWindow(threadId, {
+            rowLimit: 77,
+            userTurnLimit: THREAD_HISTORY_PAGE_POLICY.maxUserTurns,
+          });
+        assert.lengthOf(
+          (yield* humanWindow()).projection.turnItems,
+          THREAD_HISTORY_TURN_SNAPSHOT_ROW_LIMIT,
+        );
+        // With the newest user turn 1,000 rows back, the window pages from inside it.
+        const setNewestTurnType = (type: "command_execution" | "user_message") => sql`
         UPDATE orchestration_v2_projection_turn_items
         SET type = ${type}, payload_json = json_set(payload_json, '$.type', ${type})
         WHERE thread_id = ${threadId} AND ordinal = 1000
       `;
-      yield* setNewestTurnType("command_execution");
-      assert.lengthOf((yield* humanWindow()).projection.turnItems, 77);
-      yield* setNewestTurnType("user_message");
+        yield* setNewestTurnType("command_execution");
+        assert.lengthOf((yield* humanWindow()).projection.turnItems, 77);
+        yield* setNewestTurnType("user_message");
 
-      // Fewer than 75 rows still need a byte pass after materializing wire payloads.
-      yield* sql`
+        // Fewer than 75 rows still need a byte pass after materializing wire payloads.
+        yield* sql`
         UPDATE orchestration_v2_projection_turn_items
         SET type = 'assistant_message', payload_json = json_set(payload_json,
           '$.type', 'assistant_message', '$.text', ${"x".repeat(40_000)},
           '$.messageId', turn_item_id, '$.streaming', json('false'))
         WHERE thread_id = ${threadId} AND ordinal BETWEEN 2 AND 70
       `;
-      const byteCursor = encodeThreadHistoryCursor({
-        snapshotSequence: 0,
-        sourceThreadId: threadId,
-        sourceItemId: TurnItemId.make("turn-item:bounded-sql-history:71"),
-        position: 70,
-      });
-      const bytePage = yield* historyPage(threadId, byteCursor);
-      assert.isAbove(bytePage.items.length, 0);
-      assert.isBelow(bytePage.items.length, 70);
-      assert.isAtMost(
-        Buffer.byteLength(JSON.stringify(bytePage.items), "utf8"),
-        THREAD_HISTORY_PAGE_POLICY.maxEncodedBytes,
-      );
-      const byteIds = bytePage.items.map((row) => String(row.sourceItemId));
-      let byteNext = bytePage.nextCursor;
-      for (let pages = 0; byteNext !== null; pages += 1) {
-        assert.isBelow(pages, 70);
-        const page = yield* historyPage(threadId, byteNext);
-        assert.isAbove(page.items.length, 0);
-        byteIds.unshift(...page.items.map((row) => String(row.sourceItemId)));
-        byteNext = page.nextCursor;
-      }
-      assert.deepEqual(
-        byteIds,
-        Array.from({ length: 70 }, (_, index) => `turn-item:bounded-sql-history:${index + 1}`),
-      );
+        const byteCursor = encodeThreadHistoryCursor({
+          snapshotSequence: 0,
+          sourceThreadId: threadId,
+          sourceItemId: TurnItemId.make("turn-item:bounded-sql-history:71"),
+          position: 70,
+        });
+        const bytePage = yield* historyPage(threadId, byteCursor);
+        assert.isAbove(bytePage.items.length, 0);
+        assert.isBelow(bytePage.items.length, 70);
+        assert.isAtMost(
+          Buffer.byteLength(JSON.stringify(bytePage.items), "utf8"),
+          THREAD_HISTORY_PAGE_POLICY.maxEncodedBytes,
+        );
+        const byteIds = bytePage.items.map((row) => String(row.sourceItemId));
+        let byteNext = bytePage.nextCursor;
+        for (let pages = 0; byteNext !== null; pages += 1) {
+          assert.isBelow(pages, 70);
+          const page = yield* historyPage(threadId, byteNext);
+          assert.isAbove(page.items.length, 0);
+          byteIds.unshift(...page.items.map((row) => String(row.sourceItemId)));
+          byteNext = page.nextCursor;
+        }
+        assert.deepEqual(
+          byteIds,
+          Array.from({ length: 70 }, (_, index) => `turn-item:bounded-sql-history:${index + 1}`),
+        );
 
-      // Selected message reads recover ordinals for only the loaded messages, while 69
-      // unloaded assistant messages remain in the thread's history.
-      const firstMessageId = MessageId.make("message:bounded-sql-history:1");
-      const lastMessageId = MessageId.make("message:bounded-sql-history:1000");
-      const insertMessageItem = (
-        suffix: string,
-        itemThreadId: string,
-        ordinal: number,
-        messageId: string | null | undefined,
-      ) => sql`
+        // Selected message reads recover ordinals for only the loaded messages, while 69
+        // unloaded assistant messages remain in the thread's history.
+        const firstMessageId = MessageId.make("message:bounded-sql-history:1");
+        const lastMessageId = MessageId.make("message:bounded-sql-history:1000");
+        const insertMessageItem = (
+          suffix: string,
+          itemThreadId: string,
+          ordinal: number,
+          messageId: string | null | undefined,
+        ) => sql`
         INSERT INTO orchestration_v2_projection_turn_items (
           turn_item_id, thread_id, run_id, node_id, provider_thread_id, provider_turn_id,
           parent_item_id, ordinal, type, status, updated_at, payload_json
@@ -3925,76 +4123,82 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           ${encodeUnknownJsonString({ messageId })}
         )
       `;
-      yield* insertMessageItem("duplicate", threadId, 0, lastMessageId);
-      yield* insertMessageItem(
-        "other-thread",
-        "thread:bounded-sql-history:other",
-        -1,
-        firstMessageId,
-      );
-      yield* insertMessageItem("null-id", threadId, -2, null);
-      yield* insertMessageItem("missing-id", threadId, -3, undefined);
-      const absentMessageId = MessageId.make("message:bounded-sql-history:absent");
-      const messageReadTrace = traceSqlStatements();
-      const selected = yield* projectionStore
-        .getMessagesById(threadId, [firstMessageId, lastMessageId, firstMessageId, absentMessageId])
-        .pipe(Effect.withTracer(messageReadTrace.tracer));
-      assert.isFalse(messageReadTrace.statements.some((query) => query.includes("turn_items")));
-      assert.equal(selected.size, 2);
-      assert.equal(selected.get(firstMessageId)?.id, firstMessageId);
-      assert.equal(selected.get(lastMessageId)?.id, lastMessageId);
-      assert.isFalse(selected.has(absentMessageId));
-      assert.equal((yield* projectionStore.getMessagesById(threadId, [])).size, 0);
-      assert.equal(
-        (yield* projectionStore.getMessagesById(ThreadId.make("other-thread"), [firstMessageId]))
-          .size,
-        0,
-      );
-      const readMessageIds = (filter?: ProjectionStore.ProjectionRecordFilter) =>
-        projectionStore
-          .getThreadRecords(threadId, ["messages"], filter)
-          .pipe(Effect.map(({ messages }) => messages.map((message) => message.id)));
-      const canonical = yield* projectionStore.getThreadRecords(threadId, ["messages"]);
-      for (const message of canonical.messages) assert.deepEqual(selected.get(message.id), message);
-      assert.deepEqual(yield* readMessageIds(), [lastMessageId, firstMessageId]);
-      assert.deepEqual(yield* readMessageIds({ messageRoles: ["user", "assistant"] }), [
-        lastMessageId,
-        firstMessageId,
-      ]);
-      for (const filter of [
-        {
-          messageIds: [
+        yield* insertMessageItem("duplicate", threadId, 0, lastMessageId);
+        yield* insertMessageItem(
+          "other-thread",
+          "thread:bounded-sql-history:other",
+          -1,
+          firstMessageId,
+        );
+        yield* insertMessageItem("null-id", threadId, -2, null);
+        yield* insertMessageItem("missing-id", threadId, -3, undefined);
+        const absentMessageId = MessageId.make("message:bounded-sql-history:absent");
+        const messageReadTrace = traceSqlStatements();
+        const selected = yield* projectionStore
+          .getMessagesById(threadId, [
             firstMessageId,
             lastMessageId,
-            MessageId.make("message:bounded-sql-history:absent"),
-          ],
-        },
-        { messageRoles: ["user" as const] },
-        {
-          messageRunIds: [
-            RunId.make("run:bounded-sql-history:1"),
-            RunId.make("run:bounded-sql-history:1000"),
-          ],
-        },
-      ]) {
-        assert.deepEqual(yield* readMessageIds(filter), [lastMessageId, firstMessageId]);
-      }
-      assert.deepEqual(yield* readMessageIds({ messageIds: [] }), []);
-      assert.deepEqual(yield* readMessageIds({ messageIds: [firstMessageId] }), [firstMessageId]);
-      yield* sql`
+            firstMessageId,
+            absentMessageId,
+          ])
+          .pipe(Effect.withTracer(messageReadTrace.tracer));
+        assert.isFalse(messageReadTrace.statements.some((query) => query.includes("turn_items")));
+        assert.equal(selected.size, 2);
+        assert.equal(selected.get(firstMessageId)?.id, firstMessageId);
+        assert.equal(selected.get(lastMessageId)?.id, lastMessageId);
+        assert.isFalse(selected.has(absentMessageId));
+        assert.equal((yield* projectionStore.getMessagesById(threadId, [])).size, 0);
+        assert.equal(
+          (yield* projectionStore.getMessagesById(ThreadId.make("other-thread"), [firstMessageId]))
+            .size,
+          0,
+        );
+        const readMessageIds = (filter?: ProjectionStore.ProjectionRecordFilter) =>
+          projectionStore
+            .getThreadRecords(threadId, ["messages"], filter)
+            .pipe(Effect.map(({ messages }) => messages.map((message) => message.id)));
+        const canonical = yield* projectionStore.getThreadRecords(threadId, ["messages"]);
+        for (const message of canonical.messages)
+          assert.deepEqual(selected.get(message.id), message);
+        assert.deepEqual(yield* readMessageIds(), [lastMessageId, firstMessageId]);
+        assert.deepEqual(yield* readMessageIds({ messageRoles: ["user", "assistant"] }), [
+          lastMessageId,
+          firstMessageId,
+        ]);
+        for (const filter of [
+          {
+            messageIds: [
+              firstMessageId,
+              lastMessageId,
+              MessageId.make("message:bounded-sql-history:absent"),
+            ],
+          },
+          { messageRoles: ["user" as const] },
+          {
+            messageRunIds: [
+              RunId.make("run:bounded-sql-history:1"),
+              RunId.make("run:bounded-sql-history:1000"),
+            ],
+          },
+        ]) {
+          assert.deepEqual(yield* readMessageIds(filter), [lastMessageId, firstMessageId]);
+        }
+        assert.deepEqual(yield* readMessageIds({ messageIds: [] }), []);
+        assert.deepEqual(yield* readMessageIds({ messageIds: [firstMessageId] }), [firstMessageId]);
+        yield* sql`
         DELETE FROM orchestration_v2_projection_turn_items
         WHERE turn_item_id LIKE 'turn-item:bounded-sql-history:ordinal-%'
       `;
 
-      yield* sql`
+        yield* sql`
         UPDATE orchestration_v2_projection_turn_items
         SET type = 'command_execution', payload_json = json_set(payload_json, '$.type', 'command_execution')
         WHERE thread_id = ${threadId} AND ordinal BETWEEN 2 AND 70
       `;
 
-      // A targeted page that needs more than 20 human turns must still reach its target
-      // after the byte pass re-bounds it.
-      yield* sql`
+        // A targeted page that needs more than 20 human turns must still reach its target
+        // after the byte pass re-bounds it.
+        yield* sql`
         UPDATE orchestration_v2_projection_turn_items
         SET type = 'user_message', payload_json = json_set(payload_json,
           '$.type', 'user_message', '$.createdBy', 'user', '$.creationSource', 'web',
@@ -4002,28 +4206,28 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           '$.attachments', json('[]'))
         WHERE thread_id = ${threadId} AND ordinal BETWEEN 600 AND 624
       `;
-      const targetedPage = yield* historyPage(
-        threadId,
-        encodeThreadHistoryCursor({
-          snapshotSequence: 0,
-          sourceThreadId: threadId,
-          sourceItemId: TurnItemId.make("turn-item:bounded-sql-history:625"),
-          position: 624,
-        }),
-        "turn-item:bounded-sql-history:600",
-      );
-      assert.strictEqual(
-        String(targetedPage.items[0]?.sourceItemId),
-        "turn-item:bounded-sql-history:600",
-      );
-      yield* sql`
+        const targetedPage = yield* historyPage(
+          threadId,
+          encodeThreadHistoryCursor({
+            snapshotSequence: 0,
+            sourceThreadId: threadId,
+            sourceItemId: TurnItemId.make("turn-item:bounded-sql-history:625"),
+            position: 624,
+          }),
+          "turn-item:bounded-sql-history:600",
+        );
+        assert.strictEqual(
+          String(targetedPage.items[0]?.sourceItemId),
+          "turn-item:bounded-sql-history:600",
+        );
+        yield* sql`
         UPDATE orchestration_v2_projection_turn_items
         SET type = 'command_execution', payload_json = json_set(payload_json, '$.type', 'command_execution')
         WHERE thread_id = ${threadId} AND ordinal BETWEEN 600 AND 624
       `;
 
-      // A turn split by the row budget keeps an interrupt result's request on the same page.
-      yield* sql`
+        // A turn split by the row budget keeps an interrupt result's request on the same page.
+        yield* sql`
         UPDATE orchestration_v2_projection_turn_items
         SET run_id = 'run:bounded-sql-history:500',
           type = CASE ordinal WHEN 500 THEN 'run_interrupt_request' ELSE 'run_interrupt_result' END,
@@ -4032,20 +4236,20 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
             '$.type', CASE ordinal WHEN 500 THEN 'run_interrupt_request' ELSE 'run_interrupt_result' END)
         WHERE thread_id = ${threadId} AND ordinal IN (500, 580)
       `;
-      const interruptPage = yield* historyPage(
-        threadId,
-        encodeThreadHistoryCursor({
-          snapshotSequence: 0,
-          sourceThreadId: threadId,
-          sourceItemId: TurnItemId.make("turn-item:bounded-sql-history:590"),
-          position: 589,
-        }),
-      );
-      const interruptIds = interruptPage.items.map((row) => String(row.sourceItemId));
-      assert.include(interruptIds, "turn-item:bounded-sql-history:580");
-      assert.include(interruptIds, "turn-item:bounded-sql-history:500");
-      assert.notInclude(interruptIds, "turn-item:bounded-sql-history:501");
-      yield* sql`
+        const interruptPage = yield* historyPage(
+          threadId,
+          encodeThreadHistoryCursor({
+            snapshotSequence: 0,
+            sourceThreadId: threadId,
+            sourceItemId: TurnItemId.make("turn-item:bounded-sql-history:590"),
+            position: 589,
+          }),
+        );
+        const interruptIds = interruptPage.items.map((row) => String(row.sourceItemId));
+        assert.include(interruptIds, "turn-item:bounded-sql-history:580");
+        assert.include(interruptIds, "turn-item:bounded-sql-history:500");
+        assert.notInclude(interruptIds, "turn-item:bounded-sql-history:501");
+        yield* sql`
         UPDATE orchestration_v2_projection_turn_items
         SET run_id = 'run:bounded-sql-history:' || ordinal, type = 'command_execution',
           payload_json = json_set(payload_json,
@@ -4053,135 +4257,135 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         WHERE thread_id = ${threadId} AND ordinal IN (500, 580)
       `;
 
-      // Older pages and timeline pages read the rows near the page, not the whole history. A
-      // full index that another read left cached gives the same page.
-      const pageStatements: Array<readonly [string, ReadonlyArray<unknown>]> = [];
-      const recordPageStatements = <A, E, R>(read: Effect.Effect<A, E, R>) =>
-        committed(
-          read.pipe(
+        // Older pages and timeline pages read the rows near the page, not the whole history. A
+        // full index that another read left cached gives the same page.
+        const pageStatements: Array<readonly [string, ReadonlyArray<unknown>]> = [];
+        const recordPageStatements = <A, E, R>(read: Effect.Effect<A, E, R>) =>
+          committed(
+            read.pipe(
+              Effect.provideService(Statement.CurrentTransformer, (statement) => {
+                pageStatements.push(statement.compile());
+                return Effect.succeed(statement);
+              }),
+            ),
+          );
+        const olderCursor = encodeThreadHistoryCursor({
+          snapshotSequence: 0,
+          sourceThreadId: threadId,
+          sourceItemId: TurnItemId.make("turn-item:bounded-sql-history:990"),
+          position: 989,
+        });
+        const ordinalsFrom = (first: number, length: number) =>
+          Array.from({ length }, (_, index) => first + index);
+        for (const workMode of [undefined, "deferred"] as const) {
+          const read = (throughEntryId?: string) =>
+            projectionStore.getThreadHistoryPage(
+              threadId,
+              olderCursor,
+              throughEntryId,
+              false,
+              workMode,
+            );
+          const page = yield* recordPageStatements(read());
+          assert.deepEqual(
+            page.items.map((row) => row.item.ordinal),
+            ordinalsFrom(915, 75),
+          );
+          assert.strictEqual(decodeThreadHistoryCursor(page.nextCursor!).p, 914);
+          // A jump to an entry reads the full index and leaves it cached. With work, it scans
+          // payloads for inline output only in its page's runs, not in a run after its cursor.
+          const scannedRuns: Array<string> = [];
+          yield* read("turn-item:bounded-sql-history:950").pipe(
             Effect.provideService(Statement.CurrentTransformer, (statement) => {
-              pageStatements.push(statement.compile());
+              const [query, params] = statement.compile();
+              if (query.includes("LIKE '%htmlRender%'")) scannedRuns.push(String(params[0]));
               return Effect.succeed(statement);
             }),
-          ),
-        );
-      const olderCursor = encodeThreadHistoryCursor({
-        snapshotSequence: 0,
-        sourceThreadId: threadId,
-        sourceItemId: TurnItemId.make("turn-item:bounded-sql-history:990"),
-        position: 989,
-      });
-      const ordinalsFrom = (first: number, length: number) =>
-        Array.from({ length }, (_, index) => first + index);
-      for (const workMode of [undefined, "deferred"] as const) {
-        const read = (throughEntryId?: string) =>
-          projectionStore.getThreadHistoryPage(
-            threadId,
-            olderCursor,
-            throughEntryId,
-            false,
-            workMode,
           );
-        const page = yield* recordPageStatements(read());
-        assert.deepEqual(
-          page.items.map((row) => row.item.ordinal),
-          ordinalsFrom(915, 75),
-        );
-        assert.strictEqual(decodeThreadHistoryCursor(page.nextCursor!).p, 914);
-        // A jump to an entry reads the full index and leaves it cached. With work, it scans
-        // payloads for inline output only in its page's runs, not in a run after its cursor.
-        const scannedRuns: Array<string> = [];
-        yield* read("turn-item:bounded-sql-history:950").pipe(
-          Effect.provideService(Statement.CurrentTransformer, (statement) => {
-            const [query, params] = statement.compile();
-            if (query.includes("LIKE '%htmlRender%'")) scannedRuns.push(String(params[0]));
-            return Effect.succeed(statement);
-          }),
-        );
-        assert.deepEqual(
-          [
-            scannedRuns.length,
-            scannedRuns.some((runs) => runs.includes('"run:bounded-sql-history:950"')),
-            scannedRuns.some((runs) => runs.includes('"run:bounded-sql-history:995"')),
-          ],
-          workMode === undefined ? [0, false, false] : [1, true, false],
-        );
-        assert.deepEqual(yield* read(), page);
-      }
-      for (const [view, ordinals] of [
-        ["activity", ordinalsFrom(902, 20)],
-        ["messages", [1000]],
-      ] as const) {
-        const read = projectionStore.getTimelinePage(threadId, {
-          afterPosition: 900,
-          limit: 20,
-          view,
-        });
-        const page = yield* recordPageStatements(read);
-        assert.deepEqual(
-          page.items.map((row) => [row.item.ordinal, row.position]),
-          ordinals.map((ordinal) => [ordinal, ordinal - 1]),
-        );
-        assert.strictEqual(page.totalItems, 1000);
-        // An attachment lookup reads the full index and leaves it cached.
-        yield* projectionStore.getTimelinePage(threadId, { attachmentId: "absent", limit: 1 });
-        assert.deepEqual(yield* read, page);
-      }
-      {
-        const pagePath = "file:/history-page-steps?vfs=memdb";
-        using copy = new NodeSqlite.DatabaseSync(pagePath);
-        yield* sql`VACUUM INTO ${pagePath}`;
-        // Only statements that count positions may grow with the history, and those read an
-        // index alone. Every other statement costs the same when the rows below the page are gone.
-        const countsPositions = ([query]: readonly [string, ReadonlyArray<unknown>]) =>
-          /COUNT\(\*\)|OFFSET/.test(query);
-        for (const [query, params] of pageStatements.filter(countsPositions)) {
-          const plan = copy
-            .prepare(`EXPLAIN QUERY PLAN ${query}`)
-            .all(...(params as ReadonlyArray<NodeSqlite.SQLInputValue>))
-            .map((row) => String(row.detail))
-            .filter((detail) => detail.includes("orchestration_v2_projection_turn_items"));
-          assert.isTrue(
-            plan.every((detail) => detail.includes("COVERING INDEX")),
-            `${query}\n${plan.join("\n")}`,
+          assert.deepEqual(
+            [
+              scannedRuns.length,
+              scannedRuns.some((runs) => runs.includes('"run:bounded-sql-history:950"')),
+              scannedRuns.some((runs) => runs.includes('"run:bounded-sql-history:995"')),
+            ],
+            workMode === undefined ? [0, false, false] : [1, true, false],
           );
+          assert.deepEqual(yield* read(), page);
         }
-        const rowReads = pageStatements.filter((statement) => !countsPositions(statement));
-        const rowReadSteps = () =>
-          rowReads.reduce((steps, [query, params]) => {
-            const statement = copy.prepare(query);
-            statement.all(...(params as ReadonlyArray<NodeSqlite.SQLInputValue>));
-            return steps + statement.stat("vmStep");
-          }, 0);
-        const fullSteps = rowReadSteps();
-        assert.isAbove(fullSteps, 0);
-        copy.exec(
-          "DELETE FROM orchestration_v2_projection_turn_items WHERE ordinal BETWEEN 2 AND 400",
-        );
-        assert.isAtMost(fullSteps, rowReadSteps() * 1.1);
-      }
-      // Rows that a rolled-back run hides below the page still shift every position above them.
-      const setOldRunStatus = (status: "rolled_back" | "completed") => sql`
+        for (const [view, ordinals] of [
+          ["activity", ordinalsFrom(902, 20)],
+          ["messages", [1000]],
+        ] as const) {
+          const read = projectionStore.getTimelinePage(threadId, {
+            afterPosition: 900,
+            limit: 20,
+            view,
+          });
+          const page = yield* recordPageStatements(read);
+          assert.deepEqual(
+            page.items.map((row) => [row.item.ordinal, row.position]),
+            ordinals.map((ordinal) => [ordinal, ordinal - 1]),
+          );
+          assert.strictEqual(page.totalItems, 1000);
+          // An attachment lookup reads the full index and leaves it cached.
+          yield* projectionStore.getTimelinePage(threadId, { attachmentId: "absent", limit: 1 });
+          assert.deepEqual(yield* read, page);
+        }
+        {
+          const pagePath = "file:/history-page-steps?vfs=memdb";
+          using copy = new NodeSqlite.DatabaseSync(pagePath);
+          yield* sql`VACUUM INTO ${pagePath}`;
+          // Only statements that count positions may grow with the history, and those read an
+          // index alone. Every other statement costs the same when the rows below the page are gone.
+          const countsPositions = ([query]: readonly [string, ReadonlyArray<unknown>]) =>
+            /COUNT\(\*\)|OFFSET/.test(query);
+          for (const [query, params] of pageStatements.filter(countsPositions)) {
+            const plan = copy
+              .prepare(`EXPLAIN QUERY PLAN ${query}`)
+              .all(...(params as ReadonlyArray<NodeSqlite.SQLInputValue>))
+              .map((row) => String(row.detail))
+              .filter((detail) => detail.includes("orchestration_v2_projection_turn_items"));
+            assert.isTrue(
+              plan.every((detail) => detail.includes("COVERING INDEX")),
+              `${query}\n${plan.join("\n")}`,
+            );
+          }
+          const rowReads = pageStatements.filter((statement) => !countsPositions(statement));
+          const rowReadSteps = () =>
+            rowReads.reduce((steps, [query, params]) => {
+              const statement = copy.prepare(query);
+              statement.all(...(params as ReadonlyArray<NodeSqlite.SQLInputValue>));
+              return steps + statement.stat("vmStep");
+            }, 0);
+          const fullSteps = rowReadSteps();
+          assert.isAbove(fullSteps, 0);
+          copy.exec(
+            "DELETE FROM orchestration_v2_projection_turn_items WHERE ordinal BETWEEN 2 AND 400",
+          );
+          assert.isAtMost(fullSteps, rowReadSteps() * 1.1);
+        }
+        // Rows that a rolled-back run hides below the page still shift every position above them.
+        const setOldRunStatus = (status: "rolled_back" | "completed") => sql`
         UPDATE orchestration_v2_projection_runs
         SET status = ${status}, payload_json = json_set(payload_json, '$.status', ${status})
         WHERE thread_id = ${threadId} AND ordinal BETWEEN 100 AND 109`;
-      yield* setOldRunStatus("rolled_back");
-      const shiftedPage = yield* historyPage(threadId, olderCursor);
-      assert.strictEqual(decodeThreadHistoryCursor(shiftedPage.nextCursor!).p, 904);
-      const shiftedTimeline = yield* committed(
-        projectionStore.getTimelinePage(threadId, {
-          afterPosition: 900,
-          limit: 1,
-          view: "activity",
-        }),
-      );
-      assert.deepEqual(
-        [shiftedTimeline.totalItems, shiftedTimeline.items[0]?.item.ordinal],
-        [990, 912],
-      );
-      yield* setOldRunStatus("completed");
+        yield* setOldRunStatus("rolled_back");
+        const shiftedPage = yield* historyPage(threadId, olderCursor);
+        assert.strictEqual(decodeThreadHistoryCursor(shiftedPage.nextCursor!).p, 904);
+        const shiftedTimeline = yield* committed(
+          projectionStore.getTimelinePage(threadId, {
+            afterPosition: 900,
+            limit: 1,
+            view: "activity",
+          }),
+        );
+        assert.deepEqual(
+          [shiftedTimeline.totalItems, shiftedTimeline.items[0]?.item.ordinal],
+          [990, 912],
+        );
+        yield* setOldRunStatus("completed");
 
-      const retainedRequestPlan = yield* sql<{ readonly detail: string }>`
+        const retainedRequestPlan = yield* sql<{ readonly detail: string }>`
         EXPLAIN QUERY PLAN
         WITH selected AS (
           SELECT run_id, type
@@ -4198,403 +4402,407 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           )
           AND request.type = 'run_interrupt_request'
       `;
-      assert.isTrue(
-        retainedRequestPlan.some((row) =>
-          row.detail.includes("orchestration_v2_projection_turn_items_run_ordinal_idx"),
-        ),
-      );
-
-      const older = yield* projectionStore.getThreadSnapshotWindow(threadId, {
-        rowLimit: 76,
-        anchorItemId: TurnItemId.make("turn-item:bounded-sql-history:925"),
-      });
-      assert.lengthOf(older.projection.turnItems, 76);
-      assert.lengthOf(older.projection.runs, 76);
-      assert.strictEqual(older.projection.turnItems[0]?.ordinal, 850);
-      assert.strictEqual(older.projection.turnItems.at(-1)?.ordinal, 925);
-
-      const itemId = TurnItemId.make("turn-item:bounded-sql-history:925");
-      const stored = yield* projectionStore.getTurnItem({ threadId, itemId });
-      assert.strictEqual(stored?.type === "command_execution" ? stored.output : undefined, "ok");
-      assert.isNull(
-        yield* projectionStore.getTurnItem({ threadId: ThreadId.make("thread:other"), itemId }),
-      );
-
-      const sqlPageLimit = THREAD_HISTORY_PAGE_POLICY.maxItems + 2;
-      const initialSnapshot = yield* projectionStore.getThreadSnapshotWindow(threadId, {
-        rowLimit: sqlPageLimit,
-        userTurnLimit: THREAD_HISTORY_PAGE_POLICY.maxUserTurns,
-      });
-      const initialPage = buildBoundedThreadProjection({
-        projection: initialSnapshot.projection,
-        snapshotSequence: initialSnapshot.snapshotSequence,
-      });
-      const loadedIds = initialPage.projection.visibleTurnItems.map((row) =>
-        String(row.sourceItemId),
-      );
-      let cursor = initialPage.historyCursor;
-      let pageCount = 1;
-      while (cursor !== null) {
-        const anchorItemId = TurnItemId.make(decodeThreadHistoryCursor(cursor).si);
-        const snapshot = yield* projectionStore.getThreadSnapshotWindow(threadId, {
-          rowLimit: sqlPageLimit,
-          userTurnLimit: 20,
-          anchorItemId,
-        });
-        assert.isAtMost(
-          snapshot.projection.visibleTurnItems.length,
-          THREAD_HISTORY_TURN_SNAPSHOT_ROW_LIMIT,
+        assert.isTrue(
+          retainedRequestPlan.some((row) =>
+            row.detail.includes("orchestration_v2_projection_turn_items_run_ordinal_idx"),
+          ),
         );
-        const page = selectHistoryPageFromCursor({
-          items: snapshot.projection.visibleTurnItems,
-          cursor,
-          snapshotSequence: snapshot.snapshotSequence,
+
+        const older = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+          rowLimit: 76,
+          anchorItemId: TurnItemId.make("turn-item:bounded-sql-history:925"),
         });
-        loadedIds.push(...page.items.map((row) => String(row.sourceItemId)));
-        pageCount += 1;
-        cursor = page.nextCursor;
-      }
+        assert.lengthOf(older.projection.turnItems, 76);
+        assert.lengthOf(older.projection.runs, 76);
+        assert.strictEqual(older.projection.turnItems[0]?.ordinal, 850);
+        assert.strictEqual(older.projection.turnItems.at(-1)?.ordinal, 925);
 
-      assert.isAtLeast(pageCount, 3);
-      assert.lengthOf(loadedIds, 1_000);
-      assert.strictEqual(new Set(loadedIds).size, 1_000);
-      assert.deepEqual(
-        loadedIds.toSorted(
-          (left, right) => Number(left.split(":").at(-1)) - Number(right.split(":").at(-1)),
-        ),
-        Array.from({ length: 1_000 }, (_, index) => `turn-item:bounded-sql-history:${index + 1}`),
-      );
+        const itemId = TurnItemId.make("turn-item:bounded-sql-history:925");
+        const stored = yield* projectionStore.getTurnItem({ threadId, itemId });
+        assert.strictEqual(stored?.type === "command_execution" ? stored.output : undefined, "ok");
+        assert.isNull(
+          yield* projectionStore.getTurnItem({ threadId: ThreadId.make("thread:other"), itemId }),
+        );
 
-      yield* setNewestTurnType("command_execution");
-      yield* sql`
+        const sqlPageLimit = THREAD_HISTORY_PAGE_POLICY.maxItems + 2;
+        const initialSnapshot = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+          rowLimit: sqlPageLimit,
+          userTurnLimit: THREAD_HISTORY_PAGE_POLICY.maxUserTurns,
+        });
+        const initialPage = buildBoundedThreadProjection({
+          projection: initialSnapshot.projection,
+          snapshotSequence: initialSnapshot.snapshotSequence,
+        });
+        const loadedIds = initialPage.projection.visibleTurnItems.map((row) =>
+          String(row.sourceItemId),
+        );
+        let cursor = initialPage.historyCursor;
+        let pageCount = 1;
+        while (cursor !== null) {
+          const anchorItemId = TurnItemId.make(decodeThreadHistoryCursor(cursor).si);
+          const snapshot = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+            rowLimit: sqlPageLimit,
+            userTurnLimit: 20,
+            anchorItemId,
+          });
+          assert.isAtMost(
+            snapshot.projection.visibleTurnItems.length,
+            THREAD_HISTORY_TURN_SNAPSHOT_ROW_LIMIT,
+          );
+          const page = selectHistoryPageFromCursor({
+            items: snapshot.projection.visibleTurnItems,
+            cursor,
+            snapshotSequence: snapshot.snapshotSequence,
+          });
+          loadedIds.push(...page.items.map((row) => String(row.sourceItemId)));
+          pageCount += 1;
+          cursor = page.nextCursor;
+        }
+
+        assert.isAtLeast(pageCount, 3);
+        assert.lengthOf(loadedIds, 1_000);
+        assert.strictEqual(new Set(loadedIds).size, 1_000);
+        assert.deepEqual(
+          loadedIds.toSorted(
+            (left, right) => Number(left.split(":").at(-1)) - Number(right.split(":").at(-1)),
+          ),
+          Array.from({ length: 1_000 }, (_, index) => `turn-item:bounded-sql-history:${index + 1}`),
+        );
+
+        yield* setNewestTurnType("command_execution");
+        yield* sql`
         UPDATE orchestration_v2_projection_turn_items
         SET run_id = 'run:bounded-sql-history:1',
           payload_json = json_set(payload_json, '$.runId', 'run:bounded-sql-history:1')
         WHERE thread_id = ${threadId}
       `;
-      yield* sql`UPDATE orchestration_v2_projection_turn_items SET ordinal = 1000,
+        yield* sql`UPDATE orchestration_v2_projection_turn_items SET ordinal = 1000,
         payload_json = json_set(payload_json, '$.ordinal', 1000)
         WHERE thread_id = ${threadId} AND ordinal = 999`;
-      const promptId = TurnItemId.make("turn-item:bounded-sql-history:1");
-      const { statements: deferredStatements, tracer: deferredTracer } = traceSqlStatements();
-      const deferred = yield* projectionStore
-        .getThreadSnapshotWindow(threadId, {
-          rowLimit: sqlPageLimit,
-          userTurnLimit: 10,
-          deferWork: true,
-        })
-        .pipe(Effect.withTracer(deferredTracer));
-      const deferredQuery = deferredStatements.find((statement) =>
-        statement.includes("blocked_runs AS MATERIALIZED"),
-      );
-      assert.isDefined(deferredQuery);
-      const deferredPlan = yield* sql.unsafe<{
-        readonly id: number;
-        readonly parent: number;
-        readonly detail: string;
-      }>(`EXPLAIN QUERY PLAN ${deferredQuery}`);
-      const blockedRunsPlan = deferredPlan.find((row) => row.detail === "MATERIALIZE blocked_runs");
-      assert.isDefined(blockedRunsPlan);
-      const blockedLookup = deferredPlan.find(
-        (row) => row.parent === blockedRunsPlan!.id && row.detail.startsWith("SEARCH "),
-      );
-      assert.include(blockedLookup?.detail ?? "", "run_id=?");
-      assert.lengthOf(deferred.projection.visibleTurnItems, 3);
-      assert.strictEqual(deferred.projection.visibleTurnItems[0]?.sourceItemId, promptId);
-      const anchor = deferred.projection.visibleTurnItems[1]!;
-      assert.strictEqual(anchor.item.deferredWork?.itemCount, 999);
-      const workIds = new Set<TurnItemId>();
-      let workCursor: string | null = anchor.item.deferredWork!.cursor;
-      for (let pages = 0; workCursor !== null; pages += 1) {
-        assert.isBelow(pages, 20);
-        const page: OrchestrationV2ThreadHistoryPage = yield* historyPage(
-          threadId,
-          workCursor,
-          anchor.sourceItemId,
-          false,
-          "work",
+        const promptId = TurnItemId.make("turn-item:bounded-sql-history:1");
+        const { statements: deferredStatements, tracer: deferredTracer } = traceSqlStatements();
+        const deferred = yield* projectionStore
+          .getThreadSnapshotWindow(threadId, {
+            rowLimit: sqlPageLimit,
+            userTurnLimit: 10,
+            deferWork: true,
+          })
+          .pipe(Effect.withTracer(deferredTracer));
+        const deferredQuery = deferredStatements.find((statement) =>
+          statement.includes("blocked_runs AS MATERIALIZED"),
         );
-        assert.isAtMost(page.items.length, 75);
-        for (const row of page.items) workIds.add(row.sourceItemId);
-        workCursor = page.nextCursor;
-      }
-      assert.strictEqual(workIds.size, 999);
-      for (const toolName of ["t3-code.delegate_task", "mcp__t3_code__delegate_task"]) {
-        yield* sql`UPDATE orchestration_v2_projection_turn_items SET type = 'dynamic_tool',
+        assert.isDefined(deferredQuery);
+        const deferredPlan = yield* sql.unsafe<{
+          readonly id: number;
+          readonly parent: number;
+          readonly detail: string;
+        }>(`EXPLAIN QUERY PLAN ${deferredQuery}`);
+        const blockedRunsPlan = deferredPlan.find(
+          (row) => row.detail === "MATERIALIZE blocked_runs",
+        );
+        assert.isDefined(blockedRunsPlan);
+        const blockedLookup = deferredPlan.find(
+          (row) => row.parent === blockedRunsPlan!.id && row.detail.startsWith("SEARCH "),
+        );
+        assert.include(blockedLookup?.detail ?? "", "run_id=?");
+        assert.lengthOf(deferred.projection.visibleTurnItems, 3);
+        assert.strictEqual(deferred.projection.visibleTurnItems[0]?.sourceItemId, promptId);
+        const anchor = deferred.projection.visibleTurnItems[1]!;
+        assert.strictEqual(anchor.item.deferredWork?.itemCount, 999);
+        const workIds = new Set<TurnItemId>();
+        let workCursor: string | null = anchor.item.deferredWork!.cursor;
+        for (let pages = 0; workCursor !== null; pages += 1) {
+          assert.isBelow(pages, 20);
+          const page: OrchestrationV2ThreadHistoryPage = yield* historyPage(
+            threadId,
+            workCursor,
+            anchor.sourceItemId,
+            false,
+            "work",
+          );
+          assert.isAtMost(page.items.length, 75);
+          for (const row of page.items) workIds.add(row.sourceItemId);
+          workCursor = page.nextCursor;
+        }
+        assert.strictEqual(workIds.size, 999);
+        for (const toolName of ["t3-code.delegate_task", "mcp__t3_code__delegate_task"]) {
+          yield* sql`UPDATE orchestration_v2_projection_turn_items SET type = 'dynamic_tool',
           payload_json = json_set(payload_json, '$.type', 'dynamic_tool', '$.toolName', ${toolName})
           WHERE thread_id = ${threadId} AND ordinal = 2`;
-        const window = yield* projectionStore.getThreadSnapshotWindow(threadId, {
-          rowLimit: sqlPageLimit,
-          userTurnLimit: 10,
-          deferWork: true,
-        });
-        assert.isUndefined(
-          window.projection.visibleTurnItems.find((row) => row.item.ordinal === 2)?.item
-            .deferredWork,
-        );
-        assert.strictEqual(
-          window.projection.visibleTurnItems.find((row) => row.item.deferredWork)?.item.ordinal,
-          3,
-        );
-        const newestCursor = encodeThreadHistoryCursor({
-          snapshotSequence: 0,
-          sourceThreadId: threadId,
-          sourceItemId: "turn-item:bounded-sql-history:1000",
-          position: 1000,
-        });
-        const page = yield* historyPage(threadId, newestCursor, undefined, false, "deferred");
-        assert.isUndefined(page.items.find((row) => row.item.ordinal === 2)?.item.deferredWork);
-        // Tool payloads hold megabytes, so a page that reads the full index, as a jump to an
-        // entry does, looks for inline output only in its own runs.
-        const pageRead = traceSqlStatements();
-        yield* historyPage(
-          threadId,
-          newestCursor,
-          "turn-item:bounded-sql-history:2",
-          false,
-          "deferred",
-        ).pipe(Effect.withTracer(pageRead.tracer));
-        const payloadScans = pageRead.statements.filter((statement) =>
-          statement.includes("LIKE '%htmlRender%'"),
-        );
-        assert.lengthOf(payloadScans, 1);
-        assert.include(payloadScans[0], "item.run_id IS json_extract(wanted.value, '$.id')");
-      }
-      // Until its run is scanned, a cursor on inline output is hidden inside a work group.
-      yield* sql`UPDATE orchestration_v2_projection_turn_items SET type = 'dynamic_tool',
+          const window = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+            rowLimit: sqlPageLimit,
+            userTurnLimit: 10,
+            deferWork: true,
+          });
+          assert.isUndefined(
+            window.projection.visibleTurnItems.find((row) => row.item.ordinal === 2)?.item
+              .deferredWork,
+          );
+          assert.strictEqual(
+            window.projection.visibleTurnItems.find((row) => row.item.deferredWork)?.item.ordinal,
+            3,
+          );
+          const newestCursor = encodeThreadHistoryCursor({
+            snapshotSequence: 0,
+            sourceThreadId: threadId,
+            sourceItemId: "turn-item:bounded-sql-history:1000",
+            position: 1000,
+          });
+          const page = yield* historyPage(threadId, newestCursor, undefined, false, "deferred");
+          assert.isUndefined(page.items.find((row) => row.item.ordinal === 2)?.item.deferredWork);
+          // Tool payloads hold megabytes, so a page that reads the full index, as a jump to an
+          // entry does, looks for inline output only in its own runs.
+          const pageRead = traceSqlStatements();
+          yield* historyPage(
+            threadId,
+            newestCursor,
+            "turn-item:bounded-sql-history:2",
+            false,
+            "deferred",
+          ).pipe(Effect.withTracer(pageRead.tracer));
+          const payloadScans = pageRead.statements.filter((statement) =>
+            statement.includes("LIKE '%htmlRender%'"),
+          );
+          assert.lengthOf(payloadScans, 1);
+          assert.include(payloadScans[0], "item.run_id IS json_extract(wanted.value, '$.id')");
+        }
+        // Until its run is scanned, a cursor on inline output is hidden inside a work group.
+        yield* sql`UPDATE orchestration_v2_projection_turn_items SET type = 'dynamic_tool',
         payload_json = json_set(payload_json, '$.type', 'dynamic_tool', '$.toolName', 't3-code.delegate_task')
         WHERE thread_id = ${threadId} AND ordinal = 4`;
-      const sharedRunId = "run:bounded-sql-history:1";
-      // A work page of rows that have no run leaves their inline output out too.
-      yield* sql`UPDATE orchestration_v2_projection_turn_items SET run_id = NULL
+        const sharedRunId = "run:bounded-sql-history:1";
+        // A work page of rows that have no run leaves their inline output out too.
+        yield* sql`UPDATE orchestration_v2_projection_turn_items SET run_id = NULL
         WHERE thread_id = ${threadId} AND ordinal BETWEEN 3 AND 6`;
-      const runlessWork = yield* historyPage(
-        threadId,
-        encodeThreadHistoryCursor({
-          snapshotSequence: 0,
-          sourceThreadId: threadId,
-          sourceItemId: "turn-item:bounded-sql-history:6",
-          position: 6,
-          inclusive: true,
-        }),
-        "turn-item:bounded-sql-history:3",
-        false,
-        "work",
-      );
-      assert.deepEqual(
-        runlessWork.items.map((row) => row.item.ordinal),
-        [3, 5, 6],
-      );
-      yield* sql`UPDATE orchestration_v2_projection_turn_items SET run_id = ${sharedRunId}
-        WHERE thread_id = ${threadId} AND ordinal BETWEEN 3 AND 6`;
-      // A stale position selects from the cursor row itself, or from more than a page after it
-      // once the later rows are another run's and cannot fold.
-      for (const [position, laterStatus, laterRun] of [
-        [0, "completed", sharedRunId],
-        [999, "running", "run:bounded-sql-history:300"],
-      ] as const) {
-        yield* sql`UPDATE orchestration_v2_projection_turn_items SET status = ${laterStatus},
-          run_id = ${laterRun},
-          payload_json = json_set(payload_json, '$.status', ${laterStatus}, '$.runId', ${laterRun})
-          WHERE thread_id = ${threadId} AND ordinal >= 300`;
-        const beforeInlineOutput = yield* historyPage(
+        const runlessWork = yield* historyPage(
           threadId,
           encodeThreadHistoryCursor({
             snapshotSequence: 0,
             sourceThreadId: threadId,
-            sourceItemId: "turn-item:bounded-sql-history:4",
-            position,
+            sourceItemId: "turn-item:bounded-sql-history:6",
+            position: 6,
+            inclusive: true,
           }),
-          undefined,
+          "turn-item:bounded-sql-history:3",
           false,
-          "deferred",
+          "work",
         );
         assert.deepEqual(
-          beforeInlineOutput.items.map((row) => row.item.ordinal),
-          [1, 2, 3],
+          runlessWork.items.map((row) => row.item.ordinal),
+          [3, 5, 6],
         );
-      }
-      // A cursor whose row is gone falls back to its position. Inline output between the page
-      // and that position can belong to a run with no other row there.
-      yield* sql`UPDATE orchestration_v2_projection_turn_items
+        yield* sql`UPDATE orchestration_v2_projection_turn_items SET run_id = ${sharedRunId}
+        WHERE thread_id = ${threadId} AND ordinal BETWEEN 3 AND 6`;
+        // A stale position selects from the cursor row itself, or from more than a page after it
+        // once the later rows are another run's and cannot fold.
+        for (const [position, laterStatus, laterRun] of [
+          [0, "completed", sharedRunId],
+          [999, "running", "run:bounded-sql-history:300"],
+        ] as const) {
+          yield* sql`UPDATE orchestration_v2_projection_turn_items SET status = ${laterStatus},
+          run_id = ${laterRun},
+          payload_json = json_set(payload_json, '$.status', ${laterStatus}, '$.runId', ${laterRun})
+          WHERE thread_id = ${threadId} AND ordinal >= 300`;
+          const beforeInlineOutput = yield* historyPage(
+            threadId,
+            encodeThreadHistoryCursor({
+              snapshotSequence: 0,
+              sourceThreadId: threadId,
+              sourceItemId: "turn-item:bounded-sql-history:4",
+              position,
+            }),
+            undefined,
+            false,
+            "deferred",
+          );
+          assert.deepEqual(
+            beforeInlineOutput.items.map((row) => row.item.ordinal),
+            [1, 2, 3],
+          );
+        }
+        // A cursor whose row is gone falls back to its position. Inline output between the page
+        // and that position can belong to a run with no other row there.
+        yield* sql`UPDATE orchestration_v2_projection_turn_items
         SET status = CASE WHEN ordinal <= 700 THEN 'running' ELSE 'completed' END,
           run_id = CASE WHEN ordinal <= 700 THEN 'run:bounded-sql-history:300' ELSE ${sharedRunId} END,
           payload_json = json_set(payload_json,
             '$.status', CASE WHEN ordinal <= 700 THEN 'running' ELSE 'completed' END,
             '$.runId', CASE WHEN ordinal <= 700 THEN 'run:bounded-sql-history:300' ELSE ${sharedRunId} END)
         WHERE thread_id = ${threadId} AND ordinal >= 100`;
-      yield* sql`UPDATE orchestration_v2_projection_turn_items SET type = 'dynamic_tool',
+        yield* sql`UPDATE orchestration_v2_projection_turn_items SET type = 'dynamic_tool',
         payload_json = json_set(payload_json, '$.type', 'dynamic_tool', '$.toolName', 't3-code.delegate_task')
         WHERE thread_id = ${threadId} AND ordinal = 720`;
-      const beforeMissingCursor = yield* historyPage(
-        threadId,
-        encodeThreadHistoryCursor({
-          snapshotSequence: 0,
-          sourceThreadId: threadId,
-          sourceItemId: "turn-item:bounded-sql-history:gone",
-          position: 800,
-        }),
-        undefined,
-        false,
-        "deferred",
-      );
-      assert.strictEqual(beforeMissingCursor.items.at(-1)?.item.ordinal, 720);
-      yield* sql`UPDATE orchestration_v2_projection_turn_items SET status = 'completed',
+        const beforeMissingCursor = yield* historyPage(
+          threadId,
+          encodeThreadHistoryCursor({
+            snapshotSequence: 0,
+            sourceThreadId: threadId,
+            sourceItemId: "turn-item:bounded-sql-history:gone",
+            position: 800,
+          }),
+          undefined,
+          false,
+          "deferred",
+        );
+        assert.strictEqual(beforeMissingCursor.items.at(-1)?.item.ordinal, 720);
+        yield* sql`UPDATE orchestration_v2_projection_turn_items SET status = 'completed',
         run_id = ${sharedRunId},
         payload_json = json_set(payload_json, '$.status', 'completed', '$.runId', ${sharedRunId})
         WHERE thread_id = ${threadId} AND ordinal >= 100`;
-      yield* sql`UPDATE orchestration_v2_projection_turn_items SET type = 'command_execution',
+        yield* sql`UPDATE orchestration_v2_projection_turn_items SET type = 'command_execution',
         payload_json = json_set(payload_json, '$.type', 'command_execution') WHERE thread_id = ${threadId} AND ordinal IN (2, 4, 720)`;
-      for (const [ordinal, status] of [
-        [0, "completed"],
-        [1, "superseded"],
-        [2, "running"],
-      ] as const) {
-        const attempt = {
-          id: `attempt:bounded-sql-history:${ordinal}`,
-          runId: sharedRunId,
-          attemptOrdinal: ordinal + 1,
-          rootNodeId: `node:bounded-sql-history:attempt-${ordinal === 0 ? 1 : ordinal}`,
-          providerInstanceId,
-          providerThreadId: "provider-thread:bounded-sql-history",
-          providerTurnId: null,
-          reason: ordinal === 1 ? "initial" : "steering_restart",
-          status,
-          startedAt: nowIso,
-          completedAt: status === "superseded" ? nowIso : null,
-        };
-        yield* sql`INSERT INTO orchestration_v2_projection_run_attempts
+        for (const [ordinal, status] of [
+          [0, "completed"],
+          [1, "superseded"],
+          [2, "running"],
+        ] as const) {
+          const attempt = {
+            id: `attempt:bounded-sql-history:${ordinal}`,
+            runId: sharedRunId,
+            attemptOrdinal: ordinal + 1,
+            rootNodeId: `node:bounded-sql-history:attempt-${ordinal === 0 ? 1 : ordinal}`,
+            providerInstanceId,
+            providerThreadId: "provider-thread:bounded-sql-history",
+            providerTurnId: null,
+            reason: ordinal === 1 ? "initial" : "steering_restart",
+            status,
+            startedAt: nowIso,
+            completedAt: status === "superseded" ? nowIso : null,
+          };
+          yield* sql`INSERT INTO orchestration_v2_projection_run_attempts
           (attempt_id, thread_id, run_id, attempt_ordinal, root_node_id, provider, provider_instance_id, provider_thread_id, provider_turn_id, status, payload_json)
           VALUES (${attempt.id}, ${threadId}, ${sharedRunId}, ${attempt.attemptOrdinal}, ${attempt.rootNodeId}, ${providerInstanceId}, ${providerInstanceId}, ${attempt.providerThreadId}, NULL, ${status}, ${encodeUnknownJsonString(attempt)})`;
-      }
-      yield* sql`UPDATE orchestration_v2_projection_turn_items
+        }
+        yield* sql`UPDATE orchestration_v2_projection_turn_items
         SET node_id = CASE WHEN ordinal < 990 AND ordinal <> 10 THEN 'node:bounded-sql-history:attempt-1' ELSE 'node:bounded-sql-history:attempt-2' END,
           payload_json = json_set(payload_json, '$.nodeId', CASE WHEN ordinal < 990 AND ordinal <> 10 THEN 'node:bounded-sql-history:attempt-1' ELSE 'node:bounded-sql-history:attempt-2' END)
         WHERE thread_id = ${threadId}`;
-      for (const status of ["completed", "running"]) {
-        yield* sql`UPDATE orchestration_v2_projection_runs SET status = ${status},
+        for (const status of ["completed", "running"]) {
+          yield* sql`UPDATE orchestration_v2_projection_runs SET status = ${status},
           payload_json = json_set(payload_json, '$.status', ${status}) WHERE run_id = ${sharedRunId}`;
-        const window = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+          const window = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+            rowLimit: sqlPageLimit,
+            userTurnLimit: 10,
+            deferWork: true,
+          });
+          const oldWork = window.projection.visibleTurnItems.find((row) => row.item.deferredWork);
+          assert.strictEqual(oldWork?.item.deferredWork?.itemCount, 987);
+          let cursor: string | null = oldWork!.item.deferredWork!.cursor;
+          const loaded = new Set<TurnItemId>();
+          for (let pages = 0; cursor !== null; pages += 1) {
+            assert.isBelow(pages, 20);
+            const page: OrchestrationV2ThreadHistoryPage = yield* historyPage(
+              threadId,
+              cursor,
+              oldWork!.sourceItemId,
+              false,
+              "work",
+            );
+            for (const row of page.items) loaded.add(row.sourceItemId);
+            cursor = page.nextCursor;
+          }
+          assert.strictEqual(loaded.size, 987);
+          assert.isFalse(loaded.has(TurnItemId.make("turn-item:bounded-sql-history:10")));
+        }
+        yield* sql`DELETE FROM orchestration_v2_projection_run_attempts WHERE thread_id = ${threadId}`;
+        yield* sql`UPDATE orchestration_v2_projection_runs SET status = 'completed',
+        payload_json = json_set(payload_json, '$.status', 'completed') WHERE run_id = ${sharedRunId}`;
+        yield* sql`UPDATE orchestration_v2_projection_turn_items SET node_id = NULL,
+        payload_json = json_set(payload_json, '$.nodeId', NULL) WHERE thread_id = ${threadId}`;
+        yield* sql`UPDATE orchestration_v2_projection_turn_items SET run_id = NULL,
+        payload_json = json_set(payload_json, '$.runId', NULL)
+        WHERE thread_id = ${threadId} AND ordinal > 1 AND ordinal < 851`;
+        const inlineWindow = yield* projectionStore.getThreadSnapshotWindow(threadId, {
           rowLimit: sqlPageLimit,
           userTurnLimit: 10,
           deferWork: true,
         });
-        const oldWork = window.projection.visibleTurnItems.find((row) => row.item.deferredWork);
-        assert.strictEqual(oldWork?.item.deferredWork?.itemCount, 987);
-        let cursor: string | null = oldWork!.item.deferredWork!.cursor;
-        const loaded = new Set<TurnItemId>();
-        for (let pages = 0; cursor !== null; pages += 1) {
-          assert.isBelow(pages, 20);
-          const page: OrchestrationV2ThreadHistoryPage = yield* historyPage(
-            threadId,
-            cursor,
-            oldWork!.sourceItemId,
-            false,
-            "work",
-          );
-          for (const row of page.items) loaded.add(row.sourceItemId);
-          cursor = page.nextCursor;
-        }
-        assert.strictEqual(loaded.size, 987);
-        assert.isFalse(loaded.has(TurnItemId.make("turn-item:bounded-sql-history:10")));
-      }
-      yield* sql`DELETE FROM orchestration_v2_projection_run_attempts WHERE thread_id = ${threadId}`;
-      yield* sql`UPDATE orchestration_v2_projection_runs SET status = 'completed',
-        payload_json = json_set(payload_json, '$.status', 'completed') WHERE run_id = ${sharedRunId}`;
-      yield* sql`UPDATE orchestration_v2_projection_turn_items SET node_id = NULL,
-        payload_json = json_set(payload_json, '$.nodeId', NULL) WHERE thread_id = ${threadId}`;
-      yield* sql`UPDATE orchestration_v2_projection_turn_items SET run_id = NULL,
-        payload_json = json_set(payload_json, '$.runId', NULL)
-        WHERE thread_id = ${threadId} AND ordinal > 1 AND ordinal < 851`;
-      const inlineWindow = yield* projectionStore.getThreadSnapshotWindow(threadId, {
-        rowLimit: sqlPageLimit,
-        userTurnLimit: 10,
-        deferWork: true,
-      });
-      assert.isFalse(inlineWindow.projection.visibleTurnItems.some((row) => row.item.deferredWork));
-      yield* sql`UPDATE orchestration_v2_projection_turn_items SET run_id = ${sharedRunId},
+        assert.isFalse(
+          inlineWindow.projection.visibleTurnItems.some((row) => row.item.deferredWork),
+        );
+        yield* sql`UPDATE orchestration_v2_projection_turn_items SET run_id = ${sharedRunId},
         payload_json = json_set(payload_json, '$.runId', ${sharedRunId})
         WHERE thread_id = ${threadId} AND ordinal = 850`;
-      const deferredWindow = yield* projectionStore.getThreadSnapshotWindow(threadId, {
-        rowLimit: sqlPageLimit,
-        userTurnLimit: 10,
-        deferWork: true,
-      });
-      assert.isTrue(
-        deferredWindow.projection.visibleTurnItems.some(
-          (row) => row.item.deferredWork?.itemCount === 151,
-        ),
-      );
-      yield* sql`UPDATE orchestration_v2_projection_turn_items
+        const deferredWindow = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+          rowLimit: sqlPageLimit,
+          userTurnLimit: 10,
+          deferWork: true,
+        });
+        assert.isTrue(
+          deferredWindow.projection.visibleTurnItems.some(
+            (row) => row.item.deferredWork?.itemCount === 151,
+          ),
+        );
+        yield* sql`UPDATE orchestration_v2_projection_turn_items
         SET run_id = 'run:bounded-sql-history:1',
           payload_json = json_set(payload_json, '$.runId', 'run:bounded-sql-history:1')
         WHERE thread_id = ${threadId}`;
-      yield* sql`UPDATE orchestration_v2_projection_turn_items SET ordinal = 999,
+        yield* sql`UPDATE orchestration_v2_projection_turn_items SET ordinal = 999,
         payload_json = json_set(payload_json, '$.ordinal', 999)
         WHERE turn_item_id = 'turn-item:bounded-sql-history:999'`;
-      // Work folded below the newest 502 visible rows still counts its whole group, so the
-      // 100 commands after the messages stay hidden in the 398-item group.
-      yield* sql`UPDATE orchestration_v2_projection_turn_items SET type = 'assistant_message',
+        // Work folded below the newest 502 visible rows still counts its whole group, so the
+        // 100 commands after the messages stay hidden in the 398-item group.
+        yield* sql`UPDATE orchestration_v2_projection_turn_items SET type = 'assistant_message',
         payload_json = json_set(payload_json, '$.type', 'assistant_message', '$.text', 'Working',
           '$.messageId', turn_item_id, '$.streaming', json('false'))
         WHERE thread_id = ${threadId} AND ordinal BETWEEN 300 AND 899`;
-      const straddledWindow = yield* projectionStore.getThreadSnapshotWindow(threadId, {
-        rowLimit: sqlPageLimit,
-        userTurnLimit: 10,
-        deferWork: true,
-      });
-      const straddledOrdinals = [
-        ...Array.from({ length: sqlPageLimit }, (_, index) => 900 - sqlPageLimit + index),
-        1000,
-      ];
-      assert.deepEqual(
-        straddledWindow.projection.turnItems.map((item) => item.ordinal),
-        straddledOrdinals,
-      );
-      // A run that starts with work (a wake) has no segment start, so the group begins at its first item.
-      const moveFirstItemToRun = (runId: string) => sql`
+        const straddledWindow = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+          rowLimit: sqlPageLimit,
+          userTurnLimit: 10,
+          deferWork: true,
+        });
+        const straddledOrdinals = [
+          ...Array.from({ length: sqlPageLimit }, (_, index) => 900 - sqlPageLimit + index),
+          1000,
+        ];
+        assert.deepEqual(
+          straddledWindow.projection.turnItems.map((item) => item.ordinal),
+          straddledOrdinals,
+        );
+        // A run that starts with work (a wake) has no segment start, so the group begins at its first item.
+        const moveFirstItemToRun = (runId: string) => sql`
         UPDATE orchestration_v2_projection_turn_items SET run_id = ${runId},
           payload_json = json_set(payload_json, '$.runId', ${runId})
         WHERE thread_id = ${threadId} AND ordinal = 1`;
-      yield* moveFirstItemToRun("run:bounded-sql-history:2");
-      const wakeWindow = yield* projectionStore.getThreadSnapshotWindow(threadId, {
-        rowLimit: sqlPageLimit,
-        userTurnLimit: 10,
-        deferWork: true,
-      });
-      assert.deepEqual(
-        wakeWindow.projection.turnItems.map((item) => item.ordinal),
-        straddledOrdinals,
-      );
-      yield* moveFirstItemToRun(sharedRunId);
-      // A failed error below the tail still blocks folding for its run. Only the SQL columns
-      // change; the row sits below the window, so its payload is never decoded.
-      // A steer at 100 starts a later segment, so the error sits below the scan start too.
-      const setItem = (ordinal: number, type: string, status: string) => sql`
+        yield* moveFirstItemToRun("run:bounded-sql-history:2");
+        const wakeWindow = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+          rowLimit: sqlPageLimit,
+          userTurnLimit: 10,
+          deferWork: true,
+        });
+        assert.deepEqual(
+          wakeWindow.projection.turnItems.map((item) => item.ordinal),
+          straddledOrdinals,
+        );
+        yield* moveFirstItemToRun(sharedRunId);
+        // A failed error below the tail still blocks folding for its run. Only the SQL columns
+        // change; the row sits below the window, so its payload is never decoded.
+        // A steer at 100 starts a later segment, so the error sits below the scan start too.
+        const setItem = (ordinal: number, type: string, status: string) => sql`
         UPDATE orchestration_v2_projection_turn_items SET type = ${type}, status = ${status}
         WHERE thread_id = ${threadId} AND ordinal = ${ordinal}`;
-      yield* setItem(100, "user_message", "completed");
-      yield* setItem(2, "error", "failed");
-      const blockedWindow = yield* projectionStore.getThreadSnapshotWindow(threadId, {
-        rowLimit: sqlPageLimit,
-        userTurnLimit: 10,
-        deferWork: true,
-      });
-      assert.isFalse(
-        blockedWindow.projection.visibleTurnItems.some((row) => row.item.deferredWork),
-      );
-      assert.deepEqual(
-        blockedWindow.projection.turnItems.map((item) => item.ordinal),
-        Array.from({ length: sqlPageLimit }, (_, index) => 1001 - sqlPageLimit + index),
-      );
-      yield* setItem(2, "command_execution", "completed");
-      yield* setItem(100, "command_execution", "completed");
-      yield* sql`UPDATE orchestration_v2_projection_turn_items SET type = 'command_execution',
+        yield* setItem(100, "user_message", "completed");
+        yield* setItem(2, "error", "failed");
+        const blockedWindow = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+          rowLimit: sqlPageLimit,
+          userTurnLimit: 10,
+          deferWork: true,
+        });
+        assert.isFalse(
+          blockedWindow.projection.visibleTurnItems.some((row) => row.item.deferredWork),
+        );
+        assert.deepEqual(
+          blockedWindow.projection.turnItems.map((item) => item.ordinal),
+          Array.from({ length: sqlPageLimit }, (_, index) => 1001 - sqlPageLimit + index),
+        );
+        yield* setItem(2, "command_execution", "completed");
+        yield* setItem(100, "command_execution", "completed");
+        yield* sql`UPDATE orchestration_v2_projection_turn_items SET type = 'command_execution',
         payload_json = json_set(payload_json, '$.type', 'command_execution')
         WHERE thread_id = ${threadId} AND ordinal BETWEEN 300 AND 899`;
 
-      // Runless rows below a run that starts after the newest 502 visible rows stay in the window.
-      yield* sql`UPDATE orchestration_v2_projection_turn_items
+        // Runless rows below a run that starts after the newest 502 visible rows stay in the window.
+        yield* sql`UPDATE orchestration_v2_projection_turn_items
         SET run_id = CASE WHEN ordinal > 990 THEN 'run:bounded-sql-history:991' END,
           type = CASE WHEN ordinal = 991 THEN 'user_message' ELSE 'assistant_message' END,
           payload_json = CASE WHEN ordinal = 991
@@ -4606,89 +4814,92 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
               '$.text', 'Working', '$.messageId', turn_item_id, '$.streaming', json('false'))
           END
         WHERE thread_id = ${threadId} AND ordinal > 1`;
-      const windowStatements: Array<readonly [string, ReadonlyArray<unknown>]> = [];
-      const runlessWindow = yield* projectionStore
-        .getThreadSnapshotWindow(threadId, {
-          rowLimit: sqlPageLimit,
-          userTurnLimit: 10,
-          deferWork: true,
-        })
-        .pipe(
-          Effect.provideService(Statement.CurrentTransformer, (statement) => {
-            windowStatements.push(statement.compile());
-            return Effect.succeed(statement);
-          }),
+        const windowStatements: Array<readonly [string, ReadonlyArray<unknown>]> = [];
+        const runlessWindow = yield* projectionStore
+          .getThreadSnapshotWindow(threadId, {
+            rowLimit: sqlPageLimit,
+            userTurnLimit: 10,
+            deferWork: true,
+          })
+          .pipe(
+            Effect.provideService(Statement.CurrentTransformer, (statement) => {
+              windowStatements.push(statement.compile());
+              return Effect.succeed(statement);
+            }),
+          );
+        // The window read must not grow with history below the newest visible rows. VM steps are
+        // deterministic; reading the whole history here cost 65% more steps.
+        const copyPath = "file:/thread-window-steps?vfs=memdb";
+        {
+          using copy = new NodeSqlite.DatabaseSync(copyPath);
+          yield* sql`VACUUM INTO ${copyPath}`;
+          assert.isNotEmpty(windowStatements);
+          const windowSteps = () =>
+            windowStatements.reduce((steps, [query, params]) => {
+              const statement = copy.prepare(query);
+              statement.all(...(params as ReadonlyArray<NodeSqlite.SQLInputValue>));
+              return steps + statement.stat("vmStep");
+            }, 0);
+          const fullSteps = windowSteps();
+          assert.isAbove(fullSteps, 0);
+          copy.exec(
+            "DELETE FROM orchestration_v2_projection_turn_items WHERE ordinal BETWEEN 2 AND 498",
+          );
+          assert.isAtMost(fullSteps, windowSteps() * 1.1);
+        }
+        assert.deepEqual(
+          runlessWindow.projection.turnItems.map((item) => item.ordinal),
+          Array.from({ length: THREAD_HISTORY_TURN_SNAPSHOT_ROW_LIMIT }, (_, index) => 499 + index),
         );
-      // The window read must not grow with history below the newest visible rows. VM steps are
-      // deterministic; reading the whole history here cost 65% more steps.
-      const copyPath = "file:/thread-window-steps?vfs=memdb";
-      {
-        using copy = new NodeSqlite.DatabaseSync(copyPath);
-        yield* sql`VACUUM INTO ${copyPath}`;
-        assert.isNotEmpty(windowStatements);
-        const windowSteps = () =>
-          windowStatements.reduce((steps, [query, params]) => {
-            const statement = copy.prepare(query);
-            statement.all(...(params as ReadonlyArray<NodeSqlite.SQLInputValue>));
-            return steps + statement.stat("vmStep");
-          }, 0);
-        const fullSteps = windowSteps();
-        assert.isAbove(fullSteps, 0);
-        copy.exec(
-          "DELETE FROM orchestration_v2_projection_turn_items WHERE ordinal BETWEEN 2 AND 498",
+        const runlessPage = buildBoundedThreadProjection({
+          projection: runlessWindow.projection,
+          snapshotSequence: runlessWindow.snapshotSequence,
+        });
+        assert.isTrue(runlessPage.hasMoreHistory);
+        assert.isNotNull(runlessPage.historyCursor);
+        // Limits SQLite reads differently from `tailRows` skip the tail bound and match main.
+        const windowOrdinalCount = (rowLimit: number) =>
+          projectionStore
+            .getThreadSnapshotWindow(threadId, { rowLimit, userTurnLimit: 10, deferWork: true })
+            .pipe(Effect.map((window) => window.projection.turnItems.length));
+        assert.strictEqual(
+          yield* windowOrdinalCount(502.5),
+          THREAD_HISTORY_TURN_SNAPSHOT_ROW_LIMIT,
         );
-        assert.isAtMost(fullSteps, windowSteps() * 1.1);
-      }
-      assert.deepEqual(
-        runlessWindow.projection.turnItems.map((item) => item.ordinal),
-        Array.from({ length: THREAD_HISTORY_TURN_SNAPSHOT_ROW_LIMIT }, (_, index) => 499 + index),
-      );
-      const runlessPage = buildBoundedThreadProjection({
-        projection: runlessWindow.projection,
-        snapshotSequence: runlessWindow.snapshotSequence,
-      });
-      assert.isTrue(runlessPage.hasMoreHistory);
-      assert.isNotNull(runlessPage.historyCursor);
-      // Limits SQLite reads differently from `tailRows` skip the tail bound and match main.
-      const windowOrdinalCount = (rowLimit: number) =>
-        projectionStore
-          .getThreadSnapshotWindow(threadId, { rowLimit, userTurnLimit: 10, deferWork: true })
-          .pipe(Effect.map((window) => window.projection.turnItems.length));
-      assert.strictEqual(yield* windowOrdinalCount(502.5), THREAD_HISTORY_TURN_SNAPSHOT_ROW_LIMIT);
-      yield* sql`UPDATE orchestration_v2_projection_turn_items
+        yield* sql`UPDATE orchestration_v2_projection_turn_items
         SET payload_json = json_set(payload_json, '$.inputIntent', 'steer')
         WHERE thread_id = ${threadId} AND ordinal = 991`;
-      assert.strictEqual(yield* windowOrdinalCount(-1), 1000);
-      yield* sql`UPDATE orchestration_v2_projection_turn_items SET run_id = ${sharedRunId},
+        assert.strictEqual(yield* windowOrdinalCount(-1), 1000);
+        yield* sql`UPDATE orchestration_v2_projection_turn_items SET run_id = ${sharedRunId},
         type = 'command_execution',
         payload_json = json_set(payload_json, '$.type', 'command_execution', '$.runId', ${sharedRunId})
         WHERE thread_id = ${threadId} AND ordinal > 1`;
-      yield* sql`
+        yield* sql`
         UPDATE orchestration_v2_projection_turn_items
         SET type = 'command_execution', payload_json = json_set(payload_json, '$.type', 'command_execution')
         WHERE thread_id = ${threadId} AND ordinal = 1
       `;
-      const backgroundWindow = yield* projectionStore.getThreadSnapshotWindow(threadId, {
-        rowLimit: sqlPageLimit,
-        userTurnLimit: 10,
-        deferWork: true,
-      });
-      assert.lengthOf(backgroundWindow.projection.visibleTurnItems, sqlPageLimit);
-      yield* sql`
+        const backgroundWindow = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+          rowLimit: sqlPageLimit,
+          userTurnLimit: 10,
+          deferWork: true,
+        });
+        assert.lengthOf(backgroundWindow.projection.visibleTurnItems, sqlPageLimit);
+        yield* sql`
         UPDATE orchestration_v2_projection_turn_items
         SET type = 'user_message', payload_json = json_set(payload_json, '$.type', 'user_message')
         WHERE thread_id = ${threadId} AND ordinal = 1
       `;
-      // A running run folds nothing, so its newest rows are the window. Reading them must not
-      // walk the rest of the turn: 999 commands here, tens of thousands after a day of work.
-      const setSharedRunStatus = (status: "running" | "completed") => sql`
+        // A running run folds nothing, so its newest rows are the window. Reading them must not
+        // walk the rest of the turn: 999 commands here, tens of thousands after a day of work.
+        const setSharedRunStatus = (status: "running" | "completed") => sql`
         UPDATE orchestration_v2_projection_runs
         SET status = ${status}, payload_json = json_set(payload_json, '$.status', ${status})
         WHERE run_id = ${sharedRunId}`;
-      yield* setSharedRunStatus("running");
-      // Another thread's rows that carry this run's id must not count toward the tail.
-      const foreignThreadId = "thread:bounded-sql-history:foreign";
-      yield* sql`
+        yield* setSharedRunStatus("running");
+        // Another thread's rows that carry this run's id must not count toward the tail.
+        const foreignThreadId = "thread:bounded-sql-history:foreign";
+        yield* sql`
         INSERT INTO orchestration_v2_projection_turn_items (
           turn_item_id, thread_id, run_id, node_id, provider_thread_id, provider_turn_id,
           parent_item_id, ordinal, type, status, updated_at, payload_json
@@ -4697,88 +4908,88 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           NULL, ordinal + 5000, type, status, updated_at, payload_json
         FROM orchestration_v2_projection_turn_items
         WHERE thread_id = ${threadId} AND ordinal > 400`;
-      const liveStatements: Array<readonly [string, ReadonlyArray<unknown>]> = [];
-      const liveWindow = yield* projectionStore
-        .getThreadSnapshotWindow(threadId, {
+        const liveStatements: Array<readonly [string, ReadonlyArray<unknown>]> = [];
+        const liveWindow = yield* projectionStore
+          .getThreadSnapshotWindow(threadId, {
+            rowLimit: sqlPageLimit,
+            userTurnLimit: 10,
+            deferWork: true,
+          })
+          .pipe(
+            Effect.provideService(Statement.CurrentTransformer, (statement) => {
+              liveStatements.push(statement.compile());
+              return Effect.succeed(statement);
+            }),
+          );
+        assert.deepEqual(
+          liveWindow.projection.turnItems.map((item) => item.ordinal),
+          Array.from({ length: sqlPageLimit }, (_, index) => 1001 - sqlPageLimit + index),
+        );
+        {
+          const livePath = "file:/thread-window-live-steps?vfs=memdb";
+          using copy = new NodeSqlite.DatabaseSync(livePath);
+          yield* sql`VACUUM INTO ${livePath}`;
+          const liveSteps = (statements = liveStatements) =>
+            statements.reduce((steps, [query, params]) => {
+              const statement = copy.prepare(query);
+              statement.all(...(params as ReadonlyArray<NodeSqlite.SQLInputValue>));
+              return steps + statement.stat("vmStep");
+            }, 0);
+          const deleteOrdinals = (from: number, to: number) =>
+            copy.exec(
+              `DELETE FROM orchestration_v2_projection_turn_items WHERE ordinal BETWEEN ${from} AND ${to}`,
+            );
+          // Nothing below the newest 502 rows is read to find the tail.
+          const fullSteps = liveSteps();
+          assert.isAbove(fullSteps, 0);
+          deleteOrdinals(2, 498);
+          assert.isAtMost(fullSteps, liveSteps() * 1.1);
+          // The rows themselves are read only from the newest page, not from all 502.
+          const rowStatements = liveStatements.filter(([query]) => query.includes("work_segments"));
+          assert.lengthOf(rowStatements, 1);
+          const pageSteps = liveSteps(rowStatements);
+          deleteOrdinals(499, 900);
+          assert.isAtMost(pageSteps, liveSteps(rowStatements) * 1.1);
+          // The tail search reads conversation rows from their own index, not past the work rows.
+          const tailSearch = liveStatements.find(([query]) => query.includes("visible_tail"));
+          assert.isDefined(tailSearch);
+          const plan = copy
+            .prepare(`EXPLAIN QUERY PLAN ${tailSearch![0]}`)
+            .all(...(tailSearch![1] as ReadonlyArray<NodeSqlite.SQLInputValue>))
+            .map((row) => String(row.detail));
+          assert.isTrue(
+            plan.some((detail) => detail.includes("turn_items_conversation_idx")),
+            plan.join("\n"),
+          );
+        }
+        const olderLivePage = yield* projectionStore.getThreadSnapshotWindow(threadId, {
           rowLimit: sqlPageLimit,
           userTurnLimit: 10,
           deferWork: true,
-        })
-        .pipe(
-          Effect.provideService(Statement.CurrentTransformer, (statement) => {
-            liveStatements.push(statement.compile());
-            return Effect.succeed(statement);
-          }),
+          anchorItemId: TurnItemId.make("turn-item:bounded-sql-history:600"),
+        });
+        // Rows above the anchor must not set the tail, or the page would start above its end.
+        assert.deepEqual(
+          olderLivePage.projection.turnItems.map((item) => item.ordinal),
+          Array.from({ length: sqlPageLimit }, (_, index) => 601 - sqlPageLimit + index),
         );
-      assert.deepEqual(
-        liveWindow.projection.turnItems.map((item) => item.ordinal),
-        Array.from({ length: sqlPageLimit }, (_, index) => 1001 - sqlPageLimit + index),
-      );
-      {
-        const livePath = "file:/thread-window-live-steps?vfs=memdb";
-        using copy = new NodeSqlite.DatabaseSync(livePath);
-        yield* sql`VACUUM INTO ${livePath}`;
-        const liveSteps = (statements = liveStatements) =>
-          statements.reduce((steps, [query, params]) => {
-            const statement = copy.prepare(query);
-            statement.all(...(params as ReadonlyArray<NodeSqlite.SQLInputValue>));
-            return steps + statement.stat("vmStep");
-          }, 0);
-        const deleteOrdinals = (from: number, to: number) =>
-          copy.exec(
-            `DELETE FROM orchestration_v2_projection_turn_items WHERE ordinal BETWEEN ${from} AND ${to}`,
-          );
-        // Nothing below the newest 502 rows is read to find the tail.
-        const fullSteps = liveSteps();
-        assert.isAbove(fullSteps, 0);
-        deleteOrdinals(2, 498);
-        assert.isAtMost(fullSteps, liveSteps() * 1.1);
-        // The rows themselves are read only from the newest page, not from all 502.
-        const rowStatements = liveStatements.filter(([query]) => query.includes("work_segments"));
-        assert.lengthOf(rowStatements, 1);
-        const pageSteps = liveSteps(rowStatements);
-        deleteOrdinals(499, 900);
-        assert.isAtMost(pageSteps, liveSteps(rowStatements) * 1.1);
-        // The tail search reads conversation rows from their own index, not past the work rows.
-        const tailSearch = liveStatements.find(([query]) => query.includes("visible_tail"));
-        assert.isDefined(tailSearch);
-        const plan = copy
-          .prepare(`EXPLAIN QUERY PLAN ${tailSearch![0]}`)
-          .all(...(tailSearch![1] as ReadonlyArray<NodeSqlite.SQLInputValue>))
-          .map((row) => String(row.detail));
-        assert.isTrue(
-          plan.some((detail) => detail.includes("turn_items_conversation_idx")),
-          plan.join("\n"),
-        );
-      }
-      const olderLivePage = yield* projectionStore.getThreadSnapshotWindow(threadId, {
-        rowLimit: sqlPageLimit,
-        userTurnLimit: 10,
-        deferWork: true,
-        anchorItemId: TurnItemId.make("turn-item:bounded-sql-history:600"),
-      });
-      // Rows above the anchor must not set the tail, or the page would start above its end.
-      assert.deepEqual(
-        olderLivePage.projection.turnItems.map((item) => item.ordinal),
-        Array.from({ length: sqlPageLimit }, (_, index) => 601 - sqlPageLimit + index),
-      );
-      yield* sql`DELETE FROM orchestration_v2_projection_turn_items
+        yield* sql`DELETE FROM orchestration_v2_projection_turn_items
         WHERE thread_id = ${foreignThreadId}`;
-      yield* setSharedRunStatus("completed");
-      yield* sql`
+        yield* setSharedRunStatus("completed");
+        yield* sql`
         UPDATE orchestration_v2_projection_turn_items
         SET run_id = 'run:bounded-sql-history:' || ordinal,
           payload_json = json_set(payload_json, '$.runId', 'run:bounded-sql-history:' || ordinal)
         WHERE thread_id = ${threadId}
       `;
-      yield* setNewestTurnType("user_message");
+        yield* setNewestTurnType("user_message");
 
-      const tiedIds = [
-        TurnItemId.make("turn-item:bounded-sql-history:tie:b"),
-        TurnItemId.make("turn-item:bounded-sql-history:tie:a"),
-      ];
-      for (const id of tiedIds) {
-        yield* sql`
+        const tiedIds = [
+          TurnItemId.make("turn-item:bounded-sql-history:tie:b"),
+          TurnItemId.make("turn-item:bounded-sql-history:tie:a"),
+        ];
+        for (const id of tiedIds) {
+          yield* sql`
           INSERT INTO orchestration_v2_projection_turn_items (
             turn_item_id, thread_id, run_id, node_id, provider_thread_id, provider_turn_id,
             parent_item_id, ordinal, type, status, updated_at, payload_json
@@ -4789,19 +5000,19 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           FROM orchestration_v2_projection_turn_items
           WHERE turn_item_id = ${itemId}
         `;
-      }
-      const tied = yield* projectionStore.getThreadSnapshotWindow(threadId, { rowLimit: 3 });
-      assert.deepEqual(
-        tied.projection.turnItems.map((item) => item.id),
-        [TurnItemId.make("turn-item:bounded-sql-history:1000"), tiedIds[1], tiedIds[0]],
-      );
-      yield* sql`
+        }
+        const tied = yield* projectionStore.getThreadSnapshotWindow(threadId, { rowLimit: 3 });
+        assert.deepEqual(
+          tied.projection.turnItems.map((item) => item.id),
+          [TurnItemId.make("turn-item:bounded-sql-history:1000"), tiedIds[1], tiedIds[0]],
+        );
+        yield* sql`
         DELETE FROM orchestration_v2_projection_turn_items
         WHERE turn_item_id IN ${sql.in(tiedIds)}
       `;
 
-      const hiddenRunId = RunId.make("run:bounded-sql-history:hidden-suffix");
-      yield* sql`
+        const hiddenRunId = RunId.make("run:bounded-sql-history:hidden-suffix");
+        yield* sql`
         INSERT INTO orchestration_v2_projection_runs (
           run_id, thread_id, ordinal, provider, provider_thread_id, status,
           requested_at, completed_at, payload_json
@@ -4826,9 +5037,9 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           })}
         )
       `;
-      for (let ordinal = 1_001; ordinal <= 1_100; ordinal += 1) {
-        const id = `turn-item:bounded-sql-history:hidden:${ordinal}`;
-        yield* sql`
+        for (let ordinal = 1_001; ordinal <= 1_100; ordinal += 1) {
+          const id = `turn-item:bounded-sql-history:hidden:${ordinal}`;
+          yield* sql`
           INSERT INTO orchestration_v2_projection_turn_items (
             turn_item_id, thread_id, run_id, node_id, provider_thread_id, provider_turn_id,
             parent_item_id, ordinal, type, status, updated_at, payload_json
@@ -4857,42 +5068,44 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
             })}
           )
         `;
-      }
+        }
 
-      const hiddenSuffixSnapshot = yield* projectionStore.getThreadSnapshotWindow(threadId, {
-        rowLimit: sqlPageLimit,
-      });
-      const hiddenSuffixPage = buildBoundedThreadProjection({
-        policy: { ...THREAD_HISTORY_PAGE_POLICY, maxUserTurns: undefined },
-        projection: hiddenSuffixSnapshot.projection,
-        snapshotSequence: hiddenSuffixSnapshot.snapshotSequence,
-      });
-      assert.lengthOf(hiddenSuffixPage.projection.visibleTurnItems, 75);
-      assert.strictEqual(hiddenSuffixPage.latestLocalTurnOrdinal, 1_100);
-      assert.isTrue(hiddenSuffixPage.hasMoreHistory);
-      assert.isFalse(
-        hiddenSuffixPage.projection.visibleTurnItems.some((row) =>
-          String(row.sourceItemId).includes(":hidden:"),
-        ),
-      );
-      const hiddenSuffixCursor = hiddenSuffixPage.historyCursor;
-      assert.isNotNull(hiddenSuffixCursor);
-      const hiddenSuffixAnchor = TurnItemId.make(decodeThreadHistoryCursor(hiddenSuffixCursor!).si);
-      const hiddenSuffixOlderSnapshot = yield* projectionStore.getThreadSnapshotWindow(threadId, {
-        rowLimit: sqlPageLimit,
-        anchorItemId: hiddenSuffixAnchor,
-      });
-      const hiddenSuffixOlderPage = selectHistoryPageFromCursor({
-        policy: { ...THREAD_HISTORY_PAGE_POLICY, maxUserTurns: undefined },
-        items: hiddenSuffixOlderSnapshot.projection.visibleTurnItems,
-        cursor: hiddenSuffixCursor!,
-        snapshotSequence: hiddenSuffixOlderSnapshot.snapshotSequence,
-      });
-      assert.lengthOf(hiddenSuffixOlderPage.items, 75);
-      assert.isTrue(hiddenSuffixOlderPage.hasMoreHistory);
+        const hiddenSuffixSnapshot = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+          rowLimit: sqlPageLimit,
+        });
+        const hiddenSuffixPage = buildBoundedThreadProjection({
+          policy: { ...THREAD_HISTORY_PAGE_POLICY, maxUserTurns: undefined },
+          projection: hiddenSuffixSnapshot.projection,
+          snapshotSequence: hiddenSuffixSnapshot.snapshotSequence,
+        });
+        assert.lengthOf(hiddenSuffixPage.projection.visibleTurnItems, 75);
+        assert.strictEqual(hiddenSuffixPage.latestLocalTurnOrdinal, 1_100);
+        assert.isTrue(hiddenSuffixPage.hasMoreHistory);
+        assert.isFalse(
+          hiddenSuffixPage.projection.visibleTurnItems.some((row) =>
+            String(row.sourceItemId).includes(":hidden:"),
+          ),
+        );
+        const hiddenSuffixCursor = hiddenSuffixPage.historyCursor;
+        assert.isNotNull(hiddenSuffixCursor);
+        const hiddenSuffixAnchor = TurnItemId.make(
+          decodeThreadHistoryCursor(hiddenSuffixCursor!).si,
+        );
+        const hiddenSuffixOlderSnapshot = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+          rowLimit: sqlPageLimit,
+          anchorItemId: hiddenSuffixAnchor,
+        });
+        const hiddenSuffixOlderPage = selectHistoryPageFromCursor({
+          policy: { ...THREAD_HISTORY_PAGE_POLICY, maxUserTurns: undefined },
+          items: hiddenSuffixOlderSnapshot.projection.visibleTurnItems,
+          cursor: hiddenSuffixCursor!,
+          snapshotSequence: hiddenSuffixOlderSnapshot.snapshotSequence,
+        });
+        assert.lengthOf(hiddenSuffixOlderPage.items, 75);
+        assert.isTrue(hiddenSuffixOlderPage.hasMoreHistory);
 
-      const cancelledRunId = RunId.make("run:bounded-sql-history:cancelled-suffix");
-      yield* sql`
+        const cancelledRunId = RunId.make("run:bounded-sql-history:cancelled-suffix");
+        yield* sql`
         INSERT INTO orchestration_v2_projection_runs (
           run_id, thread_id, ordinal, provider, provider_thread_id, status,
           requested_at, completed_at, payload_json
@@ -4917,9 +5130,9 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           })}
         )
       `;
-      for (let ordinal = 1_101; ordinal <= 1_200; ordinal += 1) {
-        const id = `turn-item:bounded-sql-history:cancelled:${ordinal}`;
-        yield* sql`
+        for (let ordinal = 1_101; ordinal <= 1_200; ordinal += 1) {
+          const id = `turn-item:bounded-sql-history:cancelled:${ordinal}`;
+          yield* sql`
           INSERT INTO orchestration_v2_projection_turn_items (
             turn_item_id, thread_id, run_id, node_id, provider_thread_id, provider_turn_id,
             parent_item_id, ordinal, type, status, updated_at, payload_json
@@ -4951,9 +5164,9 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
             })}
           )
         `;
-      }
-      const runlessQueuedId = "turn-item:bounded-sql-history:runless-queued";
-      yield* sql`
+        }
+        const runlessQueuedId = "turn-item:bounded-sql-history:runless-queued";
+        yield* sql`
         INSERT INTO orchestration_v2_projection_turn_items (
           turn_item_id, thread_id, run_id, node_id, provider_thread_id, provider_turn_id,
           parent_item_id, ordinal, type, status, updated_at, payload_json
@@ -4985,8 +5198,8 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           })}
         )
       `;
-      const laterCancelledId = "turn-item:bounded-sql-history:cancelled:1202";
-      yield* sql`
+        const laterCancelledId = "turn-item:bounded-sql-history:cancelled:1202";
+        yield* sql`
         INSERT INTO orchestration_v2_projection_turn_items (
           turn_item_id, thread_id, run_id, node_id, provider_thread_id, provider_turn_id,
           parent_item_id, ordinal, type, status, updated_at, payload_json
@@ -5018,41 +5231,41 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           })}
         )
       `;
-      // A steer that fell back to the queue keeps its queued-turn item while its
-      // run waits. End on cancelled for the checks below.
-      for (const status of ["queued", "cancelled"] as const) {
-        yield* sql`
+        // A steer that fell back to the queue keeps its queued-turn item while its
+        // run waits. End on cancelled for the checks below.
+        for (const status of ["queued", "cancelled"] as const) {
+          yield* sql`
           UPDATE orchestration_v2_projection_runs
           SET status = ${status}, payload_json = json_set(payload_json, '$.status', ${status})
           WHERE run_id = ${cancelledRunId}
         `;
-        const cancelledSuffixSnapshot = yield* projectionStore.getThreadSnapshotWindow(threadId, {
-          rowLimit: sqlPageLimit,
-        });
-        const cancelledSuffixPage = buildBoundedThreadProjection({
-          policy: { ...THREAD_HISTORY_PAGE_POLICY, maxUserTurns: undefined },
-          projection: cancelledSuffixSnapshot.projection,
-          snapshotSequence: cancelledSuffixSnapshot.snapshotSequence,
-        });
-        assert.strictEqual(cancelledSuffixPage.latestLocalTurnOrdinal, 1_202);
-        assert.lengthOf(cancelledSuffixPage.projection.visibleTurnItems, 75);
-        assert.isFalse(
-          cancelledSuffixPage.projection.visibleTurnItems.some((row) =>
-            String(row.sourceItemId).includes(":cancelled:"),
-          ),
-          status,
-        );
-        assert.isTrue(
-          cancelledSuffixPage.projection.visibleTurnItems.some(
-            (row) => row.sourceItemId === runlessQueuedId,
-          ),
-        );
-      }
+          const cancelledSuffixSnapshot = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+            rowLimit: sqlPageLimit,
+          });
+          const cancelledSuffixPage = buildBoundedThreadProjection({
+            policy: { ...THREAD_HISTORY_PAGE_POLICY, maxUserTurns: undefined },
+            projection: cancelledSuffixSnapshot.projection,
+            snapshotSequence: cancelledSuffixSnapshot.snapshotSequence,
+          });
+          assert.strictEqual(cancelledSuffixPage.latestLocalTurnOrdinal, 1_202);
+          assert.lengthOf(cancelledSuffixPage.projection.visibleTurnItems, 75);
+          assert.isFalse(
+            cancelledSuffixPage.projection.visibleTurnItems.some((row) =>
+              String(row.sourceItemId).includes(":cancelled:"),
+            ),
+            status,
+          );
+          assert.isTrue(
+            cancelledSuffixPage.projection.visibleTurnItems.some(
+              (row) => row.sourceItemId === runlessQueuedId,
+            ),
+          );
+        }
 
-      // A steer moves the cancelled queued message outside the window.
-      const steeredItemId = "turn-item:bounded-sql-history:steered-output";
-      const steeredRunId = RunId.make("run:bounded-sql-history:1000");
-      yield* sql`
+        // A steer moves the cancelled queued message outside the window.
+        const steeredItemId = "turn-item:bounded-sql-history:steered-output";
+        const steeredRunId = RunId.make("run:bounded-sql-history:1000");
+        yield* sql`
         INSERT INTO orchestration_v2_projection_turn_items (
           turn_item_id, thread_id, run_id, node_id, provider_thread_id, provider_turn_id,
           parent_item_id, ordinal, type, status, updated_at, payload_json
@@ -5081,27 +5294,29 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           })}
         )
       `;
-      const steeredSnapshot = yield* projectionStore.getThreadSnapshotWindow(threadId, {
-        rowLimit: sqlPageLimit,
-      });
-      assert.isFalse(
-        steeredSnapshot.projection.turnItems.some((item) => item.runId === cancelledRunId),
-      );
-      const latestRunId = (yield* projectionStore.getShellSnapshot()).threads.find(
-        (thread) => thread.id === threadId,
-      )?.latestRunId;
-      assert.equal(latestRunId, hiddenRunId);
-      assert.isFalse(
-        steeredSnapshot.projection.turnItems.some((item) => item.runId === latestRunId),
-      );
-      assert.isTrue(steeredSnapshot.projection.runs.some((run) => run.id === latestRunId));
-      yield* sql`DELETE FROM orchestration_v2_projection_turn_items WHERE turn_item_id = ${steeredItemId}`;
+        const steeredSnapshot = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+          rowLimit: sqlPageLimit,
+        });
+        assert.isFalse(
+          steeredSnapshot.projection.turnItems.some((item) => item.runId === cancelledRunId),
+        );
+        const latestRunId = (yield* projectionStore.getShellSnapshot()).threads.find(
+          (thread) => thread.id === threadId,
+        )?.latestRunId;
+        assert.equal(latestRunId, hiddenRunId);
+        assert.isFalse(
+          steeredSnapshot.projection.turnItems.some((item) => item.runId === latestRunId),
+        );
+        assert.isTrue(steeredSnapshot.projection.runs.some((run) => run.id === latestRunId));
+        yield* sql`DELETE FROM orchestration_v2_projection_turn_items WHERE turn_item_id = ${steeredItemId}`;
 
-      const interruptRunId = RunId.make("run:bounded-sql-history:interrupt");
-      const interruptNodeId = NodeId.make("node:bounded-sql-history:interrupt");
-      const interruptRequestId = TurnItemId.make("turn-item:bounded-sql-history:interrupt-request");
-      const interruptResultId = TurnItemId.make("turn-item:bounded-sql-history:interrupt-result");
-      yield* sql`
+        const interruptRunId = RunId.make("run:bounded-sql-history:interrupt");
+        const interruptNodeId = NodeId.make("node:bounded-sql-history:interrupt");
+        const interruptRequestId = TurnItemId.make(
+          "turn-item:bounded-sql-history:interrupt-request",
+        );
+        const interruptResultId = TurnItemId.make("turn-item:bounded-sql-history:interrupt-result");
+        yield* sql`
         INSERT INTO orchestration_v2_projection_runs (
           run_id, thread_id, ordinal, provider, provider_thread_id, status,
           requested_at, completed_at, payload_json
@@ -5127,7 +5342,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           })}
         )
       `;
-      yield* sql`
+        yield* sql`
         INSERT INTO orchestration_v2_projection_run_attempts (
           attempt_id, thread_id, run_id, attempt_ordinal, root_node_id, provider,
           provider_instance_id, provider_thread_id, provider_turn_id, status, payload_json
@@ -5150,11 +5365,11 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           })}
         )
       `;
-      const insertInterruptItem = (input: {
-        id: TurnItemId;
-        ordinal: number;
-        type: "run_interrupt_request" | "run_interrupt_result";
-      }) => sql`
+        const insertInterruptItem = (input: {
+          id: TurnItemId;
+          ordinal: number;
+          type: "run_interrupt_request" | "run_interrupt_result";
+        }) => sql`
         INSERT INTO orchestration_v2_projection_turn_items (
           turn_item_id, thread_id, run_id, node_id, provider_thread_id, provider_turn_id,
           parent_item_id, ordinal, type, status, updated_at, payload_json
@@ -5181,14 +5396,14 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           })}
         )
       `;
-      yield* insertInterruptItem({
-        id: interruptRequestId,
-        ordinal: 1_201,
-        type: "run_interrupt_request",
-      });
-      for (let ordinal = 1_202; ordinal <= 1_281; ordinal += 1) {
-        const id = `turn-item:bounded-sql-history:interrupt-filler:${ordinal}`;
-        yield* sql`
+        yield* insertInterruptItem({
+          id: interruptRequestId,
+          ordinal: 1_201,
+          type: "run_interrupt_request",
+        });
+        for (let ordinal = 1_202; ordinal <= 1_281; ordinal += 1) {
+          const id = `turn-item:bounded-sql-history:interrupt-filler:${ordinal}`;
+          yield* sql`
           INSERT INTO orchestration_v2_projection_turn_items (
             turn_item_id, thread_id, run_id, node_id, provider_thread_id, provider_turn_id,
             parent_item_id, ordinal, type, status, updated_at, payload_json
@@ -5217,32 +5432,34 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
             })}
           )
         `;
-      }
-      yield* insertInterruptItem({
-        id: interruptResultId,
-        ordinal: 1_282,
-        type: "run_interrupt_result",
-      });
+        }
+        yield* insertInterruptItem({
+          id: interruptResultId,
+          ordinal: 1_282,
+          type: "run_interrupt_result",
+        });
 
-      const interruptSnapshot = yield* projectionStore.getThreadSnapshotWindow(threadId, {
-        rowLimit: sqlPageLimit,
-      });
-      assert.isTrue(
-        interruptSnapshot.projection.turnItems.some((item) => item.id === interruptRequestId),
-      );
-      assert.isTrue(
-        interruptSnapshot.projection.visibleTurnItems.some(
-          (row) => row.sourceItemId === interruptResultId,
-        ),
-      );
+        const interruptSnapshot = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+          rowLimit: sqlPageLimit,
+        });
+        assert.isTrue(
+          interruptSnapshot.projection.turnItems.some((item) => item.id === interruptRequestId),
+        );
+        assert.isTrue(
+          interruptSnapshot.projection.visibleTurnItems.some(
+            (row) => row.sourceItemId === interruptResultId,
+          ),
+        );
 
-      yield* sql`
+        yield* sql`
         UPDATE orchestration_v2_projection_turn_items
         SET payload_json = json_set(payload_json, '$.createdBy', 'agent')
         WHERE thread_id = ${threadId} AND type = 'user_message'
       `;
-      const agentPromptId = TurnItemId.make("turn-item:bounded-sql-history:interrupt-filler:1281");
-      yield* sql`
+        const agentPromptId = TurnItemId.make(
+          "turn-item:bounded-sql-history:interrupt-filler:1281",
+        );
+        yield* sql`
         UPDATE orchestration_v2_projection_turn_items
         SET type = 'user_message',
           payload_json = json_set(payload_json,
@@ -5252,22 +5469,34 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
             '$.text', 'Continue the child task', '$.attachments', json('[]'))
         WHERE turn_item_id = ${agentPromptId}
       `;
-      const agentWindow = yield* projectionStore.getThreadSnapshotWindow(threadId, {
-        rowLimit: sqlPageLimit,
-        userTurnLimit: THREAD_HISTORY_PAGE_POLICY.maxUserTurns,
-      });
-      assert.lengthOf(
-        agentWindow.projection.visibleTurnItems.filter(
-          (row) => row.item.type !== "run_interrupt_request",
-        ),
-        sqlPageLimit,
-      );
-      assert.isTrue(
-        agentWindow.projection.visibleTurnItems.some((row) => row.sourceItemId === agentPromptId),
-      );
-    }),
+        const agentWindow = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+          rowLimit: sqlPageLimit,
+          userTurnLimit: THREAD_HISTORY_PAGE_POLICY.maxUserTurns,
+        });
+        assert.lengthOf(
+          agentWindow.projection.visibleTurnItems.filter(
+            (row) => row.item.type !== "run_interrupt_request",
+          ),
+          sqlPageLimit,
+        );
+        assert.isTrue(
+          agentWindow.projection.visibleTurnItems.some((row) => row.sourceItemId === agentPromptId),
+        );
+      }),
   );
 
+  it.effect("limits turn-start history to the requested runs, including an empty selection", () =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const threadId = yield* addRolledBackRecoveryCandidate("selected-turn-start-history");
+      const runId = (yield* store.getThreadProjection(threadId)).runs[0]!.id;
+      const history = yield* store.getTurnStartHistory(threadId);
+      assert.isNotEmpty(history);
+      assert.deepEqual(yield* store.getTurnStartHistory(threadId, [runId]), history);
+      assert.deepEqual(yield* store.getTurnStartHistory(threadId, []), []);
+      assert.deepEqual(yield* store.getTurnStartHistory(threadId, [RunId.make("run:other")]), []);
+    }),
+  );
   it.effect("keeps an open question's row in the window after the run kept working", () =>
     Effect.gen(function* () {
       const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
@@ -7230,6 +7459,19 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         completedAt: null,
         checkpointId: null,
         contextHandoffId: null,
+        actionObligations: [
+          {
+            actionRunId: "action-owned",
+            messageId: MessageId.make("action-resume:action-owned:follow-up"),
+            owner: {
+              parentEnvironmentId: EnvironmentId.make("environment:parent"),
+              parentThreadId: ThreadId.make("thread:parent"),
+              taskId,
+              sourceRunId: runId,
+            },
+            state: "waiting" as const,
+          },
+        ],
         delegatedCompletion: {
           disposition: "stopped" as const,
           nextGeneration: 2,
@@ -7292,7 +7534,11 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         payload: task,
       });
 
-      const { delegatedCompletion: _delegatedCompletion, ...staleRun } = run;
+      const {
+        delegatedCompletion: _delegatedCompletion,
+        actionObligations: _actionObligations,
+        ...staleRun
+      } = run;
       const { completionDelivery: _completionDelivery, ...staleTask } = task;
       yield* projectionStore.apply({
         id: EventId.make("event:projection-delegated-completion:stale-run"),
@@ -7323,6 +7569,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
 
       const projection = yield* projectionStore.getThreadProjection(threadId);
       assert.deepEqual(projection.runs[0]?.delegatedCompletion, run.delegatedCompletion);
+      assert.deepEqual(projection.runs[0]?.actionObligations, run.actionObligations);
       assert.deepEqual(projection.subagents[0]?.completionDelivery, task.completionDelivery);
       assert.deepEqual(
         (yield* projectionStore.getThreadRecords(threadId, ["subagents"], {
@@ -11245,3 +11492,60 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
     }),
   );
 });
+
+it.effect("finds used thread read authorizations without confusing threads or message roles", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make("authorization-thread");
+    const otherThreadId = ThreadId.make("authorization-other-thread");
+    const corruptThreadIds = [
+      ThreadId.make("corrupt-run-thread"),
+      ThreadId.make("corrupt-request-thread"),
+      ThreadId.make("corrupt-message-thread"),
+    ] as const;
+    for (const id of [threadId, otherThreadId, ...corruptThreadIds]) {
+      yield* sql`INSERT INTO orchestration_v2_projection_threads
+        (thread_id, project_id, title, default_provider, runtime_mode, interaction_mode, created_at, updated_at, payload_json)
+        VALUES (${id}, 'project', 'title', 'codex', 'full-access', 'default', 'now', 'now', '{}')`;
+    }
+    yield* sql`INSERT INTO orchestration_v2_projection_runs
+      (run_id, thread_id, ordinal, provider, status, requested_at, payload_json)
+      VALUES ('run', ${threadId}, 1, 'codex', 'complete', 'now', '{"userMessageId":"run-auth"}')`;
+    yield* sql`INSERT INTO orchestration_v2_projection_runtime_requests
+      (runtime_request_id, thread_id, node_id, kind, status, created_at, payload_json)
+      VALUES ('request', ${threadId}, 'node', 'user_input', 'resolved', 'now', '{"threadReadContext":{"authorizationId":"request-auth"}}')`;
+    yield* sql`INSERT INTO orchestration_v2_projection_messages
+      (message_id, thread_id, role, streaming, created_at, updated_at, payload_json)
+      VALUES ('message', ${threadId}, 'user', 0, 'now', 'now', '{"threadReadContext":{"authorizationId":"message-auth"}}'),
+      ('assistant', ${threadId}, 'assistant', 0, 'now', 'now', '{"threadReadContext":{"authorizationId":"assistant-auth"}}'),
+      ('other', ${otherThreadId}, 'user', 0, 'now', 'now', '{"threadReadContext":{"authorizationId":"other-auth"}}')`;
+    yield* sql`INSERT INTO orchestration_v2_projection_runs
+      (run_id, thread_id, ordinal, provider, status, requested_at, payload_json)
+      VALUES ('broken-run', ${corruptThreadIds[0]}, 1, 'codex', 'completed', 'now', '{broken')`;
+    yield* sql`INSERT INTO orchestration_v2_projection_runtime_requests
+      (runtime_request_id, thread_id, node_id, kind, status, created_at, payload_json)
+      VALUES ('broken-request', ${corruptThreadIds[1]}, 'node', 'user_input', 'resolved', 'now', '{broken')`;
+    // Search parses message JSON; isolate this corruption fixture from its insert trigger.
+    yield* sql`DROP TRIGGER IF EXISTS orchestration_v2_message_search_insert`;
+    yield* sql`INSERT INTO orchestration_v2_projection_messages
+      (message_id, thread_id, role, streaming, created_at, updated_at, payload_json)
+      VALUES ('broken-message', ${corruptThreadIds[2]}, 'user', 1, 'now', 'now', '{broken'),
+      ('broken-assistant', ${threadId}, 'assistant', 1, 'now', 'now', '{broken')`;
+    for (const id of ["run-auth", "request-auth", "message-auth"]) {
+      assert.isTrue(yield* store.hasThreadReadAuthorization(threadId, MessageId.make(id)));
+    }
+    for (const id of ["missing", "assistant-auth", "other-auth", "message"]) {
+      assert.isFalse(yield* store.hasThreadReadAuthorization(threadId, MessageId.make(id)));
+    }
+    for (const id of corruptThreadIds) {
+      assert.isTrue(
+        yield* store.hasThreadReadAuthorization(id, MessageId.make("fresh-authorization")),
+      );
+    }
+    const missing = yield* Effect.flip(
+      store.hasThreadReadAuthorization(ThreadId.make("missing-thread"), MessageId.make("missing")),
+    );
+    assert.strictEqual(missing._tag, "ProjectionStoreThreadNotFoundError");
+  }).pipe(Effect.provide(layerTest)),
+);

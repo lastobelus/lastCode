@@ -3,6 +3,14 @@ import { workspaceAreaProps } from "../lib/workspaceFocus";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
 import { queuedRunEditBlockedReason } from "@t3tools/client-runtime/queued-run-edit";
+import {
+  recoveryQueuesFollowUps,
+  recoverySuppressesWorking,
+} from "@t3tools/client-runtime/state/thread-recovery";
+import { canPromoteSubagent } from "@t3tools/client-runtime/state/subagent-promotion";
+import { useThreadRecoveryBanner } from "./chat/useThreadRecoveryBanner";
+import { useChatThreadAnnotation } from "./thread-annotation/useChatThreadAnnotation";
+import { recordHandoff } from "../handoffs/handoffsStore";
 import { ScrollToEndButton, WorkspaceFileDropOverlay } from "./chat/TimelineOverlays";
 import { usePasteToFocusComposer } from "./chat/usePasteToFocusComposer";
 import { useFocusComposerOnThreadOpen } from "./chat/useFocusComposerOnThreadOpen";
@@ -218,10 +226,7 @@ import { usePanelAnimationSettings, usePanelPresence } from "../panelAnimations"
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useOpenPanelPullRequestUrl } from "../hooks/useOpenPanelPullRequestUrl";
 import { isPreviewFocused } from "../lib/previewFocus";
-import {
-  focusTerminal,
-  getTerminalFocusOwner,
-} from "../lib/terminalFocus";
+import { focusTerminal, getTerminalFocusOwner } from "../lib/terminalFocus";
 import {
   deriveLogicalProjectKeyFromSettings,
   selectProjectGroupingSettings,
@@ -328,6 +333,8 @@ import { useProactivePanels } from "../hooks/useProactivePanels";
 import { useIncrementalTimelineEntries } from "../hooks/useIncrementalTimelineEntries";
 import { useRightPanelSurfaceClose } from "../hooks/useRightPanelSurfaceClose";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
+import { EnvironmentPauseNotice } from "./EnvironmentPauseControl";
+import { useActionResumeWait } from "../state/actionResume";
 import { modelFallbackBannerItem } from "./chat/ComposerUsageLimits";
 import { ComposerSurface } from "./chat/ComposerSurface";
 import { resolveThreadSyncPhase } from "../threadSync";
@@ -371,7 +378,8 @@ import { ChatTerminalDrawers } from "./chat/ChatTerminalDrawers";
 import { ChatRightPanel } from "./chat/ChatRightPanel";
 import { useDraftEnvironmentRouting } from "./chat/useDraftEnvironmentRouting";
 import { branchMismatchBannerItem, extensionStatusBannerItem } from "./chat/ThreadActivityBanners";
-import { ThreadNow } from "./chat/ThreadNow";
+import { LastCodeThreadNow } from "./chat/LastCodeThreadNow";
+import { LastCodeCurrentWork } from "./chat/LastCodeCurrentWork";
 import type { ThreadStructure } from "@t3tools/client-runtime/state/shell";
 import { useDelayedStatus } from "../hooks/useDelayedStatus";
 import { useTimelineFollow } from "./chat/useTimelineFollow";
@@ -454,6 +462,18 @@ export default function ChatView(props: ChatViewProps) {
       currentRouteThreadKeyRef.current = null;
     };
   }, [routeThreadKey]);
+  const requestSubagentPromotion = useOrchestrationCommand(
+    threadEnvironment.requestSubagentPromotion,
+    {
+      reportFailure: false,
+    },
+  );
+  const cancelSubagentPromotion = useOrchestrationCommand(
+    threadEnvironment.cancelSubagentPromotion,
+    {
+      reportFailure: false,
+    },
+  );
   const updateThreadMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
@@ -854,7 +874,8 @@ export default function ChatView(props: ChatViewProps) {
     serverProjection !== null &&
     canResumeThread(serverProjection, resumableRunId, hasHeldQueuedRuns);
   const parentSubagentThreadId =
-    activeThread?.lineage.relationshipToParent === "subagent"
+    activeThread?.lineage.relationshipToParent === "subagent" &&
+    activeThread.lineage.independent !== true
       ? activeThread.lineage.parentThreadId
       : null;
   const parentSubagentEnvironmentId = activeThread?.environmentId ?? null;
@@ -1493,7 +1514,7 @@ export default function ChatView(props: ChatViewProps) {
     activeThreadLiveTokenUsage,
     activeProviderThread,
   );
-  const pendingBackgroundTasks = deriveThreadPendingBackgroundTasks(serverProjection);
+  const pendingBackgroundTasks = deriveThreadPendingBackgroundTasks(serverProjection, true);
   const activeWorkStartedAt =
     deriveActiveWorkStartedAt(activeActivityRun, activeRuntime, localDispatchStartedAt) ??
     runlessWorkStartedAt;
@@ -1531,6 +1552,11 @@ export default function ChatView(props: ChatViewProps) {
   const openFileAttachment = (attachment: ChatFileAttachment) => {
     if (activeThreadRef) {
       useRightPanelStore.getState().openAttachment(activeThreadRef, attachment);
+      recordHandoff(
+        activeThreadRef,
+        { kind: "attachment", attachment },
+        { label: attachment.name },
+      );
       return;
     }
   };
@@ -1936,6 +1962,7 @@ export default function ChatView(props: ChatViewProps) {
     activeRightPanelSurface,
     runningTerminalIds,
     activeServerOrderedTerminalIds,
+    activeThreadKnownSessions,
     activeTerminalLabelsById,
     panelTerminalIds,
     canReuseTerminal,
@@ -2384,6 +2411,7 @@ export default function ChatView(props: ChatViewProps) {
     addDeviceSurfaceStable,
     addDiffSurfaceStable,
     addFilesSurfaceStable,
+    addHandoffsSurfaceStable,
     addPullRequestSurfaceStable,
     addPullRequestsSurfaceStable,
     closePreviewPanelStable,
@@ -2480,14 +2508,20 @@ export default function ChatView(props: ChatViewProps) {
     scrollToEnd,
     persistThreadSettingsForNextTurn,
   });
+  const resumableActionWait = useActionResumeWait(
+    routeThreadDetailRef,
+    activeThreadShell?.actionResume ?? null,
+  );
   const {
     runningBanner: runningResumableActionBannerItem,
+    pendingBanner: pendingActionBannerItem,
     interruptedBanner: interruptedActionBannerItem,
-    heldBanner: heldActionBannerItem,
   } = useActionResumeBanners({
     routeThreadRef,
     threadRef: activeThreadRef,
-    action: activeThreadShell?.actionResume ?? null,
+    action:
+      resumableActionWait.presentation === null ? null : (activeThreadShell?.actionResume ?? null),
+    status: resumableActionWait.status,
     onRequestTerminalFocus: (terminalId) => {
       if (activeThreadRef) focusTerminal(activeThreadRef, terminalId);
     },
@@ -2611,6 +2645,25 @@ export default function ChatView(props: ChatViewProps) {
           },
         })
       : null;
+  const chatAnnotation = useChatThreadAnnotation({
+    routeThreadRef,
+    threadRef: isServerThread ? activeThreadRef : null,
+    annotation: activeThreadShell?.annotation ?? null,
+    supported: serverConfig?.environment.capabilities.threadAnnotationHistory === true,
+    hasUserMessage: () =>
+      serverProjection?.messages.some((message) => message.role === "user") === true,
+    cwd: gitCwd,
+  });
+  const threadRecoveryBanner = useThreadRecoveryBanner({
+    thread: activeThreadShell,
+    environmentId,
+    onOpenThread: onOpenRelatedThreadStable,
+  });
+  const suppressStaleWorking = recoverySuppressesWorking(activeThreadShell?.recovery);
+  const forceQueueFollowUps = recoveryQueuesFollowUps(
+    activeThreadShell?.recovery,
+    activeRuntime?.activeRunId,
+  );
   const composerBannerItems = (() => {
     const fallbackSelection = draftFallback?.selection;
     const defaultSelection =
@@ -2657,16 +2710,12 @@ export default function ChatView(props: ChatViewProps) {
             }),
           ]
         : [];
+    const threadRecoveryItems = threadRecoveryBanner === null ? [] : [threadRecoveryBanner];
     const limitRecoveryItems = limitRecoveryBanner === null ? [] : [limitRecoveryBanner];
     const extensionStatusBanner = extensionStatusBannerItem(
       deriveProviderExtensionStatuses(serverProjection),
     );
     const extensionStatusItems = extensionStatusBanner === null ? [] : [extensionStatusBanner];
-    const interruptedActionItems =
-      interruptedActionBannerItem === null ? [] : [interruptedActionBannerItem];
-    const heldActionItems = heldActionBannerItem === null ? [] : [heldActionBannerItem];
-    const runningActionItems =
-      runningResumableActionBannerItem === null ? [] : [runningResumableActionBannerItem];
     const usageLimitsItems = usageLimitsBanner === null ? [] : [usageLimitsBanner];
     const projectCloneItems = projectCloneBannerItem === null ? [] : [projectCloneBannerItem];
     // An approval's feedback goes to that approval; the armed session waits for the next message.
@@ -2674,8 +2723,10 @@ export default function ChatView(props: ChatViewProps) {
       freshSessionAvailable && freshSessionArmed && activePendingApproval === null
         ? [freshSessionBannerItem(() => disarmFreshSession(routeThreadKey))]
         : [];
+    const annotationItems = chatAnnotation.banner === null ? [] : [chatAnnotation.banner];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
       return [
+        ...threadRecoveryItems,
         ...feedbackBannerItems,
         ...fallbackItems,
         ...limitRecoveryItems,
@@ -2684,12 +2735,11 @@ export default function ChatView(props: ChatViewProps) {
         ...projectCloneItems,
         ...freshSessionItems,
         ...systemComposerBannerItems,
-        ...interruptedActionItems,
-        ...heldActionItems,
-        ...runningActionItems,
+        ...annotationItems,
       ];
     }
     return [
+      ...threadRecoveryItems,
       ...feedbackBannerItems,
       ...fallbackItems,
       ...limitRecoveryItems,
@@ -2698,9 +2748,6 @@ export default function ChatView(props: ChatViewProps) {
       ...projectCloneItems,
       ...freshSessionItems,
       ...systemComposerBannerItems,
-      ...interruptedActionItems,
-      ...heldActionItems,
-      ...runningActionItems,
       branchMismatchBannerItem({
         mismatchKey: activeBranchMismatchKey,
         mismatch: localCheckoutBranchMismatch,
@@ -2712,6 +2759,7 @@ export default function ChatView(props: ChatViewProps) {
           setBranchMismatchDismissTick((tick) => tick + 1);
         },
       }),
+      ...annotationItems,
     ];
   })() as ComposerBannerStackItem[];
 
@@ -2941,6 +2989,9 @@ export default function ChatView(props: ChatViewProps) {
     setThreadError,
   });
   const { onSend } = useComposerSend({
+    forceQueueFollowUps,
+    chatAnnotation,
+    canAutoBalance: canAutoBalanceEnvironments && loadBalancingSettings.loadBalancingEnabled,
     environmentId,
     routeThreadKey,
     currentRouteThreadKeyRef,
@@ -3138,7 +3189,11 @@ export default function ChatView(props: ChatViewProps) {
   const onExpandTimelineImageStable = useStableCallback(onExpandTimelineImage);
   const shownThreadSyncPhase = activeEnvironmentUnavailable ? null : delayedThreadSyncPhase;
   const hasThreadNow =
-    attentionNow !== null || workNow !== null || goalNow !== null || shownThreadSyncPhase !== null;
+    attentionNow !== null ||
+    workNow !== null ||
+    runningResumableActionBannerItem !== null ||
+    goalNow !== null ||
+    shownThreadSyncPhase !== null;
   const queuedRunCount = serverProjection ? getUserQueuedThreadRuns(serverProjection).length : 0;
   // The queue control is mounted for every server thread but joins the footer only while it shows
   // something, by its own rule: an optimistic message stops counting once the server has it.
@@ -3172,10 +3227,15 @@ export default function ChatView(props: ChatViewProps) {
             />
           </div>
         )}
-        <ThreadNow
+        <LastCodeThreadNow
           key={routeThreadKey}
           attention={attentionNow}
           work={workNow}
+          action={activeThreadShell?.actionResume ?? null}
+          actionItems={[runningResumableActionBannerItem]}
+          tasks={pendingBackgroundTasks}
+          turnItems={serverProjection?.turnItems ?? EMPTY_TURN_ITEMS}
+          onOpenThread={onOpenRelatedThreadStable}
           syncPhase={shownThreadSyncPhase}
           goal={goalNow}
         />
@@ -3462,9 +3522,10 @@ export default function ChatView(props: ChatViewProps) {
                   {...(activeProject
                     ? { onRunShellCommand: parentPanel?.runShellCommand ?? runShellCommandStable }
                     : {})}
-                  isWorking={isWorking}
-                  runlessWorkActive={runlessWorkStartedAt !== null}
-                  isCompacting={isCompacting}
+                  {...chatAnnotation.timeline}
+                  isWorking={!suppressStaleWorking && isWorking}
+                  runlessWorkActive={!suppressStaleWorking && runlessWorkStartedAt !== null}
+                  isCompacting={!suppressStaleWorking && isCompacting}
                   awaitingUser={
                     activePendingApproval !== null
                       ? "approval"
@@ -3477,7 +3538,7 @@ export default function ChatView(props: ChatViewProps) {
                   awaitingRequestId={
                     activePendingApproval?.requestId ?? activePendingUserInput?.requestId ?? null
                   }
-                  activeTurnStartedAt={activeWorkStartedAt}
+                  activeTurnStartedAt={suppressStaleWorking ? null : activeWorkStartedAt}
                   providerStartingLabel={activeActivityRun?.providerStartingLabel ?? null}
                   worktreeSetup={worktreeSetup}
                   onCancelWorktreeSetup={onCancelWorktreeSetupStable}
@@ -3573,6 +3634,19 @@ export default function ChatView(props: ChatViewProps) {
                   data-chat-composer-stack="true"
                   className="group/composer-stack pointer-events-auto relative z-10 mx-auto w-full max-w-(--chat-content-max-width)"
                 >
+                  {interruptedActionBannerItem !== null || pendingActionBannerItem !== null ? (
+                    <div className="mb-2 rounded-lg border border-border bg-background px-2 pt-2">
+                      <LastCodeCurrentWork
+                        key={routeThreadKey}
+                        work={null}
+                        action={activeThreadShell?.actionResume ?? null}
+                        actionItems={[interruptedActionBannerItem, pendingActionBannerItem]}
+                        tasks={[]}
+                        turnItems={EMPTY_TURN_ITEMS}
+                        onOpenThread={onOpenRelatedThreadStable}
+                      />
+                    </div>
+                  ) : null}
                   {isDraftHeroState ? (
                     <div className="absolute inset-x-0 bottom-full">
                       <div
@@ -3610,6 +3684,61 @@ export default function ChatView(props: ChatViewProps) {
                           <div className="relative z-10">
                             {showProviderSubagentBar ? (
                               <ProviderSubagentBar
+                                key={activeThreadId}
+                                promotion={activeThread?.subagentPromotion ?? null}
+                                promotionAvailable={
+                                  canOperateThread &&
+                                  canPromoteSubagent(
+                                    selectedProviderEntry?.snapshot.threadCapabilities,
+                                  )
+                                }
+                                onPromote={
+                                  canOperateThread &&
+                                  canPromoteSubagent(
+                                    selectedProviderEntry?.snapshot.threadCapabilities,
+                                  ) &&
+                                  !activeEnvironmentUnavailable
+                                    ? async () => {
+                                        if (!activeThread) return;
+                                        const result = await requestSubagentPromotion({
+                                          environmentId,
+                                          input: {
+                                            threadId: activeThread.id,
+                                            creationSource: "web",
+                                          },
+                                        });
+                                        if (result._tag === "Failure")
+                                          throw squashAtomCommandFailure(result);
+                                      }
+                                    : null
+                                }
+                                onCancelPromotion={
+                                  canOperateThread &&
+                                  activeThread?.subagentPromotion?.status === "waiting" &&
+                                  !activeEnvironmentUnavailable
+                                    ? async () => {
+                                        const promotion = activeThread.subagentPromotion;
+                                        if (!promotion) return;
+                                        const result = await cancelSubagentPromotion({
+                                          environmentId,
+                                          input: {
+                                            threadId: activeThread.id,
+                                            requestId: promotion.requestId,
+                                          },
+                                        });
+                                        if (result._tag === "Failure")
+                                          throw squashAtomCommandFailure(result);
+                                      }
+                                    : null
+                                }
+                                onOpenPromoted={
+                                  activeThread?.subagentPromotion?.status === "promoted"
+                                    ? () =>
+                                        onOpenRelatedThreadStable(
+                                          activeThread.subagentPromotion!.targetThreadId,
+                                        )
+                                    : null
+                                }
                                 provider={selectedProviderEntry ?? null}
                                 showInstanceBadge={
                                   selectedProviderEntry !== undefined &&
@@ -3631,6 +3760,11 @@ export default function ChatView(props: ChatViewProps) {
                                   ) : null
                                 }
                               />
+                            ) : null}
+                            {composerMounted ? (
+                              <div className="space-y-2">
+                                <EnvironmentPauseNotice environmentId={environmentId} />
+                              </div>
                             ) : null}
                             {!composerMounted ? null : (
                               <ChatComposer
@@ -3664,6 +3798,7 @@ export default function ChatView(props: ChatViewProps) {
                                 }
                                 phase={phase}
                                 canSteer={!compactionBlocksSteer}
+                                forceQueue={forceQueueFollowUps}
                                 canInterrupt={canInterruptRunningThread}
                                 isSendBusy={
                                   (isSendBusy && !sendQueuesBehindSetup) ||
@@ -3752,6 +3887,7 @@ export default function ChatView(props: ChatViewProps) {
                                 permissionsShownInStrip={
                                   showComposerContextStrip && !isServerThread
                                 }
+                                threadAnnotationsSupported={chatAnnotation.canAnnotate}
                                 promptRef={promptRef}
                                 composerImagesRef={composerImagesRef}
                                 composerFilesRef={composerFilesRef}
@@ -3785,6 +3921,7 @@ export default function ChatView(props: ChatViewProps) {
                                 setThreadError={setThreadError}
                                 onExpandImage={onExpandTimelineImageStable}
                                 onFileOpen={openFileAttachmentStable}
+                                onOpenThreadAnnotation={chatAnnotation.openEditor}
                                 editingQueuedAttachments={queuedRunEdit.editingAttachments}
                                 onRemoveEditingQueuedAttachment={
                                   queuedRunEdit.removeEditingAttachment
@@ -3969,6 +4106,8 @@ export default function ChatView(props: ChatViewProps) {
                   }}
                 />
 
+                {chatAnnotation.editor}
+
                 <PullRequestThreadDialogHost
                   threadKey={activeThreadKey}
                   environmentId={activeThread.environmentId}
@@ -4047,6 +4186,8 @@ export default function ChatView(props: ChatViewProps) {
           onAddPullRequests={addPullRequestsSurfaceStable}
           onAddDevice={addDeviceSurfaceStable}
           onAddSideChat={sideChatsOffered ? openSideChatStable : undefined}
+          onAddHandoffs={addHandoffsSurfaceStable}
+          threadRef={activeThreadRef ?? undefined}
           browserAvailable={canOperatePreview && browserAvailable}
           terminalAvailable={activeProject !== null && canOperateTerminal}
           diffAvailable={isServerThread && isGitRepo}

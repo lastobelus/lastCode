@@ -59,6 +59,7 @@ const makeServerConfig = (baseDir: string) => {
     settingsPath: NodePath.join(stateDir, "settings.json"),
     environmentThemesDir: NodePath.join(stateDir, "themes"),
     providerStatusCacheDir: NodePath.join(baseDir, "caches"),
+    worktreeCheckoutCacheDir: NodePath.join(baseDir, "caches", "worktree-checkouts"),
     worktreesDir: NodePath.join(baseDir, "worktrees"),
     attachmentsDir: NodePath.join(stateDir, "attachments"),
     browserArtifactsDir: NodePath.join(stateDir, "browser-artifacts"),
@@ -205,7 +206,9 @@ it.effect("fails before the server can construct persistence or listen", () => {
             Layer.mock(DesktopBrowserChannel.DesktopBrowserChannel)({
               available: false,
               isShown: () => false,
+              loadFailure: () => undefined,
               isPresented: () => false,
+              isRendering: () => false,
             }),
           ),
         ),

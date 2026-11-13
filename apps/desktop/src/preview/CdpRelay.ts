@@ -16,8 +16,8 @@ export interface CdpRelayTarget {
   readonly url: () => string;
   readonly title: () => string;
   readonly userAgent: () => string;
-  /** The desktop and its server share a disk; download paths need no translation. */
-  readonly setDownloadDirectory: (directory: string | null) => void;
+  /** The host prepares the download directory before the configuration reply is sent. */
+  readonly setDownloadDirectory: (directory: string | null) => void | Promise<void>;
 }
 
 export interface CdpRelayConnection {
@@ -122,6 +122,20 @@ export function createCdpRelayConnection(
   const browserCommand = async (command: CdpCommand): Promise<unknown> => {
     if (ACKNOWLEDGED.has(command.method)) return {};
     switch (command.method) {
+      case "Storage.getCookies":
+      case "Storage.setCookies": {
+        const { browserContextId, ...params } = command.params ?? {};
+        if (browserContextId !== undefined && browserContextId !== BROWSER_CONTEXT_ID)
+          throw new Error("Only this preview tab's browser context can be used.");
+        // Storage.* resolves a browser-wide context, while Network.* uses the
+        // attached page's actual storage partition, including named/incognito
+        // profiles. The relay's synthetic context id never belongs to Chromium.
+        return target.send(
+          command.method === "Storage.getCookies" ? "Network.getAllCookies" : "Network.setCookies",
+          params,
+          undefined,
+        );
+      }
       case "Browser.setDownloadBehavior": {
         const directory = command.params?.["downloadPath"];
         const allowed = command.params?.["behavior"] !== "deny" && typeof directory === "string";
@@ -131,7 +145,7 @@ export function createCdpRelayConnection(
           { behavior: command.params?.["behavior"] === "deny" ? "deny" : "default" },
           undefined,
         );
-        target.setDownloadDirectory(allowed ? directory : null);
+        await target.setDownloadDirectory(allowed ? directory : null);
         downloadEventsEnabled = command.params?.["eventsEnabled"] === true;
         return result;
       }
@@ -195,6 +209,8 @@ export function createCdpRelayConnection(
   };
 
   const pageCommand = (command: CdpCommand): Promise<unknown> => {
+    if (command.method === "Storage.getCookies" || command.method === "Storage.setCookies")
+      return browserCommand(command);
     const child = sessions.get(command.sessionId!) === "page" ? undefined : command.sessionId;
     const owner =
       child === undefined && command.sessionId !== PAGE_SESSION_ID ? command.sessionId : undefined;

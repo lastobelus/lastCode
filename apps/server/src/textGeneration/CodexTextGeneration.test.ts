@@ -13,6 +13,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Result from "effect/Result";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -58,6 +59,7 @@ interface FakeCodexInput {
   mcpServers?: ReadonlyArray<{ name: string; enabled: boolean }> | number;
   requiredCwd?: string;
   requireInstructions?: string;
+  requirePromptOnly?: boolean;
 }
 
 function makeFakeCodexBinary(dir: string, input: FakeCodexInput) {
@@ -76,6 +78,7 @@ function makeFakeCodexBinary(dir: string, input: FakeCodexInput) {
     stderr: input.stderr ?? null,
     output: input.output,
     exitCode: input.exitCode ?? 0,
+    requirePromptOnly: input.requirePromptOnly ?? false,
   });
   return Effect.gen(function* () {
     const path = yield* Path.Path;
@@ -123,6 +126,15 @@ function makeFakeCodexBinary(dir: string, input: FakeCodexInput) {
         "  }",
         "}",
         "const chunks = [];",
+        "if (check.requirePromptOnly) {",
+        '  const required = ["--ignore-user-config", "--ignore-rules", "project_doc_max_bytes=0", \'web_search="disabled"\'];',
+        '  if (required.some((value) => !args.includes(value))) { process.stderr.write("preview isolation flags missing"); process.exit(10); }',
+        '  for (const feature of ["shell_tool", "apps", "plugins", "hooks", "memories", "multi_agent", "browser_use", "computer_use"]) {',
+        '    const index = args.findIndex((arg, i) => arg === "--disable" && args[i + 1] === feature);',
+        '    if (index < 0) { process.stderr.write("preview tool is enabled: " + feature); process.exit(11); }',
+        "  }",
+        '  if (!process.cwd().includes("t3code-incoming-preview-")) { process.stderr.write("preview has project access"); process.exit(12); }',
+        "}",
         "for await (const chunk of process.stdin) chunks.push(chunk);",
         'const stdinContent = Buffer.concat(chunks).toString("utf8");',
         "function fail(message, code) {",
@@ -241,6 +253,66 @@ it.layer(layerCodexTextGenerationTest)("CodexTextGeneration", (it) => {
       }),
   );
 
+  it.effect.each(["preview", "mining"] as const)(
+    "generates %s with isolated prompt-only flags and the requested Luna options",
+    (operation) =>
+      withFakeCodexEnv(
+        {
+          output: JSON.stringify({
+            text: "Review build; preserve release workflow",
+            snippets: [{ existingIds: [], title: "Review", text: "Review; do not merge." }],
+          }),
+          requirePromptOnly: true,
+          mcpServers: [{ name: "node_repl", enabled: true }],
+          forbidArg: '--config mcp_servers={"node_repl"={enabled=false}}',
+          requireServiceTier: "default",
+          requireReasoningEffort: "xhigh",
+          requireArg: "--model gpt-6-luna",
+
+          managedRuntime: true,
+        },
+        (textGeneration) =>
+          Effect.gen(function* () {
+            const input = {
+              cwd: process.cwd(),
+              message: "Review the build. Do not publish a release.",
+              modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-6-luna", [
+                { id: "reasoningEffort", value: "xhigh" },
+                { id: "serviceTier", value: "default" },
+              ]),
+            };
+            if (operation === "preview") {
+              expect((yield* textGeneration.generateIncomingMessageSummary(input)).text).toBe(
+                "Review build; preserve release workflow",
+              );
+            } else {
+              expect(
+                (yield* textGeneration.generatePromptSnippets({
+                  ...input,
+                  messages: [input.message],
+                  existing: [],
+                })).snippets,
+              ).toEqual([{ existingIds: [], title: "Review", text: "Review; do not merge." }]);
+            }
+          }),
+      ),
+  );
+  it.effect.each(["x".repeat(91), "Review the build.\nPublish later.", "   "])(
+    "rejects an unusable incoming preview %s",
+    (text) =>
+      withFakeCodexEnv({ output: JSON.stringify({ text }) }, (textGeneration) =>
+        Effect.gen(function* () {
+          const result = yield* textGeneration
+            .generateIncomingMessageSummary({
+              cwd: process.cwd(),
+              message: "Review the build and preserve the release workflow.",
+              modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+            })
+            .pipe(Effect.result);
+          expect(Result.isFailure(result)).toBe(true);
+        }),
+      ),
+  );
   it.effect.each([
     {
       selectedModel: "gpt-5.6-luna",
@@ -626,11 +698,13 @@ it.effect.each(PREFLIGHT_PRIMARY_STATES)("text generation preflight: %s", (prima
         snapshot: { getSnapshot: Effect.succeed(snapshot) } as ProviderInstance["snapshot"],
         orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
         textGeneration: TextGeneration.TextGeneration.of({
+          generatePromptSnippets: () => Effect.die("unused"),
           generateCommitMessage: () => Effect.die("unused"),
           generatePrContent: () => Effect.die("unused"),
           generateBranchName: () => Effect.die("unused"),
           generateReviewGuide: () => Effect.die("unused"),
           generateTranscriptionPostProcessing: () => Effect.die("unused"),
+          generateIncomingMessageSummary: () => Effect.die("unused"),
           generateThreadTitle: (input) =>
             Effect.sync(() => {
               calls.push(input.modelSelection);
@@ -726,6 +800,8 @@ it.effect(
           generateBranchName: () => Effect.die("unused"),
           generateThreadTitle: () => Effect.die("unused"),
           generateTranscriptionPostProcessing: () => Effect.die("unused"),
+          generatePromptSnippets: () => Effect.die("unused"),
+          generateIncomingMessageSummary: () => Effect.die("unused"),
           generateReviewGuide: (input) =>
             Effect.sync(() => {
               calls.push(input.modelSelection);

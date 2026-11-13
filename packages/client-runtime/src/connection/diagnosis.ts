@@ -4,6 +4,10 @@ import {
 } from "@t3tools/contracts";
 import type { RelayEnvironmentStatusResponse } from "@t3tools/contracts/relay";
 import * as DateTime from "effect/DateTime";
+import * as Option from "effect/Option";
+
+import type { ConnectionCatalogEntry } from "./catalog.ts";
+import { connectionRoutes } from "./routes.ts";
 
 import type {
   ConnectionAttemptError,
@@ -32,6 +36,7 @@ export interface ConnectionDiagnosis {
 
 export interface ConnectionDiagnosisInput {
   readonly hostLabel: string;
+  readonly entry: ConnectionCatalogEntry;
   readonly state: SupervisorConnectionState;
   /** The environment's usual route, used when the failure does not name one. */
   readonly via: "relay" | "direct";
@@ -95,7 +100,13 @@ function locate(input: ConnectionDiagnosisInput): Located | null {
   return { hop: cause !== null && NOT_ANSWERING.has(cause) ? "server" : "tunnel", cause };
 }
 
-function headline(host: string, located: Located, failure: ConnectionAttemptError | null): string {
+function headline(
+  host: string,
+  located: Located,
+  failure: ConnectionAttemptError | null,
+  relayPath: boolean,
+  savedPairing: boolean,
+): string {
   switch (located.cause) {
     case "offline":
       return "This device is offline";
@@ -147,13 +158,27 @@ function headline(host: string, located: Located, failure: ConnectionAttemptErro
         ? `This device can't reach ${host}'s tunnel`
         : `T3 Connect could not reach ${host}'s tunnel`;
     case "server":
-      return failure?.reason === "authentication" || failure?.reason === "permission"
-        ? `T3 Code on ${host} did not accept this device`
-        : `T3 Code on ${host} did not answer`;
+      if (failure?.reason === "authentication") {
+        return located.guessed
+          ? failure.detail
+          : `${host} is reachable, but didn't accept this device's ${relayPath ? "sign-in" : savedPairing ? "saved pairing" : "saved access"}`;
+      }
+      if (failure?.reason === "permission") {
+        return located.guessed
+          ? failure.detail
+          : `${host} is reachable, but this device's access doesn't allow this`;
+      }
+      return `T3 Code on ${host} did not answer`;
   }
 }
 
-function steps(host: string, located: Located, failure: ConnectionAttemptError | null): string[] {
+function steps(
+  host: string,
+  located: Located,
+  failure: ConnectionAttemptError | null,
+  relayPath: boolean,
+  savedPairing: boolean,
+): string[] {
   const checkHost = `On ${host}, check Settings > Sharing & access or run \`t3 connect status\`.`;
   switch (located.cause) {
     case "offline":
@@ -224,6 +249,24 @@ function steps(host: string, located: Located, failure: ConnectionAttemptError |
           ]
         : [`Make sure ${host} is awake and online.`, checkHost];
     case "server":
+      if (located.guessed) {
+        return ["Retry. If it keeps failing, copy the diagnostics."];
+      }
+      if (failure?.reason === "authentication") {
+        if (relayPath) return ["Sign out of T3 Connect and sign in again."];
+        return savedPairing
+          ? [
+              `Pair this device with ${host} again.`,
+              `Get a new pairing code from Settings > Sharing & access on ${host}, then choose Add environment here and enter the same address.`,
+              `Your projects and threads on ${host} are unaffected.`,
+            ]
+          : ["Retry. If it keeps failing, copy the diagnostics."];
+      }
+      if (failure?.reason === "permission") {
+        return [
+          `On ${host}, open Settings > Sharing & access and check this device's access.${savedPairing ? " If it needs more, pair again with a new pairing code." : ""}`,
+        ];
+      }
       return [
         `Make sure T3 Code is running on ${host}.`,
         "Retry. If it keeps failing, copy the diagnostics.",
@@ -318,6 +361,15 @@ export function presentConnectionDiagnosis(
     located.hop === "tunnel" ||
     (failure === null && input.relayStatus?.status === "offline") ||
     (failure?.via ?? input.via) === "relay";
+  const profile = Option.getOrNull(input.entry.profile);
+  // Failures identify direct vs relay, not which saved route supplied the credential.
+  const savedPairing =
+    !relayPath &&
+    connectionRoutes(input.entry).length === 1 &&
+    input.entry.target._tag === "BearerConnectionTarget" &&
+    profile?._tag === "BearerConnectionProfile" &&
+    profile.authorization !== "t3-connect" &&
+    profile.learned !== true;
   const order: ReadonlyArray<ConnectionHop> = HOP_ORDER[relayPath ? "relay" : "direct"];
   const failedIndex = order.indexOf(located.hop);
   const hops = order.map((hop, index): ConnectionDiagnosisHop => ({
@@ -353,9 +405,9 @@ export function presentConnectionDiagnosis(
   add("Trace ID", failure?.traceId);
 
   return {
-    headline: headline(host, located, failure),
+    headline: headline(host, located, failure, relayPath, savedPairing),
     hops,
-    steps: steps(host, located, failure),
+    steps: steps(host, located, failure, relayPath, savedPairing),
     facts,
     moreInfoUrl:
       relayPath || located.cause === "session_pending"

@@ -76,7 +76,9 @@ device button above the composer to watch the live screen and control it.
 On iOS layouts with an inspector, the device opens beside the thread. Maximize
 it to fill the screen; closing the full-screen view returns to the inspector.
 If the thread has several devices open, choose one in the viewer. Closing the
-viewer stops streaming and leaves the device available to the agent. Device
+viewer stops streaming and leaves the device available to the agent. A simulator or emulator an agent started on this machine is
+powered off when its thread is settled, archived or deleted, after 30 minutes
+without device commands, or when the server stops. Devices you started stay on. Device
 activity also appears in the thread timeline.
 
 Agents drive the device through the `agent-device` command line. T3

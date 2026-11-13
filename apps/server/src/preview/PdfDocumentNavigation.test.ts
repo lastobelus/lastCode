@@ -1,7 +1,13 @@
 import type { CDPSession } from "playwright-core";
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { installPdfDocumentNavigation } from "./PdfDocumentNavigation.ts";
+import { installDocumentNavigation } from "./DocumentNavigation.ts";
+import { createPdfDocumentNavigation } from "./PdfDocumentNavigation.ts";
+
+async function installPdfDocumentNavigation(cdp: CDPSession) {
+  const pdf = await createPdfDocumentNavigation(cdp);
+  await installDocumentNavigation(cdp, pdf ? [pdf] : []);
+}
 
 const source = "https://environment.test/api/assets/signed-token/files/Study%20guide.PDF";
 
@@ -10,6 +16,7 @@ function fixture(nativePdfViewer = false) {
   let paused: (event: {
     requestId: string;
     frameId: string;
+    resourceType: string;
     request: { url: string; method: string };
     responseStatusCode: number;
     responseHeaders: Array<{ name: string; value: string }>;
@@ -47,6 +54,7 @@ function fixture(nativePdfViewer = false) {
       paused({
         requestId: "request-1",
         frameId,
+        resourceType: "Document",
         request: { url, method },
         responseStatusCode: status,
         responseHeaders: [{ name: "Content-Type", value: contentType }],
@@ -57,6 +65,18 @@ function fixture(nativePdfViewer = false) {
 }
 
 describe("PDF document navigation", () => {
+  it.each([
+    "https://environment.test/api/assets/image.png",
+    "https://environment.test/docs/api/assets/readme",
+  ])("continues a non-PDF asset document: %s", async (url) => {
+    const test = fixture();
+    await installPdfDocumentNavigation(test.cdp);
+    expect(await test.navigate(url, "main", "GET", 200, "text/plain")).toEqual({
+      method: "Fetch.continueRequest",
+      params: { requestId: "request-1" },
+    });
+  });
+
   it("escapes filenames in the browser document", async () => {
     const test = fixture();
     await installPdfDocumentNavigation(test.cdp);

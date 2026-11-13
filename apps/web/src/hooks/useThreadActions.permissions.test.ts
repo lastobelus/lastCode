@@ -9,6 +9,7 @@ import {
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { makeThreadFixture } from "../test-fixtures";
 
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { useDiffPanelStore } from "../diffPanelStore";
@@ -34,6 +35,7 @@ const state = vi.hoisted(() => ({
     title: string;
     worktreePath: string | null;
     lineage: { parentThreadId: ThreadId | null; sideChat?: boolean };
+    source: ReturnType<typeof makeThreadFixture>["source"];
     runtime: { status: "idle" } | null;
     latestRun: null;
   }[],
@@ -49,10 +51,25 @@ const state = vi.hoisted(() => ({
   sessionLookupFails: false,
 }));
 
-vi.mock("react", () => ({
+vi.mock("react", async (original) => ({
+  ...(await original<typeof import("react")>()),
   useCallback: (callback: unknown) => callback,
   useMemo: (factory: () => unknown) => factory(),
   useRef: (current: unknown) => ({ current }),
+}));
+vi.mock("./useWorkspaceLifecycleConfirmation", async (original) => ({
+  ...(await original<typeof import("./useWorkspaceLifecycleConfirmation")>()),
+  useWorkspaceLifecycleConfirmation: () => ({
+    supported: () => false,
+    confirm: () => {
+      throw new Error("These permission fixtures do not support saved workspaces.");
+    },
+  }),
+}));
+vi.mock("../components/ThreadArchiveDialog", () => ({
+  requestThreadArchiveDialog: () => {
+    throw new Error("These permission fixtures do not require archive confirmation.");
+  },
 }));
 vi.mock("@tanstack/react-router", () => ({
   useRouter: () => ({
@@ -77,6 +94,37 @@ vi.mock("../state/use-atom-command", () => ({
         return AsyncResult.failure(Cause.fail(new Error("Server denied the request")));
       }
       state.afterRequest?.(action);
+      if (action === "loadArchiveFamily") {
+        return AsyncResult.success({
+          childThreadIds: [],
+          promotableChildThreadIds: [],
+          keptThreadIds: [],
+          activeChildThreadIds: [],
+          activeThreadIds: [],
+          unreadThreadIds: [],
+          protectedChildThreadIds: [],
+          nativeStopCount: 0,
+          requiresConfirmation: false,
+          canPromote: false,
+          canStopAndArchive: true,
+          children: [],
+          activeChildren: [],
+          activeThreads: [],
+          unreadThreads: [],
+          promotableChildren: [],
+          protectedChildren: [],
+          threads: state.threads
+            .filter(
+              (thread) =>
+                thread.environmentId === request.environmentId &&
+                thread.id === request.input.threadId,
+            )
+            .map(({ lineage, ...thread }) => {
+              const fixture = makeThreadFixture({ ...thread, runtime: null });
+              return { ...fixture, lineage: { ...fixture.lineage, ...lineage } };
+            }),
+        });
+      }
       return AsyncResult.success(undefined);
     },
 }));
@@ -106,27 +154,31 @@ vi.mock("../state/server", async (importOriginal) => {
   };
 });
 vi.mock("../state/threads", () => ({
-  threadEnvironment: Object.fromEntries(
-    [
-      "archive",
-      "unarchive",
-      "delete",
-      "settle",
-      "unsettle",
-      "pin",
-      "unpin",
-      "reorderPin",
-      "snooze",
-      "unsnooze",
-      "stopSession",
-    ].map((action) => [action, action]),
-  ),
+  threadEnvironment: {
+    loadArchiveFamily: "loadArchiveFamily",
+    ...Object.fromEntries(
+      [
+        "archive",
+        "unarchive",
+        "delete",
+        "settle",
+        "unsettle",
+        "pin",
+        "unpin",
+        "reorderPin",
+        "snooze",
+        "unsnooze",
+        "stopSession",
+      ].map((action) => [action, action]),
+    ),
+  },
 }));
 vi.mock("../state/vcs", () => ({
   vcsEnvironment: { removeWorktree: "removeWorktree", refreshStatus: "refreshStatus" },
 }));
 vi.mock("../state/entities", () => ({
   readEnvironmentServerConfigLoaded: () => true,
+  readEnvironmentSupportsArchiveFamilies: () => true,
   readEnvironmentSupportsWorktreeCleanup: () => false,
   readThreadShell: (ref: ScopedThreadRef) =>
     state.threads.find(
@@ -275,6 +327,7 @@ beforeEach(() => {
       title: "Thread",
       worktreePath: null,
       lineage: { parentThreadId: null },
+      source: makeThreadFixture().source,
       runtime: null,
       latestRun: null,
     },
@@ -314,6 +367,15 @@ describe("thread action permissions", () => {
       state.scopes.get(secondary)!.add(AuthOrchestrationOperateScope);
       expect((await run(actions, target))._tag).toBe("Success");
       expect(state.requests).toEqual([
+        ...(name === "archive"
+          ? [
+              expect.objectContaining({
+                action: "loadArchiveFamily",
+                environmentId: secondary,
+                input: { threadId: target.threadId },
+              }),
+            ]
+          : []),
         expect.objectContaining({ action: name, environmentId: secondary }),
       ]);
     },

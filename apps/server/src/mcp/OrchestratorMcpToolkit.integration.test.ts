@@ -4,17 +4,17 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import {
   CommandId,
-  EnvironmentId,
   EventId,
   RunId,
   RunAttemptId,
+  OrchestratorMcpThreadReadResult,
+  EnvironmentId,
   isProviderNativeSubagentThread,
   MessageId,
   type ModelSelection,
   OrchestratorMcpDelegateTaskResult,
   OrchestratorMcpThreadInterruptResult,
   OrchestratorMcpThreadSendResult,
-  OrchestratorMcpThreadReadResult,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -56,6 +56,7 @@ import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as ThreadSearch from "../orchestration-v2/ThreadSearch.ts";
 import * as ThreadRecovery from "../orchestration-v2/ThreadRecoveryService.ts";
 import * as ThreadRecoveryRepair from "../orchestration-v2/ThreadRecoveryRepairService.ts";
 import * as ThreadReadBroker from "./ThreadReadBroker.ts";
@@ -64,8 +65,20 @@ import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as PeerLinkRequests from "../peer/PeerLinkRequests.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
+import * as ActionResume from "../actionResume/ActionResume.ts";
 
-const layerOrchestratorToolkit = McpHttpServer.layerOrchestratorToolkit.pipe(
+const layerOrchestratorToolkit = Layer.mergeAll(
+  McpHttpServer.layerOrchestratorToolkit,
+  McpHttpServer.layerThreadToolkit,
+).pipe(
+  Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
+  Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
+  Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
+  Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
+  Layer.provide(
+    Layer.mock(ActionResume.ActionResume)({ readLatestSummary: () => Effect.succeed(null) }),
+  ),
+  Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
 );
@@ -96,10 +109,12 @@ const queuedFollowupResult = "Queued delegated follow-up completed.";
 const decodeThreadRead = Schema.decodeUnknownEffect(OrchestratorMcpThreadReadResult);
 const longFollowupResult = "Long delegated follow-up line. ".repeat(1_500);
 
+const encodeCallToolResult = Schema.encodeEffect(McpSchema.CallToolResult);
 const decodeDelegateTaskResult = Schema.decodeUnknownEffect(OrchestratorMcpDelegateTaskResult);
 const decodeThreadInterruptResult = Schema.decodeUnknownEffect(
   OrchestratorMcpThreadInterruptResult,
 );
+const decodeThreadReadResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadReadResult);
 const decodeThreadSendResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadSendResult);
 
 const codexSelection = {
@@ -401,9 +416,7 @@ describe("orchestrator MCP toolkit", () => {
         for (const tool of ["t3_subagent_promote", "t3_subagent_promotion_cancel"]) {
           const foreignPromotion = yield* invoke(tool, {
             threadId: foreignThreadId,
-            ...(tool === "t3_subagent_promotion_cancel"
-              ? { requestId: "foreign-promotion" }
-              : {}),
+            ...(tool === "t3_subagent_promotion_cancel" ? { requestId: "foreign-promotion" } : {}),
           });
           expect(declaredFailure(foreignPromotion)).toMatchObject({
             code: "orchestration_error",
@@ -900,6 +913,8 @@ it.effect("encodes a recovered thread detail as a JSON-safe MCP tool result", ()
       ),
       Layer.provide(ServerSettings.layerTest()),
       Layer.provide(layerUnusedScheduledTaskStub),
+      Layer.provide(Layer.mock(ThreadRecovery.ThreadRecoveryService)({})),
+      Layer.provide(Layer.mock(ThreadRecoveryRepair.ThreadRecoveryRepairService)({})),
       Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
       Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
       Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
@@ -945,7 +960,7 @@ it.effect("encodes a recovered thread detail as a JSON-safe MCP tool result", ()
           );
         expect(result.isError).toBe(false);
         // The MCP transport validates structuredContent as JSON, after the toolkit returns.
-        const encoded = yield* Schema.encodeEffect(McpSchema.CallToolResult)(result);
+        const encoded = yield* encodeCallToolResult(result);
         return yield* decodeThreadReadResult(encoded.structuredContent);
       });
       const withoutRecovery = yield* read;

@@ -25,6 +25,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
@@ -192,6 +193,7 @@ const makeImporter = Effect.fn(function* (
   const events = yield* EventStore.EventStoreV2;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const published: Array<ApplicationStoredEvent> = [];
+  const persistenceLock = yield* Semaphore.make(1);
   const withTransaction: typeof sql.withTransaction = (effect) =>
     beforeTransaction.pipe(Effect.andThen(sql.withTransaction(effect)));
   const importSql = new Proxy(sql, {
@@ -257,10 +259,10 @@ const makeImporter = Effect.fn(function* (
           Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)(
             getAdapter === undefined ? {} : { get: getAdapter },
           ),
-          Layer.succeed(
-            ThreadCommandExecutor.ThreadCommandExecutor,
-            threadCommands ?? (yield* KeyedLock.make<ThreadId>()),
-          ),
+          Layer.succeed(ThreadCommandExecutor.ThreadCommandExecutor, {
+            ...(threadCommands ?? (yield* KeyedLock.make<ThreadId>())),
+            withPersistenceLock: (effect) => persistenceLock.withPermit(effect),
+          }),
         ),
       ),
     ),

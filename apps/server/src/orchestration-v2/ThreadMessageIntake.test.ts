@@ -7,12 +7,18 @@ import { expect, it } from "@effect/vitest";
 import {
   ChatAttachmentId,
   CommandId,
+  ComposerContextId,
   EventId,
+  EnvironmentId,
   GuestMessageId,
   MessageId,
   RuntimeRequestId,
   ThreadId,
   TurnItemId,
+  UpdateDrainAdmissionError,
+  UpdateDrainError,
+  UpdateDrainRequestId,
+  UpdateDrainTargetVersion,
   type OrchestrationV2Command,
   type OrchestrationV2ServerCommand,
   type OrchestrationV2StoredEvent,
@@ -31,9 +37,11 @@ import * as ServerSettings from "../serverSettings.ts";
 import {
   OrchestratorCommandPreviouslyRejectedError,
   OrchestratorDispatchError,
+  OrchestratorThreadArchivingError,
 } from "./Orchestrator.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import { dispatchCommand } from "./ThreadMessageIntake.ts";
+import { ThreadReadAuthorization } from "./ThreadReadAuthorization.ts";
 
 const layerIntakeTest = ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-question-intake-",
@@ -111,20 +119,60 @@ it.effect("claims question uploads and passes readable paths through the V2 requ
       new Uint8Array([1, 2, 3]),
     );
     const captured: OrchestrationV2ServerCommand[] = [];
+    const authorized: Array<[ThreadId, MessageId]> = [];
+    const reference = {
+      version: 1 as const,
+      contextId: ComposerContextId.make("answer-reference"),
+      kind: "thread" as const,
+      label: "Reference",
+      title: "Reference",
+      environmentId: EnvironmentId.make("source-environment"),
+      threadId: ThreadId.make("source-reference"),
+    };
+    const stale = {
+      ...reference,
+      contextId: ComposerContextId.make("stale-reference"),
+      threadId: ThreadId.make("stale-thread"),
+    };
     yield* dispatchCommand({
       type: "runtime-request.respond",
       commandId: CommandId.make("answer-1"),
       threadId: ThreadId.make("thread-answer"),
       requestId: RuntimeRequestId.make("request-1"),
-      answers: { q: ["Selected option"] },
+      answers: {
+        q: ["Selected option"],
+        details: "See [Reference](t3-context://v1/thread/answer-reference)",
+      },
+      contextsByQuestionId: {
+        q: { version: 1, records: [stale] },
+        details: { version: 1, records: [reference, stale] },
+      },
       attachmentsByQuestionId: {
         q: [{ type: "image", id, name: "screen.png", mimeType: "image/png", sizeBytes: 3 }],
       },
-    }).pipe(Effect.provide(layerFailingDispatch(captured)), Effect.result);
+    }).pipe(
+      Effect.provide(layerFailingDispatch(captured)),
+      Effect.provideService(ThreadReadAuthorization, {
+        authorize: (threadId, messageId) =>
+          Effect.sync(() => {
+            authorized.push([threadId, messageId]);
+          }),
+      }),
+      Effect.result,
+    );
+    expect(authorized).toEqual([
+      [ThreadId.make("thread-answer"), MessageId.make("answer-context:answer-1")],
+    ]);
     expect(captured).toHaveLength(1);
     const command = captured[0]!;
     expect(command.type).toBe("runtime-request.respond");
     if (command.type !== "runtime-request.respond") return;
+    expect(command.contextsByQuestionId).toEqual({ details: { version: 1, records: [reference] } });
+    expect(command.answers?.details).toBe(
+      "See [Reference](t3-context://v1/thread/answer-reference)",
+    );
+    expect(command.answers?.details).not.toContain("<t3_context");
+    expect(command.answers?.details).not.toContain("stale-thread");
     const attachment = command.attachmentsByQuestionId?.q?.[0];
     expect(attachment).toBeDefined();
     const path = resolveAttachmentPath({
@@ -173,6 +221,67 @@ it.effect("retains claimed copies when dispatch failure may have been accepted",
       entry.startsWith("thread-ambiguous-"),
     );
     expect(threadFiles).toHaveLength(1);
+    expect(NodeFS.existsSync(NodePath.join(config.attachmentsDir, `${pendingId}.png`))).toBe(true);
+  }).pipe(Effect.provide(layerIntakeTest)),
+);
+
+it.effect.each([
+  new UpdateDrainAdmissionError({
+    reason: "update_draining",
+    requestId: UpdateDrainRequestId.make("update-request"),
+    targetVersion: UpdateDrainTargetVersion.make("test-version"),
+    message: "Update intake is closed.",
+  }),
+  new UpdateDrainError({ reason: "internal_error", message: "Cannot read update admission." }),
+  new OrchestratorThreadArchivingError({
+    commandId: CommandId.make("message-draining"),
+    commandType: "message.dispatch",
+    threadId: ThreadId.make("thread-draining"),
+  }),
+])("releases claimed copies when intake fails with $_tag", (cause) =>
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    const pendingId = ChatAttachmentId.make(createPendingAttachmentId()!);
+    NodeFS.writeFileSync(
+      NodePath.join(config.attachmentsDir, `${pendingId}.png`),
+      new Uint8Array([1, 2, 3]),
+    );
+    const result = yield* dispatchCommand({
+      type: "message.dispatch",
+      commandId: CommandId.make("message-draining"),
+      threadId: ThreadId.make("thread-draining"),
+      messageId: MessageId.make("message-draining"),
+      createdBy: "user",
+      creationSource: "server",
+      dispatchMode: { type: "defer_start" },
+      text: "Read this attachment",
+      attachments: [
+        { type: "image", id: pendingId, name: "screen.png", mimeType: "image/png", sizeBytes: 3 },
+      ],
+    }).pipe(
+      Effect.provide(
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          dispatch: (command) =>
+            Effect.fail(
+              cause._tag === "OrchestratorThreadArchivingError"
+                ? cause
+                : new OrchestratorDispatchError({
+                    commandId: command.commandId,
+                    commandType: command.type,
+                    cause,
+                  }),
+            ),
+        }),
+      ),
+      Effect.result,
+    );
+    expect(result._tag).toBe("Failure");
+    expect(
+      NodeFS.readdirSync(config.attachmentsDir).filter((entry) =>
+        entry.startsWith("thread-draining-"),
+      ),
+    ).toEqual([]);
+    // Preserve the original upload so the user can retry after admission opens.
     expect(NodeFS.existsSync(NodePath.join(config.attachmentsDir, `${pendingId}.png`))).toBe(true);
   }).pipe(Effect.provide(layerIntakeTest)),
 );

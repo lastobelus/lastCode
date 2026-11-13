@@ -57,6 +57,11 @@ import { deviceScreenKey, deviceStreamScreenAtom } from "../device/deviceStreamS
 import type { PreviewStreamViewport } from "@t3tools/client-runtime/preview/server-browser-stream";
 import { previewBridge } from "./previewBridge";
 import { PreviewUnreachable } from "./PreviewUnreachable";
+import {
+  clearPreviewRecoveryRequest,
+  requestPreviewRecovery,
+  usePreviewRecoveryRequest,
+} from "./previewRecoveryRequest";
 import { showPreviewPopup } from "./showPreviewPopup";
 import {
   clampPreviewMiniPlayerPosition,
@@ -216,6 +221,24 @@ function BrowserMiniPlayer({ threadRef, tabId, miniPlayer }: Props & { readonly 
   const { serverEpoch, snapshot, desktopOverlay, serverTab, sourceSize } =
     useBrowserMiniPlayerSource(threadRef, tabId);
   const runtimeTabId = previewRuntimeTabId(threadRef, serverEpoch, tabId);
+  const navStatus = snapshot?.navStatus;
+  const recoveryUrl = navStatus && navStatus._tag !== "Idle" ? navStatus.url : "";
+  const recoveryRequest = usePreviewRecoveryRequest(threadRef, recoveryUrl, tabId);
+  const failedUrlsByTab = useRef(new Map<string, string>());
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Successful browser navigation clears the external recovery request registry.
+  useEffect(() => {
+    if (navStatus?._tag === "LoadFailed") {
+      failedUrlsByTab.current.set(runtimeTabId, navStatus.url);
+      return;
+    }
+    if (navStatus?._tag !== "Success") return;
+    const owner = { environmentId: threadRef.environmentId, threadId: threadRef.threadId };
+    const failedUrl = failedUrlsByTab.current.get(runtimeTabId);
+    // A restored URL can redirect; the final destination is not the request key.
+    if (failedUrl) clearPreviewRecoveryRequest(owner, failedUrl);
+    clearPreviewRecoveryRequest(owner, navStatus.url);
+    failedUrlsByTab.current.delete(runtimeTabId);
+  }, [navStatus, runtimeTabId, threadRef.environmentId, threadRef.threadId]);
   const recordingTabIds = useActiveBrowserRecordingTabIds();
   const recording =
     recordingTabIds.has(runtimeTabId) ||
@@ -351,6 +374,17 @@ function BrowserMiniPlayer({ threadRef, tabId, miniPlayer }: Props & { readonly 
                   code={loadFailed.code}
                   description={loadFailed.description}
                   onReload={() => void previewBridge?.refresh(runtimeTabId)}
+                  recoveryRequest={recoveryRequest}
+                  onRequestRecovery={() => {
+                    void requestPreviewRecovery({
+                      threadRef,
+                      tabId,
+                      url: loadFailed.url,
+                      code: loadFailed.code,
+                      description: loadFailed.description,
+                      title: loadFailed.title,
+                    });
+                  }}
                 />
               </div>
             ) : !desktopOverlay?.hasWebContents ? (

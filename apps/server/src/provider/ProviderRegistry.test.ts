@@ -34,6 +34,7 @@ import {
   ServerSettings,
   ServerSettingsError,
   ServerProvider,
+  type OrchestrationV2ProviderCapabilities,
   type ServerProviderSlashCommand,
   type ServerProviderUpdateState,
   type ServerProviderVersionAdvisoryStatus,
@@ -79,6 +80,8 @@ import type {
   ProviderInstance,
   ProviderWorkspaceSnapshot,
 } from "@t3tools/provider-core/server/driver";
+import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
+import { ProviderAdapterCapabilitiesError } from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderInstanceRegistry from "./ProviderInstanceRegistry.ts";
 import * as ProviderInstanceRegistryMutator from "./ProviderInstanceRegistryMutator.ts";
 import * as ProviderRegistry from "./ProviderRegistry.ts";
@@ -89,6 +92,23 @@ vi.mock("@anthropic-ai/claude-agent-sdk", { spy: true });
 
 const decodeServerProvider = Schema.decodeSync(ServerProvider);
 const encodeServerProvider = Schema.encodeSync(ServerProvider);
+const makeCatalogAdapter = (
+  capabilities?: OrchestrationV2ProviderCapabilities,
+): ProviderInstance["orchestrationAdapter"] => ({
+  instanceId: ProviderInstanceId.make("catalog-fixture"),
+  driver: ProviderDriverKind.make("test-provider"),
+  getCapabilities: () =>
+    capabilities === undefined
+      ? Effect.fail(
+          new ProviderAdapterCapabilitiesError({
+            driver: ProviderDriverKind.make("test-provider"),
+          }),
+        )
+      : Effect.succeed(capabilities),
+  planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
+  openSession: () => Effect.die("Catalog tests do not start provider sessions"),
+});
+
 const decodeServerSettings = Schema.decodeSync(ServerSettings);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const encodedDefaultServerSettings = encodeServerSettings(DEFAULT_SERVER_SETTINGS);
@@ -394,7 +414,7 @@ const buildRegistryOverSnapshot = Effect.fn("buildRegistryOverSnapshot")(functio
       streamChanges: Stream.empty,
       applyUsageLimits: () => Effect.void,
     },
-    orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+    orchestrationAdapter: makeCatalogAdapter(CodexProviderCapabilitiesV2),
     textGeneration: {} as ProviderInstance["textGeneration"],
   } satisfies ProviderInstance;
   const layerInstanceRegistry = Layer.succeed(ProviderInstanceRegistry.ProviderInstanceRegistry, {
@@ -1406,7 +1426,7 @@ it.layer(
                 streamChanges: Stream.empty,
                 applyUsageLimits: () => Effect.void,
               },
-              orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+              orchestrationAdapter: makeCatalogAdapter(),
               textGeneration: {} as ProviderInstance["textGeneration"],
             } satisfies ProviderInstance;
             const layerInstanceRegistry = Layer.succeed(
@@ -1548,7 +1568,7 @@ it.layer(
               streamChanges: Stream.empty,
               applyUsageLimits: () => Effect.void,
             },
-            orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+            orchestrationAdapter: makeCatalogAdapter(CodexProviderCapabilitiesV2),
             textGeneration: {} as ProviderInstance["textGeneration"],
           } satisfies ProviderInstance;
           const layerInstanceRegistry = Layer.succeed(
@@ -1571,6 +1591,10 @@ it.layer(
             yield* Ref.set(currentProvider, pendingProvider);
             yield* Effect.gen(function* () {
               const registry = yield* ProviderRegistry.ProviderRegistry;
+              assert.deepStrictEqual(
+                (yield* registry.getProviders)[0]?.threadCapabilities,
+                CodexProviderCapabilitiesV2.threads,
+              );
               const expectedModels = restarted
                 ? retainedModels
                 : [customModel, ...cachedProvider.models];
@@ -1654,7 +1678,7 @@ it.layer(
               streamChanges: Stream.empty,
               applyUsageLimits: () => Effect.void,
             },
-            orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+            orchestrationAdapter: makeCatalogAdapter(),
             textGeneration: {} as ProviderInstance["textGeneration"],
           } satisfies ProviderInstance;
           const layerInstanceRegistry = Layer.succeed(
@@ -2143,7 +2167,7 @@ it.layer(
                 Effect.andThen(Deferred.await(releaseScan)),
                 Effect.as(provider),
               ),
-            orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+            orchestrationAdapter: makeCatalogAdapter(),
             textGeneration: {} as ProviderInstance["textGeneration"],
           };
           const layerInstanceRegistry = Layer.succeed(
@@ -2233,7 +2257,7 @@ it.layer(
                 skills: [{ name: "finalize", path: `${directory}/finalize`, enabled: true }],
               }),
             ),
-          orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+          orchestrationAdapter: makeCatalogAdapter(),
           textGeneration: {} as ProviderInstance["textGeneration"],
         };
         const layerInstanceRegistry = Layer.succeed(
@@ -2330,7 +2354,7 @@ it.layer(
             applyUsageLimits: () => Effect.void,
           },
           snapshotForCwd: () => Ref.get(scanResult),
-          orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+          orchestrationAdapter: makeCatalogAdapter(),
           textGeneration: {} as ProviderInstance["textGeneration"],
         };
         const layerInstanceRegistry = Layer.succeed(
@@ -2458,7 +2482,7 @@ it.layer(
             applyUsageLimits: () => Effect.void,
           },
           snapshotForCwd: () => Ref.get(scanResult),
-          orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+          orchestrationAdapter: makeCatalogAdapter(),
           textGeneration: {} as ProviderInstance["textGeneration"],
         };
         const layerInstanceRegistry = Layer.succeed(
@@ -2567,7 +2591,7 @@ it.layer(
               streamChanges: Stream.empty,
               applyUsageLimits: () => Effect.void,
             },
-            orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+            orchestrationAdapter: makeCatalogAdapter(),
             textGeneration: {} as ProviderInstance["textGeneration"],
           },
         ] satisfies ReadonlyArray<ProviderInstance>;
@@ -2667,7 +2691,7 @@ it.layer(
                 streamChanges: Stream.empty,
                 applyUsageLimits: () => Effect.void,
               },
-              orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+              orchestrationAdapter: makeCatalogAdapter(),
               textGeneration: {} as ProviderInstance["textGeneration"],
             }) satisfies ProviderInstance;
           const retiredInstance = makeInstance(
@@ -2934,7 +2958,7 @@ it.layer(
             streamChanges: Stream.fromPubSub(changes),
             applyUsageLimits: () => Effect.void,
           },
-          orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+          orchestrationAdapter: makeCatalogAdapter(),
           textGeneration: {} as ProviderInstance["textGeneration"],
         } satisfies ProviderInstance;
         const layerInstanceRegistry = Layer.succeed(
@@ -3035,7 +3059,7 @@ it.layer(
             streamChanges: Stream.fromPubSub(changes),
             applyUsageLimits: () => Effect.void,
           },
-          orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+          orchestrationAdapter: makeCatalogAdapter(),
           textGeneration: {} as ProviderInstance["textGeneration"],
         } satisfies ProviderInstance;
         const layerInstanceRegistry = Layer.succeed(
@@ -3224,7 +3248,7 @@ it.layer(
               streamChanges: Stream.fromPubSub(changes),
               applyUsageLimits: () => Effect.void,
             },
-            orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+            orchestrationAdapter: makeCatalogAdapter(),
             textGeneration: {} as ProviderInstance["textGeneration"],
           } satisfies ProviderInstance;
           const layerInstanceRegistry = Layer.succeed(
@@ -3328,7 +3352,7 @@ it.layer(
             streamChanges: Stream.empty,
             applyUsageLimits: () => Effect.void,
           },
-          orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+          orchestrationAdapter: makeCatalogAdapter(),
           textGeneration: {} as ProviderInstance["textGeneration"],
         } satisfies ProviderInstance;
         const layerInstanceRegistry = Layer.succeed(

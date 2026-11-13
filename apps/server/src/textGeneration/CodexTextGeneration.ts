@@ -242,6 +242,20 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     );
 
     const runCodexCommand = Effect.fn("runCodexJson.runCodexCommand")(function* () {
+      const promptOnly =
+        operation === "generateIncomingMessageSummary" || operation === "generatePromptSnippets";
+      const isolatedCwd = promptOnly
+        ? yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3code-incoming-preview-" }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new TextGenerationError({
+                  operation,
+                  detail: "Failed to isolate preview generation.",
+                  cause,
+                }),
+            ),
+          )
+        : cwd;
       const resolved = resolveRuntime
         ? yield* resolveRuntime.pipe(
             Effect.mapError(
@@ -277,8 +291,11 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
           ? undefined
           : getModelSelectionStringOptionValue(modelSelection, "reasoningEffort")) ??
         DEFAULT_TEXT_GENERATION_REASONING_EFFORT;
-      const serviceTier =
-        resolved || fellBack ? undefined : getCodexServiceTierOptionValue(modelSelection);
+      const serviceTier = promptOnly
+        ? "default"
+        : resolved || fellBack
+          ? undefined
+          : getCodexServiceTierOptionValue(modelSelection);
       const binary = effectiveConfig.binaryPath || "codex";
       const env = {
         ...effectiveEnvironment,
@@ -291,12 +308,15 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
             }
           : {}),
       };
-      const mcpServersOff = yield* listEnabledMcpServers({
-        binary,
-        cwd,
-        env,
-        launchArgs: codexMcpListLaunchArgs(launchArgs),
-      }).pipe(Effect.map(codexMcpServersOff));
+      // Ignoring user config also omits MCP transports; disable-only entries would be invalid.
+      const mcpServersOff = promptOnly
+        ? null
+        : yield* listEnabledMcpServers({
+            binary,
+            cwd,
+            env,
+            launchArgs: codexMcpListLaunchArgs(launchArgs),
+          }).pipe(Effect.map(codexMcpServersOff));
       const spawnCommand = yield* resolveSpawnCommand(
         binary,
         [
@@ -306,6 +326,26 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
           ...CODEX_NO_PLUGIN_ARGS,
           ...(mcpServersOff ? ["--config", mcpServersOff] : []),
           "--ephemeral",
+          ...(promptOnly
+            ? [
+                "--ignore-user-config",
+                "--ignore-rules",
+                "--config",
+                "project_doc_max_bytes=0",
+                "--config",
+                'web_search="disabled"',
+                ...[
+                  "shell_tool",
+                  "apps",
+                  "plugins",
+                  "hooks",
+                  "memories",
+                  "multi_agent",
+                  "browser_use",
+                  "computer_use",
+                ].flatMap((feature) => ["--disable", feature]),
+              ]
+            : []),
           "--skip-git-repo-check",
           "-s",
           "read-only",
@@ -325,7 +365,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       );
       const command = ChildProcess.make(spawnCommand.command, spawnCommand.args, {
         env,
-        cwd,
+        cwd: isolatedCwd,
         shell: spawnCommand.shell,
         stdin: {
           stream: Stream.encodeText(Stream.make(prompt)),

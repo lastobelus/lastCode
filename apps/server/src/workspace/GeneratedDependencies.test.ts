@@ -6,9 +6,12 @@ import {
   recordDependencyUse,
   dependencyActivitySnapshot,
 } from "@t3tools/shared/dependencyActivity";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Path from "effect/Path";
 import * as Context from "effect/Context";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
@@ -35,8 +38,9 @@ import {
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
-// @effect-diagnostics-next-line nodeBuiltinImport:off - Observe native measurement reads without exposing a test-only service API.
+// @effect-diagnostics nodeBuiltinImport:off - Observe native reads and lsof captures without a test-only service API.
 import * as NodeFSP from "node:fs/promises";
+import * as NodeChildProcess from "node:child_process";
 
 import * as ServerConfig from "../config.ts";
 import { PersistedServerRuntimeState } from "../serverRuntimeState.ts";
@@ -45,8 +49,10 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GeneratedDependencies from "./GeneratedDependencies.ts";
 import * as DependencyMounts from "./DependencyMounts.ts";
 import * as WorktreeConsumers from "./WorktreeConsumers.ts";
+import * as ResourceMonitorBinary from "../resourceTelemetry/ResourceMonitorBinary.ts";
 import * as WorktreeCleanup from "../orchestration-v2/WorktreeCleanupService.ts";
 import * as StorageCleanup from "../storageCleanup.ts";
+import * as SuspensionTestkit from "./WorktreeSuspension.testkit.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
@@ -61,6 +67,10 @@ import * as ServerActivation from "../serverActivation.ts";
 vi.mock("node:fs/promises", async (importOriginal) => {
   const original = await importOriginal<typeof NodeFSP>();
   return { ...original, opendir: vi.fn(original.opendir), rm: vi.fn(original.rm) };
+});
+vi.mock("node:child_process", async (importOriginal) => {
+  const original = await importOriginal<typeof NodeChildProcess>();
+  return { ...original, execFile: vi.fn(original.execFile) };
 });
 
 const encodeRuntimeState = Schema.encodeSync(Schema.fromJsonString(PersistedServerRuntimeState));
@@ -104,7 +114,7 @@ const testLayer = (
     Layer.provideMerge(gitLayer),
     Layer.provide(VcsProcess.layer),
     Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-dependencies-test-" })),
-    Layer.provideMerge(NodeServices.layer),
+    Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
     Layer.provideMerge(Layer.succeed(GeneratedDependencies.ProcessWorkingDirectories, processCwds)),
     Layer.provideMerge(Layer.succeed(WorktreeConsumers.ProcessPaths, processPaths)),
     Layer.provideMerge(
@@ -345,6 +355,85 @@ it.effect("measures an install once across inspection and removal", () =>
     assert.equal(rootReads(), 1);
     assert.isFalse(yield* fs.exists(dependencyPath));
   }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
+const darwinCapture = WorktreeConsumers.ProcessPaths.defaultValue().pipe(
+  Effect.provideService(HostProcess.Platform, "darwin"),
+  Effect.provideService(HostProcess.UserId, 1000),
+  Effect.provideService(ResourceMonitorBinary.ProcessCaptureBinary, Effect.succeed(null)),
+);
+// Each capture parses this lsof output afresh; a path that cannot be resolved by
+// name makes every consumer query prove its captured vnode with a target walk.
+const fakeLsof = (output: string) =>
+  Effect.acquireRelease(
+    Effect.sync(() => {
+      const execFile = vi.mocked(NodeChildProcess.execFile);
+      const previous = execFile.getMockImplementation();
+      execFile.mockClear();
+      execFile.mockImplementation(((_file, _args, _options, callback) => {
+        (callback as (error: null, stdout: string, stderr: string) => void)(null, output, "");
+        return {} as NodeChildProcess.ChildProcess;
+      }) as typeof NodeChildProcess.execFile);
+      return previous!;
+    }),
+    (previous) =>
+      Effect.sync(() => vi.mocked(NodeChildProcess.execFile).mockImplementation(previous)),
+  );
+
+it.effect("walks each consumer root at most once per native inventory during removal", () =>
+  Effect.gen(function* () {
+    const { fs, cleanup, input, dependencyPath } = yield* fixture();
+    const inspected = yield* cleanup.inspect(input);
+    assert.isNotNull(inspected);
+    const opendir = vi.mocked(NodeFSP.opendir);
+    opendir.mockClear();
+    yield* fakeLsof("p123\0\nfcwd\0tDIR\0n/\0\nf8\0tREG\0D0x12\0i5\0n/t3-absent/vanished.js\0\n");
+    assert.isNotNull(yield* cleanup.remove(inspected!, Effect.succeed(true)));
+    assert.isFalse(yield* fs.exists(dependencyPath));
+    const captures = vi.mocked(NodeChildProcess.execFile).mock.invocationCallOrder;
+    const walks = opendir.mock.calls.flatMap(([target], index) =>
+      target === input.worktreePath || target === dependencyPath
+        ? [
+            `${captures.filter((order) => order < opendir.mock.invocationCallOrder[index]!).length}:${String(target)}`,
+          ]
+        : [],
+    );
+    assert.isAbove(captures.length, 1);
+    assert.isAbove(walks.length, 0);
+    assert.deepEqual([...new Set(walks)], walks);
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(testLayer(undefined, undefined, undefined, false, undefined, darwinCapture)),
+  ),
+);
+
+it.effect("records dependency use even when the broader worktree proof cannot complete", () =>
+  Effect.gen(function* () {
+    yield* TestClock.setTime(NOW);
+    const { fs, path, cleanup, input, dependencyPath } = yield* fixture();
+    const inspected = yield* cleanup.inspect(input);
+    assert.isNotNull(inspected);
+    const used = yield* Effect.promise(() =>
+      NodeFSP.stat(path.join(dependencyPath, "package/index.js"), { bigint: true }),
+    );
+    const unreadable = path.join(input.worktreePath, "unreadable");
+    yield* fs.makeDirectory(unreadable);
+    yield* Effect.acquireRelease(
+      Effect.promise(() => NodeFSP.chmod(unreadable, 0o000)),
+      () => Effect.promise(() => NodeFSP.chmod(unreadable, 0o700)),
+    );
+    const before = dependencyActivitySnapshot(input.worktreePath);
+    yield* fakeLsof(
+      "p123\0\nfcwd\0tDIR\0n/\0\n" +
+        `f8\0tREG\0D0x${used.dev.toString(16)}\0i${used.ino}\0n/t3-absent/index.js\0\n`,
+    );
+    assert.isNull(yield* cleanup.remove(inspected!, Effect.succeed(true)));
+    assert.isTrue(yield* fs.exists(dependencyPath));
+    assert.notEqual(dependencyActivitySnapshot(input.worktreePath), before);
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(testLayer(undefined, undefined, undefined, false, undefined, darwinCapture)),
+  ),
 );
 
 it.effect.each(["tracked-content", "untracked-lock", "unignored"] as const)(
@@ -1053,6 +1142,55 @@ it.effect(
       yield* assertBatchWorkspacePreserved(first);
       yield* assertBatchWorkspacePreserved(second);
     }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
+it.effect("records a completed dependency deletion even when cancelled during removal", () =>
+  Effect.gen(function* () {
+    const f = yield* inspectedBatchFixture();
+    const entered = yield* Deferred.make<void>();
+    const release = Promise.withResolvers<void>();
+    const rm = vi.mocked(NodeFSP.rm);
+    const original = rm.getMockImplementation()!;
+    let recorded = false;
+    yield* Effect.acquireRelease(
+      Effect.sync(() => {
+        rm.mockImplementation(async (...args) => {
+          if (args[0] === f.dependencyPath) {
+            Deferred.doneUnsafe(entered, Effect.void);
+            await release.promise;
+          }
+          await original(...args);
+        });
+      }),
+      () => Effect.sync(() => rm.mockImplementation(original)),
+    );
+    yield* Effect.gen(function* () {
+      const removal = yield* f.cleanup
+        .removeBatch(
+          [
+            {
+              inspection: f.inspection,
+              canRemove: Effect.succeed(true),
+              isStillEligible: Effect.succeed(true),
+            },
+          ],
+          (_inspection, decision) =>
+            Effect.sync(() => {
+              if (decision.outcome === "removed") recorded = true;
+            }),
+        )
+        .pipe(Effect.forkScoped);
+      yield* Deferred.await(entered);
+      yield* Effect.sync(() => {
+        removal.interruptUnsafe();
+        release.resolve();
+      });
+      yield* Fiber.await(removal);
+      assert.isFalse(yield* f.fs.exists(f.dependencyPath));
+      assert.isTrue(recorded);
+      yield* assertBatchWorkspacePreserved(f);
+    }).pipe(Effect.ensuring(Effect.sync(() => release.resolve())));
+  }).pipe(Effect.scoped, Effect.provide(testLayer())),
 );
 
 it.effect("one dependency removal error leaves its sibling eligible for deletion", () =>
@@ -1938,6 +2076,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   let projectRows = projects.map(({ id, ...entry }) => ({
     ...entry,
     projectId: id,
+    hasCustomTitle: false,
     pinnedAt: null,
     archivedAt: null,
     defaultThreadEnvMode: null,
@@ -2168,11 +2307,13 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     }),
   );
   const cleanupContext = yield* Layer.build(StorageCleanup.layer).pipe(
-    Effect.provide(dependencies),
+    Effect.provide(Layer.merge(SuspensionTestkit.layer, dependencies)),
     Effect.provideService(
       ServerActivation.ServerActivation,
       workerLifecycle ? Effect.void : Effect.never,
     ),
+    // Worker lifecycle cases exercise bursts during the first automatic sweep.
+    Effect.provideService(StorageCleanup.FirstAutomaticSweepDelay, Duration.zero),
   );
   const worker = Context.get(cleanupContext, StorageCleanup.StorageCleanup);
   // Clean worktrees exercise removal or shared-owner protection without research guards.
@@ -2207,11 +2348,8 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       yield* worker.drain;
     }).pipe(Effect.ensuring(Deferred.succeed(workerControl.releaseInitialInventory, undefined)));
     // Each sweep inventories dependency and build owners, then refreshes ownership for the audit.
-    assert.equal(reads, mode === "worker-ready-burst" ? 3 : 6);
-    assert.equal(
-      processReads,
-      mode === "worker-terminal-burst" ? 5 : mode === "worker-ready-burst" ? 3 : 4,
-    );
+    assert.equal(reads, mode === "worker-settings-burst" ? 6 : 3);
+    assert.equal(processReads, mode === "worker-settings-burst" ? 4 : 3);
     assert.equal(
       yield* f.fs.readFileString(f.path.join(f.input.worktreePath, "tmp/notes.md")),
       "private notes",

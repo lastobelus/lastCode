@@ -34,6 +34,7 @@ import {
   PullRequestUnlinkFailedError,
   PullRequestListFailedError,
   type PullRequestTargetInput,
+  type WatchPullRequestInput,
   PullRequestThreadRequiredError,
   PullRequestGuideFailedError,
   PullRequestProjectNotFoundError,
@@ -177,18 +178,27 @@ const make = Effect.gen(function* () {
 
   // The domain service owns the registration span.
   const setWatching = Effect.fnUntraced(function* (
-    input: PullRequestTargetInput,
+    input: WatchPullRequestInput,
     watching: boolean,
   ) {
     const scope = yield* McpInvocationContext.requireMcpCapability("pull-requests");
     const threadId = input.threadId ?? scope.thread?.threadId;
     if (threadId === undefined) return yield* new PullRequestThreadRequiredError();
-    return yield* watches.setWatching({ threadId, target: input, watching }).pipe(
-      Effect.catchTags({
-        PullRequestWatchThreadNotFoundError: (error) =>
-          threadNotFound(engine, error.threadId, error.message),
-      }),
-    );
+    return yield* watches
+      .setWatching({
+        threadId,
+        target: input,
+        watching,
+        callerHasExecution: scope.thread?.execution !== undefined,
+        quietTimeoutMinutes: input.quietTimeoutMinutes,
+        restart: input.restart,
+      })
+      .pipe(
+        Effect.catchTags({
+          PullRequestWatchThreadNotFoundError: (error) =>
+            threadNotFound(engine, error.threadId, error.message),
+        }),
+      );
   });
 
   const locateAll = Effect.fn("PullRequestsToolkit.locateAll")(function* (
@@ -246,7 +256,20 @@ const make = Effect.gen(function* () {
 
   const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A, E, R>(
     handle: (params: P) => Effect.Effect<A, E, R>,
-  ) => McpToolAccess.writesThreads((params: P) => [params.threadId], handle);
+  ) =>
+    McpToolAccess.writesThreads(
+      (params: P) => [params.threadId],
+      (params: P) =>
+        Effect.gen(function* () {
+          const scope = yield* McpInvocationContext.McpInvocationContext;
+          return yield* handle(params).pipe(
+            Effect.provideService(
+              Orchestrator.PullRequestWatchSourceAuthorization,
+              scope.thread?.execution ?? null,
+            ),
+          );
+        }),
+    );
 
   return {
     link_pull_request: writesThread((input) =>

@@ -566,6 +566,92 @@ it.effect("mark unread leaves a future snooze untouched", () =>
 );
 
 it.effect(
+  "checks archive stopping without hydrating the shell and preserves tombstone and read failures",
+  () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("thread:archive-control");
+      const now = yield* DateTime.now;
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create-archive-control"),
+        threadId,
+        projectId: ProjectId.make("project:archive-control"),
+        title: "Before",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* sql`INSERT INTO orchestration_v2_projection_provider_threads
+      (provider_thread_id, thread_id, owner_node_id, provider, driver, provider_instance_id,
+       provider_session_id, status, first_run_ordinal, last_run_ordinal, updated_at, payload_json)
+      VALUES ('obsolete-provider', ${threadId}, NULL, 'codex', 'codex', 'codex', NULL,
+              'ready', NULL, NULL, ${DateTime.formatIso(now)}, '{"obsolete":true}')`;
+      assert.equal((yield* Effect.exit(projections.getThreadShell(threadId)))._tag, "Failure");
+      const rename = (suffix: string, target = threadId) => ({
+        type: "thread.metadata.update" as const,
+        commandId: CommandId.make(`rename-archive:${suffix}`),
+        threadId: target,
+        title: suffix,
+      });
+      yield* orchestrator.dispatch(rename("ordinary"));
+      assert.equal((yield* projections.getThread(threadId)).title, "ordinary");
+      const thread = yield* projections.getThread(threadId);
+      for (const state of ["active", "deleted", "cleanup"] as const) {
+        yield* projections.apply({
+          id: EventId.make(`archive-control:${state}`),
+          type: "thread.metadata-updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            ...thread,
+            deletedAt: state === "active" ? null : now,
+            archivePending: {
+              threadId,
+              commandId: CommandId.make("archive-control"),
+              status: "stopping",
+            },
+            worktreeCleanup:
+              state === "cleanup"
+                ? {
+                    status: "deleting",
+                    repositoryRoot: "/example/repository",
+                    worktreePath: "/example/worktree",
+                    startedAt: DateTime.formatIso(now),
+                  }
+                : null,
+          },
+        });
+        if (state === "deleted") {
+          const error = yield* Effect.flip(orchestrator.dispatch(rename(state)));
+          assert.include(String(error.cause), "is deleted");
+          assert.notInclude(String(error.cause), "stopping before it is archived");
+        } else {
+          const error = yield* Effect.flip(orchestrator.dispatch(rename(state)));
+          assert.equal(error._tag, "OrchestratorThreadArchivingError");
+          assert.include(error.message, "stopping before it is archived");
+          assert.equal((yield* projections.getThread(threadId)).title, thread.title);
+        }
+      }
+      const missing = yield* Effect.flip(
+        orchestrator.dispatch(rename("missing", ThreadId.make("thread:missing"))),
+      );
+      assert.equal(missing._tag, "OrchestratorProjectionError");
+      assert.notInclude(String(missing.cause), "stopping before it is archived");
+      yield* sql`UPDATE orchestration_v2_projection_threads SET payload_json = '{"obsolete":true}' WHERE thread_id = ${threadId}`;
+      const invalid = yield* Effect.flip(orchestrator.dispatch(rename("invalid")));
+      assert.equal(invalid._tag, "OrchestratorDispatchError");
+      assert.instanceOf(invalid.cause, ProjectionStore.ProjectionStoreReadError);
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
   "dispatches metadata, queue resume and request controls without hydrating unrelated history",
   () =>
     Effect.gen(function* () {
@@ -875,6 +961,15 @@ it.effect(
         turnItemTypes: ["user_message"],
       });
       assert.isAbove(fresh.turnItems.at(-1)!.ordinal, 900);
+      const archiveRefusal = yield* orchestrator
+        .dispatch({
+          type: "thread.archive",
+          commandId: CommandId.make("archive-with-old-history"),
+          threadId,
+        })
+        .pipe(Effect.flip);
+      assert.equal(archiveRefusal._tag, "OrchestratorDispatchError");
+      assert.isNull((yield* projections.getThread(threadId)).archivedAt);
       // Deletion reads transfer history separately to find side chats.
       yield* sql`DELETE FROM orchestration_v2_projection_context_transfers
         WHERE target_thread_id = ${threadId}`;
@@ -884,11 +979,49 @@ it.effect(
       yield* sql`DELETE FROM orchestration_v2_projection_nodes WHERE node_id = 'obsolete-task'`;
       yield* sql`DELETE FROM orchestration_v2_projection_provider_threads
         WHERE provider_thread_id = 'obsolete-task-thread'`;
+      const queued = yield* projections.getThreadRecords(threadId, ["runs", "turnItems"], {
+        turnItemStatuses: ["pending", "running", "waiting"],
+      });
+      const freshRun = queued.runs.find(
+        (run) => run.userMessageId === MessageId.make("fresh-input"),
+      )!;
+      yield* projections.apply({
+        id: EventId.make("finish-control-run"),
+        type: "run.updated",
+        threadId,
+        runId: freshRun.id,
+        occurredAt: now,
+        payload: { ...freshRun, status: "interrupted", completedAt: now },
+      });
+      for (const item of queued.turnItems.filter((item) => item.runId === freshRun.id)) {
+        yield* projections.apply({
+          id: EventId.make(`finish-control-item:${item.id}`),
+          type: "turn-item.updated",
+          threadId,
+          runId: freshRun.id,
+          occurredAt: now,
+          payload: { ...item, status: "cancelled", completedAt: now, updatedAt: now },
+        });
+      }
+      yield* orchestrator.dispatch({
+        type: "thread.visit",
+        commandId: CommandId.make("review-old-history-before-archive"),
+        threadId,
+        visitedAt: DateTime.formatIso(now),
+      });
       yield* orchestrator.dispatch({
         type: "thread.archive",
-        commandId: CommandId.make("archive-with-old-history"),
+        commandId: CommandId.make("archive-after-old-history-cleanup"),
         threadId,
       });
+      // This fixture disables the effect worker that normally completes the archive.
+      yield* orchestrator.dispatch({
+        type: "thread.archive.complete",
+        commandId: CommandId.make("complete-control-archive"),
+        threadId,
+        requestId: CommandId.make("archive-after-old-history-cleanup"),
+      });
+
       yield* orchestrator.dispatch({
         type: "thread.delete",
         commandId: CommandId.make("delete-with-old-history"),
@@ -2421,14 +2554,18 @@ it.effect("queued-message commands read a long thread's history without walking 
       for (const [query, params] of statements.splice(0)) {
         const plan = yield* sql.unsafe<{ detail: string }>(`EXPLAIN QUERY PLAN ${query}`, params);
         for (const { detail } of plan) {
-          // A history-sized read: an ordering pass over every message item for a narrowed
-          // message read, or a node/turn-item row search bounded by nothing but the thread.
-          // Walking only a covering index's ids reads no payloads. Stop still loads every
-          // message, so its ordering pass is no larger than that read.
+          // Narrowed reads must not sort the full message history or load unrelated payloads.
+          // Covering indexes read ids; the partial command-history index is already ordered.
+          // Stop already loads every message, so ordering that set adds no history walk.
+          const orderedCommandHistory =
+            detail.includes(
+              "USING INDEX orchestration_v2_projection_turn_items_command_history_idx",
+            ) && query.includes("type IN ('user_message', 'error')");
           if (
             (detail.includes("TEMP B-TREE FOR GROUP BY") && query.includes("json_each")) ||
             (/^SEARCH .*(node|turn_item).* \(thread_id=\?\)$/.test(detail) &&
-              !detail.includes("USING COVERING INDEX")) ||
+              !detail.includes("USING COVERING INDEX") &&
+              !orderedCommandHistory) ||
             // Every active run in the environment, not only this thread's.
             /^SEARCH .*runs.* \(status=\?\)$/.test(detail) ||
             // A status-filtered read that fetches every typed row to check its status.

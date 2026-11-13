@@ -127,9 +127,14 @@ describe("DesktopUpdates", () => {
       Effect.gen(function* () {
         const updates = yield* DesktopUpdates.DesktopUpdates;
         yield* updates.configure;
+        const configured = yield* updates.getState;
+        yield* TestClock.adjust(Duration.millis(1));
         const requested = yield* updates.check("menu");
         assert.equal(requested.state.status, "idle");
         assert.include(requested.state.message ?? "", "Checkpoint requested");
+        // Requesting a checkpoint inspected nothing, so the last successful check stands.
+        assert.isDefined(configured.checkSucceededAt);
+        assert.equal(requested.state.checkSucceededAt, configured.checkSucceededAt);
         const inspected = yield* updates.check("poll");
         assert.equal(inspected.state.status, "up-to-date");
         assert.isNull(inspected.state.message);
@@ -374,7 +379,11 @@ describe("DesktopUpdates", () => {
           assert.isFalse(requested.checkpointRequested);
           assert.equal(requested.error, "Could not request checkpoint.");
           assert.notEqual(requested.state.checkedAt, prior.checkedAt);
-          assert.deepEqual({ ...requested.state, checkedAt: prior.checkedAt }, prior);
+          assert.isDefined(prior.checkSucceededAt);
+          assert.deepEqual(
+            { ...requested.state, checkedAt: prior.checkedAt },
+            { ...prior, refreshFailure: "Could not request checkpoint." },
+          );
           assert.deepEqual(yield* updates.getState, requested.state);
 
           if (priorKind === "available" || priorKind === "failed-build") {
@@ -438,6 +447,7 @@ describe("DesktopUpdates", () => {
         {
           version: "1.2.4-nightly.20260814.1090",
           heading: "LastCode changes",
+          release: { tag: "lastcode/checkpoint/v1.2.4-nightly.20260814.1090" },
           items: ["feat(lastcode): new workflow"],
           totalItems: 3,
           summaries: ["…and 2 more LastCode changes"],
@@ -445,6 +455,7 @@ describe("DesktopUpdates", () => {
         {
           version: "1.2.4-nightly.20260814.1090",
           heading: "Upstream changes",
+          release: { upstream: true },
           items: ["fix(web): newest upstream fix"],
           totalItems: 2,
           summaries: ["…and 1 more change"],
@@ -452,6 +463,7 @@ describe("DesktopUpdates", () => {
         {
           version: "1.2.4-nightly.20260814.1089",
           heading: "Upstream changes in 1.2.4-nightly.20260814.1089",
+          release: { upstream: true },
           items: ["fix(server): earlier upstream fix"],
           totalItems: 1,
           summaries: ["3 older nightlies not shown"],
@@ -488,6 +500,7 @@ describe("DesktopUpdates", () => {
         {
           version: "1.2.4-nightly.20260814.1090",
           heading: "LastCode changes",
+          release: { tag: "lastcode/checkpoint/v1.2.4-nightly.20260814.1090" },
           items: [],
           totalItems: 0,
           summaries: ["Couldn’t determine changes from this installed build."],
@@ -1934,6 +1947,8 @@ describe("DesktopUpdates", () => {
       Effect.gen(function* () {
         const updates = yield* DesktopUpdates.DesktopUpdates;
         yield* updates.configure;
+        const configured = yield* updates.getState;
+        yield* TestClock.adjust(Duration.millis(1));
         // A backed-out switch's download keeps reporting progress until it finishes.
         harness.emit("download-progress", { percent: 40 });
         yield* flushCallbacks;
@@ -1943,6 +1958,9 @@ describe("DesktopUpdates", () => {
         const state = yield* updates.getState;
         assert.equal(state.downloadedVersion, null);
         assert.notEqual(state.status, "downloading");
+        // The finished download inspected nothing, so it is not a fresher check.
+        assert.equal(state.checkSucceededAt, configured.checkSucceededAt);
+        assert.equal(state.refreshFailure, configured.refreshFailure);
       }),
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });

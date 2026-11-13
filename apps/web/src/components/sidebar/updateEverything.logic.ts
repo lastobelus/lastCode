@@ -627,6 +627,8 @@ function joinList(parts: ReadonlyArray<string>): string {
 /** One row per machine: this app's machines first, then servers, provider-only, and skipped. */
 export function describeUpdateEverything(plan: UpdateEverythingPlan): {
   readonly summary: string;
+  /** What the run updates besides this app, e.g. "1 server update and 3 provider updates". */
+  readonly alsoUpdates: string | null;
   readonly version: string | null;
   readonly providerCount: number;
   readonly rows: ReadonlyArray<UpdateEverythingRow>;
@@ -642,6 +644,10 @@ export function describeUpdateEverything(plan: UpdateEverythingPlan): {
       countLabel(providerCount, "provider"),
     ].filter((part) => part !== null),
   )}`;
+  const otherUpdates = [
+    countLabel(plan.servers.length, "server update"),
+    countLabel(providerCount, "provider update"),
+  ].filter((part) => part !== null);
 
   const rows = new Map<EnvironmentId | null, UpdateEverythingRow>();
   const update = (
@@ -678,6 +684,7 @@ export function describeUpdateEverything(plan: UpdateEverythingPlan): {
 
   return {
     summary,
+    alsoUpdates: otherUpdates.length > 0 ? joinList(otherUpdates) : null,
     version:
       plan.localVersion ??
       plan.servers.find((server) => server.selfUpdate !== "desktop-managed")?.targetVersion ??

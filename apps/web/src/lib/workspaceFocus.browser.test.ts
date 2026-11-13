@@ -3,6 +3,8 @@ import { userEvent } from "vite-plus/test/browser";
 import appCss from "~/index.css?inline";
 import { createWorkspaceFocusController } from "./workspaceFocus";
 import { registerCommands } from "../shortcuts/dispatcher";
+import * as settings from "../hooks/useSettings";
+import { attachTimelineViewport } from "../components/chat/timelineViewport";
 
 function setup() {
   const root = document.createElement("div");
@@ -53,12 +55,19 @@ describe("workspace area focus", () => {
     viewport.innerHTML =
       '<div class="chat-markdown" style="height: 2000px; line-height: 20px">Content\n\nwith blank lines</div>';
     area.element.append(viewport);
+    const timeline = attachTimelineViewport(viewport);
+    using cleanup = new DisposableStack();
+    cleanup.defer(() => timeline.dispose());
+    const navigations: unknown[] = [];
+    timeline.subscribe((navigation) =>
+      navigations.push({ navigation, scrollTop: viewport.scrollTop }),
+    );
     const composer = fixture.append('<div data-chat-composer-overlay="true"></div>');
     composer.style.cssText = `position: fixed; top: ${viewport.getBoundingClientRect().top + 140}px; height: 60px`;
     area.element.focus();
     viewport.scrollTop = 300;
-    const page = (key: string) =>
-      area.element.dispatchEvent(
+    const page = (key: string, target = area.element) =>
+      target.dispatchEvent(
         new KeyboardEvent("keydown", {
           key,
           bubbles: true,
@@ -67,6 +76,9 @@ describe("workspace area focus", () => {
       );
     page("PageDown");
     expect(viewport.scrollTop).toBe(420);
+    expect(navigations).toEqual([
+      { navigation: { source: "key", key: "PageDown", direction: "down" }, scrollTop: 300 },
+    ]);
     page("PageUp");
     expect(viewport.scrollTop).toBe(300);
     composer.style.top = `${viewport.getBoundingClientRect().top + 100}px`;
@@ -74,6 +86,24 @@ describe("workspace area focus", () => {
     page("PageDown");
     expect(viewport.scrollTop).toBe(380);
     expect(document.activeElement).toBe(area.element);
+    const previousSettings = settings.getClientSettings();
+    using stack = new DisposableStack();
+    stack.defer(() => settings.__setClientSettingsForTests(previousSettings));
+    settings.__setClientSettingsForTests({
+      ...previousSettings,
+      pageScrollOverlapEnabled: false,
+    });
+    page("PageDown");
+    expect(viewport.scrollTop).toBe(480);
+    page("PageUp");
+    expect(viewport.scrollTop).toBe(380);
+    viewport.tabIndex = -1;
+    viewport.focus();
+    page("PageDown", viewport);
+    expect(viewport.scrollTop).toBe(480);
+    page("PageUp", viewport);
+    expect(viewport.scrollTop).toBe(380);
+    expect(document.activeElement).toBe(viewport);
   });
 
   it("runs configured page-key shortcuts before the scrolling fallback", () => {
@@ -83,9 +113,13 @@ describe("workspace area focus", () => {
     viewport.style.cssText = "height: 100px; overflow-y: auto";
     viewport.innerHTML = '<div style="height: 1000px">Scrollable content</div>';
     area.element.append(viewport);
+    const timeline = attachTimelineViewport(viewport);
     area.element.focus();
     const command = vi.fn();
     using stack = new DisposableStack();
+    stack.defer(() => timeline.dispose());
+    const navigate = vi.fn();
+    timeline.subscribe(navigate);
     stack.defer(
       registerCommands(
         { "chat.new": command },
@@ -115,16 +149,22 @@ describe("workspace area focus", () => {
     );
     expect(command).toHaveBeenCalledOnce();
     expect(viewport.scrollTop).toBe(0);
+    expect(navigate).not.toHaveBeenCalled();
   });
 
   it("pages the scrolling content when the surrounding workspace region has focus", () => {
     using fixture = setup();
+    using cleanup = new DisposableStack();
     for (const name of ["conversation", "sidebar", "panel"]) {
       const area = fixture.area(name, 1);
       const viewport = document.createElement("div");
       viewport.style.cssText = "height: 100px; overflow-y: auto; line-height: 10px";
       viewport.innerHTML = '<div style="height: 1000px">Scrollable content</div>';
       area.element.append(viewport);
+      if (name === "conversation") {
+        const timeline = attachTimelineViewport(viewport);
+        cleanup.defer(() => timeline.dispose());
+      }
       area.element.focus();
       const page = (key: string) => {
         const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
@@ -199,6 +239,14 @@ describe("workspace area focus", () => {
     expect(document.activeElement).toBe(sidebar.button);
     fixture.controller.move(-1);
     expect(document.activeElement).toBe(panel.button);
+    const timeline = document.createElement("div");
+    timeline.tabIndex = -1;
+    timeline.dataset.workspaceFocusDefault = "";
+    timeline.style.height = "200px";
+    conversation.element.append(timeline);
+    composer.button.focus();
+    fixture.controller.move(-1);
+    expect(document.activeElement).toBe(timeline);
   });
 
   it("skips hidden, inert, and maximized-away areas", () => {

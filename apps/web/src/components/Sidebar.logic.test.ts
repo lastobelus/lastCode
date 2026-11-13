@@ -2,7 +2,7 @@ import { presentThreadShell } from "@t3tools/client-runtime/state/models";
 import { isThreadWorking as isSidebarThreadWorking } from "@t3tools/client-runtime/state/thread-inbox";
 import * as DateTime from "effect/DateTime";
 import { deriveActiveWorkStartedAt } from "../session-logic.ts";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import {
@@ -309,7 +309,9 @@ describe("sidebar thread lineage helpers", () => {
       expect(
         filterSidebarV2VisibleThreads([owner, child, ordinaryChild], scope, new Set()),
       ).toEqual([child]);
-      expect(filterSidebarV2VisibleThreads([child, ordinaryChild], scope, new Set())).toEqual([child]);
+      expect(filterSidebarV2VisibleThreads([child, ordinaryChild], scope, new Set())).toEqual([
+        child,
+      ]);
       expect(
         filterSidebarV2VisibleThreads(
           [{ ...owner, archivedAt: null }, child, ordinaryChild],
@@ -979,6 +981,7 @@ describe("getFallbackThreadIdAfterDelete", () => {
           threads: [deleted, activeSibling, archivedSibling],
           deletedThreadId: deleted.id,
           sortOrder,
+          now: "2026-09-09T12:00:00.000Z",
         }),
       ).toBe(activeSibling.id);
       expect(
@@ -986,6 +989,7 @@ describe("getFallbackThreadIdAfterDelete", () => {
           threads: [deleted, archivedSibling],
           deletedThreadId: deleted.id,
           sortOrder,
+          now: "2026-09-09T12:00:00.000Z",
         }),
       ).toBeNull();
     },

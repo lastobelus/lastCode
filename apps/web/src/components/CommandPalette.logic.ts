@@ -336,8 +336,8 @@ export function findHighlightedCommandPaletteItem(
 }
 
 export function enumerateCommandPaletteItems(
-  items: ReadonlyArray<CommandPaletteActionItem>,
-): CommandPaletteActionItem[] {
+  items: ReadonlyArray<CommandPaletteActionItem | CommandPaletteSubmenuItem>,
+): Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> {
   return items.map((item, index) => {
     const shortcutCommand = THREAD_JUMP_KEYBINDING_COMMANDS[index];
     if (shortcutCommand) return { ...item, shortcutCommand };

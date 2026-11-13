@@ -211,6 +211,8 @@ export interface ProviderEventIngestorV2Shape {
   ) => Effect.Effect<ReadonlyArray<OrchestrationV2DomainEvent>, ProviderEventIngestorV2Error>;
   readonly ingestNormalized: (
     input: ProviderEventIngestInput & {
+      /** The first root turn and its Stop ownership check share the caller's lock. */
+      readonly threadCommandLockHeld?: true;
       readonly writeIfRunCurrent?: {
         readonly runId: RunId;
         readonly activeAttemptId: RunAttemptId;
@@ -679,12 +681,12 @@ export const layer: Layer.Layer<
             }
             case "steer.updated": {
               const item = yield* projections.getTurnItem({
-                threadId: input.event.threadId,
-                itemId: idAllocator.derive.userTurnItem({ messageId: input.event.messageId }),
+                threadId: providerEvent.threadId,
+                itemId: idAllocator.derive.userTurnItem({ messageId: providerEvent.messageId }),
               });
               if (
                 item?.type !== "user_message" ||
-                item.status === input.event.status ||
+                item.status === providerEvent.status ||
                 (item.status !== "pending" && item.status !== "completed")
               ) {
                 return [];
@@ -696,8 +698,8 @@ export const layer: Layer.Layer<
                   threadId: item.threadId,
                   payload: {
                     ...item,
-                    status: input.event.status,
-                    completedAt: input.event.status === "pending" ? null : occurredAt,
+                    status: providerEvent.status,
+                    completedAt: providerEvent.status === "pending" ? null : occurredAt,
                     updatedAt: occurredAt,
                   },
                   runId: item.runId,
@@ -997,6 +999,7 @@ export const layer: Layer.Layer<
                 }),
               ),
               (ingest) => {
+                if (input.threadCommandLockHeld) return ingest;
                 if (input.event.type === "app_thread.created") {
                   const { id, lineage } = input.event.appThread;
                   const threadIds = [

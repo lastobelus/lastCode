@@ -3,9 +3,12 @@ import {
   OrchestratorMcpFailure,
   type OrchestrationV2LinkOrigin,
   type OrchestrationV2ThreadShell,
+  type RemoteDelegationAssociation,
+  type RemoteDelegationSelector,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
+import type { McpClientCaller, McpInvocationScope } from "./McpInvocationContext.ts";
 import type { Caller } from "./threadAccess.ts";
 
 /**
@@ -58,3 +61,47 @@ export const assertNotLinked = (caller: Pick<Caller, "scope" | "caller">, what: 
     ? Effect.void
     : Effect.fail(outsideLink(origin, `it cannot ${what}.`));
 };
+
+export const requireRemoteDelegationPeer = (
+  scope: McpInvocationScope,
+  target?: Pick<OrchestrationV2ThreadShell, "linkOrigin">,
+): Effect.Effect<McpClientCaller, OrchestratorMcpFailure> => {
+  const client = scope.client;
+  return scope.thread === undefined &&
+    client?.linked === true &&
+    client.access !== "read-only" &&
+    (target === undefined || target.linkOrigin?.sessionId === client.sessionId)
+    ? Effect.succeed(client)
+    : Effect.fail(
+        new OrchestratorMcpFailure({
+          code: "capability_denied",
+          message:
+            "Remote delegation requires the authenticated peer link that prepared this work.",
+        }),
+      );
+};
+
+export const assertRemoteDelegation = (
+  scope: McpInvocationScope,
+  target: Pick<OrchestrationV2ThreadShell, "linkOrigin" | "remoteDelegations">,
+  selector: RemoteDelegationSelector,
+): Effect.Effect<RemoteDelegationAssociation, OrchestratorMcpFailure> =>
+  requireRemoteDelegationPeer(scope, target).pipe(
+    Effect.flatMap((client) => {
+      const association = target.remoteDelegations?.find(
+        (entry) => entry.delegationId === selector.delegationId,
+      );
+      return association !== undefined &&
+        association.linkSessionId === client.sessionId &&
+        association.parentEnvironmentId === selector.parentEnvironmentId &&
+        association.parentThreadId === selector.parentThreadId &&
+        association.sourceTaskId === selector.sourceTaskId
+        ? Effect.succeed(association)
+        : Effect.fail(
+            new OrchestratorMcpFailure({
+              code: "capability_denied",
+              message: "Remote delegation identity does not belong to this peer link.",
+            }),
+          );
+    }),
+  );

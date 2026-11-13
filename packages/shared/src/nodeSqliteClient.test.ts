@@ -24,11 +24,45 @@ const startedWorkers = vi.hoisted((): Array<NodeWorkerThreads.Worker> => []);
 const silentWorkers = vi.hoisted(() => ({ on: false, readyOnTerminate: false }));
 const failingWorkers = vi.hoisted(() => ({ message: undefined as string | undefined }));
 const checkpointWorkers = vi.hoisted((): Array<NodeWorkerThreads.Worker> => []);
+const checkpointFailure = vi.hoisted(() => ({
+  current: undefined as
+    | {
+        point: "construct" | "prepare";
+        attempts: number;
+        failed?: Promise<string>;
+        exited?: Promise<void>;
+      }
+    | undefined,
+}));
 
 vi.mock("node:worker_threads", async (importOriginal) => {
   const actual = await importOriginal<typeof NodeWorkerThreads>();
   class RecordedWorker extends actual.Worker {
     constructor(...args: ConstructorParameters<typeof actual.Worker>) {
+      const isCheckpoint = args[1]?.workerData?.frames !== undefined;
+      const failure = isCheckpoint ? checkpointFailure.current : undefined;
+      if (failure?.point === "construct") {
+        failure.attempts++;
+        throw new Error("checkpoint worker construction failed");
+      }
+      if (failure?.point === "prepare") {
+        // The checkpoint connection opens lazily in the worker, outside the parent spy's realm.
+        args[0] = `
+          (() => {
+            const { DatabaseSync } = require("node:sqlite");
+            const prepare = DatabaseSync.prototype.prepare;
+            DatabaseSync.prototype.prepare = function(sql) {
+              if (sql === "PRAGMA wal_checkpoint(NOOP)") {
+                throw Object.assign(new Error("database is locked"), {
+                  code: "ERR_SQLITE_ERROR", errcode: 261, errstr: "database is locked"
+                });
+              }
+              return prepare.call(this, sql);
+            };
+          })();
+          ${args[0]}
+        `;
+      }
       super(
         ...((silentWorkers.on
           ? ["setInterval(() => {}, 1 << 30);", { eval: true }]
@@ -37,7 +71,18 @@ vi.mock("node:worker_threads", async (importOriginal) => {
             : args) as ConstructorParameters<typeof actual.Worker>),
       );
       startedWorkers.push(this);
-      if (args[1]?.workerData?.frames !== undefined) checkpointWorkers.push(this);
+      if (isCheckpoint) checkpointWorkers.push(this);
+      if (failure?.point === "prepare") {
+        failure.failed = new Promise<string>((resolve) => {
+          this.on("message", (message: { type?: unknown; message?: unknown }) => {
+            if (message?.type === "failed") {
+              failure.attempts++;
+              resolve(String(message.message));
+            }
+          });
+        });
+        failure.exited = new Promise<void>((resolve) => this.once("exit", () => resolve()));
+      }
     }
     override terminate() {
       // A "ready" already queued when termination starts reaches the parent before "exit".
@@ -71,58 +116,84 @@ const countEntries = (sql: SqlClient.SqlClient) =>
     (rows) => rows[0]?.count,
   );
 
-it.effect.each([
-  "SELECT sqlite_version() AS version",
-  "PRAGMA wal_checkpoint(NOOP)",
-  "PRAGMA journal_size_limit",
-])("keeps writer checkpoints when the optional probe fails: %s", (failedSql) =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-checkpoint-probe-" });
-    const filename = path.join(directory, "state.sqlite");
-    const nativePrepare = NodeSqlite.DatabaseSync.prototype.prepare;
-    const workersBefore = startedWorkers.length;
-    let probedWriter: NodeSqlite.DatabaseSync | undefined;
-    let failedProbes = 0;
-    yield* Effect.acquireRelease(
-      Effect.sync(() =>
-        vi.spyOn(NodeSqlite.DatabaseSync.prototype, "prepare").mockImplementation(function (
-          this: NodeSqlite.DatabaseSync,
-          sql,
-        ) {
-          if (sql === failedSql) {
-            probedWriter = this;
-            failedProbes++;
-            throw Object.assign(new Error("database is locked"), {
-              code: "ERR_SQLITE_ERROR",
-              errcode: 261,
-              errstr: "database is locked",
+it.effect.each(["sqlite version", "checkpoint NOOP", "checkpoint worker construction"] as const)(
+  "keeps writer checkpoints when optional setup fails: %s",
+  (failedSetup) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-checkpoint-probe-" });
+      const filename = path.join(directory, "state.sqlite");
+      const nativePrepare = NodeSqlite.DatabaseSync.prototype.prepare;
+      const workersBefore = startedWorkers.length;
+      const checkpointsBefore = checkpointWorkers.length;
+      let versionDatabase: NodeSqlite.DatabaseSync | undefined;
+      let versionProbes = 0;
+      let failedProbes = 0;
+      const failure: NonNullable<typeof checkpointFailure.current> = {
+        point: failedSetup === "checkpoint NOOP" ? "prepare" : "construct",
+        attempts: 0,
+      };
+      yield* Effect.acquireRelease(
+        Effect.sync(() => {
+          checkpointFailure.current = failedSetup === "sqlite version" ? undefined : failure;
+          return vi
+            .spyOn(NodeSqlite.DatabaseSync.prototype, "prepare")
+            .mockImplementation(function (this: NodeSqlite.DatabaseSync, sql) {
+              if (sql === "SELECT sqlite_version() AS version") {
+                versionDatabase = this;
+                versionProbes++;
+                if (failedSetup === "sqlite version") {
+                  failedProbes++;
+                  throw Object.assign(new Error("database is locked"), {
+                    code: "ERR_SQLITE_ERROR",
+                    errcode: 261,
+                    errstr: "database is locked",
+                  });
+                }
+              }
+              return nativePrepare.call(this, sql);
             });
-          }
-          return nativePrepare.call(this, sql);
         }),
-      ),
-      (prepare) => Effect.sync(() => prepare.mockRestore()),
-    );
+        (prepare) =>
+          Effect.sync(() => {
+            prepare.mockRestore();
+            checkpointFailure.current = undefined;
+          }),
+      );
 
-    yield* Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      yield* sql`PRAGMA journal_mode = WAL`;
-      yield* sql`CREATE TABLE entries(name TEXT NOT NULL)`;
-      yield* sql`INSERT INTO entries VALUES ('kept')`;
-      assert.equal(yield* countEntries(sql), 1);
-      const automatic = yield* sql<{ wal_autocheckpoint: number }>`PRAGMA wal_autocheckpoint`;
-      assert.isAbove(automatic[0]!.wal_autocheckpoint, 0);
-      const error = yield* sql`SELECT missing_column FROM entries`.pipe(Effect.flip);
-      assert.equal(error._tag, "SqlError");
-      assert.equal(error.reason.operation, "prepare");
-    }).pipe(Effect.provide(SqliteClient.layer({ filename, checkpointWorker: true })));
+      yield* Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        if (failedSetup === "checkpoint NOOP") {
+          assert.equal(checkpointWorkers.length, checkpointsBefore + 1);
+          const checkpointer = checkpointWorkers.at(-1)!;
+          checkpointer.ref();
+          assert.isDefined(failure.failed);
+          assert.equal(yield* Effect.promise(() => failure.failed!), "database is locked");
+          yield* Effect.promise(() => failure.exited!);
+          assert.equal(checkpointer.threadId, -1);
+        }
+        yield* sql`PRAGMA journal_mode = WAL`;
+        yield* sql`CREATE TABLE entries(name TEXT NOT NULL)`;
+        yield* sql`INSERT INTO entries VALUES ('kept')`;
+        assert.equal(yield* countEntries(sql), 1);
+        const automatic = yield* sql<{ wal_autocheckpoint: number }>`PRAGMA wal_autocheckpoint`;
+        assert.isAbove(automatic[0]!.wal_autocheckpoint, 0);
+        const error = yield* sql`SELECT missing_column FROM entries`.pipe(Effect.flip);
+        assert.equal(error._tag, "SqlError");
+        assert.equal(error.reason.operation, "prepare");
+      }).pipe(Effect.provide(SqliteClient.layer({ filename, writerWorker: true })));
 
-    assert.equal(failedProbes, 1);
-    assert.equal(startedWorkers.length, workersBefore);
-    assert.equal(probedWriter?.isOpen, false);
-  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+      assert.equal(versionProbes, 1);
+      assert.isDefined(versionDatabase);
+      assert.equal(versionDatabase!.isOpen, false);
+      assert.equal(failedProbes, failedSetup === "sqlite version" ? 1 : 0);
+      assert.equal(failure.attempts, failedSetup === "sqlite version" ? 0 : 1);
+      const expectedCheckpoints = failedSetup === "checkpoint NOOP" ? 1 : 0;
+      assert.equal(checkpointWorkers.length, checkpointsBefore + expectedCheckpoints);
+      assert.equal(startedWorkers.length, workersBefore + 1 + expectedCheckpoints);
+      for (const worker of startedWorkers.slice(workersBefore)) assert.equal(worker.threadId, -1);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
 const layer = it.layer(SqliteClient.layer({ filename: ":memory:" }));

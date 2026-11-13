@@ -1,3 +1,4 @@
+import { sortActiveThreadsByOrderKey as sortThreadsForListV2 } from "@t3tools/client-runtime/state/thread-sort";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
 import { createInboxReturnTracker } from "@t3tools/client-runtime/state/thread-inbox";
 import { presentThreadShell } from "@t3tools/client-runtime/state/models";
@@ -46,7 +47,6 @@ import {
   resolveThreadListV2Status,
   resolveThreadListV2SwipeActions,
   withThreadListV2ArchiveAction,
-  sortThreadsForListV2,
   threadListV2ListItemsAreEqual,
   threadHasUnseenCompletion,
   type ThreadListV2ListItem,
@@ -284,6 +284,8 @@ describe("resolveThreadListV2SwipeActions", () => {
     expect(
       resolveThreadListV2SwipeActions({
         variant: "card",
+        archiveFamiliesSupported: true,
+        persistent: false,
         settlementSupported: true,
         snoozeSupported: true,
         snoozable: canSnooze(thread, { now: NOW }),
@@ -2264,7 +2266,7 @@ describe("LastCode mobile thread state", () => {
     exitSignal: null,
   };
 
-  it("keeps Action waiting/progress visible behind question and runtime priorities", () => {
+  it("keeps Action waiting/progress visible behind native input and runtime priorities", () => {
     const thread = makeThread({ id: actionResume.threadId, title: "Action", actionResume });
     expect(resolveThreadListV2Status(thread)).toBe("waiting");
     expect(resolveThreadStatus(thread)?.kind).toBe("waiting");
@@ -2278,10 +2280,8 @@ describe("LastCode mobile thread state", () => {
         },
       }),
     ).toBe("working");
-    const question = { ...thread, attention: { kind: "question" as const, raisedAt: NOW } };
-    expect(resolveThreadListV2Status(question)).toBe("question");
-    expect(resolveThreadListV2Status({ ...question, hasPendingApprovals: true })).toBe("approval");
-    expect(resolveThreadListV2Status({ ...question, hasPendingUserInput: true })).toBe("input");
+    expect(resolveThreadListV2Status({ ...thread, hasPendingApprovals: true })).toBe("approval");
+    expect(resolveThreadListV2Status({ ...thread, hasPendingUserInput: true })).toBe("input");
     const runtime = {
       status: "running" as const,
       activeRunId: RunId.make("run-1"),

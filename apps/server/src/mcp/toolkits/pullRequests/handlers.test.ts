@@ -17,6 +17,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import type { Tool } from "effect/ai";
 
@@ -34,10 +35,15 @@ import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as McpToolAccessTestkit from "../../McpToolAccess.testkit.ts";
 import { listThreadPullRequests } from "./handlers.ts";
 import * as PullRequestsHandlers from "./handlers.ts";
-import { CHILD_PULL_REQUEST_REPORT_NEXT, PullRequestsToolkit } from "./tools.ts";
+import {
+  CHILD_PULL_REQUEST_REPORT_NEXT,
+  PullRequestsToolkit,
+  WatchPullRequestInput,
+} from "./tools.ts";
 
 const PROJECT_ID = ProjectId.make("project-1");
 const THREAD_ID = ThreadId.make("thread-1");
+const isWatchPullRequestInput = Schema.is(WatchPullRequestInput);
 
 const testCrypto = SecureRandom.make((size) => new Uint8Array(size).fill(7));
 
@@ -241,6 +247,16 @@ const makeHarness = Effect.fn("makePullRequestsToolkitHarness")(function* (
 });
 
 describe("pull request toolkit handlers", () => {
+  it.each([
+    [0, false],
+    [1, true],
+    [10080, true],
+    [10081, false],
+    [2e11, false],
+  ])("bounds quiet wait duration %s", (quietTimeoutMinutes, accepted) => {
+    expect(isWatchPullRequestInput({ quietTimeoutMinutes })).toBe(accepted);
+  });
+
   it.effect("refuses a credential without the pull-requests capability", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness();
@@ -302,6 +318,7 @@ describe("pull request toolkit handlers", () => {
       const harness = yield* makeHarness();
       const result = yield* harness.call("watch_pull_request", {
         url: "https://github.com/t3tools/t3code/pull/9",
+        quietTimeoutMinutes: 45,
       });
       expect(result).toMatchObject({ number: 9, watching: false, wasWatching: false });
       expect(yield* Ref.get(harness.commands)).toMatchObject([
@@ -309,6 +326,7 @@ describe("pull request toolkit handlers", () => {
           type: "thread.pull-request.watch",
           number: 9,
           watching: true,
+          quietTimeoutMinutes: 45,
           link: { url: "https://github.com/t3tools/t3code/pull/9", source: "agent" },
         },
       ]);
@@ -348,6 +366,54 @@ describe("pull request toolkit handlers", () => {
       expect(yield* Ref.get(harness.commands)).toMatchObject([
         { type: "thread.pull-request.watch", number: 3, watching: false },
       ]);
+    }),
+  );
+
+  it.effect.each([
+    { ended: false, dueAt: null, input: {}, refused: "quiet" },
+    { ended: false, dueAt: null, input: { quietTimeoutMinutes: 45 }, refused: "quiet" },
+    { ended: false, dueAt: null, input: { restart: true }, refused: null },
+    { ended: false, dueAt: null, input: { quietTimeoutMinutes: null }, refused: null },
+    { ended: false, dueAt: "2026-08-20T00:45:00.000Z", input: {}, refused: null },
+    { ended: true, unreadable: true, input: {}, refused: "unreadable" },
+    { ended: true, unreadable: true, input: { quietTimeoutMinutes: null }, refused: "unreadable" },
+    { ended: true, unreadable: true, input: { restart: true }, refused: null },
+    { ended: true, input: {}, refused: null },
+  ] as const)("re-watching right after a quiet wake or unreadable stop needs restart: %o", (row) =>
+    Effect.gen(function* () {
+      const watch = {
+        startedAt: "2026-08-20T00:00:00.000Z",
+        quietDeadline: { timeoutMinutes: 45, dueAt: "dueAt" in row ? row.dueAt : null },
+        headSha: "abc",
+        failedChecks: [],
+        passed: false,
+        passedChecks: [],
+        remarksThrough: "2026-08-20T00:00:00.000Z",
+        remarkIds: [],
+        reactionKeys: [],
+        reactionCounts: {},
+        conflicting: false,
+        wakes: 0,
+        ...("unreadable" in row ? { unreadable: row.unreadable } : {}),
+      };
+      const harness = yield* makeHarness({
+        thread: makeThread([
+          makeLink(4, {
+            headBranch: "waiting",
+            ...(row.ended ? { endedWatch: watch } : { watch }),
+          }),
+        ]),
+      });
+      const result = yield* harness
+        .call("watch_pull_request", { repository: "t3tools/t3code", number: 4, ...row.input })
+        .pipe(Effect.flip, Effect.option);
+      const error = Option.getOrUndefined(result);
+      expect(error && { tag: error._tag, reason: "reason" in error ? error.reason : null }).toEqual(
+        row.refused === null
+          ? undefined
+          : { tag: "PullRequestWatchRestartRefusedError", reason: row.refused },
+      );
+      expect((yield* Ref.get(harness.commands)).length).toBe(row.refused === null ? 1 : 0);
     }),
   );
 
@@ -435,6 +501,26 @@ describe("pull request toolkit handlers", () => {
           }
         }
       }
+    }),
+  );
+
+  it.effect("allows a promoted conversation to own its pull request watch", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        thread: {
+          ...makeThread([makeLink(1, { headBranch: "feature" })]),
+          lineage: {
+            rootThreadId: ThreadId.make("parent"),
+            parentThreadId: ThreadId.make("parent"),
+            relationshipToParent: "subagent",
+            independent: true,
+          },
+        },
+      });
+      yield* harness.call("watch_pull_request", { repository: "t3tools/t3code", number: 1 });
+      expect(yield* Ref.get(harness.commands)).toMatchObject([
+        { type: "thread.pull-request.watch", number: 1, watching: true },
+      ]);
     }),
   );
 

@@ -1,3 +1,4 @@
+import { physicalCleanupFileSystem } from "../workspace/physicalCleanupFileSystem.ts";
 import { GitCommandError } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
@@ -26,7 +27,7 @@ export const removeLinkedWorktree = Effect.fn("WorktreeRemoval.removeLinkedWorkt
   readonly execute: GitVcsDriver.GitVcsDriver["Service"]["execute"];
   readonly run: (args: ReadonlyArray<string>) => Effect.Effect<A, E, R>;
 }) {
-  const fileSystem = yield* FileSystem.FileSystem;
+  const fileSystem = physicalCleanupFileSystem(yield* FileSystem.FileSystem);
   const path = yield* Path.Path;
   const worktreePath = input.worktreePath;
   const gitFile = path.join(worktreePath, ".git");

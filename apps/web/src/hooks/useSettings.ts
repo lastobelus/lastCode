@@ -81,6 +81,7 @@ let clientSettingsHydrationPromise: Promise<void> | null = null;
 let clientSettingsHydrationGeneration = 0;
 let clientSettingsPersistenceQueue: Promise<void> = Promise.resolve();
 let deferredClientSettingsPatchCount = 0;
+let clientSettingsRefreshGeneration = 0;
 let unsubscribeOtherTabClientSettings: (() => void) | null = null;
 
 function emitClientSettingsChange() {
@@ -189,6 +190,7 @@ function refreshClientSettingsFromOtherTab(): void {
   void enqueueClientSettingsPersistence(async () => {
     const persistedSettings = await ensureLocalApi().persistence.getClientSettings();
     if (persistedSettings) {
+      clientSettingsRefreshGeneration += 1;
       replaceClientSettingsSnapshot({ ...DEFAULT_CLIENT_SETTINGS, ...persistedSettings });
     }
   }).catch((error) => {
@@ -226,6 +228,7 @@ export function persistClientSettingsPatch(
   } else {
     replaceClientSettingsSnapshot({ ...getClientSettingsSnapshot(), ...patch });
   }
+  const refreshGeneration = clientSettingsRefreshGeneration;
   return enqueueClientSettingsPersistence(async () => {
     if (deferPatch) {
       try {
@@ -239,6 +242,7 @@ export function persistClientSettingsPatch(
     // Also reapplies an optimistic patch that a refresh from another tab replaced.
     const current = getClientSettingsSnapshot();
     if (
+      (deferPatch || refreshGeneration !== clientSettingsRefreshGeneration) &&
       !Object.entries(patch).every(([key, value]) => current[key as keyof ClientSettings] === value)
     ) {
       replaceClientSettingsSnapshot({ ...current, ...patch });
@@ -814,6 +818,7 @@ export function __resetClientSettingsPersistenceForTests(): void {
   clientSettingsHydrationPromise = null;
   clientSettingsPersistenceQueue = Promise.resolve();
   deferredClientSettingsPatchCount = 0;
+  clientSettingsRefreshGeneration = 0;
   unsubscribeOtherTabClientSettings?.();
   unsubscribeOtherTabClientSettings = null;
   clientSettingsListeners.clear();

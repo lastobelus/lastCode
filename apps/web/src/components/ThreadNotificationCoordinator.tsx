@@ -244,6 +244,7 @@ export function startThreadNotifications(
     const changed: Array<[NotificationState | undefined, NotificationState]> = [];
     for (const rawThread of threads) {
       if (
+        rawThread.lineage.independent !== true &&
         isShownUnderParent(
           { environmentId, threadId: rawThread.id },
           rawThread.lineage,

@@ -69,6 +69,8 @@ export const TerminalOpenInput = Schema.Struct({
   env: Schema.optional(TerminalEnvSchema),
   providerInstanceId: Schema.optional(ProviderInstanceId),
   stopOnSettle: Schema.optional(Schema.Boolean),
+  /** Omit to restore retained intent; null explicitly starts an ordinary shell. */
+  terminalLinkProfileName: Schema.optional(Schema.NullOr(TrimmedNonEmptyStringSchema)),
 });
 export type TerminalOpenInput = typeof TerminalOpenInput.Type;
 
@@ -81,6 +83,8 @@ export const TerminalAttachInput = Schema.Struct({
   env: Schema.optional(TerminalEnvSchema),
   providerInstanceId: Schema.optional(ProviderInstanceId),
   stopOnSettle: Schema.optional(Schema.Boolean),
+  /** Omit to restore retained intent; null explicitly starts an ordinary shell. */
+  terminalLinkProfileName: Schema.optional(Schema.NullOr(TrimmedNonEmptyStringSchema)),
   restartIfNotRunning: Schema.optional(Schema.Boolean),
   // Resubscriptions preserve stopped terminals; unknown IDs recover after a server restart.
   resume: Schema.optional(Schema.Boolean),
@@ -123,6 +127,7 @@ export const TerminalSessionSnapshot = Schema.Struct({
   terminalId: Schema.String.check(Schema.isNonEmpty()),
   cwd: Schema.String.check(Schema.isNonEmpty()),
   worktreePath: Schema.NullOr(TrimmedNonEmptyStringSchema),
+  terminalLinkProfileName: Schema.optional(TrimmedNonEmptyStringSchema),
   status: TerminalSessionStatus,
   pid: Schema.NullOr(Schema.Int.check(Schema.isGreaterThan(0))),
   history: Schema.String,
@@ -142,6 +147,7 @@ export const TerminalSummary = Schema.Struct({
   terminalId: Schema.String.check(Schema.isNonEmpty()),
   cwd: Schema.String.check(Schema.isNonEmpty()),
   worktreePath: Schema.NullOr(TrimmedNonEmptyStringSchema),
+  terminalLinkProfileName: Schema.optional(TrimmedNonEmptyStringSchema),
   status: TerminalSessionStatus,
   pid: Schema.NullOr(Schema.Int.check(Schema.isGreaterThan(0))),
   exitCode: Schema.NullOr(Schema.Int),
@@ -306,7 +312,7 @@ export type TerminalCwdError = typeof TerminalCwdError.Type;
 export class TerminalHistoryError extends Schema.TaggedError<TerminalHistoryError>()(
   "TerminalHistoryError",
   {
-    operation: Schema.Literals(["read", "truncate", "migrate"]),
+    operation: Schema.Literals(["read", "write", "truncate", "migrate"]),
     threadId: Schema.String,
     terminalId: Schema.String,
     cause: Schema.optional(Schema.Defect()),

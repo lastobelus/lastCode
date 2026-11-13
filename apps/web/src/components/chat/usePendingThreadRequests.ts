@@ -1,7 +1,9 @@
+import { readUnavailableThreadReference } from "../../lib/composerThreadReferences";
 import type { ThreadStructure } from "@t3tools/client-runtime/state/shell";
 import {
   AuthOrchestrationOperateScope,
   type EnvironmentId,
+  type OrchestrationMessageContext,
   type ProviderApprovalDecision,
   type RuntimeRequestId,
   type ScopedThreadRef,
@@ -33,8 +35,8 @@ import {
   carryDisplacedCustomAnswerIntoPrompt,
   withdrawDisplacedCustomAnswerFromPrompt,
   derivePendingUserInputProgress,
-  projectPendingUserInputAnswer,
   threadContextsReferencedByAnswer,
+  projectPendingUserInputAnswer,
 } from "../../pendingUserInput";
 import {
   questionAttachmentDraftId,
@@ -304,6 +306,7 @@ export function usePendingThreadRequests(input: {
     const reviewCommentRecords = (
       useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.reviewComments ?? []
     ).map(reviewCommentContextRecord);
+    const contextsByQuestionId = new Map<string, OrchestrationMessageContext>();
     for (const question of pendingInput.questions) {
       const target = questionAttachmentDraftId(
         environmentId,
@@ -313,10 +316,26 @@ export function usePendingThreadRequests(input: {
       );
       if ((useQuestionAttachmentPreparation.getState().counts[target] ?? 0) > 0) return;
       const draft = useComposerDraftStore.getState().getComposerDraft(target);
-      providerAnswers[question.id] = projectPendingUserInputAnswer(answers[question.id], [
-        ...(draft?.threadContexts ?? []),
-        ...reviewCommentRecords,
-      ]);
+      const answer = answers[question.id];
+      const unavailable =
+        typeof answer === "string"
+          ? readUnavailableThreadReference(answer, draft?.threadContexts ?? [], environmentId)
+          : undefined;
+      if (unavailable) {
+        setThreadError(
+          activeThreadId,
+          "An attached thread can't be read. Check connections, read permissions and server updates for the source and selected machines, or remove the reference before submitting. Your answer is saved.",
+        );
+        return;
+      }
+      const records =
+        typeof answer === "string"
+          ? threadContextsReferencedByAnswer(answer, draft?.threadContexts ?? [])
+          : [];
+      if (records.length > 0) {
+        contextsByQuestionId.set(question.id, { version: 1, records });
+      }
+      providerAnswers[question.id] = projectPendingUserInputAnswer(answer, reviewCommentRecords);
       const attachments = draft ? [...draft.images, ...draft.files] : [];
       if (attachments.length === 0) continue;
       const uploaded = getUploadedAttachments({ environmentId, images: attachments });
@@ -340,6 +359,9 @@ export function usePendingThreadRequests(input: {
         threadId: activeThreadId,
         requestId,
         answers: providerAnswers,
+        ...(contextsByQuestionId.size > 0
+          ? { contextsByQuestionId: Object.fromEntries(contextsByQuestionId) }
+          : {}),
         ...(attachmentsByQuestionId.size > 0
           ? { attachmentsByQuestionId: Object.fromEntries(attachmentsByQuestionId) }
           : {}),
