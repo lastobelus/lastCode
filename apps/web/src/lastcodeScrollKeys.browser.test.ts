@@ -78,9 +78,12 @@ function setup() {
       key,
       bubbles: true,
       cancelable: true,
+      composed: true,
       ...options,
     });
-    (document.activeElement ?? document.body).dispatchEvent(event);
+    let target: Element = document.activeElement ?? document.body;
+    while (target.shadowRoot?.activeElement) target = target.shadowRoot.activeElement;
+    target.dispatchEvent(event);
     return event;
   };
   return { get, pointAt, press, stack, [Symbol.dispose]: () => stack.dispose() };
@@ -141,6 +144,18 @@ describe("LastCode scroll keys", () => {
     dom.get("sidebar-search").focus();
     dom.pointAt(sidebar);
     expect(dom.press("ArrowDown").defaultPrevented).toBe(false);
+    // An editor inside a shadow root keeps its keys over its own pane.
+    const settingsNode = dom.get("settings");
+    const host = document.createElement("div");
+    settingsNode.prepend(host);
+    const shadowEditor = document.createElement("div");
+    shadowEditor.contentEditable = "true";
+    shadowEditor.textContent = "source";
+    host.attachShadow({ mode: "open" }).append(shadowEditor);
+    shadowEditor.focus();
+    dom.pointAt(settingsNode);
+    expect(dom.press("ArrowDown").defaultPrevented).toBe(false);
+    expect(settingsNode.scrollTop).toBe(0);
     // Areas inside one dialog are separate panes.
     const dialogContent = dom.get("dialog-content");
     dom.get("dialog-search").focus();

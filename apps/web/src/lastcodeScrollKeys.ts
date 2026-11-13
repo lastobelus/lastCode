@@ -72,6 +72,14 @@ function parentAcrossShadow(element: Element): Element | null {
   return root instanceof ShadowRoot ? root.host : null;
 }
 
+/** `closest` that continues through shadow hosts; focus can sit inside an editor's shadow root. */
+function closestAcross<T extends Element = Element>(element: Element, selector: string): T | null {
+  const match = element.closest<T>(selector);
+  if (match) return match;
+  const root = element.getRootNode();
+  return root instanceof ShadowRoot ? closestAcross<T>(root.host, selector) : null;
+}
+
 /** Scrollers from the hovered element outward, stopping where the wheel would: a floating layer's
  * edge or a scroller that contains its overscroll. */
 function scrollersFrom(start: Element): HTMLElement[] {
@@ -101,8 +109,8 @@ function scrollersFrom(start: Element): HTMLElement[] {
  * floating layer. The composer writes into the conversation beside it.
  */
 function paneOf(element: Element): Element | null {
-  const layer = element.closest(LAYER_SELECTOR);
-  const area = element.closest<HTMLElement>(AREA_SELECTOR);
+  const layer = closestAcross(element, LAYER_SELECTOR);
+  const area = closestAcross<HTMLElement>(element, AREA_SELECTOR);
   if (layer && !(area && layer.contains(area))) return layer;
   if (area?.dataset.workspaceArea !== "composer") return area;
   const conversation = '[data-workspace-area="conversation"]';
@@ -113,10 +121,10 @@ function paneOf(element: Element): Element | null {
 function pointerTakesKey(focus: Element | null, scroller: HTMLElement): boolean {
   if (!focus || focus === focus.ownerDocument.body || focus === focus.ownerDocument.documentElement)
     return true;
-  const layer = focus.closest(LAYER_SELECTOR);
+  const layer = closestAcross(focus, LAYER_SELECTOR);
   if (layer && !layer.contains(scroller)) return false;
-  if (focus.closest(FOCUS_OWNS_KEYS_SELECTOR)) return false;
-  if (focus.closest(PANE_OWNS_KEYS_SELECTOR)) return paneOf(focus) !== paneOf(scroller);
+  if (closestAcross(focus, FOCUS_OWNS_KEYS_SELECTOR)) return false;
+  if (closestAcross(focus, PANE_OWNS_KEYS_SELECTOR)) return paneOf(focus) !== paneOf(scroller);
   return true;
 }
 
