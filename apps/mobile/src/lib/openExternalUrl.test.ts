@@ -18,6 +18,15 @@ afterEach(() => {
 });
 
 describe("tryOpenExternalUrl", () => {
+  it("opens supported URLs", async () => {
+    openURL.mockResolvedValue(undefined);
+
+    await expect(
+      tryOpenExternalUrl("https://github.com/pingdotgg/t3code/actions/runs/1", "action-report"),
+    ).resolves.toBe(true);
+    expect(openURL).toHaveBeenCalledWith("https://github.com/pingdotgg/t3code/actions/runs/1");
+  });
+
   it("keeps provider sign-in URLs unchanged and out of failure logs", async () => {
     const url =
       "https://accounts.google.com/o/oauth2/v2/auth?state=private-state&code_challenge=private-challenge&redirect_uri=http%3A%2F%2F127.0.0.1%3A43123%2F";

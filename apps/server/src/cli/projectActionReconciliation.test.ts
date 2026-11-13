@@ -9,9 +9,9 @@ import {
 } from "./projectActionReconciliation.ts";
 
 const waitDeclaration = {
-  id: "lc-wait-for-pr",
-  name: "Wait for PR",
-  command: "mise exec node@24.13.1 -- node scripts/lastcode-wait-for-pr.ts",
+  id: "lc-wait-for-checkpoint",
+  name: "Wait for Checkpoint",
+  command: "mise exec node@24.13.1 -- node scripts/lastcode-wait-for-checkpoint.ts",
   icon: "test" as const,
 };
 
@@ -26,7 +26,7 @@ it.effect("rejects a managed declaration without an explicit stable id", () =>
   reconcileProjectActions({
     projectWorkspaceRoot: "/srv/example/lastCode",
     currentScripts: [],
-    declarations: [{ name: "Wait for PR", command: waitDeclaration.command }],
+    declarations: [{ name: "Wait for Checkpoint", command: waitDeclaration.command }],
   }).pipe(
     Effect.flip,
     Effect.tap((error) => Effect.sync(() => assert.equal(error.reason, "missing_source_id"))),
@@ -51,7 +51,7 @@ it.effect("recovers all managed fields and grant provenance around an interrupte
       currentScripts: initial.scripts,
       declarations: [changedDeclaration],
       previousState: initial.state,
-      trustedSourceIds: new Set(["lc-wait-for-pr"]),
+      trustedSourceIds: new Set(["lc-wait-for-checkpoint"]),
     });
     const pending = prepareManagedProjectActionPendingState({
       projectWorkspaceRoot: "/srv/example/lastCode",
@@ -70,7 +70,7 @@ it.effect("recovers all managed fields and grant provenance around an interrupte
         currentScripts,
         declarations: [changedDeclaration],
         previousState: recoveredState,
-        trustedSourceIds: new Set(["lc-wait-for-pr"]),
+        trustedSourceIds: new Set(["lc-wait-for-checkpoint"]),
       });
       assert.deepEqual(recovered.report.diverged, []);
       assert.equal(recovered.scripts[0]?.command, changedDeclaration.command);
@@ -86,7 +86,7 @@ it.effect("preserves a local permission re-granted after a managed revocation", 
       projectWorkspaceRoot: "/srv/example/lastCode",
       currentScripts: [],
       declarations: [waitDeclaration],
-      trustedSourceIds: new Set(["lc-wait-for-pr"]),
+      trustedSourceIds: new Set(["lc-wait-for-checkpoint"]),
     });
     const revoked = yield* reconcileProjectActions({
       projectWorkspaceRoot: "/srv/example/lastCode",
@@ -142,11 +142,11 @@ it.effect("creates non-setup Actions without granting agent resume", () =>
     assert.deepEqual(
       result.scripts.map(({ id, name, allowAgentResume }) => ({ id, name, allowAgentResume })),
       [
-        { id: "lc-wait-for-pr", name: "Wait for PR", allowAgentResume: undefined },
+        { id: "lc-wait-for-checkpoint", name: "Wait for Checkpoint", allowAgentResume: undefined },
         { id: "lc-local-ci", name: "Run Quick CI", allowAgentResume: undefined },
       ],
     );
-    assert.deepEqual(result.report.created, ["lc-wait-for-pr", "lc-local-ci"]);
+    assert.deepEqual(result.report.created, ["lc-wait-for-checkpoint", "lc-local-ci"]);
   }),
 );
 
@@ -182,8 +182,8 @@ it.effect("adopts an exact legacy import and preserves its id and local permissi
       projectWorkspaceRoot: "/srv/example/lastCode",
       currentScripts: [
         {
-          id: "wait-for-pr",
-          name: "Wait for PR",
+          id: "wait-for-checkpoint",
+          name: "Wait for Checkpoint",
           command: waitDeclaration.command,
           icon: "test",
           runOnWorktreeCreate: false,
@@ -193,10 +193,10 @@ it.effect("adopts an exact legacy import and preserves its id and local permissi
       declarations: [waitDeclaration],
     });
 
-    assert.equal(result.scripts[0]?.id, "wait-for-pr");
+    assert.equal(result.scripts[0]?.id, "wait-for-checkpoint");
     assert.isTrue(result.scripts[0]?.allowAgentResume);
-    assert.deepEqual(result.report.adopted, ["lc-wait-for-pr"]);
-    assert.equal(result.state.actions[0]?.scriptId, "wait-for-pr");
+    assert.deepEqual(result.report.adopted, ["lc-wait-for-checkpoint"]);
+    assert.equal(result.state.actions[0]?.scriptId, "wait-for-checkpoint");
   }),
 );
 
@@ -222,12 +222,12 @@ it.effect("reserves existing ownership before adopting a legacy match", () =>
       result.state.actions.map(({ sourceId, scriptId }) => ({ sourceId, scriptId })),
       [
         { sourceId: "lc-new-duplicate", scriptId: "lc-new-duplicate" },
-        { sourceId: "lc-wait-for-pr", scriptId: "lc-wait-for-pr" },
+        { sourceId: "lc-wait-for-checkpoint", scriptId: "lc-wait-for-checkpoint" },
       ],
     );
     assert.deepEqual(
       result.scripts.map((script) => script.id),
-      ["lc-wait-for-pr", "lc-new-duplicate"],
+      ["lc-wait-for-checkpoint", "lc-new-duplicate"],
     );
     assert.deepEqual(result.report.created, ["lc-new-duplicate"]);
     assert.deepEqual(result.report.adopted, []);
@@ -281,7 +281,7 @@ it.effect("updates managed fields while preserving local-only state", () =>
       currentScripts: [
         {
           id: "legacy-action-id",
-          name: "Wait for PR",
+          name: "Wait for Checkpoint",
           command: waitDeclaration.command,
           icon: "test",
           runOnWorktreeCreate: false,
@@ -314,7 +314,7 @@ it.effect("updates managed fields while preserving local-only state", () =>
         allowAgentResume: true,
       },
     ]);
-    assert.deepEqual(second.report.updated, ["lc-wait-for-pr"]);
+    assert.deepEqual(second.report.updated, ["lc-wait-for-checkpoint"]);
   }),
 );
 
@@ -334,7 +334,7 @@ it.effect("retains locally diverged and removed Actions", () =>
     });
 
     assert.deepEqual(second.scripts, diverged);
-    assert.deepEqual(second.report.diverged, ["lc-wait-for-pr"]);
+    assert.deepEqual(second.report.diverged, ["lc-wait-for-checkpoint"]);
     assert.equal(second.state.actions.length, 1);
   }),
 );
@@ -354,7 +354,7 @@ it.effect("removes an undeclared Action only while it still matches managed stat
     });
 
     assert.deepEqual(second.scripts, []);
-    assert.deepEqual(second.report.removed, ["lc-wait-for-pr"]);
+    assert.deepEqual(second.report.removed, ["lc-wait-for-checkpoint"]);
     assert.equal(second.state.actions.length, 0);
   }),
 );
@@ -365,7 +365,7 @@ it.effect("applies and revokes only environment-managed trust grants", () =>
       projectWorkspaceRoot: "/srv/example/lastCode",
       currentScripts: [],
       declarations: [waitDeclaration],
-      trustedSourceIds: new Set(["lc-wait-for-pr"]),
+      trustedSourceIds: new Set(["lc-wait-for-checkpoint"]),
     });
     assert.isTrue(trusted.scripts[0]?.allowAgentResume);
     assert.isTrue(trusted.state.actions[0]?.managesResumePermission);
@@ -396,8 +396,8 @@ it.effect("does not claim a pre-existing local trust grant", () =>
       projectWorkspaceRoot: "/srv/example/lastCode",
       currentScripts: [
         {
-          id: "wait-for-pr",
-          name: "Wait for PR",
+          id: "wait-for-checkpoint",
+          name: "Wait for Checkpoint",
           command: waitDeclaration.command,
           icon: "test",
           runOnWorktreeCreate: false,
@@ -405,7 +405,7 @@ it.effect("does not claim a pre-existing local trust grant", () =>
         },
       ],
       declarations: [waitDeclaration],
-      trustedSourceIds: new Set(["lc-wait-for-pr"]),
+      trustedSourceIds: new Set(["lc-wait-for-checkpoint"]),
     });
     assert.isTrue(local.scripts[0]?.allowAgentResume);
     assert.isFalse(local.state.actions[0]?.managesResumePermission);
@@ -426,7 +426,7 @@ it.effect("revokes a managed trust grant from divergent fields even while allowl
       projectWorkspaceRoot: "/srv/example/lastCode",
       currentScripts: [],
       declarations: [waitDeclaration],
-      trustedSourceIds: new Set(["lc-wait-for-pr"]),
+      trustedSourceIds: new Set(["lc-wait-for-checkpoint"]),
     });
     const divergent = trusted.scripts.map((script) => ({
       ...script,
@@ -438,13 +438,13 @@ it.effect("revokes a managed trust grant from divergent fields even while allowl
       currentScripts: divergent,
       declarations: [waitDeclaration],
       previousState: trusted.state,
-      trustedSourceIds: new Set(["lc-wait-for-pr"]),
+      trustedSourceIds: new Set(["lc-wait-for-checkpoint"]),
     });
 
     assert.equal(reconciled.scripts[0]?.command, "local command");
     assert.isUndefined(reconciled.scripts[0]?.allowAgentResume);
     assert.isFalse(reconciled.state.actions[0]?.managesResumePermission);
-    assert.deepEqual(reconciled.report.diverged, ["lc-wait-for-pr"]);
-    assert.deepEqual(reconciled.report.updated, ["lc-wait-for-pr"]);
+    assert.deepEqual(reconciled.report.diverged, ["lc-wait-for-checkpoint"]);
+    assert.deepEqual(reconciled.report.updated, ["lc-wait-for-checkpoint"]);
   }),
 );
