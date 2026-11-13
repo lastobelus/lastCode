@@ -3114,6 +3114,8 @@ describe("UsageService", () => {
             [SCAN_CACHE_FILE_NAME, `${SCAN_CACHE_FILE_NAME}.active`],
           );
         }).pipe(
+          // Finish service cache writes before the layer removes its state directory.
+          Effect.scoped,
           Effect.provide(
             layerService({
               prefix: "usage-service-cache-upgrade-test",
