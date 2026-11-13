@@ -109,6 +109,10 @@ describe("LastCode scroll keys", () => {
     dom.pointAt(dom.get("rail"));
     dom.press("ArrowDown");
     expect(sidebar.scrollTop).toBe(40);
+    // Chrome beside the list, such as the sidebar's search header, scrolls the pane's list.
+    dom.pointAt(dom.get("sidebar-search"));
+    dom.press("ArrowDown");
+    expect(sidebar.scrollTop).toBe(80);
   });
 
   it("let the composer keep its keys over its own conversation, and give them up over other panes", () => {

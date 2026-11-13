@@ -191,6 +191,13 @@ export function startLastCodeScrollKeys(doc: Document = document): () => void {
       const hovered = doc.elementFromPoint(pointer.x, pointer.y);
       if (!hovered || hovered.closest(TERMINAL_SELECTOR)) return;
       chain = scrollersFrom(hovered);
+      if (chain.length === 0) {
+        // Chrome inside a pane, such as a header beside its list, scrolls that pane's list.
+        const area = hovered.closest<HTMLElement>(AREA_SELECTOR);
+        const layer = hovered.closest(LAYER_SELECTOR);
+        const scroller = area && (!layer || layer.contains(area)) ? areaScroller(area) : null;
+        if (scroller) chain = [scroller];
+      }
       if (chain.length === 0 || !pointerTakesKey(focused, chain[0]!)) return;
       // The browser already scrolls the focused scroller; only an owner's own paging replaces it.
       const native = chain.find(isScroller);
