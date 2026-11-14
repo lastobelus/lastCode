@@ -285,6 +285,31 @@ it.layer(layerOpenCodeTextGenerationTest)("OpenCodeTextGeneration", (it) => {
     ),
   );
 
+  it.effect.each([DEFAULT_OPENCODE_SETTINGS, EXISTING_SERVER_OPENCODE_SETTINGS])(
+    "rejects prompt mining before opening a tool-enabled v1 session at $serverUrl",
+    (settings) =>
+      withOpenCodeTextGeneration(settings, (textGeneration) =>
+        Effect.gen(function* () {
+          const failure = yield* textGeneration
+            .generatePromptSnippets({
+              cwd: process.cwd(),
+              modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+              messages: ["Read workspace files before reviewing the changes."],
+              existing: [],
+            })
+            .pipe(Effect.flip);
+          expect(failure).toMatchObject({
+            _tag: "TextGenerationError",
+            operation: "generatePromptSnippets",
+            reason: "prompt-mining-unsupported",
+          });
+          expect(runtimeMock.state.startCalls).toEqual([]);
+          expect(runtimeMock.state.sessionCreateCalls).toBe(0);
+          expect(runtimeMock.state.promptUrls).toEqual([]);
+        }),
+      ),
+  );
+
   it.effect("cancels or times out an in-flight session creation before prompting", () =>
     withOpenCodeTextGeneration(EXISTING_SERVER_OPENCODE_SETTINGS, (textGeneration) =>
       Effect.gen(function* () {

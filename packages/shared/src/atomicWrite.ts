@@ -22,6 +22,7 @@ const CHUNK_WRITE_LENGTH = 1 << 20;
 export const writeFileStringAtomically = (input: {
   readonly filePath: string;
   readonly contents: string | Iterable<string>;
+  readonly mode?: number;
 }) =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -44,12 +45,12 @@ export const writeFileStringAtomically = (input: {
 
       const contents = input.contents;
       if (typeof contents === "string") {
-        yield* fs.writeFileString(tempPath, contents);
+        yield* fs.writeFileString(tempPath, contents, { mode: input.mode });
       } else {
         // Closed before the rename, which Windows refuses for open files.
         yield* Effect.scoped(
           Effect.gen(function* () {
-            const file = yield* fs.open(tempPath, { flag: "w" });
+            const file = yield* fs.open(tempPath, { flag: "w", mode: input.mode });
             const encoder = new TextEncoder();
             let batch: string[] = [];
             let batchLength = 0;
@@ -65,6 +66,8 @@ export const writeFileStringAtomically = (input: {
           }),
         );
       }
+      // Set the requested permissions before the replacement becomes visible.
+      if (input.mode !== undefined) yield* fs.chmod(tempPath, input.mode);
       if (platform !== "win32") return yield* fs.rename(tempPath, targetPath);
 
       // Stop retrying if another save changes the target; read-only targets also return permanent EPERM.

@@ -292,6 +292,8 @@ describe("ssh tunnel scripts", () => {
       const bin = NodePath.join(root, "bin");
       const release = NodePath.join(root, "release");
       const archive = `t3-${ARCHIVE.archiveVersion}-linux-x64.tar.gz`;
+      const checksumTool =
+        HostProcess.Platform.defaultValue() === "darwin" ? "shasum" : "sha256sum";
       NodeFS.mkdirSync(bin);
       NodeFS.mkdirSync(NodePath.join(root, "home"));
       NodeFS.mkdirSync(NodePath.join(release, "t3"), { recursive: true });
@@ -299,9 +301,14 @@ describe("ssh tunnel scripts", () => {
         mode: 0o755,
       });
       NodeChildProcess.execFileSync("tar", ["-czf", archive, "t3"], { cwd: release });
-      NodeChildProcess.execFileSync("sh", ["-c", `sha256sum ${archive} > SHA256SUMS`], {
-        cwd: release,
-      });
+      NodeFS.writeFileSync(
+        NodePath.join(release, "SHA256SUMS"),
+        NodeChildProcess.execFileSync(
+          checksumTool,
+          checksumTool === "shasum" ? ["-a", "256", archive] : [archive],
+          { cwd: release },
+        ),
+      );
       for (const tool of [
         "sh",
         "mkdir",
@@ -310,8 +317,7 @@ describe("ssh tunnel scripts", () => {
         "rm",
         "grep",
         "cut",
-        "sha256sum",
-        "tar",
+        checksumTool,
         "mv",
       ]) {
         NodeFS.symlinkSync(
@@ -321,6 +327,12 @@ describe("ssh tunnel scripts", () => {
           NodePath.join(bin, tool),
         );
       }
+      // Simulate the remote tar's missing-gzip failure independently of the local tar.
+      NodeFS.writeFileSync(
+        NodePath.join(bin, "tar"),
+        "#!/bin/sh\nprintf '%s\\n' 'tar (child): gzip: Cannot exec: No such file or directory' >&2\nexit 2\n",
+        { mode: 0o755 },
+      );
       NodeFS.writeFileSync(
         NodePath.join(bin, "uname"),
         '#!/bin/sh\ncase "$1" in -s) echo Linux ;; -m) echo x86_64 ;; esac\n',

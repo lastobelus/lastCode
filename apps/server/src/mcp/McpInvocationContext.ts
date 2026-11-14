@@ -1,3 +1,4 @@
+import type { McpExecutionOrigin } from "@t3tools/provider-core/server/McpProviderSessions";
 import {
   type AuthMcpClientAccess,
   type EnvironmentId,
@@ -24,15 +25,18 @@ const ALL_MCP_CAPABILITIES = [
   "worktree",
   "device",
   "pull-requests",
+  "action-resume",
 ] as const;
 export type McpCapability = (typeof ALL_MCP_CAPABILITIES)[number];
 
 export interface McpThreadCaller {
+  readonly execution?: McpExecutionOrigin;
   readonly threadId: ThreadId;
   readonly providerSessionId: string;
   readonly providerInstanceId: ProviderInstanceId;
   /** A delegated child task; its parent owns the work it hands back. */
   readonly subagent?: boolean;
+  readonly appOwnedSubagent?: boolean;
 }
 
 export interface McpClientCaller {
@@ -176,6 +180,14 @@ export const hiddenFromSubagents = (): boolean => {
   const fiber = Fiber.getCurrent();
   const scope = fiber && Context.getOrUndefined(fiber.context, McpInvocationContext);
   return scope?.thread?.subagent !== true;
+};
+
+// Discovery has no native tool-call metadata. This server-issued classification only
+// exposes tools; their handlers still require the exact authenticated execution origin.
+export const visibleForPullRequestWatch = (): boolean => {
+  const fiber = Fiber.getCurrent();
+  const scope = fiber && Context.getOrUndefined(fiber.context, McpInvocationContext);
+  return scope?.thread?.subagent !== true || scope.thread.appOwnedSubagent === true;
 };
 
 /** `McpSchema.EnabledWhen` for tools that only serve links, hidden while the beta is off. */

@@ -343,7 +343,13 @@ describe("BrowserSession", () => {
       assert.isFalse(yield* request("zoommtg://zoom.us/join"));
       assert.strictEqual(showMessageBox.mock.calls.length, 2);
 
-      for (const url of ["file:///etc/passwd", "javascript:alert(1)", "data:text/html,x"]) {
+      for (const url of [
+        "file:///etc/passwd",
+        "javascript:alert(1)",
+        "data:text/html,x",
+        "t3-thread://v1/thread",
+        "t3-thread://v2/environment/thread",
+      ]) {
         assert.isFalse(yield* request(url), `${url} must never open externally`);
       }
       assert.strictEqual(showMessageBox.mock.calls.length, 2);

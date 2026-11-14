@@ -127,8 +127,13 @@ export const layer: Layer.Layer<
         capturedAt,
         forceMissing: sideChat,
       });
-      // Omit delegatedCompletion to preserve cohort writes made after capture loaded the run.
-      const { delegatedCompletion: _delegatedCompletion, ...runWithoutDelegatedCompletion } = run;
+      // These fields can change while Git captures the checkpoint; keep the committed ownership.
+      const {
+        delegatedCompletion: _delegatedCompletion,
+        pullRequestWatchObligations: _watchObligations,
+        pullRequestWatchContinuation: _watchContinuation,
+        ...runWithoutDelegatedCompletion
+      } = run;
       const commandId = CommandId.make(`command:effect:checkpoint.capture:${run.id}`);
       yield* eventSink.commitCommand({
         commandId,

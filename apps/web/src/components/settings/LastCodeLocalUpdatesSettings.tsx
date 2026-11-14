@@ -12,6 +12,7 @@ function useLocalNightlyPreference() {
   const [settings, setSettings] = useState<DesktopLastCodeSettingsState | null>(null);
   const [isSaving, setIsSaving] = useState(false);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the native desktop update preference when this settings control mounts
   useEffect(() => {
     const bridge = window.desktopBridge;
     if (!bridge || typeof bridge.getLastCodeSettings !== "function") return;

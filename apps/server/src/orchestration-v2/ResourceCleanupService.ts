@@ -24,6 +24,8 @@ export class ResourceCleanupError extends Schema.TaggedError<ResourceCleanupErro
   },
 ) {}
 
+const isResourceCleanupError = Schema.is(ResourceCleanupError);
+
 export class ResourceCleanupService extends Context.Reference<{
   readonly cleanupScheduledTasks: (threadId: ThreadId) => Effect.Effect<void, ResourceCleanupError>;
   readonly cleanupTerminals: (threadId: string) => Effect.Effect<void, ResourceCleanupError>;
@@ -135,29 +137,25 @@ export const layer = Layer.effect(
           return yield* new ResourceCleanupError({ operation: "device", threadId, cause: failure });
       }),
       cleanupArchivedTerminals: Effect.fn("ResourceCleanupService.cleanupArchivedTerminals")(
-        function* (threadId: string) {
-          const previewsResult = yield* Effect.result(previews.list(threadId));
-          // An unreadable lease file cannot identify owners; preserve the managed namespace.
-          yield* terminals
-            .closeThreadExcept(
-              threadId,
-              previewsResult._tag === "Success"
-                ? previewsResult.success.map((lease) => lease.terminalId)
-                : [],
-              previewsResult._tag === "Failure" ? ["preview-"] : [],
-            )
+        function (threadId: string) {
+          // Legacy preview terminals may lack the managed prefix; cancel previews
+          // successfully before closing the remaining terminals.
+          const closeTerminals = terminals
+            .closeThreadExcept(threadId, [])
             .pipe(
               Effect.mapError(
                 (cause) => new ResourceCleanupError({ operation: "terminal", threadId, cause }),
               ),
             );
-          if (previewsResult._tag === "Failure") {
-            return yield* new ResourceCleanupError({
-              operation: "preview",
-              threadId,
-              cause: previewsResult.failure,
-            });
-          }
+          return previews
+            .cleanupArchivedThread(threadId, closeTerminals)
+            .pipe(
+              Effect.mapError((cause) =>
+                isResourceCleanupError(cause)
+                  ? cause
+                  : new ResourceCleanupError({ operation: "preview", threadId, cause }),
+              ),
+            );
         },
       ),
       cleanupAttachments: Effect.fn("ResourceCleanupService.cleanupAttachments")(function (

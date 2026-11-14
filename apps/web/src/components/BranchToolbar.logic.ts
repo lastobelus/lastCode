@@ -7,7 +7,7 @@ import type {
 } from "@t3tools/contracts";
 import type { ThreadStructureRuntime } from "@t3tools/client-runtime/state/shell";
 import * as Schema from "effect/Schema";
-import { sanitizeNewRefName } from "@t3tools/shared/git";
+import { isTemporaryWorktreeBranch, sanitizeNewRefName } from "@t3tools/shared/git";
 import { workspaceRelativeFilePath } from "@t3tools/shared/path";
 import { toSortableTimestamp } from "@t3tools/client-runtime/state/thread-sort";
 import { deriveCanInterruptRunningThread } from "../session-logic";
@@ -256,6 +256,37 @@ export function resolveLocalCheckoutBranchMismatch(input: {
     return null;
   }
   return { threadBranch: activeThreadBranch, currentBranch: currentGitBranch };
+}
+
+export function resolveCheckoutBranchMismatch(input: {
+  effectiveEnvMode: EnvMode;
+  activeWorktreePath: string | null;
+  activeThreadBranch: string | null;
+  currentGitBranch: string | null;
+}) {
+  const { effectiveEnvMode, activeWorktreePath, activeThreadBranch, currentGitBranch } = input;
+  const isLocalCheckout = effectiveEnvMode === "local" && activeWorktreePath === null;
+  const isEstablishedWorktree = effectiveEnvMode === "worktree" && activeWorktreePath !== null;
+  if (!isLocalCheckout && !isEstablishedWorktree) {
+    return null;
+  }
+  if (!activeThreadBranch || !currentGitBranch || activeThreadBranch === currentGitBranch) {
+    return null;
+  }
+  // Cached status can predate the automatic rename of a temporary worktree branch.
+  if (
+    isEstablishedWorktree &&
+    !isTemporaryWorktreeBranch(activeThreadBranch) &&
+    isTemporaryWorktreeBranch(currentGitBranch)
+  ) {
+    return null;
+  }
+  return {
+    threadBranch: activeThreadBranch,
+    currentBranch: currentGitBranch,
+    // Restoring a worktree checkout could switch the branch for sibling threads.
+    canRestoreThreadBranch: isLocalCheckout,
+  };
 }
 
 export function resolveBranchSelectionTarget(input: {

@@ -24,11 +24,18 @@ import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as EventSink from "./EventSink.ts";
+import * as EventStore from "./EventStore.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
+
+const layerEventSink = EventSink.layer.pipe(
+  Layer.provide(Layer.merge(EventStore.layer, ProjectionStore.layer)),
+  Layer.provide(SqlitePersistence.layerMemory),
+);
 
 const driver = ProviderDriverKind.make("codex");
 const providerInstanceId = ProviderInstanceId.make("codex");
@@ -191,7 +198,7 @@ it.effect("preserves steering rejection separately from turn completion", () =>
                 providerThreadId,
                 userMessageId: messageId,
                 rootNodeId: nodeId,
-                activeAttemptId: attemptId,
+                activeAttemptId: testCase.status === "running" ? attemptId : null,
                 status: runStatus,
                 requestedAt: now,
                 startedAt: now,
@@ -239,7 +246,8 @@ it.effect("preserves steering rejection separately from turn completion", () =>
       } satisfies ProviderAdapter.ProviderAdapterV2SessionRuntime;
       const layerControl = ProviderTurnControlService.layer.pipe(
         Layer.provide(
-          Layer.merge(
+          Layer.mergeAll(
+            layerEventSink,
             Layer.mock(ProjectionStore.ProjectionStoreV2)({
               getProviderControlContext: () =>
                 testCase.target === "read-failure"
@@ -475,10 +483,15 @@ it.effect(
         ProjectionStore.ProjectionStoreV2,
         ProjectionStore.ProjectionStoreV2.of({
           apply: () => Effect.void,
+          hasThreadReadAuthorization: () => Effect.die("unused hasThreadReadAuthorization"),
           getLimitRecoveryCandidates: () => Effect.die("unused getLimitRecoveryCandidates"),
           getLimitRecoveryWakeAt: () => Effect.die("unused getLimitRecoveryWakeAt"),
           getOpenRemoteDelegatedTasks: Effect.die("unused getOpenRemoteDelegatedTasks"),
           getAgentAwarenessSnapshot: () => Effect.die("unused awareness snapshot"),
+          getOwnedThreadIds: () => Effect.die("not used by turn control tests"),
+          getArchiveFamilyThreadIds: () => Effect.die("not used by turn control tests"),
+          getThreadLatestAssistantMessageAt: () => Effect.die("not used by turn control tests"),
+          getGroupedCreatorThreadIds: () => Effect.die("not used by turn control tests"),
           getShellSnapshot: () => Effect.die("unused getShellSnapshot"),
           listActiveSubagentThreadIds: () => Effect.die("unused listActiveSubagentThreadIds"),
           countThreads: () => Effect.die("unused countThreads"),
@@ -490,10 +503,15 @@ it.effect(
           getThreadTitles: () => Effect.die("unused getThreadTitles"),
           getThreadLinkMetadata: () => Effect.die("unused getThreadLinkMetadata"),
           findGuestShareThreadId: () => Effect.die("unused findGuestShareThreadId"),
+          getWorktreeCleanupThreads: Effect.die("unused getWorktreeCleanupThreads"),
+          getPersistentThreads: Effect.die("unused getPersistentThreads"),
           getThread: () => Ref.get(projection).pipe(Effect.map((state) => state.thread)),
           getSettlementCandidates: () => Effect.die("unused getSettlementCandidates"),
+          hasOutstandingOwnedWork: () => Effect.die("unused hasOutstandingOwnedWork"),
+          getPendingPullRequestWatchDeliveries: Effect.succeed([]),
           getThreadsWithPullRequests: () => Effect.die("unused getThreadsWithPullRequests"),
           getThreadWorktreePaths: () => Effect.die("unused getThreadWorktreePaths"),
+          getWorktreeSuspensionThreads: () => Effect.die("unused getWorktreeSuspensionThreads"),
           getThreadProjection: () => Effect.die("control effects must not load transcript"),
           getTurnStartContext: () => Effect.die("unused"),
           getTurnStartHistory: () => Effect.die("unused"),
@@ -505,6 +523,7 @@ it.effect(
           searchThreadStream: () => Stream.empty,
           getThreadHistoryPage: () => Effect.die("unused"),
           getTimelinePage: () => Effect.die("Unused timeline read"),
+          getVisiblePublications: () => Effect.die("Unused visible publication read"),
           getMessageCount: () => Effect.die("unused message count"),
           getTranscriptByteFloor: () => Effect.die("unused transcript byte floor"),
           hasPendingDelegatedCompletion: () => Effect.die("unused hasPendingDelegatedCompletion"),
@@ -556,12 +575,14 @@ it.effect(
           isLive: (providerSessionId) => Effect.succeed(providerSessionId === oldSessionId),
           pendingExecution: Effect.succeed([]),
           ownershipRevision: Effect.succeed(0),
+          workspaceOwnership: Effect.succeed([]),
           get: (providerSessionId) =>
             Effect.succeed(
               providerSessionId === oldSessionId ? Option.some(runtime) : Option.none(),
             ),
           close: () => Effect.void,
           closeInstance: () => Effect.void,
+          teardownThread: () => Effect.die("unused teardownThread"),
           release: () => Effect.void,
           detach: () => Effect.void,
           otherWorkingThreads: () => Effect.succeed([]),
@@ -570,13 +591,7 @@ it.effect(
         }),
       );
       const layerControl = ProviderTurnControlService.layer.pipe(
-        Layer.provide(
-          Layer.mergeAll(
-            layerProjection,
-            layerSessionManager,
-            Layer.mock(EventSink.EventSinkV2)({}),
-          ),
-        ),
+        Layer.provide(Layer.mergeAll(layerProjection, layerSessionManager, layerEventSink)),
       );
 
       const [ordinaryInterrupt, unrelatedRestart] = yield* Effect.gen(function* () {

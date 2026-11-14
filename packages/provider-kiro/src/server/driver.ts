@@ -55,6 +55,8 @@ const unsupportedTextGeneration: ProviderTextGeneration = (() => {
     generateThreadTitle: () => unsupported("generateThreadTitle"),
     generateReviewGuide: () => unsupported("generateReviewGuide"),
     generateTranscriptionPostProcessing: () => unsupported("generateTranscriptionPostProcessing"),
+    generatePromptSnippets: () => unsupported("generatePromptSnippets"),
+    generateIncomingMessageSummary: () => unsupported("generateIncomingMessageSummary"),
   };
 })();
 

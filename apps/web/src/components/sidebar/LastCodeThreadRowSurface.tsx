@@ -75,6 +75,7 @@ export function LastCodeThreadRowSurface({
 }: Props) {
   const {
     annotationPopoverHandle,
+    threadDetailsPopoverHandle,
     annotationTriggerId,
     threadNavigationRef,
     threadRowActive,
@@ -90,7 +91,7 @@ export function LastCodeThreadRowSurface({
   return (
     <ThreadAnnotationNavigationTrigger
       annotationActive={annotationActive}
-      handle={annotationPopoverHandle}
+      handle={annotationActive ? annotationPopoverHandle : threadDetailsPopoverHandle}
       id={annotationTriggerId}
       render={
         <div

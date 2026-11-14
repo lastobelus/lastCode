@@ -46,6 +46,9 @@ import * as ProcessRunner from "../processRunner.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as UpdateDrainAdmissionTestkit from "../updateDrain/UpdateDrainAdmission.testkit.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+import { withProjectRootLease } from "../workspace/projectRootLease.ts";
+import * as SuspensionRegistry from "../workspace/WorktreeSuspensionRegistry.ts";
+import * as SuspensionRegistryTestkit from "../workspace/WorktreeSuspensionRegistry.testkit.ts";
 import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
 import * as ProjectFaviconResolver from "./ProjectFaviconResolver.ts";
 import * as ProjectService from "./ProjectService.ts";
@@ -114,8 +117,10 @@ const layerTestFor = (
 ) =>
   RuntimeLayer.layerProjectService.pipe(
     Layer.provide(UpdateDrainAdmissionTestkit.layerOpen),
+    Layer.provideMerge(ServerSettings.layerTest()),
     Layer.provideMerge(ProjectEnrichmentService.layer),
     Layer.provideMerge(layerWorkspacePaths),
+    Layer.provideMerge(SuspensionRegistryTestkit.layer),
     Layer.provideMerge(projectMetadataLayer),
     Layer.provideMerge(SqlitePersistence.layerMemory),
     Layer.provideMerge(ServerSettings.layerTest()),
@@ -210,6 +215,7 @@ it.effect("resolves only the requested active project page in creation order", (
 
 const layerProjectServiceDependencies = Layer.mergeAll(
   UpdateDrainAdmissionTestkit.layerOpen,
+  SuspensionRegistryTestkit.layer,
   RuntimeLayer.layerEventSink,
   ProjectStore.layer,
   ProjectionStore.layer,
@@ -692,6 +698,7 @@ it.layer(layerTest)("ProjectService", (it) => {
             }),
             Layer.succeed(ProjectFaviconResolver.ProjectFaviconResolver, {
               resolvePath: () => Effect.succeed(null),
+              invalidate: () => Effect.void,
             }),
           ),
         ),
@@ -974,6 +981,316 @@ it.effect("refuses a worktree container as a new project and as a new workspace 
       );
     }).pipe(Effect.provide(layerTest));
   }).pipe(Effect.provide(ProcessRunner.layer.pipe(Layer.provideMerge(NodeServices.layer)))),
+);
+
+it.effect.each(["suspended", "interrupted capture", "accepted recovery"] as const)(
+  "does not recreate a missing workspace protected by %s",
+  (state) =>
+    Effect.gen(function* () {
+      let created = false;
+      const registry = yield* SuspensionRegistry.WorktreeSuspensionRegistry;
+      yield* registry.put(
+        {
+          checkoutId: "fixture-saved-workspace",
+          repositoryRoot: "/work/repository",
+          path: "/work/saved-workspace",
+          aliases: ["/work/saved-workspace"],
+          owners: [],
+          summary: {
+            checkoutId: "fixture-saved-workspace",
+            generation: 1,
+            state: state === "suspended" ? "suspended" : "capturing",
+            snapshotId: "fixture-snapshot",
+            lastRestoredAt: null,
+            keepWorkspace: false,
+          },
+          history: [],
+          blockedReason: null,
+          ...(state === "accepted recovery"
+            ? {
+                operation: {
+                  id: "fixture-recovery",
+                  kind: "recovery" as const,
+                  snapshotIds: [],
+                  manual: true,
+                  acceptedAt: "2026-01-01T00:00:00.000Z",
+                  destinationPath: "/work/recovery-destination",
+                },
+              }
+            : {}),
+        },
+        null,
+      );
+      const service = yield* ProjectService.make.pipe(
+        Effect.provideService(WorkspacePaths.WorkspacePaths, {
+          resolveRelativePathWithinRoot: ({ workspaceRoot, relativePath }) =>
+            Effect.succeed({ absolutePath: `${workspaceRoot}/${relativePath}`, relativePath }),
+          normalizeWorkspaceRoot: (workspaceRoot, options) =>
+            options?.createIfMissing
+              ? Effect.sync(() => {
+                  created = true;
+                  return workspaceRoot;
+                })
+              : Effect.fail(
+                  new WorkspacePaths.WorkspaceRootNotExistsError({
+                    workspaceRoot,
+                    normalizedWorkspaceRoot: workspaceRoot,
+                  }),
+                ),
+        }),
+        Effect.provideService(SuspensionRegistry.WorktreeSuspensionRegistry, registry),
+      );
+      const result = yield* Effect.result(
+        service.create({
+          commandId: CommandId.make(`command:protected:${state}`),
+          projectId: ProjectId.make(`project:protected:${state}`),
+          title: "Workspace",
+          workspaceRoot:
+            state === "accepted recovery" ? "/work/recovery-destination" : "/work/saved-workspace",
+          createWorkspaceRootIfMissing: true,
+        }),
+      );
+      assert.equal(result._tag, "Failure");
+      assert.isFalse(created);
+    }).pipe(
+      Effect.provide(
+        Layer.merge(
+          layerProjectServiceDependencies,
+          SuspensionRegistry.layer.pipe(
+            Layer.provide(
+              ServerConfig.layerTest(process.cwd(), { prefix: "protected-project-root-" }),
+            ),
+            Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+          ),
+        ),
+      ),
+    ),
+);
+
+it.effect.each(["restore", "recovery"] as const)(
+  "refuses project roots that overlap a reserved %s destination",
+  (kind) =>
+    Effect.gen(function* () {
+      const registry = yield* SuspensionRegistry.WorktreeSuspensionRegistry;
+      const service = yield* ProjectService.make.pipe(
+        Effect.provideService(SuspensionRegistry.WorktreeSuspensionRegistry, registry),
+      );
+      const projectId = ProjectId.make("project:recovery-update");
+      yield* service.create({
+        commandId: CommandId.make("recovery:initial-project"),
+        projectId,
+        title: "Existing",
+        workspaceRoot: "/work/original",
+      });
+      yield* registry.put(
+        {
+          checkoutId: "saved",
+          repositoryRoot: "/work/repository",
+          path: "/work/saved",
+          aliases: ["/work/saved"],
+          owners: [],
+          summary: {
+            checkoutId: "saved",
+            generation: 1,
+            state: "suspended",
+            snapshotId: "snapshot",
+            lastRestoredAt: null,
+            keepWorkspace: false,
+          },
+          history: [],
+          blockedReason: null,
+          operation: {
+            id: "recovery",
+            kind,
+            snapshotIds: [],
+            manual: true,
+            acceptedAt: "2026-01-01T00:00:00.000Z",
+            destinationPath: "/work/recovery/checkout",
+          },
+        },
+        null,
+      );
+      const created = yield* Effect.result(
+        service.create({
+          commandId: CommandId.make("recovery:create-project"),
+          projectId: ProjectId.make("project:recovery-create"),
+          title: "Overlapping",
+          workspaceRoot: "/work/recovery",
+        }),
+      );
+      const updated = yield* Effect.result(
+        service.update({
+          commandId: CommandId.make("recovery:update-project"),
+          projectId,
+          workspaceRoot: "/work/recovery/checkout",
+        }),
+      );
+      assert.equal(created._tag, "Failure");
+      assert.equal(updated._tag, "Failure");
+      assert.equal(
+        Option.getOrThrow(yield* service.getById(projectId)).workspaceRoot,
+        "/work/original",
+      );
+    }).pipe(
+      Effect.provide(
+        Layer.merge(
+          layerProjectServiceDependencies,
+          SuspensionRegistry.layer.pipe(
+            Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "project-recovery-" })),
+            Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+          ),
+        ),
+      ),
+    ),
+);
+
+it.effect.each(["available", "unavailable"] as const)(
+  "handles a missing project directory when saved-workspace authority is %s",
+  (authority) =>
+    Effect.gen(function* () {
+      let created = false;
+      const service = yield* ProjectService.make.pipe(
+        Effect.provideService(WorkspacePaths.WorkspacePaths, {
+          resolveRelativePathWithinRoot: ({ workspaceRoot, relativePath }) =>
+            Effect.succeed({ absolutePath: `${workspaceRoot}/${relativePath}`, relativePath }),
+          normalizeWorkspaceRoot: (workspaceRoot, options) =>
+            options?.createIfMissing
+              ? Effect.sync(() => {
+                  created = true;
+                  return workspaceRoot;
+                })
+              : Effect.fail(
+                  new WorkspacePaths.WorkspaceRootNotExistsError({
+                    workspaceRoot,
+                    normalizedWorkspaceRoot: workspaceRoot,
+                  }),
+                ),
+        }),
+        Effect.provide(
+          Layer.mock(SuspensionRegistry.WorktreeSuspensionRegistry)({
+            root: "/test/saved-workspaces",
+            recoveryDestinationProtection: () => Effect.succeed(null),
+            automaticProtection: () =>
+              authority === "available"
+                ? Effect.succeed(null)
+                : Effect.fail(
+                    new SuspensionRegistry.SuspensionRegistryError({ operation: "read" }),
+                  ),
+          }),
+        ),
+      );
+      const result = yield* Effect.result(
+        service.create({
+          commandId: CommandId.make("command:missing-authority"),
+          projectId: ProjectId.make("project:missing-authority"),
+          title: "Workspace",
+          workspaceRoot: "/work/missing-authority",
+          createWorkspaceRootIfMissing: true,
+        }),
+      );
+      assert.equal(result._tag, authority === "available" ? "Success" : "Failure");
+      assert.equal(created, authority === "available");
+    }).pipe(Effect.provide(layerProjectServiceDependencies)),
+);
+
+it.effect("does not register a workspace removed after the final project-root check", () =>
+  Effect.gen(function* () {
+    let exists = true;
+    let normalized = false;
+    const workspacePaths: WorkspacePaths.WorkspacePaths["Service"] = {
+      resolveRelativePathWithinRoot: ({ workspaceRoot, relativePath }) =>
+        Effect.succeed({ absolutePath: `${workspaceRoot}/${relativePath}`, relativePath }),
+      normalizeWorkspaceRoot: (workspaceRoot) =>
+        Effect.suspend(() => {
+          normalized = true;
+          return exists
+            ? Effect.succeed(workspaceRoot)
+            : Effect.fail(
+                new WorkspacePaths.WorkspaceRootNotExistsError({
+                  workspaceRoot,
+                  normalizedWorkspaceRoot: workspaceRoot,
+                }),
+              );
+        }),
+    };
+    const service = yield* ProjectService.make.pipe(
+      Effect.provideService(WorkspacePaths.WorkspacePaths, workspacePaths),
+    );
+    const projectId = ProjectId.make("project:removed-workspace");
+    const registration = yield* withProjectRootLease(
+      Effect.gen(function* () {
+        const attempt = yield* service
+          .create({
+            commandId: CommandId.make("command:removed-workspace"),
+            projectId,
+            title: "Workspace",
+            workspaceRoot: "/work/removed-workspace",
+          })
+          .pipe(Effect.result, Effect.forkChild({ startImmediately: true }));
+        assert.isFalse(normalized);
+        exists = false;
+        return attempt;
+      }),
+    );
+    assert.equal((yield* Fiber.join(registration))._tag, "Failure");
+    assert.isTrue(Option.isNone(yield* service.getById(projectId)));
+  }).pipe(Effect.provide(layerProjectServiceDependencies)),
+);
+
+it.effect("does not move a project to a workspace removed during the final check", () =>
+  Effect.gen(function* () {
+    const initial = yield* ProjectService.make;
+    const projectId = ProjectId.make("project:moved-to-removed-workspace");
+    yield* initial.create({
+      commandId: CommandId.make("command:move-race:create"),
+      projectId,
+      title: "Workspace",
+      workspaceRoot: "/work/original",
+    });
+    const projects = yield* ProjectStore.ProjectStoreV2;
+    const original = yield* projects.get(projectId);
+    let exists = true;
+    let normalized = false;
+    const service = yield* ProjectService.make.pipe(
+      Effect.provideService(ProjectStore.ProjectStoreV2, {
+        ...projects,
+        get: (id, options) =>
+          id === projectId ? Effect.succeed(original) : projects.get(id, options),
+      }),
+      Effect.provideService(WorkspacePaths.WorkspacePaths, {
+        resolveRelativePathWithinRoot: ({ workspaceRoot, relativePath }) =>
+          Effect.succeed({ absolutePath: `${workspaceRoot}/${relativePath}`, relativePath }),
+        normalizeWorkspaceRoot: (workspaceRoot) =>
+          Effect.suspend(() => {
+            normalized = true;
+            return exists
+              ? Effect.succeed(workspaceRoot)
+              : Effect.fail(
+                  new WorkspacePaths.WorkspaceRootNotExistsError({
+                    workspaceRoot,
+                    normalizedWorkspaceRoot: workspaceRoot,
+                  }),
+                );
+          }),
+      }),
+    );
+    const update = yield* withProjectRootLease(
+      Effect.gen(function* () {
+        const attempt = yield* service
+          .update({
+            commandId: CommandId.make("command:move-race:update"),
+            projectId,
+            workspaceRoot: "/work/removed-workspace",
+          })
+          .pipe(Effect.result, Effect.forkChild({ startImmediately: true }));
+        assert.isFalse(normalized);
+        exists = false;
+        return attempt;
+      }),
+    );
+    assert.equal((yield* Fiber.join(update))._tag, "Failure");
+    assert.equal(Option.getOrThrow(yield* projects.get(projectId)).workspaceRoot, "/work/original");
+  }).pipe(Effect.provide(layerProjectServiceDependencies)),
 );
 
 it.effect("serializes two projects claiming the same workspace root", () =>

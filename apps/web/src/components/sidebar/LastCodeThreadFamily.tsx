@@ -1,4 +1,4 @@
-import { BotIcon, ChevronRightIcon, SparklesIcon, TriangleAlertIcon } from "lucide-react";
+import { BotIcon, ChevronRightIcon, TriangleAlertIcon } from "lucide-react";
 import { parseScopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { ScopedThreadRef } from "@t3tools/contracts";
 import { cn } from "../../lib/utils";
@@ -195,7 +195,7 @@ export function LastCodeThreadRelationshipBadge({
               />
             }
           >
-            {isAgentCreated ? <SparklesIcon aria-hidden className="size-3" /> : null}
+            {isAgentCreated ? <BotIcon aria-hidden className="size-3" /> : null}
             {isAgentCreated && !compactStatusIndicators ? (
               <span className="hidden @sm/lastcode-sidebar:inline">Agent-created</span>
             ) : null}

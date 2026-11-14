@@ -38,13 +38,13 @@ import * as SqlitePersistence from "../apps/server/src/persistence/Sqlite.ts";
 import * as ProjectionStore from "../apps/server/src/orchestration-v2/ProjectionStore.ts";
 import * as EventStore from "../apps/server/src/orchestration-v2/EventStore.ts";
 import * as Positions from "../apps/server/src/orchestration-v2/TurnItemPositionStore.ts";
-import * as Maintenance from "../apps/server/src/orchestration-v2/ProjectionMaintenance.ts";
+import * as ProjectionReplay from "../apps/server/src/orchestration-v2/testkit/ProjectionReplay.ts";
 const persistence = SqlitePersistence.layerFromPath(process.argv[1]);
 const native = Layer.mergeAll(ProjectionStore.layer, EventStore.layer, Positions.layer).pipe(Layer.provideMerge(persistence));
-const layer = Maintenance.layer.pipe(Layer.provideMerge(native), Layer.provide(NodeServices.layer));
+const layer = ProjectionReplay.layer.pipe(Layer.provideMerge(native), Layer.provide(NodeServices.layer));
 const result = await Effect.runPromise(Effect.gen(function* () {
   const store = yield* ProjectionStore.ProjectionStoreV2;
-  const maintenance = yield* Maintenance.ProjectionMaintenanceV2;
+  const replay = yield* ProjectionReplay.ProjectionReplay;
   const sql = yield* SqlClient.SqlClient;
   const snapshot = () => Effect.forEach(JSON.parse(process.argv[2]), id => Effect.gen(function* () {
     const threadId = ThreadId.make(id);
@@ -55,7 +55,7 @@ const result = await Effect.runPromise(Effect.gen(function* () {
     return { shell, timeline, records, positions };
   }));
   const before = yield* snapshot();
-  const rebuilt = yield* maintenance.rebuild;
+  const rebuilt = yield* replay.rebuild;
   const after = yield* snapshot();
   if (after.length > 0) {
     const positions = yield* Positions.TurnItemPositionStoreV2;
@@ -296,8 +296,10 @@ describe("public-doc fixture lifecycle", () => {
   let outputDirectory: string;
   let head: string;
   let ready: Record<string, unknown> | undefined;
+  let runner: NodeChildProcess.ChildProcess | undefined;
 
-  // Two cold server starts belong to fixture preparation; replay has its own checks below.
+  // Keep source watchers out of this lifecycle test: concurrent suites edit watched files.
+  // The controlled child still exercises output parsing and owned-process cleanup.
   beforeAll(async () => {
     outputDirectory = await NodeFSP.mkdtemp(
       NodePath.join(NodeOS.tmpdir(), "lastcode-public-doc-lifecycle-test-"),
@@ -311,7 +313,34 @@ describe("public-doc fixture lifecycle", () => {
       { commit: head.trim(), outputDirectory },
       {
         resolveSourceCommit: async (requestedCommit) => requestedCommit,
-        waitForShutdown: async () => {},
+        spawnDevRunner: (command, args, options) => {
+          const baseDir = NodePath.join(outputDirectory, "environment");
+          assert.equal(args[args.indexOf("--home-dir") + 1], baseDir);
+          assert.equal(options.env?.T3CODE_HOME, baseDir);
+          assert.equal(options.env?.HOME, NodePath.join(outputDirectory, "home"));
+          runner = NodeChildProcess.spawn(
+            command,
+            [
+              "--input-type=module",
+              "-e",
+              `import { createServer } from "node:http";
+const server = createServer((_request, response) => response.end("fixture-ready"));
+server.listen(0, "127.0.0.1", () => {
+  const port = server.address().port;
+  process.stdout.write("[dev-runner] serverPort=" + port + " webPort=" + port + " baseDir=fixture\\n");
+  process.stdout.write("pairingUrl: http://127.0.0.1:" + port + "/#token=fixture-only\\n");
+});`,
+            ],
+            { ...options, stdio: ["pipe", "pipe", "pipe"] },
+          );
+          return runner;
+        },
+        waitForShutdown: async () => {
+          const origin = new URL(String(ready?.serverOrigin));
+          origin.hostname = "127.0.0.1";
+          const response = await fetch(origin, { signal: AbortSignal.timeout(1_000) });
+          assert.equal(await response.text(), "fixture-ready");
+        },
         writeReady: (value) => {
           ready = value;
         },
@@ -325,10 +354,14 @@ describe("public-doc fixture lifecycle", () => {
 
   it("runs the public-doc fixture lifecycle in isolated state", async () => {
     if (!ready) throw new Error("Fixture did not emit ready metadata.");
+    assert.isDefined(runner);
+    assert.isNotNull(runner?.signalCode);
     assert.equal(ready.sourceCommit, head.trim());
     assert.equal(ready.projectId, PUBLIC_DOCS_PROJECT_ID);
     assert.match(String(ready.pairingUrl), /#token=/u);
-    await expectRejected(fetch(String(ready.serverOrigin), { signal: AbortSignal.timeout(1_000) }));
+    const origin = new URL(String(ready.serverOrigin));
+    origin.hostname = "127.0.0.1";
+    await expectRejected(fetch(origin, { signal: AbortSignal.timeout(1_000) }));
 
     const metadataText = await NodeFSP.readFile(
       NodePath.join(outputDirectory, "fixture.json"),

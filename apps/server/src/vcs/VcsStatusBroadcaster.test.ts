@@ -31,6 +31,7 @@ import { applyGitStatusStreamEvent } from "@t3tools/shared/git";
 import * as VcsStatusBroadcaster from "./VcsStatusBroadcaster.ts";
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
+import * as AutoPullStatus from "../project/AutoPullStatus.ts";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 
 const TEST_EPOCH = DateTime.makeUnsafe("1970-01-01T00:00:00.000Z");
@@ -656,7 +657,9 @@ describe("VcsStatusBroadcaster", () => {
       let remoteStatus: VcsStatusRemoteResult = { ...baseRemoteStatus, behindCount: 2 };
       let pullCalls = 0;
       let configuredWorkspaceRoot = "";
-      const localStatus: VcsStatusLocalResult = {
+      const statusStore = AutoPullStatus.make();
+      let fetchState: "fetched" | "failed" = "fetched";
+      let localStatus: VcsStatusLocalResult = {
         ...baseLocalStatus,
         isDefaultRef: true,
         refName: "main",
@@ -664,9 +667,11 @@ describe("VcsStatusBroadcaster", () => {
       const layerTest = VcsStatusBroadcaster.layer.pipe(
         Layer.provideMerge(NodeServices.layer),
         Layer.provide(layerBackgroundPolicy(() => true)),
+        Layer.provide(Layer.succeed(AutoPullStatus.AutoPullStatus, statusStore)),
         Layer.provide(
           Layer.succeed(VcsStatusBroadcaster.VcsAutoPullPolicy, {
             isEnabled: (cwd) => Effect.succeed(cwd === configuredWorkspaceRoot),
+            fetchState: () => Effect.succeed(fetchState),
           }),
         ),
         Layer.provide(
@@ -708,6 +713,25 @@ describe("VcsStatusBroadcaster", () => {
 
         assert.equal(pullCalls, 1);
         assert.equal(status.behindCount, 0);
+        assert.equal((yield* statusStore.get(configuredWorkspaceRoot))?.result, "pulled");
+
+        // A checkout left on a feature branch is reported, not silently passed over.
+        localStatus = { ...localStatus, isDefaultRef: false, refName: "lastcode/telemetry-copy" };
+        yield* broadcaster.refreshStatus(configuredWorkspaceRoot);
+        assert.equal(pullCalls, 1);
+        const skipped = yield* statusStore.get(configuredWorkspaceRoot);
+        assert.equal(skipped?.result, "skipped");
+        assert.equal(skipped?.reason, "on branch lastcode/telemetry-copy, not the default branch");
+        assert.isNotNull(skipped?.lastSuccessAt);
+
+        // Old remote refs from a failed fetch must not read as up to date.
+        localStatus = { ...localStatus, isDefaultRef: true, refName: "main" };
+        fetchState = "failed";
+        yield* broadcaster.refreshStatus(configuredWorkspaceRoot);
+        const unfetched = yield* statusStore.get(configuredWorkspaceRoot);
+        assert.equal(unfetched?.result, "failed");
+        assert.equal(unfetched?.reason, AutoPullStatus.AUTO_PULL_FETCH_FAILED);
+        assert.equal(unfetched?.lastSuccessAt, skipped?.lastSuccessAt);
       }).pipe(Effect.provide(layerTest));
     },
   );
@@ -1231,6 +1255,7 @@ describe("VcsStatusBroadcaster", () => {
         Layer.provide(
           Layer.succeed(VcsStatusBroadcaster.VcsAutoPullPolicy, {
             isEnabled: () => Effect.succeed(autoPull),
+            fetchState: () => Effect.succeed("fetched"),
           }),
         ),
       );

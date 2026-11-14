@@ -26,6 +26,35 @@ const makeRelay = (target: CdpRelayTarget, write: (raw: string) => void) =>
 // oxlint-disable-next-line t3code/no-real-time-wait-in-tests -- a zero-delay macrotask boundary, not a wait for time
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
+const makeRelayClient = (target: CdpRelayTarget) => {
+  let nextId = 0;
+  const pending = new Map<
+    number,
+    {
+      resolve: (result: Record<string, unknown>) => void;
+      reject: (cause: Error) => void;
+    }
+  >();
+  const relay = makeRelay(target, (raw) => {
+    const reply = JSON.parse(raw) as {
+      id: number;
+      result: Record<string, unknown>;
+      error?: { message: string };
+    };
+    const request = pending.get(reply.id);
+    if (!request) return;
+    pending.delete(reply.id);
+    if (reply.error) request.reject(new Error(reply.error.message));
+    else request.resolve(reply.result);
+  });
+  return (method: string, params?: Record<string, unknown>, sessionId?: string) =>
+    new Promise<Record<string, unknown>>((resolve, reject) => {
+      const id = ++nextId;
+      pending.set(id, { resolve, reject });
+      relay.receive(JSON.stringify({ id, method, params, sessionId }));
+    });
+};
+
 describe("CDP relay", () => {
   it("replays the retained page's execution context to a reconnected client", async () => {
     let runtimeEnabled = false;
@@ -56,7 +85,7 @@ describe("CDP relay", () => {
     const target = makeTarget(send);
     for (let connection = 0; connection < 2; connection += 1) {
       const written: Array<Record<string, unknown>> = [];
-      activeRelay = createCdpRelayConnection(target, (raw) => written.push(JSON.parse(raw)));
+      activeRelay = makeRelay(target, (raw) => written.push(JSON.parse(raw)));
       activeRelay.receive(JSON.stringify({ id: 1, method: "Target.setAutoAttach", params: {} }));
       await settle();
       activeRelay.receive(
@@ -103,9 +132,7 @@ describe("CDP relay", () => {
       return {};
     });
     const written: Array<Record<string, unknown>> = [];
-    const relay = createCdpRelayConnection(makeTarget(send), (raw) =>
-      written.push(JSON.parse(raw)),
-    );
+    const relay = makeRelay(makeTarget(send), (raw) => written.push(JSON.parse(raw)));
     relay.receive(JSON.stringify({ id: 1, method: "Target.setAutoAttach", params: {} }));
     await settle();
     expect(written).toEqual([]);
@@ -279,6 +306,183 @@ describe("CDP relay extra sessions", () => {
     relay.event("Page.screencastFrame", { data: "x" }, undefined);
     expect(written.map((m) => m["sessionId"])).toEqual(["t3-preview-page", extra]);
   });
+
+  it("reports a binding call only to the sessions that added that binding", async () => {
+    const written: Array<Record<string, unknown>> = [];
+    const relay = makeRelay(
+      makeTarget(async () => ({})),
+      (raw) => written.push(JSON.parse(raw)),
+    );
+    relay.receive(JSON.stringify({ id: 1, method: "Target.setAutoAttach", params: {} }));
+    relay.receive(JSON.stringify({ id: 2, method: "Target.attachToBrowserTarget" }));
+    await settle();
+    const browserSession = (written.find((m) => m["id"] === 2)!["result"] as { sessionId: string })
+      .sessionId;
+    relay.receive(
+      JSON.stringify({
+        id: 3,
+        method: "Target.attachToTarget",
+        params: { targetId: "GUEST-TARGET", flatten: true },
+        sessionId: browserSession,
+      }),
+    );
+    await settle();
+    const extra = (written.find((m) => m["id"] === 3)!["result"] as { sessionId: string })
+      .sessionId;
+    const add = (id: number, sessionId: string, name: string, method = "Runtime.addBinding") =>
+      relay.receive(JSON.stringify({ id, method, params: { name }, sessionId }));
+    const called = (name: string, sessionId?: string) => {
+      written.length = 0;
+      relay.event("Runtime.bindingCalled", { name, payload: "active" }, sessionId);
+      return written.map((m) => m["sessionId"]);
+    };
+    add(4, "t3-preview-page", "__playwright__binding__");
+    add(6, "iframe-session", "__playwright__binding__");
+    await settle();
+    // The host adds its own gesture binding on its debugger, outside the relay.
+    expect(called("t3ThreadLinkGesture")).toEqual([]);
+    add(5, extra, "t3ThreadLinkGesture");
+    await settle();
+    expect(called("t3ThreadLinkGesture")).toEqual([extra]);
+    expect(called("__playwright__binding__")).toEqual(["t3-preview-page"]);
+    expect(called("__playwright__binding__", "iframe-session")).toEqual(["iframe-session"]);
+    expect(called("t3ThreadLinkGesture", "iframe-session")).toEqual([]);
+    add(7, extra, "t3ThreadLinkGesture", "Runtime.removeBinding");
+    await settle();
+    expect(called("t3ThreadLinkGesture")).toEqual([]);
+  });
+});
+
+describe("CDP relay cookies", () => {
+  it("roundtrips request cookies through the attached native session without touching another profile", async () => {
+    const cookie = {
+      name: "session",
+      value: "before-exchange",
+      domain: "preview.example",
+      path: "/",
+      expires: -1,
+      httpOnly: true,
+      secure: true,
+      sameSite: "Lax",
+    };
+    const otherOriginCookie = { ...cookie, name: "other-origin", domain: "other.example" };
+    const makeCookieTarget = (initialCookies: Array<Record<string, unknown>>) => {
+      const keyOf = (cookie: Record<string, unknown>) =>
+        JSON.stringify([cookie.name, cookie.domain, cookie.path, cookie.partitionKey]);
+      const cookies = new Map(initialCookies.map((cookie) => [keyOf(cookie), cookie]));
+      const send = vi.fn(async (method: string, params: Record<string, unknown>) => {
+        if (method === "Network.getAllCookies")
+          return { cookies: structuredClone([...cookies.values()]) };
+        if (method === "Network.setCookies") {
+          for (const cookie of params.cookies as Array<Record<string, unknown>>)
+            cookies.set(keyOf(cookie), structuredClone(cookie));
+          return {};
+        }
+        throw new Error(`Unexpected native command: ${method}`);
+      });
+      return { target: { ...makeTarget(send), url: () => "about:blank" }, send };
+    };
+    const profile = makeCookieTarget([cookie, otherOriginCookie]);
+    const otherProfile = makeCookieTarget([{ ...cookie, value: "other-profile" }]);
+    const request = makeRelayClient(profile.target);
+    const requestInOtherProfile = makeRelayClient(otherProfile.target);
+
+    // A context request reads its jar before HTTP, even while the page is blank.
+    expect(await request("Storage.getCookies", { browserContextId: "t3-preview" })).toEqual({
+      cookies: [cookie, otherOriginCookie],
+    });
+    const responseCookies = [
+      { ...cookie, value: "after-exchange", expires: 2_000_000_000 },
+      {
+        ...cookie,
+        name: "partitioned",
+        sameSite: "None",
+        partitionKey: { topLevelSite: "https://preview.example", hasCrossSiteAncestor: true },
+      },
+    ];
+    expect(
+      await request("Storage.setCookies", {
+        browserContextId: "t3-preview",
+        cookies: responseCookies,
+      }),
+    ).toEqual({});
+
+    // The next request, including after reconnect, must see the HTTP response cookies.
+    const reconnected = makeRelayClient(profile.target);
+    expect(await reconnected("Storage.getCookies")).toEqual({
+      cookies: [responseCookies[0], otherOriginCookie, responseCookies[1]],
+    });
+    expect(await requestInOtherProfile("Storage.getCookies")).toEqual({
+      cookies: [{ ...cookie, value: "other-profile" }],
+    });
+    expect(profile.send.mock.calls).toEqual([
+      ["Network.getAllCookies", {}, undefined],
+      ["Network.setCookies", { cookies: responseCookies }, undefined],
+      ["Network.getAllCookies", {}, undefined],
+    ]);
+    expect(otherProfile.send.mock.calls).toEqual([["Network.getAllCookies", {}, undefined]]);
+  });
+
+  it("routes cookie commands on synthetic browser and page sessions to the attached tab", async () => {
+    const send = vi.fn(async (method: string) =>
+      method === "Network.getAllCookies" ? { cookies: [] } : {},
+    );
+    const request = makeRelayClient(makeTarget(send));
+    const { sessionId } = (await request("Target.attachToBrowserTarget")) as { sessionId: string };
+    expect(
+      await request("Storage.getCookies", { browserContextId: "t3-preview" }, sessionId),
+    ).toEqual({
+      cookies: [],
+    });
+    expect(
+      await request(
+        "Storage.setCookies",
+        { cookies: [], browserContextId: "t3-preview" },
+        sessionId,
+      ),
+    ).toEqual({});
+    expect(await request("Storage.getCookies", {}, "t3-preview-page")).toEqual({ cookies: [] });
+    expect(await request("Storage.setCookies", { cookies: [] }, "t3-preview-page")).toEqual({});
+    expect(send.mock.calls).toEqual([
+      ["Network.getAllCookies", {}, undefined],
+      ["Network.setCookies", { cookies: [] }, undefined],
+      ["Network.getAllCookies", {}, undefined],
+      ["Network.setCookies", { cookies: [] }, undefined],
+    ]);
+  });
+
+  it.each(["Storage.getCookies", "Storage.setCookies"])(
+    "rejects another browser context for %s before accessing a native cookie jar",
+    async (method) => {
+      const send = vi.fn(async () => ({}));
+      const request = makeRelayClient(makeTarget(send));
+      await expect(
+        request(method, { browserContextId: "another-native-context", cookies: [] }),
+      ).rejects.toThrow("Only this preview tab's browser context can be used.");
+      await expect(
+        request(
+          method,
+          { browserContextId: "another-native-context", cookies: [] },
+          "t3-preview-page",
+        ),
+      ).rejects.toThrow("Only this preview tab's browser context can be used.");
+      expect(send).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["Storage.getCookies", "Storage.setCookies"])(
+    "reports native cookie failures for %s instead of acknowledging success",
+    async (method) => {
+      const request = makeRelayClient(
+        makeTarget(async () => {
+          throw new Error("Native cookie operation failed");
+        }),
+      );
+      await expect(
+        request(method, { browserContextId: "t3-preview", cookies: [] }),
+      ).rejects.toThrow("Native cookie operation failed");
+    },
+  );
 });
 
 describe("CDP relay downloads", () => {
@@ -287,7 +491,9 @@ describe("CDP relay downloads", () => {
     const directories: Array<string | null> = [];
     const written: Array<Record<string, unknown>> = [];
     const relay = makeRelay(
-      makeTarget(send, (directory) => directories.push(directory)),
+      makeTarget(send, (directory) => {
+        directories.push(directory);
+      }),
       (raw) => written.push(JSON.parse(raw)),
     );
     relay.receive(JSON.stringify({ id: 1, method: "Target.setAutoAttach", params: {} }));
@@ -306,6 +512,7 @@ describe("CDP relay downloads", () => {
     await settle();
     expect(directories).toEqual(["/srv/artifacts"]);
     expect(send.mock.calls).toEqual([
+      ["Runtime.disable", {}, undefined],
       ["Page.setDownloadBehavior", { behavior: "default" }, undefined],
     ]);
     written.length = 0;
@@ -321,7 +528,9 @@ describe("CDP relay downloads", () => {
     const send = vi.fn(async () => ({}));
     const directories: Array<string | null> = [];
     const relay = makeRelay(
-      makeTarget(send, (directory) => directories.push(directory)),
+      makeTarget(send, (directory) => {
+        directories.push(directory);
+      }),
       () => {},
     );
     for (const [id, behavior] of ["deny", "allowAndName"].entries()) {
@@ -364,10 +573,13 @@ describe("CDP relay downloads", () => {
   it.each([false, true])(
     "keeps the previous download configuration (events enabled: %s) when configuration fails",
     async (enabled) => {
-      const send = vi
-        .fn(async () => ({}))
-        .mockResolvedValueOnce({})
-        .mockRejectedValueOnce(new Error("Page command rejected"));
+      let downloadConfigurations = 0;
+      const send = vi.fn(async (method: string) => {
+        if (method === "Page.setDownloadBehavior" && ++downloadConfigurations === 2) {
+          throw new Error("Page command rejected");
+        }
+        return {};
+      });
       const written: Array<Record<string, unknown>> = [];
       let directory: string | null = null;
       const relay = makeRelay(

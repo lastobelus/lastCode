@@ -8,6 +8,8 @@ import {
   MCP_PEER_LINK_SOFTWARE_ID,
   type PeerLink,
   type PeerLinkCreateInput,
+  type PeerLinkPreflightInput,
+  type PeerLinkPreflightResult,
   PeerLinkError,
   type PeerLinkSummary,
 } from "@t3tools/contracts";
@@ -96,6 +98,9 @@ export class PeerLinks extends Context.Service<
     /** Whether the Linked environments beta (Settings → Labs) is on here. */
     readonly enabled: Effect.Effect<boolean>;
     readonly link: (input: PeerLinkCreateInput) => Effect.Effect<PeerLink, PeerLinkError>;
+    readonly preflight: (
+      input: PeerLinkPreflightInput,
+    ) => Effect.Effect<PeerLinkPreflightResult, PeerLinkError>;
     readonly list: Effect.Effect<ReadonlyArray<PeerLinkSummary>, PeerLinkError>;
     /** The stored link, without asking the peer whether it answers. */
     readonly get: (
@@ -158,7 +163,7 @@ const peerOrigin = (url: string) => {
     return Effect.fail(
       new PeerLinkError({
         reason: "unreachable",
-        message: `${url} is not an http or https address.`,
+        message: "Use an http or https address for the other environment.",
       }),
     );
   }
@@ -170,7 +175,7 @@ const peerOrigin = (url: string) => {
     return Effect.fail(
       new PeerLinkError({
         reason: "unreachable",
-        message: `${url} is plain http, which would send the link's credentials unencrypted. Use its https address, or its Tailscale address.`,
+        message: `${parsed.origin} is plain http, which would send the link's credentials unencrypted. Use its https address, or its Tailscale address.`,
       }),
     );
   }
@@ -203,9 +208,18 @@ const probeFailure = (
       code === undefined ? `${origin} did not answer.` : `${origin} did not answer (${code}).`,
     );
   }
+  const status = HttpClientError.isHttpClientError(error) ? error.response?.status : undefined;
   return new PeerLinkError({
     reason: "not_a_t3_environment",
-    message: `${origin} answered, but not as a T3 Code environment this version understands.`,
+    message:
+      status !== undefined && status >= 500
+        ? `${origin} returned HTTP ${status} while checking its environment descriptor.`
+        : error._tag === "SchemaError" ||
+            (HttpClientError.isHttpClientError(error) &&
+              error.reason._tag === "DecodeError" &&
+              (status === undefined || (status >= 200 && status < 300)))
+          ? `${origin} did not return a valid T3 Code environment descriptor.`
+          : `${origin} answered, but not as a T3 Code environment this version understands.`,
   });
 };
 
@@ -449,7 +463,7 @@ const make = Effect.gen(function* () {
           if (descriptor.environmentId !== environmentId) {
             return yield* new PeerLinkError({
               reason: "unreachable",
-              message: `${origin} answered as another environment, ${descriptor.label}.`,
+              message: `${origin} answers as ${descriptor.label}, a different environment from ${name}.`,
             });
           }
           return { origin, descriptor };
@@ -464,9 +478,10 @@ const make = Effect.gen(function* () {
       const reasons = checked.flatMap((result) =>
         Result.isFailure(result) ? [result.failure.message] : [],
       );
+      const self = yield* environment.getDescriptor;
       return yield* new PeerLinkError({
         reason: "unreachable",
-        message: `This environment could not reach ${name}: ${reasons.join(" ")}`,
+        message: `${self.label} could not reach ${name}: ${reasons.join(" ")}`,
       });
     }
     // Each address is kept once, even when two spellings share an origin.
@@ -481,7 +496,7 @@ const make = Effect.gen(function* () {
     return { primary, peer: yield* probe(primary), origins };
   });
 
-  const link: PeerLinks["Service"]["link"] = Effect.fn("PeerLinks.link")(function* (input) {
+  const prepareLink = Effect.fn("PeerLinks.prepareLink")(function* (input: PeerLinkPreflightInput) {
     if (!(yield* enabled)) {
       return yield* new PeerLinkError({ reason: "disabled", message: LINKED_ENVIRONMENTS_OFF });
     }
@@ -525,6 +540,18 @@ const make = Effect.gen(function* () {
         message: `${peer.label} runs a T3 Code version that cannot keep a linked agent's limits. Update it, then link again.`,
       });
     }
+    return { primary, peer, origins, self };
+  });
+
+  const preflight: PeerLinks["Service"]["preflight"] = Effect.fn("PeerLinks.preflight")(
+    function* (input) {
+      const { peer, origins } = yield* prepareLink(input);
+      return { environmentId: peer.environmentId, label: peer.label, urls: origins };
+    },
+  );
+
+  const link: PeerLinks["Service"]["link"] = Effect.fn("PeerLinks.link")(function* (input) {
+    const { primary, peer, origins, self } = yield* prepareLink(input);
     const issued = yield* signIn(primary, input, `T3 Code · ${self.label}`);
     const now = yield* DateTime.now;
     const linked: PeerLink = {
@@ -713,6 +740,7 @@ const make = Effect.gen(function* () {
 
   return PeerLinks.of({
     enabled,
+    preflight,
     link,
     list,
     get,

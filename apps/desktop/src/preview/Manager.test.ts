@@ -12,6 +12,7 @@ import { parseKeybindingShortcut } from "@t3tools/shared/keybindings";
 import { app, shell } from "electron";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
@@ -88,6 +89,24 @@ describe("previewWindowOpenAction", () => {
     expect(
       PreviewManager.previewWindowOpenAction(details({ url: "http://localhost:5173/auth" })),
     ).toBe("popup");
+    for (const disposition of ["new-window", "foreground-tab", "background-tab"] as const) {
+      expect(
+        PreviewManager.previewWindowOpenAction(
+          details({
+            url: "https://app.t3.codes/threads/linked/thread",
+            disposition,
+          }),
+        ),
+      ).toBe("popup");
+      expect(
+        PreviewManager.previewWindowOpenAction(
+          details({
+            url: "t3-thread://v2/linked/thread",
+            disposition,
+          }),
+        ),
+      ).toBe("deny");
+    }
   });
 
   it("opens HTTP links in preview tabs", () => {
@@ -1555,8 +1574,10 @@ describe("PreviewManager", () => {
     const detachListeners = new Set<() => void>();
     let chromiumDetaches = 0;
     let destroyed = false;
+    let hostDestroyed = false;
     const wc = {
       id,
+      hostWebContents: { isDestroyed: () => hostDestroyed },
       isDestroyed: () => destroyed,
       isDevToolsOpened: () => {
         if (destroyed) throw new TypeError("Object has been destroyed");
@@ -1605,6 +1626,9 @@ describe("PreviewManager", () => {
       detach,
       sendCommand,
       chromiumDetach,
+      closeHost: () => {
+        hostDestroyed = true;
+      },
       destroy: () => {
         destroyed = true;
         listeners.get("destroyed")?.();
@@ -1612,7 +1636,10 @@ describe("PreviewManager", () => {
     };
   };
 
-  effectIt.effect("reattaches a debugger that Chromium dropped on its own", () =>
+  effectIt.effect.each([
+    { name: "while its window is open", hostClosed: false, attaches: 2 },
+    { name: "never once its window has closed", hostClosed: true, attaches: 1 },
+  ])("reattaches a debugger that Chromium dropped on its own $name", ({ hostClosed, attaches }) =>
     withManager((manager) =>
       Effect.gen(function* () {
         const guest = makeAttachingGuest(48);
@@ -1622,10 +1649,31 @@ describe("PreviewManager", () => {
         yield* Effect.yieldNow;
         expect(guest.attach).toHaveBeenCalledTimes(1);
 
+        if (hostClosed) guest.closeHost();
         guest.chromiumDetach();
         yield* Effect.yieldNow;
         yield* Effect.yieldNow;
-        expect(guest.attach).toHaveBeenCalledTimes(2);
+        expect(guest.attach).toHaveBeenCalledTimes(attaches);
+      }),
+    ),
+  );
+
+  effectIt.effect("abandons a debugger session that never finishes opening", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const guest = makeAttachingGuest(49);
+        guest.sendCommand.mockImplementation(() => new Promise<unknown>(() => {}));
+        fromId.mockReturnValue(guest.wc);
+        yield* manager.createTab("tab_stalled");
+        yield* manager.registerWebview("tab_stalled", 49);
+        yield* Effect.yieldNow;
+        expect(guest.attach).toHaveBeenCalledTimes(1);
+
+        yield* TestClock.adjust(Duration.seconds(30));
+        yield* Effect.yieldNow;
+        expect(guest.detach).toHaveBeenCalledTimes(1);
+        // The session map's lock is free again, so closing the tab completes.
+        yield* manager.closeTab("tab_stalled");
       }),
     ),
   );
@@ -2444,13 +2492,21 @@ describe("PreviewManager", () => {
 
       fromId.mockReturnValue(initial.wc);
       yield* manager.registerWebview("tab_1", 42);
-      expect(JSON.parse(yield* Queue.take(lines))).toEqual({ type: "attached", ...serverTab });
+      expect(JSON.parse(yield* Queue.take(lines))).toEqual({
+        type: "attached",
+        ...serverTab,
+        supportsNativeSurface: true,
+      });
       expect(JSON.parse(yield* Queue.take(lines))).toEqual(failure("https://first.local/"));
 
       fromId.mockReturnValue(replacement.wc);
       yield* manager.registerWebview("tab_1", 43);
       expect(JSON.parse(yield* Queue.take(lines))).toEqual({ type: "detached", ...serverTab });
-      expect(JSON.parse(yield* Queue.take(lines))).toEqual({ type: "attached", ...serverTab });
+      expect(JSON.parse(yield* Queue.take(lines))).toEqual({
+        type: "attached",
+        ...serverTab,
+        supportsNativeSurface: true,
+      });
       expect(JSON.parse(yield* Queue.take(lines))).toEqual(failure("https://second.local/"));
 
       // A callback queued by the old guest must not report a failure for its replacement.
@@ -2466,9 +2522,62 @@ describe("PreviewManager", () => {
       fromId.mockReturnValue(retried.wc);
       yield* manager.registerWebview("tab_1", 44);
       expect(JSON.parse(yield* Queue.take(lines))).toEqual({ type: "detached", ...serverTab });
-      expect(JSON.parse(yield* Queue.take(lines))).toEqual({ type: "attached", ...serverTab });
+      expect(JSON.parse(yield* Queue.take(lines))).toEqual({
+        type: "attached",
+        ...serverTab,
+        supportsNativeSurface: true,
+      });
       expect(statuses.at(-1)?.kind).toBe("Success");
     }).pipe(Effect.provide(managerLayer())),
+  );
+
+  effectIt.effect.each(["https://example.com/", "https://example.com/next"])(
+    "detaches the server binding when a native tab closes after navigating to %s",
+    (url) =>
+      Effect.gen(function* () {
+        const host = yield* DesktopBrowserHost.DesktopBrowserHost;
+        using detach = vi.spyOn(host, "detach");
+        const serverTab = { threadId: "thread-1", tabId: "server-tab-1" };
+        const lines = yield* Queue.unbounded<string>();
+        yield* host.events.pipe(
+          Stream.runForEach((line) => Queue.offer(lines, new TextDecoder().decode(line))),
+          Effect.forkScoped,
+        );
+        const nextType = Queue.take(lines).pipe(
+          Effect.map((line) => /"type":"(\w+)"/.exec(line)?.[1]),
+        );
+        const capturePage = vi.fn(async () => ({
+          toPNG: () => Buffer.from("png"),
+          toJPEG: () => Buffer.from("jpeg"),
+          getSize: () => ({ width: 100, height: 80 }),
+        }));
+        const loadURL = vi.fn(async () => undefined);
+        const reload = vi.fn();
+        fromId.mockReturnValue(
+          Object.assign(makeTestPreviewWebContents(capturePage, 42), {
+            isDevToolsOpened: () => false,
+            getUserAgent: () => "Electron",
+            getURL: () => "https://example.com/",
+            loadURL,
+            reload,
+          }),
+        );
+        const manager = yield* PreviewManager.PreviewManager;
+        yield* manager.createTab("tab_1", { serverTab });
+        yield* manager.registerWebview("tab_1", 42);
+        expect(yield* nextType).toBe("attached");
+
+        yield* manager.navigate("tab_1", url);
+        if (url === "https://example.com/") {
+          expect(reload).toHaveBeenCalledOnce();
+        } else {
+          expect(loadURL).toHaveBeenCalledWith(url);
+        }
+        yield* manager.closeTab("tab_1");
+
+        expect(detach).toHaveBeenCalledWith(serverTab);
+        expect(yield* nextType).toBe("detached");
+      }).pipe(Effect.provide(managerLayer()), Effect.scoped),
   );
 
   effectIt.effect("discards a screenshot that resolves after its guest is replaced", () =>

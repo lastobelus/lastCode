@@ -225,6 +225,8 @@ it.effect.each([false, true])(
             Layer.mock(DesktopBrowserHost.DesktopBrowserHost)({
               setRootFactory: unexpectedBrowserHostCall,
               attach: unexpectedBrowserHostCall,
+              agentLedPage: unexpectedBrowserHostCall,
+              loadFailed: unexpectedBrowserHostCall,
               reserveTab: unexpectedBrowserHostCall,
               releaseReservation: unexpectedBrowserHostCall,
               registerPopup: unexpectedBrowserHostCall,

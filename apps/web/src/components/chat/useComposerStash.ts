@@ -27,7 +27,6 @@ import {
 } from "../../promptStashStore";
 import { type PendingUserInput } from "../../session-logic";
 import { type ReviewCommentContext } from "../../reviewCommentContext";
-import { collapseExpandedComposerCursor } from "../../composer-logic";
 import { collectComposerPromptInlineTokens } from "../../composer-editor-mentions";
 import { compressImageForStash } from "../../lib/imageCompression";
 import { formatInlineContextReference } from "~/lib/composerContextReferences";
@@ -242,7 +241,7 @@ export function useComposerStash(input: {
     if (promptChanged) {
       promptRef.current = nextPrompt;
       setComposerDraftPrompt(composerDraftTarget, nextPrompt);
-      setComposerCursor(collapseExpandedComposerCursor(nextPrompt, nextPrompt.length));
+      setComposerCursor(nextPrompt.length);
       setComposerTrigger(null);
     }
 
@@ -349,9 +348,7 @@ export function useComposerStash(input: {
         const restoredFilePrompt = getComposerDraft(composerDraftTarget)?.prompt;
         if (restoredFilePrompt !== undefined && restoredFilePrompt !== promptRef.current) {
           promptRef.current = restoredFilePrompt;
-          setComposerCursor(
-            collapseExpandedComposerCursor(restoredFilePrompt, restoredFilePrompt.length),
-          );
+          setComposerCursor(restoredFilePrompt.length);
           setComposerTrigger(null);
           promptChanged = true;
         }

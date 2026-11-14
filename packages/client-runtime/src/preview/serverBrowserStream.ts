@@ -1,3 +1,4 @@
+import { parseThreadLinkHref } from "@t3tools/shared/threadLinks";
 // @effect-diagnostics globalTimers:off globalFetch:off - This browser and WebView transport runs without an Effect runtime.
 import { type DeviceHubAccess, withDeviceHubQuery } from "../device/hubAccess.ts";
 import {
@@ -17,7 +18,7 @@ export type PreviewStreamMouseButton = "none" | "left" | "middle" | "right";
 
 export interface PreviewStreamControl {
   readonly canOperate: boolean;
-  readonly controller: "agent" | "you" | "another-viewer" | "unclaimed";
+  readonly controller: "agent" | "you" | "taking-control" | "another-viewer" | "unclaimed";
   readonly generation: number;
   readonly dialog: null | {
     readonly type: string;
@@ -33,11 +34,13 @@ export const previewStreamControlLabel = (control: PreviewStreamControl | null):
       ? "Read-only"
       : control.controller === "you"
         ? "You have control"
-        : control.controller === "agent"
-          ? "Agent has control"
-          : control.controller === "another-viewer"
-            ? "Another viewer has control"
-            : "Watching";
+        : control.controller === "taking-control"
+          ? "Taking control…"
+          : control.controller === "agent"
+            ? "Agent has control"
+            : control.controller === "another-viewer"
+              ? "Another viewer has control"
+              : "Watching";
 
 const isPreviewStreamDialog = (value: unknown): value is PreviewStreamControl["dialog"] =>
   value === null ||
@@ -191,6 +194,7 @@ export interface PreviewStreamEvents {
   readonly onControl?: (control: PreviewStreamControl) => void;
   readonly onClipboard?: (text: string) => void;
   readonly onDownload?: (download: PreviewStreamDownload) => void;
+  readonly onThreadLink?: (href: string) => void;
   readonly onPopup?: (tabId: string) => void;
   readonly onFileChooser?: (chooser: PreviewStreamFileChooser | null) => void;
   readonly onConnectedChange: (connected: boolean) => void;
@@ -279,6 +283,7 @@ export function createPreviewStreamClient(
         phase,
         sequence,
         tabId,
+        href,
       } = message as Record<string, unknown>;
       if (
         type === "fileChooser" &&
@@ -305,6 +310,8 @@ export function createPreviewStreamClient(
         typeof sequence === "number"
       ) {
         events.onPointer?.({ phase, x, y, sequence });
+      } else if (type === "threadLink" && typeof href === "string" && parseThreadLinkHref(href)) {
+        events.onThreadLink?.(href);
       } else if (type === "popup" && typeof tabId === "string") {
         events.onPopup?.(tabId);
       } else if (type === "clipboard" && typeof text === "string") {
@@ -335,6 +342,7 @@ export function createPreviewStreamClient(
         typeof canOperate === "boolean" &&
         (controller === "agent" ||
           controller === "you" ||
+          controller === "taking-control" ||
           controller === "another-viewer" ||
           controller === "unclaimed") &&
         typeof generation === "number" &&
@@ -384,7 +392,9 @@ export function createPreviewStreamClient(
     send: (input) => {
       if (socket?.readyState !== WebSocket.OPEN) return false;
       if (!control?.canOperate) return false;
-      if (input.type !== "takeControl" && control.controller !== "you") return false;
+      if (control.controller === "taking-control") {
+        if (input.type !== "dialog" && input.type !== "releaseControl") return false;
+      } else if (input.type !== "takeControl" && control.controller !== "you") return false;
       socket.send(JSON.stringify(input));
       return true;
     },

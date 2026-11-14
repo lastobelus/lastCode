@@ -10,7 +10,9 @@ import { afterAll, vi } from "vite-plus/test";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
+import * as Digest from "effect/crypto/Digest";
 import * as Effect from "effect/Effect";
+import * as Hex from "effect/encoding/Hex";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
@@ -530,6 +532,7 @@ it.effect.each([
             `exit ${hookExitCode}\n`,
         );
         yield* fs.chmod(path.join(cwd, ".git/hooks/post-checkout"), 0o755);
+        yield* git(cwd, ["config", "core.hooksPath", path.join(cwd, ".git/hooks")]);
         const worktreePath = path.join(yield* makeTmpDir("git-worktrees-"), "created");
         spawnedArgs.length = 0;
         invalidationFailure = commonDirFailure;
@@ -1698,6 +1701,44 @@ it.effect.each([
   ),
 );
 
+it.effect("classifies the worktree fetch deadline without changing its displayed error", () =>
+  Effect.gen(function* () {
+    const started = yield* Deferred.make<void>();
+    const spawner = ChildProcessSpawner.make((command) =>
+      Effect.succeed(
+        ChildProcess.isStandardCommand(command) && command.args[0] === "fetch"
+          ? ChildProcessSpawner.makeHandle({
+              ...makeSuccessfulHandle(""),
+              exitCode: Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)),
+            })
+          : makeNonRepositoryHandle(),
+      ),
+    );
+    const driver = yield* makeGitVcsDriverCore().pipe(
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+    );
+    const cwd = yield* makeTmpDir();
+    const fetching = yield* driver
+      .fetchRemote({ cwd, remoteName: "origin" })
+      .pipe(Effect.flip, Effect.forkChild);
+    yield* Deferred.await(started);
+    yield* TestClock.adjust("30 seconds");
+    const error = yield* Fiber.join(fetching);
+    assert.equal(error.operation, "GitVcsDriver.fetchRemote");
+    assert.equal(error.reason, "timed_out");
+    assert.equal(
+      error.message,
+      `Git command failed in GitVcsDriver.fetchRemote (${cwd}): Git command timed out.`,
+    );
+  }).pipe(
+    Effect.provide(
+      layerServerConfig.pipe(
+        Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+      ),
+    ),
+  ),
+);
+
 it.effect("retries a fetch that lost a ref update to another Git process", () =>
   Effect.gen(function* () {
     const attempts = yield* Ref.make(0);
@@ -2473,6 +2514,12 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         yield* initRepoWithCommit(cwd);
         yield* git(cwd, ["init", "--bare", remote]);
         yield* git(cwd, ["remote", "add", "origin", remote]);
+        yield* git(remote, [
+          "--git-dir=.",
+          "config",
+          "core.hooksPath",
+          pathService.join(remote, "hooks"),
+        ]);
         const preReceive = pathService.join(remote, "hooks", "pre-receive");
         yield* writeTextFile(
           remote,
@@ -4641,6 +4688,30 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
       }),
     );
 
+    it.effect("reports whether a status read's background fetch reached the remote", () =>
+      Effect.gen(function* () {
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const tracked = Effect.fn(function* (remoteUrl?: string) {
+          const cwd = yield* makeTmpDir();
+          const remote = yield* makeTmpDir("git-vcs-driver-remote-");
+          const { initialBranch } = yield* initRepoWithCommit(cwd);
+          yield* git(remote, ["init", "--bare"]);
+          yield* git(cwd, ["remote", "add", "origin", remote]);
+          yield* git(cwd, ["push", "-u", "origin", initialBranch]);
+          if (remoteUrl !== undefined) yield* git(cwd, ["remote", "set-url", "origin", remoteUrl]);
+          return cwd;
+        });
+        const healthy = yield* tracked();
+        const unreachable = yield* tracked(`${yield* makeTmpDir()}/missing.git`);
+
+        yield* driver.statusDetails(healthy);
+        yield* driver.statusDetails(unreachable);
+
+        assert.equal(yield* driver.statusFetchState(healthy), "fetched");
+        assert.equal(yield* driver.statusFetchState(unreachable), "failed");
+      }),
+    );
+
     it.effect("does not start Git auto-maintenance from background upstream fetches", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();
@@ -5335,6 +5406,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
           "#!/bin/sh\ngit config checkout.workers > checkout-workers\nexit 0\n",
         );
         yield* fs.chmod(path.join(cwd, ".git/hooks/post-checkout"), 0o755);
+        yield* git(cwd, ["config", "core.hooksPath", path.join(cwd, ".git/hooks")]);
         const worktreePath = path.join(yield* makeTmpDir("git-worktrees-"), "parallel");
 
         yield* driver.createWorktree({
@@ -5492,6 +5564,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         const path = yield* Path.Path;
         const driver = yield* GitVcsDriver.GitVcsDriver;
         // Something else takes the new worktree's index lock as soon as its checkout ends.
+        yield* git(cwd, ["config", "core.hooksPath", path.join(cwd, ".git/hooks")]);
         yield* writeTextFile(
           cwd,
           ".git/hooks/post-checkout",
@@ -5932,6 +6005,76 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
       }),
     );
 
+    it.effect(
+      "checks the allocated destination before adding a worktree or creating its branch",
+      () =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          const { initialBranch } = yield* initRepoWithCommit(cwd);
+          const destinationRoot = yield* makeTmpDir("git-worktrees-");
+          const driver = yield* GitVcsDriver.GitVcsDriver;
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          let checked: string | undefined;
+          const identity = `${yield* fs.realPath(path.join(cwd, ".git"))}\0feature/reserved`;
+          const digest = yield* Digest.Digest;
+          const hash = yield* digest.digest(Digest.sha256, new TextEncoder().encode(identity));
+          const result = yield* driver
+            .createWorktree(
+              { cwd, path: null, refName: initialBranch, newRefName: "feature/reserved" },
+              {
+                worktreesDirectory: destinationRoot,
+                acquireDestination: (destination) => {
+                  checked = destination;
+                  return Effect.fail(
+                    new GitCommandError({
+                      operation: "test.destination",
+                      command: "workspace-acquisition",
+                      cwd,
+                      detail: "Destination retained",
+                    }),
+                  );
+                },
+              },
+            )
+            .pipe(Effect.result);
+          assert.equal(result._tag, "Failure");
+          assert.equal(
+            checked,
+            path.join(
+              destinationRoot,
+              path.basename(cwd),
+              `feature-reserved-${Hex.encode(hash).slice(0, 16)}`,
+            ),
+          );
+          assert.isFalse(yield* fs.exists(checked!));
+          assert.isFalse((yield* driver.listLocalBranchNames(cwd)).includes("feature/reserved"));
+        }),
+    );
+
+    it.effect("uses an acquired destination without changing the requested worktree branch", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const path = yield* Path.Path;
+        const fs = yield* FileSystem.FileSystem;
+        const destinationRoot = yield* makeTmpDir("git-worktrees-");
+        const allocated = path.join(destinationRoot, "original");
+        const acquired = path.join(destinationRoot, "available");
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const result = yield* driver.createWorktree(
+          { cwd, path: allocated, refName: initialBranch, newRefName: "feature/acquired" },
+          { acquireDestination: () => Effect.succeed(acquired) },
+        );
+        assert.deepEqual(result.worktree, { path: acquired, refName: "feature/acquired" });
+        assert.isFalse(yield* fs.exists(allocated));
+        assert.equal(
+          (yield* git(acquired, ["branch", "--show-current"])).trim(),
+          "feature/acquired",
+        );
+      }),
+    );
+
     it.effect("creates worktrees under the configured worktrees directory", () =>
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
@@ -6173,33 +6316,85 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
       }),
     );
 
-    it.effect.each([false, true])(
-      "cleans up links left by successful worktree removal, preserving ordinary files: %s",
-      (keepFile) =>
+    it.effect.each(
+      [0, 1].flatMap((exitCode) =>
+        ["metadata", "file", "directory"].map((leftover) => ({ exitCode, leftover })),
+      ),
+    )(
+      "cleans up leftovers after Git unregisters the worktree: $exitCode, $leftover",
+      ({ exitCode, leftover }) =>
         Effect.gen(function* () {
           const cwd = yield* makeTmpDir();
+          const { initialBranch } = yield* initRepoWithCommit(cwd);
           const fileSystem = yield* FileSystem.FileSystem;
           const pathService = yield* Path.Path;
           const outside = yield* makeTmpDir("git-worktree-link-target-");
           yield* writeTextFile(outside, "keep.txt", "external target\n");
-          const worktreePath = pathService.join(cwd, "leftover");
-          const nested = pathService.join(worktreePath, "node_modules");
-          yield* fileSystem.makeDirectory(nested, { recursive: true });
-          yield* fileSystem.makeDirectory(pathService.join(worktreePath, "empty"));
-          NodeFS.symlinkSync(outside, pathService.join(worktreePath, "linked"), "junction");
-          NodeFS.symlinkSync(outside, pathService.join(nested, "pkg"), "junction");
-          if (keepFile) {
-            yield* writeTextFile(worktreePath, "notes/draft.txt", "new work\n");
-          }
+          const worktreePath = pathService.join(yield* makeTmpDir("git-worktrees-"), "leftover");
+          const realDriver = yield* GitVcsDriver.GitVcsDriver;
+          yield* realDriver.createWorktree({
+            cwd,
+            path: worktreePath,
+            refName: initialBranch,
+            newRefName: "feature/leftover",
+          });
 
-          // Git removes symlinks on Unix; simulate its successful Windows removal
-          // leaving junctions behind so the cleanup is exercised on every platform.
+          // Recreate files after real Git has removed the checkout and registration,
+          // then report the rmdir failure Finder can cause. No timing race is needed.
           const delegate = yield* ChildProcessSpawner.ChildProcessSpawner;
           const spawner = ChildProcessSpawner.make((command) =>
-            ChildProcess.isStandardCommand(command) &&
-            command.args.join(" ").includes("worktree remove")
-              ? Effect.succeed(makeSuccessfulHandle(""))
-              : delegate.spawn(command),
+            Effect.gen(function* () {
+              const handle = yield* delegate.spawn(command);
+              if (
+                !ChildProcess.isStandardCommand(command) ||
+                !command.args.join(" ").includes("worktree remove")
+              )
+                return handle;
+              return ChildProcessSpawner.makeHandle({
+                ...handle,
+                stderr: Stream.encodeText(
+                  Stream.make("error: failed to delete: Directory not empty"),
+                ),
+                exitCode: handle.exitCode.pipe(
+                  Effect.flatMap((actualExitCode) =>
+                    Effect.gen(function* () {
+                      assert.equal(actualExitCode, 0);
+                      const nested = pathService.join(worktreePath, "node_modules");
+                      yield* fileSystem.makeDirectory(nested, { recursive: true });
+                      yield* fileSystem.makeDirectory(pathService.join(worktreePath, "empty"));
+                      NodeFS.symlinkSync(
+                        outside,
+                        pathService.join(worktreePath, "linked"),
+                        "junction",
+                      );
+                      NodeFS.symlinkSync(outside, pathService.join(nested, "pkg"), "junction");
+                      yield* writeTextFile(worktreePath, ".DS_Store", "Finder metadata\n");
+                      yield* writeTextFile(nested, ".DS_Store", "Finder metadata\n");
+                      if (leftover === "file") {
+                        yield* writeTextFile(worktreePath, "notes/draft.txt", "new work\n");
+                      } else if (leftover === "directory") {
+                        yield* writeTextFile(
+                          worktreePath,
+                          "notes/.DS_Store/keep.txt",
+                          "new work\n",
+                        );
+                        yield* writeTextFile(
+                          worktreePath,
+                          "notes/.DS_Store/.DS_Store",
+                          "keep metadata name\n",
+                        );
+                        yield* fileSystem.makeDirectory(
+                          pathService.join(worktreePath, "notes/.DS_Store/empty"),
+                        );
+                      }
+                      return ChildProcessSpawner.ExitCode(exitCode);
+                    }),
+                  ),
+                  Effect.provideService(FileSystem.FileSystem, fileSystem),
+                  Effect.provideService(Path.Path, pathService),
+                ),
+              });
+            }),
           );
           const driver = yield* makeGitVcsDriverCore().pipe(
             Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
@@ -6212,12 +6407,30 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
             yield* fileSystem.readFileString(pathService.join(outside, "keep.txt")),
             "external target\n",
           );
-          if (keepFile) {
+          assert.notInclude(yield* git(cwd, ["worktree", "list", "--porcelain"]), worktreePath);
+          if (leftover !== "metadata") {
             assert.deepEqual(yield* fileSystem.readDirectory(worktreePath), ["notes"]);
             assert.equal(
-              yield* fileSystem.readFileString(pathService.join(worktreePath, "notes/draft.txt")),
+              yield* fileSystem.readFileString(
+                pathService.join(
+                  worktreePath,
+                  leftover === "file" ? "notes/draft.txt" : "notes/.DS_Store/keep.txt",
+                ),
+              ),
               "new work\n",
             );
+            if (leftover === "directory") {
+              assert.equal(
+                yield* fileSystem.readFileString(
+                  pathService.join(worktreePath, "notes/.DS_Store/.DS_Store"),
+                ),
+                "keep metadata name\n",
+              );
+              assert.equal(
+                yield* fileSystem.exists(pathService.join(worktreePath, "notes/.DS_Store/empty")),
+                true,
+              );
+            }
           } else {
             assert.equal(yield* fileSystem.exists(worktreePath), false);
           }
@@ -6252,31 +6465,59 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
       }),
     );
 
-    it.effect("leaves a folder alone that only shares the worktree's short name", () =>
-      Effect.gen(function* () {
-        const cwd = yield* makeTmpDir();
-        const { initialBranch } = yield* initRepoWithCommit(cwd);
-        const pathService = yield* Path.Path;
-        const fileSystem = yield* FileSystem.FileSystem;
-        const driver = yield* GitVcsDriver.GitVcsDriver;
-        const worktreePath = pathService.join(yield* makeTmpDir("git-worktrees-"), "short");
-        yield* driver.createWorktree({
-          cwd,
-          path: worktreePath,
-          refName: initialBranch,
-          newRefName: "feature/short",
-        });
-        // Unrelated to the worktree, but resolving "short" against cwd lands here.
-        const outside = yield* makeTmpDir("git-worktree-link-target-");
-        const unrelated = pathService.join(cwd, "short");
-        NodeFS.mkdirSync(unrelated);
-        NodeFS.symlinkSync(outside, pathService.join(unrelated, "linked"), "junction");
+    it.effect.each(["plain", "foreign", "pruned"])(
+      "leaves an unrelated $0 folder alone that shares the worktree's short name",
+      (kind) =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          const { initialBranch } = yield* initRepoWithCommit(cwd);
+          const pathService = yield* Path.Path;
+          const fileSystem = yield* FileSystem.FileSystem;
+          const driver = yield* GitVcsDriver.GitVcsDriver;
+          const worktreePath = pathService.join(yield* makeTmpDir("git-worktrees-"), "short");
+          yield* driver.createWorktree({
+            cwd,
+            path: worktreePath,
+            refName: initialBranch,
+            newRefName: "feature/short",
+          });
+          // Unrelated to the worktree, but resolving "short" against cwd lands here.
+          const outside = yield* makeTmpDir("git-worktree-link-target-");
+          const unrelated = pathService.join(cwd, "short");
+          if (kind === "plain") {
+            NodeFS.mkdirSync(unrelated);
+          } else {
+            const otherRepo = kind === "foreign" ? yield* makeTmpDir("git-other-repo-") : cwd;
+            const otherBranch =
+              kind === "foreign"
+                ? (yield* initRepoWithCommit(otherRepo)).initialBranch
+                : initialBranch;
+            yield* driver.createWorktree({
+              cwd: otherRepo,
+              path: unrelated,
+              refName: otherBranch,
+              newRefName: "feature/unrelated",
+            });
+            if (kind === "pruned") {
+              const adminDir = yield* git(unrelated, ["rev-parse", "--absolute-git-dir"]);
+              yield* fileSystem.remove(adminDir, { recursive: true });
+            }
+          }
+          NodeFS.symlinkSync(outside, pathService.join(unrelated, "linked"), "junction");
+          yield* writeTextFile(unrelated, ".DS_Store", "keep metadata\n");
 
-        yield* Effect.result(driver.removeWorktree({ cwd, path: "short" }));
+          const result = yield* Effect.result(driver.removeWorktree({ cwd, path: "short" }));
 
-        assert.isTrue(NodeFS.lstatSync(pathService.join(unrelated, "linked")).isSymbolicLink());
-        assert.equal(yield* fileSystem.exists(worktreePath), true);
-      }),
+          assert.isTrue(Result.isFailure(result));
+          assert.isTrue(NodeFS.lstatSync(pathService.join(unrelated, "linked")).isSymbolicLink());
+          assert.equal(
+            yield* fileSystem.readFileString(pathService.join(unrelated, ".DS_Store")),
+            "keep metadata\n",
+          );
+          if (kind !== "plain")
+            assert.equal(yield* fileSystem.exists(pathService.join(unrelated, ".git")), true);
+          assert.equal(yield* fileSystem.exists(worktreePath), true);
+        }),
     );
 
     it.effect("force-removes a worktree without deleting what its junctions point to", () =>
@@ -6317,33 +6558,72 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
       }),
     );
 
-    it.effect("keeps the junctions of a worktree that git refuses to remove", () =>
-      Effect.gen(function* () {
-        const cwd = yield* makeTmpDir();
-        const { initialBranch } = yield* initRepoWithCommit(cwd);
-        yield* writeTextFile(cwd, ".gitignore", "node_modules\n");
-        yield* git(cwd, ["add", ".gitignore"]);
-        yield* git(cwd, ["commit", "-m", "ignore node_modules"]);
-        const pathService = yield* Path.Path;
-        const outside = yield* makeTmpDir("git-worktree-link-target-");
-        const worktreePath = pathService.join(yield* makeTmpDir("git-worktrees-"), "linked");
-        const driver = yield* GitVcsDriver.GitVcsDriver;
-        yield* driver.createWorktree({
-          cwd,
-          path: worktreePath,
-          refName: initialBranch,
-          newRefName: "feature/linked",
-        });
-        const link = pathService.join(worktreePath, "node_modules");
-        NodeFS.symlinkSync(outside, link, "junction");
-        yield* writeTextFile(worktreePath, "notes.txt", "draft\n");
+    it.effect.each(["refused", "registered", "quoted-fallback"])(
+      "keeps the junctions of a registered worktree after $0 removal",
+      (mode) =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          const { initialBranch } = yield* initRepoWithCommit(cwd);
+          yield* writeTextFile(cwd, ".gitignore", "node_modules\n");
+          yield* git(cwd, ["add", ".gitignore"]);
+          yield* git(cwd, ["commit", "-m", "ignore node_modules"]);
+          const pathService = yield* Path.Path;
+          const outside = yield* makeTmpDir("git-worktree-link-target-");
+          const worktreePath = pathService.join(yield* makeTmpDir("git-worktrees-"), "linked");
+          const realDriver = yield* GitVcsDriver.GitVcsDriver;
+          yield* realDriver.createWorktree({
+            cwd,
+            path: worktreePath,
+            refName: initialBranch,
+            newRefName: "feature/linked",
+          });
+          const link = pathService.join(worktreePath, "node_modules");
+          NodeFS.symlinkSync(outside, link, "junction");
+          yield* writeTextFile(worktreePath, "notes.txt", "draft\n");
+          yield* writeTextFile(worktreePath, ".DS_Store", "Finder metadata\n");
+          const alias = pathService.join(yield* makeTmpDir("git-worktree-alias-"), "root");
+          NodeFS.symlinkSync(pathService.dirname(worktreePath), alias, "junction");
+          yield* git(worktreePath, ["checkout", "--detach"]);
+          const delegate = yield* ChildProcessSpawner.ChildProcessSpawner;
+          const spawner = ChildProcessSpawner.make((command) => {
+            if (mode !== "refused" && ChildProcess.isStandardCommand(command)) {
+              const args = command.args.join(" ");
+              if (args.includes("worktree remove")) {
+                return Effect.sync(() => {
+                  // Partial deletion can also leave the admin registration intact.
+                  NodeFS.unlinkSync(pathService.join(worktreePath, ".git"));
+                  return makeFailedHandle("error: failed to delete: Directory not empty");
+                });
+              }
+              if (mode === "quoted-fallback" && args.includes("worktree list")) {
+                return Effect.succeed(
+                  command.args.includes("-z")
+                    ? makeFailedHandle("error: unknown switch z")
+                    : makeSuccessfulHandle(
+                        `worktree "${NodeFS.realpathSync(worktreePath)}"\nHEAD abc\ndetached\n\n`,
+                      ),
+                );
+              }
+            }
+            return delegate.spawn(command);
+          });
+          const driver = yield* makeGitVcsDriverCore().pipe(
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+            Effect.provide(layerServerConfig),
+          );
 
-        const result = yield* Effect.result(driver.removeWorktree({ cwd, path: worktreePath }));
+          const result = yield* Effect.result(
+            driver.removeWorktree({ cwd, path: pathService.join(alias, "linked") }),
+          );
 
-        assert.isTrue(Result.isFailure(result));
-        assert.isTrue(NodeFS.lstatSync(link).isSymbolicLink());
-        assert.deepEqual(NodeFS.readdirSync(pathService.dirname(worktreePath)), ["linked"]);
-      }),
+          assert.isTrue(Result.isFailure(result));
+          assert.isTrue(NodeFS.lstatSync(link).isSymbolicLink());
+          assert.equal(
+            NodeFS.readFileSync(pathService.join(worktreePath, ".DS_Store"), "utf8"),
+            "Finder metadata\n",
+          );
+          assert.deepEqual(NodeFS.readdirSync(pathService.dirname(worktreePath)), ["linked"]);
+        }),
     );
 
     it.effect("removes the same worktree path twice without failing", () =>
@@ -7157,6 +7437,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         yield* initRepoWithCommit(cwd);
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
+        yield* git(cwd, ["config", "core.hooksPath", path.join(cwd, ".git/hooks")]);
         for (const [name, script] of Object.entries(hooks)) {
           yield* writeTextFile(cwd, `.git/hooks/${name}`, `#!/bin/sh\n${script}\n`);
           yield* fs.chmod(path.join(cwd, ".git/hooks", name), 0o755);

@@ -234,7 +234,7 @@ export function delegatedTaskAwaitsWork(
   runs: ReadonlyArray<OrchestrationV2Run>,
   child: {
     readonly subagents: ReadonlyArray<
-      Pick<OrchestrationV2Subagent, "runId" | "status" | "completionDelivery">
+      Pick<OrchestrationV2Subagent, "runId" | "status" | "completionDelivery" | "ownershipReleased">
     >;
     readonly providerThreads: ReadonlyArray<
       Pick<OrchestrationV2ProviderThread, "pendingBackgroundTasks">
@@ -243,7 +243,10 @@ export function delegatedTaskAwaitsWork(
 ): boolean {
   const runIds = new Set<string | null>(runs.map((run) => run.id));
   return (
-    child.subagents.some((task) => runIds.has(task.runId) && subagentHoldsCompletion(task)) ||
+    child.subagents.some(
+      (task) =>
+        task.ownershipReleased !== true && runIds.has(task.runId) && subagentHoldsCompletion(task),
+    ) ||
     child.providerThreads.some((thread) =>
       backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? []),
     )
@@ -255,8 +258,22 @@ export function delegatedTaskResultRun(
   runs: ReadonlyArray<OrchestrationV2Run>,
 ): OrchestrationV2Run | undefined {
   const taskRuns = runs.toSorted((a, b) => b.ordinal - a.ordinal);
+  const actionContinuations = new Set(
+    taskRuns.flatMap(
+      (run) =>
+        run.actionObligations?.flatMap((row) =>
+          row.state === "transferred" && row.continuationRunId !== undefined
+            ? [row.continuationRunId]
+            : [],
+        ) ?? [],
+    ),
+  );
+  // Owned continuations retain the task's work and outcome even when held or cancelled before start.
   const awaited = taskRuns.filter(
-    (run) => !cancelledBeforeStart(run) && !(run.status === "queued" && run.queueHeld === true),
+    (run) =>
+      run.pullRequestWatchContinuation !== undefined ||
+      actionContinuations.has(run.id) ||
+      (!cancelledBeforeStart(run) && !(run.status === "queued" && run.queueHeld === true)),
   );
   // Executing work reports the task's state; a reordered queue can finish a newer run before an older one.
   const executing = awaited.find((run) =>

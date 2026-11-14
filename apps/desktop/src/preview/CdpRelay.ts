@@ -16,8 +16,8 @@ export interface CdpRelayTarget {
   readonly url: () => string;
   readonly title: () => string;
   readonly userAgent: () => string;
-  /** The desktop and its server share a disk; download paths need no translation. */
-  readonly setDownloadDirectory: (directory: string | null) => void;
+  /** The host prepares the download directory before the configuration reply is sent. */
+  readonly setDownloadDirectory: (directory: string | null) => void | Promise<void>;
 }
 
 export interface CdpRelayConnection {
@@ -104,6 +104,14 @@ export function createCdpRelayConnection(
   /** Relay-created page sessions share one real debugger; child frame sessions retain their own ids. */
   const sessions = new Map<string, "browser" | "page">([[PAGE_SESSION_ID, "page"]]);
   let sessionSequence = 0;
+  // Chromium reports a binding call only to sessions that added that binding, and Playwright
+  // parses every report as its own. The shared debugger reports them all, so filter here.
+  const bindings = new Map<string, Set<string>>();
+  const reportsTo = (sessionId: string, method: string, params: unknown) => {
+    if (method !== "Runtime.bindingCalled") return true;
+    const { name } = params as { name: string };
+    return bindings.get(sessionId)?.has(name) ?? false;
+  };
   const newSession = (kind: "browser" | "page") => {
     const sessionId = `t3-preview-${kind}-${++sessionSequence}`;
     sessions.set(sessionId, kind);
@@ -122,6 +130,20 @@ export function createCdpRelayConnection(
   const browserCommand = async (command: CdpCommand): Promise<unknown> => {
     if (ACKNOWLEDGED.has(command.method)) return {};
     switch (command.method) {
+      case "Storage.getCookies":
+      case "Storage.setCookies": {
+        const { browserContextId, ...params } = command.params ?? {};
+        if (browserContextId !== undefined && browserContextId !== BROWSER_CONTEXT_ID)
+          throw new Error("Only this preview tab's browser context can be used.");
+        // Storage.* resolves a browser-wide context, while Network.* uses the
+        // attached page's actual storage partition, including named/incognito
+        // profiles. The relay's synthetic context id never belongs to Chromium.
+        return target.send(
+          command.method === "Storage.getCookies" ? "Network.getAllCookies" : "Network.setCookies",
+          params,
+          undefined,
+        );
+      }
       case "Browser.setDownloadBehavior": {
         const directory = command.params?.["downloadPath"];
         const allowed = command.params?.["behavior"] !== "deny" && typeof directory === "string";
@@ -131,7 +153,7 @@ export function createCdpRelayConnection(
           { behavior: command.params?.["behavior"] === "deny" ? "deny" : "default" },
           undefined,
         );
-        target.setDownloadDirectory(allowed ? directory : null);
+        await target.setDownloadDirectory(allowed ? directory : null);
         downloadEventsEnabled = command.params?.["eventsEnabled"] === true;
         return result;
       }
@@ -170,6 +192,7 @@ export function createCdpRelayConnection(
         const sessionId = command.params?.["sessionId"];
         if (typeof sessionId === "string" && sessionId !== PAGE_SESSION_ID) {
           sessions.delete(sessionId);
+          bindings.delete(sessionId);
           target.sessionDetached?.(sessionId);
         }
         return {};
@@ -195,6 +218,8 @@ export function createCdpRelayConnection(
   };
 
   const pageCommand = (command: CdpCommand): Promise<unknown> => {
+    if (command.method === "Storage.getCookies" || command.method === "Storage.setCookies")
+      return browserCommand(command);
     const child = sessions.get(command.sessionId!) === "page" ? undefined : command.sessionId;
     const owner =
       child === undefined && command.sessionId !== PAGE_SESSION_ID ? command.sessionId : undefined;
@@ -204,6 +229,13 @@ export function createCdpRelayConnection(
     }
     // Playwright asks for this on every page; the host emulates focus only while it is in use.
     if (command.method === "Emulation.setFocusEmulationEnabled") return Promise.resolve({});
+    const binding = command.params?.["name"];
+    if (typeof binding === "string" && command.method === "Runtime.addBinding") {
+      const added = bindings.get(command.sessionId!) ?? new Set<string>();
+      bindings.set(command.sessionId!, added.add(binding));
+    } else if (typeof binding === "string" && command.method === "Runtime.removeBinding") {
+      bindings.get(command.sessionId!)?.delete(binding);
+    }
     return target.send(command.method, command.params ?? {}, child, owner);
   };
 
@@ -253,11 +285,11 @@ export function createCdpRelayConnection(
       }
       // Electron reports the page's own events with an empty session id.
       if (sessionId) {
-        send({ method, params, sessionId });
+        if (reportsTo(sessionId, method, params)) send({ method, params, sessionId });
         return;
       }
       for (const [id, kind] of sessions) {
-        if (kind !== "page") continue;
+        if (kind !== "page" || !reportsTo(id, method, params)) continue;
         if (
           method === "Page.screencastFrame" &&
           !target.receivesScreencast(id === PAGE_SESSION_ID ? undefined : id)

@@ -713,6 +713,13 @@ it.effect(
         const b = yield* serveB(box);
         const a = yield* makeA(laptop);
         const pairing = yield* b.auth.issuePairingCredential();
+        const checked = yield* a.links.preflight({
+          url: impostor.url,
+          alternateUrls: [b.url],
+          expectedEnvironmentId: box.environmentId,
+        });
+        expect(checked).toMatchObject({ environmentId: box.environmentId, urls: [b.url] });
+        expect(yield* linkedSessions(b)).toEqual([]);
         const linked = yield* a.links.link({
           url: impostor.url,
           alternateUrls: [b.url],
@@ -754,7 +761,7 @@ it.effect(
     ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
-it.effect("linking a picked machine that answers nowhere names it and links nothing", () =>
+it.live("linking a picked machine that answers nowhere names it and links nothing", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const impostor = yield* serveApart(descriptorOf("environment-impostor", "Impostor"));
@@ -770,9 +777,10 @@ it.effect("linking a picked machine that answers nowhere names it and links noth
         })
         .pipe(Effect.flip);
       expect(failed.reason).toBe("unreachable");
-      expect(failed.message).toBe(
-        `This environment could not reach Box: ${new URL(impostor.url).origin} answered as another environment, Impostor. http://192.168.1.20:3773 is plain http, which would send the link's credentials unencrypted. Use its https address, or its Tailscale address.`,
-      );
+      expect(failed.message).toContain("Impostor");
+      expect(failed.message).toContain("different environment");
+      expect(failed.message).toContain("plain http");
+      expect(failed.message).toContain("Laptop");
       expect(yield* a.links.list).toEqual([]);
       expect(yield* linkedSessions(impostor)).toEqual([]);
 
@@ -788,6 +796,22 @@ it.effect("linking a picked machine that answers nowhere names it and links noth
         .pipe(Effect.flip);
       expect(refused.message).toContain("could not reach Box");
       expect(refused.message).toContain("plain http");
+
+      for (const [status, body, detail] of [
+        [502, "Bad Gateway", "HTTP 502"],
+        [200, "{}", "descriptor"],
+      ] as const) {
+        const front = yield* serveRaw(() =>
+          Effect.succeed(
+            HttpServerResponse.text(body, { status, contentType: "application/json" }),
+          ),
+        );
+        const unavailable = yield* a.links
+          .preflight({ url: front, expectedEnvironmentId: box.environmentId, expectedLabel: "Box" })
+          .pipe(Effect.flip);
+        expect(unavailable.message).toContain(detail);
+        expect(yield* a.links.list).toEqual([]);
+      }
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

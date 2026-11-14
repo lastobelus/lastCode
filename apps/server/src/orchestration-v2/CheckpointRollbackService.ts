@@ -25,6 +25,7 @@ import {
   withCheckpointRestoreReservation,
   withWorkspaceLease,
 } from "../workspace/workspaceLease.ts";
+import * as WorkspaceAcquisition from "../workspace/WorkspaceAcquisition.ts";
 import {
   isCheckpointRestoreIsolated,
   SHARED_WORKSPACE_RESTORE_MESSAGE,
@@ -124,9 +125,11 @@ export const layer: Layer.Layer<
   | ServerConfig.ServerConfig
   | ServerSettings.ServerSettingsService
   | ThreadCommandExecutor.ThreadCommandExecutor
+  | WorkspaceAcquisition.WorkspaceAcquisition
 > = Layer.effect(
   CheckpointRollbackServiceV2,
   Effect.gen(function* () {
+    const workspaceAcquisition = yield* WorkspaceAcquisition.WorkspaceAcquisition;
     const checkpoints = yield* CheckpointServiceV2;
     const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
     const eventSink = yield* EventSinkV2;
@@ -140,14 +143,46 @@ export const layer: Layer.Layer<
     const threadCommands = yield* ThreadCommandExecutor.ThreadCommandExecutor;
     const isManagedWorktreePath = yield* makeIsManagedWorktreePath;
 
-    const execute = Effect.fn("orchestrationV2.checkpointRollback.execute")(function* (input: {
-      readonly threadId: ThreadId;
-      readonly providerThreadId: ProviderThreadId;
-      readonly checkpointId: CheckpointId;
-      readonly scopeId: CheckpointScopeId;
-      readonly restoreFiles?: boolean;
-    }) {
-      const context = yield* projections.getCheckpointRollbackContext(input.threadId, input);
+    const execute = Effect.fn("orchestrationV2.checkpointRollback.execute")(function* (
+      input: {
+        readonly threadId: ThreadId;
+        readonly providerThreadId: ProviderThreadId;
+        readonly checkpointId: CheckpointId;
+        readonly scopeId: CheckpointScopeId;
+        readonly restoreFiles?: boolean;
+      },
+      acquisition?: {
+        readonly originalPath: string;
+        readonly workspace: WorkspaceAcquisition.AcquiredWorkspace;
+      },
+    ) {
+      const current = yield* projections.getCheckpointRollbackContext(input.threadId, input);
+      const relativeScope =
+        current.scope === undefined || acquisition === undefined
+          ? null
+          : path.relative(acquisition.originalPath, current.scope.cwd);
+      const context =
+        acquisition?.workspace.restored && current.thread.worktreePath !== null
+          ? {
+              ...current,
+              thread: {
+                ...current.thread,
+                worktreePath: acquisition.workspace.path,
+                branch: acquisition.workspace.branch,
+              },
+              scope:
+                current.scope !== undefined &&
+                relativeScope !== null &&
+                relativeScope !== ".." &&
+                !relativeScope.startsWith(`..${path.sep}`) &&
+                !path.isAbsolute(relativeScope)
+                  ? {
+                      ...current.scope,
+                      cwd: path.resolve(acquisition.workspace.path, relativeScope),
+                    }
+                  : current.scope,
+            }
+          : current;
       const { providerThread, checkpoint, scope, targetAttempt, runsToRollback, staleCheckpoints } =
         context;
       if (
@@ -248,6 +283,14 @@ export const layer: Layer.Layer<
           (leftover || !(yield* fileSystem.exists(worktreePath))) &&
           (yield* isManagedWorktreePath(worktreePath))
         ) {
+          if (acquisition?.workspace.restored)
+            return yield* new CheckpointRollbackExecutionError({
+              reason: "unexpected-failure",
+              threadId: input.threadId,
+              providerThreadId: input.providerThreadId,
+              checkpointId: input.checkpointId,
+              cause: new WorkspaceAcquisition.WorkspaceUnavailableError({ reason: "blocked" }),
+            });
           const project = yield* projects.get(context.thread.projectId);
           if (Option.isSome(project)) {
             const recreate = gitWorkflow.pruneWorktrees({ cwd: project.value.workspaceRoot }).pipe(
@@ -425,15 +468,36 @@ export const layer: Layer.Layer<
         function* (input) {
           // Storage cleanup removes worktrees under the same lease.
           const thread = yield* projections.getThread(input.threadId);
-          if (thread.worktreePath === null) return yield* execute(input);
-          const worktreePath = path.resolve(thread.worktreePath);
-          const rollback = withWorkspaceLease(worktreePath, execute(input));
-          // Shared-workspace restores are rejected and conversation-only rewinds
-          // touch no files; reserving for them would stall turn starts on the
-          // slow provider rollback for nothing.
-          yield* input.restoreFiles === false
+          const project =
+            thread.worktreePath === null
+              ? Option.getOrUndefined(yield* projects.get(thread.projectId))
+              : undefined;
+          const workspacePath = thread.worktreePath ?? project?.workspaceRoot;
+          const rollback =
+            workspacePath === undefined
+              ? execute(input)
+              : withWorkspaceLease(
+                  path.resolve(workspacePath),
+                  Effect.gen(function* () {
+                    const acquired = yield* workspaceAcquisition.acquire({
+                      path: workspacePath,
+                      threadId: input.threadId,
+                      purpose: "checkpoint",
+                    });
+                    yield* withWorkspaceLease(
+                      acquired.path,
+                      execute(input, { originalPath: workspacePath, workspace: acquired }),
+                    );
+                  }),
+                );
+          yield* input.restoreFiles === false || thread.worktreePath === null
             ? rollback
-            : withCheckpointRestoreReservation(fileSystem, path, worktreePath, rollback);
+            : withCheckpointRestoreReservation(
+                fileSystem,
+                path,
+                path.resolve(workspacePath!),
+                rollback,
+              );
         },
         (effect, input) =>
           effect.pipe(

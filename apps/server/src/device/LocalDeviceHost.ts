@@ -693,10 +693,9 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
         // A recovered daemon may predate the current pin, even when activation has
         // already resolved the new launcher. Retire with its completed recorded install.
         const installed = yield* installedAgentDevice(config.baseDir, existing.value.version).pipe(
-          Effect.flatMap((recorded) =>
-            recorded !== null
-              ? Effect.succeed(recorded)
-              : installedAgentDevice(config.baseDir, AGENT_DEVICE_VERSION),
+          Effect.filterOrElse(
+            (recorded) => recorded !== null,
+            () => installedAgentDevice(config.baseDir, AGENT_DEVICE_VERSION),
           ),
           Effect.provideService(FileSystem.FileSystem, fs),
           Effect.provideService(Path.Path, path),

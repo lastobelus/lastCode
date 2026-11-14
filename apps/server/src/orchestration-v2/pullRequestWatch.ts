@@ -21,6 +21,7 @@ export type PullRequestWatchChange =
   | { readonly kind: "remarks"; readonly remarks: ReadonlyArray<PullRequestComment> }
   | { readonly kind: "no-checks"; readonly minutes: number }
   | { readonly kind: "reactions"; readonly reactions: ReadonlyArray<PullRequestWatchReaction> }
+  | { readonly kind: "quiet"; readonly minutes: number }
   | { readonly kind: "conflicting" }
   | { readonly kind: "merge-queue-removed"; readonly reason: string | null };
 
@@ -268,10 +269,24 @@ export function evaluatePullRequestWatch(
     changes.every((change) => change.kind === "remarks" || change.kind === "reactions");
   const progress = headMoved || (changes.length > 0 && !commentsOnly);
   const wakes = (progress ? 0 : watch.wakes) + (commentsOnly ? 1 : 0);
+  let quietDeadline = watch.quietDeadline;
+  if (quietDeadline !== undefined) {
+    if ((headMoved && watch.headSha !== null) || changes.length > 0) {
+      quietDeadline = {
+        ...quietDeadline,
+        dueAt: DateTime.formatIso(DateTime.makeUnsafe(now + quietDeadline.timeoutMinutes * 60_000)),
+      };
+    } else if (quietDeadline.dueAt !== null && now >= Date.parse(quietDeadline.dueAt)) {
+      changes.push({ kind: "quiet", minutes: quietDeadline.timeoutMinutes });
+      quietDeadline = { ...quietDeadline, dueAt: null };
+    }
+  }
   return {
     changes,
     next: {
       startedAt: watch.startedAt,
+      ...(watch.generation === undefined ? {} : { generation: watch.generation }),
+      ...(quietDeadline === undefined ? {} : { quietDeadline }),
       headSha,
       failedChecks,
       passed,
@@ -370,6 +385,10 @@ function changeLines(
         }),
       ];
     }
+    case "quiet":
+      return [
+        `- No new actionable check results, comments, reviews, conflicts, or pushes for ${change.minutes} minutes, so this bounded wait has expired. Check the PR now and act on any failure or finding; this notice is not a review or merge signal. If it is still pending, report the expired wait as a blocker and call unwatch_pull_request: this notice comes only once, and stuck CI or review sends no further updates. Watch again only if the user asks you to keep waiting or new actionable work needs it.`,
+      ];
     case "conflicting":
       return [`- The branch now conflicts with ${context.baseBranch}.`];
     case "merge-queue-removed":
@@ -386,6 +405,7 @@ const SUMMARY: Record<PullRequestWatchChange["kind"], string> = {
   remarks: "new comments",
   "no-checks": "no checks reported",
   reactions: "new reactions",
+  quiet: "still waiting",
   conflicting: "merge conflict",
   "merge-queue-removed": "removed from merge queue",
 };
@@ -433,6 +453,7 @@ export function pullRequestWatchMessage(input: {
   readonly baseBranch: string;
   readonly headSha: string | null;
   readonly report: PullRequestWatchReport;
+  readonly ended?: "merged" | "closed";
 }): { readonly text: string; readonly notification: OrchestrationV2Notification } {
   const { changes, exhausted } = input.report;
   const context = {
@@ -440,12 +461,18 @@ export function pullRequestWatchMessage(input: {
     commit: input.headSha === null ? "" : ` on ${input.headSha.slice(0, 7)}`,
   };
   const text = [
-    `Update on pull request #${input.number} (${input.url}), which T3 Code is watching for you:`,
+    input.ended === undefined
+      ? `Update on pull request #${input.number} (${input.url}), which T3 Code is watching for you:`
+      : `Pull request #${input.number} (${input.url}) was ${input.ended}, so T3 Code stopped watching it.`,
     ...changes.flatMap((change) => changeLines(change, context)),
     "",
-    exhausted
-      ? `T3 Code stopped watching after ${PULL_REQUEST_WATCH_WAKE_LIMIT} comment-only updates in a row. Call watch_pull_request to watch it again.`
-      : WATCHING_CLOSING,
+    input.ended !== undefined
+      ? "Look into each item and act on it as your task requires."
+      : exhausted
+        ? `T3 Code stopped watching after ${PULL_REQUEST_WATCH_WAKE_LIMIT} comment-only updates in a row. Call watch_pull_request to watch it again.`
+        : changes.some((change) => change.kind === "quiet")
+          ? "When you hand the work back to the user, call unwatch_pull_request first so the thread returns to their inbox."
+          : WATCHING_CLOSING,
   ].join("\n");
   const failed = changes.some(
     (change) =>

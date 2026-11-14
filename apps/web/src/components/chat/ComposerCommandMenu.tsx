@@ -112,6 +112,7 @@ export const ComposerCommandMenu = memo(function ComposerCommandMenu(props: {
   isLoading: boolean;
   triggerKind: ComposerTriggerKind | null;
   emptyStateText?: string;
+  searchStatus?: string | null;
   activeItemId: string | null;
   onHighlightedItemChange: (itemId: string | null) => void;
   onSelect: (item: ComposerCommandItem) => void;
@@ -181,6 +182,11 @@ export const ComposerCommandMenu = memo(function ComposerCommandMenu(props: {
             </p>
           </div>
         )}
+        {props.items.length > 0 && props.searchStatus ? (
+          <div role="status" className="px-5 py-2 text-secondary-label text-xs">
+            {props.searchStatus}
+          </div>
+        ) : null}
       </ComposerBanner.Surface>
     </Command>
   );

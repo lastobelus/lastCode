@@ -247,6 +247,20 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     );
 
     const runCodexCommand = Effect.fn("runCodexJson.runCodexCommand")(function* () {
+      const promptOnly =
+        operation === "generateIncomingMessageSummary" || operation === "generatePromptSnippets";
+      const isolatedCwd = promptOnly
+        ? yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3code-incoming-preview-" }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new TextGenerationError({
+                  operation,
+                  detail: "Failed to isolate preview generation.",
+                  cause,
+                }),
+            ),
+          )
+        : cwd;
       const resolved = resolveRuntime
         ? yield* resolveRuntime.pipe(
             Effect.mapError(
@@ -282,8 +296,11 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
           ? undefined
           : getModelSelectionStringOptionValue(modelSelection, "reasoningEffort")) ??
         DEFAULT_TEXT_GENERATION_REASONING_EFFORT;
-      const serviceTier =
-        resolved || fellBack ? undefined : getCodexServiceTierOptionValue(modelSelection);
+      const serviceTier = promptOnly
+        ? "default"
+        : resolved || fellBack
+          ? undefined
+          : getCodexServiceTierOptionValue(modelSelection);
       const binary = effectiveConfig.binaryPath || "codex";
       const env = {
         ...effectiveEnvironment,
@@ -296,13 +313,15 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
             }
           : {}),
       };
-      const enabledMcpServers = yield* listEnabledMcpServers({
-        binary,
-        cwd,
-        env,
-        launchArgs: codexMcpListLaunchArgs(launchArgs),
-      });
-      const mcpServersOff = codexMcpServersOff(enabledMcpServers);
+      const enabledMcpServers = promptOnly
+        ? []
+        : yield* listEnabledMcpServers({
+            binary,
+            cwd,
+            env,
+            launchArgs: codexMcpListLaunchArgs(launchArgs),
+          });
+      const mcpServersOff = promptOnly ? null : codexMcpServersOff(enabledMcpServers);
       const execLaunchArgs = codexExecLaunchArgs(launchArgs);
       // A launch-arg mcp_servers={...} table replaces ours and can re-enable dotted names.
       const launchArgsSetMcpTable = execLaunchArgs.some((arg) => /\bmcp_servers\s*=/.test(arg));
@@ -319,6 +338,26 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
           // After launch args, so a launch arg's enabled=true cannot turn a server back on.
           ...codexMcpServerOffFlags(enabledMcpServers),
           "--ephemeral",
+          ...(promptOnly
+            ? [
+                "--ignore-user-config",
+                "--ignore-rules",
+                "--config",
+                "project_doc_max_bytes=0",
+                "--config",
+                'web_search="disabled"',
+                ...[
+                  "shell_tool",
+                  "apps",
+                  "plugins",
+                  "hooks",
+                  "memories",
+                  "multi_agent",
+                  "browser_use",
+                  "computer_use",
+                ].flatMap((feature) => ["--disable", feature]),
+              ]
+            : []),
           "--skip-git-repo-check",
           "-s",
           "read-only",
@@ -338,7 +377,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       );
       const command = ChildProcess.make(spawnCommand.command, spawnCommand.args, {
         env,
-        cwd,
+        cwd: isolatedCwd,
         shell: spawnCommand.shell,
         stdin: {
           stream: Stream.encodeText(Stream.make(prompt)),

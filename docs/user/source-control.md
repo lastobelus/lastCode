@@ -175,6 +175,18 @@ For a local Git repository without a remote, **Publish Repository** creates a ho
 adds it as `origin`, and pushes your commits. If there are no commits yet, it creates the remote;
 make your first commit before pushing.
 
+## Keep project checkouts on their default branch
+
+A project's main checkout stays on its default branch (the one `origin/HEAD` names, or else `origin/main` or `origin/master`),
+so it keeps pulling cleanly while threads work elsewhere. When the server starts or you add a project, LastCode tells
+Git (2.54 or later) to refuse any command that moves that checkout to another branch or a detached
+HEAD, including commands agents run. Do branch work in a worktree instead. Commits, pulls, rebases,
+`git worktree add`, and switching back to the default branch still work there. A repository with no such
+remote branch isn't guarded.
+
+To switch on purpose, run `LASTCODE_ALLOW_ROOT_BRANCH_CHANGE=1 git switch <branch>`. To turn the
+guard off for one repository, run `git config hook.lastcode-root-guard.enabled false` in it.
+
 ## Create a pull request
 
 Use a thread's Git actions to commit, push, and create a pull request. T3 Code can generate commit

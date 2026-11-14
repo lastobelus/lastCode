@@ -46,6 +46,7 @@ interface ComposerPrimaryActionsProps {
   runId?: string | null;
   followUpBehavior?: "queue" | "steer";
   canSteer?: boolean;
+  forceQueue?: boolean;
   alternateShortcutLabel?: string | null;
   /** Dictation is running; Send finishes it and submits once the transcript lands. */
   voiceInputActive?: boolean;
@@ -229,6 +230,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   runId = null,
   followUpBehavior = "steer",
   canSteer = true,
+  forceQueue = false,
   alternateShortcutLabel = null,
   voiceInputActive = false,
   isSendBusy,
@@ -260,9 +262,10 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
       running: isRunning,
       activeTurnDefault: followUpBehavior,
       canSteer,
+      forceQueue,
       alternateModifier: shortcutModifiers.metaKey || shortcutModifiers.ctrlKey,
     }) === "queue";
-  const alternateAction = alternateComposerDispatchAction(followUpBehavior);
+  const alternateAction = alternateComposerDispatchAction(followUpBehavior, forceQueue);
   const isSendDisabled = !canOperateThread || sendDisabledReason !== null;
   const stageBackdropVariant = useSidebarStageBackdropVariant(environmentIdentificationMode);
 
@@ -394,7 +397,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     submitStatus ??
     (compactsBeforeSend
       ? `Summarize ${compactTokens} tokens of history, then send`
-      : isRunning && !isEditingQueuedMessage && canSteer
+      : isRunning && !isEditingQueuedMessage && canSteer && !forceQueue
         ? `Click to ${followUpBehavior}, ${isMacPlatform(navigator.platform) ? "⌘" : "Ctrl"}-click${alternateShortcutLabel ? ` or ${alternateShortcutLabel}` : ""} to ${alternateAction}`
         : submitLabel);
 
@@ -435,7 +438,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
         <PlayIcon className="size-4 fill-current" aria-hidden="true" />
       ) : isEditingQueuedMessage ? (
         <CheckIcon className="size-4" aria-hidden="true" />
-      ) : isRunning && isQueuing ? (
+      ) : isQueuing ? (
         <ListPlusIcon className="size-4" aria-hidden="true" />
       ) : isRunning ? (
         <CornerUpRightIcon className="size-4" aria-hidden="true" />
