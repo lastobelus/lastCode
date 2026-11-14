@@ -29,7 +29,7 @@ function shell(
   };
 }
 
-it("ranks thread mentions and includes subagent threads", () => {
+it("ranks thread mentions and includes subagent threads and ordered gaps beside literal matches", () => {
   const items = matchComposerThreadItems({
     shells: [
       shell("newer-mid-word", "Remodel the settings page", {
@@ -45,13 +45,20 @@ it("ranks thread mentions and includes subagent threads", () => {
       }),
       shell("other-environment", "Model docs", { environmentId: EnvironmentId.make("env-other") }),
     ],
+    candidates: [shell("gap-candidate", "Monitor deployment logs")],
     environmentId,
     allowedEnvironmentIds: new Set([environmentId]),
     excludeThread: null,
     query: "model",
     now: Date.parse("2026-10-23T00:00:00.000Z"),
   });
-  expect(items.map((item) => item.thread.threadId)).toEqual(["word", "subagent", "newer-mid-word"]);
+  const ids = items.map((item) => item.thread.threadId);
+  expect(new Set(ids)).toEqual(new Set(["word", "subagent", "newer-mid-word", "gap-candidate"]));
+  // Fuzzysort favors the title prefix over a later word boundary; activity is not a boost.
+  expect(ids.indexOf(ThreadId.make("subagent"))).toBeLessThan(ids.indexOf(ThreadId.make("word")));
+  expect(ids.indexOf(ThreadId.make("word"))).toBeLessThan(
+    ids.indexOf(ThreadId.make("gap-candidate")),
+  );
 });
 
 it("offers authorized environments and keeps duplicate IDs scoped", () => {
@@ -134,6 +141,37 @@ it("excludes only the exact current scoped thread and retains archived subagent 
         { environmentId: other, threadId: "same" },
       ]);
     }
+  }
+});
+
+it("deduplicates before limiting thread mentions to five and leaves blank queries empty", () => {
+  const shells = Array.from({ length: 6 }, (_, index) =>
+    shell(`candidate-${index}`, "Review notes"),
+  );
+  const input = {
+    shells,
+    candidates: [shell("candidate-0", "Review notes", { projectTitle: "Example project" })],
+    environmentId,
+    allowedEnvironmentIds: new Set([environmentId]),
+    excludeThread: null,
+    now: 0,
+  };
+  const items = matchComposerThreadItems({ ...input, query: "review" });
+  expect(items.map((item) => item.thread.threadId)).toEqual([
+    "candidate-0",
+    "candidate-1",
+    "candidate-2",
+    "candidate-3",
+    "candidate-4",
+  ]);
+  expect(items[0]).toMatchObject({
+    id: `thread:${environmentId}:candidate-0`,
+    type: "thread",
+    label: "Review notes",
+    description: "Example project",
+  });
+  for (const query of ["", "   "]) {
+    expect(matchComposerThreadItems({ ...input, query })).toEqual([]);
   }
 });
 

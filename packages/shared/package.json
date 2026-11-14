@@ -279,6 +279,10 @@
       "types": "./src/paletteSearch.ts",
       "import": "./src/paletteSearch.ts"
     },
+    "./lastcodeThreadMentionSearch": {
+      "types": "./src/lastcodeThreadMentionSearch.ts",
+      "import": "./src/lastcodeThreadMentionSearch.ts"
+    },
     "./threadPullRequests": {
       "types": "./src/threadPullRequests.ts",
       "import": "./src/threadPullRequests.ts"
@@ -636,6 +640,7 @@
     "@t3tools/contracts": "workspace:*",
     "effect": "catalog:",
     "ffi-rs": "1.3.2",
+    "fuzzysort": "4.0.2",
     "mdast-util-directive": "catalog:",
     "mdast-util-to-hast": "^13.2.1",
     "micromark-extension-directive": "catalog:",
