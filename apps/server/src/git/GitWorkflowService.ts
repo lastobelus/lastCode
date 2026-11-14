@@ -266,7 +266,7 @@ export const make = Effect.gen(function* () {
                   operation,
                   command: "workspace-acquisition",
                   cwd: input.cwd,
-                  detail: "The workspace must be restored before Git can modify it.",
+                  detail: cause.message,
                   cause,
                 }),
             ),

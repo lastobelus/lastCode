@@ -962,7 +962,7 @@ const make = Effect.gen(function* () {
               (cause) =>
                 new ActionResumeError({
                   reason: "launch_failed",
-                  message: "The workspace must be restored before this Action can run.",
+                  message: cause.message,
                   cause,
                 }),
             ),

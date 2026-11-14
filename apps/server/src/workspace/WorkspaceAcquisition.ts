@@ -17,6 +17,7 @@ export class WorkspaceUnavailableError extends Schema.TaggedError<WorkspaceUnava
       "destination-occupied",
       "permission-denied",
     ]),
+    detail: Schema.optionalKey(Schema.String),
   },
 ) {
   override get message(): string {
@@ -26,7 +27,9 @@ export class WorkspaceUnavailableError extends Schema.TaggedError<WorkspaceUnava
       case "discarded":
         return "The saved workspace was discarded. Create a fresh worktree to continue.";
       case "snapshot-unavailable":
-        return "The saved workspace cannot be verified. Its recovery data has been retained.";
+        return this.detail === undefined
+          ? "The saved workspace cannot be verified. Its recovery data has been retained."
+          : `${this.detail} Recovery data has been retained. Review the workspace's repository and ownership before retrying.`;
       case "owner-changed":
         return "Workspace ownership changed. Review the saved workspace before continuing.";
       case "destination-occupied":
