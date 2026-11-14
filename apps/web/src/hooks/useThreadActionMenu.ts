@@ -28,6 +28,8 @@ import { threadChipCopyTarget } from "@t3tools/client-runtime/thread-reference";
 import { threadEnvironment } from "../state/threads";
 import { useOrchestrationCommand } from "../state/use-orchestration-command";
 import { readEnvironmentScope } from "../state/session";
+import { terminalEnvironment } from "../state/terminal";
+import { useAtomCommand } from "../state/use-atom-command";
 import {
   readEnvironmentServerConfigLoaded,
   readEnvironmentSupportsAutoSettleOptOut,
@@ -92,6 +94,7 @@ export function useThreadActionMenu(input: {
   const regenerateThreadTitle = useOrchestrationCommand(threadEnvironment.regenerateTitle, {
     reportFailure: false,
   });
+  const closeTerminal = useAtomCommand(terminalEnvironment.close, "cancel Project Action");
   const handleNewThread = useNewThreadHandler();
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
@@ -149,6 +152,7 @@ export function useThreadActionMenu(input: {
         canSnoozeNow: canSnooze(thread, { now: now.toISOString() }),
         isRegeneratingTitle,
         isRunning: !threadRuntimeCanArchive(thread.runtime),
+        hasRunningAction: thread.actionResume?.outcome === "running",
         supports,
         snoozePresets,
         canShareWithGuest,
@@ -260,6 +264,17 @@ export function useThreadActionMenu(input: {
             }),
           ]);
           if (toast) toastManager.add(toast);
+          return;
+        }
+        case "cancel-action": {
+          const actionState = thread.actionResume;
+          if (actionState?.outcome !== "running") return;
+          await reportFailure("Failed to cancel Project Action", () =>
+            closeTerminal({
+              environmentId: threadRef.environmentId,
+              input: { threadId: threadRef.threadId, terminalId: actionState.terminalId },
+            }),
+          );
           return;
         }
         case "mark-unread":

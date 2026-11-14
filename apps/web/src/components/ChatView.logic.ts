@@ -1469,7 +1469,10 @@ const LIVE_RUN_STATUSES = new Set(["queued", "preparing", "starting", "running"]
  * foreground work, so they never count as background. The provider roster is
  * not run-tied, so it drops entries naming a live run's item by native id.
  */
-export function deriveThreadPendingBackgroundTasks(projection: ThreadStructure | null) {
+export function deriveThreadPendingBackgroundTasks(
+  projection: ThreadStructure | null,
+  includeWhileActive = false,
+) {
   if (projection === null) return [];
   const sessionError =
     projection.providerSessions.findLast(
@@ -1488,6 +1491,7 @@ export function deriveThreadPendingBackgroundTasks(projection: ThreadStructure |
     latestUnheldRun(projection.runs.filter((run) => !liveRunIds.has(run.id)));
   return [
     ...derivePendingBackgroundWork({
+      includeWhileActive,
       latestRun,
       providerThreads: projection.providerThreads.map((thread) => ({
         ...thread,

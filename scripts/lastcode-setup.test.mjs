@@ -15,7 +15,7 @@ describe("lastcode-setup", () => {
         "--checkpoint-interval-seconds",
         "1234",
         "--trusted-project-action",
-        "lc-wait-for-pr",
+        "lc-wait-for-checkpoint",
         "--dry-run",
       ]),
     ).toEqual({
@@ -23,7 +23,7 @@ describe("lastcode-setup", () => {
       dryRun: true,
       enableNightlyWrites: true,
       help: false,
-      trustedProjectActionIds: ["lc-wait-for-pr"],
+      trustedProjectActionIds: ["lc-wait-for-checkpoint"],
     });
     expect(() => parseOptions(["--checkpoint-interval-seconds", "0"])).toThrow("positive integer");
     expect(() => parseOptions(["--surprise"])).toThrow("Unknown argument");
@@ -39,7 +39,7 @@ describe("lastcode-setup", () => {
   it("installs dependencies, the service, and all managed commands", () => {
     const commands = setupCommands("/repo", "/node", 1234, {
       home: "/home/example",
-      trustedProjectActionIds: ["lc-wait-for-pr"],
+      trustedProjectActionIds: ["lc-wait-for-checkpoint"],
     });
     expect(commands.map(({ command, args }) => [command, ...args])).toEqual([
       ["vp", "install", "--frozen-lockfile"],
@@ -52,7 +52,7 @@ describe("lastcode-setup", () => {
         "--base-dir",
         "/home/example/.lastcode",
         "--trusted-source-id",
-        "lc-wait-for-pr",
+        "lc-wait-for-checkpoint",
       ],
       [
         "/node",
@@ -61,7 +61,7 @@ describe("lastcode-setup", () => {
         "--interval-seconds",
         "1234",
         "--trusted-project-action",
-        "lc-wait-for-pr",
+        "lc-wait-for-checkpoint",
       ],
       ["/node", "/repo/scripts/lastcode-checkpoints.mjs", "--install"],
       ["/node", "/repo/scripts/lastcode-build.mjs", "--install"],
