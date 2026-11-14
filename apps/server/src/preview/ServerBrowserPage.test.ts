@@ -42,7 +42,7 @@ describe("server browser capture deadlines", () => {
           outcome = cause;
         });
       const evaluation = control.agent("agent", () =>
-        ServerBrowserPage.evaluate(cdp, { expression: "document.title" }, 1_000),
+        ServerBrowserPage.evaluate(cdp, { expression: "document.title" }, { timeoutMs: 1_000 }),
       );
 
       await vi.advanceTimersByTimeAsync(3_000);
@@ -64,6 +64,25 @@ describe("server browser capture deadlines", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("native viewport", () => {
+  it("uses the CDP guest dimensions and captures without clip scaling", async () => {
+    const page = { viewportSize: () => null } as unknown as Page;
+    const send = vi.fn(async (method: string) =>
+      method === "Page.getLayoutMetrics"
+        ? { cssVisualViewport: { clientWidth: 390, clientHeight: 844, pageX: 20, pageY: 30 } }
+        : { data: "image" },
+    );
+    const cdp = { send } as unknown as CDPSession;
+    expect(await ServerBrowserPage.viewportSize(page, cdp)).toEqual({ width: 390, height: 844 });
+    expect(await ServerBrowserPage.captureViewport(cdp, { format: "png" })).toBe(
+      "image",
+    );
+    expect(send).toHaveBeenLastCalledWith("Page.captureScreenshot", {
+      format: "png",
+    });
   });
 });
 
@@ -241,6 +260,7 @@ describe("server browser element refs", () => {
     );
     expect(result.visibleText).not.toContain("editable-pass");
     expect(result.visibleText).toContain("Order ••••••••-2");
+    expect(tree).toMatch(/row "password: •+"/);
     expect(tree).toMatch(/textbox "Username" [^\n]*: maria$/m);
     const line = tree.split("\n").find((line) => line.includes('textbox "Password"'));
     expect(line).toMatch(/: •+$/);
@@ -344,7 +364,7 @@ describe("server browser element refs", () => {
     const result = await ServerBrowserPage.evaluate(
       cdp,
       { expression: "await Promise.resolve(); document.title" },
-      5_000,
+      { timeoutMs: 5_000 },
     );
     expect(result).toBe("Ready");
   });
@@ -354,7 +374,7 @@ describe("server browser element refs", () => {
       expression: "({ answer: 42, nested: { ready: true } })",
       returnByValue: false,
     });
-    const result = await ServerBrowserPage.evaluate(cdp, input, 5_000);
+    const result = await ServerBrowserPage.evaluate(cdp, input, { timeoutMs: 5_000 });
     expect(result).toEqual({ answer: 42, nested: { ready: true } });
   });
 
@@ -362,7 +382,7 @@ describe("server browser element refs", () => {
     const result = await ServerBrowserPage.evaluate(
       cdp,
       { expression: "(async () => { await 0; return 1 })()" },
-      5_000,
+      { timeoutMs: 5_000 },
     );
     expect(result).toBe(1);
   });
@@ -371,7 +391,7 @@ describe("server browser element refs", () => {
     const evaluation = ServerBrowserPage.evaluate(
       cdp,
       { expression: "window.runs = (window.runs ?? 0) + 1; new Function('await 0')" },
-      5_000,
+      { timeoutMs: 5_000 },
     );
     await expect(evaluation).rejects.toThrow("await is only valid");
     expect(await page.evaluate("window.runs")).toBe(1);
@@ -390,7 +410,7 @@ describe("server browser element refs", () => {
         expression:
           "(async () => { const r = await fetch('/api', { method: 'POST' }); return r.json() })()",
       },
-      5_000,
+      { timeoutMs: 5_000 },
     );
     await expect(evaluation).rejects.toThrow("is not valid JSON");
     expect(posts).toBe(1);
@@ -404,9 +424,16 @@ describe("server browser element refs", () => {
     const result = await ServerBrowserPage.evaluate(
       cdp,
       { expression: "await 0; location.reload(); ({ clicked: true })" },
-      5_000,
+      { timeoutMs: 5_000 },
     );
     expect(result).toEqual({ clicked: true });
+  });
+
+  it("stops an evaluation at its deadline so the page answers the next one", async () => {
+    await expect(
+      ServerBrowserPage.evaluate(cdp, { expression: "for (;;) {}" }, { timeoutMs: 200 }),
+    ).rejects.toMatchObject({ tag: "PreviewAutomationTimeoutError" });
+    expect(await ServerBrowserPage.evaluate(cdp, { expression: "1 + 1" }, { timeoutMs: 2_000 })).toBe(2);
   });
 });
 
@@ -692,7 +719,7 @@ describe("server browser evaluate", () => {
         method === "Runtime.evaluate" ? classic.promise : Promise.resolve({}),
       );
       const cdp = { send } as unknown as CDPSession;
-      const evaluation = ServerBrowserPage.evaluate(cdp, { expression: "await 0; 1" }, 10);
+      const evaluation = ServerBrowserPage.evaluate(cdp, { expression: "await 0; 1" }, { timeoutMs: 10 });
       const rejected = expect(evaluation).rejects.toMatchObject({
         tag: "PreviewAutomationTimeoutError",
       });

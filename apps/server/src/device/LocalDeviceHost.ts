@@ -45,11 +45,11 @@ import {
   ensureAgentDevice,
   ensureDeviceHub,
   isAgentDeviceInstalled,
+  installedAgentDevice,
   isDeviceHubInstalled,
   deviceToolVersions,
   AGENT_DEVICE_VERSION,
   DEVICE_HUB_VERSION,
-  installedAgentDeviceEntry,
 } from "./DeviceToolchain.ts";
 
 const HUB_READY_TIMEOUT_MS = 30_000;
@@ -516,6 +516,8 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
       Effect.catchCause((cause) => Effect.logWarning("Device hub supervisor failed", { cause })),
     );
 
+  let ownsAgentDaemon = false;
+
   const daemonFilePath = () => path.join(agentDeviceStateDir(path, config.stateDir), "daemon.json");
 
   const readDaemonFile = Effect.fn("LocalDeviceHost.readDaemonFile")(function* () {
@@ -523,6 +525,32 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
     return yield* decodeDaemonFile(raw);
   });
 
+  const readRecoveredDaemonFile = Effect.fn("LocalDeviceHost.readRecoveredDaemonFile")(
+    function* () {
+      const fail = (cause: unknown) =>
+        new DeviceHost.DeviceHostError({
+          hostId,
+          step: "invalidating recovered agent access",
+          cause,
+        });
+      const raw = yield* fs.readFileString(daemonFilePath()).pipe(
+        Effect.asSome,
+        Effect.catchIf(
+          (error) => error.reason._tag === "NotFound",
+          () => Effect.succeed(Option.none<string>()),
+        ),
+        Effect.mapError(fail),
+      );
+      if (Option.isNone(raw)) return raw;
+      return yield* decodeDaemonFile(raw.value).pipe(Effect.asSome, Effect.mapError(fail));
+    },
+  );
+
+  /**
+   * agent-device auto-starts its daemon on any command. A trivial `devices`
+   * call in HTTP mode is the documented way to bring it up; its output is the
+   * daemon.json this reads back.
+   */
   const startAgentDeviceDaemon = Effect.fn("LocalDeviceHost.startAgentDeviceDaemon")(function* (
     agentTool: Pick<DeviceToolPaths, "entryPath">,
     nodePath: string,
@@ -531,10 +559,11 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
     | DeviceHost.DeviceHostError
     | DeviceHost.DeviceHostTimeoutError
     | DeviceHost.AgentDeviceStartError
+    | NodeRuntimeUnavailableError
   > {
     const stateDir = agentDeviceStateDir(path, config.stateDir);
     yield* fs.makeDirectory(stateDir, { recursive: true }).pipe(Effect.ignore);
-    const existing = yield* readDaemonFile().pipe(Effect.option);
+    const existing = yield* readRecoveredDaemonFile();
     const daemonEnvironment: NodeJS.ProcessEnv = {
       ...hostEnvironment,
       AGENT_DEVICE_STATE_DIR: stateDir,
@@ -552,6 +581,18 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
       token: file.token,
       entryPath: agentTool.entryPath,
     });
+    const adoptStartedDaemon = Effect.fn("LocalDeviceHost.adoptStartedDaemon")(function* (
+      file: typeof AgentDeviceDaemonFile.Type,
+    ) {
+      if (existing._tag === "Some" && file.token === existing.value.token)
+        return yield* new DeviceHost.DeviceHostError({
+          hostId,
+          step: "invalidating recovered agent access",
+          cause: new Error("Recovered daemon credential was not replaced."),
+        });
+      ownsAgentDaemon = true;
+      return toEndpoint(file);
+    });
     if (existing._tag === "Some") {
       const alive = yield* HttpClient.withScope(httpClient)
         .get(`http://127.0.0.1:${existing.value.httpPort}/health`)
@@ -563,7 +604,8 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
           Effect.scoped,
           Effect.orElseSucceed(() => false),
         );
-      if (alive) return toEndpoint(existing.value);
+      if (alive && ownsAgentDaemon) return toEndpoint(existing.value);
+      yield* stopAgentDeviceDaemon({ entryPath: agentTool.entryPath, nodePath });
       yield* fs.remove(daemonFilePath(), { force: true }).pipe(Effect.ignore);
     }
     // No `daemon start` exists; `devices` is the cheapest command that starts and awaits it.
@@ -578,7 +620,7 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
       .pipe(Effect.result);
     // Discovery may fail after startup; accept a published endpoint or preserve the CLI failure.
     const started = yield* readDaemonFile().pipe(Effect.option);
-    if (started._tag === "Some") return toEndpoint(started.value);
+    if (started._tag === "Some") return yield* adoptStartedDaemon(started.value);
     if (runResult._tag === "Failure") {
       return yield* new DeviceHost.DeviceHostError({
         hostId,
@@ -615,7 +657,7 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
     const deadline = (yield* Clock.currentTimeMillis) + DAEMON_READY_TIMEOUT_MS;
     while (true) {
       const file = yield* readDaemonFile().pipe(Effect.option);
-      if (file._tag === "Some") return toEndpoint(file.value);
+      if (file._tag === "Some") return yield* adoptStartedDaemon(file.value);
       if ((yield* Clock.currentTimeMillis) > deadline) {
         return yield* new DeviceHost.DeviceHostTimeoutError({
           hostId,
@@ -626,44 +668,107 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
     }
   });
 
-  // The daemon may predate this process (an earlier server was killed, possibly on an
-  // older pin), so stop it with the CLI of its recorded version when that is installed.
-  const stopAgentDeviceDaemon = Effect.gen(function* () {
-    if (!(yield* fs.exists(daemonFilePath()))) return;
-    const recorded = yield* readDaemonFile().pipe(Effect.option);
-    if (
-      Option.isSome(recorded) &&
-      recorded.value.pid &&
-      !(yield* isProcessAlive(recorded.value.pid))
-    ) {
-      return yield* fs.remove(daemonFilePath(), { force: true });
-    }
-    const entryPath = yield* installedAgentDeviceEntry(config.baseDir, [
-      ...(Option.isSome(recorded) && recorded.value.version ? [recorded.value.version] : []),
-      AGENT_DEVICE_VERSION,
-    ]);
-    if (!entryPath) return;
-    const nodePath = yield* resolveNodeExecutable("Local device support", hostEnvironment).pipe(
-      Effect.provideService(HostProcess.Platform, hostPlatform),
-    );
-    yield* runner.run({
-      command: nodePath,
-      args: [
-        entryPath,
-        "daemon",
-        "stop",
-        "--state-dir",
-        agentDeviceStateDir(path, config.stateDir),
-      ],
-      env: { ...hostEnvironment, AGENT_DEVICE_NO_UPDATE_NOTIFIER: "1" },
-      timeout: Duration.seconds(10),
-      timeoutBehavior: "timedOutResult",
+  const stopAgentDeviceDaemon = Effect.fn("LocalDeviceHost.stopAgentDeviceDaemon")(function* (
+    agentTool: { readonly entryPath: string; readonly nodePath: string } | null,
+  ) {
+    const existing = yield* readRecoveredDaemonFile();
+    if (existing._tag === "None") return;
+    const daemonIsDead = Effect.sync(() => {
+      const pid = existing.value.pid;
+      if (pid === undefined || pid <= 0) return false;
+      try {
+        process.kill(pid, 0);
+        return false;
+      } catch (cause) {
+        // Permission errors and unknown process state must keep retirement fail closed.
+        return (
+          typeof cause === "object" && cause !== null && "code" in cause && cause.code === "ESRCH"
+        );
+      }
     });
-  }).pipe(
-    Effect.provideService(FileSystem.FileSystem, fs),
-    Effect.provideService(Path.Path, path),
-    Effect.ignore,
-  );
+    yield* Effect.gen(function* () {
+      // Dead state needs no launcher, including after a pinned tool upgrade.
+      if (yield* daemonIsDead) return;
+      if (agentTool === null || !ownsAgentDaemon) {
+        // A recovered daemon may predate the current pin, even when activation has
+        // already resolved the new launcher. Retire with its completed recorded install.
+        const installed = yield* installedAgentDevice(config.baseDir, existing.value.version).pipe(
+          Effect.flatMap((recorded) =>
+            recorded !== null
+              ? Effect.succeed(recorded)
+              : installedAgentDevice(config.baseDir, AGENT_DEVICE_VERSION),
+          ),
+          Effect.provideService(FileSystem.FileSystem, fs),
+          Effect.provideService(Path.Path, path),
+        );
+        if (installed === null)
+          return yield* new DeviceHost.DeviceHostError({
+            hostId,
+            step: "invalidating recovered agent access",
+            cause: new Error("The installed agent-device launcher is unavailable."),
+          });
+        agentTool = {
+          entryPath: installed.entryPath,
+          nodePath:
+            agentTool?.nodePath ??
+            (yield* resolveNodeExecutable("Device automation", hostEnvironment).pipe(
+              Effect.provideService(FileSystem.FileSystem, fs),
+              Effect.provideService(Path.Path, path),
+              Effect.provideService(HostProcess.Platform, hostPlatform),
+            )),
+        };
+      }
+      const stopped = yield* runner
+        .run({
+          command: agentTool.nodePath,
+          args: [
+            agentTool.entryPath,
+            "daemon",
+            "stop",
+            "--state-dir",
+            agentDeviceStateDir(path, config.stateDir),
+          ],
+          env: { ...hostEnvironment, AGENT_DEVICE_NO_UPDATE_NOTIFIER: "1" },
+          timeout: Duration.seconds(10),
+          timeoutBehavior: "timedOutResult",
+        })
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new DeviceHost.DeviceHostError({
+                hostId,
+                step: "invalidating recovered agent access",
+                cause,
+              }),
+          ),
+        );
+      if (stopped.code !== 0 || stopped.timedOut)
+        return yield* new DeviceHost.DeviceHostError({
+          hostId,
+          step: "invalidating recovered agent access",
+          cause: stopped,
+        });
+    }).pipe(
+      Effect.catch((cause) =>
+        Effect.gen(function* () {
+          if (!(yield* daemonIsDead)) return yield* cause;
+        }),
+      ),
+    );
+    yield* fs.remove(daemonFilePath(), { force: true }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new DeviceHost.DeviceHostError({
+            hostId,
+            step: "invalidating recovered agent access",
+            cause,
+          }),
+      ),
+    );
+    ownsAgentDaemon = false;
+  });
+
+  let agentToolRef: { readonly entryPath: string; readonly nodePath: string } | null = null;
 
   const ensureHubReady = Effect.fn("LocalDeviceHost.ensureHubReady")(function* (
     onPhase: (phase: "installing" | "starting", detail?: string) => Effect.Effect<void>,
@@ -778,6 +883,7 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
               }),
           ),
         );
+        agentToolRef = { entryPath: agentTool.entryPath, nodePath: running.hub.nodePath };
         yield* onPhase("starting");
         const agentDevice = yield* startAgentDeviceDaemon(agentTool, running.hub.nodePath);
         yield* pruneLocalDeviceTools(config.baseDir, running.hub.nodePath, "agent").pipe(
@@ -855,12 +961,19 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
   });
 
   const current: DeviceHost.DeviceHost["Service"]["current"] = Ref.get(runningRef).pipe(
-    Effect.map((running) => (running ? toReady(running) : null)),
+    Effect.map((running) =>
+      running
+        ? {
+            ...toReady(running),
+            ...(running.agentDevice ? { agentDevice: running.agentDevice } : {}),
+          }
+        : null,
+    ),
   );
 
   const stopAgent: DeviceHost.DeviceHost["Service"]["stopAgent"] = startLock.withPermits(1)(
     Effect.gen(function* () {
-      yield* stopAgentDeviceDaemon;
+      yield* stopAgentDeviceDaemon(agentToolRef);
       yield* Ref.update(runningRef, (running) =>
         running ? { ...running, agentDevice: null } : running,
       );
@@ -876,7 +989,7 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
           stopHub(running?.hub).pipe(
             Effect.andThen(fs.remove(hubStatePath(), { force: true }).pipe(Effect.ignore)),
           ),
-          stopAgentDeviceDaemon,
+          stopAgentDeviceDaemon(agentToolRef).pipe(Effect.ignore),
         ],
         { concurrency: "unbounded", discard: true },
       );

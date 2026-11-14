@@ -1,70 +1,100 @@
+import { useAtomValue } from "@effect/atom-react";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentId } from "@t3tools/contracts";
 import {
   formatHostedThreadLink,
   guessThreadLinkRef,
+  resolveThreadLinkReference,
   threadLinkCandidates,
-  type ThreadLink,
   unknownThreadLinkLabel,
+  type ThreadLinkReference,
 } from "@t3tools/shared/threadLinks";
+import { AsyncResult, Atom } from "effect/reactivity";
 
 import { configuredHostedAppUrl } from "../../hostedPairing";
-import { useThreadRefs, useThreadShell } from "../../state/entities";
-import { useEnvironmentIdentities } from "../../state/environments";
+import { environmentSummaries } from "../../state/presentation";
 import { orchestrationEnvironment } from "../../state/orchestration";
-import { useEnvironmentQuery } from "../../state/query";
+import { environmentThreadShells } from "../../state/threads";
 import { UnresolvedChip } from "../contextChipParts";
 import { ThreadContextChip } from "../ThreadContextChip";
 
-/** `label` is the link's written text; an autolink has none. */
 export function MarkdownThreadLink(props: {
   readonly environmentId: EnvironmentId;
-  readonly link: ThreadLink;
+  readonly reference: ThreadLinkReference;
+  readonly messageEnvironmentId?: EnvironmentId | undefined;
   readonly label: string | null;
 }) {
-  const candidates = threadLinkCandidates(props.link, props.environmentId);
-  const writtenRef = candidates[0]!;
-  const written = useThreadShell(writtenRef);
-  // A linked machine's threads are reachable only through its server, not from this client.
-  const reachable = useEnvironmentIdentities().some(
-    (environment) => environment.environmentId === writtenRef.environmentId,
-  );
-  const lookup = useEnvironmentQuery(
-    written === null && reachable
-      ? orchestrationEnvironment.threadLinkMetadata({
-          environmentId: writtenRef.environmentId,
-          input: { threadIds: candidates.map((ref) => ref.threadId) },
-        })
-      : null,
-  );
-  const settled = lookup.isSuccess && !lookup.isPending;
-  const target =
-    written !== null
-      ? { ref: writtenRef, metadata: written }
-      : (candidates.flatMap((ref) => {
-          const metadata = lookup.data?.[ref.threadId];
-          return metadata ? [{ ref, metadata }] : [];
-        })[0] ?? null);
-  const missing = target === null && (settled || !reachable);
-  const guess = missing && props.link.environmentId === null;
-  const refs = useThreadRefs(guess);
-  const remoteRef = guess
-    ? guessThreadLinkRef(
-        props.link,
-        refs.filter((ref) => ref.environmentId !== writtenRef.environmentId),
-      )
-    : null;
-  const remote = useThreadShell(remoteRef);
-  const resolved = target ?? (remoteRef && remote ? { ref: remoteRef, metadata: remote } : null);
-  if (missing && resolved === null) {
-    const unknown = unknownThreadLinkLabel(props.link, props.environmentId);
+  const {
+    threadId: linkedThreadId,
+    environmentId: linkedEnvironmentId,
+    version,
+    legacyThreadId,
+  } = props.reference;
+  const messageEnvironmentId = props.messageEnvironmentId ?? props.environmentId;
+  const resolvedAtom = Atom.make((get) => {
+    const reference = {
+      threadId: linkedThreadId,
+      environmentId: linkedEnvironmentId,
+      version,
+      legacyThreadId,
+    };
+    const link = { ...reference, environmentId: linkedEnvironmentId ?? null };
+    const candidates = threadLinkCandidates(link, messageEnvironmentId);
+    let settled = true;
+    const resolved = resolveThreadLinkReference(reference, (threadId, environmentId) => {
+      const owner = environmentId ?? messageEnvironmentId;
+      const shell = get(environmentThreadShells.threadShellAtom(scopeThreadRef(owner, threadId)));
+      if (shell !== null) return shell;
+      // A linked machine's threads are reachable only through its server, not from this client.
+      const reachable = get(environmentSummaries.identitiesAtom).some(
+        (environment) => environment.environmentId === owner,
+      );
+      if (!reachable) return undefined;
+      const lookup = get(
+        orchestrationEnvironment.threadLinkMetadata({
+          environmentId: owner,
+          input: {
+            threadIds: candidates
+              .filter((candidate) => candidate.environmentId === owner)
+              .map((candidate) => candidate.threadId),
+          },
+        }),
+      );
+      settled &&= lookup._tag === "Success" && !lookup.waiting;
+      return AsyncResult.getOrElse(lookup, () => null)?.[threadId];
+    });
+    const missing = resolved.value === undefined && settled;
+    if (!missing || version === 2) return { ...resolved, missing };
+    const target = guessThreadLinkRef(
+      link,
+      get(environmentThreadShells.threadRefsAtom).filter(
+        (ref) => !candidates.some((candidate) => candidate.environmentId === ref.environmentId),
+      ),
+    );
+    return target === null
+      ? { ...resolved, missing }
+      : {
+          ...target,
+          value: get(environmentThreadShells.threadShellAtom(target)) ?? undefined,
+          missing,
+        };
+  });
+  const resolved = useAtomValue(resolvedAtom);
+  const metadata = resolved.value;
+  const environmentId = resolved.environmentId ?? messageEnvironmentId;
+  if (resolved.missing && metadata === undefined) {
+    const unknown = unknownThreadLinkLabel(
+      { environmentId: resolved.environmentId ?? null, threadId: resolved.threadId },
+      messageEnvironmentId,
+    );
     return <UnresolvedChip label={props.label ?? unknown} tooltip={unknown} />;
   }
-  const ref = resolved?.ref ?? writtenRef;
-  const title = resolved?.metadata.title.trim() || props.label || "Thread";
+  const ref = { environmentId, threadId: resolved.threadId };
+  const title = metadata?.title.trim() || props.label || "Thread";
   return (
     <ThreadContextChip
       record={{ ...ref, title }}
-      projectId={resolved?.metadata.projectId ?? null}
+      projectId={metadata?.projectId ?? null}
       copyMarkdown={formatHostedThreadLink(ref, title, configuredHostedAppUrl())}
     />
   );

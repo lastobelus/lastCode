@@ -79,6 +79,7 @@ import React, {
   type ClipboardEvent as ReactClipboardEvent,
   type MouseEvent as ReactMouseEvent,
   use,
+  isValidElement,
   memo,
   useLayoutEffect,
   useRef,
@@ -95,7 +96,7 @@ import type { Pluggable, PluggableList } from "unified";
 import { defaultUrlTransform } from "react-markdown";
 import { parseAssistantCitationHref } from "@t3tools/shared/assistantCitations";
 import { parseComposerContextHref } from "@t3tools/shared/composerContextReferences";
-import { parseThreadLinkHref } from "@t3tools/shared/threadLinks";
+import { parseThreadLinkHref, parseThreadLinkReference } from "@t3tools/shared/threadLinks";
 import { AssistantCitationEmbed } from "./chat/AssistantCitationChip";
 import { MarkdownThreadLink } from "./chat/MarkdownThreadLink";
 import { mathKind } from "@t3tools/shared/markdownMath";
@@ -216,7 +217,7 @@ import { canUseMarkdownFileShellActions } from "./chat/MarkdownFileLink.logic";
 import { rehypeChipPunctuation } from "./chat/markdownChipPunctuation";
 import { handleMarkdownFragmentClick, rehypeHeadingIds } from "./chat/markdownFragments";
 import { rehypeTextDirection } from "./chat/markdownTextDirection";
-import { hastHasText, hastPlainTextDeep, plainHastText } from "./chat/markdownHast.logic";
+import { hastHasImage, hastHasText, hastPlainTextDeep, plainHastText } from "./chat/markdownHast.logic";
 import {
   extractCodeBlock,
   extractFenceLanguage,
@@ -421,6 +422,53 @@ function markdownUrlTransform(href: string) {
   if (isWindowsDrivePathHref(href)) return href;
   if (isLocalEditorFileHref(href)) return href;
   return rewriteMarkdownFileUriHref(href) ?? defaultUrlTransform(href);
+}
+
+function authoredMarkdownLinkLabel(node: ReactMarkdownExtraProps["node"], text: string) {
+  const labelStart = node?.children[0]?.position?.start.offset;
+  const labelEnd = node?.children.at(-1)?.position?.end.offset;
+  if (labelStart !== undefined && labelEnd !== undefined) return text.slice(labelStart, labelEnd);
+
+  // remark-breaks replaces text children without retaining their source positions.
+  const start = node?.position?.start.offset;
+  const end = node?.position?.end.offset;
+  if (start === undefined || end === undefined || text[start] !== "[") return undefined;
+  const source = text.slice(start, end);
+  let depth = 1;
+  for (let index = 1; index < source.length; index++) {
+    if (source[index] === "\\") {
+      index++;
+    } else if (source[index] === "`") {
+      const marker = /^`+/.exec(source.slice(index))![0];
+      const closing = new RegExp("(?<!`)" + marker + "(?!`)", "g");
+      closing.lastIndex = index + marker.length;
+      const match = closing.exec(source);
+      index = match ? match.index + marker.length - 1 : index + marker.length - 1;
+    } else if (source[index] === "[") {
+      depth++;
+    } else if (source[index] === "]" && --depth === 0) {
+      return source.slice(1, index);
+    }
+  }
+  return undefined;
+}
+
+function markFileLabelMedia(node: ReactNode): ReactNode {
+  return React.Children.map(node, (child) => {
+    if (!isValidElement<{ children?: ReactNode; node?: { tagName?: string } }>(child)) return child;
+    if (child.type === "img" || child.props.node?.tagName === "img") {
+      return (
+        <span data-markdown-copy-media>
+          <span data-markdown-copy-media-start />
+          {child}
+          <span data-markdown-copy-media-end />
+        </span>
+      );
+    }
+    return child.props.children === undefined
+      ? child
+      : React.cloneElement(child, undefined, markFileLabelMedia(child.props.children));
+  });
 }
 
 const NO_MARKDOWN_EDITORS: ReadonlyArray<EditorId> = [];
@@ -873,6 +921,7 @@ function useChatMarkdownState({
     fileLinkMeta: MarkdownFileLinkMeta,
     copyMarkdown: string,
     mediaSource?: string,
+    children?: ReactNode,
   ) => {
     const resolveHostPath = () =>
       resolveMarkdownFileHostPath({
@@ -960,7 +1009,9 @@ function useChatMarkdownState({
             ? () => openMarkdownFileInPreview(fileLinkMeta.filePath)
             : undefined
         }
-      />
+      >
+        {children}
+      </MarkdownFileLink>
     );
   };
 
@@ -1178,13 +1229,19 @@ const CHAT_MARKDOWN_COMPONENTS = {
     if (citation) {
       return <AssistantCitationEmbed citation={citation} leading={leading} trailing={trailing} />;
     }
-    const threadLink = href ? parseThreadLinkHref(href) : null;
-    if (threadLink) {
+    const linkedThread = href ? parseThreadLinkReference(href) : null;
+    if (linkedThread) {
       const written = hastPlainTextDeep(node);
       // An autolink's text is its own URL, which is no label.
       const label = written && parseThreadLinkHref(written) === null ? written : null;
-      return environmentId ? (
-        <MarkdownThreadLink environmentId={environmentId} link={threadLink} label={label} />
+      const linkedEnvironmentId = linkedThread.environmentId ?? environmentId;
+      return linkedEnvironmentId ? (
+        <MarkdownThreadLink
+          environmentId={linkedEnvironmentId}
+          reference={linkedThread}
+          messageEnvironmentId={environmentId ?? undefined}
+          label={label}
+        />
       ) : (
         <span>{label ?? "Thread"}</span>
       );
@@ -1409,22 +1466,23 @@ const CHAT_MARKDOWN_COMPONENTS = {
       );
     }
 
-    const label = nodeToPlainText(children);
-    const start = node?.position?.start.offset;
-    const end = node?.position?.end.offset;
-    const source = start !== undefined && end !== undefined ? text.slice(start, end) : "";
-    const copyMarkdown =
-      source.startsWith("[") && source.includes("](")
-        ? source
-        : `[${(label || fileLinkMeta.basename).replace(/[\\[\]]/g, "\\$&")}](${normalizedHref})`;
-    const chip = fileLinkChip(fileLinkMeta, copyMarkdown, normalizedHref);
-    return isMarkdownFileLinkLabel(label, normalizedHref) ? (
-      chip
-    ) : (
-      <span data-markdown-copy={copyMarkdown}>
-        <span className="whitespace-normal">{children} </span>
-        {chip}
-      </span>
+    const label = nodeToPlainText(children, true);
+    const escapedLabel = (label.trim() ? label : fileLinkMeta.basename)
+      .replaceAll("\\", "\\\\")
+      .replaceAll("[", "\\[")
+      .replaceAll("]", "\\]");
+    const authoredLabel =
+      label.trim() || hastHasImage(node) ? authoredMarkdownLinkLabel(node, text) : undefined;
+    const copyMarkdown = `[${authoredLabel ?? escapedLabel}](${normalizedHref})`;
+    return fileLinkChip(
+      fileLinkMeta,
+      copyMarkdown,
+      normalizedHref,
+      !hastHasImage(node) && isMarkdownFileLinkLabel(label, normalizedHref) ? undefined : (
+        <MarkdownLinkContext value>
+          <span className="whitespace-normal">{markFileLabelMedia(children)}</span>
+        </MarkdownLinkContext>
+      ),
     );
   },
   code: function MarkdownCode({ node, children, className, ...props }) {
