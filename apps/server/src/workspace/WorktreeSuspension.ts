@@ -1093,16 +1093,24 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
             record.nativeIdentity !== undefined && "commonDirectory" in record.nativeIdentity
               ? record.nativeIdentity
               : undefined;
-          // Device numbers are allocated again at boot. Rebind only an unchanged,
-          // canonical checkout and both unchanged Git directories on one volume.
+          const unchangedCheckout =
+            expected !== undefined &&
+            inspected.sourceIdentity.ino === expected.sourceIdentity.ino &&
+            inspected.gitDirectoryIdentity.ino === expected.gitDirectoryIdentity.ino;
+          const recreatedCheckout =
+            expected !== undefined &&
+            record.summary.snapshotId === null &&
+            inspected.sourceIdentity.ino !== expected.sourceIdentity.ino &&
+            inspected.gitDirectoryIdentity.ino !== expected.gitDirectoryIdentity.ino;
+          // Device numbers are allocated again at boot. A recreated checkout can
+          // share that change only with the same common directory and verified owners.
           // Keep record.path as that historical anchor; resolving a saved alias
           // today cannot prove where it pointed when the identity was recorded.
           const deviceRenumbered =
             expected !== undefined &&
             actualDestination === record.path &&
-            inspected.sourceIdentity.ino === expected.sourceIdentity.ino &&
-            inspected.gitDirectory === expected.gitDirectory &&
-            inspected.gitDirectoryIdentity.ino === expected.gitDirectoryIdentity.ino &&
+            (unchangedCheckout || recreatedCheckout) &&
+            (inspected.gitDirectory === expected.gitDirectory || recreatedCheckout) &&
             inspected.commonDirectory === expected.commonDirectory &&
             inspected.commonIdentity.ino === expected.commonIdentity.ino &&
             expected.sourceIdentity.dev === expected.commonIdentity.dev &&
@@ -1119,6 +1127,18 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
               "changed",
               "The recreated checkout belongs to another repository.",
             );
+          if (
+            expected !== undefined &&
+            inspected.commonIdentity.dev !== expected.commonIdentity.dev &&
+            !unchangedCheckout
+          ) {
+            const owners = yield* checkOwners(record);
+            if (owners.some((owner) => owner.branch !== shortBranch(inspected.branch)))
+              return yield* failure(
+                "changed",
+                "The recreated checkout branch does not match its workspace owners.",
+              );
+          }
           next = {
             ...next,
             nativeIdentity: {
@@ -3503,7 +3523,10 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       Effect.mapError((cause) =>
         isWorkspaceUnavailable(cause)
           ? cause
-          : new WorkspaceUnavailableError({ reason: "snapshot-unavailable" }),
+          : new WorkspaceUnavailableError({
+              reason: "snapshot-unavailable",
+              ...(isRequestError(cause) ? { detail: cause.message } : {}),
+            }),
       ),
     ),
   );

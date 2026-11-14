@@ -611,6 +611,11 @@ const realGit = <A, E, R>(test: (fixture: Fixture) => Effect.Effect<A, E, R>) =>
 
 it.effect.each([
   "device-only",
+  "recreated",
+  "recreated-owner",
+  "recreated-owner-set",
+  "recreated-branch",
+  "recreated-snapshot",
   "owner-alias",
   "unproven-alias",
   "moved-alias",
@@ -656,16 +661,17 @@ it.effect.each([
         });
       }
       const deviceDelta = change === "current-alias" ? 0 : 1;
+      const recreated = change.startsWith("recreated");
       const stale = {
         ...original,
         sourceIdentity: {
           dev: original.sourceIdentity.dev + (change === "source-device" ? 2 : deviceDelta),
-          ino: original.sourceIdentity.ino + (change === "source-inode" ? 1 : 0),
+          ino: original.sourceIdentity.ino + (change === "source-inode" || recreated ? 1 : 0),
         },
         gitDirectory: original.gitDirectory + (change === "git-path" ? "-other" : ""),
         gitDirectoryIdentity: {
           dev: original.gitDirectoryIdentity.dev + (change === "git-device" ? 0 : deviceDelta),
-          ino: original.gitDirectoryIdentity.ino + (change === "git-inode" ? 1 : 0),
+          ino: original.gitDirectoryIdentity.ino + (change === "git-inode" || recreated ? 1 : 0),
         },
         commonIdentity: {
           dev: original.commonIdentity.dev + deviceDelta,
@@ -673,9 +679,29 @@ it.effect.each([
         },
         commonDirectory: original.commonDirectory + (change === "common-path" ? "-other" : ""),
       };
+      if (change === "recreated-owner")
+        h.threads.set(firstId, { ...h.threads.get(firstId)!, branch: "other" });
+      if (change === "recreated-owner-set") {
+        const thirdId = ThreadId.make("fixture:third");
+        h.threads.set(thirdId, shell(thirdId, f.workspace));
+      }
+      if (change === "recreated-branch")
+        yield* Effect.promise(() => git(f.workspace, "switch", "-c", "other"));
+      const summary =
+        change === "recreated-snapshot"
+          ? { ...record.summary, snapshotId: "fixture:snapshot" }
+          : record.summary;
+      if (change === "recreated-snapshot")
+        for (const [id, thread] of h.threads)
+          h.threads.set(id, { ...thread, worktreeSuspension: summary });
       yield* h.registry.put(
         {
           ...record,
+          summary,
+          owners:
+            change === "recreated-snapshot"
+              ? record.owners.map((owner) => ({ ...owner, generation: summary.generation }))
+              : record.owners,
           path: ["unproven-alias", "moved-alias", "current-alias"].includes(change)
             ? destination
             : record.path,
@@ -692,6 +718,7 @@ it.effect.each([
         expect((yield* h.suspend).summary.state).toBe("suspended");
       } else if (
         change === "device-only" ||
+        change === "recreated" ||
         change === "owner-alias" ||
         change === "current-alias"
       ) {
@@ -722,6 +749,11 @@ it.effect.each([
           failure: { _tag: "WorkspaceUnavailableError" },
         });
         expect((yield* h.registry.list)[0]!.nativeIdentity).toEqual(stale);
+        expect((yield* h.registry.list)[0]!.summary).toEqual(summary);
+        if (change === "common-inode" && acquired._tag === "Failure")
+          expect(acquired.failure.message).toContain(
+            "The recreated checkout belongs to another repository.",
+          );
       }
     }),
   ),
@@ -3657,44 +3689,73 @@ it.live("acquires an unrelated checkout while another checkout is being preserve
   ),
 );
 
-it.live("recreates an active branch at its latest commit without restoring historical notes", () =>
-  realGit((f) =>
-    Effect.gen(function* () {
-      const h = yield* harness(f);
-      const saved = yield* h.suspend;
-      yield* h.acquisition.acquire({ path: f.workspace, purpose: "file-write" });
-      const head = yield* Effect.promise(async () => {
-        await NodeFSP.writeFile(NodePath.join(f.workspace, "tracked"), "commit B\n");
-        await git(f.workspace, "add", "tracked");
-        await git(f.workspace, "commit", "-m", "later commit");
-        const head = await git(f.workspace, "rev-parse", "HEAD");
-        await git(f.repository, "worktree", "remove", "--force", f.workspace);
-        return head;
-      });
-      expect(yield* h.acquisition.acquire({ path: f.workspace, purpose: "git" })).toEqual({
-        path: f.workspace,
-        branch: "topic",
-        restored: false,
-      });
-      yield* Effect.promise(() => git(f.repository, "worktree", "add", f.workspace, "topic"));
-      expect(
-        (yield* h.acquisition.acquire({ path: f.workspace, purpose: "file-write" })).restored,
-      ).toBe(false);
-      const active = (yield* h.registry.list)[0]!;
-      expect(active.lastHead).toBe(head);
-      expect(active.history).toEqual(saved.history);
-      expect(active.summary.snapshotId).toBeNull();
-      yield* Effect.promise(async () => {
-        expect(await git(f.workspace, "rev-parse", "HEAD")).toBe(head);
-        expect(await NodeFSP.readFile(NodePath.join(f.workspace, "tracked"), "utf8")).toBe(
-          "commit B\n",
-        );
-        await expect(NodeFSP.lstat(NodePath.join(f.workspace, "notes"))).rejects.toMatchObject({
-          code: "ENOENT",
+it.live.each(["same-device", "renumbered-device"] as const)(
+  "recreates an active branch at its latest commit without restoring historical notes: %s",
+  (device) =>
+    realGit((f) =>
+      Effect.gen(function* () {
+        const h = yield* harness(f);
+        const saved = yield* h.suspend;
+        yield* h.acquisition.acquire({ path: f.workspace, purpose: "file-write" });
+        const head = yield* Effect.promise(async () => {
+          await NodeFSP.writeFile(NodePath.join(f.workspace, "tracked"), "commit B\n");
+          await git(f.workspace, "add", "tracked");
+          await git(f.workspace, "commit", "-m", "later commit");
+          const head = await git(f.workspace, "rev-parse", "HEAD");
+          await git(f.repository, "worktree", "remove", "--force", f.workspace);
+          return head;
         });
-      });
-    }),
-  ),
+        expect(yield* h.acquisition.acquire({ path: f.workspace, purpose: "git" })).toEqual({
+          path: f.workspace,
+          branch: "topic",
+          restored: false,
+        });
+        yield* Effect.promise(() => git(f.repository, "worktree", "add", f.workspace, "topic"));
+        if (device === "renumbered-device") {
+          const record = (yield* h.registry.list)[0]!;
+          const identity = record.nativeIdentity!;
+          if (!("commonDirectory" in identity))
+            return yield* Effect.die("Expected a Git checkout identity.");
+          yield* h.registry.put(
+            {
+              ...record,
+              nativeIdentity: {
+                ...identity,
+                sourceIdentity: {
+                  ...identity.sourceIdentity,
+                  dev: identity.sourceIdentity.dev + 1,
+                },
+                gitDirectoryIdentity: {
+                  ...identity.gitDirectoryIdentity,
+                  dev: identity.gitDirectoryIdentity.dev + 1,
+                },
+                commonIdentity: {
+                  ...identity.commonIdentity,
+                  dev: identity.commonIdentity.dev + 1,
+                },
+              },
+            },
+            record,
+          );
+        }
+        expect(
+          (yield* h.acquisition.acquire({ path: f.workspace, purpose: "file-write" })).restored,
+        ).toBe(false);
+        const active = (yield* h.registry.list)[0]!;
+        expect(active.lastHead).toBe(head);
+        expect(active.history).toEqual(saved.history);
+        expect(active.summary.snapshotId).toBeNull();
+        yield* Effect.promise(async () => {
+          expect(await git(f.workspace, "rev-parse", "HEAD")).toBe(head);
+          expect(await NodeFSP.readFile(NodePath.join(f.workspace, "tracked"), "utf8")).toBe(
+            "commit B\n",
+          );
+          await expect(NodeFSP.lstat(NodePath.join(f.workspace, "notes"))).rejects.toMatchObject({
+            code: "ENOENT",
+          });
+        });
+      }),
+    ),
 );
 
 it.live(
