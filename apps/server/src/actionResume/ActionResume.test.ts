@@ -39,6 +39,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import { ChildProcessSpawner } from "effect/process";
 import * as WorkspaceAcquisitionTestkit from "../workspace/WorkspaceAcquisition.testkit.ts";
+import * as WorkspaceAcquisition from "../workspace/WorkspaceAcquisition.ts";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -204,6 +205,7 @@ const makeHarness = Effect.gen(function* () {
   const emit = (event: TerminalEvent) =>
     Effect.forEach([...listeners], (listener) => listener(event), { discard: true });
   const state = {
+    acquisitionError: null as WorkspaceAcquisition.WorkspaceUnavailableError | null,
     callerRunId: null as RunId | null,
     missingShell: false,
     actionProfileName: undefined as string | undefined,
@@ -546,7 +548,13 @@ const makeHarness = Effect.gen(function* () {
     shellReads,
     state,
     layer: ActionResume.layer.pipe(
-      Layer.provide(WorkspaceAcquisitionTestkit.layer),
+      Layer.provide(
+        WorkspaceAcquisitionTestkit.layerWith((input) =>
+          state.acquisitionError === null
+            ? Effect.succeed({ path: input.path, branch: null, restored: false })
+            : Effect.fail(state.acquisitionError),
+        ),
+      ),
       Layer.provideMerge(dependencies),
       Layer.provide(NodeServices.layer),
       Layer.provideMerge(NodeCrypto.layer),
@@ -584,6 +592,24 @@ it("propagates shell command exit status", () => {
     "exit $LASTEXITCODE",
   );
 });
+
+it.effect("preserves the workspace verification reason when an Action cannot launch", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness;
+    h.state.acquisitionError = new WorkspaceAcquisition.WorkspaceUnavailableError({
+      reason: "snapshot-unavailable",
+      detail: "The recreated checkout belongs to another repository.",
+    });
+    yield* Effect.gen(function* () {
+      const actions = yield* ActionResume.ActionResume;
+      const error = yield* actions.runProjectActionAndResume(invocation, "qa").pipe(Effect.flip);
+      assert.equal(error.reason, "launch_failed");
+      assert.include(error.message, "The recreated checkout belongs to another repository.");
+      assert.deepEqual(h.opened, []);
+      assert.deepEqual(h.written, []);
+    }).pipe(Effect.provide(h.layer));
+  }).pipe(Effect.provide(StoreTestLayer)),
+);
 
 it.effect("waits for live shell readiness before writing one complete long Action command", () =>
   Effect.gen(function* () {

@@ -706,7 +706,7 @@ export const make = Effect.gen(function* () {
               operation: "GitManager.createWorktree",
               command: "workspace-acquisition",
               cwd: destination,
-              detail: "The worktree destination is reserved by saved workspace data.",
+              detail: cause.message,
               cause,
             }),
         ),
@@ -3064,7 +3064,7 @@ export const make = Effect.gen(function* () {
                   new GitManagerError({
                     operation: "preparePullRequestThread",
                     cwd: worktreePath,
-                    detail: "The worktree must be restored before preparing this pull request.",
+                    detail: cause.message,
                     cause,
                   }),
               ),

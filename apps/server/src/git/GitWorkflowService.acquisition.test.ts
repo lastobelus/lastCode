@@ -88,13 +88,17 @@ it.effect("does not run Git when saved workspace acquisition fails", () => {
     const error = yield* git.pullCurrentBranch("/worktrees/example/saved").pipe(Effect.flip);
     assert.equal(error._tag, "GitCommandError");
     assert.instanceOf(error.cause, WorkspaceAcquisition.WorkspaceUnavailableError);
+    assert.include(error.message, "The recreated checkout belongs to another repository.");
     assert.deepEqual(calls, []);
   }).pipe(
     Effect.provide(
       fixture(
         () =>
           Effect.fail(
-            new WorkspaceAcquisition.WorkspaceUnavailableError({ reason: "snapshot-unavailable" }),
+            new WorkspaceAcquisition.WorkspaceUnavailableError({
+              reason: "snapshot-unavailable",
+              detail: "The recreated checkout belongs to another repository.",
+            }),
           ),
         calls,
       ),
