@@ -306,6 +306,51 @@ describe("CDP relay extra sessions", () => {
     relay.event("Page.screencastFrame", { data: "x" }, undefined);
     expect(written.map((m) => m["sessionId"])).toEqual(["t3-preview-page", extra]);
   });
+
+  it("reports a binding call only to the sessions that added that binding", async () => {
+    const written: Array<Record<string, unknown>> = [];
+    const relay = makeRelay(
+      makeTarget(async () => ({})),
+      (raw) => written.push(JSON.parse(raw)),
+    );
+    relay.receive(JSON.stringify({ id: 1, method: "Target.setAutoAttach", params: {} }));
+    relay.receive(JSON.stringify({ id: 2, method: "Target.attachToBrowserTarget" }));
+    await settle();
+    const browserSession = (written.find((m) => m["id"] === 2)!["result"] as { sessionId: string })
+      .sessionId;
+    relay.receive(
+      JSON.stringify({
+        id: 3,
+        method: "Target.attachToTarget",
+        params: { targetId: "GUEST-TARGET", flatten: true },
+        sessionId: browserSession,
+      }),
+    );
+    await settle();
+    const extra = (written.find((m) => m["id"] === 3)!["result"] as { sessionId: string })
+      .sessionId;
+    const add = (id: number, sessionId: string, name: string, method = "Runtime.addBinding") =>
+      relay.receive(JSON.stringify({ id, method, params: { name }, sessionId }));
+    const called = (name: string, sessionId?: string) => {
+      written.length = 0;
+      relay.event("Runtime.bindingCalled", { name, payload: "active" }, sessionId);
+      return written.map((m) => m["sessionId"]);
+    };
+    add(4, "t3-preview-page", "__playwright__binding__");
+    add(6, "iframe-session", "__playwright__binding__");
+    await settle();
+    // The host adds its own gesture binding on its debugger, outside the relay.
+    expect(called("t3ThreadLinkGesture")).toEqual([]);
+    add(5, extra, "t3ThreadLinkGesture");
+    await settle();
+    expect(called("t3ThreadLinkGesture")).toEqual([extra]);
+    expect(called("__playwright__binding__")).toEqual(["t3-preview-page"]);
+    expect(called("__playwright__binding__", "iframe-session")).toEqual(["iframe-session"]);
+    expect(called("t3ThreadLinkGesture", "iframe-session")).toEqual([]);
+    add(7, extra, "t3ThreadLinkGesture", "Runtime.removeBinding");
+    await settle();
+    expect(called("t3ThreadLinkGesture")).toEqual([]);
+  });
 });
 
 describe("CDP relay cookies", () => {
