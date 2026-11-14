@@ -22,7 +22,12 @@ function declaredLauncher(name) {
 function runDeclaredLauncher(name, target, anchor, env = {}) {
   return NodeChildProcess.spawnSync(process.execPath, ["-e", declaredLauncher(name)], {
     cwd: target,
-    env: { ...process.env, T3CODE_PROJECT_ROOT: anchor, ...env },
+    env: {
+      ...process.env,
+      PATH: `${NodePath.dirname(process.execPath)}${NodePath.delimiter}${process.env.PATH ?? ""}`,
+      T3CODE_PROJECT_ROOT: anchor,
+      ...env,
+    },
     encoding: "utf8",
   });
 }
@@ -177,6 +182,10 @@ function launcherFixture() {
     NodePath.join(target, "scripts", "lastcode-local-ci.ts"),
     child("ci", "FIXTURE_CI_STATUS"),
   );
+  NodeFS.writeFileSync(
+    NodePath.join(target, "package.json"),
+    JSON.stringify({ scripts: { "lastcode:ci": "node scripts/lastcode-local-ci.ts --full" } }),
+  );
   return { target, anchor };
 }
 
@@ -211,7 +220,7 @@ it("declared CI launcher stops after preparation failure and propagates CI failu
       .map((line) => JSON.parse(line)),
     [
       { kind: "prepare", cwd: target, args: ["--for-ci"] },
-      { kind: "ci", cwd: target, args: ["--quick"] },
+      { kind: "ci", cwd: target, args: ["--full", "--quick"] },
     ],
   );
   const success = runDeclaredLauncher("Run Quick CI", target, anchor);
