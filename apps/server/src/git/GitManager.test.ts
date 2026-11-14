@@ -220,10 +220,11 @@ const layerGitFixtureTemplates = Layer.effect(
     const repo = yield* makeTempDir("t3code-git-template-");
     // An empty template skips copying git's sample hooks into every test repository.
     yield* runGit(repo, ["init", "--initial-branch=main", "--template="]);
-    yield* runGit(repo, ["config", "user.email", "test@example.com"]);
-    yield* runGit(repo, ["config", "user.name", "Test User"]);
-    // Override global autocrlf on Windows for LF assertions, including linked worktrees.
-    yield* runGit(repo, ["config", "core.autocrlf", "false"]);
+    yield* fs.writeFileString(
+      NodePath.join(repo, ".git", "config"),
+      "\n[user]\n\temail = test@example.com\n\tname = Test User\n[core]\n\tautocrlf = false\n",
+      { flag: "a" },
+    );
     yield* fs.writeFileString(NodePath.join(repo, "README.md"), "hello\n");
     yield* runGit(repo, ["add", "README.md"]);
     yield* runGit(repo, ["commit", "-m", "Initial commit"]);

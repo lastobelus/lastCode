@@ -36,6 +36,9 @@
     "scripts/warm-dep-cache.ts",
     "../../scripts/lib/public-config.ts",
     "../../scripts/lib/tagged-source-version.ts",
+    "../../scripts/lib/apply-web-brand-assets.ts",
+    "../../scripts/lib/brand-assets.ts",
+    "../../scripts/lib/lastcode-brand-assets.ts",
     "../../scripts/lib/third-party-licenses.ts"
   ]
 }

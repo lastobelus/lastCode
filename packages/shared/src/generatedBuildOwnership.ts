@@ -31,6 +31,22 @@ const safeRelative = (path: string) =>
   !NodePath.posix.isAbsolute(path) &&
   path.split("/").every((part) => part !== "" && part !== "." && part !== "..");
 
+function validWorktreeIdentity(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const separator = value.lastIndexOf(":");
+  if (separator < 1 || !NodePath.isAbsolute(value.slice(0, separator))) return false;
+  try {
+    const identity: unknown = JSON.parse(value.slice(separator + 1));
+    return (
+      Array.isArray(identity) &&
+      identity.length === 3 &&
+      identity.every((part) => typeof part === "number" && Number.isFinite(part))
+    );
+  } catch {
+    return false;
+  }
+}
+
 function context(worktreePath: string, root: string) {
   if (!allowedRoot(root)) throw new Error("Unrecognized generated build root");
   const cwd = NodeFS.realpathSync(worktreePath);
@@ -160,23 +176,30 @@ function readRecord(ctx: Context, allowPending = false) {
     throw new Error("Unsafe build ownership record");
   const raw = NodeFS.readFileSync(ctx.recordPath, "utf8");
   const value: unknown = JSON.parse(raw);
-  validateRecord(ctx, value);
+  validateRecord(ctx, value, false);
   if (signature(NodeFS.lstatSync(ctx.recordPath)) !== signature(stat))
     throw new Error("Build ownership changed during observation");
+  // Native identities can go stale across boots; stale provenance grants no ownership.
+  if (value.worktreeIdentity !== ctx.worktreeIdentity) return null;
   return {
     record: value as BuildRecord,
     recordIdentity: signature(stat),
     token: NodeCrypto.createHash("sha256").update(raw).update(signature(stat)).digest("hex"),
   };
 }
-function validateRecord(ctx: Context, value: unknown): asserts value is BuildRecord {
+function validateRecord(
+  ctx: Context,
+  value: unknown,
+  requireCurrentOwner = true,
+): asserts value is BuildRecord {
   if (
     typeof value !== "object" ||
     value === null ||
     !("version" in value) ||
     value.version !== 1 ||
     !("worktreeIdentity" in value) ||
-    value.worktreeIdentity !== ctx.worktreeIdentity ||
+    !validWorktreeIdentity(value.worktreeIdentity) ||
+    (requireCurrentOwner && value.worktreeIdentity !== ctx.worktreeIdentity) ||
     !("root" in value) ||
     value.root !== ctx.root ||
     !("lastUsedAt" in value) ||
@@ -975,7 +998,7 @@ export function createGeneratedBuildStage(worktreePath: string, root: string) {
       allocation(NodeFS.lstatSync(directory)) !== initialAllocation
     )
       throw new Error("Build stage changed identity");
-    NodeFS.rmSync(directory, { recursive: true }); // Only the fresh, runner-owned stage, never an actual output root.
+    NodeFS.rmSync(directory, { recursive: true, maxRetries: 3 }); // Only the fresh, runner-owned stage, never an actual output root.
     finished = true;
   };
   return {
@@ -1042,7 +1065,9 @@ export function createGeneratedBuildStage(worktreePath: string, root: string) {
               return { file, destination, prior, skip: false };
             if (existing.hash === file.hash)
               return { file, destination, prior: undefined, skip: true };
-            throw new Error(`Build output collision requires file review: ${root}/${file.path}`);
+            throw new Error(
+              `Build output collision requires file review: ${root}/${file.path}. The existing file differs from the new build output and no current build owns these bytes, so it was left in place. Review it or move it aside, then rebuild.`,
+            );
           } catch (error) {
             if (missing(error)) return { file, destination, prior: undefined, skip: false };
             throw error;
@@ -1194,7 +1219,7 @@ function rootAllocation(ctx: Context) {
   return allocation(stat);
 }
 
-function readReview(ctx: Context): ReviewSnapshot | null {
+function readReview(ctx: Context, includeStaleObservation = false): ReviewSnapshot | null {
   const path = reviewPath(ctx);
   let fd;
   try {
@@ -1213,7 +1238,8 @@ function readReview(ctx: Context): ReviewSnapshot | null {
       typeof value !== "object" ||
       value === null ||
       value.version !== 1 ||
-      value.worktreeIdentity !== ctx.worktreeIdentity ||
+      !validWorktreeIdentity(value.worktreeIdentity) ||
+      (value.protected && value.worktreeIdentity !== ctx.worktreeIdentity) ||
       value.root !== ctx.root ||
       typeof value.rootAllocation !== "string" ||
       typeof value.lastUsedAt !== "number" ||
@@ -1250,6 +1276,8 @@ function readReview(ctx: Context): ReviewSnapshot | null {
       signature(NodeFS.fstatSync(fd)) !== signature(stat)
     )
       throw new Error("Build review changed during observation");
+    // Observation-only clocks hold no consent; retained protection still binds to its owner.
+    if (value.worktreeIdentity !== ctx.worktreeIdentity && !includeStaleObservation) return null;
     return {
       record: value as ReviewRecord,
       token: digest(raw + signature(stat)),
@@ -1387,7 +1415,7 @@ export function generatedBuildReviewProtection(worktreePath: string, relativeCan
         digest(value.root) !== match[1]
       )
         return true;
-      const previous = readReview({ ...ctx, root: value.root });
+      const previous = readReview({ ...ctx, root: value.root }, true);
       if (!previous) return true;
       if (!previous.record.protected) continue;
       const root = previous.record.root;

@@ -395,7 +395,7 @@ const commitInitialRepo = (cwd: string) =>
     yield* git(cwd, ["init"]);
     yield* fileSystem.writeFileString(
       pathService.join(cwd, ".git", "config"),
-      "[user]\n\temail = test@test.com\n\tname = Test\n",
+      "\n[user]\n\temail = test@test.com\n\tname = Test\n",
       { flag: "a" },
     );
     yield* writeTextFile(cwd, "README.md", "# test\n");
