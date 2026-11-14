@@ -46,6 +46,9 @@ directories.
   T3 Code into an independent LastCode profile, including exclusions and backups.
 - [QA preview handoffs](preview-handoffs.md): recovery requests and the required
   24-hour hosting and automatic cleanup contract for agent-delivered previews.
+- [Keyboard scrolling](keyboard-scrolling.md): arrow and page keys scroll the
+  pane under the pointer; the desired behaviour, the upstream seams it rests on,
+  and when a checkpoint is fighting upstream.
 - [Codex Computer Use lifecycle](computer-use-lifecycle.md): lingering native
   indicators, upstream findings, and the limits of LastCode cleanup.
 

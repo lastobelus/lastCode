@@ -131,29 +131,15 @@ it("scrolls to and opens PRs at the end of a long list while keeping thread deta
   const onOpen = vi.fn((event: MouseEvent<HTMLAnchorElement>, _url: string) =>
     event.preventDefault(),
   );
-  const onComposerKey = vi.fn();
   const container = document.createElement("div");
   container.style.setProperty("--available-height", "600px");
   await using screen = await render(
-    <>
-      <textarea
-        aria-label="Composer"
-        data-lastcode-source-composer="true"
-        onKeyDown={(event) => onComposerKey(event.key)}
-      />
-      <input aria-label="Find in thread" onKeyDown={(event) => onComposerKey(event.key)} />
-      <div role="dialog">
-        <input aria-label="Other dialog field" onKeyDown={(event) => onComposerKey(event.key)} />
-      </div>
-      {hoverContent(
-        null,
-        null,
-        {
-          pullRequests: Array.from({ length: 70 }, (_, index) => pullRequest(index + 1, false)),
-        },
-        onOpen,
-      )}
-    </>,
+    hoverContent(
+      null,
+      null,
+      { pullRequests: Array.from({ length: 70 }, (_, index) => pullRequest(index + 1, false)) },
+      onOpen,
+    ),
     { container },
   );
   const links = [...screen.container.querySelectorAll<HTMLAnchorElement>("a")];
@@ -168,60 +154,6 @@ it("scrolls to and opens PRs at the end of a long list while keeping thread deta
   await commands.wheel(200);
   await scrolled;
   expect(scroller.scrollTop).toBeGreaterThan(0);
-  const composer = screen.getByRole("textbox", { name: "Composer" });
-  await userEvent.click(composer);
-  await userEvent.hover(page.elementLocator(scroller));
-  for (const key of ["PageDown", "PageUp", "ArrowDown", "ArrowUp"]) {
-    await act(() => {
-      scroller.scrollTop = 200;
-    });
-    await userEvent.keyboard(`{${key}}`);
-    expect(key.endsWith("Down") ? scroller.scrollTop > 200 : scroller.scrollTop < 200).toBe(true);
-  }
-  expect(document.activeElement).toBe(composer.element());
-  expect(onComposerKey).not.toHaveBeenCalled();
-  for (const [position, key] of [
-    [0, "PageUp"],
-    [0, "ArrowUp"],
-    [scroller.scrollHeight, "PageDown"],
-    [scroller.scrollHeight, "ArrowDown"],
-  ] as const) {
-    await act(() => {
-      scroller.scrollTop = position;
-    });
-    const boundary = scroller.scrollTop;
-    await userEvent.keyboard(`{${key}}`);
-    expect(scroller.scrollTop).toBe(boundary);
-  }
-  expect(onComposerKey).not.toHaveBeenCalled();
-  await userEvent.keyboard("{Control>}{ArrowDown}{/Control}");
-  expect(onComposerKey).toHaveBeenCalledWith("ArrowDown");
-  onComposerKey.mockClear();
-  await act(() =>
-    (screen.getByRole("textbox", { name: "Find in thread" }).element() as HTMLElement).focus(),
-  );
-  const beforeFindKeys = scroller.scrollTop;
-  for (const key of ["PageDown", "PageUp", "ArrowDown", "ArrowUp"]) {
-    await userEvent.keyboard(`{${key}}`);
-    expect(onComposerKey).toHaveBeenLastCalledWith(key);
-    expect(scroller.scrollTop).toBe(beforeFindKeys);
-  }
-  onComposerKey.mockClear();
-  await act(() =>
-    (screen.getByRole("textbox", { name: "Other dialog field" }).element() as HTMLElement).focus(),
-  );
-  await userEvent.keyboard("{ArrowDown}");
-  expect(onComposerKey).toHaveBeenCalledWith("ArrowDown");
-  onComposerKey.mockClear();
-  await act(() => {
-    scroller.scrollTop = 200;
-    links[0]!.focus();
-  });
-  await userEvent.hover(composer);
-  const focusedPosition = scroller.scrollTop;
-  await userEvent.keyboard("{ArrowDown}");
-  expect(scroller.scrollTop).toBeGreaterThan(focusedPosition);
-  expect(document.activeElement).toBe(links[0]);
   await act(() => {
     scroller.scrollTop = scroller.scrollHeight;
   });

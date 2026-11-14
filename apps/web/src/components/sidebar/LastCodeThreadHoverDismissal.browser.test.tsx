@@ -10,7 +10,6 @@ import { LastCodeThreadRowLayout } from "./LastCodeThreadRowLayout";
 import { LastCodeThreadRowSurface } from "./LastCodeThreadRowSurface";
 import { useLastCodeThreadDetails } from "./useLastCodeThreadDetails";
 import { useLastCodeThreadFileDrop } from "./lastcodeThreadRowInteractions";
-import { bindThreadHoverScrollKeys } from "./threadHoverScrollKeys";
 import "../../index.css";
 
 vi.mock("../../hooks/useSettings", () => ({
@@ -113,7 +112,6 @@ function Harness({
                 <div>
                   <span>Thread details</span>
                   <div
-                    ref={bindThreadHoverScrollKeys}
                     data-testid="pr-scroll"
                     style={{
                       maxHeight: 140,

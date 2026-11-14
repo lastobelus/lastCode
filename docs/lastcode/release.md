@@ -250,6 +250,8 @@ disabled, report that setup problem rather than reverting to a sleep loop.
 
 When the checkpoint failure record links a conflict dossier, read it before you resolve a retained carry conflict.
 
+When a conflict or failing test touches keyboard scrolling (`lastcodeScrollKeys`, `timelineViewport.ts`, workspace focus, or the composer's arrow and page keys), read [Keyboard scrolling](keyboard-scrolling.md) first. It defines the behaviour to keep and when to stop and report a clash with upstream.
+
 Preserve the retained worktree, including resolutions and subsequent repairs.
 The checkpoint command enables rerere in repository configuration for
 historical, non-carry rebases; carry replay overrides it on its own rebase

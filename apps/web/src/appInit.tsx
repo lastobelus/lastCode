@@ -10,6 +10,7 @@ import * as Schema from "effect/Schema";
 
 import { applyAppearanceContrast } from "./appearanceContrast";
 import { applyScrollbarAppearance } from "./scrollbarAppearance";
+import { startLastCodeScrollKeys } from "./lastcodeScrollKeys";
 import { applyAppearanceFontVariables, TYPOGRAPHY_ADVANCED_STORAGE_KEY } from "./appearanceFonts";
 import { startElectronBrowserHost } from "./browser/ElectronBrowserHost";
 import { startBrowserProfileReporting } from "./browser/BrowserProfileReporter";
@@ -305,6 +306,7 @@ export function startAppServices(): AppRouter {
   });
   startMainAppLocationTracking(router);
   startWorkspaceFocus(router);
+  startLastCodeScrollKeys();
   startBackgroundThreadAnnouncements(appAtomRegistry, router);
   startThreadVisitedMigration(appAtomRegistry);
   startSshPasswordPromptQueue();

@@ -25,7 +25,6 @@ import {
 } from "~/hooks/useLocalStorage";
 import { resolveSidebarState, type ResponsiveSidebarState } from "./sidebarState";
 import { bindSidebarRailScroll } from "./sidebarRailScroll";
-import { bindSidebarPageScroll } from "./sidebarPageScroll";
 import * as Schema from "effect/Schema";
 import { announceSidebarVisibility } from "~/lib/accessibilityAnnouncements";
 
@@ -692,16 +691,10 @@ function SidebarContent({
 }: React.ComponentProps<"div"> & {
   fixedHeader?: React.ReactNode;
 }) {
-  const scrollAreaRef = React.useRef<HTMLDivElement | null>(null);
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- binds the mounted sidebar viewport DOM scroll listeners and removes them on cleanup
-  React.useEffect(() => {
-    if (scrollAreaRef.current) return bindSidebarPageScroll(scrollAreaRef.current);
-  }, []);
   return (
     <>
       {fixedHeader ? <div className="w-full shrink-0">{fixedHeader}</div> : null}
       <ScrollArea
-        ref={scrollAreaRef}
         hideScrollbars
         scrollFade
         scrollFadePadding={false}

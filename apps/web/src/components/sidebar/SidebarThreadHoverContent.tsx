@@ -21,7 +21,6 @@ import { MiddleTruncate } from "../ui/middle-truncate";
 import { useKnownTerminalSessions } from "../../state/terminalSessions";
 import { useThreadPreviewLeases } from "../../state/previewHosting";
 import { threadTerminalProcessLabels } from "./threadTerminalPresentation";
-import { bindThreadHoverScrollKeys } from "./threadHoverScrollKeys";
 
 type SidebarHoverProviderEntry = Pick<
   ProviderInstanceEntry,
@@ -258,10 +257,7 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
         ) : null}
       </div>
       {hasPullRequests ? (
-        <div
-          ref={bindThreadHoverScrollKeys}
-          className="min-h-0 overflow-y-auto overscroll-contain border-t border-border/60 pt-2 pl-0.5 text-xs text-muted-foreground"
-        >
+        <div className="min-h-0 overflow-y-auto overscroll-contain border-t border-border/60 pt-2 pl-0.5 text-xs text-muted-foreground">
           <ThreadPullRequestsMiniList
             pullRequests={props.thread.pullRequests}
             onOpenPullRequest={props.onOpenPullRequest}
