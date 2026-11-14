@@ -50,7 +50,7 @@ function createLaunchFixture(root: string) {
   writeExecutable(
     NodePath.join(toolBin, "mise"),
     `#!/bin/sh
-[ "$1" = exec ] && [ "$2" = node@24.13.1 ] && [ "$3" = -- ] || exit 90
+[ "$1" = exec ] && [ "$2" = node@26.12.1 ] && [ "$3" = -- ] || exit 90
 shift 3
 # Model mise restoring pristine PATH entries unless aggressive activation is explicit.
 if [ "$MISE_ACTIVATE_AGGRESSIVE" = 1 ]; then

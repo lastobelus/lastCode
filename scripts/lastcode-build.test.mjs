@@ -314,7 +314,7 @@ describe("LastCode userland build command", () => {
 
   it("launches with the repository's pinned Node runtime", () => {
     expect(renderLauncher("/tmp/Last Code/lastcode-build.mjs")).toContain(
-      "env MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@24.13.1 -- node '/tmp/Last Code/lastcode-build.mjs' \"$@\"",
+      "env MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@26.12.1 -- node '/tmp/Last Code/lastcode-build.mjs' \"$@\"",
     );
   });
 });

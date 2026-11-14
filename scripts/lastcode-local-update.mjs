@@ -771,10 +771,14 @@ function resolveMise(home) {
 }
 
 export function resolveMiseNodeExecutable(cwd, mise, runCommand = run) {
-  const installRoot = runCommand(cwd, mise, ["where", "node@24.13.1"]);
+  // Older installable tags can require a different tooling runtime than engines.node.
+  const manifest = JSON.parse(NodeFS.readFileSync(NodePath.join(cwd, "package.json"), "utf8"));
+  const nodeTool = manifest.scripts["lastcode:ci"].match(/\bnode@\d+\.\d+\.\d+\b/u)?.[0];
+  if (!nodeTool) throw new Error("The target tag's lastcode:ci command must pin a Node runtime.");
+  const installRoot = runCommand(cwd, mise, ["where", nodeTool]);
   const executable = NodePath.join(installRoot, "bin", "node");
   if (!NodeFS.existsSync(executable)) {
-    throw new Error(`mise did not provide the expected Node 24 executable at ${executable}.`);
+    throw new Error(`mise did not provide the expected ${nodeTool} executable at ${executable}.`);
   }
   return executable;
 }

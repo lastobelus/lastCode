@@ -13,7 +13,7 @@ const declarations = JSON.parse(
 function declaredLauncher(name) {
   const command = declarations.find((declaration) => declaration.name === name)?.command;
   const match = command?.match(
-    /^MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@24\.13\.1 -- node -e "([^"]+)"$/,
+    /^MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@26\.12\.1 -- node -e "([^"]+)"$/,
   );
   NodeAssert.ok(match, `${name} must use the pinned Node inline launcher`);
   return match[1];

@@ -252,7 +252,7 @@ describe("LastCode GitHub CI workflow", () => {
   it.each([
     { packages: "", filters: ["!t3", "!@t3tools/monorepo", "!@t3tools/web"] },
     { packages: "@t3tools/scripts", filters: ["@t3tools/scripts"] },
-  ])("selects the supported Node before testing packages '$packages'", ({ packages, filters }) => {
+  ])("tests packages '$packages' on the project Node", ({ packages, filters }) => {
     const steps = asRecord(asRecord(asRecord(parse(workflow))?.jobs)?.test)?.steps;
     if (!Array.isArray(steps)) throw new Error("CI test job is missing its steps.");
     const script = steps.map(asRecord).find((step) => step?.name === "Test")?.run;
@@ -265,7 +265,6 @@ describe("LastCode GitHub CI workflow", () => {
     );
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout.trim().split("\n")).toEqual([
-      "env use 24.13.1",
       `run --parallel --concurrency-limit 4 ${filters.map((filter) => `--filter ${filter}`).join(" ")} test`,
     ]);
   });

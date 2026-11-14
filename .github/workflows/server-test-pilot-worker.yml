@@ -31,9 +31,9 @@ jobs:
           install-args: --frozen-lockfile
       - name: Select checkpoint pilot Node runtime
         run: |
-          vp env use 24.13.1
-          echo 'VP_NODE_VERSION=24.13.1' >> "$GITHUB_ENV"
-          vp env exec --node 24.13.1 node -p 'require("node:path").dirname(process.execPath)' >> "$GITHUB_PATH"
+          vp env use 26.12.1
+          echo 'VP_NODE_VERSION=26.12.1' >> "$GITHUB_ENV"
+          vp env exec --node 26.12.1 node -p 'require("node:path").dirname(process.execPath)' >> "$GITHUB_PATH"
       - name: Install Chromium and system dependencies
         run: node apps/server/node_modules/playwright-core/cli.js install --with-deps --only-shell chromium
       - name: Run uncached cohort

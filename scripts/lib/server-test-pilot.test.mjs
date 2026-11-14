@@ -11,8 +11,8 @@ function fixture() {
       cohort,
       fingerprint: {
         candidate: "candidate",
-        node: "v24.13.1",
-        testNode: "v24.13.1",
+        node: "v26.12.1",
+        testNode: "v26.12.1",
         cpu: "CPU family A",
         cpus: 4,
         memoryGiB: 16,
@@ -79,7 +79,7 @@ it("accepts complete disjoint cohorts and rejects unusable benchmark evidence", 
       r[1].fingerprint[field] = "other";
     }),
     (r) => {
-      for (const receipt of r) receipt.fingerprint.node = receipt.fingerprint.testNode = "v26.12.1";
+      for (const receipt of r) receipt.fingerprint.node = receipt.fingerprint.testNode = "v24.13.1";
     },
     (r) => {
       r[1].discovery = ["other"];

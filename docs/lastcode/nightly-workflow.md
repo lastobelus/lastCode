@@ -480,7 +480,7 @@ the dedicated automation worktree in `~/.lastcode/dashboard.json`, so the
 command works from any directory without depending on a human development
 worktree. Installation fails instead of recording the current checkout when the
 automation worktree is missing. The installed launcher uses the repository's
-pinned Node 24 runtime through `mise`, independent of the shell's default Node.
+pinned Node runtime through `mise`, independent of the shell's default Node.
 
 Show the latest eight checkpoint activities, or choose another count:
 

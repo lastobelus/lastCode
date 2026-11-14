@@ -3,7 +3,7 @@ import * as NodeAssert from "node:assert/strict";
 const transferTest = "integration/transferBudgetV2.integration.test.ts";
 
 export function assertPilotRuntime(version) {
-  NodeAssert.equal(version, "v24.13.1", "Pilot requires checkpoint Node v24.13.1");
+  NodeAssert.equal(version, "v26.12.1", "Pilot requires checkpoint Node v26.12.1");
 }
 
 function strictFingerprint({ cpu: _cpu, ...identity }) {

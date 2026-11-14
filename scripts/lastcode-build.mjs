@@ -144,7 +144,7 @@ function shellQuote(value) {
 }
 
 export function renderLauncher(modulePath) {
-  return `#!/bin/sh\n# ${BUILD_MANAGED_MARKER}\nexec env MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@24.13.1 -- node ${shellQuote(modulePath)} "$@"\n`;
+  return `#!/bin/sh\n# ${BUILD_MANAGED_MARKER}\nexec env MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@26.12.1 -- node ${shellQuote(modulePath)} "$@"\n`;
 }
 
 function runGit(repoRoot, args) {
@@ -392,7 +392,7 @@ export function installCommandAssets(automationWorktree, home) {
   );
   replaceManagedSymlink(exposed, target);
 
-  console.log(`Installed ${target} with the pinned Node 24 runtime`);
+  console.log(`Installed ${target} with the pinned Node runtime`);
   console.log(`Exposed on PATH as ${exposed}`);
 }
 

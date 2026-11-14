@@ -8,7 +8,7 @@ import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 import { shardedTestFiles } from "./lib/sharded-tests.ts";
 
-NodeAssert.equal(process.version, "v24.13.1", "Pilot driver requires checkpoint Node v24.13.1");
+NodeAssert.equal(process.version, "v26.12.1", "Pilot driver requires checkpoint Node v26.12.1");
 
 const root = NodePath.resolve(import.meta.dirname, "..");
 const server = NodePath.join(root, "apps/server");
@@ -75,7 +75,7 @@ const result = NodeChildProcess.spawnSync(
       ...process.env,
       VP_REMOTE_CACHE: "off",
       VP_REMOTE_CACHE_URL: "",
-      VP_NODE_VERSION: "24.13.1",
+      VP_NODE_VERSION: "26.12.1",
       T3CODE_SERVER_PILOT_RUNTIME_PATH: runtimePath,
       T3CODE_TRANSFER_BUDGET_REPORT_PATH: NodePath.join(output, "transfer.md"),
       T3CODE_TRANSFER_BUDGET_RESULT_PATH: NodePath.join(output, "transfer.json"),
