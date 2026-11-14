@@ -108,6 +108,7 @@ export interface ThreadLaunchInput {
   readonly linkOrigin?: OrchestrationV2LinkOrigin;
   /** The parent there, when that environment's agent delegated this as a task. */
   readonly delegatedFrom?: OrchestrationV2DelegatedFrom;
+  readonly creatorThreadId?: ThreadId;
 }
 
 type PreparationInput = Pick<
@@ -1217,6 +1218,9 @@ const make = Effect.gen(function* () {
                   : { delegatedFrom: input.delegatedFrom }),
                 createdBy: input.createdBy,
                 creationSource: input.creationSource,
+                ...(input.creatorThreadId === undefined
+                  ? {}
+                  : { creatorThreadId: input.creatorThreadId }),
               };
         const claimOperation =
           input.reuseExistingThread === true ? "update-thread" : "create-thread";

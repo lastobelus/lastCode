@@ -66,6 +66,13 @@ describe("buildThreadActionMenuItems", () => {
     },
   );
 
+  it("keeps explicit read markers available without task operation permission", () => {
+    const items = buildThreadActionMenuItems({ ...baseState, canOperate: false });
+    expect(items.filter((item) => !item.disabled).map((item) => item.id)).toEqual(
+      expect.arrayContaining(["mark-read", "mark-unread"]),
+    );
+  });
+
   it.each([false, true])("offers Action cancellation when running is %s", (hasRunningAction) => {
     const items = buildThreadActionMenuItems({ ...baseState, hasRunningAction });
     expect(items.some((item) => item.id === "cancel-action")).toBe(hasRunningAction);
