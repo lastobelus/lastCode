@@ -11,14 +11,14 @@ import {
 const waitDeclaration = {
   id: "lc-wait-for-checkpoint",
   name: "Wait for Checkpoint",
-  command: "mise exec node@24.13.1 -- node scripts/lastcode-wait-for-checkpoint.ts",
+  command: "mise exec node@26.12.1 -- node scripts/lastcode-wait-for-checkpoint.ts",
   icon: "test" as const,
 };
 
 const quickDeclaration = {
   id: "lc-local-ci",
   name: "Run Quick CI",
-  command: "mise exec node@24.13.1 -- node scripts/lastcode-local-ci.ts --quick",
+  command: "mise exec node@26.12.1 -- node scripts/lastcode-local-ci.ts --quick",
   icon: "test" as const,
 };
 
