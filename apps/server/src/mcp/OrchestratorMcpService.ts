@@ -2878,11 +2878,13 @@ const make = Effect.gen(function* () {
         childRunEvent?.event.type === "run.created" &&
         childRunEvent.event.payload.workspacePreparation !== undefined
       ) {
-        yield* threadLaunch.prepareRun({
-          commandId,
-          threadId: childThreadId,
-          runId: childRunEvent.event.payload.id,
-        });
+        yield* threadLaunch
+          .prepareRun({
+            commandId,
+            threadId: childThreadId,
+            runId: childRunEvent.event.payload.id,
+          })
+          .pipe(Effect.mapError((error) => failure("orchestration_error", errorMessage(error))));
       }
 
       return yield* input.mode === "wait"

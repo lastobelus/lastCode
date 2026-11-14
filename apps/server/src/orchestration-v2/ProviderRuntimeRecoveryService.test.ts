@@ -268,6 +268,46 @@ it.effect.each(
     }),
 );
 
+it.effect("recovers an empty initial preparation claim without replenishing its fetch budget", () =>
+  Effect.gen(function* () {
+    const { threadId } = yield* seedRecoveryRuns("empty-workspace", []);
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const thread = yield* store.getThread(threadId);
+    const now = yield* DateTime.now;
+    const commandId = CommandId.make("empty-workspace:claim");
+    yield* (yield* EventSink.EventSinkV2).writeWithEffects({
+      commandId,
+      effects: [],
+      events: [
+        {
+          id: EventId.make("empty-workspace:claim:event"),
+          type: "thread.metadata-updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            ...thread,
+            emptyWorkspacePreparationClaim: {
+              commandId,
+              requestId: CommandId.make("empty-workspace:launch"),
+              workspaceStrategy: { type: "worktree", baseRef: "main", startFromOrigin: true },
+            },
+          },
+        },
+      ],
+    });
+    const recovery = yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService;
+    yield* recovery.recover;
+    yield* recovery.recover;
+    const recovered = yield* store.getThreadProjection(threadId);
+    assert.isUndefined(recovered.thread.emptyWorkspacePreparationClaim);
+    assert.equal(recovered.thread.emptyWorkspacePreparation?.state, "failed");
+    assert.equal(recovered.thread.emptyWorkspacePreparation?.failure.retryable, false);
+    assert.equal(recovered.turnItems.filter((item) => item.type === "error").length, 1);
+    assert.isEmpty(recovered.runs);
+    assert.isEmpty(yield* (yield* EffectOutbox.EffectOutboxV2).listByCommandId(commandId));
+  }).pipe(Effect.provide(recoveryPersistence)),
+);
+
 it.effect("expires orphaned runtime requests before command readiness", () => {
   const threadId = ThreadId.make("thread_recovery_requests");
   let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
@@ -747,12 +787,17 @@ it.effect("recovery closes a secret card's form but leaves a link card open", ()
 it.effect.each([
   "queued",
   "preparing",
+  "preparing-auto",
   "starting",
   "starting-other-request",
   "starting-own-request",
   "starting-scheduled",
 ] as const)("recovers $0 work after restart", (scenario) => {
-  const status = scenario.startsWith("starting") ? "starting" : scenario;
+  const status = scenario.startsWith("starting")
+    ? "starting"
+    : scenario === "preparing-auto"
+      ? "preparing"
+      : scenario;
   const terminalized =
     status === "preparing" ||
     scenario === "starting-own-request" ||
@@ -786,6 +831,17 @@ it.effect.each([
         status,
         startedAt: null,
         activeAttemptId: attemptId,
+        rootNodeId,
+        providerThreadId: null,
+        ...(scenario === "preparing-auto"
+          ? {
+              workspacePreparationRetry: {
+                resetAt: "2026-01-01T00:05:00.000Z",
+                failureCommandId: CommandId.make("failure"),
+                state: "claimed",
+              },
+            }
+          : {}),
         userMessageId: MessageId.make("message_queued_restart"),
         queuePosition: 1,
         providerInstanceId: ProviderInstanceId.make("codex"),
@@ -885,17 +941,27 @@ it.effect.each([
     const nodeEvent = command.events.find((event) => event.type === "node.updated");
     assert.equal(
       runEvent?.type === "run.updated" ? runEvent.payload.status : null,
-      terminalized ? "cancelled" : "queued",
+      scenario === "preparing-auto" ? "failed" : terminalized ? "cancelled" : "queued",
     );
+    if (scenario === "preparing-auto") {
+      const failure = command.events.find(
+        (event) => event.type === "turn-item.updated" && event.payload.type === "error",
+      );
+      assert.equal(failure?.type === "turn-item.updated" ? failure.payload.status : null, "failed");
+    }
     assert.isEmpty(command.effects);
     if (terminalized) {
       assert.equal(
         attemptEvent?.type === "run-attempt.updated" ? attemptEvent.payload.status : null,
-        "cancelled",
+        scenario === "preparing-auto" ? "failed" : "cancelled",
       );
       assert.equal(
         nodeEvent?.type === "node.updated" ? nodeEvent.payload.status : null,
-        scenario === "starting-own-request" ? null : "cancelled",
+        scenario === "starting-own-request"
+          ? null
+          : scenario === "preparing-auto"
+            ? "failed"
+            : "cancelled",
       );
     } else {
       assert.equal(runEvent?.type === "run.updated" ? runEvent.payload.queuePosition : null, 1);

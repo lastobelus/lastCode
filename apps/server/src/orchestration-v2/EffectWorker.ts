@@ -31,6 +31,7 @@ import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
 import * as IncomingMessageSummaryService from "./IncomingMessageSummaryService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
+import * as ThreadLaunchService from "./ThreadLaunchService.ts";
 import { DispatchModeLimit } from "./DispatchModeLimit.ts";
 import {
   PullRequestWatchDeliveryAuthorization,
@@ -117,6 +118,8 @@ export const layerExecutor: Layer.Layer<
     const environmentPauseStore = yield* Effect.serviceOption(
       EnvironmentPauseStore.EnvironmentPauseStore,
     );
+    // Workspace preparation runs only where the production runtime provides thread launches.
+    const threadLaunch = yield* Effect.serviceOption(ThreadLaunchService.ThreadLaunchService);
     const recordPauseDelivery = (threadId: ThreadId, messageId: MessageId, delivered: boolean) =>
       messageId.startsWith("environment-pause:") && Option.isSome(environmentPauseStore)
         ? outbox
@@ -839,6 +842,33 @@ export const layerExecutor: Layer.Layer<
                     }),
                 ),
               );
+          case "prepared-run.auto-retry":
+            return Option.isNone(threadLaunch)
+              ? Effect.fail(
+                  new OrchestrationEffectExecutionError({
+                    effectId: effect.id,
+                    effectType: effect.request.type,
+                    cause: "Thread launches are unavailable.",
+                  }),
+                )
+              : threadLaunch.value
+                  .retryPreparationAutomatically({
+                    threadId: effect.threadId,
+                    runId: effect.request.runId,
+                    resetAt: effect.request.resetAt,
+                    failureCommandId: effect.commandId,
+                    finalAttempt: !willRetry,
+                  })
+                  .pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new OrchestrationEffectExecutionError({
+                          effectId: effect.id,
+                          effectType: effect.request.type,
+                          cause,
+                        }),
+                    ),
+                  );
         }
       }),
     });

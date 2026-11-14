@@ -303,8 +303,12 @@ export interface CancelQueuedRunInput extends ThreadCommandInput {
   readonly runId: RunId;
 }
 
-export interface RetryWorkspacePreparationInput extends ThreadCommandInput {
-  readonly runId: RunId;
+export type RetryWorkspacePreparationInput = ThreadCommandInput &
+  ({ readonly runId: RunId } | { readonly runId: null; readonly failureCommandId: CommandId });
+
+export interface AcknowledgeWorkspacePreparationInput extends ThreadCommandInput {
+  readonly runId: RunId | null;
+  readonly failureCommandId: CommandId;
 }
 
 export interface EditQueuedRunInput extends ThreadCommandInput {
@@ -1306,8 +1310,27 @@ export const cancelQueuedRun = Effect.fn("EnvironmentCommands.cancelQueuedRun")(
   });
 });
 
+export const acknowledgeWorkspacePreparation = Effect.fn(
+  "EnvironmentCommands.acknowledgeWorkspacePreparation",
+)(function* (input: AcknowledgeWorkspacePreparationInput) {
+  return yield* dispatch({
+    type: "prepared-run.acknowledge",
+    commandId: yield* allocateCommandId(input),
+    threadId: input.threadId,
+    runId: input.runId,
+    failureCommandId: input.failureCommandId,
+  });
+});
+
 export const retryWorkspacePreparation = Effect.fn("EnvironmentCommands.retryWorkspacePreparation")(
   function* (input: RetryWorkspacePreparationInput) {
+    if (input.runId === null)
+      return yield* dispatch({
+        type: "thread.preparation.retry",
+        commandId: yield* allocateCommandId(input),
+        threadId: input.threadId,
+        failureCommandId: input.failureCommandId,
+      });
     return yield* dispatch({
       type: "prepared-run.retry",
       commandId: yield* allocateCommandId(input),

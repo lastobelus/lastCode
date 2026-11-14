@@ -1,4 +1,5 @@
 import { Button } from "../../components/ui/Button";
+import { emptyWorkspacePreparationRetryFailureId } from "@t3tools/client-runtime/state/turn-item-presentation";
 import { ThreadSubagentGroup } from "./thread-subagent-group";
 import { ProposedPlanCard } from "./ProposedPlanCard";
 import {
@@ -771,11 +772,20 @@ function workLogRowKey(row: ThreadFeedActivity): string {
 function WorkspacePreparationRetryButton(props: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
-  readonly runId: RunId;
+  readonly runId: RunId | null;
+  readonly itemId: string;
 }) {
   const retryable = useAtomValue(
     environmentThreadDetails.threadAtom(scopeThreadRef(props.environmentId, props.threadId)),
     (thread) => {
+      if (props.runId === null) {
+        const failureId = thread
+          ? emptyWorkspacePreparationRetryFailureId(thread.projection.thread)
+          : null;
+        return failureId !== null && props.itemId === `turn-item:empty-workspace:${failureId}`
+          ? failureId
+          : false;
+      }
       const run = thread?.projection.runs.find((candidate) => candidate.id === props.runId);
       return run?.status === "failed" && run.workspacePreparation !== undefined;
     },
@@ -795,7 +805,10 @@ function WorkspacePreparationRetryButton(props: {
           void Haptics.selectionAsync();
           void retry({
             environmentId: props.environmentId,
-            input: { threadId: props.threadId, runId: props.runId },
+            input:
+              props.runId === null && typeof retryable === "string"
+                ? { threadId: props.threadId, runId: null, failureCommandId: retryable }
+                : { threadId: props.threadId, runId: props.runId! },
           }).finally(() => setBusy(false));
         }}
         icon="arrow.clockwise"
@@ -953,12 +966,12 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
               {failureItem.failure.message}
             </Text>
           ) : null}
-          {failureItem.failure.code === ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE &&
-          failureItem.runId !== null ? (
+          {failureItem.failure.code === ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE ? (
             <WorkspacePreparationRetryButton
               environmentId={props.environmentId}
               threadId={failureItem.threadId}
               runId={failureItem.runId}
+              itemId={failureItem.id}
             />
           ) : null}
         </View>

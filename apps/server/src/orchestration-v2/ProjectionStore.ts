@@ -14,6 +14,7 @@ import type {
 } from "@t3tools/contracts";
 import {
   latestRootProviderFailure,
+  emptyWorkspacePreparationFailure,
   latestUnheldRun,
   threadErrorSummary,
   usageLimitRunPresentedAsLatest,
@@ -1897,9 +1898,16 @@ export function threadShellFromProjection(
     activityRunStatus: activityRun?.status ?? null,
     activityRunStartedAt:
       activityRun === null ? null : orchestrationV2RunWorkStartedAt(activityRun),
-    status: latestRun?.status ?? "idle",
+    status:
+      latestRun?.status ??
+      (projection.thread.emptyWorkspacePreparation?.state === "claimed"
+        ? "preparing"
+        : emptyWorkspacePreparationFailure(projection.thread) === null
+          ? "idle"
+          : "failed"),
     ...threadErrorSummary(
-      latestRootProviderFailure(latestRun, projection.turnItems),
+      latestRootProviderFailure(latestRun, projection.turnItems) ??
+        emptyWorkspacePreparationFailure(projection.thread),
       providerSession?.lastError ?? null,
     ),
     pendingRuntimeRequest,
@@ -2239,10 +2247,19 @@ function shellFromState(input: {
     blockedOnThreadWait: input.state.blockedOnThreadWait,
     activityRunStatus: input.state.activityRunStatus,
     activityRunStartedAt: input.state.activityRunStartedAt,
-    status: input.state.latestRunStatus,
-    lastError: input.state.lastError,
-    lastErrorClass: input.state.lastErrorClass,
-    lastErrorCode: input.state.lastErrorCode,
+    status:
+      input.state.thread.emptyWorkspacePreparation?.state === "claimed"
+        ? "preparing"
+        : input.state.latestRunId === null &&
+            emptyWorkspacePreparationFailure(input.state.thread) !== null
+          ? "failed"
+          : input.state.latestRunStatus,
+    lastError:
+      emptyWorkspacePreparationFailure(input.state.thread)?.message ?? input.state.lastError,
+    lastErrorClass:
+      emptyWorkspacePreparationFailure(input.state.thread)?.class ?? input.state.lastErrorClass,
+    lastErrorCode:
+      emptyWorkspacePreparationFailure(input.state.thread)?.code ?? input.state.lastErrorCode,
     usageLimitResetAt: input.state.usageLimitResetAt,
     pendingRuntimeRequest: input.state.pendingRuntimeRequest,
     pendingGuestMessageCount: pendingGuestMessageCount(input.state.thread.guestShare),
@@ -5018,6 +5035,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 SELECT thread_id FROM orchestration_v2_projection_threads
                 WHERE CASE WHEN json_valid(payload_json)
                   THEN json_extract(payload_json, '$.recovery.status') IN ('suspect', 'stale', 'recovering')
+                    OR json_extract(payload_json, '$.emptyWorkspacePreparationClaim') IS NOT NULL
                   ELSE 0 END
                 UNION
                 SELECT thread_id FROM orchestration_v2_projection_runs

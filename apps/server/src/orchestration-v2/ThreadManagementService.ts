@@ -847,6 +847,16 @@ const make = Effect.gen(function* () {
             }),
           ),
         );
+      case "thread.preparation.retry":
+        return orchestrator.getThreadRecords(command.threadId, []).pipe(
+          Effect.flatMap(({ thread }) =>
+            assertProviderInstanceEnabled({
+              projectId: thread.projectId,
+              commandId: command.commandId,
+              instanceId: thread.providerInstanceId,
+            }),
+          ),
+        );
       case "prepared-run.release":
       case "prepared-run.retry":
         return orchestrator

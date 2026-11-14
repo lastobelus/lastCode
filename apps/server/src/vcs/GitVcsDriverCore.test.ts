@@ -1681,6 +1681,44 @@ it.effect.each([
   ),
 );
 
+it.effect("classifies the worktree fetch deadline without changing its displayed error", () =>
+  Effect.gen(function* () {
+    const started = yield* Deferred.make<void>();
+    const spawner = ChildProcessSpawner.make((command) =>
+      Effect.succeed(
+        ChildProcess.isStandardCommand(command) && command.args[0] === "fetch"
+          ? ChildProcessSpawner.makeHandle({
+              ...makeSuccessfulHandle(""),
+              exitCode: Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)),
+            })
+          : makeNonRepositoryHandle(),
+      ),
+    );
+    const driver = yield* makeGitVcsDriverCore().pipe(
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+    );
+    const cwd = yield* makeTmpDir();
+    const fetching = yield* driver
+      .fetchRemote({ cwd, remoteName: "origin" })
+      .pipe(Effect.flip, Effect.forkChild);
+    yield* Deferred.await(started);
+    yield* TestClock.adjust("30 seconds");
+    const error = yield* Fiber.join(fetching);
+    assert.equal(error.operation, "GitVcsDriver.fetchRemote");
+    assert.equal(error.reason, "timed_out");
+    assert.equal(
+      error.message,
+      `Git command failed in GitVcsDriver.fetchRemote (${cwd}): Git command timed out.`,
+    );
+  }).pipe(
+    Effect.provide(
+      layerServerConfig.pipe(
+        Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+      ),
+    ),
+  ),
+);
+
 it.effect("retries a fetch that lost a ref update to another Git process", () =>
   Effect.gen(function* () {
     const attempts = yield* Ref.make(0);

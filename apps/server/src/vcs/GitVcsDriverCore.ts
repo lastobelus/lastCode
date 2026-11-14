@@ -1145,6 +1145,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
             () =>
               new GitCommandError({
                 ...gitCommandContext(commandInput),
+                reason: "timed_out",
                 detail: "Git command timed out.",
               }),
           ),

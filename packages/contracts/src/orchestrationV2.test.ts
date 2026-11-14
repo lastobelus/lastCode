@@ -685,6 +685,29 @@ it("keeps accepted workspace completions outside client dispatch commands", () =
     branch: "feature/workspace",
   };
   expect(decodeClientWorkspaceCompletion(completion)._tag).toBe("Failure");
+  expect(
+    decodeClientWorkspaceCompletion({
+      type: "workspace-preparation.claim",
+      commandId: "claim-workspace",
+      threadId: "workspace-thread",
+      requestId: "accepted-preparation",
+      runId: null,
+      workspaceStrategy: { type: "worktree", baseRef: "main" },
+    })._tag,
+  ).toBe("Failure");
+  expect(
+    decodeOrchestrationV2Command({
+      type: "thread.preparation.retry",
+      commandId: "retry-empty-workspace",
+      threadId: "workspace-thread",
+      failureCommandId: "observed-workspace-failure",
+    }),
+  ).toEqual({
+    type: "thread.preparation.retry",
+    commandId: "retry-empty-workspace",
+    threadId: "workspace-thread",
+    failureCommandId: "observed-workspace-failure",
+  });
 });
 
 it("retains a failed-attempt precondition across archive command decoding", () => {

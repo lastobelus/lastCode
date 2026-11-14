@@ -373,6 +373,7 @@ export const GitCommandFailureReason = Schema.Literals([
   "ref_update_rejected_by_hook",
   "remote_unreachable",
   "tag_would_be_clobbered",
+  "timed_out",
 ]);
 export type GitCommandFailureReason = typeof GitCommandFailureReason.Type;
 
@@ -390,7 +391,8 @@ export class GitCommandError extends Schema.TaggedError<GitCommandError>()("GitC
   cause: Schema.optional(Schema.Defect()),
 }) {
   override get message(): string {
-    const reason = this.reason === undefined ? "" : ` (${this.reason})`;
+    const reason =
+      this.reason === undefined || this.reason === "timed_out" ? "" : ` (${this.reason})`;
     return `Git command failed in ${this.operation} (${this.cwd}): ${this.detail}${reason}`;
   }
 }

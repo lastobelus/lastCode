@@ -2051,8 +2051,13 @@ const layerCoreWsRpc = (
             Effect.andThen(
               startup
                 .enqueueCommand(
-                  (command.type === "prepared-run.retry"
-                    ? threadLaunch.retryPreparation(command)
+                  (command.type === "prepared-run.retry" ||
+                  command.type === "thread.preparation.retry"
+                    ? threadLaunch.retryPreparation(
+                        command.type === "thread.preparation.retry"
+                          ? { ...command, runId: null }
+                          : command,
+                      )
                     : ThreadMessageIntake.dispatchUserCommand(
                         ThreadManagementService.withCreationProvenance(command, {
                           createdBy: "user",

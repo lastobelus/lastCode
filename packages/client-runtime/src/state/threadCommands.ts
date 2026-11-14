@@ -59,6 +59,7 @@ import {
   promoteQueuedRun,
   resumeThreadQueue,
   retryWorkspacePreparation,
+  acknowledgeWorkspacePreparation,
   linkThreadPullRequest,
   respondToThreadApproval,
   respondToThreadUserInput,
@@ -501,6 +502,12 @@ export function createThreadEnvironmentAtoms<R, E>(
     cancelQueuedRun: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:cancel-queued-run",
       execute: cancelQueuedRun,
+      scheduler,
+      concurrency,
+    }),
+    acknowledgeWorkspacePreparation: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:acknowledge-workspace-preparation",
+      execute: acknowledgeWorkspacePreparation,
       scheduler,
       concurrency,
     }),
