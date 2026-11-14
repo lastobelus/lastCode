@@ -49,14 +49,14 @@ it("renders the deployment-defined interval in a source-only launch agent", () =
   const plist = renderLaunchAgentPlist({
     repoRoot: "/Users/example/LastCode & experiments",
     logDirectory: "/Users/example/.lastcode/automation",
-    nodePath: "/Users/example/.local/share/mise/installs/node/24.13.1/bin/node",
+    nodePath: "/Users/example/.local/share/mise/installs/node/26.12.1/bin/node",
     schedule: { kind: "interval", intervalSeconds: 1234 },
     scheduleHelperPath: "/Users/example/.lastcode/automation/bin/schedule helper.mjs",
     supervisorPath: "/Users/example/.lastcode/automation/bin/checkpoint supervisor.mjs",
   });
 
   expect(plist).toContain("<integer>1234</integer>");
-  expect(plist).toContain("node/24.13.1/bin/node");
+  expect(plist).toContain("node/26.12.1/bin/node");
   expect(plist).toContain("checkpoint supervisor.mjs");
   expect(plist).not.toContain("/bin/zsh");
   expect(plist).not.toContain("/usr/bin/env");
