@@ -1177,6 +1177,8 @@ it.layer(layerTest)("ThreadSearch.searchThreads", (it) => {
         const ordinary = ThreadId.make("thread:mention-ordinary");
         const bestTitle = ThreadId.make("thread:zz-best-title");
         const strongAfterTypos = ThreadId.make("thread:zzz-strong-after-typos");
+        const gapMatch = ThreadId.make("thread:zz-gap-match");
+        const literalMatch = ThreadId.make("thread:zzz-literal-match");
         yield* Effect.forEach(
           [
             ...Array.from({ length: 520 }, (_, index) =>
@@ -1203,6 +1205,8 @@ it.layer(layerTest)("ThreadSearch.searchThreads", (it) => {
             thread(ordinary, firstProject, { title: "Fix broken login" }),
             thread(bestTitle, firstProject, { title: "Build notes", archivedAt: at(2) }),
             thread(strongAfterTypos, firstProject, { title: "Buidl notes" }),
+            thread(gapMatch, firstProject, { title: "Why Thread 7b246810 Is Stuck" }),
+            thread(literalMatch, firstProject, { title: "Why7b246" }),
           ],
           projections.apply,
           { discard: true },
@@ -1214,6 +1218,17 @@ it.layer(layerTest)("ThreadSearch.searchThreads", (it) => {
           [archived, subagent],
         );
         assert.equal(mention.mentionsTruncated, false);
+        const gaps = yield* search.searchMentionCandidates({ query: "Why7b246" });
+        assert.deepEqual(
+          gaps.mentionCandidates.map((candidate) => candidate.id),
+          [literalMatch, gapMatch],
+        );
+        const limitedGaps = yield* search.searchMentionCandidates({ query: "Why7b246", limit: 1 });
+        assert.deepEqual(
+          limitedGaps.mentionCandidates.map((candidate) => candidate.id),
+          [literalMatch],
+        );
+        assert.equal(limitedGaps.mentionsTruncated, true);
         assert.equal(
           mention.mentionCandidates.find((candidate) => candidate.id === archived)?.archivedAt,
           DateTime.formatIso(at(2)),
@@ -1242,36 +1257,50 @@ it.layer(layerTest)("ThreadSearch.searchThreads", (it) => {
         );
         assert.equal(ranked.mentionsTruncated, true);
 
-        const withoutTypos = yield* search.searchMentionCandidates({ query: "buidl notes" });
+        const many = yield* search.searchMentionCandidates({ query: "build notes", limit: 20 });
+        assert.equal(many.mentionCandidates.length, 20);
+        assert.equal(many.mentionCandidates[0]?.id, bestTitle);
+        assert.equal(many.mentionsTruncated, true);
+
+        const fuzzyAlongsideLiteral = yield* search.searchMentionCandidates({
+          query: "buidl notes",
+          limit: 2,
+        });
         assert.deepEqual(
-          withoutTypos.mentionCandidates.map((candidate) => candidate.id),
-          [strongAfterTypos],
+          fuzzyAlongsideLiteral.mentionCandidates.map((candidate) => candidate.id),
+          [strongAfterTypos, ThreadId.make("thread:000-unrelated-0")],
         );
-        assert.equal(withoutTypos.mentionsTruncated, false);
+        assert.equal(fuzzyAlongsideLiteral.mentionsTruncated, true);
 
         for (const [query, environmentLabel, expected] of [
-          ["fix login", "", ordinary],
-          ["mobile helper", "", subagent],
-          ["remote helper", "Remote server", subagent],
-          ["the comet helper", "", subagent],
-          ["comet archvial", "", archived],
-          ["#42", "", archived],
-          ["acme/app#42", "", archived],
+          ["fix login", "", [ordinary]],
+          ["mobile helper", "", []],
+          ["remote helper", "Remote server", []],
+          ["the comet helper", "", [subagent]],
+          ["comet archvial", "", []],
+          ["acme/app#42", "", [archived]],
         ] as const) {
           const result = yield* search.searchMentionCandidates({ query, environmentLabel });
           assert.deepEqual(
             result.mentionCandidates.map((candidate) => candidate.id),
-            [expected],
+            [...expected],
           );
-          if (query === "#42")
-            assert.deepEqual(result.mentionCandidates[0]?.searchPullRequests, [
-              {
-                number: 42,
-                title: null,
-                references: ["acme/app#42", "https://github.com/acme/app/pull/42"],
-              },
-            ]);
         }
+
+        const pullRequest = yield* search.searchMentionCandidates({ query: "#42" });
+        assert.equal(pullRequest.mentionCandidates[0]?.id, archived);
+        assert.ok(
+          pullRequest.mentionCandidates.some(
+            (candidate) => candidate.id === "thread:000-unrelated-42",
+          ),
+        );
+        assert.deepEqual(pullRequest.mentionCandidates[0]?.searchPullRequests, [
+          {
+            number: 42,
+            title: null,
+            references: ["acme/app#42", "https://github.com/acme/app/pull/42"],
+          },
+        ]);
 
         const ordinarySearch = yield* search.searchThreads({ query: "comet", limit: 50 });
         assert.deepEqual(ordinarySearch.matches, []);

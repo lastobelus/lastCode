@@ -25,6 +25,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import type * as SqlError from "effect/sql/SqlError";
 import * as SqlSchema from "effect/sql/SqlSchema";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import { rankThreadMentions } from "@t3tools/shared/lastcodeThreadMentionSearch";
 import {
   messageSearchTokens,
   foldSearchQuery,
@@ -681,49 +682,31 @@ export const make = Effect.gen(function* () {
         mentionsTruncated: false,
       };
     }
-    const normalizedQuery = foldSearchQuery(query);
-    const now = DateTime.toEpochMillis(yield* DateTime.now);
-    const subjectOf = (row: typeof MentionCandidateRow.Type): ThreadSearchSubject => ({
+    const subjectOf = (row: typeof MentionCandidateRow.Type) => ({
       id: row.thread.id,
       title: row.thread.title,
       branch: row.thread.branch,
       projectTitle: row.projectTitle,
       environmentLabel,
       pullRequests: threadSearchPullRequests(row.thread),
-      activityAt: Date.parse(row.latestUserMessageAt ?? DateTime.formatIso(row.thread.createdAt)),
-      opens: row.thread.opens ?? null,
     });
     let candidates: ReadonlyArray<typeof MentionCandidateRow.Type> = [];
-    let typoCandidates: ReadonlyArray<typeof MentionCandidateRow.Type> = [];
-    let hasStrongMatch = false;
     let afterThreadId: ThreadId | null = null;
     // Scan every metadata page, retaining only the best results plus one for truncation.
-    // Keep typo matches separate until any strong match disables the fallback globally.
     while (true) {
       const rows: ReadonlyArray<typeof MentionCandidateRow.Type> = yield* read(
         mentionCandidates({ threadIds: null, afterThreadId }),
       );
-      const ranked = rankSearchItems([...candidates, ...rows], (row) =>
-        scoreThreadSearch(normalizedQuery, subjectOf(row), now, { typos: false, picks: false }),
+      candidates = rankThreadMentions(query, [...candidates, ...rows], subjectOf).slice(
+        0,
+        limit + 1,
       );
-      hasStrongMatch ||= ranked.some(({ match }) => match.strong);
-      candidates = ranked.slice(0, limit + 1).map(({ item }) => item);
-      if (hasStrongMatch) {
-        typoCandidates = [];
-      } else {
-        typoCandidates = rankSearchItems([...typoCandidates, ...rows], (row) =>
-          scoreThreadSearch(normalizedQuery, subjectOf(row), now, { typos: true, picks: false }),
-        )
-          .slice(0, limit + 1)
-          .map(({ item }) => item);
-      }
       if (rows.length < MENTION_CANDIDATE_BATCH_SIZE) break;
       afterThreadId = rows[rows.length - 1]!.thread.id;
     }
-    const ranked = hasStrongMatch ? candidates : typoCandidates;
     return {
-      mentionCandidates: ranked.slice(0, limit).map(candidateOf),
-      mentionsTruncated: ranked.length > limit,
+      mentionCandidates: candidates.slice(0, limit).map(candidateOf),
+      mentionsTruncated: candidates.length > limit,
     };
   });
 

@@ -1,5 +1,5 @@
 import type { EnvironmentId, EnvironmentMachineKind, ScopedThreadRef } from "@t3tools/contracts";
-import { foldSearchQuery, rankSearchItems, scoreThreadSearch } from "@t3tools/shared/paletteSearch";
+import { rankThreadMentions } from "@t3tools/shared/lastcodeThreadMentionSearch";
 
 import type { EnvironmentThreadShell } from "./state/models.ts";
 import { threadSearchSubject, type ThreadSearchShell } from "./state/threadSearch.ts";
@@ -21,9 +21,8 @@ export interface ComposerThreadItem {
 }
 
 /**
- * Threads to reference from the composer, matched and ranked like the command
- * palette. Eligibility comes from the client's authorized environment catalog,
- * not peer-link membership or sidebar visibility.
+ * Threads to reference from the composer. Eligibility comes from the client's
+ * authorized environment catalog, not peer-link membership or sidebar visibility.
  */
 export function matchComposerThreadItems(input: {
   shells: ReadonlyArray<ComposerThreadCandidate>;
@@ -37,11 +36,8 @@ export function matchComposerThreadItems(input: {
   /** Lightweight server candidates for archived/subagent/omitted shells. */
   candidates?: ReadonlyArray<ComposerThreadCandidate>;
   query: string;
-  /** Recency is measured against this time. */
   now: number;
 }): ComposerThreadItem[] {
-  const query = foldSearchQuery(input.query);
-  if (query.length === 0) return [];
   const byKey = new Map<string, ComposerThreadCandidate>();
   for (const shell of [...input.shells, ...(input.candidates ?? [])]) {
     byKey.set(JSON.stringify([shell.environmentId, shell.id]), shell);
@@ -54,23 +50,15 @@ export function matchComposerThreadItems(input: {
       : false;
     return isAllowed && !excluded;
   });
-  return rankSearchItems(candidates, (shell, options) =>
-    scoreThreadSearch(
-      query,
-      threadSearchSubject(
-        shell,
-        shell.projectTitle,
-        input.environmentLabels?.get(shell.environmentId),
-      ),
-      input.now,
-      {
-        ...options,
-        picks: false,
-      },
+  return rankThreadMentions(input.query, candidates, (shell) =>
+    threadSearchSubject(
+      shell,
+      shell.projectTitle,
+      input.environmentLabels?.get(shell.environmentId),
     ),
   )
     .slice(0, COMPOSER_THREAD_RESULT_LIMIT)
-    .map(({ item: shell }) => {
+    .map((shell) => {
       const environment =
         shell.environmentId === input.environmentId
           ? undefined
