@@ -557,44 +557,55 @@ describe("LastCode carry CI", () => {
     }
   });
 
-  it("asks a child behind its topic base to rebase onto the parent's current tip", () => {
-    const { repo, cleanup } = fixture();
-    try {
-      const { upstream } = compactFixture(repo);
-      write(repo, "parent.txt", "parent contribution\n");
-      const forkPoint = commit(repo, "parent contribution", "Carry-Group: tooling");
-      write(repo, "child.txt", "child contribution\n");
-      const head = commit(repo, "child contribution", "Carry-Group: build-ci");
-      git(repo, ["checkout", "--quiet", "--detach", forkPoint]);
-      write(repo, "parent-fix.txt", "parent review fix\n");
-      const base = commit(repo, "parent review fix", "Carry-Group: tooling");
-      const before = snapshot(repo);
-      expect(() => validateCarryPullRequest(repo, { base, head, number: 232 })).toThrow(
-        new Error(
-          `PR #232 forked from ${forkPoint}, behind its topic base ${base}, whose parent commits have not squash-merged yet. Rebase onto the topic base with \`git rebase --onto ${base} ${forkPoint}\` and push.`,
-        ),
-      );
-      expect(snapshot(repo)).toEqual(before);
+  it.each(["parent-fix.txt", "child.txt"])(
+    "asks a child behind its topic base to rebase onto the parent's current tip (parent edits %s)",
+    (parentPath) => {
+      const { repo, cleanup } = fixture();
+      try {
+        const { upstream } = compactFixture(repo);
+        write(repo, "parent.txt", "parent contribution\n");
+        const forkPoint = commit(repo, "parent contribution", "Carry-Group: tooling");
+        write(repo, "child.txt", "child contribution\n");
+        const head = commit(repo, "child contribution", "Carry-Group: build-ci");
+        git(repo, ["checkout", "--quiet", "--detach", forkPoint]);
+        write(repo, parentPath, "parent review fix\n");
+        const base = commit(repo, "parent review fix", "Carry-Group: tooling");
+        const before = snapshot(repo);
+        expect(() => validateCarryPullRequest(repo, { base, head, number: 232 })).toThrow(
+          new Error(
+            `PR #232 forked from ${forkPoint}, behind its topic base ${base}, whose parent commits have not squash-merged yet. Rebase onto the topic base with \`git rebase --onto ${base} ${forkPoint}\` and push.`,
+          ),
+        );
+        expect(snapshot(repo)).toEqual(before);
 
-      git(repo, ["checkout", "--quiet", "--detach", head]);
-      git(repo, ["rebase", "--quiet", "--onto", base, forkPoint]);
-      const restacked = git(repo, ["rev-parse", "HEAD"]);
-      const tree = git(repo, ["rev-parse", `${restacked}^{tree}`]);
-      expect(
-        validateCarryPullRequest(repo, { base, head: restacked, number: 232 }).compilation,
-      ).toEqual({ upstream, sourceTree: tree, compiledTree: tree });
-    } finally {
-      cleanup();
-    }
-  });
+        git(repo, ["checkout", "--quiet", "--detach", head]);
+        if (parentPath === "child.txt") {
+          expect(() => git(repo, ["rebase", "--quiet", "--onto", base, forkPoint])).toThrow();
+          write(repo, "child.txt", "resolved child contribution\n");
+          git(repo, ["add", "child.txt"]);
+          git(repo, ["-c", "core.editor=true", "rebase", "--continue"]);
+        } else {
+          git(repo, ["rebase", "--quiet", "--onto", base, forkPoint]);
+        }
+        const restacked = git(repo, ["rev-parse", "HEAD"]);
+        const tree = git(repo, ["rev-parse", `${restacked}^{tree}`]);
+        expect(
+          validateCarryPullRequest(repo, { base, head: restacked, number: 232 }).compilation,
+        ).toEqual({ upstream, sourceTree: tree, compiledTree: tree });
+      } finally {
+        cleanup();
+      }
+    },
+  );
 
   it.each([
-    { shape: "squash", path: "child.txt" },
-    { shape: "compiled carry chain", path: "child.txt" },
-    { shape: "squash", path: "parent.txt" },
+    { shape: "squash", path: "child.txt", parentAdvances: false },
+    { shape: "compiled carry chain", path: "child.txt", parentAdvances: false },
+    { shape: "squash", path: "parent.txt", parentAdvances: false },
+    { shape: "squash", path: "child.txt", parentAdvances: true },
   ])(
-    "asks a child to restack once its parent has landed on main as a $shape (child edits $path)",
-    ({ shape, path }) => {
+    "asks a child to restack once its parent has landed on main as a $shape (child edits $path, parent advances $parentAdvances)",
+    ({ shape, path, parentAdvances }) => {
       const { repo, cleanup } = fixture();
       try {
         const { upstream, base: compact } = compactFixture(repo);
@@ -602,11 +613,17 @@ describe("LastCode carry CI", () => {
         const parent = commit(repo, "parent contribution", "Carry-Group: tooling");
         write(repo, path, "child contribution\n");
         const head = commit(repo, "child contribution", "Carry-Group: build-ci");
-        const parentSource = validateCarrySourceRange(repo, 230, compact, parent);
-        git(repo, ["update-ref", parentSource.ref, parent]);
+        let parentHead = parent;
+        if (parentAdvances) {
+          git(repo, ["checkout", "--quiet", "--detach", parent]);
+          write(repo, "parent-fix.txt", "parent review fix\n");
+          parentHead = commit(repo, "parent review fix", "Carry-Group: tooling");
+        }
+        const parentSource = validateCarrySourceRange(repo, 230, compact, parentHead);
+        git(repo, ["update-ref", parentSource.ref, parentHead]);
         const squash = git(repo, [
           "commit-tree",
-          `${parent}^{tree}`,
+          `${parentHead}^{tree}`,
           "-p",
           compact,
           "-m",

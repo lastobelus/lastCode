@@ -47,9 +47,6 @@ export interface CarryCiResult {
   };
 }
 
-// @effect-diagnostics-next-line extendsNativeError:off -- Plain Git orchestration; the message names the restack.
-class CarryRestackError extends Error {}
-
 function git(
   repoRoot: string,
   args: ReadonlyArray<string>,
@@ -175,6 +172,12 @@ function landedParentHead(
   for (const message of messages.split("\0")) {
     const trailers = parseCarryTrailers(message);
     if (trailers.sourceHead) landed.add(trailers.sourceHead);
+    if (trailers.sourceBase && trailers.sourceHead) {
+      const range = `${exactCommit(trailers.sourceBase, "source base")}..${exactCommit(trailers.sourceHead, "source head")}`;
+      for (const commit of git(repoRoot, ["rev-list", range])!.split("\n").filter(Boolean)) {
+        landed.add(commit);
+      }
+    }
     for (const contribution of trailers.contributions) landed.add(contribution.sourceCommit);
   }
   if (landed.size === 0) return undefined;
@@ -245,11 +248,6 @@ function compilePullRequest(
   const stop = compact?.head ?? representedSource ?? bootstrap!.source;
   const compilationSource = { ...source, base: topicBase(repoRoot, source.base, stop) };
   const behind = source.base !== target;
-  if (behind && topicBase(repoRoot, target, stop) !== target) {
-    throw new CarryRestackError(
-      `forked from ${source.base}, behind its topic base ${target}, whose parent commits have not squash-merged yet. Rebase onto the topic base with \`git rebase --onto ${target} ${source.base}\` and push.`,
-    );
-  }
   const temporaryRoot = NodeFS.mkdtempSync(
     NodePath.join(NodeOS.tmpdir(), "lastcode-carry-admission-"),
   );
@@ -343,6 +341,21 @@ export function validateCarryPullRequest(
       `PR #${pullRequest.number} still contains commits through ${landed} that already landed in base ${target} through a merged parent PR. Restack only its own commits with \`git rebase --onto ${target} ${landed}\` and push.`,
     );
   }
+  if (base !== target) {
+    const carryManifest = [targetManifest, manifestAt(repoRoot, head)].find(
+      (manifest) => manifest && shouldRetainCarrySources(manifest),
+    );
+    if (carryManifest) {
+      const stop =
+        compactBase(repoRoot, target)?.head ??
+        parseManifestReplayConfiguration(carryManifest)?.bootstrap?.source;
+      if (stop && topicBase(repoRoot, target, stop) !== target) {
+        throw new Error(
+          `PR #${pullRequest.number} forked from ${base}, behind its topic base ${target}, whose parent commits have not squash-merged yet. Rebase onto the topic base with \`git rebase --onto ${target} ${base}\` and push.`,
+        );
+      }
+    }
+  }
   const manifests = [
     targetManifest,
     manifestAt(repoRoot, base === target ? head : landingTree(repoRoot, base, target, head)),
@@ -373,9 +386,6 @@ export function validateCarryPullRequest(
       compilation: compilePullRequest(repoRoot, source, manifest, target),
     };
   } catch (error) {
-    if (error instanceof CarryRestackError) {
-      throw new Error(`PR #${pullRequest.number} ${error.message}`, { cause: error });
-    }
     const detail =
       error instanceof CarryReplayConflictError
         ? `${error.diagnosis}\n${error.advice}\nPush the corrected head and rerun carry validation before merging.\nGit output:\n${error.gitOutput}`
