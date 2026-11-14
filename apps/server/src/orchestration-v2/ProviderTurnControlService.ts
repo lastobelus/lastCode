@@ -20,6 +20,7 @@ import * as Stream from "effect/Stream";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as EventSink from "./EventSink.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import { ProviderAdapterSteerRunError } from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 
 const yieldToRuntime = Effect.yieldNow.pipe(
@@ -43,11 +44,13 @@ export class ProviderTurnControlError extends Schema.TaggedError<ProviderTurnCon
     steerDeclined: Schema.optional(Schema.Boolean),
     /** The provider never confirmed the stop; Force stop is the way out. */
     unresponsive: Schema.optional(Schema.Boolean),
+    deliveryRejected: Schema.optional(Schema.Boolean),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {}
 
 const isProviderTurnControlError = Schema.is(ProviderTurnControlError);
+const isProviderAdapterSteerRunError = Schema.is(ProviderAdapterSteerRunError);
 
 export interface ProviderTurnControlServiceV2Shape {
   readonly interrupt: (input: {
@@ -132,13 +135,35 @@ export const layer: Layer.Layer<
         providerThread === undefined ||
         providerTurn === undefined ||
         (!targetsRecordedSession && !targetsCommittedReplacement) ||
-        providerTurn.providerThreadId !== providerThread.id
+        providerTurn.providerThreadId !== providerThread.id ||
+        (input.operation === "steer" &&
+          providerTurn.status === "running" &&
+          (context.run === undefined || context.message === undefined))
       ) {
         return yield* new ProviderTurnControlError({
           threadId: input.threadId,
           operation: input.operation,
           providerTurnId: input.providerTurnId,
+          ...(input.operation === "steer" ? { deliveryRejected: true } : {}),
           cause: "The recorded provider execution target is no longer valid.",
+        });
+      }
+      // Deletion cancels the run before its session-detach effect executes.
+      // The provider turn may still look running, but this delivery target has ended.
+      if (
+        input.operation === "steer" &&
+        context.run !== undefined &&
+        ["completed", "interrupted", "failed", "cancelled", "rolled_back"].includes(
+          context.run.status,
+        )
+      ) {
+        return yield* new ProviderTurnControlError({
+          threadId: input.threadId,
+          operation: "steer",
+          providerTurnId: input.providerTurnId,
+          turnCompleted: context.run.status === "completed",
+          deliveryRejected: true,
+          cause: "The target run ended before the steering message was delivered.",
         });
       }
       // A restart-session command commits the replacement binding before its
@@ -159,6 +184,7 @@ export const layer: Layer.Layer<
             operation: "steer",
             providerTurnId: input.providerTurnId,
             turnCompleted: providerTurn.status === "completed",
+            ...(providerTurn.status === "pending" ? {} : { deliveryRejected: true }),
             cause: "The provider turn ended before the steering message was delivered.",
           });
         }
@@ -419,6 +445,7 @@ export const layer: Layer.Layer<
               threadId: input.threadId,
               operation: "steer",
               providerTurnId: input.providerTurnId,
+              deliveryRejected: true,
               cause: "The persisted steering message or target run is missing.",
             });
           }
@@ -474,6 +501,9 @@ export const layer: Layer.Layer<
                     operation: "steer",
                     providerTurnId: input.providerTurnId,
                     turnCompleted: status === "completed",
+                    ...(isProviderAdapterSteerRunError(cause) && cause.deliveryRejected === true
+                      ? { deliveryRejected: true }
+                      : {}),
                     cause,
                   });
                 }),

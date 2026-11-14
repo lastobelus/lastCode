@@ -1711,7 +1711,8 @@ process.disconnect();
         processResult({ code: 125, stderr: "Could not find domain for user gui: 501" }),
       );
 
-      expect(yield* service.uninstall()).toBe(true);
+      const uninstalled = yield* service.uninstall;
+      expect(uninstalled).toBe(true);
       expect(yield* fs.exists(plan.unitPath)).toBe(false);
     }),
   );

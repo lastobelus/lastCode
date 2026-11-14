@@ -167,13 +167,14 @@ const resolveInstallLauncher = Effect.gen(function* () {
 export const resolveHostCliCommand = Effect.fn("invocation.resolveHostCliCommand")(function* (
   subcommand: string,
   args: ReadonlyArray<string> = [],
+  options: { readonly preferLauncher?: boolean } = {},
 ) {
   const platform = yield* HostProcess.Platform;
   const withArgs = (prefix: string) =>
     [prefix, ...args.map((arg) => hostShellWord(platform, arg))].join(" ");
   const command = yield* resolveCliCommand(subcommand);
   if (command !== `t3 ${subcommand}`) return { command: withArgs(command), launcher: false };
-  const onPath = yield* resolveCommandPath("t3");
+  const onPath = options.preferLauncher ? null : yield* resolveCommandPath("t3");
   if (onPath !== null) {
     const shim = (yield* HostProcess.Environment).T3CODE_CLI_PATH?.trim();
     const fs = yield* FileSystem.FileSystem;

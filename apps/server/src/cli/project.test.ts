@@ -1,4 +1,4 @@
-import * as ServerSettings from "../serverSettings.ts";
+import * as UpdateDrainAdmissionTestkit from "../updateDrain/UpdateDrainAdmission.testkit.ts";
 import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
 import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
 // @effect-diagnostics nodeBuiltinImport:off - CLI integration uses temporary Node paths.
@@ -8,15 +8,19 @@ import * as NodePath from "node:path";
 
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, it } from "@effect/vitest";
+import { assert, it, vi } from "@effect/vitest";
 import {
   CommandId,
   EventId,
   ProviderInstanceId,
   ThreadId,
+  UpdateDrainAdmissionError,
+  UpdateDrainRequestId,
+  UpdateDrainTargetVersion,
   type OrchestrationV2AppThread,
   type ProjectId,
 } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NetService from "@t3tools/shared/Net";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -24,6 +28,7 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as References from "effect/References";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { Command } from "effect/cli";
 import { FetchHttpClient } from "effect/http";
@@ -31,6 +36,7 @@ import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { cli } from "../binCli.ts";
+import { ProjectLiveServerRequestError } from "./project.ts";
 import * as ServerConfig from "../config.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as EventStore from "../orchestration-v2/EventStore.ts";
@@ -48,9 +54,20 @@ import {
 } from "../serverRuntimeState.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
+import * as UpdateDrain from "../updateDrain/UpdateDrain.ts";
+import * as UpdateDrainRepository from "../persistence/UpdateDrainRepository.ts";
+import * as ServerOwnerLease from "../serverOwnerLease.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 
-const layerCliRuntime = Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, NetService.layer);
+const isProjectOperationError = Schema.is(ProjectService.ProjectOperationError);
+const isUpdateDrainAdmissionError = Schema.is(UpdateDrainAdmissionError);
+
+const layerCliRuntime = Layer.mergeAll(
+  NodeServices.layer,
+  NodeCrypto.layer,
+  NetService.layer,
+  Layer.succeed(HostProcess.Platform, HostProcess.Platform.defaultValue()),
+);
 const runCli = (args: ReadonlyArray<string>) =>
   Command.runWith(cli, { version: "0.0.0" })(args).pipe(Effect.provide(layerCliRuntime));
 
@@ -94,7 +111,7 @@ const readProjects = (baseDir: string) =>
   Effect.gen(function* () {
     const config = yield* makeConfig(baseDir);
     const layer = RuntimeLayer.layerProjectService.pipe(
-      Layer.provideMerge(ServerSettings.layerTest()),
+      Layer.provide(UpdateDrainAdmissionTestkit.layerOpen),
       Layer.provideMerge(ProjectEnrichmentService.layer),
       Layer.provideMerge(RepositoryIdentityResolver.layer),
       Layer.provideMerge(ProjectFaviconResolver.layer),
@@ -131,8 +148,14 @@ it.effect("adds, renames, and removes projects through the V2 project CLI domain
     yield* runCli(["project", "rename", workspaceRoot, "Beta", "--base-dir", baseDir]);
     assert.equal((yield* readProjects(baseDir)).projects[0]?.title, "Beta");
 
-    yield* runCli(["project", "remove", added?.id ?? "", "--base-dir", baseDir]);
-    assert.deepEqual((yield* readProjects(baseDir)).projects, []);
+    const remove = runCli(["project", "remove", added?.id ?? "", "--base-dir", baseDir]);
+    if ((yield* HostProcess.Platform) !== "darwin") {
+      assert.include((yield* remove.pipe(Effect.flip)).message, "exclusive server ownership");
+      assert.equal((yield* readProjects(baseDir)).projects[0]?.title, "Beta");
+    } else {
+      yield* remove;
+      assert.deepEqual((yield* readProjects(baseDir)).projects, []);
+    }
   }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
@@ -193,7 +216,7 @@ it.effect.each(["snapshot", "mutation"] as const)(
       assert.equal(snapshotRequests, 2);
       assert.equal(mutations, 1);
       assert.deepEqual((yield* readProjects(baseDir)).projects, []);
-    }).pipe(Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
 it.effect("does not send a token to whatever took over a dead server's port", () =>
@@ -354,7 +377,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))(
           }),
         );
 
-        assert.include(error.message, "not empty");
+        assert.include(
+          error.message,
+          (yield* HostProcess.Platform) === "darwin" ? "not empty" : "exclusive server ownership",
+        );
         assert.deepEqual(
           (yield* readProjects(baseDir)).projects.map((entry) => entry.id),
           [project.id],
@@ -390,7 +416,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))(
             yield* fs.rename(workspaceRoot, `${workspaceRoot}-removed`);
           }
 
-          yield* runCli([
+          const removal = runCli([
             "project",
             "remove",
             workspace === "missing" ? workspaceRoot : project.id,
@@ -398,6 +424,13 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))(
             "--base-dir",
             baseDir,
           ]);
+          if ((yield* HostProcess.Platform) !== "darwin") {
+            assert.include((yield* removal.pipe(Effect.flip)).message, "exclusive server ownership");
+            for (const id of [activeId, archivedId])
+              assert.isNull((yield* readNativeThreadState(baseDir, id)).thread.deletedAt);
+            return;
+          }
+          yield* removal;
 
           assert.deepEqual(
             (yield* readProjects(baseDir)).projects.map((entry) => entry.id),
@@ -438,8 +471,14 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))(
           "relative path": NodePath.relative(process.cwd(), workspaceRoot),
           "path with a trailing separator": `${workspaceRoot}${NodePath.sep}`,
         }[identifier];
-        yield* runCli(["project", "remove", target, "--base-dir", baseDir]);
-        assert.deepEqual((yield* readProjects(baseDir)).projects, []);
+        const removal = runCli(["project", "remove", target, "--base-dir", baseDir]);
+        if ((yield* HostProcess.Platform) === "darwin") {
+          yield* removal;
+          assert.deepEqual((yield* readProjects(baseDir)).projects, []);
+        } else {
+          assert.include((yield* removal.pipe(Effect.flip)).message, "exclusive server ownership");
+          assert.lengthOf((yield* readProjects(baseDir)).projects, 1);
+        }
         assert.isFalse(yield* fs.exists(workspaceRoot));
       }),
     );
@@ -449,9 +488,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))(
         const fs = yield* FileSystem.FileSystem;
         const { baseDir, workspaceRoot, project } = yield* makeProjectLookupFixture();
         yield* fs.rename(workspaceRoot, `${workspaceRoot}-removed`);
-        const replacementDir = yield* fs.makeTempDirectoryScoped({
-          prefix: "t3-v2-project-empty-",
-        });
+        const replacementDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-v2-project-empty-" });
         const error = yield* runCli([
           "project",
           "remove",
@@ -497,13 +534,187 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))(
         const aliasProject = added.find((entry) => entry.workspaceRoot === aliasPath);
         assert.isDefined(aliasProject);
         assert.notEqual(aliasProject?.id, project.id);
-        yield* runCli(["project", "remove", `${aliasPath}${NodePath.sep}.`, "--base-dir", baseDir]);
-        assert.deepEqual(
-          (yield* readProjects(baseDir)).projects.map((entry) => entry.id),
-          [project.id],
+        yield* runCli([
+          "project",
+          "rename",
+          `${aliasPath}${NodePath.sep}.`,
+          "Normalized alias",
+          "--base-dir",
+          baseDir,
+        ]);
+        const beforeRemoval = yield* readProjects(baseDir);
+        assert.equal(
+          beforeRemoval.projects.find((entry) => entry.id === project.id)?.title,
+          "Normalized",
         );
+        assert.equal(
+          beforeRemoval.projects.find((entry) => entry.id === aliasProject?.id)?.title,
+          "Normalized alias",
+        );
+        const removal = runCli([
+          "project",
+          "remove",
+          `${aliasPath}${NodePath.sep}.`,
+          "--base-dir",
+          baseDir,
+        ]);
+        if ((yield* HostProcess.Platform) === "darwin") {
+          yield* removal;
+          assert.deepEqual(
+            (yield* readProjects(baseDir)).projects.map((entry) => entry.id),
+            [project.id],
+          );
+        } else {
+          assert.include((yield* removal.pipe(Effect.flip)).message, "exclusive server ownership");
+          assert.deepEqual(yield* readProjects(baseDir), beforeRemoval);
+        }
         assert.isTrue(NodeFS.existsSync(workspaceRoot));
       }),
+    );
+  },
+);
+
+it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))(
+  "offline ownership and drain admission",
+  (it) => {
+    it.effect("refuses unmanaged offline deletion while preserving other offline mutations", () =>
+      Effect.gen(function* () {
+        const lease = vi
+          .spyOn(ServerOwnerLease, "acquireServerOwnerLease")
+          .mockReturnValue(Effect.succeed({ endpoint: "unmanaged", release: Effect.void }));
+        yield* Effect.gen(function* () {
+          const { baseDir, project } = yield* makeProjectLookupFixture();
+          yield* runCli(["project", "rename", project.id, "Renamed offline", "--base-dir", baseDir]);
+          const before = yield* readProjects(baseDir);
+          const error = yield* runCli([
+            "project",
+            "remove",
+            project.id,
+            "--force",
+            "--base-dir",
+            baseDir,
+          ]).pipe(Effect.flip);
+          assert.include(error.message, "exclusive server ownership");
+          assert.deepEqual(yield* readProjects(baseDir), before);
+        }).pipe(Effect.ensuring(Effect.sync(() => lease.mockRestore())));
+      }),
+    );
+
+    it.effect("preserves an alive recorded server after failed HTTP without offline mutation", () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const { baseDir, project } = yield* makeProjectLookupFixture();
+        const config = yield* makeConfig(baseDir);
+        const raw = JSON.stringify({
+          version: 1,
+          pid: process.pid,
+          port: 1,
+          origin: "http://127.0.0.1:1",
+          startedAt: "2026-10-08T00:00:00.000Z",
+        });
+        yield* fs.writeFileString(config.serverRuntimeStatePath, raw);
+        const before = yield* readProjects(baseDir);
+        const error = yield* runCli([
+          "project",
+          "rename",
+          project.id,
+          "Must not commit",
+          "--base-dir",
+          baseDir,
+        ]).pipe(Effect.flip);
+        assert.instanceOf(error, ProjectLiveServerRequestError);
+        assert.equal(yield* fs.readFileString(config.serverRuntimeStatePath), raw);
+        assert.deepEqual(yield* readProjects(baseDir), before);
+      }),
+    );
+
+    it.effect(
+      "holds kernel ownership before constructing the offline database and releases after commit",
+      () =>
+        Effect.gen(function* () {
+          if ((yield* HostProcess.Platform) !== "darwin") return;
+          const fs = yield* FileSystem.FileSystem;
+          const root = yield* fs.makeTempDirectoryScoped({ prefix: "project-offline-lease-" });
+          const config = yield* makeConfig(NodePath.join(root, "state"));
+          const workspaceRoot = NodePath.join(root, "workspace");
+          yield* fs.makeDirectory(workspaceRoot);
+          yield* Effect.acquireUseRelease(
+            ServerOwnerLease.acquireServerOwnerLease(config.stateDir),
+            () =>
+              Effect.gen(function* () {
+                const error = yield* runCli([
+                  "project",
+                  "add",
+                  workspaceRoot,
+                  "--base-dir",
+                  config.baseDir,
+                ]).pipe(Effect.flip);
+                assert.instanceOf(error, ServerOwnerLease.ServerOwnerLeaseHeldError);
+                assert.isFalse(yield* fs.exists(config.dbPath));
+              }),
+            (lease) => lease.release,
+          );
+          yield* runCli(["project", "add", workspaceRoot, "--base-dir", config.baseDir]);
+          const project = (yield* readProjects(config.baseDir)).projects[0]!;
+          yield* runCli(["project", "remove", project.id, "--base-dir", config.baseDir]);
+          assert.isEmpty((yield* readProjects(config.baseDir)).projects);
+          // No descriptor escapes the completed offline operation.
+          yield* Effect.acquireUseRelease(
+            ServerOwnerLease.acquireServerOwnerLease(config.stateDir),
+            () => Effect.void,
+            (lease) => lease.release,
+          );
+        }),
+    );
+
+    it.effect.each(["draining", "claimed"] as const)(
+      "refuses offline deletion under a durable %s intent",
+      (status) =>
+        Effect.gen(function* () {
+          const { baseDir, project } = yield* makeProjectLookupFixture();
+          const config = yield* makeConfig(baseDir);
+          const requestId = UpdateDrainRequestId.make("offline-cli-update");
+          yield* Effect.gen(function* () {
+            const drain = yield* UpdateDrain.UpdateDrain;
+            yield* drain.dispatch({
+              type: "update-drain.start",
+              commandId: CommandId.make("offline-cli:start"),
+              requestId,
+              targetVersion: UpdateDrainTargetVersion.make("1.2.3"),
+              createdAt: "2026-10-08T00:00:00.000Z",
+            });
+            if (status === "claimed")
+              yield* drain.dispatch({
+                type: "update-drain.claim",
+                commandId: CommandId.make("offline-cli:claim"),
+                requestId,
+                createdAt: "2026-10-08T00:00:00.000Z",
+              });
+          }).pipe(
+            Effect.provide(
+              UpdateDrain.layer.pipe(
+                Layer.provide(UpdateDrainRepository.layer),
+                Layer.provide(SqlitePersistence.layerConfig),
+                Layer.provide(ServerConfig.layer(config)),
+              ),
+            ),
+          );
+          const before = yield* readProjects(baseDir);
+          const error = yield* runCli([
+            "project",
+            "remove",
+            project.id,
+            "--force",
+            "--base-dir",
+            baseDir,
+          ]).pipe(Effect.flip);
+          if ((yield* HostProcess.Platform) === "darwin") {
+            assert.isTrue(isProjectOperationError(error));
+            if (isProjectOperationError(error))
+              assert.isTrue(isUpdateDrainAdmissionError(error.cause));
+          } else assert.include(error.message, "exclusive server ownership");
+          assert.deepEqual(yield* readProjects(baseDir), before);
+        }),
     );
   },
 );
