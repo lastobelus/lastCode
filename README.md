@@ -29,7 +29,7 @@ git clone git@github.com:YOUR_GITHUB_USER/LastCode.git ~/projects/lastCode
 cd ~/projects/lastCode
 git switch lastcode/main
 git remote add upstream https://github.com/pingdotgg/t3code.git
-mise exec node@24.13.1 -- node scripts/lastcode-setup.mjs \
+mise exec node@26.12.1 -- node scripts/lastcode-setup.mjs \
   --enable-nightly-writes \
   --checkpoint-interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS"
 ```

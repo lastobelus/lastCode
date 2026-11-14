@@ -175,15 +175,26 @@ describe("lastcode-local-update", () => {
     try {
       NodeFS.mkdirSync(NodePath.dirname(executable), { recursive: true });
       NodeFS.writeFileSync(executable, "");
-      assert.equal(
-        resolveMiseNodeExecutable("/build", "/mise", (cwd, command, args) => {
-          assert.equal(cwd, "/build");
-          assert.equal(command, "/mise");
-          assert.deepEqual(args, ["where", "node@24.13.1"]);
-          return root;
-        }),
-        executable,
-      );
+      for (const version of ["26.12.1", "24.13.1"]) {
+        NodeFS.writeFileSync(
+          NodePath.join(root, "package.json"),
+          JSON.stringify({
+            engines: { node: "26.12.1" },
+            scripts: {
+              "lastcode:ci": `MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@${version} -- node scripts/lastcode-local-ci.ts --full`,
+            },
+          }),
+        );
+        assert.equal(
+          resolveMiseNodeExecutable(root, "/mise", (cwd, command, args) => {
+            assert.equal(cwd, root);
+            assert.equal(command, "/mise");
+            assert.deepEqual(args, ["where", `node@${version}`]);
+            return root;
+          }),
+          executable,
+        );
+      }
     } finally {
       NodeFS.rmSync(root, { recursive: true, force: true });
     }

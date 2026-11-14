@@ -180,7 +180,7 @@ describe("immutable Intel release validation", () => {
       id: "lc-build-intel-package",
       name: "Build Intel package (macOS)",
       command:
-        "MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@24.13.1 -- node scripts/lastcode-build-intel-package.ts run",
+        "MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@26.12.1 -- node scripts/lastcode-build-intel-package.ts run",
       icon: "build",
     });
     const automationCheckout = workflow.slice(

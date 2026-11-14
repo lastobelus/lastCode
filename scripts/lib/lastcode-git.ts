@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Host-side Git helpers shared by local CI and the guarded merge.
 // No installed dependencies: lastcode:merge runs from checkouts without node_modules.
 import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
 import { CiCommandFailure } from "./lastcode-ci-process.ts";
@@ -37,14 +38,22 @@ export function cleanGitEnvironment(
   );
 }
 
+const PROJECT_NODE_VERSION: string = JSON.parse(
+  NodeFS.readFileSync(NodePath.join(import.meta.dirname, "..", "..", "package.json"), "utf8"),
+).engines.node;
+
+// Transition: saved Project Actions in Settings still launch through `mise exec node@24.13.1`.
+// Remove the ^24.13.1 branch once they launch with the `engines.node` version.
+function isTransitionalNode24(major: number, minor: number, patch: number): boolean {
+  return major === 24 && (minor > 13 || (minor === 13 && patch >= 1));
+}
+
 export function assertSupportedNodeVersion(version = process.versions.node): void {
   const [major = 0, minor = 0, patch = 0] = version.split(".").map(Number);
-  const supported = major === 24 && (minor > 13 || (minor === 13 && patch >= 1));
-  if (!supported) {
-    throw new Error(
-      `LastCode local CI requires Node ^24.13.1, received ${version}. Run it through the package script so mise selects the project runtime.`,
-    );
-  }
+  if (version === PROJECT_NODE_VERSION || isTransitionalNode24(major, minor, patch)) return;
+  throw new Error(
+    `LastCode local CI requires Node ${PROJECT_NODE_VERSION} (root package.json engines.node) or ^24.13.1, received ${version}. Run it through the package script so mise selects the project runtime.`,
+  );
 }
 
 export function runProcess(

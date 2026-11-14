@@ -305,11 +305,16 @@ describe("lastcode-local-ci", () => {
     expect(hook).toContain("lastcode:ci:quick -- --pre-push");
   });
 
-  it("requires the repository's supported Node release line", () => {
+  it("requires engines.node, or ^24.13.1 during the transition", () => {
+    const enginesNode: string = JSON.parse(
+      NodeFS.readFileSync(NodePath.join(import.meta.dirname, "..", "package.json"), "utf8"),
+    ).engines.node;
+    expect(() => assertSupportedNodeVersion(enginesNode)).not.toThrow();
     expect(() => assertSupportedNodeVersion("24.13.1")).not.toThrow();
     expect(() => assertSupportedNodeVersion("24.99.0")).not.toThrow();
-    expect(() => assertSupportedNodeVersion("24.13.0")).toThrow("Node ^24.13.1");
-    expect(() => assertSupportedNodeVersion("26.7.0")).toThrow("Node ^24.13.1");
+    expect(() => assertSupportedNodeVersion("24.13.0")).toThrow(`Node ${enginesNode}`);
+    expect(() => assertSupportedNodeVersion("26.7.0")).toThrow(`Node ${enginesNode}`);
+    expect(() => assertSupportedNodeVersion("25.0.0")).toThrow(`Node ${enginesNode}`);
   });
 
   it("defaults to the full gate and supports the quick pre-push gate", () => {
@@ -330,6 +335,7 @@ describe("lastcode-local-ci", () => {
       prePush: false,
       requireLocal: true,
     });
+    expect(parseLocalCiOptions(["--full", "--quick"]).mode).toBe("quick");
     expect(() => parseLocalCiOptions(["--require-local"])).toThrow("only supported with --quick");
     expect(() => parseLocalCiOptions(["--full", "--pre-push"])).toThrow(
       "only supported with --quick",
