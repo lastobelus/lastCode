@@ -1,5 +1,4 @@
 import { toServerClock } from "@t3tools/client-runtime/clock";
-import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { type OrchestrationV2ProviderTurn, type RunAttemptId } from "@t3tools/contracts";
 import {
   deriveLatestThreadRun,
@@ -143,10 +142,7 @@ export function shouldRenderPreviewMiniPlayer(
   if (source.kind === "browser") {
     return !(
       renderedRightPanelSurface?.kind === "preview" &&
-      renderedRightPanelSurface.resourceId === source.tabId &&
-      (renderedRightPanelSurface.sourceThreadRef
-        ? scopedThreadKey(renderedRightPanelSurface.sourceThreadRef)
-        : null) === (source.sourceThreadRef ? scopedThreadKey(source.sourceThreadRef) : null)
+      renderedRightPanelSurface.resourceId === source.tabId
     );
   }
   return !(

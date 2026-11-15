@@ -79,17 +79,8 @@ export function followPreviewSessions(threadRef: ScopedThreadRef, state: ThreadP
     ),
   );
   const miniPlayer = usePreviewMiniPlayerStore.getState();
-  for (const [hostKey, player] of Object.entries(miniPlayer.byThreadKey)) {
-    const hostRef = parseScopedThreadKey(hostKey);
-    const source = player.source;
-    if (
-      hostRef &&
-      source.kind === "browser" &&
-      scopedThreadKey(source.sourceThreadRef ?? hostRef) === scopedThreadKey(threadRef) &&
-      !state.sessions[source.tabId]
-    )
-      miniPlayer.close(hostRef);
-  }
+  const source = miniPlayer.byThreadKey[scopedThreadKey(threadRef)]?.source;
+  if (source?.kind === "browser" && !state.sessions[source.tabId]) miniPlayer.close(threadRef);
 }
 
 /**

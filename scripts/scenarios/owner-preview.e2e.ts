@@ -46,10 +46,17 @@ test(
       fs.makeTempDirectory({ directory: T3_HOME, prefix: "owner-preview-" }),
     );
     let registered = false;
+    let openOutcome: { ok: boolean; error: string } | undefined;
     let observed = { note: "", clicks: 0, scrollY: 0, trusted: false, sequence: 0 };
     const dashboard = NodeHttp.createServer((request, response) => {
       const url = new URL(request.url ?? "/", "http://fixture.invalid");
-      if (url.pathname === "/event") {
+      if (url.pathname === "/open-result") {
+        openOutcome = {
+          ok: url.searchParams.get("ok") === "true",
+          error: url.searchParams.get("error") ?? "",
+        };
+        response.writeHead(204).end();
+      } else if (url.pathname === "/event") {
         const sequence = Number(url.searchParams.get("sequence"));
         if (sequence > observed.sequence) {
           observed = {
@@ -114,9 +121,9 @@ createInterface({input:process.stdin,crlfDelay:Infinity}).on('line', async (line
       opened = true;
       const before = await call('preview_status', {});
       if (before.tabs?.length) throw Error('The scenario must start without a browser tab');
-      try {
-        await call('preview_open', {purpose:'user',open:true,browserHost:'environment',url:${JSON.stringify(dashboardUrl)}});
-      } catch (error) { console.error('Owner preview open failed:', error); }
+      const outcome = await call('preview_open', {purpose:'user',open:true,browserHost:'environment',url:${JSON.stringify(dashboardUrl)}})
+        .then(() => ({ok:true}), (error) => ({ok:false,error:String(error)}));
+      await fetch(${JSON.stringify(`${dashboardUrl}/open-result?`)} + new URLSearchParams({ok:String(outcome.ok),error:outcome.error ?? ''}));
     }
     agent.stdin.write(line + '\\n');
   } catch (error) {
@@ -206,6 +213,7 @@ createInterface({input:process.stdin,crlfDelay:Infinity}).on('line', async (line
         await expect(browserPage).toBeEnabled();
         await expect(browserPage).toBeVisible();
         await expect(screen.getByRole("button", "Take control")).not.toBeVisible();
+        await expect.poll(() => openOutcome).toMatchObject({ ok: true });
       } finally {
         await app.screenshot("dashboard-control");
       }

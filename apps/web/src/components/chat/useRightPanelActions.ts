@@ -172,13 +172,7 @@ export function useRightPanelActions(input: RightPanelActionsInput) {
       if (activeRightPanelSurface?.kind === "preview" && activeRightPanelSurface.resourceId) {
         usePreviewMiniPlayerStore
           .getState()
-          .open(
-            activeThreadRef,
-            browserMiniPlayerSource(
-              activeRightPanelSurface.resourceId,
-              activeRightPanelSurface.sourceThreadRef,
-            ),
-          );
+          .open(activeThreadRef, browserMiniPlayerSource(activeRightPanelSurface.resourceId));
       } else if (activeRightPanelSurface?.kind === "device" && activeRightPanelSurface.target) {
         floatDeviceSurface(
           activeThreadRef,
@@ -210,7 +204,7 @@ export function useRightPanelActions(input: RightPanelActionsInput) {
     if (!activeThreadRef) return;
     useRightPanelStore.getState().activateSurface(activeThreadRef, surface.id);
     if (surface.kind === "preview" && surface.resourceId) {
-      setActivePreviewTab(surface.sourceThreadRef ?? activeThreadRef, surface.resourceId);
+      setActivePreviewTab(activeThreadRef, surface.resourceId);
     }
     if (surface.kind === "terminal") {
       focusTerminal(activeThreadRef, surface.activeTerminalId);

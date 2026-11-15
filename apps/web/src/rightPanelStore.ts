@@ -36,12 +36,8 @@ export interface DeviceTabTarget {
 }
 
 export type RightPanelSurface =
-  | {
-      id: `browser:${string}`;
-      kind: "preview";
-      resourceId: string | null;
-      sourceThreadRef?: ScopedThreadRef;
-    }
+  | { id: `browser:${string}`; kind: "preview"; resourceId: string }
+  | { id: "browser:new"; kind: "preview"; resourceId: null }
   | { id: "device" | `device:${string}`; kind: "device"; target?: DeviceTabTarget; title?: string }
   | {
       id: `terminal:${string}`;
@@ -240,17 +236,10 @@ const singletonSurface = (
   }
 };
 
-const browserSurface = (
-  tabId: string | null,
-  sourceThreadRef?: ScopedThreadRef,
-): Extract<RightPanelSurface, { kind: "preview" }> => ({
-  id: sourceThreadRef
-    ? `browser:${scopedThreadKey(sourceThreadRef)}:${tabId ?? "new"}`
-    : `browser:${tabId ?? "new"}`,
-  kind: "preview",
-  resourceId: tabId,
-  ...(sourceThreadRef ? { sourceThreadRef } : {}),
-});
+const browserSurface = (tabId: string | null): RightPanelSurface =>
+  tabId
+    ? { id: `browser:${tabId}`, kind: "preview", resourceId: tabId }
+    : { id: "browser:new", kind: "preview", resourceId: null };
 
 const fileSurface = (
   relativePath: string,
@@ -420,23 +409,20 @@ const automaticUpdate = (
 });
 
 // A side chat pane has no panel of its own, so its panel actions open in its parent's panel.
-const panelHosts = new Map<string, Array<{ ref: ScopedThreadRef }>>();
+const panelHosts = new Map<string, ScopedThreadRef>();
 
 /** Routes `guest`'s panel actions to `host`'s panel until the returned cleanup runs. */
 export function hostRightPanel(guest: ScopedThreadRef, host: ScopedThreadRef): () => void {
   const guestKey = scopedThreadKey(guest);
-  const registration = { ref: host };
-  panelHosts.set(guestKey, [...(panelHosts.get(guestKey) ?? []), registration]);
+  panelHosts.set(guestKey, host);
   return () => {
-    const remaining = panelHosts.get(guestKey)?.filter((entry) => entry !== registration) ?? [];
-    if (remaining.length) panelHosts.set(guestKey, remaining);
-    else panelHosts.delete(guestKey);
+    if (panelHosts.get(guestKey) === host) panelHosts.delete(guestKey);
   };
 }
 
-/** The thread whose panel shows `ref`'s panel actions. */
+/** The thread whose panel shows `ref`'s panel actions, so it also owns their browser tabs. */
 export function rightPanelHostRef(ref: ScopedThreadRef): ScopedThreadRef {
-  return panelHosts.get(scopedThreadKey(ref))?.at(-1)?.ref ?? ref;
+  return panelHosts.get(scopedThreadKey(ref)) ?? ref;
 }
 
 const userAction = (
@@ -445,7 +431,7 @@ const userAction = (
   updater: (current: ThreadRightPanelState) => ThreadRightPanelState,
   closesView = false,
 ): Partial<RightPanelStoreState> => {
-  const host = panelHosts.get(guestKey)?.at(-1)?.ref;
+  const host = panelHosts.get(guestKey);
   const threadKey = host === undefined ? guestKey : scopedThreadKey(host);
   return userActionOnThread(state, threadKey, updater, closesView);
 };
@@ -778,23 +764,15 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
           })),
         ),
       openBrowser: (ref, tabId, automatic = false) =>
-        set((state) => {
-          const hostRef = rightPanelHostRef(ref);
-          const sourceThreadRef =
-            scopedThreadKey(hostRef) !== scopedThreadKey(ref) ? ref : undefined;
-          return (automatic ? automaticUpdate : userAction)(
-            state,
-            scopedThreadKey(automatic ? hostRef : ref),
-            (current) => {
-              const surface = browserSurface(tabId, sourceThreadRef);
-              const placeholderId = browserSurface(null, sourceThreadRef).id;
-              const withoutPlaceholder = tabId
-                ? current.surfaces.filter((entry) => entry.id !== placeholderId)
-                : current.surfaces;
-              return upsertSurface({ ...current, surfaces: withoutPlaceholder }, surface);
-            },
-          );
-        }),
+        set((state) =>
+          (automatic ? automaticUpdate : userAction)(state, scopedThreadKey(ref), (current) => {
+            const surface = browserSurface(tabId);
+            const withoutPlaceholder = tabId
+              ? current.surfaces.filter((entry) => entry.id !== "browser:new")
+              : current.surfaces;
+            return upsertSurface({ ...current, surfaces: withoutPlaceholder }, surface);
+          }),
+        ),
       openPullRequest: (ref, target) =>
         set((state) =>
           userAction(state, scopedThreadKey(ref), (current) => {
@@ -1073,37 +1051,22 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
           }),
         ),
       reconcileBrowserSurfaces: (ref, tabIds, hiddenTabIds, focusTabId) =>
-        set((state) => {
-          const threadKey = scopedThreadKey(ref);
-          const validIds = new Set(tabIds);
-          const reconcile = (
-            current: ThreadRightPanelState,
-            panelKey: string,
-          ): ThreadRightPanelState => {
-            const belongsToSource = (surface: RightPanelSurface) =>
-              surface.kind === "preview" &&
-              (surface.sourceThreadRef ? scopedThreadKey(surface.sourceThreadRef) : panelKey) ===
-                threadKey;
+        set((state) =>
+          automaticUpdate(state, scopedThreadKey(ref), (current) => {
+            const validIds = new Set(tabIds.map((tabId) => `browser:${tabId}`));
             const kept = current.surfaces.filter(
               (surface) =>
-                !belongsToSource(surface) ||
-                (surface.kind === "preview" &&
-                  surface.resourceId !== null &&
-                  validIds.has(surface.resourceId)),
+                surface.kind !== "preview" ||
+                (surface.id !== "browser:new" && validIds.has(surface.id)),
             );
-            const knownIds = new Set(
-              kept
-                .filter(belongsToSource)
-                .map((surface) => (surface.kind === "preview" ? surface.resourceId : null)),
-            );
-            const added = (panelKey === threadKey ? tabIds : [])
-              .filter((tabId) => !knownIds.has(tabId) && !hiddenTabIds?.has(tabId))
+            const knownIds = new Set(kept.map((surface) => surface.id));
+            const added = tabIds
+              .filter((tabId) => !knownIds.has(`browser:${tabId}`) && !hiddenTabIds?.has(tabId))
               .map((tabId) => browserSurface(tabId));
             const surfaces = [...kept, ...added];
             const focusedSurface = surfaces.find(
               (surface) =>
                 surface.kind === "preview" &&
-                belongsToSource(surface) &&
                 surface.resourceId === focusTabId &&
                 surface.resourceId !== null &&
                 !hiddenTabIds?.has(surface.resourceId),
@@ -1127,24 +1090,8 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
                   ? current.activeSurfaceId
                   : (fallbackBrowser?.id ?? surfaces[0]?.id ?? null)),
             };
-          };
-          let next = updateThread(state, threadKey, (current) => reconcile(current, threadKey));
-          // A hosted tab keeps its source even after the side chat that registered the host unmounts.
-          for (const [panelKey, panel] of Object.entries(next.byThreadKey)) {
-            if (
-              panelKey === threadKey ||
-              !panel.surfaces.some(
-                (surface) =>
-                  surface.kind === "preview" &&
-                  surface.sourceThreadRef &&
-                  scopedThreadKey(surface.sourceThreadRef) === threadKey,
-              )
-            )
-              continue;
-            next = updateThread(next, panelKey, (current) => reconcile(current, panelKey));
-          }
-          return next;
-        }),
+          }),
+        ),
       reconcileFileSurfaces: (ref, workspaceAvailable) =>
         set((state) =>
           automaticUpdate(state, scopedThreadKey(ref), (current) => {

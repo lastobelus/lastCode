@@ -1,7 +1,5 @@
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
-import { useAtomValue } from "@effect/atom-react";
-import { Atom } from "effect/reactivity";
-import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   threadRuntimeIsActive,
   type EnvironmentThreadShell,
@@ -64,8 +62,7 @@ import {
 } from "react";
 
 import { isElectron } from "~/env";
-import { previewStateAtom, type DesktopPreviewOverlay } from "~/previewStateStore";
-import { previewRuntimeTabId } from "~/browser/previewRuntimeTabId";
+import type { DesktopPreviewOverlay } from "~/previewStateStore";
 import type { RightPanelSurface } from "~/rightPanelStore";
 import { cn } from "~/lib/utils";
 import { resolveShortcutCommand, type ShortcutMatchContext } from "~/keybindings";
@@ -164,28 +161,6 @@ export interface RightPanelTabsProps {
   sideChatDisabledReason?: string | null;
   pullRequestStatusSeeds?: Readonly<Record<string, PullRequestTabStatusSeed>>;
   children: ReactNode;
-}
-
-type PanelPreviewData = Pick<
-  RightPanelTabsProps,
-  "previewSessions" | "desktopByTabId" | "previewRuntimeTabId"
->;
-
-export function rightPanelPreviewDataAtom(surfaces: readonly RightPanelSurface[]) {
-  return Atom.make((get): Readonly<Record<string, PanelPreviewData>> => {
-    const bySurfaceId: Record<string, PanelPreviewData> = {};
-    for (const surface of surfaces) {
-      if (surface.kind !== "preview" || !surface.sourceThreadRef) continue;
-      const ref = surface.sourceThreadRef;
-      const state = get(previewStateAtom(scopedThreadKey(ref)));
-      bySurfaceId[surface.id] = {
-        previewSessions: state.sessions,
-        desktopByTabId: state.desktopByTabId,
-        previewRuntimeTabId: (tabId) => previewRuntimeTabId(ref, state.serverEpoch, tabId),
-      };
-    }
-    return bySurfaceId;
-  });
 }
 
 export interface PullRequestTabStatus {
@@ -1065,9 +1040,6 @@ function RightPanelTab(
 }
 
 export function RightPanelTabs(props: RightPanelTabsProps) {
-  const sourcedPreviewData = useAtomValue(rightPanelPreviewDataAtom(props.surfaces));
-  const previewDataFor = (surface: RightPanelSurface): PanelPreviewData =>
-    sourcedPreviewData[surface.id] ?? props;
   const focusedSurface = props.surfaces.find((surface) => surface.id === props.activeSurfaceId);
   const ownsDesktopTitleBar = isElectron && props.mode === "inline";
   const browserProfiles = useBrowserDefaults().profiles;
@@ -1231,18 +1203,15 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
     if (surface.kind === "file" && surface.attachment === undefined) {
       items.push({ id: "copy-path", label: "Copy path" });
     }
-    const previewData = previewDataFor(surface);
-    const menuPreviewTabId = previewTabIdOf(surface, previewData.previewSessions);
-    const menuOverlay = menuPreviewTabId
-      ? (previewData.desktopByTabId[menuPreviewTabId] ?? null)
-      : null;
+    const menuPreviewTabId = previewTabIdOf(surface, props.previewSessions);
+    const menuOverlay = menuPreviewTabId ? (props.desktopByTabId[menuPreviewTabId] ?? null) : null;
     const menuMuted = menuOverlay?.audioMuted ?? false;
     if (surface.kind === "preview") {
       items.push({
         id: "toggle-mute",
         ...tabMuteMenuItem({
           overlay: menuOverlay,
-          canResolveRuntimeTabId: previewData.previewRuntimeTabId !== undefined,
+          canResolveRuntimeTabId: props.previewRuntimeTabId !== undefined,
         }),
       });
     }
@@ -1278,7 +1247,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       case "toggle-mute": {
         const runtimeTabId =
           menuPreviewTabId && menuOverlay
-            ? (previewData.previewRuntimeTabId?.(menuPreviewTabId) ?? null)
+            ? (props.previewRuntimeTabId?.(menuPreviewTabId) ?? null)
             : null;
         if (runtimeTabId) {
           void previewBridge?.setAudioMuted(runtimeTabId, !menuMuted).catch(() => undefined);
@@ -1370,7 +1339,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       workspaceFocusKey={`panel:${props.environmentId}:${props.activeSurfaceId ?? "empty"}`}
       workspaceLabel={
         focusedSurface
-          ? `Workspace panel: ${surfaceTitle(focusedSurface, previewDataFor(focusedSurface).previewSessions, props.terminalLabelsById)}`
+          ? `Workspace panel: ${surfaceTitle(focusedSurface, props.previewSessions, props.terminalLabelsById)}`
           : "Workspace panel"
       }
       mode={props.mode}
@@ -1408,12 +1377,11 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
           <div className="flex h-full w-max min-w-full items-center gap-1">
             <SortableTabList surfaces={props.surfaces} onMove={props.onMoveSurface}>
               {props.surfaces.map((surface) => {
-                const previewData = previewDataFor(surface);
-                const previewTabId = previewTabIdOf(surface, previewData.previewSessions);
+                const previewTabId = previewTabIdOf(surface, props.previewSessions);
                 const favicon = previewFaviconOf(
                   surface,
-                  previewData.previewSessions,
-                  previewData.desktopByTabId,
+                  props.previewSessions,
+                  props.desktopByTabId,
                 );
                 return (
                   <RightPanelTab
@@ -1422,18 +1390,12 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                     dragDisabled={!props.onMoveSurface || renamingDevice === surface.id}
                     active={surface.id === props.activeSurfaceId}
                     pending={props.pendingSurfaceIds.has(surface.id)}
-                    title={surfaceTitle(
-                      surface,
-                      previewData.previewSessions,
-                      props.terminalLabelsById,
-                    )}
+                    title={surfaceTitle(surface, props.previewSessions, props.terminalLabelsById)}
                     audio={tabAudioState(
-                      previewTabId ? (previewData.desktopByTabId[previewTabId] ?? null) : null,
+                      previewTabId ? (props.desktopByTabId[previewTabId] ?? null) : null,
                     )}
                     audioRuntimeTabId={
-                      previewTabId
-                        ? (previewData.previewRuntimeTabId?.(previewTabId) ?? null)
-                        : null
+                      previewTabId ? (props.previewRuntimeTabId?.(previewTabId) ?? null) : null
                     }
                     previewUrl={favicon.url}
                     previewCapturedUrl={favicon.capturedUrl}

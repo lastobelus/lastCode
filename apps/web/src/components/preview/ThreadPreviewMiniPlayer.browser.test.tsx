@@ -9,18 +9,11 @@ import { expect, it, vi } from "vite-plus/test";
 
 import { act, render } from "../../../test/render";
 import {
-  browserMiniPlayerSource,
   type PreviewMiniPlayerSource,
   selectThreadPreviewMiniPlayer,
   usePreviewMiniPlayerStore,
 } from "../../previewMiniPlayerStore";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
-import { applyPreviewServerSnapshot, resetPreviewStateForTests } from "../../previewStateStore";
-import {
-  hostRightPanel,
-  selectThreadRightPanelState,
-  useRightPanelStore,
-} from "../../rightPanelStore";
 import { deviceEnvironment } from "../../state/device";
 import { ChatCanvas } from "../chat/ChatCanvas";
 import { createChatCanvasStore } from "../chat/canvasStore";
@@ -32,14 +25,6 @@ vi.mock(import("../device/DeviceStreamView"), () => ({
     <div data-testid="stream" data-view-id={viewId} />
   )) as never,
 }));
-vi.mock(import("~/state/environments"), async (importOriginal) => ({
-  ...(await importOriginal()),
-  useEnvironmentHttpBaseUrl: () => null,
-}));
-vi.mock("~/state/primaryEnvironment", async () => {
-  const { Atom } = await import("effect/reactivity");
-  return { primaryEnvironmentIdAtom: Atom.make(null), themeEnvironmentIdAtom: Atom.make(null) };
-});
 
 const threadRef = scopeThreadRef("env-1" as EnvironmentId, ThreadId.make("thread-1"));
 const phone: PreviewMiniPlayerSource = {
@@ -64,51 +49,6 @@ function Harness() {
     </ChatCanvas>
   );
 }
-
-it("floats a hosted browser in the parent and docks it with its session source", async () => {
-  resetPreviewStateForTests();
-  useRightPanelStore.setState({ byThreadKey: {} });
-  const child = { ...threadRef, threadId: ThreadId.make("child-browser") };
-  applyPreviewServerSnapshot(child, {
-    threadId: child.threadId,
-    tabId: "child-tab",
-    runtime: "desktop",
-    navStatus: { _tag: "Success", url: "https://page.example/", title: "Child page" },
-    canGoBack: false,
-    canGoForward: false,
-    updatedAt: "2026-01-01T00:00:00Z",
-  });
-  const unhost = hostRightPanel(child, threadRef);
-  using _cleanup = {
-    [Symbol.dispose]: () => {
-      unhost();
-      resetPreviewStateForTests();
-      usePreviewMiniPlayerStore.getState().removeThread(threadRef);
-    },
-  };
-  usePreviewMiniPlayerStore.getState().open(threadRef, browserMiniPlayerSource("child-tab", child));
-  const container = document.createElement("div");
-  container.style.cssText = "display:flex;position:fixed;inset:0";
-  await using screen = await render(
-    <RegistryContext.Provider value={appAtomRegistry}>
-      <Harness />
-    </RegistryContext.Provider>,
-    { container },
-  );
-  await expect
-    .element(screen.getByRole("button", { name: "Open preview in right panel" }))
-    .toBeVisible();
-  await act(() =>
-    screen.getByRole("button", { name: "Open preview in right panel" }).element().focus(),
-  );
-  await screen.getByRole("button", { name: "Open preview in right panel" }).click();
-  expect(
-    selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, threadRef).surfaces,
-  ).toMatchObject([{ resourceId: "child-tab", sourceThreadRef: child }]);
-  expect(
-    selectThreadPreviewMiniPlayer(usePreviewMiniPlayerStore.getState().byThreadKey, threadRef),
-  ).toBeNull();
-});
 
 it("holds its frame through a source change and stops when the gesture is interrupted", async () => {
   using _state = vi
