@@ -17,7 +17,7 @@ function report(baseRef, headRef, upstreamRef = "origin/main") {
   const base = resolve(baseRef);
   const head = resolve(headRef);
   const upstream = git("merge-base", base, resolve(upstreamRef)).trim();
-  const owned = new Set(git("ls-tree", "-rz", "--name-only", upstream).split("\0"));
+  const owned = new Set(git("ls-tree", "--full-tree", "-rz", "--name-only", upstream).split("\0"));
   const count = (from) => {
     let added = 0;
     let deleted = 0;

@@ -17,11 +17,11 @@ test("counts endpoint changes over pinned paths through replay and nightly merge
     git("commit", "-qm", message);
     return git("rev-parse", "HEAD");
   };
-  const report = (base, head) => {
+  const report = (base, head, runCwd = cwd) => {
     const summary = path.join(cwd, ".git", "summary.md");
     fs.rmSync(summary, { force: true });
     const result = spawnSync(process.execPath, [script, base, head], {
-      cwd,
+      cwd: runCwd,
       encoding: "utf8",
       env: { ...process.env, GITHUB_STEP_SUMMARY: summary },
     });
@@ -64,6 +64,9 @@ test("counts endpoint changes over pinned paths through replay and nightly merge
   assert.match(output, /\| Whole fork \| 3 \| 4 \|/);
   assert.ok(output.includes(pinned));
   assert.match(output, /Binary files.*excluded/);
+  const nested = path.join(cwd, "nested");
+  fs.mkdirSync(nested);
+  assert.equal(report(base, head, nested), output);
 
   // A transient edit and its revert add no endpoint churn.
   write("owned.txt", "temporary\n");
