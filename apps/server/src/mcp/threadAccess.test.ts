@@ -1,12 +1,28 @@
 import { expect, it } from "@effect/vitest";
-import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { CommandId, EnvironmentId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import { liveThreadShell } from "./McpToolAccess.testkit.ts";
-import { readThread } from "./threadAccess.ts";
+import { readThread, threadCreationFailure } from "./threadAccess.ts";
+
+import { OrchestratorCommandPreviouslyRejectedError } from "../orchestration-v2/Orchestrator.ts";
+
+it("identifies a rejected creation key without disclosing the stored cause", () => {
+  const error = threadCreationFailure(
+    new OrchestratorCommandPreviouslyRejectedError({
+      commandId: CommandId.make("rejected-creation"),
+      commandType: "thread.create",
+      detail: "private-storage-path",
+    }),
+  );
+  expect(error.code).toBe("invalid_request");
+  expect(error.message).toContain("clientRequestId");
+  expect(error.message).toContain("new clientRequestId");
+  expect(error.message).not.toContain("private-storage-path");
+});
 
 const bareId = ThreadId.make("5d0b4a3e-8c1f-4a52-9d37-2f6c7e1b9a04");
 const client: McpInvocationContext.McpInvocationScope = {

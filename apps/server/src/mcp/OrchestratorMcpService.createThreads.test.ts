@@ -150,6 +150,48 @@ const createParent = Effect.gen(function* () {
   });
 });
 
+it.effect("names invalid grouping inputs without creating a thread", () =>
+  Effect.gen(function* () {
+    const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+    yield* createParent;
+    for (const prompt of [undefined, "Inspect this project"]) {
+      for (const groupedUnderThreadId of ["null", "missing-thread"]) {
+        const clientRequestId = `bad-group:${prompt === undefined ? "empty" : "prompted"}:${groupedUnderThreadId}`;
+        const error = yield* service
+          .createThreads(scope, {
+            clientRequestId,
+            threads: [
+              {
+                title: "Invalid grouping",
+                groupedUnderThreadId: ThreadId.make(groupedUnderThreadId),
+                ...(prompt === undefined ? {} : { prompt }),
+              },
+            ],
+          })
+          .pipe(Effect.flip);
+        assert.equal(error.code, "invalid_request");
+        assert.include(error.message, "groupedUnderThreadId");
+        assert.include(error.message, "JSON null");
+        const retry = yield* service
+          .createThreads(scope, {
+            clientRequestId,
+            threads: [{ title: "Corrected grouping", groupedUnderThreadId: null }],
+          })
+          .pipe(Effect.flip);
+        assert.equal(retry.code, "invalid_request");
+        assert.include(retry.message, "clientRequestId");
+      }
+    }
+    const records = yield* service.listThreads(scope, {});
+    assert.lengthOf(records.threads, 1);
+    const fresh = yield* service.createThreads(scope, {
+      clientRequestId: "corrected-with-new-key",
+      threads: [{ title: "Corrected grouping", groupedUnderThreadId: null }],
+    });
+    assert.isNull(fresh.threads[0]?.groupedUnderThreadId);
+  }).pipe(Effect.provide(layer)),
+);
+
 it.effect(
   "creates empty containers, moves a large family through the service and discovers paged children",
   () =>

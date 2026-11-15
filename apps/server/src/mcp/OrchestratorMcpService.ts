@@ -141,7 +141,7 @@ import {
   runtimeModeRank,
   taskPrompt,
 } from "./delegatedTaskModes.ts";
-import { isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
+import { threadCreationFailure, isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
@@ -2886,16 +2886,7 @@ const make = Effect.gen(function* () {
           // gives up the wait (timeout, cancelled call) and upgrades the wake.
           completionWake: input.mode === "wait" ? "settled_only" : "always",
         })
-        .pipe(
-          Effect.mapError((error) =>
-            error._tag === "ThreadManagementProviderInstanceDisabledError"
-              ? threadManagementFailure(error)
-              : failure(
-                  "orchestration_error",
-                  `Unable to create delegated task: ${errorMessage(error)}`,
-                ),
-          ),
-        );
+        .pipe(Effect.mapError(threadCreationFailure));
       const taskEvent = result.storedEvents.find(
         (stored) =>
           stored.event.type === "subagent.updated" && stored.event.payload.origin === "app_owned",
@@ -3317,14 +3308,7 @@ const make = Effect.gen(function* () {
               if (request.prompt === undefined) {
                 yield* threadManagement
                   .dispatch(claim)
-                  .pipe(
-                    Effect.mapError((error) =>
-                      failure(
-                        "orchestration_error",
-                        `Unable to create thread ${index + 1}: ${errorMessage(error)}`,
-                      ),
-                    ),
-                  );
+                  .pipe(Effect.mapError(threadCreationFailure));
               } else {
                 const messageId = stableMessageId({ scope, requestKey: key, index });
                 yield* threadManagement
@@ -3349,16 +3333,7 @@ const make = Effect.gen(function* () {
                       dispatchMode: { type: "start_immediately" },
                     },
                   })
-                  .pipe(
-                    Effect.mapError((error) =>
-                      error._tag === "ThreadManagementProviderInstanceDisabledError"
-                        ? threadManagementFailure(error)
-                        : failure(
-                            "orchestration_error",
-                            `Unable to ${"commandId" in error && error.commandId === claim.commandId ? "create" : "start"} thread ${index + 1}: ${errorMessage(error)}`,
-                          ),
-                    ),
-                  );
+                  .pipe(Effect.mapError(threadCreationFailure));
               }
               const resolvedModelSelection = (yield* threadManagement
                 .getThreadRecords(threadId, [])

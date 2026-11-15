@@ -54,6 +54,7 @@ export const dispatchFailure = (
   if (
     error._tag === "ThreadManagementProviderInstanceDisabledError" ||
     error._tag === "OrchestratorRuntimeModeAboveCeilingError" ||
+    error._tag === "OrchestratorThreadPlacementError" ||
     error._tag === "OrchestratorProviderSelectionBusyError"
   ) {
     return new OrchestratorMcpFailure({ code: "invalid_request", message: error.message });
@@ -71,6 +72,17 @@ export const dispatchFailure = (
       })
     : unavailable();
 };
+
+export const threadCreationFailure = (
+  error: OrchestratorV2Error | ThreadManagement.ThreadManagementProviderInstanceDisabledError,
+) =>
+  error._tag === "OrchestratorCommandPreviouslyRejectedError"
+    ? new OrchestratorMcpFailure({
+        code: "invalid_request",
+        message:
+          "This clientRequestId belongs to an earlier request that was rejected. Correct the input, then retry with a new clientRequestId.",
+      })
+    : dispatchFailure(error);
 
 export interface CallerLimits {
   readonly runtimeMode: RuntimeMode;
