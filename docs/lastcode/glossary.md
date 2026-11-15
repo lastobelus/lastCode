@@ -23,10 +23,11 @@ The complete, ordered set of LastCode-owned changes retained across upstream upd
 delta LastCode intentionally carries on top of an upstream T3 Code version, not the upstream code
 underneath it and not the pull requests that originally delivered it.
 
-Today, `lastcode/main` represents the downstream carry set as replayable commit history. The initial
-carry-set tooling inventories that history into stable groups and proves it can reconstruct the same
-final tree as a bounded sequence of generated commits. It does not yet replace the nightly replay or
-publish the generated history.
+Since September 2026, `lastcode/main` holds the downstream carry set as six group commits, one per
+[carry patch](#carry-patch), sitting directly on an upstream nightly, plus any PRs merged since the
+last publication. Each checkpoint folds those PRs into the groups their commits' `Carry-Group`
+trailers name, then replays only the six group commits onto the new nightly. See
+[carry replay ownership][5].
 
 #### Patch stack
 
@@ -39,12 +40,14 @@ fork delta from stacked pull requests and other temporary development branches.
 
 One bounded change unit inside a [downstream carry set](#downstream-carry-set). A carry patch should
 describe the final change LastCode needs to retain, rather than preserving every development commit
-that produced it. Boundaries should follow coherent ownership and maintenance: a later fix belongs
-in the carry patch it repairs, while a separately owned capability belongs in another carry patch.
+that produced it. Boundaries should follow coherent ownership and maintenance: a separately owned
+capability belongs in another carry patch. A later fix normally joins the carry patch it repairs,
+but replay order comes first: a fix that edits lines a later carry patch changed must move to that
+later patch so it replays after them. PR CI names that patch when regrouping conflicts.
 
 Carry patches do not have to apply independently. The downstream carry set declares one fixed
-application order, and a later carry patch may depend on an earlier one. For example, an initial
-order can apply `Upstream bugfixes`, `Tooling`, `Resumable Actions`, `Legacy Sidebar`, and then
+application order, and a later carry patch may depend on an earlier one. The order is
+`Upstream bugfixes`, `Tooling`, `Build & CI`, `Resumable Actions`, `Legacy Sidebar`, and then
 `Incubator`. Resumable Actions carries its essential behavior without the legacy sidebar; Legacy
 Sidebar owns the optional resumable-action visibility and applies after the capability it presents.
 
@@ -66,8 +69,11 @@ claim that its contents form one feature.
 
 The group itself may remain in the fixed application order, while coherent clusters of changes
 graduate from it into named carry patches as they become substantial enough to maintain separately.
-The initial reconstruction also assigns files touched by more than one group to Incubator, making
-mixed boundaries explicit until a later extraction can separate them safely.
+No tooling does this yet.
+
+Carry replay has no path ownership: each commit's `Carry-Group` trailer picks its group, and several
+groups may change the same file. Only the historical reconstruction, which checks historical-mode
+tags, sends files touched by more than one group to Incubator.
 
 ## Practical Shortcuts
 
@@ -85,9 +91,10 @@ mixed boundaries explicit until a later extraction can separate them safely.
 - [LastCode documentation][3]
 - [Nightly workflow][1]
 - [Contribution and fork conventions][2]
-- [Downstream carry set proposal ELI5][4]
+- [Downstream carry set ELI5][4]
 
 [1]: ./nightly-workflow.md
 [2]: ./fork-conventions.md
 [3]: ./README.md
 [4]: ../../doc/design/2026-08-29__downstream-carry-set-eli5.html
+[5]: ./nightly-workflow.md#carry-replay-ownership

@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Keep every idea. Stop replaying every draft. — LastCode ELI5</title>
+    <title>Downstream Carry Set — LastCode ELI5</title>
     <style>
       :root {
         --ink: #18252c;
@@ -410,42 +410,45 @@
   <body>
     <main class="page">
       <header>
-        <p class="eyebrow">LastCode design proposal · ELI5</p>
-        <h1>Keep every idea. Stop replaying every draft.</h1>
+        <p class="eyebrow">LastCode release machinery · ELI5</p>
+        <h1>Six commits on top of upstream, no matter how many PRs.</h1>
         <p class="lede">
-          Development can keep using small, ordinary pull requests. The nightly updater can carry
-          their final combined result as a small set of named feature patches instead of replaying
-          every implementation and repair commit forever.
+          LastCode keeps its own changes on top of each T3 Code nightly as exactly six commits, one
+          per named group. You still merge small, ordinary PRs. At the next publication, the
+          automation folds every PR merged since the last one into the group each of its commits
+          names, then replays just those six commits onto the new nightly.
         </p>
         <p class="answer-first">
-          Recommendation: compact the replayed history into a few coherent carry patches; do not
-          replace normal PRs with permanent umbrella PRs.
+          PRs merged since the last checkpoint do not survive as separate commits. They are folded
+          into the six group commits.
         </p>
       </header>
 
-      <details class="truth">
+      <details class="truth" open>
         <summary>
           <span>Where This Is True</span>
-          <span class="truth-state">Proposed · repository snapshot 2026-08-29</span>
+          <span class="truth-state">Shipped · checked against the code on 2026-11-14</span>
         </summary>
         <div class="details-body">
           <p>
-            This page explains a proposal for LastCode's downstream nightly workflow. It is not yet
-            implemented. The current checkpoint runner rebases commit history from
-            <code>lastcode/main</code>, validates the result, and publishes immutable checkpoint or
-            revision tags.
+            This page first appeared on 2026-08-29 as a proposal for a mechanism that did not exist
+            yet. It was rewritten on 2026-11-14 to describe the mechanism as built, using the
+            scripts, their tests and the git history at that date as the source of truth. Where the
+            proposal and the result differ, see
+            <a href="#changed-title">What changed from the proposal</a>.
           </p>
           <p>
-            At this snapshot, the promoted downstream tree contains 117 commits after its upstream
-            nightly base. Its final delta touches 468 files, while walking the commits touches file
-            paths 1,082 times because later work revisits earlier files. Those measurements will
-            change; the stable point is that development history and the final downstream delta are
-            different things.
+            Carry replay is switched on:
+            <code>scripts/lastcode-carry-set.json</code> sets <code>replay.mode: "carry"</code>. On
+            2026-11-14, <code>lastcode/main</code> was six
+            <code>carry(&lt;group&gt;): compile downstream group</code> commits sitting directly on
+            an upstream commit, with one ordinary PR squash (#708) on top. The checkpoint tag for
+            those six commits, <code>lastcode/checkpoint/v0.1.10-nightly.20261114.4669</code>,
+            records <code>Replay-Mode: carry</code> and <code>Fork-Commits-Rebased: 6</code>.
           </p>
           <p>
-            The proposal covers public repository structure and automation behavior. Concrete host
-            identities, schedules, and deployment topology are outside this document. Re-check the
-            nightly workflow and checkpoint source before treating this as current architecture.
+            This page covers repository structure and automation behavior only. When and where the
+            checkpoint service runs is outside it.
           </p>
         </div>
       </details>
@@ -453,87 +456,200 @@
       <section aria-labelledby="tiny-story-title">
         <h2 id="tiny-story-title">The Tiny Story</h2>
         <p class="section-intro">
-          Imagine maintaining a recipe while the cookbook publisher releases a new edition every
-          night.
+          Imagine keeping your own changes to a recipe while the cookbook publisher releases a new
+          edition every night.
         </p>
         <div class="grid three tiny-story">
           <article class="card current">
-            <span class="label current">Today</span>
+            <span class="label current">Before</span>
             <h3>Replay every edit</h3>
             <p>
-              The updater replays “add salt,” “use less salt,” “fix the salt test,” and every other
-              historical edit, even though only the final recipe matters.
+              The updater used to replay “add salt,” “use less salt,” “fix the salt test,” and every
+              other edit, one by one, onto each new edition. By late August that was 117 commits per
+              nightly.
             </p>
           </article>
           <article class="card proposed">
-            <span class="label proposed">Proposal</span>
-            <h3>Carry the finished sections</h3>
+            <span class="label proposed">Now</span>
+            <h3>Six labelled sections</h3>
             <p>
-              Keep the edit history for review, but give the nightly updater a few named sections of
-              the finished LastCode recipe: upstream bugfixes, tooling, resumable actions, legacy
-              sidebar, and an incubator for everything that has not earned its own section yet.
+              Each edit carries a label saying which of six sections it belongs to. Before each new
+              edition, the updater rewrites the six sections to include the new edits, then pastes
+              those six sections onto the new edition.
             </p>
           </article>
           <article class="card same">
             <span class="label same">Unchanged</span>
-            <h3>Ideas still move immediately</h3>
+            <h3>Small PRs, immutable tags</h3>
             <p>
-              Make an idea, merge its normal PR, and let automation publish it. Interactive and
-              scheduled updates keep consuming the same ordered installable tags.
+              Work still lands as small reviewed PRs. Each published build is still an annotated
+              <code>lastcode/checkpoint/…</code> or <code>lastcode/revision/…</code> tag that is
+              never moved.
             </p>
           </article>
         </div>
       </section>
 
       <section aria-labelledby="pressure-title">
-        <h2 id="pressure-title">Why the pressure grows</h2>
+        <h2 id="pressure-title">Why the fork needs it</h2>
         <p class="section-intro">
-          The final downstream product naturally grows as LastCode gains capabilities. The avoidable
-          growth is replaying every intermediate correction that led to that product.
+          The amount of LastCode behavior keeps growing. What the carry set removes is replaying
+          every intermediate correction that led to it, and the repair PRs that replay used to
+          produce.
         </p>
         <div class="grid three">
           <article class="card">
-            <p class="number">117</p>
-            <h3>commits replayed</h3>
-            <p class="metric-note">Current snapshot after upstream nightly 1219.</p>
-          </article>
-          <article class="card">
-            <p class="number">468</p>
-            <h3>files in the final delta</h3>
-            <p class="metric-note">The real semantic surface that compaction cannot erase.</p>
-          </article>
-          <article class="card">
-            <p class="number">1,082</p>
-            <h3>historical file applications</h3>
+            <p class="number">117 → 6</p>
+            <h3>commits replayed per nightly</h3>
             <p class="metric-note">
-              Repeated touches caused by applying the history commit-by-commit.
+              117 at the 2026-08-29 snapshot. 6 in every carry checkpoint since, for example the
+              <code>v0.1.9-nightly.20261110.4452</code> tag.
+            </p>
+          </article>
+          <article class="card">
+            <p class="number">2,256</p>
+            <h3>contributions inside those six</h3>
+            <p class="metric-note">
+              <code>Carry-Contribution</code> lines across the six group commits on
+              <code>HEAD</code> on 2026-11-14. Each one names an original source commit.
+            </p>
+          </article>
+          <article class="card">
+            <p class="number">1,015</p>
+            <h3>of them in Incubator</h3>
+            <p class="metric-note">
+              The catch-all group is the largest by far. Nothing yet moves its contents into a named
+              group.
             </p>
           </article>
         </div>
       </section>
 
-      <section aria-labelledby="flow-title">
-        <h2 id="flow-title">The proposed flow</h2>
+      <section aria-labelledby="groups-title">
+        <h2 id="groups-title">The six groups, in their fixed order</h2>
         <p class="section-intro">
-          The green step is new. Everything before and after it keeps the current human-facing
-          contract.
+          The order lives in code, not just in the manifest.
+          <code>CARRY_REPLAY_GROUPS</code> in <code>scripts/lastcode-carry-replay.ts</code> lists
+          the six IDs, the manifest must repeat them in the same order, and a compiled chain with
+          any other count or order is rejected. What belongs in each group is a written convention
+          from the nightly workflow guide; the code only checks that every commit names one group.
+        </p>
+        <div class="grid three">
+          <article class="card current">
+            <span class="label current">1 · first</span>
+            <h3><code>upstream-bugfixes</code></h3>
+            <p>
+              LastCode copies of fixes that exist, or were proposed, upstream. They go first because
+              upstream may adopt, change or replace them.
+            </p>
+          </article>
+          <article class="card proposed">
+            <span class="label proposed">2</span>
+            <h3><code>tooling</code></h3>
+            <p>Checkpointing, recovery orchestration and contributor automation.</p>
+          </article>
+          <article class="card proposed">
+            <span class="label proposed">3 · added after the proposal</span>
+            <h3><code>build-ci</code></h3>
+            <p>Dependency setup, CI, packaging and build verification.</p>
+          </article>
+          <article class="card proposed">
+            <span class="label proposed">4</span>
+            <h3><code>resumable-actions</code></h3>
+            <p>The core Action Resume behavior, without any sidebar presentation.</p>
+          </article>
+          <article class="card proposed">
+            <span class="label proposed">5</span>
+            <h3><code>legacy-sidebar</code></h3>
+            <p>
+              Legacy sidebar behavior and its optional integrations, such as showing resumable
+              action status. PR #671 later dropped the legacy sidebar mode to match upstream; that
+              removal is itself a
+              <code>legacy-sidebar</code> contribution.
+            </p>
+          </article>
+          <article class="card same">
+            <span class="label same">6 · last</span>
+            <h3><code>incubator</code></h3>
+            <p>
+              Everything else, and anything genuinely inseparable. It is the only default group.
+            </p>
+          </article>
+        </div>
+        <div class="card same">
+          <h3>Order matters; independence does not</h3>
+          <p>
+            A later group may build on an earlier one, so
+            <code>legacy-sidebar</code> can show resumable-action status without the action feature
+            depending on the sidebar. Only the complete six-commit chain is ever validated. No
+            group, and no prefix of groups, has to build or pass tests on its own.
+          </p>
+        </div>
+      </section>
+
+      <section aria-labelledby="assign-title">
+        <h2 id="assign-title">How a change gets its group</h2>
+        <p class="section-intro">
+          By a trailer on each commit in the PR, not by a list in the manifest.
+        </p>
+        <div class="grid two">
+          <article class="card proposed">
+            <h3>Every commit names exactly one group</h3>
+            <p>
+              Before review, the author gives each commit in the PR one
+              <code>Carry-Group:</code> trailer with one of the six IDs. A PR can span several
+              groups by using several commits. PR #708, for example, has commits in
+              <code>build-ci</code>, <code>resumable-actions</code> and <code>incubator</code>.
+            </p>
+            <p>
+              PR CI and the guarded merge both refuse a PR in which any commit has no group, has
+              two, or is a merge commit.
+            </p>
+          </article>
+          <article class="card proposed">
+            <h3>Optional notes for future repairers</h3>
+            <p>
+              Commits can also carry <code>Carry-Fix</code>, <code>Carry-Upstream</code>,
+              <code>Carry-Observation</code>, <code>Carry-Evidence</code>,
+              <code>Carry-Applies-To</code> and <code>Carry-Supersedes</code>. They are copied into
+              the group commit's metadata so whoever repairs a conflict later can see why a change
+              exists and where it came from. Nothing requires them.
+            </p>
+          </article>
+        </div>
+        <p class="caution">
+          The manifest still has <code>pullRequests</code> lists for some groups. Carry replay does
+          not read them. They are a frozen inventory from before carry replay was switched on, used
+          only when checking a tag built by the old historical replay.
+        </p>
+      </section>
+
+      <section aria-labelledby="flow-title">
+        <h2 id="flow-title">From PR to published build</h2>
+        <p class="section-intro">
+          The green steps are the compile checks. The amber step is where a genuinely new upstream
+          conflict can stop the run.
         </p>
         <figure class="diagram-card">
           <figcaption>
-            Normal development history remains available for review and provenance. Nightly
-            automation receives a bounded downstream carry set built from coherent parts of the
-            final integrated tree.
+            A PR is checked by compiling it into the groups before it merges. It then sits on
+            <code>lastcode/main</code> as a normal squash commit until the next publication folds it
+            into the six group commits and replays them onto the newest nightly.
           </figcaption>
-          <div class="diagram-scroll" tabindex="0" aria-label="Scrollable proposal flow diagram">
-            <svg viewBox="0 0 760 930" role="img" aria-labelledby="diagram-title diagram-desc">
-              <title id="diagram-title">
-                Normal pull requests compiled into a compact carry set
-              </title>
+          <div class="diagram-scroll" tabindex="0" aria-label="Scrollable carry set flow diagram">
+            <svg viewBox="0 0 760 1000" role="img" aria-labelledby="diagram-title diagram-desc">
+              <title id="diagram-title">How a LastCode PR reaches a published carry build</title>
               <desc id="diagram-desc">
-                An idea becomes a normal pull request and merges as today. Automation generates a
-                compact downstream carry set containing a few named patches in a fixed order,
-                replays and validates it on an upstream nightly, publishes an immutable installable,
-                and makes it available to both interactive and scheduled update consumers.
+                Step 1: each commit in a PR gets one Carry-Group trailer. Step 2: PR CI compiles the
+                existing six groups plus the PR on the same upstream base and requires the result to
+                equal the tree the squash will land. Step 3: the guarded merge squashes the PR onto
+                lastcode/main, keeps the original commits in a carry-sources ref and records them in
+                Carry-Source trailers. Step 4: at the next publication, the checkpoint folds every
+                squash since the last publication into the six groups on the old nightly and
+                requires the tree to equal main. Step 5: it replays the six group commits onto the
+                newest nightly; a conflict stops here and keeps the worktree. Step 6: smoke
+                validation and an annotated tag. Step 7: lastcode/main is moved to the six new
+                commits if nobody merged in the meantime. New PRs then stack on top again.
               </desc>
               <defs>
                 <marker
@@ -556,7 +672,7 @@
                   x="100"
                   y="20"
                   width="560"
-                  height="105"
+                  height="95"
                   rx="18"
                   fill="#e8eef8"
                   stroke="#345d95"
@@ -564,57 +680,23 @@
                 ></rect>
                 <text
                   x="380"
-                  y="58"
+                  y="56"
                   text-anchor="middle"
                   font-size="18"
                   font-weight="750"
                   fill="#18252c"
                 >
-                  1 · Idea → ordinary pull request
+                  1 · Ordinary PR
                 </text>
-                <text x="380" y="88" text-anchor="middle" font-size="15" fill="#46565d">
-                  Small scope, normal review, normal CI
-                </text>
-
-                <line
-                  x1="380"
-                  y1="125"
-                  x2="380"
-                  y2="163"
-                  stroke="#64747a"
-                  stroke-width="3"
-                  marker-end="url(#arrow)"
-                ></line>
-
-                <rect
-                  x="100"
-                  y="170"
-                  width="560"
-                  height="105"
-                  rx="18"
-                  fill="#e8eef8"
-                  stroke="#345d95"
-                  stroke-width="2"
-                ></rect>
-                <text
-                  x="380"
-                  y="208"
-                  text-anchor="middle"
-                  font-size="18"
-                  font-weight="750"
-                  fill="#18252c"
-                >
-                  2 · Merge normally
-                </text>
-                <text x="380" y="238" text-anchor="middle" font-size="15" fill="#46565d">
-                  The merged PR remains the development and review record
+                <text x="380" y="86" text-anchor="middle" font-size="15" fill="#46565d">
+                  Every commit gets exactly one Carry-Group trailer
                 </text>
 
                 <line
                   x1="380"
-                  y1="275"
+                  y1="115"
                   x2="380"
-                  y2="313"
+                  y2="148"
                   stroke="#64747a"
                   stroke-width="3"
                   marker-end="url(#arrow)"
@@ -622,82 +704,45 @@
 
                 <rect
                   x="70"
-                  y="320"
+                  y="155"
                   width="620"
-                  height="125"
+                  height="105"
                   rx="18"
                   fill="#e0f2ee"
                   stroke="#08766f"
-                  stroke-width="4"
+                  stroke-width="3"
                 ></rect>
                 <text
                   x="380"
-                  y="360"
+                  y="191"
                   text-anchor="middle"
-                  font-size="19"
+                  font-size="18"
                   font-weight="800"
                   fill="#075d58"
                 >
-                  3 · Generate the downstream carry set
+                  2 · PR CI: same-base compile
                 </text>
-                <text x="380" y="392" text-anchor="middle" font-size="15" fill="#355d5a">
-                  1 Upstream bugfixes → 2 Tooling → 3 Resumable Actions
+                <text x="380" y="219" text-anchor="middle" font-size="15" fill="#355d5a">
+                  Six existing groups + this PR, on the same upstream base,
                 </text>
-                <text x="380" y="418" text-anchor="middle" font-size="15" fill="#355d5a">
-                  → 4 Legacy Sidebar → 5 Incubator
+                <text x="380" y="243" text-anchor="middle" font-size="15" fill="#355d5a">
+                  must produce exactly the tree the squash will land
                 </text>
 
                 <line
                   x1="380"
-                  y1="445"
+                  y1="260"
                   x2="380"
-                  y2="483"
+                  y2="293"
                   stroke="#64747a"
                   stroke-width="3"
                   marker-end="url(#arrow)"
                 ></line>
 
                 <rect
-                  x="100"
-                  y="490"
-                  width="560"
-                  height="115"
-                  rx="18"
-                  fill="#fff1cd"
-                  stroke="#8a5a16"
-                  stroke-width="2"
-                ></rect>
-                <text
-                  x="380"
-                  y="528"
-                  text-anchor="middle"
-                  font-size="18"
-                  font-weight="750"
-                  fill="#18252c"
-                >
-                  4 · Apply to the nightly and validate
-                </text>
-                <text x="380" y="558" text-anchor="middle" font-size="15" fill="#5d512f">
-                  Exact tree check · smoke gate · provenance check
-                </text>
-                <text x="380" y="583" text-anchor="middle" font-size="15" fill="#5d512f">
-                  A real upstream incompatibility can still stop here
-                </text>
-
-                <line
-                  x1="380"
-                  y1="605"
-                  x2="380"
-                  y2="643"
-                  stroke="#64747a"
-                  stroke-width="3"
-                  marker-end="url(#arrow)"
-                ></line>
-
-                <rect
-                  x="100"
-                  y="650"
-                  width="560"
+                  x="70"
+                  y="300"
+                  width="620"
                   height="105"
                   rx="18"
                   fill="#e8eef8"
@@ -706,85 +751,180 @@
                 ></rect>
                 <text
                   x="380"
-                  y="688"
+                  y="336"
                   text-anchor="middle"
                   font-size="18"
                   font-weight="750"
                   fill="#18252c"
                 >
-                  5 · Publish the immutable installable
+                  3 · Guarded merge
                 </text>
-                <text x="380" y="718" text-anchor="middle" font-size="15" fill="#46565d">
-                  Same checkpoint and revision tag contract as today
+                <text x="380" y="364" text-anchor="middle" font-size="15" fill="#46565d">
+                  Squash onto lastcode/main with Carry-Source-* trailers;
+                </text>
+                <text x="380" y="388" text-anchor="middle" font-size="15" fill="#46565d">
+                  original commits kept in refs/lastcode/carry-sources/
                 </text>
 
-                <line x1="380" y1="755" x2="380" y2="788" stroke="#64747a" stroke-width="3"></line>
-                <line x1="205" y1="788" x2="555" y2="788" stroke="#64747a" stroke-width="3"></line>
                 <line
-                  x1="205"
-                  y1="788"
-                  x2="205"
-                  y2="823"
-                  stroke="#64747a"
-                  stroke-width="3"
-                  marker-end="url(#arrow)"
-                ></line>
-                <line
-                  x1="555"
-                  y1="788"
-                  x2="555"
-                  y2="823"
+                  x1="380"
+                  y1="405"
+                  x2="380"
+                  y2="438"
                   stroke="#64747a"
                   stroke-width="3"
                   marker-end="url(#arrow)"
                 ></line>
 
                 <rect
-                  x="45"
-                  y="830"
-                  width="320"
-                  height="80"
-                  rx="16"
-                  fill="#e8eef8"
-                  stroke="#345d95"
-                  stroke-width="2"
+                  x="70"
+                  y="445"
+                  width="620"
+                  height="105"
+                  rx="18"
+                  fill="#e0f2ee"
+                  stroke="#08766f"
+                  stroke-width="4"
                 ></rect>
                 <text
-                  x="205"
-                  y="864"
+                  x="380"
+                  y="481"
                   text-anchor="middle"
-                  font-size="17"
-                  font-weight="750"
-                  fill="#18252c"
+                  font-size="18"
+                  font-weight="800"
+                  fill="#075d58"
                 >
-                  Interactive update
+                  4 · Publication: fold (compile)
                 </text>
-                <text x="205" y="890" text-anchor="middle" font-size="14" fill="#46565d">
-                  Ad hoc, when convenient
+                <text x="380" y="509" text-anchor="middle" font-size="15" fill="#355d5a">
+                  Every squash since the last publication goes into its groups,
+                </text>
+                <text x="380" y="533" text-anchor="middle" font-size="15" fill="#355d5a">
+                  still on the old nightly; the tree must equal lastcode/main
                 </text>
 
+                <line
+                  x1="380"
+                  y1="550"
+                  x2="380"
+                  y2="583"
+                  stroke="#64747a"
+                  stroke-width="3"
+                  marker-end="url(#arrow)"
+                ></line>
+
                 <rect
-                  x="395"
-                  y="830"
-                  width="320"
-                  height="80"
-                  rx="16"
+                  x="70"
+                  y="590"
+                  width="620"
+                  height="105"
+                  rx="18"
+                  fill="#fff1cd"
+                  stroke="#8a5a16"
+                  stroke-width="2"
+                ></rect>
+                <text
+                  x="380"
+                  y="626"
+                  text-anchor="middle"
+                  font-size="18"
+                  font-weight="750"
+                  fill="#18252c"
+                >
+                  5 · Replay six commits onto the newest nightly
+                </text>
+                <text x="380" y="654" text-anchor="middle" font-size="15" fill="#5d512f">
+                  A conflict stops the run, keeps the worktree
+                </text>
+                <text x="380" y="678" text-anchor="middle" font-size="15" fill="#5d512f">
+                  and writes a conflict dossier
+                </text>
+
+                <line
+                  x1="380"
+                  y1="695"
+                  x2="380"
+                  y2="728"
+                  stroke="#64747a"
+                  stroke-width="3"
+                  marker-end="url(#arrow)"
+                ></line>
+
+                <rect
+                  x="100"
+                  y="735"
+                  width="560"
+                  height="95"
+                  rx="18"
                   fill="#e8eef8"
                   stroke="#345d95"
                   stroke-width="2"
                 ></rect>
                 <text
-                  x="555"
-                  y="864"
+                  x="380"
+                  y="771"
                   text-anchor="middle"
-                  font-size="17"
+                  font-size="18"
                   font-weight="750"
                   fill="#18252c"
                 >
-                  Scheduled update
+                  6 · Smoke gate, then an immutable tag
                 </text>
-                <text x="555" y="890" text-anchor="middle" font-size="14" fill="#46565d">
-                  Still respects its version ceiling
+                <text x="380" y="801" text-anchor="middle" font-size="15" fill="#46565d">
+                  Tag records Replay-Mode: carry and Source-Commit
+                </text>
+
+                <line
+                  x1="380"
+                  y1="830"
+                  x2="380"
+                  y2="863"
+                  stroke="#64747a"
+                  stroke-width="3"
+                  marker-end="url(#arrow)"
+                ></line>
+
+                <rect
+                  x="100"
+                  y="870"
+                  width="560"
+                  height="95"
+                  rx="18"
+                  fill="#e8eef8"
+                  stroke="#345d95"
+                  stroke-width="2"
+                ></rect>
+                <text
+                  x="380"
+                  y="906"
+                  text-anchor="middle"
+                  font-size="18"
+                  font-weight="750"
+                  fill="#18252c"
+                >
+                  7 · Move lastcode/main to the six new commits
+                </text>
+                <text x="380" y="936" text-anchor="middle" font-size="15" fill="#46565d">
+                  Only if main has not moved; otherwise promotion waits
+                </text>
+
+                <path
+                  d="M 660 917 L 728 917 L 728 352 L 698 352"
+                  fill="none"
+                  stroke="#64747a"
+                  stroke-width="2"
+                  stroke-dasharray="7 6"
+                  marker-end="url(#arrow)"
+                ></path>
+                <text
+                  x="740"
+                  y="640"
+                  text-anchor="middle"
+                  font-size="13"
+                  fill="#46565d"
+                  transform="rotate(90 740 640)"
+                >
+                  new PRs stack on top again
                 </text>
               </g>
             </svg>
@@ -792,43 +932,439 @@
         </figure>
       </section>
 
-      <section aria-labelledby="comparison-title">
-        <h2 id="comparison-title">What changes—and what does not</h2>
+      <section aria-labelledby="shape-title">
+        <h2 id="shape-title">What <code>lastcode/main</code> looks like</h2>
+        <p class="section-intro">
+          Between publications, <code>lastcode/main</code> is the six group commits plus ordinary
+          squash commits on top. A publication folds those squashes away.
+        </p>
+        <figure class="diagram-card">
+          <figcaption>
+            Real example: 14 PRs (#671 to #688) merged on top of the
+            <code>v0.1.8-nightly.20261109.4399</code> checkpoint. The
+            <code>v0.1.9-nightly.20261110.4449</code> checkpoint published six commits again, with
+            those PRs inside them.
+          </figcaption>
+          <div class="diagram-scroll" tabindex="0" aria-label="Scrollable branch shape diagram">
+            <svg
+              viewBox="0 0 760 360"
+              role="img"
+              aria-labelledby="shape-diagram-title shape-diagram-desc"
+            >
+              <title id="shape-diagram-title">Shape of lastcode/main across one checkpoint</title>
+              <desc id="shape-diagram-desc">
+                Row one, after the 4399 checkpoint: upstream nightly 4399, then six carry commits.
+                Row two, before the next checkpoint: the same six carry commits, then 14 squash
+                commits from PR 671 to PR 688. Row three, after the 4449 checkpoint: upstream
+                nightly 4449, then six new carry commits that contain those 14 PRs.
+              </desc>
+              <defs>
+                <marker
+                  id="arrow-shape"
+                  viewBox="0 0 10 10"
+                  refX="8"
+                  refY="5"
+                  markerWidth="7"
+                  markerHeight="7"
+                  orient="auto-start-reverse"
+                >
+                  <path d="M 0 0 L 10 5 L 0 10 z" fill="#64747a"></path>
+                </marker>
+              </defs>
+              <g
+                font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+              >
+                <text x="20" y="40" font-size="15" font-weight="750" fill="#18252c">
+                  After the 4399 checkpoint
+                </text>
+                <rect
+                  x="20"
+                  y="55"
+                  width="130"
+                  height="44"
+                  rx="10"
+                  fill="#f8f6ef"
+                  stroke="#aaa69d"
+                  stroke-width="2"
+                ></rect>
+                <text x="85" y="82" text-anchor="middle" font-size="14" fill="#18252c">
+                  nightly 4399
+                </text>
+                <line x1="150" y1="77" x2="170" y2="77" stroke="#64747a" stroke-width="2"></line>
+                <rect
+                  x="170"
+                  y="55"
+                  width="250"
+                  height="44"
+                  rx="10"
+                  fill="#e0f2ee"
+                  stroke="#08766f"
+                  stroke-width="2"
+                ></rect>
+                <text
+                  x="295"
+                  y="82"
+                  text-anchor="middle"
+                  font-size="14"
+                  font-weight="700"
+                  fill="#075d58"
+                >
+                  6 carry(…) commits
+                </text>
+
+                <text x="20" y="150" font-size="15" font-weight="750" fill="#18252c">
+                  Before the next checkpoint
+                </text>
+                <rect
+                  x="20"
+                  y="165"
+                  width="130"
+                  height="44"
+                  rx="10"
+                  fill="#f8f6ef"
+                  stroke="#aaa69d"
+                  stroke-width="2"
+                ></rect>
+                <text x="85" y="192" text-anchor="middle" font-size="14" fill="#18252c">
+                  nightly 4399
+                </text>
+                <line x1="150" y1="187" x2="170" y2="187" stroke="#64747a" stroke-width="2"></line>
+                <rect
+                  x="170"
+                  y="165"
+                  width="250"
+                  height="44"
+                  rx="10"
+                  fill="#e0f2ee"
+                  stroke="#08766f"
+                  stroke-width="2"
+                ></rect>
+                <text
+                  x="295"
+                  y="192"
+                  text-anchor="middle"
+                  font-size="14"
+                  font-weight="700"
+                  fill="#075d58"
+                >
+                  6 carry(…) commits
+                </text>
+                <line x1="420" y1="187" x2="440" y2="187" stroke="#64747a" stroke-width="2"></line>
+                <rect
+                  x="440"
+                  y="165"
+                  width="300"
+                  height="44"
+                  rx="10"
+                  fill="#e8eef8"
+                  stroke="#345d95"
+                  stroke-width="2"
+                ></rect>
+                <text x="590" y="192" text-anchor="middle" font-size="14" fill="#18252c">
+                  14 squashes: #671 … #688
+                </text>
+
+                <line
+                  x1="590"
+                  y1="209"
+                  x2="590"
+                  y2="238"
+                  stroke="#64747a"
+                  stroke-width="2"
+                  marker-end="url(#arrow-shape)"
+                ></line>
+                <text x="600" y="232" font-size="13" fill="#46565d">fold, then replay</text>
+
+                <text x="20" y="270" font-size="15" font-weight="750" fill="#18252c">
+                  After the 4449 checkpoint
+                </text>
+                <rect
+                  x="20"
+                  y="285"
+                  width="130"
+                  height="44"
+                  rx="10"
+                  fill="#f8f6ef"
+                  stroke="#aaa69d"
+                  stroke-width="2"
+                ></rect>
+                <text x="85" y="312" text-anchor="middle" font-size="14" fill="#18252c">
+                  nightly 4449
+                </text>
+                <line x1="150" y1="307" x2="170" y2="307" stroke="#64747a" stroke-width="2"></line>
+                <rect
+                  x="170"
+                  y="285"
+                  width="570"
+                  height="44"
+                  rx="10"
+                  fill="#e0f2ee"
+                  stroke="#08766f"
+                  stroke-width="2"
+                ></rect>
+                <text
+                  x="455"
+                  y="312"
+                  text-anchor="middle"
+                  font-size="14"
+                  font-weight="700"
+                  fill="#075d58"
+                >
+                  6 carry(…) commits, now containing #671 … #688
+                </text>
+              </g>
+            </svg>
+          </div>
+        </figure>
+      </section>
+
+      <section aria-labelledby="compile-title">
+        <h2 id="compile-title">What “compile” makes, and what it promises</h2>
+        <div class="grid two">
+          <article class="card proposed">
+            <h3>Six commits, rebuilt from deltas</h3>
+            <p>
+              Compiling starts from the previous six group commits and replays each new source
+              commit's change into the group its trailer names, using an ordinary git rebase script.
+              Each group ends as one commit titled
+              <code>carry(&lt;group&gt;): compile downstream group</code>. Its message keeps one
+              <code>Carry-Contribution:</code> line per source commit ever folded into it, with the
+              commit hash, subject and notes, carried forward from generation to generation.
+            </p>
+            <p>
+              A group commit stays even when its changes cancel out to nothing, so the chain is
+              always exactly six long.
+            </p>
+          </article>
+          <article class="card same">
+            <h3>The guarantee: same tree, same base</h3>
+            <p>
+              On the same upstream base, the six compiled commits must produce exactly the same
+              files as the source they were compiled from: the PR's landing tree in CI, or
+              <code>lastcode/main</code> at publication. If not, the compile fails.
+            </p>
+            <p>
+              This proves the regrouping lost nothing. It does
+              <strong>not</strong> prove the result works on a newer nightly. That is what the
+              replay and smoke gate are for.
+            </p>
+          </article>
+        </div>
+        <details>
+          <summary>
+            <span>Two edge cases the compiler handles</span>
+            <span class="truth-state">Details</span>
+          </summary>
+          <div class="details-body">
+            <p>
+              <strong>Moving a change earlier can conflict.</strong> Grouping replays changes in
+              group order, not history order. A commit tagged <code>legacy-sidebar</code> that edits
+              lines an <code>incubator</code> commit wrote earlier now replays before those lines
+              exist. PR CI catches this, names the later-group commits that changed those lines, and
+              suggests retagging or splitting the commit. PR #671 hit exactly this: deleting
+              <code>LegacySidebar.tsx</code> had to become a separate <code>incubator</code> commit.
+            </p>
+            <p>
+              <strong>Deleting a file a later group introduced.</strong> If a commit deletes a file
+              that a later group added, the compiler splits the deletion out and replays it with
+              that later group, noting the split in the contribution's
+              <code>Carry-Observation</code> and <code>Carry-Supersedes</code>.
+            </p>
+          </div>
+        </details>
+      </section>
+
+      <section aria-labelledby="checkpoint-title">
+        <h2 id="checkpoint-title">What happens when a new nightly arrives</h2>
+        <p class="section-intro">The checkpoint run does up to two things, in this order.</p>
+        <div class="grid two">
+          <article class="card proposed">
+            <span class="label proposed">Step A · only if main moved</span>
+            <h3>Fold new PRs into the groups</h3>
+            <p>
+              If <code>lastcode/main</code> is no longer exactly the last published build, the run
+              compiles first. It takes the previous carry build's six commits, adds every squash
+              merged since, and rebuilds the six commits on the <em>old</em> nightly. Each squash is
+              checked against its retained source commits before they are used.
+            </p>
+            <p>
+              Example: the 4449 checkpoint folded 14 squashes, #671 to #688. The 4452 checkpoint had
+              nothing new on main, so it skipped this step.
+            </p>
+          </article>
+          <article class="card current">
+            <span class="label current">Step B · always</span>
+            <h3>Replay six commits onto the nightly</h3>
+            <p>
+              The run rebases the six group commits onto the newest nightly that has no checkpoint
+              yet, runs the smoke gate, and publishes an annotated checkpoint tag. If several
+              nightlies are waiting, only the newest is checkpointed.
+            </p>
+            <p>
+              Then it moves <code>lastcode/main</code> to the six new commits. If someone merged a
+              PR during the run, main is left alone and the next run picks it up. The published tag
+              stays valid either way.
+            </p>
+          </article>
+        </div>
+        <div class="card same">
+          <h3>No new nightly? A revision does step A only.</h3>
+          <p>
+            When there is no new nightly but <code>lastcode/main</code> has new PRs, a run compiles
+            them into the six groups on the current nightly and publishes a
+            <code>lastcode/revision/…</code> tag, then moves main the same way. Merging a PR does
+            not start a run by itself: <code>lastcode:merge</code> skips the checkpoint unless it is
+            given <code>--checkpoint</code>, so folding waits for the next scheduled or requested
+            run.
+          </p>
+        </div>
+      </section>
+
+      <section aria-labelledby="conflict-title">
+        <h2 id="conflict-title">When something conflicts</h2>
+        <div class="grid two">
+          <article class="card">
+            <h3>Before merge: the PR author fixes it</h3>
+            <p>
+              A regrouping conflict in PR CI or the guarded merge blocks the merge. The author
+              retags or splits commits and pushes again, because the owning PR is still open and can
+              change.
+            </p>
+          </article>
+          <article class="card">
+            <h3>At a checkpoint: a person or agent repairs it</h3>
+            <p>
+              A conflict while folding or replaying stops the run. It keeps the work on a
+              <code>sync/nightly/&lt;nightly-tag&gt;</code> branch in a retained worktree, records
+              the failure and sends a notification. A replay conflict also writes a conflict dossier
+              into the worktree's git directory: the group that stopped, the contributions that
+              touched each conflicted file, and the upstream commits that touched them.
+            </p>
+            <p>
+              Whoever maintains the fork resolves it there, then selects the repaired head with
+              <code>--select-recovery</code>. Repairs committed with their own
+              <code>Carry-Group</code> trailers are folded into their groups when selected. The next
+              run validates, tags and promotes the result.
+            </p>
+          </article>
+        </div>
+        <p class="caution">
+          Carry replay never uses git's remembered resolutions (<code>rerere</code>). Each carry
+          conflict is resolved explicitly. As a last resort, a run can be forced back to the old
+          commit-by-commit replay with <code>--replay-mode historical</code> and a required
+          <code>--rollback-reason</code>, which is recorded on the published tag.
+        </p>
+      </section>
+
+      <section aria-labelledby="upstreamed-title">
+        <h2 id="upstreamed-title">When upstream adopts a carried fix</h2>
+        <div class="grid two">
+          <article class="card">
+            <h3>Same change upstream: it quietly disappears</h3>
+            <p>
+              Replay is an ordinary three-way rebase. If the new nightly already contains the same
+              change, that part of the group's diff has nothing left to add, and the group commit
+              gets smaller. Nothing has to be deleted by hand.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Different change upstream: it becomes a repair</h3>
+            <p>
+              If upstream fixed it another way, the replay usually conflicts and goes through the
+              repair path above. Retiring a carried fix on purpose is an ordinary PR that removes
+              it, folded at the next publication like any other change.
+            </p>
+          </article>
+        </div>
+        <p class="caution">
+          No code removes a retired contribution's
+          <code>Carry-Contribution</code> line. The metadata keeps listing a fix after upstream has
+          absorbed its diff.
+        </p>
+      </section>
+
+      <section aria-labelledby="changed-title">
+        <h2 id="changed-title">What changed from the proposal</h2>
         <div class="comparison">
           <table>
             <thead>
               <tr>
-                <th>Concern</th>
-                <th>Today</th>
-                <th>Proposed</th>
+                <th>Topic</th>
+                <th>Proposal (2026-08-29)</th>
+                <th>What shipped</th>
               </tr>
             </thead>
             <tbody>
               <tr>
-                <td>Development</td>
-                <td>One-purpose PRs merge to <code>lastcode/main</code>.</td>
-                <td><strong>Unchanged.</strong> No umbrella selection step for the user.</td>
-              </tr>
-              <tr>
-                <td>Replay input</td>
-                <td>Every retained implementation and repair commit.</td>
-                <td>A small, generated carry set with named ownership and a fixed order.</td>
-              </tr>
-              <tr>
-                <td>Later fixes</td>
-                <td>Each fix permanently adds another replay step.</td>
-                <td>The next version of the owning carry patch absorbs the fix.</td>
-              </tr>
-              <tr>
-                <td>Updates</td>
-                <td>Consumers select immutable checkpoint and revision tags.</td>
-                <td><strong>Unchanged.</strong> The tag contract and version ceiling remain.</td>
-              </tr>
-              <tr>
-                <td>Real incompatibility</td>
-                <td>Conflict or smoke failure stops publication.</td>
+                <td>Groups</td>
                 <td>
-                  <strong>Still stops publication.</strong> Compaction cannot erase semantic drift.
+                  Five: Upstream bugfixes, Tooling, Resumable Actions, Legacy Sidebar, Incubator.
+                </td>
+                <td>
+                  Six. <code>build-ci</code> sits between <code>tooling</code> and
+                  <code>resumable-actions</code>.
+                </td>
+              </tr>
+              <tr>
+                <td>Who assigns ownership</td>
+                <td>A generated plan giving every downstream change one owner.</td>
+                <td>
+                  The PR author, with one <code>Carry-Group</code> trailer per commit, enforced in
+                  CI and at merge.
+                </td>
+              </tr>
+              <tr>
+                <td>Development history</td>
+                <td>Merged PR commits stay on the branch for review.</td>
+                <td>
+                  Squashes are folded away at each publication. Original commits survive in
+                  <code>refs/lastcode/carry-sources/</code> and in the group commits'
+                  <code>Carry-Contribution</code> lines.
+                </td>
+              </tr>
+              <tr>
+                <td>Upstream provenance</td>
+                <td>Record the upstream PR for every Upstream bugfixes entry.</td>
+                <td>
+                  Required only for the old manifest list. On a trailer it is optional: 122 of 252
+                  <code>upstream-bugfixes</code> contributions on 2026-11-14 have no
+                  <code>Carry-Upstream</code>.
+                </td>
+              </tr>
+              <tr>
+                <td>Exact-tree proof</td>
+                <td>The ordered set reproduces the validated source tree.</td>
+                <td>
+                  Shipped as the same-base compile check, run in PR CI, at merge and at publication.
+                </td>
+              </tr>
+              <tr>
+                <td>Patch budget</td>
+                <td>Fail loudly above a chosen number of patches.</td>
+                <td>Fixed at exactly six. Any other count or order is rejected.</td>
+              </tr>
+              <tr>
+                <td>Publishing after merge</td>
+                <td>Merging must keep requesting publication automatically.</td>
+                <td>
+                  Merging does not start a run unless
+                  <code>--checkpoint</code> is given.
+                </td>
+              </tr>
+              <tr>
+                <td>Open PRs and promotion</td>
+                <td>Open PRs keep <code>lastcode/main</code> still until the queue is empty.</td>
+                <td>
+                  No open-PR check. Promotion takes a write lock on main and only moves it if main
+                  still equals the source that was compiled; otherwise it waits for a later run.
+                </td>
+              </tr>
+              <tr>
+                <td>Incubator graduation</td>
+                <td>Periodically move coherent clusters into named groups.</td>
+                <td>
+                  Not built. Once work is folded into Incubator, nothing moves it out. A group is
+                  chosen only when a new commit is tagged.
                 </td>
               </tr>
             </tbody>
@@ -836,203 +1372,67 @@
         </div>
       </section>
 
-      <section aria-labelledby="words-title">
-        <h2 id="words-title">The words</h2>
-        <p class="section-intro">
-          Use these names so development workflow and release artifacts do not blur together.
-        </p>
-        <div class="grid three">
-          <article class="card proposed">
-            <h3>Downstream carry set</h3>
-            <p>Everything LastCode intentionally retains on top of an upstream T3 Code version.</p>
-          </article>
-          <article class="card">
-            <h3>Patch stack</h3>
-            <p>
-              A general Git term. In LastCode documentation, use
-              <strong>downstream carry set</strong> for the durable fork delta.
-            </p>
-          </article>
-          <article class="card">
-            <h3>Carry patch</h3>
-            <p>
-              One maintainable final-state unit inside the downstream carry set, with explicit
-              ownership and a fixed place in the application order.
-            </p>
-          </article>
-        </div>
-      </section>
-
-      <section aria-labelledby="first-step-title">
-        <h2 id="first-step-title">Start with the boundaries already visible</h2>
-        <p class="section-intro">
-          The current work already has feature families strong enough to justify separate carry
-          patches. Upstream-facing fixes need their own volatile group, and an explicit catch-all
-          prevents the first inventory from requiring premature taxonomy.
-        </p>
-        <div class="grid three">
-          <article class="card current">
-            <span class="label current">Carry patch · first</span>
-            <h3>Upstream bugfixes</h3>
-            <p>
-              Imports of existing upstream PRs and LastCode copies of fixes also proposed upstream.
-              Each fix keeps its upstream PR provenance because it may disappear, be partially
-              replaced, or be solved differently upstream.
-            </p>
-          </article>
-          <article class="card proposed">
-            <span class="label proposed">Carry patch</span>
-            <h3>Tooling</h3>
-            <p>
-              Checkpointing, builds, update machinery, contributor automation, and their operational
-              documentation. Its lifecycle and conflict surface are distinct from product features.
-            </p>
-          </article>
-          <article class="card proposed">
-            <span class="label proposed">Carry patch</span>
-            <h3>Resumable Actions</h3>
-            <p>
-              The essential action state, commands, composer controls, and resume behavior. The core
-              remains useful without any legacy-sidebar presentation.
-            </p>
-          </article>
-          <article class="card proposed">
-            <span class="label proposed">Carry patch</span>
-            <h3>Legacy Sidebar</h3>
-            <p>
-              Legacy sidebar behavior and its optional integrations, including resumable-action
-              visibility. Presentation belongs here because removing it does not remove the action
-              capability itself.
-            </p>
-          </article>
-          <article class="card same">
-            <span class="label same">Carry patch · last</span>
-            <h3>Incubator</h3>
-            <p>
-              The starting bucket for everything else. Its contents do not pretend to form one
-              feature; coherent clusters graduate into named patches when they accumulate enough
-              ownership, maintenance weight, or replay risk.
-            </p>
-          </article>
-        </div>
-        <div class="card same">
-          <h3>Fixed order, not an independence gate</h3>
-          <p>
-            Apply Upstream bugfixes, Tooling, Resumable Actions, Legacy Sidebar, then Incubator. A
-            later patch may rely on an earlier one, so Legacy Sidebar can show resumable-action
-            status without making the action capability depend on the sidebar. Initially, only the
-            complete ordered carry set needs to pass validation.
-          </p>
-        </div>
-        <p class="caution">
-          The Incubator is intentionally a catch-all. The guardrail is that its contents are not
-          permanent by default: periodically graduate coherent clusters instead of letting one patch
-          absorb every mature feature forever. Compaction changes the number of Git commits, not the
-          amount of product behavior; migration collisions, changed upstream APIs, and conflicting
-          edits still require strong validation.
-        </p>
-      </section>
-
-      <section aria-labelledby="alternatives-title">
-        <h2 id="alternatives-title">Why not the two bigger reorganizations?</h2>
-        <div class="grid two">
-          <article class="card current">
-            <h3>Permanent umbrella PRs</h3>
-            <ul class="plain-list">
-              <li>The diff, comments, and CI history grow without bound.</li>
-              <li>Stacked child PRs deepen the dependency graph we are trying to shrink.</li>
-              <li>
-                They permanently pause <code>lastcode/main</code> promotion, although installable
-                tags still publish.
-              </li>
-              <li>
-                A branch or generated artifact is a better durable container than an unfinished
-                review.
-              </li>
-            </ul>
-          </article>
-          <article class="card current">
-            <h3>A second fork</h3>
-            <ul class="plain-list">
-              <li>It does not reduce the final downstream delta or semantic conflicts.</li>
-              <li>It adds cross-fork mirroring, permissions, CI, and provenance failure modes.</li>
-              <li>
-                If source and integration roles later need separation, refs in this fork are enough.
-              </li>
-            </ul>
-          </article>
-        </div>
-      </section>
-
-      <section aria-labelledby="rails-title">
-        <h2 id="rails-title">Safety rails before shipping it</h2>
+      <section aria-labelledby="unbuilt-title">
+        <h2 id="unbuilt-title">Still unbuilt, or deliberately out of scope</h2>
         <ul class="checklist">
           <li>
-            <strong>Exact combined tree:</strong> prove the ordered carry set produces the same
-            files and contents as the validated source tree.
+            <strong>Incubator graduation.</strong> Nothing moves folded contributions out of the
+            catch-all group, which holds 1,015 of 2,256 contributions.
           </li>
           <li>
-            <strong>Patch ownership:</strong> give every downstream change one owner, using
-            Incubator until a more coherent group has earned its own patch.
+            <strong>Retiring metadata.</strong> Contributions whose diffs upstream absorbed keep
+            their metadata line indefinitely.
           </li>
           <li>
-            <strong>Upstream provenance:</strong> record the source or paired upstream PR for every
-            Upstream bugfixes entry and reevaluate it when upstream changes.
+            <strong>Upstream provenance on trailers.</strong> Nothing requires
+            <code>Carry-Upstream</code> on <code>upstream-bugfixes</code> commits.
           </li>
           <li>
-            <strong>Incubator graduation:</strong> move a coherent cluster out when its ownership,
-            maintenance weight, or replay risk justifies a named patch.
+            <strong>Compatibility with future nightlies.</strong> Out of scope by design. The
+            compile check proves regrouping only; a real upstream incompatibility still stops a
+            checkpoint and needs a repair.
           </li>
           <li>
-            <strong>Fixed application order:</strong> store and replay one canonical ordered list;
-            do not require every patch or prefix to pass independently.
-          </li>
-          <li>
-            <strong>Final-commit validation:</strong> run smoke and provenance checks against the
-            commit that will actually be tagged.
-          </li>
-          <li>
-            <strong>Release-note continuity:</strong> preserve and test
-            <code>Source-Commit</code> boundaries across the first compaction.
-          </li>
-          <li>
-            <strong>Bounded depth:</strong> fail loudly if an installable unexpectedly carries more
-            than the chosen patch budget.
-          </li>
-          <li>
-            <strong>Immutable rollback:</strong> retain existing checkpoint and revision tags so the
-            previous installable remains selectable.
-          </li>
-          <li>
-            <strong>No new human step:</strong> merging a PR must continue to request publication
-            automatically.
+            <strong>Intermediate nightlies.</strong> When several nightlies are waiting, only the
+            newest gets a checkpoint.
           </li>
         </ul>
       </section>
 
-      <section aria-labelledby="open-pr-title">
-        <h2 id="open-pr-title">One subtle point about open PRs</h2>
-        <div class="card same">
-          <p>
-            Open PRs do <strong>not</strong> prevent checkpoint or revision tags from being
-            published, so they do not block updates. They only keep the moving
-            <code>lastcode/main</code> branch stable until the PR queue is empty. The compact
-            installable should preserve that behavior: publish the immutable tag now, promote the
-            branch when safe.
-          </p>
-        </div>
-      </section>
-
-      <section aria-labelledby="decision-title">
-        <h2 id="decision-title">The proposed decision</h2>
-        <div class="decision">
-          <h3>Approve automatic carry-set compaction as the next workflow change.</h3>
-          <p>
-            Keep normal PRs and the existing update experience. Begin with a small named carry set,
-            ordered as Upstream bugfixes, Tooling, Resumable Actions, Legacy Sidebar, and Incubator;
-            preserve provenance; fold fixes into their owning patch; and graduate coherent Incubator
-            contents when they earn a dedicated group.
-          </p>
+      <section aria-labelledby="words-title">
+        <h2 id="words-title">The words</h2>
+        <div class="grid three">
+          <article class="card proposed">
+            <h3>Downstream carry set</h3>
+            <p>Everything LastCode intentionally keeps on top of an upstream T3 Code nightly.</p>
+          </article>
+          <article class="card">
+            <h3>Group commit</h3>
+            <p>
+              One of the six
+              <code>carry(&lt;group&gt;): compile downstream group</code>
+              commits. The glossary calls these carry patches.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Contribution</h3>
+            <p>
+              One original source commit folded into a group commit, recorded as a
+              <code>Carry-Contribution</code> line.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Compile</h3>
+            <p>Rebuild the six group commits on the same nightly to include new source commits.</p>
+          </article>
+          <article class="card">
+            <h3>Replay</h3>
+            <p>Rebase the six group commits onto a newer nightly.</p>
+          </article>
+          <article class="card">
+            <h3>Historical replay</h3>
+            <p>The old commit-by-commit rebase, kept as an explicit, recorded rollback.</p>
+          </article>
         </div>
       </section>
 
@@ -1040,32 +1440,48 @@
         <h2 id="references-title">References</h2>
         <ul class="references">
           <li>
+            <a href="#" data-repo-path="scripts/lastcode-carry-set.json"
+              >scripts/lastcode-carry-set.json</a
+            >
+            — group order, replay mode and the bootstrap partition.
+          </li>
+          <li>
+            <a href="#" data-repo-path="scripts/lastcode-carry-replay.ts"
+              >scripts/lastcode-carry-replay.ts</a
+            >
+            — trailers, compile, replay, regroup-conflict diagnosis.
+          </li>
+          <li>
+            <a href="#" data-repo-path="scripts/lastcode-checkpoint.ts" data-repo-line="2805"
+              >scripts/lastcode-checkpoint.ts:2805</a
+            >
+            — when a checkpoint compiles first; replay onto the nightly is near line 3268.
+          </li>
+          <li>
+            <a href="#" data-repo-path="scripts/lastcode-carry-ci.ts"
+              >scripts/lastcode-carry-ci.ts</a
+            >
+            and
+            <a href="#" data-repo-path="scripts/lastcode-carry-delivery.ts"
+              >scripts/lastcode-carry-delivery.ts</a
+            >
+            — PR CI compile check and guarded-merge source retention.
+          </li>
+          <li>
+            <a href="#" data-repo-path="scripts/lastcode-carry-dossier.ts"
+              >scripts/lastcode-carry-dossier.ts</a
+            >
+            — the conflict dossier written when a replay stops.
+          </li>
+          <li>
+            <a href="#" data-repo-path="docs/lastcode/nightly-workflow.md"
+              >docs/lastcode/nightly-workflow.md</a
+            >
+            — group ownership conventions, trailer guidance and recovery steps.
+          </li>
+          <li>
             <a href="#" data-repo-path="docs/lastcode/glossary.md">docs/lastcode/glossary.md</a>
-            — canonical LastCode maintenance vocabulary.
-          </li>
-          <li>
-            <a href="#" data-repo-path="docs/lastcode/nightly-workflow.md" data-repo-line="47"
-              >docs/lastcode/nightly-workflow.md:47</a
-            >
-            — checkpointing, publication, promotion, and provenance behavior.
-          </li>
-          <li>
-            <a href="#" data-repo-path="scripts/lastcode-checkpoint.ts" data-repo-line="1125"
-              >scripts/lastcode-checkpoint.ts:1125</a
-            >
-            — the current commit-by-commit nightly rebase loop.
-          </li>
-          <li>
-            <a href="#" data-repo-path="scripts/lastcode-checkpoint.ts" data-repo-line="850"
-              >scripts/lastcode-checkpoint.ts:850</a
-            >
-            — the open-PR branch-promotion safeguard.
-          </li>
-          <li>
-            <a href="https://github.com/lastobelus/lastCode/pull/95">PR 95</a>,
-            <a href="https://github.com/lastobelus/lastCode/pull/105">PR 105</a>, and
-            <a href="https://github.com/lastobelus/lastCode/pull/141">PR 141</a>
-            — examples of semantic replay repairs and conflict-resolution fallout.
+            — LastCode maintenance vocabulary.
           </li>
         </ul>
       </section>
@@ -1073,30 +1489,29 @@
       <footer>
         <details class="context">
           <summary>
-            <span>Prompt/context</span>
+            <span>History</span>
             <span class="truth-state">Why this page exists</span>
           </summary>
           <div class="details-body">
             <p>
-              The nightly process repeatedly rebases LastCode's complete retained history onto new
-              T3 Code nightlies. Recent failures produced more repair PRs, which then enlarged later
-              replays. The requested constraint was strict: ideas, ordinary PR work, ad hoc
-              workstation updates, and scheduled server updates must not gain manual steps or become
-              more brittle.
+              In August 2026 the nightly process rebased LastCode's complete history onto each new
+              T3 Code nightly, commit by commit. Failures produced repair PRs, which made later
+              replays longer. The original version of this page proposed compiling merged history
+              into a small, ordered set of named patches without adding manual steps to ordinary PR
+              work.
             </p>
             <p>
-              This explanation recommends compiling merged development history into a compact
-              release artifact. Feedback on the first draft identified Tooling, Resumable Actions,
-              and Legacy Sidebar as existing feature boundaries; resumable-action sidebar visibility
-              belongs to Legacy Sidebar because it is optional presentation. Further feedback added
-              a changeable Upstream bugfixes group with PR provenance and an Incubator catch-all for
-              changes that have not yet earned a dedicated group. The proposal does not prescribe
-              private deployment topology or claim that compaction solves genuine upstream
-              incompatibilities.
+              That mechanism shipped and changed along the way: a sixth group, per-commit trailers
+              instead of a generated ownership plan, a compile check in PR CI, and a bootstrap
+              partition pinned in the manifest to start the first compact generation. The 2026-11-14
+              rewrite replaced the proposal text with the mechanism as built.
             </p>
           </div>
         </details>
-        <p>LastCode downstream carry set proposal · prepared 2026-08-29</p>
+        <p>
+          LastCode downstream carry set · proposed 2026-08-29 · rewritten and verified against the
+          code 2026-11-14
+        </p>
       </footer>
     </main>
 
