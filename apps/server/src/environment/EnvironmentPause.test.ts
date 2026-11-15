@@ -194,6 +194,7 @@ const thread = (
 const harness = Effect.gen(function* () {
   const store = yield* Store.EnvironmentPauseStore;
   const receiptStore = yield* Ref.make(store);
+  const reads = yield* Ref.make({ shell: 0, records: 0, outbox: 0, activity: 0 });
   const enabled = yield* Ref.make(true);
   const snapshot = yield* Ref.make(shell([thread(a), thread(b), thread(c, "idle")]));
   const runtimeWork = yield* Ref.make<
@@ -221,12 +222,15 @@ const harness = Effect.gen(function* () {
   const evidenceFailuresAfterCommit = yield* Ref.make(new Set<ThreadId>());
   const outboxEvidenceAfterCommit = yield* Ref.make(new Set<ThreadId>());
   const outboxReadFailed = yield* Ref.make(false);
+  const outboxGate = yield* Ref.make<Deferred.Deferred<void> | null>(null);
+  const outboxBlocked = yield* Deferred.make<void>();
   const receiptFailures = yield* Ref.make(new Set<ThreadId>());
   const receiptGate = yield* Ref.make<Deferred.Deferred<void> | null>(null);
   const receiptEntered = yield* Deferred.make<void>();
   const observationFailed = yield* Ref.make(false);
   const gate = yield* Ref.make<Deferred.Deferred<void> | null>(null);
   const entered = yield* Deferred.make<void>();
+  const submissionBlocked = yield* Deferred.make<void>();
   const layers = Layer.mergeAll(
     Layer.mock(ServerSettings.ServerSettingsService)({
       getSettings: Ref.get(enabled).pipe(
@@ -234,9 +238,13 @@ const harness = Effect.gen(function* () {
       ),
     }),
     Layer.mock(ProjectionStore.ProjectionStoreV2)({
-      getShellSnapshot: () => Ref.get(snapshot),
+      getShellSnapshot: () =>
+        Ref.update(reads, (n) => ({ ...n, shell: n.shell + 1 })).pipe(
+          Effect.andThen(Ref.get(snapshot)),
+        ),
       getThreadRecords: (threadId, _fields, filter) =>
         Effect.gen(function* () {
+          yield* Ref.update(reads, (n) => ({ ...n, records: n.records + 1 }));
           if ((yield* Ref.get(readFailures)).has(threadId))
             return yield* new ProjectionStore.ProjectionStoreReadError({ threadId });
           const state = (yield* Ref.get(recipientStates)).get(threadId);
@@ -272,7 +280,15 @@ const harness = Effect.gen(function* () {
         return yield* Ref.get(deferred);
       }),
       listByCommandId: (commandId) =>
-        Ref.get(outboxReadFailed).pipe(
+        Effect.gen(function* () {
+          yield* Ref.update(reads, (n) => ({ ...n, outbox: n.outbox + 1 }));
+          const gate = yield* Ref.getAndSet(outboxGate, null);
+          if (gate !== null) {
+            yield* Deferred.succeed(outboxBlocked, undefined);
+            yield* Deferred.await(gate);
+          }
+          return yield* Ref.get(outboxReadFailed);
+        }).pipe(
           Effect.flatMap((failed) =>
             failed
               ? Effect.fail(
@@ -288,6 +304,7 @@ const harness = Effect.gen(function* () {
     }),
     Layer.mock(ProviderSessions.ProviderSessionManagerV2)({
       pendingExecution: Effect.gen(function* () {
+        yield* Ref.update(reads, (n) => ({ ...n, activity: n.activity + 1 }));
         if (yield* Ref.get(observationFailed))
           return yield* new ProviderSessions.ProviderSessionActivityError({
             providerSessionId: ProviderSessionId.make("provider-example"),
@@ -326,7 +343,10 @@ const harness = Effect.gen(function* () {
           const milestone = yield* Ref.get(dispatchMilestone);
           if (milestone !== null) yield* Deferred.succeed(milestone, undefined);
           const block = yield* Ref.get(gate);
-          if (block !== null) yield* Deferred.await(block);
+          if (block !== null) {
+            yield* Deferred.succeed(submissionBlocked, undefined);
+            yield* Deferred.await(block);
+          }
           if (
             input.pauseOnlyIfActive &&
             Store.environmentPauseDeliveryCancelled(
@@ -414,6 +434,7 @@ const harness = Effect.gen(function* () {
   return {
     store,
     receiptStore,
+    reads,
     pause,
     enabled,
     snapshot,
@@ -427,6 +448,8 @@ const harness = Effect.gen(function* () {
     evidenceFailuresAfterCommit,
     outboxEvidenceAfterCommit,
     outboxReadFailed,
+    outboxGate,
+    outboxBlocked,
     receiptFailures,
     receiptGate,
     receiptEntered,
@@ -444,6 +467,7 @@ const harness = Effect.gen(function* () {
     readFailures,
     gate,
     entered,
+    submissionBlocked,
     layers,
   };
 });
@@ -2318,6 +2342,265 @@ it.effect.each([
       assert.isTrue((yield* current.pause.status).quiet);
       assert.isNull((yield* current.pause.resume).session);
       assert.strictEqual((yield* Ref.get(h.calls)).at(-1)?.text, "resume");
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("persists Pause2 before an earlier Pause fanout finishes", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    yield* Ref.set(h.snapshot, shell([thread(a)]));
+    const gate = yield* Deferred.make<void>();
+    yield* Ref.set(h.gate, gate);
+    const original = yield* h.pause.start.pipe(Effect.forkChild);
+    yield* Deferred.await(h.submissionBlocked);
+    assert.isNull((yield* h.pause.resume).session);
+    // The first send already captured its Deferred; the second need not wait on it.
+    yield* Ref.set(h.gate, null);
+    const again = yield* h.pause.start;
+    assert.strictEqual(again.session?.phase, "pausing");
+    assert.isFalse(yield* Deferred.isDone(gate));
+    yield* Fiber.interrupt(original);
+    const recovered = yield* restart(h);
+    assert.strictEqual((yield* recovered.store.get)?.phase, "pausing");
+    yield* recovered.pause.continueResume;
+    const messages = yield* Ref.get(h.messages);
+    assert.lengthOf(messages, 1);
+    assert.isFalse(
+      Store.environmentPauseDeliveryCancelled(yield* recovered.store.get, messages[0]!.id),
+    );
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("overlapping Pause calls retain one in-flight message identity", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    yield* Ref.set(h.snapshot, shell([thread(a)]));
+    const gate = yield* Deferred.make<void>();
+    yield* Ref.set(h.gate, gate);
+    const original = yield* h.pause.start.pipe(Effect.forkChild);
+    yield* Deferred.await(h.submissionBlocked);
+    const first = (yield* h.store.get)!;
+    yield* Ref.set(h.gate, null);
+    const second = yield* h.pause.start;
+    assert.strictEqual(second.session?.id, first.id);
+    assert.strictEqual(second.session?.targets[0]?.pause, "pending");
+    assert.lengthOf(yield* Ref.get(h.calls), 1);
+    yield* Deferred.succeed(gate, undefined);
+    yield* Fiber.join(original);
+    assert.lengthOf(yield* Ref.get(h.messages), 1);
+    assert.strictEqual((yield* h.pause.status).session?.targets[0]?.pause, "sent");
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("an older Resume cannot retire Pause after a newer Pause takes ownership", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    yield* Ref.set(h.snapshot, shell([thread(a)]));
+    const submission = yield* Deferred.make<void>();
+    yield* Ref.set(h.gate, submission);
+    const original = yield* h.pause.start.pipe(Effect.forkChild);
+    yield* Deferred.await(h.submissionBlocked);
+    const evidence = yield* Deferred.make<void>();
+    yield* Ref.set(h.outboxGate, evidence);
+    const resumed = yield* h.pause.resume.pipe(Effect.forkChild);
+    yield* Deferred.await(h.outboxBlocked);
+    assert.strictEqual((yield* h.store.get)?.phase, "resuming");
+    yield* h.pause.start;
+    assert.strictEqual((yield* h.store.get)?.phase, "pausing");
+    yield* Deferred.succeed(evidence, undefined);
+    yield* Fiber.join(resumed);
+    assert.strictEqual((yield* h.store.get)?.targets[0]?.pause, "pending");
+    yield* Deferred.succeed(submission, undefined);
+    yield* Fiber.join(original);
+    assert.strictEqual((yield* h.store.get)?.targets[0]?.pause, "sent");
+    assert.lengthOf(yield* Ref.get(h.messages), 1);
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each([
+  { recover: false, owed: false },
+  { recover: true, owed: false },
+  { recover: false, owed: true },
+  { recover: true, owed: true },
+])(
+  "renews a guard-cancelled Resume across P1 R1 P2 R2, restart=$recover owed=$owed",
+  ({ recover, owed }) =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      yield* Ref.set(h.snapshot, shell([thread(a)]));
+      yield* h.pause.start;
+      yield* Ref.set(h.queued, true);
+      yield* h.pause.resume;
+      const first = (yield* h.store.get)!;
+      const identity = Store.deliveryIdentity(first, first.targets[0]!, "resume");
+      yield* Ref.update(h.runs, (runs) =>
+        runs.map((run) =>
+          run.userMessageId === identity.messageId ? { ...run, status: "starting" } : run,
+        ),
+      );
+      if (owed)
+        yield* h.store.update(
+          (session) =>
+            session && {
+              ...session,
+              targets: session.targets.map((target) => ({
+                ...target,
+                resumeRequired: true as const,
+              })),
+            },
+        );
+      yield* Ref.set(h.snapshot, shell([thread(a, "idle")]));
+      yield* h.pause.start;
+      assert.strictEqual((yield* h.store.get)?.targets[0]?.rePause, "waiting");
+      assert.isTrue(
+        Store.environmentPauseDeliveryCancelled(yield* h.store.get, identity.messageId),
+      );
+      yield* h.store.recordDelivery(identity.messageId, "cancelled");
+      const current = recover ? yield* restart(h) : h;
+      yield* Ref.set(h.queued, false);
+      yield* current.pause.resume;
+      yield* current.pause.continueResume;
+      const resumes = (yield* Ref.get(h.calls)).filter((call) => call.text === "resume");
+      assert.lengthOf(resumes, 2);
+      assert.notStrictEqual(resumes[1]!.messageId, identity.messageId);
+      assert.isNull(yield* current.store.get);
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("uses ordinary Pause admission for an idle recipient resumed before Pause2", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    yield* h.pause.start;
+    yield* Ref.set(h.queued, true);
+    yield* h.pause.resume;
+    const first = (yield* h.store.get)!;
+    yield* h.store.recordDelivery(
+      Store.deliveryIdentity(
+        first,
+        first.targets.find((target) => target.threadId === a)!,
+        "resume",
+      ).messageId,
+      true,
+    );
+    const resumeB = Store.deliveryIdentity(
+      first,
+      first.targets.find((target) => target.threadId === b)!,
+      "resume",
+    );
+    yield* Ref.update(h.runs, (runs) =>
+      runs.map((run) =>
+        run.userMessageId === resumeB.messageId ? { ...run, status: "starting" } : run,
+      ),
+    );
+    yield* Ref.set(h.inactiveRecipients, new Set([a]));
+    yield* Ref.set(h.snapshot, shell([thread(a, "idle"), thread(b, "idle")]));
+    yield* h.pause.start;
+    const secondPause = (yield* Ref.get(h.calls))
+      .filter((call) => call.threadId === a && call.text === "pause to go offline")
+      .at(-1)!;
+    assert.isTrue(secondPause.pauseOnlyIfActive);
+    assert.strictEqual(
+      (yield* h.store.get)?.targets.find((target) => target.threadId === a)?.pause,
+      "unavailable",
+    );
+    assert.lengthOf(
+      (yield* Ref.get(h.messages)).filter((message) => message.threadId === a),
+      2,
+    );
+    yield* h.store.recordDelivery(resumeB.messageId, "cancelled");
+    yield* Ref.set(h.queued, false);
+    yield* h.pause.resume;
+    assert.lengthOf(
+      (yield* Ref.get(h.calls)).filter((call) => call.threadId === a && call.text === "resume"),
+      1,
+    );
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("does no background scans for a settled Pause but explicit status sees new work", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    yield* Ref.set(h.snapshot, shell([thread(a)]));
+    yield* h.pause.start;
+    yield* Ref.set(h.snapshot, shell([thread(a, "idle")]));
+    const before = yield* Ref.get(h.reads);
+    yield* h.pause.continueResume;
+    yield* h.pause.continueResume;
+    yield* Ref.set(h.runtimeWork, [
+      { providerSessionId: ProviderSessionId.make("cleanup-example"), status: "stopping" },
+    ]);
+    yield* h.pause.continueResume;
+    assert.deepEqual(yield* Ref.get(h.reads), before);
+    const observed = yield* h.pause.status;
+    assert.isFalse(observed.quiet);
+    assert.isNotEmpty(observed.blockers);
+    assert.isAbove((yield* Ref.get(h.reads)).activity, before.activity);
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("recovers pending controls with at most one activity scan per background pass", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    yield* Ref.set(h.snapshot, shell([thread(a)]));
+    yield* Ref.set(h.queued, true);
+    yield* h.pause.start;
+    const before = yield* Ref.get(h.reads);
+    yield* h.pause.continueResume;
+    assert.isAtMost((yield* Ref.get(h.reads)).activity - before.activity, 1);
+    assert.isAbove((yield* Ref.get(h.reads)).records, before.records);
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each(["archived", "deleted", "missing", "cancelled", "failed"] as const)(
+  "settles corrective Pause %s only on definitive non-delivery",
+  (outcome) =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      yield* Ref.set(h.snapshot, shell([thread(a)]));
+      yield* h.pause.start;
+      yield* Ref.set(h.queued, true);
+      yield* h.pause.resume;
+      const first = (yield* h.store.get)!;
+      const identity = Store.deliveryIdentity(first, first.targets[0]!, "resume");
+      yield* Ref.update(h.runs, (runs) =>
+        runs.map((run) =>
+          run.userMessageId === identity.messageId ? { ...run, status: "starting" } : run,
+        ),
+      );
+      yield* Ref.set(h.snapshot, shell([thread(a, "idle")]));
+      yield* h.pause.start;
+      yield* h.store.recordDelivery(identity.messageId, true);
+      if (["archived", "deleted", "missing"].includes(outcome)) {
+        yield* Ref.set(
+          h.recipientStates,
+          new Map([[a, outcome as "archived" | "deleted" | "missing"]]),
+        );
+        yield* Ref.set(h.failures, new Set([a]));
+      } else if (outcome === "failed") {
+        yield* Ref.set(h.queued, false);
+        yield* Ref.set(h.receiptFailures, new Set([a]));
+      }
+      yield* h.pause.continueResume;
+      if (outcome === "cancelled") {
+        const current = (yield* h.store.get)!;
+        yield* h.store.recordDelivery(
+          Store.deliveryIdentity(current, current.targets[0]!, "pause").messageId,
+          "cancelled",
+        );
+      }
+      const observed = yield* h.pause.status;
+      if (outcome === "failed") {
+        assert.strictEqual(observed.session?.targets[0]?.pause, "failed");
+        assert.isNotNull(observed.session?.targets[0]?.error);
+        assert.isFalse(observed.quiet);
+        yield* Ref.set(h.receiptFailures, new Set());
+        yield* h.pause.retry;
+        assert.isTrue((yield* h.pause.status).quiet);
+      } else {
+        assert.strictEqual(observed.session?.targets[0]?.pause, "unavailable");
+        assert.isUndefined((yield* h.store.get)!.targets[0]!.rePause);
+        assert.isTrue(observed.quiet);
+      }
     }).pipe(Effect.provide(testLayer)),
 );
 

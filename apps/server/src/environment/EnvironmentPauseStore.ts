@@ -26,6 +26,7 @@ const StoredTarget = Schema.Struct({
   /** An earlier successful Pause still needs Resume while another Pause is attempted. */
   resumeRequired: Schema.optional(Schema.Literal(true)),
   pauseCancelled: Schema.optional(Schema.Literal(true)),
+  resumeCancelled: Schema.optional(Schema.Literal(true)),
   /** Pause must follow an outstanding Resume, even if the recipient becomes idle. */
   rePause: Schema.optional(Schema.Literals(["waiting", "required"])),
 });
@@ -75,6 +76,7 @@ export class EnvironmentPauseStore extends Context.Service<
     readonly recordDelivery: (
       messageId: MessageId,
       delivered: boolean | "cancelled",
+      options?: { readonly onlyIfSuperseded: true },
     ) => Effect.Effect<void, EnvironmentPauseError>;
   }
 >()("t3/environment/EnvironmentPauseStore") {}
@@ -123,45 +125,57 @@ const make = Effect.gen(function* () {
   return EnvironmentPauseStore.of({
     get: Ref.get(state),
     update,
-    recordDelivery: Effect.fn("EnvironmentPauseStore.recordDelivery")((messageId, delivered) =>
-      update((session) => {
-        if (session === null) return session;
-        let changed = false;
-        const targets = session.targets.map((target) => {
-          for (const direction of ["pause", "resume"] as const) {
-            if (
-              deliveryIdentity(session, target, direction).messageId !== messageId ||
-              target[direction] === "sent" ||
-              target[direction] === "unavailable"
-            )
-              continue;
-            changed = true;
-            return {
-              ...target,
-              [direction]:
-                delivered === "cancelled"
-                  ? ("unavailable" as const)
-                  : delivered
-                    ? ("sent" as const)
-                    : ("failed" as const),
-              [`${direction}Accepted`]: true,
-              ...(delivered === true
-                ? direction === "pause"
+    recordDelivery: Effect.fn("EnvironmentPauseStore.recordDelivery")(
+      (messageId, delivered, options) =>
+        update((session) => {
+          if (
+            session === null ||
+            (options?.onlyIfSuperseded && !environmentPauseDeliveryCancelled(session, messageId))
+          )
+            return session;
+          let changed = false;
+          const targets = session.targets.map((target) => {
+            for (const direction of ["pause", "resume"] as const) {
+              if (
+                deliveryIdentity(session, target, direction).messageId !== messageId ||
+                target[direction] === "sent" ||
+                target[direction] === "unavailable"
+              )
+                continue;
+              changed = true;
+              return {
+                ...target,
+                [direction]:
+                  delivered === "cancelled"
+                    ? ("unavailable" as const)
+                    : delivered
+                      ? ("sent" as const)
+                      : ("failed" as const),
+                [`${direction}Accepted`]: true,
+                ...(direction === "pause" && (delivered === true || delivered === "cancelled")
                   ? { rePause: undefined }
-                  : { resumeRequired: undefined }
-                : {}),
-              ...(direction === "pause" && delivered === "cancelled"
-                ? { pauseCancelled: true as const }
-                : {}),
-              error: delivered
-                ? null
-                : "The provider did not accept this message. Retry to send it again.",
-            };
-          }
-          return target;
-        });
-        return changed ? { ...session, targets } : session;
-      }).pipe(Effect.asVoid),
+                  : {}),
+                ...(direction === "resume" && delivered === true
+                  ? { resumeRequired: undefined, resumeCancelled: undefined }
+                  : {}),
+                ...(direction === "resume" && delivered === "cancelled"
+                  ? {
+                      resumeCancelled: true as const,
+                      ...(target.pause === "sent" ? { resumeRequired: true as const } : {}),
+                    }
+                  : {}),
+                ...(direction === "pause" && delivered === "cancelled"
+                  ? { pauseCancelled: true as const }
+                  : {}),
+                error: delivered
+                  ? null
+                  : "The provider did not accept this message. Retry to send it again.",
+              };
+            }
+            return target;
+          });
+          return changed ? { ...session, targets } : session;
+        }).pipe(Effect.asVoid),
     ),
   });
 });
