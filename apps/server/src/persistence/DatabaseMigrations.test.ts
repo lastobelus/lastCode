@@ -158,7 +158,7 @@ it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))("fresh database", (it
   );
 });
 
-for (const through of [41, 49]) {
+for (const through of [41, 49, 53]) {
   it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))(
     `upstream through ${through}`,
     (it) => {
@@ -167,6 +167,7 @@ for (const through of [41, 49]) {
           yield* runMigrations({ toMigrationInclusive: through });
           yield* runDatabaseMigrations();
           yield* assertCurrent();
+          assert.deepStrictEqual(yield* runDatabaseMigrations(), []);
         }),
       );
     },
@@ -357,28 +358,41 @@ it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))("LastCode before V2",
   );
 });
 
-it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))("LastCode V2 preview ledger", (it) => {
-  it.effect("normalizes the published upstream preview before checking both ledgers", () =>
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 52 });
-      yield* runLastCodeMigrations({ toMigrationInclusive: 11 });
-      yield* Migrator.make({})({
-        loader: Migrator.fromRecord({ "53_OrchestrationV2": orchestrationV2Migration }),
-      });
-      yield* sql`INSERT INTO orchestration_v2_legacy_imports
+for (const existingLastCode of [false, true]) {
+  it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))(
+    `LastCode V2 preview ledger (existing LastCode: ${existingLastCode})`,
+    (it) => {
+      it.effect("normalizes the published upstream preview before checking both ledgers", () =>
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* runMigrations({ toMigrationInclusive: 52 });
+          if (existingLastCode) yield* runLastCodeMigrations({ toMigrationInclusive: 11 });
+          yield* Migrator.make({})({
+            loader: Migrator.fromRecord({ "53_OrchestrationV2": orchestrationV2Migration }),
+          });
+          yield* sql`INSERT INTO orchestration_v2_legacy_imports
         (thread_id, source_updated_at, shell_imported_at, transcript_imported_at, imported_message_count)
         VALUES ('preview-thread', '2026-09-15', '2026-09-15', '2026-09-16', 42)`;
-      const imports = yield* sql`SELECT * FROM orchestration_v2_legacy_imports`;
-      const lastcode = yield* sql`SELECT * FROM lastcode_sql_migrations ORDER BY migration_id`;
-      yield* runDatabaseMigrations();
-      yield* assertCurrent();
-      assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
-      assert.deepStrictEqual(
-        yield* sql`SELECT * FROM lastcode_sql_migrations WHERE migration_id <= 11 ORDER BY migration_id`,
-        lastcode,
+          const imports = yield* sql`SELECT * FROM orchestration_v2_legacy_imports`;
+          const lastcode = existingLastCode
+            ? yield* sql`SELECT * FROM lastcode_sql_migrations ORDER BY migration_id`
+            : [];
+          assert.deepStrictEqual(yield* runDatabaseMigrations(), [
+            ...migrationManifest.filter(([id]) => id >= 53 && id !== 55),
+            ...lastcodeMigrationManifest.filter(([id]) => !existingLastCode || id > 11),
+          ]);
+          yield* assertCurrent();
+          assert.deepStrictEqual(
+            yield* sql`SELECT * FROM orchestration_v2_legacy_imports`,
+            imports,
+          );
+          assert.deepStrictEqual(
+            yield* sql`SELECT * FROM lastcode_sql_migrations WHERE migration_id <= ${existingLastCode ? 11 : 0} ORDER BY migration_id`,
+            lastcode,
+          );
+          assert.deepStrictEqual(yield* runDatabaseMigrations(), []);
+        }),
       );
-      assert.deepStrictEqual(yield* runDatabaseMigrations(), []);
-    }),
+    },
   );
-});
+}

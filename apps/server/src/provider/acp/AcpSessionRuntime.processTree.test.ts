@@ -418,17 +418,16 @@ describe("terminatePosixOwnedProcessTree", () => {
 
   it.live("rotates more than 64 live parents without scanning retained tombstones", () =>
     Effect.gen(function* () {
-      // Keep synthetic PIDs above the worker so they cannot overwrite its server identity.
-      const rootPid = process.pid + 100;
-      const parents = Array.from({ length: 130 }, (_, index) => {
-        const pid = rootPid + 1_000 + index;
-        return identity(pid, rootPid, pid, pid);
-      });
+      // Use a different synthetic parent group; the fixture shares the runner's real group, which cleanup skips.
+      const parentPidBase = process.pid < 500_000 ? 500_000 : 1_000;
+      const parents = Array.from({ length: 130 }, (_, index) =>
+        identity(parentPidBase + index, 100, parentPidBase + index, parentPidBase + index),
+      );
       let childListReads = 0;
       let identityCalls = 0;
       let snapshotCalls = 0;
       const fixture = makeController({
-        processes: [server(), identity(rootPid, process.pid, rootPid, rootPid)],
+        processes: [server(), identity(100, process.pid, 100, 100)],
       });
       const controller: AcpSessionRuntime.AcpPosixProcessTreeController = {
         ...fixture.controller,
@@ -450,8 +449,7 @@ describe("terminatePosixOwnedProcessTree", () => {
       const ledger = new Map<string, AcpSessionRuntime.AcpOwnedPosixProcess>();
       const root: AcpSessionRuntime.AcpPosixOwnershipRoot = { value: undefined };
       for (let index = 0; index < 5_000; index += 1) {
-        const pid = rootPid + 100_000 + index;
-        const tombstone = identity(pid, 1, pid, pid);
+        const tombstone = identity(100_000 + index, 1, 100_000 + index, 100_000 + index);
         ledger.set(`${tombstone.pid}:${tombstone.startTime}`, {
           ...tombstone,
           parentExecutable: undefined,
@@ -464,7 +462,7 @@ describe("terminatePosixOwnedProcessTree", () => {
         frontier,
         ledger,
         root,
-        rootPid,
+        rootPid: 100,
       });
       for (const parent of parents) {
         fixture.processes.set(parent.pid, parent);
@@ -489,7 +487,7 @@ describe("terminatePosixOwnedProcessTree", () => {
           ledger,
           maxProcesses: 64,
           root,
-          rootPid,
+          rootPid: 100,
         });
         expect(identityCalls + childListReads).toBeLessThanOrEqual(64);
         passes += 1;
@@ -504,7 +502,7 @@ describe("terminatePosixOwnedProcessTree", () => {
         controller,
         grace: 0,
         ledger,
-        rootPid,
+        rootPid: 100,
       });
       expect(snapshotCalls).toBe(10);
       expect(fixture.processes.size).toBe(1);
