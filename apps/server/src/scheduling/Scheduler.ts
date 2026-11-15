@@ -16,6 +16,7 @@ export class Scheduler extends Context.Service<
     readonly register: <E, R>(
       name: string,
       runDueWork: Effect.Effect<void, E, R>,
+      options?: { readonly runWhilePaused?: boolean },
     ) => Effect.Effect<void, never, R | Scope.Scope>;
   }
 >()("t3/scheduling/Scheduler") {}
@@ -31,12 +32,16 @@ const make = Effect.gen(function* () {
   const register: Scheduler["Service"]["register"] = Effect.fn("Scheduler.register")(function* <
     E,
     R,
-  >(name: string, runDueWork: Effect.Effect<void, E, R>) {
+  >(
+    name: string,
+    runDueWork: Effect.Effect<void, E, R>,
+    options?: { readonly runWhilePaused?: boolean },
+  ) {
     const scope = yield* Effect.scope;
     const context = yield* Effect.context<R>();
     const permit = yield* Semaphore.make(1);
     const run = automationPaused.pipe(
-      Effect.flatMap((paused) => (paused ? Effect.void : runDueWork)),
+      Effect.flatMap((paused) => (paused && !options?.runWhilePaused ? Effect.void : runDueWork)),
       Effect.provideContext(context),
       Effect.catchCause((cause) =>
         Cause.hasInterruptsOnly(cause)

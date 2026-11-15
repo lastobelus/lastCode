@@ -1828,11 +1828,11 @@ effectIt.effect(
       });
       harness.startRootRun.mockImplementation((runInput) =>
         Effect.gen(function* () {
-          expect(yield* runInput.shouldStartProviderTurn!()).toBe(true);
+          expect(yield* runInput.shouldStartProviderTurn!().pipe(Effect.orDie)).toBe(true);
           yield* runInput.session.startTurn(runInput as never).pipe(Effect.orDie);
           yield* Ref.set(resuming, true);
           // RunExecution rechecks ownership after ingesting the first native turn event.
-          expect(yield* runInput.shouldStartProviderTurn!()).toBe(true);
+          expect(yield* runInput.shouldStartProviderTurn!().pipe(Effect.orDie)).toBe(true);
         }),
       );
       yield* Effect.gen(function* () {

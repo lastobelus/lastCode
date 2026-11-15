@@ -2194,6 +2194,133 @@ it.effect.each(["failed", "cancelled"] as const)(
     }).pipe(Effect.provide(testLayer)),
 );
 
+it.effect.each([false, true])(
+  "retains a native Pause identity across Pause Resume Pause, restart=%s",
+  (recover) =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      yield* Ref.set(h.snapshot, shell([thread(a)]));
+      yield* Ref.set(h.queued, true);
+      yield* h.pause.start;
+      const initial = (yield* h.store.get)!;
+      const identity = Store.deliveryIdentity(initial, initial.targets[0]!, "pause");
+      const rootNodeId = NodeId.make("pending-pause-node");
+      yield* Ref.update(h.runs, (runs) =>
+        runs.map((run) => ({ ...run, status: "running", rootNodeId })),
+      );
+      yield* Ref.set(h.providerTurns, [nativeTurn(rootNodeId)]);
+      assert.strictEqual((yield* h.pause.resume).session?.phase, "resuming");
+      yield* Ref.set(h.snapshot, shell([thread(a, "idle")]));
+      const paused = yield* h.pause.start;
+      assert.strictEqual(paused.session?.id, initial.id);
+      assert.strictEqual(paused.session?.targets[0]?.pause, "pending");
+      const current = recover ? yield* restart(h) : h;
+      yield* current.store.recordDelivery(identity.messageId, true);
+      yield* current.pause.continueResume;
+      yield* Ref.set(h.queued, false);
+      assert.isNull((yield* current.pause.resume).session);
+      assert.deepEqual(
+        (yield* Ref.get(h.calls)).map((call) => call.text),
+        ["pause to go offline", "resume"],
+      );
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each([false, true])(
+  "waits for the current native re-Pause receipt before Resume, restart=%s",
+  (recover) =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      yield* Ref.set(h.snapshot, shell([thread(a)]));
+      yield* h.pause.start;
+      const later = {
+        ...run(RunId.make("later-run"), MessageId.make("later-message")),
+        ordinal: 2,
+        status: "running" as const,
+      };
+      yield* Ref.update(h.runs, (runs) => [...runs, later]);
+      yield* Ref.set(h.snapshot, shell([{ ...thread(a), activeRunId: later.id }]));
+      yield* Ref.set(h.queued, true);
+      yield* h.pause.retry;
+      const session = (yield* h.store.get)!;
+      assert.isTrue(session.targets[0]?.resumeRequired);
+      const identity = Store.deliveryIdentity(session, session.targets[0]!, "pause");
+      const rootNodeId = NodeId.make("re-pause-node");
+      yield* Ref.update(h.runs, (runs) =>
+        runs.map((run) =>
+          run.userMessageId === identity.messageId
+            ? { ...run, status: "running", rootNodeId }
+            : run,
+        ),
+      );
+      yield* Ref.set(h.providerTurns, [nativeTurn(rootNodeId)]);
+      yield* Ref.set(h.queued, false);
+      const resumed = yield* h.pause.resume;
+      assert.strictEqual(resumed.session?.phase, "resuming");
+      assert.strictEqual(resumed.session?.targets[0]?.pause, "pending");
+      assert.isEmpty((yield* Ref.get(h.calls)).filter((call) => call.text === "resume"));
+      const current = recover ? yield* restart(h) : h;
+      yield* current.store.recordDelivery(identity.messageId, true);
+      yield* current.pause.continueResume;
+      assert.isNull(yield* current.store.get);
+      assert.deepEqual(
+        (yield* Ref.get(h.calls)).map((call) => call.text),
+        ["pause to go offline", "pause to go offline", "resume"],
+      );
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each([
+  { recover: false, active: false },
+  { recover: true, active: false },
+  { recover: false, active: true },
+  { recover: true, active: true },
+])(
+  "corrects a late native Resume with Pause without an open client, restart=$recover active=$active",
+  ({ recover, active }) =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      yield* Ref.set(h.snapshot, shell([thread(a)]));
+      yield* h.pause.start;
+      yield* Ref.set(h.queued, true);
+      yield* h.pause.resume;
+      const initial = (yield* h.store.get)!;
+      const identity = Store.deliveryIdentity(initial, initial.targets[0]!, "resume");
+      const rootNodeId = NodeId.make("late-resume-node");
+      yield* Ref.update(h.runs, (runs) =>
+        runs.map((run) =>
+          run.userMessageId === identity.messageId
+            ? { ...run, status: "running", rootNodeId }
+            : run,
+        ),
+      );
+      yield* Ref.set(h.providerTurns, [nativeTurn(rootNodeId)]);
+      const resumeRun = (yield* Ref.get(h.runs)).find(
+        (run) => run.userMessageId === identity.messageId,
+      )!;
+      yield* Ref.set(
+        h.snapshot,
+        shell([active ? { ...thread(a), activeRunId: resumeRun.id } : thread(a, "idle")]),
+      );
+      const paused = yield* h.pause.start;
+      assert.strictEqual(paused.session?.id, initial.id);
+      assert.isFalse(paused.quiet);
+      assert.lengthOf(yield* Ref.get(h.calls), 2);
+      const current = recover ? yield* restart(h) : h;
+      yield* current.store.recordDelivery(identity.messageId, true);
+      yield* Ref.set(h.queued, false);
+      yield* current.pause.continueResume;
+      assert.deepEqual(
+        (yield* Ref.get(h.calls)).map((call) => call.text),
+        ["pause to go offline", "resume", "pause to go offline"],
+      );
+      yield* Ref.set(h.snapshot, shell([thread(a, "idle")]));
+      assert.isTrue((yield* current.pause.status).quiet);
+      assert.isNull((yield* current.pause.resume).session);
+      assert.strictEqual((yield* Ref.get(h.calls)).at(-1)?.text, "resume");
+    }).pipe(Effect.provide(testLayer)),
+);
+
 it.effect("waits for provider-owned children but sends only to messageable threads", () =>
   Effect.gen(function* () {
     const h = yield* harness;

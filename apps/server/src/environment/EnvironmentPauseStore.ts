@@ -26,6 +26,8 @@ const StoredTarget = Schema.Struct({
   /** An earlier successful Pause still needs Resume while another Pause is attempted. */
   resumeRequired: Schema.optional(Schema.Literal(true)),
   pauseCancelled: Schema.optional(Schema.Literal(true)),
+  /** Pause must follow an outstanding Resume, even if the recipient becomes idle. */
+  rePause: Schema.optional(Schema.Literals(["waiting", "required"])),
 });
 const StoredSession = Schema.Struct({
   ...EnvironmentPauseSession.fields,
@@ -143,6 +145,11 @@ const make = Effect.gen(function* () {
                     ? ("sent" as const)
                     : ("failed" as const),
               [`${direction}Accepted`]: true,
+              ...(delivered === true
+                ? direction === "pause"
+                  ? { rePause: undefined }
+                  : { resumeRequired: undefined }
+                : {}),
               ...(direction === "pause" && delivered === "cancelled"
                 ? { pauseCancelled: true as const }
                 : {}),
