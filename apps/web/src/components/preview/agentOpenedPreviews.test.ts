@@ -204,6 +204,7 @@ describe("revealServerTabs", () => {
     canGoForward: false,
     updatedAt: "2026-01-01T00:00:00.000Z",
     runtime: "server",
+    automationOwner: "agent-a",
     reveal: true,
     ...(force === undefined ? {} : { revealRequest: { id: "r1", force } }),
   });
@@ -238,6 +239,20 @@ describe("revealServerTabs", () => {
     expect(floatingTabId()).toBeNull();
     // A user action moves keyboard focus into the panel; an agent reveal must not.
     expect(useRightPanelStore.getState().getUserActionRevision(ref)).toBe(userActionRevision);
+  });
+
+  it("opens a user-facing tab directly in the panel without taking keyboard focus", () => {
+    setup();
+    const revision = useRightPanelStore.getState().getUserActionRevision(ref);
+    revealServerTabs(ref, [{ ...tab("tab_user", true), automationOwner: undefined }], {
+      autoShowFloatingPreview: false,
+    });
+    expect(useRightPanelStore.getState().byThreadKey[threadKey]).toMatchObject({
+      isOpen: true,
+      activeSurfaceId: "browser:tab_user",
+    });
+    expect(floatingTabId()).toBeNull();
+    expect(useRightPanelStore.getState().getUserActionRevision(ref)).toBe(revision);
   });
 });
 

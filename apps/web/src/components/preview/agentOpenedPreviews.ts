@@ -51,7 +51,9 @@ export function revealServerTabs(
       .byThreadKey[scopedThreadKey(threadRef)]?.surfaces.find(
         (surface) => surface.kind === "preview" && surface.resourceId === session.tabId,
       );
-    if (surface && force) {
+    if (force && session.automationOwner === undefined) {
+      useRightPanelStore.getState().openBrowser(threadRef, session.tabId, true);
+    } else if (surface && force) {
       useRightPanelStore.getState().revealSurface(threadRef, surface.id);
     } else if (!surface) {
       usePreviewMiniPlayerStore.getState().open(threadRef, browserMiniPlayerSource(session.tabId));
