@@ -256,7 +256,7 @@ Preserve the retained worktree, including resolutions and subsequent repairs.
 The checkpoint command enables rerere in repository configuration for
 historical, non-carry rebases; carry replay overrides it on its own rebase
 commands only. Continue a carry replay manually with
-`git -c rerere.enabled=false -c rerere.autoupdate=false rebase --continue`.
+`node <automation>/scripts/lastcode-carry-replay.ts --continue <worktree>`.
 When a replay or incorporation conflict is in a derived field, take either side
 of that field to clear the markers and continue; all of them are regenerated after the replay.
 The derived files are `pnpm-lock.yaml`,

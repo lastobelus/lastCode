@@ -39,6 +39,7 @@ function fixture(overrides = {}) {
   let state = overrides.state ?? null;
   let now = 0;
   const dependencies = {
+    collectEpisode: vi.fn(),
     latestFailedCheckpointRun: () => ({
       status: "failed",
       upstreamTag: "v0.0.35-nightly.20260826.1195",
@@ -2367,4 +2368,20 @@ describe("LastCode checkpoint supervisor", () => {
 
     NodeFS.rmSync(directory, { recursive: true });
   });
+});
+
+it("keeps a successful checkpoint successful when episode collection fails", () => {
+  const test = fixture({
+    dependencies: {
+      collectEpisode: () => {
+        throw new Error("unavailable");
+      },
+    },
+  });
+  expect(
+    runCheckpointSupervisor(
+      { home: "/fixture", repoRoot: "/repo", environment: {} },
+      test.dependencies,
+    ).status,
+  ).toBe("success");
 });
