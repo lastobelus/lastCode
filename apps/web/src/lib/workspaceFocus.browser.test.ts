@@ -61,14 +61,6 @@ describe("workspace area focus", () => {
     expect(document.activeElement).toBe(sidebar.button);
     fixture.controller.move(-1);
     expect(document.activeElement).toBe(panel.button);
-    const timeline = document.createElement("div");
-    timeline.tabIndex = -1;
-    timeline.dataset.workspaceFocusDefault = "";
-    timeline.style.height = "200px";
-    conversation.element.append(timeline);
-    composer.button.focus();
-    fixture.controller.move(-1);
-    expect(document.activeElement).toBe(timeline);
   });
 
   it("skips hidden, inert, and maximized-away areas", () => {

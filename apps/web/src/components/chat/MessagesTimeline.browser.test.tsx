@@ -53,7 +53,6 @@ import { collectThreadFindRanges } from "./threadFindHighlights";
 import { toastManager } from "../ui/toast";
 import type { CitedHistory } from "./citationProcedure";
 import type { TimelineNavigation } from "./timelineViewport";
-import { useTimelineFollow } from "./useTimelineFollow";
 import { rememberTimelinePosition } from "./timelineScrollAnchoring";
 import {
   COMPOSER_CONTEXT_CLIPBOARD_MIME,
@@ -469,96 +468,6 @@ describe("MessagesTimeline work rows", () => {
 });
 
 describe("MessagesTimeline messages", () => {
-  it("scrolls with arrow keys after F6 or a click focuses the conversation", async () => {
-    setup();
-    const props = baseProps();
-    const entries = Array.from({ length: 40 }, (_, index) =>
-      message(`Turn ${index}:\n\n${"x ".repeat(200)}`, {}, `turn-${index}`),
-    );
-    function Conversation({ timelineEntries }: { timelineEntries: Entry[] }) {
-      const follow = useTimelineFollow({
-        legendListRef: props.listRef,
-        composerTimelineInset: 0,
-        routeThreadKey: props.routeThreadKey,
-        activeThreadKey: props.routeThreadKey,
-        isServerThread: false,
-        serverProjection: null,
-        threadStatus: "live",
-        activeActivityRun: null,
-        activeRunningTurnId: null,
-        timelineEntries,
-        timelineAnchorMessageId: null,
-        setTimelineAnchor: () => {},
-      });
-      return (
-        <>
-          <div
-            {...workspaceAreaProps("conversation", 1, "Conversation")}
-            className="relative flex min-h-0 flex-1 flex-col"
-          >
-            <MessagesTimeline
-              {...props}
-              timelineEntries={timelineEntries}
-              liveFollowEnabled={follow.timelineLiveFollowEnabled}
-              onViewportAttach={follow.attachTimelineViewport}
-              onIsAtEndChange={follow.onIsAtEndChangeStable}
-            />
-          </div>
-          <div {...workspaceAreaProps("composer", 2, "Message input")}>
-            <button type="button">Send</button>
-          </div>
-        </>
-      );
-    }
-    const conversation = (timelineEntries: Entry[]) => (
-      <Conversation timelineEntries={timelineEntries} />
-    );
-    await using screen = await renderElement(conversation([]));
-    // Keep the conversation and composer visible so input does not scroll the test document.
-    screen.container.style.height = "min(600px, 100vh)";
-    const focus = createWorkspaceFocusController(document);
-    using cleanup = new DisposableStack();
-    cleanup.defer(focus.dispose);
-    screen.button("Send").focus();
-    focus.move(-1);
-    expect(document.activeElement?.getAttribute("data-workspace-area")).toBe("conversation");
-    await screen.rerender(conversation(entries));
-    const viewport = props.listRef.current!.getScrollableNode()!;
-    // Reserve viewport padding that cannot hit a virtual row or one of its controls.
-    viewport.style.paddingRight = "32px";
-    await expect.element(screen.getByText("Turn 39:")).toHaveStyle({ pointerEvents: "auto" });
-    await vi.waitFor(() => expect(viewport.scrollTop).toBeGreaterThan(0));
-    const nextScrollEnd = () =>
-      new Promise<void>((resolve) => {
-        const onScrollEnd = () => resolve();
-        viewport.addEventListener("scrollend", onScrollEnd, { once: true });
-        cleanup.defer(() => viewport.removeEventListener("scrollend", onScrollEnd));
-      });
-    // Native keyboard scrolling can still be animating after scrollTop first changes.
-    const arrowUpEnded = nextScrollEnd();
-    const atEnd = viewport.scrollTop;
-    await userEvent.keyboard("{ArrowUp}");
-    await vi.waitFor(() => expect(viewport.scrollTop).toBeLessThan(atEnd));
-    await arrowUpEnded;
-    await vi.waitFor(() => expect(document.activeElement).toBe(viewport));
-    screen.button("Send").focus();
-    focus.move(-1);
-    expect(document.activeElement).toBe(viewport);
-    screen.button("Send").focus();
-    await userEvent.click(viewport, { position: { x: viewport.clientWidth - 16, y: 1 } });
-    await vi.waitFor(() => expect(document.activeElement).toBe(viewport));
-    const homeEnded = nextScrollEnd();
-    await userEvent.keyboard("{Home}");
-    await vi.waitFor(() => expect(viewport.scrollTop).toBe(0));
-    await homeEnded;
-    await userEvent.keyboard("{ArrowDown}");
-    await vi.waitFor(() => expect(viewport.scrollTop).toBeGreaterThan(0));
-    screen.button("Send").focus();
-    await screen.rerender(conversation([]));
-    await screen.rerender(conversation(entries));
-    expect(document.activeElement).toBe(screen.button("Send"));
-  });
-
   it("settles when equally long messages have very different rendered heights", async () => {
     const props = baseProps();
     const tall = message("a\n\n".repeat(6000), { role: "assistant" }, "tall");

@@ -1269,12 +1269,6 @@ const ConversationTimeline = memo(function ConversationTimeline({
   const setTimelineList = useStableCallback((list: LegendListRef | null) => {
     listRef.current = list;
     const scrollNode: HTMLElement | null = list?.getScrollableNode() ?? null;
-    if (scrollNode) {
-      const area = scrollNode.closest('[data-workspace-area="conversation"]');
-      if (area && scrollNode.ownerDocument.activeElement === area) {
-        scrollNode.focus({ preventScroll: true });
-      }
-    }
     registerTimeline?.(scrollNode);
     const viewport = scrollNode
       ? attachTimelineViewport(scrollNode, (frame) => {
