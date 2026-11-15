@@ -242,6 +242,41 @@ it.each([true, false])(
   },
 );
 
+it.each(["failed", "unavailable"] as const)(
+  "reports an owed Resume that is %s after a later Pause failed",
+  async (resume) => {
+    using h = setup();
+    const status: EnvironmentPauseStatus = {
+      ...resuming,
+      session: {
+        ...resuming.session!,
+        targets: [
+          {
+            ...resuming.session!.targets[0]!,
+            pause: "failed",
+            resume,
+            error: "Resume was not delivered after the later Pause failed.",
+          },
+        ],
+      },
+    };
+    h.registry.set(h.status, AsyncResult.success(status));
+    await using screen = await render(h.view(environment, true));
+    await screen.getByRole("button", { name: "Manage pause" }).click();
+    await act(() => h.registry.set(h.status, AsyncResult.success(status)));
+    await expect
+      .element(
+        page
+          .getByRole("dialog")
+          .getByText("Work: Resume was not delivered after the later Pause failed."),
+      )
+      .toBeVisible();
+    await expect
+      .element(page.getByRole("dialog").getByRole("button", { name: "Resume", exact: true }))
+      .toBeEnabled();
+  },
+);
+
 it.each(["pausing", "paused", "resuming"] as const)(
   "sends the next action directly during %s with unfinished deliveries and work",
   async (phase) => {

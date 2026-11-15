@@ -260,9 +260,7 @@ function EnvironmentPauseDetails(props: {
           })}
           {session.targets
             .filter((target) =>
-              session.phase === "resuming"
-                ? target.pause === "sent" && target.resume === "failed"
-                : target.pause === "failed",
+              session.phase === "resuming" ? target.resume === "failed" : target.pause === "failed",
             )
             .map((target) => (
               <Text key={target.threadId} selectable className="text-sm text-danger-foreground">
@@ -272,7 +270,7 @@ function EnvironmentPauseDetails(props: {
           {session.targets
             .filter((target) =>
               session.phase === "resuming"
-                ? target.pause === "sent" && target.resume === "unavailable"
+                ? target.resume === "unavailable"
                 : target.pause === "unavailable",
             )
             .map((target) => (

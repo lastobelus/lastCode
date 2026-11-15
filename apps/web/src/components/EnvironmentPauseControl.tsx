@@ -190,9 +190,7 @@ function EnvironmentPauseDialog({
   const retry = useAtomCommand(environmentPause.retry, { reportFailure: false });
   const [error, setError] = useState<string | null>(null);
   const pauseFailures = session?.targets.filter((thread) => thread.pause === "failed") ?? [];
-  const resumeFailures =
-    session?.targets.filter((thread) => thread.pause === "sent" && thread.resume === "failed") ??
-    [];
+  const resumeFailures = session?.targets.filter((thread) => thread.resume === "failed") ?? [];
   const resuming = intent === "resume" || (intent !== "start" && session?.phase === "resuming");
   const showRetryPause =
     session !== null &&
@@ -201,9 +199,7 @@ function EnvironmentPauseDialog({
     (pauseFailures.length > 0 || status?.quiet !== true);
   const unavailableRecipients =
     session?.targets.filter((thread) =>
-      resuming
-        ? thread.pause === "sent" && thread.resume === "unavailable"
-        : thread.pause === "unavailable",
+      resuming ? thread.resume === "unavailable" : thread.pause === "unavailable",
     ) ?? [];
   const quiet = known && status.quiet && pauseFailures.length === 0;
   const sawSession = useRef(false);
