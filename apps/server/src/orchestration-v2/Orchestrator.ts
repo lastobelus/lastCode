@@ -279,6 +279,7 @@ export class OrchestratorDispatchError extends Schema.TaggedError<OrchestratorDi
   {
     commandId: CommandId,
     commandType: Schema.String,
+    field: Schema.optional(Schema.Literal("groupedUnderThreadId")),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
@@ -4298,6 +4299,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
+          field: "groupedUnderThreadId",
           cause: "The parent cannot be this thread or one of its descendants.",
         });
       seen.add(next);
@@ -4318,6 +4320,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           commandType: command.type,
           cause:
             "The parent and each of its ancestors must be an interactive thread in this project that is not archived, being archived, or deleted.",
+          field: "groupedUnderThreadId",
         });
       if (next === parentId) yield* refuseAboveDispatchModeLimit(command, parent.id, parent);
       const organizationalParent = getInteractiveThreadParentThreadId(parent);

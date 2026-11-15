@@ -34,7 +34,10 @@ import { ChildProcessSpawner } from "effect/process";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as DocumentText from "../../../provider/DocumentText.ts";
-import { OrchestratorRuntimeModeAboveCeilingError } from "../../../orchestration-v2/Orchestrator.ts";
+import {
+  OrchestratorDispatchError,
+  OrchestratorRuntimeModeAboveCeilingError,
+} from "../../../orchestration-v2/Orchestrator.ts";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as ServerConfig from "../../../config.ts";
@@ -251,6 +254,7 @@ const clientLaunchHarness = (input: {
   readonly hostedAppUrl?: string;
   /** The orchestrator refuses the new thread's mode, as under a managed ceiling. */
   readonly refusedByCeiling?: true;
+  readonly refusedPlacement?: { value: boolean };
 }) => {
   const projectId = ProjectId.make("project:client-target");
   const modelSelection = {
@@ -326,6 +330,25 @@ const clientLaunchHarness = (input: {
                 runtimeMode: launch.runtimeMode,
                 maxRuntimeMode: "approval-required",
                 organization: "Example Corp",
+              }),
+            }),
+          );
+        }
+        if (input.refusedPlacement?.value && launch.groupedUnderThreadId != null) {
+          return Effect.fail(
+            new ThreadLaunch.ThreadLaunchError({
+              operation: "create-thread",
+              commandId: launch.commandId,
+              projectId: launch.projectId,
+              cause: new OrchestratorDispatchError({
+                commandId: launch.commandId,
+                commandType: "thread.create",
+                cause: new OrchestratorDispatchError({
+                  commandId: launch.commandId,
+                  commandType: "thread.create",
+                  field: "groupedUnderThreadId",
+                  cause: "The parent is not available for grouping.",
+                }),
               }),
             }),
           );
@@ -900,9 +923,11 @@ it.effect(
   () =>
     Effect.gen(function* () {
       const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+      const refusedPlacement = { value: false };
       const { projectId, dependencies } = clientLaunchHarness({
         runtimeModeCeiling: "auto",
         launched,
+        refusedPlacement,
       });
       const toolkit = yield* ProjectToolkit.pipe(
         Effect.provide(
@@ -943,6 +968,13 @@ it.effect(
         threadId: childId,
       });
       expect(launched.at(-1)?.threadId).toBe(childId);
+      refusedPlacement.value = true;
+      const refused = (yield* launch(childId!)).at(-1)?.result;
+      expect(refused).toMatchObject({
+        code: "invalid_request",
+        message: expect.stringContaining("groupedUnderThreadId"),
+      });
+      expect(refused).toMatchObject({ message: expect.stringContaining("JSON null") });
     }),
 );
 

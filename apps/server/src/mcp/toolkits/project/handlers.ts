@@ -12,7 +12,10 @@ import * as Hex from "effect/encoding/Hex";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { OrchestratorRuntimeModeAboveCeilingError } from "../../../orchestration-v2/Orchestrator.ts";
+import {
+  OrchestratorDispatchError,
+  OrchestratorRuntimeModeAboveCeilingError,
+} from "../../../orchestration-v2/Orchestrator.ts";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageIntake.ts";
 import * as ThreadReadBroker from "../../ThreadReadBroker.ts";
@@ -37,6 +40,20 @@ import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../t
 import { ProjectToolkit } from "./tools.ts";
 
 const isAboveCeilingError = Schema.is(OrchestratorRuntimeModeAboveCeilingError);
+const isDispatchError = Schema.is(OrchestratorDispatchError);
+
+function groupingPlacementFailure(error: unknown): OrchestratorMcpFailure | undefined {
+  while (isDispatchError(error)) {
+    if (error.field === "groupedUnderThreadId") {
+      const detail = typeof error.cause === "string" ? `${error.cause} ` : "";
+      return new OrchestratorMcpFailure({
+        code: "invalid_request",
+        message: `Invalid groupedUnderThreadId. ${detail}Use JSON null (without quotes) for a top-level thread.`,
+      });
+    }
+    error = error.cause;
+  }
+}
 
 function projectFailure(error: Project.ProjectServiceError) {
   if (error._tag === "ProjectOperationError") return unavailable();
@@ -387,6 +404,10 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                 code: "invalid_request",
                 message: error.cause.message,
               });
+            }
+            if (error._tag === "ThreadLaunchError") {
+              const placement = groupingPlacementFailure(error.cause);
+              if (placement !== undefined) return placement;
             }
             return unavailable();
           }),
