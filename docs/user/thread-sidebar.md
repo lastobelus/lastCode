@@ -26,7 +26,7 @@ moment, even while threads are still pausing. It sends “resume” only to thre
 that received Pause, and cancels pause messages that haven't been delivered yet.
 
 If a pause or resume message can't be delivered, the thread stays listed with
-the error. Click **Resume** again to retry threads that missed it. Archived or
+the error. Use **Manage pause → Resume** to retry threads that missed it. Archived or
 deleted threads don't receive Resume.
 
 ## Start a thread
