@@ -12,7 +12,7 @@ import { useThreadTerminalActions } from "../components/terminal/useThreadTermin
 import { confirmTerminalClose } from "../lib/terminalCloseConfirm";
 import { focusPanelTerminalAfterClose } from "../lib/terminalFocus";
 import { readLocalApi } from "../localApi";
-import { setActivePreviewTab, useThreadPreviewState } from "../previewStateStore";
+import { readThreadPreviewState, setActivePreviewTab } from "../previewStateStore";
 import {
   selectActiveRightPanelSurface,
   selectThreadRightPanelState,
@@ -22,7 +22,7 @@ import {
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { readThreadShell } from "../state/entities";
 import { previewEnvironment } from "../state/preview";
-import { readEnvironmentScope, useEnvironmentScope } from "../state/session";
+import { readEnvironmentScope } from "../state/session";
 import { environmentShell } from "../state/shell";
 import { threadEnvironment } from "../state/threads";
 import { useAtomCommand } from "../state/use-atom-command";
@@ -40,11 +40,6 @@ export function useRightPanelSurfaceClose(input: {
   const { threadRef, terminalLabelsById } = input;
   const closePreview = useAtomCommand(previewEnvironment.close, "preview close");
   const deleteThread = useAtomCommand(threadEnvironment.delete, "side chat delete");
-  const canOperatePreview = useEnvironmentScope(
-    threadRef?.environmentId ?? null,
-    AuthPreviewOperateScope,
-  );
-  const previewState = useThreadPreviewState(threadRef);
   const terminalActions = useThreadTerminalActions(threadRef);
   const storeCloseTerminal = useTerminalUiStateStore((state) => state.closeTerminal);
   const surfaces = useRightPanelStore(
@@ -53,12 +48,17 @@ export function useRightPanelSurfaceClose(input: {
 
   const releaseSurfaceResources = (ref: ScopedThreadRef, surface: RightPanelSurface) => {
     // Without preview access, server state remains until an authorized close or restart.
-    if (canOperatePreview && surface.kind === "preview" && surface.resourceId) {
+    const previewRef = surface.kind === "preview" ? (surface.sourceThreadRef ?? ref) : ref;
+    if (
+      surface.kind === "preview" &&
+      surface.resourceId &&
+      readEnvironmentScope(previewRef.environmentId, AuthPreviewOperateScope)
+    ) {
       void closePreviewSession({
         closePreview,
-        snapshot: previewState.sessions[surface.resourceId] ?? null,
+        snapshot: readThreadPreviewState(previewRef).sessions[surface.resourceId] ?? null,
         tabId: surface.resourceId,
-        threadRef: ref,
+        threadRef: previewRef,
       });
     }
     if (
@@ -90,7 +90,21 @@ export function useRightPanelSurfaceClose(input: {
     toClose: readonly RightPanelSurface[],
     closeSurfaces: () => void,
   ) => {
-    const message = agentControlledBrowserCloseConfirmation(toClose, previewState.desktopByTabId);
+    const desktopBySurfaceId = Object.fromEntries(
+      toClose.flatMap((surface) => {
+        if (surface.kind !== "preview" || !surface.resourceId || !threadRef) return [];
+        const ref = surface.sourceThreadRef ?? threadRef;
+        return [[surface.id, readThreadPreviewState(ref).desktopByTabId[surface.resourceId]]];
+      }),
+    );
+    const message = agentControlledBrowserCloseConfirmation(
+      toClose.map((surface) =>
+        surface.kind === "preview"
+          ? { ...surface, resourceId: surface.resourceId ? surface.id : null }
+          : surface,
+      ),
+      desktopBySurfaceId,
+    );
     if (!message) {
       closeSurfaces();
       return;
@@ -123,7 +137,10 @@ export function useRightPanelSurfaceClose(input: {
       threadRef,
     );
     if (nextActiveSurface?.kind === "preview" && nextActiveSurface.resourceId) {
-      setActivePreviewTab(threadRef, nextActiveSurface.resourceId);
+      setActivePreviewTab(
+        nextActiveSurface.sourceThreadRef ?? threadRef,
+        nextActiveSurface.resourceId,
+      );
     }
     focusPanelTerminalAfterClose(threadRef, activeId);
   };

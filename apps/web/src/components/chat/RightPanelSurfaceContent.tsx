@@ -89,7 +89,7 @@ export function RightPanelSurfaceContent(props: {
         <Suspense fallback={null}>
           <PreviewPanel
             mode="embedded"
-            threadRef={threadRef}
+            threadRef={surface.sourceThreadRef ?? threadRef}
             tabId={surface.resourceId}
             configuredUrls={props.configuredPreviewUrls}
             visible={visible}

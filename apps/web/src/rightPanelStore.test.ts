@@ -50,6 +50,12 @@ describe("rightPanelStore", () => {
     expect(
       selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refB).surfaces,
     ).toEqual([]);
+    store.openBrowser(refB, "manual-browser");
+    expect(selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
+      id: "browser:manual-browser",
+      kind: "preview",
+      resourceId: "manual-browser",
+    });
     unhost();
     store.openFile(refB, "src/app.ts");
     expect(selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, refB)?.id).toBe(
@@ -75,6 +81,83 @@ describe("rightPanelStore", () => {
       resourceId: "destination",
     });
     expect(store.getUserActionRevision(refA)).toBe(initialRevision + 2);
+  });
+
+  it("keeps routing agent opens to a side chat's parent while its tab is hidden", () => {
+    const store = useRightPanelStore.getState();
+    store.openSideChat(refA, refB.threadId);
+    const unhostPane = hostRightPanel(refB, refA);
+    const unhostPanel = hostRightPanel(refB, refA);
+    store.openBrowser(refB, "first", true);
+    unhostPane();
+    store.openBrowser(refB, "second", true);
+    expect(
+      selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, refA),
+    ).toMatchObject({
+      kind: "preview",
+      resourceId: "second",
+      sourceThreadRef: refB,
+    });
+    unhostPanel();
+    store.closeAllSurfaces(refA);
+    store.openBrowser(refB, "third", true);
+    expect(
+      selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, refB),
+    ).toMatchObject({
+      kind: "preview",
+      resourceId: "third",
+    });
+  });
+
+  it("reveals a hosted agent browser in the parent while retaining its session source", async () => {
+    const store = useRightPanelStore.getState();
+    const childRef = scopeThreadRef("env-2" as EnvironmentId, refB.threadId);
+    const unhost = hostRightPanel(childRef, refA);
+    try {
+      store.openBrowser(refA, "shared-tab");
+      const revision = store.getUserActionRevision(refA);
+      store.openBrowser(childRef, "shared-tab", true);
+      const hosted = selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, refA);
+      expect(hosted).toMatchObject({
+        kind: "preview",
+        resourceId: "shared-tab",
+        sourceThreadRef: childRef,
+      });
+      expect(hosted?.id).not.toBe("browser:shared-tab");
+      expect(store.getUserActionRevision(refA)).toBe(revision);
+      expect(
+        selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, childRef).surfaces,
+      ).toEqual([]);
+
+      store.openBrowser(childRef, "shared-tab", true);
+      store.reconcileBrowserSurfaces(refA, []);
+      expect(
+        selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA).surfaces,
+      ).toEqual([hosted]);
+      store.reconcileBrowserSurfaces(childRef, ["shared-tab", "background-tab"]);
+      expect(
+        selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA).surfaces,
+      ).toEqual([hosted]);
+      expect(
+        selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA).isOpen,
+      ).toBe(true);
+
+      await reloadRightPanelStore();
+      expect(
+        selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, refA),
+      ).toEqual(hosted);
+      unhost();
+      store.reconcileBrowserSurfaces(childRef, []);
+      expect(
+        selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA),
+      ).toMatchObject({
+        isOpen: false,
+        surfaces: [],
+        activeSurfaceId: null,
+      });
+    } finally {
+      unhost();
+    }
   });
 
   it("records single and bulk tab closes, newest first", () => {

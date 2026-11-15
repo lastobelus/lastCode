@@ -1,11 +1,55 @@
-import { EnvironmentId, type ThreadPullRequestLink } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ThreadId,
+  type PreviewSessionSnapshot,
+  type ThreadPullRequestLink,
+} from "@t3tools/contracts";
+import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { AtomRegistry } from "effect/reactivity";
 import { describe, expect, it } from "vite-plus/test";
+import { previewStateAtom } from "../previewStateStore";
 
 import {
   resolvePullRequestTabLink,
+  rightPanelPreviewDataAtom,
   surfaceShortcutActionForKey,
   surfaceShortcutTargetsTypingContext,
 } from "./RightPanelTabs";
+
+it("subscribes hosted browser labels and desktop controls to their source session", () => {
+  const registry = AtomRegistry.make();
+  try {
+    const ref = scopeThreadRef(EnvironmentId.make("child-environment"), ThreadId.make("child"));
+    const sourceAtom = previewStateAtom(scopedThreadKey(ref));
+    const tab: PreviewSessionSnapshot = {
+      threadId: ref.threadId,
+      tabId: "shared-tab",
+      navStatus: { _tag: "Success", url: "https://example.com", title: "Child page" },
+      canGoBack: false,
+      canGoForward: false,
+      updatedAt: "2026-01-01T00:00:00Z",
+    };
+    registry.set(sourceAtom, {
+      ...registry.get(sourceAtom),
+      serverEpoch: "child-epoch",
+      sessions: { [tab.tabId]: tab },
+    });
+    const dataAtom = rightPanelPreviewDataAtom([
+      { id: "browser:hosted", kind: "preview", resourceId: tab.tabId, sourceThreadRef: ref },
+      { id: "browser:shared-tab", kind: "preview", resourceId: tab.tabId },
+    ]);
+    const data = registry.get(dataAtom);
+    expect(data["browser:shared-tab"]).toBeUndefined();
+    expect(data["browser:hosted"]?.previewSessions[tab.tabId]).toBe(tab);
+    expect(data["browser:hosted"]?.previewRuntimeTabId?.(tab.tabId)).toBe(
+      JSON.stringify([ref.environmentId, ref.threadId, "child-epoch", tab.tabId]),
+    );
+    registry.set(sourceAtom, { ...registry.get(sourceAtom), sessions: {} });
+    expect(registry.get(dataAtom)["browser:hosted"]?.previewSessions).toEqual({});
+  } finally {
+    registry.dispose();
+  }
+});
 
 function shortcutEvent(
   key: string,

@@ -19,7 +19,7 @@ vi.mock("../components/ChatView.logic", () => ({
   agentControlledBrowserCloseConfirmation: () => null,
 }));
 vi.mock("../previewStateStore", () => ({
-  useThreadPreviewState: () => ({ sessions: {}, desktopByTabId: {} }),
+  readThreadPreviewState: () => ({ sessions: {}, desktopByTabId: {} }),
   setActivePreviewTab: () => {},
   beginPreviewSessionClose: () => {},
   cancelPreviewSessionClose: () => {},
