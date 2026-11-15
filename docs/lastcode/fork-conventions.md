@@ -1,7 +1,8 @@
 # LastCode Contribution and Fork Conventions
 
-This document defines LastCode's default delivery path, explicitly requested
-upstream contributions, contribution bases, and evaluation of other forks.
+This document defines LastCode's default delivery path, where LastCode changes
+go, explicitly requested upstream contributions, contribution bases, and
+evaluation of other forks.
 
 ## Goals
 
@@ -44,6 +45,34 @@ release automation, or `docs/lastcode` material. When both PRs are requested,
 link them for provenance, but do not make either merge depend on the other. If
 upstream later merges the change, the nightly rebase reconciles the duplicate
 patch in the normal conflict resolution process.
+
+## Where LastCode Changes Go
+
+Each line LastCode changes in an upstream-owned file can conflict with a later
+upstream change, and the nightly checkpoint has to resolve every conflict. A
+file is upstream-owned when it exists in upstream T3 Code, which is when
+`git cat-file -e origin/main:<path>` succeeds for its repository path. Every
+other file is fork-owned.
+
+In LastCode delivery:
+
+- Put new behavior in fork-owned files where practical, new or existing, and
+  connect it with call-site edits in upstream-owned files.
+- Fix existing behavior where it lives, even in an upstream-owned file. A fix
+  in an upstream-owned module places its test as the `AGENTS.md` test rules say.
+- Put tests for a fork-owned module in a fork-owned test file, including a
+  fix's test when the module's older tests sit in an upstream test file. For
+  these tests, "Extend before you add" means extending a fork-owned test file.
+
+These rules place new work; existing code and tests stay where they are.
+Requested upstream contributions, their LastCode ports, and imported upstream
+PRs keep upstream's file layout and test placement, so each stays a faithful
+copy of upstream's change, which the nightly rebase can reconcile if upstream
+merges it.
+
+Leave `docs/internals/testing.md` as upstream wrote it: the review bots that
+read it without `AGENTS.md`, Macroscope's test-signal check and CodeRabbit, do
+not review LastCode PRs.
 
 ## Repository Layout
 
