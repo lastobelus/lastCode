@@ -465,6 +465,7 @@ function makeLocalCommandHarness(input: {
   readonly initialRunStatus?: OrchestrationV2ThreadProjection["runs"][number]["status"];
   readonly skipStartAt?: "load" | "running-write" | "preparation" | "last-check" | "handoff";
   readonly failFinalization?: boolean;
+  readonly beforeBaseline?: Effect.Effect<void>;
   readonly acquireWorkspace?: WorkspaceAcquisition.WorkspaceAcquisition["Service"]["acquire"];
   readonly onMessageDelivery?: (messageId: MessageId, delivered: boolean) => Effect.Effect<void>;
 }) {
@@ -1339,7 +1340,13 @@ function makeLocalCommandHarness(input: {
                   Layer.mock(ProjectionStore.ProjectionStoreV2)({}),
                   Layer.mock(CheckpointService.CheckpointServiceV2)({
                     captureBaseline: () =>
-                      input.skipStartAt === "preparation" ? Effect.sync(interruptRun) : Effect.void,
+                      (input.beforeBaseline ?? Effect.void).pipe(
+                        Effect.andThen(
+                          input.skipStartAt === "preparation"
+                            ? Effect.sync(interruptRun)
+                            : Effect.void,
+                        ),
+                      ),
                   }),
                   Layer.mock(EventSink.EventSinkV2)({
                     writeIfRunCurrent,
@@ -1737,6 +1744,50 @@ effectIt.effect("recovers an abandoned failed turn before continuing its native 
       "existing-native-conversation",
     );
   }),
+);
+
+effectIt.effect.each(["before preparation", "before native prompt"] as const)(
+  "cancels an undelivered Pause after Resume $stage",
+  (stage) =>
+    Effect.gen(function* () {
+      const resuming = yield* Ref.make(stage === "before preparation");
+      const harness = makeLocalCommandHarness({
+        text: "pause to go offline",
+        nativeStart: "accepted",
+        beforeBaseline: Ref.set(resuming, true),
+      });
+      const target = {
+        threadId: harness.threadId,
+        projectId: harness.projection().thread.projectId,
+        title: "Example",
+        pause: "pending" as const,
+        resume: "pending" as const,
+        pauseAttempt: 0,
+        resumeAttempt: 0,
+        pauseAccepted: true,
+        resumeAccepted: false,
+        error: null,
+      };
+      const receipts = yield* Ref.make<ReadonlyArray<boolean | "cancelled">>([]);
+      const store = Layer.mock(PauseStore.EnvironmentPauseStore)({
+        get: Ref.get(resuming).pipe(
+          Effect.map((value) => ({
+            id: "fixture",
+            createdAt: "2026-09-04T12:00:00.000Z",
+            phase: value ? ("resuming" as const) : ("pausing" as const),
+            targets: [target],
+          })),
+        ),
+        recordDelivery: (_id, delivery) => Ref.update(receipts, (rows) => [...rows, delivery]),
+      });
+      yield* Effect.gen(function* () {
+        const service = yield* ProviderTurnStart.ProviderTurnStartServiceV2;
+        yield* service.start({ threadId: harness.threadId, runId: harness.runId });
+      }).pipe(Effect.provide(harness.layer.pipe(Layer.provide(store))));
+      expect(harness.nativePrompts).toEqual([]);
+      expect(harness.projection().runs.at(-1)?.status).toBe("cancelled");
+      expect(yield* Ref.get(receipts)).toEqual(["cancelled"]);
+    }),
 );
 
 effectIt.effect.each([
@@ -2377,7 +2428,7 @@ effectIt.effect.each([
         text: direction === "pause" ? "pause to go offline" : "resume",
         ...scenario,
       });
-      const receipts = yield* Ref.make<ReadonlyArray<boolean>>([]);
+      const receipts = yield* Ref.make<ReadonlyArray<boolean | "cancelled">>([]);
       const session: PauseStore.StoredSession = {
         id: "fixture",
         createdAt: "2026-09-04T12:00:00.000Z",

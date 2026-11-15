@@ -26,6 +26,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
+import * as PauseStore from "../environment/EnvironmentPauseStore.ts";
 
 import * as ServerConfig from "../config.ts";
 import {
@@ -215,6 +216,7 @@ export const layer: Layer.Layer<
   Effect.gen(function* () {
     const workspaceAcquisition = yield* WorkspaceAcquisition.WorkspaceAcquisition;
     const eventSink = yield* EventSink.EventSinkV2;
+    const pauseStore = yield* Effect.serviceOption(PauseStore.EnvironmentPauseStore);
     const turnAnalytics = yield* ProviderUsageAnalytics.ProviderTurnAnalytics;
     const contextHandoffService = yield* ContextHandoffService.ContextHandoffServiceV2;
     const idAllocator = yield* IdAllocator.IdAllocatorV2;
@@ -452,6 +454,67 @@ export const layer: Layer.Layer<
           cause: `Run ${runId} is missing its execution projection state.`,
         });
       }
+      const cancelResumedPause = Effect.fn("ProviderTurnStartService.cancelResumedPause")(
+        function* (expectedStatus: "starting" | "running") {
+          if (
+            Option.isNone(pauseStore) ||
+            !PauseStore.environmentPauseDeliveryCancelled(
+              yield* pauseStore.value.get,
+              run.userMessageId,
+            )
+          )
+            return false;
+          const completedAt = yield* DateTime.now;
+          const node = rootNode;
+          const payloads = [
+            {
+              type: "run.updated" as const,
+              payload: { ...run, status: "cancelled" as const, completedAt },
+            },
+            ...(node === undefined
+              ? []
+              : [
+                  {
+                    type: "node.updated" as const,
+                    payload: { ...node, status: "cancelled" as const, completedAt },
+                  },
+                ]),
+            ...(attempt === undefined
+              ? []
+              : [
+                  {
+                    type: "run-attempt.updated" as const,
+                    payload: { ...attempt, status: "cancelled" as const, completedAt },
+                  },
+                ]),
+          ];
+          const events = yield* Effect.forEach(payloads, (event) =>
+            Effect.gen(function* () {
+              return {
+                ...event,
+                id: yield* idAllocator.allocate.event({ threadId: run.threadId }),
+                threadId: run.threadId,
+                runId: run.id,
+                providerInstanceId: run.providerInstanceId,
+                occurredAt: completedAt,
+              } satisfies OrchestrationV2DomainEvent;
+            }),
+          );
+          yield* eventSink
+            .writeIfRunCurrent({
+              threadId: run.threadId,
+              runId: run.id,
+              activeAttemptId: attempt.id,
+              expectedStatus,
+              events,
+            })
+            .pipe(Effect.orDie);
+          yield* pauseStore.value.recordDelivery(run.userMessageId, "cancelled").pipe(Effect.orDie);
+          return true;
+        },
+        Effect.orDie,
+      );
+      if (yield* cancelResumedPause("starting")) return;
       const settleRunBeforeStart = Effect.fn("orchestrationV2.providerTurnStart.settleBeforeStart")(
         function* (input: {
           readonly signal: string;
@@ -1875,7 +1938,12 @@ export const layer: Layer.Layer<
           (legacyInputRunIds.size > 0 &&
             sameNativeThread &&
             !acceptedAttempts.some((source) => source.nativeThreadId !== undefined)),
-        shouldStartProviderTurn: runControls.shouldStartProviderTurn,
+        shouldStartProviderTurn: () =>
+          cancelResumedPause("running").pipe(
+            Effect.flatMap((cancelled) =>
+              cancelled ? Effect.succeed(false) : runControls.shouldStartProviderTurn(),
+            ),
+          ),
         shouldFinalizeRun: runControls.shouldFinalizeRun,
         hasUnpairedRunInterruptRequest: runControls.hasUnpairedRunInterruptRequest,
         loadRunInterruptReason: runControls.loadRunInterruptReason,

@@ -895,6 +895,57 @@ it.effect("a launch into an unknown project says the project was not found", () 
   }),
 );
 
+it.effect(
+  "a launch reports an unknown grouping parent and preserves null placement and retries",
+  () =>
+    Effect.gen(function* () {
+      const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+      const { projectId, dependencies } = clientLaunchHarness({
+        runtimeModeCeiling: "auto",
+        launched,
+      });
+      const toolkit = yield* ProjectToolkit.pipe(
+        Effect.provide(
+          McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+            Layer.provide(dependencies),
+          ),
+        ),
+      );
+      const launch = (groupedUnderThreadId: ThreadId | null, clientRequestId?: string) =>
+        toolkit
+          .handle("t3_thread_launch", {
+            title: "Fix",
+            projectId,
+            groupedUnderThreadId,
+            ...(clientRequestId === undefined ? {} : { clientRequestId }),
+          })
+          .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+
+      for (const parentId of ["null", "missing-parent"]) {
+        const result = (yield* launch(ThreadId.make(parentId))).at(-1)?.result;
+        expect(result).toMatchObject({
+          code: "invalid_request",
+          message: expect.stringContaining("groupedUnderThreadId"),
+        });
+        expect(result).toMatchObject({ message: expect.stringContaining("JSON null") });
+      }
+      expect(launched).toHaveLength(0);
+
+      yield* launch(null);
+      expect(launched[0]?.groupedUnderThreadId).toBeNull();
+      const parentId = launched[0]!.threadId!;
+      yield* launch(parentId, "grouped-child");
+      expect(launched[1]?.groupedUnderThreadId).toBe(parentId);
+      const childId = launched[1]!.threadId;
+
+      launched.splice(0, 1);
+      expect((yield* launch(parentId, "grouped-child")).at(-1)?.result).toMatchObject({
+        threadId: childId,
+      });
+      expect(launched.at(-1)?.threadId).toBe(childId);
+    }),
+);
+
 it.effect("a retried worktree launch replays after its base ref is gone", () =>
   Effect.gen(function* () {
     const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];

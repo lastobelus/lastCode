@@ -1,5 +1,5 @@
 import { useAtomRefresh, useAtomValue } from "@effect/atom-react";
-import { environmentPauseResumeComplete, type EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId } from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
 import * as Option from "effect/Option";
 import { CheckCircle2Icon, PauseIcon, PlayIcon } from "lucide-react";
@@ -65,7 +65,6 @@ export function EnvironmentPauseNotice({
           environmentId={environmentId}
           label={environment.label}
           connected={environment.connection.phase === "connected"}
-          enabled={environment.serverConfig?.settings.environmentPauseEnabled === true}
           onClose={() => setOpen(false)}
         />
       ) : null}
@@ -73,11 +72,10 @@ export function EnvironmentPauseNotice({
   );
 }
 
-/** Every entry point stays bound to one machine, including while its dialog is open. */
 export function EnvironmentPauseControl(props: EnvironmentPauseControlProps) {
   if (props.environment.serverConfig?.environment.capabilities.environmentPause !== true)
     return null;
-  return <EnvironmentPauseButton {...props} />;
+  return <EnvironmentPauseButton key={props.environment.environmentId} {...props} />;
 }
 
 function EnvironmentPauseButton({
@@ -86,14 +84,38 @@ function EnvironmentPauseButton({
   size = "icon-sm",
   showEnvironmentLabel = false,
 }: EnvironmentPauseControlProps) {
-  const [open, setOpen] = useState(false);
   const result = useAtomValue(
-    environmentPause.monitorStatus({ environmentId: environment.environmentId, input: {} }),
+    environmentPause.activeStatus({ environmentId: environment.environmentId, input: {} }),
   );
-  const hasSession = Option.getOrNull(AsyncResult.value(result))?.session != null;
+  const starting = useAtomValue(environmentPause.starting(environment.environmentId));
+  const hasSession = starting || Option.getOrNull(AsyncResult.value(result))?.session != null;
   const enabled = environment.serverConfig?.settings.environmentPauseEnabled === true;
-  if (!enabled && !hasSession && !open) return null;
-  const label = hasSession ? `Pause and resume ${environment.label}` : `Pause ${environment.label}`;
+  const canStart = useAtomValue(environmentPause.start.permissionAtom(environment.environmentId));
+  const canResume = useAtomValue(environmentPause.resume.permissionAtom(environment.environmentId));
+  const start = useAtomCommand(environmentPause.start, { reportFailure: false });
+  const resume = useAtomCommand(environmentPause.resume, { reportFailure: false });
+  const [error, setError] = useState<string | null>(null);
+  const requestVersion = useRef(0);
+  if (!enabled && !hasSession) return null;
+  const label = `${hasSession ? "Resume" : "Pause"} ${environment.label}`;
+  const disabled =
+    environment.connection.phase !== "connected" || (hasSession ? !canResume : !canStart);
+  const execute = async () => {
+    if (disabled) return;
+    const version = ++requestVersion.current;
+    setError(null);
+    const outcome = await (hasSession ? resume : start)({
+      environmentId: environment.environmentId,
+      input: {},
+    });
+    if (version === requestVersion.current && AsyncResult.isFailure(outcome)) {
+      setError(
+        hasSession
+          ? "Could not resume the environment. Reconnect and try again."
+          : "Could not send the pause request. Reconnect and try again.",
+      );
+    }
+  };
 
   return (
     <div className="relative z-10 flex shrink-0 items-center gap-1">
@@ -107,7 +129,8 @@ function EnvironmentPauseButton({
               aria-label={label}
               size={size}
               variant={onBackdrop ? "media-toggle" : "ghost-toggle"}
-              onClick={() => setOpen(true)}
+              disabled={disabled}
+              onClick={() => void execute()}
             >
               {hasSession ? <PlayIcon /> : <PauseIcon />}
             </Button>
@@ -115,15 +138,10 @@ function EnvironmentPauseButton({
         />
         <TooltipPopup side="bottom">{label}</TooltipPopup>
       </Tooltip>
-      {open ? (
-        <EnvironmentPauseDialog
-          key={`${environment.environmentId}:${environment.connection.phase}`}
-          environmentId={environment.environmentId}
-          label={environment.label}
-          connected={environment.connection.phase === "connected"}
-          enabled={enabled}
-          onClose={() => setOpen(false)}
-        />
+      {error ? (
+        <p role="alert" className="text-xs text-destructive">
+          {error}
+        </p>
       ) : null}
     </div>
   );
@@ -133,13 +151,11 @@ function EnvironmentPauseDialog({
   environmentId,
   label,
   connected,
-  enabled,
   onClose,
 }: {
   environmentId: EnvironmentId;
   label: string;
   connected: boolean;
-  enabled: boolean;
   onClose: () => void;
 }) {
   const target = { environmentId, input: {} };
@@ -154,13 +170,9 @@ function EnvironmentPauseDialog({
     AsyncResult.isSuccess(result) &&
     result.timestamp >= observedAfter &&
     status?.observation === "known";
-  const canStart = useAtomValue(environmentPause.start.permissionAtom(environmentId));
-  const canRetry = useAtomValue(environmentPause.retry.permissionAtom(environmentId));
   const canResume = useAtomValue(environmentPause.resume.permissionAtom(environmentId));
-  const start = useAtomCommand(environmentPause.start, { reportFailure: false });
-  const retry = useAtomCommand(environmentPause.retry, { reportFailure: false });
+  const starting = useAtomValue(environmentPause.starting(environmentId));
   const resume = useAtomCommand(environmentPause.resume, { reportFailure: false });
-  const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const pauseFailures = session?.targets.filter((thread) => thread.pause === "failed") ?? [];
   const resumeFailures =
@@ -174,12 +186,6 @@ function EnvironmentPauseDialog({
         : thread.pause === "unavailable",
     ) ?? [];
   const quiet = known && status.quiet && pauseFailures.length === 0;
-  const canCancelPause =
-    known &&
-    session !== null &&
-    !resuming &&
-    !quiet &&
-    session.targets.every((thread) => thread.pause !== "pending");
   const sawSession = useRef(false);
   // Delivery receipts may finish after Resume returns; close only after the server clears the session.
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- closes the mounted pause dialog only after the server confirms that the previously observed session has cleared
@@ -190,32 +196,21 @@ function EnvironmentPauseDialog({
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- refreshes the server pause-status atom when this dialog mounts so it observes the current connection
   useEffect(() => refreshInitial(), [refreshInitial]);
 
-  const execute = async (action: "start" | "retry" | "resume") => {
-    setPending(true);
+  const execute = async () => {
     setError(null);
-    await (async () => {
-      const outcome = await (action === "start" ? start : action === "retry" ? retry : resume)(
-        target,
-      );
-      refresh();
-      refreshInitial();
-      if (AsyncResult.isFailure(outcome)) {
-        setError(
-          action === "resume"
-            ? "Could not resume the environment. Reconnect and try again."
-            : "Could not send the pause request. Reconnect and try again.",
-        );
-      } else if (action === "resume" && outcome.value.session === null) {
-        onClose();
-      }
-    })().finally(() => {
-      setPending(false);
-    });
+    const outcome = await resume(target);
+    refresh();
+    refreshInitial();
+    if (AsyncResult.isFailure(outcome)) {
+      setError("Could not resume the environment. Reconnect and try again.");
+    } else if (outcome.value.session === null) {
+      onClose();
+    }
   };
 
   return (
-    <Dialog open onOpenChange={(nextOpen) => !nextOpen && !pending && onClose()}>
-      <DialogPopup showCloseButton={!pending}>
+    <Dialog open onOpenChange={(nextOpen) => !nextOpen && onClose()}>
+      <DialogPopup>
         <DialogHeader>
           <DialogTitle>
             {session
@@ -224,14 +219,18 @@ function EnvironmentPauseDialog({
                 : quiet
                   ? "Environment is quiet"
                   : "Pausing threads"
-              : `Pause ${label}?`}
+              : starting
+                ? "Pausing threads"
+                : label}
           </DialogTitle>
           <DialogDescription>
             {session
               ? resuming
-                ? `Resume requests for ${label}.`
+                ? `Sending “resume” to the threads on ${label} that received Pause.`
                 : `Automatic thread wake-ups on ${label} are held until you resume.`
-              : `Ask all active threads on ${label} to pause safely before you go offline. Automatic thread wake-ups will wait until you resume, even if the environment reconnects. Resume will message those same threads when you return.`}
+              : starting
+                ? "Checking thread activity…"
+                : "Not paused."}
           </DialogDescription>
         </DialogHeader>
         <DialogPanel>
@@ -254,27 +253,27 @@ function EnvironmentPauseDialog({
                 <div>
                   <p className="font-medium tabular-nums">
                     {resuming
-                      ? "Automatic thread wake-ups are enabled"
+                      ? "Automatic thread wake-ups are back on"
                       : quiet
                         ? "All threads are quiet"
                         : `${status.activeThreadCount} active ${status.activeThreadCount === 1 ? "thread" : "threads"} remaining`}
                   </p>
                   <p className="text-sm text-muted-foreground">
                     {resuming
-                      ? "Held work will continue as threads become available."
+                      ? "Work that was held will start as threads become available."
                       : quiet
                         ? "You can go offline. Return here to resume the paused threads."
                         : status.activeThreadCount === 0 && status.blockers.length > 0
-                          ? "Waiting for background work to finish."
-                          : "Waiting for threads to finish their pause requests."}
+                          ? "Waiting for background work to finish. You can resume at any time."
+                          : "Waiting for threads to stop. You can resume at any time."}
                   </p>
                 </div>
               </div>
             ) : (
               <p className="text-sm text-muted-foreground">
                 {status.activeThreadCount} active{" "}
-                {status.activeThreadCount === 1 ? "thread will" : "threads will"} receive “pause to
-                go offline”.
+                {status.activeThreadCount === 1 ? "thread" : "threads"}. Pause sends each one “pause
+                to go offline”.
               </p>
             )}
             {known && session && !resuming && status.blockers.length > 0 ? (
@@ -300,8 +299,8 @@ function EnvironmentPauseDialog({
               <div role="alert" className="space-y-1 text-sm text-destructive">
                 <p>
                   {resuming
-                    ? "Some resume messages could not be sent."
-                    : "Some pause messages could not be sent."}
+                    ? "These threads didn’t get the resume message. Press Resume to try again."
+                    : "These threads didn’t get the pause message and may still be running."}
                 </p>
                 <ul className="list-inside list-disc">
                   {(resuming ? resumeFailures : pauseFailures).map((thread) => (
@@ -311,12 +310,11 @@ function EnvironmentPauseDialog({
                     </li>
                   ))}
                 </ul>
-                <p>Retry sends only the messages that are still missing.</p>
               </div>
             ) : null}
             {unavailableRecipients.length > 0 ? (
               <div className="space-y-1 text-sm text-muted-foreground">
-                <p>{resuming ? "Resume unavailable" : "No pause needed"}</p>
+                <p>{resuming ? "Not resumed" : "No pause needed"}</p>
                 <ul className="list-inside list-disc">
                   {unavailableRecipients.map((thread) => (
                     <li key={thread.threadId}>
@@ -332,7 +330,7 @@ function EnvironmentPauseDialog({
                 {error}
               </p>
             ) : null}
-            {known && !canStart && !canResume ? (
+            {!canResume ? (
               <p className="text-sm text-muted-foreground">
                 This connection does not have permission to send thread messages.
               </p>
@@ -340,48 +338,15 @@ function EnvironmentPauseDialog({
           </div>
         </DialogPanel>
         <DialogFooter>
-          <Button variant="outline" disabled={pending} onClick={onClose}>
-            {session ? "Close" : "Cancel"}
+          <Button variant="outline" onClick={onClose}>
+            Close
           </Button>
-          {canCancelPause ? (
-            <Button
-              variant="outline"
-              disabled={pending || !canResume}
-              onClick={() => void execute("resume")}
-            >
-              Cancel pause
+          {session || starting ? (
+            <Button disabled={!connected || !canResume} onClick={() => void execute()}>
+              <PlayIcon />
+              Resume
             </Button>
           ) : null}
-          {!session ? (
-            <Button
-              disabled={pending || !known || !enabled || !canStart}
-              onClick={() => void execute("start")}
-            >
-              {pending ? <Spinner /> : <PauseIcon />}
-              Pause threads
-            </Button>
-          ) : resuming && environmentPauseResumeComplete(session) ? (
-            <Button
-              disabled={pending || !known || !enabled || !canStart}
-              onClick={() => void execute("start")}
-            >
-              {pending ? <Spinner /> : <PauseIcon />}
-              Pause again
-            </Button>
-          ) : resuming || quiet ? (
-            <Button
-              disabled={pending || !known || !canResume}
-              onClick={() => void execute("resume")}
-            >
-              {pending ? <Spinner /> : <PlayIcon />}
-              {resuming ? "Retry resume" : "Resume"}
-            </Button>
-          ) : (
-            <Button disabled={pending || !known || !canRetry} onClick={() => void execute("retry")}>
-              {pending ? <Spinner /> : <PauseIcon />}
-              {pauseFailures.length > 0 ? "Retry pause messages" : "Pause remaining threads"}
-            </Button>
-          )}
         </DialogFooter>
       </DialogPopup>
     </Dialog>

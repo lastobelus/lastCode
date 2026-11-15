@@ -511,11 +511,13 @@ const layerEnvironmentAutomationResume = Layer.effectDiscard(
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const actions = yield* ActionResume.ActionResume;
     const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const pause = yield* EnvironmentPause.EnvironmentPause;
     // Durable sources make missed transitions and restart recovery harmless.
     // Scheduler holds this source while paused; no connectivity signal releases it.
     yield* scheduler.register(
       "environment-pause-resume",
       Effect.gen(function* () {
+        yield* pause.continueResume;
         yield* actions.retryPendingFollowUps;
         yield* orchestrator.resumeQueuedRuns;
         yield* outbox.notifyAvailable();
@@ -524,7 +526,12 @@ const layerEnvironmentAutomationResume = Layer.effectDiscard(
   }),
 ).pipe(
   Layer.provide(
-    Layer.mergeAll(layerOrchestratorProvided, layerActionResumeProvided, EffectOutbox.layer),
+    Layer.mergeAll(
+      layerOrchestratorProvided,
+      layerActionResumeProvided,
+      EffectOutbox.layer,
+      layerEnvironmentPauseProvided,
+    ),
   ),
 );
 

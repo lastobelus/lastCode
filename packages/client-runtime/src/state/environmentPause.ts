@@ -5,11 +5,7 @@ import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import * as Option from "effect/Option";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 import type { EnvironmentConnectionSummary } from "./presentation.ts";
-import {
-  createAtomCommandScheduler,
-  createEnvironmentRpcCommand,
-  createEnvironmentRpcQueryAtomFamily,
-} from "./runtime.ts";
+import { createEnvironmentRpcCommand, createEnvironmentRpcQueryAtomFamily } from "./runtime.ts";
 
 type PauseConnection = EnvironmentConnectionSummary & {
   readonly connected: boolean;
@@ -41,11 +37,25 @@ export function createEnvironmentPauseConnectionsAtom(
 export function createEnvironmentPauseAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
 ) {
-  const scheduler = createAtomCommandScheduler();
+  const startState = Atom.family((_environmentId: EnvironmentId) =>
+    Atom.make<"idle" | "pending" | "refreshing">("idle").pipe(Atom.keepAlive),
+  );
+  const starting = Atom.family((environmentId: EnvironmentId) =>
+    Atom.make((get) => get(startState(environmentId)) !== "idle"),
+  );
   const query = { tag: WS_METHODS.serverEnvironmentPauseStatus, staleTimeMs: 0, idleTtlMs: 0 };
   const status = createEnvironmentRpcQueryAtomFamily(runtime, {
     ...query,
     label: "environment-data:pause:status",
+    onAnswer: ({ environmentId }, answer, registry) =>
+      Effect.sync(() => {
+        if (
+          answer.observation === "known" &&
+          registry.get(startState(environmentId)) === "refreshing"
+        ) {
+          registry.set(startState(environmentId), "idle");
+        }
+      }),
   });
   const monitorFamily = Atom.family((source: ReturnType<typeof status>) =>
     source.pipe(Atom.withRefresh(15_000), Atom.setIdleTTL(0)),
@@ -76,14 +86,13 @@ export function createEnvironmentPauseAtoms<R, E>(
       Effect.sync(() => {
         registry.refresh(status({ environmentId, input: {} }));
       }),
-    scheduler,
     concurrency: {
-      mode: "serial" as const,
+      mode: "singleFlight" as const,
       key: ({ environmentId }: { environmentId: string }) => environmentId,
     },
   };
   return {
-    // All readers share the same query. Monitor slowly; count down only in an open dialog.
+    starting,
     status,
     monitorStatus,
     activeStatus,
@@ -91,6 +100,16 @@ export function createEnvironmentPauseAtoms<R, E>(
       ...commands,
       label: "environment-data:pause:start",
       tag: WS_METHODS.serverPauseEnvironment,
+      onStart: ({ environmentId }, registry) => {
+        registry.set(startState(environmentId), "pending");
+      },
+      onSettled: (target, registry) =>
+        Effect.sync(() => {
+          // Keep Resume visible until the refreshed status replaces the pre-Pause observation.
+          if (registry.get(startState(target.environmentId)) === "pending") {
+            registry.set(startState(target.environmentId), "refreshing");
+          }
+        }).pipe(Effect.andThen(commands.onSettled(target, registry))),
     }),
     retry: createEnvironmentRpcCommand(runtime, {
       ...commands,

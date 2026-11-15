@@ -1,43 +1,25 @@
-import { environmentPauseResumeComplete, type EnvironmentPauseStatus } from "@t3tools/contracts";
+import type { EnvironmentPauseStatus } from "@t3tools/contracts";
 
 export function environmentPauseAvailability(input: {
   readonly enabled: boolean;
   readonly connected: boolean;
   readonly fresh: boolean;
+  readonly starting?: boolean;
   readonly status: EnvironmentPauseStatus | null;
 }) {
   const session = input.status?.session ?? null;
   const known = input.connected && input.fresh && input.status?.observation === "known";
   const pauseFailed = session?.targets.some((target) => target.pause === "failed") ?? false;
-  const resumeFailed =
-    session?.targets.some((target) => target.pause === "sent" && target.resume === "failed") ??
-    false;
-  const pauseSettled = session?.targets.every((target) => target.pause !== "pending") ?? false;
-  const showPauseRemaining = session?.phase === "pausing" && input.status?.quiet === false;
-  const showRetryPause =
-    session !== null && session.phase !== "resuming" && (pauseFailed || showPauseRemaining);
   const ready =
     known && input.status?.quiet === true && session?.phase === "paused" && !pauseFailed;
-  const showCancelPause =
-    session !== null && session.phase !== "resuming" && pauseSettled && !ready;
-  const showPauseAgain =
-    input.enabled && session?.phase === "resuming" && environmentPauseResumeComplete(session);
+  const hasSession = session !== null || input.starting === true;
   return {
-    visible: input.enabled || session !== null,
+    visible: input.enabled || hasSession,
+    hasSession,
     known,
     ready,
-    canStart: input.enabled && known && (session === null || showPauseAgain),
-    showPauseAgain,
-    canPauseAgain: known && showPauseAgain,
-    showPauseRemaining,
-    showRetryPause,
-    canRetryPause: known && showRetryPause,
-    showCancelPause,
-    canCancelPause: known && showCancelPause,
-    canResume:
-      session !== null &&
-      (session.phase === "resuming" ? known && resumeFailed : ready && !pauseFailed),
+    canStart: input.enabled && input.connected && !hasSession,
+    canResume: input.connected && hasSession,
     pauseFailed,
-    resumeFailed,
   };
 }

@@ -18,6 +18,10 @@ import * as Stream from "effect/Stream";
 
 import * as Environment from "../../../environment/ServerEnvironment.ts";
 import * as EnvironmentPause from "../../../environment/EnvironmentPause.ts";
+import {
+  EnvironmentPauseCaller,
+  type PauseCaller,
+} from "../../../environment/EnvironmentPauseActivity.ts";
 import * as ThreadCommandExecutor from "../../../orchestration-v2/ThreadCommandExecutor.ts";
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as Settings from "../../../serverSettings.ts";
@@ -68,11 +72,18 @@ const pauseHarness = (scope = callerScope, initialCaller = liveThreadShell(threa
     const executor = yield* ThreadCommandExecutor.ThreadCommandExecutor;
     const caller = yield* Ref.make(initialCaller);
     const calls = yield* Ref.make<ReadonlyArray<string>>([]);
+    const reportingCallers = yield* Ref.make<ReadonlyArray<PauseCaller | null>>([]);
     const failure = yield* Ref.make<EnvironmentPauseError | null>(null);
     const descriptorGate = yield* Ref.make<Deferred.Deferred<void> | null>(null);
     const descriptorEntered = yield* Deferred.make<void>();
     const operation = (name: string) =>
       Ref.update(calls, (previous) => [...previous, name]).pipe(
+        Effect.andThen(
+          Effect.gen(function* () {
+            const reportingCaller = yield* EnvironmentPauseCaller;
+            yield* Ref.update(reportingCallers, (previous) => [...previous, reportingCaller]);
+          }),
+        ),
         Effect.andThen(Ref.get(failure)),
         Effect.flatMap((error) =>
           error === null ? Effect.succeed(pauseStatus) : Effect.fail(error),
@@ -125,6 +136,7 @@ const pauseHarness = (scope = callerScope, initialCaller = liveThreadShell(threa
           start: executor.withLock(threadId, operation("start")),
           retry: executor.withLock(threadId, operation("retry")),
           resume: executor.withLock(threadId, operation("resume")),
+          continueResume: Effect.void,
         }),
       ),
     );
@@ -145,10 +157,10 @@ const pauseHarness = (scope = callerScope, initialCaller = liveThreadShell(threa
           ),
         ),
       );
-    return { invoke, caller, calls, failure, descriptorGate, descriptorEntered };
+    return { invoke, caller, calls, reportingCallers, failure, descriptorGate, descriptorEntered };
   });
 
-it.effect("reads pause status with a read-only environment client", () =>
+it.effect("scopes pause reports to thread callers and preserves read-only client access", () =>
   Effect.gen(function* () {
     const h = yield* pauseHarness({
       ...callerScope,
@@ -157,6 +169,17 @@ it.effect("reads pause status with a read-only environment client", () =>
     });
     expect(yield* h.invoke("t3_environment_pause_status")).toEqual(pauseStatus);
     expect(yield* Ref.get(h.calls)).toEqual(["status"]);
+    expect(yield* Ref.get(h.reportingCallers)).toEqual([null]);
+    const agent = yield* pauseHarness();
+    expect(yield* agent.invoke("t3_environment_pause_status")).toEqual(pauseStatus);
+    expect(yield* Ref.get(agent.reportingCallers)).toEqual([
+      {
+        threadId,
+        runId: liveThreadShell(threadId).activeRunId,
+        providerSessionId: callerScope.thread!.providerSessionId,
+      },
+    ]);
+    expect(yield* EnvironmentPauseCaller).toBeNull();
   }).pipe(Effect.provide(ThreadCommandExecutor.layer)),
 );
 
@@ -224,6 +247,16 @@ it.effect.each(writeTools)(
         const h = yield* pauseHarness(scope);
         expect(yield* h.invoke(tool)).toEqual(pauseStatus);
         expect(yield* Ref.get(h.calls)).toEqual([tool.replace("t3_environment_pause_", "")]);
+        expect(yield* Ref.get(h.reportingCallers)).toEqual([
+          scope.thread === undefined
+            ? null
+            : {
+                threadId,
+                runId: liveThreadShell(threadId).activeRunId,
+                providerSessionId: scope.thread.providerSessionId,
+              },
+        ]);
+        expect(yield* EnvironmentPauseCaller).toBeNull();
       }
     }).pipe(Effect.provide(ThreadCommandExecutor.layer)),
 );

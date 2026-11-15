@@ -11,17 +11,24 @@ import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Semaphore from "effect/Semaphore";
 import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderSessions from "../orchestration-v2/ProviderSessionManager.ts";
+import * as PreviewHosting from "../preview/Hosting.ts";
 import { TerminalManager } from "../terminal/Manager.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { currentExecutionBlockers } from "../updateDrain/UpdateDrainAdmission.ts";
 import * as Store from "./EnvironmentPauseStore.ts";
-import { pauseActivity, deferredActivity } from "./EnvironmentPauseActivity.ts";
+import {
+  pauseActivity,
+  deferredActivity,
+  EnvironmentPauseCaller,
+  pauseExecutionBlockers,
+} from "./EnvironmentPauseActivity.ts";
 
 export class EnvironmentPause extends Context.Service<
   EnvironmentPause,
@@ -30,6 +37,7 @@ export class EnvironmentPause extends Context.Service<
     readonly start: Effect.Effect<EnvironmentPauseStatus, EnvironmentPauseError>;
     readonly retry: Effect.Effect<EnvironmentPauseStatus, EnvironmentPauseError>;
     readonly resume: Effect.Effect<EnvironmentPauseStatus, EnvironmentPauseError>;
+    readonly continueResume: Effect.Effect<void, EnvironmentPauseError>;
   }
 >()("t3/environment/EnvironmentPause") {}
 
@@ -50,7 +58,8 @@ const make = Effect.gen(function* () {
   >();
   const operations = yield* Semaphore.make(1);
   const recovery = yield* Semaphore.make(1);
-  const operationActive = yield* Ref.make(false);
+  const operationActive = yield* Ref.make(0);
+  let resumeRevision = 0;
   const readShell = projections
     .getShellSnapshot()
     .pipe(
@@ -58,7 +67,14 @@ const make = Effect.gen(function* () {
         (cause) => new EnvironmentPauseError({ operation: "status", reason: "unavailable", cause }),
       ),
     );
-  const readBlockers = currentExecutionBlockers().pipe(Effect.provide(executionContext));
+  const previewHosting = yield* Effect.serviceOption(PreviewHosting.PreviewHosting);
+  const readBlockers = Effect.gen(function* () {
+    const blockers = yield* currentExecutionBlockers().pipe(Effect.provide(executionContext));
+    const previews = Option.isSome(previewHosting)
+      ? yield* previewHosting.value.list().pipe(Effect.orElseSucceed(() => []))
+      : [];
+    return { blockers, previews };
+  });
   const readTargets = Effect.gen(function* () {
     const session = yield* store.get;
     const automationPaused = session !== null && session.phase !== "resuming";
@@ -333,13 +349,58 @@ const make = Effect.gen(function* () {
   });
   const reconcileUnaccepted = recovery.withPermits(1)(recoverUnaccepted);
 
+  const retireCancelledPauses = Effect.gen(function* () {
+    const session = yield* store.get;
+    if (session === null) return;
+    for (const target of session.targets) {
+      if (target.pause !== "failed" || !target.pauseAccepted) continue;
+      const identity = Store.deliveryIdentity(session, target, "pause");
+      const record = yield* projections
+        .getThreadRecords(target.threadId, ["messages", "runs", "providerTurns"], {
+          messageIds: [identity.messageId],
+        })
+        .pipe(Effect.result);
+      if (record._tag === "Failure") continue;
+      const message = record.success.messages.find((message) => message.id === identity.messageId);
+      const run = record.success.runs.find(
+        (run) => run.id === message?.runId && run.userMessageId === identity.messageId,
+      );
+      if (
+        run?.status !== "cancelled" ||
+        record.success.providerTurns.some(
+          (turn) =>
+            turn.nativeTurnRef !== null &&
+            ((run.rootNodeId !== null && turn.nodeId === run.rootNodeId) ||
+              (run.activeAttemptId !== null && turn.runAttemptId === run.activeAttemptId)),
+        )
+      )
+        continue;
+      const effects = yield* outbox
+        .listByCommandId(CommandId.make(`command:system:start-queued:${run.id}`))
+        .pipe(Effect.result);
+      if (effects._tag === "Failure" || effects.success.some((effect) => effect.attemptCount > 0))
+        continue;
+      yield* store.recordDelivery(identity.messageId, "cancelled");
+    }
+  });
+
   const withOperation = (effect: Effect.Effect<EnvironmentPauseStatus, EnvironmentPauseError>) =>
     operations.withPermits(1)(
-      // Finish any observation of unsent rows before fanout owns them. The
-      // recovery lock is released before dispatch so status remains live.
-      recovery
-        .withPermits(1)(recoverUnaccepted.pipe(Effect.andThen(Ref.set(operationActive, true))))
-        .pipe(Effect.andThen(effect), Effect.ensuring(Ref.set(operationActive, false))),
+      Effect.acquireUseRelease(
+        // Finish any observation of unsent rows before fanout owns them. The
+        // recovery lock is released before dispatch so status remains live.
+        recovery.withPermits(1)(
+          recoverUnaccepted.pipe(Effect.andThen(Ref.update(operationActive, (count) => count + 1))),
+        ),
+        () => effect,
+        () => Ref.update(operationActive, (count) => count - 1),
+      ),
+    );
+  const withResumeOperation = <A, E>(effect: Effect.Effect<A, E>) =>
+    Effect.acquireUseRelease(
+      Ref.update(operationActive, (count) => count + 1),
+      () => effect,
+      () => Ref.update(operationActive, (count) => count - 1),
     );
 
   const status = Effect.gen(function* (): Effect.fn.Return<
@@ -347,6 +408,7 @@ const make = Effect.gen(function* () {
     EnvironmentPauseError
   > {
     const recoveryUnknown = yield* reconcileUnaccepted;
+    yield* retireCancelledPauses;
     yield* reconcileResumeRecipients;
     let session = yield* store.get;
     if (session?.phase === "resuming" && resumeComplete(session)) {
@@ -384,95 +446,110 @@ const make = Effect.gen(function* () {
     let deliveryUnknown = recoveryUnknown;
     if (session !== null) {
       for (const target of session.targets) {
-        const direction = session.phase === "resuming" ? "resume" : "pause";
-        if (direction === "resume" && target.pause !== "sent") continue;
-        if (target[direction] !== "pending") continue;
-        if (!target[`${direction}Accepted`]) {
-          if ((yield* readSubmission(session, target, direction)) === "unknown")
-            deliveryUnknown = true;
-          continue;
-        }
-        const identity = Store.deliveryIdentity(session, target, direction);
-        let effects = yield* outbox
-          .listByCommandId(identity.commandId)
-          .pipe(
-            Effect.mapError(
-              (cause) =>
-                new EnvironmentPauseError({ operation: "status", reason: "unavailable", cause }),
-            ),
-          );
-        let deliveries = effects.filter(
-          (effect) =>
-            effect.request.type === "provider-turn.start" ||
-            effect.request.type === "provider-turn.steer",
-        );
-        if (deliveries.length === 0) {
-          const records = yield* projections
-            .getThreadRecords(target.threadId, ["messages", "runs", "providerTurns"], {
-              messageIds: [identity.messageId],
-            })
-            .pipe(Effect.result);
-          if (records._tag === "Failure") {
-            deliveryUnknown = true;
+        for (const direction of session.phase === "resuming"
+          ? (["pause", "resume"] as const)
+          : (["pause"] as const)) {
+          if (direction === "resume" && target.pause !== "sent") continue;
+          if (target[direction] !== "pending") continue;
+          if (!target[`${direction}Accepted`]) {
+            if ((yield* readSubmission(session, target, direction)) === "unknown")
+              deliveryUnknown = true;
             continue;
           }
-          const message = records.success.messages.find(
-            (message) => message.id === identity.messageId,
-          );
-          const run = records.success.runs.find(
-            (run) => run.id === message?.runId && run.userMessageId === identity.messageId,
-          );
-          if (run === undefined) {
-            deliveryUnknown = true;
-            continue;
-          }
-          // Queued messages acquire their start effect under a later system command.
-          // The original message command has no provider effect while waiting.
-          if (run.status === "queued") continue;
-          effects = yield* outbox
-            .listByCommandId(CommandId.make(`command:system:start-queued:${run.id}`))
+          const identity = Store.deliveryIdentity(session, target, direction);
+          let effects = yield* outbox
+            .listByCommandId(identity.commandId)
             .pipe(
               Effect.mapError(
                 (cause) =>
                   new EnvironmentPauseError({ operation: "status", reason: "unavailable", cause }),
               ),
             );
-          deliveries = effects.filter((effect) => effect.request.type === "provider-turn.start");
-          const nativeAcceptance = records.success.providerTurns.some(
-            (turn) =>
-              turn.nativeTurnRef !== null &&
-              ((run.rootNodeId !== null && turn.nodeId === run.rootNodeId) ||
-                (run.activeAttemptId !== null && turn.runAttemptId === run.activeAttemptId)),
-          );
-          if (
-            deliveries.length === 0 &&
-            !nativeAcceptance &&
-            (run.status === "cancelled" || run.status === "failed")
-          ) {
-            yield* store.recordDelivery(identity.messageId, false);
-            continue;
-          }
-          if (deliveries.length === 0) {
-            deliveryUnknown = true;
-            continue;
-          }
-        }
-        const unsettled = deliveries.some(
-          (effect) => effect.status === "pending" || effect.status === "running",
-        );
-        if (unsettled) continue;
-        if (
-          deliveries.some(
+          let deliveries = effects.filter(
             (effect) =>
-              (effect.status === "cancelled" || effect.status === "failed") &&
-              effect.attemptCount === 0,
-          )
-        ) {
-          yield* store.recordDelivery(identity.messageId, false);
-        } else {
-          // A crash between native acceptance and its receipt cannot prove non-delivery.
-          // Keep the target; never re-send it or declare it safely paused by inference.
-          deliveryUnknown = true;
+              effect.request.type === "provider-turn.start" ||
+              effect.request.type === "provider-turn.steer",
+          );
+          if (deliveries.length === 0) {
+            const records = yield* projections
+              .getThreadRecords(target.threadId, ["messages", "runs", "providerTurns"], {
+                messageIds: [identity.messageId],
+              })
+              .pipe(Effect.result);
+            if (records._tag === "Failure") {
+              deliveryUnknown = true;
+              continue;
+            }
+            const message = records.success.messages.find(
+              (message) => message.id === identity.messageId,
+            );
+            const run = records.success.runs.find(
+              (run) => run.id === message?.runId && run.userMessageId === identity.messageId,
+            );
+            if (run === undefined) {
+              deliveryUnknown = true;
+              continue;
+            }
+            // Queued messages acquire their start effect under a later system command.
+            // The original message command has no provider effect while waiting.
+            if (run.status === "queued") continue;
+            effects = yield* outbox
+              .listByCommandId(CommandId.make(`command:system:start-queued:${run.id}`))
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new EnvironmentPauseError({
+                      operation: "status",
+                      reason: "unavailable",
+                      cause,
+                    }),
+                ),
+              );
+            deliveries = effects.filter((effect) => effect.request.type === "provider-turn.start");
+            const nativeAcceptance = records.success.providerTurns.some(
+              (turn) =>
+                turn.nativeTurnRef !== null &&
+                ((run.rootNodeId !== null && turn.nodeId === run.rootNodeId) ||
+                  (run.activeAttemptId !== null && turn.runAttemptId === run.activeAttemptId)),
+            );
+            if (
+              deliveries.length === 0 &&
+              !nativeAcceptance &&
+              (run.status === "cancelled" || run.status === "failed")
+            ) {
+              yield* store.recordDelivery(
+                identity.messageId,
+                run.status === "cancelled" && direction === "pause" ? "cancelled" : false,
+              );
+              continue;
+            }
+            if (deliveries.length === 0) {
+              deliveryUnknown = true;
+              continue;
+            }
+          }
+          const unsettled = deliveries.some(
+            (effect) => effect.status === "pending" || effect.status === "running",
+          );
+          if (unsettled) continue;
+          if (
+            deliveries.some(
+              (effect) =>
+                (effect.status === "cancelled" || effect.status === "failed") &&
+                effect.attemptCount === 0,
+            )
+          ) {
+            yield* store.recordDelivery(
+              identity.messageId,
+              direction === "pause" && deliveries.every((effect) => effect.status === "cancelled")
+                ? "cancelled"
+                : false,
+            );
+          } else {
+            // A crash between native acceptance and its receipt cannot prove non-delivery.
+            // Keep the target; never re-send it or declare it safely paused by inference.
+            deliveryUnknown = true;
+          }
         }
       }
       deliveryUnknown =
@@ -495,10 +572,16 @@ const make = Effect.gen(function* () {
     const shellThreads =
       shell._tag === "Success" ? [...shell.success.threads, ...shell.success.archivedThreads] : [];
     const deferredRuns = deferred._tag === "Success" ? deferred.success : [];
-    const activity = pauseActivity(shellThreads, deferredRuns, automationPaused);
+    const caller = yield* EnvironmentPauseCaller;
+    const activity = pauseActivity(shellThreads, deferredRuns, automationPaused, caller);
     const blockers =
       execution._tag === "Success"
-        ? execution.success.filter((blocker) => {
+        ? pauseExecutionBlockers(
+            execution.success.blockers,
+            shellThreads,
+            caller,
+            execution.success.previews,
+          ).filter((blocker) => {
             if (blocker.type === "thread-background" && automationPaused)
               return !shellThreads.some(
                 (thread) =>
@@ -552,6 +635,7 @@ const make = Effect.gen(function* () {
                   pauseAccepted: _pauseAccepted,
                   resumeAccepted: _resumeAccepted,
                   resumeRequired: _resumeRequired,
+                  pauseCancelled: _pauseCancelled,
                   ...target
                 }) => target,
               ),
@@ -571,6 +655,7 @@ const make = Effect.gen(function* () {
       (target) =>
         Effect.gen(function* () {
           if (direction === "resume" && target.pause !== "sent") return;
+          if (direction === "pause" && (yield* store.get)?.phase === "resuming") return;
           if (
             target[direction] === "sent" ||
             target[direction] === "unavailable" ||
@@ -588,7 +673,7 @@ const make = Effect.gen(function* () {
                 ...identity,
                 text: direction === "pause" ? "pause to go offline" : "resume",
                 attachments: [],
-                mode: "cooperative",
+                mode: "auto",
                 ...(direction === "pause" ? { pauseOnlyIfActive: true as const } : {}),
                 createdBy: "user",
                 creationSource: "server",
@@ -605,7 +690,7 @@ const make = Effect.gen(function* () {
               submission === "unsubmitted";
           }
           yield* store.update((current) =>
-            current?.id !== snapshot.id
+            current?.id !== snapshot.id || (direction === "pause" && current.phase === "resuming")
               ? current
               : {
                   ...current,
@@ -707,7 +792,7 @@ const make = Effect.gen(function* () {
       const restored = session.targets.map((target) => {
         const thread = activeById.get(target.threadId);
         const reenroll =
-          target.pause === "unavailable" ||
+          (target.pause === "unavailable" && !target.pauseCancelled) ||
           (target.pause === "sent" && laterRuns.get(target.threadId) === target.pauseAttempt);
         return !reenroll || thread === undefined
           ? target
@@ -771,50 +856,119 @@ const make = Effect.gen(function* () {
     yield* deliver(direction);
   });
 
+  const cancelPendingPauses = Effect.gen(function* () {
+    const session = yield* store.get;
+    if (session?.phase !== "resuming") return;
+    for (const target of session.targets) {
+      if (target.pause !== "pending") continue;
+      const identity = Store.deliveryIdentity(session, target, "pause");
+      if (
+        !target.pauseAccepted &&
+        (yield* readSubmission(session, target, "pause")) === "unsubmitted"
+      ) {
+        yield* store.recordDelivery(identity.messageId, "cancelled");
+        continue;
+      }
+      const record = yield* projections
+        .getThreadRecords(target.threadId, ["messages", "runs"], {
+          messageIds: [identity.messageId],
+        })
+        .pipe(Effect.result);
+      if (record._tag === "Failure") continue;
+      const message = record.success.messages.find((message) => message.id === identity.messageId);
+      const run = record.success.runs.find(
+        (run) => run.id === message?.runId && run.userMessageId === identity.messageId,
+      );
+      if (run?.status !== "queued" && run?.status !== "cancelled") continue;
+      if (run.status === "queued") {
+        const cancelled = yield* threads
+          .dispatch({
+            type: "queued-run.cancel",
+            commandId: CommandId.make(`${identity.commandId}:cancel`),
+            threadId: target.threadId,
+            runId: run.id,
+          })
+          .pipe(Effect.result);
+        if (cancelled._tag === "Failure") continue;
+      }
+      yield* store.recordDelivery(identity.messageId, "cancelled");
+    }
+  });
+  const continueResume = withResumeOperation(
+    Effect.gen(function* () {
+      if ((yield* store.get)?.phase !== "resuming") return;
+      yield* cancelPendingPauses;
+      yield* deliver("resume");
+      yield* status;
+    }),
+  );
+
   return EnvironmentPause.of({
     status,
-    start: withOperation(
-      Effect.gen(function* () {
-        const existing = yield* store.get;
-        if (existing !== null && !(existing.phase === "resuming" && resumeComplete(existing))) {
-          if (existing.phase === "resuming")
-            return yield* new EnvironmentPauseError({
-              operation: "start",
-              reason: "resume_in_progress",
-            });
+    start: Effect.suspend(() => {
+      const requestedAtRevision = resumeRevision;
+      return withOperation(
+        Effect.gen(function* () {
+          if (requestedAtRevision !== resumeRevision) return yield* status;
+          const existing = yield* store.get;
+          if (existing !== null && existing.phase !== "resuming") {
+            yield* collectNewTargets;
+            yield* deliver("pause");
+            return yield* status;
+          }
+          const enabled = yield* settings.getSettings.pipe(
+            Effect.mapError(
+              (cause) =>
+                new EnvironmentPauseError({ operation: "start", reason: "unavailable", cause }),
+            ),
+          );
+          if (!enabled.environmentPauseEnabled)
+            return yield* new EnvironmentPauseError({ operation: "start", reason: "disabled" });
+          const now = yield* DateTime.now;
+          const session: Store.StoredSession = {
+            id: yield* random
+              .uuidV4()
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new EnvironmentPauseError({ operation: "start", reason: "unavailable", cause }),
+                ),
+              ),
+            createdAt: DateTime.formatIso(now),
+            phase: "pausing",
+            targets:
+              existing?.phase === "resuming"
+                ? existing.targets
+                    .filter(
+                      (target) =>
+                        target.pause === "sent" &&
+                        target.resume !== "sent" &&
+                        target.resume !== "unavailable",
+                    )
+                    .map((target) => ({
+                      ...target,
+                      pauseAttempt: 0,
+                      resumeAttempt: 0,
+                      pause: "pending" as const,
+                      pauseAccepted: false,
+                      resumeAccepted: false,
+                      resume: "pending" as const,
+                      resumeRequired: true as const,
+                      error: null,
+                    }))
+                : [],
+          };
+          // Close automatic admission before observing which threads need a message.
+          const admitted = yield* store.update((current) =>
+            requestedAtRevision === resumeRevision ? session : current,
+          );
+          if (admitted?.id !== session.id) return yield* status;
           yield* collectNewTargets;
           yield* deliver("pause");
           return yield* status;
-        }
-        const enabled = yield* settings.getSettings.pipe(
-          Effect.mapError(
-            (cause) =>
-              new EnvironmentPauseError({ operation: "start", reason: "unavailable", cause }),
-          ),
-        );
-        if (!enabled.environmentPauseEnabled)
-          return yield* new EnvironmentPauseError({ operation: "start", reason: "disabled" });
-        const now = yield* DateTime.now;
-        const session: Store.StoredSession = {
-          id: yield* random
-            .uuidV4()
-            .pipe(
-              Effect.mapError(
-                (cause) =>
-                  new EnvironmentPauseError({ operation: "start", reason: "unavailable", cause }),
-              ),
-            ),
-          createdAt: DateTime.formatIso(now),
-          phase: "pausing",
-          targets: [],
-        };
-        // Close automatic admission before observing which threads need a message.
-        yield* store.update(() => session);
-        yield* collectNewTargets;
-        yield* deliver("pause");
-        return yield* status;
-      }),
-    ),
+        }),
+      );
+    }),
     retry: withOperation(
       Effect.gen(function* () {
         yield* status;
@@ -826,13 +980,12 @@ const make = Effect.gen(function* () {
         return yield* status;
       }),
     ),
-    resume: withOperation(
+    continueResume,
+    resume: withResumeOperation(
       Effect.gen(function* () {
+        resumeRevision++;
         const session = yield* store.get;
-        if (session === null)
-          return yield* new EnvironmentPauseError({ operation: "resume", reason: "no_session" });
-        if (session.targets.some((target) => target.pause === "pending"))
-          return yield* new EnvironmentPauseError({ operation: "resume", reason: "unavailable" });
+        if (session === null) return yield* status;
         yield* store.update((current) =>
           current === null
             ? current
@@ -845,6 +998,7 @@ const make = Effect.gen(function* () {
                 ),
               },
         );
+        yield* cancelPendingPauses;
         yield* retryDirection("resume");
         return yield* status;
       }),

@@ -49,7 +49,10 @@ const testLayer = (testAdapter: ProviderAdapterV2["Service"]) =>
 
 it.effect.each(
   (["pause", "resume"] as const).flatMap((direction) =>
-    (["starting", "failed"] as const).map((outcome) => ({ direction, outcome })),
+    (direction === "pause"
+      ? (["starting", "failed", "cancelled"] as const)
+      : (["starting", "failed"] as const)
+    ).map((outcome) => ({ direction, outcome })),
   ),
 )(
   "makes $direction $outcome ahead of a held queue without releasing ordinary work",
@@ -135,7 +138,28 @@ it.effect.each(
             },
           ],
         });
-        const controlId = `environment-pause:queue-fixture:${threadId}:${direction}:0`;
+        yield* Ref.update(pause.state, (session) =>
+          session === null
+            ? session
+            : {
+                ...session,
+                targets: [
+                  {
+                    threadId,
+                    projectId: ProjectId.make(`${threadId}:project`),
+                    title: "Example",
+                    pause: direction === "pause" ? ("pending" as const) : ("sent" as const),
+                    resume: "pending" as const,
+                    pauseAttempt: 0,
+                    resumeAttempt: 0,
+                    pauseAccepted: true,
+                    resumeAccepted: false,
+                    error: null,
+                  },
+                ],
+              },
+        );
+        const controlId = `environment-pause:pause-session-fixture:${threadId}:${direction}:0`;
         yield* send(controlId, direction === "pause" ? "pause to go offline" : "resume");
         yield* send(`${threadId}:ordinary-after-control`, "Another ordinary prompt");
         const queued = yield* orchestrator.getThreadProjection(threadId);
@@ -144,6 +168,7 @@ it.effect.each(
         assert.notEqual(control.queueHeld, true);
         assert.isTrue(queued.runs[3]?.queueHeld);
         assert.isFalse(yield* projections.canStartQueuedRun(threadId));
+        if (outcome === "cancelled") yield* pause.resume;
         // Keep promotion manual here: publishing completion would also wake the
         // orchestrator's terminal-event subscriber before the eligibility assertion.
         yield* projections.apply({
@@ -179,7 +204,7 @@ it.effect.each(
               },
             ],
           });
-        else
+        else if (outcome === "failed")
           assert.lengthOf(
             started.turnItems.filter((item) => item.type === "error" && item.runId === control.id),
             1,

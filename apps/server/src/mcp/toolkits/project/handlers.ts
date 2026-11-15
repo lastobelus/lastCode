@@ -220,6 +220,17 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         const launchedModel =
           launched === null || launched.deletedAt !== null ? undefined : launched.modelSelection;
         const replaying = launchedModel !== undefined;
+        if (!replaying && input.groupedUnderThreadId != null) {
+          const parent = yield* context.threads
+            .getThreadShell(input.groupedUnderThreadId)
+            .pipe(Effect.mapError(unavailable));
+          if (parent === null || parent.deletedAt !== null)
+            return yield* new OrchestratorMcpFailure({
+              code: "invalid_request",
+              message:
+                "groupedUnderThreadId must name an existing thread. Use JSON null (without quotes) for a top-level thread.",
+            });
+        }
         const project = replaying
           ? undefined
           : yield* Project.ProjectService.pipe(

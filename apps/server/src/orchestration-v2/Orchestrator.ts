@@ -2661,11 +2661,20 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         selectedRun ?? controlRun ?? (yield* nextDeliverableQueuedRun(projection));
       while (
         storedQueuedRun !== undefined &&
-        isStalePullRequestWatchWake(projection, storedQueuedRun)
+        (isStalePullRequestWatchWake(projection, storedQueuedRun) ||
+          (Option.isSome(pauseStore) &&
+            EnvironmentPauseStore.environmentPauseDeliveryCancelled(
+              yield* pauseStore.value.get,
+              storedQueuedRun.userMessageId,
+            )))
       ) {
         yield* writeSystemEvents(
           queuedRunCancellationEvents(projection, storedQueuedRun, yield* DateTime.now),
         );
+        if (Option.isSome(pauseStore))
+          yield* pauseStore.value
+            .recordDelivery(storedQueuedRun.userMessageId, "cancelled")
+            .pipe(Effect.orDie);
         projection = yield* readCommandProjection(threadId);
         storedQueuedRun = yield* nextDeliverableQueuedRun(projection);
       }
@@ -19585,6 +19594,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "message.dispatch": {
         const thread = yield* refuseNativeSubagentMessage(command);
         if (yield* PauseRecipientMustBeActive) {
+          if (
+            Option.isSome(pauseStore) &&
+            EnvironmentPauseStore.environmentPauseDeliveryCancelled(
+              yield* pauseStore.value.get,
+              command.messageId,
+            )
+          )
+            return yield* new OrchestratorPauseRecipientInactiveError({
+              commandId: command.commandId,
+              threadId: command.threadId,
+            });
           const snapshot = yield* projectionStore
             .getShellSnapshot()
             .pipe(mapDispatchError(command));

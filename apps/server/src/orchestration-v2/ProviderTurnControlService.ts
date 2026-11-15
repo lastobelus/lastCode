@@ -16,6 +16,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as PauseStore from "../environment/EnvironmentPauseStore.ts";
 
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as EventSink from "./EventSink.ts";
@@ -114,6 +115,7 @@ export const layer: Layer.Layer<
     const eventSink = yield* EventSink.EventSinkV2;
     const projections = yield* ProjectionStore.ProjectionStoreV2;
     const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+    const pauseStore = yield* Effect.serviceOption(PauseStore.EnvironmentPauseStore);
 
     const load = Effect.fn("ProviderTurnControlService.load")(function* (input: {
       readonly threadId: ThreadId;
@@ -448,6 +450,16 @@ export const layer: Layer.Layer<
               deliveryRejected: true,
               cause: "The persisted steering message or target run is missing.",
             });
+          }
+          if (
+            Option.isSome(pauseStore) &&
+            PauseStore.environmentPauseDeliveryCancelled(
+              yield* pauseStore.value.get,
+              input.messageId,
+            )
+          ) {
+            yield* pauseStore.value.recordDelivery(input.messageId, "cancelled").pipe(Effect.orDie);
+            return;
           }
           yield* loaded.session.value
             .steerTurn({

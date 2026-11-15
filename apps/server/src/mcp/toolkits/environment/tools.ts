@@ -94,24 +94,24 @@ const pause = {
 const EnvironmentPauseStatusTool = Tool.make("t3_environment_pause_status", {
   ...pause,
   description:
-    "Read this environment's durable pause session, delivery results, and current execution blockers. Only quiet=true with observation=known confirms the environment is quiet.",
+    "Report this environment's pause session, per-thread delivery results, and the work still running. No need to call it before Pause or Resume. Your own current turn and managed previews with no cleanup pending are not counted; unfinished commands, Actions, and cleanup are. The environment is quiet only when quiet=true and observation=known.",
 })
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false);
 const EnvironmentPauseStartTool = Tool.make("t3_environment_pause_start", {
   ...pause,
   description:
-    "Start an environment-wide pause when explicitly instructed to pause or go offline. Requires environment pause enabled and a live full-access/default calling thread or full-access client. Saves the automatic wake gate and sends 'pause to go offline' to active threads cooperatively. Returns before those threads necessarily become quiet. After starting, stop work and end the turn; the app tracks quiet progress.",
+    "Pause this whole environment when explicitly told to pause or go offline. Requires environment pause enabled and a live full-access/default calling thread or full-access client. Holds automatic thread wake-ups, then sends 'pause to go offline' to each active thread as an ordinary user message, steering running turns where the provider supports it. Returns without waiting for threads to go quiet. After starting, stop work and end your turn; the app shows progress.",
 }).annotate(Tool.Destructive, true);
 const EnvironmentPauseRetryTool = Tool.make("t3_environment_pause_retry", {
   ...pause,
   description:
-    "Recover the current environment pause session: retry failed deliveries and pause newly active threads while pausing, or retry remaining Resume deliveries while resuming. Successful deliveries are preserved. Requires a live full-access/default calling thread or full-access client.",
+    "Optional recovery when messages failed to deliver; normal Pause and Resume never need it. While pausing, resends failed pause messages and pauses threads that became active since; while resuming, resends failed resume messages. Delivered messages are not resent. Requires a live full-access/default calling thread or full-access client.",
 }).annotate(Tool.Destructive, true);
 const EnvironmentPauseResumeTool = Tool.make("t3_environment_pause_resume", {
   ...pause,
   description:
-    "Resume this environment when explicitly instructed. Releases the durable automatic wake gate and sends 'resume' to the threads that received Pause. Requires a live full-access/default calling thread or full-access client. Pending pause deliveries must settle first. Failures stay available for retry; archived or deleted recipients can finish recovery without a message.",
+    "Resume this environment when explicitly told to. Works at any time, including while a pause is unfinished. Immediately lifts the hold on automatic thread wake-ups, cancels pause messages not yet delivered, and sends 'resume' only to threads that received Pause. Requires a live full-access/default calling thread or full-access client. Failed resume messages can be resent with t3_environment_pause_retry; archived or deleted threads finish without a message.",
 }).annotate(Tool.Destructive, true);
 const PromptSnippetsSaveTool = Tool.make("prompt_snippets_save", {
   ...shared,

@@ -19,6 +19,13 @@ export function useEnvironmentPauseControl(environmentId: EnvironmentId) {
   const targets = useAtomValue(environmentPauseConnectionsAtom);
   const target = targets.find((candidate) => candidate.environmentId === environmentId);
   const [open, setOpen] = useState(false);
+  const [failure, setFailure] = useState<{ environmentId: EnvironmentId; message: string } | null>(
+    null,
+  );
+  const error = failure?.environmentId === environmentId ? failure.message : null;
+  const requestVersion = useRef(0);
+  const start = useAtomCommand(environmentPause.start, { reportFailure: false });
+  const resume = useAtomCommand(environmentPause.resume, { reportFailure: false });
   const entryAtom = useMemo(
     () =>
       Atom.make((get) => {
@@ -26,15 +33,14 @@ export function useEnvironmentPauseControl(environmentId: EnvironmentId) {
         const request = { environmentId, input: {} };
         const config = get(serverEnvironment.configValueAtom(environmentId));
         const supported = config?.environment.capabilities.environmentPause === true;
-        const initial = supported
-          ? get(environmentPause.monitorStatus(request))
+        const result = supported
+          ? get(
+              (target.connected ? environmentPause.activeStatus : environmentPause.monitorStatus)(
+                request,
+              ),
+            )
           : AsyncResult.initial<EnvironmentPauseStatus>();
-        const saved = Option.getOrNull(AsyncResult.value(initial));
-        const result =
-          supported && target.connected && open
-            ? get(environmentPause.activeStatus(request))
-            : initial;
-        const status = Option.getOrNull(AsyncResult.value(result)) ?? saved;
+        const status = Option.getOrNull(AsyncResult.value(result));
         const enabled = supported && config.settings.environmentPauseEnabled === true;
         return {
           ...target,
@@ -43,25 +49,54 @@ export function useEnvironmentPauseControl(environmentId: EnvironmentId) {
             enabled,
             connected: target.connected,
             fresh: AsyncResult.isSuccess(result) && result.timestamp >= target.since,
+            starting: get(environmentPause.starting(environmentId)),
             status,
           }),
           queryFailed: AsyncResult.isFailure(result),
           canStart: get(environmentPause.start.permissionAtom(environmentId)),
-          canRetry: get(environmentPause.retry.permissionAtom(environmentId)),
           canResume: get(environmentPause.resume.permissionAtom(environmentId)),
         };
       }),
-    [environmentId, open, target],
+    [environmentId, target],
   );
   const entry = useAtomValue(entryAtom);
   const onPress = useCallback(() => setOpen(true), []);
+  const hasSession = entry?.availability.hasSession ?? false;
+  const disabled =
+    !entry ||
+    (hasSession
+      ? !entry.canResume || !entry.availability.canResume
+      : !entry.canStart || !entry.availability.canStart);
+  const execute = async () => {
+    if (!entry || disabled) return;
+    const version = ++requestVersion.current;
+    setFailure(null);
+    const result = await (hasSession ? resume : start)({ environmentId, input: {} });
+    if (version === requestVersion.current && AsyncResult.isFailure(result)) {
+      const cause = squashAtomCommandFailure(result);
+      setFailure({
+        environmentId,
+        message: cause instanceof Error ? cause.message : "The request failed. Try again.",
+      });
+    }
+  };
   return {
     visible: entry?.availability.visible ?? false,
-    hasSession: entry?.availability.known === true && entry.status?.session != null,
+    hasSession,
+    disabled,
+    error,
     environmentLabel: entry?.environmentLabel ?? "Environment",
     onPress,
+    onToggle: () => void execute(),
     modal:
-      open && entry ? <EnvironmentPauseModal entry={entry} onClose={() => setOpen(false)} /> : null,
+      open && entry ? (
+        <EnvironmentPauseModal
+          entry={entry}
+          error={error}
+          onResume={() => void execute()}
+          onClose={() => setOpen(false)}
+        />
+      ) : null,
   };
 }
 
@@ -75,8 +110,14 @@ export function EnvironmentPauseControl(props: { readonly environmentId: Environ
           <Button
             label={`${control.hasSession ? "Resume" : "Pause"} ${control.environmentLabel}`}
             tone="secondary"
-            onPress={control.onPress}
+            disabled={control.disabled}
+            onPress={control.onToggle}
           />
+          {control.error ? (
+            <Text selectable accessibilityRole="alert" className="text-sm text-danger-foreground">
+              {control.error}
+            </Text>
+          ) : null}
         </View>
       ) : null}
       {control.modal}
@@ -91,13 +132,13 @@ type PauseEntry = {
   readonly status: EnvironmentPauseStatus | null;
   readonly availability: ReturnType<typeof environmentPauseAvailability>;
   readonly queryFailed: boolean;
-  readonly canStart: boolean;
-  readonly canRetry: boolean;
   readonly canResume: boolean;
 };
 
 function EnvironmentPauseModal(props: {
   readonly entry: PauseEntry;
+  readonly error: string | null;
+  readonly onResume: () => void;
   readonly onClose: () => void;
 }) {
   return (
@@ -110,6 +151,8 @@ function EnvironmentPauseModal(props: {
           <EnvironmentPauseDetails
             key={props.entry.environmentId}
             entry={props.entry}
+            error={props.error}
+            onResume={props.onResume}
             onClose={props.onClose}
           />
         </ScrollView>
@@ -120,49 +163,21 @@ function EnvironmentPauseModal(props: {
 
 function EnvironmentPauseDetails(props: {
   readonly entry: PauseEntry;
+  readonly error: string | null;
+  readonly onResume: () => void;
   readonly onClose: () => void;
 }) {
   const { entry } = props;
-  const start = useAtomCommand(environmentPause.start, { reportFailure: false });
-  const retry = useAtomCommand(environmentPause.retry, { reportFailure: false });
-  const resume = useAtomCommand(environmentPause.resume, { reportFailure: false });
-  const [pending, setPending] = useState(false);
-  const pendingRef = useRef(false);
-  const [error, setError] = useState<string | null>(null);
-  const [resumed, setResumed] = useState(false);
   const session = entry.status?.session ?? null;
   const availability = entry.availability;
-  const run = async (action: "start" | "retry" | "resume" | "cancel") => {
-    if (pendingRef.current) return;
-    if (action === "start" && (!entry.canStart || !availability.canStart)) return;
-    if (action === "retry" && (!entry.canRetry || !availability.canRetryPause)) return;
-    if (action === "resume" && (!entry.canResume || !availability.canResume)) return;
-    if (action === "cancel" && (!entry.canResume || !availability.canCancelPause)) return;
-    pendingRef.current = true;
-    setPending(true);
-    setError(null);
-    await (async () => {
-      const command = action === "start" ? start : action === "retry" ? retry : resume;
-      const result = await command({ environmentId: entry.environmentId, input: {} });
-      if (AsyncResult.isFailure(result)) throw squashAtomCommandFailure(result);
-      if (action === "resume" || action === "cancel") setResumed(true);
-    })()
-      .catch((cause) => {
-        setError(cause instanceof Error ? cause.message : "The request failed. Try again.");
-      })
-      .finally(() => {
-        pendingRef.current = false;
-        setPending(false);
-      });
-  };
   const working = session !== null && !availability.ready && availability.known;
   return (
     <>
       <Text accessibilityRole="header" className="text-xl font-t3-semibold">
         {entry.environmentLabel}
       </Text>
-      {resumed && availability.known && session === null ? (
-        <Text className="text-base text-foreground-secondary">Pause session finished.</Text>
+      {availability.known && !availability.hasSession ? (
+        <Text className="text-base text-foreground-secondary">Not paused.</Text>
       ) : !availability.known ? (
         <Text accessibilityRole="alert" className="text-base text-foreground-secondary">
           {!entry.connected
@@ -171,13 +186,7 @@ function EnvironmentPauseDetails(props: {
               ? "Could not check the environment. Reconnect or try again."
               : "Checking the environment…"}
         </Text>
-      ) : session === null ? (
-        <Text className="text-base text-foreground-secondary">
-          Send “pause to go offline” to every active thread in this environment, then wait until all
-          environment work is quiet. Automatic thread wake-ups will wait until you resume, even if
-          the environment reconnects.
-        </Text>
-      ) : session.phase === "resuming" ? (
+      ) : session?.phase === "resuming" ? (
         <View className="flex-row items-center gap-3">
           {session.targets.some(
             (target) => target.pause === "sent" && target.resume === "pending",
@@ -185,8 +194,8 @@ function EnvironmentPauseDetails(props: {
             <AppActivityIndicator accessibilityLabel="Resuming paused threads" />
           ) : null}
           <Text className="flex-1 text-base text-foreground-secondary">
-            Resuming the original paused threads. Automatic thread wake-ups are enabled; held work
-            will continue as threads become available.
+            Sending “resume” to the threads that received Pause. Automatic thread wake-ups are back
+            on.
           </Text>
         </View>
       ) : availability.ready ? (
@@ -210,17 +219,13 @@ function EnvironmentPauseDetails(props: {
       {session && availability.known ? (
         <>
           <Text className="text-sm text-foreground-muted">
-            {session.targets.length} {session.targets.length === 1 ? "thread" : "threads"} tracked.
-            Resume sends “resume” to the threads that received the pause message.
+            {session.targets.length} {session.targets.length === 1 ? "thread" : "threads"} in this
+            pause. You can resume at any time; only threads that got the pause message receive
+            “resume”.
           </Text>
           {session.phase !== "resuming" ? (
             <Text className="text-sm text-foreground-muted">
               Automatic thread wake-ups are held until you resume.
-            </Text>
-          ) : null}
-          {availability.showCancelPause ? (
-            <Text className="text-sm text-foreground-muted">
-              Cancel pause resumes those threads so you can deal with unfinished work.
             </Text>
           ) : null}
           {entry.status?.blockers.map((blocker) => {
@@ -243,7 +248,7 @@ function EnvironmentPauseDetails(props: {
             )
             .map((target) => (
               <Text key={target.threadId} selectable className="text-sm text-danger-foreground">
-                {target.title}: {target.error ?? "Message could not be sent."}
+                {target.title}: {target.error ?? "Message not delivered."}
               </Text>
             ))}
           {session.targets
@@ -259,59 +264,21 @@ function EnvironmentPauseDetails(props: {
             ))}
         </>
       ) : null}
-      {error ? (
+      {props.error ? (
         <Text selectable accessibilityRole="alert" className="text-sm text-danger-foreground">
-          {error}
+          {props.error}
         </Text>
       ) : null}
       <View className="flex-row flex-wrap justify-end gap-3">
         <Button label="Close" tone="secondary" onPress={props.onClose} />
-        {resumed && availability.known && session === null ? null : session === null ? (
+        {availability.hasSession ? (
           <Button
-            label={pending ? "Pausing…" : "Pause to go offline"}
+            label="Resume"
             tone="primary"
-            disabled={pending || !entry.canStart || !availability.canStart}
-            onPress={() => void run("start")}
+            disabled={!entry.canResume || !availability.canResume}
+            onPress={props.onResume}
           />
-        ) : (
-          <>
-            {availability.showPauseAgain ? (
-              <Button
-                label={pending ? "Pausing…" : "Pause again"}
-                tone="primary"
-                disabled={pending || !entry.canStart || !availability.canPauseAgain}
-                onPress={() => void run("start")}
-              />
-            ) : null}
-            {availability.showRetryPause ? (
-              <Button
-                label={availability.pauseFailed ? "Retry pause" : "Pause remaining threads"}
-                tone="secondary"
-                disabled={pending || !entry.canRetry || !availability.canRetryPause}
-                onPress={() => void run("retry")}
-              />
-            ) : null}
-            {availability.showCancelPause ? (
-              <Button
-                label={pending ? "Sending…" : "Cancel pause"}
-                tone="secondary"
-                disabled={pending || !entry.canResume || !availability.canCancelPause}
-                onPress={() => void run("cancel")}
-              />
-            ) : null}
-            {availability.ready ||
-            (session.phase === "resuming" && !availability.showPauseAgain) ? (
-              <Button
-                label={
-                  pending ? "Sending…" : session.phase === "resuming" ? "Retry resume" : "Resume"
-                }
-                tone="primary"
-                disabled={pending || !entry.canResume || !availability.canResume}
-                onPress={() => void run("resume")}
-              />
-            ) : null}
-          </>
-        )}
+        ) : null}
       </View>
     </>
   );

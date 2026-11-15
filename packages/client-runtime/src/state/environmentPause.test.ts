@@ -1,9 +1,164 @@
-import { EnvironmentId } from "@t3tools/contracts";
-import { Atom, AtomRegistry } from "effect/reactivity";
-import { expect, it, vi } from "vite-plus/test";
+import { expect, it } from "@effect/vitest";
+import {
+  AuthOrchestrationOperateScope,
+  EnvironmentId,
+  WS_METHODS,
+  type AuthSessionState,
+  type EnvironmentPauseStatus,
+} from "@t3tools/contracts";
+import * as Deferred from "effect/Deferred";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Stream from "effect/Stream";
+import * as SubscriptionRef from "effect/SubscriptionRef";
+import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
+import { vi } from "vite-plus/test";
 
-import { createEnvironmentPauseConnectionsAtom } from "./environmentPause.ts";
+import { EnvironmentRegistry } from "../connection/registry.ts";
+import { EnvironmentSupervisor } from "../connection/supervisor.ts";
+import { AVAILABLE_CONNECTION_STATE } from "../connection/model.ts";
+import type { RpcSession } from "../rpc/session.ts";
+import {
+  createEnvironmentPauseAtoms,
+  createEnvironmentPauseConnectionsAtom,
+} from "./environmentPause.ts";
 import type { EnvironmentConnectionSummary } from "./presentation.ts";
+import { executeAtomQuery } from "./runtime.ts";
+
+const mocks = vi.hoisted(() => ({ request: vi.fn() }));
+vi.mock("../rpc/client.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../rpc/client.ts")>()),
+  request: mocks.request,
+  requestGuarded: mocks.request,
+}));
+vi.mock("./session.ts", () => ({
+  createEnvironmentSessionAtoms: () => ({ sessionStateAtom: sessions }),
+}));
+const sessions = Atom.family((_environmentId: EnvironmentId) =>
+  Atom.make<AsyncResult.AsyncResult<AuthSessionState, never>>(AsyncResult.initial()),
+);
+
+const unpaused: EnvironmentPauseStatus = {
+  session: null,
+  observation: "known",
+  quiet: true,
+  activeThreadCount: 0,
+  blockers: [],
+};
+
+const makeHarness = Effect.fn("TestEnvironmentPause.makeHarness")(function* () {
+  mocks.request.mockReset();
+  const environmentId = EnvironmentId.make("workstation");
+  const state = yield* SubscriptionRef.make({
+    ...AVAILABLE_CONNECTION_STATE,
+    phase: "connected" as const,
+  });
+  const supervisor = {
+    target: { environmentId },
+    state,
+    session: yield* SubscriptionRef.make(Option.some({} as RpcSession)),
+  } as unknown as EnvironmentSupervisor["Service"];
+  const run: EnvironmentRegistry["Service"]["run"] = (_id, effect) =>
+    Effect.provideService(effect, EnvironmentSupervisor, supervisor);
+  const followStream: EnvironmentRegistry["Service"]["followStream"] = (_id, stream) =>
+    Stream.provideService(stream, EnvironmentSupervisor, supervisor);
+  const runtime = Atom.runtime(
+    Layer.succeed(EnvironmentRegistry, {
+      run,
+      followStream,
+      stateChanges: () => SubscriptionRef.changes(state),
+    } as unknown as EnvironmentRegistry["Service"]),
+  );
+  const registry = AtomRegistry.make();
+  yield* Effect.addFinalizer(() => Effect.sync(() => registry.dispose()));
+  registry.set(
+    sessions(environmentId),
+    AsyncResult.success({
+      authenticated: true,
+      auth: {
+        policy: "remote-reachable",
+        bootstrapMethods: [],
+        sessionMethods: [],
+        sessionCookieName: "test",
+      },
+      scopes: [AuthOrchestrationOperateScope],
+      permissions: [AuthOrchestrationOperateScope],
+    }),
+  );
+  return { environmentId, registry, pause: createEnvironmentPauseAtoms(runtime) };
+});
+
+it.effect(
+  "dispatches Resume to the bound environment before Pause returns and retains it until status refreshes",
+  () =>
+    Effect.gen(function* () {
+      const { environmentId, registry, pause } = yield* makeHarness();
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const calls: Array<readonly [EnvironmentId, string]> = [];
+      let observedStatus = unpaused;
+      mocks.request.mockImplementation((tag: string) =>
+        EnvironmentSupervisor.pipe(
+          Effect.flatMap((supervisor) => {
+            calls.push([supervisor.target.environmentId, tag]);
+            return tag === WS_METHODS.serverPauseEnvironment
+              ? Deferred.succeed(entered, undefined).pipe(
+                  Effect.andThen(Deferred.await(release)),
+                  Effect.as(unpaused),
+                )
+              : Effect.succeed(observedStatus);
+          }),
+        ),
+      );
+      const target = { environmentId, input: {} };
+      const pendingPause = pause.start.run(registry, target);
+      yield* Deferred.await(entered);
+      expect(registry.get(pause.starting(environmentId))).toBe(true);
+      expect(registry.get(pause.starting(EnvironmentId.make("other")))).toBe(false);
+      const resumed = yield* Effect.promise(() => pause.resume.run(registry, target));
+      expect(AsyncResult.isSuccess(resumed)).toBe(true);
+      expect(yield* Deferred.isDone(release)).toBe(false);
+      expect(calls).toEqual([
+        [environmentId, WS_METHODS.serverPauseEnvironment],
+        [environmentId, WS_METHODS.serverResumeEnvironment],
+      ]);
+      yield* Effect.promise(() => executeAtomQuery(registry, pause.status(target)));
+      expect(registry.get(pause.starting(environmentId))).toBe(true);
+      yield* Deferred.succeed(release, undefined);
+      yield* Effect.promise(() => pendingPause);
+      expect(registry.get(pause.starting(environmentId))).toBe(true);
+      observedStatus = { ...unpaused, observation: "unknown" };
+      yield* Effect.promise(() =>
+        executeAtomQuery(registry, pause.status(target), { refresh: true }),
+      );
+      expect(registry.get(pause.starting(environmentId))).toBe(true);
+      observedStatus = unpaused;
+      yield* Effect.promise(() =>
+        executeAtomQuery(registry, pause.status(target), { refresh: true }),
+      );
+      expect(registry.get(pause.starting(environmentId))).toBe(false);
+    }),
+);
+
+it.effect("does not dispatch or switch to Resume without the destination's permission", () =>
+  Effect.gen(function* () {
+    const { environmentId, registry, pause } = yield* makeHarness();
+    const granted = AsyncResult.getOrElse(registry.get(sessions(environmentId)), () => null)!;
+    registry.set(
+      sessions(environmentId),
+      AsyncResult.success({ ...granted, scopes: [], permissions: [] }),
+    );
+    for (const command of [pause.start, pause.resume]) {
+      const outcome = yield* Effect.promise(() =>
+        command.run(registry, { environmentId, input: {} }),
+      );
+      expect(AsyncResult.isFailure(outcome)).toBe(true);
+    }
+    expect(mocks.request).not.toHaveBeenCalled();
+    expect(registry.get(pause.starting(environmentId))).toBe(false);
+  }),
+);
 
 it("requires a fresh pause observation after reconnect, preserving other environments", () => {
   const environment: EnvironmentConnectionSummary = {

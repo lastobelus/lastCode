@@ -6,28 +6,28 @@ need a separate branch and working directory.
 ## Pause before going offline
 
 Enable **Environment pause button** in **Settings → LastCode** for each environment
-where you want it. It is off by default. The sidebar control pauses only the
-environment running on this computer, so you can take it offline. To pause a
-remote environment, use its control in **Settings → Connections**. Each control
-shows that environment's own pause state. On mobile, use Connections.
+where you want it. It is off by default. The sidebar button pauses only the
+environment running on this computer. To pause a remote environment, or to pause
+from mobile, use its control in **Settings → Connections**. Each control shows
+that environment's own pause state.
 
-If this computer also runs a WSL environment, pause it separately in Connections
-before taking the computer offline.
+Click **Pause** once. Each active thread receives an ordinary “pause to go
+offline” message. Automatic thread wake-ups are held until you resume, even if
+you reconnect or restart. PR watches stop polling while paused. Scheduled tasks
+follow their usual missed-run policy when you return.
 
-Confirm to send “pause to go offline” to that environment's active threads. The
-dialog counts down while the agents finish pausing and other thread work stops.
-If new work starts while you wait, choose **Pause remaining threads** to include it.
+The environment is quiet once its agents stop and its real background work ends:
+background commands, Project Actions and cleanup still count as unfinished.
+Browser previews keep running and don't need to stop before you move your laptop.
+Progress is shown while threads stop, but you don't need to watch it.
 
-Automatic thread wake-ups are blocked until you resume, including after
-reconnecting or restarting. PR watches also stop polling while paused. Scheduled
-tasks keep their usual missed-run policy when you return.
+The button turns into **Resume** (play) as soon as you pause. Click it at any
+moment, even while threads are still pausing. It sends “resume” only to threads
+that received Pause, and cancels pause messages that haven't been delivered yet.
 
-Once the environment is quiet, leave the dialog available until you return, then
-choose **Resume** to send “resume” to the threads that received the pause request.
-You can reopen the dialog after closing it or reconnecting. Failed deliveries
-remain available to retry. A thread archived or deleted before receiving Pause
-no longer blocks the dialog once its work stops. Deleted or archived threads
-cannot receive Resume.
+If a pause or resume message can't be delivered, the thread stays listed with
+the error. Click **Resume** again to retry threads that missed it. Archived or
+deleted threads don't receive Resume.
 
 ## Start a thread
 
