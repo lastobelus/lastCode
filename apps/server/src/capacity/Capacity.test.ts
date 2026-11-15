@@ -4,7 +4,11 @@ import { describe, expect, it } from "@effect/vitest";
 import type { CapacityMode, HostPowerSnapshot } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Logger from "effect/Logger";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -45,10 +49,11 @@ describe("Capacity service", () => {
       return Effect.gen(function* () {
         const mode = yield* Ref.make<CapacityMode>("observe");
         const reads = yield* Ref.make(0);
+        const directory = yield* Ref.make<string | null>("/unused");
         const service = yield* Capacity.make({
           mode: Ref.get(mode),
           activity,
-          worktreesDir: "/unused",
+          worktreesDir: Ref.get(directory),
           ownerPower: Effect.succeed(power),
           source: {
             read: Effect.gen(function* () {
@@ -110,6 +115,20 @@ describe("Capacity service", () => {
         expect(yield* Ref.get(reads)).toBe(4);
         expect((yield* service.read).smoothed.sampleCount).toBe(1);
         expect(logs).toHaveLength(4);
+
+        yield* Ref.set(directory, "/different-volume/worktrees");
+        yield* TestClock.adjust("5 seconds");
+        const retargeted = yield* service.read;
+        expect(retargeted.smoothed.sampleCount).toBe(1);
+        expect(retargeted.smoothed.freeBytesChangePerMinute).toBeNull();
+        expect(retargeted.verdicts.agent.state).toBe("unknown");
+
+        yield* Ref.set(directory, null);
+        yield* TestClock.adjust("5 seconds");
+        const unreadableDirectory = yield* service.read;
+        expect(unreadableDirectory.measurements?.worktreesFreeBytes).toBeNull();
+        expect(unreadableDirectory.verdicts.agent.state).toBe("unknown");
+        expect(unreadableDirectory.verdicts.owner.state).toBe("open");
       }).pipe(
         Effect.scoped,
         Effect.provide(
@@ -127,7 +146,7 @@ describe("Capacity service", () => {
         const reads = yield* Ref.make(0);
         const service = yield* Capacity.make({
           mode: Ref.get(mode),
-          worktreesDir: "/unused",
+          worktreesDir: Effect.succeed("/unused"),
           activity,
           ownerPower: Effect.fail(new CapacityTestReadError({ message: "no desktop telemetry" })),
           source: {
@@ -152,5 +171,48 @@ describe("Capacity service", () => {
         expect(failed.verdicts.owner.state).toBe("open");
         expect(failed.ownerIdleSeconds).toBeNull();
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+  it.effect("samples the selected directory and resets disk history when it changes", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "capacity-directory-" });
+      const first = path.join(root, "first");
+      const second = path.join(root, "second");
+      yield* fs.makeDirectory(path.join(first, "project-a", "worktree-one"), { recursive: true });
+      yield* fs.makeDirectory(path.join(second, "project-b", "worktree-two"), { recursive: true });
+      const directory = yield* Ref.make<string | null>(first);
+      let sampled = yield* Deferred.make<void>();
+      const logger = Logger.make(({ message }) => {
+        if (Array.isArray(message) && message[0] === "capacity.would-hold")
+          Deferred.doneUnsafe(sampled, Effect.void);
+      });
+      const service = yield* Capacity.make({
+        mode: Effect.succeed("observe"),
+        worktreesDir: Ref.get(directory),
+        activity,
+        ownerPower: Effect.succeed(power),
+      }).pipe(Effect.provide(Logger.layer([logger], { mergeWithExisting: false })));
+      expect((yield* service.read).measurements?.worktreeFoldersByProject).toEqual({
+        "project-a": 1,
+      });
+      sampled = yield* Deferred.make<void>();
+      yield* TestClock.adjust("5 seconds");
+      yield* Deferred.await(sampled);
+      expect((yield* service.read).smoothed.sampleCount).toBe(2);
+      yield* Ref.set(directory, second);
+      sampled = yield* Deferred.make<void>();
+      yield* TestClock.adjust("5 seconds");
+      yield* Deferred.await(sampled);
+      const retargeted = yield* service.read;
+      expect(retargeted.measurements?.worktreeFoldersByProject).toEqual({ "project-b": 1 });
+      expect(retargeted.smoothed.sampleCount).toBe(1);
+      expect(retargeted.smoothed.freeBytesChangePerMinute).toBeNull();
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(NodeServices.layer, Layer.succeed(HostProcess.Platform, "linux")),
+      ),
+    ),
   );
 });

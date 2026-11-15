@@ -34,7 +34,7 @@ export class Capacity extends Context.Service<
 export interface CapacityInputs {
   readonly mode: Effect.Effect<CapacityMode>;
   readonly activity: Effect.Effect<CapacityActivity, Error>;
-  readonly worktreesDir: string;
+  readonly worktreesDir: Effect.Effect<string | null, Error>;
   readonly ownerPower: Effect.Effect<HostPowerSnapshot, Error>;
   readonly source?: CapacitySource;
 }
@@ -51,8 +51,23 @@ const failedMeasurements = (sampledAt: number): CapacityMeasurements => ({
 });
 
 export const make = Effect.fn("capacity.make")(function* (inputs: CapacityInputs) {
-  const source = inputs.source ?? (yield* nativeSource(inputs.worktreesDir));
   const state = yield* Ref.make(initialCapacityState());
+  const sourceDirectory = yield* Ref.make<string | null>(null);
+  const readMeasurements = Effect.gen(function* () {
+    const directory = yield* inputs.worktreesDir;
+    const previous = yield* Ref.getAndSet(sourceDirectory, directory);
+    if (directory !== previous) {
+      yield* Ref.update(state, (current) => ({
+        ...current,
+        samples: [],
+        agent: { ...current.agent, healthySince: null },
+        background: { ...current.background, healthySince: null },
+      }));
+    }
+    if (directory === null) return failedMeasurements(yield* Clock.currentTimeMillis);
+    const source = inputs.source ?? (yield* nativeSource(directory));
+    return yield* source.read;
+  });
   const paused = yield* Ref.make(false);
   const sample = Effect.fn("capacity.sample")(function* () {
     const mode = yield* inputs.mode;
@@ -64,7 +79,7 @@ export const make = Effect.fn("capacity.make")(function* (inputs: CapacityInputs
     const startedAt = yield* Clock.currentTimeMillis;
     const [measurements, activity, ownerPower] = yield* Effect.all(
       [
-        source.read.pipe(
+        readMeasurements.pipe(
           Effect.timeout("3 seconds"),
           Effect.orElseSucceed(() => failedMeasurements(startedAt)),
         ),

@@ -1,3 +1,4 @@
+import { resolveWorktreesDirectory } from "./worktreesDirectory.ts";
 import * as EnvironmentPauseStore from "./environment/EnvironmentPauseStore.ts";
 import * as EffectOutbox from "./orchestration-v2/EffectOutbox.ts";
 import * as Capacity from "./capacity/Capacity.ts";
@@ -907,6 +908,8 @@ const layerCapacity = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
     const settings = yield* ServerSettings.ServerSettingsService;
+    const path = yield* Path.Path;
+    const home = yield* HostProcess.HomeDirectory;
     const power = yield* HostPowerMonitor.HostPowerMonitor;
     const projections = yield* ProjectionStoreV2.ProjectionStoreV2;
     const outbox = yield* EffectOutbox.EffectOutboxV2;
@@ -917,7 +920,11 @@ const layerCapacity = Layer.unwrap(
         Effect.orElseSucceed(() => "observe" as const),
       ),
       ownerPower: power.snapshot,
-      worktreesDir: config.worktreesDir,
+      worktreesDir: settings.getSettings.pipe(
+        Effect.map((current) =>
+          resolveWorktreesDirectory(current.worktreesDirectory, config.worktreesDir, path, home),
+        ),
+      ),
       activity: Effect.gen(function* () {
         const shell = yield* projections.getShellSnapshot();
         const session = yield* pauseStore.get;
