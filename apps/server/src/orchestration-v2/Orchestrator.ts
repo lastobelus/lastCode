@@ -17766,6 +17766,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         activeThreadIds,
         unreadThreadIds,
         activeChildThreadIds: activeThreadIds.filter((id) => id !== threadId),
+        promotableChildThreadIds: [],
         keptThreadIds: [],
         protectedChildThreadIds: family.protectedChildren.map((thread) => thread.id),
         nativeStopCount: family.children.filter((thread) => thread.creationSource === "provider")
@@ -17773,6 +17774,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         requiresConfirmation:
           activity.some((entry) => entry.requiresConfirmation) ||
           family.protectedChildren.length > 0,
+        canPromote: false,
         canStopAndArchive: owner?.persistent !== true && family.protectedChildren.length === 0,
       };
     },

@@ -22,6 +22,7 @@ it.effect(
         [17, "OrchestrationV2ThreadReadAuthorizationIndex"],
         [18, "OrchestrationV2InteractiveThreadParentIndex"],
         [19, "OrchestrationV2PullRequestWatchIndex"],
+        [20, "OrchestrationV2RetiredNativePromotion"],
       ]);
       assert.deepEqual(yield* runDatabaseMigrations(), []);
       for (const recovery of [false, true]) {

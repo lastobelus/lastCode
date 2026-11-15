@@ -350,7 +350,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       const family = yield* threads
         .getThreadArchiveFamily(projection.thread.id)
         .pipe(Effect.mapError(unavailable));
-      return Struct.omit(family, ["threads"]);
+      return Struct.omit(family, ["threads", "canPromote", "promotableChildThreadIds"]);
     }),
   ),
   t3_queue: McpToolAccess.either(

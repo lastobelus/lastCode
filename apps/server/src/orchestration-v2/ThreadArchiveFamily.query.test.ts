@@ -152,6 +152,7 @@ it.effect.each([false, true])(
         [rootId, interactiveId, appId, nestedId, nativeId].toSorted(),
       );
       assert.sameMembers([...result.childThreadIds], [interactiveId, appId, nestedId, nativeId]);
+      assert.deepEqual(result.promotableChildThreadIds, []);
       assert.deepEqual(result.keptThreadIds, []);
       assert.sameMembers(
         [...result.protectedChildThreadIds],
@@ -162,6 +163,7 @@ it.effect.each([false, true])(
       assert.deepEqual(result.activeChildThreadIds, []);
       assert.equal(result.nativeStopCount, 2);
       assert.isTrue(result.requiresConfirmation);
+      assert.isFalse(result.canPromote);
       assert.isFalse(result.canStopAndArchive);
       const refused = yield* service
         .dispatch({
@@ -289,6 +291,8 @@ it.effect.each([
       result.activeChildThreadIds,
       needsConsent && state !== "owner-work" ? [childId] : [],
     );
+    assert.isFalse(result.canPromote);
+    assert.deepEqual(result.promotableChildThreadIds, []);
     assert.deepEqual(result.keptThreadIds, []);
     assert.isTrue(result.canStopAndArchive);
   }).pipe(Effect.provide(testLayer)),
@@ -351,8 +355,10 @@ it.effect.each(["archived", "deleted"] as const)(
       assert.deepEqual(family.activeThreadIds, []);
       assert.deepEqual(family.activeChildThreadIds, []);
       assert.deepEqual(family.unreadThreadIds, []);
+      assert.deepEqual(family.promotableChildThreadIds, []);
       assert.deepEqual(family.keptThreadIds, []);
       assert.isFalse(family.requiresConfirmation);
+      assert.isFalse(family.canPromote);
       assert.isTrue(family.canStopAndArchive);
       assert.isFalse("attention" in family.threads.find(({ id }) => id === childId)!);
       assert.isNotNull(family.threads.find(({ id }) => id === rootId)?.archivedAt);

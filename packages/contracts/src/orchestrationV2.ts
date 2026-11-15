@@ -5014,10 +5014,12 @@ export const OrchestrationV2ThreadArchiveFamily = Schema.Struct({
   activeChildThreadIds: Schema.Array(ThreadId),
   activeThreadIds: Schema.Array(ThreadId),
   unreadThreadIds: Schema.Array(ThreadId),
+  promotableChildThreadIds: Schema.Array(ThreadId),
   keptThreadIds: Schema.Array(ThreadId),
   protectedChildThreadIds: Schema.Array(ThreadId),
   nativeStopCount: Schema.Number,
   requiresConfirmation: Schema.Boolean,
+  canPromote: Schema.Boolean,
   canStopAndArchive: Schema.Boolean,
 });
 export type OrchestrationV2ThreadArchiveFamily = typeof OrchestrationV2ThreadArchiveFamily.Type;
