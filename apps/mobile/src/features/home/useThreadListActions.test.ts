@@ -230,6 +230,7 @@ function makeArchiveDecision(
     threads,
     children,
     childThreadIds: children.map((child) => child.id),
+    promotableChildThreadIds: [],
     keptThreadIds: [],
     activeChildThreadIds: [],
     activeThreadIds: [],
@@ -237,6 +238,7 @@ function makeArchiveDecision(
     protectedChildThreadIds: [],
     nativeStopCount: 0,
     requiresConfirmation: false,
+    canPromote: false,
     canStopAndArchive: true,
     activeChildren: [],
     activeThreads: [],
@@ -619,6 +621,7 @@ describe("archive family reads", () => {
       protectedChildThreadIds: [protectedChild.id],
       protectedChildren: [protectedChild],
       requiresConfirmation: true,
+      canPromote: false,
       canStopAndArchive: false,
     });
     useThreadListActions().archiveThread(root);

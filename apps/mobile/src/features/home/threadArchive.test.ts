@@ -21,6 +21,7 @@ describe("thread family archive confirmation", () => {
     threads: [root, ...children],
     children,
     childThreadIds: children.map(({ id }) => id),
+    promotableChildThreadIds: [],
     keptThreadIds: [],
     activeChildThreadIds: [],
     activeThreadIds: [],
@@ -28,6 +29,7 @@ describe("thread family archive confirmation", () => {
     protectedChildThreadIds: [],
     nativeStopCount: 0,
     requiresConfirmation: false,
+    canPromote: false,
     canStopAndArchive: true,
     activeChildren: [],
     activeThreads: [],
@@ -117,6 +119,7 @@ describe("thread family archive confirmation", () => {
         protectedChildren: [protectedChild],
         protectedChildThreadIds: [protectedChild.id],
         requiresConfirmation: true,
+        canPromote: false,
         canStopAndArchive: false,
       }),
     );
