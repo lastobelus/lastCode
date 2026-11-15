@@ -420,21 +420,23 @@ const automaticUpdate = (
 });
 
 // A side chat pane has no panel of its own, so its panel actions open in its parent's panel.
-const panelHosts = new Map<string, { ref: ScopedThreadRef }>();
+const panelHosts = new Map<string, Array<{ ref: ScopedThreadRef }>>();
 
 /** Routes `guest`'s panel actions to `host`'s panel until the returned cleanup runs. */
 export function hostRightPanel(guest: ScopedThreadRef, host: ScopedThreadRef): () => void {
   const guestKey = scopedThreadKey(guest);
   const registration = { ref: host };
-  panelHosts.set(guestKey, registration);
+  panelHosts.set(guestKey, [...(panelHosts.get(guestKey) ?? []), registration]);
   return () => {
-    if (panelHosts.get(guestKey) === registration) panelHosts.delete(guestKey);
+    const remaining = panelHosts.get(guestKey)?.filter((entry) => entry !== registration) ?? [];
+    if (remaining.length) panelHosts.set(guestKey, remaining);
+    else panelHosts.delete(guestKey);
   };
 }
 
 /** The thread whose panel shows `ref`'s panel actions. */
 export function rightPanelHostRef(ref: ScopedThreadRef): ScopedThreadRef {
-  return panelHosts.get(scopedThreadKey(ref))?.ref ?? ref;
+  return panelHosts.get(scopedThreadKey(ref))?.at(-1)?.ref ?? ref;
 }
 
 const userAction = (
@@ -443,7 +445,7 @@ const userAction = (
   updater: (current: ThreadRightPanelState) => ThreadRightPanelState,
   closesView = false,
 ): Partial<RightPanelStoreState> => {
-  const host = panelHosts.get(guestKey)?.ref;
+  const host = panelHosts.get(guestKey)?.at(-1)?.ref;
   const threadKey = host === undefined ? guestKey : scopedThreadKey(host);
   return userActionOnThread(state, threadKey, updater, closesView);
 };
@@ -779,7 +781,7 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
         set((state) => {
           const hostRef = rightPanelHostRef(ref);
           const sourceThreadRef =
-            automatic && scopedThreadKey(hostRef) !== scopedThreadKey(ref) ? ref : undefined;
+            scopedThreadKey(hostRef) !== scopedThreadKey(ref) ? ref : undefined;
           return (automatic ? automaticUpdate : userAction)(
             state,
             scopedThreadKey(automatic ? hostRef : ref),

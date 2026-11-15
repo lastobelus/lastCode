@@ -385,6 +385,7 @@ import { observeResize } from "~/lib/observeResize";
 import { ThreadVisitWatermark } from "./chat/ThreadVisitWatermark";
 import { ChatTerminalDrawers } from "./chat/ChatTerminalDrawers";
 import { ChatRightPanel } from "./chat/ChatRightPanel";
+import { HostedPreviewSessions } from "./preview/HostedPreviewSessions";
 import { useDraftEnvironmentRouting } from "./chat/useDraftEnvironmentRouting";
 import { branchMismatchBannerItem, extensionStatusBannerItem } from "./chat/ThreadActivityBanners";
 import { LastCodeThreadNow } from "./chat/LastCodeThreadNow";
@@ -4063,7 +4064,13 @@ export default function ChatView(props: ChatViewProps) {
             </div>
 
             {canOperatePreview && activeThreadRef && activeEnvironmentServerBrowser && !embedded ? (
-              <PreviewSessionSync threadRef={activeThreadRef} />
+              <>
+                <PreviewSessionSync threadRef={activeThreadRef} />
+                <HostedPreviewSessions
+                  threadRef={activeThreadRef}
+                  surfaces={rightPanelState.surfaces}
+                />
+              </>
             ) : null}
             {activeThreadRef && shownPreviewMiniPlayer && !embedded ? (
               <ThreadPreviewMiniPlayer

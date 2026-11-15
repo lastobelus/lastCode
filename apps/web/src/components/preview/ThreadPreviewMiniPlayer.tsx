@@ -173,7 +173,7 @@ export function useThreadPreviewCanvasSource(
 ): ChatCanvasPreview | null {
   const source = miniPlayer?.source ?? null;
   const browser = useBrowserMiniPlayerSource(
-    threadRef,
+    source?.kind === "browser" ? (source.sourceThreadRef ?? threadRef) : threadRef,
     source?.kind === "browser" ? source.tabId : null,
   );
   const sourceKey = source ? previewMiniPlayerSourceKey(source) : null;
@@ -221,7 +221,13 @@ export function ThreadPreviewMiniPlayer({ threadRef, miniPlayer }: Props) {
   );
 }
 
-function BrowserMiniPlayer({ threadRef, tabId, miniPlayer }: Props & { readonly tabId: string }) {
+function BrowserMiniPlayer({
+  threadRef: hostRef,
+  tabId,
+  miniPlayer,
+}: Props & { readonly tabId: string }) {
+  const threadRef =
+    miniPlayer.source.kind === "browser" ? (miniPlayer.source.sourceThreadRef ?? hostRef) : hostRef;
   const httpBaseUrl = useEnvironmentHttpBaseUrl(threadRef.environmentId);
   const { serverEpoch, snapshot, desktopOverlay, serverTab, sourceSize } =
     useBrowserMiniPlayerSource(threadRef, tabId);
@@ -257,7 +263,7 @@ function BrowserMiniPlayer({ threadRef, tabId, miniPlayer }: Props & { readonly 
   );
 
   const openInPanel = () => {
-    usePreviewMiniPlayerStore.getState().close(threadRef);
+    usePreviewMiniPlayerStore.getState().close(hostRef);
     useRightPanelStore.getState().openBrowser(threadRef, tabId);
   };
 
@@ -299,7 +305,7 @@ function BrowserMiniPlayer({ threadRef, tabId, miniPlayer }: Props & { readonly 
 
   return (
     <MiniPlayerShell
-      threadRef={threadRef}
+      threadRef={hostRef}
       miniPlayer={miniPlayer}
       sourceSize={sourceSize}
       label="Floating browser preview"

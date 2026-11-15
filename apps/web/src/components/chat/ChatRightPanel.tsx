@@ -1,7 +1,4 @@
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { useEffect } from "react";
 import { usePreviewPanelInlineSize } from "../../hooks/usePreviewPanelInlineSize";
-import { hostRightPanel } from "../../rightPanelStore";
 import { RightPanelSheet } from "../RightPanelSheet";
 import { RightPanelTabs, type RightPanelTabsProps } from "../RightPanelTabs";
 
@@ -30,23 +27,6 @@ export function ChatRightPanel(props: ChatRightPanelProps) {
     layoutControls,
     ...tabs
   } = props;
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keeps the visible parent as host when displaying a preview unmounts its side chat pane
-  useEffect(() => {
-    const hostRef = tabs.threadRef;
-    if (!hostRef) return;
-    const cleanups = tabs.surfaces.flatMap((surface) => {
-      const sourceRef =
-        surface.kind === "side-chat"
-          ? scopeThreadRef(hostRef.environmentId, surface.threadId)
-          : surface.kind === "preview"
-            ? surface.sourceThreadRef
-            : undefined;
-      return sourceRef ? [hostRightPanel(sourceRef, hostRef)] : [];
-    });
-    return () => {
-      for (const cleanup of cleanups) cleanup();
-    };
-  }, [tabs.threadRef, tabs.surfaces]);
   const inlineSize = usePreviewPanelInlineSize({
     container: workspaceLayoutElement,
     widthStorageKey,

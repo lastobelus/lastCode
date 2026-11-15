@@ -185,28 +185,52 @@ describe("reopenClosedView", () => {
     ).toEqual([]);
   });
 
-  it("recreates a browser tab with saved URL, viewport and profile, then selects its new ID", async () => {
-    const openPreview = vi.fn(async () => AsyncResult.success({ ...snapshot, tabId: "new-tab" }));
-    const result = await reopenClosedView(
-      { kind: "browser", threadRef, snapshot },
-      { openPreview, workspaceAvailable: false },
-    );
-    expect(result).toBe(true);
-    expect(openPreview).toHaveBeenCalledWith({
-      environmentId: threadRef.environmentId,
-      input: {
-        threadId: threadRef.threadId,
-        url: "https://example.com",
-        viewport: snapshot.viewport,
-        profileId: "work",
-      },
-    });
-    expect(readThreadPreviewState(threadRef).snapshot?.tabId).toBe("new-tab");
-    expect(
-      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, threadRef)
-        .activeSurfaceId,
-    ).toBe("browser:new-tab");
-  });
+  it.each([false, true])(
+    "recreates a browser tab with its source intact (hosted: %s)",
+    async (hosted) => {
+      const hostRef = hosted
+        ? { ...threadRef, threadId: "host" as ScopedThreadRef["threadId"] }
+        : threadRef;
+      const unhost = hostRightPanel(threadRef, hostRef);
+      try {
+        const openPreview = vi.fn(async () =>
+          AsyncResult.success({ ...snapshot, tabId: "new-tab" }),
+        );
+        const result = await reopenClosedView(
+          { kind: "browser", threadRef, snapshot },
+          { openPreview, workspaceAvailable: false },
+        );
+        expect(result).toBe(true);
+        expect(openPreview).toHaveBeenCalledWith({
+          environmentId: threadRef.environmentId,
+          input: {
+            threadId: threadRef.threadId,
+            url: "https://example.com",
+            viewport: snapshot.viewport,
+            profileId: "work",
+          },
+        });
+        expect(readThreadPreviewState(threadRef).snapshot?.tabId).toBe("new-tab");
+        expect(
+          selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, hostRef)
+            .activeSurfaceId,
+        ).toBe(
+          hosted
+            ? `browser:${threadRef.environmentId}:${threadRef.threadId}:new-tab`
+            : "browser:new-tab",
+        );
+        expect(
+          selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, hostRef)
+            .surfaces[0],
+        ).toMatchObject({
+          resourceId: "new-tab",
+          ...(hosted ? { sourceThreadRef: threadRef } : {}),
+        });
+      } finally {
+        unhost();
+      }
+    },
+  );
 
   it("leaves the panel unchanged when a browser resource fails to reopen", async () => {
     const result = await reopenClosedView(

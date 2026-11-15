@@ -13,7 +13,7 @@ export interface PreviewMiniPlayerSize {
 }
 
 export type PreviewMiniPlayerSource =
-  | { readonly kind: "browser"; readonly tabId: string }
+  | { readonly kind: "browser"; readonly tabId: string; readonly sourceThreadRef?: ScopedThreadRef }
   | {
       readonly kind: "device";
       readonly hostId: string;
@@ -50,13 +50,17 @@ interface PreviewMiniPlayerStoreState {
 
 export function previewMiniPlayerSourceKey(source: PreviewMiniPlayerSource): string {
   return source.kind === "browser"
-    ? `browser:${source.tabId}`
+    ? `browser:${source.sourceThreadRef ? `${scopedThreadKey(source.sourceThreadRef)}:` : ""}${source.tabId}`
     : `device:${encodeURIComponent(source.hostId)}:${encodeURIComponent(source.deviceId)}`;
 }
 
-export const browserMiniPlayerSource = (tabId: string): PreviewMiniPlayerSource => ({
+export const browserMiniPlayerSource = (
+  tabId: string,
+  sourceThreadRef?: ScopedThreadRef,
+): PreviewMiniPlayerSource => ({
   kind: "browser",
   tabId,
+  ...(sourceThreadRef ? { sourceThreadRef } : {}),
 });
 
 export const usePreviewMiniPlayerStore = create<PreviewMiniPlayerStoreState>()((set) => ({

@@ -173,8 +173,11 @@ export function useRightPanelActions(input: RightPanelActionsInput) {
         usePreviewMiniPlayerStore
           .getState()
           .open(
-            activeRightPanelSurface.sourceThreadRef ?? activeThreadRef,
-            browserMiniPlayerSource(activeRightPanelSurface.resourceId),
+            activeThreadRef,
+            browserMiniPlayerSource(
+              activeRightPanelSurface.resourceId,
+              activeRightPanelSurface.sourceThreadRef,
+            ),
           );
       } else if (activeRightPanelSurface?.kind === "device" && activeRightPanelSurface.target) {
         floatDeviceSurface(

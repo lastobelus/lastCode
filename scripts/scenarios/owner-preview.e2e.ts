@@ -114,7 +114,9 @@ createInterface({input:process.stdin,crlfDelay:Infinity}).on('line', async (line
       opened = true;
       const before = await call('preview_status', {});
       if (before.tabs?.length) throw Error('The scenario must start without a browser tab');
-      await call('preview_open', {purpose:'user',open:true,browserHost:'environment',url:${JSON.stringify(dashboardUrl)}});
+      try {
+        await call('preview_open', {purpose:'user',open:true,browserHost:'environment',url:${JSON.stringify(dashboardUrl)}});
+      } catch (error) { console.error('Owner preview open failed:', error); }
     }
     agent.stdin.write(line + '\\n');
   } catch (error) {

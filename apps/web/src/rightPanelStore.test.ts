@@ -52,9 +52,10 @@ describe("rightPanelStore", () => {
     ).toEqual([]);
     store.openBrowser(refB, "manual-browser");
     expect(selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
-      id: "browser:manual-browser",
+      id: `browser:${refB.environmentId}:${refB.threadId}:manual-browser`,
       kind: "preview",
       resourceId: "manual-browser",
+      sourceThreadRef: refB,
     });
     unhost();
     store.openFile(refB, "src/app.ts");
@@ -83,31 +84,34 @@ describe("rightPanelStore", () => {
     expect(store.getUserActionRevision(refA)).toBe(initialRevision + 2);
   });
 
-  it("keeps routing agent opens to a side chat's parent while its tab is hidden", () => {
-    const store = useRightPanelStore.getState();
-    store.openSideChat(refA, refB.threadId);
-    const unhostPane = hostRightPanel(refB, refA);
-    const unhostPanel = hostRightPanel(refB, refA);
-    store.openBrowser(refB, "first", true);
-    unhostPane();
-    store.openBrowser(refB, "second", true);
-    expect(
-      selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, refA),
-    ).toMatchObject({
-      kind: "preview",
-      resourceId: "second",
-      sourceThreadRef: refB,
-    });
-    unhostPanel();
-    store.closeAllSurfaces(refA);
-    store.openBrowser(refB, "third", true);
-    expect(
-      selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, refB),
-    ).toMatchObject({
-      kind: "preview",
-      resourceId: "third",
-    });
-  });
+  it.each([false, true])(
+    "keeps a host until both subscribers unmount (latest first: %s)",
+    (latestFirst) => {
+      const store = useRightPanelStore.getState();
+      store.openSideChat(refA, refB.threadId);
+      const unhostPane = hostRightPanel(refB, refA);
+      const unhostPanel = hostRightPanel(refB, refA);
+      store.openBrowser(refB, "first", true);
+      (latestFirst ? unhostPanel : unhostPane)();
+      store.openBrowser(refB, "second", true);
+      expect(
+        selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, refA),
+      ).toMatchObject({
+        kind: "preview",
+        resourceId: "second",
+        sourceThreadRef: refB,
+      });
+      (latestFirst ? unhostPane : unhostPanel)();
+      store.closeAllSurfaces(refA);
+      store.openBrowser(refB, "third", true);
+      expect(
+        selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, refB),
+      ).toMatchObject({
+        kind: "preview",
+        resourceId: "third",
+      });
+    },
+  );
 
   it("reveals a hosted agent browser in the parent while retaining its session source", async () => {
     const store = useRightPanelStore.getState();

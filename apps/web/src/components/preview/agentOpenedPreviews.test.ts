@@ -297,6 +297,18 @@ describe("followPreviewSessions", () => {
     expect(browserTabs()).toEqual([]);
     expect(miniPlayerSource()).toBeUndefined();
   });
+
+  it("keeps a hosted floating browser until its source session ends", () => {
+    setup();
+    const host = { ...ref, threadId: ThreadId.make("host") };
+    usePreviewMiniPlayerStore.getState().open(host, browserMiniPlayerSource("tab_a", ref));
+    followPreviewSessions(host, previewState([]));
+    expect(usePreviewMiniPlayerStore.getState().byThreadKey[scopedThreadKey(host)]).toBeDefined();
+    followPreviewSessions(ref, previewState([snapshot("tab_a")]));
+    expect(usePreviewMiniPlayerStore.getState().byThreadKey[scopedThreadKey(host)]).toBeDefined();
+    followPreviewSessions(ref, previewState([]));
+    expect(usePreviewMiniPlayerStore.getState().byThreadKey[scopedThreadKey(host)]).toBeUndefined();
+  });
 });
 
 describe("startAgentOpenedPreviews", () => {
