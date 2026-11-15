@@ -264,7 +264,7 @@ it.effect(
           groupedUnderThreadId: stage,
         })
         .pipe(Effect.flip);
-      assert.equal(cycle._tag, "OrchestratorDispatchError");
+      assert.equal(cycle._tag, "OrchestratorThreadPlacementError");
       yield* orchestrator.dispatch({
         type: "thread.delete",
         commandId: CommandId.make("organization:delete-origin"),
@@ -523,7 +523,7 @@ it.effect(
             groupedUnderThreadId: target,
           })
           .pipe(Effect.flip);
-        assert.equal(rejected._tag, "OrchestratorDispatchError");
+        assert.equal(rejected._tag, "OrchestratorThreadPlacementError");
       }
       yield* orchestrator.dispatch({
         type: "thread.archive",
@@ -536,7 +536,7 @@ it.effect(
           groupedUnderThreadId: other,
         })
         .pipe(Effect.flip);
-      assert.equal(rejected._tag, "OrchestratorDispatchError");
+      assert.equal(rejected._tag, "OrchestratorThreadPlacementError");
       assert.isNull((yield* store.getThread(a)).archivedAt);
     }).pipe(Effect.provide(testLayer)),
 );
@@ -784,7 +784,7 @@ it.effect("does not infer historical creators and rejects invalid attribution or
           groupedUnderThreadId: parent,
         })
         .pipe(Effect.flip);
-      assert.equal(rejected._tag, "OrchestratorDispatchError");
+      assert.equal(rejected._tag, "OrchestratorThreadPlacementError");
     }
     const sideChatChild = ThreadId.make("creator:side-chat-child");
     yield* createOrdinary(sideChatChild, ThreadId.make("creator:eligibility:side-chat"), project);
@@ -1007,7 +1007,7 @@ it.effect.each(["archived", "deleted", "stopping"] as const)(
           creatorGrouping: "grouped",
         })
         .pipe(Effect.flip);
-      assert.equal(refused._tag, "OrchestratorDispatchError");
+      assert.equal(refused._tag, "OrchestratorThreadPlacementError");
       assert.equal((yield* store.getThread(child)).creatorGrouping, "independent");
     }).pipe(Effect.provide(testLayer)),
 );

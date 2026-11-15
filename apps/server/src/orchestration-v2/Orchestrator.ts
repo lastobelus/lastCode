@@ -305,6 +305,11 @@ export class OrchestratorCommandRejectedError extends Schema.TaggedError<Orchest
   }
 }
 
+export class OrchestratorThreadPlacementError extends Schema.TaggedError<OrchestratorThreadPlacementError>()(
+  "OrchestratorThreadPlacementError",
+  { commandId: CommandId, commandType: Schema.String, message: Schema.String },
+) {}
+
 /** A temporary admission hold must not consume a durable command identity. */
 export class OrchestratorThreadArchivingError extends Schema.TaggedError<OrchestratorThreadArchivingError>()(
   "OrchestratorThreadArchivingError",
@@ -458,6 +463,7 @@ export const OrchestratorV2Error = Schema.Union([
   OrchestratorDispatchError,
   OrchestratorThreadAlreadyExistsError,
   OrchestratorCommandRejectedError,
+  OrchestratorThreadPlacementError,
   OrchestratorThreadArchivingError,
   OrchestratorPauseRecipientInactiveError,
   OrchestratorProjectionError,
@@ -4286,10 +4292,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     let next: ThreadId | null = parentId;
     while (next !== null) {
       if (seen.has(next))
-        return yield* new OrchestratorDispatchError({
+        return yield* new OrchestratorThreadPlacementError({
           commandId: command.commandId,
           commandType: command.type,
-          cause: "The parent cannot be this thread or one of its descendants.",
+          message:
+            "groupedUnderThreadId names this thread or one of its descendants. Pass a different parent thread id, or JSON null for top level.",
         });
       seen.add(next);
       const parent: OrchestrationV2ThreadShell | null = yield* projectionStore
@@ -4304,11 +4311,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         parent.lineage.sideChat === true ||
         isProviderNativeSubagentThread(parent)
       )
-        return yield* new OrchestratorDispatchError({
+        return yield* new OrchestratorThreadPlacementError({
           commandId: command.commandId,
           commandType: command.type,
-          cause:
-            "The parent and each of its ancestors must be an interactive thread in this project that is not archived, being archived, or deleted.",
+          message:
+            'groupedUnderThreadId must be the id of an existing, unarchived interactive thread in this project, or JSON null for top level (not the string "null").',
         });
       if (next === parentId) yield* refuseAboveDispatchModeLimit(command, parent.id, parent);
       const organizationalParent = getInteractiveThreadParentThreadId(parent);

@@ -218,7 +218,7 @@ const RequestSecretTool = Tool.make("request_secret", {
 
 const CreateThreadsTool = Tool.make("create_threads", {
   description:
-    "Create interactive threads in this checkout; not delegation. Omit prompt for an empty parent (no model turn). groupedUnderThreadId defaults to your thread; null means top level. One thread or its own worktree: `t3_thread_launch`. Project, branch, and worktree inherit.",
+    "Create interactive threads in this checkout; not delegation. Omit prompt for an empty parent (no model turn). groupedUnderThreadId: a thread id, or JSON `null` (unquoted) for top level. Omitted, it groups under your thread; from a hidden side chat, top level. One thread or its own worktree: `t3_thread_launch`. Project, branch, and worktree inherit.",
   parameters: OrchestratorMcpCreateThreadsInput,
   success: OrchestratorMcpCreateThreadsResult,
   failure: OrchestratorMcpFailure,

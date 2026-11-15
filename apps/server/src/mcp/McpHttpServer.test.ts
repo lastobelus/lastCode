@@ -1186,6 +1186,42 @@ it.effect("accepts a nested key the merged advertised schema shows", () => {
   }).pipe(Effect.provide(layerRecordingTools(calls)));
 });
 
+it.effect("accepts launch instanceId without legacy provider or optional serviceTier", () => {
+  const calls: Array<unknown> = [];
+  return Effect.gen(function* () {
+    const selection = {
+      instanceId: "codex",
+      model: "gpt-5",
+      options: [{ id: "reasoningEffort", value: "high" }],
+    };
+    for (const modelSelection of [
+      selection,
+      {
+        ...selection,
+        provider: "codex",
+        options: [...selection.options, { id: "serviceTier", value: "default" }],
+      },
+    ]) {
+      yield* callTool("t3_thread_launch", {
+        title: "Inspect",
+        projectId: "project-1",
+        clientRequestId: "launch-control",
+        workspaceStrategy: { type: "worktree", baseRef: "origin/main", startFromOrigin: true },
+        message: "Inspect the project. ".repeat(300),
+        modelSelection,
+      });
+    }
+    yield* callTool("t3_thread_launch", {
+      title: "Top level",
+      projectId: "project-1",
+      groupedUnderThreadId: null,
+    });
+    expect(calls).toHaveLength(3);
+    expect(calls[0]).toMatchObject({ modelSelection: selection });
+    expect(calls[2]).toMatchObject({ groupedUnderThreadId: null });
+  }).pipe(Effect.provide(layerRecordingTools(calls)));
+});
+
 it.effect(
   "clamps t3_thread_read page sizes above their maximum instead of rejecting the call",
   () => {
