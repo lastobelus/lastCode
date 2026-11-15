@@ -257,6 +257,9 @@ The checkpoint command enables rerere in repository configuration for
 historical, non-carry rebases; carry replay overrides it on its own rebase
 commands only. Continue a carry replay manually with
 `git -c rerere.enabled=false -c rerere.autoupdate=false rebase --continue`.
+When a replay or incorporation conflict is in `pnpm-lock.yaml` or
+`apps/server/src/provider/agentContextBudget.json`, take either side to clear
+the markers and continue. Both files are regenerated after the replay.
 The retained recovery worktree is the only checkout that receives committed
 repairs. Incorporate any downstream merges made since that attempt before
 selecting its exact head.
@@ -272,6 +275,14 @@ repair commits, select the clean six-group head with the selection command below
 This records the completed replay plan so the final selection can fold repairs
 into their owning groups. This selection is bookkeeping: never request `run-now`
 after it. Only step 3's final selection leads to `run-now`.
+
+**Before step 1, after the replay and every incorporated downstream merge:** in
+the retained worktree, regenerate both derived files with this command, and
+commit any changes with `Carry-Group: incubator` so they replay after every group's inputs:
+
+```bash
+pnpm --config.verify-deps-before-run=false lastcode:regenerate-derived --upstream <replay-upstream-head>
+```
 
 1. Run the gate and client QA in one separate checkout, always; the service
    validates the retained recovery worktree, so neither runs there. Create the
@@ -296,8 +307,11 @@ after it. Only step 3's final selection leads to `run-now`.
    exists in the `<pre-replay-head>` or `<replay-upstream-head>` tree, so deleting
    a file the new upstream nightly introduced also passes. Tests that survive
    beside a deleted file still run. Fix concrete failures by committing in the
-   retained worktree, update the path list, then refresh the separate checkout and
-   rerun the gate. Broader checks remain in the service's unchanged Full CI; this preflight
+   retained worktree and updating the path list. If a repair changes dependency
+   manifests, patches, pnpm settings, or measured agent context, rerun the
+   regeneration command above and commit its changes with `Carry-Group: incubator`.
+   Then refresh the separate checkout and rerun the gate.
+   Broader checks remain in the service's unchanged Full CI; this preflight
    does not create a Full CI stamp or a PR Quick CI receipt.
 
 3. Record the passing gate checkout's HEAD as `<gated-head>`. If repairs moved
@@ -396,10 +410,12 @@ pass finish untouched and wait on it with **Wait for Checkpoint**; its retained
 checkout stays unedited while it validates. What happens next depends on the result:
 
 - **Failed without publishing:** fix and commit the defect in the retained worktree
-  with its owning `Carry-Group`, and update the path list. Refresh the gate/QA
-  checkout to the new retained HEAD, prepare dependencies again only if the repair
-  changed manifests or the lockfile, and rerun the focused gate. Then select the
-  repaired head and request another service pass.
+  with its owning `Carry-Group`, and update the path list. If step 2's
+  regeneration rule applies to the repair, regenerate and commit with `Carry-Group: incubator`.
+  Then refresh the gate/QA checkout to the new retained HEAD, prepare
+  dependencies again only if the repair changed manifests or the lockfile, and
+  rerun the focused gate. Then select the repaired head and request another
+  service pass.
 - **Published:** leave the immutable tag intact and fix the defect through
   [Publishing a revision while newer nightlies are on hold](#publishing-a-revision-while-newer-nightlies-are-on-hold).
   A successful promotion releases the recovery selection and worktree. If promotion
