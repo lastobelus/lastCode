@@ -466,6 +466,7 @@ function makeLocalCommandHarness(input: {
   readonly skipStartAt?: "load" | "running-write" | "preparation" | "last-check" | "handoff";
   readonly failFinalization?: boolean;
   readonly beforeBaseline?: Effect.Effect<void>;
+  readonly mockRunExecution?: boolean;
   readonly acquireWorkspace?: WorkspaceAcquisition.WorkspaceAcquisition["Service"]["acquire"];
   readonly onMessageDelivery?: (messageId: MessageId, delivered: boolean) => Effect.Effect<void>;
 }) {
@@ -1323,7 +1324,7 @@ function makeLocalCommandHarness(input: {
             ),
         }),
         Layer.mock(ProviderAuthService.ProviderAuthService)({ tryHandlePromptCommand }),
-        input.nativeStart === undefined
+        input.nativeStart === undefined || input.mockRunExecution === true
           ? Layer.mock(RunExecutionService.RunExecutionServiceV2)({
               startRootRun,
               forkBaseline: () => Effect.succeed(Effect.void),
@@ -1787,6 +1788,64 @@ effectIt.effect.each(["before preparation", "before native prompt"] as const)(
       expect(harness.nativePrompts).toEqual([]);
       expect(harness.projection().runs.at(-1)?.status).toBe("cancelled");
       expect(yield* Ref.get(receipts)).toEqual(["cancelled"]);
+    }),
+);
+
+effectIt.effect(
+  "preserves a delivered Pause when Resume arrives before the provider ownership recheck",
+  () =>
+    Effect.gen(function* () {
+      const resuming = yield* Ref.make(false);
+      const receipts = yield* Ref.make<ReadonlyArray<boolean | "cancelled">>([]);
+      const harness = makeLocalCommandHarness({
+        text: "pause to go offline",
+        nativeStart: "accepted",
+        mockRunExecution: true,
+      });
+      const store = Layer.mock(PauseStore.EnvironmentPauseStore)({
+        get: Ref.get(resuming).pipe(
+          Effect.map((value) => ({
+            id: "fixture",
+            createdAt: "2026-09-04T12:00:00.000Z",
+            phase: value ? ("resuming" as const) : ("pausing" as const),
+            targets: [
+              {
+                threadId: harness.threadId,
+                projectId: harness.projection().thread.projectId,
+                title: "Example",
+                pause: "pending" as const,
+                resume: "pending" as const,
+                pauseAttempt: 0,
+                resumeAttempt: 0,
+                pauseAccepted: true,
+                resumeAccepted: false,
+                error: null,
+              },
+            ],
+          })),
+        ),
+        recordDelivery: (_id, delivery) => Ref.update(receipts, (rows) => [...rows, delivery]),
+      });
+      harness.startRootRun.mockImplementation((runInput) =>
+        Effect.gen(function* () {
+          expect(yield* runInput.shouldStartProviderTurn!()).toBe(true);
+          yield* runInput.session.startTurn(runInput as never).pipe(Effect.orDie);
+          yield* Ref.set(resuming, true);
+          // RunExecution rechecks ownership after ingesting the first native turn event.
+          expect(yield* runInput.shouldStartProviderTurn!()).toBe(true);
+        }),
+      );
+      yield* Effect.gen(function* () {
+        const service = yield* ProviderTurnStart.ProviderTurnStartServiceV2;
+        yield* service.start({
+          threadId: harness.threadId,
+          runId: harness.runId,
+          onMessageDelivery: (_id, delivery) => Ref.update(receipts, (rows) => [...rows, delivery]),
+        });
+      }).pipe(Effect.provide(harness.layer.pipe(Layer.provide(store))));
+      expect(harness.nativePrompts).toEqual(["pause to go offline"]);
+      expect(harness.projection().runs.at(-1)?.status).toBe("running");
+      expect(yield* Ref.get(receipts)).toEqual([true]);
     }),
 );
 

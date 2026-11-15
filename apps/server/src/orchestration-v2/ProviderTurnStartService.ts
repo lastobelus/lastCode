@@ -457,10 +457,17 @@ export const layer: Layer.Layer<
       const cancelResumedPause = Effect.fn("ProviderTurnStartService.cancelResumedPause")(
         function* (expectedStatus: "starting" | "running") {
           if (
+            nativeStart.invoked ||
             Option.isNone(pauseStore) ||
             !PauseStore.environmentPauseDeliveryCancelled(
               yield* pauseStore.value.get,
               run.userMessageId,
+            ) ||
+            projection.providerTurns.some(
+              (turn) =>
+                turn.runAttemptId === attempt.id &&
+                turn.providerThreadId === providerThread.id &&
+                turn.nativeTurnRef !== null,
             )
           )
             return false;
