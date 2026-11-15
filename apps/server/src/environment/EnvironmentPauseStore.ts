@@ -76,7 +76,10 @@ export class EnvironmentPauseStore extends Context.Service<
     readonly recordDelivery: (
       messageId: MessageId,
       delivered: boolean | "cancelled",
-      options?: { readonly onlyIfSuperseded: StoredSession["targets"][number] },
+      options?: {
+        readonly onlyIfSuperseded?: StoredSession["targets"][number];
+        readonly superseded?: true;
+      },
     ) => Effect.Effect<void, EnvironmentPauseError>;
   }
 >()("t3/environment/EnvironmentPauseStore") {}
@@ -136,25 +139,32 @@ const make = Effect.gen(function* () {
           let changed = false;
           const targets = session.targets.map((target) => {
             for (const direction of ["pause", "resume"] as const) {
+              const renewPause =
+                direction === "pause" &&
+                delivered === "cancelled" &&
+                options?.superseded === true &&
+                session.phase !== "resuming";
               // A newer intent can reuse the id and phase. Retire only the
               // target snapshot whose non-delivery was observed.
               if (
                 deliveryIdentity(session, target, direction).messageId !== messageId ||
                 (options?.onlyIfSuperseded && target !== options.onlyIfSuperseded) ||
                 target[direction] === "sent" ||
-                target[direction] === "unavailable"
+                (target[direction] === "unavailable" && !(renewPause && target.pauseCancelled))
               )
                 continue;
               changed = true;
               return {
                 ...target,
-                [direction]:
-                  delivered === "cancelled"
+                [direction]: renewPause
+                  ? ("pending" as const)
+                  : delivered === "cancelled"
                     ? ("unavailable" as const)
                     : delivered
                       ? ("sent" as const)
                       : ("failed" as const),
-                [`${direction}Accepted`]: true,
+                [`${direction}Accepted`]: !renewPause,
+                ...(renewPause ? { pauseAttempt: target.pauseAttempt + 1 } : {}),
                 ...(direction === "pause" && (delivered === true || delivered === "cancelled")
                   ? { rePause: undefined }
                   : {}),
@@ -168,7 +178,7 @@ const make = Effect.gen(function* () {
                     }
                   : {}),
                 ...(direction === "pause" && delivered === "cancelled"
-                  ? { pauseCancelled: true as const }
+                  ? { pauseCancelled: renewPause ? undefined : (true as const) }
                   : {}),
                 error: delivered
                   ? null

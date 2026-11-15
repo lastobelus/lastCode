@@ -753,6 +753,14 @@ const make = Effect.gen(function* () {
                   creationSource: "server",
                 })
                 .pipe(Effect.result);
+              if (
+                result._tag === "Failure" &&
+                result.failure._tag === "OrchestratorPauseRecipientInactiveError" &&
+                result.failure.superseded
+              ) {
+                yield* store.recordDelivery(identity.messageId, "cancelled", { superseded: true });
+                return;
+              }
               submission =
                 result._tag === "Success"
                   ? "accepted"
@@ -1007,7 +1015,11 @@ const make = Effect.gen(function* () {
           .pipe(Effect.result);
         if (cancelled._tag === "Failure") continue;
       }
-      yield* store.recordDelivery(identity.messageId, "cancelled");
+      yield* store.recordDelivery(
+        identity.messageId,
+        "cancelled",
+        run.status === "queued" ? { superseded: true } : undefined,
+      );
     }
   });
   const cancelPendingPauses = cancelPending("pause");

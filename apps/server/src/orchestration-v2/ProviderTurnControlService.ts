@@ -458,7 +458,9 @@ export const layer: Layer.Layer<
               input.messageId,
             )
           ) {
-            yield* pauseStore.value.recordDelivery(input.messageId, "cancelled").pipe(Effect.orDie);
+            yield* pauseStore.value
+              .recordDelivery(input.messageId, "cancelled", { superseded: true })
+              .pipe(Effect.orDie);
             return;
           }
           yield* loaded.session.value

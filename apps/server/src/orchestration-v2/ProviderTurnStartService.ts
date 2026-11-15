@@ -516,7 +516,9 @@ export const layer: Layer.Layer<
               events,
             })
             .pipe(Effect.orDie);
-          yield* pauseStore.value.recordDelivery(run.userMessageId, "cancelled").pipe(Effect.orDie);
+          yield* pauseStore.value
+            .recordDelivery(run.userMessageId, "cancelled", { superseded: true })
+            .pipe(Effect.orDie);
           return true;
         },
         Effect.orDie,

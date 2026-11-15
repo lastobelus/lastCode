@@ -324,7 +324,7 @@ export const PauseRecipientMustBeActive = Context.Reference<boolean>(
 
 export class OrchestratorPauseRecipientInactiveError extends Schema.TaggedError<OrchestratorPauseRecipientInactiveError>()(
   "OrchestratorPauseRecipientInactiveError",
-  { commandId: CommandId, threadId: ThreadId },
+  { commandId: CommandId, threadId: ThreadId, superseded: Schema.optional(Schema.Literal(true)) },
 ) {
   override get message(): string {
     return "This thread finished before Pause could be submitted.";
@@ -2674,7 +2674,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         );
         if (Option.isSome(pauseStore))
           yield* pauseStore.value
-            .recordDelivery(storedQueuedRun.userMessageId, "cancelled")
+            .recordDelivery(storedQueuedRun.userMessageId, "cancelled", { superseded: true })
             .pipe(Effect.orDie);
         projection = yield* readCommandProjection(threadId);
         storedQueuedRun = yield* nextDeliverableQueuedRun(projection);
@@ -19607,6 +19607,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             return yield* new OrchestratorPauseRecipientInactiveError({
               commandId: command.commandId,
               threadId: command.threadId,
+              superseded: true,
             });
           const snapshot = yield* projectionStore
             .getShellSnapshot()

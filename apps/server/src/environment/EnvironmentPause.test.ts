@@ -357,6 +357,7 @@ const harness = Effect.gen(function* () {
             return yield* new Orchestrator.OrchestratorPauseRecipientInactiveError({
               commandId: input.commandId,
               threadId: input.threadId,
+              superseded: true,
             });
           if (input.pauseOnlyIfActive && (yield* Ref.get(inactiveRecipients)).has(input.threadId))
             return yield* new Orchestrator.OrchestratorPauseRecipientInactiveError({
@@ -2514,6 +2515,46 @@ it.effect("keeps native delivery after an older cancellation spans P1 R1 P2 R2",
     );
     assert.isNull(yield* h.store.get);
   }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each([false, true])(
+  "renews Pause when an older guard cancellation finishes after Pause2, restart=%s",
+  (recover) =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      yield* Ref.set(h.snapshot, shell([thread(a)]));
+      yield* Ref.set(h.queued, true);
+      yield* h.pause.start;
+      const initial = (yield* h.store.get)!;
+      const oldPause = Store.deliveryIdentity(initial, initial.targets[0]!, "pause");
+      yield* Ref.update(h.runs, (runs) =>
+        runs.map((run) =>
+          run.userMessageId === oldPause.messageId ? { ...run, status: "starting" as const } : run,
+        ),
+      );
+      yield* h.pause.resume;
+      assert.isTrue(
+        Store.environmentPauseDeliveryCancelled(yield* h.store.get, oldPause.messageId),
+      );
+      yield* h.pause.start;
+      yield* Ref.update(h.runs, (runs) =>
+        runs.map((run) =>
+          run.userMessageId === oldPause.messageId ? { ...run, status: "cancelled" as const } : run,
+        ),
+      );
+      yield* h.store.recordDelivery(oldPause.messageId, "cancelled", { superseded: true });
+      const current = recover ? yield* restart(h) : h;
+      yield* Ref.set(h.queued, false);
+      yield* current.pause.continueResume;
+      const pauses = (yield* Ref.get(h.calls)).filter(
+        (call) => call.text === "pause to go offline",
+      );
+      assert.lengthOf(pauses, 2);
+      assert.notStrictEqual(pauses[1]!.messageId, oldPause.messageId);
+      assert.strictEqual((yield* current.store.get)?.targets[0]?.pause, "sent");
+      assert.isNull((yield* current.pause.resume).session);
+      assert.strictEqual((yield* Ref.get(h.calls)).at(-1)?.text, "resume");
+    }).pipe(Effect.provide(testLayer)),
 );
 
 it.effect.each(["pause", "resume"] as const)(
