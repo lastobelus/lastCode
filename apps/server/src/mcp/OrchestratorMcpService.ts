@@ -151,7 +151,12 @@ import {
   runtimeModeRank,
   taskPrompt,
 } from "./delegatedTaskModes.ts";
-import { assertTargetWithinLimits, isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
+import {
+  assertTargetWithinLimits,
+  isLiveCallerShell,
+  threadCreationInputFailure,
+  threadNotFound,
+} from "./threadAccess.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
@@ -3289,13 +3294,15 @@ const make = Effect.gen(function* () {
               completionWake: input.mode === "wait" ? "settled_only" : "always",
             })
             .pipe(
-              Effect.mapError((error) =>
-                error._tag === "ThreadManagementProviderInstanceDisabledError"
-                  ? threadManagementFailure(error)
-                  : failure(
-                      "orchestration_error",
-                      `Unable to create delegated task: ${userFacingDispatchErrorMessage(error) ?? errorMessage(error)}`,
-                    ),
+              Effect.mapError(
+                (error) =>
+                  threadCreationInputFailure(error) ??
+                  (error._tag === "ThreadManagementProviderInstanceDisabledError"
+                    ? threadManagementFailure(error)
+                    : failure(
+                        "orchestration_error",
+                        `Unable to create delegated task: ${userFacingDispatchErrorMessage(error) ?? errorMessage(error)}`,
+                      )),
               ),
             );
           const taskEvent = result.storedEvents.find(
@@ -3744,11 +3751,13 @@ const make = Effect.gen(function* () {
                 yield* threadManagement
                   .dispatch(claim)
                   .pipe(
-                    Effect.mapError((error) =>
-                      failure(
-                        "orchestration_error",
-                        `Unable to create thread ${index + 1}: ${userFacingDispatchErrorMessage(error) ?? errorMessage(error)}`,
-                      ),
+                    Effect.mapError(
+                      (error) =>
+                        threadCreationInputFailure(error, index + 1) ??
+                        failure(
+                          "orchestration_error",
+                          `Unable to create thread ${index + 1}: ${userFacingDispatchErrorMessage(error) ?? errorMessage(error)}`,
+                        ),
                     ),
                   );
               } else {
@@ -3783,13 +3792,15 @@ const make = Effect.gen(function* () {
                       interactionMode: currentParent.interactionMode,
                       refused,
                     }),
-                    Effect.mapError((error) =>
-                      error._tag === "ThreadManagementProviderInstanceDisabledError"
-                        ? threadManagementFailure(error)
-                        : failure(
-                            "orchestration_error",
-                            `Unable to ${"commandId" in error && error.commandId === claim.commandId ? "create" : "start"} thread ${index + 1}: ${userFacingDispatchErrorMessage(error) ?? errorMessage(error)}`,
-                          ),
+                    Effect.mapError(
+                      (error) =>
+                        threadCreationInputFailure(error, index + 1) ??
+                        (error._tag === "ThreadManagementProviderInstanceDisabledError"
+                          ? threadManagementFailure(error)
+                          : failure(
+                              "orchestration_error",
+                              `Unable to ${"commandId" in error && error.commandId === claim.commandId ? "create" : "start"} thread ${index + 1}: ${userFacingDispatchErrorMessage(error) ?? errorMessage(error)}`,
+                            )),
                     ),
                     Effect.catch((error) =>
                       Effect.flatMap(Ref.get(refused), (refusal) =>
