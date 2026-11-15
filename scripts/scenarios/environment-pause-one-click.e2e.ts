@@ -77,16 +77,29 @@ test(
         const catalogPath = "/src/connection/catalog.ts";
         const registryPath = "/src/rpc/atomRegistry.ts";
         const presentationPath = "/src/state/presentation.ts";
+        const serverPath = "/src/state/server.ts";
         const { environmentCatalog } = await import(catalogPath);
         const { appAtomRegistry } = await import(registryPath);
         const { environmentPresentations } = await import(presentationPath);
+        const { serverEnvironment } = await import(serverPath);
         const catalog = appAtomRegistry.get(environmentCatalog.catalogValueAtom) as {
           entries: Map<string, { target: { label: string } }>;
         };
-        for (const entry of catalog.entries.values()) entry.target.label = "workstation.example";
+        for (const [environmentId, entry] of catalog.entries) {
+          catalog.entries.set(environmentId, {
+            ...entry,
+            target: { ...entry.target, label: "workstation.example" },
+          });
+          const config = appAtomRegistry.get(serverEnvironment.configValueAtom(environmentId)) as {
+            environment: { label: string };
+          } | null;
+          if (config !== null) config.environment.label = "workstation.example";
+          appAtomRegistry.refresh(environmentPresentations.presentationAtom(environmentId));
+        }
         appAtomRegistry.refresh(environmentPresentations.presentationsAtom);
         return null;
       });
+      await screen.getByRole("button", "Pause workstation.example").waitFor({ state: "visible" });
       await app.screenshot("before-pause-click");
 
       await screen.getByRole("button", /^Pause /).tap();
