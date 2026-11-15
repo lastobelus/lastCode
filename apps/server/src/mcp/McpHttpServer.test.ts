@@ -1,4 +1,5 @@
 import * as EnvironmentTheme from "../environmentTheme.ts";
+import * as CapacityTestkit from "../capacity/testkit.ts";
 import * as AssetSigner from "../assets/AssetSigner.ts";
 import * as PromptSnippets from "../promptSnippets/PromptSnippets.ts";
 import * as DocumentText from "../provider/DocumentText.ts";
@@ -166,6 +167,7 @@ it.effect("isolates full and restricted tool discovery over HTTP", () =>
         ),
         Layer.provide(
           Layer.mergeAll(
+            CapacityTestkit.layer,
             Layer.mock(PromptSnippets.PromptSnippets)({}),
             Layer.mock(IssueService.IssueService)({}),
             Layer.mock(ThreadIssueService.ThreadIssueService)({}),
@@ -365,6 +367,11 @@ const layerPullRequestsTest = McpHttpServer.layerPullRequestsToolkit.pipe(
       NodeCrypto.layer,
     ),
   ),
+);
+const layerActionResumeTest = McpHttpServer.layerActionResumeToolkit.pipe(
+  Layer.provide(CapacityTestkit.layer),
+  Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
+  Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
 );
 
 const snapshotResult = {
@@ -606,7 +613,9 @@ const layerRecordingTools = (calls: Array<unknown>) => {
     Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
     Layer.provide(
       Layer.mergeAll(
+        CapacityTestkit.layer,
         McpToolAccessTestkit.liveThreadsLayer,
+        Layer.mock(PeerForwarding.PeerForwarding)({}),
         Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({}),
         Layer.mock(ProjectService.ProjectService)({}),
         Layer.mock(PreviewManager.PreviewManager)({}),
@@ -769,9 +778,7 @@ it.effect("returns the Action service's update drain rejection over MCP", () =>
       reason: "internal_error",
       message: "LastCode is draining for an update.",
     });
-    const layer = McpHttpServer.layerActionResumeToolkit.pipe(
-      Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
-      Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
+    const layer = layerActionResumeTest.pipe(
       Layer.provideMerge(
         Layer.mock(ActionResume)({
           runProjectActionAndResume: (_invocation, actionId) => {
@@ -819,9 +826,7 @@ it.effect("inspects retained Action output within the credential-scoped thread",
       | { readonly threadId: ThreadId; readonly providerInstanceId: ProviderInstanceId }
       | undefined;
     let inspectedRunId: string | undefined;
-    const layer = McpHttpServer.layerActionResumeToolkit.pipe(
-      Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
-      Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
+    const layer = layerActionResumeTest.pipe(
       Layer.provideMerge(
         Layer.mock(ActionResume)({
           inspectActionRun: (input, runId) =>

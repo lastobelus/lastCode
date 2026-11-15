@@ -1,3 +1,4 @@
+import * as CapacityTestkit from "../capacity/testkit.ts";
 import * as PeerMcpClient from "./PeerMcpClient.ts";
 import * as Schema from "effect/Schema";
 import * as DocumentText from "../provider/DocumentText.ts";
@@ -261,6 +262,7 @@ const serveBox = (seen: Ref.Ref<Seen>, linkSession: Ref.Ref<string>) =>
       McpHttpServer.layerThreadToolkit,
     )
       .pipe(
+        Layer.provide(CapacityTestkit.layer),
         Layer.provide(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
         Layer.provide(Layer.mock(ThreadRecovery.ThreadRecoveryService)({})),
         Layer.provide(Layer.mock(ThreadRecoveryRepair.ThreadRecoveryRepairService)({})),
@@ -326,6 +328,7 @@ const makeLaptop = Effect.gen(function* () {
     McpHttpServer.layerProjectRegistration,
     McpHttpServer.layerThreadToolkit,
   ).pipe(
+    Layer.provide(CapacityTestkit.layer),
     Layer.provide(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
     Layer.provide(Layer.mock(ThreadRecovery.ThreadRecoveryService)({})),
     Layer.provide(Layer.mock(ThreadRecoveryRepair.ThreadRecoveryRepairService)({})),

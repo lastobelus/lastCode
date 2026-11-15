@@ -1,3 +1,5 @@
+import * as Capacity from "../../../capacity/Capacity.ts";
+import { CapacitySnapshot } from "@t3tools/contracts";
 import {
   ActionResumeError,
   ActionResumeState,
@@ -43,9 +45,13 @@ const RunProjectActionAndResumeTool = Tool.make("run_project_action_and_resume",
   description:
     "Launch one opted-in Project Action in a terminal, arm one same-thread automated follow-up, and return immediately. It may run indefinitely; do not poll it. The user can cancel it from LastCode. Use only an eligible id returned by list_project_actions. A delegated child launches only when its brief says its parent verified features.appOwnedActionContinuationVersion and installed acceptance, or authorized an isolated acceptance scenario; its task stays unfinished across the wait and continues in the follow-up. A delegated call without a verified execution source is refused before launch. Otherwise, or after a refusal, the child ends its turn with a handoff request; the parent verifies the target, launches it in its own thread, and queues the result to the child. Eligibility is independent of automatic-settlement settings.",
   parameters: Schema.Struct({ actionId: Schema.String }),
-  success: ActionResumeState,
+  success: Schema.Struct({ ...ActionResumeState.fields, capacity: CapacitySnapshot }),
   failure: ActionResumeToolError,
-  dependencies: [...dependencies, ThreadManagementService.ThreadManagementService],
+  dependencies: [
+    ...dependencies,
+    ThreadManagementService.ThreadManagementService,
+    Capacity.Capacity,
+  ],
 })
   .annotate(Tool.Title, "Run Project Action and resume")
   .annotate(Tool.Readonly, false)

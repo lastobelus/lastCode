@@ -1,3 +1,7 @@
+import * as EnvironmentPauseStore from "./environment/EnvironmentPauseStore.ts";
+import * as EffectOutbox from "./orchestration-v2/EffectOutbox.ts";
+import * as Capacity from "./capacity/Capacity.ts";
+import { capacityActivity } from "./capacity/activity.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay";
 import * as Random from "effect/Random";
@@ -899,6 +903,42 @@ const layerCommandReadiness = HttpRouter.middleware(
   { global: true },
 );
 
+const layerCapacity = Layer.unwrap(
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    const settings = yield* ServerSettings.ServerSettingsService;
+    const power = yield* HostPowerMonitor.HostPowerMonitor;
+    const projections = yield* ProjectionStoreV2.ProjectionStoreV2;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const pauseStore = yield* EnvironmentPauseStore.EnvironmentPauseStore;
+    return Capacity.layer({
+      mode: settings.getSettings.pipe(
+        Effect.map((current) => current.capacityMode),
+        Effect.orElseSucceed(() => "observe" as const),
+      ),
+      ownerPower: power.snapshot,
+      worktreesDir: config.worktreesDir,
+      activity: Effect.gen(function* () {
+        const shell = yield* projections.getShellSnapshot();
+        const session = yield* pauseStore.get;
+        const automationPaused = session !== null && session.phase !== "resuming";
+        const deferred = automationPaused ? yield* outbox.deferredAutomaticExecution : [];
+        return capacityActivity(
+          [...shell.threads, ...shell.archivedThreads],
+          deferred,
+          automationPaused,
+        );
+      }),
+    });
+  }),
+).pipe(
+  Layer.provide(layerServerSettings),
+  Layer.provide(layerHostPowerMonitor),
+  Layer.provide(ProjectionStoreV2.layer),
+  Layer.provide(EffectOutbox.layer),
+  Layer.provide(EnvironmentPauseStore.layer),
+);
+
 const layerMakeRoutes = Layer.mergeAll(
   Layer.mergeAll(
     HttpApiBuilder.layer(EnvironmentHttpApi).pipe(
@@ -945,6 +985,7 @@ const layerMakeRoutes = Layer.mergeAll(
     Layer.provide(
       PullRequestReviewGuideService.layer.pipe(Layer.provide(PullRequestReviewGuides.layer)),
     ),
+    Layer.provide(layerCapacity),
     // delegate_task to a linked environment, from /mcp and the follower above.
     Layer.provide(RemoteDelegation.layer.pipe(Layer.provide(ProjectionStoreV2.layer))),
     // Links agents ask for: shown in a thread from /mcp, answered over WebSocket.

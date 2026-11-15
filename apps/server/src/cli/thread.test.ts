@@ -1,3 +1,4 @@
+import { unknownCapacitySnapshot } from "../capacity/logic.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
@@ -129,7 +130,12 @@ it.effect(
                 return Effect.succeed({ structuredContent: { projects, nextCursor: null } });
               case "t3_thread_launch":
                 return Effect.succeed({
-                  structuredContent: { threadId, projectId: args.projectId, runId: null },
+                  structuredContent: {
+                    threadId,
+                    projectId: args.projectId,
+                    runId: null,
+                    capacity: unknownCapacitySnapshot(0),
+                  },
                 });
               default:
                 return Effect.die(`unexpected ${tool} call`);
@@ -162,7 +168,12 @@ it.effect(
         );
         assert.strictEqual(
           (yield* TestConsole.logLines).at(-1),
-          JSON.stringify({ threadId, projectId: expectedProjectId, runId: null }),
+          JSON.stringify({
+            capacity: unknownCapacitySnapshot(0),
+            threadId,
+            projectId: expectedProjectId,
+            runId: null,
+          }),
           identifier,
         );
       }

@@ -47,6 +47,7 @@ import {
 import {
   listProjectThreads,
   sendMcpThreadMessage,
+  threadCapacityCommand,
   threadStartCommand,
   threadShowCommand,
   ThreadUsageError,
@@ -1409,6 +1410,7 @@ const waitCommand = Command.make("wait", {
 export const threadCommand = Command.make("thread").pipe(
   Command.withDescription("Inspect, start, and message LastCode threads."),
   Command.withSubcommands([
+    threadCapacityCommand,
     currentCommand,
     listCommand,
     readCommand,

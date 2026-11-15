@@ -1,3 +1,5 @@
+import * as Capacity from "../../../capacity/Capacity.ts";
+import { CapacitySnapshot } from "@t3tools/contracts";
 import {
   OrchestratorMcpCapabilitiesInput,
   OrchestratorMcpCapabilitiesResult,
@@ -90,10 +92,13 @@ const DelegateTaskTool = Tool.make("delegate_task", {
   description:
     "Start one child agent with only `task`. The child does not see this conversation, but it starts with the same project instructions you have, so the task prompt carries only what it cannot find there. Separate checkout or PR per child: `isolation:'worktree'`. Keep `taskId` for `task_status` and `task_cancel`. No secrets in `task`.",
   parameters: OrchestratorMcpDelegateTaskInput,
-  success: OrchestratorMcpDelegateTaskResult,
+  success: Schema.Struct({
+    ...OrchestratorMcpDelegateTaskResult.fields,
+    capacity: CapacitySnapshot,
+  }),
   failure: OrchestratorMcpFailure,
   failureMode: "return",
-  dependencies,
+  dependencies: [...dependencies, Capacity.Capacity, PeerForwarding.PeerForwarding],
 })
   .annotate(Tool.Title, "Delegate a child task")
   .annotate(Tool.Destructive, true)
@@ -225,10 +230,13 @@ const CreateThreadsTool = Tool.make("create_threads", {
   description:
     "Create interactive threads in this checkout; not delegation. Omit prompt for an empty parent (no model turn). Your thread owns each new thread. Set `topLevel:true` on a row only for a user-requested independent sidebar root. groupedUnderThreadId defaults to your thread unless it is a side chat; null leaves the new thread ungrouped. One thread or its own worktree: `t3_thread_launch`. Project, branch, and worktree inherit.",
   parameters: OrchestratorMcpCreateThreadsInput,
-  success: OrchestratorMcpCreateThreadsResult,
+  success: Schema.Struct({
+    ...OrchestratorMcpCreateThreadsResult.fields,
+    capacity: CapacitySnapshot,
+  }),
   failure: OrchestratorMcpFailure,
   failureMode: "return",
-  dependencies,
+  dependencies: [...dependencies, Capacity.Capacity],
 })
   .annotate(Tool.Title, "Create T3 threads")
   .annotate(Tool.Destructive, true)

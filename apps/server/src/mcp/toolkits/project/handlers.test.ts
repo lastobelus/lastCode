@@ -1,4 +1,5 @@
 import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
+import * as CapacityTestkit from "../../../capacity/testkit.ts";
 import { ThreadReadAuthorization } from "../../../orchestration-v2/ThreadReadAuthorization.ts";
 import { expect, it } from "@effect/vitest";
 import {
@@ -221,6 +222,7 @@ it.effect.each(["resolved", "unresolved", "absent"] as const)(
         capabilities: new Set(["orchestration" as const]),
       };
       const layerDependencies = Layer.mergeAll(
+        CapacityTestkit.layer,
         Layer.mock(ProviderRegistry.ProviderRegistry)({
           getProviders: Effect.succeed([]),
         }),
@@ -312,7 +314,11 @@ it.effect.each(["resolved", "unresolved", "absent"] as const)(
       const result = yield* toolkit
         .handle("t3_thread_launch", { title: "Audit", message: "Review the change" })
         .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
-      expect(result.at(-1)?.result).toMatchObject({ projectId, modelSelection });
+      expect(result.at(-1)?.result).toMatchObject({
+        projectId,
+        modelSelection,
+        capacity: CapacityTestkit.snapshot,
+      });
       expect(advanceAfterCallerLoads).toBe(false);
       expect(launched[0]?.initialMessage?.senderThreadId).toBe(sourceThreadId);
       expect(launched[0]?.creatorThreadId).toBe(sourceThreadId);
@@ -486,6 +492,7 @@ const clientLaunchHarness = (input: {
     model: input.overrideModel === undefined ? modelSelection : null,
   };
   const layerDependencies = Layer.mergeAll(
+    CapacityTestkit.layer,
     Layer.mock(ProviderRegistry.ProviderRegistry)({
       getProviders: Effect.succeed(input.providers ?? []),
     }),

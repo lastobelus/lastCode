@@ -1,3 +1,5 @@
+import { linkedCapacity } from "../../capacityRead.ts";
+import * as Capacity from "../../../capacity/Capacity.ts";
 import * as PromptSnippets from "../../../promptSnippets/PromptSnippets.ts";
 import {
   OrchestratorMcpFailure,
@@ -25,6 +27,7 @@ export function preferences(settings: ServerSettings) {
   } = settings;
   const characters = Array.from(sourceControlWritingStyle.customInstructions);
   return {
+    capacityMode: settings.capacityMode,
     defaultThreadEnvMode,
     newWorktreesStartFromOrigin,
     enableProviderUpdateChecks,
@@ -135,7 +138,7 @@ export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
   t3_environment_pause_start: pauseWrite("start"),
   t3_environment_pause_retry: pauseWrite("retry"),
   t3_environment_pause_resume: pauseWrite("resume"),
-  t3_environment_read: McpToolAccess.reads(() =>
+  t3_environment_read: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const { descriptor, settings } = yield* access;
       const current = yield* settings.getSettings.pipe(Effect.mapError(unavailable));
@@ -145,6 +148,12 @@ export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
         serverVersion: descriptor.serverVersion,
         platform: descriptor.platform,
         preferences: preferences(current),
+        capacity: {
+          ...(yield* (yield* Capacity.Capacity).read),
+          ...(input.includeLinked === false
+            ? { linkedObservation: "not-requested" as const, linked: [] }
+            : yield* linkedCapacity(yield* McpInvocationContext.McpInvocationContext)),
+        },
       };
     }),
   ),

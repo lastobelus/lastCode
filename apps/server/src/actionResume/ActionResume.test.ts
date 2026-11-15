@@ -1,3 +1,4 @@
+import * as CapacityTestkit from "../capacity/testkit.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
@@ -318,6 +319,7 @@ const makeHarness = Effect.gen(function* () {
     ),
   );
   const dependencies = Layer.mergeAll(
+    CapacityTestkit.layer,
     Layer.mock(ThreadManagement.ThreadManagementService)({
       getThreadShell: (id) =>
         Effect.sync(() => {

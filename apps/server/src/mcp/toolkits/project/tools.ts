@@ -1,3 +1,5 @@
+import * as Capacity from "../../../capacity/Capacity.ts";
+import { CapacitySnapshot } from "@t3tools/contracts";
 import { McpAttachmentInput } from "../attachment/input.ts";
 import {
   clampedPositiveInt,
@@ -179,6 +181,7 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     ),
   }),
   success: Schema.Struct({
+    capacity: CapacitySnapshot,
     threadId: ThreadId,
     link: Schema.optional(Schema.String),
     projectId: ProjectId,
@@ -190,6 +193,7 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
   }),
   dependencies: [
     ...shared.dependencies,
+    Capacity.Capacity,
     ThreadLaunchService.ThreadLaunchService,
     ManagedProjectFolders.ManagedProjectFolders,
     GitVcsDriver.GitVcsDriver,

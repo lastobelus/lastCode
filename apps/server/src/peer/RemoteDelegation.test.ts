@@ -1,3 +1,4 @@
+import * as CapacityTestkit from "../capacity/testkit.ts";
 import { ProjectToolkit } from "../mcp/toolkits/project/tools.ts";
 import * as ThreadMetadataMcpService from "../mcp/ThreadMetadataMcpService.ts";
 import * as OrchestratorMcpService from "../mcp/OrchestratorMcpService.ts";
@@ -846,6 +847,7 @@ const boxToolkitLayer = (thread: BoxThread, owned: boolean, worktrees: boolean) 
     ),
     McpHttpServer.layerProjectRegistration,
   ).pipe(
+    Layer.provide(CapacityTestkit.layer),
     Layer.provide(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
     Layer.provide(
       Layer.mock(ActionResume.ActionResume)({ readLatestSummary: () => Effect.succeed(null) }),
@@ -989,6 +991,7 @@ const makeLaptop = (
       Layer.provideMerge(Layer.merge(layerOrchestrator, ServerSettings.layerTest())),
     );
     const layerHere = McpHttpServer.layerOrchestratorToolkit.pipe(
+      Layer.provide(CapacityTestkit.layer),
       Layer.provide(
         Layer.mock(ActionResume.ActionResume)({ readLatestSummary: () => Effect.succeed(null) }),
       ),

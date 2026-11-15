@@ -1,4 +1,7 @@
 import {
+  CapacitySnapshot,
+  EnvironmentCapacitySnapshot,
+  EnvironmentId,
   OrchestratorMcpFailure,
   OrchestratorMcpThreadListResult,
   OrchestratorMcpThreadReadResult,
@@ -171,6 +174,7 @@ const ProjectListResult = Schema.Struct({
 });
 
 const ThreadLaunchResult = Schema.Struct({
+  capacity: CapacitySnapshot,
   threadId: ThreadId,
   projectId: ProjectId,
   runId: Schema.NullOr(RunId),
@@ -980,5 +984,33 @@ export const threadShowCommand = Command.make("show", {
         }),
       );
     }).pipe(reportThreadErrors),
+  ),
+);
+
+export const threadCapacityCommand = Command.make("capacity", {
+  ...projectLocationFlags,
+  environment: Flag.String("environment").pipe(
+    Flag.withDescription("Environment id to forward the read to. Defaults to this environment."),
+    Flag.optional,
+  ),
+}).pipe(
+  Command.withDescription(
+    "Print this environment's capacity as JSON: mode, per-class verdicts, sampled metrics and reasons. Reports only; never holds work.",
+  ),
+  Command.withHandler((flags) =>
+    withThreadTools(flags, (tools) =>
+      tools
+        .call(
+          "t3_environment_read",
+          Option.isSome(flags.environment)
+            ? { environmentId: EnvironmentId.make(flags.environment.value) }
+            : {},
+          Schema.Struct({
+            environmentId: EnvironmentId,
+            capacity: EnvironmentCapacitySnapshot,
+          }),
+        )
+        .pipe(Effect.flatMap(printJson)),
+    ).pipe(reportThreadErrors),
   ),
 );

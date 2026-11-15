@@ -1,3 +1,4 @@
+import * as CapacityTestkit from "../../capacity/testkit.ts";
 import * as AssetSigner from "../../assets/AssetSigner.ts";
 import * as DocumentText from "../../provider/DocumentText.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
@@ -75,6 +76,7 @@ import * as PeerLinks from "../../peer/PeerLinks.ts";
 import * as ActionResume from "../../actionResume/ActionResume.ts";
 
 const layerOrchestratorToolkit = McpHttpServer.layerOrchestratorToolkit.pipe(
+  Layer.provide(CapacityTestkit.layer),
   Layer.provide(
     Layer.mock(ActionResume.ActionResume)({ readLatestSummary: () => Effect.succeed(null) }),
   ),
