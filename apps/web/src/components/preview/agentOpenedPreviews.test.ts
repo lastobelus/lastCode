@@ -15,6 +15,7 @@ import {
   beginPreviewSessionClose,
   cancelPreviewSessionClose,
   reconcilePreviewServerSessions,
+  readThreadPreviewState,
   resetPreviewStateForTests,
 } from "../../previewStateStore";
 import { useRightPanelStore } from "../../rightPanelStore";
@@ -384,6 +385,42 @@ describe("startAgentOpenedPreviews", () => {
     });
     expect(floatingTabId()).toBe("tab_agent");
   });
+
+  it.each([2, 3].flatMap((revision) => [false, true].map((replay) => ({ revision, replay }))))(
+    "consumes a live reveal after list revision $revision (replay: $replay)",
+    ({ revision, replay }) => {
+      using _following = following();
+      const tab = serverTab({ revealRequest: { id: "list-first-user", force: true } });
+      const listed = {
+        ...tab,
+        navStatus: {
+          _tag: "Success" as const,
+          url: "https://page.example/loaded",
+          title: "Loaded",
+        },
+      };
+      reconcilePreviewServerSessions(ref, { sessions: [listed], serverEpoch, revision });
+      expect(useRightPanelStore.getState().byThreadKey[threadKey]?.isOpen ?? false).toBe(false);
+      const event = {
+        type: "navigated" as const,
+        threadId: ref.threadId,
+        tabId: tab.tabId,
+        createdAt: tab.updatedAt,
+        snapshot: tab,
+        serverEpoch,
+        revision: 2,
+        reveal: true,
+      };
+      applyPreviewServerEvent(ref, event, { replay });
+      expect(useRightPanelStore.getState().byThreadKey[threadKey]?.isOpen ?? false).toBe(!replay);
+      if (revision > event.revision)
+        expect(readThreadPreviewState(ref).sessions[tab.tabId]).toBe(listed);
+      useRightPanelStore.getState().close(ref);
+      applyPreviewServerEvent(ref, { ...event }, { replay });
+      expect(useRightPanelStore.getState().byThreadKey[threadKey]?.isOpen ?? false).toBe(false);
+      expect(floatingTabId()).toBeNull();
+    },
+  );
 
   it("reveals an existing tab only for a new reveal request", () => {
     using _following = following();

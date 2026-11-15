@@ -336,6 +336,8 @@ const PreviewNavigatedEvent = Schema.Struct({
   ...PreviewEventBaseSchema.fields,
   type: Schema.Literal("navigated"),
   snapshot: PreviewSessionSnapshot,
+  /** This event requests presentation; later snapshot updates carry metadata only. */
+  reveal: Schema.optional(Schema.Boolean),
 });
 
 const PreviewResizedEvent = Schema.Struct({

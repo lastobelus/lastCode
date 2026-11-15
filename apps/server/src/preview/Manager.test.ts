@@ -1544,6 +1544,9 @@ it.layer(PreviewManagerTestLayer)("PreviewManager", (it) => {
       const events = yield* collector.drain;
       const last = events.at(-1);
       expect(last?.type).toBe("navigated");
+      expect(
+        events.filter((event) => event.type === "navigated").map((event) => event.reveal ?? false),
+      ).toEqual([true, false, true]);
       if (last?.type === "navigated")
         expect(last.snapshot.revealRequest).toEqual(second?.revealRequest);
     }),
