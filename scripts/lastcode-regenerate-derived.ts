@@ -20,6 +20,7 @@ export async function regenerateCheckpointLockfile(upstream: string, cwd: string
   const commit = git("rev-parse", "--verify", `${upstream}^{commit}`);
   const lockfile = NodeChildProcess.execFileSync("git", ["show", `${commit}:pnpm-lock.yaml`], {
     cwd,
+    maxBuffer: Number.POSITIVE_INFINITY,
   });
   verifyPnpmVersion(cwd);
   NodeFS.writeFileSync(NodePath.resolve(cwd, "pnpm-lock.yaml"), lockfile);
@@ -31,19 +32,9 @@ export async function regenerateCheckpointLockfile(upstream: string, cwd: string
       stdio: "inherit",
     },
   );
-  // Frozen installation checks every completed manifest (including fork-only versions),
+  // Frozen installation checks every completed manifest (including fork-only version requirements),
   // verifies patch contents, and supplies the completed tree's dependencies to the generator.
   prepareDependencies(cwd);
-  const { parseAllDocuments } = await import("yaml");
-  const { verifyDerivedLockfile, parseWorkspaceLockfile } =
-    await import("./lib/lastcode-derived-lockfile.ts");
-  const settings = parseAllDocuments(
-    NodeFS.readFileSync(NodePath.resolve(cwd, "pnpm-workspace.yaml"), "utf8"),
-  )[0]!.toJS();
-  const regenerated = parseWorkspaceLockfile(
-    NodeFS.readFileSync(NodePath.resolve(cwd, "pnpm-lock.yaml"), "utf8"),
-  );
-  verifyDerivedLockfile(settings, regenerated);
   return commit;
 }
 

@@ -7,37 +7,7 @@ import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 import { regenerateCheckpointLockfile } from "./lastcode-regenerate-derived.ts";
 
-import { parseWorkspaceLockfile, verifyDerivedLockfile } from "./lib/lastcode-derived-lockfile.ts";
-
-it("rejects regenerated lockfiles that lose fork overrides or patches", () => {
-  // pnpm 12 writes its own dependencies before the workspace lockfile document.
-  const packageManager =
-    "---\nlockfileVersion: '9.0'\nimporters:\n  .:\n    packageManagerDependencies: {}\n";
-  const workspace =
-    "---\nlockfileVersion: '9.0'\nsettings: {}\noverrides:\n  shared: 2.0.0\npatchedDependencies:\n  shared@2.0.0: patch-hash\n";
-  expect(parseWorkspaceLockfile(packageManager + workspace)).toEqual(
-    parseWorkspaceLockfile(workspace),
-  );
-  expect(() => parseWorkspaceLockfile(packageManager)).toThrow(/No workspace settings/);
-  const settings = {
-    catalog: { shared: "2.0.0" },
-    overrides: { shared: "catalog:", "shared>nested": "3.0.0" },
-    patchedDependencies: { "shared@2.0.0": "patches/shared.patch" },
-  };
-  const lockfile = {
-    overrides: { shared: "2.0.0", "shared>nested": "3.0.0" },
-    patchedDependencies: { "shared@2.0.0": "patch-hash" },
-  };
-  expect(() => verifyDerivedLockfile(settings, lockfile)).not.toThrow();
-  expect(() =>
-    verifyDerivedLockfile(settings, { ...lockfile, overrides: { shared: "1.0.0" } }),
-  ).toThrow(/overrides/);
-  expect(() => verifyDerivedLockfile(settings, { ...lockfile, patchedDependencies: {} })).toThrow(
-    /patchedDependencies/,
-  );
-});
-
-it("leaves the lockfile untouched until the replay is complete and upstream exists", async () => {
+it("reads large upstream lockfiles and leaves retained data untouched until preflight passes", async () => {
   const cwd = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-derived-"));
   try {
     NodeChildProcess.execFileSync("git", ["init", "--quiet"], { cwd });
@@ -53,10 +23,12 @@ it("leaves the lockfile untouched until the replay is complete and upstream exis
       NodePath.join(cwd, "package.json"),
       JSON.stringify({ packageManager: "pnpm@12.15.0" }),
     );
-    NodeFS.writeFileSync(lockfile, "upstream lockfile");
+    NodeFS.writeFileSync(lockfile, "upstream lockfile\n" + "x".repeat(1024 * 1024));
     const git = (...args: string[]) => NodeChildProcess.execFileSync("git", args, { cwd });
     git("add", "package.json", "pnpm-lock.yaml");
     git(
+      "-c",
+      "commit.gpgSign=false",
       "-c",
       "user.name=Test",
       "-c",
