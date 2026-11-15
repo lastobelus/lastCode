@@ -234,7 +234,7 @@ converge on upstream, and the user decides from the item whether to retire,
 reconcile, or keep it. A conflict or missing proof of required behavior blocks
 publication.
 
-### Carry replay inspection and rollout
+### Carry replay inspection and rollback
 
 Inspect an immutable compact checkpoint using its recorded upstream base:
 
@@ -244,29 +244,28 @@ pnpm lastcode:carry-set -- \
   --source <lastcode-checkpoint-tag> --json
 ```
 
-The initial manifest pins a reviewed source partition with the same tree as its
-historical source. `--reconstruct` compiles that partition and subsequent annotated
-source contributions using Git deltas. A successful same-base compilation must
-reproduce the source tree; it does not prove compatibility with newer upstream.
-Compilation conflicts retain their worktree and phase record for repair. The
-checkpoint service applies the resulting group commits onto the new upstream,
-validates the integrated result, and preserves immutable publication, source
-provenance, and concurrent-main protections. After publication, the carry check
-inspects the actual group chain rather than constructing full-file snapshots.
+The manifest pins the reviewed bootstrap partition that started the first compact
+generation, with the same tree as its historical source. `--reconstruct` recompiles
+only that generation: it needs `--base` at the bootstrap base and a source that
+descends from the bootstrap source, so current checkpoints cannot use it. A
+successful same-base compilation must reproduce the source tree; it does not prove
+compatibility with newer upstream. Compilation conflicts retain their worktree and
+phase record for repair. The checkpoint service compiles its own group commits from
+the previous build and the new squashes, applies them onto the new upstream,
+validates the integrated result, and preserves immutable
+publication, source provenance, and concurrent-main protections. Carry publications
+run no post-publication carry check. Only after a
+historical-mode publication does a non-blocking shadow check rebuild the groups
+from the manifest's PR and subject lists and record the result in run history.
 
-During rollout, `--replay-mode historical --rollback-reason '<reason>'` explicitly
-selects historical replay for a carry-machinery incident. The reason and mode
-remain in publication and run history. Historical replay uses the latest
-represented result plus new source contributions; it must not discard newer
-integration resolutions. There is no silent fallback. A rollback leaves the carry
-transition unfinished and cannot bypass a genuine feature conflict.
-
-Retire historical replay only after production demonstrates a newer upstream
-checkpoint, a newly merged LastCode PR folded in, a successful package, and another
-newer upstream checkpoint using compact replay, with no unresolved carry-machinery
-defect. Existing immutable working installables remain available. Before carry
-activation, the historical inventory and non-blocking reconstruction check remain
-available; that shadow result alone is not production acceptance.
+Carry replay has been the production path since 2026-09-05. Historical replay
+remains only as an explicit rollback: `--replay-mode historical --rollback-reason '<reason>'`
+selects it for a carry-machinery incident. The reason and mode remain in
+publication and run history. Historical replay uses the latest represented
+result plus new source contributions; it must not discard newer integration
+resolutions. There is no silent fallback, and a rollback cannot bypass a genuine
+feature conflict. Immutable installables published before carry replay remain
+available.
 
 ### Local updater inspection protocol
 
@@ -500,8 +499,9 @@ lastcode-checkpoints --repair-persistent-thread
 ```
 
 The dashboard shows success or failure, upstream nightly, number of downstream
-commits replayed, finish time, duration, checkpoint commit, promotion to
-`lastcode/main`, and whether a local build tag exists. Built LastCode revisions
+commits replayed (normally 6 under carry replay, one per group), finish time,
+duration, checkpoint commit, promotion to `lastcode/main`, and whether a local
+build tag exists. Built LastCode revisions
 appear as distinct indented rows beneath their upstream checkpoint, including
 the revision commit, build number, and whether that revision is on
 `lastcode/main`. It also summarizes the launch agent and whether the local
