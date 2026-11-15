@@ -29,6 +29,14 @@ describe("PreviewAutomationOpenInput", () => {
     expect(() => decodeOpenInput({ profileId: "" })).toThrow();
   });
 
+  it.each([{ tabId: "existing" }, { reuseExistingTab: true }, { open: false }, { show: false }])(
+    "rejects user-facing opens that reuse or hide a tab: %j",
+    (options) => {
+      expect(() => decodeOpenInput({ purpose: "user", ...options })).toThrow();
+      expect(() => decodeMcpOpenInput({ purpose: "user", ...options })).toThrow();
+    },
+  );
+
   it("accepts an own-thread published document target", () => {
     expect(
       decodeMcpOpenInput({ target: { kind: "published-document", path: "report.html" } }),

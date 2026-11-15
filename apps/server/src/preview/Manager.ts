@@ -975,6 +975,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
           next: { ...session, snapshot },
           emit: {
             type: "navigated" as const,
+            reveal: true,
             threadId: session.threadId,
             tabId: session.tabId,
             createdAt: snapshot.updatedAt,

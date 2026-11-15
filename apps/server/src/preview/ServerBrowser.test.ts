@@ -9386,6 +9386,86 @@ it.effect(
     ).pipe(Effect.provide(layer)),
 );
 
+it.effect.each(["environment", "desktop"] as const)(
+  "user-facing %s tabs open without an agent claim and reconnect without a takeover",
+  (browserHost) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        localDesktopAvailable = browserHost === "desktop";
+        const browser = yield* ServerBrowser.ServerBrowser;
+        const broker = yield* Broker.PreviewAutomationBroker;
+        const manager = yield* Manager.PreviewManager;
+        const events = yield* manager.subscribeEvents;
+        yield* Effect.yieldNow;
+        desktopRendersNext = browserHost === "desktop";
+        const qa = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { browserHost, open: false, reuseExistingTab: false },
+        });
+        expect(qa.control).toMatchObject({ owner: "agent", ownedByCaller: true });
+        const attached = yield* Deferred.make<void>();
+        let automationOwner: string | undefined;
+        yield* Effect.gen(function* () {
+          let event;
+          do event = yield* PubSub.take(events);
+          while (event.type !== "navigated" || !event.snapshot.revealRequest);
+          automationOwner = event.snapshot.automationOwner;
+          yield* Effect.scoped(browser.attachViewer(viewerInput(event.tabId, true)));
+          yield* Deferred.succeed(attached, undefined);
+        }).pipe(Effect.forkScoped);
+        desktopRendersNext = browserHost === "desktop";
+        const opened = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { purpose: "user", browserHost, url: "https://page.example/dashboard" },
+        });
+        expect(opened.tabId).not.toBe(qa.tabId);
+        yield* Deferred.await(attached);
+        expect(automationOwner).toBeUndefined();
+        const tabId = PreviewTabId.make(opened.tabId!);
+        const unclaimed = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "status",
+          input: {},
+        });
+        expect(unclaimed.control).toMatchObject({ owner: "unclaimed", ownedByCaller: false });
+        const reconnected = yield* browser.attachViewer(viewerInput(tabId, true));
+        const status = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "status",
+          input: {},
+        });
+        expect(status.control).toMatchObject({ owner: "human", ownedByCaller: false });
+        yield* reconnected.input({ type: "key", action: "down", key: "a", code: "KeyA" });
+        const context =
+          browserHost === "desktop" ? desktopConnections.at(-1)!.context : contexts.at(-1)!;
+        expect(context.sessions.at(-1)!.send).toHaveBeenCalledWith(
+          "Input.dispatchKeyEvent",
+          expect.objectContaining({ key: "a" }),
+        );
+        const refused = yield* broker
+          .invoke<void>({
+            scope,
+            tabId,
+            operation: "evaluate",
+            input: { expression: "1" },
+          })
+          .pipe(Effect.flip);
+        expect(refused).toMatchObject({ reason: "humanControl" });
+        const qaStatus = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId: PreviewTabId.make(qa.tabId!),
+          operation: "status",
+          input: {},
+        });
+        expect(qaStatus.control).toMatchObject({ owner: "agent", ownedByCaller: true });
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
 it.effect("preview_open reports a tab it shows as visible once the client attaches", () =>
   Effect.scoped(
     Effect.gen(function* () {

@@ -51,7 +51,9 @@ export function revealServerTabs(
       .byThreadKey[scopedThreadKey(threadRef)]?.surfaces.find(
         (surface) => surface.kind === "preview" && surface.resourceId === session.tabId,
       );
-    if (surface && force) {
+    if (force && session.automationOwner === undefined) {
+      useRightPanelStore.getState().openBrowser(threadRef, session.tabId, true);
+    } else if (surface && force) {
       useRightPanelStore.getState().revealSurface(threadRef, surface.id);
     } else if (!surface) {
       usePreviewMiniPlayerStore.getState().open(threadRef, browserMiniPlayerSource(session.tabId));
@@ -82,33 +84,56 @@ export function followPreviewSessions(threadRef: ScopedThreadRef, state: ThreadP
 }
 
 /**
- * Server tabs that are new, or carry a new reveal request, since `previous`.
- * Nothing is fresh until the first list has loaded: that list is the baseline,
- * so a reload never reopens previews the user dismissed. A tab this client was
- * closing comes back without a reveal if the close fails.
+ * Consume live presentation requests independently of list/snapshot ordering.
+ * Lists and replayed events remain baselines; each request opens its tab once.
+ * A tab this client was closing comes back without a reveal if the close fails.
  */
 function freshlyRevealedServerTabs(
   previous: ThreadPreviewState,
   next: ThreadPreviewState,
+  handledRequests: Set<string>,
 ): ReadonlyArray<PreviewSessionSnapshot> {
-  if (!previous.listLoaded || previous.sessions === next.sessions) return [];
-  return Object.values(next.sessions).filter((session) => {
+  const candidates =
+    previous.sessions !== next.sessions && previous.liveServerRevision !== next.liveServerRevision
+      ? Object.values(next.sessions).filter((session) => {
+          const before = previous.sessions[session.tabId];
+          return session.revealRequest
+            ? before?.revealRequest?.id !== session.revealRequest.id
+            : before === undefined;
+        })
+      : [];
+  const request = next.liveRevealRequest;
+  if (
+    request &&
+    request !== previous.liveRevealRequest &&
+    next.sessions[request.tabId]?.reveal !== false &&
+    next.sessions[request.tabId]
+  ) {
+    candidates.unshift(request.snapshot);
+  }
+  return candidates.filter((session) => {
     if (session.runtime !== "server" || session.reveal !== true) return false;
     if (previous.suppressedTabIds.has(session.tabId)) return false;
-    const before = previous.sessions[session.tabId];
-    const requested = session.revealRequest;
-    return requested ? before?.revealRequest?.id !== requested.id : before === undefined;
+    const key = JSON.stringify([
+      next.serverEpoch,
+      session.tabId,
+      session.revealRequest?.id ?? null,
+    ]);
+    if (handledRequests.has(key)) return false;
+    handledRequests.add(key);
+    return true;
   });
 }
 
 function followThread(threadKey: string, threadRef: ScopedThreadRef): () => void {
   const atom = previewStateAtom(threadKey);
+  const handledRequests = new Set<string>();
   let previous = appAtomRegistry.get(atom);
   return appAtomRegistry.subscribe(atom, (next) => {
     const before = previous;
     previous = next;
     // Reveals run first so a revealed tab floats before it gains a panel tab.
-    const revealed = freshlyRevealedServerTabs(before, next);
+    const revealed = freshlyRevealedServerTabs(before, next, handledRequests);
     if (revealed.length > 0) {
       revealServerTabs(threadRef, revealed, {
         autoShowFloatingPreview: getClientSettings().browserAutoShowFloatingPreview,

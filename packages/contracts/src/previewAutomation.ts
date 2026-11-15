@@ -169,6 +169,10 @@ export type PreviewAutomationDialogInput = typeof PreviewAutomationDialogInput.T
 
 export const PreviewAutomationOpenInput = Schema.Struct({
   ...PreviewAutomationTabTargetFields,
+  purpose: Schema.optional(Schema.Literals(["automation", "user"])).annotate({
+    description:
+      "user: a new visible tab for the user to see and use, owned by no agent. It never reuses a tab, so it cannot be combined with tabId, reuseExistingTab=true, open=false, or show=false. automation (default): a tab your session drives.",
+  }),
   browserHost: Schema.optional(Schema.Literals(["environment", "desktop"])).annotate({
     description:
       "Choose environment to run the page in this environment's browser and reach its loopback apps without exposing a port. New environment tabs default to isolated Incognito storage; explicitly selecting Default uses this environment's persistent storage, never desktop sign-ins. Choose desktop for existing desktop profiles. Omit to retain the current hosting policy. An exact tabId cannot switch hosts.",
@@ -201,6 +205,17 @@ export const PreviewAutomationOpenInput = Schema.Struct({
     }),
   ),
 })
+  .check(
+    Schema.makeFilter(
+      (input) =>
+        input.purpose !== "user" ||
+        (input.tabId === undefined &&
+          input.reuseExistingTab !== true &&
+          input.open !== false &&
+          input.show !== false) ||
+        "purpose=user cannot be combined with tabId, reuseExistingTab=true, open=false, or show=false.",
+    ),
+  )
   .check(
     Schema.makeFilter(
       (input) =>

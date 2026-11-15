@@ -31,81 +31,103 @@ import { layerInProcessMcpServer, toolkitRegistration } from "../../McpHttpServe
 import { claimPreviewRecording, layerStandard } from "./handlers.ts";
 import { PreviewStandardToolkit } from "./tools.ts";
 
-it.effect("preview_open navigates the opened tab to a dev server in one tool call", () =>
-  Effect.gen(function* () {
-    const scope = yield* McpInvocationContext.McpInvocationContext;
-    const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
-    const connected = yield* Deferred.make<void>();
-    const tabId = PreviewTabId.make("opened-tab");
-    const target = {
-      kind: "environment-port" as const,
-      port: 3000,
-      path: "/settings?tab=account",
-    };
-    const requests: PreviewAutomationRequest[] = [];
-    const status = {
-      available: true,
-      visible: false,
-      tabId,
-      url: "http://localhost:3000/settings?tab=account",
-      title: "Settings",
-      loading: false,
-    };
-    const events = yield* broker.connect({
-      clientId: "client-1",
-      environmentId: scope.environmentId,
-    });
-    yield* Stream.runForEach(events, (event) => {
-      if (event.type === "connected") return Deferred.succeed(connected, undefined);
-      requests.push(event.request);
-      return broker.respond({
+it.effect.each([false, true])(
+  "preview_open navigates a dev server for user purpose %s",
+  (forUser) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.McpInvocationContext;
+      const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
+      const connected = yield* Deferred.make<void>();
+      const tabId = PreviewTabId.make("opened-tab");
+      const target = {
+        kind: "environment-port" as const,
+        port: 3000,
+        path: "/settings?tab=account",
+      };
+      const requests: PreviewAutomationRequest[] = [];
+      const status = {
+        available: true,
+        visible: false,
+        tabId,
+        url: "http://localhost:3000/settings?tab=account",
+        title: "Settings",
+        loading: false,
+      };
+      const events = yield* broker.connect({
         clientId: "client-1",
-        connectionId: event.connectionId,
-        requestId: event.request.requestId,
-        ok: true,
-        result: event.request.operation === "open" ? { ...status, url: "about:blank" } : status,
+        environmentId: scope.environmentId,
       });
-    }).pipe(Effect.forkScoped);
-    yield* Deferred.await(connected);
-    const toolkit = yield* PreviewStandardToolkit.pipe(
-      Effect.provide(McpToolAccess.HandlersLayer.layer(layerStandard)),
-    );
-    const results = yield* toolkit
-      .handle("preview_open", {
-        url: "http://localhost:3000",
-        target,
-        open: false,
-        reuseExistingTab: false,
-      })
-      .pipe(Stream.unwrap, Stream.runCollect);
-    expect(results.at(-1)?.result).toEqual(status);
-    expect(requests.map(({ operation, input }) => ({ operation, input }))).toEqual([
-      { operation: "open", input: { open: false, show: false, reuseExistingTab: false } },
-      { operation: "navigate", input: { target } },
-    ]);
-    expect(requests[1]?.tabId).toBe(tabId);
-    expect(requests[1]?.tabIdExplicit).toBe(true);
-  }).pipe(
-    Effect.provideService(McpInvocationContext.McpInvocationContext, {
-      environmentId: EnvironmentId.make("environment-1"),
-      requestNamespace: "provider-session-1",
-      thread: {
-        threadId: ThreadId.make("thread-1"),
-        providerSessionId: "provider-session-1",
-        providerInstanceId: ProviderInstanceId.make("codex"),
-      },
-      client: undefined,
-      capabilities: new Set(["preview"] as const),
-      issuedAt: 1,
-    }),
-    Effect.provide(
-      Layer.mergeAll(
-        PreviewAutomationBroker.layer,
-        McpToolAccessTestkit.liveThreadsLayer,
-        Layer.mock(PublishedDocumentPreview.PublishedDocumentPreview)({}),
-      ).pipe(Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+      yield* Stream.runForEach(events, (event) => {
+        if (event.type === "connected") return Deferred.succeed(connected, undefined);
+        requests.push(event.request);
+        return broker.respond({
+          clientId: "client-1",
+          connectionId: event.connectionId,
+          requestId: event.request.requestId,
+          ok: true,
+          result:
+            event.request.operation === "open" && !forUser
+              ? { ...status, url: "about:blank" }
+              : status,
+        });
+      }).pipe(Effect.forkScoped);
+      yield* Deferred.await(connected);
+      const toolkit = yield* PreviewStandardToolkit.pipe(
+        Effect.provide(McpToolAccess.HandlersLayer.layer(layerStandard)),
+      );
+      const results = yield* toolkit
+        .handle("preview_open", {
+          url: "http://localhost:3000",
+          target,
+          ...(forUser ? { purpose: "user" as const } : { open: false }),
+          reuseExistingTab: false,
+        })
+        .pipe(Stream.unwrap, Stream.runCollect);
+      expect(results.at(-1)?.result).toEqual(status);
+      expect(requests.map(({ operation, input }) => ({ operation, input }))).toEqual(
+        forUser
+          ? [
+              {
+                operation: "open",
+                input: {
+                  purpose: "user",
+                  open: true,
+                  show: true,
+                  reuseExistingTab: false,
+                  url: status.url,
+                },
+              },
+            ]
+          : [
+              { operation: "open", input: { open: false, show: false, reuseExistingTab: false } },
+              { operation: "navigate", input: { target } },
+            ],
+      );
+      if (!forUser) {
+        expect(requests[1]?.tabId).toBe(tabId);
+        expect(requests[1]?.tabIdExplicit).toBe(true);
+      }
+    }).pipe(
+      Effect.provideService(McpInvocationContext.McpInvocationContext, {
+        environmentId: EnvironmentId.make("environment-1"),
+        requestNamespace: "provider-session-1",
+        thread: {
+          threadId: ThreadId.make("thread-1"),
+          providerSessionId: "provider-session-1",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+        },
+        client: undefined,
+        capabilities: new Set(["preview"] as const),
+        issuedAt: 1,
+      }),
+      Effect.provide(
+        Layer.mergeAll(
+          PreviewAutomationBroker.layer,
+          McpToolAccessTestkit.liveThreadsLayer,
+          Layer.mock(PublishedDocumentPreview.PublishedDocumentPreview)({}),
+        ).pipe(Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+      ),
     ),
-  ),
 );
 
 it.effect.each([

@@ -68,6 +68,8 @@ export interface ThreadPreviewState {
   listLoaded: boolean;
   serverEpoch: string | null;
   serverRevision: number;
+  liveServerRevision: number;
+  liveRevealRequest: Extract<PreviewEvent, { type: "navigated" }> | null;
 }
 
 const EMPTY_THREAD_PREVIEW_STATE: ThreadPreviewState = Object.freeze({
@@ -82,6 +84,8 @@ const EMPTY_THREAD_PREVIEW_STATE: ThreadPreviewState = Object.freeze({
   listLoaded: false,
   serverEpoch: null,
   serverRevision: 0,
+  liveServerRevision: -1,
+  liveRevealRequest: null,
 });
 
 const emptyPreviewStateAtom = Atom.make<ThreadPreviewState>(EMPTY_THREAD_PREVIEW_STATE).pipe(
@@ -303,7 +307,16 @@ export function applyPreviewServerEvent(
     event.type === "opened" &&
     event.focus?.clientId === openFocusClientId &&
     event.focus.userActionRevision !== useRightPanelStore.getState().getUserActionRevision(ref);
-  updateThreadPreviewState(ref, (current) => {
+  updateThreadPreviewState(ref, (state) => {
+    const current =
+      !options.replay &&
+      event.type === "navigated" &&
+      event.reveal === true &&
+      !state.suppressedTabIds.has(event.tabId) &&
+      (state.serverEpoch === null || event.serverEpoch === state.serverEpoch) &&
+      (event.revision >= state.serverRevision || state.sessions[event.tabId])
+        ? { ...state, liveRevealRequest: event }
+        : state;
     if (current.serverEpoch !== null && event.serverEpoch !== current.serverEpoch) return current;
     // A list may hydrate a new tab before its live creation event. Consume
     // that focus once, while retaining newer metadata and revision ordering.
@@ -370,12 +383,16 @@ export function applyPreviewServerEvent(
         }
       }
     })();
-    return next.serverRevision === event.revision && next.serverEpoch === event.serverEpoch
+    const liveServerRevision = options.replay ? current.liveServerRevision : event.revision;
+    return next.serverRevision === event.revision &&
+      next.serverEpoch === event.serverEpoch &&
+      next.liveServerRevision === liveServerRevision
       ? next
       : {
           ...next,
           serverEpoch: event.serverEpoch,
           serverRevision: event.revision,
+          liveServerRevision,
         };
   });
   const state = readThreadPreviewState(ref);
