@@ -85,6 +85,7 @@ test(
         };
         for (const entry of catalog.entries.values()) entry.target.label = "workstation.example";
         appAtomRegistry.refresh(environmentPresentations.presentationsAtom);
+        return null;
       });
       await app.screenshot("before-pause-click");
 
