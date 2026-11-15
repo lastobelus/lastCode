@@ -64,7 +64,9 @@ if (
 ) {
   const args = process.argv.slice(2);
   if (args.length !== 2 || args[0] !== "--upstream" || !args[1]) {
-    throw new Error("Usage: pnpm lastcode:regenerate-derived --upstream <target-upstream-commit>");
+    throw new Error(
+      "Usage: pnpm --config.verify-deps-before-run=false lastcode:regenerate-derived --upstream <target-upstream-commit>",
+    );
   }
   await regenerateDerived(args[1], process.cwd());
 }

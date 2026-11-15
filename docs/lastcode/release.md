@@ -278,7 +278,7 @@ after it. Only step 3's final selection leads to `run-now`.
 
 **Before step 1, after the replay and every incorporated downstream merge:** in
 the retained worktree, run
-`pnpm lastcode:regenerate-derived --upstream <replay-upstream-head>`, which
+`pnpm --config.verify-deps-before-run=false lastcode:regenerate-derived --upstream <replay-upstream-head>`, which
 regenerates both derived files, and commit any changes with their owning `Carry-Group`.
 
 1. Run the gate and client QA in one separate checkout, always; the service
@@ -306,7 +306,7 @@ regenerates both derived files, and commit any changes with their owning `Carry-
    beside a deleted file still run. Fix concrete failures by committing in the
    retained worktree and updating the path list. If a repair changes dependency
    manifests, patches, pnpm settings, or measured agent context, rerun
-   `pnpm lastcode:regenerate-derived --upstream <replay-upstream-head>` and commit
+   `pnpm --config.verify-deps-before-run=false lastcode:regenerate-derived --upstream <replay-upstream-head>` and commit
    its changes before refreshing the separate checkout and rerunning the gate. Broader checks remain in the service's unchanged Full CI; this preflight
    does not create a Full CI stamp or a PR Quick CI receipt.
 
@@ -404,8 +404,8 @@ pass finish untouched and wait on it with **Wait for Checkpoint**; its retained
 checkout stays unedited while it validates. What happens next depends on the result:
 
 - **Failed without publishing:** fix and commit the defect in the retained worktree
-  with its owning `Carry-Group`, and update the path list. Refresh the gate/QA
-  checkout to the new retained HEAD, prepare dependencies again only if the repair
+  with its owning `Carry-Group`, and update the path list. Apply step 2's
+  regeneration check above before refreshing the gate/QA checkout to the new retained HEAD, prepare dependencies again only if the repair
   changed manifests or the lockfile, and rerun the focused gate. Then select the
   repaired head and request another service pass.
 - **Published:** leave the immutable tag intact and fix the defect through
