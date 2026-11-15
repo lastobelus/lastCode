@@ -124,12 +124,10 @@ const makeHarness = Effect.fn("TestThreadCommands.makeHarness")(function* (optio
       activeChildThreadIds: [],
       activeThreadIds: [],
       unreadThreadIds: [],
-      promotableChildThreadIds: [],
       keptThreadIds: [],
       protectedChildThreadIds: [],
       nativeStopCount: 0,
       requiresConfirmation: false,
-      canPromote: false,
       canStopAndArchive: true,
     },
   } = options ?? {};
@@ -538,12 +536,10 @@ it.effect("reads a scoped complete family without replacing the active shell sna
         activeChildThreadIds: [liveChildId],
         activeThreadIds: [liveChildId],
         unreadThreadIds: [root.id],
-        promotableChildThreadIds: [],
         keptThreadIds: [],
         protectedChildThreadIds: [liveChildId],
         nativeStopCount: 1,
         requiresConfirmation: true,
-        canPromote: false,
         canStopAndArchive: false,
       },
     });
@@ -563,7 +559,6 @@ it.effect("reads a scoped complete family without replacing the active shell sna
     expect(result.value.activeThreads.map(({ id }) => id)).toEqual([liveChildId]);
     expect(result.value.unreadThreads.map(({ id }) => id)).toEqual([root.id]);
     expect(result.value.protectedChildren.map(({ id }) => id)).toEqual([liveChildId]);
-    expect(result.value.promotableChildren).toEqual([]);
     expect(result.value.requiresConfirmation).toBe(true);
     expect(result.value.canStopAndArchive).toBe(false);
     expect(result.value.nativeStopCount).toBe(1);

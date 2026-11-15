@@ -15,7 +15,6 @@ import * as CheckpointCapture from "./CheckpointCaptureService.ts";
 import * as CheckpointRollback from "./CheckpointRollbackService.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as IncomingMessageSummaryService from "./IncomingMessageSummaryService.ts";
-import * as SubagentPromotionService from "./SubagentPromotionService.ts";
 import * as EffectWorker from "./EffectWorker.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderSessions from "./ProviderSessionManager.ts";
@@ -94,7 +93,6 @@ it.effect.each([
         finalization,
         outbox,
         Layer.mock(IncomingMessageSummaryService.IncomingMessageSummaryService)({}),
-        Layer.mock(SubagentPromotionService.SubagentPromotionService)({}),
         Layer.mock(ProviderSessions.ProviderSessionManagerV2)({}),
         Layer.mock(ProviderTurnControl.ProviderTurnControlServiceV2)({}),
         Layer.mock(CheckpointRollback.CheckpointRollbackServiceV2)({}),

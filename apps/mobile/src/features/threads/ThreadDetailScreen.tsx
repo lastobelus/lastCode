@@ -17,7 +17,7 @@ import { parseThreadKey, threadKey } from "@t3tools/client-runtime/state/entitie
 import { createThreadVisitTracker } from "@t3tools/client-runtime/state/thread-visits";
 import { useChildThreadInputs, useThreadReportedModelSelection } from "../../state/entities";
 import { UsageLimitRecoveryCard } from "./UsageLimitRecoveryCard";
-import { StackActions, useFocusEffect, useNavigation } from "@react-navigation/native";
+import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import {
   effectiveSnoozed,
   threadWokeAt,
@@ -163,7 +163,6 @@ import {
 } from "../../state/threads";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { threadStreamHaptics } from "./threadStreamHaptics";
-import { canPromoteSubagent } from "@t3tools/client-runtime/state/subagent-promotion";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { orchestrationEnvironment } from "../../state/orchestration";
 import { useDelayedStatus } from "../../lib/useDelayedStatus";
@@ -1280,13 +1279,6 @@ function ThreadDetailBody(
       : (appAtomRegistry.get(
           environmentThreadDetails.pendingRequestsAtom(props.selectedThreadDetailRef),
         )?.approvals ?? []);
-
-  const requestSubagentPromotion = useAtomCommand(threadEnvironment.requestSubagentPromotion, {
-    reportFailure: false,
-  });
-  const cancelSubagentPromotion = useAtomCommand(threadEnvironment.cancelSubagentPromotion, {
-    reportFailure: false,
-  });
   const handleSendMessage = async (
     followUp?: ActiveTurnComposerAction,
     stillSendable?: () => boolean,
@@ -1863,58 +1855,6 @@ function ThreadDetailBody(
                       }}
                     >
                       <ProviderSubagentBar
-                        key={String(props.selectedThread.id)}
-                        promotion={props.selectedThread.subagentPromotion ?? null}
-                        promotionAvailable={canPromoteSubagent(
-                          providerSubagentProvider?.threadCapabilities,
-                        )}
-                        onPromote={
-                          canPromoteSubagent(providerSubagentProvider?.threadCapabilities) &&
-                          props.connectionStateLabel === "connected"
-                            ? async () => {
-                                const result = await requestSubagentPromotion({
-                                  environmentId: props.environmentId,
-                                  input: {
-                                    threadId: props.selectedThread.id,
-                                    creationSource: "mobile",
-                                  },
-                                });
-                                if (result._tag === "Failure")
-                                  throw squashAtomCommandFailure(result);
-                              }
-                            : null
-                        }
-                        onCancelPromotion={
-                          props.selectedThread.subagentPromotion?.status === "waiting" &&
-                          props.connectionStateLabel === "connected"
-                            ? async () => {
-                                const promotion = props.selectedThread.subagentPromotion;
-                                if (!promotion) return;
-                                const result = await cancelSubagentPromotion({
-                                  environmentId: props.environmentId,
-                                  input: {
-                                    threadId: props.selectedThread.id,
-                                    requestId: promotion.requestId,
-                                  },
-                                });
-                                if (result._tag === "Failure")
-                                  throw squashAtomCommandFailure(result);
-                              }
-                            : null
-                        }
-                        onOpenPromoted={
-                          props.selectedThread.subagentPromotion?.status === "promoted"
-                            ? () =>
-                                navigation.dispatch(
-                                  StackActions.push("Thread", {
-                                    environmentId: String(props.environmentId),
-                                    threadId: String(
-                                      props.selectedThread.subagentPromotion!.targetThreadId,
-                                    ),
-                                  }),
-                                )
-                            : null
-                        }
                         provider={providerSubagentProvider ?? null}
                         modelLabel={
                           providerSubagentCatalogModel?.name ??

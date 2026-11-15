@@ -7,7 +7,6 @@ import {
   recoveryQueuesFollowUps,
   recoverySuppressesWorking,
 } from "@t3tools/client-runtime/state/thread-recovery";
-import { canPromoteSubagent } from "@t3tools/client-runtime/state/subagent-promotion";
 import { useThreadRecoveryBanner } from "./chat/useThreadRecoveryBanner";
 import { useChatThreadAnnotation } from "./thread-annotation/useChatThreadAnnotation";
 import { recordHandoff } from "../handoffs/handoffsStore";
@@ -471,18 +470,6 @@ export default function ChatView(props: ChatViewProps) {
       currentRouteThreadKeyRef.current = null;
     };
   }, [routeThreadKey]);
-  const requestSubagentPromotion = useOrchestrationCommand(
-    threadEnvironment.requestSubagentPromotion,
-    {
-      reportFailure: false,
-    },
-  );
-  const cancelSubagentPromotion = useOrchestrationCommand(
-    threadEnvironment.cancelSubagentPromotion,
-    {
-      reportFailure: false,
-    },
-  );
   const acknowledgeWorkspacePreparation = useOrchestrationCommand(
     threadEnvironment.acknowledgeWorkspacePreparation,
   );
@@ -3732,61 +3719,6 @@ export default function ChatView(props: ChatViewProps) {
                           <div className="relative z-10">
                             {showProviderSubagentBar ? (
                               <ProviderSubagentBar
-                                key={activeThreadId}
-                                promotion={activeThread?.subagentPromotion ?? null}
-                                promotionAvailable={
-                                  canOperateThread &&
-                                  canPromoteSubagent(
-                                    selectedProviderEntry?.snapshot.threadCapabilities,
-                                  )
-                                }
-                                onPromote={
-                                  canOperateThread &&
-                                  canPromoteSubagent(
-                                    selectedProviderEntry?.snapshot.threadCapabilities,
-                                  ) &&
-                                  !activeEnvironmentUnavailable
-                                    ? async () => {
-                                        if (!activeThread) return;
-                                        const result = await requestSubagentPromotion({
-                                          environmentId,
-                                          input: {
-                                            threadId: activeThread.id,
-                                            creationSource: "web",
-                                          },
-                                        });
-                                        if (result._tag === "Failure")
-                                          throw squashAtomCommandFailure(result);
-                                      }
-                                    : null
-                                }
-                                onCancelPromotion={
-                                  canOperateThread &&
-                                  activeThread?.subagentPromotion?.status === "waiting" &&
-                                  !activeEnvironmentUnavailable
-                                    ? async () => {
-                                        const promotion = activeThread.subagentPromotion;
-                                        if (!promotion) return;
-                                        const result = await cancelSubagentPromotion({
-                                          environmentId,
-                                          input: {
-                                            threadId: activeThread.id,
-                                            requestId: promotion.requestId,
-                                          },
-                                        });
-                                        if (result._tag === "Failure")
-                                          throw squashAtomCommandFailure(result);
-                                      }
-                                    : null
-                                }
-                                onOpenPromoted={
-                                  activeThread?.subagentPromotion?.status === "promoted"
-                                    ? () =>
-                                        onOpenRelatedThreadStable(
-                                          activeThread.subagentPromotion!.targetThreadId,
-                                        )
-                                    : null
-                                }
                                 provider={selectedProviderEntry ?? null}
                                 showInstanceBadge={
                                   selectedProviderEntry !== undefined &&

@@ -9,7 +9,6 @@ import {
   OrchestrationThreadSearchMatch,
   OrchestrationV2ThreadForkSourcePoint,
   OrchestrationV2ContextTransfer,
-  OrchestrationV2SubagentPromotion,
   CommandId,
   TrimmedNonEmptyString,
   ModelSelection,
@@ -232,28 +231,6 @@ const ThreadTransferTool = Tool.make("t3_thread_transfer", {
     }),
   ]),
 }).annotate(Tool.Destructive, true);
-const SubagentPromoteTool = Tool.make("t3_subagent_promote", {
-  ...commandTool,
-  description:
-    "Request an interactive native fork of a provider-owned subagent by threadId in this environment. A running subagent is allowed to finish first. Repeated requests reuse the existing promotion; a failed request retries it. Acceptance is not completion: use t3_subagent_promotion_status to read the destination and progress. The original subagent remains read-only, and its parent receives a handoff after the native fork succeeds.",
-  parameters: Schema.Struct({ threadId: ThreadId }),
-}).annotate(Tool.Destructive, true);
-const SubagentPromotionCancelTool = Tool.make("t3_subagent_promotion_cancel", {
-  ...commandTool,
-  description:
-    "Cancel a subagent promotion while it is waiting for the subagent to finish. Pass the requestId from t3_subagent_promotion_status. This does not stop the subagent; a native fork already in progress cannot be cancelled.",
-  parameters: Schema.Struct({ threadId: ThreadId, requestId: CommandId }),
-}).annotate(Tool.Destructive, true);
-const SubagentPromotionStatusTool = Tool.make("t3_subagent_promotion_status", {
-  ...commandTool,
-  description:
-    "Read durable subagent promotion progress for threadId in this environment. Null means no promotion was requested. The destination is usable only when status is promoted; use t3_thread_send on that interactive thread for further work.",
-  parameters: Schema.Struct({ threadId: ThreadId }),
-  success: Schema.Struct({ promotion: Schema.NullOr(OrchestrationV2SubagentPromotion) }),
-})
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false);
-
 const ThreadSearchTool = Tool.make("t3_thread_search", {
   ...commandTool,
   description:
@@ -327,9 +304,6 @@ export const ThreadToolkit = Toolkit.make(
   ThreadRepairTool,
   ScheduledTaskRunTool,
   ThreadSearchTool,
-  SubagentPromoteTool,
-  SubagentPromotionCancelTool,
-  SubagentPromotionStatusTool,
   ThreadArchiveFamilyTool,
   ThreadConfigureTool,
   ThreadTransferTool,

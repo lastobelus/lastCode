@@ -37,7 +37,6 @@ import {
   PullRequestWatchDeliveryAuthorization,
   AcceptedSteeringContinuation,
 } from "./Orchestrator.ts";
-import * as SubagentPromotionService from "./SubagentPromotionService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
 
@@ -94,7 +93,6 @@ export const layerExecutor: Layer.Layer<
   | ThreadTitleRegenerationService.ThreadTitleRegenerationService
   | IncomingMessageSummaryService.IncomingMessageSummaryService
   | ThreadManagementService.ThreadManagementService
-  | SubagentPromotionService.SubagentPromotionService
   | ServerSettings.ServerSettingsService
   | EffectOutbox.EffectOutboxV2
 > = Layer.effect(
@@ -112,7 +110,6 @@ export const layerExecutor: Layer.Layer<
     const incomingMessageSummary =
       yield* IncomingMessageSummaryService.IncomingMessageSummaryService;
     const threads = yield* ThreadManagementService.ThreadManagementService;
-    const subagentPromotion = yield* SubagentPromotionService.SubagentPromotionService;
     const settings = yield* ServerSettings.ServerSettingsService;
     const outbox = yield* EffectOutbox.EffectOutboxV2;
     const environmentPauseStore = yield* Effect.serviceOption(
@@ -252,23 +249,6 @@ export const layerExecutor: Layer.Layer<
                   ProviderSessionManager.ProviderSessionManagerV2,
                   providerSessions,
                 ),
-                Effect.mapError(
-                  (cause) =>
-                    new OrchestrationEffectExecutionError({
-                      effectId: effect.id,
-                      effectType: effect.request.type,
-                      cause,
-                    }),
-                ),
-              );
-          case "subagent.promote":
-            return subagentPromotion
-              .execute({
-                threadId: effect.threadId,
-                requestId: effect.request.requestId,
-                willRetry,
-              })
-              .pipe(
                 Effect.mapError(
                   (cause) =>
                     new OrchestrationEffectExecutionError({

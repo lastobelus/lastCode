@@ -181,7 +181,6 @@ it.layer(layer)("provider message classification", (it) => {
           providerMessage: false,
         },
         { request: { type: "thread.archive", requestId }, providerMessage: false },
-        { request: { type: "subagent.promote", requestId }, providerMessage: false },
         { request: { type: "delegated-tasks.stop" }, providerMessage: false },
       ];
       yield* outbox.enqueue(

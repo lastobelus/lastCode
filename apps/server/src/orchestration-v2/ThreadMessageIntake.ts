@@ -78,7 +78,6 @@ function adoptsWorkspace(command: OrchestrationV2Command): boolean {
     case "thread.interaction-mode.set":
     case "thread.model-selection.set":
     case "provider.switch":
-    case "subagent.promote.request":
     case "thread.fork":
     case "thread.merge_back":
       return true;

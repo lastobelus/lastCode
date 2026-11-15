@@ -3585,7 +3585,7 @@ it.live("does not capture files after their checkout becomes a project root", ()
 );
 
 it.live(
-  "retains promoted and unknown legacy children instead of treating no authored messages as untouched",
+  "retains unknown legacy children instead of treating no authored messages as untouched",
   () =>
     realGit((f) =>
       Effect.gen(function* () {
@@ -3594,24 +3594,8 @@ it.live(
         yield* h.service.previewSuspend({ threadId: firstId });
         const record = (yield* h.registry.list)[0]!;
         yield* h.registry.put({ ...record, lastWorkspaceUseAt: DateTime.formatIso(at) }, record);
-        h.threads.set(firstId, {
-          ...h.threads.get(firstId)!,
-          subagentPromotion: {
-            requestId: CommandId.make("promotion"),
-            targetThreadId: secondId,
-            status: "promoted",
-            error: null,
-            requestedAt: at,
-            updatedAt: at,
-            createdBy: "user",
-            creationSource: "web",
-          },
-        });
-        yield* h.service.sweep;
-        expect((yield* h.registry.list)[0]!.operation).toBeUndefined();
         const legacy = { ...h.threads.get(firstId)! };
         delete legacy.workspaceUserAdopted;
-        delete legacy.subagentPromotion;
         h.threads.set(firstId, legacy);
         yield* h.service.sweep;
         expect((yield* h.registry.list)[0]!.summary.state).toBe("active");

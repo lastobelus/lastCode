@@ -23,6 +23,8 @@ import InteractiveThreadParentIndexMigration from "./Migrations/OrchestrationV2/
 
 import PullRequestWatchIndexMigration from "./Migrations/OrchestrationV2/PullRequestWatchIndex.ts";
 
+import RetiredNativePromotionMigration from "./Migrations/OrchestrationV2/RetiredNativePromotion.ts";
+
 export const lastcodeMigrationEntries = [
   [1, "ProjectionThreadAnnotation", Migration0048],
   [2, "UpdateDrain", Migration0049],
@@ -43,6 +45,7 @@ export const lastcodeMigrationEntries = [
   [17, "OrchestrationV2ThreadReadAuthorizationIndex", ThreadReadAuthorizationIndexMigration],
   [18, "OrchestrationV2InteractiveThreadParentIndex", InteractiveThreadParentIndexMigration],
   [19, "OrchestrationV2PullRequestWatchIndex", PullRequestWatchIndexMigration],
+  [20, "OrchestrationV2RetiredNativePromotion", RetiredNativePromotionMigration],
 ] as const;
 
 export const lastcodeMigrationManifest = lastcodeMigrationEntries.map(

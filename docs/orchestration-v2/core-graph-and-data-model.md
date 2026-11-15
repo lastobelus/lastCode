@@ -361,7 +361,7 @@ type ProviderThread = {
 };
 ```
 
-`appThreadId` is set when the provider thread backs a first-class app thread. `ownerNodeId` is set when the provider thread is nested under an execution node, such as a subagent. A provider thread can later be forked or promoted into a first-class app thread.
+`appThreadId` is set when the provider thread backs a first-class app thread. `ownerNodeId` is set when the provider thread is nested under an execution node, such as a subagent. A provider thread can later be forked into a first-class app thread.
 
 A provider thread may have gaps in its native run coverage. Example: runs 1-5 use Codex provider thread A, runs 6-8 use Claude provider thread B, and run 9 returns to Codex thread A with a handoff summary covering runs 6-8. In that case, Codex thread A remains the same provider thread, but it has an explicit `ContextHandoff` before run 9.
 
@@ -562,7 +562,7 @@ type Checkpoint = {
 };
 ```
 
-A child/subagent provider turn can create a child checkpoint. It does not create an app-run checkpoint unless it is running as a first-class app run in a forked/promoted thread.
+A child/subagent provider turn can create a child checkpoint. It does not create an app-run checkpoint unless it is running as a first-class app run in a forked thread.
 
 ## Raw Provider Diagnostics
 

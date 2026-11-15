@@ -1299,7 +1299,6 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       thread.workspaceUserAdopted === true ||
       thread.createdBy === "user" ||
       thread.latestUserAuthoredMessageAt != null ||
-      thread.subagentPromotion != null ||
       thread.settledOverride !== null ||
       thread.lineage.independent === true ||
       thread.creatorGrouping === "independent";

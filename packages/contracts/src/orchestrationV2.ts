@@ -530,19 +530,6 @@ const OrchestrationV2LastTitleRegeneration = Schema.Struct({
   completedAt: Schema.DateTimeUtc,
 });
 
-export const OrchestrationV2SubagentPromotion = Schema.Struct({
-  requestId: CommandId,
-  targetThreadId: ThreadId,
-  sourceProviderTurnId: Schema.optional(ProviderTurnId),
-  status: Schema.Literals(["waiting", "forking", "failed", "promoted"]),
-  error: Schema.NullOr(Schema.String),
-  requestedAt: Schema.DateTimeUtc,
-  updatedAt: Schema.DateTimeUtc,
-  title: Schema.optional(TrimmedNonEmptyString),
-  ...OrchestrationV2CreationFields,
-});
-export type OrchestrationV2SubagentPromotion = typeof OrchestrationV2SubagentPromotion.Type;
-
 export const OrchestrationV2ThreadRecovery = Schema.Struct({
   runId: RunId,
   attemptId: RunAttemptId,
@@ -626,7 +613,6 @@ export const OrchestrationV2AppThread = Schema.Struct({
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   pullRequests: Schema.optional(Schema.Array(ThreadPullRequestLink)),
   branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
-  subagentPromotion: Schema.optional(Schema.NullOr(OrchestrationV2SubagentPromotion)),
   activeProviderThreadId: Schema.NullOr(ProviderThreadId),
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),
   linkOrigin: Schema.optional(OrchestrationV2LinkOrigin),
@@ -2439,7 +2425,6 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   annotation: Schema.optional(Schema.NullOr(ThreadAnnotation)),
   dashboardItems: Schema.optional(ThreadDashboardItems),
   actionResume: Schema.optional(Schema.NullOr(ActionResumeState)),
-  subagentPromotion: Schema.optional(Schema.NullOr(OrchestrationV2SubagentPromotion)),
   worktreeCleanup: Schema.optional(Schema.NullOr(ThreadWorktreeCleanup)),
   worktreeSuspension: Schema.optional(WorktreeSuspensionSummary),
   workspaceUserAdopted: Schema.optional(Schema.Boolean),
@@ -2661,17 +2646,8 @@ const OrchestrationV2ThreadRecoveryJson = OrchestrationV2ThreadRecovery.mapField
   updatedAt: Schema.DateTimeUtcFromString,
 }));
 
-const OrchestrationV2SubagentPromotionJson = OrchestrationV2SubagentPromotion.mapFields(
-  (fields) => ({
-    ...fields,
-    requestedAt: Schema.DateTimeUtcFromString,
-    updatedAt: Schema.DateTimeUtcFromString,
-  }),
-);
-
 export const OrchestrationV2AppThreadJson = OrchestrationV2AppThread.mapFields((fields) => ({
   ...fields,
-  subagentPromotion: Schema.optional(Schema.NullOr(OrchestrationV2SubagentPromotionJson)),
   recovery: Schema.optional(OrchestrationV2ThreadRecoveryJson),
   createdAt: Schema.DateTimeUtcFromString,
   updatedAt: Schema.DateTimeUtcFromString,
@@ -3123,7 +3099,6 @@ export type OrchestrationV2LatestVisibleMessageSummaryJson =
 
 export const OrchestrationV2ThreadShellJson = OrchestrationV2ThreadShell.mapFields((fields) => ({
   ...fields,
-  subagentPromotion: Schema.optional(Schema.NullOr(OrchestrationV2SubagentPromotionJson)),
   recovery: Schema.optional(OrchestrationV2ThreadRecoveryJson),
   latestRunRequestedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   latestRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
@@ -3865,20 +3840,6 @@ export const OrchestrationV2Command = Schema.Union([
     checkpointId: CheckpointId,
   }),
   Schema.Struct({
-    type: Schema.Literal("subagent.promote.request"),
-    ...OrchestrationV2CreationFields,
-    commandId: CommandId,
-    threadId: ThreadId,
-    targetThreadId: ThreadId,
-    title: Schema.optional(TrimmedNonEmptyString),
-  }),
-  Schema.Struct({
-    type: Schema.Literal("subagent.promote.cancel"),
-    commandId: CommandId,
-    threadId: ThreadId,
-    requestId: CommandId,
-  }),
-  Schema.Struct({
     type: Schema.Literal("thread.fork"),
     ...OrchestrationV2CreationFields,
     commandId: CommandId,
@@ -4059,30 +4020,6 @@ const OrchestrationV2InternalCommand = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("thread.archive.fail"),
-    commandId: CommandId,
-    threadId: ThreadId,
-    requestId: CommandId,
-    error: Schema.String,
-  }),
-  Schema.Struct({
-    type: Schema.Literal("subagent.promote.advance"),
-    commandId: CommandId,
-    threadId: ThreadId,
-    requestId: CommandId,
-  }),
-  Schema.Struct({
-    type: Schema.Literal("subagent.promote.complete"),
-    commandId: CommandId,
-    threadId: ThreadId,
-    requestId: CommandId,
-    providerThread: OrchestrationV2ProviderThread,
-    snapshot: Schema.Struct({
-      providerTurns: Schema.Array(OrchestrationV2ProviderTurn),
-      messages: Schema.Array(OrchestrationV2ConversationMessage),
-    }),
-  }),
-  Schema.Struct({
-    type: Schema.Literal("subagent.promote.fail"),
     commandId: CommandId,
     threadId: ThreadId,
     requestId: CommandId,
@@ -5077,12 +5014,10 @@ export const OrchestrationV2ThreadArchiveFamily = Schema.Struct({
   activeChildThreadIds: Schema.Array(ThreadId),
   activeThreadIds: Schema.Array(ThreadId),
   unreadThreadIds: Schema.Array(ThreadId),
-  promotableChildThreadIds: Schema.Array(ThreadId),
   keptThreadIds: Schema.Array(ThreadId),
   protectedChildThreadIds: Schema.Array(ThreadId),
   nativeStopCount: Schema.Number,
   requiresConfirmation: Schema.Boolean,
-  canPromote: Schema.Boolean,
   canStopAndArchive: Schema.Boolean,
 });
 export type OrchestrationV2ThreadArchiveFamily = typeof OrchestrationV2ThreadArchiveFamily.Type;

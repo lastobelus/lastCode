@@ -504,7 +504,7 @@ Rules:
 
 - Root run todo lists update the main plan/progress UI.
 - Child/subagent todo lists are nested under their execution node.
-- Child plans do not replace root plans unless promoted/forked.
+- Child plans do not replace root plans unless forked.
 - Proposed plan implementation creates a new run or a new thread depending on user action.
 
 ## Activities

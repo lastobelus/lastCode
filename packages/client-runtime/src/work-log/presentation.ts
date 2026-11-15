@@ -536,8 +536,6 @@ function summaryActionPriority(action: ToolGroupAction | T3McpToolSummaryAction)
     case "schedule-run":
     case "thread-configure":
     case "thread-fork":
-    case "subagent-promote":
-    case "subagent-promotion-cancel":
     case "thread-merge":
     case "thread-organize":
     case "thread-update":

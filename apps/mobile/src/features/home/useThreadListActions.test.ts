@@ -230,7 +230,6 @@ function makeArchiveDecision(
     threads,
     children,
     childThreadIds: children.map((child) => child.id),
-    promotableChildThreadIds: [],
     keptThreadIds: [],
     activeChildThreadIds: [],
     activeThreadIds: [],
@@ -238,12 +237,10 @@ function makeArchiveDecision(
     protectedChildThreadIds: [],
     nativeStopCount: 0,
     requiresConfirmation: false,
-    canPromote: false,
     canStopAndArchive: true,
     activeChildren: [],
     activeThreads: [],
     unreadThreads: [],
-    promotableChildren: [],
     protectedChildren: [],
     ...options,
   };
@@ -333,7 +330,6 @@ describe("archive family reads", () => {
         activeThreadIds: [root.id],
         activeThreads: [root],
         requiresConfirmation: true,
-        canPromote: true,
       });
       const archiving = useThreadListActions().archiveThread(root);
       await vi.waitFor(() => expect(state.alerts[0]?.buttons).toBeDefined());
@@ -384,7 +380,6 @@ describe("archive family reads", () => {
         activeThreadIds: [owner.id],
         activeThreads: [owner],
         requiresConfirmation: true,
-        canPromote: true,
       });
       const archiving = useThreadListActions().archiveThread(local);
       await vi.waitFor(() => expect(state.alerts[0]?.buttons).toBeDefined());
@@ -558,7 +553,6 @@ describe("archive family reads", () => {
       activeThreadIds: [first.id, added.id],
       activeThreads: [first, added],
       requiresConfirmation: true,
-      canPromote: true,
     });
     actions.archiveThread(root);
     await vi.waitFor(() => expect(state.alerts[2]?.buttons).toBeDefined());
@@ -594,7 +588,6 @@ describe("archive family reads", () => {
       unreadThreadIds: [root.id],
       unreadThreads: [root],
       requiresConfirmation: true,
-      canPromote: true,
     });
     const archiving = useThreadListActions().archiveThread(root);
     await vi.waitFor(() => expect(state.alerts[0]?.buttons).toBeDefined());
@@ -619,7 +612,7 @@ describe("archive family reads", () => {
     ]);
   });
 
-  it("offers only Close for protected family members despite promotion availability", async () => {
+  it("offers only Close for protected family members", async () => {
     const root = makeThread();
     const protectedChild = makeThread({ id: ThreadId.make("persistent-child"), persistent: true });
     state.archiveFamily = makeArchiveDecision([root, protectedChild], [protectedChild], {
@@ -627,7 +620,6 @@ describe("archive family reads", () => {
       protectedChildren: [protectedChild],
       requiresConfirmation: true,
       canStopAndArchive: false,
-      canPromote: true,
     });
     useThreadListActions().archiveThread(root);
     await vi.waitFor(() => expect(state.alerts[0]?.buttons).toBeDefined());

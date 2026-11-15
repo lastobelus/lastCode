@@ -43,7 +43,6 @@ import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
 import * as IncomingMessageSummaryService from "./IncomingMessageSummaryService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
-import * as SubagentPromotionService from "./SubagentPromotionService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ServerConfig from "../config.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -107,7 +106,6 @@ function layerExecutorFor(input: {
     Layer.mock(IncomingMessageSummaryService.IncomingMessageSummaryService)({
       execute: () => Effect.void,
     }),
-    Layer.mock(SubagentPromotionService.SubagentPromotionService)({ execute: () => Effect.void }),
     Layer.succeed(
       ProviderTurnControlService.ProviderTurnControlServiceV2,
       ProviderTurnControlService.ProviderTurnControlServiceV2.of({

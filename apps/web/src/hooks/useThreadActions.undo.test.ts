@@ -186,19 +186,16 @@ function archiveDecisionFixture(
     activeChildren,
     activeThreads,
     unreadThreads,
-    promotableChildren: [],
     protectedChildren: family.protectedChildren,
     childThreadIds: family.children.map((thread) => thread.id),
     activeThreadIds: activeThreads.map((thread) => thread.id),
     unreadThreadIds: unreadThreads.map((thread) => thread.id),
-    promotableChildThreadIds: [],
     activeChildThreadIds: activeChildren.map((thread) => thread.id),
     protectedChildThreadIds: family.protectedChildren.map((thread) => thread.id),
     keptThreadIds: [],
     nativeStopCount: family.nativeChildren.length,
     requiresConfirmation:
       activeThreads.length > 0 || unreadThreads.length > 0 || family.protectedChildren.length > 0,
-    canPromote: false,
     canStopAndArchive: family.protectedChildren.length === 0,
   };
 }

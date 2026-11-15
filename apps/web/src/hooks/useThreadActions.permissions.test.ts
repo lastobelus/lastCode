@@ -97,7 +97,6 @@ vi.mock("../state/use-atom-command", () => ({
       if (action === "loadArchiveFamily") {
         return AsyncResult.success({
           childThreadIds: [],
-          promotableChildThreadIds: [],
           keptThreadIds: [],
           activeChildThreadIds: [],
           activeThreadIds: [],
@@ -105,13 +104,11 @@ vi.mock("../state/use-atom-command", () => ({
           protectedChildThreadIds: [],
           nativeStopCount: 0,
           requiresConfirmation: false,
-          canPromote: false,
           canStopAndArchive: true,
           children: [],
           activeChildren: [],
           activeThreads: [],
           unreadThreads: [],
-          promotableChildren: [],
           protectedChildren: [],
           threads: state.threads
             .filter(

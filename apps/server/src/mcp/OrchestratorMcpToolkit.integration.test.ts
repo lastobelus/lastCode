@@ -89,13 +89,6 @@ const localChild = (childThreadId: ThreadId | null): ThreadId => {
   return childThreadId;
 };
 
-// Effect returns a declared tool failure as `isError` with its encoded payload
-// as JSON text, never as `structuredContent`.
-const declaredFailure = (result: McpSchema.CallToolResult) => {
-  const text = result.content[0];
-  return result.isError === true && text?.type === "text" ? JSON.parse(text.text) : undefined;
-};
-
 const parentThreadId = ThreadId.make("thread:mcp-orchestrator-parent");
 const projectId = ProjectId.make("project:mcp-orchestrator");
 const codexInstanceId = ProviderInstanceId.make("codex");
@@ -383,21 +376,6 @@ describe("orchestrator MCP toolkit", () => {
               Effect.provideService(McpSchema.McpServerClient, client),
             );
 
-        const noPromotion = yield* invoke("t3_subagent_promotion_status", {
-          threadId: parentThreadId,
-        });
-        expect(noPromotion.structuredContent).toEqual({ promotion: null });
-        const ordinaryThreadPromotion = yield* invoke("t3_subagent_promote", {
-          threadId: parentThreadId,
-        });
-        expect(declaredFailure(ordinaryThreadPromotion)).toMatchObject({
-          code: "orchestration_error",
-        });
-        expect(
-          (yield* orchestrator.getThreadProjection(parentThreadId)).thread.subagentPromotion ??
-            null,
-        ).toBeNull();
-
         const foreignThreadId = ThreadId.make("thread:mcp-replay-foreign");
         yield* orchestrator.dispatch({
           type: "thread.create",
@@ -413,25 +391,6 @@ describe("orchestrator MCP toolkit", () => {
           branch: null,
           worktreePath: cwd,
         });
-        for (const tool of ["t3_subagent_promote", "t3_subagent_promotion_cancel"]) {
-          const foreignPromotion = yield* invoke(tool, {
-            threadId: foreignThreadId,
-            ...(tool === "t3_subagent_promotion_cancel" ? { requestId: "foreign-promotion" } : {}),
-          });
-          expect(declaredFailure(foreignPromotion)).toMatchObject({
-            code: "orchestration_error",
-          });
-        }
-        const foreignPromotionStatus = yield* invoke("t3_subagent_promotion_status", {
-          threadId: foreignThreadId,
-        });
-        expect(foreignPromotionStatus.isError).toBe(false);
-        expect(foreignPromotionStatus.structuredContent).toEqual({ promotion: null });
-        expect(
-          (yield* orchestrator.getThreadProjection(foreignThreadId)).thread.subagentPromotion ??
-            null,
-        ).toBeNull();
-
         const delegationStartSequence = yield* orchestrator.getThreadEventSequence(parentThreadId);
         const delegatedCall = yield* invoke("delegate_task", {
           task: delegatedPrompt,

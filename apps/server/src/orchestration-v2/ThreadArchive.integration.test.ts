@@ -216,7 +216,6 @@ it.effect("archives and restores grouped conversations and delegated descendants
       [ids.conversation, ids.delegated, ids.finished, ids.native],
     );
     assert.sameMembers([...inspected.activeThreadIds], [ids.conversation, ids.delegated]);
-    assert.isFalse(inspected.canPromote);
     const sequence = (yield* orchestrator.getShellSnapshot()).snapshotSequence;
     const refused = yield* orchestrator
       .dispatch({
