@@ -257,9 +257,14 @@ The checkpoint command enables rerere in repository configuration for
 historical, non-carry rebases; carry replay overrides it on its own rebase
 commands only. Continue a carry replay manually with
 `git -c rerere.enabled=false -c rerere.autoupdate=false rebase --continue`.
-When a replay or incorporation conflict is in `pnpm-lock.yaml` or
-`apps/server/src/provider/agentContextBudget.json`, take either side to clear
-the markers and continue. Both files are regenerated after the replay.
+When a replay or incorporation conflict is in a derived field, take either side
+of that field to clear the markers and continue; all of them are regenerated after the replay.
+The derived files are `pnpm-lock.yaml`,
+`apps/server/src/provider/agentContextBudget.json`, and the instruction text in
+`apps/server/src/orchestration-v2/testkit/fixtures/*/muse_transcript.ndjson`.
+Regeneration rewrites only those fixtures' instruction fields from the tree's
+runtime instructions; their recorded behavior stays as it is.
+Resolve conflicts in recorded behavior normally; regeneration cannot repair those fields.
 The retained recovery worktree is the only checkout that receives committed
 repairs. Incorporate any downstream merges made since that attempt before
 selecting its exact head.
@@ -277,7 +282,7 @@ into their owning groups. This selection is bookkeeping: never request `run-now`
 after it. Only step 3's final selection leads to `run-now`.
 
 **Before step 1, after the replay and every incorporated downstream merge:** in
-the retained worktree, regenerate both derived files with this command, and
+the retained worktree, regenerate the derived files with this command, and
 commit any changes with `Carry-Group: incubator` so they replay after every group's inputs:
 
 ```bash
@@ -308,7 +313,8 @@ pnpm --config.verify-deps-before-run=false lastcode:regenerate-derived --upstrea
    a file the new upstream nightly introduced also passes. Tests that survive
    beside a deleted file still run. Fix concrete failures by committing in the
    retained worktree and updating the path list. If a repair changes dependency
-   manifests, patches, pnpm settings, or measured agent context, rerun the
+   manifests, patches, pnpm settings, measured agent context, or runtime
+   instructions (`packages/provider-core/src/server/runtimeInstructions.ts`), rerun the
    regeneration command above and commit its changes with `Carry-Group: incubator`.
    Then refresh the separate checkout and rerun the gate.
    Broader checks remain in the service's unchanged Full CI; this preflight

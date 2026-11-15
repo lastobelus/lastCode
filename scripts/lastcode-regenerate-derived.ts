@@ -44,8 +44,13 @@ async function regenerateDerived(upstream: string, cwd: string) {
     cwd,
     stdio: "inherit",
   });
+  NodeChildProcess.execFileSync(
+    process.execPath,
+    ["apps/server/scripts/lastcode-muse-replay-instructions.ts"],
+    { cwd, stdio: "inherit" },
+  );
   console.log(
-    `Regenerated lockfile from ${commit}; frozen install, overrides, patches and context budget passed.`,
+    `Regenerated lockfile from ${commit}; frozen install, overrides, patches, context budget and Muse instructions passed.`,
   );
 }
 
