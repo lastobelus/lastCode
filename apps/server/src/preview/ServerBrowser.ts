@@ -3926,6 +3926,7 @@ const make = Effect.gen(function* () {
             message: "The agent session is missing. Reconnect the provider.",
           });
         const open = input as PreviewAutomationOpenInput;
+        const forUser = open.purpose === "user";
         const currentHost =
           open.browserHost === "environment" ? undefined : await profileHost(request);
         const environmentHosted =
@@ -3993,7 +3994,7 @@ const make = Effect.gen(function* () {
         const newTabProfileId =
           selectedProfileId ?? catalogue?.defaultProfileId ?? reportedProfileId;
         const initialUrl = open.url === undefined ? undefined : normalizePreviewUrl(open.url);
-        const reuse = open.reuseExistingTab ?? true;
+        const reuse = !forUser && (open.reuseExistingTab ?? true);
         if (
           reuse &&
           !request.tabIdExplicit &&
@@ -4145,7 +4146,7 @@ const make = Effect.gen(function* () {
                 ...(reportedProfileId === undefined ? {} : { profileId: reportedProfileId }),
                 runtime: "server",
                 reveal: false,
-                automationOwner: request.agentSessionId,
+                ...(forUser ? {} : { automationOwner: request.agentSessionId }),
                 ...(environmentHosted
                   ? {
                       environmentHosted: true,
@@ -4182,8 +4183,9 @@ const make = Effect.gen(function* () {
                 });
               if (environmentHosted)
                 environmentProfileSessions.add(tabKey(tab.threadId, tab.tabId));
-              const reveal = open.open ?? open.show;
-              if (reveal !== false) {
+              const reveal = forUser ? true : (open.open ?? open.show);
+              const revealTab = async () => {
+                if (reveal === false) return;
                 tab.revealRequested = true;
                 await runPromise(
                   manager.requestReveal({
@@ -4192,7 +4194,8 @@ const make = Effect.gen(function* () {
                     force: reveal === true,
                   }),
                 );
-              }
+              };
+              if (!forUser) await revealTab();
               try {
                 if (destination)
                   await prepareBrowserCredential(tab, destination, signal, remainingTimeoutMs());
@@ -4248,6 +4251,7 @@ const make = Effect.gen(function* () {
                   else await reportLoaded(tab, true);
                 }
               }
+              if (forUser) await revealTab();
               if (reveal === true && tab.viewers.size === 0 && tab.desktop === null)
                 await awaitViewer(
                   tab,

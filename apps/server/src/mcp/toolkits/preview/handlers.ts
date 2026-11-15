@@ -46,11 +46,12 @@ import { previewToolFailure } from "./errors.ts";
  * `true` would silently override it for every `preview_open`.
  */
 function normalizePreviewOpenInput(input: PreviewAutomationOpenInput): PreviewAutomationOpenInput {
-  const open = input.open ?? input.show;
+  const forUser = input.purpose === "user";
+  const open = forUser ? true : (input.open ?? input.show);
   return {
     ...input,
     ...(open === undefined ? {} : { open, show: open }),
-    reuseExistingTab: input.reuseExistingTab ?? true,
+    reuseExistingTab: forUser ? false : (input.reuseExistingTab ?? true),
   };
 }
 
@@ -270,6 +271,11 @@ const handlers = {
         const scope = yield* McpInvocationContext.requireThreadMcpCapability("preview");
         const preview = yield* PublishedDocumentPreview.PublishedDocumentPreview;
         return yield* preview.open(scope, { ...normalizePreviewOpenInput(input), target });
+      }
+      if (input.purpose === "user" && target !== undefined) {
+        const path = target.path ?? "";
+        url = `${target.protocol ?? "http"}://localhost:${target.port}${path.startsWith("/") || path === "" ? path : `/${path}`}`;
+        target = undefined;
       }
       const opened = yield* invokeTargeted<PreviewAutomationStatus>(
         input.profileId !== undefined || input.profileName !== undefined
