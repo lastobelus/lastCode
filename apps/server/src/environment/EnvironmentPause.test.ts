@@ -1431,10 +1431,12 @@ it.effect("recovers a durable pause saved before message submission after restar
       const recovered = yield* restart(h);
       const status = yield* recovered.pause.status;
       assert.strictEqual(status.observation, "known");
-      assert.strictEqual(status.session?.targets[0]?.pause, "failed");
+      assert.strictEqual(status.session?.targets[0]?.pause, "pending");
+      assert.isNull(status.session?.targets[0]?.error);
       yield* Ref.set(h.gate, null);
-      const retried = yield* recovered.pause.retry;
-      assert.strictEqual(retried.session?.targets[0]?.pause, "sent");
+      yield* recovered.pause.continueResume;
+      assert.strictEqual((yield* recovered.pause.status).session?.targets[0]?.pause, "sent");
+      yield* recovered.pause.retry;
       assert.lengthOf(yield* Ref.get(h.messages), 1);
     }),
   ).pipe(Effect.provide(testLayer)),
@@ -2465,6 +2467,105 @@ it.effect.each([
       assert.notStrictEqual(resumes[1]!.messageId, identity.messageId);
       assert.isNull(yield* current.store.get);
     }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("keeps native delivery after an older cancellation spans P1 R1 P2 R2", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    yield* Ref.set(h.snapshot, shell([thread(a)]));
+    yield* Ref.set(h.queued, true);
+    const submission = yield* Deferred.make<void>();
+    yield* Ref.set(h.gate, submission);
+    const original = yield* h.pause.start.pipe(Effect.forkChild);
+    yield* Deferred.await(h.submissionBlocked);
+    const initial = (yield* h.store.get)!;
+    const identity = Store.deliveryIdentity(initial, initial.targets[0]!, "pause");
+    const evidence = yield* Deferred.make<void>();
+    yield* Ref.set(h.outboxGate, evidence);
+    const firstResume = yield* h.pause.resume.pipe(Effect.forkChild);
+    yield* Deferred.await(h.outboxBlocked);
+    yield* h.pause.start;
+    const accepted = yield* Deferred.make<void>();
+    yield* Ref.set(h.receiptGate, accepted);
+    yield* Deferred.succeed(submission, undefined);
+    yield* Deferred.await(h.receiptEntered);
+    const nodeId = NodeId.make("four-toggle-native-pause");
+    yield* Ref.update(h.runs, (runs) =>
+      runs.map((run) =>
+        run.userMessageId === identity.messageId
+          ? { ...run, status: "running" as const, rootNodeId: nodeId, startedAt: now }
+          : run,
+      ),
+    );
+    yield* Ref.set(h.providerTurns, [nativeTurn(nodeId)]);
+    yield* h.pause.resume;
+    yield* Deferred.succeed(evidence, undefined);
+    yield* Fiber.join(firstResume);
+    assert.strictEqual((yield* h.store.get)?.targets[0]?.pause, "pending");
+    yield* Ref.set(h.receiptGate, null);
+    yield* Deferred.succeed(accepted, undefined);
+    yield* Fiber.join(original);
+    yield* h.store.recordDelivery(identity.messageId, true);
+    yield* Ref.set(h.queued, false);
+    yield* h.pause.continueResume;
+    assert.deepEqual(
+      (yield* Ref.get(h.calls)).map((call) => call.text),
+      ["pause to go offline", "resume"],
+    );
+    assert.isNull(yield* h.store.get);
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each(["pause", "resume"] as const)(
+  "leaves a definitive unaccepted %s failure for optional Retry",
+  (direction) =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      yield* Ref.set(h.snapshot, shell([thread(a)]));
+      if (direction === "resume") yield* h.pause.start;
+      yield* Ref.set(h.failures, new Set([a]));
+      yield* direction === "pause" ? h.pause.start : h.pause.resume;
+      assert.strictEqual((yield* h.store.get)?.targets[0]?.[direction], "failed");
+      const calls = yield* Ref.get(h.calls);
+      const reads = yield* Ref.get(h.reads);
+      yield* h.pause.continueResume;
+      yield* h.pause.continueResume;
+      assert.deepEqual(yield* Ref.get(h.calls), calls);
+      assert.deepEqual(yield* Ref.get(h.reads), reads);
+      yield* Ref.set(h.failures, new Set());
+      yield* h.pause.retry;
+      assert.strictEqual((yield* Ref.get(h.calls)).length, calls.length + 1);
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("status polls do not invent a failure for a newly owed Resume", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    yield* Ref.set(h.snapshot, shell([thread(a)]));
+    yield* h.pause.start;
+    yield* Ref.set(h.queued, true);
+    yield* h.pause.resume;
+    const initial = (yield* h.store.get)!;
+    const identity = Store.deliveryIdentity(initial, initial.targets[0]!, "resume");
+    yield* Ref.update(h.runs, (runs) =>
+      runs.map((run) =>
+        run.userMessageId === identity.messageId ? { ...run, status: "starting" as const } : run,
+      ),
+    );
+    yield* h.pause.start;
+    yield* h.pause.resume;
+    yield* h.store.recordDelivery(identity.messageId, "cancelled");
+    yield* h.pause.status;
+    const observed = yield* h.pause.status;
+    assert.notStrictEqual(observed.session?.targets[0]?.resume, "failed");
+    assert.isNull(observed.session?.targets[0]?.error);
+    yield* Ref.set(h.queued, false);
+    yield* h.pause.continueResume;
+    assert.isNull(yield* h.store.get);
+    const resumes = (yield* Ref.get(h.calls)).filter((call) => call.text === "resume");
+    assert.lengthOf(resumes, 2);
+    assert.notStrictEqual(resumes[1]!.messageId, identity.messageId);
+  }).pipe(Effect.provide(testLayer)),
 );
 
 it.effect("uses ordinary Pause admission for an idle recipient resumed before Pause2", () =>

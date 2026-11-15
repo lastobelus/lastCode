@@ -350,31 +350,32 @@ const make = Effect.gen(function* () {
           if (target[direction] === "pending") continue;
         }
         if (submission === "unsubmitted" && target[direction] === "failed") continue;
-        yield* store.update((current) =>
-          current?.id !== session.id
+        yield* store.update((current) => {
+          if (current?.id !== session.id) return current;
+          const error =
+            accepted || submission === "unsubmitted"
+              ? null
+              : "The message submission could not be confirmed. Waiting for recovery.";
+          const targets = current.targets.map((latest) =>
+            latest.threadId !== target.threadId ||
+            latest[`${direction}Attempt`] !== target[`${direction}Attempt`] ||
+            latest[direction] !== target[direction] ||
+            latest[`${direction}Accepted`] ||
+            (latest[direction] === "pending" &&
+              latest[`${direction}Accepted`] === accepted &&
+              latest.error === error)
+              ? latest
+              : {
+                  ...latest,
+                  [direction]: "pending" as const,
+                  [`${direction}Accepted`]: accepted,
+                  error,
+                },
+          );
+          return targets.every((target, index) => target === current.targets[index])
             ? current
-            : {
-                ...current,
-                targets: current.targets.map((latest) =>
-                  latest.threadId !== target.threadId ||
-                  latest[`${direction}Attempt`] !== target[`${direction}Attempt`] ||
-                  latest[direction] !== target[direction] ||
-                  latest[`${direction}Accepted`]
-                    ? latest
-                    : {
-                        ...latest,
-                        [direction]:
-                          submission === "unsubmitted" ? ("failed" as const) : ("pending" as const),
-                        [`${direction}Accepted`]: accepted,
-                        error: accepted
-                          ? null
-                          : submission === "unknown"
-                            ? "The message submission could not be confirmed. Waiting for recovery."
-                            : "The message was not submitted before the server stopped. Retry to send it.",
-                      },
-                ),
-              },
-        );
+            : { ...current, targets };
+        });
       }
     }
     return (yield* reconcileUnavailablePauseRecipients) || unknown;
@@ -477,7 +478,6 @@ const make = Effect.gen(function* () {
   const reconcileDeliveries = Effect.gen(function* () {
     const recoveryUnknown = yield* reconcileUnaccepted;
     yield* retireCancelledPauses;
-    yield* renewCancelledResumes;
     yield* reconcileResumeRecipients;
     let session = yield* store.get;
     let deliveryUnknown = recoveryUnknown;
@@ -591,7 +591,6 @@ const make = Effect.gen(function* () {
         (yield* recovery.withPermits(1)(reconcileUnavailablePauseRecipients)) || deliveryUnknown;
       session = yield* store.get;
     }
-    yield* renewCancelledResumes;
     session = yield* finishResume;
     return { session, deliveryUnknown };
   });
@@ -731,6 +730,7 @@ const make = Effect.gen(function* () {
               return;
             if (
               target[direction] === "sent" ||
+              target[direction] === "failed" ||
               target[direction] === "unavailable" ||
               target[`${direction}Accepted`]
             )
@@ -763,38 +763,49 @@ const make = Effect.gen(function* () {
                 result.failure._tag === "OrchestratorPauseRecipientInactiveError" &&
                 submission === "unsubmitted";
             }
-            yield* store.update((current) =>
-              current?.id !== snapshot.id || (direction === "pause" && current.phase === "resuming")
+            yield* store.update((current) => {
+              if (
+                current?.id !== snapshot.id ||
+                (direction === "pause" && current.phase === "resuming")
+              )
+                return current;
+              const targets = current.targets.map((latest): Target => {
+                if (
+                  latest.threadId !== target.threadId ||
+                  latest[direction] === "sent" ||
+                  latest[direction] === "unavailable" ||
+                  (latest[direction] === "failed" && latest[`${direction}Accepted`]) ||
+                  latest[`${direction}Attempt`] !== target[`${direction}Attempt`]
+                )
+                  return latest;
+                const next: Target = {
+                  ...latest,
+                  [`${direction}Accepted`]: submission === "accepted",
+                  ...(inactive ? { rePause: undefined } : {}),
+                  [direction]: inactive
+                    ? "unavailable"
+                    : submission === "unsubmitted"
+                      ? "failed"
+                      : "pending",
+                  error: inactive
+                    ? "This thread finished before Pause was submitted."
+                    : submission === "accepted"
+                      ? latest.error
+                      : submission === "unknown"
+                        ? "The message submission could not be confirmed. Waiting for recovery."
+                        : "This thread could not accept the message. Retry after resolving its current state.",
+                };
+                return latest[direction] === next[direction] &&
+                  latest[`${direction}Accepted`] === next[`${direction}Accepted`] &&
+                  latest.rePause === next.rePause &&
+                  latest.error === next.error
+                  ? latest
+                  : next;
+              });
+              return targets.every((target, index) => target === current.targets[index])
                 ? current
-                : {
-                    ...current,
-                    targets: current.targets.map((latest) =>
-                      latest.threadId !== target.threadId ||
-                      latest[direction] === "sent" ||
-                      latest[direction] === "unavailable" ||
-                      (latest[direction] === "failed" && latest[`${direction}Accepted`]) ||
-                      latest[`${direction}Attempt`] !== target[`${direction}Attempt`]
-                        ? latest
-                        : {
-                            ...latest,
-                            [`${direction}Accepted`]: submission === "accepted",
-                            ...(inactive ? { rePause: undefined } : {}),
-                            [direction]: inactive
-                              ? ("unavailable" as const)
-                              : submission === "unsubmitted"
-                                ? ("failed" as const)
-                                : ("pending" as const),
-                            error: inactive
-                              ? "This thread finished before Pause was submitted."
-                              : submission === "accepted"
-                                ? latest.error
-                                : submission === "unknown"
-                                  ? "The message submission could not be confirmed. Waiting for recovery."
-                                  : "This thread could not accept the message. Retry after resolving its current state.",
-                          },
-                    ),
-                  },
-            );
+                : { ...current, targets };
+            });
           }).pipe(
             Effect.ensuring(
               Effect.sync(() => {
@@ -960,7 +971,7 @@ const make = Effect.gen(function* () {
       ) {
         // This is a preflight observation, not a native receipt. A newer
         // owner action can reclaim the same still-unsubmitted control.
-        yield* store.recordDelivery(identity.messageId, "cancelled", { onlyIfSuperseded: true });
+        yield* store.recordDelivery(identity.messageId, "cancelled", { onlyIfSuperseded: target });
         continue;
       }
       const record = yield* projections
@@ -1019,21 +1030,24 @@ const make = Effect.gen(function* () {
   });
   const continueResume = Effect.gen(function* () {
     const current = yield* store.get;
-    if (
-      current === null ||
-      (current.phase !== "resuming" &&
-        !current.targets.some(
-          (target) =>
-            target.rePause ||
-            target.pause === "pending" ||
-            (target.pause === "failed" && !target.pauseAccepted),
-        ))
-    )
+    if (current === null) return;
+    const pending = current.targets.some(
+      (target) =>
+        target.rePause ||
+        target.pause === "pending" ||
+        (current.phase === "resuming" &&
+          needsResume(target) &&
+          (target.resume === "pending" || target.resumeCancelled)),
+    );
+    if (!pending) {
+      yield* finishResume;
       return;
+    }
     const { session } = yield* reconcileDeliveries;
     if (session === null) return;
     yield* withResumeOperation(
       Effect.gen(function* () {
+        yield* renewCancelledResumes;
         if (session.phase === "resuming") {
           yield* cancelPendingPauses;
           yield* deliver("resume");
@@ -1113,6 +1127,7 @@ const make = Effect.gen(function* () {
     }),
     retry: withOperation(
       Effect.gen(function* () {
+        yield* renewCancelledResumes;
         yield* status;
         const session = yield* store.get;
         if (session === null)
@@ -1125,11 +1140,11 @@ const make = Effect.gen(function* () {
     continueResume,
     resume: withResumeOperation(
       Effect.gen(function* () {
-        intentRevision++;
+        const requestedAtRevision = ++intentRevision;
         const session = yield* store.get;
         if (session === null) return yield* status;
         yield* store.update((current) =>
-          current === null
+          current === null || requestedAtRevision !== intentRevision
             ? current
             : {
                 ...current,
@@ -1140,6 +1155,7 @@ const make = Effect.gen(function* () {
                 })),
               },
         );
+        if (requestedAtRevision !== intentRevision) return yield* status;
         yield* renewCancelledResumes;
         yield* cancelPendingPauses;
         yield* retryDirection("resume");

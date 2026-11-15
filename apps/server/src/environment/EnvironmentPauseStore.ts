@@ -76,7 +76,7 @@ export class EnvironmentPauseStore extends Context.Service<
     readonly recordDelivery: (
       messageId: MessageId,
       delivered: boolean | "cancelled",
-      options?: { readonly onlyIfSuperseded: true },
+      options?: { readonly onlyIfSuperseded: StoredSession["targets"][number] },
     ) => Effect.Effect<void, EnvironmentPauseError>;
   }
 >()("t3/environment/EnvironmentPauseStore") {}
@@ -136,8 +136,11 @@ const make = Effect.gen(function* () {
           let changed = false;
           const targets = session.targets.map((target) => {
             for (const direction of ["pause", "resume"] as const) {
+              // A newer intent can reuse the id and phase. Retire only the
+              // target snapshot whose non-delivery was observed.
               if (
                 deliveryIdentity(session, target, direction).messageId !== messageId ||
+                (options?.onlyIfSuperseded && target !== options.onlyIfSuperseded) ||
                 target[direction] === "sent" ||
                 target[direction] === "unavailable"
               )

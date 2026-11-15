@@ -19,7 +19,10 @@ export function environmentPauseAvailability(input: {
       ? ("resume" as const)
       : ("start" as const);
   const showRetryPause =
-    session !== null && session.phase !== "resuming" && pauseFailed && input.intent !== "resume";
+    session !== null &&
+    session.phase !== "resuming" &&
+    (pauseFailed || input.status?.quiet !== true) &&
+    input.intent !== "resume";
   return {
     visible: input.enabled || hasSession,
     hasSession,

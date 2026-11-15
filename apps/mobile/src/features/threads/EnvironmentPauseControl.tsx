@@ -291,7 +291,7 @@ function EnvironmentPauseDetails(props: {
         <Button label="Close" tone="secondary" onPress={props.onClose} />
         {availability.showRetryPause ? (
           <Button
-            label="Retry pause"
+            label={entry.availability.pauseFailed ? "Retry pause" : "Pause remaining threads"}
             tone="secondary"
             disabled={!entry.canRetry || !availability.canRetryPause}
             onPress={props.onRetry}

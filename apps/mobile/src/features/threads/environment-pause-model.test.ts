@@ -62,7 +62,7 @@ describe("mobile environment pause availability", () => {
     ).toMatchObject({ primaryAction: "resume", canStart: false, canResume: true });
   });
 
-  it("offers optional Retry pause only for definitive failed Pause recipients before resuming", () => {
+  it("offers optional pause recovery for failed or newly active recipients before resuming", () => {
     for (const phase of ["pausing", "paused", "resuming"] as const) {
       for (const pause of ["pending", "sent", "failed", "unavailable"] as const) {
         const status = {
@@ -89,6 +89,14 @@ describe("mobile environment pause availability", () => {
         });
       }
     }
+    expect(
+      availability({
+        ...paused,
+        quiet: false,
+        activeThreadCount: 1,
+        session: { ...paused.session!, phase: "pausing" },
+      }),
+    ).toMatchObject({ showRetryPause: true, canRetryPause: true });
   });
   it.each(["pausing", "paused", "resuming"] as const)(
     "keeps Resume available in %s despite pending or failed deliveries and unfinished work",

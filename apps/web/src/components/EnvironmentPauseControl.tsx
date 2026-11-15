@@ -198,7 +198,7 @@ function EnvironmentPauseDialog({
     session !== null &&
     session.phase !== "resuming" &&
     intent !== "resume" &&
-    pauseFailures.length > 0;
+    (pauseFailures.length > 0 || status?.quiet !== true);
   const unavailableRecipients =
     session?.targets.filter((thread) =>
       resuming
@@ -368,7 +368,7 @@ function EnvironmentPauseDialog({
               disabled={!connected || !canRetry}
               onClick={() => void execute("retry")}
             >
-              Retry pause
+              {pauseFailures.length > 0 ? "Retry pause" : "Pause remaining threads"}
             </Button>
           ) : null}
           {session || intent !== null ? (

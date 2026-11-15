@@ -195,48 +195,52 @@ it("switches immediately to Pause while Resume is outstanding and keeps the late
   await expect.element(screen.getByRole("dialog")).not.toBeInTheDocument();
 });
 
-it("offers optional Retry pause for failed deliveries in Manage pause without blocking Resume", async () => {
-  using h = setup();
-  h.registry.set(
-    h.status,
-    AsyncResult.success({
-      ...resuming,
-      session: {
-        ...resuming.session!,
-        phase: "pausing",
-        targets: [
-          { ...resuming.session!.targets[0]!, pause: "failed" },
-          resuming.session!.targets[1]!,
-        ],
-      },
-    }),
-  );
-  await using screen = await render(h.view(environment, true));
-  await expect
-    .element(screen.getByRole("button", { name: "Resume Remote environment" }))
-    .toBeEnabled();
-  await screen.getByRole("button", { name: "Manage pause" }).click();
-  await act(() => h.registry.set(h.retryPermission, false));
-  await expect
-    .element(page.getByRole("dialog").getByRole("button", { name: "Retry pause", exact: true }))
-    .toBeDisabled();
-  await expect
-    .element(page.getByRole("dialog").getByRole("button", { name: "Resume", exact: true }))
-    .toBeEnabled();
-  await act(() => h.registry.set(h.retryPermission, true));
-  const retryButton = page
-    .getByRole("dialog")
-    .getByRole("button", { name: "Retry pause", exact: true })
-    .element() as HTMLButtonElement;
-  await act(() => retryButton.click());
-  expect(h.retry.run).toHaveBeenCalledExactlyOnceWith(h.registry, {
-    environmentId: environment.environmentId,
-    input: {},
-  });
-  expect(h.start.run).not.toHaveBeenCalled();
-  expect(h.resume.run).not.toHaveBeenCalled();
-  await expect.element(page.getByRole("dialog")).toBeVisible();
-});
+it.each([true, false])(
+  "offers optional pause recovery without blocking Resume (failed=%s)",
+  async (failed) => {
+    using h = setup();
+    const retryLabel = failed ? "Retry pause" : "Pause remaining threads";
+    h.registry.set(
+      h.status,
+      AsyncResult.success({
+        ...resuming,
+        session: {
+          ...resuming.session!,
+          phase: "pausing",
+          targets: [
+            { ...resuming.session!.targets[0]!, pause: failed ? "failed" : "sent" },
+            resuming.session!.targets[1]!,
+          ],
+        },
+      }),
+    );
+    await using screen = await render(h.view(environment, true));
+    await expect
+      .element(screen.getByRole("button", { name: "Resume Remote environment" }))
+      .toBeEnabled();
+    await screen.getByRole("button", { name: "Manage pause" }).click();
+    await act(() => h.registry.set(h.retryPermission, false));
+    await expect
+      .element(page.getByRole("dialog").getByRole("button", { name: retryLabel, exact: true }))
+      .toBeDisabled();
+    await expect
+      .element(page.getByRole("dialog").getByRole("button", { name: "Resume", exact: true }))
+      .toBeEnabled();
+    await act(() => h.registry.set(h.retryPermission, true));
+    const retryButton = page
+      .getByRole("dialog")
+      .getByRole("button", { name: retryLabel, exact: true })
+      .element() as HTMLButtonElement;
+    await act(() => retryButton.click());
+    expect(h.retry.run).toHaveBeenCalledExactlyOnceWith(h.registry, {
+      environmentId: environment.environmentId,
+      input: {},
+    });
+    expect(h.start.run).not.toHaveBeenCalled();
+    expect(h.resume.run).not.toHaveBeenCalled();
+    await expect.element(page.getByRole("dialog")).toBeVisible();
+  },
+);
 
 it.each(["pausing", "paused", "resuming"] as const)(
   "sends the next action directly during %s with unfinished deliveries and work",
