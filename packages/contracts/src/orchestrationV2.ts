@@ -5008,6 +5008,7 @@ export class OrchestrationV2SearchThreadError extends Schema.TaggedError<Orchest
 }
 
 /** Read-time choices; archive commands recheck ownership and work under their locks. */
+// canPromote/promotableChildThreadIds stay false/[] for older archive clients; MCP omits them.
 export const OrchestrationV2ThreadArchiveFamily = Schema.Struct({
   threads: Schema.Array(OrchestrationV2ThreadShell),
   childThreadIds: Schema.Array(ThreadId),
