@@ -572,7 +572,8 @@
             <span class="label same">6 · last</span>
             <h3><code>incubator</code></h3>
             <p>
-              Everything else, and anything genuinely inseparable. It is the only default group.
+              Everything else, and anything genuinely inseparable. Commits still have to name it: an
+              untagged commit is refused.
             </p>
           </article>
         </div>
@@ -645,11 +646,12 @@
                 equal the tree the squash will land. Step 3: the guarded merge squashes the PR onto
                 lastcode/main, keeps the original commits in a carry-sources ref and records them in
                 Carry-Source trailers. Step 4: at the next publication, the checkpoint folds every
-                squash since the last publication into the six groups on the old nightly and
-                requires the tree to equal main. Step 5: it replays the six group commits onto the
-                newest nightly; a conflict stops here and keeps the worktree. Step 6: smoke
-                validation and an annotated tag. Step 7: lastcode/main is moved to the six new
-                commits if nobody merged in the meantime. New PRs then stack on top again.
+                squash since the last publication into the six groups on the old nightly and, when
+                main contains the previous build, requires the tree to equal main. Step 5: it
+                replays the six group commits onto the newest nightly; a conflict stops here and
+                keeps the worktree. Step 6: smoke validation and an annotated tag. Step 7:
+                lastcode/main is moved to the six new commits if nobody merged in the meantime. New
+                PRs then stack on top again.
               </desc>
               <defs>
                 <marker
@@ -800,7 +802,7 @@
                   Every squash since the last publication goes into its groups,
                 </text>
                 <text x="380" y="533" text-anchor="middle" font-size="15" fill="#355d5a">
-                  still on the old nightly; the tree must equal lastcode/main
+                  still on the old nightly, usually checked against lastcode/main
                 </text>
 
                 <line
@@ -1144,6 +1146,12 @@
               <code>lastcode/main</code> at publication. If not, the compile fails.
             </p>
             <p>
+              One exception: when the previous build was never promoted because a PR merged during
+              its run, main does not contain that build. The trees cannot match, so the next
+              publication compiles without this comparison. Checkpoint 3717 folded #508 to #510 that
+              way.
+            </p>
+            <p>
               This proves the regrouping lost nothing. It does
               <strong>not</strong> prove the result works on a newer nightly. That is what the
               replay and smoke gate are for.
@@ -1241,18 +1249,23 @@
               touched each conflicted file, and the upstream commits that touched them.
             </p>
             <p>
-              Whoever maintains the fork resolves it there, then selects the repaired head with
-              <code>--select-recovery</code>. Repairs committed with their own
-              <code>Carry-Group</code> trailers are folded into their groups when selected. The next
-              run validates, tags and promotes the result.
+              Whoever maintains the fork resolves it there, runs the focused recovery gate in a
+              separate checkout, then selects the repaired head with
+              <code>--select-recovery</code> and <code>--recovery-source</code>. Repairs committed
+              with their own <code>Carry-Group</code> trailers are folded into their groups when
+              selected. The next run validates, tags and promotes the result. The full steps are in
+              “Resuming a repaired checkpoint” in
+              <a href="#" data-repo-path="docs/lastcode/release.md">docs/lastcode/release.md</a>.
             </p>
           </article>
         </div>
         <p class="caution">
           Carry replay never uses git's remembered resolutions (<code>rerere</code>). Each carry
-          conflict is resolved explicitly. As a last resort, a run can be forced back to the old
-          commit-by-commit replay with <code>--replay-mode historical</code> and a required
-          <code>--rollback-reason</code>, which is recorded on the published tag.
+          conflict is resolved explicitly. For a fault in the carry machinery itself, a run can fall
+          back to historical replay with <code>--replay-mode historical</code> and a required
+          <code>--rollback-reason</code>, which is recorded on the published tag. It replays the
+          last six group commits and then each new PR squash in turn, without regrouping, so it
+          cannot get around a real conflict with upstream.
         </p>
       </section>
 
@@ -1335,7 +1348,8 @@
                 <td>Exact-tree proof</td>
                 <td>The ordered set reproduces the validated source tree.</td>
                 <td>
-                  Shipped as the same-base compile check, run in PR CI, at merge and at publication.
+                  Shipped as the same-base compile check, run in PR CI, at merge and at publication,
+                  except a publication after a deferred promotion.
                 </td>
               </tr>
               <tr>
@@ -1431,7 +1445,10 @@
           </article>
           <article class="card">
             <h3>Historical replay</h3>
-            <p>The old commit-by-commit rebase, kept as an explicit, recorded rollback.</p>
+            <p>
+              Replay without regrouping: the last six group commits, then each new squash in turn.
+              Kept as an explicit, recorded rollback.
+            </p>
           </article>
         </div>
       </section>
@@ -1478,6 +1495,10 @@
               >docs/lastcode/nightly-workflow.md</a
             >
             — group ownership conventions, trailer guidance and recovery steps.
+          </li>
+          <li>
+            <a href="#" data-repo-path="docs/lastcode/release.md">docs/lastcode/release.md</a>
+            — resuming a repaired checkpoint.
           </li>
           <li>
             <a href="#" data-repo-path="docs/lastcode/glossary.md">docs/lastcode/glossary.md</a>

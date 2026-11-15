@@ -244,15 +244,16 @@ pnpm lastcode:carry-set -- \
   --source <lastcode-checkpoint-tag> --json
 ```
 
-The initial manifest pins a reviewed source partition with the same tree as its
-historical source. `--reconstruct` compiles that partition and subsequent annotated
-source contributions using Git deltas. A successful same-base compilation must
-reproduce the source tree; it does not prove compatibility with newer upstream.
-Compilation conflicts retain their worktree and phase record for repair. The
-checkpoint service applies the resulting group commits onto the new upstream,
-validates the integrated result, and preserves immutable publication, source
-provenance, and concurrent-main protections. Carry publications run no further
-carry check, because compilation already proved the tree. Only after a
+The manifest pins the reviewed bootstrap partition that started the first compact
+generation, with the same tree as its historical source. `--reconstruct` recompiles
+only that generation: it needs `--base` at the bootstrap base and a source that
+descends from the bootstrap source, so current checkpoints cannot use it. A
+successful same-base compilation must reproduce the source tree; it does not prove
+compatibility with newer upstream. Compilation conflicts retain their worktree and
+phase record for repair. The checkpoint service applies the resulting group commits
+onto the new upstream, validates the integrated result, and preserves immutable
+publication, source provenance, and concurrent-main protections. Carry publications
+run no post-publication carry check. Only after a
 historical-mode publication does a non-blocking shadow check rebuild the groups
 from the manifest's PR and subject lists and record the result in run history.
 
