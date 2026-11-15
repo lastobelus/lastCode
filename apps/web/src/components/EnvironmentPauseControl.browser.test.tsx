@@ -3,25 +3,32 @@ import {
   EnvironmentId,
   ProjectId,
   ThreadId,
+  EnvironmentPauseError,
   type EnvironmentPauseStatus,
 } from "@t3tools/contracts";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import * as Cause from "effect/Cause";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import { expect, it, vi } from "vite-plus/test";
+import { page } from "vite-plus/test/browser";
 
-import { act, render } from "../../test/render";
+import { act, fakeTimers, render } from "../../test/render";
 import type { EnvironmentPresentation } from "../state/environments";
 
-const mocks = vi.hoisted(() => ({ pause: {} }));
+const mocks = vi.hoisted(() => ({ pause: {}, noticeEnvironment: null as unknown }));
 vi.mock("../state/actionResume", () => ({
-  useActionEnvironmentPause: () => ({ environment: null }),
+  useActionEnvironmentPause: () => ({
+    environment: mocks.noticeEnvironment,
+    phase: "resuming",
+    known: true,
+    showUnknown: false,
+  }),
 }));
 vi.mock("../state/environmentPause", () => ({
   environmentPause: mocks.pause,
 }));
 
-import { EnvironmentPauseControl } from "./EnvironmentPauseControl";
+import { EnvironmentPauseControl, EnvironmentPauseNotice } from "./EnvironmentPauseControl";
 
 const environment = {
   environmentId: EnvironmentId.make("remote-environment"),
@@ -39,15 +46,40 @@ const unpaused: EnvironmentPauseStatus = {
   activeThreadCount: 0,
   blockers: [],
 };
+const resuming: EnvironmentPauseStatus = {
+  ...unpaused,
+  quiet: false,
+  activeThreadCount: 2,
+  session: {
+    id: "pause-session",
+    createdAt: "2026-10-08T00:00:00.000Z",
+    phase: "resuming",
+    targets: ["pending", "failed"].map((resume, index) => ({
+      threadId: ThreadId.make(`thread-${index}`),
+      projectId: ProjectId.make("project"),
+      title: "Work",
+      pause: "sent",
+      resume: resume as "pending" | "failed",
+      error: null,
+    })),
+  },
+};
 
 function setup() {
   const registry = AtomRegistry.make();
   const status = Atom.make(AsyncResult.success(unpaused));
+  const statusReads = vi.fn();
+  const query = Atom.make((get) => {
+    statusReads();
+    return get(status);
+  });
+  const monitor = query.pipe(Atom.withRefresh(15_000), Atom.setIdleTTL(0));
+  const active = query.pipe(Atom.withRefresh(1_000), Atom.setIdleTTL(0));
   const starting = Atom.make(false);
   const permission = Atom.make(true);
   let finishPause = () => {};
   let failPause = () => {};
-  const startResult = new Promise<AtomCommandResult<EnvironmentPauseStatus, Error>>((resolve) => {
+  const startResult = new Promise<AtomCommandResult<EnvironmentPauseStatus, unknown>>((resolve) => {
     finishPause = () => resolve(AsyncResult.success(unpaused));
     failPause = () => resolve(AsyncResult.failure(Cause.fail(new Error("Pause was cancelled"))));
   });
@@ -62,10 +94,15 @@ function setup() {
   const resume = {
     label: "resume",
     permissionAtom: () => permission,
-    run: vi.fn(async () => AsyncResult.success(unpaused)),
+    run: vi.fn(async (): Promise<AtomCommandResult<EnvironmentPauseStatus, unknown>> =>
+      AsyncResult.success(unpaused),
+    ),
   };
+  mocks.noticeEnvironment = environment;
   Object.assign(mocks.pause, {
-    activeStatus: () => status,
+    status: () => query,
+    monitorStatus: () => monitor,
+    activeStatus: () => active,
     starting: () => starting,
     start,
     resume,
@@ -73,14 +110,16 @@ function setup() {
   return {
     registry,
     status,
+    statusReads,
     starting,
     permission,
     start,
     resume,
     failPause,
-    view: (target = environment) => (
+    view: (target = environment, notice = false) => (
       <RegistryContext.Provider value={registry}>
         <EnvironmentPauseControl environment={target} />
+        {notice ? <EnvironmentPauseNotice environmentId={target.environmentId} /> : null}
       </RegistryContext.Provider>
     ),
     [Symbol.dispose]: () => {
@@ -110,7 +149,7 @@ it("sends Pause on the first click and Resume on the next while Pause is still i
 });
 
 it.each(["pausing", "paused", "resuming"] as const)(
-  "sends Resume directly during %s with unfinished deliveries and work",
+  "sends the next action directly during %s with unfinished deliveries and work",
   async (phase) => {
     using h = setup();
     h.registry.set(
@@ -123,24 +162,93 @@ it.each(["pausing", "paused", "resuming"] as const)(
           id: "pause-session",
           createdAt: "2026-10-08T00:00:00.000Z",
           phase,
-          targets: ["pending", "failed"].map((pause, index) => ({
-            threadId: ThreadId.make(`thread-${index}`),
-            projectId: ProjectId.make("project"),
-            title: "Work",
-            pause: pause as "pending" | "failed",
-            resume: "pending",
-            error: null,
-          })),
+          targets: resuming.session!.targets,
         },
       }),
     );
     await using screen = await render(h.view());
-    await screen.getByRole("button", { name: "Resume Remote environment" }).click();
-    expect(h.resume.run).toHaveBeenCalledOnce();
-    expect(h.start.run).not.toHaveBeenCalled();
+    await screen
+      .getByRole("button", {
+        name: `${phase === "resuming" ? "Pause" : "Resume"} Remote environment`,
+      })
+      .click();
+    if (phase === "resuming") {
+      expect(h.start.run).toHaveBeenCalledExactlyOnceWith(h.registry, {
+        environmentId: environment.environmentId,
+        input: {},
+      });
+      expect(h.resume.run).not.toHaveBeenCalled();
+      await screen.getByRole("button", { name: "Resume Remote environment" }).click();
+      expect(h.resume.run).toHaveBeenCalledExactlyOnceWith(h.registry, {
+        environmentId: environment.environmentId,
+        input: {},
+      });
+    } else {
+      expect(h.resume.run).toHaveBeenCalledOnce();
+      expect(h.start.run).not.toHaveBeenCalled();
+    }
     await expect.element(screen.getByRole("dialog")).not.toBeInTheDocument();
   },
 );
+
+it.each([
+  [
+    new EnvironmentPauseError({ operation: "start", reason: "disabled" }),
+    "Enable environment pause in Settings before starting a pause.",
+  ],
+  [
+    { message: "This connection does not have permission to send thread messages." },
+    "This connection does not have permission to send thread messages.",
+  ],
+  [{}, "The request failed. Try again."],
+] as const)(
+  "shows returned errors from both the main control and Resume retry: %j",
+  async (cause, message) => {
+    using h = setup();
+    h.start.run.mockResolvedValueOnce(AsyncResult.failure(Cause.fail(cause)));
+    await using screen = await render(h.view(environment, true));
+    await screen.getByRole("button", { name: "Pause Remote environment" }).click();
+    await expect.element(screen.getByRole("alert")).toHaveTextContent(message);
+    await act(() => h.registry.set(h.status, AsyncResult.success(resuming)));
+    h.resume.run.mockResolvedValueOnce(AsyncResult.failure(Cause.fail(cause)));
+    await screen.getByRole("button", { name: "Manage pause" }).click();
+    const resumeButton = page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Resume", exact: true })
+      .element() as HTMLButtonElement;
+    await act(() => resumeButton.click());
+    expect(h.resume.run).toHaveBeenCalledExactlyOnceWith(h.registry, {
+      environmentId: environment.environmentId,
+      input: {},
+    });
+    await expect
+      .element(page.getByRole("dialog").getByText(message, { exact: true }))
+      .toBeVisible();
+  },
+);
+
+it("polls slowly with only the main control mounted and uses fast progress only in an open dialog", async () => {
+  using h = setup();
+  using _timers = fakeTimers();
+  h.registry.set(h.status, AsyncResult.success(resuming));
+  await using screen = await render(h.view(environment, true));
+  const initially = h.statusReads.mock.calls.length;
+  await act(() => vi.advanceTimersByTimeAsync(1_000));
+  expect(h.statusReads).toHaveBeenCalledTimes(initially);
+  await act(() => vi.advanceTimersByTimeAsync(14_000));
+  expect(h.statusReads).toHaveBeenCalledTimes(initially + 1);
+  const manageButton = screen
+    .getByRole("button", { name: "Manage pause" })
+    .element() as HTMLButtonElement;
+  await act(() => manageButton.click());
+  const opened = h.statusReads.mock.calls.length;
+  await act(() => vi.advanceTimersByTimeAsync(1_000));
+  expect(h.statusReads.mock.calls.length).toBeGreaterThan(opened);
+  await screen.unmount();
+  const unmounted = h.statusReads.mock.calls.length;
+  await act(() => vi.advanceTimersByTimeAsync(15_000));
+  expect(h.statusReads).toHaveBeenCalledTimes(unmounted);
+});
 
 it("preserves connection permissions for both commands", async () => {
   using h = setup();

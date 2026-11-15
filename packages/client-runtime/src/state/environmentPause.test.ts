@@ -90,21 +90,25 @@ const makeHarness = Effect.fn("TestEnvironmentPause.makeHarness")(function* () {
 });
 
 it.effect(
-  "dispatches Resume to the bound environment before Pause returns and retains it until status refreshes",
+  "dispatches Resume before Pause returns without letting the old response restore optimistic Pause",
   () =>
     Effect.gen(function* () {
       const { environmentId, registry, pause } = yield* makeHarness();
       const entered = yield* Deferred.make<void>();
       const release = yield* Deferred.make<void>();
+      const nextEntered = yield* Deferred.make<void>();
+      const nextRelease = yield* Deferred.make<void>();
+      let pauseRequests = 0;
       const calls: Array<readonly [EnvironmentId, string]> = [];
       let observedStatus = unpaused;
       mocks.request.mockImplementation((tag: string) =>
         EnvironmentSupervisor.pipe(
           Effect.flatMap((supervisor) => {
             calls.push([supervisor.target.environmentId, tag]);
+            if (tag === WS_METHODS.serverPauseEnvironment) pauseRequests++;
             return tag === WS_METHODS.serverPauseEnvironment
-              ? Deferred.succeed(entered, undefined).pipe(
-                  Effect.andThen(Deferred.await(release)),
+              ? Deferred.succeed(pauseRequests === 1 ? entered : nextEntered, undefined).pipe(
+                  Effect.andThen(Deferred.await(pauseRequests === 1 ? release : nextRelease)),
                   Effect.as(unpaused),
                 )
               : Effect.succeed(observedStatus);
@@ -124,11 +128,30 @@ it.effect(
         [environmentId, WS_METHODS.serverResumeEnvironment],
       ]);
       yield* Effect.promise(() => executeAtomQuery(registry, pause.status(target)));
+      expect(registry.get(pause.starting(environmentId))).toBe(false);
+      const nextPause = pause.start.run(registry, target);
+      yield* Deferred.await(nextEntered);
+      expect(pauseRequests).toBe(2);
       expect(registry.get(pause.starting(environmentId))).toBe(true);
       yield* Deferred.succeed(release, undefined);
       yield* Effect.promise(() => pendingPause);
       expect(registry.get(pause.starting(environmentId))).toBe(true);
+      yield* Effect.promise(() =>
+        executeAtomQuery(registry, pause.status(target), { refresh: true }),
+      );
+      expect(registry.get(pause.starting(environmentId))).toBe(true);
+      yield* Effect.promise(() => pause.resume.run(registry, target));
+      expect(registry.get(pause.starting(environmentId))).toBe(false);
+      yield* Deferred.succeed(nextRelease, undefined);
+      yield* Effect.promise(() => nextPause);
+      expect(registry.get(pause.starting(environmentId))).toBe(false);
       observedStatus = { ...unpaused, observation: "unknown" };
+      yield* Effect.promise(() =>
+        executeAtomQuery(registry, pause.status(target), { refresh: true }),
+      );
+      expect(registry.get(pause.starting(environmentId))).toBe(false);
+      yield* Effect.promise(() => pause.start.run(registry, target));
+      expect(registry.get(pause.starting(environmentId))).toBe(true);
       yield* Effect.promise(() =>
         executeAtomQuery(registry, pause.status(target), { refresh: true }),
       );

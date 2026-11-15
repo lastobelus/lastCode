@@ -35,9 +35,9 @@ export function useEnvironmentPauseControl(environmentId: EnvironmentId) {
         const supported = config?.environment.capabilities.environmentPause === true;
         const result = supported
           ? get(
-              (target.connected ? environmentPause.activeStatus : environmentPause.monitorStatus)(
-                request,
-              ),
+              (open && target.connected
+                ? environmentPause.activeStatus
+                : environmentPause.monitorStatus)(request),
             )
           : AsyncResult.initial<EnvironmentPauseStatus>();
         const status = Option.getOrNull(AsyncResult.value(result));
@@ -57,21 +57,27 @@ export function useEnvironmentPauseControl(environmentId: EnvironmentId) {
           canResume: get(environmentPause.resume.permissionAtom(environmentId)),
         };
       }),
-    [environmentId, target],
+    [environmentId, open, target],
   );
   const entry = useAtomValue(entryAtom);
   const onPress = useCallback(() => setOpen(true), []);
-  const hasSession = entry?.availability.hasSession ?? false;
+  const primaryAction = entry?.availability.primaryAction ?? "start";
   const disabled =
     !entry ||
-    (hasSession
+    (primaryAction === "resume"
       ? !entry.canResume || !entry.availability.canResume
       : !entry.canStart || !entry.availability.canStart);
-  const execute = async () => {
-    if (!entry || disabled) return;
+  const execute = async (action: "start" | "resume") => {
+    if (
+      !entry ||
+      (action === "resume"
+        ? !entry.canResume || !entry.availability.canResume
+        : !entry.canStart || !entry.availability.canStart)
+    )
+      return;
     const version = ++requestVersion.current;
     setFailure(null);
-    const result = await (hasSession ? resume : start)({ environmentId, input: {} });
+    const result = await (action === "resume" ? resume : start)({ environmentId, input: {} });
     if (version === requestVersion.current && AsyncResult.isFailure(result)) {
       const cause = squashAtomCommandFailure(result);
       setFailure({
@@ -82,18 +88,18 @@ export function useEnvironmentPauseControl(environmentId: EnvironmentId) {
   };
   return {
     visible: entry?.availability.visible ?? false,
-    hasSession,
+    primaryAction,
     disabled,
     error,
     environmentLabel: entry?.environmentLabel ?? "Environment",
     onPress,
-    onToggle: () => void execute(),
+    onToggle: () => void execute(primaryAction),
     modal:
       open && entry ? (
         <EnvironmentPauseModal
           entry={entry}
           error={error}
-          onResume={() => void execute()}
+          onResume={() => void execute("resume")}
           onClose={() => setOpen(false)}
         />
       ) : null,
@@ -108,7 +114,7 @@ export function EnvironmentPauseControl(props: { readonly environmentId: Environ
       {control.visible ? (
         <View className="items-start px-4 pb-3">
           <Button
-            label={`${control.hasSession ? "Resume" : "Pause"} ${control.environmentLabel}`}
+            label={`${control.primaryAction === "resume" ? "Resume" : "Pause"} ${control.environmentLabel}`}
             tone="secondary"
             disabled={control.disabled}
             onPress={control.onToggle}

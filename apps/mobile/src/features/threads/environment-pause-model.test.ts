@@ -66,7 +66,12 @@ describe("mobile environment pause availability", () => {
                 targets: [{ ...paused.session!.targets[0]!, pause, resume }],
               },
             }),
-          ).toMatchObject({ hasSession: true, canResume: true, canStart: false, ready: false });
+          ).toMatchObject({
+            hasSession: true,
+            canResume: true,
+            canStart: phase === "resuming",
+            ready: false,
+          });
         }
       }
     },
@@ -86,6 +91,12 @@ describe("mobile environment pause availability", () => {
       canResume: true,
     });
     expect(availability(null, { starting: true, enabled: false }).visible).toBe(true);
+    expect(
+      availability(
+        { ...paused, session: { ...paused.session!, phase: "resuming" } },
+        { starting: true },
+      ),
+    ).toMatchObject({ canStart: false, canResume: true });
   });
 
   it("keeps a saved session resumable when the setting is off or status is stale or unknown", () => {
@@ -100,6 +111,16 @@ describe("mobile environment pause availability", () => {
     expect(availability({ ...paused, observation: "unknown" })).toMatchObject({
       known: false,
       ready: false,
+      canResume: true,
+    });
+    expect(
+      availability(
+        { ...paused, session: { ...paused.session!, phase: "resuming" } },
+        { enabled: false },
+      ),
+    ).toMatchObject({
+      visible: true,
+      canStart: false,
       canResume: true,
     });
     expect(availability({ ...paused, session: null }, { enabled: false })).toMatchObject({

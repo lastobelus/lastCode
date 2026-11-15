@@ -4,6 +4,7 @@ import * as Clock from "effect/Clock";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import * as Option from "effect/Option";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
+import { requestGuarded, type EnvironmentRpcInput } from "../rpc/client.ts";
 import type { EnvironmentConnectionSummary } from "./presentation.ts";
 import { createEnvironmentRpcCommand, createEnvironmentRpcQueryAtomFamily } from "./runtime.ts";
 
@@ -38,10 +39,13 @@ export function createEnvironmentPauseAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
 ) {
   const startState = Atom.family((_environmentId: EnvironmentId) =>
-    Atom.make<"idle" | "pending" | "refreshing">("idle").pipe(Atom.keepAlive),
+    Atom.make<{ readonly phase: "idle" | "pending" | "refreshing"; readonly request: number }>({
+      phase: "idle",
+      request: 0,
+    }).pipe(Atom.keepAlive),
   );
   const starting = Atom.family((environmentId: EnvironmentId) =>
-    Atom.make((get) => get(startState(environmentId)) !== "idle"),
+    Atom.make((get) => get(startState(environmentId)).phase !== "idle"),
   );
   const query = { tag: WS_METHODS.serverEnvironmentPauseStatus, staleTimeMs: 0, idleTtlMs: 0 };
   const status = createEnvironmentRpcQueryAtomFamily(runtime, {
@@ -49,11 +53,9 @@ export function createEnvironmentPauseAtoms<R, E>(
     label: "environment-data:pause:status",
     onAnswer: ({ environmentId }, answer, registry) =>
       Effect.sync(() => {
-        if (
-          answer.observation === "known" &&
-          registry.get(startState(environmentId)) === "refreshing"
-        ) {
-          registry.set(startState(environmentId), "idle");
+        const state = registry.get(startState(environmentId));
+        if (answer.observation === "known" && state.phase === "refreshing") {
+          registry.set(startState(environmentId), { ...state, phase: "idle" });
         }
       }),
   });
@@ -86,10 +88,6 @@ export function createEnvironmentPauseAtoms<R, E>(
       Effect.sync(() => {
         registry.refresh(status({ environmentId, input: {} }));
       }),
-    concurrency: {
-      mode: "singleFlight" as const,
-      key: ({ environmentId }: { environmentId: string }) => environmentId,
-    },
   };
   return {
     starting,
@@ -100,16 +98,25 @@ export function createEnvironmentPauseAtoms<R, E>(
       ...commands,
       label: "environment-data:pause:start",
       tag: WS_METHODS.serverPauseEnvironment,
-      onStart: ({ environmentId }, registry) => {
-        registry.set(startState(environmentId), "pending");
-      },
-      onSettled: (target, registry) =>
-        Effect.sync(() => {
-          // Keep Resume visible until the refreshed status replaces the pre-Pause observation.
-          if (registry.get(startState(target.environmentId)) === "pending") {
-            registry.set(startState(target.environmentId), "refreshing");
-          }
-        }).pipe(Effect.andThen(commands.onSettled(target, registry))),
+      execute: Effect.fn("EnvironmentPause.start")(function* (
+        input: EnvironmentRpcInput<typeof WS_METHODS.serverPauseEnvironment>,
+        registry: AtomRegistry.AtomRegistry,
+        environmentId: EnvironmentId,
+      ) {
+        const request = registry.get(startState(environmentId)).request + 1;
+        registry.set(startState(environmentId), { phase: "pending", request });
+        return yield* requestGuarded(WS_METHODS.serverPauseEnvironment, input).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              // Keep Resume visible until the refreshed status replaces this Pause's observation.
+              const state = registry.get(startState(environmentId));
+              if (state.request === request && state.phase === "pending") {
+                registry.set(startState(environmentId), { ...state, phase: "refreshing" });
+              }
+            }),
+          ),
+        );
+      }),
     }),
     retry: createEnvironmentRpcCommand(runtime, {
       ...commands,
@@ -120,6 +127,13 @@ export function createEnvironmentPauseAtoms<R, E>(
       ...commands,
       label: "environment-data:pause:resume",
       tag: WS_METHODS.serverResumeEnvironment,
+      onStart: ({ environmentId }, registry) => registry.get(startState(environmentId)).request,
+      onSuccess: ({ environmentId }, registry, _result, request) =>
+        Effect.sync(() => {
+          const state = registry.get(startState(environmentId));
+          if (state.request === request)
+            registry.set(startState(environmentId), { ...state, phase: "idle" });
+        }),
     }),
   };
 }

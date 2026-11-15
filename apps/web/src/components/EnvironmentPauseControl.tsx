@@ -1,5 +1,6 @@
 import { useAtomRefresh, useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId } from "@t3tools/contracts";
+import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { AsyncResult } from "effect/reactivity";
 import * as Option from "effect/Option";
 import { CheckCircle2Icon, PauseIcon, PlayIcon } from "lucide-react";
@@ -34,6 +35,17 @@ type EnvironmentPauseControlProps = {
   size?: "titlebar-icon" | "icon-sm";
   showEnvironmentLabel?: boolean;
 };
+
+function pauseErrorMessage(failure: Parameters<typeof squashAtomCommandFailure>[0]) {
+  const cause = squashAtomCommandFailure(failure);
+  return typeof cause === "object" &&
+    cause !== null &&
+    "message" in cause &&
+    typeof cause.message === "string" &&
+    cause.message.trim() !== ""
+    ? cause.message
+    : "The request failed. Try again.";
+}
 
 export function EnvironmentPauseNotice({
   environmentId,
@@ -85,10 +97,12 @@ function EnvironmentPauseButton({
   showEnvironmentLabel = false,
 }: EnvironmentPauseControlProps) {
   const result = useAtomValue(
-    environmentPause.activeStatus({ environmentId: environment.environmentId, input: {} }),
+    environmentPause.monitorStatus({ environmentId: environment.environmentId, input: {} }),
   );
   const starting = useAtomValue(environmentPause.starting(environment.environmentId));
-  const hasSession = starting || Option.getOrNull(AsyncResult.value(result))?.session != null;
+  const session = Option.getOrNull(AsyncResult.value(result))?.session ?? null;
+  const hasSession = starting || session !== null;
+  const shouldResume = starting || (session !== null && session.phase !== "resuming");
   const enabled = environment.serverConfig?.settings.environmentPauseEnabled === true;
   const canStart = useAtomValue(environmentPause.start.permissionAtom(environment.environmentId));
   const canResume = useAtomValue(environmentPause.resume.permissionAtom(environment.environmentId));
@@ -97,23 +111,20 @@ function EnvironmentPauseButton({
   const [error, setError] = useState<string | null>(null);
   const requestVersion = useRef(0);
   if (!enabled && !hasSession) return null;
-  const label = `${hasSession ? "Resume" : "Pause"} ${environment.label}`;
+  const label = `${shouldResume ? "Resume" : "Pause"} ${environment.label}`;
   const disabled =
-    environment.connection.phase !== "connected" || (hasSession ? !canResume : !canStart);
+    environment.connection.phase !== "connected" ||
+    (shouldResume ? !canResume : !enabled || !canStart);
   const execute = async () => {
     if (disabled) return;
     const version = ++requestVersion.current;
     setError(null);
-    const outcome = await (hasSession ? resume : start)({
+    const outcome = await (shouldResume ? resume : start)({
       environmentId: environment.environmentId,
       input: {},
     });
     if (version === requestVersion.current && AsyncResult.isFailure(outcome)) {
-      setError(
-        hasSession
-          ? "Could not resume the environment. Reconnect and try again."
-          : "Could not send the pause request. Reconnect and try again.",
-      );
+      setError(pauseErrorMessage(outcome));
     }
   };
 
@@ -132,7 +143,7 @@ function EnvironmentPauseButton({
               disabled={disabled}
               onClick={() => void execute()}
             >
-              {hasSession ? <PlayIcon /> : <PauseIcon />}
+              {shouldResume ? <PlayIcon /> : <PauseIcon />}
             </Button>
           }
         />
@@ -202,7 +213,7 @@ function EnvironmentPauseDialog({
     refresh();
     refreshInitial();
     if (AsyncResult.isFailure(outcome)) {
-      setError("Could not resume the environment. Reconnect and try again.");
+      setError(pauseErrorMessage(outcome));
     } else if (outcome.value.session === null) {
       onClose();
     }

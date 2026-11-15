@@ -13,12 +13,17 @@ export function environmentPauseAvailability(input: {
   const ready =
     known && input.status?.quiet === true && session?.phase === "paused" && !pauseFailed;
   const hasSession = session !== null || input.starting === true;
+  const primaryAction =
+    input.starting || (session !== null && session.phase !== "resuming")
+      ? ("resume" as const)
+      : ("start" as const);
   return {
     visible: input.enabled || hasSession,
     hasSession,
+    primaryAction,
     known,
     ready,
-    canStart: input.enabled && input.connected && !hasSession,
+    canStart: input.enabled && input.connected && primaryAction === "start",
     canResume: input.connected && hasSession,
     pauseFailed,
   };
