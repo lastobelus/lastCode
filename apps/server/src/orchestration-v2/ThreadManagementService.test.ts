@@ -162,26 +162,36 @@ it("stamps authoritative provenance on commands that create threads or messages"
   expect(stamped).not.toHaveProperty("delegatedFrom");
 });
 
-it.effect.each([
-  { provider: "codex", active: true, strict: true, interruptsTools: false, native: true },
-  { provider: "claude", active: true, strict: undefined, interruptsTools: true, native: false },
-  { provider: "cursor", active: false, strict: undefined, interruptsTools: false, native: false },
-  { provider: "opencode", active: true, strict: undefined, interruptsTools: false, native: false },
-  {
-    provider: "strict-interrupting",
-    active: true,
-    strict: true,
-    interruptsTools: true,
-    native: false,
-  },
-  {
-    provider: "missing-session",
-    active: true,
-    strict: true,
-    interruptsTools: false,
-    native: false,
-  },
-])("cooperative delivery uses safe native steering or queues for $provider", (scenario) =>
+it.effect.each(
+  [
+    { provider: "codex", active: true, strict: true, interruptsTools: false, native: true },
+    { provider: "claude", active: true, strict: undefined, interruptsTools: true, native: false },
+    { provider: "cursor", active: false, strict: undefined, interruptsTools: false, native: false },
+    {
+      provider: "opencode",
+      active: true,
+      strict: undefined,
+      interruptsTools: false,
+      native: false,
+    },
+    {
+      provider: "strict-interrupting",
+      active: true,
+      strict: true,
+      interruptsTools: true,
+      native: false,
+    },
+    {
+      provider: "missing-session",
+      active: true,
+      strict: true,
+      interruptsTools: false,
+      native: false,
+    },
+  ].flatMap((scenario) =>
+    (["cooperative", "auto"] as const).map((mode) => ({ ...scenario, mode })),
+  ),
+)("$mode delivery reaches a running $provider thread through its message path", (scenario) =>
   Effect.gen(function* () {
     const projectId = ProjectId.make("project-example");
     const threadId = ThreadId.make("thread-example");
@@ -256,18 +266,21 @@ it.effect.each([
       commandId: CommandId.make("pause-command-example"),
       text: "pause to go offline",
       attachments: [],
-      mode: "cooperative",
+      mode: scenario.mode,
       createdBy: "user",
       creationSource: "server",
     });
     expect(commands).toHaveLength(1);
     expect(commands[0]).toMatchObject({
       type: "message.dispatch",
-      dispatchMode: scenario.native
-        ? { type: "steer_active_native", targetRunId: activeRunId }
-        : { type: "queue_after_active" },
+      dispatchMode:
+        scenario.mode === "auto"
+          ? { type: "steer_active", targetRunId: activeRunId }
+          : scenario.native
+            ? { type: "steer_active_native", targetRunId: activeRunId }
+            : { type: "queue_after_active" },
     });
-    expect(sent.delivery).toBe(scenario.native ? "steered" : "queued");
+    expect(sent.delivery).toBe(scenario.native || scenario.mode === "auto" ? "steered" : "queued");
   }),
 );
 

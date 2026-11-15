@@ -511,8 +511,12 @@ const layerEnvironmentAutomationResume = Layer.effectDiscard(
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const actions = yield* ActionResume.ActionResume;
     const outbox = yield* EffectOutbox.EffectOutboxV2;
-    // Durable sources make missed transitions and restart recovery harmless.
-    // Scheduler holds this source while paused; no connectivity signal releases it.
+    const pause = yield* EnvironmentPause.EnvironmentPause;
+    // Delivery ordering must settle even while automatic admission is closed.
+    // Its failures cannot prevent the independent release of admitted work.
+    yield* scheduler.register("environment-pause-delivery", pause.continueResume, {
+      runWhilePaused: true,
+    });
     yield* scheduler.register(
       "environment-pause-resume",
       Effect.gen(function* () {
@@ -524,7 +528,12 @@ const layerEnvironmentAutomationResume = Layer.effectDiscard(
   }),
 ).pipe(
   Layer.provide(
-    Layer.mergeAll(layerOrchestratorProvided, layerActionResumeProvided, EffectOutbox.layer),
+    Layer.mergeAll(
+      layerOrchestratorProvided,
+      layerActionResumeProvided,
+      EffectOutbox.layer,
+      layerEnvironmentPauseProvided,
+    ),
   ),
 );
 

@@ -3,8 +3,63 @@ import {
   type OrchestrationV2ThreadShell,
   type RunId,
   type ThreadId,
+  TurnId,
+  type UpdateDrainBlocker,
 } from "@t3tools/contracts";
+import * as Context from "effect/Context";
 import { threadPullRequestKeyOf } from "../sourceControl/threadPullRequests.ts";
+
+export interface PauseCaller {
+  readonly threadId: ThreadId;
+  readonly runId: RunId | null;
+  readonly providerSessionId: string;
+}
+
+export const EnvironmentPauseCaller = Context.Reference<PauseCaller | null>(
+  "t3/environment/EnvironmentPauseCaller",
+  { defaultValue: () => null },
+);
+
+const callerTurn = (thread: OrchestrationV2ThreadShell, caller: PauseCaller | null) =>
+  caller !== null &&
+  caller.runId !== null &&
+  thread.id === caller.threadId &&
+  thread.activeRunId === caller.runId;
+
+export const pauseExecutionBlockers = (
+  blockers: ReadonlyArray<UpdateDrainBlocker>,
+  threads: ReadonlyArray<OrchestrationV2ThreadShell>,
+  caller: PauseCaller | null,
+  previews: ReadonlyArray<{
+    readonly threadId: string;
+    readonly terminalId: string;
+    readonly cleanupPending?: boolean | undefined;
+  }>,
+) => {
+  const currentCaller = threads.some((thread) => callerTurn(thread, caller)) ? caller : null;
+  return blockers.filter((blocker) => {
+    if (blocker.type === "terminal-process")
+      return !previews.some(
+        (preview) =>
+          !preview.cleanupPending &&
+          preview.threadId === blocker.threadId &&
+          preview.terminalId === blocker.terminalId,
+      );
+    if (currentCaller === null || currentCaller.runId === null) return true;
+    if (blocker.type === "thread-turn")
+      return (
+        blocker.threadId !== currentCaller.threadId ||
+        blocker.turnId !== TurnId.make(currentCaller.runId)
+      );
+    // A running caller necessarily owns live provider work. Shutdown is separate
+    // work and stays visible, as do the caller's commands, Actions and cleanup.
+    return (
+      blocker.type !== "provider-runtime" ||
+      blocker.providerSessionId !== currentCaller.providerSessionId ||
+      blocker.status !== "running"
+    );
+  });
+};
 
 export const deferredActivity = (
   thread: OrchestrationV2ThreadShell,
@@ -19,6 +74,7 @@ export const pauseActivity = (
   threads: ReadonlyArray<OrchestrationV2ThreadShell>,
   deferred: ReadonlyArray<{ readonly threadId: ThreadId; readonly runId: RunId }>,
   automationPaused: boolean,
+  caller: PauseCaller | null = null,
 ) => {
   const byId = new Map(threads.map((thread) => [thread.id, thread]));
   const activity = new Map<ThreadId, boolean>();
@@ -62,7 +118,8 @@ export const pauseActivity = (
     if (cached !== undefined) return cached;
     if (ancestors.has(thread.id)) return true;
     const active =
-      (!deferredActivity(thread, deferred) &&
+      (!callerTurn(thread, caller) &&
+        !deferredActivity(thread, deferred) &&
         (["preparing", "queued", "starting", "running", "waiting"].includes(
           thread.activityRunStatus ?? thread.status,
         ) ||

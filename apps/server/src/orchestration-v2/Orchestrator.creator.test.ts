@@ -765,6 +765,17 @@ it.effect("does not infer historical creators and rejects invalid attribution or
     }
     const ordinary = ThreadId.make("creator:destination-check");
     yield* orchestrator.dispatch(create(ordinary, project));
+    const foreignParent = ThreadId.make("creator:foreign-parent");
+    yield* orchestrator.dispatch(create(foreignParent, ProjectId.make("creator:other-project")));
+    const archivedParent = ThreadId.make("creator:archived-parent");
+    yield* orchestrator.dispatch(create(archivedParent, project));
+    yield* projections.apply({
+      id: EventId.make("creator:archive-parent"),
+      type: "thread.archived",
+      threadId: archivedParent,
+      occurredAt: now,
+      payload: { ...(yield* projections.getThread(archivedParent)), archivedAt: now },
+    });
     yield* orchestrator.dispatch({
       type: "thread.metadata.update",
       commandId: CommandId.make("creator:owned-destination"),
@@ -775,6 +786,8 @@ it.effect("does not infer historical creators and rejects invalid attribution or
       [historical, child],
       [ordinary, ThreadId.make("creator:eligibility:native")],
       [ordinary, ThreadId.make("creator:eligibility:side-chat")],
+      [ordinary, foreignParent],
+      [ordinary, archivedParent],
     ] as const) {
       const rejected = yield* orchestrator
         .dispatch({
@@ -785,6 +798,7 @@ it.effect("does not infer historical creators and rejects invalid attribution or
         })
         .pipe(Effect.flip);
       assert.equal(rejected._tag, "OrchestratorDispatchError");
+      assert.equal(Reflect.get(rejected, "field"), "groupedUnderThreadId");
     }
     const sideChatChild = ThreadId.make("creator:side-chat-child");
     yield* createOrdinary(sideChatChild, ThreadId.make("creator:eligibility:side-chat"), project);

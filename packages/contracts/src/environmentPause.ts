@@ -32,7 +32,8 @@ export type EnvironmentPauseSession = typeof EnvironmentPauseSession.Type;
 export const environmentPauseResumeComplete = (session: EnvironmentPauseSession) =>
   session.targets.every(
     (target) =>
-      target.pause !== "sent" || target.resume === "sent" || target.resume === "unavailable",
+      target.pause !== "pending" &&
+      (target.pause !== "sent" || target.resume === "sent" || target.resume === "unavailable"),
   );
 
 export const EnvironmentPauseStatus = Schema.Struct({
@@ -48,7 +49,7 @@ export class EnvironmentPauseError extends Schema.TaggedError<EnvironmentPauseEr
   "EnvironmentPauseError",
   {
     operation: Schema.Literals(["status", "start", "retry", "resume", "persist"]),
-    reason: Schema.Literals(["disabled", "no_session", "resume_in_progress", "unavailable"]),
+    reason: Schema.Literals(["disabled", "no_session", "unavailable"]),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
@@ -58,8 +59,6 @@ export class EnvironmentPauseError extends Schema.TaggedError<EnvironmentPauseEr
         return "Enable environment pause in Settings before starting a pause.";
       case "no_session":
         return "This environment has no pause session to recover.";
-      case "resume_in_progress":
-        return "Finish resuming this environment before starting another pause.";
       case "unavailable":
         return "Environment pause could not confirm the server's current state.";
     }

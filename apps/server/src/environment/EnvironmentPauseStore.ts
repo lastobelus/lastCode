@@ -25,6 +25,10 @@ const StoredTarget = Schema.Struct({
   resumeAccepted: Schema.Boolean,
   /** An earlier successful Pause still needs Resume while another Pause is attempted. */
   resumeRequired: Schema.optional(Schema.Literal(true)),
+  pauseCancelled: Schema.optional(Schema.Literal(true)),
+  resumeCancelled: Schema.optional(Schema.Literal(true)),
+  /** Pause must follow an outstanding Resume, even if the recipient becomes idle. */
+  rePause: Schema.optional(Schema.Literals(["waiting", "required"])),
 });
 const StoredSession = Schema.Struct({
   ...EnvironmentPauseSession.fields,
@@ -44,6 +48,24 @@ export function deliveryIdentity(
   return { commandId: CommandId.make(id), messageId: MessageId.make(id) };
 }
 
+/** A later owner action retires control messages that have not reached the provider. */
+export function environmentPauseDeliveryCancelled(
+  session: StoredSession | null,
+  messageId: MessageId,
+) {
+  const direction = /:(pause|resume):\d+$/.exec(messageId)?.[1] as "pause" | "resume" | undefined;
+  if (!messageId.startsWith("environment-pause:") || direction === undefined) return false;
+  return (
+    session === null ||
+    (direction === "pause" ? session.phase === "resuming" : session.phase !== "resuming") ||
+    !session.targets.some(
+      (target) =>
+        deliveryIdentity(session, target, direction).messageId === messageId &&
+        target[direction] !== "unavailable",
+    )
+  );
+}
+
 export class EnvironmentPauseStore extends Context.Service<
   EnvironmentPauseStore,
   {
@@ -53,7 +75,11 @@ export class EnvironmentPauseStore extends Context.Service<
     ) => Effect.Effect<StoredSession | null, EnvironmentPauseError>;
     readonly recordDelivery: (
       messageId: MessageId,
-      delivered: boolean,
+      delivered: boolean | "cancelled",
+      options?: {
+        readonly onlyIfSuperseded?: StoredSession["targets"][number];
+        readonly superseded?: true;
+      },
     ) => Effect.Effect<void, EnvironmentPauseError>;
   }
 >()("t3/environment/EnvironmentPauseStore") {}
@@ -102,32 +128,67 @@ const make = Effect.gen(function* () {
   return EnvironmentPauseStore.of({
     get: Ref.get(state),
     update,
-    recordDelivery: Effect.fn("EnvironmentPauseStore.recordDelivery")((messageId, delivered) =>
-      update((session) => {
-        if (session === null) return session;
-        let changed = false;
-        const targets = session.targets.map((target) => {
-          for (const direction of ["pause", "resume"] as const) {
-            if (
-              deliveryIdentity(session, target, direction).messageId !== messageId ||
-              target[direction] === "sent" ||
-              target[direction] === "unavailable"
-            )
-              continue;
-            changed = true;
-            return {
-              ...target,
-              [direction]: delivered ? ("sent" as const) : ("failed" as const),
-              [`${direction}Accepted`]: true,
-              error: delivered
-                ? null
-                : "The provider did not accept this message. Retry to send it again.",
-            };
-          }
-          return target;
-        });
-        return changed ? { ...session, targets } : session;
-      }).pipe(Effect.asVoid),
+    recordDelivery: Effect.fn("EnvironmentPauseStore.recordDelivery")(
+      (messageId, delivered, options) =>
+        update((session) => {
+          if (
+            session === null ||
+            (options?.onlyIfSuperseded && !environmentPauseDeliveryCancelled(session, messageId))
+          )
+            return session;
+          let changed = false;
+          const targets = session.targets.map((target) => {
+            for (const direction of ["pause", "resume"] as const) {
+              const renewPause =
+                direction === "pause" &&
+                delivered === "cancelled" &&
+                options?.superseded === true &&
+                session.phase !== "resuming";
+              // A newer intent can reuse the id and phase. Retire only the
+              // target snapshot whose non-delivery was observed.
+              if (
+                deliveryIdentity(session, target, direction).messageId !== messageId ||
+                (options?.onlyIfSuperseded && target !== options.onlyIfSuperseded) ||
+                target[direction] === "sent" ||
+                (target[direction] === "unavailable" && !(renewPause && target.pauseCancelled))
+              )
+                continue;
+              changed = true;
+              return {
+                ...target,
+                [direction]: renewPause
+                  ? ("pending" as const)
+                  : delivered === "cancelled"
+                    ? ("unavailable" as const)
+                    : delivered
+                      ? ("sent" as const)
+                      : ("failed" as const),
+                [`${direction}Accepted`]: !renewPause,
+                ...(renewPause ? { pauseAttempt: target.pauseAttempt + 1 } : {}),
+                ...(direction === "pause" && (delivered === true || delivered === "cancelled")
+                  ? { rePause: undefined }
+                  : {}),
+                ...(direction === "resume" && delivered === true
+                  ? { resumeRequired: undefined, resumeCancelled: undefined }
+                  : {}),
+                ...(direction === "resume" && delivered === "cancelled"
+                  ? {
+                      resumeCancelled: true as const,
+                      ...(target.pause === "sent" ? { resumeRequired: true as const } : {}),
+                    }
+                  : {}),
+                ...(direction === "pause" && delivered === "cancelled"
+                  ? { pauseCancelled: renewPause ? undefined : (true as const) }
+                  : {}),
+                error: delivered
+                  ? null
+                  : "The provider did not accept this message. Retry to send it again.",
+              };
+            }
+            return target;
+          });
+          return changed ? { ...session, targets } : session;
+        }).pipe(Effect.asVoid),
     ),
   });
 });

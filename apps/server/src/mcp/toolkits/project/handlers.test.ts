@@ -34,7 +34,10 @@ import { ChildProcessSpawner } from "effect/process";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as DocumentText from "../../../provider/DocumentText.ts";
-import { OrchestratorRuntimeModeAboveCeilingError } from "../../../orchestration-v2/Orchestrator.ts";
+import {
+  OrchestratorDispatchError,
+  OrchestratorRuntimeModeAboveCeilingError,
+} from "../../../orchestration-v2/Orchestrator.ts";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as ServerConfig from "../../../config.ts";
@@ -251,6 +254,7 @@ const clientLaunchHarness = (input: {
   readonly hostedAppUrl?: string;
   /** The orchestrator refuses the new thread's mode, as under a managed ceiling. */
   readonly refusedByCeiling?: true;
+  readonly refusedPlacement?: { value: boolean };
 }) => {
   const projectId = ProjectId.make("project:client-target");
   const modelSelection = {
@@ -326,6 +330,25 @@ const clientLaunchHarness = (input: {
                 runtimeMode: launch.runtimeMode,
                 maxRuntimeMode: "approval-required",
                 organization: "Example Corp",
+              }),
+            }),
+          );
+        }
+        if (input.refusedPlacement?.value && launch.groupedUnderThreadId != null) {
+          return Effect.fail(
+            new ThreadLaunch.ThreadLaunchError({
+              operation: "create-thread",
+              commandId: launch.commandId,
+              projectId: launch.projectId,
+              cause: new OrchestratorDispatchError({
+                commandId: launch.commandId,
+                commandType: "thread.create",
+                cause: new OrchestratorDispatchError({
+                  commandId: launch.commandId,
+                  commandType: "thread.create",
+                  field: "groupedUnderThreadId",
+                  cause: "The parent is not available for grouping.",
+                }),
               }),
             }),
           );
@@ -893,6 +916,66 @@ it.effect("a launch into an unknown project says the project was not found", () 
     }
     expect(launched).toHaveLength(0);
   }),
+);
+
+it.effect(
+  "a launch reports an unknown grouping parent and preserves null placement and retries",
+  () =>
+    Effect.gen(function* () {
+      const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+      const refusedPlacement = { value: false };
+      const { projectId, dependencies } = clientLaunchHarness({
+        runtimeModeCeiling: "auto",
+        launched,
+        refusedPlacement,
+      });
+      const toolkit = yield* ProjectToolkit.pipe(
+        Effect.provide(
+          McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+            Layer.provide(dependencies),
+          ),
+        ),
+      );
+      const launch = (groupedUnderThreadId: ThreadId | null, clientRequestId?: string) =>
+        toolkit
+          .handle("t3_thread_launch", {
+            title: "Fix",
+            projectId,
+            groupedUnderThreadId,
+            ...(clientRequestId === undefined ? {} : { clientRequestId }),
+          })
+          .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+
+      for (const parentId of ["null", "missing-parent"]) {
+        const result = (yield* launch(ThreadId.make(parentId))).at(-1)?.result;
+        expect(result).toMatchObject({
+          code: "invalid_request",
+          message: expect.stringContaining("groupedUnderThreadId"),
+        });
+        expect(result).toMatchObject({ message: expect.stringContaining("JSON null") });
+      }
+      expect(launched).toHaveLength(0);
+
+      yield* launch(null);
+      expect(launched[0]?.groupedUnderThreadId).toBeNull();
+      const parentId = launched[0]!.threadId!;
+      yield* launch(parentId, "grouped-child");
+      expect(launched[1]?.groupedUnderThreadId).toBe(parentId);
+      const childId = launched[1]!.threadId;
+
+      launched.splice(0, 1);
+      expect((yield* launch(parentId, "grouped-child")).at(-1)?.result).toMatchObject({
+        threadId: childId,
+      });
+      expect(launched.at(-1)?.threadId).toBe(childId);
+      refusedPlacement.value = true;
+      const refused = (yield* launch(childId!)).at(-1)?.result;
+      expect(refused).toMatchObject({
+        code: "invalid_request",
+        message: expect.stringContaining("groupedUnderThreadId"),
+      });
+      expect(refused).toMatchObject({ message: expect.stringContaining("JSON null") });
+    }),
 );
 
 it.effect("a retried worktree launch replays after its base ref is gone", () =>

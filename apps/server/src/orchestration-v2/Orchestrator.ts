@@ -279,6 +279,7 @@ export class OrchestratorDispatchError extends Schema.TaggedError<OrchestratorDi
   {
     commandId: CommandId,
     commandType: Schema.String,
+    field: Schema.optional(Schema.Literal("groupedUnderThreadId")),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
@@ -323,7 +324,7 @@ export const PauseRecipientMustBeActive = Context.Reference<boolean>(
 
 export class OrchestratorPauseRecipientInactiveError extends Schema.TaggedError<OrchestratorPauseRecipientInactiveError>()(
   "OrchestratorPauseRecipientInactiveError",
-  { commandId: CommandId, threadId: ThreadId },
+  { commandId: CommandId, threadId: ThreadId, superseded: Schema.optional(Schema.Literal(true)) },
 ) {
   override get message(): string {
     return "This thread finished before Pause could be submitted.";
@@ -2661,11 +2662,20 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         selectedRun ?? controlRun ?? (yield* nextDeliverableQueuedRun(projection));
       while (
         storedQueuedRun !== undefined &&
-        isStalePullRequestWatchWake(projection, storedQueuedRun)
+        (isStalePullRequestWatchWake(projection, storedQueuedRun) ||
+          (Option.isSome(pauseStore) &&
+            EnvironmentPauseStore.environmentPauseDeliveryCancelled(
+              yield* pauseStore.value.get,
+              storedQueuedRun.userMessageId,
+            )))
       ) {
         yield* writeSystemEvents(
           queuedRunCancellationEvents(projection, storedQueuedRun, yield* DateTime.now),
         );
+        if (Option.isSome(pauseStore))
+          yield* pauseStore.value
+            .recordDelivery(storedQueuedRun.userMessageId, "cancelled", { superseded: true })
+            .pipe(Effect.orDie);
         projection = yield* readCommandProjection(threadId);
         storedQueuedRun = yield* nextDeliverableQueuedRun(projection);
       }
@@ -4289,6 +4299,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
+          field: "groupedUnderThreadId",
           cause: "The parent cannot be this thread or one of its descendants.",
         });
       seen.add(next);
@@ -4309,6 +4320,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           commandType: command.type,
           cause:
             "The parent and each of its ancestors must be an interactive thread in this project that is not archived, being archived, or deleted.",
+          field: "groupedUnderThreadId",
         });
       if (next === parentId) yield* refuseAboveDispatchModeLimit(command, parent.id, parent);
       const organizationalParent = getInteractiveThreadParentThreadId(parent);
@@ -19585,6 +19597,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "message.dispatch": {
         const thread = yield* refuseNativeSubagentMessage(command);
         if (yield* PauseRecipientMustBeActive) {
+          if (
+            Option.isSome(pauseStore) &&
+            EnvironmentPauseStore.environmentPauseDeliveryCancelled(
+              yield* pauseStore.value.get,
+              command.messageId,
+            )
+          )
+            return yield* new OrchestratorPauseRecipientInactiveError({
+              commandId: command.commandId,
+              threadId: command.threadId,
+              superseded: true,
+            });
           const snapshot = yield* projectionStore
             .getShellSnapshot()
             .pipe(mapDispatchError(command));

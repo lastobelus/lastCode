@@ -7,11 +7,12 @@ import {
 import * as Effect from "effect/Effect";
 import * as Environment from "../../../environment/ServerEnvironment.ts";
 import * as EnvironmentPause from "../../../environment/EnvironmentPause.ts";
+import { EnvironmentPauseCaller } from "../../../environment/EnvironmentPauseActivity.ts";
 import * as ThreadCommandExecutor from "../../../orchestration-v2/ThreadCommandExecutor.ts";
 import * as Settings from "../../../serverSettings.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
-import { readCaller, unavailable } from "../../threadAccess.ts";
+import { type Caller, readCaller, unavailable } from "../../threadAccess.ts";
 import { EnvironmentToolkit } from "./tools.ts";
 
 export function preferences(settings: ServerSettings) {
@@ -48,14 +49,25 @@ const access = Effect.gen(function* () {
 });
 const pauseFailure = (error: EnvironmentPauseError) =>
   new OrchestratorMcpFailure({ code: "orchestration_error", message: error.message });
+const pauseCaller = ({ caller, scope }: Caller) =>
+  scope.thread === undefined || caller === undefined
+    ? null
+    : {
+        threadId: scope.thread.threadId,
+        runId: scope.thread.execution?.runId ?? caller.activeRunId,
+        providerSessionId: scope.thread.providerSessionId,
+      };
 const pauseWrite = (operation: "start" | "retry" | "resume") =>
   McpToolAccess.writesEnvironment((_input, check) =>
     Effect.gen(function* () {
-      yield* access;
+      const context = yield* access;
       yield* check;
       const pause = yield* EnvironmentPause.EnvironmentPause;
       // Fanout dispatch acquires each recipient's lock, including the caller's.
-      return yield* pause[operation].pipe(Effect.mapError(pauseFailure));
+      return yield* pause[operation].pipe(
+        Effect.provideService(EnvironmentPauseCaller, pauseCaller(context)),
+        Effect.mapError(pauseFailure),
+      );
     }),
   );
 export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
@@ -112,9 +124,12 @@ export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
   ),
   t3_environment_pause_status: McpToolAccess.reads(() =>
     Effect.gen(function* () {
-      yield* access;
+      const context = yield* access;
       const pause = yield* EnvironmentPause.EnvironmentPause;
-      return yield* pause.status.pipe(Effect.mapError(pauseFailure));
+      return yield* pause.status.pipe(
+        Effect.provideService(EnvironmentPauseCaller, pauseCaller(context)),
+        Effect.mapError(pauseFailure),
+      );
     }),
   ),
   t3_environment_pause_start: pauseWrite("start"),

@@ -31,6 +31,7 @@ import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
+import * as PauseStore from "../environment/EnvironmentPauseStore.ts";
 
 const layerEventSink = EventSink.layer.pipe(
   Layer.provide(Layer.merge(EventStore.layer, ProjectionStore.layer)),
@@ -51,7 +52,7 @@ it.effect("preserves steering rejection separately from turn completion", () =>
     const providerSessionId = ProviderSessionId.make("session:steer-rejected");
     const providerThreadId = ProviderThreadId.make("provider-thread:steer-rejected");
     const providerTurnId = ProviderTurnId.make("provider-turn:steer-rejected");
-    const messageId = MessageId.make("message:steer-rejected");
+    const messageId = MessageId.make("environment-pause:fixture:thread:steer-rejected:pause:0");
     const runId = RunId.make("run:steer-rejected");
     const nodeId = NodeId.make("node:steer-rejected");
     const attemptId = RunAttemptId.make("attempt:steer-rejected");
@@ -72,7 +73,14 @@ it.effect("preserves steering rejection separately from turn completion", () =>
       createdAt: now,
       updatedAt: now,
     };
+    const receipts = yield* Ref.make<ReadonlyArray<boolean | "cancelled">>([]);
     for (const testCase of [
+      {
+        target: "cancelled-pause",
+        status: "running",
+        adapterRejected: undefined,
+        deliveryRejected: undefined,
+      },
       { target: "recorded", status: "running", adapterRejected: true, deliveryRejected: true },
       {
         target: "recorded",
@@ -247,6 +255,13 @@ it.effect("preserves steering rejection separately from turn completion", () =>
       const layerControl = ProviderTurnControlService.layer.pipe(
         Layer.provide(
           Layer.mergeAll(
+            testCase.target === "cancelled-pause"
+              ? Layer.mock(PauseStore.EnvironmentPauseStore)({
+                  get: Effect.succeed(null),
+                  recordDelivery: (_id, delivered) =>
+                    Ref.update(receipts, (rows) => [...rows, delivered]),
+                })
+              : Layer.empty,
             layerEventSink,
             Layer.mock(ProjectionStore.ProjectionStoreV2)({
               getProviderControlContext: () =>
@@ -270,14 +285,14 @@ it.effect("preserves steering rejection separately from turn completion", () =>
                           cause: "session unavailable",
                         }),
                       )
-                    : testCase.target === "recorded"
+                    : testCase.target === "recorded" || testCase.target === "cancelled-pause"
                       ? Effect.succeedSome(runtime)
                       : Effect.die("Invalid targets must not reach a live provider session"),
             }),
           ),
         ),
       );
-      const error = yield* Effect.gen(function* () {
+      const result = yield* Effect.gen(function* () {
         const control = yield* ProviderTurnControlService.ProviderTurnControlServiceV2;
         return yield* control
           .steer({
@@ -287,8 +302,17 @@ it.effect("preserves steering rejection separately from turn completion", () =>
             providerTurnId,
             messageId,
           })
-          .pipe(Effect.flip);
+          .pipe(Effect.result);
       }).pipe(Effect.provide(layerControl));
+      if (testCase.target === "cancelled-pause") {
+        assert.equal(result._tag, "Success");
+        assert.deepEqual(yield* Ref.get(receipts), ["cancelled"]);
+        assert.equal(context.run?.status, "running");
+        continue;
+      }
+      assert.equal(result._tag, "Failure");
+      if (result._tag !== "Failure") return;
+      const error = result.failure;
       assert.equal(
         error.turnCompleted,
         testCase.status === "pending"
