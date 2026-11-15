@@ -8,6 +8,7 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import type { CheckpointCiCandidate } from "./lastcode-local-ci.ts";
 import { CiCommandFailure } from "./lib/lastcode-ci-process.ts";
+import { withCiFailingSteps } from "./lib/lastcode-ci-diagnostics.ts";
 import { PUBLICATION_CHECKS } from "./lib/lastcode-publication-checks.ts";
 
 import {
@@ -38,6 +39,8 @@ import {
   compileCarrySetSameBase,
   completeCarryReplay,
   readCarryReplayPlan,
+  readCarryReplayStops,
+  recordCarryReplayStop,
   replayCarrySetOnto,
   replayUngroupedOnto,
 } from "./lastcode-carry-replay.ts";
@@ -46,6 +49,7 @@ import {
   appendCheckpointRun,
   appendCheckpointRevisionRun,
   checkpointFailureRecord,
+  checkpointFailingSteps,
   readLatestCheckpointRun,
   type CarrySetShadowRecord,
   type CheckpointHistoryRecord,
@@ -97,7 +101,14 @@ interface CheckpointOptions {
 function appendCheckpointRunForOptions(
   options: CheckpointOptions,
   record: CheckpointHistoryRecord,
+  worktree?: string,
 ): boolean {
+  if (worktree && (record.status === "failed" || record.status === "success")) {
+    record = {
+      ...record,
+      replayStops: [...(record.replayStops ?? []), ...readCarryReplayStops(worktree)],
+    };
+  }
   return options.revisionOnly ? appendCheckpointRevisionRun(record) : appendCheckpointRun(record);
 }
 
@@ -260,6 +271,7 @@ function run(
     readonly allowFailure?: boolean;
     readonly environment?: NodeJS.ProcessEnv;
     readonly maxBuffer?: number;
+    readonly failureStep?: string;
   } = {},
 ): string {
   const result = NodeChildProcess.spawnSync(command, args, {
@@ -274,10 +286,16 @@ function run(
   if (result.status !== 0) {
     if (options.allowFailure) return "";
     const details = options.capture ? result.stderr.trim() : "";
-    throw new CiCommandFailure(
-      [`${command} ${args.join(" ")} failed with exit code ${result.status ?? "unknown"}.`, details]
-        .filter(Boolean)
-        .join("\n"),
+    throw Object.assign(
+      new CiCommandFailure(
+        [
+          `${command} ${args.join(" ")} failed with exit code ${result.status ?? "unknown"}.`,
+          details,
+        ]
+          .filter(Boolean)
+          .join("\n"),
+      ),
+      { failingSteps: options.failureStep ? [options.failureStep] : [] },
     );
   }
   return options.capture ? result.stdout.trim() : "";
@@ -407,11 +425,13 @@ function rebaseProgress(worktree: string): string {
 }
 
 function rebaseOnto(worktree: string, upstreamTag: string, baseTag: string): void {
+  const identity = { replayId: NodeCrypto.randomUUID(), kind: "replay" } as const;
   let failure: unknown;
   try {
     run(worktree, "git", ["rebase", "--onto", upstreamTag, baseTag]);
     return;
   } catch (error) {
+    recordCarryReplayStop(worktree, identity);
     failure = error;
   }
 
@@ -427,6 +447,7 @@ function rebaseOnto(worktree: string, upstreamTag: string, baseTag: string): voi
       run(worktree, "git", ["-c", "core.editor=true", "rebase", "--continue"]);
       return;
     } catch (error) {
+      recordCarryReplayStop(worktree, identity);
       failure = error;
       if (!rerereRebaseMadeProgress(previousProgress, rebaseProgress(worktree))) break;
     }
@@ -1546,16 +1567,25 @@ function assertForkInvariants(worktree: string): void {
       );
     }
   }
-  run(worktree, "git", ["diff", "--check"]);
+  run(worktree, "git", ["diff", "--check"], { failureStep: "Git diff whitespace" });
 }
 
 function prepareCheckpointValidation(repoRoot: string, worktree: string): void {
   const vp = checkpointVpPaths(repoRoot, worktree);
   const environment = checkpointSmokeEnvironment(worktree);
   console.log("[lastcode:checkpoint] Installing checkpoint worktree dependencies...");
-  run(worktree, vp.bootstrap, ["install", "--frozen-lockfile"], { environment });
+  run(worktree, vp.bootstrap, ["install", "--frozen-lockfile"], {
+    environment,
+    failureStep: "Install checkpoint dependencies",
+  });
   migrationDependenciesInstalled(worktree);
-  assertForkInvariants(worktree);
+  try {
+    assertForkInvariants(worktree);
+  } catch (error) {
+    if (error instanceof Error && checkpointFailingSteps(error).length === 0)
+      Object.assign(error, { failingSteps: ["Fork invariants"] });
+    throw error;
+  }
 }
 
 function runFullCandidateValidation(
@@ -1566,23 +1596,30 @@ function runFullCandidateValidation(
   console.log(
     "[lastcode:checkpoint] Collecting complete candidate validation before publication...",
   );
-  run(
-    worktree,
-    process.execPath,
-    [
-      NodePath.join(repoRoot, "scripts/lastcode-local-ci.ts"),
-      "--full",
-      "--candidate",
-      candidate.checkpointTag,
-      "--candidate-commit",
-      candidate.commit,
-      "--upstream-commit",
-      candidate.upstreamCommit,
-      "--source-commit",
-      candidate.sourceCommit,
-    ],
-    { environment: checkpointSmokeEnvironment(worktree) },
-  );
+  withCiFailingSteps((failingStepsPath) => {
+    run(
+      worktree,
+      process.execPath,
+      [
+        NodePath.join(repoRoot, "scripts/lastcode-local-ci.ts"),
+        "--full",
+        "--candidate",
+        candidate.checkpointTag,
+        "--candidate-commit",
+        candidate.commit,
+        "--upstream-commit",
+        candidate.upstreamCommit,
+        "--source-commit",
+        candidate.sourceCommit,
+      ],
+      {
+        environment: {
+          ...checkpointSmokeEnvironment(worktree),
+          LASTCODE_CHECKPOINT_FAILURE_STEPS_PATH: failingStepsPath,
+        },
+      },
+    );
+  });
 }
 
 function runCandidateGate(
@@ -1600,7 +1637,10 @@ function runSmokeGate(repoRoot: string, worktree: string, candidate: CheckpointC
   const environment = checkpointSmokeEnvironment(worktree);
   try {
     for (const args of checkpointSmokeStaticCheckCommands()) {
-      run(worktree, vp.isolated, args, { environment });
+      const failureStep =
+        PUBLICATION_CHECKS.find((step) => step.args.join("\0") === args.join("\0"))?.label ??
+        "Format and lint";
+      run(worktree, vp.isolated, args, { environment, failureStep });
     }
     run(
       worktree,
@@ -1620,15 +1660,25 @@ function runSmokeGate(repoRoot: string, worktree: string, candidate: CheckpointC
         "scripts/build-desktop-artifact.test.ts",
         "apps/desktop/src/electron/ElectronProtocol.test.ts",
       ],
-      { environment },
+      { environment, failureStep: "Checkpoint tests" },
     );
     for (const args of checkpointSmokeTypecheckCommands()) {
-      run(worktree, vp.isolated, args, { environment });
+      run(worktree, vp.isolated, args, { environment, failureStep: "Workspace typecheck" });
     }
   } catch (error) {
     if (!(error instanceof CiCommandFailure)) throw error;
     console.error(`[lastcode:checkpoint] Smoke check failed: ${error.message}`);
-    runFullCandidateValidation(repoRoot, worktree, candidate);
+    try {
+      runFullCandidateValidation(repoRoot, worktree, candidate);
+    } catch (fullError) {
+      if (fullError instanceof Error)
+        Object.assign(fullError, {
+          failingSteps: Array.from(
+            new Set([...checkpointFailingSteps(error), ...checkpointFailingSteps(fullError)]),
+          ),
+        });
+      throw fullError;
+    }
     throw error;
   }
 }
@@ -1821,21 +1871,25 @@ function publishRevisionIfNeeded(
     pendingTag = undefined;
     completed = true;
     const finishedAtMs = Date.now();
-    appendCheckpointRunForOptions(options, {
-      schemaVersion: 1,
-      status: "success",
-      upstreamTag: plan.nightly.tag,
-      startedAt: new Date(startedAtMs).toISOString(),
-      finishedAt: new Date(finishedAtMs).toISOString(),
-      durationMs: finishedAtMs - startedAtMs,
-      commitsRebased: 0,
-      checkpointCommit: candidateCommit,
-      checkpointTag: publishedTag,
-      replayMode: replay.mode,
-      ...(replay.rollbackReason ? { rollbackReason: replay.rollbackReason } : {}),
-      sourceObjectRef: sourceObjectRef(publishedTag),
-      sourceCommit,
-    });
+    appendCheckpointRunForOptions(
+      options,
+      {
+        schemaVersion: 1,
+        status: "success",
+        upstreamTag: plan.nightly.tag,
+        startedAt: new Date(startedAtMs).toISOString(),
+        finishedAt: new Date(finishedAtMs).toISOString(),
+        durationMs: finishedAtMs - startedAtMs,
+        commitsRebased: 0,
+        checkpointCommit: candidateCommit,
+        checkpointTag: publishedTag,
+        replayMode: replay.mode,
+        ...(replay.rollbackReason ? { rollbackReason: replay.rollbackReason } : {}),
+        sourceObjectRef: sourceObjectRef(publishedTag),
+        sourceCommit,
+      },
+      worktree,
+    );
   } catch (error) {
     if (pendingTag) completed = deleteCheckpointTag(repoRoot, pendingTag);
     appendCheckpointRunForOptions(
@@ -1851,6 +1905,7 @@ function publishRevisionIfNeeded(
         startedAtMs,
         upstreamTag: plan.nightly.tag,
       }),
+      worktree,
     );
     if (!completed) {
       notify(
@@ -2659,7 +2714,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
     );
     let pendingTag: string | undefined;
     let shadowTag: string | undefined;
-    let failurePhase: "publication" | "smoke" = "smoke";
+    let failurePhase: "publication" | "rebase" | "smoke" = "rebase";
     const upstreamCommit = git(repoRoot, ["rev-parse", `${selection.nightlyTag}^{commit}`]);
     try {
       const normalizedHead =
@@ -2682,6 +2737,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       )
         ? nextRevisionPlan(selectedNightly, installables).installableTag
         : checkpointTagFromNightlyTag(selectedNightly.tag);
+      failurePhase = "smoke";
       runCandidateGate(repoRoot, worktree, {
         checkpointTag: plannedTag,
         commit: selection.head,
@@ -2730,23 +2786,27 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       publishRepairedCheckpoint(repoRoot, options.pushRemote, pendingTag, selection);
       const publishedTag = pendingTag;
       pendingTag = undefined;
-      appendCheckpointRunForOptions(options, {
-        schemaVersion: 1,
-        status: "success",
-        upstreamTag: nightly.tag,
-        ...timing,
-        checkpointCommit: selection.head,
-        checkpointTag: publishedTag,
-        replayMode: replay.mode,
-        ...(replay.rollbackReason ? { rollbackReason: replay.rollbackReason } : {}),
-        sourceObjectRef: sourceObjectRef(publishedTag),
-        sourceCommit: selection.sourceCommit,
-      });
+      appendCheckpointRunForOptions(
+        options,
+        {
+          schemaVersion: 1,
+          status: "success",
+          upstreamTag: nightly.tag,
+          ...timing,
+          checkpointCommit: selection.head,
+          checkpointTag: publishedTag,
+          replayMode: replay.mode,
+          ...(replay.rollbackReason ? { rollbackReason: replay.rollbackReason } : {}),
+          sourceObjectRef: sourceObjectRef(publishedTag),
+          sourceCommit: selection.sourceCommit,
+        },
+        worktree,
+      );
       shadowTag = publishedTag;
     } catch (error) {
       if (pendingTag) deleteCheckpointTag(repoRoot, pendingTag);
       let recoveryFingerprint: string | undefined;
-      if (failurePhase === "smoke") {
+      if (failurePhase === "rebase" || failurePhase === "smoke") {
         try {
           recoveryFingerprint = checkpointRecoveryFingerprint(
             worktree,
@@ -2770,6 +2830,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
           startedAtMs,
           upstreamTag: selection.nightlyTag,
         }),
+        worktree,
       );
       notify(
         hostPlatform,
@@ -2902,6 +2963,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
           commitsRebased: 0,
           error,
           failurePhase: "rebase",
+          failingSteps: ["Carry compilation"],
           recoveryBranch: carryBranch,
           ...(recoveryFingerprint ? { recoveryFingerprint } : {}),
           replayMode: replay.mode,
@@ -2909,6 +2971,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
           startedAtMs,
           upstreamTag: plan.missingNightlies[0]?.tag ?? plan.baseNightly.tag,
         }),
+        worktree,
       );
       notify(hostPlatform, "LastCode carry replay needs attention", `${carryBranch} is retained.`);
       throw error;
@@ -2984,23 +3047,28 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         );
       }
       pendingCheckpointTag = undefined;
-      appendCheckpointRunForOptions(options, {
-        schemaVersion: 1,
-        status: "success",
-        upstreamTag: plan.baseNightly.tag,
-        ...timing,
-        checkpointCommit: candidateCommit,
-        checkpointTag,
-        replayMode: replay.mode,
-        ...(replay.rollbackReason ? { rollbackReason: replay.rollbackReason } : {}),
-        sourceObjectRef: sourceObjectRef(checkpointTag),
-        sourceCommit,
-      });
+      appendCheckpointRunForOptions(
+        options,
+        {
+          schemaVersion: 1,
+          status: "success",
+          upstreamTag: plan.baseNightly.tag,
+          ...timing,
+          checkpointCommit: candidateCommit,
+          checkpointTag,
+          replayMode: replay.mode,
+          ...(replay.rollbackReason ? { rollbackReason: replay.rollbackReason } : {}),
+          sourceObjectRef: sourceObjectRef(checkpointTag),
+          sourceCommit,
+        },
+        carryWorktreePrepared ? automationWorktree() : undefined,
+      );
       newestProducedInstallableTag = checkpointTag;
     } catch (error) {
       const tagDeleted = pendingCheckpointTag
         ? deleteCheckpointTag(repoRoot, pendingCheckpointTag)
         : true;
+      const replayStops = carryWorktreePrepared ? readCarryReplayStops(automationWorktree()) : [];
       const disposition = carryBootstrapFailureDisposition({
         failurePhase: bootstrapFailurePhase,
         ...(pendingCheckpointTag ? { pendingCheckpointTag } : {}),
@@ -3039,6 +3107,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
             commitsRebased,
             error,
             failurePhase: bootstrapFailurePhase,
+            replayStops,
             ...(!tagDeleted ? { localTagRetained: true } : {}),
             ...(recoveryBranch ? { recoveryBranch } : {}),
             ...(recoveryFingerprint ? { recoveryFingerprint } : {}),
@@ -3050,6 +3119,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
           },
           finishedAtMs,
         ),
+        undefined,
       );
       if (recoveryBranch) {
         notify(
@@ -3120,20 +3190,24 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
           );
         }
         const finishedAtMs = Date.now();
-        appendCheckpointRunForOptions(options, {
-          schemaVersion: 1,
-          status: "success",
-          upstreamTag: revisionPlan.nightly.tag,
-          startedAt: new Date(startedAtMs).toISOString(),
-          finishedAt: new Date(finishedAtMs).toISOString(),
-          durationMs: finishedAtMs - startedAtMs,
-          commitsRebased: 0,
-          checkpointCommit: candidateCommit,
-          checkpointTag: pendingTag,
-          replayMode: replay.mode,
-          sourceObjectRef: sourceObjectRef(pendingTag),
-          sourceCommit,
-        });
+        appendCheckpointRunForOptions(
+          options,
+          {
+            schemaVersion: 1,
+            status: "success",
+            upstreamTag: revisionPlan.nightly.tag,
+            startedAt: new Date(startedAtMs).toISOString(),
+            finishedAt: new Date(finishedAtMs).toISOString(),
+            durationMs: finishedAtMs - startedAtMs,
+            commitsRebased: 0,
+            checkpointCommit: candidateCommit,
+            checkpointTag: pendingTag,
+            replayMode: replay.mode,
+            sourceObjectRef: sourceObjectRef(pendingTag),
+            sourceCommit,
+          },
+          worktree,
+        );
         newestProducedInstallableTag = pendingTag;
         pendingTag = undefined;
       } catch (error) {
@@ -3159,6 +3233,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
             startedAtMs,
             upstreamTag: revisionPlan.nightly.tag,
           }),
+          worktree,
         );
         notify(
           hostPlatform,
@@ -3386,18 +3461,22 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         }
       }
       pendingCheckpointTag = undefined;
-      appendCheckpointRunForOptions(options, {
-        schemaVersion: 1,
-        status: "success",
-        upstreamTag: nightly.tag,
-        ...timing,
-        checkpointCommit: candidateCommit,
-        checkpointTag,
-        replayMode: replay.mode,
-        ...(replay.rollbackReason ? { rollbackReason: replay.rollbackReason } : {}),
-        sourceObjectRef: sourceObjectRef(checkpointTag),
-        sourceCommit,
-      });
+      appendCheckpointRunForOptions(
+        options,
+        {
+          schemaVersion: 1,
+          status: "success",
+          upstreamTag: nightly.tag,
+          ...timing,
+          checkpointCommit: candidateCommit,
+          checkpointTag,
+          replayMode: replay.mode,
+          ...(replay.rollbackReason ? { rollbackReason: replay.rollbackReason } : {}),
+          sourceObjectRef: sourceObjectRef(checkpointTag),
+          sourceCommit,
+        },
+        worktree,
+      );
       newestProducedInstallableTag = checkpointTag;
       baseTag = nightly.tag;
       baseCommit = nightly.commit;
@@ -3448,6 +3527,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
           },
           finishedAtMs,
         ),
+        worktree,
       );
     }
     if (disposition.recoveryBranch) {

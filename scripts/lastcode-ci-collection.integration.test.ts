@@ -220,6 +220,11 @@ it.each(
           env: {
             ...env,
             T3CODE_LOCAL_CI_SETTINGS_PATH: settingsPath,
+            LASTCODE_CHECKPOINT_FAILURE_STEPS_PATH: NodePath.join(
+              root,
+              ".git",
+              "checkpoint-failing-steps.json",
+            ),
             PATH: [bin, NodePath.dirname(node), env.PATH ?? ""].join(NodePath.delimiter),
           },
         },
@@ -249,6 +254,11 @@ it.each(
               : "passed"
             : "failed",
       );
+      expect(
+        JSON.parse(
+          NodeFS.readFileSync(NodePath.join(root, ".git", "checkpoint-failing-steps.json"), "utf8"),
+        ),
+      ).toEqual(report.steps.filter((step) => step.status === "failed").map((step) => step.label));
       expect(report.commit).toBe(head);
       expect(report.context).toMatchObject({
         kind: candidate ? "checkpoint-candidate" : "checkpoint",

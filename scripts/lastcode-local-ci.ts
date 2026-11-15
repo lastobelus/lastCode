@@ -28,7 +28,7 @@ import {
 import { CiCommandFailure, runCiProcess } from "./lib/lastcode-ci-process.ts";
 import { runCollectedCiSteps, type CiStepResult } from "./lib/lastcode-ci-collection.ts";
 import { PUBLICATION_CHECKS } from "./lib/lastcode-publication-checks.ts";
-import { pruneCiDiagnostics } from "./lib/lastcode-ci-diagnostics.ts";
+import { pruneCiDiagnostics, writeCiFailingSteps } from "./lib/lastcode-ci-diagnostics.ts";
 import {
   assertBaseIsAncestor,
   assertCleanWorktree,
@@ -1323,6 +1323,7 @@ async function executeLocalCi(
       status: "running" | "failed" | "passed" | "incomplete",
       error?: unknown,
     ) => {
+      writeCiFailingSteps(results);
       if (!diagnosticDirectory || !reportPath) return;
       NodeFS.mkdirSync(diagnosticDirectory, { recursive: true });
       const pendingReportPath = `${reportPath}.pending`;

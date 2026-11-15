@@ -334,7 +334,7 @@ The checkpoint command enables `rerere` and automatic index updates in repositor
 configuration so historical, non-carry rebases can reuse and stage remembered
 resolutions. Carry replay overrides both settings on its own Git commands only,
 so continue a carry rebase manually with
-`git -c rerere.enabled=false -c rerere.autoupdate=false rebase --continue`.
+`node <automation>/scripts/lastcode-carry-replay.ts --continue <worktree>`.
 Resolve carry conflicts explicitly and preserve the retained worktree. A later
 checkpoint run can continue once every resolution is staged; genuinely unmerged
 paths still stop for review. Automatic continuation also stops if Git rejects
@@ -595,6 +595,64 @@ scheduled runs independent of shell PATH configuration and global `vp`
 installations.
 
 The launch agent is opt-in. Repository installation and tests never register it.
+
+### Checkpoint episode effort
+
+Episode records measure what each upstream nightly costs from the first
+checkpoint attempt to an installable build: attempts, replay stops, failed
+steps, alert delivery, and agent tokens spent on recovery. They exist to compare
+six-group carry replay with stable nightly merges. Nothing is sent anywhere;
+the records stay in `~/.lastcode/automation/checkpoint-runs.jsonl`.
+
+An episode is every checkpoint and revision attempt for one upstream nightly,
+keyed by `episodeKey` (the upstream tag). The supervisor writes a
+`status: "episode"` snapshot each time it finishes, and a local package build
+writes one after it records a `status: "build-ready"` marker. Each snapshot
+**replaces** the earlier ones for its key, so read only the latest and never
+add snapshots together:
+
+```bash
+jq -nR 'reduce (inputs | fromjson? | select(.status == "episode")) as $r
+  ({}; .[$r.episodeKey] = $r)' ~/.lastcode/automation/checkpoint-runs.jsonl
+```
+
+Each stretch of attempts for one upstream tag owns a time window, ending at
+build readiness or the next tag's first attempt. A later revision opens another
+window for its own tag, so its effort is included without claiming the work
+between those windows. Rebuilds keep the first qualifying readiness time.
+Later snapshots can show more work or updated alert and authorization state.
+Unchanged snapshots are not appended. Collection processes the most recently
+active episodes first and stops 35 days after an episode's last attempt.
+
+- **Attempts.** Each `success` or `failed` record now carries an
+  `attemptOrdinal`, the carry-replay conflict stops it hit (group, commit, and
+  conflicted test, generated, and other path counts; a stop already seen in an
+  earlier attempt is not repeated), and the names of failed CI or smoke steps.
+  Records from before this change lack these fields and are still grouped by
+  upstream tag.
+- **Build readiness.** `timing.installableBuildReadyAt` is when the package was
+  ready, not when someone installed it. `timing.revisionNeeded` is true when the
+  episode needed a LastCode revision rather than only the checkpoint itself.
+- **Effort.** Read-only from the local LastCode database's projections, starting
+  at the coordinator thread (the supervisor's existing `recoveryThreadId`, or
+  the thread an alert was delivered to) and following its subagent children.
+  Independent threads are excluded. Tokens are the sum of each provider turn's
+  accumulated `turnTokenUsage`, not the `tokenUsage` context snapshot; provider-ledger
+  other usage stays separate because its cache breakdown is unknown and it can overlap child turns.
+  `cachedInputTokens` is part of `inputTokens`; do not add them.
+- **Boundaries.** Effort counts whole provider turns that overlap the episode,
+  so a turn that straddles a boundary is counted in full, and in both episodes
+  when it overlaps two.
+- **Gaps.** `effort.status` is `complete`, `partial`, or `missing`. Partial
+  totals cover available usage and name the turns and coverage they lack;
+  overlapping turns can also include work outside the episode. Missing
+  means no totals were recorded, not zero.
+
+The default database is `~/.lastcode/userdata/statev2.sqlite`. Set
+`effortDatabasePath` in `~/.lastcode/automation/checkpoint-supervisor.json` to
+read a different one. Collection never changes a checkpoint or build result:
+when it fails, the run prints that episode collection was unavailable and
+continues.
 
 ## Selecting a Build
 

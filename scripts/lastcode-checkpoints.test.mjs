@@ -314,7 +314,7 @@ describe("LastCode checkpoint dashboard", () => {
         replayMode: "carry",
       }),
     ).toEqual([
-      "Resolve and stage conflicts, then repeat until the rebase finishes: git -C '/tmp/recovery' rebase --continue",
+      "Resolve and stage conflicts, then repeat until the rebase finishes: node '/tmp/automation/scripts/lastcode-carry-replay.ts' --continue '/tmp/recovery'",
       "Continue the retained carry replay: pnpm --dir '/tmp/automation' lastcode:checkpoint -- --select-recovery \"$(git -C '/tmp/recovery' rev-parse HEAD)\" --recovery-source 'abc123' --replay-mode carry",
     ]);
   });
