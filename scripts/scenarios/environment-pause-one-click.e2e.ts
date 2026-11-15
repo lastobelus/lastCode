@@ -91,14 +91,13 @@ test(
           entries: Map<string, { target: { label: string } }>;
         };
         for (const [environmentId, entry] of catalog.entries) {
-          catalog.entries.set(environmentId, {
-            ...entry,
-            target: { ...entry.target, label: "workstation.example" },
-          });
+          // Replacing a live entry makes acquireSupervisor close its authenticated connection.
+          entry.target.label = "workstation.example";
           const config = appAtomRegistry.get(serverEnvironment.configValueAtom(environmentId)) as {
             environment: { label: string };
           } | null;
-          if (config !== null) config.environment.label = "workstation.example";
+          if (config !== null)
+            config.environment = { ...config.environment, label: "workstation.example" };
           appAtomRegistry.refresh(environmentPresentations.presentationAtom(environmentId));
         }
         appAtomRegistry.refresh(environmentPresentations.presentationsAtom);
