@@ -528,11 +528,12 @@
       <section aria-labelledby="groups-title">
         <h2 id="groups-title">The six groups, in their fixed order</h2>
         <p class="section-intro">
-          The order lives in code, not just in the manifest.
+          The order lives in code.
           <code>CARRY_REPLAY_GROUPS</code> in <code>scripts/lastcode-carry-replay.ts</code> lists
-          the six IDs, the manifest must repeat them in the same order, and a compiled chain with
-          any other count or order is rejected. What belongs in each group is a written convention
-          from the nightly workflow guide; the code only checks that every commit names one group.
+          the six IDs, and a compiled chain with any other count or order is rejected. The
+          manifest's <code>order</code> list repeats them, but only the historical check reads it.
+          What belongs in each group is a written convention from the nightly workflow guide; the
+          code only checks that every commit names one group.
         </p>
         <div class="grid three">
           <article class="card current">
@@ -620,9 +621,9 @@
         </div>
         <p class="caution">
           The manifest still has <code>pullRequests</code> lists for some groups and marks
-          <code>incubator</code> as <code>default</code>. Carry replay reads neither. They are a
-          frozen inventory from before carry replay was switched on, used only when checking a tag
-          built by the old historical replay.
+          <code>incubator</code> as <code>default</code>. Carry replay reads neither. They matter
+          only when checking a tag built by historical replay: the PR lists sort its commits into
+          groups, and the check refuses a manifest without the flag.
         </p>
       </section>
 
@@ -1253,11 +1254,11 @@
               Whoever maintains the fork repairs it there by following “Resuming a repaired
               checkpoint” in
               <a href="#" data-repo-path="docs/lastcode/release.md">docs/lastcode/release.md</a>.
-              That procedure ends by selecting the repaired head with
+              Near its end, the procedure selects the repaired head with
               <code>--select-recovery</code> and <code>--recovery-source</code>, which folds repairs
-              committed with their own <code>Carry-Group</code> trailers into their groups. The next
-              run validates and tags the result, then promotes it, or defers promotion if main has
-              moved.
+              committed with their own <code>Carry-Group</code> trailers into their groups, then
+              compares trees and requests a service run. That run validates and tags the result,
+              then promotes it, or defers promotion if main has moved.
             </p>
           </article>
         </div>
