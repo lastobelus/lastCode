@@ -336,6 +336,32 @@ describe("startAgentOpenedPreviews", () => {
       .byThreadKey[threadKeyToRead]?.surfaces.filter((surface) => surface.kind === "preview")
       .map((surface) => surface.id);
 
+  it.each([false, true])(
+    "reveals only live user opens before the first list (replay: %s)",
+    (replay) => {
+      using _following = following();
+      const tab = serverTab({ revealRequest: { id: "early-user", force: true } });
+      applyPreviewServerEvent(
+        ref,
+        {
+          type: "navigated",
+          threadId: ref.threadId,
+          tabId: tab.tabId,
+          createdAt: tab.updatedAt,
+          snapshot: tab,
+          serverEpoch,
+          revision: 1,
+        },
+        { replay },
+      );
+      expect(useRightPanelStore.getState().byThreadKey[threadKey]?.isOpen ?? false).toBe(!replay);
+      useRightPanelStore.getState().close(ref);
+      reconcilePreviewServerSessions(ref, { sessions: [tab], serverEpoch, revision: 1 });
+      expect(useRightPanelStore.getState().byThreadKey[threadKey]?.isOpen ?? false).toBe(false);
+      expect(floatingTabId()).toBeNull();
+    },
+  );
+
   it("treats the first list as a baseline and floats tabs opened later", () => {
     using _following = following();
     reconcilePreviewServerSessions(ref, {

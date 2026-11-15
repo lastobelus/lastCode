@@ -221,6 +221,7 @@ vi.mock(import("~/previewStateStore"), async () => {
         listLoaded: false,
         serverEpoch: null,
         serverRevision: 0,
+        liveServerRevision: -1,
       }),
     ),
     previewThreadRefsAtom: Atom.make<ReadonlyMap<string, ScopedThreadRef>>(new Map()),

@@ -68,6 +68,7 @@ export interface ThreadPreviewState {
   listLoaded: boolean;
   serverEpoch: string | null;
   serverRevision: number;
+  liveServerRevision: number;
 }
 
 const EMPTY_THREAD_PREVIEW_STATE: ThreadPreviewState = Object.freeze({
@@ -82,6 +83,7 @@ const EMPTY_THREAD_PREVIEW_STATE: ThreadPreviewState = Object.freeze({
   listLoaded: false,
   serverEpoch: null,
   serverRevision: 0,
+  liveServerRevision: -1,
 });
 
 const emptyPreviewStateAtom = Atom.make<ThreadPreviewState>(EMPTY_THREAD_PREVIEW_STATE).pipe(
@@ -370,12 +372,16 @@ export function applyPreviewServerEvent(
         }
       }
     })();
-    return next.serverRevision === event.revision && next.serverEpoch === event.serverEpoch
+    const liveServerRevision = options.replay ? current.liveServerRevision : event.revision;
+    return next.serverRevision === event.revision &&
+      next.serverEpoch === event.serverEpoch &&
+      next.liveServerRevision === liveServerRevision
       ? next
       : {
           ...next,
           serverEpoch: event.serverEpoch,
           serverRevision: event.revision,
+          liveServerRevision,
         };
   });
   const state = readThreadPreviewState(ref);
