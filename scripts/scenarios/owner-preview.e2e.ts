@@ -125,6 +125,7 @@ createInterface({input:process.stdin,crlfDelay:Infinity}).on('line', async (line
         ),
       );
       await t3.open();
+      await expect(screen.getByRole("button", "owner-preview").first()).toBeVisible();
       await browser.evaluate(
         `async ({wrapper,node}) => {
           const {serverEnvironment} = await import('/src/state/server.ts');
