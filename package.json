@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "lastcode:regenerate-derived": "MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@26.12.1 -- node scripts/lastcode-regenerate-derived.ts",
     "prepare": "vp config --no-agent",
     "dev": "node scripts/dev-runner.ts dev",
     "profile:startup": "node scripts/profile-startup.mjs",

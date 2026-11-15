@@ -257,6 +257,9 @@ The checkpoint command enables rerere in repository configuration for
 historical, non-carry rebases; carry replay overrides it on its own rebase
 commands only. Continue a carry replay manually with
 `git -c rerere.enabled=false -c rerere.autoupdate=false rebase --continue`.
+When a replay conflict is in `pnpm-lock.yaml` or
+`apps/server/src/provider/agentContextBudget.json`, take either side to clear the
+markers and continue; both files are regenerated after the replay.
 The retained recovery worktree is the only checkout that receives committed
 repairs. Incorporate any downstream merges made since that attempt before
 selecting its exact head.
@@ -272,6 +275,11 @@ repair commits, select the clean six-group head with the selection command below
 This records the completed replay plan so the final selection can fold repairs
 into their owning groups. This selection is bookkeeping: never request `run-now`
 after it. Only step 3's final selection leads to `run-now`.
+
+**Before step 1, after the replay and every incorporated downstream merge:** in
+the retained worktree, run
+`pnpm lastcode:regenerate-derived --upstream <replay-upstream-head>`, which
+regenerates both derived files, and commit any changes with their owning `Carry-Group`.
 
 1. Run the gate and client QA in one separate checkout, always; the service
    validates the retained recovery worktree, so neither runs there. Create the
@@ -296,8 +304,10 @@ after it. Only step 3's final selection leads to `run-now`.
    exists in the `<pre-replay-head>` or `<replay-upstream-head>` tree, so deleting
    a file the new upstream nightly introduced also passes. Tests that survive
    beside a deleted file still run. Fix concrete failures by committing in the
-   retained worktree, update the path list, then refresh the separate checkout and
-   rerun the gate. Broader checks remain in the service's unchanged Full CI; this preflight
+   retained worktree and updating the path list. If a repair changes dependency
+   manifests, patches, pnpm settings, or measured agent context, rerun
+   `pnpm lastcode:regenerate-derived --upstream <replay-upstream-head>` and commit
+   its changes before refreshing the separate checkout and rerunning the gate. Broader checks remain in the service's unchanged Full CI; this preflight
    does not create a Full CI stamp or a PR Quick CI receipt.
 
 3. Record the passing gate checkout's HEAD as `<gated-head>`. If repairs moved
