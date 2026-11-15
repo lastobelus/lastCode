@@ -619,9 +619,10 @@
           </article>
         </div>
         <p class="caution">
-          The manifest still has <code>pullRequests</code> lists for some groups. Carry replay does
-          not read them. They are a frozen inventory from before carry replay was switched on, used
-          only when checking a tag built by the old historical replay.
+          The manifest still has <code>pullRequests</code> lists for some groups and marks
+          <code>incubator</code> as <code>default</code>. Carry replay reads neither. They are a
+          frozen inventory from before carry replay was switched on, used only when checking a tag
+          built by the old historical replay.
         </p>
       </section>
 
@@ -1146,10 +1147,10 @@
               <code>lastcode/main</code> at publication. If not, the compile fails.
             </p>
             <p>
-              One exception: when the previous build was never promoted because a PR merged during
-              its run, main does not contain that build. The trees cannot match, so the next
-              publication compiles without this comparison. Checkpoint 3717 folded #508 to #510 that
-              way.
+              One exception: when the previous build was never promoted, for example because a PR
+              merged during its run, main does not contain that build. The trees cannot match, so
+              the next publication compiles without this comparison. Checkpoint 3717 folded #508 to
+              #510 that way.
             </p>
             <p>
               This proves the regrouping lost nothing. It does
@@ -1249,13 +1250,14 @@
               touched each conflicted file, and the upstream commits that touched them.
             </p>
             <p>
-              Whoever maintains the fork resolves it there, runs the focused recovery gate in a
-              separate checkout, then selects the repaired head with
-              <code>--select-recovery</code> and <code>--recovery-source</code>. Repairs committed
-              with their own <code>Carry-Group</code> trailers are folded into their groups when
-              selected. The next run validates, tags and promotes the result. The full steps are in
-              “Resuming a repaired checkpoint” in
+              Whoever maintains the fork repairs it there by following “Resuming a repaired
+              checkpoint” in
               <a href="#" data-repo-path="docs/lastcode/release.md">docs/lastcode/release.md</a>.
+              That procedure ends by selecting the repaired head with
+              <code>--select-recovery</code> and <code>--recovery-source</code>, which folds repairs
+              committed with their own <code>Carry-Group</code> trailers into their groups. The next
+              run validates and tags the result, then promotes it, or defers promotion if main has
+              moved.
             </p>
           </article>
         </div>

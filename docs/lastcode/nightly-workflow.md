@@ -250,8 +250,9 @@ only that generation: it needs `--base` at the bootstrap base and a source that
 descends from the bootstrap source, so current checkpoints cannot use it. A
 successful same-base compilation must reproduce the source tree; it does not prove
 compatibility with newer upstream. Compilation conflicts retain their worktree and
-phase record for repair. The checkpoint service applies the resulting group commits
-onto the new upstream, validates the integrated result, and preserves immutable
+phase record for repair. The checkpoint service compiles its own group commits from
+the previous build and the new squashes, applies them onto the new upstream,
+validates the integrated result, and preserves immutable
 publication, source provenance, and concurrent-main protections. Carry publications
 run no post-publication carry check. Only after a
 historical-mode publication does a non-blocking shadow check rebuild the groups
