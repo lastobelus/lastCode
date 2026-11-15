@@ -6,11 +6,11 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as EffectAcpErrors from "effect-acp/errors";
 
-import { readAntigravityClientTextFile } from "../../provider/acp/AntigravityClientFiles.ts";
+import { readAntigravityClientTextFile } from "./AntigravityClientFiles.ts";
 
 const isAcpRequestError = Schema.is(EffectAcpErrors.AcpRequestError);
 
-describe("AntigravityAdapterV2 client file workspace aliases", () => {
+describe("AntigravityClientFiles workspace aliases", () => {
   it.effect("resolves missing nested paths through a workspace alias before reading", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
