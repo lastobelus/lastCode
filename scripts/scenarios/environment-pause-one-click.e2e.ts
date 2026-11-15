@@ -71,7 +71,12 @@ test(
         model: "question",
       });
       const status = () => runPromise(client["server.environmentPauseStatus"]({}));
-      await t3.open(thread);
+      // Pairing leaves /pair before reloading its connection; wait for the app before navigating.
+      await t3.open();
+      await screen.getByRole("button", /^Pause /).waitFor({ state: "visible" });
+      const { environment } = await runPromise(client["server.getConfig"]({}));
+      await app.open(`/${environment.environmentId}/${thread.threadId}`);
+      await screen.getByRole("button", /^Pause /).waitFor({ state: "visible" });
       // Public evidence uses a generic display name; requests keep the real environment identity.
       await browser.evaluate(async () => {
         const catalogPath = "/src/connection/catalog.ts";
