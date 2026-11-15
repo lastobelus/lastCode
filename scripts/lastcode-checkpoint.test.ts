@@ -16,7 +16,7 @@ import {
   checkpointPromotionPushArgs,
   checkpointSmokeEnvironment,
   checkpointSmokeTypecheckCommands,
-  checkpointSmokeFormatAndLintCommand,
+  checkpointSmokeStaticCheckCommands,
   checkpointSourceCommit,
   checkpointTagPushArgs,
   checkpointVpPaths,
@@ -787,8 +787,13 @@ it("typechecks every workspace before publishing", () => {
   ]);
 });
 
-it("runs the repository format and lint gate before publishing", () => {
-  assert.deepStrictEqual(checkpointSmokeFormatAndLintCommand(), ["check"]);
+it("runs format, unused-code, and generated-code checks before publishing", () => {
+  assert.deepStrictEqual(checkpointSmokeStaticCheckCommands(), [
+    ["check"],
+    ["run", "knip:check"],
+    ["run", "--filter", "@t3tools/source-control-github", "generate", "--check"],
+    ["run", "--filter", "t3", "generate", "--check"],
+  ]);
 });
 
 it("bootstraps dependencies with the invoking worktree runner before using the isolated runner", () => {

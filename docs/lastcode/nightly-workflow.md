@@ -81,9 +81,12 @@ An explicitly selected repaired recovery keeps its original target, even when ne
 nightlies exist; the next run can advance from that repair to the newest target.
 Unselected, manually modified recoveries remain protected from automatic retirement.
 
-The smoke gate checks fork identity invariants, `git diff --check`, focused
-LastCode tests, desktop protocol tests, and every workspace typecheck. It is
-intentionally smaller than the full build gate.
+The smoke gate installs frozen dependencies, checks fork identity invariants and
+`git diff --check`, then runs `vp check`, `vp run knip:check`, the generated-file
+checks (`vp run --filter @t3tools/source-control-github generate --check` and
+`vp run --filter t3 generate --check`), focused LastCode and desktop protocol
+tests, and every workspace typecheck. It is intentionally smaller than the full
+build gate.
 
 Checkpoint-tag publication uses `git push --no-verify` after that dedicated
 smoke gate passes. This avoids rerunning the generic repository-wide pre-push

@@ -489,6 +489,27 @@ describe("lastcode-local-ci", () => {
       "Workspace typecheck",
       "Workspace tests",
     ]);
+    const publicationChecks = [
+      { label: "Check unused code", args: ["run", "knip:check"] },
+      {
+        label: "Check generated GitHub GraphQL operations",
+        args: ["run", "--filter", "@t3tools/source-control-github", "generate", "--check"],
+      },
+      {
+        label: "Check generated Expo GraphQL operations",
+        args: ["run", "--filter", "t3", "generate", "--check"],
+      },
+    ];
+    const fullSteps = resolveLocalCiSteps("full");
+    for (const check of publicationChecks) {
+      expect(fullSteps.filter(({ label }) => label === check.label)).toEqual([
+        { kind: "command", command: "vp", ...check },
+      ]);
+      expect(fullLabels.indexOf(check.label)).toBeLessThan(fullLabels.indexOf("Desktop build"));
+    }
+    expect(fullSteps.find(({ label }) => label === "Desktop build")?.dependsOn).toEqual([
+      "Ensure Electron runtime",
+    ]);
   });
 
   it("plans scoped checks with existing paths and ordered duplicate package filters", () => {
