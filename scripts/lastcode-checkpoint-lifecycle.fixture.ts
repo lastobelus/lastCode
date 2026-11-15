@@ -40,6 +40,7 @@ const FIXTURE_RUNTIME_PATHS = [
   "scripts/lib/lastcode-ci-process-identity.ts",
   "scripts/lib/lastcode-ci-scope.ts",
   "scripts/lib/lastcode-ci-worker.mjs",
+  "scripts/lib/lastcode-publication-checks.ts",
   "scripts/lastcode-carry-checkpoint.ts",
   "scripts/lastcode-carry-replay.ts",
   "scripts/lastcode-carry-dossier.ts",
@@ -124,6 +125,9 @@ TASKS
   exit 0
 fi
 if [ "$1" = check ] && [ -f "$FIXTURE_CI_FAILURES/lint" ]; then echo 'fixture lint failure'; exit 71; fi
+if [ "$*" = 'run knip:check' ] && [ -f "$FIXTURE_CI_FAILURES/knip" ]; then echo 'fixture unused-code failure'; exit 71; fi
+if [ "$*" = 'run --filter @t3tools/source-control-github generate --check' ] && [ -f "$FIXTURE_CI_FAILURES/github-generate" ]; then echo 'fixture GitHub generation failure'; exit 71; fi
+if [ "$*" = 'run --filter t3 generate --check' ] && [ -f "$FIXTURE_CI_FAILURES/expo-generate" ]; then echo 'fixture Expo generation failure'; exit 71; fi
 if [ "$1" = run ] && [ "$2" = -r ] && [ "$5" = typecheck ] && [ -f "$FIXTURE_CI_FAILURES/typecheck" ]; then echo 'fixture smoke typecheck failure'; exit 72; fi
 if [ "$1" = run ] && [ "$2" = --filter ] && [ "$3" = @fixture/early ] && [ "$7" = typecheck ] && [ -f "$FIXTURE_CI_FAILURES/typecheck" ]; then echo 'fixture early typecheck failure'; exit 72; fi
 if [ "$1" = run ] && [ "$2" = --filter ] && [ "$3" = @fixture/later ] && [ "$7" = test ] && [ -f "$FIXTURE_CI_FAILURES/test" ]; then echo 'fixture later test failure'; exit 73; fi
