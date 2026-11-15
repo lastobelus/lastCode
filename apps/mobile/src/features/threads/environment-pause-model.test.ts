@@ -32,7 +32,12 @@ const paused: EnvironmentPauseStatus = {
 
 const availability = (
   status: EnvironmentPauseStatus | null,
-  overrides: { enabled?: boolean; connected?: boolean; fresh?: boolean; starting?: boolean } = {},
+  overrides: {
+    enabled?: boolean;
+    connected?: boolean;
+    fresh?: boolean;
+    intent?: "start" | "resume" | null;
+  } = {},
 ) =>
   environmentPauseAvailability({
     status,
@@ -43,6 +48,48 @@ const availability = (
   });
 
 describe("mobile environment pause availability", () => {
+  it("offers Pause immediately after Resume starts, and Resume immediately after a newer Pause starts", () => {
+    expect(availability(paused, { intent: "resume" })).toMatchObject({
+      primaryAction: "start",
+      canStart: true,
+      canResume: true,
+    });
+    expect(
+      availability(
+        { ...paused, session: { ...paused.session!, phase: "resuming" } },
+        { intent: "start" },
+      ),
+    ).toMatchObject({ primaryAction: "resume", canStart: false, canResume: true });
+  });
+
+  it("offers optional Retry pause only for definitive failed Pause recipients before resuming", () => {
+    for (const phase of ["pausing", "paused", "resuming"] as const) {
+      for (const pause of ["pending", "sent", "failed", "unavailable"] as const) {
+        const status = {
+          ...paused,
+          session: {
+            ...paused.session!,
+            phase,
+            targets: [{ ...paused.session!.targets[0]!, pause }],
+          },
+        };
+        const expected = phase !== "resuming" && pause === "failed";
+        expect(availability(status)).toMatchObject({
+          showRetryPause: expected,
+          canRetryPause: expected,
+          canResume: true,
+        });
+        expect(availability(status, { connected: false })).toMatchObject({
+          showRetryPause: expected,
+          canRetryPause: false,
+        });
+        expect(availability(status, { intent: "resume" })).toMatchObject({
+          showRetryPause: false,
+          canRetryPause: false,
+        });
+      }
+    }
+  });
   it.each(["pausing", "paused", "resuming"] as const)(
     "keeps Resume available in %s despite pending or failed deliveries and unfinished work",
     (phase) => {
@@ -78,23 +125,23 @@ describe("mobile environment pause availability", () => {
   );
 
   it("switches to Resume while Pause is in flight before any session is observed", () => {
-    expect(availability({ ...paused, session: null }, { starting: true })).toMatchObject({
+    expect(availability({ ...paused, session: null }, { intent: "start" })).toMatchObject({
       visible: true,
       hasSession: true,
       canStart: false,
       canResume: true,
     });
-    expect(availability(null, { starting: true, fresh: false })).toMatchObject({
+    expect(availability(null, { intent: "start", fresh: false })).toMatchObject({
       hasSession: true,
       known: false,
       ready: false,
       canResume: true,
     });
-    expect(availability(null, { starting: true, enabled: false }).visible).toBe(true);
+    expect(availability(null, { intent: "start", enabled: false }).visible).toBe(true);
     expect(
       availability(
         { ...paused, session: { ...paused.session!, phase: "resuming" } },
-        { starting: true },
+        { intent: "start" },
       ),
     ).toMatchObject({ canStart: false, canResume: true });
   });

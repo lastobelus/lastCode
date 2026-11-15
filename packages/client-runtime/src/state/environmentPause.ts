@@ -1,5 +1,6 @@
 import { type EnvironmentId, WS_METHODS } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Clock from "effect/Clock";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import * as Option from "effect/Option";
@@ -38,14 +39,19 @@ export function createEnvironmentPauseConnectionsAtom(
 export function createEnvironmentPauseAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
 ) {
-  const startState = Atom.family((_environmentId: EnvironmentId) =>
-    Atom.make<{ readonly phase: "idle" | "pending" | "refreshing"; readonly request: number }>({
-      phase: "idle",
+  const intentState = Atom.family((_environmentId: EnvironmentId) =>
+    Atom.make<{
+      readonly value: "start" | "resume" | null;
+      readonly pending: boolean;
+      readonly request: number;
+    }>({
+      value: null,
+      pending: false,
       request: 0,
     }).pipe(Atom.keepAlive),
   );
-  const starting = Atom.family((environmentId: EnvironmentId) =>
-    Atom.make((get) => get(startState(environmentId)).phase !== "idle"),
+  const intent = Atom.family((environmentId: EnvironmentId) =>
+    Atom.make((get) => get(intentState(environmentId)).value),
   );
   const query = { tag: WS_METHODS.serverEnvironmentPauseStatus, staleTimeMs: 0, idleTtlMs: 0 };
   const status = createEnvironmentRpcQueryAtomFamily(runtime, {
@@ -53,9 +59,9 @@ export function createEnvironmentPauseAtoms<R, E>(
     label: "environment-data:pause:status",
     onAnswer: ({ environmentId }, answer, registry) =>
       Effect.sync(() => {
-        const state = registry.get(startState(environmentId));
-        if (answer.observation === "known" && state.phase === "refreshing") {
-          registry.set(startState(environmentId), { ...state, phase: "idle" });
+        const state = registry.get(intentState(environmentId));
+        if (answer.observation === "known" && state.value !== null && !state.pending) {
+          registry.set(intentState(environmentId), { ...state, value: null });
         }
       }),
   });
@@ -89,51 +95,44 @@ export function createEnvironmentPauseAtoms<R, E>(
         registry.refresh(status({ environmentId, input: {} }));
       }),
   };
-  return {
-    starting,
-    status,
-    monitorStatus,
-    activeStatus,
-    start: createEnvironmentRpcCommand(runtime, {
+  const command = (
+    action: "start" | "resume",
+    tag: typeof WS_METHODS.serverPauseEnvironment | typeof WS_METHODS.serverResumeEnvironment,
+  ) =>
+    createEnvironmentRpcCommand(runtime, {
       ...commands,
-      label: "environment-data:pause:start",
-      tag: WS_METHODS.serverPauseEnvironment,
-      execute: Effect.fn("EnvironmentPause.start")(function* (
+      label: `environment-data:pause:${action}`,
+      tag,
+      execute: Effect.fn(`EnvironmentPause.${action}`)(function* (
         input: EnvironmentRpcInput<typeof WS_METHODS.serverPauseEnvironment>,
         registry: AtomRegistry.AtomRegistry,
         environmentId: EnvironmentId,
       ) {
-        const request = registry.get(startState(environmentId)).request + 1;
-        registry.set(startState(environmentId), { phase: "pending", request });
-        return yield* requestGuarded(WS_METHODS.serverPauseEnvironment, input).pipe(
-          Effect.ensuring(
-            Effect.sync(() => {
-              // Keep Resume visible until the refreshed status replaces this Pause's observation.
-              const state = registry.get(startState(environmentId));
-              if (state.request === request && state.phase === "pending") {
-                registry.set(startState(environmentId), { ...state, phase: "refreshing" });
-              }
-            }),
-          ),
-        );
+        const previous = registry.get(intentState(environmentId));
+        const request = previous.request + 1;
+        registry.set(intentState(environmentId), { value: action, pending: true, request });
+        const result = yield* Effect.exit(requestGuarded(tag, input));
+        if (registry.get(intentState(environmentId)).request === request) {
+          registry.set(intentState(environmentId), {
+            value: Exit.isSuccess(result) ? action : previous.value,
+            pending: false,
+            request,
+          });
+        }
+        return Exit.isSuccess(result) ? result.value : yield* Effect.failCause(result.cause);
       }),
-    }),
+    });
+  return {
+    intent,
+    status,
+    monitorStatus,
+    activeStatus,
+    start: command("start", WS_METHODS.serverPauseEnvironment),
     retry: createEnvironmentRpcCommand(runtime, {
       ...commands,
       label: "environment-data:pause:retry",
       tag: WS_METHODS.serverRetryEnvironmentPause,
     }),
-    resume: createEnvironmentRpcCommand(runtime, {
-      ...commands,
-      label: "environment-data:pause:resume",
-      tag: WS_METHODS.serverResumeEnvironment,
-      onStart: ({ environmentId }, registry) => registry.get(startState(environmentId)).request,
-      onSuccess: ({ environmentId }, registry, _result, request) =>
-        Effect.sync(() => {
-          const state = registry.get(startState(environmentId));
-          if (state.request === request)
-            registry.set(startState(environmentId), { ...state, phase: "idle" });
-        }),
-    }),
+    resume: command("resume", WS_METHODS.serverResumeEnvironment),
   };
 }

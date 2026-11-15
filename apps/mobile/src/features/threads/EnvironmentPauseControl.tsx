@@ -26,6 +26,7 @@ export function useEnvironmentPauseControl(environmentId: EnvironmentId) {
   const requestVersion = useRef(0);
   const start = useAtomCommand(environmentPause.start, { reportFailure: false });
   const resume = useAtomCommand(environmentPause.resume, { reportFailure: false });
+  const retry = useAtomCommand(environmentPause.retry, { reportFailure: false });
   const entryAtom = useMemo(
     () =>
       Atom.make((get) => {
@@ -49,12 +50,13 @@ export function useEnvironmentPauseControl(environmentId: EnvironmentId) {
             enabled,
             connected: target.connected,
             fresh: AsyncResult.isSuccess(result) && result.timestamp >= target.since,
-            starting: get(environmentPause.starting(environmentId)),
+            intent: get(environmentPause.intent(environmentId)),
             status,
           }),
           queryFailed: AsyncResult.isFailure(result),
           canStart: get(environmentPause.start.permissionAtom(environmentId)),
           canResume: get(environmentPause.resume.permissionAtom(environmentId)),
+          canRetry: get(environmentPause.retry.permissionAtom(environmentId)),
         };
       }),
     [environmentId, open, target],
@@ -67,17 +69,22 @@ export function useEnvironmentPauseControl(environmentId: EnvironmentId) {
     (primaryAction === "resume"
       ? !entry.canResume || !entry.availability.canResume
       : !entry.canStart || !entry.availability.canStart);
-  const execute = async (action: "start" | "resume") => {
+  const execute = async (action: "start" | "resume" | "retry") => {
     if (
       !entry ||
-      (action === "resume"
-        ? !entry.canResume || !entry.availability.canResume
-        : !entry.canStart || !entry.availability.canStart)
+      (action === "retry"
+        ? !entry.canRetry || !entry.availability.canRetryPause
+        : action === "resume"
+          ? !entry.canResume || !entry.availability.canResume
+          : !entry.canStart || !entry.availability.canStart)
     )
       return;
     const version = ++requestVersion.current;
     setFailure(null);
-    const result = await (action === "resume" ? resume : start)({ environmentId, input: {} });
+    const result = await (action === "retry" ? retry : action === "resume" ? resume : start)({
+      environmentId,
+      input: {},
+    });
     if (version === requestVersion.current && AsyncResult.isFailure(result)) {
       const cause = squashAtomCommandFailure(result);
       setFailure({
@@ -100,6 +107,7 @@ export function useEnvironmentPauseControl(environmentId: EnvironmentId) {
           entry={entry}
           error={error}
           onResume={() => void execute("resume")}
+          onRetry={() => void execute("retry")}
           onClose={() => setOpen(false)}
         />
       ) : null,
@@ -139,12 +147,14 @@ type PauseEntry = {
   readonly availability: ReturnType<typeof environmentPauseAvailability>;
   readonly queryFailed: boolean;
   readonly canResume: boolean;
+  readonly canRetry: boolean;
 };
 
 function EnvironmentPauseModal(props: {
   readonly entry: PauseEntry;
   readonly error: string | null;
   readonly onResume: () => void;
+  readonly onRetry: () => void;
   readonly onClose: () => void;
 }) {
   return (
@@ -159,6 +169,7 @@ function EnvironmentPauseModal(props: {
             entry={props.entry}
             error={props.error}
             onResume={props.onResume}
+            onRetry={props.onRetry}
             onClose={props.onClose}
           />
         </ScrollView>
@@ -171,6 +182,7 @@ function EnvironmentPauseDetails(props: {
   readonly entry: PauseEntry;
   readonly error: string | null;
   readonly onResume: () => void;
+  readonly onRetry: () => void;
   readonly onClose: () => void;
 }) {
   const { entry } = props;
@@ -277,6 +289,14 @@ function EnvironmentPauseDetails(props: {
       ) : null}
       <View className="flex-row flex-wrap justify-end gap-3">
         <Button label="Close" tone="secondary" onPress={props.onClose} />
+        {availability.showRetryPause ? (
+          <Button
+            label="Retry pause"
+            tone="secondary"
+            disabled={!entry.canRetry || !availability.canRetryPause}
+            onPress={props.onRetry}
+          />
+        ) : null}
         {availability.hasSession ? (
           <Button
             label="Resume"

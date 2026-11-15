@@ -99,10 +99,11 @@ function EnvironmentPauseButton({
   const result = useAtomValue(
     environmentPause.monitorStatus({ environmentId: environment.environmentId, input: {} }),
   );
-  const starting = useAtomValue(environmentPause.starting(environment.environmentId));
+  const intent = useAtomValue(environmentPause.intent(environment.environmentId));
   const session = Option.getOrNull(AsyncResult.value(result))?.session ?? null;
-  const hasSession = starting || session !== null;
-  const shouldResume = starting || (session !== null && session.phase !== "resuming");
+  const hasSession = intent !== null || session !== null;
+  const shouldResume =
+    intent === "start" || (intent !== "resume" && session !== null && session.phase !== "resuming");
   const enabled = environment.serverConfig?.settings.environmentPauseEnabled === true;
   const canStart = useAtomValue(environmentPause.start.permissionAtom(environment.environmentId));
   const canResume = useAtomValue(environmentPause.resume.permissionAtom(environment.environmentId));
@@ -182,14 +183,22 @@ function EnvironmentPauseDialog({
     result.timestamp >= observedAfter &&
     status?.observation === "known";
   const canResume = useAtomValue(environmentPause.resume.permissionAtom(environmentId));
-  const starting = useAtomValue(environmentPause.starting(environmentId));
+  const canRetry = useAtomValue(environmentPause.retry.permissionAtom(environmentId));
+  const intent = useAtomValue(environmentPause.intent(environmentId));
+  const starting = intent === "start";
   const resume = useAtomCommand(environmentPause.resume, { reportFailure: false });
+  const retry = useAtomCommand(environmentPause.retry, { reportFailure: false });
   const [error, setError] = useState<string | null>(null);
   const pauseFailures = session?.targets.filter((thread) => thread.pause === "failed") ?? [];
   const resumeFailures =
     session?.targets.filter((thread) => thread.pause === "sent" && thread.resume === "failed") ??
     [];
-  const resuming = session?.phase === "resuming";
+  const resuming = intent === "resume" || (intent !== "start" && session?.phase === "resuming");
+  const showRetryPause =
+    session !== null &&
+    session.phase !== "resuming" &&
+    intent !== "resume" &&
+    pauseFailures.length > 0;
   const unavailableRecipients =
     session?.targets.filter((thread) =>
       resuming
@@ -207,14 +216,15 @@ function EnvironmentPauseDialog({
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- refreshes the server pause-status atom when this dialog mounts so it observes the current connection
   useEffect(() => refreshInitial(), [refreshInitial]);
 
-  const execute = async () => {
+  const execute = async (action: "resume" | "retry") => {
+    if (!connected || (action === "retry" ? !showRetryPause || !canRetry : !canResume)) return;
     setError(null);
-    const outcome = await resume(target);
+    const outcome = await (action === "retry" ? retry : resume)(target);
     refresh();
     refreshInitial();
     if (AsyncResult.isFailure(outcome)) {
       setError(pauseErrorMessage(outcome));
-    } else if (outcome.value.session === null) {
+    } else if (action === "resume" && outcome.value.session === null) {
       onClose();
     }
   };
@@ -352,8 +362,17 @@ function EnvironmentPauseDialog({
           <Button variant="outline" onClick={onClose}>
             Close
           </Button>
-          {session || starting ? (
-            <Button disabled={!connected || !canResume} onClick={() => void execute()}>
+          {showRetryPause ? (
+            <Button
+              variant="outline"
+              disabled={!connected || !canRetry}
+              onClick={() => void execute("retry")}
+            >
+              Retry pause
+            </Button>
+          ) : null}
+          {session || intent !== null ? (
+            <Button disabled={!connected || !canResume} onClick={() => void execute("resume")}>
               <PlayIcon />
               Resume
             </Button>

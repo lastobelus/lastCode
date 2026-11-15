@@ -4,7 +4,7 @@ export function environmentPauseAvailability(input: {
   readonly enabled: boolean;
   readonly connected: boolean;
   readonly fresh: boolean;
-  readonly starting?: boolean;
+  readonly intent?: "start" | "resume" | null;
   readonly status: EnvironmentPauseStatus | null;
 }) {
   const session = input.status?.session ?? null;
@@ -12,11 +12,14 @@ export function environmentPauseAvailability(input: {
   const pauseFailed = session?.targets.some((target) => target.pause === "failed") ?? false;
   const ready =
     known && input.status?.quiet === true && session?.phase === "paused" && !pauseFailed;
-  const hasSession = session !== null || input.starting === true;
+  const hasSession = session !== null || input.intent != null;
   const primaryAction =
-    input.starting || (session !== null && session.phase !== "resuming")
+    input.intent === "start" ||
+    (input.intent !== "resume" && session !== null && session.phase !== "resuming")
       ? ("resume" as const)
       : ("start" as const);
+  const showRetryPause =
+    session !== null && session.phase !== "resuming" && pauseFailed && input.intent !== "resume";
   return {
     visible: input.enabled || hasSession,
     hasSession,
@@ -26,5 +29,7 @@ export function environmentPauseAvailability(input: {
     canStart: input.enabled && input.connected && primaryAction === "start",
     canResume: input.connected && hasSession,
     pauseFailed,
+    showRetryPause,
+    canRetryPause: input.connected && showRetryPause,
   };
 }

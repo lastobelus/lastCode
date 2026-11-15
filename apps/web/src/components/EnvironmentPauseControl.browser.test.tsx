@@ -65,7 +65,7 @@ const resuming: EnvironmentPauseStatus = {
   },
 };
 
-function setup() {
+function setup(holdResume = false) {
   const registry = AtomRegistry.make();
   const status = Atom.make(AsyncResult.success(unpaused));
   const statusReads = vi.fn();
@@ -75,8 +75,9 @@ function setup() {
   });
   const monitor = query.pipe(Atom.withRefresh(15_000), Atom.setIdleTTL(0));
   const active = query.pipe(Atom.withRefresh(1_000), Atom.setIdleTTL(0));
-  const starting = Atom.make(false);
+  const intent = Atom.make<"start" | "resume" | null>(null);
   const permission = Atom.make(true);
+  const retryPermission = Atom.make(true);
   let finishPause = () => {};
   let failPause = () => {};
   const startResult = new Promise<AtomCommandResult<EnvironmentPauseStatus, unknown>>((resolve) => {
@@ -87,13 +88,27 @@ function setup() {
     label: "start",
     permissionAtom: () => permission,
     run: vi.fn(() => {
-      registry.set(starting, true);
+      registry.set(intent, "start");
       return startResult;
     }),
   };
+  let finishResume = () => {};
+  const resumeResult = new Promise<AtomCommandResult<EnvironmentPauseStatus, unknown>>(
+    (resolve) => {
+      finishResume = () => resolve(AsyncResult.success(unpaused));
+    },
+  );
   const resume = {
     label: "resume",
     permissionAtom: () => permission,
+    run: vi.fn(async (): Promise<AtomCommandResult<EnvironmentPauseStatus, unknown>> => {
+      registry.set(intent, "resume");
+      return holdResume ? resumeResult : AsyncResult.success(unpaused);
+    }),
+  };
+  const retry = {
+    label: "retry",
+    permissionAtom: () => retryPermission,
     run: vi.fn(async (): Promise<AtomCommandResult<EnvironmentPauseStatus, unknown>> =>
       AsyncResult.success(unpaused),
     ),
@@ -103,18 +118,22 @@ function setup() {
     status: () => query,
     monitorStatus: () => monitor,
     activeStatus: () => active,
-    starting: () => starting,
+    intent: () => intent,
     start,
     resume,
+    retry,
   });
   return {
     registry,
     status,
     statusReads,
-    starting,
+    intent,
     permission,
+    retryPermission,
     start,
     resume,
+    retry,
+    finishResume,
     failPause,
     view: (target = environment, notice = false) => (
       <RegistryContext.Provider value={registry}>
@@ -124,6 +143,7 @@ function setup() {
     ),
     [Symbol.dispose]: () => {
       finishPause();
+      finishResume();
       registry.dispose();
     },
   };
@@ -146,6 +166,76 @@ it("sends Pause on the first click and Resume on the next while Pause is still i
   await expect.element(screen.getByRole("dialog")).not.toBeInTheDocument();
   await act(() => h.failPause());
   await expect.element(screen.getByRole("alert")).not.toBeInTheDocument();
+});
+
+it("switches immediately to Pause while Resume is outstanding and keeps the latest click after its reply", async () => {
+  using h = setup(true);
+  h.registry.set(
+    h.status,
+    AsyncResult.success({ ...resuming, session: { ...resuming.session!, phase: "paused" } }),
+  );
+  await using screen = await render(h.view());
+  await screen.getByRole("button", { name: "Resume Remote environment" }).click();
+  expect(h.resume.run).toHaveBeenCalledOnce();
+  await expect
+    .element(screen.getByRole("button", { name: "Pause Remote environment" }))
+    .toBeEnabled();
+  await screen.getByRole("button", { name: "Pause Remote environment" }).click();
+  expect(h.start.run).toHaveBeenCalledExactlyOnceWith(h.registry, {
+    environmentId: environment.environmentId,
+    input: {},
+  });
+  await expect
+    .element(screen.getByRole("button", { name: "Resume Remote environment" }))
+    .toBeEnabled();
+  await act(() => h.finishResume());
+  await expect
+    .element(screen.getByRole("button", { name: "Resume Remote environment" }))
+    .toBeEnabled();
+  await expect.element(screen.getByRole("dialog")).not.toBeInTheDocument();
+});
+
+it("offers optional Retry pause for failed deliveries in Manage pause without blocking Resume", async () => {
+  using h = setup();
+  h.registry.set(
+    h.status,
+    AsyncResult.success({
+      ...resuming,
+      session: {
+        ...resuming.session!,
+        phase: "pausing",
+        targets: [
+          { ...resuming.session!.targets[0]!, pause: "failed" },
+          resuming.session!.targets[1]!,
+        ],
+      },
+    }),
+  );
+  await using screen = await render(h.view(environment, true));
+  await expect
+    .element(screen.getByRole("button", { name: "Resume Remote environment" }))
+    .toBeEnabled();
+  await screen.getByRole("button", { name: "Manage pause" }).click();
+  await act(() => h.registry.set(h.retryPermission, false));
+  await expect
+    .element(page.getByRole("dialog").getByRole("button", { name: "Retry pause", exact: true }))
+    .toBeDisabled();
+  await expect
+    .element(page.getByRole("dialog").getByRole("button", { name: "Resume", exact: true }))
+    .toBeEnabled();
+  await act(() => h.registry.set(h.retryPermission, true));
+  const retryButton = page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Retry pause", exact: true })
+    .element() as HTMLButtonElement;
+  await act(() => retryButton.click());
+  expect(h.retry.run).toHaveBeenCalledExactlyOnceWith(h.registry, {
+    environmentId: environment.environmentId,
+    input: {},
+  });
+  expect(h.start.run).not.toHaveBeenCalled();
+  expect(h.resume.run).not.toHaveBeenCalled();
+  await expect.element(page.getByRole("dialog")).toBeVisible();
 });
 
 it.each(["pausing", "paused", "resuming"] as const)(
@@ -257,7 +347,7 @@ it("preserves connection permissions for both commands", async () => {
   await expect
     .element(screen.getByRole("button", { name: "Pause Remote environment" }))
     .toBeDisabled();
-  await act(() => h.registry.set(h.starting, true));
+  await act(() => h.registry.set(h.intent, "start"));
   await expect
     .element(screen.getByRole("button", { name: "Resume Remote environment" }))
     .toBeDisabled();
