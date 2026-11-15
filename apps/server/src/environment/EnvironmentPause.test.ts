@@ -2161,22 +2161,37 @@ it.effect.each([
   }).pipe(Effect.provide(testLayer)),
 );
 
-it.effect("does not resend a terminal queued run with durable native acceptance evidence", () =>
-  Effect.gen(function* () {
-    const h = yield* harness;
-    yield* Ref.set(h.snapshot, shell([thread(a)]));
-    yield* Ref.set(h.queued, true);
-    yield* h.pause.start;
-    const rootNodeId = NodeId.make("node-example");
-    yield* Ref.update(h.runs, (runs) =>
-      runs.map((run) => ({ ...run, status: "failed", rootNodeId })),
-    );
-    yield* Ref.set(h.providerTurns, [nativeTurn(rootNodeId)]);
-    const observed = yield* h.pause.retry;
-    assert.strictEqual(observed.observation, "unknown");
-    assert.strictEqual(observed.session?.targets[0]?.pause, "pending");
-    assert.strictEqual((yield* Ref.get(h.calls)).length, 1);
-  }).pipe(Effect.provide(testLayer)),
+it.effect.each(["failed", "cancelled"] as const)(
+  "keeps a %s Pause with native evidence until its delivery receipt settles",
+  (terminalStatus) =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      yield* Ref.set(h.snapshot, shell([thread(a)]));
+      yield* Ref.set(h.queued, true);
+      yield* h.pause.start;
+      const rootNodeId = NodeId.make("node-example");
+      yield* Ref.update(h.runs, (runs) =>
+        runs.map((run) => ({ ...run, status: terminalStatus, rootNodeId })),
+      );
+      yield* Ref.set(h.providerTurns, [nativeTurn(rootNodeId)]);
+      const observed = yield* h.pause.retry;
+      assert.strictEqual(observed.observation, "unknown");
+      assert.strictEqual(observed.session?.targets[0]?.pause, "pending");
+      assert.strictEqual((yield* Ref.get(h.calls)).length, 1);
+      assert.strictEqual((yield* h.pause.resume).session?.targets[0]?.pause, "pending");
+      const session = (yield* h.store.get)!;
+      yield* h.store.recordDelivery(
+        Store.deliveryIdentity(session, session.targets[0]!, "pause").messageId,
+        true,
+      );
+      yield* Ref.set(h.queued, false);
+      yield* h.pause.continueResume;
+      assert.isNull((yield* h.pause.status).session);
+      assert.lengthOf(
+        (yield* Ref.get(h.calls)).filter((call) => call.text === "resume"),
+        1,
+      );
+    }).pipe(Effect.provide(testLayer)),
 );
 
 it.effect("waits for provider-owned children but sends only to messageable threads", () =>

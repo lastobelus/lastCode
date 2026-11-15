@@ -870,7 +870,7 @@ const make = Effect.gen(function* () {
         continue;
       }
       const record = yield* projections
-        .getThreadRecords(target.threadId, ["messages", "runs"], {
+        .getThreadRecords(target.threadId, ["messages", "runs", "providerTurns"], {
           messageIds: [identity.messageId],
         })
         .pipe(Effect.result);
@@ -880,6 +880,17 @@ const make = Effect.gen(function* () {
         (run) => run.id === message?.runId && run.userMessageId === identity.messageId,
       );
       if (run?.status !== "queued" && run?.status !== "cancelled") continue;
+      if (
+        run.status === "cancelled" &&
+        (run.startedAt !== null ||
+          record.success.providerTurns.some(
+            (turn) =>
+              turn.nativeTurnRef !== null &&
+              ((run.rootNodeId !== null && turn.nodeId === run.rootNodeId) ||
+                (run.activeAttemptId !== null && turn.runAttemptId === run.activeAttemptId)),
+          ))
+      )
+        continue;
       if (run.status === "queued") {
         const cancelled = yield* threads
           .dispatch({
