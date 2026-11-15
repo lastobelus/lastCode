@@ -27,6 +27,7 @@ import {
 } from "./lib/lastcode-ci-scope.ts";
 import { CiCommandFailure, runCiProcess } from "./lib/lastcode-ci-process.ts";
 import { runCollectedCiSteps, type CiStepResult } from "./lib/lastcode-ci-collection.ts";
+import { PUBLICATION_CHECKS } from "./lib/lastcode-publication-checks.ts";
 import { pruneCiDiagnostics } from "./lib/lastcode-ci-diagnostics.ts";
 import {
   assertBaseIsAncestor,
@@ -206,6 +207,7 @@ const FULL_STEPS: ReadonlyArray<LocalCiStep> = [
     args: ["fmt", "--manifest-path", "native/resource-monitor/Cargo.toml", "--", "--check"],
     rustToolchainPath: true,
   },
+  ...PUBLICATION_CHECKS,
   {
     kind: "command",
     label: "Desktop build",
