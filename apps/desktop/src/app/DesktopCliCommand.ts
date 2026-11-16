@@ -238,7 +238,11 @@ export const make = Effect.gen(function* () {
     if (!environment.isPackaged) {
       return { supported: false, installedPath: null, onPath: false, launcherPath: null } as const;
     }
-    const launcherPath = (yield* exists(launcher)) ? launcher : null;
+    const launcherPath =
+      (yield* exists(launcher)) &&
+      (windows || ((yield* isExecutableFile(launcher)) && (yield* runsOurLauncher(launcher))))
+        ? launcher
+        : null;
     const found = yield* installedAt;
     // Our link into another T3 home is not this app's command; Install updates it in place.
     const installed =
