@@ -243,9 +243,11 @@ describe("LastCode GitHub CI workflow", () => {
     ]);
     expect(gate?.needs).toEqual(["check"]);
     expect(gate?.name).toBe("CI Gate");
-    expect(gate?.permissions).toEqual({ contents: "read", actions: "read" });
+    expect(gate?.permissions).toEqual({ actions: "read" });
     expect(gateBlock).toContain("Verify source CI for metadata edit");
-    expect(gateBlock).toContain("lastcode-metadata-ci-gate.cjs");
+    expect(gateBlock).toContain("await verifyMetadataCi({github, context, core});");
+    expect(gateBlock).not.toContain("actions/checkout");
+    expect(workflow).toContain(".github/scripts/lastcode-metadata-ci-gate.test.cjs");
     expect(gateBlock).toContain("if: ${{ always() }}");
   });
 

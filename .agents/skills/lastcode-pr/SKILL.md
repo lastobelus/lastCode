@@ -214,6 +214,13 @@ completed, successful `ci.yml` pull-request run, with successful `Check` and
 run is still in progress, the gate waits for it for a bounded time. Retargeting
 the base still runs full CI. When the lightweight gate fails because it found no
 such run, CI is not green: the current merge still needs a full CI run.
+However the lightweight gate failed (failed source jobs, a timeout, or an API
+error), re-running only the source `ci.yml` run leaves the failed gate in place.
+Once a source run passes for the same PR head, base, and merge commit, re-run
+the failed `Metadata only:` workflow run; it checks that source run's success
+without running full CI. If the head, base, or merge commit has changed and no
+source run exists for it, start a fresh one by pushing or by closing and
+reopening the PR.
 
 One immediate status snapshot can establish that a wait is needed. For this
 LastCode workflow, the native PR watch owns subsequent passive checks; the

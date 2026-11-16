@@ -1,6 +1,19 @@
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
-const verify = require("./lastcode-metadata-ci-gate.cjs");
+const fs = require("node:fs");
+const path = require("node:path");
+const { parse } = require("yaml");
+const workflow = parse(fs.readFileSync(path.join(__dirname, "../workflows/ci.yml"), "utf8"));
+const step = workflow.jobs.ci_gate.steps.find(
+  (step) => step.name === "Verify source CI for metadata edit",
+);
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+const run = new AsyncFunction("github", "context", "core", "setTimeout", step.with.script);
+const verify = ({ github, context, core, wait }) =>
+  run(github, context, core, (resolve, ms) => {
+    wait(ms);
+    resolve();
+  });
 
 const title = "CI pull_request PR #42 head head base base merge merge";
 const source = {
@@ -59,7 +72,7 @@ function fixture(runs = [source], sourceJobs = jobs) {
       },
       summary,
     },
-    async wait() {
+    wait() {
       throw new Error("unexpected wait");
     },
   };
@@ -112,14 +125,14 @@ test("metadata gate requires source success for the exact head, base and merge, 
 test("an edit during source CI waits for real evidence and fails closed on errors or expiry", async () => {
   const pending = { ...source, status: "in_progress", conclusion: null };
   const f = fixture([pending]);
-  f.wait = async () => {
+  f.wait = () => {
     pending.status = "completed";
     pending.conclusion = "success";
   };
   await verify(f);
   assert.equal(f.messages.at(-1), "verified");
   const expired = fixture([{ ...source, status: "queued", conclusion: null }]);
-  expired.wait = async () => {};
+  expired.wait = () => {};
   await assert.rejects(verify(expired), /still pending/);
   const denied = fixture();
   denied.github.paginate = async () => {
