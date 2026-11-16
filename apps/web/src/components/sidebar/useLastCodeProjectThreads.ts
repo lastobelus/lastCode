@@ -1,3 +1,4 @@
+import { threadKey } from "@t3tools/client-runtime/state/entities";
 import { useAtomValue } from "@effect/atom-react";
 import { environmentThreadShells } from "../../state/threads";
 import type { OlderSettledScope } from "@t3tools/client-runtime/state/threads";
@@ -24,7 +25,8 @@ export function useLastCodeProjectThreads(
   const hidden = useAtomValue(environmentThreadShells.hiddenThreadKeysAtom);
   const loadedThreads = useThreadShellsForProjectRefs(project.memberProjectRefs);
   const threads = loadedThreads.filter(
-    (thread) => !hidden.has(scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))),
+    (thread) =>
+      !hidden.has(threadKey({ environmentId: thread.environmentId, threadId: thread.id })),
   );
   const scopes: OlderSettledScope[] = [
     ...new Set(project.memberProjectRefs.map((ref) => ref.environmentId)),
