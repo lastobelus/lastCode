@@ -144,3 +144,56 @@ it("shows a persistent family as blocked and closes without submitting", async (
   expect(await result).toBeNull();
   expect(submit).not.toHaveBeenCalled();
 });
+
+it("keeps deferred Ask feedback in the dialog and closes after sending without archive consent", async () => {
+  await using _screen = await render(<ThreadArchiveDialogHost />);
+  const request = options();
+  const ownerThreadId = ThreadId.make("interactive-owner");
+  const ask = vi.fn().mockResolvedValueOnce("This agent is busy.").mockResolvedValueOnce(null);
+  const submit = vi.fn();
+  let result!: ReturnType<typeof requestThreadArchiveDialog>;
+  await act(() => {
+    result = requestThreadArchiveDialog({
+      ...request,
+      consultation: {
+        environmentId: request.family.threads[0]!.environmentId,
+        targets: [
+          {
+            ownerThreadId,
+            ownerTitle: "Coordinator",
+            work: [{ threadId: request.family.children[0]!.id }],
+          },
+        ],
+        ask,
+      },
+      submit,
+    });
+  });
+  await act(() => button("Ask the agent").click());
+  expect(document.querySelector('[role="status"]')?.textContent).toBe("This agent is busy.");
+  expect(document.querySelector('[role="alertdialog"]')).not.toBeNull();
+  expect(submit).not.toHaveBeenCalled();
+  await act(() => button("Ask the agent").click());
+  expect(await result).toBeNull();
+  expect(ask).toHaveBeenNthCalledWith(1, ownerThreadId);
+  expect(ask).toHaveBeenCalledTimes(2);
+  expect(submit).not.toHaveBeenCalled();
+});
+
+it("reviews an unread conversation without authorizing archive", async () => {
+  await using _screen = await render(<ThreadArchiveDialogHost />);
+  const request = options();
+  const review = vi.fn().mockResolvedValue(undefined);
+  const submit = vi.fn();
+  let result!: ReturnType<typeof requestThreadArchiveDialog>;
+  await act(() => {
+    result = requestThreadArchiveDialog({ ...request, review, submit });
+  });
+  await act(() => button("Review").click());
+  expect(await result).toBeNull();
+  expect(review).toHaveBeenCalledExactlyOnceWith({
+    environmentId: request.family.threads[0]!.environmentId,
+    threadId: request.family.threads[0]!.id,
+  });
+  expect(submit).not.toHaveBeenCalled();
+});

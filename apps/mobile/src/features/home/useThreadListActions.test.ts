@@ -47,6 +47,11 @@ const state = vi.hoisted(() => ({
   afterAlert: undefined as (() => void) | undefined,
 }));
 
+const reviewThread = vi.hoisted(() => vi.fn());
+vi.mock("../layout/workspace/useSelectWorkspaceDetail", () => ({
+  useSelectWorkspaceDetail: () => reviewThread,
+}));
+vi.mock("../../lib/uuid", () => ({ uuidv4: vi.fn().mockReturnValue("ask-id") }));
 vi.mock("react", () => ({
   useCallback: (callback: unknown) => callback,
   useRef: (current: unknown) => ({ current }),
@@ -359,6 +364,7 @@ describe("archive family reads", () => {
       expect(state.alertMessages[0]).toContain("Thread · Working");
       expect(state.alerts[0]?.buttons?.map(({ text }) => text)).toEqual([
         "Cancel",
+        "Review",
         "Stop active threads & archive",
       ]);
       state.alerts[0]!.buttons!.find((button) => button.text === buttonText)!.onPress!();
@@ -582,6 +588,7 @@ describe("archive family reads", () => {
     expect(state.alertMessages[2]).toContain("Added child · Working");
     expect(state.alerts[2]?.buttons?.map(({ text }) => text)).toEqual([
       "Cancel",
+      "Review",
       "Stop active threads & archive",
     ]);
     state.alerts[2]!.buttons!.find((button) => button.text === "Stop active threads & archive")!
@@ -616,6 +623,7 @@ describe("archive family reads", () => {
     expect(state.alertMessages[0]).toContain("Thread · Unread");
     expect(state.alerts[0]?.buttons?.map(({ text }) => text)).toEqual([
       "Cancel",
+      "Review",
       "Archive unread threads",
     ]);
     state.alerts[0]!.buttons!.find((button) => button.text === "Archive unread threads")!
@@ -633,7 +641,7 @@ describe("archive family reads", () => {
     ]);
   });
 
-  it("offers only Close for protected family members", async () => {
+  it("offers review without archive for protected family members", async () => {
     const root = makeThread();
     const protectedChild = makeThread({ id: ThreadId.make("persistent-child"), persistent: true });
     state.archiveFamily = makeArchiveDecision([root, protectedChild], [protectedChild], {
@@ -646,7 +654,7 @@ describe("archive family reads", () => {
     useThreadListActions().archiveThread(root);
     await vi.waitFor(() => expect(state.alerts[0]?.buttons).toBeDefined());
     expect(state.requests).toEqual([]);
-    expect(state.alerts[0]?.buttons?.map(({ text }) => text)).toEqual(["Close"]);
+    expect(state.alerts[0]?.buttons?.map(({ text }) => text)).toEqual(["Close", "Review"]);
     expect(state.alertMessages[0]).toMatch(/persistent|protected/i);
     state.alerts[0]!.buttons![0]!.onPress!();
     expect(state.requests).toEqual([]);
@@ -694,9 +702,11 @@ describe("archive family reads", () => {
       expect(state.alertMessages[0]).toContain("Thread · Working");
       expect(state.alerts[0]?.buttons?.map(({ text }) => text)).toEqual([
         "Cancel",
+        "Review",
         "Stop active threads & archive",
       ]);
-      state.alerts[0]!.buttons![1]!.onPress!();
+      state.alerts[0]!.buttons!.find((button) => button.text === "Stop active threads & archive")!
+        .onPress!();
       await archiving;
       expect(state.requests).toEqual([
         expect.objectContaining({
@@ -1226,6 +1236,7 @@ describe("thread archive guard", () => {
       expect(state.requests).toEqual([]);
       expect(state.alerts.at(-1)?.buttons?.map(({ text }) => text)).toEqual([
         "Cancel",
+        "Review",
         "Stop active threads & archive",
       ]);
       state.alerts.at(-1)!.buttons![0]!.onPress!();

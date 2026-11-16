@@ -141,6 +141,11 @@ and queued messages, and archives the family. **Archive unread threads** preserv
 replies in archived history. Cancel to inspect children or make eligible threads
 independent before archiving again. Forks and independent threads stay separate.
 
+If work appears stuck, **Ask the agent** can ask the agent responsible for it whether
+it is finished. The question opens in that agent's conversation; review the answer,
+then try archiving again. Busy agents can be reviewed directly instead. Asking
+does not archive the family or authorize stopping unrelated work.
+
 Persistent children must be made independent or have their protection removed
 before the family can be archived. If stopping fails, the family remains visible;
 some work may already have stopped. Undo or restoring the archived family brings

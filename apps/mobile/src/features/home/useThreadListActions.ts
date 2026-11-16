@@ -2,13 +2,11 @@ import type { ThreadMoveDestination } from "../threads/threadOrder";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import * as ThreadUndo from "@t3tools/client-runtime/state/thread-undo";
 import { showThreadUndoNotice } from "./thread-undo-notice";
-import { THREAD_ARCHIVE_UPDATE_REQUIRED_MESSAGE } from "@t3tools/client-runtime/state/thread-archive";
+import { threadUnarchiveTargetId } from "@t3tools/client-runtime/state/thread-archive";
+import { prepareLastCodeMobileThreadArchive } from "./lastcodeThreadArchiveActions";
+import { useSelectWorkspaceDetail } from "../layout/workspace/useSelectWorkspaceDetail";
 import { canSnooze } from "@t3tools/client-runtime/state/thread-settled";
-import {
-  AuthOrchestrationOperateScope,
-  type CommandId,
-  type ThreadArchiveChildDisposition,
-} from "@t3tools/contracts";
+import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Haptics from "expo-haptics";
 import { useRef } from "react";
@@ -42,7 +40,6 @@ import {
   threadDropLifecycle,
 } from "../threads/threadOrder";
 import { getThreadListV2OrderedSection } from "../threads/threadListV2";
-import { resolveThreadArchiveFamily, threadUnarchiveTargetId } from "./threadArchive";
 import { resolveThreadTitleRename } from "../threads/thread-title-rename";
 
 function environmentConfigLoaded(environmentId: EnvironmentThreadShell["environmentId"]) {
@@ -119,6 +116,10 @@ function useThreadActionExecutor(
   const loadArchiveFamily = useAtomCommand(threadEnvironment.loadArchiveFamily, {
     reportFailure: false,
   });
+  const sendArchiveQuestion = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
+  const selectDetail = useSelectWorkspaceDetail();
+  const review = (target: { readonly environmentId: string; readonly threadId: string }) =>
+    selectDetail({ name: "Thread", params: target });
   const latestPendingActions = useRef(new Map<string, { readonly action: ThreadListAction }>());
 
   const executeAction = async (
@@ -138,102 +139,17 @@ function useThreadActionExecutor(
     latestPendingActions.current.set(key, pending);
     selectionHaptic();
     return await (async () => {
-      let archiveInput: {
-        threadId: EnvironmentThreadShell["id"];
-        childDisposition: ThreadArchiveChildDisposition;
-        expectedChildThreadIds: readonly EnvironmentThreadShell["id"][];
-        expectedArchiveCommandId?: CommandId;
-      } = {
-        threadId: thread.id,
-        childDisposition: "archive_if_idle",
-        expectedChildThreadIds: [],
-      };
-      if (action === "archive") {
-        if (
-          appAtomRegistry.get(environmentServerConfigsAtom).get(thread.environmentId)?.environment
-            .capabilities.threadArchiveFamiliesV2 !== true
-        ) {
-          Dialog.alert("Server update required", THREAD_ARCHIVE_UPDATE_REQUIRED_MESSAGE);
-          return false;
-        }
-        const shells = appAtomRegistry.get(environmentThreadShells.threadShellsAtom);
-        const observedFailure =
-          thread.archivePending?.status === "failed" ? thread.archivePending : undefined;
-        thread =
-          shells.find(
-            (candidate) =>
-              candidate.id === thread.id && candidate.environmentId === thread.environmentId,
-          ) ?? thread;
-        const failedAttempt =
-          observedFailure ??
-          (thread.archivePending?.status === "failed" ? thread.archivePending : undefined);
-        const archiveThreadId = failedAttempt?.threadId ?? thread.id;
-        const familyResult = await loadArchiveFamily({
-          environmentId: thread.environmentId,
-          input: { threadId: archiveThreadId },
-        });
-        if (familyResult._tag === "Failure") {
-          Dialog.alert(
-            actionFailureTitle(action),
-            actionFailureMessage(action, familyResult.cause),
-          );
-          return false;
-        }
-        const owner = familyResult.value.threads.find(
-          (candidate) =>
-            candidate.id === archiveThreadId && candidate.environmentId === thread.environmentId,
-        );
-        if (!owner) {
-          Dialog.alert(
-            actionFailureTitle(action),
-            "The archive owner is no longer available. Refresh the thread list before retrying.",
-          );
-          return false;
-        }
-        thread = owner;
-        if (thread.persistent === true) {
-          Dialog.alert(
-            actionFailureTitle(action),
-            "This thread is persistent. Remove its persistent protection before archiving it.",
-          );
-          return false;
-        }
-        const family = resolveThreadArchiveFamily(familyResult.value);
-
-        const childDisposition = family.requiresConfirmation
-          ? await new Promise<typeof family.disposition | null>((resolve) => {
-              Dialog.alert(
-                `Archive "${thread.title || "Untitled thread"}"?`,
-                family.message,
-                [
-                  {
-                    text: family.blocked ? "Close" : "Cancel",
-                    style: "cancel",
-                    onPress: () => resolve(null),
-                  },
-                  ...(!family.blocked
-                    ? [
-                        {
-                          text: family.confirmLabel,
-                          style: "destructive" as const,
-                          onPress: () => resolve(family.disposition),
-                        },
-                      ]
-                    : []),
-                ],
-                { cancelable: true, onDismiss: () => resolve(null) },
-              );
+      const archive =
+        action === "archive"
+          ? await prepareLastCodeMobileThreadArchive(thread, {
+              loadArchiveFamily,
+              sendArchiveQuestion,
+              review,
             })
-          : "archive_if_idle";
-        if (childDisposition === null) return false;
-        archiveInput = {
-          threadId: thread.id,
-          ...(failedAttempt === undefined
-            ? {}
-            : { expectedArchiveCommandId: failedAttempt.commandId }),
-          childDisposition,
-          expectedChildThreadIds: family.childThreadIds,
-        };
+          : null;
+      if (action === "archive") {
+        if (!archive) return false;
+        thread = archive.owner;
       }
       if (
         (action === "settle" || action === "unsettle") &&
@@ -253,7 +169,7 @@ function useThreadActionExecutor(
         action === "archive"
           ? await archiveMutation({
               environmentId: thread.environmentId,
-              input: archiveInput,
+              input: archive!.input,
             })
           : await withThreadDismissal(
               key,
@@ -291,7 +207,9 @@ function useThreadActionExecutor(
         return false;
       }
       if (action === "archive" || action === "delete") {
-        for (const kind of ["settle", "snooze", "pin"]) ThreadUndo.invalidate(kind, key);
+        for (const id of archive?.participantIds ?? [thread.id])
+          for (const kind of ["settle", "snooze", "pin"])
+            ThreadUndo.invalidate(kind, scopedThreadKey(thread.environmentId, id));
       }
       if (action === "archive" || action === "unarchive" || action === "delete") {
         refreshArchivedThreadsForEnvironment(thread.environmentId);

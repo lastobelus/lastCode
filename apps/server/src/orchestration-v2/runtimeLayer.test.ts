@@ -53,6 +53,7 @@ import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
+import * as Tracer from "effect/Tracer";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
 
@@ -1468,21 +1469,16 @@ it.layer(layerProjectDeletionTest)("project deletion during thread commands", (i
       const releaseDelete = yield* Deferred.make<void>();
       const forkWaitsForLifecycle = yield* Deferred.make<void>();
       const withLock = executor.withLock;
-      const withPersistenceLock = executor.withPersistenceLock;
       let parentLockRequests = 0;
-      let lifecycleLockRequests = 0;
-      const observeLifecycleLock: ThreadCommandExecutor.ThreadCommandExecutor["Service"]["withPersistenceLock"] =
-        (effect) =>
-          Effect.suspend(() =>
-            ++lifecycleLockRequests === 2
-              ? Deferred.succeed(forkWaitsForLifecycle, undefined).pipe(
-                  Effect.andThen(withPersistenceLock(effect)),
-                )
-              : withPersistenceLock(effect),
-          );
-      const lifecycleLockSpy = vi
-        .spyOn(executor, "withPersistenceLock")
-        .mockImplementation(observeLifecycleLock);
+      // Observe the fork's real lifecycle request, including locks captured by the planner.
+      const forkTracer = Tracer.make({
+        span(options) {
+          const span = new Tracer.NativeSpan(options);
+          if (span.name === "ThreadCommandExecutor.withPersistenceLock")
+            Deferred.doneUnsafe(forkWaitsForLifecycle, Effect.void);
+          return span;
+        },
+      });
       const observeLock: ThreadCommandExecutor.ThreadCommandExecutor["Service"]["withLock"] = (
         key,
         effect,
@@ -1522,8 +1518,18 @@ it.layer(layerProjectDeletionTest)("project deletion during thread commands", (i
             createdBy: "user",
             creationSource: "web",
           })
-          .pipe(Effect.flip, Effect.forkChild({ startImmediately: true }));
-        yield* Deferred.await(forkWaitsForLifecycle);
+          .pipe(
+            Effect.flip,
+            Effect.withTracer(forkTracer),
+            Effect.withTracerEnabled(true),
+            Effect.forkChild({ startImmediately: true }),
+          );
+        yield* Effect.raceFirst(
+          Deferred.await(forkWaitsForLifecycle),
+          Fiber.join(forkFiber).pipe(
+            Effect.andThen(Effect.die("Fork bypassed the deletion's lifecycle lock.")),
+          ),
+        );
         assert.equal(parentLockRequests, 1);
         yield* Deferred.succeed(releaseDelete, undefined);
         yield* Fiber.join(deleteFiber);
@@ -1535,7 +1541,6 @@ it.layer(layerProjectDeletionTest)("project deletion during thread commands", (i
         Effect.ensuring(
           Effect.sync(() => {
             lockSpy.mockRestore();
-            lifecycleLockSpy.mockRestore();
           }),
         ),
       );
@@ -1547,7 +1552,6 @@ it.layer(layerProjectDeletionTest)("project deletion during thread commands", (i
       const projects = yield* ProjectService.ProjectService;
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const projections = yield* ProjectionStore.ProjectionStoreV2;
-      const executor = yield* ThreadCommandExecutor.ThreadCommandExecutor;
       const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
       const fileSystem = yield* FileSystem.FileSystem;
       const projectId = ProjectId.make("html-fork-project");
@@ -1623,10 +1627,11 @@ it.layer(layerProjectDeletionTest)("project deletion during thread commands", (i
 
       // `first`'s delete pauses after reading what to free. A fork of it and the project delete,
       // which reaches `second`, must each wait on a lock it holds rather than decide on the same
-      // state; `blocked` hears each request for one.
+      // state; the tracers hear each contender's lifecycle lock request.
       const firstPlanned = yield* Deferred.make<void>();
       const releaseFirst = yield* Deferred.make<void>();
-      const blocked = yield* Queue.unbounded<void>();
+      const forkBlocked = yield* Deferred.make<void>();
+      const projectBlocked = yield* Deferred.make<void>();
       const readAttachmentIds = projections.getThreadAttachmentIds;
       const attachmentSpy = vi
         .spyOn(projections, "getThreadAttachmentIds")
@@ -1638,40 +1643,14 @@ it.layer(layerProjectDeletionTest)("project deletion during thread commands", (i
               )
             : readAttachmentIds(threadId),
         );
-      const deletionHeld = yield* Ref.make(false);
-      const requestsHeld = (held: Effect.Effect<boolean>) =>
-        Effect.all([Deferred.isDone(firstPlanned), held]).pipe(
-          Effect.flatMap(([planned, isHeld]) =>
-            planned && isHeld ? Queue.offer(blocked, undefined) : Effect.void,
-          ),
-        );
-      const { withLock, withDeletionLock, withPersistenceLock } = executor;
-      const observeLock: ThreadCommandExecutor.ThreadCommandExecutor["Service"]["withLock"] = (
-        key,
-        effect,
-      ) => requestsHeld(Effect.succeed(key === first)).pipe(Effect.andThen(withLock(key, effect)));
-      const observeDeletion: ThreadCommandExecutor.ThreadCommandExecutor["Service"]["withDeletionLock"] =
-        (effect) =>
-          requestsHeld(Ref.get(deletionHeld)).pipe(
-            Effect.andThen(
-              withDeletionLock(
-                Ref.set(deletionHeld, true).pipe(
-                  Effect.andThen(effect),
-                  Effect.ensuring(Ref.set(deletionHeld, false)),
-                ),
-              ),
-            ),
-          );
-      const observePersistence: ThreadCommandExecutor.ThreadCommandExecutor["Service"]["withPersistenceLock"] =
-        (effect) =>
-          requestsHeld(Effect.succeed(true)).pipe(Effect.andThen(withPersistenceLock(effect)));
-      const lockSpy = vi.spyOn(executor, "withLock").mockImplementation(observeLock);
-      const persistenceSpy = vi
-        .spyOn(executor, "withPersistenceLock")
-        .mockImplementation(observePersistence);
-      const deletionSpy = vi
-        .spyOn(executor, "withDeletionLock")
-        .mockImplementation(observeDeletion);
+      const lockTracer = (name: string, blocked: Deferred.Deferred<void>) =>
+        Tracer.make({
+          span(options) {
+            const span = new Tracer.NativeSpan(options);
+            if (span.name === name) Deferred.doneUnsafe(blocked, Effect.void);
+            return span;
+          },
+        });
       const forkOfDeleted = yield* Effect.gen(function* () {
         const firstFiber = yield* deleteThread(first).pipe(
           Effect.forkChild({ startImmediately: true }),
@@ -1682,13 +1661,29 @@ it.layer(layerProjectDeletionTest)("project deletion during thread commands", (i
             onSuccess: () => "created",
             onFailure: (error) => ("cause" in error ? String(error.cause) : error._tag),
           }),
+          Effect.withTracer(lockTracer("ThreadCommandExecutor.withPersistenceLock", forkBlocked)),
+          Effect.withTracerEnabled(true),
           Effect.forkChild({ startImmediately: true }),
         );
-        yield* Effect.raceFirst(Queue.take(blocked), Fiber.await(forkFiber));
+        yield* Effect.raceFirst(
+          Deferred.await(forkBlocked),
+          Fiber.join(forkFiber).pipe(
+            Effect.andThen(Effect.die("Fork bypassed the deletion's lifecycle lock.")),
+          ),
+        );
         const projectFiber = yield* projects
           .delete({ commandId: CommandId.make("html-fork-project-delete"), projectId, force: true })
-          .pipe(Effect.forkChild({ startImmediately: true }));
-        yield* Effect.raceFirst(Queue.take(blocked), Fiber.await(projectFiber));
+          .pipe(
+            Effect.withTracer(lockTracer("ThreadCommandExecutor.withDeletionLock", projectBlocked)),
+            Effect.withTracerEnabled(true),
+            Effect.forkChild({ startImmediately: true }),
+          );
+        yield* Effect.raceFirst(
+          Deferred.await(projectBlocked),
+          Fiber.join(projectFiber).pipe(
+            Effect.andThen(Effect.die("Project deletion bypassed the thread deletion's lock.")),
+          ),
+        );
         yield* Deferred.succeed(releaseFirst, undefined);
         yield* Fiber.join(firstFiber);
         yield* Fiber.join(projectFiber);
@@ -1696,9 +1691,6 @@ it.layer(layerProjectDeletionTest)("project deletion during thread commands", (i
       }).pipe(
         Effect.ensuring(
           Effect.sync(() => {
-            lockSpy.mockRestore();
-            persistenceSpy.mockRestore();
-            deletionSpy.mockRestore();
             attachmentSpy.mockRestore();
           }),
         ),

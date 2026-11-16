@@ -17,7 +17,6 @@ import {
   CommandId,
   isDelegatedAppThread,
   isListedThreadLineage,
-  getThreadArchivePlan,
   MessageId,
   OrchestrationV2StopWorkflowError,
   type OrchestrationV2StopWorkflowInput,
@@ -55,7 +54,6 @@ import { threadTranscriptHeader } from "@t3tools/shared/threadTranscript";
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
-import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -82,10 +80,9 @@ import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { ThreadWorktreeRestore } from "../workspace/restoreMissingWorktree.ts";
 import * as ThreadRecovery from "./ThreadRecoveryService.ts";
+import * as LastCodeArchiveRunner from "./LastCodeArchiveRunner.ts";
 import { withVerifiedArchiveActivity } from "./ThreadArchiveActivity.ts";
 import * as WorkspaceLifecycle from "../workspace/WorkspaceLifecycle.ts";
-
-const isThreadAboveModeLimitError = Schema.is(Orchestrator.OrchestratorThreadAboveModeLimitError);
 
 const isWorktreeSuspensionRequestError = Schema.is(WorktreeSuspensionRequestError);
 
@@ -688,6 +685,7 @@ const isForceStopThreadError = Schema.is(OrchestrationV2ForceStopThreadError);
 const make = Effect.gen(function* () {
   const threadDispatch = yield* ThreadCommandExecutor.ThreadCommandExecutor;
   const orchestrator = yield* Orchestrator.OrchestratorV2;
+  const archiveRunner = yield* LastCodeArchiveRunner.LastCodeArchiveRunner;
   const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
   const layerScope = yield* Effect.scope;
   const agentScope = yield* AgentScope;
@@ -1139,62 +1137,6 @@ const make = Effect.gen(function* () {
       yield* assertDispatchTargetEnabled(input.initialMessage);
     }
     return yield* orchestrator.dispatchLaunch(input);
-  });
-
-  const executeArchive: ThreadManagementServiceShape["executeArchive"] = Effect.fn(
-    "ThreadManagementService.executeArchive",
-  )(function* (input) {
-    const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
-    const { thread } = yield* orchestrator.getThreadRecords(input.threadId, []);
-    const pending = getThreadArchivePlan(thread.archivePending);
-    if (pending?.commandId !== input.requestId || pending.status !== "stopping") return;
-    const stopped = yield* Effect.exit(
-      Effect.gen(function* () {
-        // Every participant is held before this effect becomes claimable. Shutdown is
-        // strict: an adapter finalizer still running after its timeout is a failure.
-        for (const threadId of pending.archiveThreadIds.toReversed()) {
-          const context = yield* orchestrator.getThreadRecords(threadId, [
-            "providerSessions",
-            "providerThreads",
-          ]);
-          // A stopped projection may still have an adapter finalizer closing.
-          // Include every binding, plus native mirrors' owned session references.
-          const sessions = new Set([
-            ...context.providerSessions.map((session) => session.id),
-            ...context.providerThreads.flatMap((providerThread) =>
-              providerThread.appThreadId !== threadId || providerThread.providerSessionId === null
-                ? []
-                : [providerThread.providerSessionId],
-            ),
-          ]);
-          for (const providerSessionId of sessions)
-            yield* providerSessions.teardownThread({ threadId, providerSessionId });
-        }
-        yield* orchestrator.dispatch({
-          type: "thread.archive.complete",
-          commandId: CommandId.make(`${input.requestId}:complete`),
-          threadId: input.threadId,
-          requestId: input.requestId,
-        });
-      }),
-    );
-    if (stopped._tag === "Failure") {
-      const failure = Cause.findErrorOption(stopped.cause);
-      yield* Effect.logWarning("Thread family archive could not confirm shutdown", {
-        threadId: input.threadId,
-        cause: stopped.cause,
-      });
-      yield* orchestrator.dispatch({
-        type: "thread.archive.fail",
-        commandId: CommandId.make(`${input.requestId}:failed`),
-        threadId: input.threadId,
-        requestId: input.requestId,
-        error:
-          Option.isSome(failure) && isThreadAboveModeLimitError(failure.value)
-            ? "Permissions changed while stopping. The family remains visible; some work may have stopped. Review the archive choices again."
-            : "Could not stop all subagents and provider work. The conversations remain visible; some work may still be running. Try archiving again.",
-      });
-    }
   });
 
   const getProjectThreadRecords: ThreadManagementServiceShape["getProjectThreadRecords"] = (
@@ -2236,7 +2178,7 @@ const make = Effect.gen(function* () {
         );
       },
     ),
-    executeArchive,
+    executeArchive: archiveRunner.execute,
     getTimelinePage: Effect.fn("ThreadManagementService.getTimelinePage")(
       function (threadId, options) {
         return ensureProjectionTranscript(threadId).pipe(
@@ -2351,6 +2293,7 @@ export const layer: Layer.Layer<
   Layer.provide(layerLegacyV1ThreadImporterNoop),
   Layer.provide(layerThreadWorktreeRestoreNoop),
   Layer.provide(ThreadCommandExecutor.layer),
+  Layer.provide(LastCodeArchiveRunner.layer),
 );
 
 export const layerWithLegacyImporter: Layer.Layer<
@@ -2363,4 +2306,7 @@ export const layerWithLegacyImporter: Layer.Layer<
   | ServerSettings.ServerSettingsService
   | CommandReceiptStore.CommandReceiptStoreV2
   | ProjectionStore.ProjectionStoreV2
-> = Layer.effect(ThreadManagementService, make).pipe(Layer.provide(ThreadCommandExecutor.layer));
+> = Layer.effect(ThreadManagementService, make).pipe(
+  Layer.provide(ThreadCommandExecutor.layer),
+  Layer.provide(LastCodeArchiveRunner.layer),
+);

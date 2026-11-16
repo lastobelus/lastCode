@@ -1,3 +1,16 @@
+import {
+  ThreadArchiveChildDisposition,
+  ThreadArchivedWith,
+  ThreadArchivePending,
+  ThreadArchiveConsultationTarget,
+} from "./threadArchive.ts";
+export {
+  ThreadArchiveChildDisposition,
+  ThreadArchivedWith,
+  ThreadArchiveParticipant,
+  ThreadArchiveOperation,
+  ThreadArchivePending,
+} from "./threadArchive.ts";
 import { ActionResumeState, ActionResumeOwner, ActionResumeObligation } from "./actionResume.ts";
 import {
   WorktreeSuspensionSummary,
@@ -201,45 +214,6 @@ export type OrchestrationV2AppThreadLineage = typeof OrchestrationV2AppThreadLin
 export const isListedThreadLineage = (lineage: OrchestrationV2AppThreadLineage): boolean =>
   lineage.sideChat !== true &&
   (lineage.relationshipToParent !== "subagent" || lineage.independent === true);
-
-/** Idle archive is not consent to stop newly active work; the server rechecks before accepting it. */
-export const ThreadArchiveChildDisposition = Schema.Literals([
-  "archive_if_idle",
-  "archive_after_review",
-  "stop_and_archive",
-]);
-export type ThreadArchiveChildDisposition = typeof ThreadArchiveChildDisposition.Type;
-export const ThreadArchivedWith = Schema.Struct({ threadId: ThreadId, commandId: CommandId });
-export const ThreadArchiveParticipant = Schema.Struct({
-  threadId: ThreadId,
-  commandId: CommandId,
-  status: Schema.Literals(["stopping", "failed"]),
-  error: Schema.optional(Schema.String),
-});
-/** Only the operation owner stores the family plan; participants hold a compact reference. */
-export const ThreadArchiveOperation = Schema.Struct({
-  ...ThreadArchiveParticipant.fields,
-  /** Missing on deployed plans whose consent covered delegated ownership only. */
-  familyVersion: Schema.optional(Schema.Literal(1)),
-  // Already-deployed pending operations may finish their original promotion plan.
-  childDisposition: Schema.Literals([
-    "archive_if_idle",
-    "archive_after_review",
-    "stop_and_archive",
-    "promote",
-  ]),
-  childThreadIds: Schema.Array(ThreadId),
-  archiveThreadIds: Schema.Array(ThreadId),
-  promoteThreadIds: Schema.Array(ThreadId),
-  /** Keeps a limited caller's ceiling across provider shutdown and server recovery. */
-  modeLimit: Schema.optional(
-    Schema.Struct({ runtimeMode: RuntimeMode, interactionMode: ProviderInteractionMode }),
-  ),
-});
-export const ThreadArchivePending = Schema.Union([
-  ThreadArchiveOperation,
-  ThreadArchiveParticipant,
-]);
 
 export const OrchestrationV2ContextTransferType = Schema.Literals([
   "fork",
@@ -5057,6 +5031,7 @@ export class OrchestrationV2SearchThreadError extends Schema.TaggedError<Orchest
 /** Read-time choices; archive commands recheck ownership and work under their locks. */
 // canPromote/promotableChildThreadIds stay false/[] for older archive clients; MCP omits them.
 export const OrchestrationV2ThreadArchiveFamily = Schema.Struct({
+  consultationTargets: Schema.optional(Schema.Array(ThreadArchiveConsultationTarget)),
   threads: Schema.Array(OrchestrationV2ThreadShell),
   childThreadIds: Schema.Array(ThreadId),
   activeChildThreadIds: Schema.Array(ThreadId),

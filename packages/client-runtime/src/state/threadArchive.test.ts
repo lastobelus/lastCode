@@ -3,11 +3,17 @@ import {
   EnvironmentId,
   OrchestrationV2ThreadShellJson,
   ProjectId,
+  NodeId,
+  RunId,
+  RunAttemptId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 import {
+  consultThreadArchiveAgent,
+  THREAD_ARCHIVE_CONSULTATION_BUSY_MESSAGE,
+  THREAD_ARCHIVE_CONSULTATION_UNAVAILABLE_MESSAGE,
   archiveRetryThreadId,
   getArchiveRecoveryRows,
   presentThreadArchive,
@@ -188,5 +194,129 @@ describe("durable archive presentation", () => {
   );
   it("clears the archive indication after the server clears the pending operation", () => {
     expect(presentThreadArchive({ archivePending: null })).toBeNull();
+  });
+});
+
+describe("archive consultation", () => {
+  const owner = { ...base, id: ThreadId.make("interactive-owner") };
+  const work = { ...base, id: ThreadId.make("native-work"), title: "Implementation" };
+  const familyRef = { environmentId: base.environmentId, threadId: base.id };
+  const target = {
+    ownerThreadId: owner.id,
+    ownerTitle: "Coordinator",
+    work: [
+      {
+        threadId: work.id,
+        taskId: NodeId.make("task"),
+        runId: RunId.make("run"),
+        attemptId: RunAttemptId.make("attempt"),
+      },
+    ],
+  };
+
+  it("refreshes execution ownership and queues one question with scoped identities and the owner's modes", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const inspect = vi
+      .fn()
+      .mockResolvedValue({ threads: [base, work], consultationTargets: [target] });
+    const readOwner = vi.fn().mockReturnValue(owner);
+    let id = 0;
+    const input = {
+      familyRef,
+      ownerThreadId: owner.id,
+      inspect,
+      readOwner,
+      randomId: () => `new-id-${++id}`,
+      send,
+    };
+    expect(await consultThreadArchiveAgent(input)).toBeNull();
+    expect(await consultThreadArchiveAgent(input)).toBeNull();
+    expect(inspect).toHaveBeenCalledTimes(2);
+    expect(readOwner).toHaveBeenCalledWith({
+      environmentId: base.environmentId,
+      threadId: owner.id,
+    });
+    expect(send).toHaveBeenCalledTimes(2);
+    const [first, second] = send.mock.calls.map(([value]) => value);
+    expect(first).toMatchObject({
+      environmentId: base.environmentId,
+      input: {
+        threadId: owner.id,
+        dispatchMode: "queue",
+        runtimeMode: owner.runtimeMode,
+        interactionMode: owner.interactionMode,
+      },
+    });
+    expect(first.input.commandId).not.toBe(second.input.commandId);
+    expect(first.input.message.messageId).not.toBe(second.input.message.messageId);
+    expect(first.input).not.toHaveProperty("modelSelection");
+    for (const identity of [
+      base.environmentId,
+      base.id,
+      owner.id,
+      work.id,
+      "task",
+      "run",
+      "attempt",
+      "Implementation",
+    ])
+      expect(first.input.message.text).toContain(identity);
+    expect(first.input.message.text).toContain("Do not archive this family");
+    expect(first.input.message).toMatchObject({ role: "user", attachments: [] });
+  });
+
+  it.each(["busy", "unavailable", "missing", "self", "missing-owner", "archived-owner"] as const)(
+    "keeps %s work available for review without dispatching a question",
+    async (state) => {
+      const send = vi.fn();
+      const consultation =
+        state === "self"
+          ? { ...target, work: [{ threadId: owner.id }] }
+          : state === "busy" || state === "unavailable"
+            ? { ...target, unavailableReason: state }
+            : target;
+      const result = await consultThreadArchiveAgent({
+        familyRef,
+        ownerThreadId: owner.id,
+        inspect: async () => ({
+          threads: [base, work],
+          ...(state === "missing" ? {} : { consultationTargets: [consultation] }),
+        }),
+        readOwner: () =>
+          state === "missing-owner"
+            ? null
+            : state === "archived-owner"
+              ? { ...owner, archivedAt: base.createdAt }
+              : owner,
+        randomId: () => {
+          throw new Error("Must not allocate a paid action");
+        },
+        send,
+      });
+      expect(result).toBe(
+        state === "busy"
+          ? THREAD_ARCHIVE_CONSULTATION_BUSY_MESSAGE
+          : THREAD_ARCHIVE_CONSULTATION_UNAVAILABLE_MESSAGE,
+      );
+      expect(send).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not consult a stale owner after inspection maps the work to a different agent", async () => {
+    const send = vi.fn();
+    expect(
+      await consultThreadArchiveAgent({
+        familyRef,
+        ownerThreadId: owner.id,
+        inspect: async () => ({
+          threads: [base, work],
+          consultationTargets: [{ ...target, ownerThreadId: base.id }],
+        }),
+        readOwner: () => owner,
+        randomId: () => "unused",
+        send,
+      }),
+    ).toBe(THREAD_ARCHIVE_CONSULTATION_UNAVAILABLE_MESSAGE);
+    expect(send).not.toHaveBeenCalled();
   });
 });
