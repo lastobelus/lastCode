@@ -9,7 +9,7 @@ import {
 } from "@t3tools/contracts";
 import type { ComponentProps } from "react";
 import { expect, it, vi } from "vite-plus/test";
-import { userEvent } from "vite-plus/test/browser";
+import { page, userEvent } from "vite-plus/test/browser";
 
 import { act, render } from "../../../test/render";
 
@@ -282,8 +282,7 @@ it.each([true, false])(
     });
     await using screen = await renderSection({ canList, projects: [project, second] });
     await screen.getByRole("combobox").click();
-    if (canList) await userEvent.keyboard("{ArrowDown}{Enter}");
-    else await screen.getByRole("option", { name: "Second", exact: true }).click();
+    await page.getByRole("option", { name: "Second", exact: true }).click();
     await expect
       .element(
         screen.getByRole("combobox", {

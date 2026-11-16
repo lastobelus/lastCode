@@ -139,11 +139,20 @@ function commandThreadIds(command: OrchestrationV2Command): ReadonlyArray<Thread
   switch (command.type) {
     case "thread.create":
     case "thread.stop":
+    case "thread.persistence.set":
+    case "thread.annotation.upsert":
+    case "thread.annotation.resolve":
+    case "thread.annotation.reopen":
+    case "thread.dashboard-item.upsert":
+    case "thread.dashboard-item.remove":
     case "thread.archive":
     case "thread.unarchive":
     case "thread.delete":
     case "thread.guest-share.close":
     case "thread.guest-message.dismiss":
+    case "thread.worktree-cleanup.retry":
+    case "thread.worktree-cleanup.abandon":
+    case "thread.worktree-cleanup.update":
     case "thread.settle":
     case "thread.auto-settle":
     case "thread.unsettle":
@@ -173,7 +182,9 @@ function commandThreadIds(command: OrchestrationV2Command): ReadonlyArray<Thread
     case "prepared-run.release":
     case "prepared-run.progress":
     case "prepared-run.fail":
+    case "prepared-run.acknowledge":
     case "prepared-run.retry":
+    case "thread.preparation.retry":
     case "subagent.stop":
     case "run.interrupt":
     case "queued-message.promote-to-steer":

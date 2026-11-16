@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off processEnvInEffect:off - fixtures need real paths, the process resource list and the live environment.
+import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -60,7 +61,7 @@ describe("SpawnWorker", () => {
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const literal = "quote' \" $HOME; * & %PATH%";
-      const cwd = NodeOS.tmpdir();
+      const cwd = NodeFS.realpathSync(NodeOS.tmpdir());
       const script = `
         const fs = require('node:fs');
         const input = fs.readFileSync(0, 'utf8');

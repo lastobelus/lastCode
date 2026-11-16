@@ -60,7 +60,7 @@ export function MarkdownThreadLink(props: {
           },
         }),
       );
-      settled &&= lookup._tag === "Success" && !lookup.waiting;
+      settled = settled && lookup._tag === "Success" && !lookup.waiting;
       return AsyncResult.getOrElse(lookup, () => null)?.[threadId];
     });
     const missing = resolved.value === undefined && settled;

@@ -1,3 +1,4 @@
+import { useWorkspaceLifecycleConfirmation } from "../../hooks/useWorkspaceLifecycleConfirmation";
 import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
 import type {
   SidebarProjectGroupMember,
@@ -9,7 +10,7 @@ import {
 } from "../../sidebarProjectGrouping";
 import type { SidebarThreadSummary } from "../../types";
 import { useClientSettings } from "~/hooks/useSettings";
-import { selectProjectGroupingSettings } from "../../logicalProject";
+import { selectProjectGroupingSettings } from "@t3tools/client-runtime/state/project-grouping";
 import { useRouter } from "@tanstack/react-router";
 import { readLocalApi } from "../../localApi";
 import { readEnvironmentScope } from "../../state/session";
@@ -34,6 +35,7 @@ export function useLastCodeProjectMenu(
   getThreads: () => readonly SidebarThreadSummary[],
 ) {
   const { isMobile, setOpenMobile } = useSidebar();
+  const lifecycle = useWorkspaceLifecycleConfirmation();
   const router = useRouter();
   const settings = useClientSettings(selectProjectGroupingSettings);
   const projectSettingsKey = resolveSidebarProjectSettingsKey({
@@ -76,7 +78,20 @@ export function useLastCodeProjectMenu(
           (thread) =>
             thread.environmentId === member.environmentId && thread.projectId === member.id,
         ).length,
-        removeProject: (member) => deleteLastCodeSidebarProject(member, deleteProject, threads),
+        removeProject: (member, savedWorkspace) =>
+          deleteLastCodeSidebarProject(member, deleteProject, threads, savedWorkspace),
+        confirmSavedData: async (member, description) => {
+          const result = await lifecycle.confirm(
+            [
+              {
+                environmentId: member.environmentId,
+                input: { operation: "delete", target: { kind: "project", projectId: member.id } },
+              },
+            ],
+            { title: `Remove project "${member.title}"?`, description },
+          );
+          return result === null ? null : (result.dispositions[0] ?? { mode: "retain" });
+        },
         waitForWarning: () => new Promise<void>((resolve) => window.setTimeout(resolve, 180)),
       });
     const api = readLocalApi();

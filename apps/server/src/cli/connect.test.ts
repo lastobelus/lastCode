@@ -18,6 +18,7 @@ import { Command } from "effect/cli";
 
 import { makeCli } from "../binCli.ts";
 import { CLOUD_CLI_DESIRED_LINK_SECRET } from "../cloud/CliState.ts";
+import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import {
   makePersistedServerRuntimeState,
   persistServerRuntimeState,
@@ -88,6 +89,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, NetService.layer))
           Layer.mergeAll(
             ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),
             Layer.fresh(TestConsole.layer),
+            ManagedPolicy.layerTest(),
           ),
         ),
       ),
@@ -171,6 +173,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, NetService.layer))
           Layer.mergeAll(
             ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),
             Layer.fresh(TestConsole.layer),
+            ManagedPolicy.layerTest(),
           ),
         ),
       );

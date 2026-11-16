@@ -194,11 +194,17 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
         icon: <WifiOffIcon />,
         title: awaitingApproval
           ? `${activeEnvironmentUnavailableState.label} is waiting to approve this device`
-          : `${activeEnvironmentUnavailableState.label} is ${environmentReconnecting ? "reconnecting" : "offline"}`,
-        description: awaitingApproval ? (
-          (unavailableConnection.error ?? undefined)
+          : environmentReconnecting
+            ? `Reconnecting to ${activeEnvironmentUnavailableState.label}…`
+            : `Can't connect to ${activeEnvironmentUnavailableState.label}`,
+        children: awaitingApproval ? (
+          <p className="px-3 pb-3 text-muted-foreground">
+            {unavailableConnection.error ?? undefined}
+          </p>
         ) : activeEnvironment ? (
-          <ConnectionDiagnosisHeadline environment={activeEnvironment} />
+          <p className="px-3 pb-3 text-muted-foreground">
+            <ConnectionDiagnosisHeadline environment={activeEnvironment} showNextStep />
+          </p>
         ) : undefined,
         actions: (
           <>
@@ -215,6 +221,13 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
                 {environmentReconnecting ? "Retry now" : "Reconnect"}
               </Button>
             ) : null}
+            <Button
+              size="xs"
+              variant="ghost"
+              onClick={() => void navigate({ to: "/settings/connections" })}
+            >
+              Open Environments
+            </Button>
             {disconnectAction}
           </>
         ),

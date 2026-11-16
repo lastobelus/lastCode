@@ -1,5 +1,7 @@
+import { mergeWorktreeSuspensionMenuItems } from "../worktreeSuspensionMenu";
 import { withThreadReadPermissions } from "../../hooks/threadReadActions";
 import type { ScopedThreadRef } from "@t3tools/contracts";
+import { threadAnnotationId } from "@t3tools/shared/threadAnnotation";
 import {
   scopedProjectKey,
   scopedThreadKey,
@@ -11,9 +13,10 @@ import type { SidebarThreadSummary } from "../../types";
 import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
 import type { useNewThreadHandler } from "../../hooks/useHandleNewThread";
 import { useClientSettings } from "~/hooks/useSettings";
-import { selectProjectGroupingSettings } from "../../logicalProject";
+import { selectProjectGroupingSettings } from "@t3tools/client-runtime/state/project-grouping";
 import { useRouter } from "@tanstack/react-router";
 import { useOpenHandoff } from "../../handoffs/useOpenHandoff";
+import { useWorktreeSuspensionActions } from "../../hooks/useWorktreeSuspensionActions";
 import { useRightPanelStore } from "../../rightPanelStore";
 import { useSidebar } from "../ui/sidebar";
 import { readLocalApi } from "../../localApi";
@@ -47,17 +50,26 @@ export function useLastCodeThreadMenu(
   navigateToThread: (ref: ScopedThreadRef) => Promise<void>,
   handleNewThread: ReturnType<typeof useNewThreadHandler>,
 ) {
-  const { unarchiveThread, deleteThread, setThreadPersistence, markThreadUnread, markThreadRead } =
-    useLastCodeThreadActions();
+  const {
+    archiveThread,
+    unarchiveThread,
+    confirmAndDeleteThread,
+    setThreadPersistence,
+    markThreadUnread,
+    markThreadRead,
+  } = useLastCodeThreadActions();
   const updateMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
+    reportFailure: false,
+  });
+  const resolveAnnotation = useOrchestrationCommand(threadEnvironment.resolveAnnotation, {
     reportFailure: false,
   });
   const stopProcesses = useStopThreadProcesses();
   const { copyPath, copyId } = useLastCodeThreadClipboard();
   const handoffsLimit = useClientSettings((s) => s.handoffsMenuLimit);
-  const confirmDeletion = useClientSettings((s) => s.confirmThreadDelete);
   const settings = useClientSettings(selectProjectGroupingSettings);
   const router = useRouter();
+  const workspaceActions = useWorktreeSuspensionActions();
   const { isMobile, setOpenMobile } = useSidebar();
   const openHandoff = useThreadMenuHandoff(router, isMobile, setOpenMobile);
   const members = new Map(
@@ -82,9 +94,13 @@ export function useLastCodeThreadMenu(
       hasStoppableProcesses,
     );
     const clicked = await api.contextMenu.show(
-      withThreadReadPermissions(target.items, [ref]),
+      withThreadReadPermissions(
+        mergeWorktreeSuspensionMenuItems(target.items, workspaceActions.menuItems(thread)),
+        [ref],
+      ),
       position,
     );
+    if (await workspaceActions.run(clicked, ref)) return;
     const handoff = parseLastCodeHandoffAction(clicked);
     if (handoff) {
       await openHandoff(target, handoff);
@@ -93,10 +109,14 @@ export function useLastCodeThreadMenu(
     if (lastcodeThreadActionRequiresOperate(clicked) && !checkTaskPermission(ref.environmentId))
       return;
     const setCreatorGrouping = async (mode: "grouped" | "independent") => {
-      if (!target.creator.groupingEligible) return;
+      if (mode === "grouped" && (!target.creator.groupingEligible || !target.creator.ref)) return;
+      if (mode === "independent" && target.parentThreadId === null) return;
       const result = await updateMetadata({
         environmentId: ref.environmentId,
-        input: { threadId: ref.threadId, creatorGrouping: mode },
+        input: {
+          threadId: ref.threadId,
+          groupedUnderThreadId: mode === "grouped" ? target.creator.ref!.threadId : null,
+        },
       });
       reportThreadOperationFailure(result, "Failed to update creator grouping");
     };
@@ -160,6 +180,14 @@ export function useLastCodeThreadMenu(
       },
       rename: () => startRename(scopedThreadKey(ref), thread.title),
       annotate: () => editAnnotation(thread),
+      "resolve-annotation": async () => {
+        if (thread.annotation?.resolvedAt !== null) return;
+        const result = await resolveAnnotation({
+          environmentId: thread.environmentId,
+          input: { threadId: thread.id, annotationId: threadAnnotationId(thread.annotation) },
+        });
+        reportThreadOperationFailure(result, "Failed to resolve annotation");
+      },
       "mark-unread": () => {
         markThreadUnread(ref);
       },
@@ -185,13 +213,19 @@ export function useLastCodeThreadMenu(
         copyPath(target.workspacePath, { path: target.workspacePath });
       },
       "copy-thread-id": () => copyId(thread.id, { threadId: thread.id }),
+      "archive-discard": async () => {
+        reportThreadOperationFailure(
+          await archiveThread(ref, { discardSavedWorkspace: true }),
+          "Failed to archive thread",
+        );
+      },
       delete: () =>
         deleteLastCodeThread(ref, thread, {
           canOperate: checkTaskPermission,
           confirm: (message, options) => api.dialogs.confirm(message, options),
-          confirmDeletion,
+          confirmDeletion: false,
           readThread: readThreadShell,
-          deleteThread: deleteThread,
+          deleteThread: confirmAndDeleteThread,
         }),
       "handoffs-heading": () => {},
       "handoffs-empty": () => {},

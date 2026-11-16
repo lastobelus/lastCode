@@ -24,11 +24,19 @@ import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as EventSink from "./EventSink.ts";
+import * as EventStore from "./EventStore.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
+import * as PauseStore from "../environment/EnvironmentPauseStore.ts";
+
+const layerEventSink = EventSink.layer.pipe(
+  Layer.provide(Layer.merge(EventStore.layer, ProjectionStore.layer)),
+  Layer.provide(SqlitePersistence.layerMemory),
+);
 
 const driver = ProviderDriverKind.make("codex");
 const providerInstanceId = ProviderInstanceId.make("codex");
@@ -44,7 +52,7 @@ it.effect("preserves steering rejection separately from turn completion", () =>
     const providerSessionId = ProviderSessionId.make("session:steer-rejected");
     const providerThreadId = ProviderThreadId.make("provider-thread:steer-rejected");
     const providerTurnId = ProviderTurnId.make("provider-turn:steer-rejected");
-    const messageId = MessageId.make("message:steer-rejected");
+    const messageId = MessageId.make("environment-pause:fixture:thread:steer-rejected:pause:0");
     const runId = RunId.make("run:steer-rejected");
     const nodeId = NodeId.make("node:steer-rejected");
     const attemptId = RunAttemptId.make("attempt:steer-rejected");
@@ -65,7 +73,14 @@ it.effect("preserves steering rejection separately from turn completion", () =>
       createdAt: now,
       updatedAt: now,
     };
+    const receipts = yield* Ref.make<ReadonlyArray<boolean | "cancelled">>([]);
     for (const testCase of [
+      {
+        target: "cancelled-pause",
+        status: "running",
+        adapterRejected: undefined,
+        deliveryRejected: undefined,
+      },
       { target: "recorded", status: "running", adapterRejected: true, deliveryRejected: true },
       {
         target: "recorded",
@@ -191,7 +206,7 @@ it.effect("preserves steering rejection separately from turn completion", () =>
                 providerThreadId,
                 userMessageId: messageId,
                 rootNodeId: nodeId,
-                activeAttemptId: attemptId,
+                activeAttemptId: testCase.status === "running" ? attemptId : null,
                 status: runStatus,
                 requestedAt: now,
                 startedAt: now,
@@ -239,7 +254,15 @@ it.effect("preserves steering rejection separately from turn completion", () =>
       } satisfies ProviderAdapter.ProviderAdapterV2SessionRuntime;
       const layerControl = ProviderTurnControlService.layer.pipe(
         Layer.provide(
-          Layer.merge(
+          Layer.mergeAll(
+            testCase.target === "cancelled-pause"
+              ? Layer.mock(PauseStore.EnvironmentPauseStore)({
+                  get: Effect.succeed(null),
+                  recordDelivery: (_id, delivered) =>
+                    Ref.update(receipts, (rows) => [...rows, delivered]),
+                })
+              : Layer.empty,
+            layerEventSink,
             Layer.mock(ProjectionStore.ProjectionStoreV2)({
               getProviderControlContext: () =>
                 testCase.target === "read-failure"
@@ -262,14 +285,14 @@ it.effect("preserves steering rejection separately from turn completion", () =>
                           cause: "session unavailable",
                         }),
                       )
-                    : testCase.target === "recorded"
+                    : testCase.target === "recorded" || testCase.target === "cancelled-pause"
                       ? Effect.succeedSome(runtime)
                       : Effect.die("Invalid targets must not reach a live provider session"),
             }),
           ),
         ),
       );
-      const error = yield* Effect.gen(function* () {
+      const result = yield* Effect.gen(function* () {
         const control = yield* ProviderTurnControlService.ProviderTurnControlServiceV2;
         return yield* control
           .steer({
@@ -279,8 +302,17 @@ it.effect("preserves steering rejection separately from turn completion", () =>
             providerTurnId,
             messageId,
           })
-          .pipe(Effect.flip);
+          .pipe(Effect.result);
       }).pipe(Effect.provide(layerControl));
+      if (testCase.target === "cancelled-pause") {
+        assert.equal(result._tag, "Success");
+        assert.deepEqual(yield* Ref.get(receipts), ["cancelled"]);
+        assert.equal(context.run?.status, "running");
+        continue;
+      }
+      assert.equal(result._tag, "Failure");
+      if (result._tag !== "Failure") return;
+      const error = result.failure;
       assert.equal(
         error.turnCompleted,
         testCase.status === "pending"
@@ -475,10 +507,15 @@ it.effect(
         ProjectionStore.ProjectionStoreV2,
         ProjectionStore.ProjectionStoreV2.of({
           apply: () => Effect.void,
+          hasThreadReadAuthorization: () => Effect.die("unused hasThreadReadAuthorization"),
           getLimitRecoveryCandidates: () => Effect.die("unused getLimitRecoveryCandidates"),
           getLimitRecoveryWakeAt: () => Effect.die("unused getLimitRecoveryWakeAt"),
           getOpenRemoteDelegatedTasks: Effect.die("unused getOpenRemoteDelegatedTasks"),
           getAgentAwarenessSnapshot: () => Effect.die("unused awareness snapshot"),
+          getOwnedThreadIds: () => Effect.die("not used by turn control tests"),
+          getArchiveFamilyThreadIds: () => Effect.die("not used by turn control tests"),
+          getThreadLatestAssistantMessageAt: () => Effect.die("not used by turn control tests"),
+          getGroupedCreatorThreadIds: () => Effect.die("not used by turn control tests"),
           getShellSnapshot: () => Effect.die("unused getShellSnapshot"),
           listActiveSubagentThreadIds: () => Effect.die("unused listActiveSubagentThreadIds"),
           countThreads: () => Effect.die("unused countThreads"),
@@ -490,10 +527,15 @@ it.effect(
           getThreadTitles: () => Effect.die("unused getThreadTitles"),
           getThreadLinkMetadata: () => Effect.die("unused getThreadLinkMetadata"),
           findGuestShareThreadId: () => Effect.die("unused findGuestShareThreadId"),
+          getWorktreeCleanupThreads: Effect.die("unused getWorktreeCleanupThreads"),
+          getPersistentThreads: Effect.die("unused getPersistentThreads"),
           getThread: () => Ref.get(projection).pipe(Effect.map((state) => state.thread)),
           getSettlementCandidates: () => Effect.die("unused getSettlementCandidates"),
+          hasOutstandingOwnedWork: () => Effect.die("unused hasOutstandingOwnedWork"),
+          getPendingPullRequestWatchDeliveries: Effect.succeed([]),
           getThreadsWithPullRequests: () => Effect.die("unused getThreadsWithPullRequests"),
           getThreadWorktreePaths: () => Effect.die("unused getThreadWorktreePaths"),
+          getWorktreeSuspensionThreads: () => Effect.die("unused getWorktreeSuspensionThreads"),
           getThreadProjection: () => Effect.die("control effects must not load transcript"),
           getTurnStartContext: () => Effect.die("unused"),
           getTurnStartHistory: () => Effect.die("unused"),
@@ -507,6 +549,7 @@ it.effect(
           searchThreadStream: () => Stream.empty,
           getThreadHistoryPage: () => Effect.die("unused"),
           getTimelinePage: () => Effect.die("Unused timeline read"),
+          getVisiblePublications: () => Effect.die("Unused visible publication read"),
           getMessageCount: () => Effect.die("unused message count"),
           getTranscriptByteFloor: () => Effect.die("unused transcript byte floor"),
           hasPendingDelegatedCompletion: () => Effect.die("unused hasPendingDelegatedCompletion"),
@@ -558,12 +601,14 @@ it.effect(
           isLive: (providerSessionId) => Effect.succeed(providerSessionId === oldSessionId),
           pendingExecution: Effect.succeed([]),
           ownershipRevision: Effect.succeed(0),
+          workspaceOwnership: Effect.succeed([]),
           get: (providerSessionId) =>
             Effect.succeed(
               providerSessionId === oldSessionId ? Option.some(runtime) : Option.none(),
             ),
           close: () => Effect.void,
           closeInstance: () => Effect.void,
+          teardownThread: () => Effect.die("unused teardownThread"),
           release: () => Effect.void,
           detach: () => Effect.void,
           otherWorkingThreads: () => Effect.succeed([]),
@@ -572,13 +617,7 @@ it.effect(
         }),
       );
       const layerControl = ProviderTurnControlService.layer.pipe(
-        Layer.provide(
-          Layer.mergeAll(
-            layerProjection,
-            layerSessionManager,
-            Layer.mock(EventSink.EventSinkV2)({}),
-          ),
-        ),
+        Layer.provide(Layer.mergeAll(layerProjection, layerSessionManager, layerEventSink)),
       );
 
       const [ordinaryInterrupt, unrelatedRestart] = yield* Effect.gen(function* () {

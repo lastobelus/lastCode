@@ -45,6 +45,15 @@ export function createInitialDesktopUpdateState(
   };
 }
 
+/** A check that reached its source; clears any earlier refresh failure. */
+export function recordSuccessfulDesktopUpdateCheck(
+  state: DesktopUpdateState,
+  checkedAt: string,
+): DesktopUpdateState {
+  const { refreshFailure: _resolved, ...next } = state;
+  return { ...next, checkedAt, checkSucceededAt: checkedAt };
+}
+
 export function reduceDesktopUpdateStateOnCheckStart(
   state: DesktopUpdateState,
   checkedAt: string,
@@ -76,14 +85,16 @@ export function reduceDesktopUpdateStateOnCheckFailure(
       status: "downloaded",
       message: null,
       checkedAt,
+      refreshFailure: message,
       downloadPercent: 100,
       errorContext: null,
       canRetry: true,
     };
   }
 
+  const { refreshFailure: _shownAsError, ...rest } = state;
   return {
-    ...state,
+    ...rest,
     status: "error",
     message,
     checkedAt,
@@ -105,7 +116,7 @@ export function reduceDesktopUpdateStateOnUpdateAvailable(
   const isDownloadedVersion = state.downloadedVersion === version;
   const preserveReleaseNotes = isDownloadedVersion && releaseNotes.length === 0;
   return {
-    ...state,
+    ...recordSuccessfulDesktopUpdateCheck(state, checkedAt),
     status: isDownloadedVersion ? "downloaded" : "available",
     availableVersion: version,
     downloadedVersion: isDownloadedVersion ? version : null,
@@ -122,9 +133,10 @@ export function reduceDesktopUpdateStateOnUpdateAvailable(
 }
 
 export function reduceDesktopUpdateStateOnNoUpdate(
-  state: DesktopUpdateState,
+  current: DesktopUpdateState,
   checkedAt: string,
 ): DesktopUpdateState {
+  const state = recordSuccessfulDesktopUpdateCheck(current, checkedAt);
   if (state.downloadedVersion !== null) {
     return {
       ...state,

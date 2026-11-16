@@ -7,7 +7,7 @@ import { MobileClientsUserProfilePage } from "./MobileClientsUserProfilePage";
 import { T3ChatUserProfilePage } from "./T3ChatUserProfilePage";
 import { T3ConnectUserProfilePage } from "./T3ConnectUserProfilePage";
 
-export const T3_CONNECT_ACCOUNT_PAGES = [
+const T3_CONNECT_ACCOUNT_PAGES = [
   {
     label: "Mobile clients",
     url: "mobile-clients",

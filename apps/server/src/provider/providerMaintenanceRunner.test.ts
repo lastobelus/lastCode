@@ -1034,6 +1034,8 @@ describe("providerMaintenanceRunner", () => {
           generateBranchName: () => Effect.die("unused"),
           generateReviewGuide: () => Effect.die("unused"),
           generateTranscriptionPostProcessing: () => Effect.die("unused"),
+          generatePromptSnippets: () => Effect.die("unused"),
+          generateIncomingMessageSummary: () => Effect.die("unused"),
           generateThreadTitle: () =>
             Effect.sync(() => {
               log.push("text generation spawned provider");

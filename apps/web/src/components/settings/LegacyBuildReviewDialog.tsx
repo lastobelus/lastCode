@@ -68,6 +68,7 @@ function RootReview({
       setRequest((value) => ({ offset: 0, revision: value.revision + 1 }));
     }
   });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- owns the server build-preview request for the mounted review and ignores its result after cleanup
   useEffect(() => {
     let cancelled = false;
     void load(environmentId, target.id, request.offset).then((result) => {
@@ -295,6 +296,7 @@ function EnvironmentReview({
       ),
     ),
   );
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- owns the server build-target discovery requests for the mounted settings view and ignores results after cleanup
   useEffect(() => {
     if (!allowed) return;
     let cancelled = false;

@@ -8,6 +8,7 @@ import { CheckIcon, CopyIcon, TriangleAlertIcon } from "lucide-react";
 import { type ComponentProps, useId, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import { APP_BASE_NAME } from "../../branding";
 import { isElectron } from "../../env";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
@@ -26,6 +27,8 @@ import {
   getDesktopUpdateDownloadedVersion,
   getDesktopUpdateIdleTooltip,
   getDesktopUpdateInstallConfirmationMessage,
+  getDesktopUpdateInstallRefusal,
+  getDesktopUpdatePopoverHeader,
   getDesktopUpdateProgressPercent,
   isDesktopUpdateButtonDisabled,
   resolveDesktopUpdateButtonAction,
@@ -46,7 +49,7 @@ import {
   shouldContinueDesktopUpdateCheckAnimation,
   shouldShowDesktopUpdateCheckIcon,
 } from "./DesktopUpdateStatusIcon";
-import { SidebarUpdateReleaseNotes } from "./SidebarUpdateReleaseNotes";
+import { SidebarUpdateFreshness, SidebarUpdateReleaseNotes } from "./SidebarUpdateReleaseNotes";
 import { SidebarUpdateCapsule } from "./SidebarUpdateCapsule";
 import { UpdateEverythingDialog } from "./UpdateEverythingDialog";
 import type { UpdateEverythingRun, UpdateRunLocalState } from "./updateEverything.logic";
@@ -66,7 +69,10 @@ function shouldUseSidebarUpdateReleaseNotesPopover(
   showUpdateDetails: boolean,
   state: DesktopUpdateState | null,
 ): boolean {
-  return showUpdateDetails && (state?.releaseNotes.length ?? 0) > 0;
+  if (!showUpdateDetails || !state) return false;
+  return (
+    state.releaseNotes.length > 0 || getDesktopUpdatePopoverHeader(state, APP_BASE_NAME) !== null
+  );
 }
 
 function handleSidebarUpdateReleaseNotesPopoverOpenChange(
@@ -151,14 +157,19 @@ export function resolveSidebarUpdateButtonToneClassName({
 }
 
 export function SidebarLocalBuildFailurePopover({
+  alsoUpdates = null,
   failure,
   isCopied,
   onCopy,
+  state = null,
 }: {
+  readonly alsoUpdates?: string | null;
   readonly failure: DesktopLocalBuildFailure;
   readonly isCopied: boolean;
   readonly onCopy: () => void;
+  readonly state?: DesktopUpdateState | null;
 }) {
+  const header = state ? getDesktopUpdatePopoverHeader(state, APP_BASE_NAME) : null;
   return (
     <div className="w-[min(22rem,calc(100vw-2rem))] space-y-3 p-1 text-left" role="alert">
       <div>
@@ -169,11 +180,18 @@ export function SidebarLocalBuildFailurePopover({
           {failure.phase} · {failure.percent}% est.
         </div>
       </div>
+      {header || alsoUpdates || state ? (
+        <div className="space-y-0.5 text-xs leading-4 text-muted-foreground">
+          {header ? <div>{header.title}</div> : null}
+          {state ? <SidebarUpdateFreshness state={state} /> : null}
+          {alsoUpdates ? <div>Also: {alsoUpdates}</div> : null}
+        </div>
+      ) : null}
       <p className="max-h-24 overflow-y-auto whitespace-pre-wrap break-words text-xs leading-4 text-popover-foreground/90">
         {formatLocalBuildFailureError(failure.error)}
       </p>
       <div className="flex items-center justify-between gap-3 border-t border-destructive/20 pt-2">
-        <span className="min-w-0 truncate text-2xs text-muted-foreground">
+        <span className="min-w-0 break-all text-2xs text-muted-foreground">
           {failure.targetVersion}
         </span>
         <Button
@@ -223,7 +241,11 @@ export async function downloadLocalUpdate(
     notifyDownloaded,
     isLocalBuild,
     reportError = toastUpdateError,
-  }: { readonly notifyDownloaded: boolean; readonly isLocalBuild: boolean; readonly reportError?: ReportLocalUpdateError },
+  }: {
+    readonly notifyDownloaded: boolean;
+    readonly isLocalBuild: boolean;
+    readonly reportError?: ReportLocalUpdateError;
+  },
 ): Promise<boolean> {
   try {
     const result = await bridge.downloadUpdate();
@@ -233,7 +255,11 @@ export async function downloadLocalUpdate(
     const actionError = shouldToastDesktopUpdateActionResult(result)
       ? getDesktopUpdateActionError(result)
       : null;
-    if (actionError) reportError(isLocalBuild ? "Could not build local nightly" : "Could not download update", actionError);
+    if (actionError)
+      reportError(
+        isLocalBuild ? "Could not build local nightly" : "Could not download update",
+        actionError,
+      );
     return result.completed;
   } catch (error) {
     reportError(
@@ -252,7 +278,9 @@ export async function installLocalUpdate(
   try {
     const result = await bridge.installUpdate(expectedVersion);
     if (!result.accepted) {
-      showDesktopUpdateDownloadedToast(bridge, result.state);
+      const refusal = getDesktopUpdateInstallRefusal(result, expectedVersion);
+      if (refusal) reportError("Update not installed", refusal);
+      else showDesktopUpdateDownloadedToast(bridge, result.state);
       return false;
     }
     const actionError = shouldToastDesktopUpdateActionResult(result)
@@ -398,13 +426,16 @@ function SidebarUpdateControl() {
     setIsActionPending(true);
 
     if (action === "download") {
-      void downloadLocalUpdate(bridge, { notifyDownloaded: true, isLocalBuild: state?.source === "lastcode-local" }).finally(() =>
-        setIsActionPending(false),
-      );
+      void downloadLocalUpdate(bridge, {
+        notifyDownloaded: true,
+        isLocalBuild: state?.source === "lastcode-local",
+      }).finally(() => setIsActionPending(false));
       return;
     }
 
     if (action === "install") {
+      // The version the person confirms is the only one this click may install.
+      const confirmedVersion = state.downloadedVersion ?? undefined;
       let confirmed = false;
       try {
         confirmed = await ensureLocalApi().dialogs.confirm(
@@ -426,7 +457,9 @@ function SidebarUpdateControl() {
         setIsActionPending(false);
         return;
       }
-      void installLocalUpdate(bridge).finally(() => setIsActionPending(false));
+      void installLocalUpdate(bridge, undefined, confirmedVersion).finally(() =>
+        setIsActionPending(false),
+      );
       return;
     }
 
@@ -464,6 +497,24 @@ function SidebarUpdateControl() {
     void Promise.allSettled([appCheck, providersChecked]).then(() => setIsActionPending(false));
   };
 
+  // The confirmation dialog already showed this app's version, so it is not asked again.
+  const runAppOnly = () => {
+    const bridge = window.desktopBridge;
+    if (!bridge || !state || localUpdateVersion === null || isActionPending) return;
+    const update =
+      action === "download"
+        ? downloadLocalUpdate(bridge, {
+            notifyDownloaded: true,
+            isLocalBuild: state.source === "lastcode-local",
+          })
+        : action === "install"
+          ? installLocalUpdate(bridge, undefined, localUpdateVersion)
+          : null;
+    if (!update) return;
+    setIsActionPending(true);
+    void update.finally(() => setIsActionPending(false));
+  };
+
   const runEverything = async () => {
     const bridge = window.desktopBridge;
     setIsConfirmingEverything(false);
@@ -473,11 +524,18 @@ function SidebarUpdateControl() {
         ...(bridge && action === "download"
           ? {
               downloadLocal: (reportError) =>
-                downloadLocalUpdate(bridge, { notifyDownloaded: false, isLocalBuild: state?.source === "lastcode-local", reportError }),
+                downloadLocalUpdate(bridge, {
+                  notifyDownloaded: false,
+                  isLocalBuild: state?.source === "lastcode-local",
+                  reportError,
+                }),
             }
           : {}),
-        ...(bridge && action !== "none"
-          ? { installLocal: (reportError) => installLocalUpdate(bridge, reportError) }
+        ...(bridge && localUpdateVersion !== null
+          ? {
+              installLocal: (reportError) =>
+                installLocalUpdate(bridge, reportError, localUpdateVersion),
+            }
           : {}),
       }),
     );
@@ -505,7 +563,13 @@ function SidebarUpdateControl() {
 
   if (!isElectron && !runsEverything && !isRunningEverything) return null;
 
-  if (!runsEverything && !isRunningEverything && state?.source === "lastcode-local" && !state.enabled) return null;
+  if (
+    !runsEverything &&
+    !isRunningEverything &&
+    state?.source === "lastcode-local" &&
+    !state.enabled
+  )
+    return null;
 
   const statusIcon = (
     <DesktopUpdateStatusIcon
@@ -526,6 +590,23 @@ function SidebarUpdateControl() {
       restarts={everything.restarts}
       checking={providerCheck === "dialog"}
       onConfirm={() => void runEverything()}
+      appOnly={
+        localUpdateVersion !== null && everything.alsoUpdates !== null && action !== "none"
+          ? {
+              // Building or downloading never installs; that still asks for the version it shows.
+              label:
+                action === "install"
+                  ? "Only update this app"
+                  : state?.source === "lastcode-local"
+                    ? "Only build this app"
+                    : "Only download this app",
+              onConfirm: () => {
+                setIsConfirmingEverything(false);
+                runAppOnly();
+              },
+            }
+          : undefined
+      }
     />
   );
 
@@ -544,6 +625,9 @@ function SidebarUpdateControl() {
           icon={statusIcon}
           {...(run.localVersion === null && action === "install" && window.desktopBridge
             ? {
+                restartLabel: state
+                  ? getDesktopUpdatePopoverHeader(state, APP_BASE_NAME)?.title
+                  : undefined,
                 onRestart: async () => {
                   saveUpdateEverythingResult({
                     localVersion: localUpdateVersion,
@@ -552,7 +636,13 @@ function SidebarUpdateControl() {
                     failures: [],
                     restarting: [],
                   });
-                  if (!(await installLocalUpdate(window.desktopBridge!))) {
+                  if (
+                    !(await installLocalUpdate(
+                      window.desktopBridge!,
+                      undefined,
+                      localUpdateVersion ?? undefined,
+                    ))
+                  ) {
                     clearSavedUpdateEverythingResult();
                   }
                 },
@@ -577,7 +667,7 @@ function SidebarUpdateControl() {
           isInteractionDisabled,
           showUpdateIconState,
         }),
-        (disabled && !showUpdateIconState) && "opacity-60",
+        disabled && !showUpdateIconState && "opacity-60",
       )}
       onClick={handleAction}
       onBlur={() => {
@@ -661,7 +751,7 @@ function SidebarUpdateControl() {
         {showUpdatePopover && state ? (
           <PopoverPopup
             align="center"
-            aria-label={localBuildFailure ? "Local build failure details" : "Update release notes"}
+            aria-label={localBuildFailure ? "Local build failure details" : "Update details"}
             elevated
             initialFocus={false}
             onKeyDownCapture={(event) => {
@@ -678,12 +768,15 @@ function SidebarUpdateControl() {
           >
             {localBuildFailure ? (
               <SidebarLocalBuildFailurePopover
+                alsoUpdates={runsEverything ? everything.alsoUpdates : null}
                 failure={localBuildFailure}
+                state={state}
                 isCopied={isCopied}
                 onCopy={() => copyToClipboard(formatLocalBuildFailureDetails(localBuildFailure))}
               />
             ) : (
               <SidebarUpdateReleaseNotes
+                alsoUpdates={runsEverything ? everything.alsoUpdates : null}
                 shell={window.desktopBridge}
                 state={state}
                 tooltip={tooltip}

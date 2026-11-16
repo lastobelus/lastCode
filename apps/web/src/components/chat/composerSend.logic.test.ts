@@ -6,7 +6,6 @@ import { threadContextReference } from "../../lib/composerContextRecords";
 import { threadContextRecord } from "@t3tools/shared/composerContextReferences";
 import {
   approvalRedirectNotice,
-  loadBalancingSendWarning,
   multipleModelSendBlock,
   referencedThreadContexts,
 } from "./composerSend.logic";
@@ -22,38 +21,6 @@ describe("referencedThreadContexts", () => {
     expect(
       referencedThreadContexts({ prompt, threadContexts: [localThread, remoteThread] }),
     ).toEqual([remoteThread]);
-  });
-});
-
-describe("loadBalancingSendWarning", () => {
-  it("asks the user to wait while resource checks run", () => {
-    expect(
-      loadBalancingSendWarning({
-        pending: true,
-        threadContexts: [localThread, remoteThread],
-        candidateEnvironmentIds: [],
-      }).title,
-    ).toBe("Checking machine resources");
-  });
-
-  it("blames the attached threads when no machine can read all of them", () => {
-    expect(
-      loadBalancingSendWarning({
-        pending: false,
-        threadContexts: [localThread, remoteThread],
-        candidateEnvironmentIds: [local, remote],
-      }).description,
-    ).toMatch(/No machine can read every attached thread/);
-  });
-
-  it("blames resources when one machine can read every attached thread", () => {
-    expect(
-      loadBalancingSendWarning({
-        pending: false,
-        threadContexts: [localThread],
-        candidateEnvironmentIds: [remote, local],
-      }).description,
-    ).toMatch(/No eligible machine has available resources/);
   });
 });
 

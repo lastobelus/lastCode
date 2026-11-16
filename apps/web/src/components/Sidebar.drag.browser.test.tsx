@@ -119,7 +119,13 @@ it("keeps focus in the search box when a click picks a search result", async () 
           project={null}
           projectDisplayName={null}
           environmentLabel={null}
-          environmentMachine="server"
+          environmentKnown={false}
+          configuredEnvironmentIconColor={undefined}
+          providerBadgePreferences={{
+            enabled: DEFAULT_CLIENT_SETTINGS.showThreadProviderBadge,
+            size: DEFAULT_CLIENT_SETTINGS.threadProviderBadgeSize,
+            transparency: DEFAULT_CLIENT_SETTINGS.threadProviderBadgeTransparency,
+          }}
           providerEntryByInstanceId={new Map()}
           isHighlighted={false}
           isRouteActive={false}

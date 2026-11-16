@@ -9,6 +9,8 @@ import { createBrowserHistory, createHashHistory } from "@tanstack/react-router"
 import * as Schema from "effect/Schema";
 
 import { applyAppearanceContrast } from "./appearanceContrast";
+import { applyScrollbarAppearance } from "./scrollbarAppearance";
+import { startLastCodeScrollKeys } from "./lastcodeScrollKeys";
 import { applyAppearanceFontVariables, TYPOGRAPHY_ADVANCED_STORAGE_KEY } from "./appearanceFonts";
 import { startElectronBrowserHost } from "./browser/ElectronBrowserHost";
 import { startBrowserProfileReporting } from "./browser/BrowserProfileReporter";
@@ -89,6 +91,17 @@ function startClientAppearance(): void {
     }
     if (previous?.roundedProjectIcons !== settings.roundedProjectIcons) {
       root.toggleAttribute("data-rounded-project-icons", settings.roundedProjectIcons);
+    }
+    if (
+      previous?.largerScrollbarsEnabled !== settings.largerScrollbarsEnabled ||
+      previous.scrollbarWidth !== settings.scrollbarWidth ||
+      previous.scrollbarMargin !== settings.scrollbarMargin
+    ) {
+      applyScrollbarAppearance(root, {
+        enabled: settings.largerScrollbarsEnabled,
+        width: settings.scrollbarWidth,
+        margin: settings.scrollbarMargin,
+      });
     }
     if (previous?.appearanceContrast !== settings.appearanceContrast) {
       applyAppearanceContrast(root, settings.appearanceContrast);
@@ -293,6 +306,7 @@ export function startAppServices(): AppRouter {
   });
   startMainAppLocationTracking(router);
   startWorkspaceFocus(router);
+  startLastCodeScrollKeys();
   startBackgroundThreadAnnouncements(appAtomRegistry, router);
   startThreadVisitedMigration(appAtomRegistry);
   startSshPasswordPromptQueue();

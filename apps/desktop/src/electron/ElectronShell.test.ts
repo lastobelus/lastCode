@@ -2,14 +2,16 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import { beforeEach, vi } from "vite-plus/test";
 
-const { openExternalMock, writeTextMock } = vi.hoisted(() => ({
+const { openExternalMock, openPathMock, writeTextMock } = vi.hoisted(() => ({
   openExternalMock: vi.fn(),
+  openPathMock: vi.fn(),
   writeTextMock: vi.fn(),
 }));
 
 vi.mock("electron", () => ({
   shell: {
     openExternal: openExternalMock,
+    openPath: openPathMock,
   },
   clipboard: {
     writeText: writeTextMock,
@@ -21,8 +23,53 @@ import * as ElectronShell from "./ElectronShell.ts";
 describe("ElectronShell", () => {
   beforeEach(() => {
     openExternalMock.mockReset();
+    openPathMock.mockReset();
     writeTextMock.mockReset();
   });
+
+  it.effect("opens a trusted local document with the OS default application", () =>
+    Effect.gen(function* () {
+      openPathMock.mockResolvedValue("");
+      const guidePath = "/desktop home/local-docs/eli5-product-guide/index.html";
+      const electronShell = yield* ElectronShell.ElectronShell;
+
+      yield* electronShell.openPath(guidePath);
+
+      assert.deepEqual(openPathMock.mock.calls, [[guidePath]]);
+      assert.isEmpty(openExternalMock.mock.calls);
+    }).pipe(Effect.provide(ElectronShell.layer)),
+  );
+
+  it.effect.each(["File does not exist", "No application is associated with this file"])(
+    "reports the OS file-opening failure: %s",
+    (cause) =>
+      Effect.gen(function* () {
+        openPathMock.mockResolvedValue(cause);
+        const guidePath = "/desktop-home/local-docs/eli5-product-guide/index.html";
+        const electronShell = yield* ElectronShell.ElectronShell;
+
+        const error = yield* electronShell.openPath(guidePath).pipe(Effect.flip);
+
+        assert.instanceOf(error, ElectronShell.ElectronShellOpenPathError);
+        assert.equal(error.filePath, guidePath);
+        assert.equal(error.cause, cause);
+      }).pipe(Effect.provide(ElectronShell.layer)),
+  );
+
+  it.effect("reports a rejected file-opening request", () =>
+    Effect.gen(function* () {
+      const cause = new Error("File opening failed");
+      openPathMock.mockRejectedValue(cause);
+      const guidePath = "/desktop-home/local-docs/eli5-product-guide/index.html";
+      const electronShell = yield* ElectronShell.ElectronShell;
+
+      const error = yield* electronShell.openPath(guidePath).pipe(Effect.flip);
+
+      assert.instanceOf(error, ElectronShell.ElectronShellOpenPathError);
+      assert.equal(error.filePath, guidePath);
+      assert.equal(error.cause, cause);
+    }).pipe(Effect.provide(ElectronShell.layer)),
+  );
 
   it.effect("opens remote SSH editor URLs", () =>
     Effect.gen(function* () {
