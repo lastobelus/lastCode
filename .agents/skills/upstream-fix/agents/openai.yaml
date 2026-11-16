@@ -1,0 +1,4 @@
+interface:
+  display_name: "Upstream Fix"
+  short_description: "Deliver an explicitly requested upstream contribution"
+  default_prompt: "Use $upstream-fix to prepare the explicitly requested upstream T3 Code contribution and its independent LastCode port."

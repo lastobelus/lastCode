@@ -1,5 +1,9 @@
+import {
+  LASTCODE_TRIAGE_CLI_COMMAND as TRIAGE_CLI_COMMAND,
+  LASTCODE_TRIAGE_CUSTOM_HOME_HINT,
+} from "@t3tools/shared/desktopDistribution";
+
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
-import { TRIAGE_CLI_COMMAND } from "~/hooks/useStartTriage";
 
 import { InlineButton } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -11,7 +15,9 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 export function TriageDraftHero(props: {
   readonly machineLabel: string | null;
   readonly serverVersion: string | null;
+  readonly cliCommand: string | null;
 }) {
+  const cliCommand = props.cliCommand ?? TRIAGE_CLI_COMMAND;
   const { copyToClipboard, isCopied } = useCopyToClipboard({ timeout: 1500, target: "command" });
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-col items-center">
@@ -31,7 +37,7 @@ export function TriageDraftHero(props: {
             )}
           </TooltipTrigger>
           <TooltipPopup side="bottom">
-            The agent reads T3 Code's logs and source here, and asks before it applies a fix or
+            The agent reads LastCode's logs and source here, and asks before it applies a fix or
             posts anything.
           </TooltipPopup>
         </Tooltip>
@@ -43,15 +49,20 @@ export function TriageDraftHero(props: {
             render={
               <InlineButton
                 tone="muted"
-                className="pointer-events-auto"
-                onClick={() => copyToClipboard(TRIAGE_CLI_COMMAND, undefined)}
+                className="pointer-events-auto min-w-0"
+                onClick={() => copyToClipboard(cliCommand, undefined)}
               />
             }
           >
             {isCopied ? "Copied" : "or run"}
-            {isCopied ? null : <code className="ml-1 font-mono text-xs">{TRIAGE_CLI_COMMAND}</code>}
+            {isCopied ? null : (
+              <code className="ml-1 min-w-0 truncate font-mono text-xs">{cliCommand}</code>
+            )}
           </TooltipTrigger>
-          <TooltipPopup side="bottom">Copy command, for a terminal</TooltipPopup>
+          <TooltipPopup side="bottom">
+            Copy command, for a terminal
+            {props.cliCommand === null ? ` ${LASTCODE_TRIAGE_CUSTOM_HOME_HINT}` : ""}
+          </TooltipPopup>
         </Tooltip>
       </p>
     </div>

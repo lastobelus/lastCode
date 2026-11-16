@@ -14,6 +14,8 @@ import {
 import * as Effect from "effect/Effect";
 
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
+import { AcpProviderCapabilitiesV2 } from "@t3tools/provider-acp/server/adapter";
+import { ClaudeProviderCapabilitiesV2 } from "./Adapters/ClaudeAdapterV2.ts";
 import { CursorProviderCapabilitiesV2 } from "@t3tools/provider-cursor/testing";
 import { makeGrokAcpAdapterFlavor } from "@t3tools/provider-grok/testing";
 import * as CommandPolicy from "./CommandPolicy.ts";
@@ -23,6 +25,11 @@ const threadId = ThreadId.make("command-policy-thread");
 const activeRunId = RunId.make("command-policy-active-run");
 const activeAttemptId = RunAttemptId.make("command-policy-active-attempt");
 const userMessageId = MessageId.make("command-policy-user-message");
+
+const grokCapabilities = makeGrokAcpAdapterFlavor(
+  { makeRuntime: () => Effect.never } as unknown as Parameters<typeof makeGrokAcpAdapterFlavor>[0],
+  "/home/ada",
+).capabilities;
 
 const baseCapabilities: OrchestrationV2ProviderCapabilities = CodexProviderCapabilitiesV2;
 
@@ -214,12 +221,7 @@ it("queues a steer for a provider that cannot steer either way", () => {
 
 // regression: #27014 a Grok follow-up cancels the foreground tool the user wanted to finish
 it("does not steer a Grok follow-up by interrupting its running turn", () => {
-  const grok = makeGrokAcpAdapterFlavor(
-    { makeRuntime: () => Effect.never } as unknown as Parameters<
-      typeof makeGrokAcpAdapterFlavor
-    >[0],
-    "/home/ada",
-  ).capabilities;
+  const grok = grokCapabilities;
   const projection = dispatchProjection(grok);
   for (const deliveryIntent of ["auto", "steer"] as const) {
     const mode = CommandPolicy.resolveMessageDispatchIntent(
@@ -280,6 +282,54 @@ layer("CommandPolicyV2", (it) => {
         capabilities: CursorProviderCapabilitiesV2,
       });
       assert.equal(result, "active_steering");
+    }),
+  );
+
+  it.effect("native-only steering never falls back to interruption", () =>
+    Effect.gen(function* () {
+      const policy = yield* CommandPolicy.CommandPolicyV2;
+      const input = {
+        commandId,
+        threadId,
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        nativeOnly: true,
+      };
+      assert.equal(
+        yield* policy.decideSteeringExecution({ ...input, capabilities: baseCapabilities }),
+        "active_steering",
+      );
+      for (const unsafe of [
+        { forceRestart: true, capabilities: baseCapabilities },
+        ...[
+          AcpProviderCapabilitiesV2,
+          ClaudeProviderCapabilitiesV2,
+          CursorProviderCapabilitiesV2,
+          grokCapabilities,
+        ].map((providerCapabilities) => ({ capabilities: providerCapabilities })),
+        ...[false, undefined].map((supportsStrictActiveSteering) => ({
+          capabilities: capabilities((current) => ({
+            ...current,
+            turns: { ...current.turns, supportsStrictActiveSteering },
+          })),
+        })),
+        {
+          capabilities: capabilities((current) => ({
+            ...current,
+            turns: { ...current.turns, supportsActiveSteering: false },
+          })),
+        },
+        {
+          capabilities: capabilities((current) => ({
+            ...current,
+            turns: { ...current.turns, activeSteeringInterruptsTools: true },
+          })),
+        },
+      ]) {
+        const error = yield* policy
+          .decideSteeringExecution({ ...input, ...unsafe })
+          .pipe(Effect.flip);
+        assert.instanceOf(error, CommandPolicy.CommandPolicyCapabilityUnsupportedError);
+      }
     }),
   );
 
