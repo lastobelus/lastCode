@@ -7,11 +7,13 @@ import {
   OrchestratorMcpFailure,
   ThreadTagVocabularyInput,
   ThreadTagVocabularyResult,
+  ThreadTagVocabularyEntry,
   ThreadTagQueryInput,
   ThreadTagSetInput,
   ThreadTagDiscoveryError,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
+import * as Struct from "effect/Struct";
 import { Tool, Toolkit } from "effect/ai";
 import * as ThreadTags from "../../../orchestration-v2/ThreadTags.ts";
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
@@ -32,10 +34,13 @@ const vocabulary = Tool.make("t3_thread_tag_vocabulary", {
   description:
     "Discover thread tags without reading transcripts. query fuzzy-finds exact spellings and derived parent paths. Omit projectId for all projects; preferredProjectId ranks its tags first. Default: unarchived threads, settled included; archived:true: archive only. count counts threads with that tag or slash descendants; projectCount counts projects. Derived parents are not necessarily assigned tags. Pass nextCursor as cursor until null.",
   parameters: Schema.Struct({
-    ...ThreadTagVocabularyInput.fields,
+    ...ThreadTagVocabularyInput.mapFields(Struct.omit(["uiVisibility"])).fields,
     environmentId: OrchestratorMcpEnvironmentTarget,
   }),
-  success: ThreadTagVocabularyResult,
+  success: Schema.Struct({
+    ...ThreadTagVocabularyResult.fields,
+    entries: Schema.Array(ThreadTagVocabularyEntry.mapFields(Struct.omit(["preferredProject"]))),
+  }),
   failure,
   failureMode: "return",
   dependencies,

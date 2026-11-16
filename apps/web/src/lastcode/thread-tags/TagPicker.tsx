@@ -6,7 +6,7 @@ import type {
   ThreadTagVocabularyInput,
 } from "@t3tools/contracts";
 import { ThreadTag } from "@t3tools/contracts";
-import { rankThreadTagVocabulary } from "@t3tools/shared/threadTags";
+import { mergeThreadTagVocabulary, threadTagEnterSelection } from "@t3tools/shared/threadTags";
 import { AsyncResult, Atom } from "effect/reactivity";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -26,7 +26,6 @@ const vocabularyPages = Atom.family((key: string) => {
     cursor: number;
   };
   const input: ThreadTagVocabularyInput = {
-    query: target.query,
     archived: target.archived,
     limit: 100,
     ...(target.projectId
@@ -37,7 +36,7 @@ const vocabularyPages = Atom.family((key: string) => {
       : {}),
   };
   return Atom.make((get) => {
-    const entries = new Map<string, ThreadTagVocabularyEntry>();
+    const pages: (readonly ThreadTagVocabularyEntry[])[] = [];
     let loading = false;
     let failed = false;
     for (const environmentId of target.environmentIds) {
@@ -45,17 +44,9 @@ const vocabularyPages = Atom.family((key: string) => {
       loading ||= result.waiting || AsyncResult.isInitial(result);
       failed ||= AsyncResult.isFailure(result);
       const page = Option.getOrNull(AsyncResult.value(result));
-      for (const entry of page?.entries ?? []) {
-        const previous = entries.get(entry.tag);
-        entries.set(entry.tag, {
-          tag: entry.tag,
-          count: entry.count + (previous?.count ?? 0),
-          projectCount: entry.projectCount + (previous?.projectCount ?? 0),
-        });
-      }
+      pages.push(page?.entries ?? []);
     }
-    const values = [...entries.values()];
-    const ranked = target.projectId ? values : rankThreadTagVocabulary(values, target.query);
+    const ranked = mergeThreadTagVocabulary(pages, target.query);
     return {
       entries: ranked.slice(target.cursor, target.cursor + 100),
       loading,
@@ -131,8 +122,13 @@ export function TagPicker({
               result.loading
             )
               return;
-            const tag =
-              highlighted !== null && options.includes(highlighted) ? highlighted : options[0];
+            const tag = threadTagEnterSelection({
+              candidate,
+              entries: result.entries,
+              allowCreate,
+              canCreate,
+              highlighted,
+            });
             if (tag === undefined) return;
             (
               event as typeof event & { preventBaseUIHandler?: () => void }

@@ -1,4 +1,3 @@
-import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import * as Effect from "effect/Effect";
 import * as ThreadTags from "../../../orchestration-v2/ThreadTags.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
@@ -22,10 +21,7 @@ export const layer = McpToolAccess.toLayer(ThreadTagsToolkit, {
         threads: result.threads.map((thread) => ({
           ...thread,
           environmentId: scope.environmentId,
-          link: formatThreadLink(
-            { environmentId: scope.environmentId, threadId: thread.id },
-            thread.title,
-          ),
+          link: McpInvocationContext.threadLinkFor(scope, thread.id, thread.title),
         })),
       };
     }),

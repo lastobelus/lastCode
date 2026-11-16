@@ -98,6 +98,7 @@ import { ThemeToolkit } from "../../mcp/toolkits/theme/tools.ts";
 import { ProjectToolkit } from "../../mcp/toolkits/project/tools.ts";
 import { WorktreeToolkit } from "../../mcp/toolkits/worktree/tools.ts";
 import { ThreadToolkit } from "../../mcp/toolkits/thread/tools.ts";
+import { ThreadTagsToolkit } from "../../mcp/toolkits/threadTags/tools.ts";
 import { OrchestratorToolkit } from "../../mcp/toolkits/orchestrator/tools.ts";
 import { ClaudeExecutableFileCheck } from "../../provider/Drivers/ClaudeExecutable.ts";
 import {
@@ -718,6 +719,9 @@ describe("ClaudeAdapterV2 MCP query overrides", () => {
       mcpServers: T3_MCP_SERVERS,
     });
     assert.isFalse(overrides.allowedTools?.includes(ClaudeAdapterV2.CLAUDE_T3_MCP_TOOL_WILDCARD));
+    assert.include(overrides.allowedTools, "mcp__t3-code__t3_thread_tag_vocabulary");
+    assert.include(overrides.allowedTools, "mcp__t3-code__t3_thread_tag_query");
+    assert.notInclude(overrides.allowedTools, "mcp__t3-code__t3_thread_tag_set");
   });
 
   it("invalidates live-query reuse when MCP credentials rotate", () => {
@@ -749,6 +753,7 @@ describe("ClaudeAdapterV2 MCP query overrides", () => {
     const readOnlyToolNames = [
       ...Object.values(OrchestratorToolkit.tools),
       ...Object.values(ThreadToolkit.tools),
+      ...Object.values(ThreadTagsToolkit.tools),
       ...Object.values(WorktreeToolkit.tools),
       ...Object.values(ProjectToolkit.tools),
       ...Object.values(EnvironmentToolkit.tools),

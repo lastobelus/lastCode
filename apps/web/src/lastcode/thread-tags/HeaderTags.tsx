@@ -5,7 +5,7 @@ import { useState } from "react";
 import { randomUUID } from "../../lib/utils";
 import { XIcon } from "lucide-react";
 import { useClientSettings } from "../../hooks/useSettings";
-import { useThreadShell } from "../../state/entities";
+import { useQuietThreadShell } from "../../state/entities";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Popover, PopoverPopup, PopoverTrigger } from "../../components/ui/popover";
 import { setThreadTag } from "./state";
@@ -25,7 +25,7 @@ export function HeaderTags({ threadRef }: { readonly threadRef: ScopedThreadRef 
 }
 
 function HeaderTagsContent({ threadRef }: { readonly threadRef: ScopedThreadRef }) {
-  const thread = useThreadShell(threadRef);
+  const thread = useQuietThreadShell(threadRef);
   const canEdit = useAtomValue(setThreadTag.permissionAtom(threadRef.environmentId));
   const update = useAtomCommand(setThreadTag, { reportFailure: false });
   const [open, setOpen] = useState(false);

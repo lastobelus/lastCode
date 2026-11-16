@@ -1,6 +1,8 @@
 import { expect, it } from "@effect/vitest";
 import {
   matchesThreadTag,
+  mergeThreadTagVocabulary,
+  threadTagEnterSelection,
   rankThreadTagVocabulary,
   threadTagPaths,
   threadTagDiscoveryRevision,
@@ -63,4 +65,60 @@ it("refreshes renamed and omitted metadata without reacting to streamed activity
   expect(threadTagDiscoveryRevision({ ...initial, snapshot: { threads: [streaming] } })).toBe(
     before,
   );
+});
+
+it("merges cached vocabulary across environments while preserving preferred ranking and counts", () => {
+  const pages = [
+    [
+      { tag: "Work/Client", count: 2, projectCount: 1, preferredProject: true },
+      { tag: "WC", count: 1, projectCount: 1 },
+    ],
+    [
+      { tag: "Work/Client", count: 1, projectCount: 1 },
+      { tag: "other", count: 1, projectCount: 1, preferredProject: true },
+    ],
+  ];
+  expect(mergeThreadTagVocabulary(pages, "wc")).toEqual([
+    { tag: "Work/Client", count: 3, projectCount: 2, preferredProject: true },
+    { tag: "WC", count: 1, projectCount: 1, preferredProject: false },
+  ]);
+});
+it("submits the typed exact candidate before an automatically highlighted fuzzy tag", () => {
+  expect(
+    threadTagEnterSelection({
+      candidate: "bug",
+      entries: [{ tag: "bugfix" }],
+      allowCreate: true,
+      canCreate: true,
+      highlighted: "bugfix",
+    }),
+  ).toBe("bug");
+  const entries = [{ tag: "Work/Client" }, { tag: "WC" }];
+  expect(
+    threadTagEnterSelection({
+      candidate: "WC",
+      entries,
+      allowCreate: true,
+      canCreate: false,
+      highlighted: "Work/Client",
+    }),
+  ).toBe("WC");
+  expect(
+    threadTagEnterSelection({
+      candidate: "",
+      entries,
+      allowCreate: true,
+      canCreate: false,
+      highlighted: "WC",
+    }),
+  ).toBe("WC");
+  expect(
+    threadTagEnterSelection({
+      candidate: "wc",
+      entries,
+      allowCreate: false,
+      canCreate: false,
+      highlighted: "stale",
+    }),
+  ).toBe("Work/Client");
 });

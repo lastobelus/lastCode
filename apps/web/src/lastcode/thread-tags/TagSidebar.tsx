@@ -1,16 +1,18 @@
 import { useAtomValue } from "@effect/atom-react";
 import { Link } from "@tanstack/react-router";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
-import { hiddenThreadKeys } from "@t3tools/client-runtime/state/threads";
-import type { EnvironmentId, OrchestrationV2ThreadShell } from "@t3tools/contracts";
-import { AsyncResult, Atom } from "effect/reactivity";
-import * as Option from "effect/Option";
+import { taggedThreadSearch, threadTagRelations } from "@t3tools/client-runtime/thread-tag-search";
+import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
+import type { EnvironmentId } from "@t3tools/contracts";
 import { XIcon } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useClientSettings } from "../../hooks/useSettings";
-import { useProjects } from "../../state/entities";
-import { environmentThreadShells } from "../../state/threads";
-import { serverEnvironment } from "../../state/server";
+import { useProjects, useQuietThreadShells, useHiddenThreadKeys } from "../../state/entities";
+import { useThreadSearch } from "../../state/queries";
+import { threadFamilies } from "../../state/threads";
+import { appAtomRegistry } from "../../rpc/atomRegistry";
+import { useNowMinute } from "../../hooks/useNowMinute";
+import { findForMessageMatch, openThreadFindOnQuery } from "../../components/chat/threadFindStore";
 import { isElectron } from "../../env";
 import { SidebarChromeHeader, SidebarChromeFooter } from "../../components/sidebar/SidebarChrome";
 import {
@@ -22,62 +24,11 @@ import {
   useSidebar,
 } from "../../components/ui/sidebar";
 import { Button } from "../../components/ui/button";
+import { Input } from "../../components/ui/input";
 import { Switch } from "../../components/ui/switch";
-import { tagMatches, useTagEnvironmentIds, useTagFilterStore } from "./state";
-
-const matchPages = Atom.family((key: string) => {
-  const target = JSON.parse(key) as {
-    environmentIds: EnvironmentId[];
-    tag: string;
-    archived: boolean;
-    cursor: number;
-  };
-  return Atom.make((get) => {
-    const entries: { environmentId: EnvironmentId; thread: OrchestrationV2ThreadShell }[] = [];
-    const environments = [];
-    let loading = false;
-    let failed = false;
-    let hasMore = false;
-    for (const environmentId of target.environmentIds) {
-      const pageResult = get(
-        tagMatches({
-          environmentId,
-          input: {
-            tag: target.tag,
-            archived: target.archived,
-            cursor: target.cursor,
-            limit: 100,
-          },
-        }),
-      );
-      const page = Option.getOrNull(AsyncResult.value(pageResult));
-      loading ||= pageResult.waiting || AsyncResult.isInitial(pageResult);
-      failed ||= AsyncResult.isFailure(pageResult);
-      hasMore ||= page?.nextCursor != null;
-      const threads = page?.threads ?? [];
-      environments.push({
-        environmentId,
-        threads,
-        hiddenTags: get(serverEnvironment.hiddenThreadTagsAtom(environmentId)),
-      });
-      entries.push(...threads.map((thread) => ({ environmentId, thread })));
-    }
-    const hidden = hiddenThreadKeys(
-      environments,
-      get(environmentThreadShells.hiddenThreadKeysAtom),
-      new Set(get(environmentThreadShells.threadRefsAtom).map((ref) => scopedThreadKey(ref))),
-    );
-    return {
-      entries: entries.filter(
-        ({ environmentId, thread }) =>
-          !hidden.has(scopedThreadKey(scopeThreadRef(environmentId, thread.id))),
-      ),
-      loading,
-      failed,
-      hasMore,
-    };
-  });
-});
+import { useTagEnvironmentIds, useTagFilterStore } from "./state";
+import { tagResultRows, tagResultShells } from "./query";
+import { TagThreadRow } from "./TagThreadRow";
 
 export function useActiveTagFilter() {
   const enabled = useClientSettings((settings) => settings.lastcodeThreadTagsSidebarEnabled);
@@ -90,21 +41,71 @@ export function TagSidebarResults({ tag }: { readonly tag: string }) {
   const select = useTagFilterStore((state) => state.select);
   const setArchived = useTagFilterStore((state) => state.setArchived);
   const environmentIds = useTagEnvironmentIds();
-  const scopeKey = JSON.stringify({ environmentIds, tag, archived });
+  const [query, setQuery] = useState("");
+  const key = JSON.stringify({ environmentIds, tag, archived });
+  const scopeKey = JSON.stringify({ key, query });
   const [pagination, setPagination] = useState({ scopeKey, cursor: 0 });
   const cursor = pagination.scopeKey === scopeKey ? pagination.cursor : 0;
   if (pagination.scopeKey !== scopeKey) setPagination({ scopeKey, cursor: 0 });
   const setCursor = (cursor: number) => setPagination({ scopeKey, cursor });
   const projects = useProjects();
   const { isMobile, setOpenMobile } = useSidebar();
-  const key = JSON.stringify({ environmentIds, tag, archived, cursor });
-  const result = useAtomValue(matchPages(key));
+  const result = useAtomValue(tagResultRows(key));
+  const search = useThreadSearch(environmentIds, query);
+  const messageMatches = new Map(
+    (search.query === query.trim() ? search.matches : []).map((match) => [
+      threadSearchMatchKey(match),
+      match,
+    ]),
+  );
+  const threads = taggedThreadSearch(
+    result.threads,
+    query,
+    messageMatches,
+    Date.parse(useNowMinute()),
+  );
+  const page = threads.slice(cursor, cursor + 100);
+  const hidden = useHiddenThreadKeys();
+  const titles = new Map(
+    useQuietThreadShells()
+      .filter(
+        (thread) => !hidden.has(scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))),
+      )
+      .map((thread) => [
+        scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+        thread.title,
+      ]),
+  );
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- retain authoritative query rows in the existing family registry while the tag view is mounted
+  useEffect(() => {
+    const target = JSON.parse(key) as { environmentIds: EnvironmentId[]; archived: boolean };
+    if (target.archived) return;
+    const releases = target.environmentIds.map((environmentId) =>
+      threadFamilies.mountRows(
+        appAtomRegistry,
+        environmentId,
+        `tags:${key}`,
+        tagResultShells(JSON.stringify({ queryKey: key, environmentId })),
+      ),
+    );
+    return () => {
+      for (const release of releases) release();
+    };
+  }, [key]);
   return (
     <>
       <SidebarChromeHeader isElectron={isElectron} />
       <SidebarContent
         fixedHeader={
           <SidebarGroup className="z-[1]">
+            <Input
+              type="search"
+              size="compact"
+              aria-label="Search tagged threads"
+              placeholder="Search threads…"
+              value={query}
+              onValueChange={setQuery}
+            />
             <div className="flex min-w-0 items-center gap-1">
               <span className="min-w-0 flex-1 truncate font-mono text-xs">#{tag}</span>
               <span className="shrink-0 text-xs text-muted-foreground">and nested tags</span>
@@ -125,7 +126,7 @@ export function TagSidebarResults({ tag }: { readonly tag: string }) {
         }
       >
         <SidebarGroup>
-          {result.loading ? (
+          {result.loading || search.isPending ? (
             <p className="px-2 py-2 text-xs text-muted-foreground" role="status">
               Finding threads…
             </p>
@@ -135,25 +136,26 @@ export function TagSidebarResults({ tag }: { readonly tag: string }) {
               Could not search every connection. Results may be incomplete.
             </p>
           ) : null}
-          {!result.loading && !result.failed && result.entries.length === 0 ? (
+          {!result.loading && !result.failed && threads.length === 0 ? (
             <p className="px-2 py-2 text-xs text-muted-foreground">
               {archived ? "No archived threads with this tag" : "No threads with this tag"}
             </p>
           ) : null}
           <SidebarMenu>
-            {result.entries.map(({ environmentId, thread }) => {
+            {page.map(({ thread, messageId }) => {
+              const environmentId = thread.environmentId;
               const project = projects.find(
                 (project) =>
                   project.environmentId === environmentId && project.id === thread.projectId,
               );
-              const label = (
-                <span className="flex min-w-0 flex-col">
-                  <span className="truncate">{thread.title}</span>
-                  <span className="truncate text-xs text-muted-foreground">
-                    {project?.title ?? "Unknown project"}
-                  </span>
-                </span>
-              );
+              const context = [
+                project?.title ?? "Unknown project",
+                ...threadTagRelations(thread).map(({ label, ref }) => {
+                  const title = titles.get(scopedThreadKey(ref));
+                  return title ? `${label}: ${title}` : label;
+                }),
+              ].join(" · ");
+              const label = <TagThreadRow thread={thread} context={context} />;
               return (
                 <SidebarMenuItem key={`${environmentId}/${thread.id}`}>
                   {archived ? (
@@ -166,6 +168,16 @@ export function TagSidebarResults({ tag }: { readonly tag: string }) {
                           to="/$environmentId/$threadId"
                           params={scopeThreadRef(environmentId, thread.id)}
                           onClick={() => {
+                            const match = messageId
+                              ? messageMatches.get(
+                                  threadSearchMatchKey({ environmentId, threadId: thread.id }),
+                                )
+                              : undefined;
+                            if (match)
+                              openThreadFindOnQuery(
+                                scopedThreadKey(scopeThreadRef(environmentId, thread.id)),
+                                findForMessageMatch(match, search.query),
+                              );
                             if (isMobile) setOpenMobile(false);
                           }}
                         />
@@ -188,7 +200,7 @@ export function TagSidebarResults({ tag }: { readonly tag: string }) {
                 Previous
               </Button>
             ) : null}
-            {result.hasMore ? (
+            {threads.length > cursor + 100 ? (
               <Button size="xs" variant="ghost" onClick={() => setCursor(cursor + 100)}>
                 Next
               </Button>

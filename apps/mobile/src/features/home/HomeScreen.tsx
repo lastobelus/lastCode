@@ -344,7 +344,6 @@ export function HomeScreen(props: HomeScreenProps) {
     pickableProjectGroups(projectScopes),
     v2ProjectScopeKey,
   );
-
   const threadSearch = useThreadSearch(
     searchEnvironmentIds,
     props.searchQuery,
@@ -359,7 +358,7 @@ export function HomeScreen(props: HomeScreenProps) {
       : v2ScopedProjectGroup.projectRefs,
     props.onSelectThread,
     props.searchQuery,
-    threadSearchMatchByKey,
+    threadSearch,
   );
   const v2ProjectTitleByProjectKey = new Map(
     projectScopes.flatMap((scope) =>
@@ -686,33 +685,31 @@ export function HomeScreen(props: HomeScreenProps) {
 
   const listHeader = Platform.OS === "ios" ? undefined : <HomeTopContentSpacer />;
 
-  const scopeFilters =
-    Platform.OS === "ios" && workspace ? (
-      <ThreadListFilters
-        gutter={sidebarSurface ? 8 : 0}
-        environments={props.environments}
-        projects={pickableProjectGroups(
-          sortHomeProjectScopes({
-            scopes: projectScopes,
-            threads: props.threads,
-            pendingTasks: [],
-            projectSortOrder: "updated_at",
-          }),
-        ).map((scope) => ({
-          key: scope.key,
-          label: scope.title,
-        }))}
-        selectedEnvironmentId={props.selectedEnvironmentId}
-        selectedProjectKey={props.selectedProjectKey}
-        onEnvironmentChange={props.onEnvironmentChange}
-        onProjectChange={props.onProjectChange}
-      />
-    ) : null;
   const v2ListHeader = (
     <>
       {listHeader}
       {tagSidebar.control}
-      {scopeFilters}
+      {Platform.OS === "ios" && workspace ? (
+        <ThreadListFilters
+          gutter={sidebarSurface ? 8 : 0}
+          environments={props.environments}
+          projects={pickableProjectGroups(
+            sortHomeProjectScopes({
+              scopes: projectScopes,
+              threads: props.threads,
+              pendingTasks: [],
+              projectSortOrder: "updated_at",
+            }),
+          ).map((scope) => ({
+            key: scope.key,
+            label: scope.title,
+          }))}
+          selectedEnvironmentId={props.selectedEnvironmentId}
+          selectedProjectKey={props.selectedProjectKey}
+          onEnvironmentChange={props.onEnvironmentChange}
+          onProjectChange={props.onProjectChange}
+        />
+      ) : null}
     </>
   );
 
@@ -752,8 +749,10 @@ export function HomeScreen(props: HomeScreenProps) {
   if (tagSidebar.active)
     return (
       <View className={containerClassName}>
-        {scopeFilters}
-        {tagSidebar.results}
+        <ScreenContent surface="screen">
+          {v2ListHeader}
+          {tagSidebar.results}
+        </ScreenContent>
       </View>
     );
 

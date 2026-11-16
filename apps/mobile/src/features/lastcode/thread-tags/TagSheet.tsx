@@ -1,7 +1,14 @@
 import { useEnvironmentThread } from "../../../state/threads";
 import { uuidv4 } from "../../../lib/uuid";
 import { useAtomValue } from "@effect/atom-react";
-import { CommandId, type EnvironmentId, type ProjectId, type ThreadId } from "@t3tools/contracts";
+import {
+  ThreadTag,
+  CommandId,
+  type EnvironmentId,
+  type ProjectId,
+  type ThreadId,
+} from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import * as Option from "effect/Option";
 import { AsyncResult } from "effect/reactivity";
 import { useRef, useState } from "react";
@@ -13,6 +20,8 @@ import { Sheet } from "../../../components/ui/Sheet";
 import { useThreadShell } from "../../../state/entities";
 import { useAtomCommand } from "../../../state/use-atom-command";
 import { tagCommands, useTagDiscovery, type TagScope } from "./state";
+
+const isThreadTag = Schema.is(ThreadTag);
 
 export function TagPickerSheet(props: {
   readonly scopes: readonly TagScope[];
@@ -32,11 +41,7 @@ export function TagPickerSheet(props: {
   const tags = [...new Set(discovery.entries.map((entry) => entry.tag))];
   const exact = query.trim().replace(/^#/, "");
   const canAdd =
-    props.editor !== undefined &&
-    exact.length > 0 &&
-    exact.length <= 64 &&
-    !/[\p{Cc}]/u.test(exact) &&
-    !props.editor.tags.includes(exact);
+    props.editor !== undefined && isThreadTag(exact) && !props.editor.tags.includes(exact);
   return (
     <Sheet title={props.editor ? "Thread tags" : "Filter by tag"} onClose={props.onClose}>
       <ScrollView

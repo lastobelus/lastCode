@@ -1,5 +1,11 @@
 import * as Schema from "effect/Schema";
-import { NonNegativeInt, ProjectId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  EnvironmentId,
+  NonNegativeInt,
+  ProjectId,
+  ThreadId,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
 import { OrchestrationV2ThreadShell } from "./orchestrationV2.ts";
 import { ThreadTag } from "./threadTags.ts";
 
@@ -13,16 +19,25 @@ const page = {
   cursor: Schema.optionalKey(NonNegativeInt),
   limit: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100 }))),
 };
+const uiVisibility = Schema.Struct({
+  environmentId: EnvironmentId,
+  hiddenTags: Schema.NullOr(Schema.Array(Schema.String)),
+  hiddenThreadKeys: Schema.Array(Schema.String),
+  loadedThreadKeys: Schema.Array(Schema.String),
+  hidingAnywhere: Schema.Boolean,
+});
 export const ThreadTagVocabularyInput = Schema.Struct({
   ...page,
   query: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(200))),
   preferredProjectId: Schema.optionalKey(ProjectId),
+  uiVisibility: Schema.optionalKey(uiVisibility),
 });
 export type ThreadTagVocabularyInput = typeof ThreadTagVocabularyInput.Type;
 export const ThreadTagVocabularyEntry = Schema.Struct({
   tag: Schema.String,
   count: NonNegativeInt,
   projectCount: NonNegativeInt,
+  preferredProject: Schema.optionalKey(Schema.Boolean),
 });
 export type ThreadTagVocabularyEntry = typeof ThreadTagVocabularyEntry.Type;
 export const ThreadTagVocabularyResult = Schema.Struct({
@@ -37,6 +52,7 @@ export const ThreadTagQueryInput = Schema.Struct({
 });
 export type ThreadTagQueryInput = typeof ThreadTagQueryInput.Type;
 export const ThreadTagQueryResult = Schema.Struct({
+  snapshotSequence: NonNegativeInt,
   threads: Schema.Array(OrchestrationV2ThreadShell),
   nextCursor: Schema.NullOr(NonNegativeInt),
 });

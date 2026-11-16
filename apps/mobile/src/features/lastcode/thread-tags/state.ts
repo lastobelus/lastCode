@@ -1,6 +1,7 @@
 import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import {
   createEnvironmentRpcCommand,
+  createEnvironmentQueryAtomFamily,
   runAtomCommand,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
@@ -11,6 +12,7 @@ import {
   ThreadTagDiscoveryError,
   type EnvironmentId,
   type ProjectId,
+  type ThreadTagVocabularyEntry,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
@@ -22,6 +24,7 @@ import { mobilePreferencesAtom } from "../../../state/preferences";
 import { environmentShell } from "../../../state/shell";
 import { serverEnvironment } from "../../../state/server";
 import { hiddenThreadKeys } from "@t3tools/client-runtime/state/threads";
+import { loadThreadTagVocabulary } from "@t3tools/client-runtime/thread-tag-discovery";
 import { scopedThreadKey } from "../../../lib/scopedEntities";
 import type { Preferences } from "../../../persistence/mobile-preferences";
 
@@ -54,9 +57,77 @@ export interface TagScope {
   readonly projectId?: ProjectId;
 }
 
-import { threadTagDiscoveryRevision } from "@t3tools/shared/threadTags";
+import { threadTagDiscoveryRevision, mergeThreadTagVocabulary } from "@t3tools/shared/threadTags";
 import { environmentThreadShells } from "../../../state/threads";
 import { collectTagPages } from "./pagination";
+const vocabularyRevision = Atom.family((environmentId: EnvironmentId) =>
+  Atom.map(environmentShell.stateValueAtom(environmentId), (state) =>
+    threadTagDiscoveryRevision({
+      generation: state.generation,
+      removals: state.removedAt,
+      snapshot: Option.getOrNull(state.snapshot),
+    }),
+  ),
+);
+const vocabularyQuery = createEnvironmentQueryAtomFamily(connectionAtomRuntime, {
+  label: "Thread tag suggestions",
+  execute: loadThreadTagVocabulary,
+  staleTimeMs: Infinity,
+  refreshTrigger: ({ environmentId }) => vocabularyRevision(environmentId),
+});
+const vocabularyScope = Atom.family((key: string) => {
+  const target = JSON.parse(key) as { scope: TagScope; preferredProjectId?: ProjectId };
+  return Atom.make((get) => {
+    const hidingAnywhere = get(environmentThreadShells.anyEnvironmentHidingAtom);
+    return get(
+      vocabularyQuery({
+        environmentId: target.scope.environmentId,
+        input: {
+          ...(target.scope.projectId ? { projectId: target.scope.projectId } : {}),
+          ...(target.preferredProjectId ? { preferredProjectId: target.preferredProjectId } : {}),
+          uiVisibility: {
+            environmentId: target.scope.environmentId,
+            hiddenTags: get(serverEnvironment.hiddenThreadTagsAtom(target.scope.environmentId)),
+            hiddenThreadKeys: hidingAnywhere
+              ? [...get(environmentThreadShells.hiddenThreadKeysAtom)]
+              : [],
+            loadedThreadKeys: hidingAnywhere
+              ? get(environmentThreadShells.threadRefsAtom).map((ref) =>
+                  scopedThreadKey(ref.environmentId, ref.threadId),
+                )
+              : [],
+            hidingAnywhere,
+          },
+        },
+      }),
+    );
+  });
+});
+interface TagDiscoveryData {
+  readonly entries: readonly ThreadTagVocabularyEntry[];
+  readonly threads: ReturnType<typeof presentThreadShell>[];
+  readonly incomplete: boolean;
+}
+const vocabularyPages = Atom.family((key: string) => {
+  const target = JSON.parse(key) as { scopes: TagScope[]; preferredProjectId?: ProjectId };
+  return Atom.make((get) => {
+    const entries: ThreadTagVocabularyEntry[] = [];
+    let loading = false;
+    let incomplete = false;
+    for (const scope of target.scopes) {
+      const result = get(
+        vocabularyScope(JSON.stringify({ scope, preferredProjectId: target.preferredProjectId })),
+      );
+      loading ||= result.waiting || AsyncResult.isInitial(result);
+      incomplete ||= AsyncResult.isFailure(result);
+      if (AsyncResult.isSuccess(result) && !result.waiting) entries.push(...result.value.entries);
+    }
+    return AsyncResult.success<TagDiscoveryData>(
+      { entries, threads: [], incomplete },
+      { waiting: loading },
+    );
+  });
+});
 export function useTagDiscovery(
   scopes: readonly TagScope[],
   query: string,
@@ -87,103 +158,89 @@ export function useTagDiscovery(
   );
   const queryAtom = useMemo(
     () =>
-      connectionAtomRuntime.atom((get) => {
-        get(revisionAtom);
-        const alreadyHidden = get(environmentThreadShells.hiddenThreadKeysAtom);
-        const loadedKeys = new Set(
-          get(environmentThreadShells.threadRefsAtom).map((ref) =>
-            scopedThreadKey(ref.environmentId, ref.threadId),
-          ),
-        );
-        const hidingAnywhere = get(environmentThreadShells.anyEnvironmentHidingAtom);
-        const targets: TagScope[] = JSON.parse(scopeKey);
-        const hiddenTags = new Map(
-          targets.map((scope) => [
-            scope.environmentId,
-            get(serverEnvironment.hiddenThreadTagsAtom(scope.environmentId)),
-          ]),
-        );
-        return Effect.tryPromise({
-          try: async (signal) => {
-            const outcomes = await Promise.allSettled(
-              targets.map(async (scope) => {
-                if (tag !== null) {
-                  const threads = await collectTagPages(
-                    async (cursor) => {
-                      const result = await runAtomCommand(registry, tagCommands.query, {
-                        environmentId: scope.environmentId,
-                        input: {
-                          ...(scope.projectId ? { projectId: scope.projectId } : {}),
-                          tag,
-                          mode: "subtree",
-                          limit: 100,
-                          ...(cursor === undefined ? {} : { cursor }),
-                        },
-                      });
-                      if (!AsyncResult.isSuccess(result)) throw squashAtomCommandFailure(result);
-                      return { items: result.value.threads, nextCursor: result.value.nextCursor };
-                    },
-                    () => !signal.aborted,
-                  );
-                  return { scope, entries: [], shells: threads };
-                }
-                const entries = await collectTagPages(
-                  async (cursor) => {
-                    const result = await runAtomCommand(registry, tagCommands.vocabulary, {
-                      environmentId: scope.environmentId,
-                      input: {
-                        ...(scope.projectId ? { projectId: scope.projectId } : {}),
-                        ...(preferredProjectId ? { preferredProjectId } : {}),
-                        query,
-                        limit: 100,
-                        ...(cursor === undefined ? {} : { cursor }),
-                      },
-                    });
-                    if (!AsyncResult.isSuccess(result)) throw squashAtomCommandFailure(result);
-                    return { items: result.value.entries, nextCursor: result.value.nextCursor };
-                  },
-                  () => !signal.aborted,
-                );
-                return { scope, entries, shells: [] };
-              }),
-            );
-            const pages = outcomes.flatMap((outcome) =>
-              outcome.status === "fulfilled" ? [outcome.value] : [],
-            );
-            const hidden = hiddenThreadKeys(
-              pages.map((page) => ({
-                environmentId: page.scope.environmentId,
-                threads: page.shells,
-                hiddenTags: hiddenTags.get(page.scope.environmentId) ?? null,
-              })),
-              alreadyHidden,
-              loadedKeys,
-              hidingAnywhere,
-            );
-            return {
-              entries: pages.flatMap((page) => page.entries),
-              threads: pages.flatMap((page) =>
-                page.shells
-                  .filter(
-                    (thread) => !hidden.has(scopedThreadKey(page.scope.environmentId, thread.id)),
-                  )
-                  .map((thread) => presentThreadShell(page.scope.environmentId, thread)),
+      tag === null
+        ? vocabularyPages(JSON.stringify({ scopes: JSON.parse(scopeKey), preferredProjectId }))
+        : connectionAtomRuntime.atom((get) => {
+            get(revisionAtom);
+            const alreadyHidden = get(environmentThreadShells.hiddenThreadKeysAtom);
+            const loadedKeys = new Set(
+              get(environmentThreadShells.threadRefsAtom).map((ref) =>
+                scopedThreadKey(ref.environmentId, ref.threadId),
               ),
-              incomplete: outcomes.some((outcome) => outcome.status === "rejected"),
-            };
-          },
-          catch: (cause) =>
-            new ThreadTagDiscoveryError({
-              message: cause instanceof Error ? cause.message : "Could not load tags.",
-              cause,
-            }),
-        });
-      }),
-    [registry, revisionAtom, scopeKey, query, tag, preferredProjectId],
+            );
+            const hidingAnywhere = get(environmentThreadShells.anyEnvironmentHidingAtom);
+            const targets: TagScope[] = JSON.parse(scopeKey);
+            const hiddenTags = new Map(
+              targets.map((scope) => [
+                scope.environmentId,
+                get(serverEnvironment.hiddenThreadTagsAtom(scope.environmentId)),
+              ]),
+            );
+            return Effect.tryPromise({
+              try: async (signal) => {
+                const outcomes = await Promise.allSettled(
+                  targets.map(async (scope) => {
+                    const threads = await collectTagPages(
+                      async (cursor) => {
+                        const result = await runAtomCommand(registry, tagCommands.query, {
+                          environmentId: scope.environmentId,
+                          input: {
+                            ...(scope.projectId ? { projectId: scope.projectId } : {}),
+                            tag,
+                            mode: "subtree",
+                            limit: 100,
+                            ...(cursor === undefined ? {} : { cursor }),
+                          },
+                        });
+                        if (!AsyncResult.isSuccess(result)) throw squashAtomCommandFailure(result);
+                        return {
+                          items: result.value.threads,
+                          nextCursor: result.value.nextCursor,
+                        };
+                      },
+                      () => !signal.aborted,
+                    );
+                    return { scope, entries: [], shells: threads };
+                  }),
+                );
+                const pages = outcomes.flatMap((outcome) =>
+                  outcome.status === "fulfilled" ? [outcome.value] : [],
+                );
+                const hidden = hiddenThreadKeys(
+                  pages.map((page) => ({
+                    environmentId: page.scope.environmentId,
+                    threads: page.shells,
+                    hiddenTags: hiddenTags.get(page.scope.environmentId) ?? null,
+                  })),
+                  alreadyHidden,
+                  loadedKeys,
+                  hidingAnywhere,
+                );
+                return {
+                  entries: pages.flatMap((page) => page.entries),
+                  threads: pages.flatMap((page) =>
+                    page.shells
+                      .filter(
+                        (thread) =>
+                          !hidden.has(scopedThreadKey(page.scope.environmentId, thread.id)),
+                      )
+                      .map((thread) => presentThreadShell(page.scope.environmentId, thread)),
+                  ),
+                  incomplete: outcomes.some((outcome) => outcome.status === "rejected"),
+                };
+              },
+              catch: (cause) =>
+                new ThreadTagDiscoveryError({
+                  message: cause instanceof Error ? cause.message : "Could not load tags.",
+                  cause,
+                }),
+            });
+          }),
+    [registry, revisionAtom, scopeKey, tag, preferredProjectId],
   );
   const state = useEnvironmentQuery(queryAtom);
   return {
-    entries: state.data?.entries ?? [],
+    entries: mergeThreadTagVocabulary([state.data?.entries ?? []], query),
     threads: state.data?.threads ?? [],
     error:
       state.error ??

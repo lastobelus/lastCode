@@ -1,5 +1,10 @@
 import { scoreSubsequenceMatch } from "./searchRanking.ts";
-import type { OrchestrationV2ThreadShell } from "@t3tools/contracts";
+import {
+  isListedThreadLineage,
+  type EnvironmentId,
+  type OrchestrationV2ThreadShell,
+  type ThreadTagVocabularyEntry,
+} from "@t3tools/contracts";
 
 type DiscoveryShell = Pick<
   OrchestrationV2ThreadShell,
@@ -71,4 +76,143 @@ export function rankThreadTagVocabulary<T extends { readonly tag: string }>(
         (a.item.tag < b.item.tag ? -1 : a.item.tag > b.item.tag ? 1 : 0),
     )
     .map(({ item }) => item);
+}
+
+type FilterableThread = Pick<
+  OrchestrationV2ThreadShell,
+  "id" | "lineage" | "tags" | "delegatedFrom"
+>;
+
+export interface TagFilteredEnvironment {
+  readonly environmentId: EnvironmentId;
+  readonly threads: ReadonlyArray<FilterableThread>;
+  /** Tags this environment hides, or null while its filter is off. */
+  readonly hiddenTags: ReadonlyArray<string> | null;
+}
+
+export const NO_HIDDEN_THREADS: ReadonlySet<string> = new Set();
+
+/** The thread a subagent, side chat or delegated task takes its visibility from, if any. */
+export function visibilityParentKey(
+  environmentId: EnvironmentId,
+  thread: Pick<FilterableThread, "lineage" | "delegatedFrom">,
+): string | null {
+  const parentId = thread.lineage.parentThreadId;
+  if (!isListedThreadLineage(thread.lineage) && parentId !== null) {
+    return `${environmentId}\u0000${parentId}`;
+  }
+  return thread.delegatedFrom === undefined
+    ? null
+    : `${thread.delegatedFrom.environmentId}\u0000${thread.delegatedFrom.threadId}`;
+}
+
+function hasHiddenTag(
+  tags: ReadonlyArray<string> | undefined,
+  hiddenTags: ReadonlyArray<string> | null,
+): boolean {
+  return hiddenTags?.some((tag) => tags?.includes(tag) === true) === true;
+}
+
+/**
+ * Keys of threads the tag filter hides. Children (subagents, side chats, delegated tasks) follow
+ * their parent; while any environment hides tags, a child whose parent is not loaded stays hidden.
+ * For a partial list such as an archive page, `alreadyHidden` and `loadedElsewhere` give the
+ * hidden and loaded keys of live threads, and `hidingAnywhere` the global flag.
+ */
+export function hiddenThreadKeys(
+  environments: ReadonlyArray<TagFilteredEnvironment>,
+  alreadyHidden: ReadonlySet<string> = NO_HIDDEN_THREADS,
+  loadedElsewhere: ReadonlySet<string> = NO_HIDDEN_THREADS,
+  hidingAnywhere: boolean = environments.some((environment) => environment.hiddenTags !== null),
+): ReadonlySet<string> {
+  if (alreadyHidden.size === 0 && !hidingAnywhere) return NO_HIDDEN_THREADS;
+  const byKey = new Map<
+    string,
+    { thread: FilterableThread; environment: TagFilteredEnvironment }
+  >();
+  for (const environment of environments) {
+    for (const thread of environment.threads) {
+      byKey.set(`${environment.environmentId}\u0000${thread.id}`, {
+        thread,
+        environment,
+      });
+    }
+  }
+  const hiddenByKey = new Map<string, boolean>();
+  const isHidden = (key: string): boolean => {
+    if (alreadyHidden.has(key)) return true;
+    const known = hiddenByKey.get(key);
+    if (known !== undefined) return known;
+    const entry = byKey.get(key);
+    if (entry === undefined) return false;
+    const { thread, environment } = entry;
+    const parentKey = visibilityParentKey(environment.environmentId, thread);
+    const followsParent =
+      parentKey !== null && (byKey.has(parentKey) || alreadyHidden.has(parentKey));
+    if (parentKey !== null && !followsParent && loadedElsewhere.has(parentKey)) {
+      hiddenByKey.set(key, false);
+      return false;
+    }
+    if (parentKey !== null && !followsParent && hidingAnywhere) {
+      hiddenByKey.set(key, true);
+      return true;
+    }
+    if (!followsParent) {
+      const hidden = hasHiddenTag(thread.tags, environment.hiddenTags);
+      hiddenByKey.set(key, hidden);
+      return hidden;
+    }
+    // Seed before following the parent so a malformed cycle ends visible.
+    hiddenByKey.set(key, false);
+    const hidden = isHidden(parentKey);
+    hiddenByKey.set(key, hidden);
+    return hidden;
+  };
+  const hidden = new Set<string>();
+  for (const key of byKey.keys()) {
+    if (isHidden(key)) hidden.add(key);
+  }
+  return hidden.size === 0 ? NO_HIDDEN_THREADS : hidden;
+}
+
+export function mergeThreadTagVocabulary(
+  pages: readonly (readonly ThreadTagVocabularyEntry[])[],
+  query = "",
+): ThreadTagVocabularyEntry[] {
+  const entries = new Map<string, ThreadTagVocabularyEntry>();
+  for (const page of pages)
+    for (const entry of page) {
+      const previous = entries.get(entry.tag);
+      entries.set(entry.tag, {
+        tag: entry.tag,
+        count: entry.count + (previous?.count ?? 0),
+        projectCount: entry.projectCount + (previous?.projectCount ?? 0),
+        preferredProject: entry.preferredProject === true || previous?.preferredProject === true,
+      });
+    }
+  return rankThreadTagVocabulary(
+    [...entries.values()],
+    query,
+    new Set(
+      [...entries.values()].filter((entry) => entry.preferredProject).map((entry) => entry.tag),
+    ),
+  );
+}
+
+export function threadTagEnterSelection(input: {
+  readonly candidate: string;
+  readonly entries: readonly { readonly tag: string }[];
+  readonly allowCreate: boolean;
+  readonly canCreate: boolean;
+  readonly highlighted: string | null;
+}): string | undefined {
+  if (input.allowCreate && input.candidate) {
+    const exact = input.entries.find((entry) => entry.tag === input.candidate);
+    if (exact) return exact.tag;
+    if (input.canCreate) return input.candidate;
+  }
+  return input.highlighted !== null &&
+    input.entries.some((entry) => entry.tag === input.highlighted)
+    ? input.highlighted
+    : input.entries[0]?.tag;
 }
