@@ -94,21 +94,12 @@ export class SessionControl {
     this.onGenerationChange();
   }
 
-  private async action<A>(
-    allowed: () => boolean,
-    run: () => Promise<A>,
-    deadlineOrSignal?: number | AbortSignal,
-    dispatchDeadlineMs?: number,
-  ) {
-    const signal = typeof deadlineOrSignal === "number" ? undefined : deadlineOrSignal;
-    const deadlineMs = typeof deadlineOrSignal === "number" ? deadlineOrSignal : dispatchDeadlineMs;
-    signal?.throwIfAborted();
+  private async action<A>(allowed: () => boolean, run: () => Promise<A>, deadlineMs?: number) {
     this.assertOpen();
     if (!allowed())
       throw new BrowserControlInterrupted({ message: "You do not control this browser tab." });
     const epoch = this.epoch;
     return this.enqueue(async () => {
-      signal?.throwIfAborted();
       this.assertOpen();
       if (epoch !== this.epoch || !allowed()) throw new BrowserControlInterrupted();
       if (deadlineMs !== undefined && performance.now() >= deadlineMs) {
@@ -125,12 +116,7 @@ export class SessionControl {
     return this.agentId === null || this.agentId === agentId;
   }
 
-  agent<A>(
-    agentId: string,
-    run: () => Promise<A>,
-    deadlineOrSignal?: number | AbortSignal,
-    dispatchDeadlineMs?: number,
-  ) {
+  agent<A>(agentId: string, run: () => Promise<A>, deadlineMs?: number) {
     if (!this.agentMayAct(agentId))
       return Promise.reject(
         new BrowserControlInterrupted({
@@ -145,12 +131,7 @@ export class SessionControl {
           reason: "humanControl",
         }),
       );
-    return this.action(
-      () => this.agentMayAct(agentId) && this.owner === null,
-      run,
-      deadlineOrSignal,
-      dispatchDeadlineMs,
-    );
+    return this.action(() => this.agentMayAct(agentId) && this.owner === null, run, deadlineMs);
   }
 
   agentCanActNow(agentId: string) {

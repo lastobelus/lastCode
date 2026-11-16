@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import { BrowserControlInterrupted, SessionControl } from "./SessionControl.ts";
 
@@ -190,43 +190,34 @@ describe("SessionControl", () => {
     expect(events).toEqual(["navigation committed", "latest"]);
   });
 
-  it("discards an expired queued action without replaying it after the active action drains", async () => {
+  it("finishes running work, skips expired queued actions, and accepts fresh work", async () => {
+    let now = 0;
+    using _clock = vi.spyOn(performance, "now").mockImplementation(() => now);
     const control = new SessionControl("agent");
     const started = Promise.withResolvers<void>();
     const finish = Promise.withResolvers<void>();
     const events: string[] = [];
-    const running = control.agent("agent", async () => {
-      started.resolve();
-      await finish.promise;
-      events.push("finished");
-    });
+    const running = control.agent(
+      "agent",
+      async () => {
+        events.push("started");
+        started.resolve();
+        await finish.promise;
+        events.push("finished");
+      },
+      100,
+    );
     await started.promise;
-    const expired = new AbortController();
-    const queued = expect(
-      control.agent("agent", async () => events.push("late click"), expired.signal),
-    ).rejects.toThrow("request expired");
-    expired.abort(new Error("request expired"));
-    const next = control.agent("agent", async () => events.push("fresh action"));
+    const expired = expect(
+      control.agent("agent", async () => events.push("expired"), 100),
+    ).rejects.toMatchObject({ name: "TimeoutError" });
+    const next = control.agent("agent", async () => events.push("next"), 200);
+    // No timer fires: expiry must be checked when the queue resumes.
+    now = 100;
+    expect(events).toEqual(["started"]);
     finish.resolve();
-    await Promise.all([running, queued, next]);
-    expect(events).toEqual(["finished", "fresh action"]);
-  });
-
-  it("rejects an already cancelled action before it reaches the queue", async () => {
-    const control = new SessionControl("agent");
-    const cancelled = AbortSignal.abort(new Error("request cancelled"));
-    let executed = false;
-    await expect(
-      control.agent(
-        "agent",
-        async () => {
-          executed = true;
-        },
-        cancelled,
-      ),
-    ).rejects.toThrow("request cancelled");
-    expect(executed).toBe(false);
-    await expect(control.agent("agent", async () => "ready")).resolves.toBe("ready");
+    await Promise.all([running, expired, next]);
+    expect(events).toEqual(["started", "finished", "next"]);
   });
 
   it("returns an action result before tracked navigation but drains it before already queued actions", async () => {
@@ -267,17 +258,12 @@ describe("SessionControl", () => {
       const handingOff = control[handoff]("viewer", async () => {
         events.push("input released");
       });
-      const cancelled = new AbortController();
-      const expired = expect(
-        control.agent("agent", async () => events.push("expired action"), cancelled.signal),
-      ).rejects.toThrow("request expired");
-      cancelled.abort(new Error("request expired"));
       const resumed = control.agent("agent", async () => events.push("agent resumed"));
       replacement.resolve();
       await replacement.promise;
       expect(events).toEqual(["human typed"]);
       slow.reject(new Error("navigation replaced"));
-      await Promise.all([handingOff, expired, resumed]);
+      await Promise.all([handingOff, resumed]);
       expect(events).toEqual(["human typed", "input released", "agent resumed"]);
     },
   );

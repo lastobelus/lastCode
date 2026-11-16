@@ -3086,7 +3086,7 @@ it.effect.each([
     ).pipe(Effect.provide(layer)),
 );
 
-it.effect("a queued recording stop drains after its caller expires during navigation", () =>
+it.effect("queued input expires but recording stop drains after navigation", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const { broker, tabId } = yield* ready;
@@ -3112,6 +3112,8 @@ it.effect("a queued recording stop drains after its caller expires during naviga
       const session = contexts[0]!.sessions.at(-1)!;
       expect(session.send).toHaveBeenCalledWith("Page.startScreencast", expect.anything());
 
+      // Keep the dispatch deadline live: interruption must also be checked at the native seam.
+      using _dispatchClock = vi.spyOn(performance, "now").mockReturnValue(0);
       const started = Promise.withResolvers<void>();
       const release = Promise.withResolvers<void>();
       yield* Effect.addFinalizer(() => Effect.sync(() => release.resolve()));
@@ -3129,6 +3131,15 @@ it.effect("a queued recording stop drains after its caller expires during naviga
         })
         .pipe(Effect.forkScoped);
       yield* Effect.promise(() => started.promise);
+      const expiredInput = yield* broker
+        .invoke<void>({
+          scope,
+          tabId,
+          operation: "press",
+          input: { key: "Enter" },
+          timeoutMs: 1000,
+        })
+        .pipe(Effect.flip, Effect.forkScoped);
       const stop = yield* broker
         .invoke<void>({
           scope,
@@ -3142,6 +3153,9 @@ it.effect("a queued recording stop drains after its caller expires during naviga
       yield* broker.invoke({ scope, tabId, operation: "status", input: {} });
       yield* TestClock.adjust(1000);
       expect(yield* Fiber.join(stop)).toMatchObject({ _tag: "PreviewAutomationTimeoutError" });
+      expect(yield* Fiber.join(expiredInput)).toMatchObject({
+        _tag: "PreviewAutomationTimeoutError",
+      });
       expect(session.detach).not.toHaveBeenCalled();
       expect(encoder.close).not.toHaveBeenCalled();
       release.resolve();
@@ -3149,6 +3163,9 @@ it.effect("a queued recording stop drains after its caller expires during naviga
       yield* Effect.promise(() => closed.promise);
       expect(session.detach).toHaveBeenCalled();
       expect(encoder.close).toHaveBeenCalledOnce();
+      expect(page.keyboard.press).not.toHaveBeenCalled();
+      yield* broker.invoke({ scope, tabId, operation: "press", input: { key: "Enter" } });
+      expect(page.keyboard.press).toHaveBeenCalledExactlyOnceWith("Enter");
       const stopped = yield* broker
         .invoke<void>({ scope, tabId, operation: "recordingStop", input: {} })
         .pipe(Effect.flip);
@@ -3899,7 +3916,12 @@ it.effect.each(["agent", "viewer"] as const)(
         const session = contexts[0]!.sessions[0]!;
         const send = session.send.getMockImplementation()!;
         session.send.mockImplementation(async (method, input) => {
-          if (method !== "Runtime.evaluate") return send(method, input);
+          // Title watches also evaluate scripts; only the dialog expression is blocked.
+          if (
+            method !== "Runtime.evaluate" ||
+            (input as { expression?: string }).expression !== 'confirm("Delete row?")'
+          )
+            return send(method, input);
           started.resolve();
           return resolvedEvaluation.promise;
         });
