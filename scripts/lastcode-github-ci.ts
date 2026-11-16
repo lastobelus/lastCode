@@ -44,14 +44,14 @@ export type GithubCiEvidence =
     }
   | {
       readonly state: "pending";
-      readonly reason: "run-in-progress" | "run-registration";
+      readonly reason: "run-in-progress" | "run-registration" | "metadata-gate";
       readonly runId?: number;
       readonly runUrl?: string;
       readonly testedMergeSha?: string;
     }
   | {
       readonly state: "failure";
-      readonly reason: "aggregate-gate" | "configuration" | "terminal-run";
+      readonly reason: "aggregate-gate" | "configuration" | "terminal-run" | "metadata-gate";
       readonly detail: string;
       readonly runId?: number;
       readonly runUrl?: string;
@@ -271,6 +271,39 @@ export function evaluateGithubCi(input: GithubCiEvaluationInput): GithubCiEviden
       detail: `${LASTCODE_CI_GATE} completed with ${gate.conclusion ?? "no conclusion"}.`,
       ...runIdentity,
     };
+  }
+  // Metadata runs now publish the required gate too. Keep their state visible
+  // without ever using their successful conclusion as source validation.
+  const metadata = input.workflowRuns
+    .filter(
+      (candidate) =>
+        candidate.event === "pull_request" &&
+        candidate.head_sha === input.headSha &&
+        (candidate.id ?? 0) > runId &&
+        candidate.display_title?.startsWith("Metadata only: ") &&
+        testedMergeShaFromGithubCiRunTitle(
+          candidate.display_title.slice("Metadata only: ".length),
+          input,
+        ) !== null,
+    )
+    .sort((left, right) => (right.id ?? 0) - (left.id ?? 0))[0];
+  if (metadata?.id !== undefined) {
+    const identity = metadata.html_url
+      ? { runId: metadata.id, runUrl: metadata.html_url, testedMergeSha }
+      : { runId: metadata.id, testedMergeSha };
+    if (
+      ["queued", "in_progress", "pending", "requested", "waiting"].includes(metadata.status ?? "")
+    ) {
+      return { state: "pending", reason: "metadata-gate", ...identity };
+    }
+    if (metadata.status !== "completed" || metadata.conclusion !== "success") {
+      return {
+        state: "failure",
+        reason: "metadata-gate",
+        detail: `Metadata CI run ${metadata.html_url ?? metadata.id} is ${metadata.status}/${metadata.conclusion ?? "no conclusion"}. After source CI passes for the same head, base and merge commit, re-run this Metadata only: run.`,
+        ...identity,
+      };
+    }
   }
   return { state: "satisfied", reason: "exact-run", ...runIdentity };
 }
