@@ -48,7 +48,9 @@ const state = vi.hoisted(() => ({
 }));
 
 const reviewThread = vi.hoisted(() => vi.fn());
-vi.mock("../threads/useOpenLinkedThread", () => ({ useOpenLinkedThread: () => reviewThread }));
+vi.mock("../layout/workspace/useSelectWorkspaceDetail", () => ({
+  useSelectWorkspaceDetail: () => reviewThread,
+}));
 vi.mock("../../lib/uuid", () => ({ uuidv4: vi.fn().mockReturnValue("ask-id") }));
 vi.mock("react", () => ({
   useCallback: (callback: unknown) => callback,

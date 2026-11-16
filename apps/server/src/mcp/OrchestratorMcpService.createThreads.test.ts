@@ -17,6 +17,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
+import * as Tracer from "effect/Tracer";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
@@ -420,13 +421,11 @@ it.effect("accepts an MCP prompt before a concurrent archive can take its target
     const service = yield* OrchestratorMcpService.OrchestratorMcpService;
     const threads = yield* ThreadManagement.ThreadManagementService;
     const sink = yield* EventSink.EventSinkV2;
-    const executor = yield* ThreadCommandExecutor.ThreadCommandExecutor;
     yield* createParent;
     const created = yield* Deferred.make<ThreadId>();
     const allowMessage = yield* Deferred.make<void>();
     const archiveQueued = yield* Deferred.make<void>();
     const commitCommand = sink.commitCommand;
-    const withPersistenceLock = executor.withPersistenceLock;
     const commitSpy = vi.spyOn(sink, "commitCommand").mockImplementation((command) =>
       command.commandType === "thread.create"
         ? commitCommand(command).pipe(
@@ -446,11 +445,15 @@ it.effect("accepts an MCP prompt before a concurrent archive can take its target
       const accepted = yield* threads.getThreadProjection(threadId);
       assert.lengthOf(accepted.messages, 1);
       assert.lengthOf(accepted.runs, 1);
-      const observeLock: typeof withPersistenceLock = (effect) =>
-        Deferred.succeed(archiveQueued, undefined).pipe(
-          Effect.andThen(withPersistenceLock(effect)),
-        );
-      const lockSpy = vi.spyOn(executor, "withPersistenceLock").mockImplementation(observeLock);
+      // The archive planner captures its lock ports before this test starts.
+      const archiveTracer = Tracer.make({
+        span(options) {
+          const span = new Tracer.NativeSpan(options);
+          if (span.name === "ThreadCommandExecutor.withPersistenceLock")
+            Deferred.doneUnsafe(archiveQueued, Effect.void);
+          return span;
+        },
+      });
       yield* Effect.gen(function* () {
         const archiving = yield* threads
           .dispatch({
@@ -458,8 +461,18 @@ it.effect("accepts an MCP prompt before a concurrent archive can take its target
             commandId: CommandId.make("archive-concurrent-create"),
             threadId,
           })
-          .pipe(Effect.flip, Effect.forkChild());
-        yield* Deferred.await(archiveQueued);
+          .pipe(
+            Effect.flip,
+            Effect.withTracer(archiveTracer),
+            Effect.withTracerEnabled(true),
+            Effect.forkChild(),
+          );
+        yield* Effect.raceFirst(
+          Deferred.await(archiveQueued),
+          Fiber.join(archiving).pipe(
+            Effect.andThen(Effect.die("Archive bypassed MCP prompt acceptance.")),
+          ),
+        );
         assert.isNull((yield* threads.getThreadProjection(threadId)).thread.archivedAt);
         yield* Deferred.succeed(allowMessage, undefined);
         const result = yield* Fiber.join(creating);
@@ -468,7 +481,7 @@ it.effect("accepts an MCP prompt before a concurrent archive can take its target
         const projection = yield* threads.getThreadProjection(threadId);
         assert.lengthOf(projection.messages, 1);
         assert.isNull(projection.thread.archivedAt);
-      }).pipe(Effect.ensuring(Effect.sync(() => lockSpy.mockRestore())));
+      });
     }).pipe(Effect.ensuring(Effect.sync(() => commitSpy.mockRestore())));
   }).pipe(Effect.provide(layer)),
 );

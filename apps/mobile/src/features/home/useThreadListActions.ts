@@ -4,7 +4,7 @@ import * as ThreadUndo from "@t3tools/client-runtime/state/thread-undo";
 import { showThreadUndoNotice } from "./thread-undo-notice";
 import { threadUnarchiveTargetId } from "@t3tools/client-runtime/state/thread-archive";
 import { prepareLastCodeMobileThreadArchive } from "./lastcodeThreadArchiveActions";
-import { useOpenLinkedThread } from "../threads/useOpenLinkedThread";
+import { useSelectWorkspaceDetail } from "../layout/workspace/useSelectWorkspaceDetail";
 import { canSnooze } from "@t3tools/client-runtime/state/thread-settled";
 import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -117,7 +117,9 @@ function useThreadActionExecutor(
     reportFailure: false,
   });
   const sendArchiveQuestion = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
-  const review = useOpenLinkedThread();
+  const selectDetail = useSelectWorkspaceDetail();
+  const review = (target: { readonly environmentId: string; readonly threadId: string }) =>
+    selectDetail({ name: "Thread", params: target });
   const latestPendingActions = useRef(new Map<string, { readonly action: ThreadListAction }>());
 
   const executeAction = async (
