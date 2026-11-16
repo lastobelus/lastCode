@@ -10137,8 +10137,40 @@ describe("CodexAdapterV2 post-settle continuation", () => {
 
   it.effect("leaves a late child's result to the root's next turn when one is running", () =>
     Effect.gen(function* () {
+      const sessions = yield* McpProviderSessions.McpProviderSessions;
+      const threadId = ThreadId.make(`thread-${RESUME_SCENARIO}`);
+      const config = {
+        environmentId: EnvironmentId.make("env-native-child"),
+        threadId,
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        providerSessionId: "credential-native-child",
+        endpoint: "http://localhost/mcp",
+        authorizationHeader: "Bearer native-child",
+        browserToolsAvailable: true,
+      };
+      const lookup = (nativeThreadId = RESUME_CHILD_THREAD, nativeTurnId = RESUME_CHILD_TURN_1) =>
+        sessions.resolveExecution({
+          threadId,
+          providerSessionId: config.providerSessionId,
+          authorizationHeader: config.authorizationHeader,
+          metadata: {
+            "x-codex-turn-metadata": { thread_id: nativeThreadId, turn_id: nativeTurnId },
+          },
+        });
+      const secondStarted = yield* Deferred.make<void>();
+      const releaseChild = yield* Deferred.make<void>();
       const secondPrompt = "Wait for the sub-agent.";
       const secondTurn = "native-codex-resume-root-turn-2";
+      const nativeMcpStart = (text: string) =>
+        CodexAdapterV2.buildCodexTurnStartParams({
+          nativeThreadId: RESUME_NATIVE_THREAD,
+          codexInput: [{ type: "text", text }],
+          runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+          modelSelection: CODEX_TEST_MODEL_SELECTION,
+          hasT3Mcp: true,
+        });
+      const firstStartParams = yield* nativeMcpStart(RESUME_PROMPT);
+      const secondStartParams = yield* nativeMcpStart(secondPrompt);
       const { spawned, rootFinished } = lateChildPrefix();
       // Reuse the preamble's turn/start exchange under the session's next request id.
       const secondTurnStart = codexReplayPreamble({
@@ -10152,14 +10184,29 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           typeof entry.frame === "object" &&
           entry.frame !== null &&
           "id" in entry.frame
-            ? { ...entry, frame: { ...entry.frame, id: 4 } }
+            ? {
+                ...entry,
+                frame: {
+                  ...entry.frame,
+                  id: 4,
+                  ...(entry.type === "expect_outbound" && entry.label === "turn/start"
+                    ? { params: secondStartParams }
+                    : {}),
+                },
+              }
             : entry,
         );
       const harness = yield* makeCodexReplayHarness(
         makeCodexReplayTranscript({
           scenario: RESUME_SCENARIO,
           entries: [
-            ...spawned,
+            ...spawned.map((entry) =>
+              entry.type === "expect_outbound" &&
+              entry.label === "turn/start" &&
+              Predicate.isObject(entry.frame)
+                ? { ...entry, frame: { ...entry.frame, params: firstStartParams } }
+                : entry,
+            ),
             ...rootFinished,
             ...secondTurnStart,
             childAgentMessage({
@@ -10182,7 +10229,21 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             },
           ],
         }),
+        (event) =>
+          event.type === "provider_turn.updated" &&
+          event.threadId === threadId &&
+          event.providerTurn.nativeTurnRef?.nativeId === secondTurn &&
+          event.providerTurn.status === "running"
+            ? Deferred.succeed(secondStarted, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+        undefined,
+        undefined,
+        (entry) =>
+          entry.label === "item/completed/child-late-answer"
+            ? Deferred.await(releaseChild)
+            : Effect.void,
       );
+      yield* sessions.set(config);
 
       const turnInput = (index: number, text: string) =>
         Effect.gen(function* () {
@@ -10198,10 +10259,18 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             providerTurnOrdinal: index,
           };
         });
-      yield* harness.runtime.startTurn(yield* turnInput(1, RESUME_PROMPT));
+      const first = yield* turnInput(1, RESUME_PROMPT);
+      yield* harness.runtime.startTurn(first);
       yield* harness.awaitTerminal(1);
+      assert.deepEqual(yield* lookup(), { runId: first.runId, attemptId: first.attemptId });
+      assert.isUndefined(yield* lookup(RESUME_NATIVE_THREAD, RESUME_NATIVE_TURN));
+      assert.isUndefined(yield* lookup("foreign-native-thread"));
       yield* harness.runtime.startTurn(yield* turnInput(2, secondPrompt));
+      yield* Deferred.await(secondStarted);
+      assert.deepEqual(yield* lookup(), { runId: first.runId, attemptId: first.attemptId });
+      yield* Deferred.succeed(releaseChild, undefined);
       yield* harness.awaitTerminal(2);
+      assert.isUndefined(yield* lookup());
       assert.equal(harness.subagentUpdates().at(-1)?.subagent.result, "CHILD_DURING_SECOND_TURN");
       assert.lengthOf(harness.continuationRequests, 0);
     }).pipe(

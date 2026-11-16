@@ -88,6 +88,11 @@ import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAda
 
 const decodeTarget = Schema.decodeUnknownEffect(OrchestratorMcpTarget);
 
+const layerThreadReadBroker = Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+  forSession: () => ({ authorize: () => Effect.undefined }),
+  inherit: () => Effect.succeed({ authorize: () => Effect.undefined }),
+});
+
 const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
   Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
   Layer.provide(Layer.mock(PeerLinks.PeerLinks)({ get: () => Effect.succeedNone })),
@@ -95,14 +100,13 @@ const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
   Layer.provide(
     Layer.mock(ActionResume.ActionResume)({ readLatestSummary: () => Effect.succeed(null) }),
   ),
-  Layer.provide(ThreadReadBroker.layer),
+  Layer.provide(layerThreadReadBroker),
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
 );
 
-/** The service with a real thread-read broker over the test's dependencies. */
-const layerWithBroker = <ROut, E, RIn>(dependencies: Layer.Layer<ROut, E, RIn>) =>
-  layerOrchestratorService.pipe(Layer.provide(ThreadReadBroker.layer), Layer.provide(dependencies));
+const layerWithDependencies = <ROut, E, RIn>(dependencies: Layer.Layer<ROut, E, RIn>) =>
+  layerOrchestratorService.pipe(Layer.provide(dependencies));
 
 describe("OrchestratorMcpService", () => {
   it.effect("retries terminal acknowledgement with a fresh command id", () =>
@@ -269,7 +273,7 @@ describe("OrchestratorMcpService", () => {
         const commandIds = yield* Ref.get(acknowledgementCommandIds);
         assert.equal(commandIds.length, 2);
         assert.notEqual(commandIds[0], commandIds[1]);
-      }).pipe(Effect.provide(layerWithBroker(layerDependencies)));
+      }).pipe(Effect.provide(layerWithDependencies(layerDependencies)));
     }),
   );
 
@@ -709,7 +713,7 @@ describe("OrchestratorMcpService", () => {
           .pipe(Effect.flip);
         assert.equal(error.code, "task_not_cancellable");
         assert.deepEqual(yield* Ref.get(dispatched), []);
-      }).pipe(Effect.provide(layerWithBroker(layerDependencies)));
+      }).pipe(Effect.provide(layerWithDependencies(layerDependencies)));
     }),
   );
 
@@ -846,7 +850,7 @@ describe("OrchestratorMcpService", () => {
               ["subagent.stop"],
             );
           }
-        }).pipe(Effect.provide(layerWithBroker(layerDependencies)));
+        }).pipe(Effect.provide(layerWithDependencies(layerDependencies)));
       }),
   );
 
@@ -1064,7 +1068,7 @@ describe("OrchestratorMcpService", () => {
           (yield* Ref.get(dispatched)).map((command) => (command as { type: string }).type),
           ["thread.stop"],
         );
-      }).pipe(Effect.provide(layerWithBroker(layerDependencies)));
+      }).pipe(Effect.provide(layerWithDependencies(layerDependencies)));
     }),
   );
 
@@ -1158,7 +1162,7 @@ describe("OrchestratorMcpService", () => {
           (yield* Ref.get(dispatched)).map((command) => (command as { type: string }).type),
           ["thread.stop", "delegated_task.completion-delivery.dispose"],
         );
-      }).pipe(Effect.provide(layerWithBroker(layerDependencies)));
+      }).pipe(Effect.provide(layerWithDependencies(layerDependencies)));
     }),
   );
 
@@ -1340,7 +1344,7 @@ describe("OrchestratorMcpService", () => {
           .pipe(Effect.flip);
         assert.equal(error.code, "runtime_mode_escalation_denied");
         assert.deepEqual(yield* Ref.get(dispatched), []);
-      }).pipe(Effect.provide(layerWithBroker(layerDependencies)));
+      }).pipe(Effect.provide(layerWithDependencies(layerDependencies)));
     }),
   );
 
@@ -1593,7 +1597,7 @@ describe("OrchestratorMcpService", () => {
           ...(child.captureOwnership ? { ownership: yield* Ref.get(ownership) } : {}),
           ...(status === undefined ? {} : { status }),
         };
-      }).pipe(Effect.provide(layerWithBroker(layerDependencies)));
+      }).pipe(Effect.provide(layerWithDependencies(layerDependencies)));
     });
 
   it.effect("refuses to cancel a task when a task under it now runs above the parent's modes", () =>
@@ -2290,7 +2294,7 @@ describe("OrchestratorMcpService provider resolution", () => {
             "Driver 'forkOnly' is not registered in this build.",
             "Provider instance is disabled.",
           ]);
-        }).pipe(Effect.provide(layerWithBroker(layerDependencies)));
+        }).pipe(Effect.provide(layerWithDependencies(layerDependencies)));
       }),
   );
 
@@ -2636,7 +2640,7 @@ describe("OrchestratorMcpService provider resolution", () => {
         assert.isTrue(
           byDriver.message.includes("No V2 provider adapter is registered for driver forkOnly."),
         );
-      }).pipe(Effect.provide(layerWithBroker(layerDependencies)));
+      }).pipe(Effect.provide(layerWithDependencies(layerDependencies)));
     }),
   );
 
@@ -2728,7 +2732,6 @@ describe("OrchestratorMcpService provider resolution", () => {
             dispatchLaunch: (input) =>
               Effect.gen(function* () {
                 const claimed = yield* dispatch(input.claim);
-                if (input.beforeInitialMessage !== undefined) yield* input.beforeInitialMessage;
                 const initialMessage = yield* dispatch(input.initialMessage);
                 return { claimed, initialMessage };
               }),
@@ -2933,7 +2936,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           modelSelection: { instanceId: string; model: string };
         };
         assert.equal(request.modelSelection.instanceId, altInstanceId);
-      }).pipe(Effect.provide(layerWithBroker(layerDependencies)));
+      }).pipe(Effect.provide(layerWithDependencies(layerDependencies)));
     }),
   );
 
@@ -3054,7 +3057,7 @@ describe("OrchestratorMcpService provider resolution", () => {
             modelSelection: { instanceId: string; model: string };
           };
           assert.equal(retryCommand.modelSelection.instanceId, codexInstanceId);
-        }).pipe(Effect.provide(layerWithBroker(layerDependencies)));
+        }).pipe(Effect.provide(layerWithDependencies(layerDependencies)));
       }),
   );
 
@@ -3330,7 +3333,7 @@ describe("OrchestratorMcpService provider resolution", () => {
               readLatestSummary: () => Effect.succeed(null),
             }),
           ),
-          Layer.provide(ThreadReadBroker.layer),
+          Layer.provide(layerThreadReadBroker),
           Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
           Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
           Layer.provideMerge(layerWatchedThreads),
@@ -3655,7 +3658,7 @@ describe("OrchestratorMcpService provider resolution", () => {
             } else {
               assert.equal(request.modelSelection.model, "codex-alt-model", testCase.name);
             }
-          }).pipe(Effect.provide(layerWithBroker(layerDependencies)));
+          }).pipe(Effect.provide(layerWithDependencies(layerDependencies)));
         }
       }),
   );
@@ -3715,7 +3718,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           Layer.mock(ActionResume.ActionResume)({ readLatestSummary: () => Effect.succeed(null) }),
         ),
         Layer.provide(Layer.mock(PeerLinks.PeerLinks)({ get: () => Effect.succeedNone })),
-        Layer.provide(ThreadReadBroker.layer),
+        Layer.provide(layerThreadReadBroker),
         Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
         Layer.provide(
           Layer.mock(GitVcsDriver.GitVcsDriver)({
@@ -3855,7 +3858,7 @@ describe("OrchestratorMcpService provider resolution", () => {
         const lookups = yield* Ref.make(0);
         const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
           Effect.provide(
-            layerWithBroker(
+            layerWithDependencies(
               Layer.mergeAll(
                 NodeServices.layer,
                 NodeCrypto.layer,
@@ -3949,7 +3952,7 @@ describe("OrchestratorMcpService provider resolution", () => {
     ) =>
       OrchestratorMcpService.layer.pipe(
         Layer.provide(Layer.mock(PeerLinks.PeerLinks)({ get: () => Effect.succeedNone })),
-        Layer.provide(ThreadReadBroker.layer),
+        Layer.provide(layerThreadReadBroker),
         Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
         Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)(git)),
         Layer.provide(
@@ -3961,7 +3964,7 @@ describe("OrchestratorMcpService provider resolution", () => {
             }),
             Layer.mock(PeerForwarding.PeerForwarding)({}),
             Layer.mock(ThreadReadBroker.ThreadReadBroker)({
-              forSession: () => ({ authorize: () => Effect.void }),
+              forSession: () => ({ authorize: () => Effect.undefined }),
             }),
             Layer.mock(ThreadManagementService.ThreadManagementService)({
               getThreadShell: () => Effect.succeed(null),
@@ -4797,7 +4800,7 @@ describe("OrchestratorMcpService provider resolution", () => {
         assert.equal(result.threads[0]?.creatorThreadId, parentThreadId);
         assert.isFalse(commands.some((command) => command.type === "message.dispatch"));
         assert.isFalse(commands.some((command) => command.type === "delegated_task.request"));
-      }).pipe(Effect.provide(layerWithBroker(dependencies)));
+      }).pipe(Effect.provide(layerWithDependencies(dependencies)));
     }),
   );
 });

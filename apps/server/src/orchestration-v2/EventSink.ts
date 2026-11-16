@@ -1,3 +1,5 @@
+import { admitAcceptedInput } from "../threadReadAuthority/Admission.ts";
+import type { ThreadReadIntakeIntent } from "../threadReadAuthority/Types.ts";
 import {
   CommandId,
   type EventId,
@@ -213,6 +215,7 @@ export interface EventSinkV2Shape {
     EventSinkV2Error
   >;
   readonly commitCommand: (input: {
+    readonly threadReadIntent?: ThreadReadIntakeIntent;
     readonly commandId: CommandId;
     readonly threadId: ThreadId;
     readonly commandType: string;
@@ -1043,10 +1046,13 @@ const layerBase: Layer.Layer<
           }
 
           const runId = input.updateDelegatedCompletionOnlyRunId;
+          const admitted = yield* admitAcceptedInput(input).pipe(
+            Effect.provideService(SqlClient.SqlClient, sql),
+          );
           const normalized = yield* normalizeEvents(
             runId === undefined
-              ? input.events
-              : yield* updateDelegatedCompletionOnly(input.events, (id) => id === runId),
+              ? admitted
+              : yield* updateDelegatedCompletionOnly(admitted, (id) => id === runId),
           );
           const storedEvents = yield* eventStore.append({
             commandId: input.commandId,

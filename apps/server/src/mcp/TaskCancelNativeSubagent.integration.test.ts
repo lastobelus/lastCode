@@ -219,7 +219,12 @@ const cancelBackgroundOnlyTask = (
         ),
       );
       const layerTest = layerOrchestratorService.pipe(
-        Layer.provide(ThreadReadBroker.layer),
+        Layer.provide(
+          Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+            forSession: () => ({ authorize: () => Effect.undefined }),
+            inherit: () => Effect.succeed({ authorize: () => Effect.undefined }),
+          }),
+        ),
         Layer.provideMerge(layerOrchestration),
         Layer.provide(
           Layer.mergeAll(

@@ -799,7 +799,12 @@ const boxToolkitLayer = (thread: BoxThread, owned: boolean) => {
     Layer.provide(
       Layer.mock(ActionResume.ActionResume)({ readLatestSummary: () => Effect.succeed(null) }),
     ),
-    Layer.provide(ThreadReadBroker.layer),
+    Layer.provide(
+      Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+        forSession: () => ({ authorize: () => Effect.undefined }),
+        inherit: () => Effect.succeed({ authorize: () => Effect.undefined }),
+      }),
+    ),
     Layer.provide(NodeCrypto.layer),
     Layer.provide(layerBoxThreads),
     Layer.provide(layerBoxLaunches),
@@ -933,7 +938,12 @@ const makeLaptop = (
       Layer.provide(
         Layer.mock(ActionResume.ActionResume)({ readLatestSummary: () => Effect.succeed(null) }),
       ),
-      Layer.provide(ThreadReadBroker.layer),
+      Layer.provide(
+        Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+          forSession: () => ({ authorize: () => Effect.undefined }),
+          inherit: () => Effect.succeed({ authorize: () => Effect.undefined }),
+        }),
+      ),
       Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
       Layer.provideMerge(
         RemoteDelegation.layer.pipe(

@@ -2,6 +2,8 @@ import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import { ThreadReadAuthorization } from "../../../orchestration-v2/ThreadReadAuthorization.ts";
 import { expect, it } from "@effect/vitest";
 import {
+  AuthSessionId,
+  CommandId,
   EnvironmentId,
   GitCommandError,
   MessageId,
@@ -10,8 +12,6 @@ import {
   ProviderInstanceId,
   ProviderDriverKind,
   type ServerProvider,
-  RunId,
-  type OrchestrationV2ThreadProjection,
   ThreadId,
   type OrchestrationV2ThreadShell,
   type Project as ProjectRecord,
@@ -22,6 +22,8 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
+import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -40,6 +42,12 @@ import {
 } from "../../../orchestration-v2/Orchestrator.ts";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as Orchestrator from "../../../orchestration-v2/Orchestrator.ts";
+import * as ProviderAdapterRegistry from "../../../orchestration-v2/ProviderAdapterRegistry.ts";
+import * as ProviderReplayHarness from "../../../orchestration-v2/testkit/ProviderReplayHarness.ts";
+import { CodexProviderCapabilitiesV2 } from "../../../orchestration-v2/Adapters/CodexAdapterV2.ts";
+import * as SqlitePersistence from "../../../persistence/Sqlite.ts";
+import * as AuthSessions from "../../../persistence/AuthSessions.ts";
 import * as ServerConfig from "../../../config.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
 import * as Project from "../../../project/ProjectService.ts";
@@ -64,48 +72,122 @@ it.effect(
       const projectId = ProjectId.make("project");
       const providerInstanceId = ProviderInstanceId.make("codex");
       const modelSelection = { instanceId: providerInstanceId, model: "gpt-5" };
-      const runs = new Map<
-        ThreadId,
-        Array<{ id: RunId; userMessageId: MessageId; status: string }>
-      >();
+      const database = SqlitePersistence.layerMemory;
+      const registry = ProviderAdapterRegistry.layerFromAdapters([
+        {
+          instanceId: providerInstanceId,
+          driver: ProviderDriverKind.make("codex"),
+          getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
+          planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" as const }),
+          openSession: () => Effect.die("The launch fixture does not execute providers"),
+        },
+      ]);
+      const orchestration = ProviderReplayHarness.layerWithRegistry(
+        { name: "project-launch-authority" },
+        registry,
+        { databaseLayer: database, runEffectWorker: false },
+      );
+      const context = yield* Layer.mergeAll(
+        database,
+        AuthSessions.layer.pipe(Layer.provide(database)),
+        ThreadManagement.layer.pipe(Layer.provide(orchestration)),
+        orchestration,
+      ).pipe(Layer.build);
+      const orchestrator = Context.get(context, Orchestrator.OrchestratorV2);
+      const acceptedThreads = Context.get(context, ThreadManagement.ThreadManagementService);
+      const sessions = Context.get(context, AuthSessions.AuthSessionRepository);
       // When set, another client's input starts after the tool has loaded its caller.
       let advanceAfterCallerLoads = false;
       const threads = Layer.mock(ThreadManagement.ThreadManagementService)({
         getThreadShell: () => Effect.succeed(caller),
-        hasThreadReadAuthorization: (threadId, authorizationId) =>
-          Effect.sync(() =>
-            (runs.get(threadId) ?? []).some((run) => run.userMessageId === authorizationId),
-          ),
-        getThreadRecords: (threadId) =>
+        getThreadRecords: (threadId, fields, filter) =>
           Effect.gen(function* () {
             if (threadId === sourceThreadId && advanceAfterCallerLoads) {
               advanceAfterCallerLoads = false;
               yield* submit("between-client-session", sourceThreadId, "between-run");
             }
-            return {
-              thread: { id: threadId },
-              runs: runs.get(threadId) ?? [],
-              contextTransfers: [],
-              runtimeRequests: [],
-              nodes: [],
-              messages: [],
-            } as unknown as OrchestrationV2ThreadProjection;
+            return yield* acceptedThreads.getThreadRecords(threadId, fields, filter);
           }),
       });
       const broker = yield* ThreadReadBroker.ThreadReadBroker.pipe(
-        Effect.provide(ThreadReadBroker.layer.pipe(Layer.provide([NodeCrypto.layer, threads]))),
+        Effect.provide(
+          ThreadReadBroker.layer.pipe(
+            Layer.provide(threads),
+            Layer.provide([NodeCrypto.layer, Layer.succeedContext(context)]),
+          ),
+        ),
       );
+      const now = yield* DateTime.now;
+      for (const sessionId of [
+        "requester-session",
+        "between-client-session",
+        "another-client-session",
+      ]) {
+        yield* sessions.create({
+          sessionId: AuthSessionId.make(sessionId),
+          subject: "paired-client",
+          method: "browser-session-cookie",
+          scopes: ["orchestration:read"],
+          issuedAt: now,
+          expiresAt: DateTime.makeUnsafe(DateTime.toEpochMillis(now) + 86_400_000),
+          client: {
+            label: null,
+            ipAddress: null,
+            userAgent: null,
+            deviceType: "unknown",
+            os: null,
+            browser: null,
+          },
+        });
+      }
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create-source"),
+        threadId: sourceThreadId,
+        projectId,
+        title: "Source",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
       const submit = (sessionId: string, threadId: ThreadId, runId: string) =>
         Effect.gen(function* () {
           const messageId = MessageId.make(`${runId}-message`);
-          yield* broker.forSession(sessionId).authorize(threadId, messageId);
-          for (const run of runs.get(threadId) ?? []) run.status = "completed";
-          runs.set(threadId, [
-            ...(runs.get(threadId) ?? []),
-            { id: RunId.make(runId), userMessageId: messageId, status: "running" },
-          ]);
+          const before = yield* acceptedThreads.getThreadRecords(threadId, ["runs"]);
+          if (before.runs.length > 0) {
+            yield* orchestrator.dispatch({
+              type: "thread.stop",
+              commandId: CommandId.make(`stop:${runId}`),
+              threadId,
+            });
+          }
+          const threadReadIntent = yield* broker
+            .forSession(sessionId)
+            .authorize(threadId, messageId);
+          expect(threadReadIntent).toBeDefined();
+          yield* orchestrator.dispatch(
+            {
+              type: "message.dispatch",
+              commandId: CommandId.make(`accept:${runId}`),
+              threadId,
+              messageId,
+              text: "Launch a thread",
+              attachments: [],
+              dispatchMode: { type: "start_immediately" },
+              createdBy: "user",
+              creationSource: "web",
+            },
+            threadReadIntent === undefined ? undefined : { threadReadIntent },
+          );
+          const records = yield* acceptedThreads.getThreadRecords(threadId, ["runs"]);
+          return records.runs.find((run) => run.userMessageId === messageId)!;
         });
-      yield* submit("requester-session", sourceThreadId, "active-run");
+      const activeRun = yield* submit("requester-session", sourceThreadId, "active-run");
+      const requesterRequests = yield* broker.connect("requester-session");
       let caller = {
         id: sourceThreadId,
         projectId,
@@ -113,7 +195,7 @@ it.effect(
         modelSelection,
         runtimeMode: "full-access",
         interactionMode: "default",
-        activeRunId: "active-run",
+        activeRunId: activeRun.id,
         lineage: { rootThreadId: sourceThreadId, parentThreadId: null, relationshipToParent: null },
         archivedAt: null,
         deletedAt: null,
@@ -145,19 +227,49 @@ it.effect(
             return Effect.gen(function* () {
               // Another client advances the parent while the launch prepares.
               yield* submit("another-client-session", sourceThreadId, "later-run");
-              if (input.initialMessage?.messageId !== undefined && input.threadId !== undefined) {
+              const threadId = input.threadId!;
+              yield* orchestrator.dispatch({
+                type: "thread.create",
+                commandId: CommandId.make(`create:${threadId}`),
+                threadId,
+                projectId,
+                title: input.title,
+                modelSelection,
+                runtimeMode: input.runtimeMode,
+                interactionMode: input.interactionMode,
+                branch: null,
+                worktreePath: null,
+                createdBy: "agent",
+                creationSource: "mcp",
+              });
+              if (input.initialMessage?.messageId !== undefined) {
                 const authorization = yield* ThreadReadAuthorization;
-                yield* authorization.authorize(input.threadId, input.initialMessage.messageId);
+                const threadReadIntent = yield* authorization.authorize(
+                  threadId,
+                  input.initialMessage.messageId,
+                );
+                expect(threadReadIntent).toBeDefined();
+                yield* orchestrator.dispatch(
+                  {
+                    type: "message.dispatch",
+                    commandId: CommandId.make(`prompt:${threadId}`),
+                    threadId,
+                    messageId: input.initialMessage.messageId,
+                    text: input.initialMessage.text,
+                    attachments: [],
+                    dispatchMode: { type: "start_immediately" },
+                    createdBy: "agent",
+                    creationSource: "mcp",
+                  },
+                  threadReadIntent === undefined ? undefined : { threadReadIntent },
+                );
               }
               return {
-                threadId: input.threadId,
-                projection: {
-                  thread: { id: input.threadId, title: input.title, projectId, modelSelection },
-                  runs: [],
-                },
+                threadId,
+                projection: yield* orchestrator.getThreadProjection(threadId),
                 resumed: false,
-              } as unknown as ThreadLaunch.ThreadLaunchResult;
-            });
+              } satisfies ThreadLaunch.ThreadLaunchResult;
+            }).pipe(Effect.orDie);
           },
         }),
         Layer.mock(DocumentText.DocumentText)({}),
@@ -192,18 +304,18 @@ it.effect(
         .handle("t3_thread_launch", { title: "Audit", message: "Review the change" })
         .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
       expect(result.at(-1)?.result).toMatchObject({ projectId, modelSelection });
+      expect(advanceAfterCallerLoads).toBe(false);
       expect(launched[0]?.initialMessage?.senderThreadId).toBe(sourceThreadId);
       expect(launched[0]?.creatorThreadId).toBe(sourceThreadId);
       const prompted = launched[0]!;
-      runs.set(prompted.threadId!, [
-        {
-          id: RunId.make("launched-run"),
-          userMessageId: prompted.initialMessage!.messageId!,
-          status: "running",
-        },
+      const launchedProjection = yield* acceptedThreads.getThreadRecords(prompted.threadId!, [
+        "runs",
       ]);
+      const launchedRun = launchedProjection.runs.find(
+        (run) => run.userMessageId === prompted.initialMessage!.messageId,
+      )!;
       // Only the requester's client is connected; reaching it yields a search miss.
-      yield* (yield* broker.connect("requester-session")).pipe(
+      yield* requesterRequests.pipe(
         Stream.runForEach((request) =>
           broker.respond("requester-session", {
             connectionId: request.connectionId,
@@ -216,7 +328,7 @@ it.effect(
       );
       expect(
         yield* broker
-          .read(prompted.threadId!, RunId.make("launched-run"), {
+          .read(prompted.threadId!, launchedRun.id, {
             threadId: ThreadId.make("remote-thread"),
           })
           .pipe(Effect.flip),

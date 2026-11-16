@@ -19,9 +19,10 @@ import type { Caller } from "./threadAccess.ts";
  */
 
 /** The link a caller acts for: its own session, or the link that started its thread. */
-export const callerLinkOrigin = (
-  caller: Pick<Caller, "scope" | "caller">,
-): OrchestrationV2LinkOrigin | undefined =>
+export const callerLinkOrigin = (caller: {
+  readonly scope: Caller["scope"];
+  readonly caller: Pick<OrchestrationV2ThreadShell, "linkOrigin"> | undefined;
+}): OrchestrationV2LinkOrigin | undefined =>
   caller.caller?.linkOrigin ??
   (caller.scope.client?.linked === true
     ? {
@@ -32,7 +33,7 @@ export const callerLinkOrigin = (
     : undefined);
 
 /** The link that fences a caller, if any: one paired below full access. */
-export const fencingLinkOrigin = (caller: Pick<Caller, "scope" | "caller">) => {
+export const fencingLinkOrigin = (caller: Parameters<typeof callerLinkOrigin>[0]) => {
   const origin = callerLinkOrigin(caller);
   return origin !== undefined && linkOriginIsFenced(origin) ? origin : undefined;
 };

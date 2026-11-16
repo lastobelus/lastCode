@@ -8,44 +8,38 @@ import {
   type ThreadReadRequest,
   type ThreadReadResponse,
   type ThreadReadFailureReason,
-  type OrchestrationV2Run,
 } from "@t3tools/contracts";
 import type * as Cause from "effect/Cause";
-import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as SecureRandom from "effect/crypto/SecureRandom";
-import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
+import type * as SqlError from "effect/sql/SqlError";
 import * as Stream from "effect/Stream";
 
-import type { OrchestratorV2Error } from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
-import { ProjectionStoreThreadNotFoundError } from "../orchestration-v2/ProjectionStore.ts";
-import {
-  ThreadReadAuthorization,
-  referencedThreads,
-} from "../orchestration-v2/ThreadReadAuthorization.ts";
+import { ThreadReadAuthorization } from "../orchestration-v2/ThreadReadAuthorization.ts";
+import * as ThreadReadAuthority from "../threadReadAuthority/Store.ts";
+import type {
+  AuthorityFailureReason,
+  GrantCheck,
+  ThreadReadGrant,
+} from "../threadReadAuthority/Types.ts";
+import { resolveThreadReadContinuation } from "./ThreadReadContinuation.ts";
+import { referenceReadFailure, threadReadFailure } from "./ThreadReadDiagnostics.ts";
+import { makeOriginalReferenceCheck } from "./ThreadReadOriginalReference.ts";
 
 type Authorization = Context.Service.Shape<typeof ThreadReadAuthorization>;
 
-/**
- * Forwards thread reads that miss locally to the authenticated client that started the calling
- * run. Clients retain their own destination credentials; this server only relays.
- */
+/** Clients retain destination credentials. Only accepted, captured authority selects a stream. */
 export class ThreadReadBroker extends Context.Service<
   ThreadReadBroker,
   {
-    /** Binds each new input to the client session that submitted it. */
     readonly forSession: (sessionId: string) => Authorization;
-    /**
-     * Binds each new input to the session that authorized the caller's captured run. Callers pass
-     * the run they already loaded, so a later run on the source never lends its authority.
-     */
     readonly inherit: (
       sourceThreadId: ThreadId,
       sourceRunId: RunId | undefined,
@@ -57,247 +51,150 @@ export class ThreadReadBroker extends Context.Service<
       sessionId: string,
       response: ThreadReadResponse,
     ) => Effect.Effect<void, OrchestratorMcpFailure>;
-    /** Reads through the clients of the session that authorized the caller's captured run. */
     readonly read: (
       sourceThreadId: ThreadId,
       sourceRunId: RunId | undefined,
       input: OrchestratorMcpThreadReadInput,
     ) => Effect.Effect<OrchestratorMcpThreadReadResult, OrchestratorMcpFailure>;
+    /** A failure value means no destination was attempted; a thrown failure is final. */
+    readonly readReference: (
+      sourceThreadId: ThreadId,
+      sourceRunId: RunId | undefined,
+      input: OrchestratorMcpThreadReadInput,
+    ) => Effect.Effect<
+      OrchestratorMcpThreadReadResult | OrchestratorMcpFailure,
+      OrchestratorMcpFailure
+    >;
   }
 >()("t3/mcp/ThreadReadBroker") {}
 
-const isProjectionThreadNotFound = Schema.is(ProjectionStoreThreadNotFoundError);
+const unavailableFor = (check: GrantCheck, reference = false) => {
+  const failure = (reason: "disconnected" | "reauthenticate" | "fence" | "revoked") =>
+    reference
+      ? referenceReadFailure(reason, true)
+      : threadReadFailure(reason, reason === "disconnected");
+  switch (check.status) {
+    case "disconnected":
+      return failure("disconnected");
+    case "reauth-required":
+      return failure("reauthenticate");
+    case "fence-unavailable":
+      return failure("fence");
+    default:
+      return failure("revoked");
+  }
+};
 
-const unavailable = () =>
-  new OrchestratorMcpFailure({
-    code: "environment_unavailable",
-    threadReadReason: "unavailable",
-    message:
-      "The authorized client could not check the thread; this does not mean it is missing. For an attached reference or exact-source read, report this and ask the user to reconnect that client or send a new message from it if client access expired; do not switch routes. For ID-only discovery, continue through already-authorized discovery routes. Never bypass a permission refusal.",
-  });
-
-const bindingIdleMillis = 7 * 24 * 60 * 60 * 1000;
-const maxBindings = 10_000;
-
-// An Action wake is a new run, not a new client grant; follow only its recorded source.
-const actionContinuationSource = (
-  runs: ReadonlyArray<OrchestrationV2Run>,
-  run: OrchestrationV2Run,
-) =>
-  runs.find(
-    (source) =>
-      (run.pullRequestWatchContinuation !== undefined &&
-        run.pullRequestWatchContinuation.owner.sourceRunId === source.id &&
-        run.pullRequestWatchContinuation.messageId === run.userMessageId &&
-        source.pullRequestWatchObligations?.some(
-          (row) =>
-            row.generation === run.pullRequestWatchContinuation!.generation &&
-            row.owner.taskId === run.pullRequestWatchContinuation!.owner.taskId &&
-            row.owner.sourceRunId === source.id &&
-            row.owner.parentEnvironmentId ===
-              run.pullRequestWatchContinuation!.owner.parentEnvironmentId &&
-            row.owner.parentThreadId === run.pullRequestWatchContinuation!.owner.parentThreadId &&
-            row.owner.delegationId === run.pullRequestWatchContinuation!.owner.delegationId,
-        )) ||
-      source.actionObligations?.some(
-        (obligation) =>
-          obligation.state === "transferred" &&
-          obligation.owner.sourceRunId === source.id &&
-          obligation.continuationRunId === run.id &&
-          obligation.messageId === run.userMessageId,
-      ),
-  );
+const deniedGrant = (reason: AuthorityFailureReason, reference = false) => {
+  const diagnostic =
+    reason === "reauth-required"
+      ? "reauthenticate"
+      : reason === "fence-unavailable"
+        ? "fence"
+        : "revoked";
+  return reference ? referenceReadFailure(diagnostic, true) : threadReadFailure(diagnostic);
+};
+type ReadAuthority = ThreadReadGrant | { readonly denialReason: AuthorityFailureReason };
+const isFailure = Schema.is(OrchestratorMcpFailure);
 
 const make = Effect.gen(function* () {
   const random = yield* SecureRandom.SecureRandom;
   const threads = yield* ThreadManagementService.ThreadManagementService;
-
-  // Map order follows valid use, so idle expiry and capacity eviction both remove the least
-  // recently used binding without extending rejected claims.
-  const bindings = new Map<string, { sessionId: string; lastUsedAt: number }>();
-  const bindingKey = (threadId: ThreadId, messageId: MessageId) =>
-    JSON.stringify([threadId, messageId]);
-  const pruneBindings = Effect.map(Clock.currentTimeMillis, (now) => {
-    for (const [key, entry] of bindings) {
-      if (now - entry.lastUsedAt < bindingIdleMillis) break;
-      bindings.delete(key);
-    }
-    return now;
-  });
-
-  const bind = Effect.fn("ThreadReadBroker.bind")(
-    function* (threadId: ThreadId, messageId: MessageId, sessionId: string) {
-      const used = yield* threads.hasThreadReadAuthorization(threadId, messageId).pipe(
-        Effect.catchTags({
-          OrchestratorProjectionError: (error) =>
-            isProjectionThreadNotFound(error.cause) ? Effect.succeed(false) : Effect.fail(error),
-        }),
-      );
-      const now = yield* pruneBindings;
-      const key = bindingKey(threadId, messageId);
-      // A replay cannot claim an existing execution, including after eviction,
-      // or replace its original requester while the binding remains present.
-      if (used || bindings.has(key)) return;
-      if (bindings.size >= maxBindings) {
-        const oldest = bindings.keys().next().value;
-        if (oldest !== undefined) bindings.delete(oldest);
-      }
-      bindings.set(key, { sessionId, lastUsedAt: now });
-    },
-    // Failure to inspect the target denies remote routing without preventing its turn.
-    Effect.ignore(),
-  );
-
-  const forSession: ThreadReadBroker["Service"]["forSession"] = (sessionId) => ({
-    authorize: (threadId, messageId) => bind(threadId, messageId, sessionId),
-  });
-
-  const bindingSession = Effect.fn("ThreadReadBroker.bindingSession")(function* (
-    threadId: ThreadId,
-    messageId: MessageId,
-  ) {
-    const now = yield* pruneBindings;
-    const key = bindingKey(threadId, messageId);
-    const entry = bindings.get(key);
-    if (entry === undefined) return undefined;
-    bindings.delete(key);
-    bindings.set(key, { ...entry, lastUsedAt: now });
-    return entry.sessionId;
-  });
-
-  // A matched but expired reference grant must never fall back to the run's original client.
-  const referenceSession = Effect.fn("ThreadReadBroker.referenceSession")(function* (
-    threadId: ThreadId,
-    runId: RunId,
-    input: OrchestratorMcpThreadReadInput,
-    visited: Set<RunId>,
-    before?: number,
-  ): Effect.fn.Return<{ sessionId: string | undefined } | undefined, OrchestratorV2Error> {
-    if (input.environmentId === undefined) return undefined;
-    if (visited.has(runId)) return { sessionId: undefined };
-    visited.add(runId);
-    const source = yield* threads.getThreadRecords(threadId, [
-      "runs",
-      "runtimeRequests",
-      "nodes",
-      "contextTransfers",
-    ]);
-    const run = source.runs.find((candidate) => candidate.id === runId);
-    if (run === undefined) return undefined;
-    const nodeIds = new Set(
-      source.nodes.filter((node) => node.runId === runId).map((node) => node.id),
-    );
-    const candidates = source.runtimeRequests
-      .filter(
-        (request) =>
-          request.kind === "user_input" &&
-          request.status === "resolved" &&
-          request.resolvedAt !== null &&
-          (before === undefined || DateTime.toEpochMillis(request.resolvedAt) < before) &&
-          (nodeIds.has(request.nodeId) ||
-            (request.responseCapability.type === "message" &&
-              run.userMessageId === `async-answer:${request.id}`)) &&
-          request.threadReadContext?.records.some(
-            (record) =>
-              record.environmentId === input.environmentId && record.threadId === input.threadId,
-          ),
-      )
-      .map((request) => ({
-        id: String(request.id),
-        at: DateTime.toEpochMillis(request.resolvedAt!),
-        authorizationId: request.threadReadContext!.authorizationId,
-      }));
-    const { messages } = yield* threads.getThreadRecords(threadId, ["messages"], {
-      messageRunIds: [runId],
-      messageRoles: ["user"],
-    });
-    for (const message of messages) {
-      const context = message.threadReadContext;
-      if (
-        (message.runId === runId || message.id === run.userMessageId) &&
-        context !== undefined &&
-        (before === undefined || context.capturedAt < before) &&
-        referencedThreads(message.text, message.context).some(
-          (record) =>
-            record.environmentId === input.environmentId && record.threadId === input.threadId,
-        )
-      ) {
-        candidates.push({
-          id: String(message.id),
-          at: context.capturedAt,
-          authorizationId: context.authorizationId,
-        });
-      }
-    }
-    const latest = candidates.sort((a, b) => b.at - a.at || b.id.localeCompare(a.id))[0];
-    if (latest !== undefined) {
-      return { sessionId: yield* bindingSession(threadId, latest.authorizationId) };
-    }
-    const actionSource = actionContinuationSource(source.runs, run);
-    if (actionSource !== undefined) {
-      return yield* referenceSession(threadId, actionSource.id, input, visited, before);
-    }
-    const spawn = source.contextTransfers.find(
-      (transfer) => transfer.type === "subagent_spawn" && transfer.targetRunId === runId,
-    );
-    if (spawn?.sourcePoint.runId === undefined) return undefined;
-    // Equal timestamps cannot establish that an answer preceded this captured spawn.
-    const cutoff = DateTime.toEpochMillis(spawn.createdAt);
-    return yield* referenceSession(
-      spawn.sourceThreadId,
-      spawn.sourcePoint.runId,
-      input,
-      visited,
-      before === undefined ? cutoff : Math.min(before, cutoff),
-    );
-  });
-
-  /** A delegated run inherits the exact run that spawned it, even after its parent moves on. */
-  const runSession = Effect.fn("ThreadReadBroker.runSession")(function* (
-    threadId: ThreadId,
-    runId: RunId,
-    visited: Set<RunId>,
-  ): Effect.fn.Return<string | undefined, OrchestratorV2Error> {
-    if (visited.has(runId)) return undefined;
-    visited.add(runId);
-    const source = yield* threads.getThreadRecords(threadId, ["runs", "contextTransfers"]);
-    const run = source.runs.find((candidate) => candidate.id === runId);
-    if (run === undefined) return undefined;
-    const actionSource = actionContinuationSource(source.runs, run);
-    if (actionSource !== undefined) {
-      return yield* runSession(threadId, actionSource.id, visited);
-    }
-    const sessionId = yield* bindingSession(threadId, run.userMessageId);
-    if (sessionId !== undefined) return sessionId;
-    const spawn = source.contextTransfers.find(
-      (transfer) => transfer.type === "subagent_spawn" && transfer.targetRunId === run.id,
-    );
-    if (spawn?.sourcePoint.runId === undefined) return undefined;
-    return yield* runSession(spawn.sourceThreadId, spawn.sourcePoint.runId, visited);
-  });
-  // Without a captured run there is no authority to inherit.
-  const sourceSession = (threadId: ThreadId, runId: RunId | undefined) =>
-    runId === undefined
-      ? Effect.void
-      : runSession(threadId, runId, new Set()).pipe(Effect.orElseSucceed(() => undefined));
-
-  const inherit: ThreadReadBroker["Service"]["inherit"] = (sourceThreadId, sourceRunId) =>
-    Effect.map(sourceSession(sourceThreadId, sourceRunId), (sessionId) =>
-      sessionId === undefined ? ThreadReadAuthorization.defaultValue() : forSession(sessionId),
-    );
-
+  const authority = yield* ThreadReadAuthority.make;
+  const isOriginalInputReference = yield* makeOriginalReferenceCheck;
   const clients = new Map<
     string,
     { sessionId: string; queue: Queue.Queue<ThreadReadRequest, Cause.Done> }
   >();
+  const connectedSessions = () => [...new Set([...clients.values()].map((row) => row.sessionId))];
+  const isLive = (sessionId: string) =>
+    [...clients.values()].some((client) => client.sessionId === sessionId);
+
+  // These are proposals only. The event writer binds them to the input it actually accepts.
+  const forSession: ThreadReadBroker["Service"]["forSession"] = (sessionId) => ({
+    authorize: Effect.fn("ThreadReadBroker.authorize")(function* (threadId, inputId) {
+      const captured = yield* authority.captureAuthenticatedSessionAuthority(sessionId, {
+        isLive: () => isLive(sessionId),
+      });
+      if (captured !== undefined) return { threadId, inputId, authority: captured };
+      const status = yield* authority.sessionAuthorityStatus(sessionId);
+      return status === "current" || status === "unavailable"
+        ? undefined
+        : { threadId, inputId, denialReason: status };
+    }, Effect.orDie),
+  });
+
+  const lookup = Effect.fn("ThreadReadBroker.lookup")(function* (
+    thread: ThreadId,
+    kind: "run" | "reference",
+    id: string,
+  ): Effect.fn.Return<ReadAuthority | undefined, SqlError.SqlError> {
+    const grant = yield* authority.lookupGrant(thread, kind, id);
+    if (grant !== undefined) return grant;
+    const reason = yield* authority.lookupFailureReason(thread, kind, id);
+    return reason === undefined ? undefined : { denialReason: reason };
+  });
+
+  const resolve = (
+    threadId: ThreadId,
+    runId: RunId | undefined,
+    input?: OrchestratorMcpThreadReadInput,
+  ) =>
+    resolveThreadReadContinuation(
+      {
+        getThreadRecords: threads.getThreadRecords,
+        lookupRunGrant: (id, run) => lookup(id, "run", run),
+        lookupReferenceGrant: (id, nonce) => lookup(id, "reference", nonce),
+        isOriginalInputReference,
+      },
+      {
+        threadId,
+        runId,
+        ...(input?.environmentId === undefined
+          ? {}
+          : { reference: { environmentId: input.environmentId, threadId: input.threadId } }),
+      },
+    );
+
+  const inherit: ThreadReadBroker["Service"]["inherit"] = Effect.fn("ThreadReadBroker.inherit")(
+    function* (threadId, runId) {
+      const selected = yield* resolve(threadId, runId);
+      if (selected?.kind !== "grant") return ThreadReadAuthorization.defaultValue();
+      if ("denialReason" in selected.grant) {
+        const denialReason = selected.grant.denialReason;
+        return {
+          authorize: (destination: ThreadId, inputId: MessageId) =>
+            Effect.succeed({ threadId: destination, inputId, denialReason }),
+        };
+      }
+      const captured = yield* authority.prepareInheritedAuthority(
+        selected.grant,
+        connectedSessions,
+        isLive,
+      );
+      if (captured === undefined) return ThreadReadAuthorization.defaultValue();
+      return {
+        authorize: (destination: ThreadId, inputId: MessageId) =>
+          Effect.succeed({ threadId: destination, inputId, authority: captured }),
+      };
+    },
+    Effect.orElseSucceed(() => ThreadReadAuthorization.defaultValue()),
+  );
+
   const pending = new Map<
     string,
     {
       input: OrchestratorMcpThreadReadInput;
+      grant: ThreadReadGrant;
+      reference: boolean;
       clients: Set<string>;
       incomplete: boolean;
+      allNoDestination: boolean;
       failure?: ThreadReadFailureReason;
-      result: Deferred.Deferred<OrchestratorMcpThreadReadResult, OrchestratorMcpFailure>;
+      result: Deferred.Deferred<
+        OrchestratorMcpThreadReadResult | OrchestratorMcpFailure,
+        OrchestratorMcpFailure
+      >;
     }
   >();
 
@@ -307,25 +204,26 @@ const make = Effect.gen(function* () {
   ) {
     const entry = pending.get(requestId);
     if (entry === undefined || (!expired && entry.clients.size > 0)) return;
-    yield* Deferred.fail(
-      entry.result,
-      entry.failure !== "permission_denied" &&
-        (expired || entry.incomplete || entry.failure === "unavailable")
-        ? unavailable()
-        : entry.failure !== undefined
-          ? new OrchestratorMcpFailure({
-              code: entry.failure === "permission_denied" ? "capability_denied" : "invalid_request",
-              threadReadReason: entry.failure,
-              message:
-                entry.failure === "permission_denied"
-                  ? "The source connection does not permit reading this thread. Report this to the user; do not use another route."
-                  : "The source environment needs a server update to read this thread reference. Report this to the user; do not use another route.",
-            })
-          : new OrchestratorMcpFailure({
-              code: "thread_not_found",
-              message: `Thread ${entry.input.threadId} was not found in this environment or the client's other connected environments.`,
-            }),
-    );
+    if (!expired && entry.allNoDestination && !entry.incomplete) {
+      if (entry.reference) {
+        yield* Deferred.succeed(entry.result, referenceReadFailure("noDestination", true));
+      } else {
+        yield* Deferred.fail(entry.result, threadReadFailure("noDestination", true));
+      }
+      return;
+    }
+    const error =
+      entry.failure === "permission_denied"
+        ? threadReadFailure("denied")
+        : expired || entry.incomplete || entry.failure === "unavailable"
+          ? threadReadFailure("unavailable")
+          : entry.failure === "unsupported"
+            ? threadReadFailure("unsupported")
+            : new OrchestratorMcpFailure({
+                code: "thread_not_found",
+                message: `Thread ${entry.input.threadId} was not found in the checked environments.`,
+              });
+    yield* Deferred.fail(entry.result, error);
   });
 
   const connect: ThreadReadBroker["Service"]["connect"] = Effect.fn("ThreadReadBroker.connect")(
@@ -339,6 +237,7 @@ const make = Effect.gen(function* () {
           for (const [requestId, entry] of pending) {
             if (!entry.clients.delete(key)) continue;
             entry.incomplete = true;
+            entry.allNoDestination = false;
             yield* finishMiss(requestId);
           }
           yield* Queue.end(queue);
@@ -351,7 +250,6 @@ const make = Effect.gen(function* () {
   const respond: ThreadReadBroker["Service"]["respond"] = Effect.fn("ThreadReadBroker.respond")(
     function* (sessionId, response) {
       const entry = pending.get(response.requestId);
-      // A response can arrive after a completed read or cancellation.
       if (entry === undefined) return;
       if (
         !entry.clients.has(response.connectionId) ||
@@ -363,8 +261,13 @@ const make = Effect.gen(function* () {
         });
       }
       if (
-        response.failure !== undefined &&
-        (entry.input.environmentId !== response.failure.environmentId || response.result !== null)
+        (response.failure !== undefined &&
+          (entry.input.environmentId !== response.failure.environmentId ||
+            response.result !== null)) ||
+        (response.noDestinationAttempt === true &&
+          (entry.input.environmentId === undefined ||
+            response.result !== null ||
+            response.failure?.reason === "permission_denied"))
       ) {
         return yield* new OrchestratorMcpFailure({
           code: "invalid_request",
@@ -383,68 +286,100 @@ const make = Effect.gen(function* () {
               "The thread read response does not match the requested thread and environment.",
           });
         }
+        const current = yield* authority
+          .touchSuccessfulRead(entry.grant, sessionId)
+          .pipe(Effect.mapError(() => threadReadFailure("fence")));
+        if (!current) {
+          const check = yield* authority
+            .eligibleConnectedSessions(entry.grant, connectedSessions())
+            .pipe(Effect.mapError(() => threadReadFailure("fence")));
+          yield* Deferred.fail(entry.result, unavailableFor(check));
+          return;
+        }
         yield* Deferred.succeed(entry.result, { ...response.result, readVia: "client" });
         return;
       }
       entry.clients.delete(response.connectionId);
-      entry.incomplete ||= response.unavailableEnvironmentIds.length > 0;
-      if (response.failure !== undefined) {
-        const reason = response.failure.reason;
-        if (reason === "unavailable") entry.incomplete = true;
-        if (entry.failure === undefined || reason === "permission_denied") entry.failure = reason;
+      entry.allNoDestination &&= response.noDestinationAttempt === true;
+      // A catalog-only no-attempt response can name its unavailable target without implying
+      // an uncertain attempt. Any old/unknown/attempted response defeats the aggregate proof.
+      if (response.noDestinationAttempt !== true) {
+        entry.incomplete ||= response.unavailableEnvironmentIds.length > 0;
+        if (response.failure !== undefined) {
+          const reason = response.failure.reason;
+          if (reason === "unavailable") entry.incomplete = true;
+          if (entry.failure === undefined || reason === "permission_denied") entry.failure = reason;
+        }
       }
       yield* finishMiss(response.requestId);
     },
   );
 
-  const read: ThreadReadBroker["Service"]["read"] = Effect.fn("ThreadReadBroker.read")(
-    function* (sourceThreadId, sourceRunId, input) {
-      const reference =
-        sourceRunId === undefined
-          ? undefined
-          : yield* referenceSession(sourceThreadId, sourceRunId, input, new Set()).pipe(
-              Effect.orElseSucceed(() => ({ sessionId: undefined })),
-            );
-      const sessionId =
-        reference === undefined
-          ? yield* sourceSession(sourceThreadId, sourceRunId)
-          : reference.sessionId;
-      if (sessionId === undefined) {
-        if (reference !== undefined) return yield* unavailable();
-        return yield* new OrchestratorMcpFailure({
-          code: "environment_unavailable",
-          threadReadReason: "unavailable",
-          message:
-            "This run has no connected client authorized to read other environments. Send a new message from the client connected to those environments and retry.",
-        });
-      }
-      const targets = [...clients].filter(([, client]) => client.sessionId === sessionId);
-      if (targets.length === 0) return yield* unavailable();
-      const requestId = yield* random.uuidV4();
-      const result = yield* Deferred.make<
-        OrchestratorMcpThreadReadResult,
-        OrchestratorMcpFailure
-      >();
-      pending.set(requestId, {
-        input,
-        result,
-        clients: new Set(targets.map(([key]) => key)),
-        incomplete: false,
-      });
-      return yield* Effect.gen(function* () {
-        for (const [connectionId, client] of targets)
-          yield* Queue.offer(client.queue, { connectionId, requestId, input });
-        return yield* Deferred.await(result).pipe(
-          Effect.timeoutOrElse({
-            duration: "15 seconds",
-            orElse: () => finishMiss(requestId, true).pipe(Effect.andThen(Deferred.await(result))),
-          }),
-        );
-      }).pipe(Effect.ensuring(Effect.sync(() => pending.delete(requestId))));
-    },
-  );
-
-  return ThreadReadBroker.of({ forSession, inherit, connect, respond, read });
+  const readSelected = Effect.fn("ThreadReadBroker.readSelected")(function* (
+    sourceThreadId: ThreadId,
+    sourceRunId: RunId | undefined,
+    input: OrchestratorMcpThreadReadInput,
+    reference: boolean,
+  ) {
+    const selected = yield* resolve(sourceThreadId, sourceRunId, input).pipe(
+      Effect.mapError(() => threadReadFailure("fence")),
+    );
+    if (selected?.kind !== "grant") {
+      if (reference) return referenceReadFailure("noGrant", true);
+      return yield* threadReadFailure("noGrant", true);
+    }
+    if ("denialReason" in selected.grant) {
+      if (reference) return deniedGrant(selected.grant.denialReason, true);
+      return yield* deniedGrant(selected.grant.denialReason);
+    }
+    const check = yield* authority
+      .eligibleConnectedSessions(selected.grant, connectedSessions())
+      .pipe(Effect.mapError(() => threadReadFailure("fence")));
+    if (check.status !== "eligible") {
+      if (reference) return unavailableFor(check, true);
+      return yield* unavailableFor(check);
+    }
+    const sessionIds = new Set(check.sessionIds);
+    const targets = [...clients].filter(([, client]) => sessionIds.has(client.sessionId));
+    if (targets.length === 0) {
+      if (reference) return referenceReadFailure("disconnected", true);
+      return yield* threadReadFailure("disconnected", true);
+    }
+    const requestId = yield* random.uuidV4();
+    const result = yield* Deferred.make<
+      OrchestratorMcpThreadReadResult | OrchestratorMcpFailure,
+      OrchestratorMcpFailure
+    >();
+    pending.set(requestId, {
+      input,
+      grant: selected.grant,
+      reference,
+      result,
+      clients: new Set(targets.map(([key]) => key)),
+      incomplete: false,
+      allNoDestination: true,
+    });
+    return yield* Effect.gen(function* () {
+      for (const [connectionId, client] of targets)
+        yield* Queue.offer(client.queue, { connectionId, requestId, input });
+      return yield* Deferred.await(result).pipe(
+        Effect.timeoutOrElse({
+          duration: "15 seconds",
+          orElse: () => finishMiss(requestId, true).pipe(Effect.andThen(Deferred.await(result))),
+        }),
+      );
+    }).pipe(Effect.ensuring(Effect.sync(() => pending.delete(requestId))));
+  });
+  const read: ThreadReadBroker["Service"]["read"] = (thread, run, input) =>
+    readSelected(thread, run, input, false).pipe(
+      Effect.filterOrFail(
+        (result): result is OrchestratorMcpThreadReadResult => !isFailure(result),
+        (result) => result as OrchestratorMcpFailure,
+      ),
+    );
+  const readReference: ThreadReadBroker["Service"]["readReference"] = (thread, run, input) =>
+    readSelected(thread, run, input, true);
+  return ThreadReadBroker.of({ forSession, inherit, connect, respond, read, readReference });
 });
 
 export const layer = Layer.effect(ThreadReadBroker, make);

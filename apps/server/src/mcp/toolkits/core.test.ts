@@ -1103,7 +1103,12 @@ it.effect("hides act-as-caller tools from a client caller", () =>
     Effect.provide(
       layerOrchestratorToolkit.pipe(
         Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
-        Layer.provide(ThreadReadBroker.layer),
+        Layer.provide(
+          Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+            forSession: () => ({ authorize: () => Effect.undefined }),
+            inherit: () => Effect.succeed({ authorize: () => Effect.undefined }),
+          }),
+        ),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
         Layer.provide(ServerSettings.layerTest()),
@@ -1154,7 +1159,12 @@ it.effect("a caller cannot rewrite a scheduled task that runs above its own mode
     Effect.provide(
       layerOrchestratorToolkit.pipe(
         Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
-        Layer.provide(ThreadReadBroker.layer),
+        Layer.provide(
+          Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+            forSession: () => ({ authorize: () => Effect.undefined }),
+            inherit: () => Effect.succeed({ authorize: () => Effect.undefined }),
+          }),
+        ),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
         Layer.provide(ServerSettings.layerTest()),
@@ -1346,7 +1356,12 @@ it.effect.each(["t3_thread_interrupt", "t3_workflow_stop"])(
       Effect.provide(
         layerOrchestratorToolkit.pipe(
           Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
-          Layer.provide(ThreadReadBroker.layer),
+          Layer.provide(
+            Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+              forSession: () => ({ authorize: () => Effect.undefined }),
+              inherit: () => Effect.succeed({ authorize: () => Effect.undefined }),
+            }),
+          ),
           Layer.provide(NodeCrypto.layer),
           Layer.provide(
             Layer.mock(ThreadManagement.ThreadManagementService)({
@@ -1455,7 +1470,12 @@ it.effect("discovers workflow stop targets and requires orchestration capability
     Effect.provide(
       layerOrchestratorToolkit.pipe(
         Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
-        Layer.provide(ThreadReadBroker.layer),
+        Layer.provide(
+          Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+            forSession: () => ({ authorize: () => Effect.undefined }),
+            inherit: () => Effect.succeed({ authorize: () => Effect.undefined }),
+          }),
+        ),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(
           Layer.mock(ThreadManagement.ThreadManagementService)({
@@ -1576,7 +1596,12 @@ it.effect(
       Effect.provide(
         layerOrchestratorToolkit.pipe(
           Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
-          Layer.provide(ThreadReadBroker.layer),
+          Layer.provide(
+            Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+              forSession: () => ({ authorize: () => Effect.undefined }),
+              inherit: () => Effect.succeed({ authorize: () => Effect.undefined }),
+            }),
+          ),
           Layer.provide(NodeCrypto.layer),
           Layer.provide(
             Layer.mock(ThreadManagement.ThreadManagementService)({

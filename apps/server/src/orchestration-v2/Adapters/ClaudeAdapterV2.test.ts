@@ -15393,7 +15393,12 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               authorizationHeader: config.authorizationHeader,
               metadata: { "claudecode/toolUseId": id },
             });
-          const frame = (id: string, promptUuid?: string) =>
+          const frame = (
+            id: string,
+            promptUuid?: string,
+            parentToolUseId: string | null = null,
+            toolName = "mcp__t3-code__run_project_action_and_resume",
+          ) =>
             claudeSdkFrame({
               type: "assistant",
               message: {
@@ -15405,12 +15410,12 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                   {
                     type: "tool_use",
                     id,
-                    name: "mcp__t3-code__run_project_action_and_resume",
+                    name: toolName,
                     input: { actionId: "test" },
                   },
                 ],
               },
-              parent_tool_use_id: null,
+              parent_tool_use_id: parentToolUseId,
               uuid: "00000000-0000-4000-8000-000000000791",
               session_id: WAKE_NATIVE_SESSION,
               ...(promptUuid === undefined ? {} : { user_message_uuid: promptUuid }),
@@ -15487,6 +15492,27 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             runId: first.runId,
             attemptId: first.attemptId,
           });
+          yield* harness.offerAndWait(frame("launch-a", undefined, null, "Agent"));
+          yield* harness.offerAndWait(frame("child-early", undefined, "launch-a"));
+          assert.isUndefined(yield* lookup("child-early"));
+          yield* harness.offerAndWait(
+            makeSubagentTaskStartedFrame({
+              taskId: "native-child-a",
+              toolUseId: "launch-a",
+              uuid: "00000000-0000-4000-8000-000000000794",
+            }),
+          );
+          assert.deepEqual(yield* lookup("child-early"), {
+            runId: first.runId,
+            attemptId: first.attemptId,
+          });
+          yield* harness.offerAndWait(frame("child-a", undefined, "launch-a"));
+          assert.deepEqual(yield* lookup("child-a"), {
+            runId: first.runId,
+            attemptId: first.attemptId,
+          });
+          yield* harness.offerAndWait(frame("child-unknown", undefined, "forged-launch"));
+          assert.isUndefined(yield* lookup("child-unknown"));
           yield* harness.offerAndWait(
             claudeSdkFrame({
               ...makeResultFrame({ uuid: "00000000-0000-4000-8000-000000000792", result: "Done" }),
@@ -15495,6 +15521,10 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           );
           yield* harness.awaitTerminal(1);
           assert.isUndefined(yield* lookup("a"));
+          assert.deepEqual(yield* lookup("child-a"), {
+            runId: first.runId,
+            attemptId: first.attemptId,
+          });
           const second = makeClaudeTestTurnInput({
             threadId: harness.threadId,
             providerThread: harness.providerThread,
@@ -15512,6 +15542,60 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             runId: second.runId,
             attemptId: second.attemptId,
           });
+          yield* harness.offerAndWait(frame("child-a-later", undefined, "launch-a"));
+          assert.deepEqual(yield* lookup("child-a-later"), {
+            runId: first.runId,
+            attemptId: first.attemptId,
+          });
+          yield* harness.offerAndWait(
+            claudeSdkFrame({
+              ...frame("foreign-child", undefined, "launch-a"),
+              session_id: "foreign-native-session",
+            }),
+          );
+          assert.isUndefined(yield* lookup("foreign-child"));
+          yield* harness.offerAndWait(
+            makeSubagentNotificationFrame({
+              taskId: "native-child-a",
+              toolUseId: "launch-a",
+              summary: "Done",
+              uuid: "00000000-0000-4000-8000-000000000795",
+            }),
+          );
+          assert.isUndefined(yield* lookup("child-a"));
+          assert.isUndefined(yield* lookup("child-a-later"));
+          yield* harness.offerAndWait(frame("old-child", undefined, "launch-a"));
+          assert.isUndefined(yield* lookup("old-child"));
+          yield* harness.offerAndWait(frame("resume-a", undefined, null, "SendMessage"));
+          yield* harness.offerAndWait(
+            makeSubagentTaskStartedFrame({
+              taskId: "native-child-a",
+              toolUseId: "resume-a",
+              uuid: "00000000-0000-4000-8000-000000000796",
+            }),
+          );
+          yield* harness.offerAndWait(frame("resumed-child-original", undefined, "launch-a"));
+          yield* harness.offerAndWait(frame("resumed-child-current", undefined, "resume-a"));
+          assert.deepEqual(yield* lookup("resumed-child-original"), {
+            runId: first.runId,
+            attemptId: first.attemptId,
+          });
+          assert.deepEqual(yield* lookup("resumed-child-current"), {
+            runId: first.runId,
+            attemptId: first.attemptId,
+          });
+          yield* harness.offerAndWait(frame("child-a", undefined, "launch-a"));
+          assert.isUndefined(yield* lookup("child-a"));
+          yield* harness.offerAndWait(
+            makeSubagentNotificationFrame({
+              taskId: "native-child-a",
+              toolUseId: "resume-a",
+              summary: "Done again",
+              uuid: "00000000-0000-4000-8000-000000000797",
+            }),
+          );
+          assert.isUndefined(yield* lookup("resumed-child-original"));
+          assert.isUndefined(yield* lookup("resumed-child-current"));
           yield* harness.offerAndWait(frame("foreign", "00000000-0000-4000-8000-000000000799"));
           assert.isUndefined(yield* lookup("foreign"));
           yield* harness.offerAndWait(frame("foreign-next"));

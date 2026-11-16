@@ -2,6 +2,7 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it, vi } from "@effect/vitest";
 import {
+  AuthSessionId,
   CommandId,
   EnvironmentId,
   EventId,
@@ -12,6 +13,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -20,6 +22,7 @@ import * as Stream from "effect/Stream";
 import * as Tracer from "effect/Tracer";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as AuthSessions from "../persistence/AuthSessions.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as CommandReceiptStore from "../orchestration-v2/CommandReceiptStore.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
@@ -61,6 +64,8 @@ const orchestration = ProviderReplayHarness.layerWithRegistry({ name: "mcp-creat
   runEffectWorker: false,
 });
 const dependencies = Layer.mergeAll(
+  database,
+  AuthSessions.layer.pipe(Layer.provide(database)),
   NodeServices.layer,
   NodeCrypto.layer,
   ServerSettings.layerTest(),
@@ -119,6 +124,24 @@ const scope: McpInvocationScope = {
 
 const createParent = Effect.gen(function* () {
   const threads = yield* ThreadManagement.ThreadManagementService;
+  const sessions = yield* AuthSessions.AuthSessionRepository;
+  const now = yield* DateTime.now;
+  yield* sessions.create({
+    sessionId: AuthSessionId.make("client:mcp-create"),
+    subject: "paired-client",
+    method: "browser-session-cookie",
+    scopes: ["orchestration:read"],
+    issuedAt: now,
+    expiresAt: DateTime.makeUnsafe(DateTime.toEpochMillis(now) + 30 * 24 * 60 * 60 * 1000),
+    client: {
+      label: null,
+      ipAddress: null,
+      userAgent: null,
+      deviceType: "unknown",
+      os: null,
+      browser: null,
+    },
+  });
   yield* threads.dispatch({
     type: "thread.create",
     commandId: CommandId.make("create-parent"),
@@ -134,21 +157,26 @@ const createParent = Effect.gen(function* () {
     creationSource: "web",
   });
   const broker = yield* ThreadReadBroker.ThreadReadBroker;
-  yield* broker
+  const requests = yield* broker.connect("client:mcp-create");
+  const threadReadIntent = yield* broker
     .forSession("client:mcp-create")
     .authorize(parentThreadId, MessageId.make("message:parent"));
-  yield* threads.dispatch({
-    type: "message.dispatch",
-    commandId: CommandId.make("start-parent"),
-    threadId: parentThreadId,
-    messageId: MessageId.make("message:parent"),
-    text: "Create another thread",
-    attachments: [],
-    modelSelection,
-    dispatchMode: { type: "start_immediately" },
-    createdBy: "user",
-    creationSource: "web",
-  });
+  yield* threads.dispatch(
+    {
+      type: "message.dispatch",
+      commandId: CommandId.make("start-parent"),
+      threadId: parentThreadId,
+      messageId: MessageId.make("message:parent"),
+      text: "Create another thread",
+      attachments: [],
+      modelSelection,
+      dispatchMode: { type: "start_immediately" },
+      createdBy: "user",
+      creationSource: "web",
+    },
+    threadReadIntent === undefined ? undefined : { threadReadIntent },
+  );
+  return { requests };
 });
 
 it.effect(
@@ -328,7 +356,7 @@ it.effect("retries an interrupted MCP create with a prompt after reopening its t
     const service = yield* OrchestratorMcpService.OrchestratorMcpService;
     const threads = yield* ThreadManagement.ThreadManagementService;
     const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
-    yield* createParent;
+    const { requests } = yield* createParent;
     const input = {
       clientRequestId: "interrupted-create",
       threads: [{ title: "Child", prompt: "Inspect the change" }],
@@ -384,7 +412,6 @@ it.effect("retries an interrupted MCP create with a prompt after reopening its t
       assert.lengthOf(projection.runs, 1);
       yield* Effect.gen(function* () {
         const broker = yield* ThreadReadBroker.ThreadReadBroker;
-        const requests = yield* broker.connect("client:mcp-create");
         const reading = yield* broker
           .read(threadId, projection.runs[0]!.id, {
             threadId: ThreadId.make("thread:remote-target"),

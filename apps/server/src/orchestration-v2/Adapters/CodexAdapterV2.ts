@@ -1395,6 +1395,10 @@ interface DeferredCodexRootTerminal {
 
 interface CodexSubagentThreadContext {
   parentContext: ActiveCodexTurnContext;
+  readonly mcpOwner: {
+    readonly threadId: ThreadId;
+    readonly execution: McpProviderSessions.McpExecutionOrigin;
+  };
   readonly providerThread: OrchestrationV2ProviderThread;
   readonly childThread: OrchestrationV2AppThread;
   readonly subagentNodeId: OrchestrationV2ExecutionNode["id"];
@@ -3149,6 +3153,16 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               runningCompactionItemIds: new Set(),
               runningWebSearchItems: new Map(),
             };
+            yield* mcpSessions.registerExecution(
+              subagent.mcpOwner.threadId,
+              {
+                provider: "codex",
+                nativeThreadId: yield* getNativeThreadId(subagent.providerThread),
+                nativeTurnId: turn.nativeTurnId,
+              },
+              subagent.mcpOwner.execution,
+              turn.nativeTurnId,
+            );
             beginTurnTokenUsage(activeContext);
             endSessionApprovalsOnModeChange(activeContext);
             yield* Ref.update(activeTurns, (current) => {
@@ -3410,6 +3424,13 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             });
             const subagent = {
               parentContext: input.context,
+              mcpOwner: input.context.subagent?.mcpOwner ?? {
+                threadId: input.context.input.threadId,
+                execution: {
+                  runId: input.context.input.runId,
+                  attemptId: input.context.input.attemptId,
+                },
+              },
               providerThread,
               childThread,
               subagentNodeId,
@@ -6930,6 +6951,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 });
               }
               if (input.context.subagent !== null) {
+                yield* mcpSessions.endExecution(
+                  input.context.subagent.mcpOwner.threadId,
+                  input.context.subagent.mcpOwner.execution,
+                  input.nativeTurnId,
+                );
                 yield* emitProviderEvent({
                   type: "node.updated",
                   driver: CODEX_PROVIDER,

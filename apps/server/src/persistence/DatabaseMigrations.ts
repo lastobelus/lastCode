@@ -1,3 +1,4 @@
+import { reconcileAuthorityFence, verifyAuthorityFence } from "../threadReadAuthority/Schema.ts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -261,7 +262,9 @@ const convertLegacyHistory = Effect.fn("convertLegacyMigrationHistory")(function
 });
 
 /** Server and snapshot tools use this entrypoint; upstream keeps its own runner. */
-export const runDatabaseMigrations = Effect.fn("runDatabaseMigrations")(function* () {
+export const runDatabaseMigrations = Effect.fn("runDatabaseMigrations")(function* (
+  options: { readonly authorityFence?: "verify" | "repair" } = {},
+) {
   const sql = yield* SqlClient.SqlClient;
   return yield* sql.withTransaction(
     Effect.gen(function* () {
@@ -269,6 +272,10 @@ export const runDatabaseMigrations = Effect.fn("runDatabaseMigrations")(function
       yield* convertLegacyHistory();
       const upstream = yield* runMigrations();
       const lastcode = yield* runLastCodeMigrations();
+      if (options.authorityFence === "verify") {
+        if (!(yield* verifyAuthorityFence()))
+          return yield* invalid("the thread read authority fence requires offline repair");
+      } else yield* reconcileAuthorityFence();
       return [...previews, ...upstream, ...lastcode];
     }),
   );

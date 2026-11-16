@@ -280,7 +280,12 @@ describe("orchestrator MCP toolkit", () => {
       ]);
       const layerTest = layerOrchestratorToolkit.pipe(
         Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
-        Layer.provide(ThreadReadBroker.layer),
+        Layer.provide(
+          Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+            forSession: () => ({ authorize: () => Effect.undefined }),
+            inherit: () => Effect.succeed({ authorize: () => Effect.undefined }),
+          }),
+        ),
         Layer.provideMerge(layerOrchestration),
         Layer.provide(
           CodexOrchestratorReplayHarness.makeProviderAdapterRegistryLayer(transcript).pipe(
@@ -812,17 +817,35 @@ describe("orchestrator MCP toolkit", () => {
             ?.state,
         ).toBe("acknowledged");
 
-        const messageReadsBeforeCapabilities = messageReads.length;
-        const tableReadsBeforeCapabilities = projectionTableReads.length;
-        const capabilities = yield* invoke("orchestrator_capabilities", {}).pipe(
-          Effect.withTracer(tracer),
-        );
-        expect(capabilities.isError).not.toBe(true);
-        expect(messageReads).toHaveLength(messageReadsBeforeCapabilities);
-        // The caller check reads only the thread row, never its history.
-        expect(new Set(projectionTableReads.slice(tableReadsBeforeCapabilities))).toEqual(
-          new Set(["threads"]),
-        );
+        const callerAttempt = afterRead.attempts.at(-1);
+        expect(callerAttempt).toBeDefined();
+        for (const caller of [
+          invocation,
+          {
+            ...invocation,
+            thread: { ...invocation.thread!, attribution: "unresolved" as const },
+          },
+          {
+            ...invocation,
+            thread: {
+              ...invocation.thread!,
+              attribution: "resolved" as const,
+              execution: { runId: callerAttempt!.runId, attemptId: callerAttempt!.id },
+            },
+          },
+        ]) {
+          const messageReadsBeforeCapabilities = messageReads.length;
+          const tableReadsBeforeCapabilities = projectionTableReads.length;
+          const capabilities = yield* invoke("orchestrator_capabilities", {}, caller).pipe(
+            Effect.withTracer(tracer),
+          );
+          expect(capabilities.isError).not.toBe(true);
+          expect(messageReads).toHaveLength(messageReadsBeforeCapabilities);
+          // The caller check reads only the thread row, never its history.
+          expect(new Set(projectionTableReads.slice(tableReadsBeforeCapabilities))).toEqual(
+            new Set(["threads"]),
+          );
+        }
         const runReadsBeforeStatus = runReads.length;
         const transferReadsBeforeStatus = transferReads.length;
         const threadRecordReadsBeforeStatus = threadRecordReads.length;
@@ -857,7 +880,12 @@ it.effect("encodes a recovered thread detail as a JSON-safe MCP tool result", ()
       ThreadManagementService.layer.pipe(Layer.provide(orchestratorLayer)),
     );
     const testLayer = layerOrchestratorToolkit.pipe(
-      Layer.provide(ThreadReadBroker.layer),
+      Layer.provide(
+        Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+          forSession: () => ({ authorize: () => Effect.undefined }),
+          inherit: () => Effect.succeed({ authorize: () => Effect.undefined }),
+        }),
+      ),
       Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
       Layer.provideMerge(orchestrationLayer),
       Layer.provide(registry),

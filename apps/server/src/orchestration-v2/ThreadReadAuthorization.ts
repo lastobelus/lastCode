@@ -6,14 +6,19 @@ import {
   type OrchestrationMessageContext,
   type ThreadContextRecord,
 } from "@t3tools/contracts";
+import type { ThreadReadIntakeIntent } from "../threadReadAuthority/Types.ts";
+export type { ThreadReadIntakeIntent } from "../threadReadAuthority/Types.ts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 
 /** Binds only remote thread-read authority to a new input before provider execution. */
 export class ThreadReadAuthorization extends Context.Reference<{
-  readonly authorize: (threadId: ThreadId, messageId: MessageId) => Effect.Effect<void>;
+  readonly authorize: (
+    threadId: ThreadId,
+    messageId: MessageId,
+  ) => Effect.Effect<ThreadReadIntakeIntent | undefined>;
 }>("t3/orchestration/ThreadReadAuthorization", {
-  defaultValue: () => ({ authorize: () => Effect.void }),
+  defaultValue: () => ({ authorize: () => Effect.undefined }),
 }) {}
 
 export const questionAnswerAuthorizationId = (commandId: CommandId): MessageId =>

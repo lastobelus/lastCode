@@ -1,5 +1,7 @@
 import {
   ActionResumeState,
+  AuthSessionId,
+  CommandId,
   EnvironmentId,
   MessageId,
   NodeId,
@@ -23,6 +25,7 @@ import * as Layer from "effect/Layer";
 import * as Metric from "effect/Metric";
 import * as TestClock from "effect/testing/TestClock";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "vite-plus/test";
 
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
@@ -37,6 +40,10 @@ import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
+import * as ProviderReplayHarness from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
+import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as AuthSessions from "../persistence/AuthSessions.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import { ThreadReadAuthorization } from "../orchestration-v2/ThreadReadAuthorization.ts";
 import type * as McpInvocationContext from "./McpInvocationContext.ts";
@@ -46,15 +53,20 @@ import * as ActionResume from "../actionResume/ActionResume.ts";
 import { liveThreadShell } from "./McpToolAccess.testkit.ts";
 import { actionResumeStatus, actionResumeSummary } from "@t3tools/shared/actionResume";
 
+const layerThreadReadBroker = Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+  forSession: () => ThreadReadAuthorization.defaultValue(),
+  inherit: () => Effect.succeed(ThreadReadAuthorization.defaultValue()),
+});
+
 const layerOrchestratorServiceBase = OrchestratorMcpService.layer.pipe(
   Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
   Layer.provide(Layer.mock(PeerLinks.PeerLinks)({ get: () => Effect.succeedNone })),
   Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
-  Layer.provide(ThreadReadBroker.layer),
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
 );
 const layerOrchestratorService = layerOrchestratorServiceBase.pipe(
+  Layer.provide(layerThreadReadBroker),
   Layer.provide(
     Layer.mock(ActionResume.ActionResume)({ readLatestSummary: () => Effect.succeed(null) }),
   ),
@@ -207,7 +219,7 @@ it("readThread preserves caller access errors and prefers activity-run status ov
   } as unknown as OrchestrationV2ThreadProjection;
 
   const layer = layerOrchestratorService.pipe(
-    Layer.provide(ThreadReadBroker.layer),
+    Layer.provide(layerThreadReadBroker),
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
@@ -378,6 +390,7 @@ it("a parent read exposes only the child's bounded latest Action summary", async
     runs: [],
   } as OrchestrationV2ThreadProjection;
   const layer = layerOrchestratorServiceBase.pipe(
+    Layer.provide(layerThreadReadBroker),
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ActionResume.ActionResume)({
@@ -488,7 +501,7 @@ it("readThread pages cut-off text without splitting an emoji across pages", asyn
   ];
 
   const layer = layerOrchestratorService.pipe(
-    Layer.provide(ThreadReadBroker.layer),
+    Layer.provide(layerThreadReadBroker),
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
@@ -877,7 +890,7 @@ it("taskStatus returns task.providerInstanceId rather than the driver kind", asy
   } as unknown as OrchestrationV2ThreadProjection;
 
   const layer = layerOrchestratorService.pipe(
-    Layer.provide(ThreadReadBroker.layer),
+    Layer.provide(layerThreadReadBroker),
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
@@ -920,12 +933,12 @@ it("taskStatus returns task.providerInstanceId rather than the driver kind", asy
 
 it("readThread and sendToThread reach threads in other projects", async () => {
   let parentShell: OrchestrationV2ThreadShell | null = null;
-  const parentLiveRun = makeRun({
+  let parentLiveRun = makeRun({
     id: RunId.make("run-parent-live"),
     ordinal: 1,
     status: "running",
   });
-  const parentQueuedRun = makeRun({
+  let parentQueuedRun = makeRun({
     id: RunId.make("run-parent-queued"),
     ordinal: 2,
     status: "queued",
@@ -1009,67 +1022,112 @@ it("readThread and sendToThread reach threads in other projects", async () => {
       updatedAt: now,
     }) as unknown as OrchestrationV2ThreadProjection;
 
-  const layer = layerOrchestratorService.pipe(
-    Layer.provideMerge(ThreadReadBroker.layer),
+  const database = SqlitePersistence.layerMemory;
+  const registry = ProviderAdapterRegistry.layerFromAdapters([
+    {
+      instanceId: parentInstanceId,
+      driver: codexDriver,
+      getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
+      planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" as const }),
+      openSession: () => Effect.die("This fixture accepts inputs without executing providers"),
+    },
+  ]);
+  const orchestration = ProviderReplayHarness.layerWithRegistry(
+    { name: "mcp-cross-project-authority" },
+    registry,
+    { databaseLayer: database, runEffectWorker: false },
+  );
+  const layer = layerOrchestratorServiceBase.pipe(
     Layer.provide(
+      Layer.mock(ActionResume.ActionResume)({ readLatestSummary: () => Effect.succeed(null) }),
+    ),
+    Layer.provideMerge(ThreadReadBroker.layer),
+    Layer.provideMerge(
       Layer.mergeAll(
-        Layer.mock(ThreadManagementService.ThreadManagementService)({
-          hasThreadReadAuthorization: (threadId, authorizationId) =>
-            Effect.sync(() =>
-              (threadId === parentThreadId
-                ? parentProjection
-                : foreignProjection(threadId)
-              ).runs.some((run) => run.userMessageId === authorizationId),
-            ),
-          getThreadRecords: (threadId) => {
-            if (threadId === parentThreadId) {
-              const loaded = { ...parentProjection };
-              if (advanceAfterCallerLoads) {
-                advanceAfterCallerLoads = false;
-                parentRuns = [
-                  { ...parentLiveRun, status: "completed" },
-                  { ...parentQueuedRun, status: "running" },
-                ];
-              }
-              return Effect.succeed(loaded);
-            }
-            if (threadId === foreignThreadId) return Effect.succeed(foreignProjection(threadId));
-            return Effect.die(`unexpected thread ${threadId}`);
-          },
-          getThreadShell: (threadId) =>
-            Effect.succeed(
-              threadId === foreignThreadId
-                ? (foreignProjection(threadId).thread as unknown as OrchestrationV2ThreadShell)
-                : threadId === parentThreadId
-                  ? parentShell
-                  : null,
-            ),
-          getTimelinePage: (threadId) =>
-            Effect.succeed({
-              items: foreignProjection(threadId).visibleTurnItems,
-              totalItems: 2,
-              hasMore: false,
-              hasEarlier: false,
-            }),
-          getProjectThreadRecords: (input) =>
-            input.threadId === foreignThreadId && input.projectId === foreignProjectId
-              ? Effect.succeed(foreignProjection(input.threadId))
-              : Effect.fail(
-                  new ThreadManagementService.ThreadManagementThreadNotFoundError({
-                    projectId: input.projectId,
-                    threadId: input.threadId,
-                  }),
+        database,
+        AuthSessions.layer.pipe(Layer.provide(database)),
+        orchestration,
+        NodeServices.layer,
+        Layer.unwrap(
+          Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            return Layer.mock(ThreadManagementService.ThreadManagementService)({
+              getThreadRecords: (threadId) => {
+                if (threadId === parentThreadId) {
+                  const loaded = { ...parentProjection };
+                  if (advanceAfterCallerLoads) {
+                    advanceAfterCallerLoads = false;
+                    parentRuns = [
+                      { ...parentLiveRun, status: "completed" },
+                      { ...parentQueuedRun, status: "running" },
+                    ];
+                  }
+                  return Effect.succeed(loaded);
+                }
+                if (threadId === foreignThreadId)
+                  return Effect.succeed(foreignProjection(threadId));
+                return Effect.die(`unexpected thread ${threadId}`);
+              },
+              getThreadShell: (threadId) =>
+                Effect.succeed(
+                  threadId === foreignThreadId
+                    ? (foreignProjection(threadId).thread as unknown as OrchestrationV2ThreadShell)
+                    : threadId === parentThreadId
+                      ? parentShell
+                      : null,
                 ),
-          sendToThread: (input) =>
-            Effect.gen(function* () {
-              const authorization = yield* ThreadReadAuthorization;
-              yield* authorization.authorize(input.threadId, input.messageId);
-              return {
-                run: { id: "run-foreign", status: "queued" },
-                delivery: "started",
-              } as unknown as ThreadManagementService.ThreadManagementSendResult;
-            }),
-        } satisfies Partial<ThreadManagementService.ThreadManagementService["Service"]>),
+              getTimelinePage: (threadId) =>
+                Effect.succeed({
+                  items: foreignProjection(threadId).visibleTurnItems,
+                  totalItems: 2,
+                  hasMore: false,
+                  hasEarlier: false,
+                }),
+              getProjectThreadRecords: (input) =>
+                input.threadId === foreignThreadId && input.projectId === foreignProjectId
+                  ? Effect.succeed(foreignProjection(input.threadId))
+                  : Effect.fail(
+                      new ThreadManagementService.ThreadManagementThreadNotFoundError({
+                        projectId: input.projectId,
+                        threadId: input.threadId,
+                      }),
+                    ),
+              sendToThread: (input) =>
+                Effect.gen(function* () {
+                  const authorization = yield* ThreadReadAuthorization;
+                  const threadReadIntent = yield* authorization.authorize(
+                    input.threadId,
+                    input.messageId,
+                  );
+                  const dispatch = yield* orchestrator.dispatch(
+                    {
+                      type: "message.dispatch",
+                      commandId: input.commandId,
+                      threadId: input.threadId,
+                      messageId: input.messageId,
+                      text: input.text,
+                      attachments: [],
+                      dispatchMode: { type: "queue_after_active" },
+                      createdBy: input.createdBy,
+                      creationSource: input.creationSource,
+                    },
+                    threadReadIntent === undefined ? undefined : { threadReadIntent },
+                  );
+                  const projection = yield* orchestrator.getThreadProjection(input.threadId);
+                  const run = projection.runs.find((run) => run.userMessageId === input.messageId)!;
+                  foreignRuns = projection.runs;
+                  return {
+                    dispatch,
+                    projection,
+                    message: projection.messages.find((message) => message.id === input.messageId)!,
+                    run,
+                    turnItem: null,
+                    delivery: run.status === "queued" ? ("queued" as const) : ("started" as const),
+                  };
+                }).pipe(Effect.orDie),
+            } satisfies Partial<ThreadManagementService.ThreadManagementService["Service"]>);
+          }),
+        ).pipe(Layer.provide(orchestration)),
         ServerSettings.layerTest(),
         Layer.mock(ProviderRegistry.ProviderRegistry)({
           getProviders: Effect.succeed([]),
@@ -1101,13 +1159,74 @@ it("readThread and sendToThread reach threads in other projects", async () => {
   await Effect.gen(function* () {
     const service = yield* OrchestratorMcpService.OrchestratorMcpService;
     const broker = yield* ThreadReadBroker.ThreadReadBroker;
-    // Each input is bound to its submitting client before its run is stored.
-    yield* broker
-      .forSession("client-session")
-      .authorize(parentThreadId, parentLiveRun.userMessageId);
-    yield* broker
-      .forSession("other-client-session")
-      .authorize(parentThreadId, parentQueuedRun.userMessageId);
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const sessions = yield* AuthSessions.AuthSessionRepository;
+    const acceptedAt = yield* DateTime.now;
+    for (const sessionId of ["client-session", "other-client-session"]) {
+      yield* sessions.create({
+        sessionId: AuthSessionId.make(sessionId),
+        subject: "paired-client",
+        method: "browser-session-cookie",
+        scopes: ["orchestration:read"],
+        issuedAt: acceptedAt,
+        expiresAt: DateTime.makeUnsafe(DateTime.toEpochMillis(acceptedAt) + 86_400_000),
+        client: {
+          label: null,
+          ipAddress: null,
+          userAgent: null,
+          deviceType: "unknown",
+          os: null,
+          browser: null,
+        },
+      });
+    }
+    for (const [threadId, project] of [
+      [parentThreadId, projectId],
+      [foreignThreadId, foreignProjectId],
+    ] as const) {
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make(`create:${threadId}`),
+        threadId,
+        projectId: project,
+        title: "Read authority fixture",
+        modelSelection: { instanceId: parentInstanceId, model: "gpt-5.4" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+    }
+    for (const [sessionId, run] of [
+      ["client-session", parentLiveRun],
+      ["other-client-session", parentQueuedRun],
+    ] as const) {
+      const threadReadIntent = yield* broker
+        .forSession(sessionId)
+        .authorize(parentThreadId, run.userMessageId);
+      expect(threadReadIntent).toBeDefined();
+      yield* orchestrator.dispatch(
+        {
+          type: "message.dispatch",
+          commandId: CommandId.make(`accept:${run.userMessageId}`),
+          threadId: parentThreadId,
+          messageId: run.userMessageId,
+          text: "Read from the connected client",
+          attachments: [],
+          dispatchMode: {
+            type: run.status === "queued" ? "queue_after_active" : "start_immediately",
+          },
+          createdBy: "user",
+          creationSource: "web",
+        },
+        threadReadIntent === undefined ? undefined : { threadReadIntent },
+      );
+    }
+    const accepted = yield* orchestrator.getThreadProjection(parentThreadId);
+    parentLiveRun = { ...accepted.runs[0]!, status: "running" };
+    parentQueuedRun = { ...accepted.runs[1]!, status: "queued" };
     parentRuns = [parentLiveRun, parentQueuedRun];
     const foreign = yield* service.readThread(makeScope(), { threadId: foreignThreadId });
     expect(foreign.thread.threadId).toBe(foreignThreadId);
@@ -1208,12 +1327,7 @@ it("readThread and sendToThread reach threads in other projects", async () => {
     });
     expect(sent.threadId).toBe(foreignThreadId);
     // The forwarded message inherits the caller's requester once its run starts.
-    foreignRuns = [
-      { ...parentLiveRun, id: RunId.make("run-foreign"), userMessageId: sent.messageId },
-    ];
-    expect(yield* broker.read(foreignThreadId, RunId.make("run-foreign"), remoteInput)).toEqual(
-      remote,
-    );
+    expect(yield* broker.read(foreignThreadId, sent.runId, remoteInput)).toEqual(remote);
     expect(forwarded).toBe(2);
     expect(unrelatedForwarded).toBe(0);
 
@@ -1343,7 +1457,7 @@ it("requestSecret saves a pasted value to a file without opening a card", async 
   const file = "/home/user/.t3/userdata/secrets/files/0123456789abcdef0123456789abcdef";
 
   const layer = layerOrchestratorService.pipe(
-    Layer.provide(ThreadReadBroker.layer),
+    Layer.provide(layerThreadReadBroker),
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
@@ -1459,7 +1573,7 @@ it("requestSecret returns the unsaved note for a declined, cancelled or timed-ou
       } as unknown as OrchestrationV2ThreadProjection;
     };
     const layer = layerOrchestratorService.pipe(
-      Layer.provide(ThreadReadBroker.layer),
+      Layer.provide(layerThreadReadBroker),
       Layer.provide(
         Layer.mergeAll(
           Layer.mock(ThreadManagementService.ThreadManagementService)({

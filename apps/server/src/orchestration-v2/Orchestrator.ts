@@ -1,4 +1,5 @@
 import { makeLastCodeArchivePlanner } from "./LastCodeArchivePlanner.ts";
+import type { ThreadReadIntakeIntent } from "../threadReadAuthority/Types.ts";
 import {
   remoteDelegationProgress,
   sameRemoteDelegation,
@@ -482,6 +483,7 @@ export interface OrchestratorV2DispatchResult {
 }
 
 export interface OrchestratorV2DispatchOptions {
+  readonly threadReadIntent?: ThreadReadIntakeIntent;
   readonly workspaceUserAdopted?: true;
   // Commit the empty launch and its owner together, before a response can arrive.
   readonly emptyWorkspaceStrategy?: NonNullable<
@@ -491,7 +493,7 @@ export interface OrchestratorV2DispatchOptions {
 
 export interface OrchestratorV2LaunchDispatchInput {
   /** Binds remote read authority before execution is accepted, including an atomic first run. */
-  readonly beforeInitialMessage?: Effect.Effect<void>;
+  readonly threadReadIntent?: ThreadReadIntakeIntent;
   readonly claim: Extract<
     OrchestrationV2ServerCommand,
     { readonly type: "thread.create" | "thread.metadata.update" }
@@ -19922,6 +19924,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           threadId: commandThreadId(command),
           commandType: command.type,
           acceptedAt,
+          ...(options?.threadReadIntent === undefined
+            ? {}
+            : { threadReadIntent: options.threadReadIntent }),
           events:
             cancelledTask === undefined
               ? plan.events
@@ -20428,7 +20433,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               ? yield* replayCommandReceipt(claim, claimReceipt.value)
               : undefined;
             if (replayedClaim?.storedEvents.some((stored) => stored.event.type === "run.created")) {
-              if (input.beforeInitialMessage !== undefined) yield* input.beforeInitialMessage;
               return { claimed: replayedClaim, initialMessage: replayedClaim };
             }
             // Refuse an inactive sender before claiming a target. Accepted retries
@@ -20456,22 +20460,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 });
               }
             }
-            const atomicInitialMessage =
-              replayedClaim === undefined &&
-              claim.type === "thread.create" &&
-              claim.initialMessage !== undefined;
-            if (atomicInitialMessage && input.beforeInitialMessage !== undefined) {
-              yield* input.beforeInitialMessage;
-            }
-            const claimed = replayedClaim ?? (yield* dispatchWithReceiptEffect(claim));
-            if (!atomicInitialMessage && input.beforeInitialMessage !== undefined) {
-              yield* input.beforeInitialMessage;
-            }
+            const intakeOptions =
+              input.threadReadIntent === undefined
+                ? undefined
+                : { threadReadIntent: input.threadReadIntent };
+            const claimed =
+              replayedClaim ??
+              (yield* dispatchWithReceiptEffect(claim, [], undefined, intakeOptions));
             const dispatched = claimed.storedEvents.some(
               (stored) => stored.event.type === "run.created",
             )
               ? claimed
-              : yield* dispatchWithReceiptEffect(initialMessage);
+              : yield* dispatchWithReceiptEffect(initialMessage, [], undefined, intakeOptions);
             return { claimed, initialMessage: dispatched };
           }),
         ),

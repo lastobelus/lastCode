@@ -1363,24 +1363,27 @@ const make = Effect.gen(function* () {
     }
 
     const authorization = yield* ThreadReadAuthorization;
-    yield* authorization.authorize(input.threadId, input.messageId);
-    const dispatched = yield* dispatch({
-      type: "message.dispatch",
-      commandId: input.commandId,
-      threadId: input.threadId,
-      messageId: input.messageId,
-      ...(input.scheduledTaskId === undefined ? {} : { scheduledTaskId: input.scheduledTaskId }),
-      ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
-      ...(input.linkedSender === undefined ? {} : { linkedSender: input.linkedSender }),
-      text: input.text,
-      attachments: input.attachments,
-      ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
-      ...(input.freshContext ? { freshContext: true } : {}),
-      dispatchMode,
-      ...(mode === "auto" ? { deliveryIntent: "auto" } : {}),
-      createdBy: input.createdBy,
-      creationSource: input.creationSource,
-    }).pipe(
+    const threadReadIntent = yield* authorization.authorize(input.threadId, input.messageId);
+    const dispatched = yield* dispatch(
+      {
+        type: "message.dispatch",
+        commandId: input.commandId,
+        threadId: input.threadId,
+        messageId: input.messageId,
+        ...(input.scheduledTaskId === undefined ? {} : { scheduledTaskId: input.scheduledTaskId }),
+        ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
+        ...(input.linkedSender === undefined ? {} : { linkedSender: input.linkedSender }),
+        text: input.text,
+        attachments: input.attachments,
+        ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
+        ...(input.freshContext ? { freshContext: true } : {}),
+        dispatchMode,
+        ...(mode === "auto" ? { deliveryIntent: "auto" } : {}),
+        createdBy: input.createdBy,
+        creationSource: input.creationSource,
+      },
+      threadReadIntent === undefined ? undefined : { threadReadIntent },
+    ).pipe(
       Effect.provideService(
         Orchestrator.PauseRecipientMustBeActive,
         input.pauseOnlyIfActive === true,

@@ -1675,13 +1675,14 @@ const make = Effect.gen(function* () {
         let messageWasAlreadyAccepted = Option.isSome(messageReceipt);
         if (initialMessage !== undefined) {
           const authorization = yield* ThreadReadAuthorization;
+          const threadReadIntent = yield* authorization.authorize(
+            candidateThreadId,
+            initialMessage.messageId,
+          );
           const result = yield* threads
             .dispatchLaunch({
               claim,
-              beforeInitialMessage: authorization.authorize(
-                candidateThreadId,
-                initialMessage.messageId,
-              ),
+              ...(threadReadIntent === undefined ? {} : { threadReadIntent }),
               initialMessage: {
                 ...initialMessage,
                 type: "message.dispatch",

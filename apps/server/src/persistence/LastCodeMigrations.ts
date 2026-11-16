@@ -25,6 +25,8 @@ import PullRequestWatchIndexMigration from "./Migrations/OrchestrationV2/PullReq
 
 import RetiredNativePromotionMigration from "./Migrations/OrchestrationV2/RetiredNativePromotion.ts";
 
+import { createAuthoritySchema } from "../threadReadAuthority/Schema.ts";
+
 export const lastcodeMigrationEntries = [
   [1, "ProjectionThreadAnnotation", Migration0048],
   [2, "UpdateDrain", Migration0049],
@@ -46,6 +48,7 @@ export const lastcodeMigrationEntries = [
   [18, "OrchestrationV2InteractiveThreadParentIndex", InteractiveThreadParentIndexMigration],
   [19, "OrchestrationV2PullRequestWatchIndex", PullRequestWatchIndexMigration],
   [20, "OrchestrationV2RetiredNativePromotion", RetiredNativePromotionMigration],
+  [21, "ThreadReadAuthority", createAuthoritySchema],
 ] as const;
 
 export const lastcodeMigrationManifest = lastcodeMigrationEntries.map(

@@ -4,6 +4,7 @@ import * as EffectWorker from "./EffectWorker.ts";
 import * as OrchestratorMcp from "../mcp/OrchestratorMcpService.ts";
 import * as ThreadReadBroker from "../mcp/ThreadReadBroker.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
+import * as PeerLinks from "../peer/PeerLinks.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
@@ -5994,9 +5995,10 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
                       mcpThreads,
                       Layer.succeed(ActionResume.ActionResume, actions),
                       Layer.mock(ThreadReadBroker.ThreadReadBroker)({
-                        forSession: () => ({ authorize: () => Effect.void }),
+                        forSession: () => ({ authorize: () => Effect.undefined }),
                       }),
                       Layer.mock(PeerForwarding.PeerForwarding)({}),
+                      Layer.mock(PeerLinks.PeerLinks)({ get: () => Effect.succeedNone }),
                       Layer.mock(RemoteDelegation.RemoteDelegation)({}),
                       Layer.mock(ThreadLaunch.ThreadLaunchService)({}),
                       Layer.mock(GitVcsDriver.GitVcsDriver)({}),
