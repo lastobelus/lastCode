@@ -1,3 +1,5 @@
+import { useAtomValue } from "@effect/atom-react";
+import { AsyncResult, Atom } from "effect/reactivity";
 import { SymbolView } from "./ui/AppSymbol";
 import { AppText } from "./ui/AppText";
 import { Image } from "expo-image";
@@ -9,8 +11,6 @@ import {
   getProjectFaviconResourceKey,
   isProjectFaviconFallbackUrl,
 } from "@t3tools/shared/projectFavicon";
-import { useAtomValue } from "@effect/atom-react";
-import { Atom } from "effect/reactivity";
 import { useAppearancePreferences } from "../features/settings/appearance/AppearancePreferencesProvider";
 import { projectFaviconUrlAtom } from "../state/assets";
 import {
@@ -22,7 +22,7 @@ import {
   type ProjectIconGlyph,
 } from "../lib/projectIcon";
 import { resolveProjectFaviconColorScheme } from "../lib/projectFaviconColorScheme";
-
+import { mobilePreferencesAtom } from "../state/preferences";
 import {
   beginProjectFaviconRequest,
   createProjectFaviconRequest,
@@ -30,6 +30,7 @@ import {
   markProjectFaviconFailed,
   markProjectFaviconLoaded,
 } from "../lib/projectFaviconRequests";
+import { resolveProjectFaviconBorderRadius } from "./projectFaviconAppearance";
 
 const EMPTY_FAVICON_URL = Atom.make<string | null>(null);
 
@@ -45,6 +46,10 @@ export const ProjectFavicon = memo(function ProjectFavicon(props: {
   const size = props.size ?? 42;
   const symbol = resolveProjectIconSymbol(props.projectIcon);
   const glyph = resolveProjectIconGlyph(props.projectIcon, props.projectTitle);
+  const preferencesResult = useAtomValue(mobilePreferencesAtom);
+  const roundedProjectIcons =
+    AsyncResult.isSuccess(preferencesResult) &&
+    preferencesResult.value.roundedProjectIcons === true;
   const faviconUrl = useAtomValue(
     props.workspaceRoot == null || glyph !== null
       ? EMPTY_FAVICON_URL
@@ -85,6 +90,7 @@ export const ProjectFavicon = memo(function ProjectFavicon(props: {
       faviconUrl={renderableFaviconUrl}
       open={props.open}
       projectTitle={props.projectTitle}
+      rounded={roundedProjectIcons}
       size={size}
     />
   );
@@ -145,6 +151,7 @@ function ProjectFaviconImage(props: {
   readonly faviconUrl: string | null;
   readonly open?: boolean;
   readonly projectTitle: string;
+  readonly rounded: boolean;
   readonly size: number;
 }) {
   const faviconRequest = createProjectFaviconRequest(props.cacheKey, props.faviconUrl);
@@ -209,7 +216,7 @@ function ProjectFaviconImage(props: {
           style={{
             width: props.size,
             height: props.size,
-            borderRadius: props.size * 0.16,
+            borderRadius: resolveProjectFaviconBorderRadius(props.size, props.rounded),
             ...(showImage ? {} : { position: "absolute" as const, opacity: 0 }),
           }}
           contentFit="contain"
