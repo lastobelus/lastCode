@@ -49,7 +49,18 @@ export class PullRequestWatchFromSubagentError extends Schema.TaggedError<PullRe
   {},
 ) {
   override get message(): string {
-    return "This thread is a subagent, so it cannot watch pull requests. Its parent thread owns the pull request: finish your task and report back instead.";
+    return "This child execution cannot own a PR watch. End your turn with an unfinished handoff asking your parent to own the watch, without polling.";
+  }
+}
+
+export class PullRequestWatchRestartRefusedError extends Schema.TaggedError<PullRequestWatchRestartRefusedError>()(
+  "PullRequestWatchRestartRefusedError",
+  { reason: Schema.Literals(["quiet", "unreadable"]) },
+) {
+  override get message(): string {
+    return this.reason === "quiet"
+      ? "Not watched again: this watch's quiet deadline already expired and the PR has had no activity since, so a new watch would expire the same way. The watch is still registered: it still wakes you on failed or passed checks, new comments or reviews, and conflicts, and a push restarts its timer, so after a push just run the gate check. Otherwise report the pending gates as a blocker and call unwatch_pull_request. Pass restart: true only if the user asked you to keep waiting."
+      : "Not watched again: T3 Code stopped this watch because it could not read the PR from the host, and a new watch would stop the same way. Check the PR yourself and report that T3 Code cannot read it as a blocker. Pass restart: true only if the user asked you to keep waiting.";
   }
 }
 
@@ -69,11 +80,15 @@ export class PullRequestWatchService extends Context.Service<
       readonly threadId: ThreadId;
       readonly target: PullRequestTarget;
       readonly watching: boolean;
+      readonly callerHasExecution?: boolean | undefined;
+      readonly quietTimeoutMinutes?: number | null | undefined;
+      readonly restart?: boolean | undefined;
     }) => Effect.Effect<
       ResolvedTarget & { readonly watching: boolean; readonly wasWatching: boolean },
       | PullRequestWatchFailedError
       | PullRequestNotOpenError
       | PullRequestWatchFromSubagentError
+      | PullRequestWatchRestartRefusedError
       | PullRequestWatchThreadNotFoundError
       | PullRequestTargetError
       | PullRequestUnavailableError
@@ -104,6 +119,9 @@ const make = Effect.gen(function* () {
     readonly threadId: ThreadId;
     readonly target: PullRequestTarget;
     readonly watching: boolean;
+    readonly callerHasExecution?: boolean | undefined;
+    readonly quietTimeoutMinutes?: number | null | undefined;
+    readonly restart?: boolean | undefined;
   }) {
     const { watching } = input;
     const thread = yield* requireThread(input.threadId);
@@ -116,12 +134,24 @@ const make = Effect.gen(function* () {
       threadPullRequestsOf(shell).find(
         (link) => link.source !== "stack-dismissed" && threadPullRequestKeysEqual(link, target),
       );
-    if (watching && thread.lineage.relationshipToParent === "subagent") {
+    if (
+      watching &&
+      thread.lineage.relationshipToParent === "subagent" &&
+      thread.lineage.independent !== true &&
+      input.callerHasExecution !== true
+    ) {
       return yield* new PullRequestWatchFromSubagentError();
     }
     const before = watchedLink(thread);
     if (watching && before?.snapshot?.state === "merged") {
       return yield* new PullRequestNotOpenError({ state: "merged" });
+    }
+    if (watching && input.restart !== true) {
+      // A null dueAt means the quiet wake fired and nothing on the PR has restarted the timer since.
+      if (before?.watch?.quietDeadline?.dueAt === null && input.quietTimeoutMinutes !== null)
+        return yield* new PullRequestWatchRestartRefusedError({ reason: "quiet" });
+      if (before?.watch === undefined && before?.endedWatch?.unreadable === true)
+        return yield* new PullRequestWatchRestartRefusedError({ reason: "unreadable" });
     }
     if (watching && before?.watch === undefined) {
       yield* pullRequests
@@ -157,6 +187,9 @@ const make = Effect.gen(function* () {
         repository: target.repository,
         number: target.number,
         watching,
+        ...(watching && input.quietTimeoutMinutes !== undefined
+          ? { quietTimeoutMinutes: input.quietTimeoutMinutes }
+          : {}),
         ...(watching ? { link: { url: target.url, source: "agent" as const } } : {}),
       })
       .pipe(

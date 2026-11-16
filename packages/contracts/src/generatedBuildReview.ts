@@ -10,7 +10,6 @@ const ReviewPath = Schema.String.check(
       value.length > 0 &&
       value.length <= 4096 &&
       !value.startsWith("/") &&
-      // oxlint-disable-next-line no-control-regex -- Relative file selection must not carry path separators or control escapes.
       !/[\\:\x00-\x1f]/.test(value) &&
       value.split("/").every((part) => part !== "" && part !== "." && part !== ".."),
     { expected: "a safe relative build-file path" },

@@ -1,4 +1,4 @@
-import { deriveProviderInstanceConfigMap } from "./provider/ProviderInstanceRegistryHydration.ts";
+import { deriveProviderInstanceConfigMap } from "./provider/providerInstanceConfig.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {

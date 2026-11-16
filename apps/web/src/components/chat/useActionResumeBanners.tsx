@@ -3,6 +3,7 @@ import {
   AuthTerminalOperateScope,
   AuthTerminalReadScope,
   type ActionResumeState,
+  type ActionResumeStatus,
   type ScopedThreadRef,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -22,8 +23,8 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { useTerminalUiStateStore } from "../../terminalUiStateStore";
 import {
-  heldActionBanner,
   interruptedActionBanner,
+  pendingActionBanner,
   runningActionBanner,
 } from "./ComposerActionResume";
 
@@ -33,6 +34,7 @@ interface ActionResumeBannerInput {
   readonly routeThreadRef: ScopedThreadRef;
   readonly threadRef: ScopedThreadRef | null;
   readonly action: ActionResumeState | null;
+  readonly status: ActionResumeStatus | null;
   readonly onRequestTerminalFocus: (terminalId: string) => void;
   readonly onThreadError: (threadId: ThreadId | null, error: string | null) => void;
 }
@@ -59,16 +61,16 @@ function useRunningActionControl({
   const closeTerminal = useAtomCommand(terminalEnvironment.close, { reportFailure: false });
   const ensureTerminal = useTerminalUiStateStore((state) => state.ensureTerminal);
   const [cancellingRunId, setCancellingRunId] = useState<string | null>(null);
-  const running = action?.outcome === "running" ? action : null;
+  const running = action?.outcome === "running" && action.delivery === "armed" ? action : null;
   const environmentId = threadRef?.environmentId ?? null;
   const canRead = useEnvironmentScope(environmentId, AuthTerminalReadScope);
   const canOperate = useEnvironmentScope(environmentId, AuthTerminalOperateScope);
 
   const openTerminal = useStableCallback(() => {
-    if (threadRef === null || running === null) return;
+    if (threadRef === null || action === null || action.threadId !== threadRef.threadId) return;
     if (!readEnvironmentScope(threadRef.environmentId, AuthTerminalReadScope)) return;
-    ensureTerminal(threadRef, running.terminalId, { open: true, active: true });
-    onRequestTerminalFocus(running.terminalId);
+    ensureTerminal(threadRef, action.terminalId, { open: true, active: true });
+    onRequestTerminalFocus(action.terminalId);
   });
   const cancel = useStableCallback(async () => {
     if (threadRef === null || running === null) return;
@@ -158,8 +160,13 @@ export function useActionResumeBanners(input: ActionResumeBannerInput) {
   const running = useRunningActionControl(input);
   const interrupted = useInterruptedActionDelivery(input);
   return {
-    runningBanner: runningActionBanner(running),
-    interruptedBanner: interruptedActionBanner(interrupted),
-    heldBanner: heldActionBanner(input.action),
+    runningBanner: runningActionBanner({ ...running, status: input.status }),
+    pendingBanner: pendingActionBanner({
+      action: input.action,
+      status: input.status,
+      canRead: running.canRead,
+      onOpenTerminal: running.onOpenTerminal,
+    }),
+    interruptedBanner: interruptedActionBanner({ ...interrupted, status: input.status }),
   };
 }

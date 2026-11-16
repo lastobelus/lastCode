@@ -117,26 +117,38 @@ describe("LastCode update operations", () => {
     );
     expect(finish.pending).toHaveBeenCalledWith(false);
   });
-  it.each([false, true])(
-    "installs after confirmation, preserving %s IPC failure",
-    async (rejected) => {
+  it.each([
+    ["an IPC failure", "rejected", "Could not install update", "Install failed"],
+    ["an install error", "failed", "Could not install update", "Install failed"],
+    [
+      "a newer build that replaced the confirmed one",
+      "replaced",
+      "Update not installed",
+      "1.1.0 was replaced by 1.2.0. Review it and try again.",
+    ],
+  ] as const)(
+    "installs only the confirmed version and reports %s",
+    async (_name, outcome, title, description) => {
       const shell = bridge(),
         finish = completion();
       mocks.confirm.mockResolvedValue(true);
-      if (rejected) shell.installUpdate.mockRejectedValue(new Error("Install failed"));
-      else shell.installUpdate.mockResolvedValue(result("Install failed"));
+      if (outcome === "rejected")
+        shell.installUpdate.mockRejectedValue(new Error("Install failed"));
+      else if (outcome === "failed")
+        shell.installUpdate.mockResolvedValue(result("Install failed"));
+      else
+        shell.installUpdate.mockResolvedValue({
+          accepted: false,
+          completed: false,
+          state: { ...state, availableVersion: "1.2.0", downloadedVersion: "1.2.0" },
+        });
       await installLastCodeSidebarUpdate(shell, state, finish.pending);
       await finish.done;
       expect(mocks.confirm).toHaveBeenCalledWith(
         expect.stringContaining("Install update 1.1.0 and restart T3 Code?"),
       );
-      expect(shell.installUpdate).toHaveBeenCalledOnce();
-      expect(mocks.toast).toHaveBeenCalledWith(
-        expect.objectContaining({
-          title: "Could not install update",
-          description: "Install failed",
-        }),
-      );
+      expect(shell.installUpdate).toHaveBeenCalledExactlyOnceWith(state.downloadedVersion);
+      expect(mocks.toast).toHaveBeenCalledWith(expect.objectContaining({ title, description }));
     },
   );
 });

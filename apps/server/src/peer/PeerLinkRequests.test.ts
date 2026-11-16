@@ -33,6 +33,8 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import { McpSchema, McpServer, Tool, Toolkit } from "effect/ai";
 
+import * as ActionResume from "../actionResume/ActionResume.ts";
+import * as ThreadReadBroker from "../mcp/ThreadReadBroker.ts";
 import * as ServerConfig from "../config.ts";
 import * as McpHttpServer from "../mcp/McpHttpServer.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
@@ -164,6 +166,10 @@ const makeLaptopWith = (
       Layer.provideMerge(Layer.merge(layerOrchestrator, ServerSettings.layerTest())),
     );
     const layerHere = McpHttpServer.layerOrchestratorToolkit.pipe(
+      Layer.provide(
+        Layer.mock(ActionResume.ActionResume)({ readLatestSummary: () => Effect.succeed(null) }),
+      ),
+      Layer.provide(ThreadReadBroker.layer),
       Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
       Layer.provideMerge(PeerLinkRequests.layer),
       Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
@@ -587,7 +593,10 @@ it.live("the agent asks without waiting, and the user links the box after its tu
         answer: { type: "link", urls: [b.url], access: "auto", pairingCode: pairing.credential },
       });
 
-      expect((yield* a.projections.getThread(threadId)).snoozedUntil).toBeNull();
+      expect(
+        (yield* a.projections.getThread(threadId)).snoozedUntil,
+        JSON.stringify(yield* cardOf(a)),
+      ).toBeNull();
 
       const link = yield* a.links.get(box.environmentId);
       expect(Option.getOrUndefined(link)?.access).toBe("auto");
@@ -882,6 +891,8 @@ it.live("archiving the thread closes its open card", () =>
         type: "thread.archive",
         commandId: CommandId.make("command:archive:laptop"),
         threadId,
+        childDisposition: "stop_and_archive",
+        expectedChildThreadIds: [],
       });
       expect(yield* cardOf(a)).toMatchObject({ status: "cancelled", linkStatus: "cancelled" });
     }),

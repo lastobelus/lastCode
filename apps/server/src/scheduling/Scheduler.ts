@@ -3,10 +3,12 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
+import * as Option from "effect/Option";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 
 import { forkParked } from "../serverActivation.ts";
+import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts";
 
 export class Scheduler extends Context.Service<
   Scheduler,
@@ -14,20 +16,32 @@ export class Scheduler extends Context.Service<
     readonly register: <E, R>(
       name: string,
       runDueWork: Effect.Effect<void, E, R>,
+      options?: { readonly runWhilePaused?: boolean },
     ) => Effect.Effect<void, never, R | Scope.Scope>;
   }
 >()("t3/scheduling/Scheduler") {}
 
 const make = Effect.gen(function* () {
+  const pauseStore = yield* Effect.serviceOption(EnvironmentPauseStore.EnvironmentPauseStore);
+  const automationPaused = Option.isSome(pauseStore)
+    ? pauseStore.value.get.pipe(
+        Effect.map((session) => session !== null && session.phase !== "resuming"),
+      )
+    : Effect.succeed(false);
   const sources = yield* Ref.make(new Map<symbol, Effect.Effect<void>>());
   const register: Scheduler["Service"]["register"] = Effect.fn("Scheduler.register")(function* <
     E,
     R,
-  >(name: string, runDueWork: Effect.Effect<void, E, R>) {
+  >(
+    name: string,
+    runDueWork: Effect.Effect<void, E, R>,
+    options?: { readonly runWhilePaused?: boolean },
+  ) {
     const scope = yield* Effect.scope;
     const context = yield* Effect.context<R>();
     const permit = yield* Semaphore.make(1);
-    const run = runDueWork.pipe(
+    const run = automationPaused.pipe(
+      Effect.flatMap((paused) => (paused && !options?.runWhilePaused ? Effect.void : runDueWork)),
       Effect.provideContext(context),
       Effect.catchCause((cause) =>
         Cause.hasInterruptsOnly(cause)

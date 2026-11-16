@@ -5,6 +5,7 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
+import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import * as ServerConfig from "../config.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
@@ -14,7 +15,7 @@ import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as DeviceService from "./DeviceService.ts";
 import { agentDeviceThreadConfigDirectory } from "./AgentDeviceTarget.ts";
 
-/** Keep deletion cleanup above the device/provider service dependency graph. */
+/** Keep thread-end cleanup above the device/provider service dependency graph. */
 export const layer = Layer.effectDiscard(
   Effect.gen(function* () {
     const devices = yield* DeviceService.DeviceService;
@@ -66,12 +67,37 @@ export const layer = Layer.effectDiscard(
       if (Option.isNone(project) || project.value.deletedAt !== null)
         yield* removeProjectOverride(projectId);
     }
+    const release = Effect.fn("DeviceAgentLifecycle.release")(
+      (threadId: ThreadId) => devices.releaseThread(threadId),
+      Effect.catch((cause) =>
+        Effect.logError("Device release for a finished thread failed", { cause }),
+      ),
+    );
     yield* events.stream({ afterSequence, eventType: "thread.deleted" }).pipe(
       Stream.runForEach((stored) =>
-        stored.event.type === "thread.deleted" ? retire(stored.event.payload.id) : Effect.void,
+        stored.event.type === "thread.deleted"
+          ? release(stored.event.payload.id).pipe(Effect.andThen(retire(stored.event.payload.id)))
+          : Effect.void,
       ),
       Effect.catch((cause) => Effect.logError("Device access deletion cleanup failed", { cause })),
       Effect.forkScoped,
     );
+    // Settling or archiving can be undone, so it releases devices but keeps agent access.
+    for (const eventType of ["thread.settled", "thread.archived"] as const)
+      yield* events.stream({ afterSequence, eventType }).pipe(
+        Stream.runForEach((stored) =>
+          stored.event.type === eventType ? release(stored.event.payload.id) : Effect.void,
+        ),
+        Effect.catch((cause) =>
+          Effect.logError("Device release for a finished thread failed", { cause }),
+        ),
+        Effect.forkScoped,
+      );
+    yield* devices.shutdownIdleDevices.pipe(
+      Effect.repeat(Schedule.spaced("1 minute")),
+      Effect.forkScoped,
+    );
+    // Simulators an agent booted would otherwise outlive the server that tracks them.
+    yield* Effect.addFinalizer(() => devices.shutdownAgentBootedDevices);
   }),
 );

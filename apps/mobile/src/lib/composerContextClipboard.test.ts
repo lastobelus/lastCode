@@ -215,16 +215,16 @@ describe("mobile context clipboard imports", () => {
     expect(mocks.download).not.toHaveBeenCalled();
   });
 
-  it("pastes local threads, text context and files at the cap after excluding foreign threads", async () => {
+  it("pastes local and foreign thread references, text context and files", async () => {
     const result = await importComposerContextClipboard(
       mixedClipboard,
       0,
       new AbortController().signal,
-      COMPOSER_CONTEXT_MAX_RECORDS - 3,
-      EnvironmentId.make("destination"),
+      COMPOSER_CONTEXT_MAX_RECORDS - 4,
     );
     expect(result).not.toBeNull();
     expect(result!.context.records).toEqual([
+      { ...foreignThread, contextId: expect.any(String) },
       { ...localThread, contextId: expect.any(String) },
       { ...terminal, contextId: expect.any(String) },
       { ...image, contextId: expect.any(String), attachmentId: result!.attachments[0]!.id },
@@ -233,13 +233,13 @@ describe("mobile context clipboard imports", () => {
       expect.objectContaining({ name: image.name, fileUri: "file:///owned.png" }),
     ]);
     expect(result!.failures).toEqual([]);
-    expect(result!.skippedThreads).toEqual([foreignThread.title]);
+    expect(result!.skippedThreads).toEqual([]);
     const references = collectComposerContextReferences(result!.text);
     expect(references.map((reference) => reference.label)).toEqual(
       mixedRecords.map((record) => record.label),
     );
     expect(result!.context.records.map((record) => record.contextId)).toEqual(
-      references.slice(1).map((reference) => reference.contextId),
+      references.map((reference) => reference.contextId),
     );
     expect(
       references.every(
@@ -248,7 +248,7 @@ describe("mobile context clipboard imports", () => {
     ).toBe(true);
     expect(
       result!.context.records.some((record) => record.contextId === references[0]!.contextId),
-    ).toBe(false);
+    ).toBe(true);
     expect(result!.text).toMatch(/^Compare these findings: .* before changing anything\.$/);
 
     const restoreHistory = createComposerContextHistory();
@@ -264,31 +264,29 @@ describe("mobile context clipboard imports", () => {
         mixedClipboard,
         0,
         new AbortController().signal,
-        COMPOSER_CONTEXT_MAX_RECORDS - 2,
-        EnvironmentId.make("destination"),
+        COMPOSER_CONTEXT_MAX_RECORDS - 3,
       ),
     ).rejects.toThrow("Remove some context");
     expect(mocks.download).not.toHaveBeenCalled();
   });
 
-  // regression: #18322 don't send or paste attached threads a machine can't read
-  it("reports foreign threads and failed files together while keeping the rest of a paste", async () => {
+  it("retains foreign thread references when a file download fails", async () => {
     mocks.download.mockRejectedValueOnce(new Error("source disconnected"));
     const result = await importComposerContextClipboard(
       mixedClipboard,
       0,
       new AbortController().signal,
       0,
-      EnvironmentId.make("destination"),
     );
     expect(result).not.toBeNull();
     expect(result!.context.records).toEqual([
+      { ...foreignThread, contextId: expect.any(String) },
       { ...localThread, contextId: expect.any(String) },
       { ...terminal, contextId: expect.any(String) },
     ]);
     expect(result!.attachments).toEqual([]);
     expect(result!.failures).toEqual([image.name]);
-    expect(result!.skippedThreads).toEqual([foreignThread.title]);
+    expect(result!.skippedThreads).toEqual([]);
     const references = collectComposerContextReferences(result!.text);
     expect(references.map((reference) => reference.label)).toEqual(
       mixedRecords.map((record) => record.label),
@@ -300,18 +298,16 @@ describe("mobile context clipboard imports", () => {
             !result!.context.records.some((record) => record.contextId === reference.contextId),
         )
         .map((reference) => reference.label),
-    ).toEqual([foreignThread.label, image.label]);
+    ).toEqual([image.label]);
     expect(result!.text).toMatch(/^Compare these findings: .* before changing anything\.$/);
   });
 
-  it("keeps a thread from a machine the destination links to", async () => {
+  it("keeps a thread from a machine regardless of peer links", async () => {
     const result = await importComposerContextClipboard(
       mixedClipboard,
       0,
       new AbortController().signal,
       0,
-      EnvironmentId.make("destination"),
-      new Map([[foreignThread.environmentId, "Source"]]),
     );
     expect(result!.skippedThreads).toEqual([]);
     expect(result!.context.records.filter((record) => record.kind === "thread")).toEqual([
@@ -340,7 +336,7 @@ describe("mobile context clipboard imports", () => {
     ).toEqual(result!.context.records.map((record) => record.contextId));
   });
 
-  it("pastes a thread link as a chip only where the destination's agent reads its machine", async () => {
+  it("pastes local and foreign thread links as chips", async () => {
     const text = [
       "https://app.t3.codes/threads/destination/local-thread",
       "<t3-thread://v2/source/foreign-thread>",
@@ -350,16 +346,21 @@ describe("mobile context clipboard imports", () => {
       0,
       new AbortController().signal,
       0,
-      EnvironmentId.make("destination"),
     );
-    const [record] = result!.context.records;
+    const [record, foreignRecord] = result!.context.records;
     expect(record).toMatchObject({
       kind: "thread",
       environmentId: "destination",
       threadId: "local-thread",
     });
+    expect(result!.context.records).toHaveLength(2);
+    expect(foreignRecord).toMatchObject({
+      kind: "thread",
+      environmentId: "source",
+      threadId: "foreign-thread",
+    });
     expect(result!.text).toBe(
-      `[Thread](t3-context://v1/thread/${record!.contextId}) <t3-thread://v2/source/foreign-thread>`,
+      `[Thread](t3-context://v1/thread/${record!.contextId}) [Thread](t3-context://v1/thread/${foreignRecord!.contextId})`,
     );
     expect(
       await importComposerContextClipboard(

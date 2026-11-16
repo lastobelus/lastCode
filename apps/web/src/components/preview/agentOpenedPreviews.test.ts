@@ -15,6 +15,7 @@ import {
   beginPreviewSessionClose,
   cancelPreviewSessionClose,
   reconcilePreviewServerSessions,
+  readThreadPreviewState,
   resetPreviewStateForTests,
 } from "../../previewStateStore";
 import { useRightPanelStore } from "../../rightPanelStore";
@@ -204,6 +205,7 @@ describe("revealServerTabs", () => {
     canGoForward: false,
     updatedAt: "2026-01-01T00:00:00.000Z",
     runtime: "server",
+    automationOwner: "agent-a",
     reveal: true,
     ...(force === undefined ? {} : { revealRequest: { id: "r1", force } }),
   });
@@ -238,6 +240,20 @@ describe("revealServerTabs", () => {
     expect(floatingTabId()).toBeNull();
     // A user action moves keyboard focus into the panel; an agent reveal must not.
     expect(useRightPanelStore.getState().getUserActionRevision(ref)).toBe(userActionRevision);
+  });
+
+  it("opens a user-facing tab directly in the panel without taking keyboard focus", () => {
+    setup();
+    const revision = useRightPanelStore.getState().getUserActionRevision(ref);
+    revealServerTabs(ref, [{ ...tab("tab_user", true), automationOwner: undefined }], {
+      autoShowFloatingPreview: false,
+    });
+    expect(useRightPanelStore.getState().byThreadKey[threadKey]).toMatchObject({
+      isOpen: true,
+      activeSurfaceId: "browser:tab_user",
+    });
+    expect(floatingTabId()).toBeNull();
+    expect(useRightPanelStore.getState().getUserActionRevision(ref)).toBe(revision);
   });
 });
 
@@ -321,6 +337,32 @@ describe("startAgentOpenedPreviews", () => {
       .byThreadKey[threadKeyToRead]?.surfaces.filter((surface) => surface.kind === "preview")
       .map((surface) => surface.id);
 
+  it.each([false, true])(
+    "reveals only live user opens before the first list (replay: %s)",
+    (replay) => {
+      using _following = following();
+      const tab = serverTab({ revealRequest: { id: "early-user", force: true } });
+      applyPreviewServerEvent(
+        ref,
+        {
+          type: "navigated",
+          threadId: ref.threadId,
+          tabId: tab.tabId,
+          createdAt: tab.updatedAt,
+          snapshot: tab,
+          serverEpoch,
+          revision: 1,
+        },
+        { replay },
+      );
+      expect(useRightPanelStore.getState().byThreadKey[threadKey]?.isOpen ?? false).toBe(!replay);
+      useRightPanelStore.getState().close(ref);
+      reconcilePreviewServerSessions(ref, { sessions: [tab], serverEpoch, revision: 1 });
+      expect(useRightPanelStore.getState().byThreadKey[threadKey]?.isOpen ?? false).toBe(false);
+      expect(floatingTabId()).toBeNull();
+    },
+  );
+
   it("treats the first list as a baseline and floats tabs opened later", () => {
     using _following = following();
     reconcilePreviewServerSessions(ref, {
@@ -343,6 +385,42 @@ describe("startAgentOpenedPreviews", () => {
     });
     expect(floatingTabId()).toBe("tab_agent");
   });
+
+  it.each([2, 3].flatMap((revision) => [false, true].map((replay) => ({ revision, replay }))))(
+    "consumes a live reveal after list revision $revision (replay: $replay)",
+    ({ revision, replay }) => {
+      using _following = following();
+      const tab = serverTab({ revealRequest: { id: "list-first-user", force: true } });
+      const listed = {
+        ...tab,
+        navStatus: {
+          _tag: "Success" as const,
+          url: "https://page.example/loaded",
+          title: "Loaded",
+        },
+      };
+      reconcilePreviewServerSessions(ref, { sessions: [listed], serverEpoch, revision });
+      expect(useRightPanelStore.getState().byThreadKey[threadKey]?.isOpen ?? false).toBe(false);
+      const event = {
+        type: "navigated" as const,
+        threadId: ref.threadId,
+        tabId: tab.tabId,
+        createdAt: tab.updatedAt,
+        snapshot: tab,
+        serverEpoch,
+        revision: 2,
+        reveal: true,
+      };
+      applyPreviewServerEvent(ref, event, { replay });
+      expect(useRightPanelStore.getState().byThreadKey[threadKey]?.isOpen ?? false).toBe(!replay);
+      if (revision > event.revision)
+        expect(readThreadPreviewState(ref).sessions[tab.tabId]).toBe(listed);
+      useRightPanelStore.getState().close(ref);
+      applyPreviewServerEvent(ref, { ...event }, { replay });
+      expect(useRightPanelStore.getState().byThreadKey[threadKey]?.isOpen ?? false).toBe(false);
+      expect(floatingTabId()).toBeNull();
+    },
+  );
 
   it("reveals an existing tab only for a new reveal request", () => {
     using _following = following();

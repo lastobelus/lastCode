@@ -1,7 +1,12 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { releaseProjectDraftUploads } from "../../lib/composerDraftUploads";
 import { useComposerDraftStore } from "../../composerDraftStore";
-import type { EnvironmentId, ProjectId, LocalApi } from "@t3tools/contracts";
+import type {
+  EnvironmentId,
+  ProjectId,
+  LocalApi,
+  SavedWorkspaceDisposition,
+} from "@t3tools/contracts";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
 import {
@@ -11,6 +16,7 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import type { SidebarProjectGroupMember } from "../../sidebarProjectGrouping";
 import type { SidebarThreadSummary } from "../../types";
+import { readUnloadedThreadCount } from "../../state/olderSettledShelf";
 import { projectsContainPersistentThread } from "../projectPersistence.logic";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 
@@ -21,8 +27,13 @@ export type RemovalDependencies = {
   threadCount: number;
   removeProject: (
     member: SidebarProjectGroupMember,
+    savedWorkspace?: SavedWorkspaceDisposition,
   ) => Promise<AtomCommandResult<unknown, unknown>>;
   waitForWarning: () => Promise<void>;
+  confirmSavedData?: (
+    member: SidebarProjectGroupMember,
+    message: string,
+  ) => Promise<SavedWorkspaceDisposition | null>;
 };
 type ConfirmRemoval = LocalApi["dialogs"]["confirm"];
 function projectRemovalMessage(member: SidebarProjectGroupMember, threadCount: number) {
@@ -68,13 +79,21 @@ async function confirmNonemptyProjectRemoval(
     .filter(
       (thread) => thread.environmentId === member.environmentId && thread.projectId === member.id,
     );
+  const threadCount = latestThreads.length + readUnloadedThreadCount([member], latestThreads);
+  const savedWorkspace = dependencies.confirmSavedData
+    ? await dependencies.confirmSavedData(member, projectRemovalMessage(member, threadCount))
+    : undefined;
+  if (savedWorkspace === null) return;
   if (
-    !(await confirm(projectRemovalMessage(member, latestThreads.length), {
+    savedWorkspace === undefined &&
+    !(await confirm(projectRemovalMessage(member, threadCount), {
       variant: "destructive",
     }))
   )
     return;
-  const result = await dependencies.removeProject(member);
+  const result = await (savedWorkspace === undefined
+    ? dependencies.removeProject(member)
+    : dependencies.removeProject(member, savedWorkspace));
   if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
     reportProjectRemovalError(member, squashAtomCommandFailure(result));
   }
@@ -130,9 +149,18 @@ export async function requestLastCodeProjectRemoval(
     );
     return;
   }
-  if (!(await api.dialogs.confirm(projectRemovalMessage(member, 0), { variant: "destructive" })))
+  const savedWorkspace = dependencies.confirmSavedData
+    ? await dependencies.confirmSavedData(member, projectRemovalMessage(member, 0))
+    : undefined;
+  if (savedWorkspace === null) return;
+  if (
+    savedWorkspace === undefined &&
+    !(await api.dialogs.confirm(projectRemovalMessage(member, 0), { variant: "destructive" }))
+  )
     return;
-  const result = await dependencies.removeProject(member);
+  const result = await (savedWorkspace === undefined
+    ? dependencies.removeProject(member)
+    : dependencies.removeProject(member, savedWorkspace));
   if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
     const error = squashAtomCommandFailure(result);
     logProjectRemovalError(member, error);
@@ -142,12 +170,13 @@ export async function requestLastCodeProjectRemoval(
 
 export type DeleteProjectCommand = (value: {
   environmentId: EnvironmentId;
-  input: { projectId: ProjectId; force: boolean };
+  input: { projectId: ProjectId; force: boolean; savedWorkspace?: SavedWorkspaceDisposition };
 }) => Promise<AtomCommandResult<unknown, unknown>>;
 export async function deleteLastCodeSidebarProject(
   member: SidebarProjectGroupMember,
   deleteProject: DeleteProjectCommand,
   sidebarThreads: readonly SidebarThreadSummary[],
+  savedWorkspace?: SavedWorkspaceDisposition,
 ) {
   const memberProjectRef = scopeProjectRef(member.environmentId, member.id);
   const result = await deleteProject({
@@ -155,6 +184,7 @@ export async function deleteLastCodeSidebarProject(
     input: {
       projectId: member.id,
       force: true,
+      ...(savedWorkspace === undefined ? {} : { savedWorkspace }),
     },
   });
   if (result._tag === "Failure") {

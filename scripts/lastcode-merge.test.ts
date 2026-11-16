@@ -65,46 +65,31 @@ describe("lastcode-merge", () => {
     ]);
   });
 
-  it("accepts an open, clean LastCode PR at the exact head and base", () => {
-    expect(() =>
-      validatePullRequestForMerge(mergeablePullRequest, "head-sha", "base-sha"),
-    ).not.toThrow();
+  it("accepts an open, clean LastCode PR at the exact head", () => {
+    expect(() => validatePullRequestForMerge(mergeablePullRequest, "head-sha")).not.toThrow();
   });
 
   it("rejects drafts, stale heads, non-clean merge state, and other base branches", () => {
     expect(() =>
-      validatePullRequestForMerge(
-        { ...mergeablePullRequest, isDraft: true },
-        "head-sha",
-        "base-sha",
-      ),
+      validatePullRequestForMerge({ ...mergeablePullRequest, isDraft: true }, "head-sha"),
     ).toThrow("still a draft");
-    expect(() =>
-      validatePullRequestForMerge(mergeablePullRequest, "other-sha", "base-sha"),
-    ).toThrow("not local HEAD");
-    expect(() =>
-      validatePullRequestForMerge(mergeablePullRequest, "head-sha", "other-base-sha"),
-    ).toThrow("not the locally tested base");
+    expect(() => validatePullRequestForMerge(mergeablePullRequest, "other-sha")).toThrow(
+      "not local HEAD",
+    );
     expect(() =>
       validatePullRequestForMerge(
         { ...mergeablePullRequest, mergeable: "CONFLICTING" },
         "head-sha",
-        "base-sha",
       ),
     ).toThrow("not cleanly mergeable");
     expect(() =>
       validatePullRequestForMerge(
         { ...mergeablePullRequest, mergeStateStatus: "BEHIND" },
         "head-sha",
-        "base-sha",
       ),
     ).toThrow("not cleanly mergeable");
     expect(() =>
-      validatePullRequestForMerge(
-        { ...mergeablePullRequest, baseRefName: "main" },
-        "head-sha",
-        "base-sha",
-      ),
+      validatePullRequestForMerge({ ...mergeablePullRequest, baseRefName: "main" }, "head-sha"),
     ).toThrow("not 'lastcode/main'");
   });
 

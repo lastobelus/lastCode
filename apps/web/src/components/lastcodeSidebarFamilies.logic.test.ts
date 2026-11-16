@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import { EnvironmentId, ProjectId, RunId, ThreadId } from "@t3tools/contracts";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { makeThreadFixture, type ThreadFixtureOverrides } from "../test-fixtures";
 import {
   lastcodeSidebarFamilySummary,
@@ -8,6 +9,7 @@ import {
   lastcodeSidebarIsAgentCreated,
   lastcodeSidebarSubagentStatusLabel,
   lastcodeSidebarThreadKey,
+  lastcodeSidebarThreadPath,
   lastcodeSidebarSubagentGroupKey,
   projectLastCodeSidebarFamilies,
 } from "./lastcodeSidebarFamilies.logic";
@@ -51,7 +53,61 @@ function project(
 const keys = (projection: ReturnType<typeof project>) =>
   projection.renderedRows.map((row) => row.thread.id);
 
+it("follows explicit arbitrary-depth placement and keeps detached creator children reachable", () => {
+  const origin = thread("origin");
+  const destination = thread("destination");
+  const item = thread("item", undefined, {
+    creatorThreadId: origin.id,
+    creatorGrouping: "grouped",
+    groupedUnderThreadId: destination.id,
+  });
+  const stages = Array.from({ length: 12 }, (_, index) =>
+    thread(`stage-${index}`, undefined, {
+      groupedUnderThreadId: ThreadId.make(index === 0 ? "item" : `stage-${index - 1}`),
+    }),
+  );
+  const shells = [origin, destination, item, ...stages];
+  const nested = project(shells, { previewCount: 100 });
+  expect(nested.allRows.find((row) => row.thread.id === origin.id)?.descendantCount).toBe(0);
+  expect(nested.allRows.find((row) => row.thread.id === destination.id)?.descendantCount).toBe(13);
+  expect(
+    lastcodeSidebarThreadPath(
+      shells,
+      scopeThreadRef(stages[11]!.environmentId, stages[11]!.id),
+    ).map((row) => row.id),
+  ).toEqual([destination.id, item.id, ...stages.map((stage) => stage.id)]);
+  expect(
+    project([{ ...item, groupedUnderThreadId: null }, origin]).allRows.find(
+      (row) => row.thread.id === item.id,
+    )?.parentKey,
+  ).toBeNull();
+  const collapsed = project(shells, {
+    previewCount: 100,
+    collapsedByKey: { [lastcodeSidebarThreadKey(destination)]: true },
+  });
+  expect(keys(collapsed)).toEqual([origin.id, destination.id]);
+});
+
 describe("legacy sidebar subagent families", () => {
+  it.each([false, true])(
+    "keeps side chats out of rows and keyboard order (independent=%s)",
+    (independent) => {
+      const parent = thread("parent");
+      const sideChat = thread("side-chat", "parent", {
+        lineage: {
+          rootThreadId: parent.id,
+          parentThreadId: parent.id,
+          relationshipToParent: "fork",
+          sideChat: true,
+          independent,
+        },
+      });
+      const result = project([parent, sideChat]);
+      expect(keys(result)).toEqual(["parent"]);
+      expect(result.orderedThreadKeys).toEqual([lastcodeSidebarThreadKey(parent)]);
+      expect(result.allRows).toHaveLength(1);
+    },
+  );
   it("keeps rendered and keyboard order identical across preview, expansion and status inputs", () => {
     const parent = thread("parent");
     const child = thread("child", "parent");
@@ -359,7 +415,7 @@ describe("legacy sidebar subagent families", () => {
     expect(result.renderedItems.map((item) => item.type)).toEqual(["thread"]);
     expect(result.renderedRows[0]?.descendantsStatus?.label).toBe("Failed");
     expect(lastcodeSidebarFamilySummary(result.renderedRows[0]!)).toBe(
-      "1 created thread (1 failed)",
+      "1 grouped thread (1 failed)",
     );
     expect(resolveThreadStatusPill({ thread: parent })).toBeNull();
   });
@@ -563,6 +619,84 @@ function created(
   };
 }
 
+describe("sidebar thread paths", () => {
+  const ref = (value: ReturnType<typeof thread>) => scopeThreadRef(value.environmentId, value.id);
+
+  it("returns root-to-sender paths through grouped creators and subagents", () => {
+    const root = thread("root");
+    const conversation = created("conversation", "root");
+    const child = thread("child", "conversation");
+    const sender = thread("sender", "child");
+    expect(lastcodeSidebarThreadPath([sender, child, root, conversation], ref(sender))).toEqual([
+      root,
+      conversation,
+      child,
+      sender,
+    ]);
+  });
+
+  it("does not include independent creators", () => {
+    const root = thread("root");
+    const sender = created("sender", "root", "independent");
+    expect(lastcodeSidebarThreadPath([root, sender], ref(sender))).toEqual([sender]);
+  });
+
+  it("stops at missing parents and returns no path for a missing sender", () => {
+    const sender = thread("sender", "missing");
+    expect(lastcodeSidebarThreadPath([sender], ref(sender))).toEqual([sender]);
+    expect(lastcodeSidebarThreadPath([], ref(sender))).toEqual([]);
+    const missingCreator = created("conversation", "missing");
+    expect(lastcodeSidebarThreadPath([missingCreator], ref(missingCreator))).toEqual([
+      missingCreator,
+    ]);
+  });
+
+  it.each(["subagent", "creator"] as const)(
+    "keeps %s ancestry inside its environment and project",
+    (relationship) => {
+      const parent = thread("parent");
+      const sender =
+        relationship === "subagent" ? thread("sender", "parent") : created("sender", "parent");
+      const remoteParent = { ...parent, environmentId: EnvironmentId.make("remote") };
+      const otherProjectParent = { ...parent, projectId: ProjectId.make("other-project") };
+      expect(lastcodeSidebarThreadPath([remoteParent, sender], ref(sender))).toEqual([sender]);
+      expect(lastcodeSidebarThreadPath([otherProjectParent, sender], ref(sender))).toEqual([
+        sender,
+      ]);
+      expect(lastcodeSidebarThreadPath([remoteParent, sender, parent], ref(sender))).toEqual([
+        parent,
+        sender,
+      ]);
+      expect(
+        lastcodeSidebarThreadPath([sender], scopeThreadRef(remoteParent.environmentId, sender.id)),
+      ).toEqual([]);
+    },
+  );
+
+  it("detaches lineage cycles while preserving descendants", () => {
+    const a = thread("a", "b");
+    const b = thread("b", "a");
+    const sender = thread("sender", "a");
+    expect(lastcodeSidebarThreadPath([a, b, sender], ref(sender))).toEqual([a, sender]);
+    expect(lastcodeSidebarThreadPath([a, b, sender], ref(b))).toEqual([b]);
+  });
+
+  it("detaches creator cycles and preserves subagent ownership in mixed cycles", () => {
+    const a = created("a", "b");
+    const b = created("b", "a");
+    expect(lastcodeSidebarThreadPath([a, b], ref(a))).toEqual([a]);
+    const parent = created("parent", "sender");
+    const sender = thread("sender", "parent");
+    expect(lastcodeSidebarThreadPath([sender, parent], ref(sender))).toEqual([parent, sender]);
+  });
+
+  it("keeps caller-supplied ancestors without changing their visibility", () => {
+    const parent = thread("parent", undefined, { archivedAt: "2026-01-01T00:00:00Z" });
+    const sender = thread("sender", "parent");
+    expect(lastcodeSidebarThreadPath([parent, sender], ref(sender))).toEqual([parent, sender]);
+  });
+});
+
 describe("legacy sidebar creator grouping", () => {
   it("groups ordinary conversations by trusted creator without changing their identity or lineage", () => {
     const child = created("conversation", "creator");
@@ -622,7 +756,7 @@ describe("legacy sidebar creator grouping", () => {
     expect(keys(typed)).toEqual(expected);
     expect(typed.renderedRows.map((row) => row.groupHeading)).toEqual([
       null,
-      "Created by this thread",
+      "Grouped under this thread",
       null,
       null,
       null,
@@ -640,7 +774,7 @@ describe("legacy sidebar creator grouping", () => {
     });
     expect(keys(result)).toEqual(["creator"]);
     expect(lastcodeSidebarFamilySummary(result.renderedRows[0]!)).toBe(
-      "1 subagent (1 idle) · 1 created thread (1 idle)",
+      "1 subagent (1 idle) · 1 grouped thread (1 idle)",
     );
     expect(result.renderedRows[0]?.descendantCount).toBe(2);
   });

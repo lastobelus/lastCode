@@ -34,7 +34,7 @@ function shellQuote(value) {
 }
 
 export function renderLauncher(modulePath) {
-  return `#!/bin/sh\n# ${INSTALL_MANAGED_MARKER}\nexec env MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@26.12.1 -- node ${shellQuote(modulePath)} "$@"\n`;
+  return `#!/bin/sh\n# ${INSTALL_MANAGED_MARKER}\nexec env MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@26.13.1 -- node ${shellQuote(modulePath)} "$@"\n`;
 }
 
 export function parseOptions(argv) {

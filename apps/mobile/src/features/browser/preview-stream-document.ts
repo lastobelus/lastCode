@@ -21,6 +21,7 @@ export type PreviewStreamMessage =
       readonly status: "connecting" | "streaming" | "error";
       readonly detail?: string;
     }
+  | { readonly type: "threadLink"; readonly href: string }
   | { readonly type: "unauthorized" }
   | { readonly type: "gone" }
   | ({ readonly type: "hostSetup" } & PreviewStreamHostSetup)

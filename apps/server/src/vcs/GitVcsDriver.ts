@@ -148,6 +148,8 @@ export interface CreateWorktreeProgress {
 }
 
 export interface CreateWorktreeOptions {
+  readonly reuseMissingRegistrationAt?: string | undefined;
+  readonly acquireDestination?: (destination: string) => Effect.Effect<string, GitCommandError>;
   readonly progress?: CreateWorktreeProgress;
   /** Null or omitted defers to the checkout's t3.json. */
   readonly submodules?: WorktreeSubmodules | null;
@@ -316,6 +318,8 @@ export interface GitSetBranchUpstreamInput {
   remoteBranch: string;
 }
 
+export type GitStatusFetchState = "fetched" | "failed" | "pending";
+
 export interface GitRemoteStatusOptions {
   readonly refreshUpstream?: boolean;
 }
@@ -341,6 +345,8 @@ export class GitVcsDriver extends Context.Service<
     ) => Effect.Effect<GitRemoteStatusDetails, GitCommandError>;
     /** Refs, HEAD and shallow boundaries. Null when the snapshot cannot be read. */
     readonly readRefSnapshot: (cwd: string) => Effect.Effect<string | null>;
+    /** Whether the background fetch behind this cwd's last status read reached its remote. */
+    readonly statusFetchState: (cwd: string) => Effect.Effect<GitStatusFetchState>;
     readonly prepareCommitContext: (
       cwd: string,
       filePaths?: readonly string[],
@@ -1401,6 +1407,8 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
             args: [
               ...indexConfig,
               ...durableWrite,
+              // Batch fsync can delete its nested object store before finalizing an open bulk pack.
+              ...(hostPlatform === "darwin" ? ["-c", "core.fsyncMethod=fsync"] : []),
               ...longPaths,
               // safecrlf=true refuses LF files under CRLF conversion; capture them as Git's default does.
               "-c",

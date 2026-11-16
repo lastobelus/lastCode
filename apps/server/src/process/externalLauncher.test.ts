@@ -945,6 +945,11 @@ it.effect.skipIf(windowsHost)("does not offer the OpenZFS zed daemon as Zed on L
       resolveEditorCommand(editor, { HOME: home, PATH: `${binDir}:${laterBin}` }).pipe(
         Effect.provideService(HostProcess.Platform, platform),
         Effect.provideService(Path.Path, withSystemBin(path, systemBin)),
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          stat: (file) =>
+            fs.stat(file.startsWith(`${home}${path.sep}`) ? file : path.join(home, "missing")),
+        }),
       );
     assert.deepEqual(yield* resolveOn("linux"), Option.none());
     assert.deepEqual(yield* resolveOn("darwin"), Option.none());

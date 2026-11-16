@@ -11,6 +11,7 @@ function useT3SettingsImport() {
   const [importPreview, setImportPreview] = useState<LastCodeSettingsImportPreview | null>(null);
   const [isImporting, setIsImporting] = useState(false);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the native desktop settings-import preview when this settings control mounts
   useEffect(() => {
     const bridge = window.desktopBridge;
     if (!bridge || typeof bridge.previewT3SettingsImport !== "function") return;

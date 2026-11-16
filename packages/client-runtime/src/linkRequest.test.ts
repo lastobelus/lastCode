@@ -192,10 +192,23 @@ describe("linkableMachines", () => {
     const here = presentation("environment-here", "Here", { saved: ["http://localhost:3773"] });
     // A loopback address would name the linking server itself, so it is no address of the VPS.
     const vps = presentation("environment-vps", "VPS", {
-      saved: ["https://vps.example.com", "https://vps.ts.net", "http://127.0.0.1:3773"],
-      reported: ["https://vps.ts.net", "http://localhost:3773"],
+      saved: [
+        "http://localhost:3774",
+        "https://vps.example.com",
+        "https://vps.ts.net",
+        "http://127.0.0.1:3773",
+      ],
+      reported: [
+        "http://127.0.0.1:3774",
+        "https://vps.ts.net",
+        "http://[::1]:3774",
+        "http://localhost:3773",
+      ],
     });
-    const mini = presentation("environment-mini", "Mini", { connected: false });
+    const mini = presentation("environment-mini", "Mini", {
+      connected: false,
+      saved: ["http://127.0.0.1:3774"],
+    });
     expect(
       linkableMachines({
         environments: [here, vps, mini],

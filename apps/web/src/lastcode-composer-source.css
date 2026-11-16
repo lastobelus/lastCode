@@ -1,0 +1,81 @@
+/* LastCode source preview decorates editable text; upstream composer rules remain intact. */
+[data-lastcode-source-composer] .composer-md-em {
+  font-style: italic;
+}
+[data-lastcode-source-composer] .composer-md-strong {
+  font-weight: 700;
+}
+[data-lastcode-source-composer] .composer-md-strike {
+  text-decoration: line-through;
+}
+[data-lastcode-source-composer] .composer-md-code {
+  direction: ltr;
+  unicode-bidi: isolate;
+  font-family: var(--font-mono);
+  background: color-mix(in oklab, var(--muted-foreground) 12%, transparent);
+  border-radius: 0.3em;
+}
+[data-lastcode-source-composer] .composer-md-syntax {
+  color: var(--muted-foreground);
+  font-weight: 400;
+  font-style: normal;
+  text-decoration: none;
+}
+[data-lastcode-source-composer] .composer-md-syntax-hidden {
+  font-size: 0;
+}
+
+/* Block decorations sit on ordinary source paragraphs. */
+.composer-tiptap[data-lastcode-source-composer]
+  :is(
+    .composer-md-h1,
+    .composer-md-h2,
+    .composer-md-h3,
+    .composer-md-h4,
+    .composer-md-h5,
+    .composer-md-h6
+  ) {
+  font-weight: 600;
+  color: var(--contrast-foreground);
+}
+.composer-tiptap[data-lastcode-source-composer] .composer-md-h1 {
+  font-size: 1.25em;
+}
+.composer-tiptap[data-lastcode-source-composer] .composer-md-h2 {
+  font-size: 1.125em;
+}
+.composer-tiptap[data-lastcode-source-composer] .composer-md-quote {
+  border-inline-start: 2px solid var(--border);
+  padding-inline-start: 0.65em;
+  color: var(--muted-foreground);
+}
+.composer-tiptap[data-lastcode-source-composer] .composer-md-rule {
+  border-block-end: 1px solid var(--border);
+}
+.composer-tiptap[data-lastcode-source-composer]
+  :is(.composer-md-fence-open, .composer-md-fence-body, .composer-md-fence-close) {
+  background: color-mix(in oklab, var(--muted-foreground) 8%, transparent);
+  padding-inline: 0.65em;
+  font-family: var(--font-mono);
+}
+.composer-tiptap[data-lastcode-source-composer] .composer-md-fence-open {
+  border-radius: 0.4em 0.4em 0 0;
+}
+.composer-tiptap[data-lastcode-source-composer] .composer-md-fence-close {
+  border-radius: 0 0 0.4em 0.4em;
+}
+[data-lastcode-source-composer] .composer-md-fence-header {
+  display: inline-flex;
+  font-family: var(--font-sans);
+}
+[data-lastcode-source-composer] .composer-md-checkbox {
+  margin-inline-end: 0.4em;
+}
+[data-lastcode-source-composer] .composer-md-checkbox input {
+  width: 0.95em;
+  height: 0.95em;
+  cursor: pointer;
+}
+[data-lastcode-source-composer] .composer-md-bullet {
+  color: var(--muted-foreground);
+}

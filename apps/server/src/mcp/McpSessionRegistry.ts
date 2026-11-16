@@ -20,6 +20,7 @@ export interface McpCredentialRequest {
   readonly browserToolsAvailable?: boolean;
   readonly capabilities?: ReadonlySet<McpInvocationContext.McpCapability>;
   readonly subagent?: boolean;
+  readonly appOwnedSubagent?: boolean;
 }
 
 export interface McpIssuedCredential {
@@ -125,6 +126,9 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
       const rawToken = yield* random.randomBytes(32).pipe(Effect.map(tokenFromBytes), Effect.orDie);
       const tokenHash = yield* hashToken(rawToken);
       const browserToolsAvailable = request.browserToolsAvailable ?? true;
+      const requestedCapabilities =
+        request.capabilities ??
+        new Set<McpInvocationContext.McpCapability>(browserToolsAvailable ? ["preview"] : []);
       const scope: McpInvocationContext.McpThreadInvocationScope = {
         environmentId,
         requestNamespace: providerSessionId,
@@ -133,13 +137,15 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
           providerSessionId,
           providerInstanceId: ProviderInstanceId.make(request.providerInstanceId),
           subagent: request.subagent === true,
+          appOwnedSubagent: request.appOwnedSubagent === true,
         },
         client: undefined,
         capabilities: new Set<McpInvocationContext.McpCapability>([
           "orchestration",
           "worktree",
           "pull-requests",
-          ...(request.capabilities ?? (browserToolsAvailable ? (["preview"] as const) : [])),
+          ...requestedCapabilities,
+          ...(requestedCapabilities.has("preview") ? (["action-resume"] as const) : []),
         ]),
         issuedAt: issuedAlive.wallMs,
       };
@@ -154,7 +160,10 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
           threadId: scope.thread.threadId,
           providerSessionId,
           providerInstanceId: scope.thread.providerInstanceId,
-          endpoint,
+          endpoint:
+            scope.capabilities.has("preview") || scope.capabilities.has("device")
+              ? endpoint
+              : `${endpoint}/thread`,
           authorizationHeader: `Bearer ${rawToken}`,
           browserToolsAvailable: scope.capabilities.has("preview"),
           capabilities: scope.capabilities,

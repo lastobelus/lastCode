@@ -76,7 +76,6 @@ it.each([
   const settled = deferred<void>();
   const input = {
     environmentId: EnvironmentId.make("clipboard-target"),
-    linkedEnvironments: new Map(),
     activeThread: undefined,
     activeThreadId: null,
     composerDraftTarget: target,
@@ -218,7 +217,6 @@ it.each(["same", "other-environment"] as const)(
       <Harness
         input={{
           environmentId,
-          linkedEnvironments: new Map([[otherEnvironmentId, "Other machine"]]),
           activeThread: undefined,
           activeThreadId: null,
           composerDraftTarget: target,
