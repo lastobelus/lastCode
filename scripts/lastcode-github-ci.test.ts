@@ -69,26 +69,59 @@ describe("LastCode GitHub CI evidence", () => {
     ]);
   });
 
-  it("ignores a newer metadata-only run while retaining real exact-head CI", () => {
+  it("tracks newer metadata gates without treating them as source evidence", () => {
     const realRun = input().workflowRuns[0]!;
-    for (const status of ["in_progress", "completed"]) {
+    for (const [status, conclusion, state] of [
+      ["queued", null, "pending"],
+      ["in_progress", null, "pending"],
+      ["completed", "success", "satisfied"],
+      ["completed", "failure", "failure"],
+      ["completed", "cancelled", "failure"],
+      ["completed", "skipped", "failure"],
+    ] as const) {
+      const metadata = {
+        ...realRun,
+        id: 457,
+        display_title: `Metadata only: ${TITLE}`,
+        created_at: "2026-08-27T11:00:00Z",
+        html_url: "https://github.com/lastobelus/lastCode/actions/runs/457",
+        status,
+        conclusion,
+      };
+      const result = evaluateGithubCi(input({ workflowRuns: [metadata, realRun] }));
+      expect(result).toMatchObject({ state });
+      if (state !== "satisfied") {
+        expect(result).toMatchObject({
+          reason: "metadata-gate",
+          runId: 457,
+          runUrl: metadata.html_url,
+        });
+      }
+      if (state === "failure") {
+        expect(result).toMatchObject({
+          detail: expect.stringContaining("re-run this Metadata only: run"),
+        });
+      }
+      expect(evaluateGithubCi(input({ workflowRuns: [metadata] }))).toMatchObject({
+        state: "pending",
+        reason: "run-registration",
+      });
       expect(
         evaluateGithubCi(
-          input({
-            workflowRuns: [
-              {
-                ...realRun,
-                id: 457,
-                display_title: `Metadata only: ${TITLE}`,
-                created_at: "2026-08-27T11:00:00Z",
-                status: "completed",
-                conclusion: "skipped",
-              },
-              { ...realRun, status },
-            ],
-          }),
+          input({ workflowRuns: [metadata, { ...realRun, status: "in_progress" }] }),
         ),
-      ).toMatchObject({ state: status === "completed" ? "satisfied" : "pending", runId: 456 });
+      ).toMatchObject({ state: "pending", reason: "run-in-progress", runId: 456 });
+      for (const other of [
+        { ...metadata, id: 455, created_at: "2026-08-27T09:00:00Z" },
+        { ...metadata, head_sha: "other" },
+        { ...metadata, display_title: `Metadata only: ${TITLE.replace(BASE, HEAD)}` },
+        { ...metadata, display_title: `Metadata only: ${TITLE.replace("#104", "#105")}` },
+      ]) {
+        expect(evaluateGithubCi(input({ workflowRuns: [other, realRun] }))).toMatchObject({
+          state: "satisfied",
+          runId: 456,
+        });
+      }
     }
   });
 
