@@ -242,7 +242,8 @@ export function useTagDiscovery(
   const state = useEnvironmentQuery(queryAtom);
   return {
     entries: mergeThreadTagVocabulary([state.data?.entries ?? []], query),
-    threads: state.data?.threads ?? [],
+    // Cached data was filtered under the previous privacy state, so only expose a settled read.
+    threads: state.successResult?.value.threads ?? [],
     error:
       state.error ??
       (state.data?.incomplete
