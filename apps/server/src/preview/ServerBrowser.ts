@@ -4403,7 +4403,6 @@ const make = Effect.gen(function* () {
                 );
               return statusWithTitle(tab, request.agentSessionId);
             }),
-          signal,
           deadlineMs,
         );
       }
@@ -4578,7 +4577,6 @@ const make = Effect.gen(function* () {
             if (generation !== tab.control.generation) ServerBrowserPage.invalidateRefs(tab.page);
           }
         }),
-      signal,
       deadlineMs,
     );
   };
