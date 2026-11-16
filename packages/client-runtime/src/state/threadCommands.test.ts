@@ -563,7 +563,6 @@ it.effect("reads a scoped complete family without replacing the active shell sna
     expect(result.value.activeThreads.map(({ id }) => id)).toEqual([liveChildId]);
     expect(result.value.unreadThreads.map(({ id }) => id)).toEqual([root.id]);
     expect(result.value.protectedChildren.map(({ id }) => id)).toEqual([liveChildId]);
-    expect(result.value.promotableChildren).toEqual([]);
     expect(result.value.requiresConfirmation).toBe(true);
     expect(result.value.canStopAndArchive).toBe(false);
     expect(result.value.nativeStopCount).toBe(1);

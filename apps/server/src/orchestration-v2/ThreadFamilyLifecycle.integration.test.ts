@@ -8,7 +8,6 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionId,
-  ProviderThreadId,
   RunId,
   ThreadId,
   getOwnedThreadFamily,
@@ -206,84 +205,6 @@ const seed = Effect.fn("ThreadFamilyLifecycle.seed")(function* () {
 });
 
 it.layer(TestLayer)("thread family lifecycle", (it) => {
-  it.effect("checks the broader-mode owner before deletion releases its promotion", () =>
-    Effect.gen(function* () {
-      const h = yield* seed();
-      for (const threadId of [h.rootId, h.nativeId, h.nestedId, h.independentId]) {
-        const thread = yield* h.store.getThread(threadId);
-        yield* h.sink.write({
-          events: [
-            {
-              id: EventId.make(`lower-delete:${threadId}`),
-              type: "thread.metadata-updated",
-              threadId,
-              occurredAt: h.now,
-              payload: {
-                ...thread,
-                runtimeMode: "approval-required",
-                ...(threadId === h.rootId
-                  ? {
-                      lineage: {
-                        parentThreadId: h.forkId,
-                        rootThreadId: h.forkId,
-                        relationshipToParent: "fork",
-                      },
-                      forkedFrom: {
-                        type: "provider_thread",
-                        providerThreadId: ProviderThreadId.make(`promotion-source:${h.rootId}`),
-                      },
-                    }
-                  : {}),
-              },
-            },
-          ],
-        });
-      }
-      const source = yield* h.store.getThread(h.forkId);
-      const promotion = {
-        requestId: CommandId.make(`promotion:${h.rootId}`),
-        targetThreadId: h.rootId,
-        status: "waiting" as const,
-        error: null,
-        requestedAt: h.now,
-        updatedAt: h.now,
-        createdBy: "user" as const,
-        creationSource: "web" as const,
-      };
-      yield* h.sink.write({
-        events: [
-          {
-            id: EventId.make(`promotion-owner:${h.rootId}`),
-            type: "thread.metadata-updated",
-            threadId: h.forkId,
-            occurredAt: h.now,
-            payload: {
-              ...source,
-              lineage: {
-                parentThreadId: null,
-                rootThreadId: h.forkId,
-                relationshipToParent: null,
-              },
-              subagentPromotion: promotion,
-            },
-          },
-        ],
-      });
-      const refused = yield* h.command("thread.delete", "limited-promotion-release").pipe(
-        Effect.provideService(DispatchModeLimit, {
-          runtimeMode: "approval-required",
-          interactionMode: "default",
-        }),
-        Effect.flip,
-      );
-      assert.equal(refused._tag, "OrchestratorThreadAboveModeLimitError");
-      if (refused._tag === "OrchestratorThreadAboveModeLimitError")
-        assert.equal(refused.threadId, h.forkId);
-      assert.isNull((yield* h.store.getThread(h.rootId)).deletedAt);
-      assert.deepEqual((yield* h.store.getThread(h.forkId)).subagentPromotion, promotion);
-    }),
-  );
-
   it.effect.each(["archived", "deleted"] as const)(
     "does not release a prepared run from a previously %s thread",
     (state) =>

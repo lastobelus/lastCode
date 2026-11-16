@@ -485,7 +485,7 @@ export const layer: Layer.Layer<
                 return [];
               const now = yield* DateTime.now;
               // Reannounced children may refresh provider metadata without replacing
-              // durable app state, including promotion and archive ownership.
+              // durable app state, including archive ownership.
               if (existing !== null)
                 return [
                   yield* makeDomainEvent(input, {

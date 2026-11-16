@@ -71,7 +71,6 @@ import * as ActionResume from "../actionResume/ActionResume.ts";
 import * as ActionRunStore from "../actionResume/ActionRunStore.ts";
 import * as UpdateDrainRepositoryPersistence from "../persistence/UpdateDrainRepository.ts";
 import * as WorktreeCleanupService from "./WorktreeCleanupService.ts";
-import * as SubagentPromotionService from "./SubagentPromotionService.ts";
 import * as ThreadRecovery from "./ThreadRecoveryService.ts";
 import * as ThreadRecoveryRepair from "./ThreadRecoveryRepairService.ts";
 
@@ -424,17 +423,6 @@ const layerThreadTitleRegenerationProvided = ThreadTitleRegenerationService.laye
 const layerIncomingMessageSummaryProvided = IncomingMessageSummaryService.layer.pipe(
   Layer.provide(Layer.mergeAll(layerThreadManagementProvided, TextGeneration.layer)),
 );
-const layerSubagentPromotionProvided = SubagentPromotionService.layer.pipe(
-  Layer.provide(
-    Layer.mergeAll(
-      ProjectionStore.layer,
-      ProviderAdapterRegistry.layerFromProviderInstanceRegistry,
-      layerRuntimePolicyProvided,
-      layerOrchestratorProvided,
-    ),
-  ),
-);
-
 const layerEffectExecutorProvided = EffectWorker.layerExecutor.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -448,7 +436,6 @@ const layerEffectExecutorProvided = EffectWorker.layerExecutor.pipe(
       layerThreadTitleRegenerationProvided,
       layerIncomingMessageSummaryProvided,
       layerThreadManagementProvided,
-      layerSubagentPromotionProvided,
     ),
   ),
 );

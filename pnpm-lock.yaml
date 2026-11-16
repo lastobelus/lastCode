@@ -268,6 +268,7 @@ catalogs:
       version: 11.0.5
 
 overrides:
+  unenv: 2.0.0-rc.24
   react-native-image-viewing: 0.2.2
   mdast-util-math: 3.0.0
   micromark-extension-llm-math: 3.1.0

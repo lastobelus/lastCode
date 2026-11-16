@@ -2372,85 +2372,77 @@ layer("ProviderEventIngestorV2", (it) => {
     }),
   );
 
-  it.effect.each(["waiting", "promoted"] as const)(
-    "preserves %s promotion when a restarted provider reannounces its child",
-    (status) =>
-      Effect.gen(function* () {
-        const now = yield* DateTime.now;
-        const eventSink = yield* EventSink.EventSinkV2;
-        const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
-        const idAllocator = yield* IdAllocator.IdAllocatorV2;
-        const rootEvent = yield* threadCreatedEvent(now);
-        if (rootEvent.type !== "thread.created") throw new Error("Expected thread fixture");
-        const childThreadId = idAllocator.derive.threadFromProviderThread({
+  it.effect("preserves archive ownership when a restarted provider reannounces its child", () =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const rootEvent = yield* threadCreatedEvent(now);
+      if (rootEvent.type !== "thread.created") throw new Error("Expected thread fixture");
+      const childThreadId = idAllocator.derive.threadFromProviderThread({
+        driver: CODEX_DRIVER,
+        nativeThreadId: "native-reannounced",
+      });
+      const childThread: OrchestrationV2AppThread = {
+        ...rootEvent.payload,
+        id: childThreadId,
+        title: "Saved child title",
+        archivedAt: now,
+        archivedWith: {
+          threadId: rootEvent.threadId,
+          commandId: CommandId.make("archive-reannounced-child"),
+        },
+        lineage: {
+          parentThreadId: rootEvent.threadId,
+          relationshipToParent: "subagent",
+          rootThreadId: rootEvent.threadId,
+        },
+      };
+      yield* eventSink.write({
+        events: [
+          rootEvent,
+          {
+            ...rootEvent,
+            id: yield* idAllocator.allocate.event({ threadId: childThreadId }),
+            threadId: childThreadId,
+            payload: childThread,
+          },
+        ],
+      });
+      const restartedIngestor = yield* ProviderEventIngestor.ProviderEventIngestorV2.pipe(
+        Effect.provide(Layer.fresh(ProviderEventIngestor.layer)),
+      );
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId: rootEvent.threadId,
+      });
+      const events = yield* restartedIngestor.ingestNormalized({
+        providerSessionId,
+        providerInstanceId: modelSelection.instanceId,
+        threadId: rootEvent.threadId,
+        event: {
+          type: "app_thread.created",
           driver: CODEX_DRIVER,
-          nativeThreadId: `native-reannounced-${status}`,
-        });
-        const childThread: OrchestrationV2AppThread = {
-          ...rootEvent.payload,
-          id: childThreadId,
-          title: "Saved child title",
-          archivedAt: now,
-          subagentPromotion: {
-            requestId: CommandId.make(`promotion-${status}`),
-            targetThreadId: ThreadId.make(`interactive-${status}`),
-            status,
-            createdBy: "user",
-            creationSource: "web",
-            requestedAt: now,
-            updatedAt: now,
-            error: null,
+          appThread: {
+            ...childThread,
+            title: "Provider's fresh title",
+            archivedAt: null,
+            archivedWith: null,
           },
-          lineage: {
-            parentThreadId: rootEvent.threadId,
-            relationshipToParent: "subagent",
-            rootThreadId: rootEvent.threadId,
-          },
-        };
-        yield* eventSink.write({
-          events: [
-            rootEvent,
-            {
-              ...rootEvent,
-              id: yield* idAllocator.allocate.event({ threadId: childThreadId }),
-              threadId: childThreadId,
-              payload: childThread,
-            },
-          ],
-        });
-        const restartedIngestor = yield* ProviderEventIngestor.ProviderEventIngestorV2.pipe(
-          Effect.provide(Layer.fresh(ProviderEventIngestor.layer)),
-        );
-        const providerSessionId = yield* idAllocator.allocate.providerSession({
-          providerInstanceId: modelSelection.instanceId,
-          threadId: rootEvent.threadId,
-        });
-        const events = yield* restartedIngestor.ingestNormalized({
-          providerSessionId,
-          providerInstanceId: modelSelection.instanceId,
-          threadId: rootEvent.threadId,
-          event: {
-            type: "app_thread.created",
-            driver: CODEX_DRIVER,
-            appThread: {
-              ...childThread,
-              title: "Provider's fresh title",
-              archivedAt: null,
-              subagentPromotion: null,
-            },
-          },
-        });
-        assert.deepEqual(
-          events.map((stored) => stored.event.type),
-          ["thread.metadata-updated"],
-        );
-        const refreshed = yield* projectionStore.getThread(childThreadId);
-        assert.deepEqual(refreshed, {
-          ...childThread,
-          title: "Provider's fresh title",
-          updatedAt: refreshed.updatedAt,
-        });
-      }),
+        },
+      });
+      assert.deepEqual(
+        events.map((stored) => stored.event.type),
+        ["thread.metadata-updated"],
+      );
+      const refreshed = yield* projectionStore.getThread(childThreadId);
+      assert.deepEqual(refreshed, {
+        ...childThread,
+        title: "Provider's fresh title",
+        updatedAt: refreshed.updatedAt,
+      });
+    }),
   );
 
   it.effect("moves a native subagent's thread to its later model through a database lock", () =>

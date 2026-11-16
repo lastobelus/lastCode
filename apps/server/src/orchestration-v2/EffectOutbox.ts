@@ -51,10 +51,6 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
     messageId: MessageId,
   }),
   Schema.Struct({
-    type: Schema.Literal("subagent.promote"),
-    requestId: CommandId,
-  }),
-  Schema.Struct({
     type: Schema.Literal("provider-runtime.continue"),
     sourceRunId: RunId,
   }),
@@ -172,7 +168,6 @@ export const REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS = [
   "pull-request-watch.deliver",
   "environment-pause.record-delivery",
   "thread.archive",
-  "subagent.promote",
   "provider-runtime.continue",
   "provider-session.detach",
   "provider-thread.rollback",
@@ -651,7 +646,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
         WHERE candidate.status IN ('pending', 'running')
           AND ${paused ? sql`(candidate.status = 'running' OR NOT ${automaticEffect("candidate")})` : sql`1 = 1`}
           AND candidate.effect_type IN (
-          'thread.archive', 'subagent.promote', 'provider-runtime.continue',
+          'thread.archive', 'provider-runtime.continue',
           'provider-turn.start', 'provider-turn.restart', 'provider-turn.steer',
           'runtime-request.respond', 'provider-thread.rollback', 'checkpoint.capture',
           'delegated-tasks.stop'

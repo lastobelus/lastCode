@@ -111,7 +111,6 @@ vi.mock("../state/use-atom-command", () => ({
           activeChildren: [],
           activeThreads: [],
           unreadThreads: [],
-          promotableChildren: [],
           protectedChildren: [],
           threads: state.threads
             .filter(

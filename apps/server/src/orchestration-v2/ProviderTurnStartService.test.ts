@@ -78,7 +78,6 @@ import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
 import * as IncomingMessageSummaryService from "./IncomingMessageSummaryService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
-import * as SubagentPromotionService from "./SubagentPromotionService.ts";
 import { CommandId } from "@t3tools/contracts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnStart from "./ProviderTurnStartService.ts";
@@ -2522,7 +2521,6 @@ effectIt.effect.each([
             Layer.mock(ThreadManagementService.ThreadManagementService)({
               getThreadRecords: () => Effect.succeed(harness.projection()),
             }),
-            Layer.mock(SubagentPromotionService.SubagentPromotionService)({}),
             Layer.mock(EffectOutbox.EffectOutboxV2)({
               enqueue: () => Effect.void,
               notifyAvailable: () => Effect.void,

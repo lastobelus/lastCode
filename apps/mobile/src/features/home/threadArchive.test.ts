@@ -34,7 +34,6 @@ describe("thread family archive confirmation", () => {
     activeChildren: [],
     activeThreads: [],
     unreadThreads: [],
-    promotableChildren: [],
     protectedChildren: [],
     ...options,
   });
@@ -49,7 +48,6 @@ describe("thread family archive confirmation", () => {
         activeThreads: [root],
         unreadThreads: [nested],
         requiresConfirmation: true,
-        canPromote: true,
       }),
     );
     expect(family.requiresConfirmation).toBe(true);
@@ -114,24 +112,21 @@ describe("thread family archive confirmation", () => {
     }
   });
 
-  it.each([true, false])(
-    "explains protected children without offering a separate archive choice: %s",
-    (canPromote) => {
-      const protectedChild = { ...child("persistent"), persistent: true };
-      const family = resolveThreadArchiveFamily(
-        decision([protectedChild], {
-          protectedChildren: [protectedChild],
-          protectedChildThreadIds: [protectedChild.id],
-          requiresConfirmation: true,
-          canStopAndArchive: false,
-          canPromote,
-        }),
-      );
-      expect(family.canStopAndArchive).toBe(false);
-      expect(family.message).toMatch(/persistent|protected/i);
-      expect(family.message).not.toContain("Keep running separately");
-    },
-  );
+  it("explains protected children without offering a separate archive choice", () => {
+    const protectedChild = { ...child("persistent"), persistent: true };
+    const family = resolveThreadArchiveFamily(
+      decision([protectedChild], {
+        protectedChildren: [protectedChild],
+        protectedChildThreadIds: [protectedChild.id],
+        requiresConfirmation: true,
+        canPromote: false,
+        canStopAndArchive: false,
+      }),
+    );
+    expect(family.canStopAndArchive).toBe(false);
+    expect(family.message).toMatch(/persistent|protected/i);
+    expect(family.message).not.toContain("Keep running separately");
+  });
 
   it("lists every attention member instead of truncating the confirmation", () => {
     const children = Array.from({ length: 5 }, (_, index) => child(`child-${index}`));

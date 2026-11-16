@@ -120,7 +120,6 @@ export const layer: Layer.Layer<ThreadForkServiceV2> = Layer.succeed(
         // The source's title job completes only on the source thread.
         titleRegeneration: null,
         activeProviderThreadId: null,
-        subagentPromotion: null,
         dashboardItems: [],
         actionResume: null,
         lineage: {

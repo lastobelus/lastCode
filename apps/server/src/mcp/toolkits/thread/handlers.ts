@@ -344,37 +344,13 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       }),
     ),
   ),
-  t3_subagent_promote: writesThread((input) =>
-    dispatch(input.threadId, ({ commandId, threadId }) => ({
-      type: "subagent.promote.request",
-      commandId,
-      threadId,
-      targetThreadId: ThreadId.make(`${commandId}:interactive`),
-      createdBy: "agent",
-      creationSource: "mcp",
-    })),
-  ),
-  t3_subagent_promotion_cancel: writesThread((input) =>
-    dispatch(input.threadId, ({ commandId, threadId }) => ({
-      type: "subagent.promote.cancel",
-      commandId,
-      threadId,
-      requestId: input.requestId,
-    })),
-  ),
-  t3_subagent_promotion_status: McpToolAccess.reads((input) =>
-    Effect.gen(function* () {
-      const { projection } = yield* readThread(input.threadId);
-      return { promotion: projection.thread.subagentPromotion ?? null };
-    }),
-  ),
   t3_thread_archive_family: writesThread((input) =>
     Effect.gen(function* () {
       const { threads, projection } = yield* readArchiveThread(input.threadId);
       const family = yield* threads
         .getThreadArchiveFamily(projection.thread.id)
         .pipe(Effect.mapError(unavailable));
-      return Struct.omit(family, ["threads"]);
+      return Struct.omit(family, ["threads", "canPromote", "promotableChildThreadIds"]);
     }),
   ),
   t3_queue: McpToolAccess.either(

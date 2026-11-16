@@ -186,7 +186,6 @@ export type ProjectionStoreV2Error = typeof ProjectionStoreV2Error.Type;
 export type ProjectionRecoveryKind =
   | "thread-families"
   | "creator-grouping"
-  | "subagent-promotions"
   | "queued-runs"
   | "runtime"
   | "restart-continuations"
@@ -1990,7 +1989,6 @@ export function threadShellFromProjection(
     titleRegeneration: projection.thread.titleRegeneration ?? null,
     lastTitleRegeneration: projection.thread.lastTitleRegeneration ?? null,
     ...(projection.thread.recovery ? { recovery: projection.thread.recovery } : {}),
-    subagentPromotion: projection.thread.subagentPromotion ?? null,
     limitRecovery: projection.thread.limitRecovery ?? null,
     deletedAt: projection.thread.deletedAt,
   };
@@ -2331,7 +2329,6 @@ function shellFromState(input: {
     titleRegeneration: input.state.thread.titleRegeneration ?? null,
     lastTitleRegeneration: input.state.thread.lastTitleRegeneration ?? null,
     ...(input.state.thread.recovery ? { recovery: input.state.thread.recovery } : {}),
-    subagentPromotion: input.state.thread.subagentPromotion ?? null,
     limitRecovery: input.state.thread.limitRecovery ?? null,
     deletedAt: input.state.thread.deletedAt,
   };
@@ -4990,14 +4987,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 WHERE parent.deleted_at IS NULL AND parent.archived_at IS NOT NULL
                   AND child.deleted_at IS NULL AND child.archived_at IS NULL
                   AND child.project_id = parent.project_id
-              `;
-            case "subagent-promotions":
-              return sql`
-                SELECT thread_id FROM orchestration_v2_projection_threads
-                WHERE CASE WHEN json_valid(payload_json) THEN
-                  json_extract(payload_json, '$.subagentPromotion.status') = 'waiting'
-                  AND json_extract(payload_json, '$.deletedAt') IS NULL
-                  ELSE 0 END
               `;
             case "queued-runs":
               return sql`

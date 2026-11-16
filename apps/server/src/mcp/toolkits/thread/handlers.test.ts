@@ -244,14 +244,12 @@ it.effect("a full-access client discovers the idle recursive family before archi
     expect(result.isError, JSON.stringify(result.content)).toBe(false);
     const family = yield* decodeFamily(result.structuredContent);
     expect(family.childThreadIds.toSorted()).toEqual([appId, nestedId, nativeId].toSorted());
-    expect(family.promotableChildThreadIds).toEqual([]);
     expect(family.keptThreadIds).toEqual([]);
     expect(family.activeThreadIds).toEqual([]);
     expect(family.unreadThreadIds).toEqual([]);
     expect(family).toMatchObject({
       nativeStopCount: 2,
       requiresConfirmation: false,
-      canPromote: false,
       canStopAndArchive: true,
     });
     for (const id of [rootId, ...family.childThreadIds])
@@ -353,12 +351,10 @@ it.effect("discovers mixed recursive creator groups and delegated ownership thro
     expect(family.childThreadIds.toSorted()).toEqual(
       [appId, nestedId, nativeId, interactiveId, delegatedId, nestedInteractiveId].toSorted(),
     );
-    expect(family.promotableChildThreadIds).toEqual([]);
     expect(family.keptThreadIds).toEqual([]);
     expect(family.activeThreadIds).toEqual([]);
     expect(family.unreadThreadIds).toEqual([]);
     expect(family.requiresConfirmation).toBe(false);
-    expect(family.canPromote).toBe(false);
   }).pipe(Effect.provide(testLayer)),
 );
 
@@ -423,7 +419,6 @@ it.effect.each(["active", "unread"] as const)(
       expect(family.activeThreadIds).toEqual(state === "active" ? [appId] : []);
       expect(family.unreadThreadIds).toEqual(state === "unread" ? [appId] : []);
       expect(family.requiresConfirmation).toBe(true);
-      expect(family.canPromote).toBe(false);
       const idle = yield* invoke(
         "t3_thread_organize",
         {
@@ -478,10 +473,8 @@ it.effect.each([rootId, appId, nestedId])(
           .structuredContent,
       );
       expect(family.childThreadIds).toHaveLength(3);
-      expect(family.promotableChildThreadIds).toEqual([]);
       expect(family.keptThreadIds).toEqual([]);
       expect(family.protectedChildThreadIds).toEqual(protectedId === rootId ? [] : [protectedId]);
-      expect(family.canPromote).toBe(false);
       expect(family.canStopAndArchive).toBe(false);
       for (const childDisposition of [
         "archive_if_idle",

@@ -40,7 +40,6 @@ import * as ContextHandoffService from "../ContextHandoffService.ts";
 import * as EffectOutbox from "../EffectOutbox.ts";
 import * as EffectWorker from "../EffectWorker.ts";
 import * as IncomingMessageSummaryService from "../IncomingMessageSummaryService.ts";
-import * as SubagentPromotionService from "../SubagentPromotionService.ts";
 import * as EventSink from "../EventSink.ts";
 import * as EventStore from "../EventStore.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -608,11 +607,6 @@ export function layerWithRegistry<Error, SettingsError = never>(
           ),
         )
       : Layer.empty;
-  const subagentPromotionProvided = SubagentPromotionService.layer.pipe(
-    Layer.provide(
-      Layer.mergeAll(layerStores, layerProvidedRegistry, layerRuntime, layerOrchestratorProvided),
-    ),
-  );
   const layerEffectExecutorProvided = EffectWorker.layerExecutor.pipe(
     Layer.provide(
       Layer.mergeAll(
@@ -629,7 +623,6 @@ export function layerWithRegistry<Error, SettingsError = never>(
         }),
         layerServerSettings,
         layerThreadManagementProvided,
-        subagentPromotionProvided,
       ),
     ),
   );

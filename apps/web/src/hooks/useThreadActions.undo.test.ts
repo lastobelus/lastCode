@@ -186,14 +186,13 @@ function archiveDecisionFixture(
     activeChildren,
     activeThreads,
     unreadThreads,
-    promotableChildren: [],
     protectedChildren: family.protectedChildren,
     childThreadIds: family.children.map((thread) => thread.id),
     activeThreadIds: activeThreads.map((thread) => thread.id),
     unreadThreadIds: unreadThreads.map((thread) => thread.id),
-    promotableChildThreadIds: [],
     activeChildThreadIds: activeChildren.map((thread) => thread.id),
     protectedChildThreadIds: family.protectedChildren.map((thread) => thread.id),
+    promotableChildThreadIds: [],
     keptThreadIds: [],
     nativeStopCount: family.nativeChildren.length,
     requiresConfirmation:
@@ -768,6 +767,7 @@ describe("archive family confirmation", () => {
         requiresConfirmation: true,
         activeThreadIds: [child.id],
         protectedChildThreadIds: [child.id],
+        canPromote: false,
         canStopAndArchive: false,
       },
     });
