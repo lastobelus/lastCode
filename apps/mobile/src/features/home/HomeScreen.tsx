@@ -686,27 +686,28 @@ export function HomeScreen(props: HomeScreenProps) {
 
   const listHeader = Platform.OS === "ios" ? undefined : <HomeTopContentSpacer />;
 
-  const scopeFilters = Platform.OS === "ios" && workspace ? (
-        <ThreadListFilters
-          gutter={sidebarSurface ? 8 : 0}
-          environments={props.environments}
-          projects={pickableProjectGroups(
-            sortHomeProjectScopes({
-              scopes: projectScopes,
-              threads: props.threads,
-              pendingTasks: [],
-              projectSortOrder: "updated_at",
-            }),
-          ).map((scope) => ({
-            key: scope.key,
-            label: scope.title,
-          }))}
-          selectedEnvironmentId={props.selectedEnvironmentId}
-          selectedProjectKey={props.selectedProjectKey}
-          onEnvironmentChange={props.onEnvironmentChange}
-          onProjectChange={props.onProjectChange}
-        />
-      ) : null;
+  const scopeFilters =
+    Platform.OS === "ios" && workspace ? (
+      <ThreadListFilters
+        gutter={sidebarSurface ? 8 : 0}
+        environments={props.environments}
+        projects={pickableProjectGroups(
+          sortHomeProjectScopes({
+            scopes: projectScopes,
+            threads: props.threads,
+            pendingTasks: [],
+            projectSortOrder: "updated_at",
+          }),
+        ).map((scope) => ({
+          key: scope.key,
+          label: scope.title,
+        }))}
+        selectedEnvironmentId={props.selectedEnvironmentId}
+        selectedProjectKey={props.selectedProjectKey}
+        onEnvironmentChange={props.onEnvironmentChange}
+        onProjectChange={props.onProjectChange}
+      />
+    ) : null;
   const v2ListHeader = (
     <>
       {listHeader}

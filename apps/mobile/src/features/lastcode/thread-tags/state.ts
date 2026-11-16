@@ -8,6 +8,7 @@ import { presentThreadShell } from "@t3tools/client-runtime/state/models";
 import {
   ORCHESTRATION_V2_WS_METHODS,
   THREAD_TAG_RPC_METHODS,
+  ThreadTagDiscoveryError,
   type EnvironmentId,
   type ProjectId,
 } from "@t3tools/contracts";
@@ -171,7 +172,11 @@ export function useTagDiscovery(
               incomplete: outcomes.some((outcome) => outcome.status === "rejected"),
             };
           },
-          catch: (error) => (error instanceof Error ? error : new Error("Could not load tags.")),
+          catch: (cause) =>
+            new ThreadTagDiscoveryError({
+              message: cause instanceof Error ? cause.message : "Could not load tags.",
+              cause,
+            }),
         });
       }),
     [registry, revisionAtom, scopeKey, query, tag, preferredProjectId],

@@ -46,25 +46,25 @@ export function ThreadHeader(props: {
 
   return (
     <>
-    <AppBar
-      title={props.title}
-      subtitle={props.subtitle}
-      onBackToList={goBack}
-      onCompose={props.draft ? undefined : startNewTask}
-      backInSplitView={
-        props.onReturnToThread
-          ? {
-              accessibilityLabel: "Return to chat",
-              icon: "chevron.left",
-              onPress: props.onReturnToThread,
-            }
-          : undefined
-      }
-      actions={tags.action ? [tags.action, ...actions] : actions}
-      menus={menus}
-      hideBottomBorder
-    />
-    {tags.editor}
+      <AppBar
+        title={props.title}
+        subtitle={props.subtitle}
+        onBackToList={goBack}
+        onCompose={props.draft ? undefined : startNewTask}
+        backInSplitView={
+          props.onReturnToThread
+            ? {
+                accessibilityLabel: "Return to chat",
+                icon: "chevron.left",
+                onPress: props.onReturnToThread,
+              }
+            : undefined
+        }
+        actions={tags.action ? [tags.action, ...actions] : actions}
+        menus={menus}
+        hideBottomBorder
+      />
+      {tags.editor}
     </>
   );
 }

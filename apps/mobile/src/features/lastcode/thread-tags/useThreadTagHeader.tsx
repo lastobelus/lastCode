@@ -15,12 +15,13 @@ export function useThreadTagHeader(target: {
     : null;
   return {
     action,
-    editor: enabled && open ? (
-      <ThreadTagEditor
-        environmentId={EnvironmentId.make(target.environmentId)}
-        threadId={ThreadId.make(target.threadId)}
-        onClose={() => setOpen(false)}
-      />
-    ) : null,
+    editor:
+      enabled && open ? (
+        <ThreadTagEditor
+          environmentId={EnvironmentId.make(target.environmentId)}
+          threadId={ThreadId.make(target.threadId)}
+          onClose={() => setOpen(false)}
+        />
+      ) : null,
   };
 }
