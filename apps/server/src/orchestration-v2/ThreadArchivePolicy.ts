@@ -1,6 +1,8 @@
-import type {
-  OrchestrationV2ThreadProjection,
-  OrchestrationV2ThreadShell,
+import {
+  isOrchestrationV2WorkActive,
+  type OrchestrationV2Subagent,
+  type OrchestrationV2ThreadProjection,
+  type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import { pendingBackgroundTurnItems } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as DateTime from "effect/DateTime";
@@ -10,7 +12,11 @@ type ArchiveControls = Pick<
   "runs" | "runtimeRequests" | "providerThreads" | "providerTurns"
 > & {
   readonly thread: Pick<OrchestrationV2ThreadProjection["thread"], "id" | "actionResume">;
-} & Partial<Pick<OrchestrationV2ThreadProjection, "turnItems">>;
+} & Partial<Pick<OrchestrationV2ThreadProjection, "turnItems">> & {
+    readonly subagents?: ReadonlyArray<
+      Pick<OrchestrationV2Subagent, "origin" | "childThreadId" | "status" | "ownershipReleased">
+    >;
+  };
 
 type ArchiveReplyState = Pick<
   OrchestrationV2ThreadShell,
@@ -42,6 +48,16 @@ export function hasUnfinishedArchiveWork(projection: ArchiveControls): boolean {
       runs: projection.runs,
       turnItems: projection.turnItems ?? [],
     }).length > 0 ||
+    // Live local ownership holds archive even when its child has no active run.
+    // Released tasks and remote-only cancellation/follower records do not hold the family.
+    (projection.subagents?.some(
+      (task) =>
+        task.origin === "app_owned" &&
+        task.childThreadId !== null &&
+        task.ownershipReleased !== true &&
+        isOrchestrationV2WorkActive(task.status),
+    ) ??
+      false) ||
     projection.thread.actionResume?.outcome === "running"
   );
 }

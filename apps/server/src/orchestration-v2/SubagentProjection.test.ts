@@ -83,56 +83,6 @@ function makeParentThread(): OrchestrationV2AppThread {
   };
 }
 
-it.each(["stopping", "failed"] as const)(
-  "native child construction keeps a compact %s archive reference through nested children",
-  (status) => {
-    const parentThread = {
-      ...makeParentThread(),
-      archivePending: {
-        threadId: parentThreadId,
-        commandId: CommandId.make("subagent-pending-archive"),
-        status,
-        ...(status === "failed" ? { error: "Fixture shutdown refused" } : {}),
-        childDisposition: "stop_and_archive" as const,
-        childThreadIds: Array.from({ length: 128 }, (_, index) =>
-          ThreadId.make(`family-child:${index}`),
-        ),
-        archiveThreadIds: [parentThreadId],
-        promoteThreadIds: [],
-        modeLimit: { runtimeMode: "approval-required" as const, interactionMode: "plan" as const },
-      },
-    };
-    const makeChild = (parent: OrchestrationV2AppThread, id: ThreadId) =>
-      makeSubagentChildThread({
-        parentThread: parent,
-        childThreadId: id,
-        parentNodeId: NodeId.make("node:subagent-parent"),
-        activeProviderThreadId: null,
-        providerInstanceId: childProviderInstanceId,
-        modelSelection: childModelSelection,
-        title: "Late native child",
-        now: childCreatedAt,
-        createdBy: "agent",
-        creationSource: "provider",
-      });
-    const child = makeChild(parentThread, childThreadId);
-    const nested = makeChild(child, ThreadId.make("nested-late-native-child"));
-    const expected = {
-      threadId: parentThreadId,
-      commandId: parentThread.archivePending.commandId,
-      status,
-      ...(status === "failed" ? { error: "Fixture shutdown refused" } : {}),
-    };
-    assert.deepEqual(child.archivePending, expected);
-    assert.deepEqual(nested.archivePending, expected);
-    assert.lengthOf(parentThread.archivePending.childThreadIds, 128);
-    assert.deepEqual(parentThread.archivePending.modeLimit, {
-      runtimeMode: "approval-required",
-      interactionMode: "plan",
-    });
-  },
-);
-
 it("resets a subagent child's snooze, title job and remote delegation but keeps its workspace", () => {
   const parentThread: OrchestrationV2AppThread = {
     ...makeParentThread(),

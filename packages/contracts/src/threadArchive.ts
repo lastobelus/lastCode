@@ -1,8 +1,64 @@
-import type { ThreadId } from "./baseSchemas.ts";
+import { ThreadId, CommandId, NodeId, RunId, RunAttemptId } from "./baseSchemas.ts";
+import { RuntimeMode, ProviderInteractionMode } from "./providerPolicy.ts";
+import * as Schema from "effect/Schema";
 import type {
   OrchestrationV2AppThread,
   OrchestrationV2AppThreadLineage,
 } from "./orchestrationV2.ts";
+
+/** Idle archive is not consent to stop newly active work; the server rechecks before accepting it. */
+export const ThreadArchiveChildDisposition = Schema.Literals([
+  "archive_if_idle",
+  "archive_after_review",
+  "stop_and_archive",
+]);
+export type ThreadArchiveChildDisposition = typeof ThreadArchiveChildDisposition.Type;
+export const ThreadArchivedWith = Schema.Struct({ threadId: ThreadId, commandId: CommandId });
+export const ThreadArchiveParticipant = Schema.Struct({
+  threadId: ThreadId,
+  commandId: CommandId,
+  status: Schema.Literals(["stopping", "failed"]),
+  error: Schema.optional(Schema.String),
+});
+/** Only the operation owner stores the family plan; participants hold a compact reference. */
+export const ThreadArchiveOperation = Schema.Struct({
+  ...ThreadArchiveParticipant.fields,
+  /** Missing on deployed plans whose consent covered delegated ownership only. */
+  familyVersion: Schema.optional(Schema.Literal(1)),
+  // Already-deployed pending operations may finish their original promotion plan.
+  childDisposition: Schema.Literals([
+    "archive_if_idle",
+    "archive_after_review",
+    "stop_and_archive",
+    "promote",
+  ]),
+  childThreadIds: Schema.Array(ThreadId),
+  archiveThreadIds: Schema.Array(ThreadId),
+  promoteThreadIds: Schema.Array(ThreadId),
+  /** Keeps a limited caller's ceiling across provider shutdown and server recovery. */
+  modeLimit: Schema.optional(
+    Schema.Struct({ runtimeMode: RuntimeMode, interactionMode: ProviderInteractionMode }),
+  ),
+});
+export const ThreadArchivePending = Schema.Union([
+  ThreadArchiveOperation,
+  ThreadArchiveParticipant,
+]);
+
+export const ThreadArchiveConsultationTarget = Schema.Struct({
+  ownerThreadId: ThreadId,
+  ownerTitle: Schema.String,
+  work: Schema.Array(
+    Schema.Struct({
+      threadId: ThreadId,
+      taskId: Schema.optional(NodeId),
+      runId: Schema.optional(RunId),
+      attemptId: Schema.optional(RunAttemptId),
+    }),
+  ),
+  unavailableReason: Schema.optional(Schema.Literals(["busy", "unavailable"])),
+});
+export type ThreadArchiveConsultationTarget = typeof ThreadArchiveConsultationTarget.Type;
 
 export function getThreadArchivePlan(pending: OrchestrationV2AppThread["archivePending"]) {
   return pending != null && "archiveThreadIds" in pending ? pending : null;

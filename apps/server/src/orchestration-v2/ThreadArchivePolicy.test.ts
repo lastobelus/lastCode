@@ -5,6 +5,7 @@ import {
   archiveNeedsConfirmation,
   archiveRepairNeedsConfirmation,
   hasUnreadArchiveResponse,
+  hasUnfinishedArchiveWork,
 } from "./ThreadArchivePolicy.ts";
 
 const repliedAt = DateTime.makeUnsafe("2026-10-02T00:00:00Z");
@@ -72,3 +73,61 @@ it("uses prior delegated consent only for unread repair, never unfinished work",
   assert.isTrue(archiveRepairNeedsConfirmation({ unfinished: false, unread: true }, false));
   assert.isTrue(archiveRepairNeedsConfirmation({ unfinished: true, unread: false }, true));
 });
+
+it.each([
+  {
+    origin: "app_owned",
+    childThreadId: ThreadId.make("local-child"),
+    status: "pending",
+    unfinished: true,
+  },
+  {
+    origin: "app_owned",
+    childThreadId: ThreadId.make("local-child"),
+    status: "running",
+    unfinished: true,
+  },
+  {
+    origin: "app_owned",
+    childThreadId: ThreadId.make("local-child"),
+    status: "waiting",
+    unfinished: true,
+  },
+  {
+    origin: "app_owned",
+    childThreadId: ThreadId.make("local-child"),
+    status: "completed",
+    unfinished: false,
+  },
+  {
+    origin: "app_owned",
+    childThreadId: ThreadId.make("local-child"),
+    status: "failed",
+    unfinished: false,
+  },
+  {
+    origin: "app_owned",
+    childThreadId: ThreadId.make("local-child"),
+    status: "cancelled",
+    unfinished: false,
+  },
+  { origin: "app_owned", childThreadId: null, status: "running", unfinished: false },
+  {
+    origin: "provider_native",
+    childThreadId: ThreadId.make("native-child"),
+    status: "running",
+    unfinished: false,
+  },
+  {
+    origin: "app_owned",
+    childThreadId: ThreadId.make("released-child"),
+    status: "running",
+    ownershipReleased: true,
+    unfinished: false,
+  },
+] as const)(
+  "detects active local task ownership for $origin $status (local=$childThreadId)",
+  ({ unfinished, ...task }) => {
+    assert.equal(hasUnfinishedArchiveWork({ ...controls, subagents: [task] }), unfinished);
+  },
+);

@@ -1,5 +1,8 @@
 import type { ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import { EnvironmentPauseStore } from "../environment/EnvironmentPauseStore.ts";
+import { archiveConsultationTargets } from "./ThreadArchiveConsultation.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import type { ThreadManagementServiceShape } from "./ThreadManagementService.ts";
 import type { ThreadRecoveryService } from "./ThreadRecoveryService.ts";
@@ -9,25 +12,60 @@ export function withVerifiedArchiveActivity(
   threads: ThreadManagementServiceShape,
   recovery: ThreadRecoveryService["Service"] | undefined,
 ): ThreadManagementServiceShape {
+  const inspectVerifiedFamily = Effect.fn("ThreadArchiveActivity.inspectVerifiedFamily")(function* (
+    threadId: ThreadId,
+  ) {
+    const family = yield* threads.getThreadArchiveFamily(threadId);
+    if (recovery === undefined || family.activeThreadIds.length === 0) return family;
+    yield* Effect.forEach(
+      family.activeThreadIds,
+      (id) =>
+        Effect.gen(function* () {
+          const { runs } = yield* threads.getThreadRecords(id, ["runs"], {
+            runStatuses: ["running"],
+          });
+          for (const run of runs) {
+            if (run.status !== "running" || run.activeAttemptId === null) continue;
+            yield* recovery
+              .verify({ threadId: id, runId: run.id, attemptId: run.activeAttemptId })
+              .pipe(Effect.catchTags({ ThreadRecoveryError: () => Effect.void }));
+          }
+        }),
+      { concurrency: 4, discard: true },
+    );
+    return yield* threads.getThreadArchiveFamily(threadId);
+  });
   const getThreadArchiveFamily = Effect.fn("ThreadArchiveActivity.getThreadArchiveFamily")(
     function* (threadId: ThreadId) {
-      const family = yield* threads.getThreadArchiveFamily(threadId);
-      if (recovery === undefined || family.activeThreadIds.length === 0) return family;
-      yield* Effect.forEach(
+      const family = yield* inspectVerifiedFamily(threadId);
+      const pauseStore = yield* Effect.serviceOption(EnvironmentPauseStore);
+      const pause = Option.isSome(pauseStore) ? yield* pauseStore.value.get : null;
+      const paused = pause !== null && pause.phase !== "resuming";
+      const consultationTargets = yield* archiveConsultationTargets(
         family.activeThreadIds,
         (id) =>
+          threads
+            .getThreadRecords(
+              id,
+              ["runs", "subagents", "runtimeRequests", "providerThreads", "providerTurns"],
+              {
+                runStatuses: ["queued", "preparing", "starting", "running", "waiting"],
+                runtimeRequestStatuses: ["pending"],
+                subagentChildThreadIds: [...family.childThreadIds, ...family.activeThreadIds],
+              },
+            )
+            .pipe(Effect.orElseSucceed(() => null)),
+        (id) =>
           Effect.gen(function* () {
-            const { runs } = yield* threads.getThreadRecords(id, ["runs"]);
-            for (const run of runs) {
-              if (run.status !== "running" || run.activeAttemptId === null) continue;
-              yield* recovery
-                .verify({ threadId: id, runId: run.id, attemptId: run.activeAttemptId })
-                .pipe(Effect.catchTags({ ThreadRecoveryError: () => Effect.void }));
-            }
-          }),
-        { concurrency: 4, discard: true },
+            if (paused) return false;
+            const { thread } = yield* threads.getThreadRecords(id, []);
+            return yield* threads.isProviderInstanceEnabledForProject({
+              projectId: thread.projectId,
+              instanceId: thread.modelSelection.instanceId,
+            });
+          }).pipe(Effect.orElseSucceed(() => false)),
       );
-      return yield* threads.getThreadArchiveFamily(threadId);
+      return { ...family, consultationTargets };
     },
     (effect, threadId) =>
       effect.pipe(

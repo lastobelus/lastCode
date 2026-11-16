@@ -1,3 +1,5 @@
+import * as Option from "effect/Option";
+import * as SqlClient from "effect/sql/SqlClient";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
@@ -794,6 +796,7 @@ const idleArchiveFamily = Effect.gen(function* () {
 it.effect.each([
   "child work",
   "owner work",
+  "delegated task",
   "question",
   "approval",
   "native turn",
@@ -814,6 +817,16 @@ it.effect.each([
           "work-after-idle-snapshot",
           "start_immediately",
         );
+      if (change === "delegated task") {
+        const owner = yield* orchestrator.getThreadProjection(parent);
+        yield* projections.apply({
+          id: EventId.make("idle-snapshot-owned-task"),
+          type: "subagent.updated",
+          threadId: parent,
+          occurredAt: now,
+          payload: { ...owner.subagents[0]!, status: "running", completedAt: null, updatedAt: now },
+        });
+      }
       if (change === "question" || change === "approval") {
         const owner = yield* orchestrator.getThreadProjection(grandchild);
         yield* projections.apply({
@@ -889,7 +902,7 @@ it.effect.each([
       assert.isTrue(decision.requiresConfirmation);
       assert.deepEqual(
         decision.activeChildThreadIds,
-        change === "owner work"
+        change === "owner work" || change === "delegated task"
           ? []
           : [change === "child work" ? child : change === "background" ? grandchild : native],
       );
@@ -2175,4 +2188,317 @@ it.effect("stores a single family plan through shutdown failure and completion",
       assert.isNotNull(projection.thread.archivedAt);
     }
   }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect(
+  "checks archive stopping without hydrating the shell and preserves tombstone and read failures",
+  () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("thread:archive-control");
+      const now = yield* DateTime.now;
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create-archive-control"),
+        threadId,
+        projectId: ProjectId.make("project:archive-control"),
+        title: "Before",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* sql`INSERT INTO orchestration_v2_projection_provider_threads
+      (provider_thread_id, thread_id, owner_node_id, provider, driver, provider_instance_id,
+       provider_session_id, status, first_run_ordinal, last_run_ordinal, updated_at, payload_json)
+      VALUES ('obsolete-provider', ${threadId}, NULL, 'codex', 'codex', 'codex', NULL,
+              'ready', NULL, NULL, ${DateTime.formatIso(now)}, '{"obsolete":true}')`;
+      assert.equal((yield* Effect.exit(projections.getThreadShell(threadId)))._tag, "Failure");
+      const rename = (suffix: string, target = threadId) => ({
+        type: "thread.metadata.update" as const,
+        commandId: CommandId.make(`rename-archive:${suffix}`),
+        threadId: target,
+        title: suffix,
+      });
+      yield* orchestrator.dispatch(rename("ordinary"));
+      assert.equal((yield* projections.getThread(threadId)).title, "ordinary");
+      const thread = yield* projections.getThread(threadId);
+      for (const state of ["active", "deleted", "cleanup"] as const) {
+        yield* projections.apply({
+          id: EventId.make(`archive-control:${state}`),
+          type: "thread.metadata-updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            ...thread,
+            deletedAt: state === "active" ? null : now,
+            archivePending: {
+              threadId,
+              commandId: CommandId.make("archive-control"),
+              status: "stopping",
+            },
+            worktreeCleanup:
+              state === "cleanup"
+                ? {
+                    status: "deleting",
+                    repositoryRoot: "/example/repository",
+                    worktreePath: "/example/worktree",
+                    startedAt: DateTime.formatIso(now),
+                  }
+                : null,
+          },
+        });
+        if (state === "deleted") {
+          const error = yield* Effect.flip(orchestrator.dispatch(rename(state)));
+          assert.include(String(error.cause), "is deleted");
+          assert.notInclude(String(error.cause), "stopping before it is archived");
+        } else {
+          const error = yield* Effect.flip(orchestrator.dispatch(rename(state)));
+          assert.equal(error._tag, "OrchestratorThreadArchivingError");
+          assert.include(error.message, "stopping before it is archived");
+          assert.equal((yield* projections.getThread(threadId)).title, thread.title);
+        }
+      }
+      const missing = yield* Effect.flip(
+        orchestrator.dispatch(rename("missing", ThreadId.make("thread:missing"))),
+      );
+      assert.equal(missing._tag, "OrchestratorProjectionError");
+      assert.notInclude(String(missing.cause), "stopping before it is archived");
+      yield* sql`UPDATE orchestration_v2_projection_threads SET payload_json = '{"obsolete":true}' WHERE thread_id = ${threadId}`;
+      const invalid = yield* Effect.flip(orchestrator.dispatch(rename("invalid")));
+      assert.equal(invalid._tag, "OrchestratorDispatchError");
+      assert.instanceOf(invalid.cause, ProjectionStore.ProjectionStoreReadError);
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect(
+  "archive refuses malformed task history and succeeds after cleanup without hydrating unrelated history",
+  () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("archive:control-history");
+      const now = yield* DateTime.now;
+      yield* createWatchingThread(threadId, 61);
+      yield* sql`INSERT INTO orchestration_v2_projection_messages
+      (message_id, thread_id, run_id, node_id, role, streaming, created_at, updated_at, payload_json)
+      VALUES ('obsolete', ${threadId}, NULL, NULL, 'assistant', 0, ${DateTime.formatIso(now)}, ${DateTime.formatIso(now)}, '{"obsolete":true}')`;
+      yield* sql`INSERT INTO orchestration_v2_projection_turn_items
+        (turn_item_id, thread_id, run_id, node_id, provider_thread_id, provider_turn_id,
+          type, status, ordinal, updated_at, payload_json)
+        VALUES ('obsolete-output', ${threadId}, NULL, NULL, NULL, NULL,
+          'command_execution', 'completed', 900, ${DateTime.formatIso(now)}, '{"obsolete":true}')`;
+      yield* sql`INSERT INTO orchestration_v2_projection_plans
+        (plan_id, thread_id, run_id, node_id, kind, status, payload_json)
+        VALUES ('obsolete-plan', ${threadId}, NULL, 'old-node', 'proposed', 'completed', '{"obsolete":true}')`;
+      yield* sql`INSERT INTO orchestration_v2_projection_context_handoffs
+        (context_handoff_id, thread_id, target_run_id, to_provider_thread_id, strategy, status, updated_at, payload_json)
+        VALUES ('obsolete-handoff', ${threadId}, 'old-run', 'old-provider-thread', 'full_thread_summary', 'ready', ${DateTime.formatIso(now)}, '{"obsolete":true}')`;
+      for (const status of [
+        "resolved_native",
+        "resolved_portable",
+        "failed",
+        "consumed",
+        "superseded",
+      ]) {
+        yield* sql`INSERT INTO orchestration_v2_projection_context_transfers
+          (context_transfer_id, source_thread_id, target_thread_id, target_run_id,
+            type, status, updated_at, payload_json)
+          VALUES (${`obsolete-transfer:${status}`}, 'old-source', ${threadId}, NULL,
+            'merge_back', ${status}, ${DateTime.formatIso(now)}, '{"obsolete":true}')`;
+      }
+      assert.equal(
+        (yield* Effect.exit(projections.getThreadRecords(threadId, ["contextTransfers"])))._tag,
+        "Failure",
+      );
+      // A delegated task that ended and handed its result over.
+      yield* sql`INSERT INTO orchestration_v2_projection_subagents
+        (subagent_id, thread_id, run_id, parent_node_id, provider, provider_thread_id,
+          child_thread_id, origin, status, updated_at, payload_json, completion_delivery_state)
+        VALUES ('obsolete-task', ${threadId}, 'old-run', 'old-node', 'codex', 'obsolete-task-thread',
+          'old-child', 'app_owned', 'completed', ${DateTime.formatIso(now)}, '{"obsolete":true}',
+          'delivered')`;
+      yield* sql`INSERT INTO orchestration_v2_projection_nodes
+        (node_id, thread_id, run_id, root_node_id, kind, status, payload_json)
+        VALUES ('obsolete-task', ${threadId}, 'old-run', 'old-node', 'subagent', 'completed',
+          '{"obsolete":true}')`;
+      yield* sql`INSERT INTO orchestration_v2_projection_provider_threads
+        (provider_thread_id, thread_id, provider, status, updated_at, payload_json)
+        VALUES ('obsolete-task-thread', 'old-child', 'codex', 'idle', ${DateTime.formatIso(now)},
+          '{"obsolete":true}')`;
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("dispatch-with-old-history"),
+        threadId,
+        messageId: MessageId.make("fresh-input"),
+        text: "Continue",
+        attachments: [],
+        dispatchMode: { type: "defer_start" },
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const fresh = yield* projections.getThreadRecords(threadId, ["turnItems"], {
+        turnItemTypes: ["user_message"],
+      });
+      assert.isAbove(fresh.turnItems.at(-1)!.ordinal, 900);
+      const archiveRefusal = yield* orchestrator
+        .dispatch({
+          type: "thread.archive",
+          commandId: CommandId.make("archive-with-old-history"),
+          threadId,
+        })
+        .pipe(Effect.flip);
+      assert.equal(archiveRefusal._tag, "OrchestratorDispatchError");
+      assert.isNull((yield* projections.getThread(threadId)).archivedAt);
+      // Deletion reads transfer history separately to find side chats.
+      yield* sql`DELETE FROM orchestration_v2_projection_context_transfers
+        WHERE target_thread_id = ${threadId}`;
+      // Archiving reads every task of the thread to stop the ones still running.
+      yield* sql`DELETE FROM orchestration_v2_projection_subagents
+        WHERE subagent_id = 'obsolete-task'`;
+      yield* sql`DELETE FROM orchestration_v2_projection_nodes WHERE node_id = 'obsolete-task'`;
+      yield* sql`DELETE FROM orchestration_v2_projection_provider_threads
+        WHERE provider_thread_id = 'obsolete-task-thread'`;
+      const queued = yield* projections.getThreadRecords(threadId, ["runs", "turnItems"], {
+        turnItemStatuses: ["pending", "running", "waiting"],
+      });
+      const freshRun = queued.runs.find(
+        (run) => run.userMessageId === MessageId.make("fresh-input"),
+      )!;
+      yield* projections.apply({
+        id: EventId.make("finish-control-run"),
+        type: "run.updated",
+        threadId,
+        runId: freshRun.id,
+        occurredAt: now,
+        payload: { ...freshRun, status: "interrupted", completedAt: now },
+      });
+      for (const item of queued.turnItems.filter((item) => item.runId === freshRun.id)) {
+        yield* projections.apply({
+          id: EventId.make(`finish-control-item:${item.id}`),
+          type: "turn-item.updated",
+          threadId,
+          runId: freshRun.id,
+          occurredAt: now,
+          payload: { ...item, status: "cancelled", completedAt: now, updatedAt: now },
+        });
+      }
+      yield* orchestrator.dispatch({
+        type: "thread.visit",
+        commandId: CommandId.make("review-old-history-before-archive"),
+        threadId,
+        visitedAt: DateTime.formatIso(now),
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.archive",
+        commandId: CommandId.make("archive-after-old-history-cleanup"),
+        threadId,
+      });
+      // This fixture disables the effect worker that normally completes the archive.
+      yield* orchestrator.dispatch({
+        type: "thread.archive.complete",
+        commandId: CommandId.make("complete-control-archive"),
+        threadId,
+        requestId: CommandId.make("archive-after-old-history-cleanup"),
+      });
+
+      assert.isNotNull((yield* projections.getThread(threadId)).archivedAt);
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect(
+  "backfills a legacy archived intermediate's own restore cohort in the archive transaction",
+  () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const rootId = ThreadId.make("legacy-cohort:root");
+      const middleId = ThreadId.make("legacy-cohort:middle");
+      const leafIds = [ThreadId.make("legacy-cohort:first"), ThreadId.make("legacy-cohort:second")];
+      const now = yield* DateTime.now;
+      for (const [index, threadId] of [rootId, middleId, ...leafIds].entries()) {
+        yield* createWatchingThread(threadId, 70 + index);
+        if (threadId === rootId) continue;
+        const thread = yield* projections.getThread(threadId);
+        yield* projections.apply({
+          id: EventId.make(`legacy-cohort:lineage:${threadId}`),
+          type: "thread.metadata-updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            ...thread,
+            lineage: {
+              parentThreadId: threadId === middleId ? rootId : middleId,
+              relationshipToParent: "subagent",
+              rootThreadId: rootId,
+            },
+            archivedAt: threadId === middleId ? now : null,
+            archivedWith: null,
+          },
+        });
+      }
+      const commandId = CommandId.make("legacy-cohort:archive-root");
+      yield* orchestrator.dispatch({
+        type: "thread.archive",
+        commandId,
+        threadId: rootId,
+        childDisposition: "archive_if_idle",
+        expectedChildThreadIds: leafIds,
+      });
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      yield* threads.executeArchive({ threadId: rootId, requestId: commandId });
+      const cohort = { threadId: middleId, commandId };
+      assert.deepEqual((yield* projections.getThread(rootId)).archivedWith, {
+        threadId: rootId,
+        commandId,
+      });
+      for (const threadId of [middleId, ...leafIds]) {
+        const thread = yield* projections.getThread(threadId);
+        assert.isNotNull(thread.archivedAt);
+        assert.deepEqual(thread.archivedWith, cohort);
+      }
+      const backfill = yield* orchestrator.streamStoredEventsFrom({ threadId: middleId }).pipe(
+        Stream.filter(
+          ({ commandId: storedCommandId, event }) =>
+            storedCommandId === CommandId.make(`${commandId}:complete`) &&
+            event.type === "thread.metadata-updated" &&
+            event.threadId === middleId &&
+            event.payload.archivedWith?.commandId === commandId,
+        ),
+        Stream.runHead,
+      );
+      assert.isTrue(Option.isSome(backfill));
+      yield* orchestrator.dispatch({
+        type: "thread.unarchive",
+        commandId: CommandId.make("legacy-cohort:restore-root"),
+        threadId: rootId,
+      });
+      assert.isNull((yield* projections.getThread(rootId)).archivedAt);
+      for (const threadId of [middleId, ...leafIds])
+        assert.isNotNull((yield* projections.getThread(threadId)).archivedAt);
+      const refused = yield* orchestrator
+        .dispatch({
+          type: "thread.unarchive",
+          commandId: CommandId.make("legacy-cohort:refuse-leaf"),
+          threadId: leafIds[0]!,
+        })
+        .pipe(Effect.flip);
+      assert.equal(refused._tag, "OrchestratorDispatchError");
+      yield* orchestrator.dispatch({
+        type: "thread.unarchive",
+        commandId: CommandId.make("legacy-cohort:restore-middle"),
+        threadId: middleId,
+      });
+      for (const threadId of [middleId, ...leafIds]) {
+        const thread = yield* projections.getThread(threadId);
+        assert.isNull(thread.archivedAt);
+        assert.isNull(thread.archivedWith);
+      }
+    }).pipe(Effect.provide(testLayer)),
 );
