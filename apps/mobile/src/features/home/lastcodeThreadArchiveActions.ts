@@ -55,7 +55,13 @@ export async function prepareLastCodeMobileThreadArchive(
     input: { threadId: archiveThreadId },
   });
   if (familyResult._tag === "Failure") {
-    Dialog.alert("Could not archive thread", String(Cause.squash(familyResult.cause)));
+    const error = Cause.squash(familyResult.cause);
+    Dialog.alert(
+      "Could not archive thread",
+      error instanceof Error && error.message.trim().length > 0
+        ? error.message
+        : "The thread could not be archived.",
+    );
     return null;
   }
   const owner = familyResult.value.threads.find(

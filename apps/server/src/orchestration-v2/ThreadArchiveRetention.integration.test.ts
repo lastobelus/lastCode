@@ -15,6 +15,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
+import { ProviderInstanceRegistry } from "../provider/ProviderInstanceRegistry.ts";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
@@ -470,4 +471,32 @@ it.effect.each(["mode-refusal", "unknown", "provider-failure"] as const)(
       for (const saved of before)
         assert.deepEqual(yield* orchestrator.getThreadProjection(saved.thread.id), saved);
     }).pipe(Effect.provide(recoveryTestLayer)),
+);
+
+it.effect("an enabled consultation owner without a provider runtime is unavailable", () =>
+  Effect.gen(function* () {
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    yield* createFamily;
+    yield* finishRun(parentId, "missing-runtime");
+    assert.isTrue(
+      yield* threads.isProviderInstanceEnabledForProject({
+        projectId: ProjectId.make("retention-project"),
+        instanceId,
+      }),
+    );
+    const family = yield* threads.getThreadArchiveFamily(parentId).pipe(
+      Effect.provideService(ProviderInstanceRegistry, {
+        getInstance: () => Effect.undefined,
+        listInstances: Effect.succeed([]),
+        listUnavailable: Effect.succeed([]),
+        streamChanges: Stream.empty,
+        subscribeChanges: Effect.die("Archive inspection does not subscribe to provider changes"),
+      }),
+    );
+    assert.equal(
+      family.consultationTargets?.find((target) => target.ownerThreadId === parentId)
+        ?.unavailableReason,
+      "unavailable",
+    );
+  }).pipe(Effect.provide(testLayer)),
 );

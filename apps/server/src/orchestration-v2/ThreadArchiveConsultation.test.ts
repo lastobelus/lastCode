@@ -1,5 +1,5 @@
 import { assert, it } from "@effect/vitest";
-import { ThreadId, NodeId, RunId, RunAttemptId } from "@t3tools/contracts";
+import { ThreadId, NodeId, RunId, RunAttemptId, CommandId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import {
   archiveConsultationTargets,
@@ -24,6 +24,8 @@ const snapshot = (
       relationshipToParent: parent === null ? null : "subagent",
     },
   },
+  providerThreads: [],
+  providerTurns: [],
   runs: [],
   runtimeRequests: [],
   subagents: [],
@@ -59,7 +61,9 @@ it.effect(
           child.thread.id,
           {
             ...child,
-            runs: [{ id: runId, activeAttemptId: attemptId, status: "running" as const }],
+            runs: [
+              { id: runId, ordinal: 1, activeAttemptId: attemptId, status: "running" as const },
+            ],
           },
         ],
       ]);
@@ -78,28 +82,47 @@ it.effect(
     }),
 );
 
-it.effect("busy owners and native mirrors never receive an independent consultation", () =>
-  Effect.gen(function* () {
-    const owner = snapshot("owner");
-    const native = snapshot("native", "owner", true);
-    const records = new Map([
-      [owner.thread.id, { ...owner, runtimeRequests: [{ status: "pending" as const }] }],
-      [native.thread.id, native],
-    ]);
-    const targets = yield* archiveConsultationTargets(
-      [native.thread.id],
-      (threadId) => Effect.succeed(records.get(threadId) ?? null),
-      () => Effect.succeed(true),
-    );
-    assert.deepEqual(targets, [
-      {
-        ownerThreadId: owner.thread.id,
-        ownerTitle: "owner",
-        work: [{ threadId: native.thread.id }],
-        unavailableReason: "busy",
-      },
-    ]);
-  }),
+it.effect.each(["request", "background"] as const)(
+  "%s keeps an owner busy without awakening native mirrors",
+  (work) =>
+    Effect.gen(function* () {
+      const owner = snapshot("owner");
+      const native = snapshot("native", "owner", true);
+      const records = new Map([
+        [
+          owner.thread.id,
+          {
+            ...owner,
+            runtimeRequests: work === "request" ? [{ status: "pending" as const }] : [],
+            turnItems:
+              work === "background"
+                ? [
+                    {
+                      id: "background-tool",
+                      type: "dynamic_tool" as const,
+                      status: "running" as const,
+                      title: "Pending tool",
+                    },
+                  ]
+                : [],
+          },
+        ],
+        [native.thread.id, native],
+      ]);
+      const targets = yield* archiveConsultationTargets(
+        [native.thread.id],
+        (threadId) => Effect.succeed(records.get(threadId) ?? null),
+        () => Effect.succeed(true),
+      );
+      assert.deepEqual(targets, [
+        {
+          ownerThreadId: owner.thread.id,
+          ownerTitle: "owner",
+          work: [{ threadId: native.thread.id }],
+          unavailableReason: "busy",
+        },
+      ]);
+    }),
 );
 
 it.effect("does not consult a released former owner or a disabled recipient", () =>
@@ -134,11 +157,25 @@ it.effect("does not consult a released former owner or a disabled recipient", ()
   }),
 );
 
-it.effect(
-  "an idle owner can be asked about a stale delegated task even when its child is idle",
-  () =>
+it.effect.each(["running", "pending", "failed-archive"] as const)(
+  "an idle owner can be asked about a stale %s task even when its child is idle",
+  (state) =>
     Effect.gen(function* () {
-      const owner = snapshot("owner");
+      const initial = snapshot("owner");
+      const owner =
+        state === "failed-archive"
+          ? {
+              ...initial,
+              thread: {
+                ...initial.thread,
+                archivePending: {
+                  threadId: initial.thread.id,
+                  commandId: CommandId.make("failed-archive"),
+                  status: "failed" as const,
+                },
+              },
+            }
+          : initial;
       const child = snapshot("child", "owner");
       const taskId = NodeId.make("stale-task");
       const records = new Map([
@@ -151,7 +188,7 @@ it.effect(
                 id: taskId,
                 childThreadId: child.thread.id,
                 origin: "app_owned" as const,
-                status: "running" as const,
+                status: state === "pending" ? ("pending" as const) : ("running" as const),
               },
             ],
           },

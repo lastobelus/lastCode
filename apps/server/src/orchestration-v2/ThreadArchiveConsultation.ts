@@ -1,16 +1,18 @@
+import { isOrchestrationV2WorkActive } from "@t3tools/contracts";
+import { hasUnfinishedArchiveWork, type ArchiveControls } from "./ThreadArchivePolicy.ts";
 import type {
   OrchestrationV2AppThread,
   OrchestrationV2Run,
-  OrchestrationV2RuntimeRequest,
   OrchestrationV2Subagent,
-  OrchestrationV2ProviderThread,
-  OrchestrationV2ProviderTurn,
   ThreadArchiveConsultationTarget,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
-export interface ArchiveConsultationSnapshot {
+export interface ArchiveConsultationSnapshot extends Omit<
+  ArchiveControls,
+  "thread" | "runs" | "subagents"
+> {
   readonly thread: Pick<
     OrchestrationV2AppThread,
     | "id"
@@ -22,12 +24,9 @@ export interface ArchiveConsultationSnapshot {
     | "archivePending"
     | "actionResume"
   >;
-  readonly providerThreads?: ReadonlyArray<
-    Pick<OrchestrationV2ProviderThread, "appThreadId" | "pendingBackgroundTasks">
+  readonly runs: ReadonlyArray<
+    Pick<OrchestrationV2Run, "id" | "ordinal" | "status" | "activeAttemptId">
   >;
-  readonly providerTurns?: ReadonlyArray<Pick<OrchestrationV2ProviderTurn, "status">>;
-  readonly runs: ReadonlyArray<Pick<OrchestrationV2Run, "id" | "status" | "activeAttemptId">>;
-  readonly runtimeRequests: ReadonlyArray<Pick<OrchestrationV2RuntimeRequest, "status">>;
   readonly subagents: ReadonlyArray<
     Pick<
       OrchestrationV2Subagent,
@@ -40,16 +39,7 @@ const active = (status: string) =>
   ["queued", "preparing", "starting", "running", "waiting"].includes(status);
 
 const ownActivity = (record: ArchiveConsultationSnapshot) =>
-  record.runs.some((run) => active(run.status)) ||
-  record.runtimeRequests.some((request) => request.status === "pending") ||
-  record.thread.actionResume?.outcome === "running" ||
-  (record.providerTurns ?? []).some(
-    (turn) => turn.status === "running" || turn.status === "pending",
-  ) ||
-  (record.providerThreads ?? []).some(
-    (thread) =>
-      thread.appThreadId === record.thread.id && (thread.pendingBackgroundTasks?.length ?? 0) > 0,
-  );
+  hasUnfinishedArchiveWork({ ...record, subagents: [] });
 
 /** Visual grouping is not authority to inspect or cancel another agent's tasks. */
 export const archiveConsultationTargets = Effect.fn("ThreadArchiveConsultation.targets")(function* <
@@ -79,7 +69,7 @@ export const archiveConsultationTargets = Effect.fn("ThreadArchiveConsultation.t
         task.origin === "app_owned" &&
         task.childThreadId !== null &&
         task.ownershipReleased !== true &&
-        active(task.status),
+        isOrchestrationV2WorkActive(task.status),
     );
     // An idle owner held only by a stale child task can answer about that task.
     // It is not itself a busy execution that the question would queue behind.
@@ -112,7 +102,8 @@ export const archiveConsultationTargets = Effect.fn("ThreadArchiveConsultation.t
           entry.origin === "app_owned" &&
           entry.ownershipReleased !== true,
       );
-      const task = tasks.findLast((entry) => active(entry.status)) ?? tasks.at(-1);
+      const task =
+        tasks.findLast((entry) => isOrchestrationV2WorkActive(entry.status)) ?? tasks.at(-1);
       // Native mirrors share a session. App-owned children require a task edge;
       // lineage alone may be historical after ownership was released.
       if (owner.thread.creationSource !== "provider" && task === undefined) break;
@@ -126,7 +117,9 @@ export const archiveConsultationTargets = Effect.fn("ThreadArchiveConsultation.t
       owner.thread.deletedAt !== null ||
       !(yield* available(owner.thread.id));
     const busy =
-      owner.thread.archivePending != null || ownActivity(owner) || owner.thread.id === threadId;
+      owner.thread.archivePending?.status === "stopping" ||
+      ownActivity(owner) ||
+      owner.thread.id === threadId;
     const unavailableReason = unavailable
       ? ("unavailable" as const)
       : busy

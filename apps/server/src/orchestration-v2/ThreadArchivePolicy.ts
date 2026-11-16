@@ -7,16 +7,28 @@ import {
 import { pendingBackgroundTurnItems } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as DateTime from "effect/DateTime";
 
-type ArchiveControls = Pick<
-  OrchestrationV2ThreadProjection,
-  "runs" | "runtimeRequests" | "providerThreads" | "providerTurns"
-> & {
+export interface ArchiveControls {
   readonly thread: Pick<OrchestrationV2ThreadProjection["thread"], "id" | "actionResume">;
-} & Partial<Pick<OrchestrationV2ThreadProjection, "turnItems">> & {
-    readonly subagents?: ReadonlyArray<
-      Pick<OrchestrationV2Subagent, "origin" | "childThreadId" | "status" | "ownershipReleased">
-    >;
-  };
+  readonly runs: ReadonlyArray<
+    Pick<OrchestrationV2ThreadProjection["runs"][number], "id" | "ordinal" | "status">
+  >;
+  readonly runtimeRequests: ReadonlyArray<
+    Pick<OrchestrationV2ThreadProjection["runtimeRequests"][number], "status">
+  >;
+  readonly providerThreads: ReadonlyArray<
+    Pick<
+      OrchestrationV2ThreadProjection["providerThreads"][number],
+      "id" | "appThreadId" | "pendingBackgroundTasks"
+    >
+  >;
+  readonly providerTurns: ReadonlyArray<
+    Pick<OrchestrationV2ThreadProjection["providerTurns"][number], "providerThreadId" | "status">
+  >;
+  readonly turnItems?: Parameters<typeof pendingBackgroundTurnItems>[0]["turnItems"];
+  readonly subagents?: ReadonlyArray<
+    Pick<OrchestrationV2Subagent, "origin" | "childThreadId" | "status" | "ownershipReleased">
+  >;
+}
 
 type ArchiveReplyState = Pick<
   OrchestrationV2ThreadShell,

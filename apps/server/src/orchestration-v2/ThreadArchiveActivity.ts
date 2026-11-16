@@ -1,6 +1,7 @@
 import type { ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import { ProviderInstanceRegistry } from "../provider/ProviderInstanceRegistry.ts";
 import { EnvironmentPauseStore } from "../environment/EnvironmentPauseStore.ts";
 import { archiveConsultationTargets } from "./ThreadArchiveConsultation.ts";
 import * as Orchestrator from "./Orchestrator.ts";
@@ -39,6 +40,7 @@ export function withVerifiedArchiveActivity(
     function* (threadId: ThreadId) {
       const family = yield* inspectVerifiedFamily(threadId);
       const pauseStore = yield* Effect.serviceOption(EnvironmentPauseStore);
+      const instances = yield* Effect.serviceOption(ProviderInstanceRegistry);
       const pause = Option.isSome(pauseStore) ? yield* pauseStore.value.get : null;
       const paused = pause !== null && pause.phase !== "resuming";
       const consultationTargets = yield* archiveConsultationTargets(
@@ -47,9 +49,25 @@ export function withVerifiedArchiveActivity(
           threads
             .getThreadRecords(
               id,
-              ["runs", "subagents", "runtimeRequests", "providerThreads", "providerTurns"],
+              [
+                "runs",
+                "subagents",
+                "runtimeRequests",
+                "providerThreads",
+                "providerTurns",
+                "turnItems",
+              ],
               {
-                runStatuses: ["queued", "preparing", "starting", "running", "waiting"],
+                runStatuses: [
+                  "queued",
+                  "preparing",
+                  "starting",
+                  "running",
+                  "waiting",
+                  "rolled_back",
+                ],
+                turnItemTypes: ["command_execution", "dynamic_tool", "subagent"],
+                turnItemStatuses: ["pending", "running", "waiting"],
                 runtimeRequestStatuses: ["pending"],
                 subagentChildThreadIds: [...family.childThreadIds, ...family.activeThreadIds],
               },
@@ -59,10 +77,21 @@ export function withVerifiedArchiveActivity(
           Effect.gen(function* () {
             if (paused) return false;
             const { thread } = yield* threads.getThreadRecords(id, []);
-            return yield* threads.isProviderInstanceEnabledForProject({
+            const enabled = yield* threads.isProviderInstanceEnabledForProject({
               projectId: thread.projectId,
               instanceId: thread.modelSelection.instanceId,
             });
+            if (!enabled || Option.isNone(instances)) return false;
+            const instance = yield* instances.value.getInstance(thread.modelSelection.instanceId);
+            if (instance === undefined || !instance.enabled) return false;
+            const snapshot = yield* instance.snapshot.getSnapshot;
+            return (
+              snapshot.enabled &&
+              snapshot.installed &&
+              snapshot.availability !== "unavailable" &&
+              snapshot.status !== "error" &&
+              snapshot.status !== "disabled"
+            );
           }).pipe(Effect.orElseSucceed(() => false)),
       );
       return { ...family, consultationTargets };
