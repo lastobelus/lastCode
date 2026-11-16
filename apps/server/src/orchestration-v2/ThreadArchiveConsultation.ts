@@ -27,6 +27,11 @@ export interface ArchiveConsultationSnapshot extends Omit<
   readonly runs: ReadonlyArray<
     Pick<OrchestrationV2Run, "id" | "ordinal" | "status" | "activeAttemptId">
   >;
+  readonly turnItems?: ReadonlyArray<
+    NonNullable<ArchiveControls["turnItems"]>[number] & {
+      readonly origin?: OrchestrationV2Subagent["origin"];
+    }
+  >;
   readonly subagents: ReadonlyArray<
     Pick<
       OrchestrationV2Subagent,
@@ -39,7 +44,13 @@ const active = (status: string) =>
   ["queued", "preparing", "starting", "running", "waiting"].includes(status);
 
 const ownActivity = (record: ArchiveConsultationSnapshot) =>
-  hasUnfinishedArchiveWork({ ...record, subagents: [] });
+  hasUnfinishedArchiveWork({
+    ...record,
+    subagents: [],
+    turnItems: (record.turnItems ?? []).filter(
+      (item) => item.type !== "subagent" || item.origin !== "app_owned",
+    ),
+  });
 
 /** Visual grouping is not authority to inspect or cancel another agent's tasks. */
 export const archiveConsultationTargets = Effect.fn("ThreadArchiveConsultation.targets")(function* <

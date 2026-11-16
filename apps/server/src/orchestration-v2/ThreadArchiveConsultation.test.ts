@@ -47,6 +47,15 @@ it.effect(
           group.thread.id,
           {
             ...group,
+            turnItems: [
+              {
+                id: taskId,
+                type: "subagent" as const,
+                origin: "app_owned" as const,
+                status: "running" as const,
+                title: "Owned child",
+              },
+            ],
             subagents: [
               {
                 id: taskId,
@@ -82,7 +91,7 @@ it.effect(
     }),
 );
 
-it.effect.each(["request", "background"] as const)(
+it.effect.each(["request", "background", "native-background"] as const)(
   "%s keeps an owner busy without awakening native mirrors",
   (work) =>
     Effect.gen(function* () {
@@ -95,11 +104,15 @@ it.effect.each(["request", "background"] as const)(
             ...owner,
             runtimeRequests: work === "request" ? [{ status: "pending" as const }] : [],
             turnItems:
-              work === "background"
+              work !== "request"
                 ? [
                     {
                       id: "background-tool",
-                      type: "dynamic_tool" as const,
+                      type:
+                        work === "native-background"
+                          ? ("subagent" as const)
+                          : ("dynamic_tool" as const),
+                      origin: "provider_native" as const,
                       status: "running" as const,
                       title: "Pending tool",
                     },
@@ -183,6 +196,15 @@ it.effect.each(["running", "pending", "failed-archive"] as const)(
           owner.thread.id,
           {
             ...owner,
+            turnItems: [
+              {
+                id: taskId,
+                type: "subagent" as const,
+                origin: "app_owned" as const,
+                status: "running" as const,
+                title: "Owned child",
+              },
+            ],
             subagents: [
               {
                 id: taskId,
