@@ -7,6 +7,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import { hasNativeMcpMetadata, McpProviderSessions, layer } from "./McpProviderSessions.ts";
 
@@ -152,14 +153,94 @@ it.effect("retains more than 4096 live tool origins and ends native children ind
     yield* sessions.endExecution(threadId, a);
     expect(yield* lookup("live-0")).toBeUndefined();
     expect(yield* lookup("live-4099")).toBeUndefined();
-    expect(yield* lookup("child-a")).toEqual(a);
-    expect(yield* lookup("child-b")).toEqual(a);
+    const childA = (yield* lookup("child-a"))!;
+    const childB = (yield* lookup("child-b"))!;
+    expect(childA).toEqual({ ...a, isLiveBackground: expect.any(Function) });
+    expect(childB).toEqual({ ...a, isLiveBackground: expect.any(Function) });
+    expect(childA.isLiveBackground?.()).toBe(true);
+    expect(childB.isLiveBackground?.()).toBe(true);
     yield* sessions.endExecution(threadId, a, "native-child-a");
     expect(yield* lookup("child-a")).toBeUndefined();
-    expect(yield* lookup("child-b")).toEqual(a);
+    expect((yield* lookup("child-b"))?.isLiveBackground?.()).toBe(true);
+    expect(childA.isLiveBackground?.()).toBe(false);
     yield* sessions.registerExecution(threadId, origin("child-a"), a, "native-child-b");
     expect(yield* lookup("child-a")).toBeUndefined();
     yield* sessions.endExecution(threadId, a, "native-child-b");
     expect(yield* lookup("child-b")).toBeUndefined();
+    expect(childB.isLiveBackground?.()).toBe(false);
   }).pipe(Effect.provide(layer)),
+);
+
+it.effect("isolates known pending Codex children and releases cancelled credential waits", () =>
+  Effect.gen(function* () {
+    const sessions = yield* McpProviderSessions;
+    const threadId = ThreadId.make("pending-children");
+    const config = {
+      threadId,
+      environmentId: EnvironmentId.make("env"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      providerSessionId: "credential",
+      endpoint: "http://localhost/mcp",
+      authorizationHeader: "Bearer test",
+      browserToolsAvailable: true,
+    };
+    yield* sessions.set(config);
+    const execution = { runId: RunId.make("original"), attemptId: RunAttemptId.make("original") };
+    const pending = Effect.fnUntraced(function* (nativeThreadId: string) {
+      const done = yield* Deferred.make<void>();
+      const fiber = yield* sessions
+        .resolveExecution({
+          threadId,
+          providerSessionId: config.providerSessionId,
+          authorizationHeader: config.authorizationHeader,
+          metadata: { "x-codex-turn-metadata": { thread_id: nativeThreadId, turn_id: "turn" } },
+        })
+        .pipe(
+          Effect.tap(() => Deferred.succeed(done, undefined)),
+          Effect.forkChild({ startImmediately: true }),
+        );
+      return { done, fiber };
+    });
+    const rootRelease = yield* sessions.beginCodexTurn(threadId, "root");
+    const releaseA = yield* sessions.beginCodexTurn(threadId, "child-a");
+    const releaseB = yield* sessions.beginCodexTurn(threadId, "child-b");
+    const a = yield* pending("child-a");
+    const b = yield* pending("child-b");
+    expect(yield* Deferred.isDone(a.done)).toBe(false);
+    expect(yield* Deferred.isDone(b.done)).toBe(false);
+    yield* rootRelease;
+    yield* sessions.registerExecution(
+      threadId,
+      { provider: "codex", nativeThreadId: "root", nativeTurnId: "turn" },
+      execution,
+    );
+    expect(yield* Deferred.isDone(a.done)).toBe(false);
+    expect(yield* Deferred.isDone(b.done)).toBe(false);
+    yield* sessions.registerExecution(
+      threadId,
+      { provider: "codex", nativeThreadId: "child-a", nativeTurnId: "turn" },
+      execution,
+      "child-a",
+    );
+    const resolved = yield* Fiber.join(a.fiber);
+    expect(resolved).toMatchObject(execution);
+    expect(resolved?.isLiveBackground?.()).toBe(true);
+    yield* releaseA;
+    yield* releaseA;
+    expect(yield* Deferred.isDone(b.done)).toBe(false);
+    yield* releaseB;
+    expect(yield* Fiber.join(b.fiber)).toBeUndefined();
+    const releaseClear = yield* sessions.beginCodexTurn(threadId, "clear");
+    const cleared = yield* pending("clear");
+    yield* sessions.clear(threadId);
+    expect(yield* Fiber.join(cleared.fiber)).toBeUndefined();
+    expect(resolved?.isLiveBackground?.()).toBe(false);
+    yield* sessions.set(config);
+    const releaseReplace = yield* sessions.beginCodexTurn(threadId, "replace");
+    const replaced = yield* pending("replace");
+    yield* sessions.set({ ...config, providerSessionId: "new-credential" });
+    expect(yield* Fiber.join(replaced.fiber)).toBeUndefined();
+    yield* releaseClear;
+    yield* releaseReplace;
+  }).pipe(Effect.scoped, Effect.provide(layer)),
 );

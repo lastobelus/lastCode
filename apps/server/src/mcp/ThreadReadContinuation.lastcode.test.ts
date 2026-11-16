@@ -301,11 +301,12 @@ describe("ThreadReadContinuation", () => {
       const h = makeHarness(first, second);
       h.bind("run", first, first.id, "client-a");
       h.bind("run", second, second.id, "client-b");
-      expect(yield* h.resolve(first)).toMatchObject({
+      expect(yield* h.resolve(first, false)).toMatchObject({
         kind: "grant",
         grant: "client-a",
         key: { kind: "run", grantId: first.id },
       });
+      expect(h.loads).toEqual([{ threadId: threadA, fields: ["runs"] }]);
       h.grants.clear();
       h.bind("run", second, second.id, "client-b");
       expect(yield* h.resolve(first)).toBeUndefined();

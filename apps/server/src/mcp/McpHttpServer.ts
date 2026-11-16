@@ -311,14 +311,15 @@ const makeMcpAuthMiddleware = Effect.fn("McpHttpServer.makeAuthMiddleware")(func
         typeof params === "object" && params !== null && "_meta" in params
           ? params._meta
           : undefined;
-      const execution = Option.isSome(providerSessions)
-        ? yield* providerSessions.value.resolveExecution({
-            threadId: invocation.thread.threadId,
-            providerSessionId: invocation.thread.providerSessionId,
-            authorizationHeader: authorization ?? "",
-            metadata,
-          })
-        : undefined;
+      const execution =
+        invocation.thread.nativeExecutionAttribution === true && Option.isSome(providerSessions)
+          ? yield* providerSessions.value.resolveExecution({
+              threadId: invocation.thread.threadId,
+              providerSessionId: invocation.thread.providerSessionId,
+              authorizationHeader: authorization ?? "",
+              metadata,
+            })
+          : undefined;
       attributed = {
         ...invocation,
         thread: {
@@ -327,7 +328,8 @@ const makeMcpAuthMiddleware = Effect.fn("McpHttpServer.makeAuthMiddleware")(func
           attribution:
             execution !== undefined
               ? "resolved"
-              : hasNativeMcpMetadata(metadata)
+              : invocation.thread.nativeExecutionAttribution === true &&
+                  hasNativeMcpMetadata(metadata)
                 ? "unresolved"
                 : "absent",
         },

@@ -47,6 +47,7 @@ import type {
   ProjectionRecordFilter,
   ProjectionRecords,
 } from "../orchestration-v2/ProjectionStore.ts";
+import { OrchestratorProjectionError } from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadReadBroker from "./ThreadReadBroker.ts";
 import { referenceReadFailure, threadReadFailure } from "./ThreadReadDiagnostics.ts";
@@ -139,44 +140,47 @@ const makeHarness = Effect.gen(function* () {
   const requests = new Map<ThreadId, OrchestrationV2ThreadProjection["runtimeRequests"]>();
   const nodes = new Map<ThreadId, Array<OrchestrationV2ExecutionNode>>();
   const messages = new Map<ThreadId, Array<Message>>();
+  let projectionFailure = false;
   const getThreadRecords = <K extends ProjectionRecordField>(
     id: ThreadId,
     fields: ReadonlyArray<K>,
     filter?: ProjectionRecordFilter,
-  ): Effect.Effect<ProjectionRecords<K>> =>
-    Effect.sync(() => {
-      const records = {
-        runs: (runs.get(id) ?? []).filter(
-          (run) =>
-            (filter?.runIds === undefined || filter.runIds.includes(run.id)) &&
-            (filter?.runStatuses === undefined || filter.runStatuses.includes(run.status)),
-        ),
-        contextTransfers: (transfers.get(id) ?? []).filter(
-          (transfer) =>
-            filter?.contextTransferStatuses === undefined ||
-            filter.contextTransferStatuses.includes(transfer.status),
-        ),
-        runtimeRequests: (requests.get(id) ?? []).filter(
-          (request) =>
-            filter?.runtimeRequestStatuses === undefined ||
-            filter.runtimeRequestStatuses.includes(request.status),
-        ),
-        nodes: (nodes.get(id) ?? []).filter(
-          (node) => filter?.nodeIds === undefined || filter.nodeIds.includes(node.id),
-        ),
-        providerThreads: [],
-        messages: (messages.get(id) ?? []).filter(
-          (message) =>
-            (filter?.messageIds === undefined || filter.messageIds.includes(message.id)) &&
-            (filter?.messageRunIds === undefined ||
-              (message.runId !== null && filter.messageRunIds.includes(message.runId))) &&
-            (filter?.messageRoles === undefined || filter.messageRoles.includes(message.role)),
-        ),
-      };
-      return Object.fromEntries(
-        fields.map((field) => [field, records[field as keyof typeof records] ?? []]),
-      ) as unknown as ProjectionRecords<K>;
-    });
+  ): Effect.Effect<ProjectionRecords<K>, OrchestratorProjectionError> =>
+    projectionFailure
+      ? Effect.fail(new OrchestratorProjectionError({ threadId: id }))
+      : Effect.sync(() => {
+          const records = {
+            runs: (runs.get(id) ?? []).filter(
+              (run) =>
+                (filter?.runIds === undefined || filter.runIds.includes(run.id)) &&
+                (filter?.runStatuses === undefined || filter.runStatuses.includes(run.status)),
+            ),
+            contextTransfers: (transfers.get(id) ?? []).filter(
+              (transfer) =>
+                filter?.contextTransferStatuses === undefined ||
+                filter.contextTransferStatuses.includes(transfer.status),
+            ),
+            runtimeRequests: (requests.get(id) ?? []).filter(
+              (request) =>
+                filter?.runtimeRequestStatuses === undefined ||
+                filter.runtimeRequestStatuses.includes(request.status),
+            ),
+            nodes: (nodes.get(id) ?? []).filter(
+              (node) => filter?.nodeIds === undefined || filter.nodeIds.includes(node.id),
+            ),
+            providerThreads: [],
+            messages: (messages.get(id) ?? []).filter(
+              (message) =>
+                (filter?.messageIds === undefined || filter.messageIds.includes(message.id)) &&
+                (filter?.messageRunIds === undefined ||
+                  (message.runId !== null && filter.messageRunIds.includes(message.runId))) &&
+                (filter?.messageRoles === undefined || filter.messageRoles.includes(message.role)),
+            ),
+          };
+          return Object.fromEntries(
+            fields.map((field) => [field, records[field as keyof typeof records] ?? []]),
+          ) as unknown as ProjectionRecords<K>;
+        });
   const buildBroker = ThreadReadBroker.ThreadReadBroker.pipe(
     Effect.provide(
       ThreadReadBroker.layer.pipe(
@@ -518,6 +522,9 @@ const makeHarness = Effect.gen(function* () {
   yield* send("client-session", sourceThreadId, MessageId.make("source-message"));
   return {
     broker,
+    failProjection: () => {
+      projectionFailure = true;
+    },
     restart: () => buildBroker,
     store,
     sql,
@@ -1303,6 +1310,41 @@ describe("ThreadReadBroker", () => {
           );
         }),
       ),
+  );
+
+  it.effect("reports projection failures without claiming the authorization fence is broken", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* makeHarness;
+        h.failProjection();
+        const failure = yield* h.broker
+          .read(sourceThreadId, sourceRunId, { threadId, environmentId })
+          .pipe(Effect.flip);
+        expect(failure.code).toBe("orchestration_error");
+        expect(failure.message).not.toContain("Restarting");
+        expect(failure.noDestinationAttempt).toBeUndefined();
+      }),
+    ),
+  );
+  it.effect("releases the waiting reader when successful-response persistence fails", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* makeHarness;
+        const stream = yield* h.broker.connect("client-session");
+        yield* TestClock.adjust("1 minute");
+        yield* h.sql`CREATE TRIGGER test_read_touch_failure BEFORE UPDATE ON lastcode_thread_read_grants
+        BEGIN SELECT RAISE(ABORT, 'fixture persistence failure'); END`;
+        const read = yield* h.broker
+          .read(sourceThreadId, sourceRunId, { threadId, environmentId })
+          .pipe(Effect.flip, Effect.forkScoped);
+        const requests = yield* stream.pipe(Stream.take(1), Stream.runCollect);
+        const reply = yield* respondTo(h.broker, "client-session", requests[0]!).pipe(Effect.flip);
+        expect(reply.code).toBe("orchestration_error");
+        const failedRead = yield* Fiber.join(read);
+        expect(failedRead.code).toBe("orchestration_error");
+        expect(failedRead.noDestinationAttempt).toBeUndefined();
+      }),
+    ),
   );
 
   it.effect.each([

@@ -647,6 +647,8 @@ export const layerWithOptions = (
                     }),
                     Effect.orElseSucceed(() => ({ subagent: false, appOwnedSubagent: false })),
                   );
+                const driver = (yield* registry.get(providerInstanceId).pipe(Effect.orDie)).driver;
+                const nativeExecutionAttribution = driver === "codex" || driver === "claudeAgent";
                 const existing = yield* mcpSessions.read(threadId);
                 if (existing !== undefined) {
                   // Reserve before async validation so release cannot revoke between validation and reservation.
@@ -666,6 +668,7 @@ export const layerWithOptions = (
                     resolved !== undefined &&
                     resolved.thread.threadId === threadId &&
                     resolved.thread.providerInstanceId === providerInstanceId &&
+                    resolved.thread.nativeExecutionAttribution === nativeExecutionAttribution &&
                     resolved.capabilities.has("preview") === browserToolsAvailable &&
                     resolved.capabilities.has("device") === deviceToolsAvailable &&
                     // A credential issued while the lineage read failed is replaced once it works.
@@ -685,6 +688,7 @@ export const layerWithOptions = (
                   capabilities,
                   subagent,
                   appOwnedSubagent,
+                  nativeExecutionAttribution,
                 });
                 yield* mcpSessions.set({
                   ...credential.config,

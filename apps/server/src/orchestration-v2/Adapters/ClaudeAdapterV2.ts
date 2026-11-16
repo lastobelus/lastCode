@@ -2331,7 +2331,7 @@ export function makeClaudeQueryOptions(input: {
               : {
                   PreToolUse: [
                     {
-                      matcher: "^mcp__t3-code__run_project_action_and_resume$",
+                      matcher: "^mcp__t3-code__",
                       hooks: [input.beforeMcpToolUse],
                     },
                   ],
@@ -5056,10 +5056,14 @@ interface ClaudeMcpLaunchOwner {
   readonly rootNodeId: OrchestrationV2ExecutionNode["id"];
   readonly nativeThreadId: string;
   readonly nativeOwner: string;
+  readonly toolName: "Agent" | "SendMessage";
+  readonly targetTaskId?: string | undefined;
 }
 
 interface ActiveClaudeSubagent {
   readonly mcpOwner?: ClaudeMcpLaunchOwner | undefined;
+  // Resumed child frames can still name the original Agent call.
+  readonly mcpLaunchToolUseId?: string | undefined;
   task: OrchestrationV2Subagent;
   readonly nativeTaskType: string | undefined;
   readonly confirmedOutcome: ProviderAdapter.ProviderAdapterV2SubagentOutcome | undefined;
@@ -5824,15 +5828,21 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           );
         const activeTurn = yield* Ref.make<ActiveClaudeTurnContext | null>(null);
         let mcpFrameOwner: ActiveClaudeTurnContext | null = null;
-        const mcpLaunchOwners = new Map<string, ClaudeMcpLaunchOwner>();
-        const mcpToolFrames = new Map<string, Deferred.Deferred<void>>();
-        const toolFrameReady = Effect.fnUntraced(function* (toolUseId: string) {
-          let ready = mcpToolFrames.get(toolUseId);
-          if (ready === undefined) {
-            ready = yield* Deferred.make<void>();
-            mcpToolFrames.set(toolUseId, ready);
+        const mcpLaunchOwners = new Map<string, ClaudeMcpLaunchOwner | null>();
+        const mcpToolFrames = new Map<
+          string,
+          {
+            readonly ready: Deferred.Deferred<void>;
+            parentToolUseId: string | null | undefined;
           }
-          return ready;
+        >();
+        const toolFrameReady = Effect.fnUntraced(function* (toolUseId: string) {
+          let frame = mcpToolFrames.get(toolUseId);
+          if (frame === undefined) {
+            frame = { ready: yield* Deferred.make<void>(), parentToolUseId: undefined };
+            mcpToolFrames.set(toolUseId, frame);
+          }
+          return frame;
         });
         const taskOutputTails = new Map<
           string,
@@ -7410,6 +7420,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               `task:${resume.taskId}:subagent`,
             ),
             runToolUseId: launchToolUseId,
+            mcpLaunchToolUseId: launchToolUseId,
             effort: undefined,
             nextChildItemOrdinal: 100,
             resultItemOrdinal: null,
@@ -8013,6 +8024,16 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             input.prompt !== undefined
               ? input.toolUseId
               : null;
+          const launchOwner =
+            input.toolUseId === undefined
+              ? undefined
+              : (mcpLaunchOwners.get(input.toolUseId) ?? undefined);
+          // A terminal child needs a newly verified SendMessage launch, never its ended owner.
+          const mcpOwner = isReopen
+            ? resumeToolUseId !== null && launchOwner?.toolName === "SendMessage"
+              ? launchOwner
+              : undefined
+            : (existingSubagent?.mcpOwner ?? launchOwner);
           const lifecycleChanged =
             existingSubagent === undefined ||
             existingSubagent.task.status !== input.status ||
@@ -8119,9 +8140,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           } satisfies OrchestrationV2Subagent;
           const subagent = {
             task,
-            mcpOwner:
-              existingSubagent?.mcpOwner ??
-              (input.toolUseId === undefined ? undefined : mcpLaunchOwners.get(input.toolUseId)),
+            mcpOwner,
+            mcpLaunchToolUseId:
+              existingSubagent?.mcpLaunchToolUseId ??
+              existingSubagent?.runToolUseId ??
+              input.toolUseId,
             nativeTaskType: input.nativeTaskType ?? existingSubagent?.nativeTaskType,
             confirmedOutcome:
               input.nativeOutcome !== undefined || input.processExited === true
@@ -8169,6 +8192,21 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             const owner = existingSubagent.mcpOwner;
             if (owner !== undefined) {
               yield* mcpSessions.endExecution(owner.threadId, owner.execution, owner.nativeOwner);
+              if (mcpLaunchOwners.get(owner.nativeOwner) === owner) {
+                // Retain the identity so replay cannot bind an ended launch to a later root run.
+                mcpLaunchOwners.set(owner.nativeOwner, null);
+              }
+            }
+          }
+          if (input.status !== "running") {
+            const taskIds = yield* Ref.get(sessionSubagentTaskIdsByToolUseId);
+            for (const frame of mcpToolFrames.values()) {
+              if (
+                frame.parentToolUseId != null &&
+                taskIds.get(frame.parentToolUseId) === input.taskId
+              ) {
+                yield* Deferred.succeed(frame.ready, undefined);
+              }
             }
           }
           if (input.nativeOutcome !== undefined) appliedSubagentOutcomes.add(input.nativeOutcome);
@@ -8519,6 +8557,23 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           return registered ?? context?.subagentsByToolUseId.get(toolUseId);
         });
 
+        const awaitingMcpSubagentStart = (
+          parentToolUseId: string,
+          child: ActiveClaudeSubagent | undefined,
+          nativeThreadId: string,
+        ): boolean =>
+          child === undefined
+            ? mcpLaunchOwners.get(parentToolUseId)?.nativeThreadId === nativeThreadId
+            : child.task.status !== "running" &&
+              [...mcpLaunchOwners.values()].some(
+                (owner) =>
+                  owner !== null &&
+                  owner.nativeThreadId === nativeThreadId &&
+                  owner.toolName === "SendMessage" &&
+                  owner.targetTaskId !== undefined &&
+                  owner.targetTaskId === child.task.nativeTaskRef?.nativeId,
+              );
+
         const registerMcpAssistantTools = Effect.fnUntraced(function* (
           message: SDKAssistantMessage,
           liveQuery: ClaudeLiveQueryContext,
@@ -8534,6 +8589,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             childOwner !== undefined &&
             child.task.status === "running" &&
             (child.runToolUseId === parentToolUseId ||
+              child.mcpLaunchToolUseId === parentToolUseId ||
               childOwner.nativeOwner === parentToolUseId) &&
             mcpLaunchOwners.get(childOwner.nativeOwner) === childOwner &&
             child.task.threadId === childOwner.threadId &&
@@ -8552,7 +8608,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               (tool.name === "Agent" || tool.name === "SendMessage") &&
               !mcpLaunchOwners.has(tool.id)
             ) {
-              const owner =
+              const targetTaskId = inputRecordValue(
+                claudeNativeToolInputFromUnknown(tool.input),
+                "to",
+              );
+              const owner: ClaudeMcpLaunchOwner | undefined =
                 rootOwner !== null
                   ? {
                       threadId: rootOwner.input.threadId,
@@ -8563,9 +8623,16 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                       rootNodeId: rootOwner.input.rootNodeId,
                       nativeThreadId: rootOwner.nativeThreadId,
                       nativeOwner: tool.id,
+                      toolName: tool.name,
+                      targetTaskId: typeof targetTaskId === "string" ? targetTaskId : undefined,
                     }
                   : validChildOwner
-                    ? { ...childOwner, nativeOwner: tool.id }
+                    ? {
+                        ...childOwner,
+                        nativeOwner: tool.id,
+                        toolName: tool.name,
+                        targetTaskId: typeof targetTaskId === "string" ? targetTaskId : undefined,
+                      }
                     : undefined;
               if (owner !== undefined) mcpLaunchOwners.set(tool.id, owner);
             }
@@ -8584,8 +8651,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 childOwner.nativeOwner,
               );
             }
-            const ready = yield* toolFrameReady(tool.id);
-            if (ready !== undefined) yield* Deferred.succeed(ready, undefined);
+            const frame = yield* toolFrameReady(tool.id);
+            frame.parentToolUseId = parentToolUseId;
+            if (
+              parentToolUseId === null ||
+              !awaitingMcpSubagentStart(parentToolUseId, child, liveQuery.nativeThreadId)
+            ) {
+              yield* Deferred.succeed(frame.ready, undefined);
+            }
           }
         });
 
@@ -11658,9 +11731,18 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           }
 
           const frameParentToolUseId = parentToolUseIdFromSdkMessage(message);
+          const frameSubagent =
+            frameParentToolUseId === null
+              ? undefined
+              : yield* resolveSubagentByToolUseId(context, frameParentToolUseId);
           if (
             frameParentToolUseId !== null &&
-            (yield* resolveSubagentByToolUseId(context, frameParentToolUseId)) === undefined
+            (frameSubagent === undefined ||
+              awaitingMcpSubagentStart(
+                frameParentToolUseId,
+                frameSubagent,
+                liveQuery.nativeThreadId,
+              ))
           ) {
             const droppedToolUseId = yield* Ref.modify(
               pendingSubagentFramesByToolUseId,
@@ -12423,13 +12505,15 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           yield* Ref.update(sessionSubagentTaskIdsByToolUseId, (current) =>
             current.get(toolUseId) === taskId ? current : new Map(current).set(toolUseId, taskId),
           );
+          const taskIds = yield* Ref.get(sessionSubagentTaskIdsByToolUseId);
           return yield* Ref.modify(pendingSubagentFramesByToolUseId, (current) => {
-            const frames = current.get(toolUseId);
-            if (frames === undefined) {
-              return [[] as ReadonlyArray<SDKMessage>, current] as const;
-            }
+            const frames: SDKMessage[] = [];
             const next = new Map(current);
-            next.delete(toolUseId);
+            for (const [parentId, pending] of current) {
+              if (taskIds.get(parentId) !== taskId) continue;
+              frames.push(...pending);
+              next.delete(parentId);
+            }
             return [frames, next] as const;
           });
         });
@@ -12546,9 +12630,18 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           }
           if (liveQuery?.query === input.query) {
             const echoes = claudeEchoedPromptUuids(message);
-            if (echoes.length > 0 && parentToolUseIdFromSdkMessage(message) === null) {
+            const lifecycle = claudePromptLifecycle(message);
+            const accepted =
+              echoes.length > 0 ? echoes : lifecycle?.state === "started" ? [lifecycle.uuid] : [];
+            if (
+              accepted.length > 0 &&
+              parentToolUseIdFromSdkMessage(message) === null &&
+              message.session_id === liveQuery.nativeThreadId
+            ) {
               mcpFrameOwner =
-                context?.promptUuid != null && echoes.includes(context.promptUuid) ? context : null;
+                context?.promptUuid != null && accepted.includes(context.promptUuid)
+                  ? context
+                  : null;
             }
             if (message.type === "assistant") {
               yield* registerMcpAssistantTools(message, liveQuery);
@@ -12562,7 +12655,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 });
               }
               mcpFrameOwner = null;
-              mcpToolFrames.clear();
+              // Background children can reach their hook after an unrelated root result.
+              for (const [id, frame] of mcpToolFrames) {
+                if (frame.parentToolUseId === null) mcpToolFrames.delete(id);
+              }
             }
           }
           if (
@@ -13428,16 +13524,22 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   allowDangerouslySkipPermissions: queryPolicy.allowDangerouslySkipPermissions,
                 }),
             canUseTool,
-            ...(turnInput.appThread.lineage.independent !== true &&
-            (turnInput.appThread.lineage.relationshipToParent === "subagent" ||
-              (turnInput.appThread.remoteDelegations?.length ?? 0) > 0)
+            ...(mcpSession !== undefined
               ? {
                   beforeMcpToolUse: (async (hook, _id, options) => {
                     if (hook.hook_event_name !== "PreToolUse") return {};
                     await runPromise(
                       Effect.gen(function* () {
-                        const ready = yield* toolFrameReady(hook.tool_use_id);
-                        if (ready !== undefined) yield* Deferred.await(ready);
+                        const frame = yield* toolFrameReady(hook.tool_use_id);
+                        yield* Deferred.await(frame.ready).pipe(
+                          Effect.ensuring(
+                            Effect.sync(() => {
+                              if (mcpToolFrames.get(hook.tool_use_id) === frame) {
+                                mcpToolFrames.delete(hook.tool_use_id);
+                              }
+                            }),
+                          ),
+                        );
                       }),
                       { signal: options.signal },
                     );

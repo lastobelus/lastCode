@@ -1439,8 +1439,7 @@ const make = Effect.gen(function* () {
   });
 
   /** The run a loaded caller is acting from; remote read authority follows this run only. */
-  const callerRunId = (_scope: McpInvocationScope, caller: CapturedMcpCaller) =>
-    caller.invocationRun?.id;
+  const callerRunId = (caller: CapturedMcpCaller) => caller.invocationRun?.id;
 
   const loadThreadCaller = Effect.fn("OrchestratorMcpService.loadThreadCaller")(function* (
     scope: McpInvocationScope,
@@ -1515,7 +1514,7 @@ const make = Effect.gen(function* () {
       ? Effect.void
       : assertLiveCaller(scope, parent);
 
-  const assertLiveCaller = (
+  const assertLiveCaller = Effect.fn("OrchestratorMcpService.assertLiveCaller")((
     scope: McpInvocationScope,
     parent: Pick<OrchestrationV2ThreadProjection, "thread" | "runs">,
   ) => {
@@ -1524,6 +1523,16 @@ const make = Effect.gen(function* () {
       "The calling provider no longer owns an active thread run.",
     );
     const activeRun = ThreadManagementService.latestActiveRun(parent);
+    const execution = scope.thread?.execution;
+    if (
+      parent.thread.archivedAt === null &&
+      execution?.isLiveBackground?.() === true &&
+      parent.runs.some(
+        (run) =>
+          run.id === execution.runId && run.providerInstanceId === scope.thread?.providerInstanceId,
+      )
+    )
+      return Effect.void;
     const unattributed =
       scope.thread?.execution === undefined &&
       (scope.thread?.attribution === undefined || scope.thread.attribution === "absent");
@@ -1543,7 +1552,7 @@ const make = Effect.gen(function* () {
       activeRun.providerInstanceId !== scope.thread?.providerInstanceId
       ? Effect.fail(notActive)
       : Effect.void;
-  };
+  });
 
   const loadReadableThread = Effect.fn("OrchestratorMcpService.loadReadableThread")(function* (
     scope: McpInvocationScope,
@@ -3671,11 +3680,11 @@ const make = Effect.gen(function* () {
         client: (request) =>
           parent === undefined
             ? Effect.die("Client reads require a validated caller")
-            : threadReadBroker.read(parent.thread.id, callerRunId(scope, parent), request),
+            : threadReadBroker.read(parent.thread.id, callerRunId(parent), request),
         reference: (request) =>
           parent === undefined
             ? Effect.die("Reference client reads require a validated caller")
-            : threadReadBroker.readReference(parent.thread.id, callerRunId(scope, parent), request),
+            : threadReadBroker.readReference(parent.thread.id, callerRunId(parent), request),
         peer: (environmentId, request) => peerForwarding.readThread(scope, environmentId, request),
         peerLink: peerLinks.get,
       });
@@ -3826,7 +3835,7 @@ const make = Effect.gen(function* () {
       const readAuthorization =
         parent === undefined
           ? ThreadReadAuthorization.defaultValue()
-          : yield* threadReadBroker.inherit(parent.thread.id, callerRunId(scope, parent));
+          : yield* threadReadBroker.inherit(parent.thread.id, callerRunId(parent));
       const result = yield* threadManagement
         .sendToThread({
           projectId: target.thread.projectId,

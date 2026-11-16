@@ -5,12 +5,14 @@ import {
   AuthSessionId,
   CommandId,
   EnvironmentId,
+  EventId,
   GitCommandError,
   MessageId,
   NodeId,
   ProjectId,
   ProviderInstanceId,
   ProviderDriverKind,
+  ProviderSessionId,
   type ServerProvider,
   ThreadId,
   type OrchestrationV2ThreadShell,
@@ -42,6 +44,7 @@ import {
 } from "../../../orchestration-v2/Orchestrator.ts";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as ProjectionStore from "../../../orchestration-v2/ProjectionStore.ts";
 import * as Orchestrator from "../../../orchestration-v2/Orchestrator.ts";
 import * as ProviderAdapterRegistry from "../../../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "../../../orchestration-v2/testkit/ProviderReplayHarness.ts";
@@ -61,12 +64,13 @@ import * as VcsProcess from "../../../vcs/VcsProcess.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as ThreadReadBroker from "../../ThreadReadBroker.ts";
+import * as ThreadReadAuthority from "../../../threadReadAuthority/Store.ts";
 import * as ProjectHandlers from "./handlers.ts";
 import { ProjectToolkit } from "./tools.ts";
 
-it.effect(
-  "keeps a launched first message tied to the requesting run when its parent advances",
-  () =>
+it.effect.each(["resolved", "unresolved", "absent"] as const)(
+  "keeps a launched first message tied to the requesting run when its parent advances (%s attribution)",
+  (attribution) =>
     Effect.gen(function* () {
       const sourceThreadId = ThreadId.make("source-thread");
       const projectId = ProjectId.make("project");
@@ -91,6 +95,7 @@ it.effect(
         database,
         AuthSessions.layer.pipe(Layer.provide(database)),
         ThreadManagement.layer.pipe(Layer.provide(orchestration)),
+        ProjectionStore.layer.pipe(Layer.provide(database)),
         orchestration,
       ).pipe(Layer.build);
       const orchestrator = Context.get(context, Orchestrator.OrchestratorV2);
@@ -102,11 +107,12 @@ it.effect(
         getThreadShell: () => Effect.succeed(caller),
         getThreadRecords: (threadId, fields, filter) =>
           Effect.gen(function* () {
+            const records = yield* acceptedThreads.getThreadRecords(threadId, fields, filter);
             if (threadId === sourceThreadId && advanceAfterCallerLoads) {
               advanceAfterCallerLoads = false;
               yield* submit("between-client-session", sourceThreadId, "between-run");
             }
-            return yield* acceptedThreads.getThreadRecords(threadId, fields, filter);
+            return records;
           }),
       });
       const broker = yield* ThreadReadBroker.ThreadReadBroker.pipe(
@@ -201,6 +207,19 @@ it.effect(
         deletedAt: null,
       } as OrchestrationV2ThreadShell;
       const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+      let expectLaunchAuthority = true;
+      const invocationScope: McpInvocationContext.McpInvocationScope = {
+        environmentId: EnvironmentId.make("environment"),
+        requestNamespace: "session",
+        thread: {
+          threadId: sourceThreadId,
+          providerSessionId: "session",
+          providerInstanceId,
+        },
+        client: undefined,
+        issuedAt: 0,
+        capabilities: new Set(["orchestration" as const]),
+      };
       const layerDependencies = Layer.mergeAll(
         Layer.mock(ProviderRegistry.ProviderRegistry)({
           getProviders: Effect.succeed([]),
@@ -209,18 +228,7 @@ it.effect(
         NodeCrypto.layer,
         Layer.succeed(ThreadReadBroker.ThreadReadBroker, broker),
         threads,
-        Layer.succeed(McpInvocationContext.McpInvocationContext, {
-          environmentId: EnvironmentId.make("environment"),
-          requestNamespace: "session",
-          thread: {
-            threadId: sourceThreadId,
-            providerSessionId: "session",
-            providerInstanceId,
-          },
-          client: undefined,
-          issuedAt: 0,
-          capabilities: new Set(["orchestration" as const]),
-        }),
+        Layer.succeed(McpInvocationContext.McpInvocationContext, invocationScope),
         Layer.mock(ThreadLaunch.ThreadLaunchService)({
           launch: (input) => {
             launched.push(input);
@@ -248,7 +256,8 @@ it.effect(
                   threadId,
                   input.initialMessage.messageId,
                 );
-                expect(threadReadIntent).toBeDefined();
+                if (expectLaunchAuthority) expect(threadReadIntent).toBeDefined();
+                else expect(threadReadIntent).toBeUndefined();
                 yield* orchestrator.dispatch(
                   {
                     type: "message.dispatch",
@@ -349,6 +358,98 @@ it.effect(
       expect(launched[1]?.initialMessage).toBeUndefined();
       expect(launched[1]?.creatorThreadId).toBe(sourceThreadId);
       expect(launched[1]?.groupedUnderThreadId).toBeNull();
+
+      // A's accepted input retains its own authority after another client's run B starts.
+      const store = Context.get(context, ProjectionStore.ProjectionStoreV2);
+      const providerSessionId = ProviderSessionId.make("runtime-session");
+      const requester = yield* acceptedThreads.getThreadRecords(sourceThreadId, [
+        "attempts",
+        "providerThreads",
+      ]);
+      const attempt = requester.attempts.find((attempt) => attempt.runId === activeRun.id)!;
+      const nativeThread = requester.providerThreads.find(
+        (thread) => thread.id === attempt.providerThreadId,
+      )!;
+      expect(attempt).toBeDefined();
+      expect(nativeThread).toBeDefined();
+      yield* store.apply({
+        id: EventId.make("requester-session-attached"),
+        type: "provider-session.attached",
+        threadId: sourceThreadId,
+        occurredAt: now,
+        payload: {
+          id: providerSessionId,
+          driver: ProviderDriverKind.make("codex"),
+          providerInstanceId,
+          status: "ready",
+          cwd: "/projects/source",
+          model: modelSelection.model,
+          capabilities: CodexProviderCapabilitiesV2,
+          extensionStatuses: [],
+          createdAt: now,
+          updatedAt: now,
+          lastError: null,
+        },
+      });
+      yield* store.apply({
+        id: EventId.make("requester-provider-thread-updated"),
+        type: "provider-thread.updated",
+        threadId: sourceThreadId,
+        occurredAt: now,
+        payload: {
+          ...nativeThread,
+          providerSessionId,
+        },
+      });
+      const authority = yield* ThreadReadAuthority.make.pipe(
+        Effect.provide(Layer.succeedContext(context)),
+      );
+      yield* broker.connect("another-client-session").pipe(Effect.asVoid);
+      const currentRun = yield* submit(
+        "another-client-session",
+        sourceThreadId,
+        `current-${attribution}`,
+      );
+      caller = { ...caller, activeRunId: currentRun.id, latestRunId: currentRun.id };
+      const records = yield* acceptedThreads.getThreadRecords(sourceThreadId, ["runs"]);
+      expect(records.runs.find((run) => run.id === activeRun.id)?.completedAt).not.toBeNull();
+      expect((yield* authority.lookupGrant(sourceThreadId, "run", activeRun.id))?.sessionId).toBe(
+        "requester-session",
+      );
+      expect((yield* authority.lookupGrant(sourceThreadId, "run", currentRun.id))?.sessionId).toBe(
+        "another-client-session",
+      );
+      expectLaunchAuthority = attribution !== "unresolved";
+      yield* toolkit
+        .handle("t3_thread_launch", { title: `Audit ${attribution}`, message: "Review the change" })
+        .pipe(
+          Stream.unwrap,
+          Stream.runCollect,
+          Effect.provideService(McpInvocationContext.McpInvocationContext, {
+            ...invocationScope,
+            thread: {
+              ...invocationScope.thread!,
+              attribution,
+              ...(attribution === "absent"
+                ? {}
+                : { execution: { runId: activeRun.id, attemptId: attempt.id } }),
+            },
+          }),
+          Effect.provide(layerDependencies),
+        );
+      const child = launched.at(-1)!;
+      const childRecords = yield* acceptedThreads.getThreadRecords(child.threadId!, ["runs"]);
+      const childRun = childRecords.runs.find(
+        (run) => run.userMessageId === child.initialMessage!.messageId,
+      )!;
+      const grant = yield* authority.lookupGrant(child.threadId!, "run", childRun.id);
+      expect(grant?.sessionId).toBe(
+        attribution === "resolved"
+          ? "requester-session"
+          : attribution === "absent"
+            ? "another-client-session"
+            : undefined,
+      );
     }).pipe(Effect.scoped),
 );
 

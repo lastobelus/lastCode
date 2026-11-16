@@ -187,8 +187,27 @@ export const resolveThreadReadContinuation = Effect.fn("ThreadReadContinuation.r
   const load = Effect.fnUntraced(function* (threadId: ThreadId) {
     const cached = recordsByThread.get(threadId);
     if (cached !== undefined) return cached;
-    const records = yield* options.getThreadRecords(threadId, recordFields);
+    const records: Records = {
+      ...(yield* options.getThreadRecords(threadId, ["runs"])),
+      contextTransfers: [],
+      runtimeRequests: [],
+      nodes: [],
+      providerThreads: [],
+    };
     recordsByThread.set(threadId, records);
+    return records;
+  });
+  const detailedThreads = new Set<ThreadId>();
+  const loadDetails = Effect.fnUntraced(function* (threadId: ThreadId) {
+    const base = yield* load(threadId);
+    if (detailedThreads.has(threadId)) return base;
+    const fields =
+      input.reference === undefined
+        ? (["contextTransfers", "providerThreads"] as const)
+        : (["contextTransfers", "providerThreads", "runtimeRequests", "nodes"] as const);
+    const records = { ...base, ...(yield* options.getThreadRecords(threadId, fields)) };
+    recordsByThread.set(threadId, records);
+    detailedThreads.add(threadId);
     return records;
   });
   const messagesFor = Effect.fnUntraced(function* (run: OrchestrationV2Run) {
@@ -221,7 +240,7 @@ export const resolveThreadReadContinuation = Effect.fn("ThreadReadContinuation.r
     const identity = sourceKey(current.threadId, current.runId);
     if (visited.has(identity)) return general;
     visited.add(identity);
-    const records = yield* load(current.threadId);
+    let records = yield* load(current.threadId);
     const run = records.runs.find((candidate) => candidate.id === current.runId);
     if (
       run === undefined ||
@@ -241,6 +260,7 @@ export const resolveThreadReadContinuation = Effect.fn("ThreadReadContinuation.r
         if (input.reference === undefined) return general;
       }
     }
+    records = yield* loadDetails(current.threadId);
     const messages = yield* messagesFor(run);
     const trigger = messages.find(
       (message) =>

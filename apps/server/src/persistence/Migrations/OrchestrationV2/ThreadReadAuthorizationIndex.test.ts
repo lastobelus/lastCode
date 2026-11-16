@@ -28,6 +28,7 @@ it.effect("upgrades existing databases with indexed thread read authorization lo
       [18, "OrchestrationV2InteractiveThreadParentIndex"],
       [19, "OrchestrationV2PullRequestWatchIndex"],
       [20, "OrchestrationV2RetiredNativePromotion"],
+      [21, "ThreadReadAuthority"],
     ]);
     const plans = [
       yield* sql<{

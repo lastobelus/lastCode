@@ -21,6 +21,7 @@ export interface McpCredentialRequest {
   readonly capabilities?: ReadonlySet<McpInvocationContext.McpCapability>;
   readonly subagent?: boolean;
   readonly appOwnedSubagent?: boolean;
+  readonly nativeExecutionAttribution?: boolean;
 }
 
 export interface McpIssuedCredential {
@@ -138,6 +139,11 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
           providerInstanceId: ProviderInstanceId.make(request.providerInstanceId),
           subagent: request.subagent === true,
           appOwnedSubagent: request.appOwnedSubagent === true,
+          ...(request.nativeExecutionAttribution === undefined
+            ? {}
+            : {
+                nativeExecutionAttribution: request.nativeExecutionAttribution,
+              }),
         },
         client: undefined,
         capabilities: new Set<McpInvocationContext.McpCapability>([

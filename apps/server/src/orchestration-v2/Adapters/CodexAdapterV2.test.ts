@@ -10135,7 +10135,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
-  it.effect("leaves a late child's result to the root's next turn when one is running", () =>
+  it.effect("releases a known child's pending MCP call when it ends before turn/started", () =>
     Effect.gen(function* () {
       const sessions = yield* McpProviderSessions.McpProviderSessions;
       const threadId = ThreadId.make(`thread-${RESUME_SCENARIO}`);
@@ -10148,131 +10148,90 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         authorizationHeader: "Bearer native-child",
         browserToolsAvailable: true,
       };
-      const lookup = (nativeThreadId = RESUME_CHILD_THREAD, nativeTurnId = RESUME_CHILD_TURN_1) =>
-        sessions.resolveExecution({
-          threadId,
-          providerSessionId: config.providerSessionId,
-          authorizationHeader: config.authorizationHeader,
-          metadata: {
-            "x-codex-turn-metadata": { thread_id: nativeThreadId, turn_id: nativeTurnId },
+      const lookup = sessions.resolveExecution({
+        threadId,
+        providerSessionId: config.providerSessionId,
+        authorizationHeader: config.authorizationHeader,
+        metadata: {
+          "x-codex-turn-metadata": {
+            thread_id: RESUME_CHILD_THREAD,
+            turn_id: RESUME_CHILD_TURN_1,
           },
-        });
-      const secondStarted = yield* Deferred.make<void>();
-      const releaseChild = yield* Deferred.make<void>();
-      const secondPrompt = "Wait for the sub-agent.";
-      const secondTurn = "native-codex-resume-root-turn-2";
-      const nativeMcpStart = (text: string) =>
-        CodexAdapterV2.buildCodexTurnStartParams({
-          nativeThreadId: RESUME_NATIVE_THREAD,
-          codexInput: [{ type: "text", text }],
-          runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
-          modelSelection: CODEX_TEST_MODEL_SELECTION,
-          hasT3Mcp: true,
-        });
-      const firstStartParams = yield* nativeMcpStart(RESUME_PROMPT);
-      const secondStartParams = yield* nativeMcpStart(secondPrompt);
+        },
+      });
+      const releaseChildEnd = yield* Deferred.make<void>();
+      const childEnded = yield* Deferred.make<void>();
       const { spawned, rootFinished } = lateChildPrefix();
-      // Reuse the preamble's turn/start exchange under the session's next request id.
-      const secondTurnStart = codexReplayPreamble({
+      const startParams = yield* CodexAdapterV2.buildCodexTurnStartParams({
         nativeThreadId: RESUME_NATIVE_THREAD,
-        nativeTurnId: secondTurn,
-        prompt: secondPrompt,
-      })
-        .slice(-3)
-        .map((entry) =>
-          entry.type !== "runtime_exit" &&
-          typeof entry.frame === "object" &&
-          entry.frame !== null &&
-          "id" in entry.frame
-            ? {
-                ...entry,
-                frame: {
-                  ...entry.frame,
-                  id: 4,
-                  ...(entry.type === "expect_outbound" && entry.label === "turn/start"
-                    ? { params: secondStartParams }
-                    : {}),
-                },
-              }
-            : entry,
-        );
+        codexInput: [{ type: "text", text: RESUME_PROMPT }],
+        runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+        modelSelection: CODEX_TEST_MODEL_SELECTION,
+        hasT3Mcp: true,
+      });
       const harness = yield* makeCodexReplayHarness(
         makeCodexReplayTranscript({
           scenario: RESUME_SCENARIO,
           entries: [
-            ...spawned.map((entry) =>
-              entry.type === "expect_outbound" &&
-              entry.label === "turn/start" &&
-              Predicate.isObject(entry.frame)
-                ? { ...entry, frame: { ...entry.frame, params: firstStartParams } }
-                : entry,
+            ...spawned.flatMap((entry) =>
+              entry.type === "emit_inbound" && entry.label === `turn/started/${RESUME_CHILD_TURN_1}`
+                ? []
+                : entry.type === "expect_outbound" &&
+                    entry.label === "turn/start" &&
+                    Predicate.isObject(entry.frame)
+                  ? [{ ...entry, frame: { ...entry.frame, params: startParams } }]
+                  : [entry],
             ),
             ...rootFinished,
-            ...secondTurnStart,
-            childAgentMessage({
-              id: "child-late-answer",
-              text: "CHILD_DURING_SECOND_TURN",
-              turnId: RESUME_CHILD_TURN_1,
-              completedAtMs: 1782622480000,
-            }),
-            childTurnCompleted(RESUME_CHILD_TURN_1),
             {
               type: "emit_inbound",
-              label: "turn/completed/root-2",
+              label: "child-ended-before-turn-started",
               frame: {
-                method: "turn/completed",
+                method: "item/completed",
                 params: {
+                  item: {
+                    type: "subAgentActivity",
+                    id: "child-ended",
+                    kind: "interrupted",
+                    agentThreadId: RESUME_CHILD_THREAD,
+                    agentPath: "/root/resume_agent",
+                  },
                   threadId: RESUME_NATIVE_THREAD,
-                  turn: makeCodexReplayTurn({ id: secondTurn, status: "completed" }),
+                  turnId: RESUME_NATIVE_TURN,
+                  completedAtMs: 1782622444000,
                 },
               },
             },
           ],
         }),
         (event) =>
-          event.type === "provider_turn.updated" &&
-          event.threadId === threadId &&
-          event.providerTurn.nativeTurnRef?.nativeId === secondTurn &&
-          event.providerTurn.status === "running"
-            ? Deferred.succeed(secondStarted, undefined).pipe(Effect.asVoid)
+          event.type === "subagent.updated" && event.subagent.status === "interrupted"
+            ? Deferred.succeed(childEnded, undefined)
             : Effect.void,
         undefined,
         undefined,
         (entry) =>
-          entry.label === "item/completed/child-late-answer"
-            ? Deferred.await(releaseChild)
+          entry.label === "child-ended-before-turn-started"
+            ? Deferred.await(releaseChildEnd)
             : Effect.void,
       );
       yield* sessions.set(config);
-
-      const turnInput = (index: number, text: string) =>
-        Effect.gen(function* () {
-          return {
-            ...makeCodexTestTurnInput({
-              threadId: harness.threadId,
-              providerThread: harness.providerThread,
-              now: yield* DateTime.now,
-              attemptId: RunAttemptId.make(`attempt-codex-active-root-${index}`),
-              text,
-            }),
-            runOrdinal: index,
-            providerTurnOrdinal: index,
-          };
-        });
-      const first = yield* turnInput(1, RESUME_PROMPT);
-      yield* harness.runtime.startTurn(first);
+      yield* harness.runtime.startTurn(
+        makeCodexTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("child-ended-before-turn-started"),
+          text: RESUME_PROMPT,
+        }),
+      );
       yield* harness.awaitTerminal(1);
-      assert.deepEqual(yield* lookup(), { runId: first.runId, attemptId: first.attemptId });
-      assert.isUndefined(yield* lookup(RESUME_NATIVE_THREAD, RESUME_NATIVE_TURN));
-      assert.isUndefined(yield* lookup("foreign-native-thread"));
-      yield* harness.runtime.startTurn(yield* turnInput(2, secondPrompt));
-      yield* Deferred.await(secondStarted);
-      assert.deepEqual(yield* lookup(), { runId: first.runId, attemptId: first.attemptId });
-      yield* Deferred.succeed(releaseChild, undefined);
-      yield* harness.awaitTerminal(2);
-      assert.isUndefined(yield* lookup());
-      assert.equal(harness.subagentUpdates().at(-1)?.subagent.result, "CHILD_DURING_SECOND_TURN");
-      assert.lengthOf(harness.continuationRequests, 0);
+      const earlyCall = yield* lookup.pipe(Effect.forkChild({ startImmediately: true }));
+      assert.isUndefined(earlyCall.pollUnsafe());
+      yield* Deferred.succeed(releaseChildEnd, undefined);
+      yield* Deferred.await(childEnded);
+      assert.isUndefined(yield* Fiber.join(earlyCall));
+      assert.isUndefined(yield* lookup);
     }).pipe(
       Effect.provide(
         Layer.mergeAll(
@@ -10283,6 +10242,201 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         ),
       ),
     ),
+  );
+
+  it.effect.each(["before root completion", "after newer root starts"] as const)(
+    "leaves a late child's result to the root's next turn when one is running (%s)",
+    (childStart) =>
+      Effect.gen(function* () {
+        const sessions = yield* McpProviderSessions.McpProviderSessions;
+        const threadId = ThreadId.make(`thread-${RESUME_SCENARIO}`);
+        const config = {
+          environmentId: EnvironmentId.make("env-native-child"),
+          threadId,
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          providerSessionId: "credential-native-child",
+          endpoint: "http://localhost/mcp",
+          authorizationHeader: "Bearer native-child",
+          browserToolsAvailable: true,
+        };
+        const lookup = (nativeThreadId = RESUME_CHILD_THREAD, nativeTurnId = RESUME_CHILD_TURN_1) =>
+          sessions.resolveExecution({
+            threadId,
+            providerSessionId: config.providerSessionId,
+            authorizationHeader: config.authorizationHeader,
+            metadata: {
+              "x-codex-turn-metadata": { thread_id: nativeThreadId, turn_id: nativeTurnId },
+            },
+          });
+        const secondStarted = yield* Deferred.make<void>();
+        const childStartPending = yield* Deferred.make<void>();
+        const releaseChildStart = yield* Deferred.make<void>();
+        const releaseChild = yield* Deferred.make<void>();
+        const secondPrompt = "Wait for the sub-agent.";
+        const secondTurn = "native-codex-resume-root-turn-2";
+        const nativeMcpStart = (text: string) =>
+          CodexAdapterV2.buildCodexTurnStartParams({
+            nativeThreadId: RESUME_NATIVE_THREAD,
+            codexInput: [{ type: "text", text }],
+            runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+            modelSelection: CODEX_TEST_MODEL_SELECTION,
+            hasT3Mcp: true,
+          });
+        const firstStartParams = yield* nativeMcpStart(RESUME_PROMPT);
+        const secondStartParams = yield* nativeMcpStart(secondPrompt);
+        const { spawned, rootFinished } = lateChildPrefix();
+        // Reuse the preamble's turn/start exchange under the session's next request id.
+        const secondTurnStart = codexReplayPreamble({
+          nativeThreadId: RESUME_NATIVE_THREAD,
+          nativeTurnId: secondTurn,
+          prompt: secondPrompt,
+        })
+          .slice(-3)
+          .map((entry) =>
+            entry.type !== "runtime_exit" &&
+            typeof entry.frame === "object" &&
+            entry.frame !== null &&
+            "id" in entry.frame
+              ? {
+                  ...entry,
+                  frame: {
+                    ...entry.frame,
+                    id: 4,
+                    ...(entry.type === "expect_outbound" && entry.label === "turn/start"
+                      ? { params: secondStartParams }
+                      : {}),
+                  },
+                }
+              : entry,
+          );
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: RESUME_SCENARIO,
+            entries: [
+              ...spawned
+                .flatMap((entry) =>
+                  childStart === "after newer root starts" &&
+                  entry.type === "emit_inbound" &&
+                  entry.label === `turn/started/${RESUME_CHILD_TURN_1}`
+                    ? []
+                    : [entry],
+                )
+                .map((entry) =>
+                  entry.type === "expect_outbound" &&
+                  entry.label === "turn/start" &&
+                  Predicate.isObject(entry.frame)
+                    ? { ...entry, frame: { ...entry.frame, params: firstStartParams } }
+                    : entry,
+                ),
+              ...rootFinished,
+              ...secondTurnStart,
+              ...(childStart === "after newer root starts"
+                ? [childTurnStarted(RESUME_CHILD_TURN_1)]
+                : []),
+              childAgentMessage({
+                id: "child-late-answer",
+                text: "CHILD_DURING_SECOND_TURN",
+                turnId: RESUME_CHILD_TURN_1,
+                completedAtMs: 1782622480000,
+              }),
+              childTurnCompleted(RESUME_CHILD_TURN_1),
+              {
+                type: "emit_inbound",
+                label: "turn/completed/root-2",
+                frame: {
+                  method: "turn/completed",
+                  params: {
+                    threadId: RESUME_NATIVE_THREAD,
+                    turn: makeCodexReplayTurn({ id: secondTurn, status: "completed" }),
+                  },
+                },
+              },
+            ],
+          }),
+          (event) =>
+            event.type === "provider_turn.updated" &&
+            event.threadId === threadId &&
+            event.providerTurn.nativeTurnRef?.nativeId === secondTurn &&
+            event.providerTurn.status === "running"
+              ? Deferred.succeed(secondStarted, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+          undefined,
+          undefined,
+          (entry) =>
+            childStart === "after newer root starts" &&
+            entry.label === `turn/started/${RESUME_CHILD_TURN_1}`
+              ? Deferred.succeed(childStartPending, undefined).pipe(
+                  Effect.andThen(Deferred.await(releaseChildStart)),
+                )
+              : entry.label === "item/completed/child-late-answer"
+                ? Deferred.await(releaseChild)
+                : Effect.void,
+        );
+        yield* sessions.set(config);
+
+        const turnInput = (index: number, text: string) =>
+          Effect.gen(function* () {
+            return {
+              ...makeCodexTestTurnInput({
+                threadId: harness.threadId,
+                providerThread: harness.providerThread,
+                now: yield* DateTime.now,
+                attemptId: RunAttemptId.make(`attempt-codex-active-root-${index}`),
+                text,
+              }),
+              runOrdinal: index,
+              providerTurnOrdinal: index,
+            };
+          });
+        const first = yield* turnInput(1, RESUME_PROMPT);
+        yield* harness.runtime.startTurn(first);
+        yield* harness.awaitTerminal(1);
+        if (childStart === "before root completion") {
+          const owner = yield* lookup();
+          assert.deepEqual<unknown>(owner, {
+            runId: first.runId,
+            attemptId: first.attemptId,
+            isLiveBackground: owner?.isLiveBackground,
+          });
+          assert.isTrue(owner?.isLiveBackground?.());
+        }
+        assert.isUndefined(yield* lookup(RESUME_NATIVE_THREAD, RESUME_NATIVE_TURN));
+        assert.isUndefined(yield* lookup("foreign-native-thread"));
+        yield* harness.runtime.startTurn(yield* turnInput(2, secondPrompt));
+        yield* Deferred.await(secondStarted);
+        if (childStart === "after newer root starts") yield* Deferred.await(childStartPending);
+        const earlyCall = yield* lookup().pipe(Effect.forkChild({ startImmediately: true }));
+        const unknownCall = yield* lookup(RESUME_CHILD_THREAD, "unknown-native-turn").pipe(
+          Effect.forkChild({ startImmediately: true }),
+        );
+        if (childStart === "after newer root starts") {
+          assert.isUndefined(earlyCall.pollUnsafe());
+          yield* Deferred.succeed(releaseChildStart, undefined);
+        }
+        const owner = yield* Fiber.join(earlyCall);
+        assert.deepEqual<unknown>(owner, {
+          runId: first.runId,
+          attemptId: first.attemptId,
+          isLiveBackground: owner?.isLiveBackground,
+        });
+        assert.isTrue(owner?.isLiveBackground?.());
+        assert.isUndefined(yield* Fiber.join(unknownCall));
+        yield* Deferred.succeed(releaseChild, undefined);
+        yield* harness.awaitTerminal(2);
+        assert.isFalse(owner?.isLiveBackground?.());
+        assert.isUndefined(yield* lookup());
+        assert.equal(harness.subagentUpdates().at(-1)?.subagent.result, "CHILD_DURING_SECOND_TURN");
+        assert.lengthOf(harness.continuationRequests, 0);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
+        ),
+      ),
   );
 
   it.effect.each(["model/rerouted"] as const)(

@@ -19,6 +19,7 @@ import {
   type OrchestratorMcpThreadReadResult,
   type ThreadReadRequest,
 } from "@t3tools/contracts";
+import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
 import * as Option from "effect/Option";
@@ -620,6 +621,99 @@ it.effect("retains the exact client reference when real delegate completion wake
         Effect.catch((error) => Effect.succeed(error.code)),
       );
     assert.equal(staleSend, "parent_not_active");
+    yield* finish(wake);
+    yield* sql`INSERT INTO auth_sessions
+      (session_id, subject, method, scopes, issued_at, expires_at)
+      VALUES ('other-client', 'other-user', 'browser-session-cookie', '["orchestration:read"]',
+        ${DateTime.formatIso(issuedAt)}, ${DateTime.formatIso(DateTime.add(issuedAt, { days: 1 }))})`;
+    const otherInput = MessageId.make("other-client-input");
+    const otherIntent = yield* broker
+      .forSession("other-client")
+      .authorize(parentThreadId, otherInput);
+    yield* orchestrator.dispatch(
+      {
+        type: "message.dispatch",
+        commandId: CommandId.make("other-client-command"),
+        threadId: parentThreadId,
+        messageId: otherInput,
+        text: "Another client's later run.",
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+        createdBy: "user",
+        creationSource: "web",
+      },
+      otherIntent === undefined ? {} : { threadReadIntent: otherIntent },
+    );
+    yield* worker.drain();
+    const later = yield* Queue.take(started);
+    yield* awaitStarted(later);
+    assert.notEqual(later.runId, original.runId);
+    const laterOwner = yield* sql<{ sessionId: string }>`SELECT session_id AS sessionId
+      FROM lastcode_thread_read_grants WHERE thread_id = ${parentThreadId}
+      AND kind = 'run' AND grant_id = ${later.runId}`;
+    assert.equal(laterOwner[0]?.sessionId, "other-client");
+    // A still-live native child keeps A while another client's run is active.
+    const nativeSessions = yield* McpProviderSessions.McpProviderSessions.pipe(
+      Effect.provide(McpProviderSessions.layer),
+    );
+    yield* nativeSessions.set({
+      environmentId: localEnvironmentId,
+      threadId: parentThreadId,
+      providerSessionId: scope.thread!.providerSessionId,
+      providerInstanceId: instanceId,
+      endpoint: "http://localhost/mcp",
+      authorizationHeader: "Bearer native-test",
+      browserToolsAvailable: true,
+    });
+    yield* nativeSessions.registerExecution(
+      parentThreadId,
+      { provider: "claude", toolUseId: "background-call" },
+      scope.thread!.execution!,
+      "live-child",
+    );
+    const nativeExecution = yield* nativeSessions.resolveExecution({
+      threadId: parentThreadId,
+      providerSessionId: scope.thread!.providerSessionId,
+      authorizationHeader: "Bearer native-test",
+      metadata: { "claudecode/toolUseId": "background-call" },
+    });
+    assert.isTrue(nativeExecution?.isLiveBackground?.());
+    const nativeBackground: McpInvocationScope = {
+      ...scope,
+      thread: {
+        ...scope.thread!,
+        attribution: "resolved",
+        execution: nativeExecution,
+      },
+    };
+    const nativeSent = yield* service.sendToThread(nativeBackground, {
+      threadId: child.threadId,
+      message: "Live native background callback.",
+      mode: "queue",
+      clientRequestId: "native-background-callback",
+    });
+    assert.equal(nativeSent.threadId, child.threadId);
+    const inheritedOwner = yield* sql<{ sessionId: string }>`SELECT session_id AS sessionId
+      FROM lastcode_thread_read_grants WHERE thread_id = ${child.threadId}
+      AND kind = 'run' AND grant_id = ${nativeSent.runId}`;
+    assert.equal(inheritedOwner[0]?.sessionId, sessionId);
+    yield* nativeSessions.endExecution(parentThreadId, scope.thread!.execution!, "live-child");
+    assert.isFalse(nativeExecution?.isLiveBackground?.());
+    assert.equal(
+      yield* service
+        .sendToThread(nativeBackground, {
+          threadId: child.threadId,
+          message: "Ended child must not borrow the wake.",
+          mode: "queue",
+          clientRequestId: "ended-native-background-control",
+        })
+        .pipe(
+          Effect.as("unexpected-delivery"),
+          Effect.catch((error) => Effect.succeed(error.code)),
+        ),
+      "parent_not_active",
+    );
+
     const unresolved: McpInvocationScope = {
       ...scope,
       thread: {

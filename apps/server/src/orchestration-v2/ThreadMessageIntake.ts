@@ -186,7 +186,9 @@ export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(
         ? queuedEditAuthorizationId(command.commandId)
         : command.type === "message.dispatch"
           ? command.messageId
-          : undefined;
+          : command.type === "thread.create"
+            ? command.initialMessage?.messageId
+            : undefined;
   const threadReadIntent =
     inputId === undefined || !("threadId" in command)
       ? undefined

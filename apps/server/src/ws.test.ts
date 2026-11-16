@@ -16,6 +16,7 @@ import {
   ORCHESTRATION_PROTOCOL_VERSION,
   ORCHESTRATION_PROTOCOL_QUERY_PARAM,
   MessageId,
+  CommandId,
   RunId,
   ThreadReadRequest,
   ThreadReadResponse,
@@ -84,6 +85,7 @@ import * as PeerForwarding from "./peer/PeerForwarding.ts";
 import { liveThreadShell, idleThreadProjection } from "./mcp/McpToolAccess.testkit.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as ThreadReadBroker from "./mcp/ThreadReadBroker.ts";
+import { admitAcceptedInput } from "./threadReadAuthority/Admission.ts";
 import * as OrchestratorMcpService from "./mcp/OrchestratorMcpService.ts";
 import * as DesktopBrowserChannel from "./preview/DesktopBrowserChannel.ts";
 import * as PreviewHosting from "./preview/Hosting.ts";
@@ -2822,24 +2824,80 @@ it.effect("disconnects a pending remote read through the public RPC transport an
       Layer.mock(PeerForwarding.PeerForwarding)({}),
       Layer.mock(ActionResume.ActionResume)({}),
     );
-    const broker = yield* ThreadReadBroker.ThreadReadBroker.pipe(
-      Effect.provide(ThreadReadBroker.layer.pipe(Layer.provide(dependencies))),
+    // The returned broker retains SQL services, so its database shares the test's outer scope.
+    const context = yield* Layer.build(
+      ThreadReadBroker.layer.pipe(Layer.provideMerge(dependencies)),
     );
+    const broker = Context.get(context, ThreadReadBroker.ThreadReadBroker);
+    const sql = Context.get(context, SqlClient.SqlClient);
     const reads = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
       Effect.provide(
         OrchestratorMcpService.layer.pipe(
           Layer.provide(Layer.succeed(ThreadReadBroker.ThreadReadBroker, broker)),
-          Layer.provide(dependencies),
+          Layer.provide(Layer.succeedContext(context)),
         ),
       ),
     );
-    yield* broker.forSession("origin").authorize(sourceId, messageId);
-    runs.push({
+    const now = yield* DateTime.now;
+    yield* sql`INSERT INTO auth_sessions
+      (session_id, subject, method, scopes, issued_at, expires_at)
+      VALUES ('origin', 'origin', 'browser-session-cookie', '["orchestration:read"]',
+        ${DateTime.formatIso(now)}, ${DateTime.formatIso(DateTime.add(now, { days: 1 }))})`;
+    const intent = yield* broker.forSession("origin").authorize(sourceId, messageId);
+    assert.isDefined(intent);
+    const acceptedRun: OrchestrationV2ThreadProjection["runs"][number] = {
       id: runId,
+      threadId: sourceId,
       userMessageId: messageId,
       status: "running",
       ordinal: 1,
-    } as OrchestrationV2ThreadProjection["runs"][number]);
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "test-model" },
+      providerThreadId: null,
+      rootNodeId: null,
+      activeAttemptId: null,
+      requestedAt: now,
+      startedAt: now,
+      completedAt: null,
+      checkpointId: null,
+      contextHandoffId: null,
+    };
+    yield* admitAcceptedInput({
+      threadId: sourceId,
+      commandId: CommandId.make("accepted-remote-read-input"),
+      commandType: "message.dispatch",
+      ...(intent === undefined ? {} : { threadReadIntent: intent }),
+      events: [
+        {
+          id: EventId.make("remote-read-message"),
+          type: "message.updated",
+          threadId: sourceId,
+          occurredAt: now,
+          payload: {
+            id: messageId,
+            threadId: sourceId,
+            runId,
+            nodeId: null,
+            role: "user",
+            text: "Read the remote thread.",
+            attachments: [],
+            streaming: false,
+            createdBy: "user",
+            creationSource: "web",
+            createdAt: now,
+            updatedAt: now,
+          },
+        },
+        {
+          id: EventId.make("remote-read-run"),
+          type: "run.created",
+          threadId: sourceId,
+          occurredAt: now,
+          payload: acceptedRun,
+        },
+      ],
+    }).pipe(sql.withTransaction, Effect.provideContext(context));
+    runs.push(acceptedRun);
     const read = reads.readThread(
       {
         environmentId: EnvironmentId.make("local-example"),
@@ -2911,7 +2969,7 @@ it.effect("disconnects a pending remote read through the public RPC transport an
               ServerBrowser.ServerBrowser.of({} as ServerBrowser.ServerBrowser["Service"]),
               () => Effect.void,
               { secretReferences: true },
-            ).pipe(Layer.provide(dependencies)),
+            ).pipe(Layer.provide(Layer.succeedContext(context))),
           ),
           Effect.provideService(Scope.Scope, scope),
         );

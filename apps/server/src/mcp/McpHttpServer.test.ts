@@ -1806,9 +1806,14 @@ it.effect("routes profile discovery and explicit profile opens over MCP", () =>
   ).pipe(Effect.provide(layerTest)),
 );
 
-it.effect.each([true, false])(
-  "admits credentials with native attribution registry available=%s",
-  (registryAvailable) =>
+it.effect.each([
+  { registryAvailable: true, nativeExecutionAttribution: true },
+  { registryAvailable: false, nativeExecutionAttribution: true },
+  { registryAvailable: true, nativeExecutionAttribution: false },
+  { registryAvailable: false, nativeExecutionAttribution: false },
+])(
+  "admits credentials with native attribution %j",
+  ({ registryAvailable, nativeExecutionAttribution }) =>
     Effect.scoped(
       Effect.gen(function* () {
         const providerToken = "providerTokenWithoutDots";
@@ -1848,6 +1853,7 @@ it.effect.each([true, false])(
           thread: {
             threadId: ThreadId.make("thread-provider"),
             providerSessionId: "provider-session",
+            nativeExecutionAttribution,
             providerInstanceId: ProviderInstanceId.make("codex"),
           },
           client: undefined,
@@ -1989,27 +1995,33 @@ it.effect.each([true, false])(
           expect((yield* call(providerToken, meta(turn))).status).toBe(200);
         }
         expect(seen.slice(2).map((scope) => scope.thread?.execution)).toEqual([
-          registryAvailable ? execution("b") : undefined,
-          registryAvailable ? execution("a") : undefined,
+          registryAvailable && nativeExecutionAttribution ? execution("b") : undefined,
+          registryAvailable && nativeExecutionAttribution ? execution("a") : undefined,
           undefined,
         ]);
         expect(seen.slice(2).map((scope) => scope.thread?.attribution)).toEqual([
-          registryAvailable ? "resolved" : "unresolved",
-          registryAvailable ? "resolved" : "unresolved",
-          "unresolved",
+          nativeExecutionAttribution ? (registryAvailable ? "resolved" : "unresolved") : "absent",
+          nativeExecutionAttribution ? (registryAvailable ? "resolved" : "unresolved") : "absent",
+          nativeExecutionAttribution ? "unresolved" : "absent",
         ]);
         yield* sessions.endExecution(ThreadId.make("thread-provider"), execution("a"));
         expect((yield* call(providerToken, meta("a"))).status).toBe(200);
         expect(seen.at(-1)?.thread?.execution).toBeUndefined();
-        expect(seen.at(-1)?.thread?.attribution).toBe("unresolved");
-        expect(seen[3]?.thread?.execution).toEqual(registryAvailable ? execution("a") : undefined);
+        expect(seen.at(-1)?.thread?.attribution).toBe(
+          nativeExecutionAttribution ? "unresolved" : "absent",
+        );
+        expect(seen[3]?.thread?.execution).toEqual(
+          registryAvailable && nativeExecutionAttribution ? execution("a") : undefined,
+        );
         for (const metadata of [
           { "x-codex-turn-metadata": null },
           { "claudecode/toolUseId": "" },
           { ...meta("b"), "claudecode/toolUseId": null },
         ]) {
           expect((yield* call(providerToken, metadata)).status).toBe(200);
-          expect(seen.at(-1)?.thread).toMatchObject({ attribution: "unresolved" });
+          expect(seen.at(-1)?.thread).toMatchObject({
+            attribution: nativeExecutionAttribution ? "unresolved" : "absent",
+          });
           expect(seen.at(-1)?.thread?.execution).toBeUndefined();
         }
 

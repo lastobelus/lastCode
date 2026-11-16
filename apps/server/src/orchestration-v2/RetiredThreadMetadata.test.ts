@@ -17,7 +17,7 @@ import * as Option from "effect/Option";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as EventStore from "./EventStore.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
-import { runDatabaseMigrations } from "../persistence/DatabaseMigrations.ts";
+import { runLastCodeMigrations } from "../persistence/LastCodeMigrations.ts";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -147,8 +147,8 @@ it.effect(
       for (const status of ["pending", "running", "succeeded", "failed", "cancelled"]) {
         yield* sql`INSERT INTO orchestration_v2_effect_outbox (effect_id, command_id, thread_id, effect_type, payload_json, status, available_at, created_at, updated_at) VALUES (${status}, 'old-command', ${threadId}, 'subagent.promote', '{"type":"subagent.promote","requestId":"old-command"}', ${status}, '2026-01-01', '2026-01-01', '2026-01-01')`;
       }
-      yield* sql`DELETE FROM lastcode_sql_migrations WHERE migration_id = 20`;
-      yield* runDatabaseMigrations();
+      yield* sql`DELETE FROM lastcode_sql_migrations WHERE migration_id >= 20`;
+      yield* runLastCodeMigrations({ toMigrationInclusive: 20 });
       assert.isEmpty(
         yield* sql`SELECT effect_id FROM orchestration_v2_effect_outbox WHERE effect_type = 'subagent.promote'`,
       );

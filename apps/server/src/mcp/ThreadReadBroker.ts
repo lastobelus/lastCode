@@ -32,6 +32,7 @@ import type {
 import { resolveThreadReadContinuation } from "./ThreadReadContinuation.ts";
 import { referenceReadFailure, threadReadFailure } from "./ThreadReadDiagnostics.ts";
 import { makeOriginalReferenceCheck } from "./ThreadReadOriginalReference.ts";
+import { unavailable } from "./threadAccess.ts";
 
 type Authorization = Context.Service.Shape<typeof ThreadReadAuthorization>;
 
@@ -286,13 +287,18 @@ const make = Effect.gen(function* () {
               "The thread read response does not match the requested thread and environment.",
           });
         }
-        const current = yield* authority
-          .touchSuccessfulRead(entry.grant, sessionId)
-          .pipe(Effect.mapError(() => threadReadFailure("fence")));
+        const checked = <A>(operation: Effect.Effect<A, SqlError.SqlError>) =>
+          operation.pipe(
+            Effect.catch(() => {
+              const error = unavailable();
+              return Deferred.fail(entry.result, error).pipe(Effect.andThen(Effect.fail(error)));
+            }),
+          );
+        const current = yield* checked(authority.touchSuccessfulRead(entry.grant, sessionId));
         if (!current) {
-          const check = yield* authority
-            .eligibleConnectedSessions(entry.grant, connectedSessions())
-            .pipe(Effect.mapError(() => threadReadFailure("fence")));
+          const check = yield* checked(
+            authority.eligibleConnectedSessions(entry.grant, connectedSessions()),
+          );
           yield* Deferred.fail(entry.result, unavailableFor(check));
           return;
         }
@@ -322,7 +328,7 @@ const make = Effect.gen(function* () {
     reference: boolean,
   ) {
     const selected = yield* resolve(sourceThreadId, sourceRunId, input).pipe(
-      Effect.mapError(() => threadReadFailure("fence")),
+      Effect.mapError(unavailable),
     );
     if (selected?.kind !== "grant") {
       if (reference) return referenceReadFailure("noGrant", true);
@@ -334,7 +340,7 @@ const make = Effect.gen(function* () {
     }
     const check = yield* authority
       .eligibleConnectedSessions(selected.grant, connectedSessions())
-      .pipe(Effect.mapError(() => threadReadFailure("fence")));
+      .pipe(Effect.mapError(unavailable));
     if (check.status !== "eligible") {
       if (reference) return unavailableFor(check, true);
       return yield* unavailableFor(check);

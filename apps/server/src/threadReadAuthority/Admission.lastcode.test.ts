@@ -550,7 +550,7 @@ it.effect.each(["missing", "wrong-input", "wrong-thread", "unaccepted"] as const
     }).pipe(Effect.provide(layer)),
 );
 
-it.effect.each(["intake", "thread.create", "thread.metadata.update"] as const)(
+it.effect.each(["intake", "intake-create", "thread.create", "thread.metadata.update"] as const)(
   "admits ordinary attached references through real %s without caller metadata",
   (path) => {
     const registry = ProviderAdapterRegistry.layerSingle({
@@ -608,10 +608,23 @@ it.effect.each(["intake", "thread.create", "thread.metadata.update"] as const)(
         createdBy: "user" as const,
         creationSource: "web" as const,
       };
-      if (path !== "thread.create") yield* orchestrator.dispatch(claim);
+      if (path !== "thread.create" && path !== "intake-create") yield* orchestrator.dispatch(claim);
       const accepted =
-        path === "intake"
-          ? yield* dispatchUserCommand(command).pipe(
+        path === "intake" || path === "intake-create"
+          ? yield* dispatchUserCommand(
+              path === "intake"
+                ? command
+                : {
+                    ...claim,
+                    initialMessage: {
+                      messageId,
+                      text: command.text,
+                      context: command.context,
+                      attachments: [],
+                      workspaceStrategy: { type: "root" },
+                    },
+                  },
+            ).pipe(
               Effect.provideService(ThreadReadAuthorization, {
                 authorize: (targetThreadId, targetMessageId) => {
                   assert.equal(targetThreadId, threadId);
