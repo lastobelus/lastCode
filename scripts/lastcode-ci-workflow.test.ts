@@ -141,7 +141,8 @@ describe("LastCode GitHub CI workflow", () => {
       );
       const doc = asRecord(parse(source));
       expect(asRecord(doc?.concurrency)?.group).toContain("format('metadata-{0}', github.run_id)");
-      for (const job of Object.values(asRecord(doc?.jobs) ?? {})) {
+      for (const [id, job] of Object.entries(asRecord(doc?.jobs) ?? {})) {
+        if (filename === "ci.yml" && id === "ci_gate") continue;
         expect(asRecord(job)?.if).toContain(
           "github.event.action != 'edited' || github.event.changes.base",
         );
@@ -241,12 +242,11 @@ describe("LastCode GitHub CI workflow", () => {
       "release_smoke",
     ]);
     expect(gate?.needs).toEqual(["check"]);
-    expect(gateBlock).toContain(
-      "name: ${{ github.event.action == 'edited' && !github.event.changes.base && 'CI Gate (metadata edit)' || 'CI Gate' }}",
-    );
-    expect(gateBlock).toContain(
-      "if: ${{ (github.event.action != 'edited' || github.event.changes.base) && always() }}",
-    );
+    expect(gate?.name).toBe("CI Gate");
+    expect(gate?.permissions).toEqual({ contents: "read", actions: "read" });
+    expect(gateBlock).toContain("Verify source CI for metadata edit");
+    expect(gateBlock).toContain("lastcode-metadata-ci-gate.cjs");
+    expect(gateBlock).toContain("if: ${{ always() }}");
   });
 
   it.each([

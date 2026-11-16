@@ -207,6 +207,14 @@ current GitHub thread and review-query mechanics.
    npm --silent run markover -- done <pr-url> --pr-status merged
    ```
 
+You can edit a PR's title or body after CI is green without pushing or closing
+and reopening it. The edit runs a lightweight `CI Gate` that passes only when a
+completed, successful `ci.yml` pull-request run, with successful `Check` and
+`CI Gate` jobs, exists for the PR's exact head, base, and merge commit. If that
+run is still in progress, the gate waits for it for a bounded time. Retargeting
+the base still runs full CI. When the lightweight gate fails because it found no
+such run, CI is not green: the current merge still needs a full CI run.
+
 One immediate status snapshot can establish that a wait is needed. For this
 LastCode workflow, the native PR watch owns subsequent passive checks; the
 general repository CI polling rule does not require agent-side sleeps or
