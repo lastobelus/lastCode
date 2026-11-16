@@ -311,6 +311,22 @@ describe("root reopen shortcut", () => {
       expect.objectContaining({ command: "rightPanel.toggle" }),
       expect.objectContaining({ command: "preview.focusUrl" }),
       expect.objectContaining({
+        command: "preview.zoomIn",
+        shortcut: expect.objectContaining({ key: "+", modKey: true, shiftKey: false }),
+      }),
+      expect.objectContaining({
+        command: "preview.zoomIn",
+        shortcut: expect.objectContaining({ key: "=", modKey: true, shiftKey: false }),
+      }),
+      expect.objectContaining({
+        command: "preview.zoomOut",
+        shortcut: expect.objectContaining({ key: "-", modKey: true, shiftKey: false }),
+      }),
+      expect.objectContaining({
+        command: "preview.resetZoom",
+        shortcut: expect.objectContaining({ key: "0", modKey: true, shiftKey: false }),
+      }),
+      expect.objectContaining({
         command: "preview.find",
         shortcut: expect.objectContaining({ key: "f", modKey: true, shiftKey: false }),
       }),

@@ -3,6 +3,7 @@ import { ensureLocalApi } from "../../localApi";
 import {
   getDesktopUpdateActionError,
   getDesktopUpdateInstallConfirmationMessage,
+  getDesktopUpdateInstallRefusal,
   shouldToastDesktopUpdateActionResult,
 } from "../desktopUpdate.logic";
 import { showDesktopUpdateDownloadedToast } from "../desktopUpdate.toast";
@@ -66,15 +67,20 @@ export async function installLastCodeSidebarUpdate(
     return;
   }
   void bridge
-    .installUpdate()
+    .installUpdate(desktopUpdateState.downloadedVersion ?? undefined)
     .then((result) => {
-      if (!shouldToastDesktopUpdateActionResult(result)) return;
-      const actionError = getDesktopUpdateActionError(result);
+      const refusal = getDesktopUpdateInstallRefusal(
+        result,
+        desktopUpdateState.downloadedVersion ?? undefined,
+      );
+      const actionError =
+        refusal ??
+        (shouldToastDesktopUpdateActionResult(result) ? getDesktopUpdateActionError(result) : null);
       if (!actionError) return;
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Could not install update",
+          title: refusal ? "Update not installed" : "Could not install update",
           description: actionError,
         }),
       );

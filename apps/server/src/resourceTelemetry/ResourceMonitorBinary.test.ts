@@ -39,6 +39,32 @@ describe("ResourceMonitorBinary", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
+  it.effect(
+    "resolves the one-shot capture binary without the telemetry layer and protects missing binaries",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-process-capture-",
+        });
+        const binaryPath = `${baseDir}/resource-monitor`;
+        yield* fileSystem.writeFileString(binaryPath, "binary");
+        yield* fileSystem.chmod(binaryPath, 0o755);
+        const resolve = ResourceMonitorBinary.ProcessCaptureBinary.defaultValue().pipe(
+          Effect.provide(ServerConfig.layerTest(process.cwd(), baseDir)),
+          Effect.provideService(HostProcess.Platform, "darwin"),
+          Effect.provideService(HostProcess.Architecture, "arm64"),
+          Effect.provideService(HostProcess.Environment, {
+            T3CODE_RESOURCE_MONITOR_PATH: binaryPath,
+          }),
+        );
+        assert.equal(yield* resolve, binaryPath);
+        yield* fileSystem.chmod(binaryPath, 0o644);
+        assert.equal(yield* resolve, null);
+        assert.equal(yield* ResourceMonitorBinary.ProcessCaptureBinary.defaultValue(), null);
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("rejects a non-executable POSIX override", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;

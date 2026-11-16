@@ -1,6 +1,6 @@
 import { makeThreadPullRequests } from "@t3tools/source-control-core/shared/threadPullRequests";
 
-import { sourceControlDefinitions } from "./sourceControlDefinitions.ts";
+import { builtInSourceControlDefinitions as sourceControlDefinitions } from "@t3tools/source-control-definitions/registry";
 
 export { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 

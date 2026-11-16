@@ -1,4 +1,5 @@
 import { threadPullRequestKeyOf } from "@t3tools/client-runtime/thread-pull-requests";
+import { parseSideChatCommand } from "@t3tools/shared/composerTrigger";
 import { filterComposerPullRequestMatches } from "@t3tools/shared/composerPullRequestMatches";
 import { EnvironmentId, MessageId, ThreadId, type AssistantCitation } from "@t3tools/contracts";
 import {
@@ -23,6 +24,7 @@ import {
   extendReplacementRangeForTrailingSpace,
   formatAssistantCitationForComposer,
   isPathSuggestionCurrent,
+  parseThreadAnnotationSlashCommand,
   replaceTextRange,
 } from "./composer-logic";
 import { slashCommandItemsForPromptPosition } from "./components/chat/composerSlashCommandSearch";
@@ -591,5 +593,42 @@ describe("side chat slash commands", () => {
     expect(slashCommandItemsForPromptPosition(items, false).map((item) => item.id)).toEqual([
       "slash:model",
     ]);
+  });
+});
+
+describe("parseThreadAnnotationSlashCommand", () => {
+  it("opens the editor for a bare command", () => {
+    expect(parseThreadAnnotationSlashCommand(" /annotate ")).toEqual({ kind: "open-editor" });
+  });
+
+  it("captures inline and multiline markdown", () => {
+    expect(parseThreadAnnotationSlashCommand("/annotate # Follow up\n- [ ] ship it")).toEqual({
+      kind: "save",
+      body: "# Follow up\n- [ ] ship it",
+    });
+  });
+
+  it("is case insensitive but requires a command boundary", () => {
+    expect(parseThreadAnnotationSlashCommand("/ANNOTATE #tag")).toEqual({
+      kind: "save",
+      body: "#tag",
+    });
+    expect(parseThreadAnnotationSlashCommand("/annotated nope")).toBeNull();
+  });
+});
+
+describe("parseSideChatCommand", () => {
+  it("reads an optional prompt after /side or /btw", () => {
+    expect(parseSideChatCommand("/side")).toEqual({ prompt: "" });
+    expect(parseSideChatCommand("  /SIDE  why does this fail?\nline two ")).toEqual({
+      prompt: "why does this fail?\nline two",
+    });
+    expect(parseSideChatCommand("/btw check @src/a.ts")).toEqual({ prompt: "check @src/a.ts" });
+  });
+
+  it("ignores other commands and inline mentions, which the menu does not offer", () => {
+    expect(parseSideChatCommand("/sidebar")).toBeNull();
+    expect(parseSideChatCommand("/btwx")).toBeNull();
+    expect(parseSideChatCommand("ask /side later")).toBeNull();
   });
 });

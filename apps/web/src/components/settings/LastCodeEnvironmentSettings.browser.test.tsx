@@ -1,8 +1,8 @@
+import { act, render as renderUi } from "../../../test/render";
 import { EnvironmentId, DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
 import { DEFAULT_CLIENT_SETTINGS, type ClientSettings } from "@t3tools/contracts/settings";
-import { type ReactElement, type ReactNode, act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { type ReactElement, type ReactNode } from "react";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { LastCodeEnvironmentPauseSettings } from "./LastCodeEnvironmentPauseSettings";
 import { LastCodeEnvironmentIconSettings } from "./LastCodeEnvironmentIconSettings";
 
@@ -145,9 +145,8 @@ vi.mock("../ui/switch", () => ({
     />
   ),
 }));
-let root: Root;
-let host: HTMLDivElement;
-beforeEach(() => {
+async function setup() {
+  await using stack = new AsyncDisposableStack();
   Object.assign(state, {
     settings: { ...DEFAULT_CLIENT_SETTINGS, environmentIconColors: {} },
     enabled: DEFAULT_SERVER_SETTINGS.environmentPauseEnabled,
@@ -157,36 +156,39 @@ beforeEach(() => {
     capabilities: [true],
   });
   state.write.mockClear();
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  host = document.createElement("div");
-  document.body.append(host);
-  root = createRoot(host);
-});
-afterEach(async () => {
-  await act(() => root.unmount());
-  host.remove();
-  vi.unstubAllGlobals();
-});
-function button(label: string) {
-  return host.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!;
-}
-async function color(label: string, value: string) {
-  await act(() => {
-    const field = host.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!;
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(field, value);
-    field.dispatchEvent(new Event("input", { bubbles: true }));
-  });
-}
-async function render(node: ReactElement) {
-  await act(() => {
-    root.render(node);
-  });
-}
+  const screen = stack.use(await renderUi(null));
+  const { container: host, rerender } = screen;
+  function button(label: string) {
+    return host.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!;
+  }
+  async function color(label: string, value: string) {
+    await act(() => {
+      const field = host.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!;
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(field, value);
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+  async function render(node: ReactElement) {
+    await rerender(node);
+  }
 
+  const owner = stack.move();
+  return {
+    host,
+    render,
+    button,
+    color,
+    rerender,
+    [Symbol.asyncDispose]: () => owner.disposeAsync(),
+  };
+}
 describe("LastCode environment settings", () => {
   it.each(["project", "checkout"])(
     "disables scoped pause at %s scope including its reset",
     async (scope) => {
+      await using fixture = await setup();
+      const { render, button } = fixture;
+
       state.scope = scope;
       state.mixed = true;
       await render(<LastCodeEnvironmentPauseSettings />);
@@ -198,6 +200,9 @@ describe("LastCode environment settings", () => {
   it.each([[], [false], [true, undefined]])(
     "requires capability support on every selected connected environment: %j",
     async (...capabilities) => {
+      await using fixture = await setup();
+      const { render, button } = fixture;
+
       state.capabilities = capabilities.flat() as (boolean | undefined)[];
       await render(<LastCodeEnvironmentPauseSettings />);
       expect(button("Environment pause button").disabled).toBe(true);
@@ -205,12 +210,15 @@ describe("LastCode environment settings", () => {
   );
 
   it("honors denied write permission and resets mixed targets to the server default", async () => {
+    await using fixture = await setup();
+    const { render, button, rerender } = fixture;
+
     state.mixed = true;
     state.canWrite = false;
     await render(<LastCodeEnvironmentPauseSettings />);
     expect(button("Environment pause button").disabled).toBe(true);
     state.canWrite = true;
-    await act(() => root.render(<LastCodeEnvironmentPauseSettings />));
+    await rerender(<LastCodeEnvironmentPauseSettings />);
     expect(button("Environment pause button").getAttribute("aria-pressed")).toBe("mixed");
     await act(() => button("Reset environment pause button").click());
     expect(state.enabled).toBe(DEFAULT_SERVER_SETTINGS.environmentPauseEnabled);
@@ -221,6 +229,9 @@ describe("LastCode environment settings", () => {
   });
 
   it("turns a mixed pause setting on across the selected targets", async () => {
+    await using fixture = await setup();
+    const { render, button } = fixture;
+
     state.mixed = true;
     await render(<LastCodeEnvironmentPauseSettings />);
     await act(() => button("Environment pause button").click());
@@ -229,6 +240,9 @@ describe("LastCode environment settings", () => {
   });
 
   it("merges consecutive icon edits against current settings and clears only the requested color", async () => {
+    await using fixture = await setup();
+    const { render, color } = fixture;
+
     await render(<LastCodeEnvironmentIconSettings />);
     await color("Workstation (local)", "#123456");
     await color("Remote", "#abcdef");
@@ -239,6 +253,9 @@ describe("LastCode environment settings", () => {
   });
 
   it("keeps badge dimensions when badges are hidden and allows the local icon independently", async () => {
+    await using fixture = await setup();
+    const { render, button, host } = fixture;
+
     state.settings = {
       ...state.settings,
       showThreadProviderBadge: true,

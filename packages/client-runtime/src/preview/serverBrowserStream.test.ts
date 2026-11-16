@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { createPreviewStreamClient, type PreviewStreamControl } from "./serverBrowserStream.ts";
+import {
+  createPreviewStreamClient,
+  previewStreamControlLabel,
+  type PreviewStreamControl,
+} from "./serverBrowserStream.ts";
 
 class FakeSocket extends EventTarget {
   static readonly OPEN = 1;
@@ -62,6 +66,25 @@ describe("preview stream control", () => {
     generation: 1,
     dialog: null,
   };
+
+  it("forwards only recognized thread links from the authenticated Browser stream", () => {
+    const onThreadLink = vi.fn();
+    const client = createPreviewStreamClient(target, {
+      onFrame: vi.fn(),
+      onViewport: vi.fn(),
+      onConnectedChange: vi.fn(),
+      onUnauthorized: vi.fn(),
+      onThreadLink,
+    });
+    for (const href of ["https://app.t3.codes/settings", "t3-thread://v2/environment/%ZZ", 42])
+      FakeSocket.current.message(JSON.stringify({ type: "threadLink", href }));
+    expect(onThreadLink).not.toHaveBeenCalled();
+    FakeSocket.current.message(
+      JSON.stringify({ type: "threadLink", href: "t3-thread://v2/linked/thread" }),
+    );
+    expect(onThreadLink).toHaveBeenCalledExactlyOnceWith("t3-thread://v2/linked/thread");
+    client.stop();
+  });
 
   it("does not grant control from malformed dialog metadata", () => {
     const { client, socket, onControl } = connect();
@@ -131,6 +154,22 @@ describe("preview stream control", () => {
     );
     restarted.stop();
     expect(onFileChooser).toHaveBeenLastCalledWith(null);
+  });
+
+  it("waits for takeover readiness while allowing cancellation and dialog replies", () => {
+    const { client, socket, onControl } = connect();
+    const pending: PreviewStreamControl = { ...agent, controller: "taking-control" };
+    socket.control(pending);
+    expect(onControl).toHaveBeenLastCalledWith(pending);
+    expect(previewStreamControlLabel(pending)).toBe("Taking control…");
+    expect(client.send({ type: "takeControl" })).toBe(false);
+    expect(client.send({ type: "text", text: "too early" })).toBe(false);
+    expect(client.send({ type: "resize", width: 390, height: 844 })).toBe(false);
+    expect(client.send({ type: "dialog", accept: true })).toBe(true);
+    expect(client.send({ type: "releaseControl" })).toBe(true);
+    socket.control({ ...pending, controller: "you" });
+    expect(client.send({ type: "text", text: "ready" })).toBe(true);
+    client.stop();
   });
 });
 

@@ -12,24 +12,35 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import { AcpProviderCapabilitiesV2 } from "@t3tools/provider-acp/server/adapter";
 import { ClaudeProviderCapabilitiesV2 } from "./Adapters/ClaudeAdapterV2.ts";
 import { CursorProviderCapabilitiesV2 } from "@t3tools/provider-cursor/testing";
 import { makeGrokAcpAdapterFlavor } from "@t3tools/provider-grok/testing";
+import { GrokSettings } from "@t3tools/provider-grok/settings";
+import * as Schema from "effect/Schema";
 import * as CommandPolicy from "./CommandPolicy.ts";
+
+const decodeGrokSettings = Schema.decodeSync(GrokSettings);
+
+const grokCapabilities = makeGrokAcpAdapterFlavor(
+  {
+    instanceId: ProviderInstanceId.make("grok"),
+    settings: decodeGrokSettings({}),
+    environment: {},
+    hostPlatform: "linux",
+    selfInvocation: { command: "node", entrypoint: undefined },
+  },
+  "/example/home",
+).capabilities;
 
 const commandId = CommandId.make("command-policy-test");
 const threadId = ThreadId.make("command-policy-thread");
 const activeRunId = RunId.make("command-policy-active-run");
 const activeAttemptId = RunAttemptId.make("command-policy-active-attempt");
 const userMessageId = MessageId.make("command-policy-user-message");
-
-const grokCapabilities = makeGrokAcpAdapterFlavor(
-  { makeRuntime: () => Effect.never } as unknown as Parameters<typeof makeGrokAcpAdapterFlavor>[0],
-  "/home/ada",
-).capabilities;
 
 const baseCapabilities: OrchestrationV2ProviderCapabilities = CodexProviderCapabilitiesV2;
 
@@ -45,6 +56,7 @@ function dispatchProjection(
   const providerThreadId = ProviderThreadId.make("command-policy-provider-thread");
   const providerSessionId = ProviderSessionId.make("command-policy-provider-session");
   return {
+    thread: {},
     runs:
       sessionCapabilities === undefined
         ? []
@@ -268,6 +280,76 @@ it.each(["/compact", " /LOGOUT "])("queues a steer sent while %s runs", (text) =
     { type: "restart_active", targetRunId: activeRunId },
   );
 });
+
+it.each(["suspect", "stale", "recovering", "failed"] as const)(
+  "queues auto and steer deliveries while the matching attempt is %s",
+  (status) => {
+    const projection = dispatchProjection(baseCapabilities);
+    const attemptId = RunAttemptId.make("recovery-attempt");
+    const recovering = {
+      ...projection,
+      thread: {
+        ...projection.thread,
+        recovery: {
+          runId: activeRunId,
+          attemptId,
+          status,
+          detail: "Event reader failed",
+          updatedAt: DateTime.makeUnsafe("2026-01-01T00:00:00Z"),
+        },
+      },
+      runs: projection.runs.map((run) => ({ ...run, activeAttemptId: attemptId })),
+      providerTurns: projection.providerTurns.map((turn) => ({ ...turn, runAttemptId: attemptId })),
+    };
+    for (const intent of ["auto", "steer", undefined] as const) {
+      assert.deepEqual(
+        CommandPolicy.resolveMessageDispatchIntent(
+          recovering,
+          { type: "steer_active", targetRunId: activeRunId },
+          intent,
+        ),
+        { type: "queue_after_active" },
+      );
+    }
+    assert.deepEqual(
+      CommandPolicy.resolveMessageDispatchIntent(
+        recovering,
+        { type: "start_immediately" },
+        "restart",
+      ),
+      { type: "restart_active", targetRunId: activeRunId },
+    );
+    for (const recovery of [
+      { ...recovering.thread.recovery, status: "recovered" as const },
+      { ...recovering.thread.recovery, attemptId: RunAttemptId.make("old-attempt") },
+      { ...recovering.thread.recovery, runId: RunId.make("old-run") },
+    ]) {
+      assert.deepEqual(
+        CommandPolicy.resolveMessageDispatchIntent(
+          {
+            ...recovering,
+            thread: { ...recovering.thread, recovery },
+          },
+          { type: "start_immediately" },
+          "auto",
+        ),
+        { type: "steer_active", targetRunId: activeRunId },
+      );
+      assert.deepEqual(
+        CommandPolicy.resolveMessageDispatchIntent(
+          {
+            ...recovering,
+            thread: { ...recovering.thread, recovery },
+            providerTurns: projection.providerTurns,
+          },
+          { type: "start_immediately" },
+          "auto",
+        ),
+        { type: "queue_after_active" },
+      );
+    }
+  },
+);
 
 const layer = it.layer(CommandPolicy.layer);
 

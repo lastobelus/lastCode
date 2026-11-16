@@ -133,6 +133,8 @@ export const layer = HttpApiBuilder.group(
           return json(409, { error: "hook_disabled" }, "disabled");
         case "blocked_by_policy":
           return json(403, { error: "blocked_by_policy" }, "blocked_by_policy");
+        case "environment_paused":
+          return json(503, { error: "environment_paused" }, "environment_paused");
         case "rate_limited":
           return json(429, { error: result.outcome }, result.outcome);
         case "expired":

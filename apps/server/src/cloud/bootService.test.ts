@@ -185,19 +185,17 @@ const launchdServiceTarget = "gui/501/com.t3tools.t3code.service";
 const launchdNotLoadedMessage =
   'Could not find service "com.t3tools.t3code.service" in domain for user gui: 501';
 
-const processResult = (input?: {
-  readonly code?: number;
-  readonly stdout?: string;
-  readonly stderr?: string;
-}): ProcessRunner.ProcessRunOutput => ({
+const processResult = (
+  input?: Partial<Omit<ProcessRunner.ProcessRunOutput, "code">> & { readonly code?: number },
+): ProcessRunner.ProcessRunOutput => ({
   stdout: input?.stdout ?? "",
   stderr: input?.stderr ?? "",
   code: ChildProcessSpawner.ExitCode(input?.code ?? 0),
-  timedOut: false,
-  stdoutTruncated: false,
-  stderrTruncated: false,
-  stdoutInvalidUtf8: false,
-  stderrInvalidUtf8: false,
+  timedOut: input?.timedOut ?? false,
+  stdoutTruncated: input?.stdoutTruncated ?? false,
+  stderrTruncated: input?.stderrTruncated ?? false,
+  stdoutInvalidUtf8: input?.stdoutInvalidUtf8 ?? false,
+  stderrInvalidUtf8: input?.stderrInvalidUtf8 ?? false,
 });
 
 it("recognizes only launchctl's exact service-not-loaded response", () => {

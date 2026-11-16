@@ -25,6 +25,7 @@ import { Command, CliError } from "effect/cli";
 import type { QuitError } from "effect/Terminal";
 
 import { cli } from "../binCli.ts";
+import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import {
   SERVICE_LAUNCHER_CONTEXT_ENV,
   SERVICE_LAUNCHER_PROTOCOL,
@@ -82,14 +83,15 @@ const runCommand: (
 ) => Effect.Effect<
   void,
   Exclude<Command.Error<typeof cli>, QuitError> | CliError.CliError,
-  NodeServices.NodeServices | NetService.NetService
-> = Command.runWith(cli, { version: "0.0.0" });
+  NodeServices.NodeServices | Layer.Success<typeof NodeCrypto.layer> | NetService.NetService
+> = (args) =>
+  Command.runWith(cli, { version: "0.0.0" })(args).pipe(Effect.provide(ManagedPolicy.layerTest()));
 const runCli = (
   args: ReadonlyArray<string>,
 ): Effect.Effect<
   void,
   Effect.Error<ReturnType<typeof runCommand>>,
-  NodeServices.NodeServices | NetService.NetService
+  NodeServices.NodeServices | Layer.Success<typeof NodeCrypto.layer> | NetService.NetService
 > => runCommand(args);
 
 const provideCliTestLayers = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
@@ -171,7 +173,11 @@ describe("t3 pair", () => {
                 unref: Effect.succeed(Effect.void),
                 stdin: Sink.drain,
                 stdout: Stream.make(
-                  new TextEncoder().encode('{"Self":{"DNSName":"pair-test.tail.ts.net."}}'),
+                  new TextEncoder().encode(
+                    command.args[0] === "status"
+                      ? '{"Self":{"DNSName":"pair-test.tail.ts.net."}}'
+                      : "{}",
+                  ),
                 ),
                 stderr: Stream.empty,
                 all: Stream.empty,

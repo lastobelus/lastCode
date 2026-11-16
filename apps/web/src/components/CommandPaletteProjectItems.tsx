@@ -79,14 +79,12 @@ export function buildNewThreadInProjectItems(
   return buildProjectActionItems({
     projects: input.projects,
     valuePrefix: "new-thread-in",
-    searchTerms: (project) => {
-      const group = input.projectGroupByTargetKey.get(`${project.environmentId}:${project.id}`);
-      const location = input.locationByEnvironmentId.get(project.environmentId);
-      return [
-        ...(group?.memberProjects.flatMap((member) => [member.title, member.workspaceRoot]) ?? []),
-        ...(location ? [location.label] : []),
-      ];
-    },
+    searchTerms: (project) => [
+      input.locationByEnvironmentId.get(project.environmentId)?.label ?? "Remote",
+      ...(input.projectGroupByTargetKey
+        .get(`${project.environmentId}:${project.id}`)
+        ?.memberProjects.flatMap((member) => [member.title, member.workspaceRoot]) ?? []),
+    ],
     renderDescription: (project) => (
       <ProjectLocationDescription
         location={input.locationByEnvironmentId.get(project.environmentId)}

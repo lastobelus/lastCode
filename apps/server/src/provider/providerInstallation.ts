@@ -21,7 +21,7 @@ import * as Stream from "effect/Stream";
 import * as CodexInstallation from "./CodexInstallation.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as AntigravityInstallation from "./AntigravityInstallation.ts";
-import { deriveProviderInstanceConfigMap } from "./ProviderInstanceRegistryHydration.ts";
+import { deriveProviderInstanceConfigMap } from "./providerInstanceConfig.ts";
 import * as ProviderInstanceRegistry from "./ProviderInstanceRegistry.ts";
 import * as ProviderRegistry from "./ProviderRegistry.ts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";

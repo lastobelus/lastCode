@@ -1,9 +1,107 @@
 import { assert, it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 
-import { withWorkspaceLease } from "./workspaceLease.ts";
+import {
+  registerWorkspaceLeaseRoot,
+  retireWorkspaceLeaseAliases,
+  resolveWorkspaceLeaseRoot,
+  withWorkspaceLease,
+} from "./workspaceLease.ts";
+
+it.effect(
+  "resolves nested commands to their nearest checkout without following a linked Git marker",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fs.makeTempDirectoryScoped();
+      const root = yield* fs.realPath(directory);
+      const nested = path.join(root, "packages", "example");
+      yield* fs.makeDirectory(path.join(root, ".git"));
+      yield* fs.makeDirectory(nested, { recursive: true });
+      assert.equal(yield* resolveWorkspaceLeaseRoot(nested), root);
+      yield* fs.symlink(path.join(root, ".git"), path.join(nested, ".git"));
+      assert.equal(yield* resolveWorkspaceLeaseRoot(nested), root);
+      yield* fs.remove(path.join(nested, ".git"));
+      yield* fs.writeFileString(
+        path.join(nested, ".git"),
+        "gitdir: /example/common/worktrees/topic\n",
+      );
+      yield* registerWorkspaceLeaseRoot(nested);
+      assert.equal(yield* resolveWorkspaceLeaseRoot(nested), nested);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect(
+  "reserves absent saved roots and every recognized alias under the current checkout key",
+  () =>
+    Effect.gen(function* () {
+      const root = "/workspace/saved-current";
+      const alias = "/workspace/saved-previous";
+      yield* registerWorkspaceLeaseRoot(root, [alias]);
+      assert.equal(yield* resolveWorkspaceLeaseRoot(`${root}/packages/example`), root);
+      assert.equal(yield* resolveWorkspaceLeaseRoot(`${alias}/packages/example`), root);
+      const entered = yield* Deferred.make<void>();
+      const child = yield* withWorkspaceLease(
+        root,
+        Effect.gen(function* () {
+          const child = yield* withWorkspaceLease(
+            `${alias}/packages/example`,
+            Deferred.succeed(entered, undefined),
+          ).pipe(Effect.forkChild({ startImmediately: true }));
+          assert.isFalse(yield* Deferred.isDone(entered));
+          yield* withWorkspaceLease(`${root}/packages/example`, Effect.void);
+          assert.isFalse(yield* Deferred.isDone(entered));
+          return child;
+        }),
+      );
+      yield* Deferred.await(entered);
+      yield* Fiber.join(child);
+    }),
+);
+
+it.effect(
+  "retires an old restore path while preserving the current root and its other aliases",
+  () =>
+    Effect.gen(function* () {
+      const previous = "/workspace/retired-restore-previous";
+      const current = "/workspace/retired-restore-current";
+      const retainedAlias = "/workspace/retired-restore-retained";
+      yield* registerWorkspaceLeaseRoot(current, [previous, retainedAlias]);
+      assert.equal(yield* resolveWorkspaceLeaseRoot(`${previous}/packages/example`), current);
+      yield* retireWorkspaceLeaseAliases(current, [previous, current]);
+      assert.equal(yield* resolveWorkspaceLeaseRoot(previous), previous);
+      assert.equal(yield* resolveWorkspaceLeaseRoot(`${current}/packages/example`), current);
+      assert.equal(yield* resolveWorkspaceLeaseRoot(`${retainedAlias}/packages/example`), current);
+      yield* registerWorkspaceLeaseRoot(previous);
+      assert.equal(yield* resolveWorkspaceLeaseRoot(`${previous}/packages/example`), previous);
+      assert.equal(yield* resolveWorkspaceLeaseRoot(`${retainedAlias}/packages/example`), current);
+    }),
+);
+
+it.effect("does not retire an alias that has been remapped to another checkout", () =>
+  Effect.gen(function* () {
+    const original = "/workspace/retired-remap-original";
+    const replacement = "/workspace/retired-remap-replacement";
+    const remappedAlias = "/workspace/retired-remap-alias";
+    const retiredAlias = "/workspace/retired-remap-unused";
+    yield* registerWorkspaceLeaseRoot(original, [remappedAlias, retiredAlias]);
+    yield* registerWorkspaceLeaseRoot(replacement, [remappedAlias]);
+    yield* retireWorkspaceLeaseAliases(original, [remappedAlias, retiredAlias, replacement]);
+    assert.equal(
+      yield* resolveWorkspaceLeaseRoot(`${remappedAlias}/packages/example`),
+      replacement,
+    );
+    assert.equal(yield* resolveWorkspaceLeaseRoot(`${replacement}/packages/example`), replacement);
+    assert.equal(yield* resolveWorkspaceLeaseRoot(`${original}/packages/example`), original);
+    assert.equal(yield* resolveWorkspaceLeaseRoot(retiredAlias), retiredAlias);
+  }),
+);
 
 it.effect("allows the owning fiber to nest leases for the same resolved workspace", () =>
   Effect.gen(function* () {

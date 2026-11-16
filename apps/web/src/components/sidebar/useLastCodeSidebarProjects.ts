@@ -2,7 +2,10 @@ import type { EnvironmentId } from "@t3tools/contracts";
 import { useProjects, useThreadShells } from "../../state/entities";
 import { useClientSettings, useClientSetting } from "../../hooks/useSettings";
 import { useUiStateStore, legacyProjectCwdPreferenceKey } from "../../uiStateStore";
-import { getProjectOrderKey, selectProjectGroupingSettings } from "../../logicalProject";
+import {
+  getProjectOrderKey,
+  selectProjectGroupingSettings,
+} from "@t3tools/client-runtime/state/project-grouping";
 import { buildSidebarProjectSnapshots } from "../../sidebarProjectGrouping";
 import { orderItemsByPreferredIds } from "../Sidebar.logic";
 import {

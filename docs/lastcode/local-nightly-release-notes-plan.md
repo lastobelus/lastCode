@@ -156,7 +156,7 @@ For each adjacent pair, reuse the checkpoint planner's ancestry invariant:
    the next source snapshot; and
 4. otherwise mark LastCode provenance unavailable for the whole interval.
 
-This handles both normal promotion and the open-PR/unpromoted revision path. It
+This handles both normal promotion and the published-but-unpromoted revision path. It
 also handles a checkpoint run that creates several missing nightlies from one
 unchanged source snapshot: every tag from that run records the same
 `Source-Commit`, so later replay edges contribute no new LastCode subjects.
@@ -410,7 +410,7 @@ Do not introduce a general release-notes component framework for this change.
   left untouched.
 - The packaged hover card showed `LastCode changes` before `Upstream changes`,
   rendered upstream nightly headings newest first, exposed `3 more LastCode
-changes` and `3 older nightlies not shown` instead of silently truncating,
+  changes` and `3 older nightlies not shown` instead of silently truncating,
   and scrolled successfully to older nightly groups. Focused rendered coverage
   proves the explicit unavailable-provenance presentation for the topology
   where that state applies.

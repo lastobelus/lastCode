@@ -30,7 +30,6 @@ import { enrichedModelDetails, enrichedModelReference } from "../lib/enrichedLin
 import { useModelMentions } from "../state/model-mentions";
 import { mobilePreferencesAtom } from "../state/preferences";
 import { useOpenLinkedThread } from "../features/threads/useOpenLinkedThread";
-import { useLinkedEnvironments } from "../state/peerLinks";
 import { ComposerContextSheet } from "./ComposerContextSheet";
 import { AppText as Text } from "./ui/AppText";
 import {
@@ -82,7 +81,6 @@ export function ComposerEditor({
   const [selected, setSelected] = useState<{ source: string; start: number; end: number } | null>(
     null,
   );
-  const linkedEnvironments = useLinkedEnvironments(environmentId ?? null);
   const models = useModelMentions(environmentId ?? draft.project?.environmentId, props.value);
   const contextImports = useAtomValue(composerContextImportsAtom);
   const importing = draftKey ? contextImports[draftKey] === true : false;
@@ -107,8 +105,6 @@ export function ComposerEditor({
         retained.attachments.length,
         signal,
         retained.context?.records.length ?? 0,
-        environmentId,
-        linkedEnvironments,
       );
       if (signal.aborted) return;
       if (!result) {

@@ -139,6 +139,9 @@ export default function ProjectScriptsControl({
       runOnSettle: fileScript.runOnSettle ?? false,
       stopOnSettle: fileScript.stopOnSettle ?? false,
       ...(readEnvironmentScope(environmentId, AuthSettingsWriteScope) ? { keybinding: null } : {}),
+      ...(fileScript.terminalLinkProfileName === undefined
+        ? {}
+        : { terminalLinkProfileName: fileScript.terminalLinkProfileName }),
       previewUrl: fileScript.previewUrl ?? null,
       autoOpenPreview: fileScript.previewUrl ? (fileScript.autoOpenPreview ?? false) : false,
       // Checked-in Actions are never silently granted agent execution.

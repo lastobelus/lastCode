@@ -16,21 +16,25 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Tracer from "effect/Tracer";
+import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
 
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as EventSink from "./EventSink.ts";
 import * as EventStore from "./EventStore.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectionMaintenance from "./ProjectionMaintenance.ts";
+import * as ProjectionReplay from "./testkit/ProjectionReplay.ts";
 import { repairHistoricalThreadCreators } from "./repairHistoricalThreadCreators.ts";
 
 const stores = Layer.mergeAll(EventStore.layer, ProjectionStore.layer).pipe(
-  Layer.provideMerge(SqlitePersistenceMemory),
+  Layer.provideMerge(SqlitePersistence.layerMemory),
 );
-const TestLayer = Layer.mergeAll(EventSink.layer, ProjectionMaintenance.layer).pipe(
-  Layer.provideMerge(stores),
-);
+const TestLayer = Layer.mergeAll(
+  EventSink.layer,
+  ProjectionMaintenance.layer,
+  ProjectionReplay.layer,
+).pipe(Layer.provideMerge(stores));
 const now = DateTime.makeUnsafe("2026-09-01T00:00:00Z");
 const provider = ProviderInstanceId.make("codex");
 
@@ -177,14 +181,14 @@ it.layer(TestLayer)("historical thread creators", (it) => {
         const sequence = yield* events.latestSequence();
         assert.equal(yield* repairHistoricalThreadCreators, 0);
         assert.equal(yield* events.latestSequence(), sequence);
-        yield* (yield* ProjectionMaintenance.ProjectionMaintenanceV2).rebuild;
+        yield* (yield* ProjectionReplay.ProjectionReplay).rebuild;
         assert.deepStrictEqual((yield* store.getThreadProjection(child.id)).thread, repaired);
         assert.equal(yield* repairHistoricalThreadCreators, 0);
       }),
   );
 
   it.effect(
-    "recovers a no-prompt creation record after compaction and preserves independent placement",
+    "recovers a retained no-prompt creation record after pruning and preserves independent placement",
     () =>
       Effect.gen(function* () {
         const parent = yield* createThread("record-parent");
@@ -194,7 +198,19 @@ it.layer(TestLayer)("historical thread creators", (it) => {
           "separate-create-command",
         );
         yield* creationRecord(child, parent.id);
-        yield* (yield* ProjectionMaintenance.ProjectionMaintenanceV2).compactEventStore();
+        const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+        const events = yield* EventStore.EventStoreV2;
+        const sequence = yield* events.latestSequence();
+        assert.equal((yield* maintenance.pruneEventStore()).deletedEventCount, 0);
+        yield* TestClock.adjust("1 day");
+        yield* maintenance.pruneEventStore();
+        assert.equal(yield* events.latestSequence(), sequence);
+        const sql = yield* SqlClient.SqlClient;
+        assert.deepEqual(
+          yield* sql`SELECT event_id FROM orchestration_events
+            WHERE event_id = ${`record:${parent.id}:${child.id}`}`,
+          [{ event_id: `record:${parent.id}:${child.id}` }],
+        );
         assert.equal(yield* repairHistoricalThreadCreators, 1);
         const repaired = (yield* (yield* ProjectionStore.ProjectionStoreV2).getThreadProjection(
           child.id,

@@ -12,6 +12,7 @@ import {
   resolveDefaultWorktreeBaseBranch,
   resolveLocalCheckoutBranchMismatch,
   resolveLockedWorkspaceLabel,
+  resolveCheckoutBranchMismatch,
   sanitizeNewRefName,
   shouldIncludeBranchPickerItem,
   isBranchHoldCurrent,
@@ -430,5 +431,69 @@ describe("resolveConfirmedSelectedRef", () => {
     expect(resolveConfirmedSelectedRef(listed, refs === null ? null : { refs }).worktreePath).toBe(
       expected,
     );
+  });
+});
+
+describe("resolveCheckoutBranchMismatch", () => {
+  it("detects when a local thread is associated with a different branch than the checkout", () => {
+    expect(
+      resolveCheckoutBranchMismatch({
+        effectiveEnvMode: "local",
+        activeWorktreePath: null,
+        activeThreadBranch: "feature/thread",
+        currentGitBranch: "feature/current",
+      }),
+    ).toEqual({
+      threadBranch: "feature/thread",
+      currentBranch: "feature/current",
+      canRestoreThreadBranch: true,
+    });
+  });
+
+  it("ignores matching local checkout state", () => {
+    expect(
+      resolveCheckoutBranchMismatch({
+        effectiveEnvMode: "local",
+        activeWorktreePath: null,
+        activeThreadBranch: "feature/thread",
+        currentGitBranch: "feature/thread",
+      }),
+    ).toBeNull();
+  });
+
+  it("warns about worktree branch drift without restore, but ignores a pending rename status", () => {
+    const worktree = {
+      effectiveEnvMode: "worktree" as const,
+      activeWorktreePath: "/repo/.t3/worktrees/feature-thread",
+      activeThreadBranch: "t3code/fix-sidebar",
+    };
+
+    expect(
+      resolveCheckoutBranchMismatch({
+        ...worktree,
+        currentGitBranch: "t3code/1a2b3c4d",
+      }),
+    ).toBeNull();
+    expect(
+      resolveCheckoutBranchMismatch({
+        ...worktree,
+        currentGitBranch: "feature/checkout",
+      }),
+    ).toEqual({
+      threadBranch: worktree.activeThreadBranch,
+      currentBranch: "feature/checkout",
+      canRestoreThreadBranch: false,
+    });
+  });
+
+  it("ignores new-worktree base selection before a worktree exists", () => {
+    expect(
+      resolveCheckoutBranchMismatch({
+        effectiveEnvMode: "worktree",
+        activeWorktreePath: null,
+        activeThreadBranch: "feature/base",
+        currentGitBranch: "main",
+      }),
+    ).toBeNull();
   });
 });

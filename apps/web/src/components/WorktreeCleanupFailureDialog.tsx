@@ -73,18 +73,20 @@ export function WorktreeCleanupFailureDialog(props: {
             The thread is deleted, but LastCode has not removed its worktree yet.
           </DialogDescription>
         </DialogHeader>
-        <DialogPanel className="space-y-3">
-          <div className="text-sm">
-            <div className="font-medium">{props.thread.title}</div>
-            <div className="font-mono text-xs text-muted-foreground">{props.thread.id}</div>
+        <DialogPanel>
+          <div className="space-y-3">
+            <div className="text-sm">
+              <div className="font-medium">{props.thread.title}</div>
+              <div className="font-mono text-xs text-muted-foreground">{props.thread.id}</div>
+            </div>
+            <div className="rounded-lg border border-border/70 bg-muted/40 p-3">
+              <div className="mb-1 text-xs font-medium text-muted-foreground">Worktree</div>
+              <div className="break-all font-mono text-xs">{cleanup.worktreePath}</div>
+            </div>
+            <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-lg border border-error/25 bg-error/8 p-3 text-xs text-error-foreground">
+              {cleanup.error}
+            </pre>
           </div>
-          <div className="rounded-lg border border-border/70 bg-muted/40 p-3">
-            <div className="mb-1 text-xs font-medium text-muted-foreground">Worktree</div>
-            <div className="break-all font-mono text-xs">{cleanup.worktreePath}</div>
-          </div>
-          <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-lg border border-error/25 bg-error/8 p-3 text-xs text-error-foreground">
-            {cleanup.error}
-          </pre>
         </DialogPanel>
         <DialogFooter className="sm:flex-wrap">
           <Button type="button" variant="destructive-outline" onClick={() => void keepWorktree()}>

@@ -38,6 +38,7 @@ export function useConnectionDiagnosis(
     connectionRoutes(presentation.entry).length === 1 && hasRelayRoute(presentation.entry);
   const diagnosis = presentConnectionDiagnosis({
     hostLabel: presentation.entry.target.label,
+    entry: presentation.entry,
     state,
     via: relayOnly ? "relay" : "direct",
     clientVersion: Constants.expoConfig?.version,

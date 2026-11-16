@@ -56,8 +56,11 @@ it("shows the titled preview inside and outside search results from a collapsed 
   // A removed row fades out as a clone without its test id, so match the live row only.
   const secondRow = page.getByTestId("sidebar-row-folder").filter({ hasText: second.title });
   await expect.element(secondRow).toBeInTheDocument();
+  // Thread entry restores composer focus after the sidebar has rendered.
+  await expect.element(page.getByTestId("composer-editor")).toHaveFocus();
   // The shift guard drops pointer presses on a row that appeared under 500ms ago; keys pass.
   folder.element().focus();
+  await expect.element(folder).toHaveFocus();
   await userEvent.keyboard("{Enter}");
   await expect.element(secondRow).not.toBeInTheDocument();
   await userEvent.fill(page.getByRole("combobox", { name: "Search threads" }), "search-target");
@@ -119,7 +122,13 @@ it("keeps focus in the search box when a click picks a search result", async () 
           project={null}
           projectDisplayName={null}
           environmentLabel={null}
-          environmentMachine="server"
+          environmentKnown={false}
+          configuredEnvironmentIconColor={undefined}
+          providerBadgePreferences={{
+            enabled: DEFAULT_CLIENT_SETTINGS.showThreadProviderBadge,
+            size: DEFAULT_CLIENT_SETTINGS.threadProviderBadgeSize,
+            transparency: DEFAULT_CLIENT_SETTINGS.threadProviderBadgeTransparency,
+          }}
           providerEntryByInstanceId={new Map()}
           isHighlighted={false}
           isRouteActive={false}

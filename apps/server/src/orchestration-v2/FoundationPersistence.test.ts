@@ -14,6 +14,7 @@ import {
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2Run,
+  type OrchestrationV2Subagent,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2TurnItem,
   ProjectId,
@@ -41,7 +42,6 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
-import * as Metric from "effect/Metric";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
@@ -60,7 +60,6 @@ import * as DatabaseStorage from "../persistence/DatabaseStorage.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { LIVE_STREAM_MAX_ITEMS, LiveStreamBufferError } from "./LiveStreamBudget.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
-import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
@@ -102,12 +101,7 @@ const isLiveStreamBufferError = Schema.is(LiveStreamBufferError);
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 const layerDatabase = SqlitePersistence.layerMemory;
-const layerApplicationEventsProvided = OrchestrationEventStore.layer.pipe(
-  Layer.provideMerge(layerDatabase),
-);
-const layerEventStoreProvided = EventStore.layerFromOrchestrationEventStore.pipe(
-  Layer.provideMerge(layerApplicationEventsProvided),
-);
+const layerEventStoreProvided = EventStore.layer.pipe(Layer.provideMerge(layerDatabase));
 const layerProjectionStoreProvided = ProjectionStore.layer.pipe(Layer.provideMerge(layerDatabase));
 const layerStoresProvided = Layer.mergeAll(
   layerDatabase,
@@ -187,440 +181,6 @@ function threadCreatedEvent(input: {
     payload: input.thread,
   };
 }
-
-it.effect.each(
-  (["write", "writeIfRunCurrent"] as const).flatMap((caller) =>
-    (["cancel transaction", "fail transaction", "cancel publication"] as const).map((scenario) => ({
-      caller,
-      scenario,
-    })),
-  ),
-)(
-  "$caller preserves event consistency and allows later writes after $scenario",
-  ({ caller, scenario }) =>
-    Effect.gen(function* () {
-      const paused = yield* Deferred.make<void>();
-      const release = yield* Deferred.make<void>();
-      const committed = scenario === "cancel publication";
-      const notifications: Array<number | undefined> = [];
-      const pause = Deferred.succeed(paused, undefined).pipe(
-        Effect.andThen(Deferred.await(release)),
-      );
-      const layerPausingOutbox = Layer.effect(
-        EffectOutbox.EffectOutboxV2,
-        Effect.gen(function* () {
-          const delegate = yield* EffectOutbox.EffectOutboxV2;
-          return EffectOutbox.EffectOutboxV2.of({
-            ...delegate,
-            enqueue: (effects) =>
-              delegate
-                .enqueue(effects)
-                .pipe(
-                  Effect.andThen(!committed && effects.length > 0 ? pause : Effect.void),
-                  Effect.andThen(
-                    scenario === "fail transaction" && effects.length > 0
-                      ? Effect.die("Injected transaction failure")
-                      : Effect.void,
-                  ),
-                ),
-            notifyAvailable: (count) =>
-              (committed ? pause : Effect.void).pipe(
-                Effect.andThen(delegate.notifyAvailable(count)),
-                Effect.tap(() => Effect.sync(() => notifications.push(count))),
-              ),
-          });
-        }),
-      ).pipe(Layer.provide(layerEffectOutboxProvided));
-      const layerEventSink = EventSink.layerFromStores.pipe(
-        Layer.provide(
-          Layer.mergeAll(
-            layerStoresProvided,
-            layerPausingOutbox,
-            layerCommandReceiptStoreProvided,
-            ProjectStore.layer.pipe(Layer.provide(layerDatabase)),
-            TurnItemPositionStore.layer.pipe(Layer.provide(layerDatabase)),
-          ),
-        ),
-      );
-
-      yield* Effect.gen(function* () {
-        const eventSink = yield* EventSink.EventSinkV2;
-        const projections = yield* ProjectionStore.ProjectionStoreV2;
-        const outbox = yield* EffectOutbox.EffectOutboxV2;
-        const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
-        const now = yield* DateTime.now;
-        const metricsProvider = ProviderInstanceId.make(
-          `publication-${caller}-${scenario.replaceAll(" ", "-")}`,
-        );
-        const runId = RunId.make("run:interrupted-publish");
-        const activeAttemptId = RunAttemptId.make("attempt:interrupted-publish");
-        const first = makeThread(ThreadId.make("thread:interrupted-publish:first"), now);
-        const run: OrchestrationV2Run = {
-          id: runId,
-          threadId: first.id,
-          ordinal: 1,
-          providerInstanceId: metricsProvider,
-          modelSelection: { instanceId: metricsProvider, model: "gpt-5.4" },
-          providerThreadId: null,
-          userMessageId: MessageId.make("message:interrupted-publish"),
-          rootNodeId: null,
-          activeAttemptId,
-          status: "running",
-          requestedAt: now,
-          startedAt: now,
-          completedAt: null,
-          checkpointId: null,
-          contextHandoffId: null,
-        };
-        yield* eventSink.write({
-          events: [
-            threadCreatedEvent({ id: "event:interrupted-publish:thread", thread: first, now }),
-            {
-              id: EventId.make("event:interrupted-publish:run"),
-              type: "run.created",
-              threadId: first.id,
-              runId,
-              occurredAt: now,
-              payload: run,
-            },
-          ],
-        });
-        const marker = makeThread(ThreadId.make("thread:interrupted-publish:marker"), now);
-        const afterSequence = yield* applicationEvents.latestApplicationSequence;
-        const published = yield* eventSink.stream({ afterSequence }).pipe(
-          Stream.takeUntil((stored) => stored.event.threadId === marker.id),
-          Stream.runCollect,
-          Effect.forkScoped({ startImmediately: true }),
-        );
-        const committedEvents = yield* applicationEvents
-          .streamApplicationEvents({ afterSequence })
-          .pipe(
-            Stream.takeUntil((stored) => "event" in stored && stored.event.threadId === marker.id),
-            Stream.runCollect,
-            Effect.forkScoped({ startImmediately: true }),
-          );
-        const input = {
-          threadId: first.id,
-          runId,
-          activeAttemptId,
-          expectedStatus: "running" as const,
-          events: [
-            {
-              id: EventId.make("event:interrupted-publish:first"),
-              type: "run.updated" as const,
-              threadId: first.id,
-              runId,
-              occurredAt: now,
-              payload: { ...run, status: "completed" as const, completedAt: now },
-            },
-          ],
-          effects: [
-            {
-              id: "effect:interrupted-publish:first",
-              commandId: CommandId.make("command:interrupted-publish:first"),
-              threadId: first.id,
-              request: { type: "terminal.cleanup" as const },
-            },
-          ],
-        };
-        if (caller === "writeIfRunCurrent") {
-          const rejected = yield* eventSink.writeIfRunCurrent({
-            ...input,
-            activeAttemptId: RunAttemptId.make("attempt:stale-publication"),
-          });
-          assert.isFalse(rejected.committed);
-          assert.deepEqual(rejected.storedEvents, []);
-          assert.isTrue(Option.isNone(yield* outbox.get("effect:interrupted-publish:first")));
-        }
-        const writer = yield* (
-          caller === "write"
-            ? eventSink.writeWithEffects(input)
-            : eventSink.writeIfRunCurrent(input)
-        ).pipe(Effect.forkScoped);
-        yield* Deferred.await(paused);
-        if (scenario !== "fail transaction") writer.interruptUnsafe();
-        if (scenario !== "cancel transaction") yield* Deferred.succeed(release, undefined);
-        assert.equal((yield* Fiber.await(writer))._tag, "Failure");
-        assert.equal(
-          (yield* projections.getThreadProjection(first.id)).runs[0]?.status,
-          committed ? "completed" : "running",
-        );
-        assert.equal(
-          Option.isSome(yield* outbox.get("effect:interrupted-publish:first")),
-          committed,
-        );
-        assert.deepEqual(notifications, committed ? [1] : []);
-        if (committed) yield* outbox.awaitAvailable;
-        const outcomes = (yield* Metric.snapshot).filter(
-          (snapshot) =>
-            snapshot.id === "t3_runs_total" && snapshot.attributes?.provider === metricsProvider,
-        );
-        assert.equal(
-          outcomes.reduce(
-            (total, snapshot) =>
-              total + (snapshot.type === "Counter" ? Number(snapshot.state.count) : 0),
-            0,
-          ),
-          committed ? 1 : 0,
-        );
-        yield* eventSink.write({
-          events: [
-            threadCreatedEvent({ id: "event:interrupted-publish:marker", thread: marker, now }),
-          ],
-        });
-        const live = yield* Fiber.join(published);
-        const application = yield* Fiber.join(committedEvents);
-        assert.deepEqual(
-          Array.from(live, (stored) => stored.event.threadId),
-          committed ? [first.id, marker.id] : [marker.id],
-        );
-        assert.deepEqual(
-          Array.from(application, (stored) => stored.sequence),
-          Array.from(live, (stored) => stored.sequence),
-        );
-        assert.deepEqual(
-          Array.from(application),
-          Array.from(
-            yield* applicationEvents
-              .readApplicationEvents({
-                afterSequence,
-                throughSequence: yield* applicationEvents.latestApplicationSequence,
-              })
-              .pipe(Stream.runCollect),
-          ),
-        );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(layerEventSink, layerStoresProvided, layerEffectOutboxProvided),
-        ),
-      );
-    }).pipe(Effect.provide(layerDatabase)),
-);
-
-it.effect("rolls back a writer cancelled while waiting for committed publication", () =>
-  Effect.gen(function* () {
-    const firstCommitted = yield* Deferred.make<void>();
-    const releaseFirst = yield* Deferred.make<void>();
-    const secondPrepared = yield* Deferred.make<void>();
-    const layerPausingOutbox = Layer.effect(
-      EffectOutbox.EffectOutboxV2,
-      Effect.gen(function* () {
-        const delegate = yield* EffectOutbox.EffectOutboxV2;
-        return EffectOutbox.EffectOutboxV2.of({
-          ...delegate,
-          enqueue: (effects) =>
-            delegate
-              .enqueue(effects)
-              .pipe(
-                Effect.andThen(
-                  effects.some((effect) => effect.id === "effect:cancel-lane:second")
-                    ? Deferred.succeed(secondPrepared, undefined).pipe(
-                        Effect.forkChild({ startImmediately: false }),
-                      )
-                    : Effect.void,
-                ),
-              ),
-          notifyAvailable: (count) =>
-            Deferred.succeed(firstCommitted, undefined).pipe(
-              Effect.andThen(Deferred.await(releaseFirst)),
-              Effect.andThen(delegate.notifyAvailable(count)),
-            ),
-        });
-      }),
-    ).pipe(Layer.provide(layerEffectOutboxProvided));
-    const layerEventSink = EventSink.layerFromStores.pipe(
-      Layer.provide(
-        Layer.mergeAll(
-          layerStoresProvided,
-          layerPausingOutbox,
-          layerCommandReceiptStoreProvided,
-          ProjectStore.layer.pipe(Layer.provide(layerDatabase)),
-          TurnItemPositionStore.layer.pipe(Layer.provide(layerDatabase)),
-        ),
-      ),
-    );
-    yield* Effect.gen(function* () {
-      const sink = yield* EventSink.EventSinkV2;
-      const projections = yield* ProjectionStore.ProjectionStoreV2;
-      const outbox = yield* EffectOutbox.EffectOutboxV2;
-      const now = yield* DateTime.now;
-      const first = makeThread(ThreadId.make("thread:cancel-lane:first"), now);
-      const second = makeThread(ThreadId.make("thread:cancel-lane:second"), now);
-      const marker = makeThread(ThreadId.make("thread:cancel-lane:marker"), now);
-      const published = yield* sink.stream({ afterSequence: yield* sink.latestSequence() }).pipe(
-        Stream.takeUntil((stored) => stored.event.threadId === marker.id),
-        Stream.runCollect,
-        Effect.forkScoped({ startImmediately: true }),
-      );
-      const write = (thread: OrchestrationV2AppThread, key: string) =>
-        sink.writeWithEffects({
-          events: [threadCreatedEvent({ id: `event:cancel-lane:${key}`, thread, now })],
-          effects: [
-            {
-              id: `effect:cancel-lane:${key}`,
-              commandId: CommandId.make(`command:cancel-lane:${key}`),
-              threadId: thread.id,
-              request: { type: "terminal.cleanup" },
-            },
-          ],
-        });
-      const firstWriter = yield* write(first, "first").pipe(Effect.forkScoped);
-      yield* Deferred.await(firstCommitted);
-      const secondWriter = yield* write(second, "second").pipe(
-        // Run from the prepared barrier to the lane wait before resuming this fiber.
-        Effect.provideService(Scheduler.MaxOpsBeforeYield, Number.POSITIVE_INFINITY),
-        Effect.forkScoped,
-      );
-      yield* Deferred.await(secondPrepared);
-      secondWriter.interruptUnsafe();
-      yield* Deferred.succeed(releaseFirst, undefined);
-      yield* Fiber.join(firstWriter);
-      assert.equal((yield* Fiber.await(secondWriter))._tag, "Failure");
-      assert.isNull(yield* projections.getThreadShell(second.id));
-      assert.isTrue(Option.isNone(yield* outbox.get("effect:cancel-lane:second")));
-      yield* sink.write({
-        events: [threadCreatedEvent({ id: "event:cancel-lane:marker", thread: marker, now })],
-      });
-      assert.deepEqual(
-        Array.from(yield* Fiber.join(published), (stored) => stored.event.threadId),
-        [first.id, marker.id],
-      );
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(layerEventSink, layerStoresProvided, layerEffectOutboxProvided),
-      ),
-    );
-  }).pipe(Effect.provide(layerDatabase)),
-);
-
-it.effect.each(["before commit", "after commit"] as const)(
-  "preserves project command consistency when cancelled %s",
-  (phase) =>
-    Effect.gen(function* () {
-      const paused = yield* Deferred.make<void>();
-      const release = yield* Deferred.make<void>();
-      const committed = phase === "after commit";
-      const firstId = ProjectId.make("project:cancel-publication:first");
-      const markerId = ProjectId.make("project:cancel-publication:marker");
-      const pause = Deferred.succeed(paused, undefined).pipe(
-        Effect.andThen(Deferred.await(release)),
-      );
-      const layerPausedProjects = Layer.effect(
-        ProjectStore.ProjectStoreV2,
-        Effect.gen(function* () {
-          const delegate = yield* ProjectStore.ProjectStoreV2;
-          return ProjectStore.ProjectStoreV2.of({
-            ...delegate,
-            apply: (event) =>
-              delegate
-                .apply(event)
-                .pipe(
-                  Effect.andThen(!committed && event.aggregateId === firstId ? pause : Effect.void),
-                ),
-          });
-        }),
-      ).pipe(Layer.provide(ProjectStore.layer.pipe(Layer.provide(layerDatabase))));
-      const layerPausedEvents = Layer.effect(
-        EventStore.EventStoreV2,
-        Effect.gen(function* () {
-          const delegate = yield* EventStore.EventStoreV2;
-          return EventStore.EventStoreV2.of({
-            ...delegate,
-            publishCommitted: (events) =>
-              (committed &&
-              events.some((event) => "aggregateId" in event && event.aggregateId === firstId)
-                ? pause
-                : Effect.void
-              ).pipe(Effect.andThen(delegate.publishCommitted(events))),
-          });
-        }),
-      ).pipe(Layer.provide(layerEventStoreProvided));
-      const layer = EventSink.layerFromStores.pipe(
-        Layer.provideMerge(
-          Layer.mergeAll(
-            layerDatabase,
-            layerApplicationEventsProvided,
-            layerProjectionStoreProvided,
-            layerPausedEvents,
-            layerPausedProjects,
-            layerEffectOutboxProvided,
-            layerCommandReceiptStoreProvided,
-            TurnItemPositionStore.layer.pipe(Layer.provide(layerDatabase)),
-          ),
-        ),
-      );
-      yield* Effect.gen(function* () {
-        const sink = yield* EventSink.EventSinkV2;
-        const projects = yield* ProjectStore.ProjectStoreV2;
-        const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
-        const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
-        const now = yield* DateTime.now;
-        const isoNow = DateTime.formatIso(now);
-        const command = (projectId: ProjectId) => {
-          const commandId = CommandId.make(`command:${projectId}`);
-          return {
-            commandId,
-            projectId,
-            commandType: "project.create",
-            acceptedAt: now,
-            event: {
-              eventId: EventId.make(`event:${projectId}`),
-              aggregateKind: "project" as const,
-              aggregateId: projectId,
-              occurredAt: isoNow,
-              commandId,
-              causationEventId: null,
-              correlationId: commandId,
-              metadata: {},
-              type: "project.created" as const,
-              payload: {
-                projectId,
-                title: projectId,
-                workspaceRoot: `/tmp/${projectId}`,
-                defaultModelSelection: null,
-                scripts: [],
-                createdAt: isoNow,
-                updatedAt: isoNow,
-              },
-            },
-          };
-        };
-        const first = command(firstId);
-        const published = yield* applicationEvents.streamApplicationEvents().pipe(
-          Stream.takeUntil((event) => "aggregateId" in event && event.aggregateId === markerId),
-          Stream.runCollect,
-          Effect.forkScoped({ startImmediately: true }),
-        );
-        const writer = yield* sink.commitProjectCommand(first).pipe(Effect.forkScoped);
-        yield* Deferred.await(paused);
-        writer.interruptUnsafe();
-        if (committed) yield* Deferred.succeed(release, undefined);
-        assert.equal((yield* Fiber.await(writer))._tag, "Failure");
-        assert.equal(Option.isSome(yield* projects.get(firstId)), committed);
-        assert.equal(
-          Option.isSome(yield* receipts.getProjectByCommandId(first.commandId)),
-          committed,
-        );
-        assert.isTrue((yield* sink.commitProjectCommand(command(markerId))).committed);
-        const events = Array.from(yield* Fiber.join(published));
-        assert.deepEqual(
-          events.map((event) => ("aggregateId" in event ? event.aggregateId : null)),
-          committed ? [firstId, markerId] : [markerId],
-        );
-        assert.deepEqual(
-          events,
-          Array.from(
-            yield* applicationEvents
-              .readApplicationEvents({
-                afterSequence: 0,
-                throughSequence: yield* applicationEvents.latestApplicationSequence,
-              })
-              .pipe(Stream.runCollect),
-          ),
-        );
-      }).pipe(Effect.provide(layer));
-    }).pipe(Effect.provide(layerDatabase)),
-);
 
 const seedCompaction = Effect.fnUntraced(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -1105,6 +665,9 @@ it.effect.each([false, true])("groups shutdown commits with rollback=%s", (fail)
           awaitWork: Effect.void,
           runRecoveryOnce: Effect.succeed(false),
           runOnce: () => Effect.succeed(false),
+          awaitIncomingSummaryWork: Effect.never,
+          runIncomingSummaryOnce: Effect.succeed(false),
+          nextIncomingSummaryClaimableAt: Effect.succeedNone,
           nextClaimableAt: () => Effect.succeedNone,
           drain: () => Effect.succeed(0),
         }),
@@ -2972,6 +2535,54 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
     }),
   );
 
+  it.effect("keeps a delayed preparation retry from holding back later thread work", () =>
+    Effect.gen(function* () {
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const commandId = CommandId.make("command:foundation-auto-retry-lane");
+      const threadId = ThreadId.make("thread:foundation-auto-retry-lane");
+      const resetAt = DateTime.add(yield* DateTime.now, { minutes: 5 });
+      yield* outbox.enqueue([
+        {
+          id: "effect:foundation-auto-retry-lane:a-retry",
+          commandId,
+          threadId,
+          request: {
+            type: "prepared-run.auto-retry",
+            runId: RunId.make("run:foundation-auto-retry-lane"),
+            resetAt: DateTime.formatIso(resetAt),
+          },
+          availableAt: resetAt,
+        },
+        {
+          id: "effect:foundation-auto-retry-lane:b-provider",
+          commandId,
+          threadId,
+          request: {
+            type: "provider-turn.start",
+            runId: RunId.make("run:foundation-auto-retry-lane"),
+          },
+        },
+      ]);
+
+      const provider = yield* outbox.claimNext({ workerId: "auto-retry-lane-worker" });
+      assert.equal(
+        Option.getOrUndefined(provider)?.id,
+        "effect:foundation-auto-retry-lane:b-provider",
+      );
+      assert.isTrue(Option.isNone(yield* outbox.claimNext({ workerId: "auto-retry-lane-worker" })));
+
+      yield* TestClock.adjust(Duration.minutes(5));
+      const retry = yield* outbox.claimNext({ workerId: "auto-retry-lane-worker" });
+      assert.equal(Option.getOrUndefined(retry)?.id, "effect:foundation-auto-retry-lane:a-retry");
+      for (const effectId of [
+        "effect:foundation-auto-retry-lane:a-retry",
+        "effect:foundation-auto-retry-lane:b-provider",
+      ]) {
+        yield* outbox.succeed({ effectId, workerId: "auto-retry-lane-worker" });
+      }
+    }),
+  );
+
   it.effect("runs title generation beside critical work while serializing each lane", () =>
     Effect.gen(function* () {
       const outbox = yield* EffectOutbox.EffectOutboxV2;
@@ -3932,6 +3543,11 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
   it.effect.each([
     { type: "terminal.cleanup" },
     { type: "provider-runtime.continue", sourceRunId: RunId.make("run:restart-replay") },
+    {
+      type: "prepared-run.auto-retry",
+      runId: RunId.make("run:restart-retry"),
+      resetAt: "2026-01-01T00:05:00.000Z",
+    },
   ] as const)(
     "retires live provider effects and requeues $type after process loss",
     (replayRequest) =>
@@ -4044,6 +3660,9 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
             awaitWork: Effect.void,
             runRecoveryOnce: Effect.succeed(false),
             runOnce: () => Effect.succeed(false),
+            awaitIncomingSummaryWork: Effect.never,
+            runIncomingSummaryOnce: Effect.succeed(false),
+            nextIncomingSummaryClaimableAt: Effect.succeedNone,
             nextClaimableAt: () => Effect.succeedNone,
             drain: () => Effect.succeed(0),
           }),
@@ -4261,6 +3880,9 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
             awaitWork: Effect.void,
             runRecoveryOnce: Effect.succeed(false),
             runOnce: () => Effect.succeed(false),
+            awaitIncomingSummaryWork: Effect.never,
+            runIncomingSummaryOnce: Effect.succeed(false),
+            nextIncomingSummaryClaimableAt: Effect.succeedNone,
             nextClaimableAt: () => Effect.succeedNone,
             drain: () => Effect.succeed(0),
           }),
@@ -4820,4 +4442,452 @@ it.effect.each(["cancel transaction", "fail transaction", "cancel publication"] 
         ),
       );
     }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect("commits recovery checkpoint effects only with the exact running attempt", () =>
+  Effect.gen(function* () {
+    const sink = yield* EventSink.EventSinkV2;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const now = yield* DateTime.now;
+    const threadId = ThreadId.make("thread:recovery-effects");
+    const runId = RunId.make("run:recovery-effects");
+    const attemptId = RunAttemptId.make("attempt:recovery-effects");
+    const commandId = CommandId.make("command:recovery-effects");
+    const run: OrchestrationV2Run = {
+      id: runId,
+      threadId,
+      ordinal: 1,
+      providerInstanceId,
+      modelSelection,
+      providerThreadId: null,
+      userMessageId: MessageId.make("message:recovery-effects"),
+      rootNodeId: null,
+      activeAttemptId: attemptId,
+      status: "running",
+      requestedAt: now,
+      startedAt: now,
+      completedAt: null,
+      checkpointId: null,
+      contextHandoffId: null,
+    };
+    yield* sink.write({
+      events: [
+        threadCreatedEvent({
+          id: "event:recovery-effects:thread",
+          thread: makeThread(threadId, now),
+          now,
+        }),
+        {
+          id: EventId.make("event:recovery-effects:run"),
+          type: "run.created",
+          threadId,
+          runId,
+          occurredAt: now,
+          payload: run,
+        },
+      ],
+    });
+    const input = {
+      threadId,
+      runId,
+      activeAttemptId: attemptId,
+      expectedStatus: "running" as const,
+      events: [
+        {
+          id: EventId.make("event:recovery-effects:complete"),
+          type: "run.updated" as const,
+          threadId,
+          runId,
+          occurredAt: now,
+          payload: { ...run, status: "waiting" as const },
+        },
+      ],
+      effects: [
+        {
+          id: "effect:recovery-checkpoint",
+          commandId,
+          threadId,
+          request: {
+            type: "checkpoint.capture" as const,
+            runId,
+            scopeId: CheckpointScopeId.make("scope:recovery"),
+          },
+        },
+      ],
+    };
+    assert.isFalse(
+      (yield* sink.writeIfRunCurrent({
+        ...input,
+        activeAttemptId: RunAttemptId.make("attempt:obsolete"),
+      })).committed,
+    );
+    assert.lengthOf(yield* outbox.listByCommandId(commandId), 0);
+    assert.isTrue((yield* sink.writeIfRunCurrent(input)).committed);
+    assert.lengthOf(yield* outbox.listByCommandId(commandId), 1);
+    assert.isFalse((yield* sink.writeIfRunCurrent(input)).committed);
+    assert.lengthOf(yield* outbox.listByCommandId(commandId), 1);
+  }).pipe(Effect.provide(Layer.fresh(layerTest))),
+);
+
+it.effect("selects unfinished recovery receipts for startup even without live provider work", () =>
+  Effect.gen(function* () {
+    const sink = yield* EventSink.EventSinkV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const now = yield* DateTime.now;
+    const threadId = ThreadId.make("thread:recovery-receipt-candidate");
+    const thread = {
+      ...makeThread(threadId, now),
+      recovery: {
+        runId: RunId.make("run:old-recovery"),
+        attemptId: RunAttemptId.make("attempt:old-recovery"),
+        status: "recovering" as const,
+        detail: "Restoring turn",
+        updatedAt: now,
+      },
+    };
+    yield* sink.write({
+      events: [threadCreatedEvent({ id: "event:recovery-receipt-candidate", thread, now })],
+    });
+    assert.include(yield* projections.getRecoveryThreadIds("runtime"), threadId);
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make("event:recovery-receipt-failed"),
+          type: "thread.metadata-updated",
+          threadId,
+          occurredAt: now,
+          payload: { ...thread, recovery: { ...thread.recovery, status: "failed" } },
+        },
+      ],
+    });
+    assert.notInclude(yield* projections.getRecoveryThreadIds("runtime"), threadId);
+  }).pipe(Effect.provide(Layer.fresh(layerTest))),
+);
+
+it.effect.each([true, false])(
+  "guards recovered background rows against completed history and independent work (during finalization: %s)",
+  (duringFinalization) =>
+    Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const key = `recovered-background:${duringFinalization}`;
+      const threadId = ThreadId.make(`thread:${key}`);
+      const childId = ThreadId.make(`thread:${key}:native-child`);
+      const independentChildId = ThreadId.make(`thread:${key}:independent-child`);
+      const foreignChildId = ThreadId.make(`thread:${key}:foreign-child`);
+      const siblingId = ThreadId.make(`thread:${key}:sibling`);
+      const runId = RunId.make(`run:${key}`);
+      const attemptId = RunAttemptId.make(`attempt:${key}`);
+      const providerThreadId = ProviderThreadId.make(`provider-thread:${key}`);
+      const providerSessionId = ProviderSessionId.make(`provider-session:${key}`);
+      const foreignProviderThreadId = ProviderThreadId.make(`provider-thread:${key}:foreign`);
+      const run: OrchestrationV2Run = {
+        id: runId,
+        threadId,
+        ordinal: 1,
+        providerInstanceId,
+        modelSelection,
+        providerThreadId,
+        userMessageId: MessageId.make(`message:${key}`),
+        rootNodeId: null,
+        activeAttemptId: attemptId,
+        status: duringFinalization ? "running" : "completed",
+        queuePosition: null,
+        requestedAt: now,
+        startedAt: now,
+        completedAt: duringFinalization ? null : now,
+        checkpointId: null,
+        contextHandoffId: null,
+      };
+      const providerThread = {
+        id: providerThreadId,
+        driver: providerDriver,
+        providerInstanceId,
+        providerSessionId,
+        appThreadId: threadId,
+        ownerNodeId: null,
+        nativeThreadRef: null,
+        nativeConversationHeadRef: null,
+        status: "idle" as const,
+        firstRunOrdinal: 1,
+        lastRunOrdinal: 1,
+        handoffIds: [],
+        forkedFrom: null,
+        pendingBackgroundTasks: [],
+        createdAt: now,
+        updatedAt: now,
+      };
+      const nativeChildProvider = {
+        ...providerThread,
+        id: ProviderThreadId.make(`provider-thread:${key}:native-child`),
+        appThreadId: childId,
+        firstRunOrdinal: null,
+        lastRunOrdinal: null,
+        nativeThreadRef: {
+          driver: providerDriver,
+          nativeId: `native-child:${key}`,
+          strength: "strong" as const,
+        },
+        forkedFrom: { providerThreadId },
+      };
+      const childRootNode = {
+        id: NodeId.make(`node:${key}:native-child-root`),
+        threadId: childId,
+        runId: null,
+        parentNodeId: null,
+        rootNodeId: NodeId.make(`node:${key}:native-child-root`),
+        kind: "root_turn" as const,
+        status: "running" as const,
+        countsForRun: false,
+        providerThreadId: nativeChildProvider.id,
+        providerTurnId: null,
+        nativeItemRef: null,
+        runtimeRequestId: null,
+        checkpointScopeId: null,
+        startedAt: now,
+        completedAt: null,
+      };
+      const command = (
+        name: string,
+        ownerThreadId = threadId,
+        ownerRunId: RunId | null = runId,
+        ownerProviderThreadId: ProviderThreadId | null = providerThreadId,
+      ): OrchestrationV2TurnItem => ({
+        id: TurnItemId.make(`item:${key}:${name}`),
+        threadId: ownerThreadId,
+        runId: ownerRunId,
+        nodeId: null,
+        providerThreadId: ownerProviderThreadId,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 1,
+        type: "command_execution",
+        status: "running",
+        title: name,
+        startedAt: now,
+        completedAt: null,
+        updatedAt: now,
+        input: "work",
+        output: "latest saved output",
+      });
+      const root = command("root");
+      const completed = {
+        ...command("completed"),
+        status: "completed" as const,
+        completedAt: now,
+      };
+      const newer = command("newer", threadId, RunId.make(`run:${key}:newer`));
+      const sibling = command("sibling", siblingId);
+      const child = {
+        ...command("child", childId, null, nativeChildProvider.id),
+        nodeId: childRootNode.id,
+      };
+      const independentChild = command("independent-child", independentChildId, null, null);
+      const foreignChild = command("foreign-child", foreignChildId, runId, foreignProviderThreadId);
+      const task = (
+        childThreadId: ThreadId,
+        origin: OrchestrationV2Subagent["origin"] = "provider_native",
+      ): OrchestrationV2Subagent => ({
+        id: NodeId.make(`node:${key}:${childThreadId}`),
+        threadId,
+        runId,
+        parentNodeId: NodeId.make(`node:${key}:root`),
+        origin,
+        createdBy: "agent",
+        driver: providerDriver,
+        providerInstanceId,
+        providerThreadId:
+          childThreadId === foreignChildId
+            ? foreignProviderThreadId
+            : childThreadId === childId
+              ? nativeChildProvider.id
+              : null,
+        childThreadId,
+        nativeTaskRef: null,
+        prompt: "Work",
+        title: "Task",
+        model: null,
+        status: "running",
+        result: null,
+        startedAt: now,
+        completedAt: null,
+        updatedAt: now,
+      });
+      const appOwned = task(ThreadId.make(`thread:${key}:app-owned`), "app_owned");
+      const tasks = [task(childId), task(independentChildId), task(foreignChildId), appOwned];
+      const items = [root, completed, newer, sibling, child, independentChild, foreignChild];
+      const itemEvent = (
+        item: OrchestrationV2TurnItem,
+        suffix: string,
+      ): OrchestrationV2DomainEvent => ({
+        id: EventId.make(`event:${key}:${item.id}:${suffix}`),
+        type: "turn-item.updated",
+        threadId: item.threadId,
+        runId: item.runId ?? runId,
+        providerInstanceId,
+        occurredAt: now,
+        payload: item,
+      });
+      yield* sink.write({
+        events: [
+          ...[threadId, childId, independentChildId, foreignChildId, siblingId].map((id) =>
+            threadCreatedEvent({ id: `event:${key}:${id}`, thread: makeThread(id, now), now }),
+          ),
+          {
+            id: EventId.make(`event:${key}:run`),
+            type: "run.created",
+            threadId,
+            runId,
+            occurredAt: now,
+            payload: run,
+          },
+          {
+            id: EventId.make(`event:${key}:provider`),
+            type: "provider-thread.updated",
+            threadId,
+            occurredAt: now,
+            payload: providerThread,
+          },
+          {
+            id: EventId.make(`event:${key}:foreign-provider`),
+            type: "provider-thread.updated",
+            threadId: foreignChildId,
+            occurredAt: now,
+            payload: {
+              ...providerThread,
+              id: foreignProviderThreadId,
+              appThreadId: foreignChildId,
+              providerSessionId: ProviderSessionId.make(`provider-session:${key}:foreign`),
+            },
+          },
+          {
+            id: EventId.make(`event:${key}:native-child-provider`),
+            type: "provider-thread.updated",
+            threadId: childId,
+            occurredAt: now,
+            payload: nativeChildProvider,
+          },
+          {
+            id: EventId.make(`event:${key}:native-child-root`),
+            type: "node.updated",
+            threadId: childId,
+            occurredAt: now,
+            payload: childRootNode,
+          },
+          {
+            id: EventId.make(`event:${key}:independent-run`),
+            type: "run.created",
+            threadId: independentChildId,
+            runId: RunId.make(`run:${key}:independent`),
+            occurredAt: now,
+            payload: {
+              ...run,
+              id: RunId.make(`run:${key}:independent`),
+              threadId: independentChildId,
+              status: "running",
+            },
+          },
+          ...tasks.map((payload): OrchestrationV2DomainEvent => ({
+            id: EventId.make(`event:${key}:${payload.id}:initial`),
+            type: "subagent.updated",
+            threadId,
+            runId,
+            occurredAt: now,
+            payload,
+          })),
+          ...items.map((item) => itemEvent(item, "initial")),
+        ],
+      });
+      // These stale candidates were built before completed/newer saved rows
+      // became visible. The transaction must preserve their current history.
+      const candidates: OrchestrationV2DomainEvent[] = [
+        {
+          id: EventId.make(`event:${key}:native-child-root:settle`),
+          type: "node.updated",
+          threadId: childId,
+          occurredAt: now,
+          payload: { ...childRootNode, status: "interrupted", completedAt: now },
+        },
+        ...items.map((item) =>
+          itemEvent(
+            {
+              ...item,
+              runId: item.threadId === threadId ? runId : item.runId,
+              status: "interrupted",
+              completedAt: now,
+              output: "stale output",
+            } as OrchestrationV2TurnItem,
+            "settle",
+          ),
+        ),
+        {
+          id: EventId.make(`event:${key}:app-owned:settle`),
+          type: "subagent.updated",
+          threadId,
+          runId,
+          occurredAt: now,
+          payload: { ...appOwned, status: "interrupted", completedAt: now },
+        },
+      ];
+      const guardRecoveredBackground = {
+        threadId,
+        runId,
+        providerThreadId,
+        providerSessionId,
+        eventIds: candidates.map((event) => event.id),
+      };
+      const result = duringFinalization
+        ? yield* sink.writeIfRunCurrent({
+            threadId,
+            runId,
+            activeAttemptId: attemptId,
+            expectedStatus: "running",
+            events: candidates,
+            guardRecoveredBackground,
+          })
+        : yield* sink.writeIfProviderThreadOwner({
+            providerThreadId,
+            runId,
+            activeAttemptId: attemptId,
+            expectedLastRunOrdinal: 1,
+            events: candidates,
+            guardRecoveredBackground,
+          });
+      assert.isTrue(result.committed);
+      assert.equal(
+        result.storedEvents.length,
+        3,
+        "only the exact native root item, native child root, and native child item settle",
+      );
+      const after = yield* projections.getThreadProjection(threadId);
+      assert.equal(after.turnItems.find((item) => item.id === root.id)?.status, "interrupted");
+      const savedRoot = after.turnItems.find((item) => item.id === root.id);
+      assert.isTrue(
+        savedRoot?.type === "command_execution" && savedRoot.output === "latest saved output",
+      );
+      assert.equal(after.turnItems.find((item) => item.id === completed.id)?.status, "completed");
+      assert.equal(after.turnItems.find((item) => item.id === newer.id)?.runId, newer.runId);
+      assert.equal(after.subagents.find((row) => row.id === appOwned.id)?.status, "running");
+      for (const item of [sibling, independentChild, foreignChild]) {
+        assert.equal(
+          (yield* projections.getTurnItem({ threadId: item.threadId, itemId: item.id }))?.status,
+          "running",
+        );
+      }
+      assert.equal(
+        (yield* projections.getTurnItem({ threadId: childId, itemId: child.id }))?.status,
+        "interrupted",
+      );
+      const childAfter = yield* projections.getThreadRecords(childId, ["nodes"]);
+      assert.equal(
+        childAfter.nodes.find((node) => node.id === childRootNode.id)?.status,
+        "interrupted",
+      );
+      assert.equal(
+        childAfter.nodes.find((node) => node.id === childRootNode.id)?.parentNodeId,
+        null,
+      );
+    }).pipe(Effect.provide(Layer.fresh(layerTest))),
 );

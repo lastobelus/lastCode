@@ -49,9 +49,10 @@ it.effect(
         materializeWorkspace: (transcript, workspace) =>
           Effect.succeed(materializeReplayTranscriptWorkspace(transcript, workspace)),
       }).pipe(Effect.withTracer(tracer), Effect.withTracerEnabled(true));
+      // Only the two node snapshots batch; message and turn-item writes take thread locks.
       assert.equal(
         writes.reduce((total, count) => total + count, 0),
-        6,
+        2,
       );
       assert.isTrue(writes.every((count) => count <= 3));
     }),

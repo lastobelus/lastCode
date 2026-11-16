@@ -1,6 +1,7 @@
 import {
   AssetWorkspaceAssetNotFoundError,
   AuthFilesystemReadScope,
+  AuthOrchestrationReadScope,
   EnvironmentAuthorizationError,
   EnvironmentId,
   ThreadId,
@@ -11,9 +12,10 @@ import { Atom, AsyncResult } from "effect/reactivity";
 import { beforeEach, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
-  session: null as Pick<AuthSessionState, "authenticated" | "scopes"> | null,
+  session: null as Pick<AuthSessionState, "authenticated" | "scopes" | "permissions"> | null,
   phase: "connected" as "connected" | "offline",
   assetAtom: {},
+  assetError: null as Error | null,
   mint: vi.fn(),
   assetQuery: vi.fn(),
   executeQuery: vi.fn(),
@@ -26,7 +28,9 @@ vi.mock("@effect/atom-react", () => ({
   useAtomSubscribe: () => undefined,
   useAtomValue: (atom: unknown) =>
     atom === state.assetAtom
-      ? AsyncResult.success({ relativeUrl: "/api/assets/image.png", expiresAt: 1 })
+      ? state.assetError
+        ? AsyncResult.failure(Cause.fail(state.assetError))
+        : AsyncResult.success({ relativeUrl: "/api/assets/image.png", expiresAt: 1 })
       : AsyncResult.initial(false),
 }));
 vi.mock("./session", () => ({
@@ -34,6 +38,8 @@ vi.mock("./session", () => ({
     sessionStateAtom: () => ({}),
     preparedConnectionValueAtom: () => state.preparedConnectionAtom,
   },
+  readEnvironmentScope: (_environmentId: unknown, scope: string) =>
+    state.session?.scopes?.some((granted) => granted === scope) ?? false,
   usePreparedConnection: () => ({ _tag: "Some", value: { httpBaseUrl: "https://host.test" } }),
 }));
 vi.mock("./presentation", () => ({
@@ -68,6 +74,7 @@ const resource = { _tag: "media-file", threadId, path: "/repo/image.png" } as co
 
 beforeEach(() => {
   state.session = null;
+  state.assetError = null;
   state.phase = "connected";
   state.assetQuery.mockReset().mockReturnValue(state.assetAtom);
   state.mint
@@ -86,6 +93,10 @@ it.each(["workspace-file", "media-file"] as const)(
       _tag: "Success",
       expiresAt: 1,
       url: "https://host.test/api/assets/image.png",
+    });
+    expect(state.assetQuery).toHaveBeenCalledWith({
+      environmentId,
+      input: { resource: { ...resource, _tag } },
     });
   },
 );
@@ -108,7 +119,10 @@ it("lets the server authorize an explicit refresh before the client grant loads"
   await expect(useRefreshAssetUrl(environmentId, resource)()).resolves.toBe(
     "https://host.test/api/assets/image.png",
   );
-  expect(state.mint).toHaveBeenCalledWith({ environmentId, input: { resource } });
+  expect(state.mint).toHaveBeenCalledWith({
+    environmentId,
+    input: { resource: { ...resource, linkedThreadFile: true } },
+  });
 
   const denied = new EnvironmentAuthorizationError({
     message: "This connection cannot read host files.",
@@ -132,4 +146,82 @@ it("rejects with the server's error and resolves null only without a connection"
 
   state.preparedConnectionAtom = Atom.make({ _tag: "None" });
   await expect(refreshAssetUrl(environmentId, resource)).resolves.toBeNull();
+});
+
+it.each(["workspace-file", "media-file"] as const)(
+  "requests an exact linked file for %s with only thread read access",
+  (_tag) => {
+    state.session = {
+      authenticated: true,
+      scopes: [AuthOrchestrationReadScope],
+      permissions: [AuthOrchestrationReadScope],
+    };
+    expect(useAssetUrlState(environmentId, { ...resource, _tag })._tag).toBe("Success");
+    expect(state.assetQuery).toHaveBeenCalledWith({
+      environmentId,
+      input: { resource: { ...resource, linkedThreadFile: true } },
+    });
+  },
+);
+
+it("keeps general draft assets gated under thread read access", () => {
+  state.session = {
+    authenticated: true,
+    scopes: [AuthOrchestrationReadScope],
+    permissions: [AuthOrchestrationReadScope],
+  };
+  expect(
+    useAssetUrlState(environmentId, {
+      _tag: "draft-workspace-file",
+      cwd: "/repo",
+      path: "image.png",
+    })._tag,
+  ).toBe("Failure");
+  expect(state.assetQuery).not.toHaveBeenCalled();
+});
+
+it("refreshes linked media through the scoped server check", async () => {
+  state.session = {
+    authenticated: true,
+    scopes: [AuthOrchestrationReadScope],
+    permissions: [AuthOrchestrationReadScope],
+  };
+  await useRefreshAssetUrl(environmentId, resource)();
+  expect(state.mint).toHaveBeenCalledWith({
+    environmentId,
+    input: { resource: { ...resource, linkedThreadFile: true } },
+  });
+});
+
+it("returns no URL when the server denies a scoped refresh", async () => {
+  state.session = {
+    authenticated: true,
+    scopes: [AuthOrchestrationReadScope],
+    permissions: [AuthOrchestrationReadScope],
+  };
+  state.mint.mockResolvedValue(
+    AsyncResult.failure(
+      Cause.fail(
+        new EnvironmentAuthorizationError({
+          message: "This file is not linked in this thread.",
+          requiredScope: AuthFilesystemReadScope,
+        }),
+      ),
+    ),
+  );
+  await expect(useRefreshAssetUrl(environmentId, resource)()).resolves.toBeNull();
+  expect(state.mint).toHaveBeenCalledWith({
+    environmentId,
+    input: { resource: { ...resource, linkedThreadFile: true } },
+  });
+});
+
+it("keeps a friendly preview failure when the server returns an internal error", () => {
+  state.session = {
+    authenticated: true,
+    scopes: [AuthOrchestrationReadScope],
+    permissions: [AuthOrchestrationReadScope],
+  };
+  state.assetError = new Error("Failed to resolve workspace.");
+  expect(useAssetUrlState(environmentId, resource)).toEqual({ _tag: "Failure", reason: "failed" });
 });
