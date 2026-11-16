@@ -22,7 +22,11 @@ import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2Pe
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import { isOrchestrationV2WorkActive, latestProviderTurnForAttempt } from "@t3tools/contracts";
+import {
+  compactThreadArchiveParticipant,
+  isOrchestrationV2WorkActive,
+  latestProviderTurnForAttempt,
+} from "@t3tools/contracts";
 
 function trimmed(value: string | null | undefined): string | undefined {
   const result = value?.trim();
@@ -62,7 +66,12 @@ export function makeSubagentChildThread(input: {
   readonly creationSource: OrchestrationV2CreationSource;
 }): OrchestrationV2AppThread {
   // The remote parent delegated the parent thread, not its subagents.
-  const { delegatedFrom: _delegatedFrom, ...inherited } = input.parentThread;
+  const {
+    delegatedFrom: _delegatedFrom,
+    creatorThreadId: _creatorThreadId,
+    creatorGrouping: _creatorGrouping,
+    ...inherited
+  } = input.parentThread;
   return {
     ...inherited,
     createdBy: input.createdBy,
@@ -76,6 +85,10 @@ export function makeSubagentChildThread(input: {
     providerInstanceId: input.providerInstanceId,
     modelSelection: input.modelSelection,
     activeProviderThreadId: input.activeProviderThreadId,
+    dashboardItems: [],
+    actionResume: null,
+    persistent: false,
+    annotation: null,
     lineage: {
       parentThreadId: input.parentThread.id,
       relationshipToParent: "subagent",
@@ -87,7 +100,9 @@ export function makeSubagentChildThread(input: {
     },
     createdAt: input.now,
     updatedAt: input.now,
-    archivedAt: null,
+    archivedAt: input.parentThread.archivedAt,
+    archivedWith: input.parentThread.archivedWith,
+    archivePending: compactThreadArchiveParticipant(input.parentThread.archivePending),
     settledOverride: null,
     settledAt: null,
     snoozedUntil: null,
@@ -98,7 +113,7 @@ export function makeSubagentChildThread(input: {
     // A guest link belongs to the thread it was made for.
     guestShare: null,
     lastVisitedAt: null,
-    deletedAt: null,
+    deletedAt: input.parentThread.deletedAt,
   };
 }
 
@@ -277,7 +292,10 @@ export function delegatedTaskProgress(projection: {
     Pick<OrchestrationV2ConversationMessage, "runId" | "notification">
   >;
   readonly subagents: ReadonlyArray<
-    Pick<OrchestrationV2ThreadProjection["subagents"][number], "status" | "completionDelivery">
+    Pick<
+      OrchestrationV2ThreadProjection["subagents"][number],
+      "status" | "completionDelivery" | "ownershipReleased"
+    >
   >;
   readonly providerThreads: ReadonlyArray<
     Pick<OrchestrationV2ThreadProjection["providerThreads"][number], "pendingBackgroundTasks">
@@ -297,7 +315,9 @@ export function delegatedTaskProgress(projection: {
     (run) => !terminal(run.status) && !(run.status === "queued" && run.queueHeld === true),
   );
   const children =
-    projection.subagents.some(subagentHoldsCompletion) ||
+    projection.subagents.some(
+      (task) => task.ownershipReleased !== true && subagentHoldsCompletion(task),
+    ) ||
     projection.providerThreads.some((thread) =>
       backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? []),
     );
