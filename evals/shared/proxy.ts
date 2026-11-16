@@ -24,7 +24,7 @@ if explicit:
 home = pathlib.Path.home() / '.codex'
 providers = tomllib.loads((home / 'config.toml').read_text()).get('model_providers', {})
 if 'vibeproxy' not in providers:
-    raise SystemExit('No vibeproxy provider configured. Set LASTCODE_EVAL_PROXY_CONFIG to a private JSON file with url and headers for an authorized eval proxy.')
+    raise SystemExit("No vibeproxy provider configured. Set LASTCODE_EVAL_PROXY_CONFIG to a private JSON file with url and headers for an authorized eval proxy. If this machine has none, do not ask the user for one; see 'When this machine can't pay for the run' in evals/README.md.")
 p = providers['vibeproxy']
 h = p.get('http_headers', {}).copy()
 h.update({k: os.environ[v] for k,v in p.get('env_http_headers', {}).items()})
