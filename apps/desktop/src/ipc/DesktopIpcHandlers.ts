@@ -1,3 +1,9 @@
+import {
+  browserCommand,
+  browserSurfaceResponse,
+  browserPresentation,
+  installBrowserEventForwarding,
+} from "./methods/desktopBrowser.ts";
 import * as Effect from "effect/Effect";
 
 import { receiveProviderAuthCallback, cancelProviderAuthCallback } from "./methods/providerAuth.ts";
@@ -16,6 +22,7 @@ import {
   setServerExposureMode,
   setTailscaleServeEnabled,
 } from "./methods/serverExposure.ts";
+import { importT3Settings, previewT3SettingsImport } from "./methods/lastCodeSettings.ts";
 import {
   bootstrapSshBearerSession,
   disconnectSshEnvironment,
@@ -29,9 +36,11 @@ import {
 import {
   checkForUpdate,
   downloadUpdate,
+  getLastCodeSettings,
   getUpdateState,
   installUpdate,
   setUpdateChannel,
+  setShowAndInstallLocalNightlies,
 } from "./methods/updates.ts";
 import {
   getAppBranding,
@@ -50,6 +59,7 @@ import {
   pasteAsText,
   probeRemoteEditors,
   revealWindow,
+  reportRunningActionCount,
   pickFolder,
   toLocalBackendPath,
   pickProjectFavicon,
@@ -91,6 +101,10 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   const ipc = yield* DesktopIpc.DesktopIpc;
   yield* installNotificationBadge();
   yield* PreviewIpc.installPreviewEventForwarding();
+  yield* installBrowserEventForwarding;
+  yield* ipc.handle(browserCommand);
+  yield* ipc.handle(browserSurfaceResponse);
+  yield* ipc.handle(browserPresentation);
 
   yield* ipc.handle(AppActivationIpc.setReady);
   yield* ipc.handle(AppActivationIpc.complete);
@@ -109,6 +123,7 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(setLocalEnvironmentEnabled);
   yield* ipc.handle(getHostEnvironmentId);
   yield* ipc.handle(getLocalEnvironmentBearerToken);
+  yield* ipc.handle(reportRunningActionCount);
 
   yield* ipc.handle(restartAudioService);
   yield* ipc.handle(getClientSettings);
@@ -164,6 +179,10 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(syncHtmlFullscreen);
   yield* ipc.handle(probeRemoteEditors);
   yield* ipc.handle(getUpdateState);
+  yield* ipc.handle(getLastCodeSettings);
+  yield* ipc.handle(setShowAndInstallLocalNightlies);
+  yield* ipc.handle(previewT3SettingsImport);
+  yield* ipc.handle(importT3Settings);
   yield* ipc.handle(setUpdateChannel);
   yield* ipc.handle(downloadUpdate);
   yield* ipc.handle(installUpdate);
