@@ -389,6 +389,38 @@ Daily installation waits for the configured wall clock instead of starting an
 immediate checkpoint. Interval installation retains its existing immediate
 first run.
 
+To run the service under a wrapper command, save an optional `launcherPrefix`
+in the same schedule file. The launch agent puts the prefix in front of its
+whole command: the selected Node executable, then the scheduler or supervisor
+and its arguments. Pass `--launcher-prefix-json` to `configure-schedule` or
+`install`:
+
+```bash
+pnpm lastcode:checkpoint:service configure-schedule \
+  --launcher-prefix-json '["/usr/bin/env","EXAMPLE_MODE=1"]'
+pnpm lastcode:checkpoint:service install
+```
+
+With this prefix, the launch agent starts `/usr/bin/env EXAMPLE_MODE=1`
+followed by the Node executable and the scheduler or supervisor command.
+
+- **Format:** a nonempty JSON array of strings. The first entry must be an
+  absolute executable path, and no entry may contain NUL. Each entry is passed
+  as one argument; no shell parses it.
+- **Persistence:** a command that passes neither `--launcher-prefix-json` nor
+  `--clear-launcher-prefix` keeps the saved prefix. That includes schedule
+  changes, `lastcode:setup`, and reinstalls. `--clear-launcher-prefix` removes
+  it; pass at most one of the two options.
+- **Repair:** while the saved prefix is invalid, `configure-schedule` and
+  `install` fail unless the same command replaces it with
+  `--launcher-prefix-json` or removes it with `--clear-launcher-prefix`.
+- **Prefix-only changes:** `configure-schedule` accepts a launcher option
+  without a schedule only when a schedule is already saved.
+- **Applying:** as with schedules, `configure-schedule` only saves the file;
+  run `install` to apply the prefix.
+- **Node:** the prefix does not choose Node. The launch agent runs the same
+  selected Node executable, after the prefix, whether or not one is set.
+
 For unattended recovery, dedicate one durable LastCode thread to checkpoint
 maintenance. Open that thread's context menu (right-click on desktop/web or
 long-press on mobile), choose **Mark as persistent thread**, then configure its
