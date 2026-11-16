@@ -405,7 +405,7 @@ const commitInitialRepo = (cwd: string, initArgs: ReadonlyArray<string> = []) =>
     // Newer Git detaches auto-maintenance after commit; its lock file would race the template copy.
     yield* fileSystem.writeFileString(
       pathService.join(cwd, ".git", "config"),
-      "[user]\n\temail = test@test.com\n\tname = Test\n[maintenance]\n\tauto = false\n",
+      "\n[user]\n\temail = test@test.com\n\tname = Test\n[maintenance]\n\tauto = false\n",
       { flag: "a" },
     );
     yield* writeTextFile(cwd, "README.md", "# test\n");

@@ -142,7 +142,7 @@ vi.mock("./settingsLayout", () => ({
 }));
 
 import { ArchivedThreadsPanel } from "./ArchivedThreadsPanel";
-import { SettingsScopeBoundary } from "../../routes/settings";
+import { SettingsScopeBoundary } from "../../routes/_chat.settings";
 import { buildSidebarProjectSnapshots } from "../../sidebarProjectGrouping";
 import { resolveSettingsScope } from "./settingsScope";
 
