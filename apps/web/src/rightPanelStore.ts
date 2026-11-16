@@ -114,6 +114,8 @@ interface RightPanelStoreState {
   closeRevisionByThreadKey: Record<string, number>;
   getUserActionRevision: (ref: ScopedThreadRef) => number;
   markUserAction: (ref: ScopedThreadRef) => number;
+  /** Order an asynchronous selection before its resource exists, without changing the view. */
+  recordSelectionIntent: (ref: ScopedThreadRef) => number;
   /** Refused if the user chose a panel after expectedUserActionRevision was read. */
   openProactive: (
     ref: ScopedThreadRef,
@@ -183,6 +185,8 @@ interface RightPanelStoreState {
     ref: ScopedThreadRef,
     tabIds: readonly string[],
     hiddenTabIds?: ReadonlySet<string>,
+    /** One consumed foreground creation intent, not the current preview selection. */
+    focusTabId?: string,
   ) => void;
   reconcileFileSurfaces: (ref: ScopedThreadRef, workspaceAvailable: boolean) => void;
   show: (ref: ScopedThreadRef) => void;
@@ -660,6 +664,11 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
         }));
         return revision;
       },
+      recordSelectionIntent: (ref) => {
+        const hostRef = rightPanelHostRef(ref);
+        set((state) => userAction(state, scopedThreadKey(ref), (current) => current));
+        return get().getUserActionRevision(hostRef);
+      },
       openProactive: (ref, request, expectedUserActionRevision, activateExisting = false) => {
         let opened = false;
         set((state) => {
@@ -1037,7 +1046,7 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
             return { ...current, surfaces };
           }),
         ),
-      reconcileBrowserSurfaces: (ref, tabIds, hiddenTabIds) =>
+      reconcileBrowserSurfaces: (ref, tabIds, hiddenTabIds, focusTabId) =>
         set((state) =>
           automaticUpdate(state, scopedThreadKey(ref), (current) => {
             const validIds = new Set(tabIds.map((tabId) => `browser:${tabId}`));
@@ -1051,6 +1060,13 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
               .filter((tabId) => !knownIds.has(`browser:${tabId}`) && !hiddenTabIds?.has(tabId))
               .map((tabId) => browserSurface(tabId));
             const surfaces = [...kept, ...added];
+            const focusedSurface = surfaces.find(
+              (surface) =>
+                surface.kind === "preview" &&
+                surface.resourceId === focusTabId &&
+                surface.resourceId !== null &&
+                !hiddenTabIds?.has(surface.resourceId),
+            );
             const activeStillExists = surfaces.some(
               (surface) => surface.id === current.activeSurfaceId,
             );
@@ -1062,11 +1078,13 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
               current.surfaces.some((surface) => surface.kind === "preview" && surface.resourceId);
             return {
               ...current,
-              isOpen: closedLastSessionTab ? false : current.isOpen,
+              isOpen: focusedSurface ? true : closedLastSessionTab ? false : current.isOpen,
               surfaces,
-              activeSurfaceId: activeStillExists
-                ? current.activeSurfaceId
-                : (fallbackBrowser?.id ?? surfaces[0]?.id ?? null),
+              activeSurfaceId:
+                focusedSurface?.id ??
+                (activeStillExists
+                  ? current.activeSurfaceId
+                  : (fallbackBrowser?.id ?? surfaces[0]?.id ?? null)),
             };
           }),
         ),
