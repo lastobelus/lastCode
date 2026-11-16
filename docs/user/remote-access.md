@@ -195,6 +195,9 @@ Mobile keeps its manual environment selection.
 
 Join both devices to the same tailnet. In the desktop app, enable **Tailscale
 HTTPS** in **Settings → Sharing & access**. Turn it off there to remove that route.
+If the HTTPS port already has a different Serve handler, T3 leaves it unchanged
+and asks you to choose another port; an unavailable backend does not make an
+occupied port safe to reuse.
 
 Your tailnet needs MagicDNS and HTTPS certificates enabled; see
 [Tailscale's HTTPS setup](https://tailscale.com/docs/how-to/set-up-https-certificates).

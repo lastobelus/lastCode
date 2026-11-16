@@ -30,6 +30,8 @@ import { parseBearerToken } from "../auth/EnvironmentAuth.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as DeviceService from "../device/DeviceService.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as HtmlRender from "../htmlRender/HtmlRender.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
@@ -646,7 +648,7 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
             Effect.gen(function* () {
               const snapshot = encodedResult as SnapshotMetadata & {
                 readonly url: string;
-                readonly screenshot: {
+                readonly screenshot?: {
                   readonly mimeType?: "image/png";
                   readonly data?: string;
                   readonly width: number;
@@ -657,14 +659,17 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
               const { screenshot, fullScreenshot, ...page } = snapshot;
               const includeImage = payload?.includeImage === true;
               const needsPixels = payload?.save === true || includeImage;
-              if (needsPixels && (screenshot.mimeType !== "image/png" || !screenshot.data)) {
+              if (
+                needsPixels &&
+                (screenshot === undefined || screenshot.mimeType !== "image/png" || !screenshot.data)
+              ) {
                 return yield* new OrchestratorMcpFailure({
                   code: "invalid_request",
                   message: "Preview snapshot did not contain requested PNG pixels.",
                 });
               }
               const png =
-                needsPixels && screenshot.data
+                needsPixels && screenshot?.data
                   ? new Uint8Array(Buffer.from(screenshot.data, "base64"))
                   : undefined;
               const screenshotPath =
@@ -690,11 +695,17 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
               }
               const metadata = {
                 ...page,
-                screenshot: {
-                  mimeType: "image/png" as const,
-                  width: screenshot.width,
-                  height: screenshot.height,
-                },
+                ...(screenshot === undefined
+                  ? {}
+                  : {
+                      screenshot: {
+                        ...(screenshot.mimeType === undefined
+                          ? {}
+                          : { mimeType: screenshot.mimeType }),
+                        width: screenshot.width,
+                        height: screenshot.height,
+                      },
+                    }),
                 ...(screenshotPath === undefined ? {} : { screenshotPath }),
               };
               const bounded = boundSnapshotMetadata(metadata);
@@ -875,6 +886,11 @@ const registerImageTool = Effect.fn("McpHttpServer.registerImageTool")(function*
 const registerDeviceScreenshot = Effect.fn("McpHttpServer.registerDeviceScreenshot")(function* () {
   const devices = yield* DeviceService.DeviceService;
   const threads = yield* ThreadManagementService.ThreadManagementService;
+  const policyContext = yield* Effect.context<
+    | ProjectStore.ProjectStoreV2
+    | ProjectionStore.ProjectionStoreV2
+    | ServerSettings.ServerSettingsService
+  >();
   const built = yield* decodeAsAdvertised(DeviceScreenshotToolkit);
   yield* registerImageTool(
     DeviceScreenshotTool,
@@ -884,6 +900,7 @@ const registerDeviceScreenshot = Effect.fn("McpHttpServer.registerDeviceScreensh
         .pipe(Stream.unwrap, Stream.run(Sink.last()), Effect.flatMap(Effect.fromOption)),
     (effect) =>
       effect.pipe(
+        Effect.provide(policyContext),
         Effect.provideService(DeviceService.DeviceService, devices),
         Effect.provideService(ThreadManagementService.ThreadManagementService, threads),
       ),

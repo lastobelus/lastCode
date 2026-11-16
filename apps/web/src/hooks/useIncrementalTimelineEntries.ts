@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { shallow } from "zustand/vanilla/shallow";
 import {
   deriveTimelineEntriesFromVisibleTurnItemsWithState,
   type TimelineEntriesInput,
@@ -6,14 +7,16 @@ import {
 } from "../session-logic";
 
 function sameInput(left: TimelineEntriesInput, right: TimelineEntriesInput): boolean {
+  // Asset hooks can return fresh but equivalent collections on a render retry.
+  // Reference-only checks would schedule another retry indefinitely.
   return (
-    left.visibleTurnItems === right.visibleTurnItems &&
-    left.optimisticMessages === right.optimisticMessages &&
-    left.anchoredMessages === right.anchoredMessages &&
-    left.attachmentUrlById === right.attachmentUrlById &&
-    left.attempts === right.attempts &&
-    left.nodes === right.nodes &&
-    left.plans === right.plans
+    shallow(left.visibleTurnItems, right.visibleTurnItems) &&
+    shallow(left.optimisticMessages, right.optimisticMessages) &&
+    shallow(left.anchoredMessages, right.anchoredMessages) &&
+    shallow(left.attachmentUrlById, right.attachmentUrlById) &&
+    shallow(left.attempts, right.attempts) &&
+    shallow(left.nodes, right.nodes) &&
+    shallow(left.plans, right.plans)
   );
 }
 
