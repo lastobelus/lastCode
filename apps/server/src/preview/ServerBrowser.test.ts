@@ -3916,7 +3916,12 @@ it.effect.each(["agent", "viewer"] as const)(
         const session = contexts[0]!.sessions[0]!;
         const send = session.send.getMockImplementation()!;
         session.send.mockImplementation(async (method, input) => {
-          if (method !== "Runtime.evaluate") return send(method, input);
+          // Title watches also evaluate scripts; only the dialog expression is blocked.
+          if (
+            method !== "Runtime.evaluate" ||
+            (input as { expression?: string }).expression !== 'confirm("Delete row?")'
+          )
+            return send(method, input);
           started.resolve();
           return resolvedEvaluation.promise;
         });
