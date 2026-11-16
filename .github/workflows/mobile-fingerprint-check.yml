@@ -19,11 +19,12 @@ on:
     types: [opened, synchronize, reopened, edited]
 
 concurrency:
-  group: mobile-fingerprint-check-${{ github.event.pull_request.number }}
+  group: mobile-fingerprint-check-${{ github.event.action == 'edited' && !github.event.changes.base && format('metadata-{0}', github.run_id) || github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   fingerprint:
+    if: ${{ github.event.action != 'edited' || github.event.changes.base }}
     name: Native fingerprint diff
     runs-on: blacksmith-8vcpu-ubuntu-2404
     permissions:

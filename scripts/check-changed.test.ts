@@ -18,7 +18,7 @@ import * as TestClock from "effect/testing/TestClock";
 import {
   comparisonBase,
   defaultConcurrency,
-  docReaderTests,
+  crossFileTests,
   gitLines,
   runSteps,
   splitTests,
@@ -42,10 +42,24 @@ describe("check:changed", () => {
     assert.isTrue(
       decide(["docs/user/t3-connect-troubleshooting.md"], packages, false).outputs.test_server,
     );
-    assert.deepStrictEqual(docReaderTests(["docs/user/t3-connect-troubleshooting.md"]), [
+    assert.deepStrictEqual(crossFileTests(["docs/user/t3-connect-troubleshooting.md"]), [
       "apps/server/src/cloud/ConnectReachability.test.ts",
     ]);
     assert.deepStrictEqual(decide(["docs/user/install.md"], packages, false).affected, []);
+  });
+
+  it("selects checkpoint fixture tests for shared build ownership dependencies", () => {
+    const expected = [
+      "scripts/lastcode-checkpoint-lifecycle.test.ts",
+      "scripts/lastcode-checkpoint-publication.test.ts",
+    ];
+    for (const file of [
+      "packages/shared/src/generatedBuildOwnership.ts",
+      "packages/shared/src/nativeFileSystem.ts",
+    ]) {
+      assert.deepStrictEqual(crossFileTests([file]), expected);
+    }
+    assert.deepStrictEqual(crossFileTests(["packages/shared/src/String.ts"]), []);
   });
 
   it.effect(
@@ -325,7 +339,7 @@ it("compares against an explicit ref instead of the closest remote main", async 
   assert.strictEqual(result.ref, "origin/main");
 });
 
-function launcherFixture() {
+function launcherFixture(nativeLauncher = false) {
   const root = NodeFS.realpathSync(
     NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3 checks & (fixture) ")),
   );
@@ -367,6 +381,7 @@ function launcherFixture() {
     import path from 'node:path';
     const args = process.argv.slice(2);
     fs.writeFileSync(path.join(process.env.RECORDS, process.pid + '.json'), JSON.stringify({ args, cwd: process.cwd() }));
+    if (process.env.FAIL_STEP === 'mutate' && args[0] === 'lint') fs.appendFileSync(args[1], '// concurrent edit\\n');
     console.log('fixture stdout: ' + args[0]);
     console.error('fixture stderr: ' + args[0]);
     process.exit(args[0] === process.env.FAIL_STEP ? 23 : 0);
@@ -375,11 +390,18 @@ function launcherFixture() {
   // Select the Windows launcher without changing the Effect runtime's host platform.
   write(
     "scripts/check-changed.ts",
-    NodeFS.readFileSync(NodePath.join(import.meta.dirname, "check-changed.ts"), "utf8").replace(
-      "vitePlusCommand(args, platform)",
-      'vitePlusCommand(args, "win32")',
-    ),
+    nativeLauncher
+      ? NodeFS.readFileSync(NodePath.join(import.meta.dirname, "check-changed.ts"), "utf8")
+      : NodeFS.readFileSync(NodePath.join(import.meta.dirname, "check-changed.ts"), "utf8").replace(
+          "vitePlusCommand(args, platform)",
+          'vitePlusCommand(args, "win32")',
+        ),
   );
+  write(
+    "node_modules/.bin/vp",
+    `#!/bin/sh\nexec '${process.execPath}' '${root}/node_modules/vite-plus/cli.js' "$@"\n`,
+  );
+  NodeFS.chmodSync(NodePath.join(root, "node_modules/.bin/vp"), 0o755);
   for (const name of ["effect", "@effect/platform-node", "@t3tools/shared"]) {
     const dest = NodePath.join(root, "node_modules", name);
     NodeFS.mkdirSync(NodePath.dirname(dest), { recursive: true });
@@ -412,11 +434,21 @@ function launcherFixture() {
     root,
     source,
     write,
-    run(failStep = "") {
-      return NodeChildProcess.spawnSync(process.execPath, ["scripts/check-changed.ts", "HEAD"], {
+    git: (...args: Array<string>) =>
+      git(...args)
+        .toString()
+        .trim(),
+    run(failStep = "", args = ["HEAD"]) {
+      return NodeChildProcess.spawnSync(process.execPath, ["scripts/check-changed.ts", ...args], {
         cwd: root,
         encoding: "utf8",
-        env: { ...env, TEMP: NodeOS.tmpdir(), RECORDS: records, FAIL_STEP: failStep },
+        env: {
+          ...env,
+          PATH: `${root}/node_modules/.bin:${process.env.PATH ?? ""}`,
+          TEMP: NodeOS.tmpdir(),
+          RECORDS: records,
+          FAIL_STEP: failStep,
+        },
       });
     },
     calls: (): Array<{ args: Array<string>; cwd: string }> =>
@@ -428,6 +460,63 @@ function launcherFixture() {
     },
   };
 }
+
+it("gates the completed replay's conflict files without repeating the broader CI checks", () => {
+  using project = launcherFixture(true);
+  const test = project.source.replace(/\.ts$/, ".test.ts");
+  const unrelated = "packages/example/unrelated.ts";
+  project.write(test, "export {};\n");
+  project.write(unrelated, "export const unrelated = true;\n");
+  project.git("add", ".");
+  project.git("commit", "-m", "completed replay");
+  const files = "node_modules/recovery-files.txt";
+  project.write(files, `${project.source}\npackages/example/package.json\n${project.source}\n`);
+  const rejected = project.run("lint", [
+    "--checkpoint-recovery-files",
+    files,
+    "--baseline",
+    "HEAD^",
+    "--onto",
+    "HEAD^",
+  ]);
+  expect(rejected.status, rejected.stdout + rejected.stderr).toBe(1);
+  expect(rejected.stdout).toContain("FAIL  lint");
+  expect(
+    NodeFS.existsSync(NodePath.join(project.root, "node_modules/.cache/check-changed.json")),
+  ).toBe(false);
+  const result = project.run("", [
+    "--checkpoint-recovery-files",
+    files,
+    "--baseline",
+    "HEAD^",
+    "--onto",
+    "HEAD^",
+  ]);
+  expect(result.status, result.stdout + result.stderr).toBe(0);
+  const commands = project.calls().map(({ args }) => args);
+  expect(commands).toContainEqual(["lint", "--no-error-on-unmatched-pattern", project.source]);
+  expect(commands).toContainEqual([
+    "fmt",
+    "--check",
+    "--no-error-on-unmatched-pattern",
+    "packages/example/package.json",
+    project.source,
+  ]);
+  expect(commands.some((args) => args.includes("typecheck") && args.includes("example"))).toBe(
+    true,
+  );
+  expect(commands).toContainEqual(["test", "run", "--passWithNoTests", test]);
+  expect(
+    commands.some(
+      (args) => args.includes(unrelated) || args.includes("knip") || args[0] === "install",
+    ),
+  ).toBe(false);
+  // This pass cannot satisfy an ordinary changed-file gate, even at the same HEAD.
+  const ordinary = project.run("", ["HEAD^"]);
+  expect(ordinary.status, ordinary.stdout + ordinary.stderr).toBe(0);
+  expect(ordinary.stdout).not.toContain("Nothing changed since the last passing run");
+  expect(project.calls().some(({ args }) => args.includes("knip"))).toBe(true);
+});
 
 it("checks changed source paths through the Windows launcher", () => {
   using project = launcherFixture();
@@ -483,6 +572,253 @@ it.each(["install", "lint"])("reports a failing %s step with its output", (step)
   expect(result.stdout + result.stderr).toContain(`fixture stderr: ${step}`);
   expect(result.stdout).toContain(step === "install" ? "FAIL  unused patches" : "FAIL  lint");
   if (step === "lint") expect(result.stdout).toContain("pass  unused patches");
+  expect(
+    NodeFS.existsSync(NodePath.join(project.root, "node_modules/.cache/check-changed.json")),
+  ).toBe(false);
+});
+
+it("checks every integrated repair against a pinned snapshot across rewritten carry history", () => {
+  using project = launcherFixture();
+  const baseline = project.git("rev-parse", "HEAD");
+  const rewritten = project.git("commit-tree", "HEAD^{tree}", "-m", "compiled carry snapshot");
+  project.git("checkout", "-B", "compiled", rewritten);
+  project.write(project.source, "export const value = 2;\n");
+  project.git("add", ".");
+  project.git("commit", "-m", "first integrated repair");
+  project.git("checkout", "-b", "delegated-repair");
+  const delegated = "packages/example/delegated.ts";
+  project.write(delegated, "export const repaired = true;\n");
+  project.git("add", ".");
+  project.git("commit", "-m", "delegated repair");
+  project.git("checkout", "compiled");
+  const final = "packages/example/final.ts";
+  project.write(final, "export const finalRepair = true;\n");
+  project.git("add", ".");
+  project.git("commit", "-m", "last child repair");
+  project.git("merge", "--no-ff", "delegated-repair", "-m", "integrate repair batch");
+  const candidate = project.git("rev-parse", "HEAD");
+  // A last-patch check omits the earlier repair; these endpoints have no merge base.
+  expect(project.git("diff", "--name-only", "HEAD^", "HEAD")).not.toContain(project.source);
+  const result = project.run("", ["--baseline", baseline, "--candidate", candidate]);
+  expect(result.status, result.stdout + result.stderr).toBe(0);
+  expect(result.stdout).toContain(baseline);
+  expect(result.stdout).toContain(candidate);
+  const calls = project.calls();
+  expect(calls.find(({ args }) => args[0] === "lint")?.args).toEqual([
+    "lint",
+    "--no-error-on-unmatched-pattern",
+    delegated,
+    final,
+    project.source,
+  ]);
+  expect(calls.find(({ args }) => args[0] === "fmt")?.args).toEqual([
+    "fmt",
+    "--check",
+    "--no-error-on-unmatched-pattern",
+    delegated,
+    final,
+    project.source,
+  ]);
+  expect(calls.some(({ args }) => args.includes("typecheck") && args.includes("example"))).toBe(
+    true,
+  );
+});
+
+it.each([
+  {
+    name: "recovery with a ref",
+    args: ["HEAD", "--checkpoint-recovery-files", "node_modules/paths.txt"],
+    message: "cannot be combined",
+  },
+  {
+    name: "recovery without a baseline",
+    args: ["--checkpoint-recovery-files", "node_modules/paths.txt"],
+    message: "requires --baseline <pre-replay-head>",
+  },
+  {
+    name: "recovery without its upstream",
+    args: ["--checkpoint-recovery-files", "node_modules/paths.txt", "--baseline", "HEAD"],
+    message: "requires --onto <replay-upstream-head>",
+  },
+  {
+    name: "upstream without recovery files",
+    args: ["--onto", "HEAD"],
+    message: "--onto requires --checkpoint-recovery-files",
+  },
+  {
+    name: "invalid recovery path",
+    args: [
+      "--checkpoint-recovery-files",
+      "node_modules/paths.txt",
+      "--baseline",
+      "HEAD",
+      "--onto",
+      "HEAD",
+    ],
+    paths: "packages/example/typo.ts\n",
+    message: "unknown recovery path(s): packages/example/typo.ts",
+  },
+  {
+    name: "legitimately deleted recovery path",
+    args: [
+      "--checkpoint-recovery-files",
+      "node_modules/paths.txt",
+      "--baseline",
+      "HEAD^",
+      "--onto",
+      "HEAD^",
+    ],
+    deleted: true,
+    message: "checkpoint recovery",
+    expectedStatus: 0,
+  },
+  {
+    name: "upstream-introduced file deleted by replay",
+    args: [
+      "--checkpoint-recovery-files",
+      "node_modules/paths.txt",
+      "--baseline",
+      "HEAD~2",
+      "--onto",
+      "HEAD^",
+    ],
+    deleted: true,
+    introduced: true,
+    message: "checkpoint recovery",
+    expectedStatus: 0,
+  },
+  {
+    name: "surviving test beside a deleted source",
+    args: [
+      "--checkpoint-recovery-files",
+      "node_modules/paths.txt",
+      "--baseline",
+      "HEAD^",
+      "--onto",
+      "HEAD^",
+    ],
+    deleted: true,
+    neighbor: true,
+    message: "checkpoint recovery",
+    expectedStatus: 0,
+  },
+  {
+    name: "empty recovery path list",
+    args: [
+      "--checkpoint-recovery-files",
+      "node_modules/paths.txt",
+      "--baseline",
+      "HEAD",
+      "--onto",
+      "HEAD",
+    ],
+    paths: "\n",
+    message: "recovery file list must contain",
+  },
+  {
+    name: "missing candidate",
+    args: ["--baseline", "HEAD"],
+    message: "use --baseline and --candidate together",
+  },
+  {
+    name: "missing baseline",
+    args: ["--candidate", "HEAD"],
+    message: "use --baseline and --candidate together",
+  },
+  {
+    name: "positional ref",
+    args: ["HEAD", "--baseline", "HEAD", "--candidate", "HEAD"],
+    message: "without a positional ref",
+  },
+  {
+    name: "invalid baseline",
+    args: ["--baseline", "missing-commit", "--candidate", "HEAD"],
+    message: "git rev-parse",
+  },
+  {
+    name: "invalid candidate",
+    args: ["--baseline", "HEAD", "--candidate", "missing-commit"],
+    message: "git rev-parse",
+  },
+])(
+  "validates $name before running scoped checks",
+  ({ args, message, paths, deleted, introduced, neighbor, expectedStatus = 1 }) => {
+    using project = launcherFixture(true);
+    if (paths !== undefined) project.write("node_modules/paths.txt", paths);
+    const source = introduced ? "packages/example/new-upstream.ts" : project.source;
+    const test = source.replace(/\.ts$/, ".test.ts");
+    if (introduced) {
+      project.write(source, "export const upstream = true;\n");
+      project.git("add", ".");
+      project.git("commit", "-m", "upstream introduces a source");
+    }
+    if (neighbor) {
+      project.write(test, "export {};\n");
+      project.git("add", ".");
+    }
+    if (deleted) {
+      project.git("rm", "--", source);
+      project.git("commit", "-m", "delete conflicted source during replay");
+      project.write("node_modules/paths.txt", `${source}\n`);
+    }
+    const result = project.run("", args);
+    expect(result.status, result.stdout + result.stderr).toBe(expectedStatus);
+    expect(result.stdout + result.stderr).toContain(message);
+    if (expectedStatus !== 0) expect(project.calls()).toEqual([]);
+    else {
+      expect(
+        project.calls().some(({ args }) => args.includes("typecheck") && args.includes("example")),
+      ).toBe(true);
+      expect(project.calls().some(({ args }) => args[0] === "fmt" || args[0] === "lint")).toBe(
+        false,
+      );
+      if (neighbor) {
+        expect(project.calls().map(({ args }) => args)).toContainEqual([
+          "test",
+          "run",
+          "--passWithNoTests",
+          test,
+        ]);
+      }
+    }
+  },
+);
+
+it.each(["tracked", "untracked", "wrong HEAD", "rebase", "merge"])(
+  "rejects an incomplete candidate: %s",
+  (kind) => {
+    using project = launcherFixture();
+    const candidate = project.git("rev-parse", "HEAD");
+    if (kind === "tracked") project.write(project.source, "export const value = 2;\n");
+    if (kind === "untracked") project.write("unfinished.ts", "unfinished\n");
+    if (kind === "wrong HEAD") {
+      project.git("commit", "--allow-empty", "-m", "another candidate");
+    }
+    if (kind === "rebase") project.write(".git/rebase-merge/head-name", "refs/heads/compiled");
+    if (kind === "merge") project.write(".git/MERGE_HEAD", candidate + "\n");
+    const result = project.run("", ["--baseline", candidate, "--candidate", candidate]);
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    expect(result.stdout + result.stderr).toContain(
+      kind === "wrong HEAD"
+        ? "is not checkout HEAD"
+        : kind === "rebase" || kind === "merge"
+          ? "finish the pending Git operation"
+          : "requires a clean checkout",
+    );
+    expect(project.calls()).toEqual([]);
+  },
+);
+
+it("rejects a candidate changed while the checks run", () => {
+  using project = launcherFixture();
+  const baseline = project.git("rev-parse", "HEAD");
+  project.write(project.source, "export const value = 2;\n");
+  project.git("add", ".");
+  project.git("commit", "-m", "integrated repair");
+  const candidate = project.git("rev-parse", "HEAD");
+  const result = project.run("mutate", ["--baseline", baseline, "--candidate", candidate]);
+  expect(result.status, result.stdout + result.stderr).toBe(1);
+  expect(result.stdout + result.stderr).toContain("requires a clean checkout");
   expect(
     NodeFS.existsSync(NodePath.join(project.root, "node_modules/.cache/check-changed.json")),
   ).toBe(false);

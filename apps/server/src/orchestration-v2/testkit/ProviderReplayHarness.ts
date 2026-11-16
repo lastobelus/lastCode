@@ -364,7 +364,10 @@ export function layerWithRegistry<Error, SettingsError = never>(
     options.serverSettingsLayer ??
     Layer.unwrap(
       Effect.gen(function* () {
-        const policy = yield* ManagedPolicy.fromDocument("/test/policy.json", options.managedPolicy);
+        const policy = yield* ManagedPolicy.fromDocument(
+          "/test/policy.json",
+          options.managedPolicy,
+        );
         const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
         // Replay adapters represent configured providers. Continuation dispatches
         // enforce settings enablement even though scenario commands go directly
