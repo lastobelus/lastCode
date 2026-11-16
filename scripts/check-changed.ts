@@ -179,6 +179,75 @@ export const comparisonBase = Effect.fn("checkChanged.comparisonBase")(function*
   return closest;
 });
 
+// Retained carry compilation can rewrite ancestry. Compare pinned endpoint trees,
+// then run checks only in the completed checkout that actually owns that candidate.
+const assertRepairCandidate = Effect.fn("checkChanged.assertRepairCandidate")(function* (
+  root: string,
+  candidate: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const head = (yield* git(root, ["rev-parse", "HEAD"])).toString().trim();
+  if (head !== candidate) {
+    return yield* Effect.fail(
+      `check:changed: candidate ${candidate} is not checkout HEAD ${head}.`,
+    );
+  }
+  for (const marker of [
+    "rebase-merge",
+    "rebase-apply",
+    "MERGE_HEAD",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+  ]) {
+    const location = (yield* git(root, [
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-path",
+      marker,
+    ]))
+      .toString()
+      .trim();
+    if (yield* fs.exists(location)) {
+      return yield* Effect.fail(
+        `check:changed: finish the pending Git operation (${marker}) first.`,
+      );
+    }
+  }
+  if ((yield* git(root, ["status", "--porcelain", "--untracked-files=all"])).length > 0) {
+    return yield* Effect.fail(
+      "check:changed: repair candidate requires a clean checkout, including untracked files.",
+    );
+  }
+});
+
+const repairComparison = Effect.fn("checkChanged.repairComparison")(function* (
+  root: string,
+  baselineRef: string,
+  candidateRef: string,
+) {
+  const resolve = (ref: string) =>
+    git(root, ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`]).pipe(
+      Effect.map((value) => value.toString().trim()),
+    );
+  const base = yield* resolve(baselineRef);
+  const candidate = yield* resolve(candidateRef);
+  yield* assertRepairCandidate(root, candidate);
+  const files = (yield* git(root, [
+    "diff",
+    "--name-only",
+    "--no-renames",
+    "-z",
+    base,
+    candidate,
+    "--",
+  ]))
+    .toString()
+    .split("\0")
+    .filter(Boolean)
+    .sort();
+  return { base, candidate, files };
+});
+
 // CI's lint and knip also read Astro components' frontmatter.
 const CODE = /\.(?:[cm]?[jt]sx?|astro)$/;
 const TEST = /\.test\.[cm]?[jt]sx?$/;
@@ -208,14 +277,30 @@ const override = Effect.fn("checkChanged.override")(function* (
   return value;
 });
 
-// Tests that read a doc; a changed doc has no test beside it to select them.
-export const docReaderTests = (files: ReadonlyArray<string>) =>
-  files.includes("docs/user/t3-connect-troubleshooting.md")
+// Tests that read files without importing them directly.
+export const crossFileTests = (files: ReadonlyArray<string>) => [
+  ...(files.includes("docs/user/t3-connect-troubleshooting.md")
     ? ["apps/server/src/cloud/ConnectReachability.test.ts"]
-    : [];
+    : []),
+  ...(files.some((file) =>
+    [
+      "packages/shared/src/generatedBuildOwnership.ts",
+      "packages/shared/src/nativeFileSystem.ts",
+    ].includes(file),
+  )
+    ? [
+        "scripts/lastcode-checkpoint-lifecycle.test.ts",
+        "scripts/lastcode-checkpoint-publication.test.ts",
+      ]
+    : []),
+];
 
 const checkChanged = Effect.fn("checkChanged")(function* (input: {
   readonly ref: Option.Option<string>;
+  readonly baseline: Option.Option<string>;
+  readonly candidate: Option.Option<string>;
+  readonly checkpointRecoveryFiles: Option.Option<string>;
+  readonly onto: Option.Option<string>;
   readonly concurrency: Option.Option<number>;
   readonly timeout: Option.Option<number>;
 }) {
@@ -243,12 +328,117 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
 
   const lines = (...args: Array<string>) => gitLines(root, args);
 
-  const { ref, base } = yield* comparisonBase(root, input.ref);
-  // --no-renames lists a rename as its old and new path, as CI does.
-  const changedFiles = lines("diff", "--name-only", "--no-renames", base, "--");
-  const untrackedFiles = lines("ls-files", "--others", "--exclude-standard");
+  const recovery = Option.isSome(input.checkpointRecoveryFiles);
+  if (!recovery && Option.isSome(input.onto)) {
+    return yield* Effect.fail("check:changed: --onto requires --checkpoint-recovery-files.");
+  }
+  if (recovery && [input.ref, input.candidate].some(Option.isSome)) {
+    return yield* Effect.fail(
+      "check:changed: --checkpoint-recovery-files cannot be combined with a positional ref or --candidate.",
+    );
+  }
+  if (recovery && Option.isNone(input.baseline)) {
+    return yield* Effect.fail(
+      "check:changed: --checkpoint-recovery-files requires --baseline <pre-replay-head> to verify deleted paths.",
+    );
+  }
+  if (recovery && Option.isNone(input.onto)) {
+    return yield* Effect.fail(
+      "check:changed: --checkpoint-recovery-files requires --onto <replay-upstream-head> to verify upstream deletions.",
+    );
+  }
+  const recoveryHead = recovery
+    ? (yield* git(root, ["rev-parse", "HEAD"])).toString().trim()
+    : undefined;
+  let recoveryFiles: Array<string> = [];
+  let recoveryBase: string | undefined;
+  let recoveryOnto: string | undefined;
+  if (recoveryHead) {
+    yield* assertRepairCandidate(root, recoveryHead);
+    recoveryFiles = (yield* fs.readFileString(Option.getOrThrow(input.checkpointRecoveryFiles)))
+      .split(/\r?\n/)
+      .filter(Boolean);
+    if (
+      recoveryFiles.length === 0 ||
+      recoveryFiles.some(
+        (file) =>
+          path.isAbsolute(file) ||
+          file.startsWith("-") ||
+          file.includes("\0") ||
+          file.split("/").some((part) => part === ".." || part === "." || part === ""),
+      )
+    ) {
+      return yield* Effect.fail(
+        "check:changed: recovery file list must contain repository-relative conflicted and repaired paths, one per line.",
+      );
+    }
+    const resolveCommit = (ref: string) =>
+      git(root, ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`]).pipe(
+        Effect.map((stdout) => stdout.toString().trim()),
+      );
+    recoveryBase = yield* resolveCommit(Option.getOrThrow(input.baseline));
+    recoveryOnto = yield* resolveCommit(Option.getOrThrow(input.onto));
+    const treePaths = (yield* git(root, ["ls-tree", "-r", "--name-only", "-z", recoveryHead]))
+      .toString()
+      .split("\0")
+      .filter(Boolean);
+    const deletedPaths = yield* Effect.forEach([recoveryBase, recoveryOnto], (deletionBase) =>
+      git(root, [
+        "diff",
+        "--name-only",
+        "--no-renames",
+        "--diff-filter=D",
+        "-z",
+        deletionBase,
+        recoveryHead,
+        "--",
+      ]).pipe(Effect.map((stdout) => stdout.toString().split("\0").filter(Boolean))),
+    );
+    const knownPaths = new Set([...treePaths, ...deletedPaths.flat()]);
+    const unknown = recoveryFiles.filter((file) => !knownPaths.has(file));
+    if (unknown.length > 0) {
+      return yield* Effect.fail(
+        `check:changed: unknown recovery path(s): ${unknown.join(", ")}. Correct the file list: each path must exist in HEAD or be deleted from --baseline or --onto to HEAD.`,
+      );
+    }
+  }
+  const exact = !recovery && Option.isSome(input.baseline) && Option.isSome(input.candidate);
+  if (
+    (!recovery && Option.isSome(input.baseline) !== Option.isSome(input.candidate)) ||
+    (exact && Option.isSome(input.ref))
+  ) {
+    return yield* Effect.fail(
+      "check:changed: use --baseline and --candidate together, without a positional ref.",
+    );
+  }
+  const repair = exact
+    ? yield* repairComparison(
+        root,
+        Option.getOrThrow(input.baseline),
+        Option.getOrThrow(input.candidate),
+      )
+    : undefined;
+  const { ref, base } = recoveryBase
+    ? { ref: "checkpoint recovery", base: recoveryBase }
+    : repair
+      ? { ref: "integrated repair", base: repair.base }
+      : yield* comparisonBase(root, input.ref);
+  // --no-renames includes both paths so deletions affect package selection too.
+  const changedFiles = recoveryHead
+    ? Effect.succeed(recoveryFiles)
+    : repair
+      ? Effect.succeed(repair.files)
+      : lines("diff", "--name-only", "--no-renames", base, "--");
+  const untrackedFiles =
+    repair || recoveryHead
+      ? Effect.succeed([] as Array<string>)
+      : lines("ls-files", "--others", "--exclude-standard");
   const files = [...new Set([...(yield* changedFiles), ...(yield* untrackedFiles)])].sort();
-
+  if (repair) {
+    yield* Console.log(
+      `check:changed: integrated repair baseline ${base} candidate ${repair.candidate}`,
+    );
+  }
   if (files.length === 0) {
     yield* Console.log(`check:changed: no changes since ${base.slice(0, 12)} (${ref}).`);
     return true;
@@ -262,7 +452,12 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
   const inputKey = Effect.gen(function* () {
     const hash = NodeCrypto.createHash("sha256");
     // CI changes test behavior (vite.config.ts rejects .only under CI).
-    hash.update(`${process.version}\0${base}\0${ci}\0`);
+    hash.update(`${process.version}\0${base}\0${repair?.candidate ?? "working-tree"}\0${ci}\0`);
+    hash.update(
+      recovery
+        ? `checkpoint-recovery\0${recoveryHead}\0${recoveryOnto}\0${files.join("\0")}\0`
+        : "changed\0",
+    );
     hash.update(
       yield* git(root, [
         "diff",
@@ -326,16 +521,18 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
   // `related` reaches most of a package: one leaf server file pulled in 252 of
   // 406 server test files and took 7 minutes. CI runs the rest.
   const tests = new Set(code.filter((file) => TEST.test(file)));
-  for (const file of code) {
+  for (const file of files.filter((file) => CODE.test(file))) {
     const dir = path.dirname(file);
+    if (!(yield* fs.exists(inRoot(dir)))) continue;
     const prefix = `${path.basename(file).replace(CODE, "")}.`;
     for (const entry of yield* fs.readDirectory(inRoot(dir))) {
       if (entry.startsWith(prefix) && TEST.test(entry)) tests.add(path.join(dir, entry));
     }
   }
-  for (const test of docReaderTests(files)) tests.add(test);
+  if (!recovery) for (const test of crossFileTests(files)) tests.add(test);
   // It reads files other than the ones beside it, so no changed file selects it.
-  if (affected.includes("t3")) tests.add("apps/server/src/provider/AgentContextBudget.test.ts");
+  if (!recovery && affected.includes("t3"))
+    tests.add("apps/server/src/provider/AgentContextBudget.test.ts");
   const { vitestTests, nodeTests } = splitTests(tests);
 
   // React Compiler coverage compiles every client source file, so run only the
@@ -374,9 +571,11 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
   // knip:check cannot be scoped to a package. Any code change can leave a file,
   // export, or dependency unused (removing the last import of a helper does), so
   // it runs whenever code or a manifest changes.
-  const runKnip = files.some(
-    (file) => CODE.test(file) || path.basename(file) === "package.json" || file === "knip.jsonc",
-  );
+  const runKnip =
+    !recovery &&
+    files.some(
+      (file) => CODE.test(file) || path.basename(file) === "package.json" || file === "knip.jsonc",
+    );
   // CI runs knip:check as a task that depends on one script per pass. The passes
   // do not depend on each other, so they run side by side here.
   const rootPackage = yield* fs
@@ -396,15 +595,17 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
 
   // A version bump can leave a patch unused, causing pnpm to reject the install
   // with ERR_PNPM_UNUSED_PATCH. Check it here as Release Smoke does in CI.
-  const runPatchCheck = files.some(
-    (file) =>
-      file === "pnpm-workspace.yaml" ||
-      file === "pnpm-lock.yaml" ||
-      file === ".pnpmfile.cjs" ||
-      file.startsWith("patches/") ||
-      file.startsWith("apps/mobile/deps/") ||
-      path.basename(file) === "package.json",
-  );
+  const runPatchCheck =
+    !recovery &&
+    files.some(
+      (file) =>
+        file === "pnpm-workspace.yaml" ||
+        file === "pnpm-lock.yaml" ||
+        file === ".pnpmfile.cjs" ||
+        file.startsWith("patches/") ||
+        file.startsWith("apps/mobile/deps/") ||
+        path.basename(file) === "package.json",
+    );
 
   // Output is piped, so keep the colors a terminal would get.
   const env = process.stdout.isTTY ? { FORCE_COLOR: "1" } : {};
@@ -466,8 +667,8 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
   ).pipe(Effect.catch((error) => Effect.succeed({ ok: false, output: error.message })));
 
   // CI's Lint job checks that generated GraphQL operations match their sources.
-  const graphql = ["apps/server", "packages/source-control-github"].filter((dir) =>
-    files.some((file) => file.startsWith(`${dir}/`)),
+  const graphql = (recovery ? [] : ["apps/server", "packages/source-control-github"]).filter(
+    (dir) => files.some((file) => file.startsWith(`${dir}/`)),
   );
   const filters = (names: ReadonlyArray<string>) => names.flatMap((name) => ["--filter", name]);
   const typecheckWorkers = Math.min(concurrency, affected.length);
@@ -530,7 +731,7 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
           ]),
         ]
       : []),
-    ...(compilerApps.length > 0
+    ...(!recovery && compilerApps.length > 0
       ? [
           {
             ...command(`react compiler (${compilerFiles} files)`, [
@@ -566,10 +767,18 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
     "release smoke": outputs.release_smoke,
   }).flatMap(([job, runs]) => (runs ? [job] : []));
   if (ciOnly.length > 0) summary.push(`  CI also runs: ${ciOnly.join(", ")}`);
-  if (!runPatchCheck) summary.push("  unused patch check skipped: no dependency files changed");
-  if (!runKnip) summary.push("  knip skipped: no code or manifest changed");
+  if (recovery) {
+    summary.push(
+      "  Checkpoint preflight only: start the service's complete Full CI next; run client QA alongside it.",
+    );
+  } else {
+    if (!runPatchCheck) summary.push("  unused patch check skipped: no dependency files changed");
+    if (!runKnip) summary.push("  knip skipped: no code or manifest changed");
+  }
   yield* Console.log(`\n${summary.join("\n")}`);
 
+  if (repair) yield* assertRepairCandidate(root, repair.candidate);
+  if (recoveryHead) yield* assertRepairCandidate(root, recoveryHead);
   if (results.some((result) => result.outcome !== "pass")) return false;
   if ((yield* inputKey) !== key) {
     yield* Console.log("  pass not cached: files changed during the run");
@@ -591,6 +800,28 @@ export const checkChangedCommand = Command.make(
     ref: Argument.String("ref").pipe(
       Argument.withDescription("Compare against the merge base with this ref."),
       Argument.optional,
+    ),
+    baseline: Flag.String("baseline").pipe(
+      Flag.withDescription(
+        "Pre-repair snapshot or pre-replay head; requires --candidate or --checkpoint-recovery-files.",
+      ),
+      Flag.optional,
+    ),
+    candidate: Flag.String("candidate").pipe(
+      Flag.withDescription(
+        "Completed integrated repair commit at clean HEAD; compared directly with --baseline.",
+      ),
+      Flag.optional,
+    ),
+    checkpointRecoveryFiles: Flag.String("checkpoint-recovery-files").pipe(
+      Flag.withDescription(
+        "Completed checkpoint replay: newline-delimited conflict/repair paths for format, lint, affected typechecks and neighboring tests before Full CI.",
+      ),
+      Flag.optional,
+    ),
+    onto: Flag.String("onto").pipe(
+      Flag.withDescription("Replay upstream commit; required with --checkpoint-recovery-files."),
+      Flag.optional,
     ),
     concurrency: Flag.Int("concurrency").pipe(
       Flag.withDescription(

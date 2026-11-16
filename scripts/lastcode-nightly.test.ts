@@ -49,6 +49,91 @@ it("parses upstream nightly tags", () => {
   assert.equal(parseNightlyTag("v0.0.25"), undefined);
 });
 
+it("preserves nightly numeric conversions and the original tag", () => {
+  const tag = "v001.002.003-nightly.00000000.004";
+  assert.deepStrictEqual(parseNightlyTag(tag), {
+    tag,
+    major: 1,
+    minor: 2,
+    patch: 3,
+    date: 0,
+    runNumber: 4,
+  });
+  assert.deepStrictEqual(parseNightlyTag("v0.0.0-nightly.99999999.0"), {
+    tag: "v0.0.0-nightly.99999999.0",
+    major: 0,
+    minor: 0,
+    patch: 0,
+    date: 99999999,
+    runNumber: 0,
+  });
+  const long = "9007199254740993";
+  const overflow = "9".repeat(400);
+  assert.deepStrictEqual(
+    parseNightlyTag(`v${long}.${overflow}.${long}-nightly.12345678.${overflow}`),
+    {
+      tag: `v${long}.${overflow}.${long}-nightly.12345678.${overflow}`,
+      major: 9007199254740992,
+      minor: Infinity,
+      patch: 9007199254740992,
+      date: 12345678,
+      runNumber: Infinity,
+    },
+  );
+});
+
+it("rejects malformed nightly fields and native regex newline boundaries", () => {
+  const nightly = "v1.2.3-nightly.12345678.4";
+  const invalid = [
+    "V1.2.3-nightly.12345678.4",
+    "1.2.3-nightly.12345678.4",
+    "v1_2.3-nightly.12345678.4",
+    "v1.2.3-Nightly.12345678.4",
+    "v.2.3-nightly.12345678.4",
+    "v1..3-nightly.12345678.4",
+    "v1.2.-nightly.12345678.4",
+    "v1.2.3-nightly..4",
+    "v1.2.3-nightly.1234567.4",
+    "v1.2.3-nightly.123456789.4",
+    "v1.2.3-nightly.12345678.",
+    "v１.2.3-nightly.12345678.4",
+    "v1.٢.3-nightly.12345678.4",
+    "v1.2.３-nightly.12345678.4",
+    "v1.2.3-nightly.１２３４５６７８.4",
+    "v1.2.3-nightly.12345678.٤",
+    `${nightly}.1`,
+    ` ${nightly}`,
+    `\n${nightly}`,
+    nightly.replace("-nightly", "\n-nightly"),
+    ...["\n", "\r", "\r\n", "\u2028", "\u2029"].map((suffix) => nightly + suffix),
+  ];
+  for (const tag of invalid) assert.equal(parseNightlyTag(tag), undefined, tag);
+});
+
+it("preserves checkpoint and revision helper validation for unusual nightly numbers", () => {
+  const nightly = "v001.0.0-nightly.00000000.0";
+  const checkpoint = `lastcode/checkpoint/${nightly}`;
+  const revision = `lastcode/revision/${nightly}.01`;
+  assert.equal(checkpointTagFromNightlyTag(nightly), checkpoint);
+  assert.equal(nightlyTagFromCheckpointTag(checkpoint), nightly);
+  assert.equal(revisionTagFromNightlyTag(nightly, 1), `lastcode/revision/${nightly}.1`);
+  assert.equal(parseLastCodeInstallableTag(checkpoint)?.revision, 0);
+  assert.equal(parseLastCodeInstallableTag(revision)?.revision, 1);
+  assert.equal(versionFromNightlyTag(nightly), "001.0.0-nightly.00000000.0");
+  assert.equal(versionFromLastCodeInstallableTag(revision), "001.0.0-nightly.00000000.0.1");
+  for (const suffix of ["0", "9007199254740993", "9".repeat(400), "1\n"]) {
+    const invalid = `lastcode/revision/${nightly}.${suffix}`;
+    assert.equal(parseLastCodeInstallableTag(invalid), undefined);
+    assert.throws(
+      () => versionFromLastCodeInstallableTag(invalid),
+      Error,
+      `Invalid LastCode installable tag '${invalid}'.`,
+    );
+  }
+  assert.throws(() => checkpointTagFromNightlyTag(nightly + "\n"));
+  assert.throws(() => revisionTagFromNightlyTag(nightly, 0));
+});
+
 it("sorts nightly tags by semver, date, and run number", () => {
   const older = parseNightlyTag("v0.0.25-nightly.20260605.999");
   const newer = parseNightlyTag("v0.0.25-nightly.20260606.1");
