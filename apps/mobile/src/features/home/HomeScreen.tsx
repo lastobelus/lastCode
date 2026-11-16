@@ -749,10 +749,7 @@ export function HomeScreen(props: HomeScreenProps) {
   if (tagSidebar.active)
     return (
       <View className={containerClassName}>
-        <ScreenContent surface="screen">
-          {v2ListHeader}
-          {tagSidebar.results}
-        </ScreenContent>
+        <ScreenContent surface="screen">{tagSidebar.results(v2ListHeader)}</ScreenContent>
       </View>
     );
 

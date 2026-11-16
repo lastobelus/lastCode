@@ -1,5 +1,5 @@
 import { RegistryContext } from "@effect/atom-react";
-import { AtomRegistry } from "effect/reactivity";
+import { Atom, AtomRegistry } from "effect/reactivity";
 import { expect, it, vi } from "vite-plus/test";
 import { userEvent } from "vite-plus/test/browser";
 import { act, render } from "../../../test/render";
@@ -11,14 +11,28 @@ vi.mock("../../components/sidebar/SidebarChrome", () => ({
   SidebarChromeHeader: () => null,
   SidebarChromeFooter: () => null,
 }));
-vi.mock("../../state/entities", () => ({
-  useProjects: () => [],
-  useQuietThreadShell: () => null,
-  useQuietThreadShells: () => [],
-  useHiddenThreadKeys: () => new Set(),
+vi.mock("../../state/entities", async () => {
+  const { useAtomValue } = await import("@effect/atom-react");
+  const { environmentThreadShells } = await import("../../state/threads");
+  const { makeThreadFixture } = await import("../../test-fixtures");
+  const { ThreadId, EnvironmentId } = await import("@t3tools/contracts");
+  const parent = makeThreadFixture({
+    id: ThreadId.make("private-parent"),
+    environmentId: EnvironmentId.make("local"),
+    title: "Private parent title",
+  });
+  return {
+    useProjects: () => [],
+    useQuietThreadShell: () => null,
+    useQuietThreadShells: () => [parent],
+    useHiddenThreadKeys: () => useAtomValue(environmentThreadShells.hiddenThreadKeysAtom),
+  };
+});
+vi.mock("../../components/sidebar/useLastCodeThreadStatus", () => ({
+  useLastCodeThreadStatus: () => null,
 }));
-vi.mock("./TagThreadRow", () => ({
-  TagThreadRow: ({ thread }: { thread: { title: string } }) => <span>{thread.title}</span>,
+vi.mock("../../components/sidebar/LastCodeThreadStatusLabel", () => ({
+  LastCodeThreadStatusLabel: () => null,
 }));
 vi.mock("../../state/queries", async () => {
   const { EnvironmentId, MessageId, ThreadId } = await import("@t3tools/contracts");
@@ -94,7 +108,29 @@ vi.mock("./state", async () => {
                     branch: index === 0 ? "fix/spacing" : null,
                   }).source,
               )
-            : [makeThreadFixture({ id: ThreadId.make("second"), title }).source],
+            : [
+                {
+                  ...makeThreadFixture({ id: ThreadId.make("second"), title }).source,
+                  groupedUnderThreadId: ThreadId.make("private-parent"),
+                },
+                {
+                  ...makeThreadFixture({
+                    id: ThreadId.make("private"),
+                    title: "Private tagged thread",
+                  }).source,
+                  tags: ["Work", "private"],
+                },
+                {
+                  ...makeThreadFixture({
+                    id: ThreadId.make("zz-visible-child"),
+                    title: "Visible delegated child",
+                  }).source,
+                  delegatedFrom: {
+                    environmentId: EnvironmentId.make("remote"),
+                    threadId: ThreadId.make("visible-parent"),
+                  },
+                },
+              ],
         nextCursor: !archived && cursor === 0 ? 100 : null,
       }),
     );
@@ -165,4 +201,57 @@ it("searches the complete tagged set and keeps message-only jump targets", async
     messageId: "message",
     query: "body phrase",
   });
+});
+
+it("applies real privacy keys to tagged results", async () => {
+  useTagFilterStore.setState({ tag: "Work", archived: false });
+  const registry = AtomRegistry.make();
+  using _registry = { [Symbol.dispose]: () => registry.dispose() };
+  const { serverEnvironment } = await import("../../state/server");
+  const { environmentThreadShells } = await import("../../state/threads");
+  const { EnvironmentId, ThreadId } = await import("@t3tools/contracts");
+  const { makeThreadFixture } = await import("../../test-fixtures");
+  const { hiddenThreadKeys } = await import("@t3tools/shared/threadTags");
+  registry.set(
+    environmentThreadShells.threadRefsAtom as Atom.Writable<
+      readonly import("@t3tools/contracts").ScopedThreadRef[]
+    >,
+    [{ environmentId: EnvironmentId.make("remote"), threadId: ThreadId.make("visible-parent") }],
+  );
+  registry.set(
+    environmentThreadShells.hiddenThreadKeysAtom as Atom.Writable<ReadonlySet<string>>,
+    hiddenThreadKeys([
+      {
+        environmentId: EnvironmentId.make("local"),
+        threads: [
+          {
+            ...makeThreadFixture({ id: ThreadId.make("private-parent") }).source,
+            tags: ["private"],
+          },
+        ],
+        hiddenTags: ["private"],
+      },
+    ]),
+  );
+  registry.set(
+    serverEnvironment.hiddenThreadTagsAtom(EnvironmentId.make("local")) as Atom.Writable<
+      readonly string[] | null
+    >,
+    ["private"],
+  );
+  registry.set(environmentThreadShells.anyEnvironmentHidingAtom as Atom.Writable<boolean>, true);
+  await using screen = await render(
+    <RegistryContext.Provider value={registry}>
+      <SidebarProvider>
+        <TagSidebarResults tag="Work" />
+      </SidebarProvider>
+    </RegistryContext.Provider>,
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Next", exact: true }));
+  await expect.element(screen.getByText("Second active page")).toBeVisible();
+  await expect.element(screen.getByText("Private tagged thread")).not.toBeInTheDocument();
+  await expect.element(screen.getByText("Visible delegated child")).toBeVisible();
+  await expect
+    .element(screen.getByText("Group: Private parent title", { exact: false }))
+    .not.toBeInTheDocument();
 });

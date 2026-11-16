@@ -98,6 +98,10 @@ it("creates a shorter exact tag without removing a selected fuzzy match", async 
   expect(select).toHaveBeenCalledExactlyOnceWith("bug");
   await userEvent.click(screen.getByText("#bugfix", { exact: true }));
   expect(select).toHaveBeenLastCalledWith("bugfix");
+  await userEvent.clear(screen.getByRole("combobox", { name: "Search tags" }));
+  await userEvent.type(screen.getByRole("combobox", { name: "Search tags" }), "cli");
+  await userEvent.keyboard("{ArrowDown}{Enter}");
+  expect(select).toHaveBeenLastCalledWith("Work/Client");
 });
 it("submits an exact existing candidate ahead of a preferred fuzzy match", async () => {
   const select = vi.fn();

@@ -1,3 +1,4 @@
+import { threadKey } from "@t3tools/client-runtime/state/entities";
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { presentThreadShell } from "@t3tools/client-runtime/state/models";
 import { hiddenThreadKeys } from "@t3tools/client-runtime/state/threads";
@@ -57,7 +58,7 @@ export const tagResultRows = Atom.family((key: string) =>
     const hidden = hiddenThreadKeys(
       environments,
       get(environmentThreadShells.hiddenThreadKeysAtom),
-      new Set(get(environmentThreadShells.threadRefsAtom).map((ref) => scopedThreadKey(ref))),
+      new Set(get(environmentThreadShells.threadRefsAtom).map((ref) => threadKey(ref))),
       get(environmentThreadShells.anyEnvironmentHidingAtom),
     );
     return {
@@ -65,9 +66,7 @@ export const tagResultRows = Atom.family((key: string) =>
       threads: environments
         .flatMap(({ environmentId, threads }) =>
           threads
-            .filter(
-              (thread) => !hidden.has(scopedThreadKey(scopeThreadRef(environmentId, thread.id))),
-            )
+            .filter((thread) => !hidden.has(threadKey({ environmentId, threadId: thread.id })))
             .map((thread) => presentThreadShell(environmentId, thread)),
         )
         .sort(

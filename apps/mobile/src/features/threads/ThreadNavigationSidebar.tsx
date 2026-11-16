@@ -611,8 +611,7 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
     return (
       <View className="flex-1">
         {Platform.OS === "ios" ? header : null}
-        {tagSidebar.control}
-        {tagSidebar.results}
+        {tagSidebar.results(tagSidebar.control)}
         {Platform.OS === "android" ? header : null}
         <ThreadUndoNotice visible={props.visible} />
       </View>

@@ -1,16 +1,20 @@
 import { EnvironmentId, MessageId, ThreadId } from "@t3tools/contracts";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
 import { expect, it } from "vite-plus/test";
-import { makeThreadShellFixture } from "../../../test-fixtures";
-import { taggedThreadSearch } from "./search";
+import { taggedThreadSearch } from "./threadTagSearch.ts";
 
 it("keeps field and message-only matches with the appropriate jump target", () => {
-  const thread = makeThreadShellFixture({
+  const thread = {
     id: ThreadId.make("thread"),
     environmentId: EnvironmentId.make("local"),
     title: "Layout experiment",
     branch: "fix/sidebar-spacing",
-  });
+    createdAt: "2026-06-01T00:00:00.000Z",
+    updatedAt: "2026-06-01T00:00:00.000Z",
+    latestUserMessageAt: null,
+    latestUserAuthoredMessageAt: null,
+    opens: null,
+  };
   const searchableThread = {
     ...thread,
     searchPullRequests: [{ number: 123, title: "Tighten header margins", references: [] }],

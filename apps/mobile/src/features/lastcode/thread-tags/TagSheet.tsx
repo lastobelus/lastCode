@@ -116,7 +116,9 @@ export function ThreadTagEditor(props: {
 }) {
   const thread = useThreadShell(props);
   const detail = useEnvironmentThread(props.environmentId, props.threadId);
-  const tags = Option.isSome(detail.data) ? (detail.data.value.thread.tags ?? []) : [];
+  const canonical = Option.getOrNull(detail.data)?.thread;
+  const projectId = canonical?.projectId ?? thread?.projectId;
+  const tags = canonical?.tags ?? thread?.source.tags ?? [];
   const permitted = useAtomValue(tagCommands.set.permissionAtom(props.environmentId));
   const setTag = useAtomCommand(tagCommands.set);
   const [saving, setSaving] = useState(false);
@@ -150,12 +152,12 @@ export function ThreadTagEditor(props: {
       <TagPickerSheet
         error={error}
         scopes={[{ environmentId: props.environmentId }]}
-        {...(thread ? { preferredProjectId: thread.projectId } : {})}
+        {...(projectId ? { preferredProjectId: projectId } : {})}
         onClose={props.onClose}
         onSelect={(tag) => write(tag, true)}
         editor={{
           tags,
-          disabled: !permitted || saving || !thread || !Option.isSome(detail.data),
+          disabled: !permitted || saving || canonical === undefined,
           set: write,
         }}
       />

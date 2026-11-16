@@ -1,19 +1,29 @@
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import { useQuietThreadShell } from "../../state/entities";
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { threadTagRelations } from "@t3tools/client-runtime/thread-tag-search";
+import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { useLastCodeThreadStatus } from "../../components/sidebar/useLastCodeThreadStatus";
 import { LastCodeThreadStatusLabel } from "../../components/sidebar/LastCodeThreadStatusLabel";
 
 export function TagThreadRow({
   thread: fallback,
-  context,
+  projectTitle,
+  parentTitles,
 }: {
   readonly thread: EnvironmentThreadShell;
-  readonly context: string;
+  readonly projectTitle: string;
+  readonly parentTitles: ReadonlyMap<string, string>;
 }) {
   const thread =
     useQuietThreadShell(scopeThreadRef(fallback.environmentId, fallback.id)) ?? fallback;
   const status = useLastCodeThreadStatus(thread);
+  const context = [
+    projectTitle,
+    ...threadTagRelations(thread).map(({ label, ref }) => {
+      const title = parentTitles.get(scopedThreadKey(ref));
+      return title ? `${label}: ${title}` : label;
+    }),
+  ].join(" · ");
   return (
     <span className="flex min-w-0 flex-1 flex-col gap-0.5">
       <span className="flex min-w-0 items-center gap-2">

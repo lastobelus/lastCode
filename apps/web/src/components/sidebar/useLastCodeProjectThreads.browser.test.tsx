@@ -1,3 +1,4 @@
+import { hiddenThreadKeys } from "@t3tools/shared/threadTags";
 import { RegistryContext } from "@effect/atom-react";
 import { Atom, AtomRegistry } from "effect/reactivity";
 import { environmentThreadShells } from "../../state/threads";
@@ -263,7 +264,18 @@ describe("project-local thread projection", () => {
             expect(rendering.threadsByKey.get(key(archived))).toBe(archived);
           }
     }
-    await act(() => registry.set(hidden, new Set([key(parent), key(child)])));
+    await act(() =>
+      registry.set(
+        hidden,
+        hiddenThreadKeys([
+          {
+            environmentId: parent.environmentId,
+            threads: [{ ...parent.source, tags: ["private"] }, child.source],
+            hiddenTags: ["private"],
+          },
+        ]),
+      ),
+    );
     expect(latest().familyProjection.orderedThreadKeys).not.toContain(key(parent));
     expect(latest().threadsByKey.has(key(parent))).toBe(false);
     expect(threads).toContain(parent);

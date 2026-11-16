@@ -206,13 +206,16 @@ export function threadTagEnterSelection(input: {
   readonly canCreate: boolean;
   readonly highlighted: string | null;
 }): string | undefined {
+  if (
+    input.highlighted !== null &&
+    (input.entries.some((entry) => entry.tag === input.highlighted) ||
+      (input.allowCreate && input.canCreate && input.highlighted === input.candidate))
+  )
+    return input.highlighted;
   if (input.allowCreate && input.candidate) {
     const exact = input.entries.find((entry) => entry.tag === input.candidate);
     if (exact) return exact.tag;
     if (input.canCreate) return input.candidate;
   }
-  return input.highlighted !== null &&
-    input.entries.some((entry) => entry.tag === input.highlighted)
-    ? input.highlighted
-    : input.entries[0]?.tag;
+  return input.entries[0]?.tag;
 }

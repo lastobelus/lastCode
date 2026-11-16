@@ -1,7 +1,8 @@
+import { threadKey } from "@t3tools/client-runtime/state/entities";
 import { useAtomValue } from "@effect/atom-react";
 import { Link } from "@tanstack/react-router";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
-import { taggedThreadSearch, threadTagRelations } from "@t3tools/client-runtime/thread-tag-search";
+import { taggedThreadSearch } from "@t3tools/client-runtime/thread-tag-search";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { XIcon } from "lucide-react";
@@ -69,7 +70,8 @@ export function TagSidebarResults({ tag }: { readonly tag: string }) {
   const titles = new Map(
     useQuietThreadShells()
       .filter(
-        (thread) => !hidden.has(scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))),
+        (thread) =>
+          !hidden.has(threadKey({ environmentId: thread.environmentId, threadId: thread.id })),
       )
       .map((thread) => [
         scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
@@ -136,9 +138,13 @@ export function TagSidebarResults({ tag }: { readonly tag: string }) {
               Could not search every connection. Results may be incomplete.
             </p>
           ) : null}
-          {!result.loading && !result.failed && threads.length === 0 ? (
+          {!result.loading && !search.isPending && !result.failed && threads.length === 0 ? (
             <p className="px-2 py-2 text-xs text-muted-foreground">
-              {archived ? "No archived threads with this tag" : "No threads with this tag"}
+              {query.trim()
+                ? "No matching threads."
+                : archived
+                  ? "No archived threads with this tag"
+                  : "No threads with this tag"}
             </p>
           ) : null}
           <SidebarMenu>
@@ -148,14 +154,13 @@ export function TagSidebarResults({ tag }: { readonly tag: string }) {
                 (project) =>
                   project.environmentId === environmentId && project.id === thread.projectId,
               );
-              const context = [
-                project?.title ?? "Unknown project",
-                ...threadTagRelations(thread).map(({ label, ref }) => {
-                  const title = titles.get(scopedThreadKey(ref));
-                  return title ? `${label}: ${title}` : label;
-                }),
-              ].join(" · ");
-              const label = <TagThreadRow thread={thread} context={context} />;
+              const label = (
+                <TagThreadRow
+                  thread={thread}
+                  projectTitle={project?.title ?? "Unknown project"}
+                  parentTitles={titles}
+                />
+              );
               return (
                 <SidebarMenuItem key={`${environmentId}/${thread.id}`}>
                   {archived ? (

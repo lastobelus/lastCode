@@ -1,3 +1,4 @@
+import { threadKey } from "@t3tools/client-runtime/state/entities";
 import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import {
   createEnvironmentRpcCommand,
@@ -25,7 +26,6 @@ import { environmentShell } from "../../../state/shell";
 import { serverEnvironment } from "../../../state/server";
 import { hiddenThreadKeys } from "@t3tools/client-runtime/state/threads";
 import { loadThreadTagVocabulary } from "@t3tools/client-runtime/thread-tag-discovery";
-import { scopedThreadKey } from "../../../lib/scopedEntities";
 import type { Preferences } from "../../../persistence/mobile-preferences";
 
 export const tagCommands = {
@@ -92,9 +92,7 @@ const vocabularyScope = Atom.family((key: string) => {
               ? [...get(environmentThreadShells.hiddenThreadKeysAtom)]
               : [],
             loadedThreadKeys: hidingAnywhere
-              ? get(environmentThreadShells.threadRefsAtom).map((ref) =>
-                  scopedThreadKey(ref.environmentId, ref.threadId),
-                )
+              ? get(environmentThreadShells.threadRefsAtom).map((ref) => threadKey(ref))
               : [],
             hidingAnywhere,
           },
@@ -164,9 +162,7 @@ export function useTagDiscovery(
             get(revisionAtom);
             const alreadyHidden = get(environmentThreadShells.hiddenThreadKeysAtom);
             const loadedKeys = new Set(
-              get(environmentThreadShells.threadRefsAtom).map((ref) =>
-                scopedThreadKey(ref.environmentId, ref.threadId),
-              ),
+              get(environmentThreadShells.threadRefsAtom).map((ref) => threadKey(ref)),
             );
             const hidingAnywhere = get(environmentThreadShells.anyEnvironmentHidingAtom);
             const targets: TagScope[] = JSON.parse(scopeKey);
@@ -222,7 +218,12 @@ export function useTagDiscovery(
                     page.shells
                       .filter(
                         (thread) =>
-                          !hidden.has(scopedThreadKey(page.scope.environmentId, thread.id)),
+                          !hidden.has(
+                            threadKey({
+                              environmentId: page.scope.environmentId,
+                              threadId: thread.id,
+                            }),
+                          ),
                       )
                       .map((thread) => presentThreadShell(page.scope.environmentId, thread)),
                   ),

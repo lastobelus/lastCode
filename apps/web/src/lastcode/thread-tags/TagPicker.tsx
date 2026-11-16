@@ -96,7 +96,10 @@ export function TagPicker({
     isThreadTag(candidate) &&
     !result.entries.some((entry) => entry.tag === candidate) &&
     !selected.includes(candidate);
-  const options = [...result.entries.map((entry) => entry.tag), ...(canCreate ? [candidate] : [])];
+  const entries = allowCreate
+    ? result.entries.toSorted((a, b) => Number(b.tag === candidate) - Number(a.tag === candidate))
+    : result.entries;
+  const options = [...(canCreate ? [candidate] : []), ...entries.map((entry) => entry.tag)];
   return (
     <div className="min-w-0 [--command-shell-inset:0.25rem]">
       <Command
@@ -139,7 +142,17 @@ export function TagPicker({
           }}
         />
         <CommandList className="max-h-64">
-          {result.entries.map((entry) => (
+          {canCreate ? (
+            <CommandItem
+              value={candidate}
+              disabled={disabled || result.loading}
+              onClick={() => onSelect(candidate)}
+            >
+              <PlusIcon className="size-3.5" />
+              <span className="truncate">Add #{candidate}</span>
+            </CommandItem>
+          ) : null}
+          {entries.map((entry) => (
             <CommandItem
               key={entry.tag}
               value={entry.tag}
@@ -156,16 +169,6 @@ export function TagPicker({
               {selected.includes(entry.tag) ? <CheckIcon className="size-3.5" /> : null}
             </CommandItem>
           ))}
-          {canCreate ? (
-            <CommandItem
-              value={candidate}
-              disabled={disabled || result.loading}
-              onClick={() => onSelect(candidate)}
-            >
-              <PlusIcon className="size-3.5" />
-              <span className="truncate">Add #{candidate}</span>
-            </CommandItem>
-          ) : null}
           {result.loading ? (
             <p className="px-2 py-1 text-xs text-muted-foreground" role="status">
               Loading tags…

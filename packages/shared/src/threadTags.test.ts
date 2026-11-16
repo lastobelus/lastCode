@@ -83,14 +83,23 @@ it("merges cached vocabulary across environments while preserving preferred rank
     { tag: "WC", count: 1, projectCount: 1, preferredProject: false },
   ]);
 });
-it("submits the typed exact candidate before an automatically highlighted fuzzy tag", () => {
+it("submits the ordered default and respects explicit keyboard choices", () => {
+  expect(
+    threadTagEnterSelection({
+      candidate: "cli",
+      entries: [{ tag: "Work/Client" }],
+      allowCreate: true,
+      canCreate: true,
+      highlighted: "Work/Client",
+    }),
+  ).toBe("Work/Client");
   expect(
     threadTagEnterSelection({
       candidate: "bug",
       entries: [{ tag: "bugfix" }],
       allowCreate: true,
       canCreate: true,
-      highlighted: "bugfix",
+      highlighted: "bug",
     }),
   ).toBe("bug");
   const entries = [{ tag: "Work/Client" }, { tag: "WC" }];
@@ -100,7 +109,7 @@ it("submits the typed exact candidate before an automatically highlighted fuzzy 
       entries,
       allowCreate: true,
       canCreate: false,
-      highlighted: "Work/Client",
+      highlighted: "WC",
     }),
   ).toBe("WC");
   expect(
