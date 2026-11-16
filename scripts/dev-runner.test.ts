@@ -80,6 +80,8 @@ it.live.each(["SIGTERM", "SIGHUP"] as const)(
       const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "dev-runner-shutdown-"));
       const bin = NodePath.join(root, "bin");
       NodeFS.mkdirSync(bin);
+      // Cold checkouts must not compile the resource monitor before testing shutdown.
+      NodeFS.writeFileSync(NodePath.join(bin, "cargo"), `#!${process.execPath}\n`, { mode: 0o755 });
       // A stubborn descendant keeps inherited output open until group cleanup finishes.
       const descendant = `process.on("SIGTERM", () => {}); process.send("ready"); setInterval(() => {}, 1000);`;
       NodeFS.writeFileSync(
@@ -117,14 +119,22 @@ it.live.each(["SIGTERM", "SIGHUP"] as const)(
           // oxlint-disable t3code/no-real-time-wait-in-tests -- A failure deadline bounds the real subprocess; readiness itself comes from its stdout event.
           // @effect-diagnostics-next-line globalTimers:off -- Real child process deadlines must use native time.
           const timeout = setTimeout(
-            () => reject(new Error("Process fixture did not start")),
+            () =>
+              reject(
+                new Error(`Process fixture did not start\nstdout:\n${output}\nstderr:\n${errors}`),
+              ),
             8000,
           );
           // oxlint-enable t3code/no-real-time-wait-in-tests
           runner.once("error", reject);
           runner.once("exit", () => {
             clearTimeout(timeout);
-            if (!tree) reject(new Error(`Runner exited before the fixture started: ${errors}`));
+            if (!tree)
+              reject(
+                new Error(
+                  `Runner exited before the fixture started\nstdout:\n${output}\nstderr:\n${errors}`,
+                ),
+              );
           });
           runner.stdout.on("data", (chunk: Buffer) => {
             output += chunk.toString();
