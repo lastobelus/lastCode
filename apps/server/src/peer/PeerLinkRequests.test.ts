@@ -593,10 +593,7 @@ it.live("the agent asks without waiting, and the user links the box after its tu
         answer: { type: "link", urls: [b.url], access: "auto", pairingCode: pairing.credential },
       });
 
-      expect(
-        (yield* a.projections.getThread(threadId)).snoozedUntil,
-        JSON.stringify(yield* cardOf(a)),
-      ).toBeNull();
+      expect((yield* a.projections.getThread(threadId)).snoozedUntil).toBeNull();
 
       const link = yield* a.links.get(box.environmentId);
       expect(Option.getOrUndefined(link)?.access).toBe("auto");
