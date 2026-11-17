@@ -1347,6 +1347,31 @@ describe("ThreadReadBroker", () => {
     ),
   );
 
+  it.effect.each(["pruned", "revoked"] as const)(
+    "refuses a destination response when its retained grant was %s while waiting",
+    (removal) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const h = yield* makeHarness;
+          const stream = yield* h.broker.connect("client-session");
+          const read = yield* h.broker
+            .read(sourceThreadId, sourceRunId, { threadId, environmentId })
+            .pipe(
+              Effect.match({ onFailure: (error) => error.code, onSuccess: () => "success" }),
+              Effect.forkScoped,
+            );
+          const requests = yield* stream.pipe(Stream.take(1), Stream.runCollect);
+          if (removal === "pruned") {
+            yield* h.sql`DELETE FROM lastcode_thread_read_grants WHERE thread_id = ${sourceThreadId}`;
+          } else {
+            yield* h.sql`UPDATE auth_sessions SET revoked_at = 'revoked' WHERE session_id = 'client-session'`;
+          }
+          yield* respondTo(h.broker, "client-session", requests[0]!);
+          expect(yield* Fiber.join(read)).toBe("environment_unavailable");
+        }),
+      ),
+  );
+
   it.effect.each([
     { denialReason: "revoked" as const, diagnostic: "revoked" as const },
     { denialReason: "expired" as const, diagnostic: "revoked" as const },

@@ -592,7 +592,15 @@ const cancelBackgroundOnlyTask = (
           assert.isUndefined(after?.cancelledRunId);
           return undefined;
         }
-        // Settling the task ends the async question it left, after its own row.
+        // Await the stored task itself: derived status and question cleanup can finish
+        // before the provider-event reactor commits the parent's terminal task row.
+        const taskSettled = yield* watch(
+          (event) =>
+            event.type === "subagent.updated" &&
+            event.threadId === parentThreadId &&
+            event.payload.id === task.id &&
+            event.payload.status === "interrupted",
+        );
         const settled = yield* watch(
           (event) =>
             event.type === "runtime-request.updated" &&
@@ -613,6 +621,7 @@ const cancelBackgroundOnlyTask = (
         );
         // task_cancel settles a finished turn itself; a running one settles when it ends.
         if ((yield* owned)?.status !== "resolved") yield* Fiber.join(settled);
+        yield* Fiber.join(taskSettled);
 
         const childAfter = yield* orchestrator.getThreadProjection(task.childThreadId!);
         const nativeStatus = background === "subagent" ? "interrupted" : undefined;

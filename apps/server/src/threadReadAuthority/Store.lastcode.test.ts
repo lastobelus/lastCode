@@ -6,6 +6,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as Statement from "effect/sql/Statement";
 import * as AuthSessions from "../persistence/AuthSessions.ts";
 import { runDatabaseMigrations } from "../persistence/DatabaseMigrations.ts";
 import * as Sqlite from "../persistence/Sqlite.ts";
@@ -415,6 +416,12 @@ it.effect(
       assert.isTrue(yield* store.touchSuccessfulRead(grant, "session"));
       const refreshed = (yield* store.lookupGrant(threadId, "run", "run"))!;
       assert.equal(refreshed.lastUsedAt, 61_000);
+      yield* TestClock.adjust(Store.grantIdleMillis - 1);
+      assert.isTrue(yield* store.touchSuccessfulRead(grant, "session"));
+      assert.equal(
+        (yield* store.lookupGrant(threadId, "run", "run"))!.lastUsedAt,
+        61_000 + Store.grantIdleMillis - 1,
+      );
       yield* TestClock.adjust("7 days");
       assert.deepEqual(yield* store.eligibleConnectedSessions(refreshed, ["session"]), {
         status: "expired",
@@ -425,6 +432,34 @@ it.effect(
       for (const table of authorityTables)
         assert.deepEqual(yield* sql`SELECT * FROM ${sql(table)}`, []);
     }).pipe(Effect.provide(layer)),
+);
+
+it.effect("refuses a successful read revoked between eligibility and the final update", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* insert("session", { key: "key" });
+    const { store, grant } = yield* bind("session");
+    yield* TestClock.adjust("1 minute");
+    let revoked = false;
+    const accepted = yield* store.touchSuccessfulRead(grant, "session").pipe(
+      Effect.provideService(Statement.CurrentTransformer, (statement) => {
+        if (
+          revoked ||
+          !statement.compile()[0].startsWith("UPDATE lastcode_thread_read_grants SET last_used_at")
+        )
+          return Effect.succeed(statement);
+        revoked = true;
+        return sql`UPDATE auth_sessions SET revoked_at = 'revoked' WHERE session_id = 'session'`.pipe(
+          Effect.provideService(Statement.CurrentTransformer, undefined),
+          Effect.orDie,
+          Effect.as(statement),
+        );
+      }),
+    );
+    assert.isTrue(revoked);
+    assert.isUndefined(yield* store.lookupGrant(threadId, "run", "run"));
+    assert.isFalse(accepted);
+  }).pipe(Effect.provide(layer)),
 );
 
 it.effect(
@@ -495,6 +530,7 @@ it.effect("preserves first ownership on collision and bounds grant and diagnosti
       Store.maxGrantRows,
     );
     assert.isUndefined(yield* original.store.lookupGrant(threadId, "run", "run"));
+    assert.isFalse(yield* original.store.touchSuccessfulRead(original.grant, "owner"));
     yield* original.store.recordFailure(threadId, "run", "diagnostic", "reauth-required", 0);
     yield* original.store.prune(Store.grantIdleMillis + 1);
     assert.isUndefined(yield* original.store.lookupFailureReason(threadId, "run", "diagnostic"));

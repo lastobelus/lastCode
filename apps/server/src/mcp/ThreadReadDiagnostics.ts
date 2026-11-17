@@ -1,4 +1,4 @@
-import { OrchestratorMcpFailure } from "@t3tools/contracts";
+import { type EnvironmentId, OrchestratorMcpFailure } from "@t3tools/contracts";
 
 const threadReadMessages = {
   noGrant:
@@ -61,3 +61,17 @@ export const referenceReadFailure = (reason: ThreadReadDiagnostic, selection = f
     ...(selection ? { noDestinationAttempt: true as const } : {}),
   });
 };
+
+// Selection has exhausted both independent authorities; only a changed condition permits a new read.
+export const exhaustedReferenceFailure = (
+  cause: OrchestratorMcpFailure,
+  expiredPeerEnvironmentId?: EnvironmentId,
+) =>
+  new OrchestratorMcpFailure({
+    code: cause.code,
+    ...(cause.threadReadReason === undefined ? {} : { threadReadReason: cause.threadReadReason }),
+    message:
+      expiredPeerEnvironmentId === undefined
+        ? cause.message
+        : `${cause.message} This environment's outgoing read link to ${expiredPeerEnvironmentId} has also expired, so as an alternative to the client recovery above, ask the user to renew that link; do not read again until the client's authority or connection, or that link, changes.`,
+  });

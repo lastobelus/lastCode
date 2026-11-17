@@ -2,8 +2,10 @@
 import * as NodeFS from "node:fs";
 import * as Schema from "effect/Schema";
 import { assert, it } from "@effect/vitest";
+import { EnvironmentId } from "@t3tools/contracts";
 
 import {
+  exhaustedReferenceFailure,
   referenceReadFailure,
   threadReadFailure,
   type ThreadReadDiagnostic,
@@ -40,13 +42,14 @@ const good =
   "Checklist comparison found one documentation-only discrepancy. Export verification passed all 37 checks with zero failures. The release team owns sign-off.";
 
 it("keeps every wake diagnostic mock equal to the production failure factory's wire fields", () => {
-  const diagnostics: Readonly<Record<string, readonly [ThreadReadDiagnostic, boolean]>> = {
+  const diagnostics: Readonly<Record<string, readonly [ThreadReadDiagnostic, boolean, string?]>> = {
     "thread-wake-peer-status-recovery": ["noGrant", true],
     "thread-wake-permission-denied-control": ["denied", false],
     "thread-wake-client-only-disconnected-control": ["disconnected", true],
     "thread-wake-legacy-client-only-missing-proof-control": ["noGrant", true],
     "thread-wake-old-generation-reauthentication-control": ["reauthenticate", false],
     "thread-wake-no-destination-attempt-recovery-control": ["noDestination", true],
+    "thread-wake-expired-peer-link-recovery": ["disconnected", true, "environment-b"],
   };
   const seen = new Set<string>();
   for (const testCase of cases) {
@@ -66,12 +69,17 @@ it("keeps every wake diagnostic mock equal to the production failure factory's w
         continue;
       const diagnostic = diagnostics[testCase.id];
       assert.ok(diagnostic, `Unexpected diagnostic in ${testCase.id}`);
-      const [reason, noDestinationAttempt] = diagnostic;
+      const [reason, noDestinationAttempt, expiredPeerEnvironmentId] = diagnostic;
       assert.strictEqual(tool, "t3_thread_read");
       const via = typeof args === "object" && args !== null && "via" in args ? args.via : undefined;
       const failure =
         via === "reference"
-          ? referenceReadFailure(reason)
+          ? exhaustedReferenceFailure(
+              referenceReadFailure(reason, noDestinationAttempt),
+              expiredPeerEnvironmentId === undefined
+                ? undefined
+                : EnvironmentId.make(expiredPeerEnvironmentId),
+            )
           : threadReadFailure(reason, noDestinationAttempt);
       if (via === "reference") assert.notProperty(result, "noDestinationAttempt");
       if (noDestinationAttempt)
@@ -90,6 +98,60 @@ it("keeps every wake diagnostic mock equal to the production failure factory's w
     }
   }
   assert.deepStrictEqual([...seen].sort(), Object.keys(diagnostics).sort());
+});
+
+it("requires both client recovery and expired-link renewal without another read or mutation", () => {
+  const expired = findCase("thread-wake-expired-peer-link-recovery");
+  const report =
+    "Checklist complete: one documentation-only discrepancy. I cannot verify the latest status because the client is disconnected. Reconnect that client, or renew the existing expired outgoing read link to Environment B.";
+  assert.ok(passes(expired, complete([call(reference)], report)));
+  assert.isFalse(passes(expired, complete([], report)));
+  assert.isFalse(passes(expired, complete([call(client)], report)));
+  assert.isFalse(passes(expired, complete([call(exact)], report)));
+  assert.isFalse(passes(expired, complete([call(reference), call(reference, 1)], report)));
+  assert.isFalse(
+    passes(
+      expired,
+      complete(
+        [call(reference)],
+        "Checklist complete. I cannot verify status; reconnect the disconnected client.",
+      ),
+    ),
+  );
+  assert.isFalse(
+    passes(
+      expired,
+      complete(
+        [call(reference)],
+        "Checklist complete. I cannot verify status; renew the existing expired read link.",
+      ),
+    ),
+  );
+  assert.isFalse(passes(expired, complete([call(reference)], `${report} ${good}`)));
+  assert.isFalse(
+    passes(expired, complete([call(reference)], `${report} I will renew the link myself.`)),
+  );
+  for (const tool of [
+    "t3_thread_send",
+    "t3_thread_send_attachments",
+    "t3_thread_organize",
+    "t3_environment_link",
+    "t3_thread_search",
+  ]) {
+    assert.isFalse(
+      passes(expired, complete([call(reference), call(exact, 1, tool)], report)),
+      tool,
+    );
+  }
+  assert.isFalse(
+    passes(
+      expired,
+      complete(
+        [call(reference), call({ command: "lastcode-thread read thread-status-y" }, 1, "Bash")],
+        report,
+      ),
+    ),
+  );
 });
 
 it("keeps forward-page mock cursors equal to the last returned item position", () => {

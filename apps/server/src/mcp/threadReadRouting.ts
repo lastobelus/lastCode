@@ -14,6 +14,7 @@ import * as Schema from "effect/Schema";
 import type * as PeerLinks from "../peer/PeerLinks.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 import { callerLinkOrigin, fencingLinkOrigin } from "./linkOrigin.ts";
+import { exhaustedReferenceFailure } from "./ThreadReadDiagnostics.ts";
 
 const isFailure = Schema.is(OrchestratorMcpFailure);
 
@@ -76,14 +77,6 @@ const strictReadInput = (
   return via === undefined ? rest : { ...rest, via };
 };
 
-// The automatic reference selection has already considered both available authorities.
-const exhaustedReference = (cause: OrchestratorMcpFailure) =>
-  new OrchestratorMcpFailure({
-    code: cause.code,
-    ...(cause.threadReadReason === undefined ? {} : { threadReadReason: cause.threadReadReason }),
-    message: cause.message,
-  });
-
 export const readThreadWithRoutes = Effect.fn("mcp.readThreadWithRoutes")(function* (
   scope: McpInvocationScope,
   caller: Pick<OrchestrationV2ThreadShell, "linkOrigin"> | undefined,
@@ -134,11 +127,11 @@ export const readThreadWithRoutes = Effect.fn("mcp.readThreadWithRoutes")(functi
     if (Option.isNone(link))
       return yield* clientUnavailable === undefined
         ? referencePeerUnavailable(input.environmentId, false)
-        : exhaustedReference(clientUnavailable);
+        : exhaustedReferenceFailure(clientUnavailable);
     if (DateTime.isLessThanOrEqualTo(link.value.expiresAt, yield* DateTime.now)) {
       return yield* clientUnavailable === undefined
         ? referencePeerUnavailable(input.environmentId, true)
-        : exhaustedReference(clientUnavailable);
+        : exhaustedReferenceFailure(clientUnavailable, input.environmentId);
     }
     // PeerLinks.get returns only this environment's outgoing links. Legacy
     // unfenced links are represented as expired; every supported access can read.

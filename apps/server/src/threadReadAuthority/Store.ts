@@ -323,14 +323,33 @@ export const make = Effect.gen(function* () {
     grant: ThreadReadGrant,
     connectedSessionId: string,
   ) {
-    const check = yield* eligibleConnectedSessions(grant, [connectedSessionId]);
-    if (check.status !== "eligible") return false;
-    const now = yield* Clock.currentTimeMillis;
-    yield* sql`UPDATE lastcode_thread_read_grants SET last_used_at = ${now}
-      WHERE thread_id = ${grant.threadId} AND kind = ${grant.kind} AND grant_id = ${grant.grantId}
-        AND family_generation = ${grant.familyGeneration} AND key_generation IS ${grant.keyGeneration}
-        AND last_used_at > ${now - grantIdleMillis} AND last_used_at <= ${now - 60_000}`;
-    return true;
+    return yield* sql.withTransaction(
+      Effect.gen(function* () {
+        const retained = yield* lookupGrant(grant.threadId, grant.kind, grant.grantId);
+        if (
+          !retained ||
+          retained.familyId !== grant.familyId ||
+          retained.familyGeneration !== grant.familyGeneration ||
+          retained.keyGeneration !== grant.keyGeneration ||
+          retained.proofKey !== grant.proofKey ||
+          retained.subject !== grant.subject ||
+          retained.method !== grant.method ||
+          encode(retained.scopes) !== encode(grant.scopes) ||
+          (yield* resolveOwner(retained)) !== (yield* resolveOwner(grant))
+        )
+          return false;
+        const check = yield* eligibleConnectedSessions(retained, [connectedSessionId]);
+        if (check.status !== "eligible") return false;
+        const now = yield* Clock.currentTimeMillis;
+        if (retained.lastUsedAt <= now - grantIdleMillis) return false;
+        if (retained.lastUsedAt > now - 60_000) return true;
+        const updated = yield* sql`UPDATE lastcode_thread_read_grants SET last_used_at = ${now}
+          WHERE thread_id = ${retained.threadId} AND kind = ${retained.kind} AND grant_id = ${retained.grantId}
+            AND last_used_at = ${retained.lastUsedAt}
+          RETURNING 1`;
+        return updated.length > 0;
+      }),
+    );
   });
   const prune = Effect.fn("threadReadAuthority.prune")(function* (now: number) {
     yield* sql`DELETE FROM lastcode_thread_read_failures WHERE recorded_at <= ${now - grantIdleMillis}`;

@@ -269,13 +269,32 @@ describe("reference routing through the real read service", () => {
               threadReadReason: "unavailable",
             });
             expect(calls.map((call) => call.route)).toEqual(["reference", "link"]);
-            for (const diagnostic of ["disconnected", "reauthenticate", "noGrant"] as const) {
+            for (const diagnostic of [
+              "disconnected",
+              "reauthenticate",
+              "noGrant",
+              "noDestination",
+            ] as const) {
               const precise = referenceReadFailure(diagnostic, true);
               const recovered = yield* harness({ link, reference: Effect.succeed(precise) });
               const failure = yield* recovered.mcp
                 .readThread(recovered.scope, input)
                 .pipe(Effect.flip);
-              expect(failure).toEqual(referenceReadFailure(diagnostic));
+              const original = referenceReadFailure(diagnostic);
+              expect(failure).toMatchObject({
+                code: original.code,
+                threadReadReason: original.threadReadReason,
+              });
+              expect(failure.message).toContain(original.message);
+              if (link === "expired") {
+                expect(failure.message).toContain(
+                  `outgoing read link to ${there} has also expired`,
+                );
+                expect(failure.message).toContain("renew that link");
+                expect(failure.message).toContain("do not read again until");
+              } else {
+                expect(failure.message).toBe(original.message);
+              }
               expect(failure.noDestinationAttempt).toBeUndefined();
             }
           }
