@@ -12676,7 +12676,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               message.session_id === liveQuery.nativeThreadId
             ) {
               mcpFrameOwner =
-                context?.promptUuid != null && accepted.includes(context.promptUuid)
+                context?.promptUuid != null &&
+                accepted.some((uuid) => uuid === context.promptUuid || context.steerUuids.has(uuid))
                   ? context
                   : null;
             }

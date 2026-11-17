@@ -15649,6 +15649,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
 
   it.effect.each([
     "root",
+    "root-steer-started",
+    "root-steer-echo",
     "independent",
     "root-result-only",
     "local",
@@ -15753,7 +15755,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             ...first,
             appThread: {
               ...first.appThread,
-              ...(ownership === "root" || ownership === "root-result-only"
+              ...(ownership.startsWith("root")
                 ? {}
                 : ownership === "independent"
                   ? {
@@ -15972,6 +15974,42 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             runId: second.runId,
             attemptId: second.attemptId,
           });
+          if (ownership === "root-steer-started" || ownership === "root-steer-echo") {
+            const idAllocator = yield* IdAllocator.IdAllocatorV2;
+            yield* harness.runtime.steerTurn({
+              threadId: harness.threadId,
+              runId: second.runId,
+              providerThread: harness.providerThread,
+              providerTurnId: idAllocator.derive.providerTurn({
+                driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+                nativeTurnId: `turn:${second.attemptId}`,
+              }),
+              message: {
+                createdBy: "user",
+                creationSource: "web",
+                messageId: MessageId.make("message-origin-steer"),
+                text: "Keep working on the same request.",
+                attachments: [],
+              },
+            });
+            yield* harness.offerAndWait(
+              ownership === "root-steer-started"
+                ? claudeSdkFrame({
+                    type: "command_lifecycle",
+                    command_uuid: harness.promptUuid(2),
+                    state: "started",
+                    uuid: "00000000-0000-4000-8000-000000000786",
+                    session_id: WAKE_NATIVE_SESSION,
+                  })
+                : frame("steer-echo", harness.promptUuid(2)),
+            );
+            yield* harness.offerAndWait(frame("after-steer"));
+            yield* invokeHook("after-steer");
+            assert.deepEqual(yield* lookup("after-steer"), {
+              runId: second.runId,
+              attemptId: second.attemptId,
+            });
+          }
           yield* harness.offerAndWait(frame("child-a-later", undefined, "launch-a"));
           yield* expectChildExecution("child-a-later", {
             runId: first.runId,
