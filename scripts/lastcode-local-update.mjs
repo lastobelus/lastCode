@@ -12,6 +12,7 @@ import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
 
 import { requestCheckpointServiceRunNow } from "./lib/lastcode-checkpoint-service-run-now.mjs";
+import { triggerIntelBuild } from "./lib/lastcode-intel-build-trigger.mjs";
 
 import { acquirePortableLock, PortableLockContentionError } from "./lastcode-lock.mjs";
 
@@ -770,10 +771,14 @@ function resolveMise(home) {
 }
 
 export function resolveMiseNodeExecutable(cwd, mise, runCommand = run) {
-  const installRoot = runCommand(cwd, mise, ["where", "node@24.13.1"]);
+  // Older installable tags can require a different tooling runtime than engines.node.
+  const manifest = JSON.parse(NodeFS.readFileSync(NodePath.join(cwd, "package.json"), "utf8"));
+  const nodeTool = manifest.scripts["lastcode:ci"].match(/\bnode@\d+\.\d+\.\d+\b/u)?.[0];
+  if (!nodeTool) throw new Error("The target tag's lastcode:ci command must pin a Node runtime.");
+  const installRoot = runCommand(cwd, mise, ["where", nodeTool]);
   const executable = NodePath.join(installRoot, "bin", "node");
   if (!NodeFS.existsSync(executable)) {
-    throw new Error(`mise did not provide the expected Node 24 executable at ${executable}.`);
+    throw new Error(`mise did not provide the expected ${nodeTool} executable at ${executable}.`);
   }
   return executable;
 }
@@ -826,7 +831,7 @@ function buildUnlocked(options, updateRoot) {
     incompleteBuildError = error;
   }
   if (existing) {
-    return { schemaVersion: 1, status: "built", checkpointTag: options.checkpointTag, ...existing };
+    return completeLocalBuild(options, checkpointCommit, existing);
   }
 
   NodeFS.mkdirSync(updateRoot, { recursive: true });
@@ -932,11 +937,30 @@ function buildUnlocked(options, updateRoot) {
   });
   if (!built)
     throw new Error(`Build completed without a usable artifact for ${options.checkpointTag}.`);
+  return completeLocalBuild(options, checkpointCommit, built);
+}
+
+export function completeLocalBuild(options, checkpointCommit, artifact, overrides = {}) {
+  const intelTrigger = triggerIntelBuild(
+    {
+      home: options.home,
+      repoRoot: options.repoRoot,
+      tag: options.checkpointTag,
+      commit: checkpointCommit,
+    },
+    overrides,
+  );
+  if (intelTrigger.status === "failed") {
+    process.stderr.write(
+      `[lastcode:local-update] Local package is ready; Intel dispatch failed: ${intelTrigger.error}\n`,
+    );
+  }
   return {
     schemaVersion: 1,
     status: "built",
     checkpointTag: options.checkpointTag,
-    ...built,
+    ...artifact,
+    intelTrigger,
   };
 }
 

@@ -96,6 +96,7 @@ function readWorkspace() {
     packages.push({
       name: manifest.name,
       dir,
+      // Config-only test tasks remain undiscovered: this selector runs before Vite+ is installed.
       hasTest: Boolean(manifest.scripts?.test),
       deps: Object.keys(deps).filter(
         (dep) =>
