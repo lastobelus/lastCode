@@ -29,10 +29,6 @@ import { loadThreadTagVocabulary } from "@t3tools/client-runtime/thread-tag-disc
 import type { Preferences } from "../../../persistence/mobile-preferences";
 
 export const tagCommands = {
-  vocabulary: createEnvironmentRpcCommand(connectionAtomRuntime, {
-    label: "Find thread tags",
-    tag: THREAD_TAG_RPC_METHODS.vocabulary,
-  }),
   query: createEnvironmentRpcCommand(connectionAtomRuntime, {
     label: "Filter by thread tag",
     tag: THREAD_TAG_RPC_METHODS.query,

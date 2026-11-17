@@ -1,4 +1,3 @@
-import { threadKey } from "@t3tools/client-runtime/state/entities";
 import { useAtomValue } from "@effect/atom-react";
 import { Link } from "@tanstack/react-router";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
@@ -8,7 +7,7 @@ import type { EnvironmentId } from "@t3tools/contracts";
 import { XIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useClientSettings } from "../../hooks/useSettings";
-import { useProjects, useQuietThreadShells, useHiddenThreadKeys } from "../../state/entities";
+import { useProjects, useQuietThreadShells } from "../../state/entities";
 import { useThreadSearch } from "../../state/queries";
 import { threadFamilies } from "../../state/threads";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
@@ -66,17 +65,11 @@ export function TagSidebarResults({ tag }: { readonly tag: string }) {
     Date.parse(useNowMinute()),
   );
   const page = threads.slice(cursor, cursor + 100);
-  const hidden = useHiddenThreadKeys();
   const titles = new Map(
-    useQuietThreadShells()
-      .filter(
-        (thread) =>
-          !hidden.has(threadKey({ environmentId: thread.environmentId, threadId: thread.id })),
-      )
-      .map((thread) => [
-        scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
-        thread.title,
-      ]),
+    useQuietThreadShells().map((thread) => [
+      scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+      thread.title,
+    ]),
   );
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- retain authoritative query rows in the existing family registry while the tag view is mounted
   useEffect(() => {

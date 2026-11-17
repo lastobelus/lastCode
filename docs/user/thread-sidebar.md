@@ -5,8 +5,8 @@ need a separate branch and working directory.
 
 ## Organize with tags
 
-Use **+Tag** below a thread's title to find or add a tag. On mobile, open
-**Tags** from the header. Search matches partial spellings. Paths such as
+Use **+Tag** below a thread's title to find or add a tag. On mobile, tap
+the tag button in the header. Search matches partial spellings. Paths such as
 `work/client` let you filter by `work` and include its nested tags, even when no
 thread has `work` itself. Adding or removing a tag changes only that exact tag.
 

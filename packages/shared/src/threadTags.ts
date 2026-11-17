@@ -216,6 +216,7 @@ export function threadTagEnterSelection(input: {
     const exact = input.entries.find((entry) => entry.tag === input.candidate);
     if (exact) return exact.tag;
     if (input.canCreate) return input.candidate;
+    return undefined;
   }
   return input.entries[0]?.tag;
 }

@@ -27,14 +27,11 @@ import { TagPickerSheet } from "./TagSheet";
 import { useTagDiscovery, useTagPreferences, type TagScope } from "./state";
 
 const visibleTitles = Atom.make((get) => {
-  const hidden = get(environmentThreadShells.hiddenThreadKeysAtom);
   return new Map(
-    get(environmentThreadShells.quietThreadShellsAtom)
-      .filter(
-        (thread) =>
-          !hidden.has(threadKey({ environmentId: thread.environmentId, threadId: thread.id })),
-      )
-      .map((thread) => [scopedThreadKey(thread.environmentId, thread.id), thread.title]),
+    get(environmentThreadShells.quietThreadShellsAtom).map((thread) => [
+      scopedThreadKey(thread.environmentId, thread.id),
+      thread.title,
+    ]),
   );
 });
 
@@ -45,6 +42,7 @@ export function useTagSidebar(
   messageSearch: {
     readonly matches: readonly EnvironmentThreadSearchMatch[];
     readonly query: string;
+    readonly isPending: boolean;
   },
 ) {
   const { sidebar: enabled } = useTagPreferences();
@@ -104,6 +102,7 @@ function TagResults({
   readonly messageSearch: {
     readonly matches: readonly EnvironmentThreadSearchMatch[];
     readonly query: string;
+    readonly isPending: boolean;
   };
   readonly onSelect: (thread: EnvironmentThreadShell) => void;
   readonly header: ReactNode;
@@ -114,6 +113,9 @@ function TagResults({
   const top = useContentTopInset();
   const bottom = useContentBottomInset();
   const needle = searchQuery.trim().toLocaleLowerCase();
+  const waiting =
+    discovery.loading ||
+    (needle.length > 0 && (messageSearch.isPending || messageSearch.query !== searchQuery.trim()));
   const nowMs = useNowMinuteMs();
   const threads = taggedThreadSearch(
     [...discovery.threads].sort(
@@ -137,18 +139,17 @@ function TagResults({
       className="flex-1"
       contentInsetAdjustmentBehavior="never"
       contentInset={Platform.OS === "ios" ? { top, bottom } : undefined}
+      contentOffset={Platform.OS === "ios" ? { x: 0, y: -top } : undefined}
       keyboardShouldPersistTaps="handled"
     >
       {header}
-      {discovery.loading ? (
-        <Text className="px-4 py-3 text-foreground-muted">Finding threads…</Text>
-      ) : null}
+      {waiting ? <Text className="px-4 py-3 text-foreground-muted">Finding threads…</Text> : null}
       {discovery.error ? (
         <Text accessibilityRole="alert" className="px-4 py-3 text-danger-foreground">
           {discovery.error}
         </Text>
       ) : null}
-      {!discovery.loading && !discovery.error && threads.length === 0 ? (
+      {!waiting && !discovery.error && threads.length === 0 ? (
         <Text className="px-4 py-3 text-foreground-muted">
           {needle ? "No matching threads." : "No threads with this tag."}
         </Text>

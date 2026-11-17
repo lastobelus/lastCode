@@ -105,6 +105,15 @@ it("submits the ordered default and respects explicit keyboard choices", () => {
   const entries = [{ tag: "Work/Client" }, { tag: "WC" }];
   expect(
     threadTagEnterSelection({
+      candidate: "private",
+      entries: [{ tag: "private/reference" }],
+      allowCreate: true,
+      canCreate: false,
+      highlighted: null,
+    }),
+  ).toBeUndefined();
+  expect(
+    threadTagEnterSelection({
       candidate: "WC",
       entries,
       allowCreate: true,

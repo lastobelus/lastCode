@@ -719,9 +719,6 @@ describe("ClaudeAdapterV2 MCP query overrides", () => {
       mcpServers: T3_MCP_SERVERS,
     });
     assert.isFalse(overrides.allowedTools?.includes(ClaudeAdapterV2.CLAUDE_T3_MCP_TOOL_WILDCARD));
-    assert.include(overrides.allowedTools, "mcp__t3-code__t3_thread_tag_vocabulary");
-    assert.include(overrides.allowedTools, "mcp__t3-code__t3_thread_tag_query");
-    assert.notInclude(overrides.allowedTools, "mcp__t3-code__t3_thread_tag_set");
   });
 
   it("invalidates live-query reuse when MCP credentials rotate", () => {

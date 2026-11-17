@@ -106,7 +106,10 @@ export function TagPicker({
         items={options}
         mode="none"
         value={query}
-        onItemHighlighted={(value) => setHighlighted(typeof value === "string" ? value : null)}
+        onItemHighlighted={(value, details) => {
+          if (details.reason === "keyboard")
+            setHighlighted(typeof value === "string" ? value : null);
+        }}
         onValueChange={(value) => {
           setQuery(value);
           setCursor(0);
@@ -132,13 +135,12 @@ export function TagPicker({
               canCreate,
               highlighted,
             });
-            if (tag === undefined) return;
             (
               event as typeof event & { preventBaseUIHandler?: () => void }
             ).preventBaseUIHandler?.();
             event.preventDefault();
             event.stopPropagation();
-            onSelect(tag);
+            if (tag !== undefined) onSelect(tag);
           }}
         />
         <CommandList className="max-h-64">

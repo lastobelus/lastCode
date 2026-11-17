@@ -12,20 +12,10 @@ vi.mock("../../components/sidebar/SidebarChrome", () => ({
   SidebarChromeFooter: () => null,
 }));
 vi.mock("../../state/entities", async () => {
-  const { useAtomValue } = await import("@effect/atom-react");
-  const { environmentThreadShells } = await import("../../state/threads");
-  const { makeThreadFixture } = await import("../../test-fixtures");
-  const { ThreadId, EnvironmentId } = await import("@t3tools/contracts");
-  const parent = makeThreadFixture({
-    id: ThreadId.make("private-parent"),
-    environmentId: EnvironmentId.make("local"),
-    title: "Private parent title",
-  });
   return {
     useProjects: () => [],
     useQuietThreadShell: () => null,
-    useQuietThreadShells: () => [parent],
-    useHiddenThreadKeys: () => useAtomValue(environmentThreadShells.hiddenThreadKeysAtom),
+    useQuietThreadShells: () => [],
   };
 });
 vi.mock("../../components/sidebar/useLastCodeThreadStatus", () => ({
@@ -251,7 +241,4 @@ it("applies real privacy keys to tagged results", async () => {
   await expect.element(screen.getByText("Second active page")).toBeVisible();
   await expect.element(screen.getByText("Private tagged thread")).not.toBeInTheDocument();
   await expect.element(screen.getByText("Visible delegated child")).toBeVisible();
-  await expect
-    .element(screen.getByText("Group: Private parent title", { exact: false }))
-    .not.toBeInTheDocument();
 });

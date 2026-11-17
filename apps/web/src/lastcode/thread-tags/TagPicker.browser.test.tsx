@@ -102,6 +102,21 @@ it("creates a shorter exact tag without removing a selected fuzzy match", async 
   await userEvent.type(screen.getByRole("combobox", { name: "Search tags" }), "cli");
   await userEvent.keyboard("{ArrowDown}{Enter}");
   expect(select).toHaveBeenLastCalledWith("Work/Client");
+  await screen.rerender(
+    <TagPicker
+      environmentIds={[EnvironmentId.make("local")]}
+      selected={["bug"]}
+      allowCreate
+      onSelect={select}
+    />,
+  );
+  await userEvent.clear(screen.getByRole("combobox", { name: "Search tags" }));
+  await userEvent.type(screen.getByRole("combobox", { name: "Search tags" }), "bug");
+  select.mockClear();
+  await userEvent.keyboard("{Enter}");
+  expect(select).not.toHaveBeenCalled();
+  await userEvent.keyboard("{ArrowDown}{Enter}");
+  expect(select).toHaveBeenCalledExactlyOnceWith("bugfix");
 });
 it("submits an exact existing candidate ahead of a preferred fuzzy match", async () => {
   const select = vi.fn();

@@ -157,7 +157,7 @@ export function ThreadTagEditor(props: {
         onSelect={(tag) => write(tag, true)}
         editor={{
           tags,
-          disabled: !permitted || saving || canonical === undefined,
+          disabled: !permitted || saving || (canonical === undefined && thread === null),
           set: write,
         }}
       />
