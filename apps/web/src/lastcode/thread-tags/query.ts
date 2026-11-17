@@ -9,7 +9,7 @@ import { environmentThreadShells } from "../../state/threads";
 import { serverEnvironment } from "../../state/server";
 import { tagMatches } from "./state";
 
-export const tagResultPages = Atom.family((key: string) => {
+const tagResultPages = Atom.family((key: string) => {
   const target = JSON.parse(key) as {
     environmentIds: EnvironmentId[];
     tag: string;
