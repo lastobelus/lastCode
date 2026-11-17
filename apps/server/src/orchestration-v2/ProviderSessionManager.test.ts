@@ -3008,6 +3008,7 @@ it.effect(
         assert.isDefined(token);
         const resolved = yield* registry.resolve(token!);
         assert.equal(resolved?.thread.threadId, threadId);
+        assert.isTrue(resolved?.thread.nativeExecutionAttribution);
         assert.deepEqual(
           resolved?.capabilities,
           new Set(["preview", "orchestration", "worktree", "pull-requests", "action-resume"]),

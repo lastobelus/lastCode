@@ -155,7 +155,11 @@ it.effect("isolates full and restricted tool discovery over HTTP", () =>
         disableListenLog: true,
         disableLogger: true,
       }).pipe(
-        Layer.provide(ThreadReadBroker.layer),
+        Layer.provide(
+          Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+            forSession: () => ({ authorize: () => Effect.undefined }),
+          }),
+        ),
         Layer.provide(
           Layer.mergeAll(
             Layer.mock(PromptSnippets.PromptSnippets)({}),
@@ -1802,237 +1806,277 @@ it.effect("routes profile discovery and explicit profile opens over MCP", () =>
   ).pipe(Effect.provide(layerTest)),
 );
 
-it.effect("admits provider and OAuth client credentials and points only clients at OAuth", () =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const providerToken = "providerTokenWithoutDots";
-      const sessions = yield* McpProviderSessions.McpProviderSessions;
-      yield* sessions.set({
-        environmentId,
-        threadId: ThreadId.make("thread-provider"),
-        providerInstanceId: ProviderInstanceId.make("codex"),
-        providerSessionId: "provider-session",
-        endpoint: "http://localhost/mcp",
-        authorizationHeader: `Bearer ${providerToken}`,
-        browserToolsAvailable: true,
-      });
-      const origin = (id: string) => ({
-        provider: "codex" as const,
-        nativeThreadId: "native",
-        nativeTurnId: id,
-      });
-      const execution = (id: string) => ({
-        runId: RunId.make(id),
-        attemptId: RunAttemptId.make(id),
-      });
-      yield* sessions.registerExecution(
-        ThreadId.make("thread-provider"),
-        origin("a"),
-        execution("a"),
-      );
-      yield* sessions.registerExecution(
-        ThreadId.make("thread-provider"),
-        origin("b"),
-        execution("b"),
-      );
-      const clientToken = "client-payload.client-signature";
-      const providerScope: McpInvocationContext.McpInvocationScope = {
-        environmentId,
-        requestNamespace: "provider-session",
-        thread: {
+it.effect.each([
+  { registryAvailable: true, nativeExecutionAttribution: true },
+  { registryAvailable: false, nativeExecutionAttribution: true },
+  { registryAvailable: true, nativeExecutionAttribution: false },
+  { registryAvailable: false, nativeExecutionAttribution: false },
+])(
+  "admits credentials with native attribution %j",
+  ({ registryAvailable, nativeExecutionAttribution }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const providerToken = "providerTokenWithoutDots";
+        const sessions = yield* McpProviderSessions.McpProviderSessions;
+        yield* sessions.set({
+          environmentId,
           threadId: ThreadId.make("thread-provider"),
-          providerSessionId: "provider-session",
           providerInstanceId: ProviderInstanceId.make("codex"),
-        },
-        client: undefined,
-        capabilities: new Set(["orchestration", "preview"]),
-        issuedAt: 1,
-      };
-      const clientScope: McpInvocationContext.McpInvocationScope = {
-        environmentId,
-        requestNamespace: "client:session-1",
-        thread: undefined,
-        client: { sessionId: "session-1", label: "Claude Code", access: "auto" },
-        capabilities: new Set(["orchestration"]),
-        issuedAt: 1,
-      };
-      const seen: Array<McpInvocationContext.McpInvocationScope> = [];
-      const ProbeToolkit = Toolkit.make(
-        Tool.make("probe", {
-          description: "Reports the caller.",
-          success: Schema.Struct({ ok: Schema.Boolean }),
-          failure: OrchestratorMcpFailure,
-          failureMode: "return",
-          dependencies: [McpInvocationContext.McpInvocationContext],
-        }),
-      );
-      const serverLayer = McpHttpServer.layerMcpTransport(
-        McpHttpServer.toolkitRegistration(
-          ProbeToolkit,
-          McpToolAccess.toLayer(ProbeToolkit, {
-            probe: McpToolAccess.reads(() =>
-              McpInvocationContext.McpInvocationContext.pipe(
-                Effect.tap((scope) => Effect.sync(() => seen.push(scope))),
-                Effect.as({ ok: true }),
-              ),
-            ),
-          }),
-        ),
-      ).pipe(
-        Layer.provide(ServerSettings.layerTest()),
-        Layer.provide(
-          Layer.mock(McpSessionRegistry.McpSessionRegistry)({
-            resolve: (token) =>
-              Effect.succeed(
-                token === providerToken
-                  ? (providerScope as McpInvocationContext.McpThreadInvocationScope)
-                  : undefined,
-              ),
-          }),
-        ),
-        Layer.provide(
-          Layer.succeed(McpHttpServer.McpClientAuthenticator, {
-            authenticate: (request) =>
-              Effect.succeed(
-                request.headers.authorization === `Bearer ${clientToken}` ? clientScope : undefined,
-              ),
-          }),
-        ),
-        Layer.provide(ServerHttp.layerBrowserApiCors),
-        Layer.provide(
-          ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-origin-test-" }).pipe(
-            Layer.provide(NodeServices.layer),
-          ),
-        ),
-      );
-      const traced = recordSpans();
-      yield* HttpRouter.serve(serverLayer, { disableListenLog: true, disableLogger: true }).pipe(
-        Layer.build,
-        Effect.withTracer(traced.tracer),
-      );
-      const httpClient = yield* HttpClient.HttpClient;
-      const call = (token: string | undefined, metadata?: unknown) =>
-        Effect.gen(function* () {
-          const headers = {
-            accept: "application/json, text/event-stream",
-            ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
-          };
-          const initialize = yield* httpClient.post("/mcp", {
-            headers,
-            body: HttpBody.text(
-              `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1.0.0"}}}`,
-              "application/json",
-            ),
-          });
-          if (initialize.status !== 200) return initialize;
-          return yield* httpClient.post("/mcp", {
-            headers: {
-              ...headers,
-              "mcp-session-id": initialize.headers["mcp-session-id"]!,
-              "mcp-protocol-version": "2025-06-18",
-            },
-            body: HttpBody.text(
-              JSON.stringify({
-                jsonrpc: "2.0",
-                id: 2,
-                method: "tools/call",
-                params: { name: "probe", arguments: {}, _meta: metadata },
-              }),
-              "application/json",
-            ),
-          });
+          providerSessionId: "provider-session",
+          endpoint: "http://localhost/mcp",
+          authorizationHeader: `Bearer ${providerToken}`,
+          browserToolsAvailable: true,
         });
-
-      expect((yield* call(providerToken)).status).toBe(200);
-      // The tool gets its own span, without its arguments, which starts once authentication has ended.
-      const toolSpan = traced.spans.find((span) => span.name === "mcp.tool.probe");
-      expect(Object.fromEntries(toolSpan?.attributes ?? [])).toEqual({
-        "rpc.system": "mcp",
-        "rpc.method": "tools/call",
-        "mcp.tool.name": "probe",
-      });
-      const authSpan = traced.spans.find(
-        (span) =>
-          span.name === "McpHttpServer.authenticateRequest" && span.traceId === toolSpan?.traceId,
-      );
-      expect(authSpan).toBeDefined();
-      expect(traced.order.slice(0, traced.order.indexOf(`start ${toolSpan?.spanId}`))).toContain(
-        `end ${authSpan?.spanId}`,
-      );
-      expect((yield* call(clientToken)).status).toBe(200);
-      expect(seen.map((scope) => scope.requestNamespace)).toEqual([
-        "provider-session",
-        "client:session-1",
-      ]);
-
-      const meta = (turn: string) => ({
-        "x-codex-turn-metadata": { thread_id: "native", turn_id: turn },
-      });
-      for (const turn of ["b", "a", "unknown"]) {
-        expect((yield* call(providerToken, meta(turn))).status).toBe(200);
-      }
-      expect(seen.slice(2).map((scope) => scope.thread?.execution)).toEqual([
-        execution("b"),
-        execution("a"),
-        undefined,
-      ]);
-      yield* sessions.endExecution(ThreadId.make("thread-provider"), execution("a"));
-      expect((yield* call(providerToken, meta("a"))).status).toBe(200);
-      expect(seen.at(-1)?.thread?.execution).toBeUndefined();
-      expect(seen[3]?.thread?.execution).toEqual(execution("a"));
-
-      const missing = yield* call(undefined);
-      expect(missing.status).toBe(401);
-      expect(missing.headers["www-authenticate"]).toMatch(
-        /^Bearer resource_metadata="http:\/\/[^"]+\/\.well-known\/oauth-protected-resource\/mcp"$/,
-      );
-
-      const expiredClient = yield* call("stale-payload.stale-signature");
-      expect(expiredClient.headers["www-authenticate"]).toContain("resource_metadata=");
-      expect(expiredClient.headers["www-authenticate"]).toContain('error="invalid_token"');
-
-      const spansBeforeRejection = traced.spans.length;
-      const deadProvider = yield* call("deadProviderToken");
-      expect(deadProvider.status).toBe(401);
-      expect(deadProvider.headers["www-authenticate"]).toBe('Bearer error="invalid_token"');
-      // A rejected credential is recorded on the auth span, and nothing is handled.
-      const rejectedSpans = traced.spans.slice(spansBeforeRejection);
-      expect(
-        rejectedSpans
-          .filter((span) => span.name === "McpHttpServer.authenticateRequest")
-          .map((span) => span.events.map(([name]) => name)),
-      ).toEqual([[expect.stringContaining("unknown_or_expired_token")]]);
-      expect(
-        rejectedSpans.filter(
-          (span) => span.name.startsWith("mcp.tool.") || span.name.startsWith("McpServer."),
-        ),
-      ).toEqual([]);
-
-      // A present, disallowed Origin is refused with 403 before credentials or CORS answer.
-      const foreignOrigin = (method: "POST" | "OPTIONS", token: string | undefined) =>
-        httpClient.execute(
-          HttpClientRequest.make(method)("/mcp", {
-            headers: {
-              origin: "https://untrusted.invalid",
-              accept: "application/json, text/event-stream",
-              "access-control-request-method": "POST",
-              ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
-            },
-            ...(method === "POST"
-              ? {
-                  body: HttpBody.text(
-                    `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1.0.0"}}}`,
-                    "application/json",
-                  ),
-                }
-              : {}),
+        const origin = (id: string) => ({
+          provider: "codex" as const,
+          nativeThreadId: "native",
+          nativeTurnId: id,
+        });
+        const execution = (id: string) => ({
+          runId: RunId.make(id),
+          attemptId: RunAttemptId.make(id),
+        });
+        yield* sessions.registerExecution(
+          ThreadId.make("thread-provider"),
+          origin("a"),
+          execution("a"),
+        );
+        yield* sessions.registerExecution(
+          ThreadId.make("thread-provider"),
+          origin("b"),
+          execution("b"),
+        );
+        const clientToken = "client-payload.client-signature";
+        const providerScope: McpInvocationContext.McpInvocationScope = {
+          environmentId,
+          requestNamespace: "provider-session",
+          thread: {
+            threadId: ThreadId.make("thread-provider"),
+            providerSessionId: "provider-session",
+            nativeExecutionAttribution,
+            providerInstanceId: ProviderInstanceId.make("codex"),
+          },
+          client: undefined,
+          capabilities: new Set(["orchestration", "preview"]),
+          issuedAt: 1,
+        };
+        const clientScope: McpInvocationContext.McpInvocationScope = {
+          environmentId,
+          requestNamespace: "client:session-1",
+          thread: undefined,
+          client: { sessionId: "session-1", label: "Claude Code", access: "auto" },
+          capabilities: new Set(["orchestration"]),
+          issuedAt: 1,
+        };
+        const seen: Array<McpInvocationContext.McpInvocationScope> = [];
+        const ProbeToolkit = Toolkit.make(
+          Tool.make("probe", {
+            description: "Reports the caller.",
+            success: Schema.Struct({ ok: Schema.Boolean }),
+            failure: OrchestratorMcpFailure,
+            failureMode: "return",
+            dependencies: [McpInvocationContext.McpInvocationContext],
           }),
         );
-      expect((yield* foreignOrigin("POST", providerToken)).status).toBe(403);
-      expect((yield* foreignOrigin("POST", undefined)).status).toBe(403);
-      expect((yield* foreignOrigin("OPTIONS", undefined)).status).toBe(403);
-    }),
-  ).pipe(Effect.provide(Layer.mergeAll(NodeHttpServer.layerTest, McpProviderSessions.layer))),
+        const serverLayer = McpHttpServer.layerMcpTransport(
+          McpHttpServer.toolkitRegistration(
+            ProbeToolkit,
+            McpToolAccess.toLayer(ProbeToolkit, {
+              probe: McpToolAccess.reads(() =>
+                McpInvocationContext.McpInvocationContext.pipe(
+                  Effect.tap((scope) => Effect.sync(() => seen.push(scope))),
+                  Effect.as({ ok: true }),
+                ),
+              ),
+            }),
+          ),
+        ).pipe(
+          Layer.provide(ServerSettings.layerTest()),
+          Layer.provide(
+            Layer.mock(McpSessionRegistry.McpSessionRegistry)({
+              resolve: (token) =>
+                Effect.succeed(
+                  token === providerToken
+                    ? (providerScope as McpInvocationContext.McpThreadInvocationScope)
+                    : undefined,
+                ),
+            }),
+          ),
+          Layer.provide(
+            Layer.succeed(McpHttpServer.McpClientAuthenticator, {
+              authenticate: (request) =>
+                Effect.succeed(
+                  request.headers.authorization === `Bearer ${clientToken}`
+                    ? clientScope
+                    : undefined,
+                ),
+            }),
+          ),
+          Layer.provide(ServerHttp.layerBrowserApiCors),
+          Layer.provide(
+            ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-origin-test-" }).pipe(
+              Layer.provide(NodeServices.layer),
+            ),
+          ),
+        );
+        const traced = recordSpans();
+        const serve = HttpRouter.serve(serverLayer, {
+          disableListenLog: true,
+          disableLogger: true,
+        }).pipe(Layer.build);
+        yield* serve.pipe(
+          Effect.updateContext((context: Context.Context<Effect.Services<typeof serve>>) =>
+            registryAvailable
+              ? context
+              : Context.omit(McpProviderSessions.McpProviderSessions)(context),
+          ),
+          Effect.withTracer(traced.tracer),
+        );
+        const httpClient = yield* HttpClient.HttpClient;
+        const call = (token: string | undefined, metadata?: unknown) =>
+          Effect.gen(function* () {
+            const headers = {
+              accept: "application/json, text/event-stream",
+              ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
+            };
+            const initialize = yield* httpClient.post("/mcp", {
+              headers,
+              body: HttpBody.text(
+                `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1.0.0"}}}`,
+                "application/json",
+              ),
+            });
+            if (initialize.status !== 200) return initialize;
+            return yield* httpClient.post("/mcp", {
+              headers: {
+                ...headers,
+                "mcp-session-id": initialize.headers["mcp-session-id"]!,
+                "mcp-protocol-version": "2025-06-18",
+              },
+              body: HttpBody.text(
+                JSON.stringify({
+                  jsonrpc: "2.0",
+                  id: 2,
+                  method: "tools/call",
+                  params: { name: "probe", arguments: {}, _meta: metadata },
+                }),
+                "application/json",
+              ),
+            });
+          });
+
+        expect((yield* call(providerToken)).status).toBe(200);
+        // The tool gets its own span, without its arguments, which starts once authentication has ended.
+        const toolSpan = traced.spans.find((span) => span.name === "mcp.tool.probe");
+        expect(Object.fromEntries(toolSpan?.attributes ?? [])).toEqual({
+          "rpc.system": "mcp",
+          "rpc.method": "tools/call",
+          "mcp.tool.name": "probe",
+        });
+        const authSpan = traced.spans.find(
+          (span) =>
+            span.name === "McpHttpServer.authenticateRequest" && span.traceId === toolSpan?.traceId,
+        );
+        expect(authSpan).toBeDefined();
+        expect(traced.order.slice(0, traced.order.indexOf(`start ${toolSpan?.spanId}`))).toContain(
+          `end ${authSpan?.spanId}`,
+        );
+        expect((yield* call(clientToken)).status).toBe(200);
+        expect(seen.map((scope) => scope.requestNamespace)).toEqual([
+          "provider-session",
+          "client:session-1",
+        ]);
+        expect(seen[0]?.thread?.attribution).toBe("absent");
+
+        const meta = (turn: string) => ({
+          "x-codex-turn-metadata": { thread_id: "native", turn_id: turn },
+        });
+        for (const turn of ["b", "a", "unknown"]) {
+          expect((yield* call(providerToken, meta(turn))).status).toBe(200);
+        }
+        expect(seen.slice(2).map((scope) => scope.thread?.execution)).toEqual([
+          registryAvailable && nativeExecutionAttribution ? execution("b") : undefined,
+          registryAvailable && nativeExecutionAttribution ? execution("a") : undefined,
+          undefined,
+        ]);
+        expect(seen.slice(2).map((scope) => scope.thread?.attribution)).toEqual([
+          nativeExecutionAttribution ? (registryAvailable ? "resolved" : "unresolved") : "absent",
+          nativeExecutionAttribution ? (registryAvailable ? "resolved" : "unresolved") : "absent",
+          nativeExecutionAttribution ? "unresolved" : "absent",
+        ]);
+        yield* sessions.endExecution(ThreadId.make("thread-provider"), execution("a"));
+        expect((yield* call(providerToken, meta("a"))).status).toBe(200);
+        expect(seen.at(-1)?.thread?.execution).toBeUndefined();
+        expect(seen.at(-1)?.thread?.attribution).toBe(
+          nativeExecutionAttribution ? "unresolved" : "absent",
+        );
+        expect(seen[3]?.thread?.execution).toEqual(
+          registryAvailable && nativeExecutionAttribution ? execution("a") : undefined,
+        );
+        for (const metadata of [
+          { "x-codex-turn-metadata": null },
+          { "claudecode/toolUseId": "" },
+          { ...meta("b"), "claudecode/toolUseId": null },
+        ]) {
+          expect((yield* call(providerToken, metadata)).status).toBe(200);
+          expect(seen.at(-1)?.thread).toMatchObject({
+            attribution: nativeExecutionAttribution ? "unresolved" : "absent",
+          });
+          expect(seen.at(-1)?.thread?.execution).toBeUndefined();
+        }
+
+        const missing = yield* call(undefined);
+        expect(missing.status).toBe(401);
+        expect(missing.headers["www-authenticate"]).toMatch(
+          /^Bearer resource_metadata="http:\/\/[^"]+\/\.well-known\/oauth-protected-resource\/mcp"$/,
+        );
+
+        const expiredClient = yield* call("stale-payload.stale-signature");
+        expect(expiredClient.headers["www-authenticate"]).toContain("resource_metadata=");
+        expect(expiredClient.headers["www-authenticate"]).toContain('error="invalid_token"');
+
+        const spansBeforeRejection = traced.spans.length;
+        const deadProvider = yield* call("deadProviderToken");
+        expect(deadProvider.status).toBe(401);
+        expect(deadProvider.headers["www-authenticate"]).toBe('Bearer error="invalid_token"');
+        // A rejected credential is recorded on the auth span, and nothing is handled.
+        const rejectedSpans = traced.spans.slice(spansBeforeRejection);
+        expect(
+          rejectedSpans
+            .filter((span) => span.name === "McpHttpServer.authenticateRequest")
+            .map((span) => span.events.map(([name]) => name)),
+        ).toEqual([[expect.stringContaining("unknown_or_expired_token")]]);
+        expect(
+          rejectedSpans.filter(
+            (span) => span.name.startsWith("mcp.tool.") || span.name.startsWith("McpServer."),
+          ),
+        ).toEqual([]);
+
+        // A present, disallowed Origin is refused with 403 before credentials or CORS answer.
+        const foreignOrigin = (method: "POST" | "OPTIONS", token: string | undefined) =>
+          httpClient.execute(
+            HttpClientRequest.make(method)("/mcp", {
+              headers: {
+                origin: "https://untrusted.invalid",
+                accept: "application/json, text/event-stream",
+                "access-control-request-method": "POST",
+                ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
+              },
+              ...(method === "POST"
+                ? {
+                    body: HttpBody.text(
+                      `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1.0.0"}}}`,
+                      "application/json",
+                    ),
+                  }
+                : {}),
+            }),
+          );
+        expect((yield* foreignOrigin("POST", providerToken)).status).toBe(403);
+        expect((yield* foreignOrigin("POST", undefined)).status).toBe(403);
+        expect((yield* foreignOrigin("OPTIONS", undefined)).status).toBe(403);
+      }),
+    ).pipe(Effect.provide(Layer.mergeAll(NodeHttpServer.layerTest, McpProviderSessions.layer))),
 );
 
 it.effect("accepts case-insensitive MCP bearer schemes and diagnoses rejected credentials", () => {

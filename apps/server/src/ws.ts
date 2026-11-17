@@ -2084,16 +2084,6 @@ const layerCoreWsRpc = (
                   ).pipe(
                     Effect.provide(intakeContext),
                     Effect.provideService(ThreadReadAuthorization, threadReadAuthorization),
-                    (effect) =>
-                      (command.type === "message.dispatch"
-                        ? threadReadAuthorization.authorize(command.threadId, command.messageId)
-                        : command.type === "thread.create" && command.initialMessage !== undefined
-                          ? threadReadAuthorization.authorize(
-                              command.threadId,
-                              command.initialMessage.messageId,
-                            )
-                          : Effect.void
-                      ).pipe(Effect.andThen(effect)),
                   ),
                 )
                 .pipe(

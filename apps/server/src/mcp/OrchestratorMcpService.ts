@@ -51,6 +51,7 @@ import {
   type OrchestratorMcpThreadListItem,
   type OrchestratorMcpThreadListResult,
   type OrchestratorMcpThreadReadInput,
+  type OrchestratorMcpThreadReadToolInput,
   type OrchestratorMcpThreadReadResult,
   type OrchestratorMcpThreadRun,
   type OrchestratorMcpThreadSendInput,
@@ -81,6 +82,7 @@ import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import { threadPullRequestUpdatedAtMs } from "@t3tools/shared/threadPullRequests";
 import * as ThreadReadBroker from "./ThreadReadBroker.ts";
+import { readThreadWithRoutes, readRouteTargetRequired } from "./threadReadRouting.ts";
 import * as ActionResume from "../actionResume/ActionResume.ts";
 import {
   normalizeThreadPullRequestKey,
@@ -128,6 +130,7 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { loadMcpCaller, type CapturedMcpCaller } from "./McpCallerAttribution.ts";
 import {
   clientModeCeiling,
   type McpInvocationScope,
@@ -146,6 +149,7 @@ import {
 import { assertTargetWithinLimits, isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
+import * as PeerLinks from "../peer/PeerLinks.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
 
 // Return recoverable handles before common MCP client timeouts expire.
@@ -228,7 +232,7 @@ export interface OrchestratorMcpServiceShape {
   ) => Effect.Effect<OrchestratorMcpThreadListResult, OrchestratorMcpFailure>;
   readonly readThread: (
     scope: McpInvocationScope,
-    input: OrchestratorMcpThreadReadInput,
+    input: OrchestratorMcpThreadReadToolInput,
   ) => Effect.Effect<OrchestratorMcpThreadReadResult, OrchestratorMcpFailure>;
   readonly readThreadLocal: (
     scope: McpInvocationScope,
@@ -1321,6 +1325,7 @@ const make = Effect.gen(function* () {
   const random = yield* SecureRandom.SecureRandom;
   const threadReadBroker = yield* ThreadReadBroker.ThreadReadBroker;
   const peerForwarding = yield* PeerForwarding.PeerForwarding;
+  const peerLinks = yield* PeerLinks.PeerLinks;
   const actionResume = yield* ActionResume.ActionResume;
   const threadManagement = yield* ThreadManagementService.ThreadManagementService;
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
@@ -1415,7 +1420,15 @@ const make = Effect.gen(function* () {
         limits: clientModeCeiling(scope.client),
       } as const;
     }
-    const parent = yield* loadCallerRecords(scope.thread.threadId, fields);
+    // Metadata reads need no execution authority; writes and routed reads request runs explicitly.
+    const parent: CapturedMcpCaller =
+      fields.length === 0
+        ? {
+            ...(yield* loadThreadRecords(scope.thread.threadId, [])),
+            runs: [],
+            invocationRun: undefined,
+          }
+        : yield* loadMcpCaller(scope.thread, loadThreadRecords);
     return {
       parent,
       limits: {
@@ -1426,9 +1439,7 @@ const make = Effect.gen(function* () {
   });
 
   /** The run a loaded caller is acting from; remote read authority follows this run only. */
-  const callerRunId = (caller: Pick<OrchestrationV2ThreadProjection, "runs">) =>
-    (ThreadManagementService.latestActiveRun(caller) ?? ThreadManagementService.latestRun(caller))
-      ?.id;
+  const callerRunId = (caller: CapturedMcpCaller) => caller.invocationRun?.id;
 
   const loadThreadCaller = Effect.fn("OrchestratorMcpService.loadThreadCaller")(function* (
     scope: McpInvocationScope,
@@ -1436,7 +1447,7 @@ const make = Effect.gen(function* () {
   ) {
     yield* requireCapability(scope);
     const threadScope = yield* requireThreadScope(scope, operation);
-    const parent = yield* loadCallerRecords(threadScope.thread.threadId, ["runs"]);
+    const parent = yield* loadMcpCaller(threadScope.thread, loadThreadRecords);
     return { scope: threadScope, parent } as const;
   });
 
@@ -1476,7 +1487,7 @@ const make = Effect.gen(function* () {
     K extends "runs",
   >(scope: McpInvocationScope, threadId: ThreadId, callerFields: ReadonlyArray<K>) {
     const caller = yield* loadCaller(scope, callerFields);
-    // Only the thread row: the caller's own record holds just its active runs.
+    // Only the target thread row: caller records follow the requested fields.
     const target: Pick<OrchestrationV2ThreadProjection, "thread"> =
       caller.parent !== undefined && threadId === caller.parent.thread.id
         ? caller.parent
@@ -2867,23 +2878,38 @@ const make = Effect.gen(function* () {
       };
     }),
     delegateTask: Effect.fn("OrchestratorMcpService.delegateTask")(function* (callerScope, input) {
+      const { scope, parent } = yield* loadThreadCaller(callerScope, "delegate_task");
+      const parentRun = parent.invocationRun;
+      if (
+        parentRun === undefined ||
+        !ThreadManagementService.isActiveRun(parentRun) ||
+        parentRun.rootNodeId === null ||
+        parentRun.providerInstanceId !== scope.thread.providerInstanceId
+      ) {
+        return yield* failure(
+          "parent_not_active",
+          "Delegated tasks require an active run owned by this MCP provider session.",
+        );
+      }
       const environmentId =
         input.target === undefined
           ? undefined
           : PeerForwarding.remoteTarget(callerScope, input.target.environmentId);
       if (input.target !== undefined && environmentId !== undefined) {
         yield* requireCapability(callerScope);
-        const scope = yield* requireThreadScope(callerScope, "delegate_task");
         // The task's child runs as an ordinary thread there; this thread keeps the task.
-        const { taskId } = yield* remoteDelegation.delegate(scope, {
-          ...input,
-          target: { ...input.target, environmentId },
-        });
+        const { taskId } = yield* remoteDelegation.delegate(
+          scope,
+          {
+            ...input,
+            target: { ...input.target, environmentId },
+          },
+          { parentRunId: parentRun.id },
+        );
         return yield* input.mode === "wait"
           ? awaitTask(scope, taskId, taskId, input.timeoutMs)
           : readTask(scope, taskId, false, true);
       }
-      const { scope, parent } = yield* loadThreadCaller(callerScope, "delegate_task");
       if (
         input.target?.projectId !== undefined &&
         input.target.projectId !== parent.thread.projectId
@@ -2891,19 +2917,6 @@ const make = Effect.gen(function* () {
         return yield* failure(
           "invalid_request",
           "A local task runs in this thread's project. Omit target.projectId, or pass target.environmentId to run it in that environment's project.",
-        );
-      }
-      const parentRun = parent.runs
-        .filter(ThreadManagementService.isActiveRun)
-        .toSorted((left, right) => right.ordinal - left.ordinal)[0];
-      if (
-        parentRun === undefined ||
-        parentRun.rootNodeId === null ||
-        parentRun.providerInstanceId !== scope.thread.providerInstanceId
-      ) {
-        return yield* failure(
-          "parent_not_active",
-          "Delegated tasks require an active run owned by this MCP provider session.",
         );
       }
       const providers = yield* loadProviders;
@@ -3325,6 +3338,7 @@ const make = Effect.gen(function* () {
         const parentRun = ThreadManagementService.latestActiveRun(parent);
         if (
           parentRun === undefined ||
+          !ThreadManagementService.isActiveRun(parentRun) ||
           parentRun.rootNodeId === null ||
           parentRun.providerInstanceId !== scope.thread.providerInstanceId
         ) {
@@ -3334,7 +3348,10 @@ const make = Effect.gen(function* () {
           );
         }
         const parentNodeId = parentRun.rootNodeId;
-        const readAuthorization = yield* threadReadBroker.inherit(parent.thread.id, parentRun.id);
+        const readAuthorization =
+          parent.invocationRun === undefined
+            ? ThreadReadAuthorization.defaultValue()
+            : yield* threadReadBroker.inherit(parent.thread.id, parent.invocationRun.id);
         const providers = yield* loadProviders;
         const key = yield* requestKey(input.clientRequestId);
         const created = yield* Effect.forEach(
@@ -3432,13 +3449,14 @@ const make = Effect.gen(function* () {
                     ),
                   );
               } else {
+                const threadReadIntent = yield* readAuthorization.authorize(
+                  threadId,
+                  initialMessage.messageId,
+                );
                 yield* threadManagement
                   .dispatchLaunch({
                     claim,
-                    beforeInitialMessage: readAuthorization.authorize(
-                      threadId,
-                      initialMessage.messageId,
-                    ),
+                    ...(threadReadIntent === undefined ? {} : { threadReadIntent }),
                     initialMessage: {
                       ...initialMessage,
                       type: "message.dispatch",
@@ -3644,40 +3662,24 @@ const make = Effect.gen(function* () {
     }),
     readThreadLocal,
     readThread: Effect.fn("OrchestratorMcpService.readThread")(function* (scope, input) {
-      if (input.via === "client" && input.environmentId === undefined) {
-        return yield* failure("invalid_request", "A client-routed read requires environmentId.");
+      if (input.via !== undefined && input.environmentId === undefined) {
+        return yield* readRouteTargetRequired();
       }
       // Validate the caller before allowing a miss to leave this environment.
       const { parent } = yield* loadCaller(scope, ["runs"]);
-      if (input.environmentId === scope.environmentId) return yield* readThreadLocal(scope, input);
-      const clientAuthority =
-        parent !== undefined &&
-        scope.client === undefined &&
-        parent.thread.linkOrigin === undefined;
-      if (input.via === "client" && !clientAuthority) {
-        return yield* new OrchestratorMcpFailure({
-          code: "capability_denied",
-          threadReadReason: "permission_denied",
-          message:
-            "This caller has no authority to read through the initiating client. Setting via does not grant that authority.",
-        });
-      }
-      if (input.via === "client" && parent !== undefined) {
-        return yield* threadReadBroker.read(parent.thread.id, callerRunId(parent), input);
-      }
-      const remote = PeerForwarding.remoteTarget(scope, input.environmentId);
-      if (remote !== undefined) {
-        return yield* peerForwarding.readThread(scope, remote, input);
-      }
-      return yield* readThreadLocal(scope, input).pipe(
-        Effect.catchIf(
-          (error) => error.code === "thread_not_found",
-          (error) =>
-            !clientAuthority || parent === undefined || input.environmentId !== undefined
-              ? Effect.fail(error)
-              : threadReadBroker.read(parent.thread.id, callerRunId(parent), input),
-        ),
-      );
+      return yield* readThreadWithRoutes(scope, parent?.thread, input, {
+        local: (request) => readThreadLocal(scope, request),
+        client: (request) =>
+          parent === undefined
+            ? Effect.die("Client reads require a validated caller")
+            : threadReadBroker.read(parent.thread.id, callerRunId(parent), request),
+        reference: (request) =>
+          parent === undefined
+            ? Effect.die("Reference client reads require a validated caller")
+            : threadReadBroker.readReference(parent.thread.id, callerRunId(parent), request),
+        peer: (environmentId, request) => peerForwarding.readThread(scope, environmentId, request),
+        peerLink: peerLinks.get,
+      });
     }),
     sendToRemoteThread: Effect.fn("OrchestratorMcpService.sendToRemoteThread")(
       function* (scope, environmentId, input) {
@@ -3720,7 +3722,7 @@ const make = Effect.gen(function* () {
               ? {}
               : { clientRequestId: input.clientRequestId }),
           },
-          input.threadId,
+          { existingThreadId: input.threadId },
         );
         const read = () =>
           threadManagement
@@ -4177,6 +4179,7 @@ export const layer: Layer.Layer<
   | ActionResume.ActionResume
   | ThreadReadBroker.ThreadReadBroker
   | PeerForwarding.PeerForwarding
+  | PeerLinks.PeerLinks
   | ThreadManagementService.ThreadManagementService
   | ThreadLaunchService.ThreadLaunchService
   | GitVcsDriver.GitVcsDriver

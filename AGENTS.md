@@ -192,6 +192,8 @@ message alone does not make Actions unavailable; use the actual disabled reason.
 
 `evals/` checks how real models behave with T3 Code's model-facing text: agent instructions, MCP tool descriptions and schemas, and generated titles. Before you change that text, read [evals/README.md](evals/README.md) and run the evals it names. When you fix a model behavior bug, add a case that fails before the fix.
 
+Thread-read routing has one contract: the `t3_thread_read` tool description and `via` schema, plus the recovery text in `apps/server/src/mcp/ThreadReadDiagnostics.ts`. The attached-thread sentence in `packages/shared/src/composerContextReferences.ts` and "Find mentioned threads" in `packages/provider-core/src/server/orchestrationInstructions.ts` restate it, so change them together.
+
 ## Local Reviews
 
 When given a budget for local reviews (e.g., example: "up to 5 rounds of Astra High review" or "review (up to 3 rounds)", run the reviews & address issues until a review comes back clean, or the budget is exhausted. Always finish addressing issues from the last review! Then proceed (if instructed) with babysitting the pr (addressing ci failures and github review comments). If instructed to merge, do so when ci/github-reviews are clean, even if the last round of local review was not clean. If instructed to "merge if clean", proceed through babysit pr but don't merge if the last local review was not clean, and notify the user.

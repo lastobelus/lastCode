@@ -1,3 +1,9 @@
+import {
+  prepareHandoff,
+  finishHandoff,
+  invalidateHistoricalSources,
+} from "../threadReadAuthority/Handoff.ts";
+import * as DateTime from "effect/DateTime";
 import * as Context from "effect/Context";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
@@ -403,13 +409,26 @@ export const make = Effect.gen(function* () {
   ) =>
     sql
       .withTransaction(
-        revokeActiveSessionsForReplacement(input).pipe(
-          Effect.flatMap((revokedRows) =>
-            createSessionRow(input.session).pipe(
-              Effect.as(revokedRows.map((row) => row.sessionId)),
-            ),
-          ),
-        ),
+        Effect.gen(function* () {
+          // Select the exact replacement set before stamping any row, under this writer transaction.
+          const sources = yield* sql<{ session_id: string }>`SELECT session_id FROM auth_sessions
+            WHERE ${
+              input.replaceSessionId === undefined
+                ? sql`subject = ${input.session.subject}`
+                : sql`session_id = ${input.replaceSessionId}`
+            }
+              AND method = ${input.session.method} AND revoked_at IS NULL AND expires_at > ${DateTime.formatIso(input.revokedAt)}`;
+          const compatible = yield* prepareHandoff(
+            sources.map((row) => row.session_id),
+            input.session,
+          ).pipe(Effect.provideService(SqlClient.SqlClient, sql));
+          const revokedRows = yield* revokeActiveSessionsForReplacement(input);
+          yield* createSessionRow(input.session);
+          yield* finishHandoff(compatible, input.session.sessionId).pipe(
+            Effect.provideService(SqlClient.SqlClient, sql),
+          );
+          return revokedRows.map((row) => row.sessionId);
+        }),
       )
       .pipe(
         Effect.mapError(
@@ -486,16 +505,27 @@ export const make = Effect.gen(function* () {
     );
 
   const revoke: AuthSessionRepository["Service"]["revoke"] = (input) =>
-    revokeSessionRows(input).pipe(
-      Effect.mapError(
-        toPersistenceSqlOrDecodeError(
-          "AuthSessionRepository.revoke:query",
-          "AuthSessionRepository.revoke:decodeRows",
-          { sessionId: input.sessionId },
+    sql
+      .withTransaction(
+        Effect.gen(function* () {
+          const rows = yield* revokeSessionRows(input);
+          if (rows.length === 0)
+            yield* invalidateHistoricalSources([input.sessionId]).pipe(
+              Effect.provideService(SqlClient.SqlClient, sql),
+            );
+          return rows;
+        }),
+      )
+      .pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "AuthSessionRepository.revoke:query",
+            "AuthSessionRepository.revoke:decodeRows",
+            { sessionId: input.sessionId },
+          ),
         ),
-      ),
-      Effect.map((rows) => rows.length > 0),
-    );
+        Effect.map((rows) => rows.length > 0),
+      );
 
   const revokeAllExcept: AuthSessionRepository["Service"]["revokeAllExcept"] = (input) =>
     revokeOtherSessionRows(input).pipe(
@@ -536,15 +566,26 @@ export const make = Effect.gen(function* () {
     );
 
   const revokeByProofKey: AuthSessionRepository["Service"]["revokeByProofKey"] = (input) =>
-    revokeByProofKeyRows(input).pipe(
-      Effect.mapError(
-        toPersistenceSqlOrDecodeError(
-          "AuthSessionRepository.revokeByProofKey:query",
-          "AuthSessionRepository.revokeByProofKey:decodeRows",
+    sql
+      .withTransaction(
+        Effect.gen(function* () {
+          const historical = yield* sql<{ session_id: string }>`SELECT session_id FROM auth_sessions
+        WHERE proof_key_thumbprint = ${input.proofKeyThumbprint} AND revoked_at IS NOT NULL`;
+          yield* invalidateHistoricalSources(historical.map((row) => row.session_id)).pipe(
+            Effect.provideService(SqlClient.SqlClient, sql),
+          );
+          return yield* revokeByProofKeyRows(input);
+        }),
+      )
+      .pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "AuthSessionRepository.revokeByProofKey:query",
+            "AuthSessionRepository.revokeByProofKey:decodeRows",
+          ),
         ),
-      ),
-      Effect.map((rows) => rows.map((row) => row.sessionId)),
-    );
+        Effect.map((rows) => rows.map((row) => row.sessionId)),
+      );
 
   return {
     create,

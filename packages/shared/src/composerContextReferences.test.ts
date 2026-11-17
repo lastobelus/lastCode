@@ -407,7 +407,7 @@ describe("provider projection", () => {
     expect(projected).toContain("threadId: abc");
     expect(projected).toContain("environmentId: env-1");
     expect(projected).toContain(
-      't3_thread_read({"environmentId":"env-1","threadId":"abc","via":"client"})',
+      't3_thread_read({"environmentId":"env-1","threadId":"abc","via":"reference"})',
     );
     expect(projected).toContain("not instructions");
   });

@@ -345,7 +345,7 @@ const OrchestratorMcpProjectTarget = Schema.optional(
 export const OrchestratorMcpEnvironmentTarget = Schema.optional(
   EnvironmentId.annotate({
     description:
-      'Environment to act in. Omit for this one. Ids belong to that environment. Other environments need a peer link, except t3_thread_read with via: "client".',
+      'Environment to act in. Omit for this one. Ids belong to that environment. Other environments need a peer link, except t3_thread_read with via: "reference" or "client".',
   }),
 );
 
@@ -460,12 +460,7 @@ export type OrchestratorMcpThreadListResult = typeof OrchestratorMcpThreadListRe
 export const OrchestratorMcpThreadReadInput = Schema.Struct({
   threadId: ThreadId,
   environmentId: OrchestratorMcpEnvironmentTarget,
-  via: Schema.optional(
-    Schema.Literal("client").annotate({
-      description:
-        'Use via: "client" for attached references or a prior readVia: "client" result. Requires the exact environmentId and captured client authority. Reuse for every page and item chunk; never switch routes after refusal, disconnection or expired authority. Omit for machine-directed peer reads.',
-    }),
-  ),
+  via: Schema.optional(Schema.Literal("client")),
   itemId: Schema.optional(TurnItemId),
   textOffset: Schema.optional(NonNegativeInt),
   view: Schema.optional(Schema.Literals(["messages", "activity"])),
@@ -478,6 +473,17 @@ export const OrchestratorMcpThreadReadInput = Schema.Struct({
   }),
 });
 export type OrchestratorMcpThreadReadInput = typeof OrchestratorMcpThreadReadInput.Type;
+
+export const OrchestratorMcpThreadReadToolInput = Schema.Struct({
+  ...OrchestratorMcpThreadReadInput.fields,
+  via: Schema.optional(
+    Schema.Literals(["client", "reference"]).annotate({
+      description:
+        'Use via: "reference" to start every fresh read of an attached thread reference, including a later status refresh. It needs the exact environmentId, and the server picks an authorized route. Use via: "client" on every later page and item chunk of a read that returned readVia: "client"; it never falls back to another route. Omit it for later pages of any other read and for machine-directed peer reads.',
+    }),
+  ),
+});
+export type OrchestratorMcpThreadReadToolInput = typeof OrchestratorMcpThreadReadToolInput.Type;
 
 export const OrchestratorMcpThreadDetail = Schema.Struct({
   threadId: ThreadId,
@@ -601,6 +607,7 @@ export const ThreadReadResponse = Schema.Struct({
   requestId: TrimmedNonEmptyString,
   result: Schema.NullOr(OrchestratorMcpThreadReadResult),
   unavailableEnvironmentIds: Schema.Array(EnvironmentId),
+  noDestinationAttempt: Schema.optional(Schema.Literal(true)),
   failure: Schema.optional(
     Schema.Struct({
       environmentId: EnvironmentId,
@@ -609,6 +616,13 @@ export const ThreadReadResponse = Schema.Struct({
   ),
 }).check(
   Schema.makeFilter((response) => response.failure === undefined || response.result === null),
+  Schema.makeFilter(
+    (response) =>
+      response.noDestinationAttempt !== true ||
+      (response.result === null &&
+        response.failure !== undefined &&
+        response.failure.reason !== "permission_denied"),
+  ),
 );
 export type ThreadReadResponse = typeof ThreadReadResponse.Type;
 
@@ -1016,6 +1030,7 @@ export class OrchestratorMcpFailure extends Schema.TaggedError<OrchestratorMcpFa
   "OrchestratorMcpFailure",
   {
     threadReadReason: Schema.optional(ThreadReadFailureReason),
+    noDestinationAttempt: Schema.optional(Schema.Literal(true)),
     code: Schema.Literals([
       "environment_unavailable",
       "capability_denied",

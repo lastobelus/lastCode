@@ -112,6 +112,19 @@ import * as DelegatedTaskQuestionReactor from "./DelegatedTaskQuestionReactor.ts
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { makePausedEnvironment } from "./EnvironmentAutomation.testkit.ts";
 
+const assertReadReferenceNonce = (
+  authorizationId: MessageId | undefined,
+  inputIds: ReadonlyArray<string>,
+) => {
+  assert.isDefined(authorizationId);
+  assert.match(
+    authorizationId,
+    /^read-reference:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+  );
+  assert.notInclude(inputIds, authorizationId);
+  return authorizationId;
+};
+
 const layerPlatformTest = Layer.mergeAll(
   WorkspaceAcquisitionTestkit.layer,
   SuspensionRegistryTestkit.layer,
@@ -2478,9 +2491,14 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
       });
       const steered = yield* orchestrator.getThreadProjection(threadId);
       assert.lengthOf(steered.runs, 1);
+      const steerReferenceId = assertReadReferenceNonce(
+        steered.messages.find((message) => message.id === steerMessageId)?.threadReadContext
+          ?.authorizationId,
+        [steerMessageId, steerCommandId],
+      );
       assert.deepEqual(
         steered.messages.find((message) => message.id === steerMessageId)?.threadReadContext,
-        { authorizationId: steerMessageId, capturedAt: DateTime.toEpochMillis(now) },
+        { authorizationId: steerReferenceId, capturedAt: DateTime.toEpochMillis(now) },
       );
       assert.equal(
         steered.messages.find((message) => message.id === steerMessageId)?.runId,
@@ -2552,6 +2570,18 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
         text: "Read [Reference](t3-context://v1/thread/steering-reference).",
         context: { version: 1, records: [reference] },
       });
+      const editedMessage = (yield* orchestrator.getThreadProjection(threadId)).messages.find(
+        (message) => message.id === queuedMessageId,
+      )!;
+      const editedReferenceId = assertReadReferenceNonce(
+        editedMessage.threadReadContext?.authorizationId,
+        [queuedMessageId, "runtime-steer-edited", "queued-edit-context:runtime-steer-edited"],
+      );
+      assert.notEqual(editedReferenceId, steerReferenceId);
+      assert.deepEqual(editedMessage.threadReadContext, {
+        authorizationId: editedReferenceId,
+        capturedAt: DateTime.toEpochMillis(yield* DateTime.now),
+      });
       yield* TestClock.adjust("1 millis");
       yield* orchestrator.dispatch({
         type: "queued-message.promote-to-steer",
@@ -2564,7 +2594,7 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
       const promotedMessage = promoted.messages.find((row) => row.id === queuedMessageId)!;
       assert.equal(promotedMessage.runId, run.id);
       assert.deepEqual(promotedMessage.threadReadContext, {
-        authorizationId: MessageId.make("queued-edit-context:runtime-steer-edited"),
+        authorizationId: editedReferenceId,
         capturedAt: DateTime.toEpochMillis(yield* DateTime.now),
       });
       for (const variant of ["selection", "interrupting", "unsupported", "stale"] as const) {
@@ -3168,10 +3198,18 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
         const answerId = MessageId.make(`async-answer:${requestId}`);
         const answered = yield* orchestrator.getThreadProjection(threadId);
         const answer = answered.messages.find((message) => message.id === answerId)!;
+        const answerReferenceId = assertReadReferenceNonce(
+          answer.threadReadContext?.authorizationId,
+          [answerId, commandId, `answer-context:${commandId}`],
+        );
         assert.deepEqual(answer.threadReadContext, {
-          authorizationId: MessageId.make(`answer-context:${commandId}`),
+          authorizationId: answerReferenceId,
           capturedAt: DateTime.toEpochMillis(now),
         });
+        assert.deepEqual(
+          answered.runtimeRequests.find((request) => request.id === requestId)?.threadReadContext,
+          { authorizationId: answerReferenceId, records: [reference] },
+        );
         assert.deepEqual(answer.context?.records, [reference]);
         if (delivery === "steer") {
           assert.equal(answer.runId, run.id);
@@ -3356,6 +3394,7 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
           assert.equal(notices[0]?.nodeId, recovered.runs[0]?.rootNodeId);
           assert.equal(notices[0]?.ordinal, Math.max(...runItems.map((item) => item.ordinal)));
         }
+        const answeredAt = yield* DateTime.now;
         yield* orchestrator.dispatch({
           type: "runtime-request.respond",
           commandId: CommandId.make(`recovery-answer-${trigger}-${scope}`),
@@ -3387,10 +3426,19 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
           answered.runtimeRequests.find((row) => row.id === requestId)?.status,
           "resolved",
         );
+        const answerReferenceId = assertReadReferenceNonce(
+          answered.runtimeRequests.find((row) => row.id === requestId)?.threadReadContext
+            ?.authorizationId,
+          [
+            `async-answer:${requestId}`,
+            `recovery-answer-${trigger}-${scope}`,
+            `answer-context:recovery-answer-${trigger}-${scope}`,
+          ],
+        );
         assert.deepEqual(
           answered.runtimeRequests.find((row) => row.id === requestId)?.threadReadContext,
           {
-            authorizationId: MessageId.make(`answer-context:recovery-answer-${trigger}-${scope}`),
+            authorizationId: answerReferenceId,
             records: [
               {
                 version: 1,
@@ -3404,6 +3452,10 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
             ],
           },
         );
+        assert.deepEqual(answered.messages.at(-1)?.threadReadContext, {
+          authorizationId: answerReferenceId,
+          capturedAt: DateTime.toEpochMillis(answeredAt),
+        });
         assert.equal(
           answered.runs.at(-1)?.userMessageId,
           MessageId.make(`async-answer:${requestId}`),
@@ -3981,7 +4033,10 @@ it.layer(layerTest)("RuntimeLayer.layer", (it) => {
       const [deliveryEffect] = yield* outbox.listByCommandId(commandId);
       assert.equal(deliveryEffect?.request.type, "runtime-request.respond");
       if (deliveryEffect?.request.type === "runtime-request.respond") {
-        assert.include(String(deliveryEffect.request.answers?.color), '"via":"client"');
+        assert.include(
+          String(deliveryEffect.request.answers?.color),
+          't3_thread_read({"environmentId":"source-environment","threadId":"source-thread","via":"reference"})',
+        );
         assert.include(String(deliveryEffect.request.answers?.color), "source-thread");
       }
       assert.equal(deliveryEffect?.status, "failed");
@@ -12146,8 +12201,16 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       const editedMessage = afterEdit.messages.find(
         (message) => message.id === queuedRun.userMessageId,
       )!;
+      const editedReferenceId = assertReadReferenceNonce(
+        editedMessage.threadReadContext?.authorizationId,
+        [
+          queuedRun.userMessageId,
+          "runtime-layer-queued-edit-edit",
+          "queued-edit-context:runtime-layer-queued-edit-edit",
+        ],
+      );
       assert.deepEqual(editedMessage.threadReadContext, {
-        authorizationId: MessageId.make("queued-edit-context:runtime-layer-queued-edit-edit"),
+        authorizationId: editedReferenceId,
         capturedAt: DateTime.toEpochMillis(editedMessage.updatedAt),
       });
       assert.deepEqual(editedMessage.context?.records, [reference, stale]);

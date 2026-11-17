@@ -184,7 +184,12 @@ it.effect.each([
               readLatestSummary: () => Effect.succeed(null),
             }),
           ),
-          Layer.provide(ThreadReadBroker.layer),
+          Layer.provide(
+            Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+              forSession: () => ({ authorize: () => Effect.undefined }),
+              inherit: () => Effect.succeed({ authorize: () => Effect.undefined }),
+            }),
+          ),
           Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
           Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
         ),

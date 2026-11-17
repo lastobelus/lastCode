@@ -35,6 +35,22 @@ export const resolveThreadRead = Effect.fn("connection.resolveThreadRead")(funct
     input: OrchestratorMcpThreadReadInput,
   ) => Effect.Effect<OrchestratorMcpThreadReadResult, E, R>,
 ) {
+  if (input.environmentId !== undefined && input.environmentId !== sourceEnvironmentId) {
+    const destination = entries.get(input.environmentId);
+    const unsupported =
+      destination?.serverUpdateRequired === true || destination?.unsupportedReason !== undefined;
+    if (destination === undefined || !destination.enabled || unsupported) {
+      return {
+        result: null,
+        unavailableEnvironmentIds: [],
+        failure: {
+          environmentId: input.environmentId,
+          reason: unsupported ? ("unsupported" as const) : ("unavailable" as const),
+        },
+        noDestinationAttempt: true as const,
+      };
+    }
+  }
   const candidates = [...entries.entries()]
     .filter(
       ([environmentId, entry]) =>

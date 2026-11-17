@@ -3594,10 +3594,11 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       const offerAndWait = Effect.fnUntraced(function* (
         message: SDKMessage,
         offered?: Deferred.Deferred<void>,
+        queue = processQueues.at(-1) ?? sdkMessages,
       ) {
         const processed = yield* Deferred.make<void>();
         processedMessages.set(message, processed);
-        yield* Queue.offer(processQueues.at(-1) ?? sdkMessages, message);
+        yield* Queue.offer(queue, message);
         if (offered !== undefined) yield* Deferred.succeed(offered, undefined);
         yield* Deferred.await(processed);
       });
@@ -3880,6 +3881,75 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       };
     });
   const makeWakeHarness = makeWakeHarnessWithOptions();
+
+  const makeWakeMcpBarrier = Effect.fnUntraced(function* (
+    harness: Effect.Success<typeof makeWakeHarness>,
+  ) {
+    const sessions = yield* McpProviderSessions.McpProviderSessions;
+    const config = {
+      environmentId: EnvironmentId.make("env-wake-barrier"),
+      threadId: harness.threadId,
+      providerInstanceId: ProviderInstanceId.make("claude"),
+      providerSessionId: "credential-wake-barrier",
+      endpoint: "http://localhost/mcp",
+      authorizationHeader: "Bearer test-wake-barrier",
+      browserToolsAvailable: true,
+    };
+    yield* sessions.set(config);
+    const lookup = (id: string) =>
+      sessions.resolveExecution({
+        threadId: harness.threadId,
+        providerSessionId: config.providerSessionId,
+        authorizationHeader: config.authorizationHeader,
+        metadata: { "claudecode/toolUseId": id },
+      });
+    const hold = Effect.fnUntraced(function* (id: string) {
+      const hook = harness.getOpenedOptions()?.hooks?.PreToolUse?.[0]?.hooks[0];
+      if (hook === undefined) throw new Error("Native T3 tools require a frame barrier");
+      const started = yield* Deferred.make<void>();
+      const released = yield* Deferred.make<void>();
+      const permission = yield* Effect.gen(function* () {
+        yield* Deferred.succeed(started, undefined);
+        yield* Effect.promise((signal) =>
+          hook(
+            {
+              hook_event_name: "PreToolUse",
+              session_id: WAKE_NATIVE_SESSION,
+              transcript_path: "/transcript.jsonl",
+              cwd: "/workspace",
+              tool_name: "mcp__t3-code__t3_thread_send",
+              tool_input: {},
+              tool_use_id: id,
+            },
+            undefined,
+            { signal },
+          ),
+        );
+        const execution = yield* lookup(id);
+        yield* Deferred.succeed(released, undefined);
+        return execution;
+      }).pipe(Effect.forkScoped);
+      yield* Deferred.await(started);
+      yield* harness.offerAndWait(
+        claudeSdkFrame({
+          type: "assistant",
+          message: {
+            model: "claude-sonnet-4-6",
+            id: `msg_${id}`,
+            type: "message",
+            role: "assistant",
+            content: [{ type: "tool_use", id, name: "mcp__t3-code__t3_thread_send", input: {} }],
+          },
+          parent_tool_use_id: null,
+          uuid: `frame-${id}`,
+          session_id: WAKE_NATIVE_SESSION,
+        }),
+      );
+      assert.isUndefined(yield* lookup(id));
+      return { permission, released };
+    });
+    return { hold, lookup };
+  });
 
   describe("ClaudeAdapterV2 session title sync", () => {
     type TitleSyncHarness = Effect.Success<ReturnType<typeof makeWakeHarnessWithOptions>>;
@@ -15369,13 +15439,248 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
-  it.effect.each(["local", "remote", "remote-disposed", "remote-settled"] as const)(
-    "binds $0 MCP tool IDs only after an explicit prompt echo and ends them at the native result",
+  it.effect.each(["active-wake", "buffered-wake", "buffered-result", "resume"] as const)(
+    "binds $0 root MCP calls to the exact attached continuation execution",
+    (arrival) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const sessions = yield* McpProviderSessions.McpProviderSessions;
+          const registrationStarted = yield* Deferred.make<void>();
+          const allowRegistration = yield* Deferred.make<void>();
+          const registeredWakeExecutions: Array<
+            { readonly runId: RunId; readonly attemptId: RunAttemptId } | undefined
+          > = [];
+          const harness = yield* makeWakeHarnessWithOptions({ separateQueryMessages: true }).pipe(
+            Effect.provideService(McpProviderSessions.McpProviderSessions, {
+              ...sessions,
+              registerExecution: (threadId, origin, execution, nativeOwner): Effect.Effect<void> =>
+                Effect.gen(function* () {
+                  if (origin.provider === "claude" && origin.toolUseId === "wake-barrier") {
+                    yield* Deferred.succeed(registrationStarted, undefined);
+                    yield* Deferred.await(allowRegistration);
+                  }
+                  yield* sessions.registerExecution(threadId, origin, execution, nativeOwner);
+                  if (origin.provider === "claude" && origin.toolUseId === "wake-root") {
+                    registeredWakeExecutions.push(yield* lookup(origin.toolUseId));
+                  }
+                }),
+            }),
+          );
+          const config = {
+            environmentId: EnvironmentId.make("env-wake-origin"),
+            threadId: harness.threadId,
+            providerInstanceId: ProviderInstanceId.make("claude"),
+            providerSessionId: "credential-wake-origin",
+            endpoint: "http://localhost/mcp",
+            authorizationHeader: "Bearer test-wake-origin",
+            browserToolsAvailable: true,
+          };
+          yield* sessions.set(config);
+          const lookup = (id: string) =>
+            sessions.resolveExecution({
+              threadId: harness.threadId,
+              providerSessionId: config.providerSessionId,
+              authorizationHeader: config.authorizationHeader,
+              metadata: { "claudecode/toolUseId": id },
+            });
+          const frame = (
+            id: string,
+            parentToolUseId: string | null = null,
+            toolName = "mcp__t3-code__t3_thread_send",
+          ) =>
+            claudeSdkFrame({
+              type: "assistant",
+              message: {
+                model: "claude-sonnet-4-6",
+                id: `msg_${id}`,
+                type: "message",
+                role: "assistant",
+                content: [{ type: "tool_use", id, name: toolName, input: {} }],
+              },
+              parent_tool_use_id: parentToolUseId,
+              uuid: `frame-${id}`,
+              session_id: WAKE_NATIVE_SESSION,
+            });
+          const makeInput = (ordinal: number) =>
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make(`wake-origin-${ordinal}`),
+              text: "Continue",
+              attachments: [],
+              providerTurnOrdinal: ordinal,
+              ...(ordinal === 2 && arrival !== "resume"
+                ? { messageCreatedBy: "agent", messageCreationSource: "provider" }
+                : {}),
+            });
+          const now = yield* DateTime.now;
+          const first = makeInput(1);
+          yield* harness.runtime.startTurn(first);
+          yield* harness.offerAndWait(
+            claudeSdkFrame({ ...frame("first"), user_message_uuid: harness.promptUuid(0) }),
+          );
+          yield* harness.offerAndWait(turnOneResult);
+          yield* harness.awaitTerminal(1);
+          assert.isUndefined(yield* lookup("first"));
+          const oldQueryMessages = harness.getOpenedMessages();
+          if (oldQueryMessages === undefined) throw new Error("Expected an open native query");
+          const hook = harness.getOpenedOptions()?.hooks?.PreToolUse?.[0]?.hooks[0];
+          if (hook === undefined) throw new Error("Native T3 tools require a frame barrier");
+          const invokeHook = (id: string) =>
+            Effect.promise(() =>
+              hook(
+                {
+                  hook_event_name: "PreToolUse",
+                  session_id: WAKE_NATIVE_SESSION,
+                  transcript_path: "/transcript.jsonl",
+                  cwd: "/workspace",
+                  tool_name: "mcp__t3-code__t3_thread_send",
+                  tool_input: {},
+                  tool_use_id: id,
+                },
+                undefined,
+                { signal: new AbortController().signal },
+              ),
+            );
+          const wake = {
+            ...makeInput(2),
+            ...(arrival === "resume" ? { resume: true as const } : {}),
+          };
+          const buffered = arrival === "buffered-wake" || arrival === "buffered-result";
+          const rootHookStarted = yield* Deferred.make<void>();
+          const rootDispatched = yield* Deferred.make<void>();
+          const rootPermission = yield* Effect.gen(function* () {
+            yield* Deferred.succeed(rootHookStarted, undefined);
+            yield* invokeHook("wake-root");
+            return yield* lookup("wake-root");
+          }).pipe(
+            Effect.tap(() => Deferred.succeed(rootDispatched, undefined)),
+            Effect.forkScoped,
+          );
+          yield* Deferred.await(rootHookStarted);
+          if (buffered) {
+            yield* harness.offerAndWait(frame("wake-root"));
+            if (arrival === "buffered-result") yield* harness.offerAndWait(wakeResult);
+            assert.isUndefined(yield* lookup("wake-root"));
+            assert.isFalse(yield* Deferred.isDone(rootDispatched));
+          } else if (arrival === "active-wake") {
+            yield* harness.offerAndWait(wakeTurnInit);
+          }
+          yield* harness.runtime.startTurn(wake);
+          if (arrival === "resume") {
+            assert.notStrictEqual(harness.getOpenedMessages(), oldQueryMessages);
+            yield* harness.offerAndWait(frame("old-query"), undefined, oldQueryMessages);
+            assert.isUndefined(yield* lookup("old-query"));
+          }
+          if (!buffered) yield* harness.offerAndWait(frame("wake-root"));
+          const expected = { runId: wake.runId, attemptId: wake.attemptId };
+          assert.deepEqual(registeredWakeExecutions, [expected]);
+          const rootExecution = yield* Fiber.join(rootPermission);
+          if (arrival === "buffered-result") {
+            yield* harness.awaitTerminal(2);
+            assert.isUndefined(yield* lookup("wake-root"));
+            return;
+          }
+          assert.deepEqual(rootExecution, expected);
+          assert.deepEqual(yield* lookup("wake-root"), expected);
+
+          const dispatched = yield* Deferred.make<void>();
+          const permission = yield* invokeHook("wake-barrier").pipe(
+            Effect.andThen(() => lookup("wake-barrier")),
+            Effect.tap(() => Deferred.succeed(dispatched, undefined)),
+            Effect.forkScoped,
+          );
+          const consume = yield* harness
+            .offerAndWait(frame("wake-barrier"))
+            .pipe(Effect.forkScoped);
+          yield* Deferred.await(registrationStarted);
+          assert.isFalse(yield* Deferred.isDone(dispatched));
+          assert.isUndefined(yield* lookup("wake-barrier"));
+          yield* Deferred.succeed(allowRegistration, undefined);
+          assert.deepEqual(yield* Fiber.join(permission), expected);
+          yield* Fiber.join(consume);
+          yield* harness.offerAndWait(
+            claudeSdkFrame({ ...frame("foreign-wake"), session_id: "foreign-native-session" }),
+          );
+          assert.isUndefined(yield* lookup("foreign-wake"));
+          yield* harness.offerAndWait(frame("wake-launch", null, "Agent"));
+          yield* harness.offerAndWait(
+            makeSubagentTaskStartedFrame({
+              taskId: "native-wake-child",
+              toolUseId: "wake-launch",
+              uuid: "00000000-0000-4000-8000-000000000781",
+            }),
+          );
+          yield* harness.offerAndWait(frame("wake-child", "wake-launch"));
+          const child = yield* lookup("wake-child");
+          assert.deepEqual({ runId: child?.runId, attemptId: child?.attemptId }, expected);
+          yield* harness.offerAndWait(wakeResult);
+          yield* harness.awaitTerminal(2);
+          assert.isUndefined(yield* lookup("wake-root"));
+          assert.isUndefined(yield* lookup("wake-barrier"));
+          yield* invokeHook("wake-child");
+          yield* harness.offerAndWait(
+            makeSubagentNotificationFrame({
+              taskId: "native-wake-child",
+              toolUseId: "wake-launch",
+              summary: "Done",
+              uuid: "00000000-0000-4000-8000-000000000782",
+            }),
+          );
+          assert.isUndefined(yield* lookup("wake-child"));
+          yield* harness.offerAndWait(frame("ended-child", "wake-launch"));
+          assert.isUndefined(yield* lookup("ended-child"));
+        }),
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
+        ),
+      ),
+  );
+
+  it.effect.each([
+    "root",
+    "root-steer-started",
+    "root-steer-echo",
+    "independent",
+    "root-result-only",
+    "local",
+    "remote",
+    "remote-disposed",
+    "remote-settled",
+  ] as const)(
+    "binds $0 MCP tool IDs only after verified prompt ownership and ends them at the native result",
     (ownership) =>
       Effect.scoped(
         Effect.gen(function* () {
-          const harness = yield* makeWakeHarness;
           const sessions = yield* McpProviderSessions.McpProviderSessions;
+          const registrationStarted = yield* Deferred.make<void>();
+          const allowRegistration = yield* Deferred.make<void>();
+          const childRegistrationStarted = yield* Deferred.make<void>();
+          const allowChildRegistration = yield* Deferred.make<void>();
+          const harness = yield* makeWakeHarness.pipe(
+            Effect.provideService(McpProviderSessions.McpProviderSessions, {
+              ...sessions,
+              registerExecution: (threadId, origin, execution, nativeOwner) =>
+                Effect.gen(function* () {
+                  if (origin.provider === "claude" && origin.toolUseId === "a") {
+                    yield* Deferred.succeed(registrationStarted, undefined);
+                    yield* Deferred.await(allowRegistration);
+                  }
+                  if (origin.provider === "claude" && origin.toolUseId === "child-early") {
+                    yield* Deferred.succeed(childRegistrationStarted, undefined);
+                    yield* Deferred.await(allowChildRegistration);
+                  }
+                  yield* sessions.registerExecution(threadId, origin, execution, nativeOwner);
+                }),
+            }),
+          );
           const config = {
             environmentId: EnvironmentId.make("env-origin"),
             threadId: harness.threadId,
@@ -15393,7 +15698,23 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               authorizationHeader: config.authorizationHeader,
               metadata: { "claudecode/toolUseId": id },
             });
-          const frame = (id: string, promptUuid?: string) =>
+          const expectChildExecution = Effect.fnUntraced(function* (
+            id: string,
+            expected: { readonly runId: RunId; readonly attemptId: RunAttemptId },
+          ) {
+            const execution = yield* lookup(id);
+            assert.deepEqual(
+              { runId: execution?.runId, attemptId: execution?.attemptId },
+              expected,
+            );
+            return execution;
+          });
+          const frame = (
+            id: string,
+            promptUuid?: string,
+            parentToolUseId: string | null = null,
+            toolName = "mcp__t3-code__run_project_action_and_resume",
+          ) =>
             claudeSdkFrame({
               type: "assistant",
               message: {
@@ -15405,12 +15726,15 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                   {
                     type: "tool_use",
                     id,
-                    name: "mcp__t3-code__run_project_action_and_resume",
-                    input: { actionId: "test" },
+                    name: toolName,
+                    input:
+                      toolName === "SendMessage"
+                        ? { to: "native-child-a", message: "Audit again." }
+                        : { actionId: "test" },
                   },
                 ],
               },
-              parent_tool_use_id: null,
+              parent_tool_use_id: parentToolUseId,
               uuid: "00000000-0000-4000-8000-000000000791",
               session_id: WAKE_NATIVE_SESSION,
               ...(promptUuid === undefined ? {} : { user_message_uuid: promptUuid }),
@@ -15427,66 +15751,182 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             ...first,
             appThread: {
               ...first.appThread,
-              ...(ownership === "local"
-                ? {
-                    lineage: {
-                      rootThreadId: ThreadId.make("parent"),
-                      parentThreadId: ThreadId.make("parent"),
-                      relationshipToParent: "subagent" as const,
-                    },
-                  }
-                : {
-                    remoteDelegations: [
-                      {
-                        parentEnvironmentId: EnvironmentId.make("remote-parent"),
-                        parentThreadId: ThreadId.make("parent"),
-                        sourceTaskId: NodeId.make("remote-task"),
-                        delegationId: "remote-delegation",
-                        linkSessionId: "remote-link",
-                        stage:
-                          ownership === "remote-disposed"
-                            ? ("disposed" as const)
-                            : ownership === "remote-settled"
-                              ? ("settled" as const)
-                              : ("active" as const),
+              ...(ownership.startsWith("root")
+                ? {}
+                : ownership === "independent"
+                  ? {
+                      lineage: {
+                        rootThreadId: harness.threadId,
+                        parentThreadId: null,
+                        relationshipToParent: null,
+                        independent: true,
                       },
-                    ],
-                  }),
+                    }
+                  : ownership === "local"
+                    ? {
+                        lineage: {
+                          rootThreadId: ThreadId.make("parent"),
+                          parentThreadId: ThreadId.make("parent"),
+                          relationshipToParent: "subagent" as const,
+                        },
+                      }
+                    : {
+                        remoteDelegations: [
+                          {
+                            parentEnvironmentId: EnvironmentId.make("remote-parent"),
+                            parentThreadId: ThreadId.make("parent"),
+                            sourceTaskId: NodeId.make("remote-task"),
+                            delegationId: "remote-delegation",
+                            linkSessionId: "remote-link",
+                            stage:
+                              ownership === "remote-disposed"
+                                ? ("disposed" as const)
+                                : ownership === "remote-settled"
+                                  ? ("settled" as const)
+                                  : ("active" as const),
+                          },
+                        ],
+                      }),
             },
           });
           yield* harness.offerAndWait(frame("unknown"));
           assert.isUndefined(yield* lookup("unknown"));
-          const hook = harness.getOpenedOptions()?.hooks?.PreToolUse?.[0]?.hooks[0];
+          const preToolUse = harness.getOpenedOptions()?.hooks?.PreToolUse?.[0];
+          assert.match("mcp__t3-code__t3_thread_read", new RegExp(preToolUse?.matcher ?? "^$"));
+          assert.match(
+            "mcp__t3-code__run_project_action_and_resume",
+            new RegExp(preToolUse?.matcher ?? "^$"),
+          );
+          assert.notMatch("mcp__other__t3_thread_list", new RegExp(preToolUse?.matcher ?? "^$"));
+          for (const name of ["t3_thread_list", "preview_snapshot", "device_open", "html_render"]) {
+            assert.notMatch(`mcp__t3-code__${name}`, new RegExp(preToolUse?.matcher ?? "^$"));
+          }
+          const hook = preToolUse?.hooks[0];
           if (hook === undefined)
-            throw new Error("Child Actions require a pre-dispatch frame barrier");
-          const hookStarted = yield* Deferred.make<void>();
-          const permission = yield* Effect.gen(function* () {
-            yield* Deferred.succeed(hookStarted, undefined);
-            return yield* Effect.promise(() =>
+            throw new Error("Native T3 tools require a pre-dispatch frame barrier");
+          const invokeHook = (id: string) =>
+            Effect.promise(() =>
               hook(
                 {
                   hook_event_name: "PreToolUse",
                   session_id: WAKE_NATIVE_SESSION,
                   transcript_path: "/transcript.jsonl",
                   cwd: "/workspace",
-                  tool_name: "mcp__t3-code__run_project_action_and_resume",
-                  tool_input: { actionId: "test" },
-                  tool_use_id: "a",
+                  tool_name: "mcp__t3-code__t3_thread_read",
+                  tool_input: {},
+                  tool_use_id: id,
                 },
                 undefined,
                 { signal: new AbortController().signal },
               ),
             );
+          // A consumed frame with no prompt identity must finish the barrier without borrowing a run.
+          yield* invokeHook("unknown");
+          assert.isUndefined(yield* lookup("unknown"));
+          if (ownership === "root-result-only") {
+            for (const [id, state, commandUuid, sessionId] of [
+              ["ack-only", "accepted", harness.promptUuid(0), WAKE_NATIVE_SESSION],
+              ["foreign-start", "started", "foreign-prompt", WAKE_NATIVE_SESSION],
+              ["foreign-session", "started", harness.promptUuid(0), "foreign-session"],
+            ] as const) {
+              yield* harness.offerAndWait(
+                claudeSdkFrame({
+                  type: "command_lifecycle",
+                  command_uuid: commandUuid,
+                  state,
+                  uuid: "00000000-0000-4000-8000-000000000790",
+                  session_id: sessionId,
+                }),
+              );
+              yield* harness.offerAndWait(frame(id));
+              yield* invokeHook(id);
+              assert.isUndefined(yield* lookup(id));
+            }
+            yield* harness.offerAndWait(
+              claudeSdkFrame({
+                type: "command_lifecycle",
+                command_uuid: harness.promptUuid(0),
+                state: "started",
+                uuid: "00000000-0000-4000-8000-000000000798",
+                session_id: WAKE_NATIVE_SESSION,
+              }),
+            );
+          }
+          const hookStarted = yield* Deferred.make<void>();
+          const dispatched = yield* Deferred.make<void>();
+          const permission = yield* Effect.gen(function* () {
+            yield* Deferred.succeed(hookStarted, undefined);
+            yield* invokeHook("a");
+            const execution = yield* lookup("a");
+            yield* Deferred.succeed(dispatched, undefined);
+            return execution;
           }).pipe(Effect.forkScoped);
           yield* Deferred.await(hookStarted);
-          yield* harness.offerAndWait(frame("a", harness.promptUuid(0)));
-          yield* Fiber.join(permission);
+          const consumeFrame = yield* harness
+            .offerAndWait(
+              frame(
+                "a",
+                ownership === "root-result-only" ? undefined : harness.promptUuid(0),
+                null,
+                "mcp__t3-code__t3_thread_read",
+              ),
+            )
+            .pipe(Effect.forkScoped);
+          yield* Deferred.await(registrationStarted);
+          assert.isFalse(yield* Deferred.isDone(dispatched));
+          assert.isUndefined(yield* lookup("a"));
+          yield* Deferred.succeed(allowRegistration, undefined);
+          assert.deepEqual(yield* Fiber.join(permission), {
+            runId: first.runId,
+            attemptId: first.attemptId,
+          });
+          yield* Fiber.join(consumeFrame);
           assert.deepEqual(yield* lookup("a"), { runId: first.runId, attemptId: first.attemptId });
           yield* harness.offerAndWait(frame("a-later"));
           assert.deepEqual(yield* lookup("a-later"), {
             runId: first.runId,
             attemptId: first.attemptId,
           });
+          yield* harness.offerAndWait(frame("launch-a", undefined, null, "Agent"));
+          yield* harness.offerAndWait(frame("child-early", undefined, "launch-a"));
+          assert.isUndefined(yield* lookup("child-early"));
+          const childDispatched = yield* Deferred.make<void>();
+          const childPermission = yield* Effect.gen(function* () {
+            yield* invokeHook("child-early");
+            const execution = yield* lookup("child-early");
+            yield* Deferred.succeed(childDispatched, undefined);
+            return execution;
+          }).pipe(Effect.forkScoped);
+          const startChild = yield* harness
+            .offerAndWait(
+              makeSubagentTaskStartedFrame({
+                taskId: "native-child-a",
+                toolUseId: "launch-a",
+                uuid: "00000000-0000-4000-8000-000000000794",
+              }),
+            )
+            .pipe(Effect.forkScoped);
+          yield* Deferred.await(childRegistrationStarted);
+          assert.isFalse(yield* Deferred.isDone(childDispatched));
+          assert.isUndefined(yield* lookup("child-early"));
+          yield* Deferred.succeed(allowChildRegistration, undefined);
+          const earlyChildExecution = yield* Fiber.join(childPermission);
+          assert.deepEqual(
+            { runId: earlyChildExecution?.runId, attemptId: earlyChildExecution?.attemptId },
+            { runId: first.runId, attemptId: first.attemptId },
+          );
+          yield* Fiber.join(startChild);
+          yield* expectChildExecution("child-early", {
+            runId: first.runId,
+            attemptId: first.attemptId,
+          });
+          yield* harness.offerAndWait(frame("child-a", undefined, "launch-a"));
+          yield* expectChildExecution("child-a", {
+            runId: first.runId,
+            attemptId: first.attemptId,
+          });
+          yield* harness.offerAndWait(frame("child-unknown", undefined, "forged-launch"));
+          assert.isUndefined(yield* lookup("child-unknown"));
           yield* harness.offerAndWait(
             claudeSdkFrame({
               ...makeResultFrame({ uuid: "00000000-0000-4000-8000-000000000792", result: "Done" }),
@@ -15495,6 +15935,12 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           );
           yield* harness.awaitTerminal(1);
           assert.isUndefined(yield* lookup("a"));
+          // Root completion must keep an already consumed background child frame's barrier.
+          yield* invokeHook("child-a");
+          yield* expectChildExecution("child-a", {
+            runId: first.runId,
+            attemptId: first.attemptId,
+          });
           const second = makeClaudeTestTurnInput({
             threadId: harness.threadId,
             providerThread: harness.providerThread,
@@ -15507,11 +15953,151 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           yield* harness.runtime.startTurn(second);
           yield* harness.offerAndWait(frame("wake"));
           assert.isUndefined(yield* lookup("wake"));
-          yield* harness.offerAndWait(frame("b", harness.promptUuid(1)));
+          if (ownership === "root-result-only") {
+            // The first result established result_only mode; the next call still needs a start signal.
+            yield* harness.offerAndWait(
+              claudeSdkFrame({
+                type: "command_lifecycle",
+                command_uuid: harness.promptUuid(1),
+                state: "started",
+                uuid: "00000000-0000-4000-8000-000000000787",
+                session_id: WAKE_NATIVE_SESSION,
+              }),
+            );
+          }
+          yield* harness.offerAndWait(
+            frame("b", ownership === "root-result-only" ? undefined : harness.promptUuid(1)),
+          );
           assert.deepEqual(yield* lookup("b"), {
             runId: second.runId,
             attemptId: second.attemptId,
           });
+          if (ownership === "root-steer-started" || ownership === "root-steer-echo") {
+            const idAllocator = yield* IdAllocator.IdAllocatorV2;
+            yield* harness.runtime.steerTurn({
+              threadId: harness.threadId,
+              runId: second.runId,
+              providerThread: harness.providerThread,
+              providerTurnId: idAllocator.derive.providerTurn({
+                driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+                nativeTurnId: `turn:${second.attemptId}`,
+              }),
+              message: {
+                createdBy: "user",
+                creationSource: "web",
+                messageId: MessageId.make("message-origin-steer"),
+                text: "Keep working on the same request.",
+                attachments: [],
+              },
+            });
+            yield* harness.offerAndWait(
+              ownership === "root-steer-started"
+                ? claudeSdkFrame({
+                    type: "command_lifecycle",
+                    command_uuid: harness.promptUuid(2),
+                    state: "started",
+                    uuid: "00000000-0000-4000-8000-000000000786",
+                    session_id: WAKE_NATIVE_SESSION,
+                  })
+                : frame("steer-echo", harness.promptUuid(2)),
+            );
+            yield* harness.offerAndWait(frame("after-steer"));
+            yield* invokeHook("after-steer");
+            assert.deepEqual(yield* lookup("after-steer"), {
+              runId: second.runId,
+              attemptId: second.attemptId,
+            });
+          }
+          yield* harness.offerAndWait(frame("child-a-later", undefined, "launch-a"));
+          yield* expectChildExecution("child-a-later", {
+            runId: first.runId,
+            attemptId: first.attemptId,
+          });
+          yield* harness.offerAndWait(
+            claudeSdkFrame({
+              ...frame("foreign-child", undefined, "launch-a"),
+              session_id: "foreign-native-session",
+            }),
+          );
+          assert.isUndefined(yield* lookup("foreign-child"));
+          yield* harness.offerAndWait(
+            makeSubagentNotificationFrame({
+              taskId: "native-child-a",
+              toolUseId: "launch-a",
+              summary: "Done",
+              uuid: "00000000-0000-4000-8000-000000000795",
+            }),
+          );
+          assert.isUndefined(yield* lookup("child-a"));
+          assert.isUndefined(yield* lookup("child-a-later"));
+          yield* harness.offerAndWait(frame("old-child", undefined, "launch-a"));
+          assert.isUndefined(yield* lookup("old-child"));
+          yield* harness.offerAndWait(frame("resume-a", undefined, null, "SendMessage"));
+          yield* harness.offerAndWait(frame("resumed-child-early", undefined, "launch-a"));
+          assert.isUndefined(yield* lookup("resumed-child-early"));
+          const resumePermission = yield* invokeHook("resumed-child-early").pipe(
+            Effect.andThen(() => lookup("resumed-child-early")),
+            Effect.forkScoped,
+          );
+          yield* harness.offerAndWait(
+            makeSubagentTaskStartedFrame({
+              taskId: "native-child-a",
+              toolUseId: "resume-a",
+              uuid: "00000000-0000-4000-8000-000000000796",
+            }),
+          );
+          const earlyResumedExecution = yield* Fiber.join(resumePermission);
+          assert.deepEqual(
+            { runId: earlyResumedExecution?.runId, attemptId: earlyResumedExecution?.attemptId },
+            { runId: second.runId, attemptId: second.attemptId },
+          );
+          yield* harness.offerAndWait(frame("resumed-child-original", undefined, "launch-a"));
+          yield* harness.offerAndWait(frame("resumed-child-current", undefined, "resume-a"));
+          yield* expectChildExecution("resumed-child-original", {
+            runId: second.runId,
+            attemptId: second.attemptId,
+          });
+          yield* expectChildExecution("resumed-child-current", {
+            runId: second.runId,
+            attemptId: second.attemptId,
+          });
+          yield* harness.offerAndWait(frame("child-a", undefined, "launch-a"));
+          assert.isUndefined(yield* lookup("child-a"));
+          yield* harness.offerAndWait(
+            makeSubagentNotificationFrame({
+              taskId: "native-child-a",
+              toolUseId: "resume-a",
+              summary: "Done again",
+              uuid: "00000000-0000-4000-8000-000000000797",
+            }),
+          );
+          assert.isUndefined(yield* lookup("resumed-child-original"));
+          assert.isUndefined(yield* lookup("resumed-child-current"));
+          yield* harness.offerAndWait(
+            makeSubagentTaskStartedFrame({
+              taskId: "native-child-a",
+              toolUseId: "unverified-resume",
+              uuid: "00000000-0000-4000-8000-000000000789",
+            }),
+          );
+          yield* harness.offerAndWait(frame("launch-a", undefined, null, "Agent"));
+          yield* harness.offerAndWait(
+            claudeSdkFrame({
+              type: "system",
+              subtype: "task_progress",
+              task_id: "native-child-a",
+              tool_use_id: "launch-a",
+              description: "Still auditing.",
+              uuid: "00000000-0000-4000-8000-000000000788",
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+          );
+          for (const parentId of ["launch-a", "unverified-resume"]) {
+            const id = `unowned-${parentId}`;
+            yield* harness.offerAndWait(frame(id, undefined, parentId));
+            yield* invokeHook(id);
+            assert.isUndefined(yield* lookup(id));
+          }
           yield* harness.offerAndWait(frame("foreign", "00000000-0000-4000-8000-000000000799"));
           assert.isUndefined(yield* lookup("foreign"));
           yield* harness.offerAndWait(frame("foreign-next"));
@@ -15992,80 +16578,91 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
-  it.effect("offers a later wake after an earlier wake's continuation dispatch failed", () =>
-    Effect.gen(function* () {
-      const SECOND_TASK_ID = "b2ndwake";
-      const SECOND_TOOL_USE_ID = "toolu_second_wake";
-      const SECOND_SUMMARY = 'Background command "Second sleep" completed (exit code 0)';
-      const harness = yield* makeWakeHarness;
-      const now = yield* DateTime.now;
+  it.effect.each(["clearIfCurrent", "onRunEndedWithoutStarting"] as const)(
+    "offers a later wake after an earlier wake's continuation dispatch failed (%s)",
+    (retire) =>
+      Effect.gen(function* () {
+        const SECOND_TASK_ID = "b2ndwake";
+        const SECOND_TOOL_USE_ID = "toolu_second_wake";
+        const SECOND_SUMMARY = 'Background command "Second sleep" completed (exit code 0)';
+        const harness = yield* makeWakeHarness;
+        const mcp = yield* makeWakeMcpBarrier(harness);
+        const now = yield* DateTime.now;
 
-      yield* harness.runtime.startTurn(
-        makeClaudeTestTurnInput({
-          threadId: harness.threadId,
-          providerThread: harness.providerThread,
-          now,
-          attemptId: RunAttemptId.make("attempt-claude-wake-dispatch-failed-1"),
-          text: "Run two builds in the background.",
-          attachments: [],
-        }),
-      );
-      yield* Queue.offer(harness.sdkMessages, wakeTaskStarted);
-      yield* Queue.offer(
-        harness.sdkMessages,
-        claudeSdkFrame({
-          ...wakeTaskStarted,
-          task_id: SECOND_TASK_ID,
-          tool_use_id: SECOND_TOOL_USE_ID,
-          description: "Second sleep",
-          uuid: "00000000-0000-4000-8000-000000000121",
-        }),
-      );
-      yield* Queue.offer(harness.sdkMessages, turnOneResult);
-      yield* harness.awaitTerminal(1);
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-wake-dispatch-failed-1"),
+            text: "Run two builds in the background.",
+            attachments: [],
+          }),
+        );
+        yield* Queue.offer(harness.sdkMessages, wakeTaskStarted);
+        yield* Queue.offer(
+          harness.sdkMessages,
+          claudeSdkFrame({
+            ...wakeTaskStarted,
+            task_id: SECOND_TASK_ID,
+            tool_use_id: SECOND_TOOL_USE_ID,
+            description: "Second sleep",
+            uuid: "00000000-0000-4000-8000-000000000121",
+          }),
+        );
+        yield* Queue.offer(harness.sdkMessages, turnOneResult);
+        yield* harness.awaitTerminal(1);
 
-      yield* harness.offerAndWait(wakeNotification);
-      yield* harness.offerAndWait(wakeTurnInit);
-      assert.lengthOf(harness.continuationRequests, 1);
-      yield* harness.offerAndWait(wakeAssistant);
-      yield* harness.offerAndWait(wakeResult);
+        yield* harness.offerAndWait(wakeNotification);
+        yield* harness.offerAndWait(wakeTurnInit);
+        assert.lengthOf(harness.continuationRequests, 1);
+        yield* harness.offerAndWait(wakeAssistant);
+        const held = yield* mcp.hold("retired-wake-root");
+        assert.isFalse(yield* Deferred.isDone(held.released));
 
-      // A failed dispatch never attaches the wake turn; clearIfCurrent is the only release.
-      const failed = harness.continuationRequests[0]!;
-      assert.isDefined(failed.clearIfCurrent);
-      yield* failed.clearIfCurrent!();
-      yield* harness.until(
-        () =>
-          !(
-            providerThreadRosterEvents(harness.events).at(-1)?.providerThread
-              .pendingBackgroundTasks ?? []
-          ).some((task) => task.taskId === WAKE_TASK_ID),
-      );
+        // A failed dispatch never attaches the wake turn; retirement must unblock its tool.
+        const failed = harness.continuationRequests[0]!;
+        assert.isDefined(failed.clearIfCurrent);
+        assert.isDefined(failed.onRunEndedWithoutStarting);
+        yield* failed[retire]!();
+        assert.isUndefined(yield* Fiber.join(held.permission));
+        assert.isUndefined(yield* mcp.lookup("retired-wake-root"));
+        const dropped = yield* mcp.hold("retired-wake-dropped-root");
+        assert.isUndefined(yield* Fiber.join(dropped.permission));
+        assert.isUndefined(yield* mcp.lookup("retired-wake-dropped-root"));
+        yield* harness.offerAndWait(wakeResult);
+        yield* harness.until(
+          () =>
+            !(
+              providerThreadRosterEvents(harness.events).at(-1)?.providerThread
+                .pendingBackgroundTasks ?? []
+            ).some((task) => task.taskId === WAKE_TASK_ID),
+        );
 
-      yield* harness.offerAndWait(
-        claudeSdkFrame({
-          ...wakeNotification,
-          task_id: SECOND_TASK_ID,
-          tool_use_id: SECOND_TOOL_USE_ID,
-          output_file: `/tmp/claude-replay/tasks/${SECOND_TASK_ID}.output`,
-          summary: SECOND_SUMMARY,
-          uuid: "00000000-0000-4000-8000-000000000123",
-        }),
-      );
-      yield* harness.offerAndWait(
-        claudeSdkFrame({ ...wakeTurnInit, uuid: "00000000-0000-4000-8000-000000000124" }),
-      );
-      assert.lengthOf(harness.continuationRequests, 2);
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-          NodeCrypto.layer,
+        yield* harness.offerAndWait(
+          claudeSdkFrame({
+            ...wakeNotification,
+            task_id: SECOND_TASK_ID,
+            tool_use_id: SECOND_TOOL_USE_ID,
+            output_file: `/tmp/claude-replay/tasks/${SECOND_TASK_ID}.output`,
+            summary: SECOND_SUMMARY,
+            uuid: "00000000-0000-4000-8000-000000000123",
+          }),
+        );
+        yield* harness.offerAndWait(
+          claudeSdkFrame({ ...wakeTurnInit, uuid: "00000000-0000-4000-8000-000000000124" }),
+        );
+        assert.lengthOf(harness.continuationRequests, 2);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
         ),
       ),
-    ),
   );
 
   it.effect("keeps a newer wake's output when a stale continuation request is cleared", () =>
@@ -18110,81 +18707,92 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
-  it.effect("settles a continuation whose wake turn a user turn absorbed", () =>
-    Effect.gen(function* () {
-      const harness = yield* makeWakeHarness;
-      const now = yield* DateTime.now;
+  it.effect.each(["user", "server"] as const)(
+    "settles a continuation whose wake turn a %s turn absorbed",
+    (source) =>
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const mcp = yield* makeWakeMcpBarrier(harness);
+        const now = yield* DateTime.now;
 
-      yield* harness.runtime.startTurn(
-        makeClaudeTestTurnInput({
-          threadId: harness.threadId,
-          providerThread: harness.providerThread,
-          now,
-          attemptId: RunAttemptId.make("attempt-claude-wake-absorbed-1"),
-          text: "Run the build in the background.",
-          attachments: [],
-        }),
-      );
-      yield* Queue.offer(harness.sdkMessages, wakeTaskStarted);
-      yield* Queue.offer(harness.sdkMessages, wakeNotification);
-      yield* Queue.offer(harness.sdkMessages, turnOneResult);
-      yield* harness.awaitTerminal(1);
-      yield* harness.offerAndWait(wakeTurnInit);
-      yield* harness.offerAndWait(wakeAssistant);
-      yield* harness.awaitContinuation(1);
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-wake-absorbed-1"),
+            text: "Run the build in the background.",
+            attachments: [],
+          }),
+        );
+        yield* Queue.offer(harness.sdkMessages, wakeTaskStarted);
+        yield* Queue.offer(harness.sdkMessages, wakeNotification);
+        yield* Queue.offer(harness.sdkMessages, turnOneResult);
+        yield* harness.awaitTerminal(1);
+        yield* harness.offerAndWait(wakeTurnInit);
+        yield* harness.offerAndWait(wakeAssistant);
+        yield* harness.awaitContinuation(1);
+        const held = yield* mcp.hold("absorbed-wake-root");
+        assert.isFalse(yield* Deferred.isDone(held.released));
 
-      // Claude folds this prompt into the wake turn it already opened, so one result ends both.
-      yield* harness.runtime.startTurn(
-        makeClaudeTestTurnInput({
-          threadId: harness.threadId,
-          providerThread: harness.providerThread,
-          now,
-          attemptId: RunAttemptId.make("attempt-claude-wake-absorbed-2"),
-          text: "Any update on the pull request?",
-          attachments: [],
-          providerTurnOrdinal: 2,
-        }),
-      );
-      yield* harness.until(() => harness.offeredMessages.length === 2);
-      yield* Queue.offer(
-        harness.sdkMessages,
-        makeResultFrame({
-          uuid: "00000000-0000-4000-8000-000000000140",
-          result: "Checks passed and the pull request is up to date.",
-        }),
-      );
-      yield* harness.awaitTerminal(2);
+        // Claude folds this prompt into the wake turn it already opened, so one result ends both.
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-wake-absorbed-2"),
+            text: "Any update on the pull request?",
+            attachments: [],
+            providerTurnOrdinal: 2,
+            ...(source === "server"
+              ? { messageCreatedBy: "agent", messageCreationSource: "server" }
+              : {}),
+          }),
+        );
+        yield* harness.until(() => harness.offeredMessages.length === 2);
+        assert.isUndefined(yield* Fiber.join(held.permission));
+        assert.isUndefined(yield* mcp.lookup("absorbed-wake-root"));
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000140",
+            result: "Checks passed and the pull request is up to date.",
+          }),
+        );
+        yield* harness.awaitTerminal(2);
 
-      yield* harness.runtime.startTurn(
-        makeClaudeTestTurnInput({
-          threadId: harness.threadId,
-          providerThread: harness.providerThread,
-          now,
-          attemptId: RunAttemptId.make("attempt-claude-wake-absorbed-3"),
-          text: "Background task completed.",
-          attachments: [],
-          providerTurnOrdinal: 3,
-          messageCreatedBy: "agent",
-          messageCreationSource: "provider",
-        }),
-      );
-      yield* harness.awaitTerminal(3);
-      assert.equal(harness.terminalEvents()[2]?.status, "completed");
-      assert.isTrue(
-        harness.events.some(
-          (event) => event.type === "message.updated" && event.message.text === WAKE_ASSISTANT_TEXT,
-        ),
-      );
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-          NodeCrypto.layer,
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-wake-absorbed-3"),
+            text: "Background task completed.",
+            attachments: [],
+            providerTurnOrdinal: 3,
+            messageCreatedBy: "agent",
+            messageCreationSource: "provider",
+          }),
+        );
+        yield* harness.awaitTerminal(3);
+        assert.equal(harness.terminalEvents()[2]?.status, "completed");
+        assert.isTrue(
+          harness.events.some(
+            (event) =>
+              event.type === "message.updated" && event.message.text === WAKE_ASSISTANT_TEXT,
+          ),
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
         ),
       ),
-    ),
   );
 
   it.effect.each(["before", "after"] as const)(

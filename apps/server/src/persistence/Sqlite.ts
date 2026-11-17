@@ -8,6 +8,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlError from "effect/sql/SqlError";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
+import { verifyAuthorityFence } from "../threadReadAuthority/Schema.ts";
 import { hasPendingMigrations } from "./Migrations.ts";
 import { runDatabaseMigrations } from "./DatabaseMigrations.ts";
 import { lastcodeMigrationManifest } from "./LastCodeMigrations.ts";
@@ -64,7 +65,8 @@ const runMigrationsAsOwner = Effect.fn("SqlitePersistence.runMigrationsAsOwner")
     }>`SELECT MAX(migration_id) AS latestId FROM lastcode_sql_migrations`)[0]?.latestId ?? 0) <
       Math.max(...lastcodeMigrationManifest.map(([id]) => id));
   // Neither migration ledger may advance behind the running server's ownership lock.
-  if (!(yield* hasPendingMigrations()) && !lastcodePending) return yield* runDatabaseMigrations();
+  if (!(yield* hasPendingMigrations()) && !lastcodePending && (yield* verifyAuthorityFence()))
+    return yield* runDatabaseMigrations({ authorityFence: "verify" });
   const { serverRuntimeStatePath } = yield* ServerConfig.ServerConfig;
   yield* ServerOwnership.holdServerOwnershipLock(serverRuntimeStatePath).pipe(
     Effect.catchTags({

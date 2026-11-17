@@ -1,4 +1,7 @@
-import { McpProviderSessions } from "@t3tools/provider-core/server/McpProviderSessions";
+import {
+  hasNativeMcpMetadata,
+  McpProviderSessions,
+} from "@t3tools/provider-core/server/McpProviderSessions";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -300,11 +303,7 @@ const makeMcpAuthMiddleware = Effect.fn("McpHttpServer.makeAuthMiddleware")(func
       });
     }
     let attributed = invocation;
-    if (
-      invocation.thread !== undefined &&
-      request.method === "POST" &&
-      Option.isSome(providerSessions)
-    ) {
+    if (invocation.thread !== undefined && request.method === "POST") {
       const body = yield* request.json.pipe(Effect.orElseSucceed(() => undefined));
       const params =
         typeof body === "object" && body !== null && "params" in body ? body.params : undefined;
@@ -312,15 +311,28 @@ const makeMcpAuthMiddleware = Effect.fn("McpHttpServer.makeAuthMiddleware")(func
         typeof params === "object" && params !== null && "_meta" in params
           ? params._meta
           : undefined;
-      const execution = yield* providerSessions.value.resolveExecution({
-        threadId: invocation.thread.threadId,
-        providerSessionId: invocation.thread.providerSessionId,
-        authorizationHeader: authorization ?? "",
-        metadata,
-      });
+      const execution =
+        invocation.thread.nativeExecutionAttribution === true && Option.isSome(providerSessions)
+          ? yield* providerSessions.value.resolveExecution({
+              threadId: invocation.thread.threadId,
+              providerSessionId: invocation.thread.providerSessionId,
+              authorizationHeader: authorization ?? "",
+              metadata,
+            })
+          : undefined;
       attributed = {
         ...invocation,
-        thread: { ...invocation.thread, ...(execution === undefined ? {} : { execution }) },
+        thread: {
+          ...invocation.thread,
+          execution,
+          attribution:
+            execution !== undefined
+              ? "resolved"
+              : invocation.thread.nativeExecutionAttribution === true &&
+                  hasNativeMcpMetadata(metadata)
+                ? "unresolved"
+                : "absent",
+        },
       };
     }
     const asked = withModeLimit(withSenderThread(attributed, request), request);

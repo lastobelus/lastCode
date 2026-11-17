@@ -30,7 +30,11 @@ const ALL_MCP_CAPABILITIES = [
 export type McpCapability = (typeof ALL_MCP_CAPABILITIES)[number];
 
 export interface McpThreadCaller {
-  readonly execution?: McpExecutionOrigin;
+  readonly execution?: McpExecutionOrigin | undefined;
+  /** Internal HTTP attribution. Only absent native metadata permits legacy run selection. */
+  readonly attribution?: "absent" | "resolved" | "unresolved" | undefined;
+  /** Set by the issuing native adapter driver, never by request metadata. */
+  readonly nativeExecutionAttribution?: boolean;
   readonly threadId: ThreadId;
   readonly providerSessionId: string;
   readonly providerInstanceId: ProviderInstanceId;

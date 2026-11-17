@@ -148,7 +148,10 @@ it.effect(
       const sending = yield* h.send("pause-after-completion", true).pipe(
         Effect.provideService(ThreadReadAuthorization, {
           authorize: () =>
-            Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+            Deferred.succeed(entered, undefined).pipe(
+              Effect.andThen(Deferred.await(release)),
+              Effect.as(undefined),
+            ),
         }),
         Effect.result,
         Effect.forkChild,

@@ -178,17 +178,23 @@ export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(
       : incoming.type === "runtime-request.respond"
         ? withQuestionContext(incoming)
         : incoming;
-  if (command.type === "runtime-request.respond" && command.contextsByQuestionId !== undefined) {
-    const authorization = yield* ThreadReadAuthorization;
-    yield* authorization.authorize(
-      command.threadId,
-      questionAnswerAuthorizationId(command.commandId),
-    );
-  }
-  if (command.type === "queued-run.edit") {
-    const authorization = yield* ThreadReadAuthorization;
-    yield* authorization.authorize(command.threadId, queuedEditAuthorizationId(command.commandId));
-  }
+  const authorization = yield* ThreadReadAuthorization;
+  const inputId =
+    command.type === "runtime-request.respond"
+      ? questionAnswerAuthorizationId(command.commandId)
+      : command.type === "queued-run.edit"
+        ? queuedEditAuthorizationId(command.commandId)
+        : command.type === "message.dispatch"
+          ? command.messageId
+          : command.type === "thread.create"
+            ? command.initialMessage?.messageId
+            : undefined;
+  const threadReadIntent =
+    inputId === undefined || !("threadId" in command)
+      ? undefined
+      : yield* authorization.authorize(command.threadId, inputId);
+  const dispatchOptions =
+    threadReadIntent === undefined ? options : { ...options, threadReadIntent };
   const threads = yield* ThreadManagement.ThreadManagementService;
   if (command.type === "runtime-request.respond" && command.attachmentsByQuestionId) {
     const config = yield* ServerConfig.ServerConfig;
@@ -226,7 +232,7 @@ export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(
           answers: prepared.answers,
           attachmentsByQuestionId: prepared.attachmentsByQuestionId,
         },
-        options,
+        dispatchOptions,
       )
       .pipe(
         Effect.tap((result) => {
@@ -261,7 +267,7 @@ export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(
     command.type !== "message.dispatch" &&
     (command.type !== "queued-run.edit" || command.attachments === undefined)
   )
-    return yield* threads.dispatch(command, options);
+    return yield* threads.dispatch(command, dispatchOptions);
   // An accepted edit's retry replays its receipt even if a later cleanup removed its files.
   if (command.type === "queued-run.edit" && !(yield* threads.hasReceipt(command.commandId))) {
     const config = yield* ServerConfig.ServerConfig;
@@ -299,7 +305,7 @@ export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(
             }
           : {}),
       },
-      options,
+      dispatchOptions,
     )
     .pipe(
       Effect.tap((result) =>

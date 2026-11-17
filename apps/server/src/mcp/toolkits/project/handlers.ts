@@ -33,6 +33,7 @@ import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { resolveInteractionMode, resolveRuntimeMode } from "../../delegatedTaskModes.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import { loadMcpCaller } from "../../McpCallerAttribution.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as OrchestrationMcp from "../../OrchestratorMcpService.ts";
 import { requireRemoteDelegationPeer } from "../../linkOrigin.ts";
@@ -207,13 +208,16 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           });
         // Resolved before preparation, so the launch keeps the requesting run's authority.
         const broker = yield* Effect.serviceOption(ThreadReadBroker.ThreadReadBroker);
-        const readAuthorization =
-          caller === undefined || Option.isNone(broker)
-            ? ThreadReadAuthorization.defaultValue()
-            : yield* broker.value.inherit(
-                caller.id,
-                caller.activeRunId ?? caller.latestRunId ?? undefined,
+        const parent =
+          scope.thread === undefined
+            ? undefined
+            : yield* loadMcpCaller(scope.thread, context.threads.getThreadRecords).pipe(
+                Effect.mapError(unavailable),
               );
+        const readAuthorization =
+          parent?.invocationRun === undefined || Option.isNone(broker)
+            ? ThreadReadAuthorization.defaultValue()
+            : yield* broker.value.inherit(parent.thread.id, parent.invocationRun.id);
         const projectId =
           input.scratch === true
             ? (yield* ManagedProjectFolders.ManagedProjectFolders.pipe(

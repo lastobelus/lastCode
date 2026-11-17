@@ -12,7 +12,6 @@ import type { McpProviderSessionConfig } from "./mcpSession.ts";
 
 // Other providers may never consume these references.
 const MAX_KEPT_HTML_RENDERS = 64;
-const MAX_LIVE_ORIGINS = 4096;
 const MAX_ENDED_ORIGINS = 4096;
 
 // Antigravity truncates long HTML arguments to a marked tail of at most 8,000 characters.
@@ -51,15 +50,35 @@ const record = (value: unknown): Record<string, unknown> | undefined =>
     ? (value as Record<string, unknown>)
     : undefined;
 
+export const hasNativeMcpMetadata = (metadata: unknown): boolean => {
+  const meta = record(metadata);
+  return (
+    meta !== undefined &&
+    (Object.hasOwn(meta, "x-codex-turn-metadata") || Object.hasOwn(meta, "claudecode/toolUseId"))
+  );
+};
+
 const nativeOriginFromMetadata = (metadata: unknown): McpNativeOrigin | undefined => {
   const meta = record(metadata);
   const codex = record(meta?.["x-codex-turn-metadata"]);
   const toolUseId = meta?.["claudecode/toolUseId"];
-  if (codex !== undefined && toolUseId !== undefined) return undefined;
-  if (typeof codex?.thread_id === "string" && typeof codex.turn_id === "string") {
+  if (
+    meta !== undefined &&
+    Object.hasOwn(meta, "x-codex-turn-metadata") &&
+    Object.hasOwn(meta, "claudecode/toolUseId")
+  )
+    return undefined;
+  if (
+    typeof codex?.thread_id === "string" &&
+    codex.thread_id.trim().length > 0 &&
+    typeof codex.turn_id === "string" &&
+    codex.turn_id.trim().length > 0
+  ) {
     return { provider: "codex", nativeThreadId: codex.thread_id, nativeTurnId: codex.turn_id };
   }
-  return typeof toolUseId === "string" ? { provider: "claude", toolUseId } : undefined;
+  return typeof toolUseId === "string" && toolUseId.trim().length > 0
+    ? { provider: "claude", toolUseId }
+    : undefined;
 };
 
 export class McpProviderSessions extends Context.Service<
@@ -73,10 +92,12 @@ export class McpProviderSessions extends Context.Service<
       threadId: ThreadId,
       origin: McpNativeOrigin,
       execution: McpExecutionOrigin,
+      nativeOwner?: string,
     ) => Effect.Effect<void>;
     readonly endExecution: (
       threadId: ThreadId,
       execution: McpExecutionOrigin,
+      nativeOwner?: string,
     ) => Effect.Effect<void>;
     readonly resolveExecution: (input: {
       readonly threadId: ThreadId;
@@ -159,10 +180,18 @@ const matchingPageIndex = (kept: ReadonlyArray<KeptHtmlRender>, input: PageInput
 const make = Effect.gen(function* () {
   const sessions = yield* Ref.make(new Map<ThreadId, McpProviderSessionConfig>());
   const htmlRenders = yield* Ref.make(new Map<ThreadId, ReadonlyArray<KeptHtmlRender>>());
-  const pendingCodex = new Map<
-    ThreadId,
-    { readonly nativeThreadId: string; readonly ready: Deferred.Deferred<void> }
-  >();
+  type PendingCodex = { readonly ready: Deferred.Deferred<void> };
+  const pendingCodex = new Map<ThreadId, Map<string, PendingCodex>>();
+  const releasePending = (threadId: ThreadId, nativeThreadId: string, pending: PendingCodex) =>
+    Effect.sync(() => {
+      const entries = pendingCodex.get(threadId);
+      if (entries?.get(nativeThreadId) === pending) entries.delete(nativeThreadId);
+      if (entries?.size === 0) pendingCodex.delete(threadId);
+    }).pipe(Effect.andThen(Deferred.succeed(pending.ready, undefined)), Effect.asVoid);
+  const clearPending = Effect.fnUntraced(function* (threadId: ThreadId) {
+    for (const [nativeThreadId, pending] of pendingCodex.get(threadId) ?? [])
+      yield* releasePending(threadId, nativeThreadId, pending);
+  });
   const endedOrigins = new Map<ThreadId, Set<string>>();
   const origins = new Map<
     ThreadId,
@@ -171,60 +200,70 @@ const make = Effect.gen(function* () {
       {
         readonly config: McpProviderSessionConfig;
         readonly execution: McpExecutionOrigin;
+        readonly nativeOwner: string | undefined;
       }
     >
   >();
   return McpProviderSessions.of({
     beginCodexTurn: Effect.fn("McpProviderSessions.beginCodexTurn")(
       function* (threadId, nativeThreadId) {
-        const ready = yield* Deferred.make<void>();
-        const pending = { nativeThreadId, ready };
-        pendingCodex.set(threadId, pending);
-        return Effect.sync(() => {
-          if (pendingCodex.get(threadId) === pending) pendingCodex.delete(threadId);
-        }).pipe(Effect.andThen(Deferred.succeed(ready, undefined)), Effect.asVoid);
+        const entries = pendingCodex.get(threadId) ?? new Map<string, PendingCodex>();
+        const previous = entries.get(nativeThreadId);
+        if (previous !== undefined) yield* releasePending(threadId, nativeThreadId, previous);
+        const pending = { ready: yield* Deferred.make<void>() };
+        entries.set(nativeThreadId, pending);
+        pendingCodex.set(threadId, entries);
+        return releasePending(threadId, nativeThreadId, pending);
       },
     ),
     registerExecution: Effect.fn("McpProviderSessions.registerExecution")(
-      function* (threadId, origin, execution) {
+      function* (threadId, origin, execution, nativeOwner) {
         const config = (yield* Ref.get(sessions)).get(threadId);
         if (config === undefined) return;
         const entries = origins.get(threadId) ?? new Map();
         const key = originKey(origin);
-        // Ended history never consumes live capacity; neither category may rebind a known key.
-        if (
-          entries.has(key) ||
-          endedOrigins.get(threadId)?.has(key) ||
-          entries.size >= MAX_LIVE_ORIGINS
-        )
-          return;
-        entries.set(key, { config, execution: Object.freeze({ ...execution }) });
-        origins.set(threadId, entries);
+        // Keep every live call until its owner ends; a long turn must not lose attribution.
+        if (!entries.has(key) && !endedOrigins.get(threadId)?.has(key)) {
+          entries.set(key, {
+            config,
+            execution: Object.freeze({ runId: execution.runId, attemptId: execution.attemptId }),
+            nativeOwner,
+          });
+          origins.set(threadId, entries);
+        }
+        if (origin.provider === "codex") {
+          const pending = pendingCodex.get(threadId)?.get(origin.nativeThreadId);
+          if (pending !== undefined)
+            yield* releasePending(threadId, origin.nativeThreadId, pending);
+        }
       },
     ),
-    endExecution: Effect.fn("McpProviderSessions.endExecution")(function (threadId, execution) {
-      return Effect.sync(() => {
-        const entries = origins.get(threadId);
-        for (const [key, entry] of entries ?? []) {
-          if (
-            entry.execution.runId === execution.runId &&
-            entry.execution.attemptId === execution.attemptId
-          ) {
-            entries?.delete(key);
-            const ended = endedOrigins.get(threadId) ?? new Set<string>();
-            ended.add(key);
-            // Expiring a tombstone does not create a binding. Only the adapter can
-            // register a native identity; stale HTTP metadata remains unattributed.
-            if (ended.size > MAX_ENDED_ORIGINS) {
-              const oldest = ended.values().next().value;
-              if (oldest !== undefined) ended.delete(oldest);
+    endExecution: Effect.fn("McpProviderSessions.endExecution")(
+      function (threadId, execution, nativeOwner) {
+        return Effect.sync(() => {
+          const entries = origins.get(threadId);
+          for (const [key, entry] of entries ?? []) {
+            if (
+              entry.execution.runId === execution.runId &&
+              entry.execution.attemptId === execution.attemptId &&
+              entry.nativeOwner === nativeOwner
+            ) {
+              entries?.delete(key);
+              const ended = endedOrigins.get(threadId) ?? new Set<string>();
+              ended.add(key);
+              // Expiring a tombstone does not create a binding. Only the adapter can
+              // register a native identity; stale HTTP metadata remains unattributed.
+              if (ended.size > MAX_ENDED_ORIGINS) {
+                const oldest = ended.values().next().value;
+                if (oldest !== undefined) ended.delete(oldest);
+              }
+              endedOrigins.set(threadId, ended);
             }
-            endedOrigins.set(threadId, ended);
           }
-        }
-        if (entries?.size === 0) origins.delete(threadId);
-      });
-    }),
+          if (entries?.size === 0) origins.delete(threadId);
+        });
+      },
+    ),
     resolveExecution: Effect.fn("McpProviderSessions.resolveExecution")(function* (input) {
       const origin = nativeOriginFromMetadata(input.metadata);
       if (origin === undefined) return undefined;
@@ -234,31 +273,39 @@ const make = Effect.gen(function* () {
         config.authorizationHeader !== input.authorizationHeader
       )
         return undefined;
-      const pending = pendingCodex.get(input.threadId);
+      const pending =
+        origin.provider === "codex"
+          ? pendingCodex.get(input.threadId)?.get(origin.nativeThreadId)
+          : undefined;
       // HTTP and app-server notifications use different connections. Only wait for a
       // known in-progress start, then look up the original IDs without changing them.
       if (
         origin.provider === "codex" &&
-        pending?.nativeThreadId === origin.nativeThreadId &&
+        pending !== undefined &&
         !origins.get(input.threadId)?.has(originKey(origin)) &&
         !endedOrigins.get(input.threadId)?.has(originKey(origin))
       ) {
         yield* Deferred.await(pending.ready);
       }
       const entry = origins.get(input.threadId)?.get(originKey(origin));
-      return entry?.config.providerSessionId === input.providerSessionId &&
-        entry.config.authorizationHeader === input.authorizationHeader
-        ? entry.execution
-        : undefined;
+      if (
+        entry?.config.providerSessionId !== input.providerSessionId ||
+        entry.config.authorizationHeader !== input.authorizationHeader ||
+        entry.config.providerInstanceId !== config.providerInstanceId
+      )
+        return undefined;
+      return entry.execution;
     }),
     set: Effect.fn("McpProviderSessions.set")(function* (config) {
       const current = yield* Ref.get(sessions);
       if (
         current.get(config.threadId)?.providerSessionId !== config.providerSessionId ||
-        current.get(config.threadId)?.authorizationHeader !== config.authorizationHeader
+        current.get(config.threadId)?.authorizationHeader !== config.authorizationHeader ||
+        current.get(config.threadId)?.providerInstanceId !== config.providerInstanceId
       ) {
         origins.delete(config.threadId);
         endedOrigins.delete(config.threadId);
+        yield* clearPending(config.threadId);
         yield* Ref.update(htmlRenders, (kept) => {
           const next = new Map(kept);
           next.delete(config.threadId);
@@ -270,22 +317,20 @@ const make = Effect.gen(function* () {
     read: Effect.fn("McpProviderSessions.read")(function (threadId) {
       return Ref.get(sessions).pipe(Effect.map((current) => current.get(threadId)));
     }),
-    clear: Effect.fn("McpProviderSessions.clear")(function (threadId) {
+    clear: Effect.fn("McpProviderSessions.clear")(function* (threadId) {
       origins.delete(threadId);
       endedOrigins.delete(threadId);
-      return Ref.update(sessions, (current) => {
+      yield* clearPending(threadId);
+      yield* Ref.update(sessions, (current) => {
         const next = new Map(current);
         next.delete(threadId);
         return next;
-      }).pipe(
-        Effect.andThen(
-          Ref.update(htmlRenders, (current) => {
-            const next = new Map(current);
-            next.delete(threadId);
-            return next;
-          }),
-        ),
-      );
+      });
+      yield* Ref.update(htmlRenders, (current) => {
+        const next = new Map(current);
+        next.delete(threadId);
+        return next;
+      });
     }),
     recordHtmlRender: Effect.fn("McpProviderSessions.recordHtmlRender")(
       function (threadId, input, reference) {

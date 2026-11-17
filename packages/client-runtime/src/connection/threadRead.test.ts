@@ -130,6 +130,7 @@ describe("connected environment thread reads", () => {
         result: null,
         failure: { environmentId: destination, reason: "permission_denied" },
       });
+      expect(response).not.toMatchObject({ noDestinationAttempt: true });
     }),
   );
 
@@ -191,13 +192,65 @@ describe("connected environment thread reads", () => {
         );
         expect(calls).toEqual([]);
         expect(response).toEqual({ result: null, unavailableEnvironmentIds: [] });
-        const explicit = yield* resolveThreadRead(
+        const updateRequired = entries([destination, true]);
+        updateRequired.set(destination, {
+          ...updateRequired.get(destination)!,
+          serverUpdateRequired: true,
+        });
+        const unsupported = entries([destination, true]);
+        unsupported.set(destination, {
+          ...unsupported.get(destination)!,
+          unsupportedReason: "This connection type is unsupported.",
+        });
+        for (const [catalog, reason] of [
+          [entries([destination, false]), "unavailable"],
+          [entries([source, true]), "unavailable"],
+          [updateRequired, "unsupported"],
+          [unsupported, "unsupported"],
+        ] as const) {
+          const explicit = yield* resolveThreadRead(
+            source,
+            { ...input, environmentId: destination },
+            catalog,
+            () => Effect.die("A missing or disabled destination must not be contacted"),
+          );
+          expect(explicit.failure).toEqual({ environmentId: destination, reason });
+          expect(explicit).toMatchObject({ noDestinationAttempt: true });
+        }
+      }),
+  );
+
+  it.effect(
+    "never reports no-attempt after a request, including unsupported and unknown failures",
+    () =>
+      Effect.gen(function* () {
+        for (const error of [
+          new OrchestratorMcpFailure({ code: "thread_not_found", message: "Missing" }),
+          new OrchestratorMcpFailure({ code: "capability_denied", message: "Denied" }),
+          new OrchestratorMcpFailure({
+            code: "invalid_request",
+            threadReadReason: "unsupported",
+            message: "Unsupported after reading config",
+          }),
+          new ConnectionTransientError({ reason: "transport", detail: "Disconnected" }),
+          new Error("Unknown failure"),
+        ]) {
+          const response = yield* resolveThreadRead(
+            source,
+            { ...input, environmentId: destination, via: "client" },
+            entries([destination, true]),
+            () => Effect.fail(error),
+          );
+          expect(response.result).toBeNull();
+          expect(response).not.toHaveProperty("noDestinationAttempt");
+        }
+        const sourceOnly = yield* resolveThreadRead(
           source,
-          { ...input, environmentId: destination },
-          entries([destination, false]),
-          () => notFound(),
+          { ...input, environmentId: source },
+          entries([source, true]),
+          () => Effect.die("The source is not a destination"),
         );
-        expect(explicit.failure).toEqual({ environmentId: destination, reason: "unavailable" });
+        expect(sourceOnly).not.toHaveProperty("noDestinationAttempt");
       }),
   );
 
@@ -281,6 +334,20 @@ describe("connected environment thread reads", () => {
         expect(yield* Fiber.join(pending)).toEqual({
           result: null,
           unavailableEnvironmentIds: [other],
+        });
+        const exactStarted = yield* Deferred.make<void>();
+        const exactPending = yield* resolveThreadRead(
+          source,
+          { ...input, environmentId: destination, via: "client" },
+          entries([destination, true]),
+          () => Deferred.succeed(exactStarted, undefined).pipe(Effect.andThen(Effect.never)),
+        ).pipe(Effect.forkChild);
+        yield* Deferred.await(exactStarted);
+        yield* TestClock.adjust("5 seconds");
+        expect(yield* Fiber.join(exactPending)).toEqual({
+          result: null,
+          unavailableEnvironmentIds: [],
+          failure: { environmentId: destination, reason: "unavailable" },
         });
       }),
   );

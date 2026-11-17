@@ -1395,6 +1395,11 @@ interface DeferredCodexRootTerminal {
 
 interface CodexSubagentThreadContext {
   parentContext: ActiveCodexTurnContext;
+  readonly mcpOwner: {
+    readonly threadId: ThreadId;
+    readonly execution: McpProviderSessions.McpExecutionOrigin;
+  };
+  readonly releasePendingMcpOrigin: Effect.Effect<void>;
   readonly providerThread: OrchestrationV2ProviderThread;
   readonly childThread: OrchestrationV2AppThread;
   readonly subagentNodeId: OrchestrationV2ExecutionNode["id"];
@@ -2991,6 +2996,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             // Late snapshots must not reopen completed children; only new turns may.
             if (settled && isOrchestrationV2WorkActive(input.status) && !input.reopen) return;
             const status = settled && !input.reopen ? prior.status : input.status;
+            if (!isOrchestrationV2WorkActive(status)) {
+              yield* input.subagent.releasePendingMcpOrigin;
+            }
             const completedAt = isOrchestrationV2WorkActive(status)
               ? null
               : (prior.completedAt ?? input.completedAt ?? now);
@@ -3081,6 +3089,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             let ancestor: ActiveCodexTurnContext | undefined = subagent.parentContext;
             while (ancestor !== undefined) {
               if (terminalizedNativeTurns.has(ancestor.nativeTurnId)) {
+                yield* subagent.releasePendingMcpOrigin;
                 const nativeThreadId = yield* getNativeThreadId(subagent.providerThread);
                 // Fork requests off the notification reader so it can read their responses.
                 yield* client
@@ -3149,6 +3158,17 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               runningCompactionItemIds: new Set(),
               runningWebSearchItems: new Map(),
             };
+            yield* mcpSessions.registerExecution(
+              subagent.mcpOwner.threadId,
+              {
+                provider: "codex",
+                nativeThreadId: yield* getNativeThreadId(subagent.providerThread),
+                nativeTurnId: turn.nativeTurnId,
+              },
+              subagent.mcpOwner.execution,
+              turn.nativeTurnId,
+            );
+            yield* subagent.releasePendingMcpOrigin;
             beginTurnTokenUsage(activeContext);
             endSessionApprovalsOnModeChange(activeContext);
             yield* Ref.update(activeTurns, (current) => {
@@ -3315,6 +3335,19 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               return;
             }
 
+            const mcpOwner = input.context.subagent?.mcpOwner ?? {
+              threadId: input.context.input.threadId,
+              execution: {
+                runId: input.context.input.runId,
+                attemptId: input.context.input.attemptId,
+              },
+            };
+            // The child's HTTP connection can beat its turn/started notification.
+            const releasePendingMcpOrigin = yield* mcpSessions.beginCodexTurn(
+              mcpOwner.threadId,
+              input.nativeThreadId,
+            );
+            yield* Scope.addFinalizer(scope, releasePendingMcpOrigin);
             const now = yield* DateTime.now;
             const subagentNodeId = idAllocator.derive.nodeFromProviderItem({
               driver: CODEX_PROVIDER,
@@ -3410,6 +3443,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             });
             const subagent = {
               parentContext: input.context,
+              mcpOwner,
+              releasePendingMcpOrigin,
               providerThread,
               childThread,
               subagentNodeId,
@@ -6930,6 +6965,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 });
               }
               if (input.context.subagent !== null) {
+                yield* mcpSessions.endExecution(
+                  input.context.subagent.mcpOwner.threadId,
+                  input.context.subagent.mcpOwner.execution,
+                  input.nativeTurnId,
+                );
                 yield* emitProviderEvent({
                   type: "node.updated",
                   driver: CODEX_PROVIDER,

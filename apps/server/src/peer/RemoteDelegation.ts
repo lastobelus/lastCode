@@ -97,7 +97,7 @@ export class RemoteDelegation extends Context.Service<
           readonly environmentId: EnvironmentId;
         };
       },
-      existingThreadId?: ThreadId,
+      owner: { readonly parentRunId: RunId } | { readonly existingThreadId: ThreadId },
     ) => Effect.Effect<{ readonly taskId: NodeId }, OrchestratorMcpFailure>;
     /**
      * A `t3_thread_send` there that started or queued a run on the thread of
@@ -268,7 +268,8 @@ const make = Effect.gen(function* () {
   });
 
   const delegate: RemoteDelegation["Service"]["delegate"] = Effect.fn("RemoteDelegation.delegate")(
-    function* (scope, input, existingThreadId) {
+    function* (scope, input, owner) {
+      const existingThreadId = "existingThreadId" in owner ? owner.existingThreadId : undefined;
       const parent = yield* threads
         .getThreadRecords(
           scope.thread.threadId,
@@ -294,11 +295,14 @@ const make = Effect.gen(function* () {
             task.remoteChild.environmentId === input.target.environmentId &&
             task.remoteChild.threadId === existingThreadId,
         );
-      const parentRun = followsUp
-        ? (followUpOwnerRun(parent.runs) ?? undefined)
-        : parent.runs
-            .filter(ThreadManagement.isActiveRun)
-            .toSorted((left, right) => right.ordinal - left.ordinal)[0];
+      const parentRun =
+        "parentRunId" in owner
+          ? parent.runs.find(
+              (run) => run.id === owner.parentRunId && ThreadManagement.isActiveRun(run),
+            )
+          : followsUp
+            ? (followUpOwnerRun(parent.runs) ?? undefined)
+            : ThreadManagement.latestActiveRun(parent);
       if (
         parentRun === undefined ||
         parentRun.rootNodeId === null ||
