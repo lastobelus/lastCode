@@ -34,25 +34,46 @@ it.effect.each([
   },
 ])(
   "read-only $clientKind clients can discover tags but cannot mutate an execution target",
-  ({ hostedAppUrl, expectedLink }) =>
-    Effect.gen(function* () {
+  ({ hostedAppUrl, expectedLink }) => {
+    let reads = 0;
+    const target = {
+      ...liveThreadShell(ThreadId.make("target")),
+      tags: ["Work/client"],
+      settledOverride: "settled" as const,
+    };
+    return Effect.gen(function* () {
       const server = yield* McpServer.McpServer;
-      const result = yield* server.callTool({ name: "t3_thread_tag_vocabulary", arguments: {} });
+      for (const input of [
+        { mode: "exact" },
+        { tag: "Work", query: "wc" },
+        { tag: "Work", preferredProjectId: "project" },
+      ]) {
+        const invalid = yield* server.callTool({ name: "t3_thread_tags", arguments: input });
+        expect(invalid.isError).toBe(true);
+        const content = invalid.content[0];
+        expect(content?.type === "text" && JSON.parse(content.text)).toMatchObject({
+          code: "invalid_request",
+        });
+      }
+      expect(reads).toBe(0);
+      const result = yield* server.callTool({ name: "t3_thread_tags", arguments: {} });
       expect(result.isError).not.toBe(true);
       expect(JSON.stringify(result.content)).toContain("Work/client");
       const matches = yield* server.callTool({
-        name: "t3_thread_tag_query",
+        name: "t3_thread_tags",
         arguments: { tag: "Work" },
       });
       expect(matches.isError, JSON.stringify(matches)).not.toBe(true);
-      expect(matches.structuredContent).toMatchObject({
+      expect(matches.structuredContent).toEqual({
         threads: [
           {
-            id: "target",
+            threadId: "target",
+            projectId: target.projectId,
             title: "target",
             environmentId: "tag-test",
             link: expectedLink,
             tags: ["Work/client"],
+            settled: true,
           },
         ],
         nextCursor: null,
@@ -74,11 +95,14 @@ it.effect.each([
           Layer.provide(
             Layer.mock(ThreadManagement.ThreadManagementService)({
               getShellSnapshot: () =>
-                Effect.succeed({
-                  schemaVersion: 2,
-                  threads: [{ ...liveThreadShell(ThreadId.make("target")), tags: ["Work/client"] }],
-                  archivedThreads: [],
-                  snapshotSequence: 0,
+                Effect.sync(() => {
+                  reads++;
+                  return {
+                    schemaVersion: 2,
+                    threads: [target],
+                    archivedThreads: [],
+                    snapshotSequence: 0,
+                  };
                 }),
               dispatch: () => Effect.die("read-only writes must never reach dispatch"),
             }),
@@ -95,7 +119,8 @@ it.effect.each([
         capabilities: new Set(["orchestration"] as const),
       }),
       Effect.provideService(McpSchema.McpServerClient, client),
-    ),
+    );
+  },
 );
 it.effect("mutation checks the destination thread's execution mode before dispatch", () =>
   Effect.gen(function* () {
