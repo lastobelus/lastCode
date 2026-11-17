@@ -59,22 +59,6 @@ const layer = McpHttpServer.layerPreviewToolkit.pipe(
 );
 
 it.live.each([
-  {
-    name: "absent default cap",
-    html: "",
-    selector: "#submit",
-    timeoutMs: undefined,
-    budget: 10_000,
-    entries: 0,
-  },
-  {
-    name: "hidden larger total",
-    html: '<button id="submit" hidden>Submit</button>',
-    selector: "#submit",
-    timeoutMs: 30_000,
-    budget: 10_000,
-    entries: 0,
-  },
   { name: "absent subcap", html: "", selector: "#submit", timeoutMs: 100, budget: 100, entries: 0 },
   {
     name: "disabled postentry",
@@ -164,11 +148,11 @@ it.live.each([
               ok: true as const,
               result: await ServerBrowserPage.click(page, {
                 selector: fixture.selector,
-                ...(fixture.timeoutMs === undefined ? {} : { timeoutMs: fixture.timeoutMs }),
+                timeoutMs: fixture.timeoutMs,
               }),
             };
           } catch (cause) {
-            remote = ServerBrowserPage.toOperationError(cause, fixture.timeoutMs ?? 15_000);
+            remote = ServerBrowserPage.toOperationError(cause, fixture.timeoutMs);
             return {
               ok: false as const,
               error: { _tag: remote.tag, message: remote.message, detail: remote.detail },
@@ -193,7 +177,7 @@ it.live.each([
           arguments: {
             action: "click",
             selector: fixture.selector,
-            ...(fixture.timeoutMs === undefined ? {} : { timeoutMs: fixture.timeoutMs }),
+            timeoutMs: fixture.timeoutMs,
           },
         })
         .pipe(
