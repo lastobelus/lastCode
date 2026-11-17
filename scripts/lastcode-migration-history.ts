@@ -26,8 +26,8 @@ export function readMigrationIdentities(
   if (body === undefined) throw new Error(`Missing literal migration registry ${exportName}.`);
   const imports = new Map(
     Array.from(
-      source.matchAll(/import (\w+) from "(\.[^"]+)";/gu),
-      (match) => [match[1]!, match[2]!] as const,
+      source.matchAll(/import (?:(\w+)|\{\s*(\w+)\s*\}) from "(\.[^"]+)";/gu),
+      (match) => [match[1] ?? match[2]!, match[3]!] as const,
     ),
   );
   const identities: Array<MigrationIdentity> = [];
@@ -39,7 +39,7 @@ export function readMigrationIdentities(
     const match = /^\[(\d+),\s*"([^"]+)",\s*(\w+)\],?\s*/u.exec(remaining);
     if (!match) throw new Error(`Unsupported entry in ${exportName}: ${remaining.slice(0, 80)}`);
     const implementation = imports.get(match[3]!);
-    if (!implementation) throw new Error(`Migration ${match[3]} has no local default import.`);
+    if (!implementation) throw new Error(`Migration ${match[3]} has no supported local import.`);
     identities.push({ id: Number(match[1]), name: match[2]!, implementation });
     remaining = remaining.slice(match[0].length);
   }
