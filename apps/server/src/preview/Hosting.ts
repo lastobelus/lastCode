@@ -617,17 +617,15 @@ const make = Effect.gen(function* () {
             }),
           ).pipe(Effect.catchCause((cause) => Deferred.failCause(ready, cause))),
         );
-        if (relaunchIdleCommand !== undefined) {
-          // Discovery suppresses unchanged empty snapshots. Recheck skipped launches
-          // within the existing deadline; an active command is never written twice.
-          yield* Effect.forkScoped(
-            Effect.forever(
-              Effect.sleep(Duration.seconds(3)).pipe(
-                Effect.andThen(Queue.offer(refreshRequests, undefined)),
-              ),
+        // Explicit readiness must progress even when background discovery is paused
+        // or another consumer already retains it. Stop retrying with this wait's scope.
+        yield* Effect.forkScoped(
+          Effect.forever(
+            Effect.sleep(Duration.seconds(3)).pipe(
+              Effect.andThen(Queue.offer(refreshRequests, undefined)),
             ),
-          );
-        }
+          ),
+        );
         yield* discovery.subscribe(
           { configuredUrls: [lease.url], initialSnapshot: [] },
           (servers) => {
