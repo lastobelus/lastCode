@@ -98,6 +98,7 @@ import { ThemeToolkit } from "../../mcp/toolkits/theme/tools.ts";
 import { ProjectToolkit } from "../../mcp/toolkits/project/tools.ts";
 import { WorktreeToolkit } from "../../mcp/toolkits/worktree/tools.ts";
 import { ThreadToolkit } from "../../mcp/toolkits/thread/tools.ts";
+import { ThreadTagsToolkit } from "../../mcp/toolkits/threadTags/tools.ts";
 import { OrchestratorToolkit } from "../../mcp/toolkits/orchestrator/tools.ts";
 import { ClaudeExecutableFileCheck } from "../../provider/Drivers/ClaudeExecutable.ts";
 import {
@@ -749,6 +750,7 @@ describe("ClaudeAdapterV2 MCP query overrides", () => {
     const readOnlyToolNames = [
       ...Object.values(OrchestratorToolkit.tools),
       ...Object.values(ThreadToolkit.tools),
+      ...Object.values(ThreadTagsToolkit.tools),
       ...Object.values(WorktreeToolkit.tools),
       ...Object.values(ProjectToolkit.tools),
       ...Object.values(EnvironmentToolkit.tools),

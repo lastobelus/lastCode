@@ -1,0 +1,142 @@
+import { expect, it } from "@effect/vitest";
+import {
+  matchesThreadTag,
+  mergeThreadTagVocabulary,
+  threadTagEnterSelection,
+  rankThreadTagVocabulary,
+  threadTagPaths,
+  threadTagDiscoveryRevision,
+} from "./threadTags.ts";
+import { ThreadId, ProjectId } from "@t3tools/contracts";
+
+it("matches slash-bounded descendants with exact case and an exact-only mode", () => {
+  expect(matchesThreadTag(["work/client"], "work")).toBe(true);
+  expect(matchesThreadTag(["worker", "Work/client"], "work")).toBe(false);
+  expect(matchesThreadTag(["work/client"], "work", "exact")).toBe(false);
+  expect(matchesThreadTag(["work"], "work", "exact")).toBe(true);
+  expect(matchesThreadTag(undefined, "work")).toBe(false);
+  expect(threadTagPaths("work/client/deep")).toEqual(["work", "work/client", "work/client/deep"]);
+  expect(threadTagPaths("legacy//literal")).toEqual(["legacy//literal"]);
+});
+it("fuzzily discovers exact spellings and ranks project vocabulary first", () => {
+  const entries = [{ tag: "Work/Client" }, { tag: "WC" }, { tag: "other" }];
+  expect(rankThreadTagVocabulary(entries, "#wc", new Set(["Work/Client"]))).toEqual(
+    entries.slice(0, 2),
+  );
+  expect(entries[0]?.tag).toBe("Work/Client");
+});
+
+it("refreshes renamed and omitted metadata without reacting to streamed activity", () => {
+  const shell = {
+    id: ThreadId.make("thread"),
+    title: "Before",
+    tags: ["work/client"],
+    projectId: ProjectId.make("project"),
+    archivedAt: null,
+    deletedAt: null,
+    lineage: {
+      rootThreadId: ThreadId.make("thread"),
+      parentThreadId: null,
+      relationshipToParent: null,
+    },
+  };
+  const initial = {
+    generation: 1,
+    removals: new Map<string, number>(),
+    snapshot: { threads: [shell] },
+  };
+  const before = threadTagDiscoveryRevision(initial);
+  expect(
+    threadTagDiscoveryRevision({
+      ...initial,
+      snapshot: { threads: [{ ...shell, title: "After" }] },
+    }),
+  ).not.toBe(before);
+  expect(
+    threadTagDiscoveryRevision({
+      ...initial,
+      snapshot: { threads: [{ ...shell, tags: ["other"] }] },
+    }),
+  ).not.toBe(before);
+  expect(
+    threadTagDiscoveryRevision({ ...initial, removals: new Map([["omitted-archive-thread", 42]]) }),
+  ).not.toBe(before);
+  const streaming = { ...shell, itemCount: 99 };
+  expect(threadTagDiscoveryRevision({ ...initial, snapshot: { threads: [streaming] } })).toBe(
+    before,
+  );
+});
+
+it("merges cached vocabulary across environments while preserving preferred ranking and counts", () => {
+  const pages = [
+    [
+      { tag: "Work/Client", count: 2, projectCount: 1, preferredProject: true },
+      { tag: "WC", count: 1, projectCount: 1 },
+    ],
+    [
+      { tag: "Work/Client", count: 1, projectCount: 1 },
+      { tag: "other", count: 1, projectCount: 1, preferredProject: true },
+    ],
+  ];
+  expect(mergeThreadTagVocabulary(pages, "wc")).toEqual([
+    { tag: "Work/Client", count: 3, projectCount: 2, preferredProject: true },
+    { tag: "WC", count: 1, projectCount: 1, preferredProject: false },
+  ]);
+});
+it("submits the ordered default and respects explicit keyboard choices", () => {
+  expect(
+    threadTagEnterSelection({
+      candidate: "cli",
+      entries: [{ tag: "Work/Client" }],
+      allowCreate: true,
+      canCreate: true,
+      highlighted: "Work/Client",
+    }),
+  ).toBe("Work/Client");
+  expect(
+    threadTagEnterSelection({
+      candidate: "bug",
+      entries: [{ tag: "bugfix" }],
+      allowCreate: true,
+      canCreate: true,
+      highlighted: "bug",
+    }),
+  ).toBe("bug");
+  const entries = [{ tag: "Work/Client" }, { tag: "WC" }];
+  expect(
+    threadTagEnterSelection({
+      candidate: "private",
+      entries: [{ tag: "private/reference" }],
+      allowCreate: true,
+      canCreate: false,
+      highlighted: null,
+    }),
+  ).toBeUndefined();
+  expect(
+    threadTagEnterSelection({
+      candidate: "WC",
+      entries,
+      allowCreate: true,
+      canCreate: false,
+      highlighted: "WC",
+    }),
+  ).toBe("WC");
+  expect(
+    threadTagEnterSelection({
+      candidate: "",
+      entries,
+      allowCreate: true,
+      canCreate: false,
+      highlighted: "WC",
+    }),
+  ).toBe("WC");
+  expect(
+    threadTagEnterSelection({
+      candidate: "wc",
+      entries,
+      allowCreate: false,
+      canCreate: false,
+      highlighted: "stale",
+    }),
+  ).toBe("Work/Client");
+});

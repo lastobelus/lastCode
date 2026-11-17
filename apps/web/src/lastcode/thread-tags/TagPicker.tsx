@@ -1,0 +1,208 @@
+import { useAtomValue } from "@effect/atom-react";
+import type {
+  EnvironmentId,
+  ProjectId,
+  ThreadTagVocabularyEntry,
+  ThreadTagVocabularyInput,
+} from "@t3tools/contracts";
+import { ThreadTag } from "@t3tools/contracts";
+import { mergeThreadTagVocabulary, threadTagEnterSelection } from "@t3tools/shared/threadTags";
+import { AsyncResult, Atom } from "effect/reactivity";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import { useState } from "react";
+import { CheckIcon, PlusIcon } from "lucide-react";
+import { Command, CommandInput, CommandItem, CommandList } from "../../components/ui/command";
+import { Button } from "../../components/ui/button";
+import { vocabularyScope } from "./state";
+
+const vocabularyPages = Atom.family((key: string) => {
+  const target = JSON.parse(key) as {
+    environmentIds: EnvironmentId[];
+    projectId?: ProjectId;
+    projectOnly: boolean;
+    query: string;
+    archived: boolean;
+  };
+  const input: ThreadTagVocabularyInput = {
+    archived: target.archived,
+    limit: 100,
+    ...(target.projectId
+      ? {
+          preferredProjectId: target.projectId,
+          ...(target.projectOnly ? { projectId: target.projectId } : {}),
+        }
+      : {}),
+  };
+  return Atom.make((get) => {
+    const pages: (readonly ThreadTagVocabularyEntry[])[] = [];
+    let loading = false;
+    let failed = false;
+    for (const environmentId of target.environmentIds) {
+      const result = get(vocabularyScope(JSON.stringify({ environmentId, input })));
+      loading ||= result.waiting || AsyncResult.isInitial(result);
+      failed ||= AsyncResult.isFailure(result);
+      const page = Option.getOrNull(AsyncResult.value(result));
+      pages.push(result.waiting || AsyncResult.isFailure(result) ? [] : (page?.entries ?? []));
+    }
+    const ranked = mergeThreadTagVocabulary(pages, target.query);
+    return {
+      entries: ranked.slice(0, 100),
+      loading,
+      failed,
+    };
+  });
+});
+
+const isThreadTag = Schema.is(ThreadTag);
+
+export function TagPicker({
+  environmentIds,
+  projectId,
+  selected = [],
+  archived = false,
+  allowCreate = false,
+  disabled = false,
+  onSelect,
+}: {
+  readonly environmentIds: readonly EnvironmentId[];
+  readonly projectId?: ProjectId;
+  readonly selected?: readonly string[];
+  readonly archived?: boolean;
+  readonly allowCreate?: boolean;
+  readonly disabled?: boolean;
+  readonly onSelect: (tag: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [projectOnly, setProjectOnly] = useState(false);
+  const [highlighted, setHighlighted] = useState<string | null>(null);
+  const key = JSON.stringify({
+    environmentIds,
+    projectId,
+    projectOnly,
+    query,
+    archived,
+  });
+  const result = useAtomValue(vocabularyPages(key));
+  const candidate = query.trim().replace(/^#/, "");
+  const canCreate =
+    allowCreate &&
+    !result.loading &&
+    candidate.length > 0 &&
+    isThreadTag(candidate) &&
+    !result.entries.some((entry) => entry.tag === candidate) &&
+    !selected.includes(candidate);
+  const entries = allowCreate
+    ? result.entries.toSorted((a, b) => Number(b.tag === candidate) - Number(a.tag === candidate))
+    : result.entries;
+  const options = [...(canCreate ? [candidate] : []), ...entries.map((entry) => entry.tag)];
+  return (
+    <div className="min-w-0 [--command-shell-inset:0.25rem]">
+      <Command
+        items={options}
+        mode="none"
+        value={query}
+        onItemHighlighted={(value, details) => {
+          if (details.reason === "keyboard")
+            setHighlighted(typeof value === "string" ? value : null);
+        }}
+        onValueChange={(value) => {
+          setQuery(value);
+          setHighlighted(null);
+        }}
+      >
+        <CommandInput
+          aria-label="Search tags"
+          placeholder={allowCreate ? "Find or add a tag…" : "Find a tag…"}
+          onKeyDown={(event) => {
+            if (
+              event.key !== "Enter" ||
+              event.nativeEvent.isComposing ||
+              event.keyCode === 229 ||
+              disabled ||
+              result.loading
+            )
+              return;
+            const tag = threadTagEnterSelection({
+              candidate,
+              entries: result.entries,
+              allowCreate,
+              canCreate,
+              highlighted,
+            });
+            (
+              event as typeof event & { preventBaseUIHandler?: () => void }
+            ).preventBaseUIHandler?.();
+            event.preventDefault();
+            event.stopPropagation();
+            if (tag !== undefined) onSelect(tag);
+          }}
+        />
+        <CommandList className="max-h-64">
+          {canCreate ? (
+            <CommandItem
+              value={candidate}
+              disabled={disabled || result.loading}
+              onClick={() => onSelect(candidate)}
+            >
+              <PlusIcon className="size-3.5" />
+              <span className="truncate">Add #{candidate}</span>
+            </CommandItem>
+          ) : null}
+          {entries.map((entry) => (
+            <CommandItem
+              key={entry.tag}
+              value={entry.tag}
+              disabled={disabled || result.loading}
+              onClick={() => onSelect(entry.tag)}
+            >
+              <span className="min-w-0 flex-1 truncate font-mono">#{entry.tag}</span>
+              <span
+                aria-label={`${entry.count} threads with this tag or nested tags`}
+                className="text-xs text-muted-foreground"
+              >
+                {entry.count}
+              </span>
+              {selected.includes(entry.tag) ? <CheckIcon className="size-3.5" /> : null}
+            </CommandItem>
+          ))}
+          {result.loading ? (
+            <p className="px-2 py-1 text-xs text-muted-foreground" role="status">
+              Loading tags…
+            </p>
+          ) : null}
+          {result.failed ? (
+            <p className="px-2 py-1 text-xs text-destructive" role="alert">
+              Could not load tags from every connection. This list may be incomplete.
+            </p>
+          ) : null}
+          {!result.loading && !result.failed && options.length === 0 ? (
+            <p className="px-2 py-1 text-xs text-muted-foreground">
+              {query.trim() ? "No matching tags" : "No tags yet"}
+            </p>
+          ) : null}
+        </CommandList>
+      </Command>
+      <div className="flex items-center justify-between gap-2 border-t border-border px-2 py-1">
+        {projectId ? (
+          <Button
+            size="xs"
+            variant="ghost"
+            onClick={() => {
+              setProjectOnly(!projectOnly);
+            }}
+            aria-label={
+              projectOnly
+                ? "Showing tags from this project. Switch to all projects."
+                : "Showing tags from all projects. Switch to this project."
+            }
+          >
+            {projectOnly ? "This project" : "All projects"}
+          </Button>
+        ) : (
+          <span className="text-xs text-muted-foreground">All projects</span>
+        )}
+      </div>
+    </div>
+  );
+}

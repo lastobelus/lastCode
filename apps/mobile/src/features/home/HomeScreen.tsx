@@ -1,3 +1,4 @@
+import { useTagSidebar } from "../lastcode/thread-tags/TagSidebar";
 import { useContentTopInset } from "../../components/ui/useBarInset";
 import { usePaneRole } from "../../components/ui/Pane";
 import { ScreenContent } from "../../components/ui/ScreenContent";
@@ -351,6 +352,13 @@ export function HomeScreen(props: HomeScreenProps) {
       : { projectIds: v2ScopedProjectGroup.projectRefs.map((ref) => ref.projectId) },
   );
   const threadSearchMatchByKey = useThreadListSearchMatches(props.threads, threadSearch);
+  const tagSidebar = useTagSidebar(
+    v2ScopedProjectGroup === null
+      ? searchEnvironmentIds.map((environmentId) => ({ environmentId }))
+      : v2ScopedProjectGroup.projectRefs,
+    props.onSelectThread,
+    props.searchQuery,
+  );
   const v2ProjectTitleByProjectKey = new Map(
     projectScopes.flatMap((scope) =>
       scope.projectRefs.map(
@@ -450,7 +458,7 @@ export function HomeScreen(props: HomeScreenProps) {
     }
     onSelectThread(thread);
   };
-  useThreadJumpShortcuts(threadListV2Items, selectThread);
+  useThreadJumpShortcuts(tagSidebar.active ? [] : threadListV2Items, selectThread);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the list's visible range after commit to enable swipe gestures on those rows
   useEffect(() => {
     if (swipeEnabled) activateVisibleRows(threadListV2Items);
@@ -679,6 +687,7 @@ export function HomeScreen(props: HomeScreenProps) {
   const v2ListHeader = (
     <>
       {listHeader}
+      {tagSidebar.control}
       {Platform.OS === "ios" && workspace ? (
         <ThreadListFilters
           gutter={sidebarSurface ? 8 : 0}
@@ -736,6 +745,13 @@ export function HomeScreen(props: HomeScreenProps) {
       />
     );
 
+  if (tagSidebar.active)
+    return (
+      <View className={containerClassName}>
+        <ScreenContent surface="screen">{tagSidebar.results(v2ListHeader)}</ScreenContent>
+      </View>
+    );
+
   if (Platform.OS === "android" && threadListV2Items.length === 0) {
     return (
       <ScreenContent surface="screen">
@@ -743,6 +759,7 @@ export function HomeScreen(props: HomeScreenProps) {
           className="flex-1 items-center justify-center px-4"
           style={{ paddingBottom: insets.bottom }}
         >
+          {tagSidebar.control}
           {v2ListEmpty}
         </View>
       </ScreenContent>

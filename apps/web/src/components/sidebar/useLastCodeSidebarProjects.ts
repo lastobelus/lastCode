@@ -1,5 +1,5 @@
 import type { EnvironmentId } from "@t3tools/contracts";
-import { useProjects, useThreadShells } from "../../state/entities";
+import { useProjects, useVisibleThreadShells } from "../../state/entities";
 import { useClientSettings, useClientSetting } from "../../hooks/useSettings";
 import { useUiStateStore, legacyProjectCwdPreferenceKey } from "../../uiStateStore";
 import {
@@ -23,7 +23,7 @@ interface ProjectEnvironments {
 /** Collection-only entity selectors and derivation; rows keep their own project-local projections. */
 export function useLastCodeSidebarProjects(environments: ProjectEnvironments) {
   const projects = useProjects();
-  const threads = useThreadShells();
+  const threads = useVisibleThreadShells();
   const preferredIds = useUiStateStore((state) => state.projectOrder);
   const settings = useClientSettings(selectProjectGroupingSettings);
   const sortOrder = useClientSetting("sidebarProjectSortOrder");

@@ -1,3 +1,6 @@
+import { threadKey } from "@t3tools/client-runtime/state/entities";
+import { useAtomValue } from "@effect/atom-react";
+import { environmentThreadShells } from "../../state/threads";
 import type { OlderSettledScope } from "@t3tools/client-runtime/state/threads";
 import { useOlderSettledShelf } from "../../state/olderSettledShelf";
 import { useShallow } from "zustand/react/shallow";
@@ -19,7 +22,12 @@ export function useLastCodeProjectThreads(
   projectExpanded: boolean,
   listExpanded: boolean,
 ) {
-  const threads = useThreadShellsForProjectRefs(project.memberProjectRefs);
+  const hidden = useAtomValue(environmentThreadShells.hiddenThreadKeysAtom);
+  const loadedThreads = useThreadShellsForProjectRefs(project.memberProjectRefs);
+  const threads = loadedThreads.filter(
+    (thread) =>
+      !hidden.has(threadKey({ environmentId: thread.environmentId, threadId: thread.id })),
+  );
   const scopes: OlderSettledScope[] = [
     ...new Set(project.memberProjectRefs.map((ref) => ref.environmentId)),
   ].map((environmentId) => ({
@@ -35,7 +43,7 @@ export function useLastCodeProjectThreads(
     visibleCount: 0,
   });
   const olderSettled = {
-    hasMore: shelf.hasMore || shelf.unloadedCount(threads) > 0,
+    hasMore: shelf.hasMore || shelf.unloadedCount(loadedThreads) > 0,
     loading: shelf.loading,
     failed: shelf.failed,
     loadMore: shelf.loadMore,
