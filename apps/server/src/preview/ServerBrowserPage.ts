@@ -1170,12 +1170,15 @@ export const snapshot = (input: SnapshotInput) =>
 export const snapshotMetadata = (input: SnapshotInput) =>
   runSnapshot({ ...input, includeImage: true }, true) as Promise<PreviewAutomationSnapshotMetadata>;
 
+export type ClickTimeoutDiagnostic = () => Promise<ServerBrowserOperationError>;
+
 /** Return when a dialog opens; waiting for the action to finish would block until dialog resolution. */
 export const click = async (
   page: Page,
   input: PreviewAutomationClickInput,
   pointer: PointerReporter = noPointer,
   signal?: AbortSignal,
+  onTimeout?: (diagnose: ClickTimeoutDiagnostic) => void,
 ): Promise<{ readonly x: number; readonly y: number }> => {
   signal?.throwIfAborted();
   // One deadline across steps keeps the reply inside the broker's grace; Playwright reads 0 as none.
@@ -1183,8 +1186,26 @@ export const click = async (
   const remaining = () => Math.max(1, deadline - Date.now());
   const locator = targetLocator(page, input);
   let stage: "target layout" | "pointer reporting" | "click" = "target layout";
+  const layoutTimeoutMs = Math.min(remaining(), DEFAULT_READ_TIMEOUT_MS);
+  if (locator !== null) {
+    // The host may cancel at the shared deadline before this promise can report its failure.
+    // It can still describe the reached stage, without extending the action or retrying it.
+    onTimeout?.(async () => {
+      const cause = new ServerBrowserOperationError({
+        tag: "PreviewAutomationTimeoutError",
+        message: "The browser operation exceeded its execution deadline.",
+        detail: {
+          stage,
+          timeoutMs:
+            stage === "target layout" ? layoutTimeoutMs : (input.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+        },
+      });
+      cause.name = "TimeoutError";
+      return toOperationError(await namedTargetTimeout(locator, input, cause, stage));
+    });
+  }
   try {
-    const point = await withReadBudget({ timeoutMs: remaining(), signal }, (read) =>
+    const point = await withReadBudget({ timeoutMs: layoutTimeoutMs, signal }, (read) =>
       read("target layout", () => targetPoint(page, locator, input, remaining, signal)),
     );
     stage = "pointer reporting";
@@ -1282,7 +1303,7 @@ const namedTargetTimeout = async (
   return new ServerBrowserOperationError({
     tag: "PreviewAutomationTimeoutError",
     message,
-    detail: { reason: message },
+    detail: { ...detail, reason: message },
     cause,
   });
 };
