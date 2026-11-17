@@ -19,6 +19,7 @@ import {
   DIALOG_MEDIA_POPUP_CLASS,
   DIALOG_MOBILE_SHEET_CLASS,
   DIALOG_POPUP_CLASS,
+  resolveDialogBackdropStyle,
 } from "~/components/ui/dialog-styles";
 import { ScrollArea } from "~/components/ui/scroll-area";
 
@@ -76,6 +77,7 @@ function DialogClose(props: DialogPrimitive.Close.Props) {
 
 function DialogBackdrop({
   className,
+  style,
   variant = "default",
   ...props
 }: DialogPrimitive.Backdrop.Props & { variant?: "default" | "media" }) {
@@ -87,6 +89,9 @@ function DialogBackdrop({
         className,
       )}
       data-slot="dialog-backdrop"
+      style={(state) =>
+        resolveDialogBackdropStyle(state.open, typeof style === "function" ? style(state) : style)
+      }
       {...props}
     />
   );

@@ -5,7 +5,9 @@ import { ENVIRONMENT_MACHINE_SYMBOLS } from "../../../components/EnvironmentMach
 import { useSettingsEnvironmentFilter } from "../settings-environment-filter";
 
 /** The settings scope filter, as an `AppBar` menu. */
-export function useSettingsEnvironmentMenu(): AppBarMenu {
+export function useSettingsEnvironmentMenu(
+  props: { readonly environmentOnly?: boolean } = {},
+): AppBarMenu {
   const {
     availableTargets,
     selectedTargets,
@@ -16,10 +18,14 @@ export function useSettingsEnvironmentMenu(): AppBarMenu {
     selectedProjectKey,
     selectProject,
   } = useSettingsEnvironmentFilter();
+  const environmentOnly = props.environmentOnly === true;
+  const filterLabel = environmentOnly
+    ? "Filter settings environments"
+    : "Filter settings environments and projects";
   return {
-    title: "Filter settings environments and projects",
+    title: filterLabel,
     icon:
-      selectedIds === null && selectedProjectKey === null
+      selectedIds === null && (environmentOnly || selectedProjectKey === null)
         ? "line.3.horizontal.decrease"
         : "line.3.horizontal.decrease.circle.fill",
     items: [
@@ -46,26 +52,30 @@ export function useSettingsEnvironmentMenu(): AppBarMenu {
           })),
         ],
       },
-      {
-        id: "projects",
-        title:
-          selectableProjectGroups.find((group) => group.key === selectedProjectKey)?.label ??
-          (selectedProjectKey === null ? "All projects" : "Unavailable project"),
-        items: [
-          {
-            id: "project:all",
-            title: "All projects",
-            selected: selectedProjectKey === null,
-            onPress: () => selectProject(null),
-          },
-          ...selectableProjectGroups.map((group) => ({
-            id: `project:${group.key}`,
-            title: projectMenuLabel(group),
-            selected: selectedProjectKey === group.key,
-            onPress: () => selectProject(group.key),
-          })),
-        ],
-      },
+      ...(!environmentOnly
+        ? [
+            {
+              id: "projects",
+              title:
+                selectableProjectGroups.find((group) => group.key === selectedProjectKey)?.label ??
+                (selectedProjectKey === null ? "All projects" : "Unavailable project"),
+              items: [
+                {
+                  id: "project:all",
+                  title: "All projects",
+                  selected: selectedProjectKey === null,
+                  onPress: () => selectProject(null),
+                },
+                ...selectableProjectGroups.map((group) => ({
+                  id: `project:${group.key}`,
+                  title: projectMenuLabel(group),
+                  selected: selectedProjectKey === group.key,
+                  onPress: () => selectProject(group.key),
+                })),
+              ],
+            },
+          ]
+        : []),
     ],
   };
 }

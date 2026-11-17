@@ -8,15 +8,15 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import {
-  assertBaseIsAncestor,
   assertCleanWorktree,
+  cleanGitEnvironment,
   assertSupportedNodeVersion,
   LASTCODE_BASE_BRANCH,
   LASTCODE_ORIGIN_REMOTE,
   resolveRepoRoot,
   runGit,
-} from "./lastcode-local-ci.ts";
-import { type GithubCiEvidence, readGithubCi } from "./lastcode-github-ci.ts";
+} from "./lib/lastcode-git.ts";
+import { type GithubCiEvidence, LASTCODE_CI_WORKFLOW, readGithubCi } from "./lastcode-github-ci.ts";
 import { readReviewData, validateReviewForMerge } from "./lastcode-pr-gates.ts";
 import { acquireMainWriteLock } from "./lastcode-main-write-lock.ts";
 import { carrySquashBody, preserveCarrySource } from "./lastcode-carry-delivery.ts";
@@ -45,10 +45,11 @@ function writeSquashBody(body: string): { readonly cleanup: () => void; readonly
   return { cleanup: () => NodeFS.rmSync(directory, { force: true, recursive: true }), path };
 }
 
+// With strict status checks off, GitHub reports a PR that is behind its base as CLEAN, so
+// CLEAN is the only state that can merge. BEHIND means the up-to-date rule is back on.
 export function validatePullRequestForMerge(
   pullRequest: PullRequestForMerge,
   expectedHead: string,
-  expectedBase: string,
 ): void {
   if (pullRequest.state !== "OPEN") {
     throw new Error(`Pull request #${pullRequest.number} is not open.`);
@@ -64,11 +65,6 @@ export function validatePullRequestForMerge(
   if (pullRequest.headRefOid !== expectedHead) {
     throw new Error(
       `Pull request #${pullRequest.number} points to ${pullRequest.headRefOid}, not local HEAD ${expectedHead}.`,
-    );
-  }
-  if (pullRequest.baseRefOid !== expectedBase) {
-    throw new Error(
-      `Pull request #${pullRequest.number} is based on ${pullRequest.baseRefOid}, not the locally tested base ${expectedBase}.`,
     );
   }
   if (pullRequest.mergeable !== "MERGEABLE" || pullRequest.mergeStateStatus !== "CLEAN") {
@@ -93,8 +89,59 @@ export function validateGithubCiForMerge(evidence: GithubCiEvidence): {
     throw new Error(`GitHub CI is not merge-ready: ${evidence.detail}`);
   }
   throw new Error(
-    `GitHub CI is not merge-ready (${evidence.state}/${evidence.reason}); check again with pnpm lastcode:pr-gates once CI settles.`,
+    `GitHub CI is not merge-ready (${evidence.state}/${evidence.reason}); check again with pnpm --config.verify-deps-before-run=false lastcode:pr-gates once CI settles.`,
   );
+}
+
+// The PR may be behind main. Its CI tested a merge onto `baseRefOid`, which must still be in main
+// (a checkpoint rewrite removes it), and its head must still merge cleanly onto the current tip.
+function assertMergesOntoBase(
+  repoRoot: string,
+  pullRequest: Pick<PullRequestForMerge, "number" | "baseRefOid">,
+  baseCommit: string,
+  head: string,
+): void {
+  const ancestor = NodeChildProcess.spawnSync(
+    "git",
+    ["merge-base", "--is-ancestor", pullRequest.baseRefOid, baseCommit],
+    { cwd: repoRoot, env: cleanGitEnvironment(process.env), stdio: "ignore" },
+  );
+  if (ancestor.error) throw ancestor.error;
+  if (ancestor.status !== 0) {
+    throw new Error(
+      `Pull request #${pullRequest.number} was tested against ${pullRequest.baseRefOid}, which is no longer in ${LASTCODE_BASE_BRANCH}. Rebase onto ${LASTCODE_ORIGIN_REMOTE}/${LASTCODE_BASE_BRANCH} and push.`,
+    );
+  }
+  const merge = NodeChildProcess.spawnSync(
+    "git",
+    ["merge-tree", "--write-tree", "--name-only", baseCommit, head],
+    { cwd: repoRoot, encoding: "utf8", env: cleanGitEnvironment(process.env) },
+  );
+  if (merge.error) throw merge.error;
+  if (merge.status !== 0) {
+    throw new Error(
+      [
+        `Pull request #${pullRequest.number} conflicts with ${LASTCODE_ORIGIN_REMOTE}/${LASTCODE_BASE_BRANCH} at ${baseCommit}. Rebase onto it and push.`,
+        merge.stdout.trim(),
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    );
+  }
+}
+
+function postMergeCiInstructions(mergeCommit: string): string {
+  const repo = `--repo ${LASTCODE_GITHUB_REPOSITORY}`;
+  // Waits up to five minutes for the push run to register, then exits with its result.
+  const watch = [
+    `run=""; for _ in $(seq 20); do run=$(gh run list ${repo} --workflow ${LASTCODE_CI_WORKFLOW} --event push --commit ${mergeCommit} --json databaseId -q '.[0].databaseId'); [ -n "$run" ] && break; sleep 15; done;`,
+    `if [ -z "$run" ]; then echo "No main CI run registered for ${mergeCommit}"; exit 1; fi;`,
+    `gh run watch "$run" ${repo} --exit-status --interval 60`,
+  ].join(" ");
+  return [
+    `[lastcode:merge] Merged as ${mergeCommit}. Confirm main CI for it with this background command:`,
+    `  ${watch}`,
+  ].join("\n");
 }
 
 export function postMergeCheckpointArguments(skipCheckpoint = true): ReadonlyArray<string> | null {
@@ -109,7 +156,9 @@ export function parseMergeOptions(argv: ReadonlyArray<string>) {
     ) ||
     (argv.includes("--skip-checkpoint") && argv.includes("--checkpoint"))
   ) {
-    throw new Error("Usage: pnpm lastcode:merge [--dry-run] [--skip-checkpoint | --checkpoint]");
+    throw new Error(
+      "Usage: pnpm --config.verify-deps-before-run=false lastcode:merge [--dry-run] [--skip-checkpoint | --checkpoint]",
+    );
   }
   return { dryRun: argv.includes("--dry-run"), skipCheckpoint: !argv.includes("--checkpoint") };
 }
@@ -145,7 +194,7 @@ export function assertMergeBaseUnchanged(
   ]);
   if (currentBase !== expectedBase) {
     throw new Error(
-      `${LASTCODE_ORIGIN_REMOTE}/${LASTCODE_BASE_BRANCH} moved from ${expectedBase} to ${currentBase} ${phase}.`,
+      `${LASTCODE_ORIGIN_REMOTE}/${LASTCODE_BASE_BRANCH} moved from ${expectedBase} to ${currentBase} ${phase}. Run lastcode:merge again; a PR behind main needs no rebase or new CI unless the rerun reports a conflict.`,
     );
   }
 }
@@ -208,10 +257,10 @@ function main(argv: ReadonlyArray<string>): void {
     "rev-parse",
     `refs/remotes/${LASTCODE_ORIGIN_REMOTE}/${LASTCODE_BASE_BRANCH}`,
   ]);
-  assertBaseIsAncestor(repoRoot, baseCommit, commit);
 
   const pullRequest = readPullRequest(repoRoot, branch);
-  validatePullRequestForMerge(pullRequest, commit, baseCommit);
+  validatePullRequestForMerge(pullRequest, commit);
+  assertMergesOntoBase(repoRoot, pullRequest, baseCommit, commit);
   const githubCi = readGithubCi(
     LASTCODE_GITHUB_REPOSITORY,
     pullRequest,
@@ -232,7 +281,8 @@ function main(argv: ReadonlyArray<string>): void {
       `Checked-out branch now resolves to pull request #${confirmedPullRequest.number}, not #${pullRequest.number}.`,
     );
   }
-  validatePullRequestForMerge(confirmedPullRequest, commit, baseCommit);
+  validatePullRequestForMerge(confirmedPullRequest, commit);
+  assertMergesOntoBase(repoRoot, confirmedPullRequest, baseCommit, commit);
   runCommand(repoRoot, "git", [
     "fetch",
     "--no-tags",
@@ -262,7 +312,8 @@ function main(argv: ReadonlyArray<string>): void {
     if (lockedPullRequest.number !== pullRequest.number) {
       throw new Error("The current branch resolves to a different pull request.");
     }
-    validatePullRequestForMerge(lockedPullRequest, commit, baseCommit);
+    validatePullRequestForMerge(lockedPullRequest, commit);
+    assertMergesOntoBase(repoRoot, lockedPullRequest, baseCommit, commit);
     validateGithubCiForMerge(
       readGithubCi(
         LASTCODE_GITHUB_REPOSITORY,
@@ -303,6 +354,25 @@ function main(argv: ReadonlyArray<string>): void {
     throw error;
   }
   lock.release();
+  let merged: string | undefined;
+  try {
+    merged = runGhJson<{ readonly mergeCommit?: { readonly oid?: string } | null }>(repoRoot, [
+      "pr",
+      "view",
+      String(pullRequest.number),
+      "--repo",
+      LASTCODE_GITHUB_REPOSITORY,
+      "--json",
+      "mergeCommit",
+    ]).mergeCommit?.oid;
+  } catch {
+    merged = undefined;
+  }
+  console.log(
+    merged
+      ? postMergeCiInstructions(merged)
+      : `[lastcode:merge] Merged, but GitHub did not report the merge commit. Read it with \`gh pr view ${pullRequest.number} --repo ${LASTCODE_GITHUB_REPOSITORY} --json mergeCommit\` and confirm main CI for that exact commit.`,
+  );
   const checkpointArguments = postMergeCheckpointArguments(skipCheckpoint);
   if (checkpointArguments === null) {
     console.log("[lastcode:merge] Merge complete. No checkpoint requested.");

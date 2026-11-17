@@ -77,7 +77,6 @@ async function downloadAttachmentBlob(url: string): Promise<Blob | null> {
  */
 export function useComposerContextImport(input: {
   readonly environmentId: EnvironmentId;
-  readonly linkedEnvironments: ReadonlyMap<EnvironmentId, string>;
   readonly activeThread: ChatComposerProps["activeThread"];
   readonly activeThreadId: ChatComposerProps["activeThreadId"];
   readonly composerDraftTarget: ChatComposerProps["composerDraftTarget"];
@@ -95,7 +94,6 @@ export function useComposerContextImport(input: {
 }) {
   const {
     environmentId,
-    linkedEnvironments,
     activeThread,
     activeThreadId,
     composerDraftTarget,
@@ -394,13 +392,8 @@ export function useComposerContextImport(input: {
           break;
         }
         case "thread": {
-          // The agent reads threads on its own server and the machines it links to; a pasted
-          // thread from any other machine is dropped.
-          if (
-            record.environmentId !== environmentId &&
-            !linkedEnvironments.has(record.environmentId)
-          )
-            break;
+          // Preserve the scoped reference through paste even when its route is currently
+          // unavailable. Send eligibility explains the problem without losing the draft.
           // Threads reuse their destination record by identity, reminting only on an ID collision.
           const threads = getComposerDraft(threadDraftTarget)?.threadContexts ?? [];
           const attached = threads.find(

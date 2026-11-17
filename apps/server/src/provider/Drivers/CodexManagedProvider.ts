@@ -276,6 +276,13 @@ export const makeManagedCodexProvider = Effect.fn("makeManagedCodexProvider")(fu
       ),
     );
   const textGeneration: ProviderInstance["textGeneration"] = {
+    generatePromptSnippets: (value) =>
+      protect("generatePromptSnippets", nativeGeneration.generatePromptSnippets(value)),
+    generateIncomingMessageSummary: (value) =>
+      protect(
+        "generateIncomingMessageSummary",
+        nativeGeneration.generateIncomingMessageSummary(value),
+      ),
     generateCommitMessage: (value) =>
       protect("generateCommitMessage", nativeGeneration.generateCommitMessage(value)),
     generatePrContent: (value) =>

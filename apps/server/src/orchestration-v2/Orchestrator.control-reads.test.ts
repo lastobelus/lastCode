@@ -900,6 +900,15 @@ it.effect(
         type: "thread.archive",
         commandId: CommandId.make("archive-with-old-history"),
         threadId,
+        childDisposition: "stop_and_archive",
+        expectedChildThreadIds: [],
+      });
+      // This harness has no effect worker to complete the confirmed archive.
+      yield* orchestrator.dispatch({
+        type: "thread.archive.complete",
+        commandId: CommandId.make("complete-control-archive"),
+        threadId,
+        requestId: CommandId.make("archive-with-old-history"),
       });
       yield* orchestrator.dispatch({
         type: "thread.delete",
@@ -2679,14 +2688,18 @@ it.effect("queued-message commands read a long thread's history without walking 
       for (const [query, params] of statements.splice(0)) {
         const plan = yield* sql.unsafe<{ detail: string }>(`EXPLAIN QUERY PLAN ${query}`, params);
         for (const { detail } of plan) {
-          // A history-sized read: an ordering pass over every message item for a narrowed
-          // message read, or a node/turn-item row search bounded by nothing but the thread.
-          // Walking only a covering index's ids reads no payloads. Stop still loads every
-          // message, so its ordering pass is no larger than that read.
+          // Narrowed reads must not sort the full message history or load unrelated payloads.
+          // Covering indexes read ids; the partial command-history index is already ordered.
+          // Stop already loads every message, so ordering that set adds no history walk.
+          const orderedCommandHistory =
+            detail.includes(
+              "USING INDEX orchestration_v2_projection_turn_items_command_history_idx",
+            ) && query.includes("type IN ('user_message', 'error')");
           if (
             (detail.includes("TEMP B-TREE FOR GROUP BY") && query.includes("json_each")) ||
             (/^SEARCH .*(node|turn_item).* \(thread_id=\?\)$/.test(detail) &&
               !detail.includes("USING COVERING INDEX") &&
+              !orderedCommandHistory &&
               // That full ordering pass, through an index that holds only message items.
               !(detail.includes("message_ordinal_idx") && !query.includes("json_each"))) ||
             // Every active run in the environment, not only this thread's.

@@ -9,6 +9,8 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { AsyncResult, Atom } from "effect/reactivity";
 import * as Dialog from "../../components/ui/Dialog";
+import { recoverySuppressesWorking } from "@t3tools/client-runtime/state/thread-recovery";
+import { ThreadRecoveryNotice } from "./ThreadRecoveryNotice";
 import { useAtomMount, useAtomValue } from "@effect/atom-react";
 import { mobilePreferencesAtom } from "../../state/preferences";
 import { parseThreadKey, threadKey } from "@t3tools/client-runtime/state/entities";
@@ -268,6 +270,7 @@ export interface ThreadDetailScreenProps {
   readonly composerDraftKey: string | null;
   readonly followUpBehavior: FollowUpBehavior;
   readonly canSteerActiveTurn: boolean;
+  readonly forceQueue: boolean;
   readonly isSavingQueuedEdit: boolean;
   readonly onCancelQueuedRunEdit: () => void;
   readonly onRemoveQueuedEditAttachment: (attachmentId: string) => void;
@@ -767,6 +770,7 @@ function ThreadDetailBody(
     };
   })();
   const statusLines = [backgroundLine, lifecycleLine].filter((line) => line !== null);
+  const suppressStaleWorking = recoverySuppressesWorking(props.selectedThread.recovery);
   const floatingStatus = ((): FloatingWorkingStatus | null => {
     const connectionStatus = connectionFloatingStatus({
       connectionError: props.connectionError,
@@ -803,6 +807,7 @@ function ThreadDetailBody(
             : null,
       };
     }
+    if (suppressStaleWorking) return null;
     if (props.activePendingApproval !== null || props.activePendingUserInput !== null) {
       return null;
     }
@@ -1443,8 +1448,8 @@ function ThreadDetailBody(
                   contentPresentation={props.contentPresentation}
                   threadTitle={props.selectedThread.title}
                   latestRun={props.activityRun}
-                  activeWorkStartedAt={props.activeWorkStartedAt}
-                  runlessWorkActive={props.runlessWorkActive ?? false}
+                  activeWorkStartedAt={suppressStaleWorking ? null : props.activeWorkStartedAt}
+                  runlessWorkActive={!suppressStaleWorking && (props.runlessWorkActive ?? false)}
                   listRef={listRef}
                   freeze={freeze}
                   anchorMessageId={anchorMessageId}
@@ -1605,6 +1610,11 @@ function ThreadDetailBody(
                         />
                       </Animated.View>
                     ) : null}
+                    <ThreadRecoveryNotice
+                      key={`${selectedThreadKey}:${props.selectedThread.recovery?.runId}:${props.selectedThread.recovery?.attemptId}`}
+                      thread={props.selectedThread}
+                      environmentId={props.environmentId}
+                    />
                     <UsageLimitRecoveryCard
                       key={props.selectedThread.latestRun?.runId}
                       thread={props.selectedThread}
@@ -1660,19 +1670,11 @@ function ThreadDetailBody(
                         />
                       </Animated.View>
                     ) : null}
-                    {props.selectedThread.actionResume?.outcome === "running" ||
-                    props.selectedThread.actionResume?.delivery === "available" ? (
-                      <Animated.View
-                        className="shrink-0 px-4 pb-3"
-                        entering={FadeInDown.duration(220)}
-                        exiting={FadeOut.duration(140)}
-                      >
-                        <ActionResumeNotice
-                          environmentId={props.environmentId}
-                          thread={props.selectedThread}
-                        />
-                      </Animated.View>
-                    ) : null}
+                    <ActionResumeNotice
+                      environmentId={props.environmentId}
+                      thread={props.selectedThread}
+                      threadDetailRef={props.selectedThreadDetailRef}
+                    />
                     {usageLimitsReport && activeUserInputRequestId === null ? (
                       <Animated.View
                         className="shrink-0 px-4"
@@ -1862,6 +1864,7 @@ function ThreadDetailBody(
                         }
                         canSteerActiveTurn={props.canSteerActiveTurn}
                         hidden={composerSlotHidden}
+                        forceQueue={props.forceQueue}
                         queuedEdit={
                           props.queuedRunEdit === null
                             ? null

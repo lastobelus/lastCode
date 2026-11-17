@@ -2,7 +2,7 @@ import { useClientSetting } from "../../hooks/useSettings";
 import type { EnvironmentIconColor } from "@t3tools/contracts/settings";
 import type { ProviderInstanceEntry } from "../../providerInstances";
 import { shouldShowInstanceBadge } from "../../providerInstances";
-import { getTriggerDisplayModelLabel } from "../chat/providerIconUtils";
+import { getTriggerDisplayModelName } from "../chat/providerIconUtils";
 import {
   legacyThreadEnvironmentPresentation,
   resolveEnvironmentIconColor,
@@ -87,7 +87,7 @@ function resolveThreadProviderIdentity(
     (model) => model.slug === thread.modelSelection.model,
   );
   const modelLabel = selectedModel
-    ? getTriggerDisplayModelLabel(selectedModel)
+    ? getTriggerDisplayModelName(selectedModel, providerEntry?.driverKind)
     : thread.modelSelection.model;
   return { modelInstanceId, providerEntry, showInstanceBadge, modelLabel };
 }

@@ -8,6 +8,7 @@ import {
 } from "@t3tools/client-runtime/media-actions";
 import {
   AuthFilesystemReadScope,
+  AuthOrchestrationReadScope,
   type EnvironmentId,
   sessionGrantsScope,
   type SessionGrantInput,
@@ -31,7 +32,11 @@ import { loadLocalAttachmentPreview } from "../lib/localAttachmentPreview";
 import { canSaveImageToLibrary, saveImageToLibrary } from "../lib/saveImageToLibrary";
 
 function allowsHostMedia(session: SessionGrantInput | null) {
-  return session === null || sessionGrantsScope(session, AuthFilesystemReadScope);
+  return (
+    session === null ||
+    sessionGrantsScope(session, AuthFilesystemReadScope) ||
+    sessionGrantsScope(session, AuthOrchestrationReadScope)
+  );
 }
 
 function canReadHostMedia(environmentId: EnvironmentId | null): boolean {

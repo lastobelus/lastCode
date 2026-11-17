@@ -15,6 +15,7 @@ import { Command } from "effect/cli";
 import { vi } from "vite-plus/test";
 
 import { cli } from "../binCli.ts";
+import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import { buildTriageLaunchPrompt } from "../triage/triagePrompt.ts";
 
 const FAILING_AGENT_POSIX = `#!/bin/sh
@@ -69,7 +70,13 @@ it.live("a failed agent launch points at the prompt it could not run", () =>
     assert.include(output, "set CODEX_HOME to a folder on another drive");
   }).pipe(
     Effect.provide(
-      Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, NetService.layer, TestConsole.layer),
+      Layer.mergeAll(
+        NodeServices.layer,
+        NodeCrypto.layer,
+        NetService.layer,
+        TestConsole.layer,
+        ManagedPolicy.layerTest(),
+      ),
     ),
   ),
 );

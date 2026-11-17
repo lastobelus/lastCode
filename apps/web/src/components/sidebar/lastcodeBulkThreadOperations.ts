@@ -63,20 +63,37 @@ export async function deleteLastCodeSelection(
   access: SelectionAccess & {
     confirm: LocalApi["dialogs"]["confirm"];
     confirmDeletion: boolean;
+    confirmSavedData?: LastCodeThreadActions["confirmThreadDeletion"];
+    deleteThreads?: LastCodeThreadActions["deleteThreads"];
     deleteThread: LastCodeThreadActions["deleteThread"];
     threadExists: (ref: ScopedThreadRef) => boolean;
   },
 ) {
-  if (access.confirmDeletion && !(await confirmSelectionDeletion(entries.length, access.confirm)))
+  const savedData = access.confirmSavedData
+    ? await access.confirmSavedData(entries.map(({ threadRef }) => threadRef))
+    : null;
+  if (savedData && (savedData._tag !== "Success" || savedData.value === null)) return;
+  if (
+    !savedData &&
+    access.confirmDeletion &&
+    !(await confirmSelectionDeletion(entries.length, access.confirm))
+  )
     return;
   if (!entries.every(({ threadRef }) => access.canOperate(threadRef.environmentId))) return;
   const current = currentOperableEntries(entries, access);
   if (!current) return;
-  const { deletedThreadKeys, firstFailure } = await deleteSelectedThreadEntries({
-    entries: current,
-    delete: ({ threadRef }, deletedThreadKeys) =>
-      access.deleteThread(threadRef, { deletedThreadKeys }),
-  });
+  if (savedData?._tag === "Success" && savedData.value !== null && !access.deleteThreads) return;
+  const { deletedThreadKeys, firstFailure } =
+    savedData?._tag === "Success" && savedData.value !== null && access.deleteThreads
+      ? await access.deleteThreads(
+          current.map(({ threadRef }) => threadRef),
+          savedData.value,
+        )
+      : await deleteSelectedThreadEntries({
+          entries: current,
+          delete: ({ threadRef }, deletedThreadKeys) =>
+            access.deleteThread(threadRef, { deletedThreadKeys }),
+        });
   if (firstFailure) reportThreadOperationFailure(firstFailure, "Failed to delete threads");
   access.removeFromSelection(
     getThreadKeysToDeselectAfterDelete(originalKeys, deletedThreadKeys, (key) => {

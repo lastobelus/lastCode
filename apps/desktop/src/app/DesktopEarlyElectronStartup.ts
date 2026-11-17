@@ -1,4 +1,5 @@
 import { fromLenientJson } from "@t3tools/shared/schemaJson";
+import { LASTCODE_DESKTOP_DISTRIBUTION } from "@t3tools/shared/desktopDistribution";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
@@ -31,7 +32,9 @@ export interface EarlyLinuxElectronOptions {
 }
 
 export const resolveLinuxDesktopEntryName = (isDevelopment: boolean): string =>
-  isDevelopment ? "com.t3tools.T3Code.Development.desktop" : "com.t3tools.T3Code.desktop";
+  isDevelopment
+    ? LASTCODE_DESKTOP_DISTRIBUTION.developmentLinuxDesktopEntryName
+    : LASTCODE_DESKTOP_DISTRIBUTION.linuxDesktopEntryName;
 
 const trimNonEmpty = (value: string | undefined): string | null => {
   const trimmed = value?.trim();

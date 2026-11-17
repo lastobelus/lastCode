@@ -8,6 +8,7 @@ import {
   linkRequestDisplay,
   linkRequestFailureMessage,
   linkRequestInitialMachine,
+  linkRequestPreflightInput,
   type LinkRequestItem,
   linkRequestTarget,
   linkRequestTargetName,
@@ -186,6 +187,11 @@ function LinkRequestDialog(props: {
   const [mintFailed, setMintFailed] = useState<ReadonlySet<EnvironmentId>>(new Set());
   // Enter then a click can both run before a re-render; this guard is synchronous.
   const inFlight = useRef(false);
+  const preflight = useAtomCommand(peerLinkEnvironment.preflight, {
+    label: "check link address",
+    reportFailure: false,
+    reportDefect: false,
+  });
   const answer = useAtomCommand(peerLinkEnvironment.answerRequest, {
     label: "answer link request",
     // The failure cause holds the request, and with it the code; keep it out of the console.
@@ -244,6 +250,17 @@ function LinkRequestDialog(props: {
         environmentId: target.environmentId,
       });
     }
+    const linkTarget =
+      target.kind === "machine" && target.urls.length > 0 ? target : { url: address };
+    const checkInput = linkRequestPreflightInput(linkTarget);
+    if (checkInput === null) return null;
+    const checked = await preflight({ environmentId: props.environmentId, input: checkInput });
+    if (checked._tag === "Failure") {
+      if (!isAtomCommandInterrupted(checked)) {
+        setError(linkRequestFailureMessage(squashAtomCommandFailure(checked)));
+      }
+      return null;
+    }
     let code = pairingCode;
     if (canMint && targetId !== null) {
       const minted = await mintPairingCodeOn(targetId, access);
@@ -256,7 +273,7 @@ function LinkRequestDialog(props: {
     }
     return linkRequestAnswerInput(item, {
       type: "link",
-      target: target.kind === "machine" && target.urls.length > 0 ? target : { url: address },
+      target: linkTarget,
       access,
       pairingCode: code,
     });

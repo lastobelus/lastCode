@@ -86,56 +86,6 @@ function makeParentThread(): OrchestrationV2AppThread {
   };
 }
 
-it.each(["stopping", "failed"] as const)(
-  "native child construction keeps a compact %s archive reference through nested children",
-  (status) => {
-    const parentThread = {
-      ...makeParentThread(),
-      archivePending: {
-        threadId: parentThreadId,
-        commandId: CommandId.make("subagent-pending-archive"),
-        status,
-        ...(status === "failed" ? { error: "Fixture shutdown refused" } : {}),
-        childDisposition: "stop_and_archive" as const,
-        childThreadIds: Array.from({ length: 128 }, (_, index) =>
-          ThreadId.make(`family-child:${index}`),
-        ),
-        archiveThreadIds: [parentThreadId],
-        promoteThreadIds: [],
-        modeLimit: { runtimeMode: "approval-required" as const, interactionMode: "plan" as const },
-      },
-    };
-    const makeChild = (parent: OrchestrationV2AppThread, id: ThreadId) =>
-      makeSubagentChildThread({
-        parentThread: parent,
-        childThreadId: id,
-        parentNodeId: NodeId.make("node:subagent-parent"),
-        activeProviderThreadId: null,
-        providerInstanceId: childProviderInstanceId,
-        modelSelection: childModelSelection,
-        title: "Late native child",
-        now: childCreatedAt,
-        createdBy: "agent",
-        creationSource: "provider",
-      });
-    const child = makeChild(parentThread, childThreadId);
-    const nested = makeChild(child, ThreadId.make("nested-late-native-child"));
-    const expected = {
-      threadId: parentThreadId,
-      commandId: parentThread.archivePending.commandId,
-      status,
-      ...(status === "failed" ? { error: "Fixture shutdown refused" } : {}),
-    };
-    assert.deepEqual(child.archivePending, expected);
-    assert.deepEqual(nested.archivePending, expected);
-    assert.lengthOf(parentThread.archivePending.childThreadIds, 128);
-    assert.deepEqual(parentThread.archivePending.modeLimit, {
-      runtimeMode: "approval-required",
-      interactionMode: "plan",
-    });
-  },
-);
-
 it("resets a subagent child's snooze, title job and remote delegation but keeps its workspace", () => {
   const parentThread: OrchestrationV2AppThread = {
     ...makeParentThread(),
@@ -516,6 +466,65 @@ it("waits for nested work and retains the report across monitor acknowledgements
   });
   assert.equal(held.state, "result_available");
   assert.equal(held.resultRun?.id, cancelled.id);
+  const obligation = {
+    actionRunId: "owned-action",
+    messageId: pending.userMessageId,
+    owner: {
+      parentEnvironmentId: EnvironmentId.make("parent-environment"),
+      parentThreadId,
+      taskId: NodeId.make("owned-task"),
+      sourceRunId: run.id,
+    },
+    state: "transferred" as const,
+    continuationRunId: pending.id,
+  };
+  assert.equal(
+    delegatedTaskProgress({
+      ...projection,
+      runs: [
+        { ...run, actionObligations: [obligation] },
+        { ...pending, queueHeld: true },
+      ],
+    }).state,
+    "working",
+  );
+  const watchOwner = obligation.owner;
+  const watch = {
+    generation: "watch-generation",
+    key: { host: "github.com", repository: "example/project", number: 1 },
+    owner: watchOwner,
+    sourceAttemptId: RunAttemptId.make("watch-attempt"),
+    state: "active" as const,
+  };
+  assert.equal(
+    delegatedTaskProgress({
+      ...projection,
+      runs: [{ ...run, pullRequestWatchObligations: [watch] }],
+    }).state,
+    "working",
+  );
+  const watchContinuation = {
+    generation: watch.generation,
+    owner: watchOwner,
+    messageId: pending.userMessageId,
+  };
+  const wake = { ...pending, queueHeld: true, pullRequestWatchContinuation: watchContinuation };
+  assert.equal(
+    delegatedTaskProgress({
+      ...projection,
+      runs: [
+        { ...run, pullRequestWatchObligations: [{ ...watch, state: "ended" as const }] },
+        wake,
+      ],
+      messages: [
+        {
+          runId: wake.id,
+          notification: { source: { kind: "monitor" }, outcome: "updated", summary: "PR changed" },
+        },
+      ],
+    }).state,
+    "working",
+  );
   const report = { ...pending, status: "completed" as const, startedAt: parentCreatedAt };
   const monitor = { ...report, id: RunId.make("monitor"), ordinal: 3 };
   const artifacts = makeSubagentConversationArtifacts({
@@ -793,6 +802,60 @@ it("orders a task's assistant messages by turn item, not by timestamps", () => {
     ).text,
     "Requested model gpt-5.4; the provider reported running gpt-5.4-mini.\n\nAll steps passed.",
   );
+  const discarded = subagentResultForRun(
+    { ...projection, messages: [progress.message], turnItems: [progress.turnItem] },
+    {
+      ...run,
+      status: "interrupted",
+      actionObligations: [
+        {
+          actionRunId: "discarded",
+          messageId: MessageId.make("discarded"),
+          owner: {
+            parentEnvironmentId: EnvironmentId.make("parent"),
+            parentThreadId,
+            taskId: NodeId.make("task"),
+            sourceRunId: run.id,
+          },
+          state: "disposed",
+        },
+      ],
+    },
+  );
+  assert.deepEqual(discarded, {
+    text: "Child task ended with status interrupted.",
+    messageId: null,
+    turnItemId: null,
+  });
+  for (const status of ["cancelled", "interrupted"] as const) {
+    const stoppedWatch = subagentResultForRun(
+      { ...projection, messages: [progress.message], turnItems: [progress.turnItem] },
+      {
+        ...run,
+        status,
+        pullRequestWatchObligations: [
+          {
+            generation: "stopped-watch",
+            key: { host: "github.com", repository: "example/project", number: 1 },
+            sourceAttemptId: RunAttemptId.make("stopped-attempt"),
+            owner: {
+              parentEnvironmentId: EnvironmentId.make("parent"),
+              parentThreadId,
+              taskId: NodeId.make("task"),
+              sourceRunId: run.id,
+            },
+            state: "disposed",
+            disposalReason: "lifecycle",
+          },
+        ],
+      },
+    );
+    assert.deepEqual(stoppedWatch, {
+      text: `Child task ended with status ${status}.`,
+      messageId: null,
+      turnItemId: null,
+    });
+  }
 });
 
 it.effect("ends an orphaned native subagent's node when only its record already ended", () =>

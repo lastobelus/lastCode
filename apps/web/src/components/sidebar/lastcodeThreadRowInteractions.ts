@@ -188,6 +188,7 @@ export function useLastCodeThreadFileDrop(
     addFiles: (files) => onDrop(threadRef, files),
     addFolders: () => {},
   });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- listens for the browser dragend event while a file drag is active so cancelled drags clear the row highlight
   useEffect(() => {
     if (!isFileDragOver) return;
     const clearFileDrag = () => setIsFileDragOver(false);

@@ -6,7 +6,10 @@ import { expect, it, vi } from "vite-plus/test";
 import { serializeEditorDoc } from "../composer-rich-text-doc";
 import { formatInlineContextReference } from "../lib/composerContextReferences";
 import { captureComposerAttachmentInsertion } from "./composerAttachmentInsertion";
-import { ComposerMarkdownSourceExtension } from "../composer-markdown-source";
+import {
+  ComposerLivePreviewExtension,
+  wrapComposerSourceSelection,
+} from "../lastcodeComposerLivePreviewTiptap";
 
 const image = { kind: "image", contextId: "image_pending", label: "picture.png" } as const;
 
@@ -75,18 +78,19 @@ it("maps source-marker rewrites before the paste point when the caret enters sty
         {
           type: "paragraph",
           content: [
-            { type: "text", text: "bold", marks: [{ type: "bold" }] },
+            { type: "text", text: "bold" },
             { type: "text", text: " after" },
           ],
         },
       ],
     },
-    [ComposerMarkdownSourceExtension],
+    [ComposerLivePreviewExtension.configure({ enabled: true })],
   );
   try {
     using _alive = vi.spyOn(editor, "isDestroyed", "get").mockReturnValue(false);
     editor.view.dispatch(editor.state.tr.setSelection(TextSelection.atEnd(editor.state.doc)));
     const insertion = captureComposerAttachmentInsertion(editor);
+    wrapComposerSourceSelection(editor.view, 1, 5, "**", "**");
     editor.view.dispatch(editor.state.tr.setSelection(TextSelection.create(editor.state.doc, 3)));
     expect(editor.state.doc.textContent).toContain("**bold**");
     expect(insertion.insert([image])).toBe(true);

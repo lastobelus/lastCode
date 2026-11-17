@@ -2076,7 +2076,9 @@ export const make = Effect.gen(function* () {
             return {
               items: items.slice(0, input.limit),
               truncated:
-                truncated || endedShort || rawCount - (rawItems.length - items.length) > input.limit,
+                truncated ||
+                endedShort ||
+                rawCount - (rawItems.length - items.length) > input.limit,
             };
           }),
         );

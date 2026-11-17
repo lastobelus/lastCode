@@ -20,6 +20,7 @@ import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as ServerOwnership from "../serverOwnership.ts";
 import { migrationManifest, runMigrations } from "./Migrations.ts";
+import { runDatabaseMigrations } from "./DatabaseMigrations.ts";
 import * as SqlitePersistence from "./Sqlite.ts";
 
 const workerData = vi.hoisted((): Array<unknown> => []);
@@ -195,6 +196,10 @@ const ownT3Home = Effect.fn(function* () {
 const migrateTo = (toMigrationInclusive?: number) =>
   Effect.gen(function* () {
     const { dbPath } = yield* ServerConfig.ServerConfig;
+    if (toMigrationInclusive === undefined)
+      return yield* runDatabaseMigrations().pipe(
+        Effect.provide(NodeSqliteClient.layer({ filename: dbPath })),
+      );
     yield* runMigrations({ toMigrationInclusive }).pipe(
       Effect.provide(NodeSqliteClient.layer({ filename: dbPath })),
     );

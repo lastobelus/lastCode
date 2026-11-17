@@ -62,7 +62,7 @@ const LANGUAGE_ALIASES: Record<string, string> = {
   yml: "yaml",
 };
 
-function languageOfInfoString(info: string): string {
+export function languageOfInfoString(info: string): string {
   return info.trim().split(/\s+/, 1)[0] ?? "";
 }
 

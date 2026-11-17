@@ -68,7 +68,7 @@ export function LastCodeThreadSourceControl({
 }
 
 /** Opening a PR retains the exact thread destination when the right panel is used. */
-function useThreadPullRequestClick(
+export function useThreadPullRequestClick(
   thread: SidebarThreadSummary,
   sourceControl: LastCodeThreadSourceControlSnapshot,
   isActive: boolean,
@@ -77,16 +77,13 @@ function useThreadPullRequestClick(
   const { openPullRequestsInRightPanel, openPrLink } = useLastCodeSidebarPresentation();
   const { prStatus, currentLinkedPr } = sourceControl;
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
-  return (event: React.MouseEvent<HTMLAnchorElement>) => {
-    const url = prStatus?.url ?? currentLinkedPr?.url;
+  return (event: React.MouseEvent<HTMLAnchorElement>, targetUrl?: string) => {
+    const url = targetUrl ?? prStatus?.url ?? currentLinkedPr?.url;
     if (!url) return;
-    const openedInRightPanel = openPrLink(
-      event,
-      url,
-      openPullRequestsInRightPanel ? threadRef : undefined,
-    );
+    const showInRightPanel = targetUrl !== undefined || openPullRequestsInRightPanel;
+    const openedInRightPanel = openPrLink(event, url, showInRightPanel ? threadRef : undefined);
     if (!openedInRightPanel) return;
-    if (!openPullRequestsInRightPanel) return;
+    if (!showInRightPanel) return;
     if (!isActive) navigateToThread(threadRef);
   };
 }

@@ -1,5 +1,6 @@
 import type {
   OrchestrationV2ProviderFailure,
+  OrchestrationV2AppThread,
   OrchestrationV2Run,
   OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
@@ -10,6 +11,16 @@ type ErrorTurnItem = Extract<OrchestrationV2TurnItem, { type: "error" }>;
 type FailureScanTurnItem =
   | ErrorTurnItem
   | { readonly type: Exclude<OrchestrationV2TurnItem["type"], "error"> };
+
+export function emptyWorkspacePreparationFailure(
+  thread: Pick<OrchestrationV2AppThread, "emptyWorkspacePreparation" | "worktreePath">,
+): OrchestrationV2ProviderFailure | null {
+  const preparation = thread.emptyWorkspacePreparation;
+  return thread.worktreePath === null &&
+    (preparation?.state === "pending" || preparation?.state === "failed")
+    ? preparation.failure
+    : null;
+}
 
 export function latestRootProviderFailure(
   run: OrchestrationV2Run | null,

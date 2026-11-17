@@ -7,7 +7,13 @@ import {
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
 import type { ContextMenuSource, EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
-import { isValidElement, memo, useState, type ReactNode, type MouseEvent as ReactMouseEvent } from "react";
+import {
+  isValidElement,
+  memo,
+  useState,
+  type ReactNode,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import { FolderIcon } from "lucide-react";
 
 import { contextMenuSourceOf } from "../../contextMenuSource";
@@ -38,13 +44,19 @@ interface MarkdownFileLinkProps {
   isAppBundle?: boolean;
   workspaceRelativePath: string | null;
   panelPath: string | null;
+  isBareFilename: boolean;
   line?: number | undefined;
   label: string;
   copyMarkdown: string;
   theme: "light" | "dark";
   threadRef?: ScopedThreadRef | undefined;
   onOpen?: (() => Promise<AtomCommandResult<unknown, unknown>>) | undefined;
-  onOpenInPanel: (panelPath: string, line: number | undefined) => void;
+  onOpenInPanel: (
+    panelPath: string,
+    line: number | undefined,
+    label: string | undefined,
+    isBareFilename: boolean,
+  ) => void;
   resolveDragPath: () => Promise<string>;
   resolveCopyPaths: () => Promise<ReturnType<typeof markdownFileCopyPaths>>;
   openInEditorMenuLabel: string;
@@ -72,6 +84,7 @@ export const MarkdownFileLink = memo(function MarkdownFileLink({
   isAppBundle = false,
   workspaceRelativePath,
   panelPath,
+  isBareFilename,
   line,
   label,
   copyMarkdown,
@@ -128,7 +141,8 @@ export const MarkdownFileLink = memo(function MarkdownFileLink({
 
   const handleOpenInFilePreview = () => {
     if (threadRef && panelPath) {
-      onOpenInPanel(panelPath, line);
+      const authoredLabel = children ? nodeToPlainText(children).trim() : "";
+      onOpenInPanel(panelPath, line, authoredLabel || undefined, isBareFilename);
       return;
     }
     if (onOpenMedia) {
@@ -339,9 +353,7 @@ export const MarkdownFileLink = memo(function MarkdownFileLink({
   const chip = (
     <FileTagChipContent
       icon={
-        isAppBundle ? (
-          <AppBundleIcon environmentId={environmentId} path={iconPath} />
-        ) : undefined
+        isAppBundle ? <AppBundleIcon environmentId={environmentId} path={iconPath} /> : undefined
       }
       path={iconPath}
       environmentId={environmentId}
@@ -392,7 +404,11 @@ export const MarkdownFileLink = memo(function MarkdownFileLink({
       type="button"
       aria-label={children ? undefined : `File options for ${label}`}
       aria-haspopup="menu"
-      className={cn(children ? "text-left" : undefined, MARKDOWN_FILE_LINK_CLASS_NAME, "select-text")}
+      className={cn(
+        children ? "text-left" : undefined,
+        MARKDOWN_FILE_LINK_CLASS_NAME,
+        "select-text",
+      )}
       data-markdown-copy={copyMarkdown}
       data-markdown-copy-images={children ? nodeImageCount(children) : undefined}
       data-markdown-copy-text={children ? `${nodeToPlainText(children)} (${label})` : undefined}
@@ -406,9 +422,7 @@ export const MarkdownFileLink = memo(function MarkdownFileLink({
   return (
     <Tooltip>
       <TooltipTrigger
-        render={
-          children ? link : <ContextChip kind={chipKind} dir="ltr" render={link} />
-        }
+        render={children ? link : <ContextChip kind={chipKind} dir="ltr" render={link} />}
       />
       <TooltipPopup side="top" variant="code">
         <WorkspaceEntryTooltip path={iconPath} label={targetPath} environmentId={environmentId} />
@@ -429,6 +443,7 @@ function areMarkdownFileLinkPropsEqual(
     previous.environmentId === next.environmentId &&
     previous.workspaceRelativePath === next.workspaceRelativePath &&
     previous.panelPath === next.panelPath &&
+    previous.isBareFilename === next.isBareFilename &&
     previous.line === next.line &&
     previous.label === next.label &&
     previous.copyMarkdown === next.copyMarkdown &&

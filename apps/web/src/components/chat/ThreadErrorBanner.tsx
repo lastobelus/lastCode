@@ -53,8 +53,13 @@ export function shouldShowThreadErrorBanner(
   threadKey: string,
   error: string | null,
   isDismissed: boolean,
+  acknowledgedPreparationError?: string,
 ): boolean {
-  return getThreadErrorBannerKey(threadKey, error) !== null && !isDismissed;
+  return (
+    getThreadErrorBannerKey(threadKey, error) !== null &&
+    !isDismissed &&
+    error !== acknowledgedPreparationError
+  );
 }
 
 const sessionDismissedThreadErrorBannerKeys = new Set<string>();
