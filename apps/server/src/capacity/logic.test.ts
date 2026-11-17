@@ -139,12 +139,13 @@ describe("capacity verdicts", () => {
     },
   );
 
-  it("marks missing activity unknown, but missing owner presence is optional", () => {
+  it("keeps activity and owner presence out of measurement verdicts", () => {
     expect(evaluateCapacity(pair(), 5_000, "observe").snapshot.verdicts.agent.state).toBe("open");
     const state = recordCapacitySample(pair(), measurement(10_000), null, null);
-    expect(evaluateCapacity(state, 10_000, "observe").snapshot.verdicts.background.state).toBe(
-      "unknown",
-    );
+    const snapshot = evaluateCapacity(state, 10_000, "observe").snapshot;
+    expect(snapshot.verdicts.agent.state).toBe("open");
+    expect(snapshot.verdicts.background.state).toBe("open");
+    expect(snapshot.activity).toBeNull();
   });
 
   it("treats age greater than 30 seconds, future samples, and an absent remote sample as unknown", () => {

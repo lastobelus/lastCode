@@ -1000,7 +1000,7 @@ export const threadCapacityCommand = Command.make("capacity", {
     "Print this environment's capacity as JSON: mode, per-class verdicts, sampled metrics and reasons. Reports only; never holds work.",
   ),
   Command.withHandler((flags) =>
-    withThreadTools(flags, (tools) =>
+    withThreadTools({ ...flags, json: true }, (tools) =>
       tools
         .call(
           "t3_environment_read",

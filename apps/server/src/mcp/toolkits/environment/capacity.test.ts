@@ -37,13 +37,13 @@ const invoke = Effect.fn("test.capacity.invoke")(function* (
   return yield* Effect.gen(function* () {
     const toolkit = yield* EnvironmentToolkit;
     const results = yield* toolkit
-      .handle("t3_environment_read", { includeLinked })
+      .handle("t3_environment_read", includeLinked === undefined ? {} : { includeLinked })
       .pipe(Stream.unwrap, Stream.runCollect);
     return results.at(-1)?.result;
   }).pipe(
     Effect.provide(
       McpToolAccess.HandlersLayer.layer(EnvironmentHandlers.layer).pipe(
-        Layer.provide(
+        Layer.provideMerge(
           Layer.mergeAll(
             Layer.succeed(McpInvocationContext.McpInvocationContext, caller),
             ThreadCommandExecutor.layer,
@@ -118,11 +118,9 @@ it.effect("checks the credential's environment before reading capacity", () =>
   Effect.gen(function* () {
     const reads = yield* Ref.make(0);
     const result = yield* invoke({ ...scope, environmentId: remoteId }).pipe(
-      Effect.provide(
-        Layer.succeed(Capacity.Capacity, {
-          read: Ref.update(reads, (count) => count + 1).pipe(Effect.as(unknownCapacitySnapshot(0))),
-        }),
-      ),
+      Effect.provideService(Capacity.Capacity, {
+        read: Ref.update(reads, (count) => count + 1).pipe(Effect.as(unknownCapacitySnapshot(0))),
+      }),
     );
     expect(result).toMatchObject({ code: "capability_denied" });
     expect(yield* Ref.get(reads)).toBe(0);

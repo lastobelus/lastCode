@@ -33,7 +33,9 @@ export const capacityForTarget = Effect.fn("mcp.capacityForTarget")(function* (
     );
 });
 
-export const linkedCapacity = Effect.fn("mcp.linkedCapacity")(function* (scope: McpInvocationScope) {
+export const linkedCapacity = Effect.fn("mcp.linkedCapacity")(function* (
+  scope: McpInvocationScope,
+) {
   const forwarding = yield* Effect.serviceOption(PeerForwarding.PeerForwarding);
   if (Option.isNone(forwarding)) return { linkedObservation: "unknown" as const, linked: [] };
   const listing = yield* forwarding.value

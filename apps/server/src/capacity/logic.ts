@@ -186,7 +186,6 @@ export function evaluateCapacity(
     if (!valid(latest.worktreesFreeBytes)) unreadable("worktreesFreeBytes");
     if (latest.worktreeFoldersByProject === null) unreadable("worktreeFoldersByProject");
   }
-  if (state.activity === null) unreadable("activity");
   const agentReasons = [...common];
   const backgroundReasons = [...common];
   if (smooth.load1PerCore !== null && smooth.load1PerCore >= 1.5)

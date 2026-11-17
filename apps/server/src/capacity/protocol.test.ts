@@ -8,8 +8,18 @@ import { EnvironmentToolkit } from "../mcp/toolkits/environment/tools.ts";
 import { OrchestratorToolkit } from "../mcp/toolkits/orchestrator/tools.ts";
 import { ProjectToolkit } from "../mcp/toolkits/project/tools.ts";
 
+const decodeLaunch = Schema.decodeSync(ProjectToolkit.tools.t3_thread_launch.successSchema);
+const decodeEnvironment = Schema.decodeSync(
+  EnvironmentToolkit.tools.t3_environment_read.successSchema,
+);
+const decodeDelegation = Schema.decodeSync(OrchestratorToolkit.tools.delegate_task.successSchema);
+const decodeCreated = Schema.decodeSync(OrchestratorToolkit.tools.create_threads.successSchema);
+const decodeAction = Schema.decodeSync(
+  ActionResumeToolkit.tools.run_project_action_and_resume.successSchema,
+);
+
 it("accepts launch and environment responses from servers without capacity support", () => {
-  const launch = Schema.decodeUnknownSync(ProjectToolkit.tools.t3_thread_launch.successSchema)({
+  const launch = decodeLaunch({
     threadId: "thread-example",
     projectId: "project-example",
     modelSelection: { instanceId: "codex", model: "example" },
@@ -18,7 +28,7 @@ it("accepts launch and environment responses from servers without capacity suppo
   });
   expect(launch.capacity).toBeUndefined();
   const { capacityMode: _capacityMode, ...olderPreferences } = preferences(DEFAULT_SERVER_SETTINGS);
-  const environment = Schema.decodeUnknownSync(EnvironmentToolkit.tools.t3_environment_read.successSchema)({
+  const environment = decodeEnvironment({
     environmentId: "environment-example",
     label: "Older environment",
     serverVersion: "0.0.0",
@@ -29,7 +39,7 @@ it("accepts launch and environment responses from servers without capacity suppo
 });
 
 it("accepts delegation, thread creation and Action results without a capacity block", () => {
-  const delegation = Schema.decodeUnknownSync(OrchestratorToolkit.tools.delegate_task.successSchema)({
+  const delegation = decodeDelegation({
     taskId: "task-example",
     childThreadId: "child-example",
     childRunId: null,
@@ -50,11 +60,11 @@ it("accepts delegation, thread creation and Action results without a capacity bl
     waitTimedOut: false,
   });
   expect(delegation.capacity).toBeUndefined();
-  const created = Schema.decodeUnknownSync(OrchestratorToolkit.tools.create_threads.successSchema)({
+  const created = decodeCreated({
     threads: [],
   });
   expect(created.capacity).toBeUndefined();
-  const action = Schema.decodeUnknownSync(ActionResumeToolkit.tools.run_project_action_and_resume.successSchema)({
+  const action = decodeAction({
     runId: "run-example",
     threadId: "thread-example",
     projectId: "project-example",

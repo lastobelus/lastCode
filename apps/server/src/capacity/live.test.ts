@@ -17,7 +17,13 @@ it.effect("provides live capacity in the production route graph", () =>
     const fs = yield* FileSystem.FileSystem;
     const server = yield* fs.readFileString(new URL("../server.ts", import.meta.url).pathname);
     expect(server).toContain('import * as CapacityLive from "./capacity/live.ts";');
-    expect(server).toContain(
+    const routesStart = server.indexOf("const layerMakeRoutes");
+    const serverStart = server.indexOf("const layerMakeServer", routesStart);
+    expect(routesStart).toBeGreaterThanOrEqual(0);
+    expect(serverStart).toBeGreaterThan(routesStart);
+    const routes = server.slice(routesStart, serverStart);
+    expect(routes).toContain("McpHttpServer.layer");
+    expect(routes).toContain(
       "Layer.provide(CapacityLive.layer.pipe(Layer.provide(layerHostPowerMonitor)))",
     );
     const snapshot = yield* Effect.flatMap(Capacity.Capacity, (capacity) => capacity.read).pipe(

@@ -113,7 +113,7 @@ export const make = Effect.fn("capacity.make")(function* (inputs: CapacityInputs
           }
         : current;
       const next = evaluateCapacity(
-        recordCapacitySample(base, measurements, current.activity, idle),
+        recordCapacitySample(base, measurements, null, idle),
         now,
         mode,
       );
@@ -138,10 +138,26 @@ export const make = Effect.fn("capacity.make")(function* (inputs: CapacityInputs
             Effect.orElseSucceed(() => null),
           );
     const now = yield* Clock.currentTimeMillis;
-    return yield* Ref.modify(state, (current) => {
-      const next = evaluateCapacity({ ...current, activity }, now, mode);
-      return [next.snapshot, next.state] as const;
-    });
+    const snapshot = evaluateCapacity(yield* Ref.get(state), now, mode).snapshot;
+    if (activity !== null) return { ...snapshot, activity };
+    const unreadable = {
+      signal: "activity",
+      comparison: "unreadable",
+      value: null,
+      limit: null,
+    } as const;
+    return {
+      ...snapshot,
+      activity,
+      verdicts: {
+        ...snapshot.verdicts,
+        agent: { state: "unknown", reasons: [...snapshot.verdicts.agent.reasons, unreadable] },
+        background: {
+          state: "unknown",
+          reasons: [...snapshot.verdicts.background.reasons, unreadable],
+        },
+      },
+    } satisfies CapacitySnapshot;
   });
   return Capacity.of({ read });
 });

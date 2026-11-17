@@ -39,6 +39,82 @@ const power: HostPowerSnapshot = {
 };
 
 describe("Capacity service", () => {
+  it.effect("samples healthy measurements without reads or activity-induced recovery", () => {
+    const logs: Array<unknown> = [];
+    const logger = Logger.make(({ message }) => logs.push(message));
+    return Effect.gen(function* () {
+      const mode = yield* Ref.make<CapacityMode>("observe");
+      const activityFailure = yield* Ref.make(false);
+      const activityReads = yield* Ref.make(0);
+      const service = yield* Capacity.make({
+        mode: Ref.get(mode),
+        worktreesDir: Effect.succeed("/unused"),
+        ownerPower: Effect.succeed(power),
+        activity: Ref.update(activityReads, (count) => count + 1).pipe(
+          Effect.andThen(Ref.get(activityFailure)),
+          Effect.flatMap((fail) =>
+            fail
+              ? Effect.fail(new CapacityTestReadError({ message: "activity unavailable" }))
+              : activity,
+          ),
+        ),
+        source: {
+          read: Effect.gen(function* () {
+            return {
+              sampledAt: yield* Clock.currentTimeMillis,
+              physicalCores: 8,
+              load1: 4,
+              load5: 4,
+              memoryPressure: "normal" as const,
+              swapUsedBytes: 0,
+              worktreesFreeBytes: 100 * GB,
+              worktreeFoldersByProject: { example: 1 },
+            };
+          }),
+        },
+      });
+      // The first disk-rate sample still needs its existing warm-up and recovery.
+      yield* TestClock.adjust("65 seconds");
+      logs.length = 0;
+      yield* TestClock.adjust("10 seconds");
+      expect(logs).toHaveLength(0);
+      expect(yield* Ref.get(activityReads)).toBe(0);
+      const firstRead = yield* service.read;
+      expect(firstRead.verdicts.agent.state).toBe("open");
+      expect(firstRead.verdicts.background.state).toBe("open");
+      expect(firstRead.activity).toEqual(yield* activity);
+
+      yield* Ref.set(activityFailure, true);
+      const failedRead = yield* service.read;
+      expect(failedRead.verdicts.agent.state).toBe("unknown");
+      expect(failedRead.verdicts.background.state).toBe("unknown");
+      expect(failedRead.verdicts.owner.state).toBe("open");
+      expect(failedRead.verdicts.agent.reasons).toContainEqual({
+        signal: "activity",
+        comparison: "unreadable",
+        value: null,
+        limit: null,
+      });
+      yield* Ref.set(activityFailure, false);
+      expect((yield* service.read).verdicts.agent.state).toBe("open");
+      yield* Ref.set(mode, "off");
+      const readsBeforeOff = yield* Ref.get(activityReads);
+      yield* service.read;
+      expect(yield* Ref.get(activityReads)).toBe(readsBeforeOff);
+      yield* Ref.set(mode, "observe");
+      const resumed = yield* service.read;
+      expect(resumed.verdicts.agent.state).toBe("open");
+      expect(resumed.verdicts.background.state).toBe("open");
+      yield* TestClock.adjust("5 seconds");
+      expect(logs).toHaveLength(0);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(NodeServices.layer, Logger.layer([logger], { mergeWithExisting: false })),
+      ),
+    );
+  });
+
   it.effect(
     "samples every five seconds, logs full verdicts each held sample, and skips sampling while off",
     () => {
@@ -86,7 +162,7 @@ describe("Capacity service", () => {
             capacity: {
               sampledAt: 5_000,
               verdicts: { background: { state: "hold" } },
-              activity: { runningTurns: 1 },
+              activity: null,
             },
           },
         ]);
