@@ -711,6 +711,7 @@ describe("server browser element refs", () => {
 
   it("tells a click target that matches nothing from one that never becomes clickable", async () => {
     await page.setContent(`<button hidden>hidden</button>`);
+    using _now = vi.spyOn(Date, "now").mockReturnValue(0);
     const failure = (selector: string) =>
       ServerBrowserPage.click(page, { selector, timeoutMs: 500 }).then(
         () => expect.unreachable(),
@@ -719,15 +720,15 @@ describe("server browser element refs", () => {
 
     const absent = await failure(".definitely-no-such-t3-target");
     expect(absent.tag).toBe("PreviewAutomationTimeoutError");
-    expect(absent.message).toBe(
-      'The click may have happened and removed its target or navigated; check the page before retrying. No element matches ".definitely-no-such-t3-target" after the timeout; take a fresh snapshot and use its locator.',
-    );
+    expect(absent.message).toContain("Click not attempted");
+    expect(absent.message).toContain("matches no element now");
+    expect(absent.detail).toMatchObject({ stage: "target layout", timeoutMs: 500 });
     expect(absent.cause).toMatchObject({ name: "TimeoutError" });
     const hidden = await failure("button");
     expect(hidden.tag).toBe("PreviewAutomationTimeoutError");
-    expect(hidden.message).toBe(
-      'The click may have happened; check the page before retrying. "button" still matches an element after the timeout.',
-    );
+    expect(hidden.message).toContain("Click not attempted");
+    expect(hidden.message).toContain("matches an element now");
+    expect(hidden.detail).toMatchObject({ stage: "target layout", timeoutMs: 500 });
   });
 
   it("gives a late target only the click's remaining time, not a fresh timeout", async () => {
@@ -1323,8 +1324,8 @@ describe("server browser click", () => {
       );
       expect(failure).toMatchObject({
         tag: "PreviewAutomationTimeoutError",
-        message:
-          'The click may have happened; check the page before retrying. "#save" still matches an element after the timeout.',
+        message: expect.stringContaining("Click not attempted"),
+        detail: { stage: "target layout", timeoutMs: 100 },
       });
       expect(failure.cause).toMatchObject({
         tag: "PreviewAutomationTimeoutError",
@@ -1336,6 +1337,64 @@ describe("server browser click", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+  it.each([false, true])(
+    "classifies a pointer timeout before click entry (coordinate: %s)",
+    async (coordinate) => {
+      const failure = Object.assign(new Error("pointer expired"), { name: "TimeoutError" });
+      const click = vi.fn();
+      const page = {
+        locator: () => ({
+          scrollIntoViewIfNeeded: async () => {},
+          boundingBox: async () => ({ x: 0, y: 0, width: 20, height: 20 }),
+          click,
+          count: async () => 1,
+        }),
+        mouse: { click },
+      } as unknown as Page;
+      const result = await ServerBrowserPage.click(
+        page,
+        coordinate ? { x: 1, y: 2 } : { selector: "#save" },
+        async () => {
+          throw failure;
+        },
+      ).catch((cause: unknown) => cause);
+      expect(click).not.toHaveBeenCalled();
+      if (coordinate) expect(result).toBe(failure);
+      else {
+        expect(result).toMatchObject({
+          tag: "PreviewAutomationTimeoutError",
+          message: expect.stringContaining(
+            "Click not attempted: timed out during pointer reporting",
+          ),
+        });
+        expect((result as Error).message).not.toContain("target layout");
+      }
+    },
+  );
+
+  it("keeps one shared deadline through layout, pointer reporting and click", async () => {
+    let now = 0;
+    using _now = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const click = vi.fn(async () => {});
+    const page = {
+      locator: () => ({
+        scrollIntoViewIfNeeded: async () => {
+          now = 200;
+        },
+        boundingBox: async () => {
+          now = 400;
+          return { x: 0, y: 0, width: 20, height: 20 };
+        },
+        click,
+      }),
+      once: () => {},
+      off: () => {},
+    } as unknown as Page;
+    await ServerBrowserPage.click(page, { selector: "#save", timeoutMs: 1_000 }, async () => {
+      now = 700;
+    });
+    expect(click).toHaveBeenCalledExactlyOnceWith({ button: "left", clickCount: 1, timeout: 300 });
   });
 });
 

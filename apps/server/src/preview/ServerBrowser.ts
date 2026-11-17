@@ -4029,6 +4029,7 @@ const make = Effect.gen(function* () {
     signal: AbortSignal,
     remainingTimeoutMs: () => number,
     deadlineMs: number,
+    onClickTimeout?: (diagnose: ServerBrowserPage.ClickTimeoutDiagnostic) => void,
   ): Promise<unknown> => {
     signal.throwIfAborted();
     const input = request.input;
@@ -4535,7 +4536,14 @@ const make = Effect.gen(function* () {
             reason: "dialogPending",
           });
         return withNativeSurface(tab, signal, remainingTimeoutMs, (_viewport, releaseSurface) =>
-          executeTabOperation(tab, request, signal, remainingTimeoutMs, releaseSurface),
+          executeTabOperation(
+            tab,
+            request,
+            signal,
+            remainingTimeoutMs,
+            releaseSurface,
+            onClickTimeout,
+          ),
         );
       });
     }
@@ -4570,6 +4578,7 @@ const make = Effect.gen(function* () {
               signal,
               remainingTimeoutMs,
               releaseSurface,
+              onClickTimeout,
             );
           } finally {
             tab.agentOperating = false;
@@ -4731,6 +4740,7 @@ const make = Effect.gen(function* () {
     signal: AbortSignal,
     remainingTimeoutMs: () => number,
     releaseRequestSurface?: () => Promise<void>,
+    onClickTimeout?: (diagnose: ServerBrowserPage.ClickTimeoutDiagnostic) => void,
   ) => {
     const originalInput = request.input as {
       readonly timeoutMs?: number;
@@ -4861,7 +4871,7 @@ const make = Effect.gen(function* () {
           ),
         };
         await recordAction(tab, "click", () =>
-          ServerBrowserPage.click(tab.page, clickInput, pointerFor(tab), signal),
+          ServerBrowserPage.click(tab.page, clickInput, pointerFor(tab), signal, onClickTimeout),
         );
         return undefined;
       }
@@ -4948,15 +4958,16 @@ const make = Effect.gen(function* () {
   const handleRequest = (connectionId: string, request: PreviewAutomationRequest) =>
     Clock.clockWith((clock) => {
       const timeoutMs = Math.max(1, request.timeoutMs - Math.min(500, request.timeoutMs / 10));
+      let clickTimeout: ServerBrowserPage.ClickTimeoutDiagnostic | undefined;
       const started = clock.monotonicTimeNanosUnsafe();
       const deadlineMs = performance.now() + request.timeoutMs;
       const remainingTimeoutMs = () =>
         Math.max(1, timeoutMs - Number(clock.monotonicTimeNanosUnsafe() - started) / 1_000_000);
       return Effect.tryPromise({
         try: (signal) =>
-          runOperation(request, signal, remainingTimeoutMs, deadlineMs).finally(() =>
-            markUsed(request),
-          ),
+          runOperation(request, signal, remainingTimeoutMs, deadlineMs, (diagnose) => {
+            clickTimeout = diagnose;
+          }).finally(() => markUsed(request)),
         catch: (cause) =>
           isDesktopBrowserTransportError(cause)
             ? new ServerBrowserPage.ServerBrowserOperationError({
@@ -4974,12 +4985,17 @@ const make = Effect.gen(function* () {
         Effect.timeout(timeoutMs),
         Effect.catchTags({
           TimeoutError: () =>
-            Effect.fail(
-              new ServerBrowserPage.ServerBrowserOperationError({
-                tag: "PreviewAutomationTimeoutError",
-                message: "The browser operation exceeded its execution deadline.",
-              }),
-            ),
+            clickTimeout
+              ? Effect.tryPromise({
+                  try: clickTimeout,
+                  catch: ServerBrowserPage.toOperationError,
+                }).pipe(Effect.flatMap(Effect.fail))
+              : Effect.fail(
+                  new ServerBrowserPage.ServerBrowserOperationError({
+                    tag: "PreviewAutomationTimeoutError",
+                    message: "The browser operation exceeded its execution deadline.",
+                  }),
+                ),
         }),
         Effect.match({
           onSuccess: (result) => ({ ok: true as const, result }),

@@ -13,6 +13,11 @@ import {
   type PreviewAutomationStatus,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import { McpSchema, McpServer } from "effect/ai";
+import * as McpHttpServer from "../mcp/McpHttpServer.ts";
+import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
+import * as McpToolAccessTestkit from "../mcp/McpToolAccess.testkit.ts";
+import * as PublishedDocumentPreview from "./PublishedDocumentPreview.ts";
 import * as Clock from "effect/Clock";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
@@ -319,4 +324,104 @@ it.live.skip(
         expect(resumedSnapshot.screenshot?.data).toBeTruthy();
       }),
     ).pipe(Effect.provide(layer)),
+);
+
+it.live.each([
+  { target: "absent", timeoutMs: 1_000, budgetMax: 900 },
+  { target: "disabled", timeoutMs: 1_000, budgetMax: 900 },
+  { target: "absent", timeoutMs: undefined, budgetMax: 10_000 },
+  { target: "hidden", timeoutMs: 30_000, budgetMax: 10_000 },
+])(
+  "keeps the $target click diagnostic through the environment host (caller budget $timeoutMs)",
+  ({ target, timeoutMs, budgetMax }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const server = yield* Effect.acquireRelease(
+          Effect.promise(async () => {
+            const server = NodeHttp.createServer((_request, response) => {
+              response.setHeader("Content-Type", "text/html");
+              response.end(
+                target === "absent"
+                  ? "<!doctype html><title>Missing target</title>"
+                  : `<!doctype html><button id="submit" ${target === "hidden" ? "hidden" : "disabled"}>Submit</button>`,
+              );
+            });
+            await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+            return server;
+          }),
+          (server) =>
+            Effect.promise(() => new Promise<void>((resolve) => server.close(() => resolve()))),
+        );
+        const address = server.address();
+        if (address === null || typeof address === "string") throw new Error("Missing test port");
+        yield* ServerBrowser.ServerBrowser;
+        const broker = yield* Broker.PreviewAutomationBroker;
+        yield* Effect.yieldNow;
+        const opened = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: {
+            browserHost: "environment",
+            url: `http://127.0.0.1:${address.port}/`,
+            open: false,
+            reuseExistingTab: false,
+          },
+        });
+        const mcp = yield* McpServer.McpServer;
+        const result = yield* mcp
+          .callTool({
+            name: "preview_act",
+            arguments: {
+              action: "click",
+              tabId: opened.tabId,
+              selector: "#submit",
+              ...(timeoutMs === undefined ? {} : { timeoutMs }),
+            },
+          })
+          .pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+            Effect.provideService(
+              McpSchema.McpServerClient,
+              McpSchema.McpServerClient.of({
+                clientId: 1,
+                clientCapabilities: {},
+                clientInfo: { name: "test", version: "1" },
+                protocolVersion: "2025-06-18",
+                initializePayload: {
+                  protocolVersion: "2025-06-18",
+                  capabilities: {},
+                  clientInfo: { name: "test", version: "1" },
+                },
+                getClient: Effect.die("unused"),
+              }),
+            ),
+          );
+        expect(result.isError).toBe(true);
+        const text = result.content
+          .filter((part) => part.type === "text")
+          .map((part) => part.text)
+          .join("\n");
+        if (target !== "disabled") {
+          expect(text).toContain("Click not attempted");
+          expect(text).toContain("target layout");
+          const budget = Number(text.match(/timed out after (\d+)ms/)?.[1]);
+          expect(budget).toBeGreaterThan(0);
+          expect(budget).toBeLessThanOrEqual(budgetMax);
+          if (budgetMax === 10_000) expect(budget).toBe(10_000);
+          expect(text).toContain(`within its ${budget}ms budget`);
+        } else {
+          expect(text).toContain("The click may have happened");
+          expect(text).not.toContain("Click not attempted");
+        }
+      }),
+    ).pipe(
+      Effect.provide(
+        McpHttpServer.layerPreviewToolkit.pipe(
+          Layer.provide(Layer.mock(PublishedDocumentPreview.PublishedDocumentPreview)({})),
+          Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
+          Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
+          Layer.provideMerge(layer),
+        ),
+      ),
+    ),
 );
