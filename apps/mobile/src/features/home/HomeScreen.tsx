@@ -358,7 +358,6 @@ export function HomeScreen(props: HomeScreenProps) {
       : v2ScopedProjectGroup.projectRefs,
     props.onSelectThread,
     props.searchQuery,
-    threadSearch,
   );
   const v2ProjectTitleByProjectKey = new Map(
     projectScopes.flatMap((scope) =>

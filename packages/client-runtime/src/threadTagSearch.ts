@@ -1,12 +1,18 @@
 import type { EnvironmentThreadShell } from "./state/shell.ts";
 import type { ScopedThreadRef } from "@t3tools/contracts";
-import type { MessageId } from "@t3tools/contracts";
+import type { MessageId, ThreadId } from "@t3tools/contracts";
 import {
   threadSearchMatchKey,
   threadSearchSubject,
   type ThreadSearchShell,
 } from "./state/threadSearch.ts";
 import { foldSearchQuery, rankSearchItems, scoreThreadSearch } from "@t3tools/shared/paletteSearch";
+
+export function threadTagMessageSearchScope(threads: readonly ThreadSearchShell[]) {
+  const messageThreadIds: Record<string, ThreadId[]> = {};
+  for (const thread of threads) (messageThreadIds[thread.environmentId] ??= []).push(thread.id);
+  return { messageThreadIds };
+}
 
 export function taggedThreadSearch<T extends ThreadSearchShell>(
   threads: readonly T[],

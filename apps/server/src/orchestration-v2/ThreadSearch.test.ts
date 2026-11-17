@@ -695,6 +695,60 @@ it.layer(layerTest)("ThreadSearch filters before it ranks", (it) => {
     }),
   );
 
+  it.effect("scopes selected thread messages before the search limits", () =>
+    Effect.gen(function* () {
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const search = yield* ThreadSearch.ThreadSearch;
+      const project = ProjectId.make("project:tag-search");
+      const selected = ThreadId.make("thread:tag-selected");
+      const archived = ThreadId.make("thread:tag-archived");
+      const child = ThreadId.make("thread:tag-child");
+      const deleted = ThreadId.make("thread:tag-deleted");
+      yield* createProject(project);
+      yield* Effect.forEach(
+        [
+          thread(selected, project),
+          message(selected, "tag-selected-message", "user", "needle", { minute: 1 }),
+          thread(archived, project, { archivedAt: at(2) }),
+          message(archived, "tag-archived-message", "user", "needle"),
+          thread(child, project, { subagentOf: selected }),
+          message(child, "tag-child-message", "user", "needle"),
+          thread(deleted, project, { deletedAt: at(2) }),
+          message(deleted, "tag-deleted-message", "user", "needle"),
+          ...Array.from({ length: 51 }, (_, index) => {
+            const id = ThreadId.make(`thread:tag-unrelated-${index}`);
+            return [
+              thread(id, project),
+              message(id, `tag-unrelated-message-${index}`, "user", "needle", { minute: 10 }),
+            ];
+          }).flat(),
+        ],
+        projections.apply,
+        { discard: true },
+      );
+      assert.notInclude(
+        (yield* search.search({ query: "needle" })).matches.map((match) => match.threadId),
+        selected,
+      );
+      const scoped = yield* search.search({ query: "needle", messageThreadIds: [selected] });
+      assert.deepEqual(
+        scoped.matches.map((match) => [match.threadId, match.messageId]),
+        [[selected, MessageId.make("tag-selected-message")]],
+      );
+      assert.sameMembers(
+        (yield* search.search({
+          query: "needle",
+          messageThreadIds: [archived, child, deleted],
+        })).matches.map((match) => match.threadId),
+        [archived, child],
+      );
+      assert.deepEqual(
+        (yield* search.search({ query: "needle", messageThreadIds: [] })).matches,
+        [],
+      );
+    }),
+  );
+
   it.effect("keeps a thread picked for the query when the limit cuts", () =>
     Effect.gen(function* () {
       const projections = yield* ProjectionStore.ProjectionStoreV2;

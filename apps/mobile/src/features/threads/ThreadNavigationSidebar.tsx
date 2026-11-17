@@ -226,7 +226,6 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
       : selectedProjectScope.projectRefs,
     props.onSelectThread,
     props.searchQuery,
-    threadSearch,
   );
   const selectedProjectKey = selectedProjectScope?.key ?? null;
   const projectByKey = useMemo(() => {

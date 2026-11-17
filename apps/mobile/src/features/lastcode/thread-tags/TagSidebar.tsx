@@ -2,11 +2,12 @@ import type {
   EnvironmentThreadShell,
   EnvironmentProject,
 } from "@t3tools/client-runtime/state/shell";
-import { threadTagRelations, taggedThreadSearch } from "@t3tools/client-runtime/thread-tag-search";
 import {
-  threadSearchMatchKey,
-  type EnvironmentThreadSearchMatch,
-} from "@t3tools/client-runtime/state/thread-search";
+  threadTagRelations,
+  taggedThreadSearch,
+  threadTagMessageSearchScope,
+} from "@t3tools/client-runtime/thread-tag-search";
+import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
 import { threadKey } from "@t3tools/client-runtime/state/entities";
 import type { MessageId } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
@@ -15,6 +16,7 @@ import { resolveThreadListV2RowStatus } from "../../threads/threadListV2";
 import { ScreenScrollView } from "../../../components/ui/ScreenScrollView";
 import { useContentTopInset, useContentBottomInset } from "../../../components/ui/useBarInset";
 import { useProjects, useQuietThreadShell } from "../../../state/entities";
+import { useThreadSearch } from "../../../state/queries";
 import { environmentThreadShells } from "../../../state/threads";
 import { requestThreadMessageJump } from "../../threads/threadMessageJump";
 import { scopedThreadKey } from "../../../lib/scopedEntities";
@@ -39,11 +41,6 @@ export function useTagSidebar(
   scopes: readonly TagScope[],
   onSelect: (thread: EnvironmentThreadShell) => void,
   searchQuery: string,
-  messageSearch: {
-    readonly matches: readonly EnvironmentThreadSearchMatch[];
-    readonly query: string;
-    readonly isPending: boolean;
-  },
 ) {
   const { sidebar: enabled } = useTagPreferences();
   const [selected, setSelected] = useState<string | null>(null);
@@ -80,7 +77,6 @@ export function useTagSidebar(
           scopes={scopes}
           tag={tag}
           searchQuery={searchQuery}
-          messageSearch={messageSearch}
           onSelect={onSelect}
           header={header}
         />
@@ -92,22 +88,21 @@ function TagResults({
   scopes,
   tag,
   searchQuery,
-  messageSearch,
   onSelect,
   header,
 }: {
   readonly scopes: readonly TagScope[];
   readonly tag: string;
   readonly searchQuery: string;
-  readonly messageSearch: {
-    readonly matches: readonly EnvironmentThreadSearchMatch[];
-    readonly query: string;
-    readonly isPending: boolean;
-  };
   readonly onSelect: (thread: EnvironmentThreadShell) => void;
   readonly header: ReactNode;
 }) {
   const discovery = useTagDiscovery(scopes, "", tag);
+  const messageSearch = useThreadSearch(
+    [...new Set(scopes.map((scope) => scope.environmentId))],
+    searchQuery,
+    threadTagMessageSearchScope(discovery.threads),
+  );
   const titles = useAtomValue(visibleTitles);
   const projects = useProjects();
   const top = useContentTopInset();

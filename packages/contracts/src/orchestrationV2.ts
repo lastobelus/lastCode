@@ -4502,6 +4502,8 @@ export type OrchestrationV2GetWorktreeThreadIdsInput =
  */
 export const OrchestrationV2SearchThreadsInput = Schema.Struct({
   ...OrchestrationSearchThreadsInput.fields,
+  /** Restricts message hits before limits; these threads are already selected by the client. */
+  messageThreadIds: Schema.optionalKey(Schema.Array(ThreadId)),
   query: TrimmedString.check(Schema.isMaxLength(THREAD_SEARCH_QUERY_MAX_LENGTH)),
   /** Searches referenceable thread metadata independently of sidebar cutoffs. */
   mode: Schema.optionalKey(Schema.Literal("thread-mention")),

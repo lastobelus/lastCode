@@ -1,7 +1,10 @@
 import { useAtomValue } from "@effect/atom-react";
 import { Link } from "@tanstack/react-router";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
-import { taggedThreadSearch } from "@t3tools/client-runtime/thread-tag-search";
+import {
+  taggedThreadSearch,
+  threadTagMessageSearchScope,
+} from "@t3tools/client-runtime/thread-tag-search";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { XIcon } from "lucide-react";
@@ -51,7 +54,11 @@ export function TagSidebarResults({ tag }: { readonly tag: string }) {
   const projects = useProjects();
   const { isMobile, setOpenMobile } = useSidebar();
   const result = useAtomValue(tagResultRows(key));
-  const search = useThreadSearch(environmentIds, query);
+  const search = useThreadSearch(
+    environmentIds,
+    query,
+    threadTagMessageSearchScope(result.threads),
+  );
   const messageMatches = new Map(
     (search.query === query.trim() ? search.matches : []).map((match) => [
       threadSearchMatchKey(match),
