@@ -3949,7 +3949,8 @@ it.effect.each([
         const original = yield* Effect.scoped(
           Effect.gen(function* () {
             const a = yield* makeLaptop(database, offers, linking);
-            yield* linkTo(a.links, b, "full-access");
+            // Real HTTP setup must let its transient probe retry advance.
+            yield* linkTo(a.links, b, "full-access").pipe(TestClock.withLive);
             yield* seedParent(a);
             const receipt = yield* a.remote.delegate(
               parentScope as McpInvocationContext.McpThreadInvocationScope,
