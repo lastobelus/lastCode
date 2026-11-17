@@ -62,14 +62,16 @@ const layerElectronApp = Layer.succeed(ElectronApp.ElectronApp, {
 interface MenuServices {
   readonly checkResult?: DesktopUpdateCheckResult;
   readonly shownMessageBox?: Deferred.Deferred<Electron.MessageBoxOptions>;
+  readonly onMessage?: (options: Electron.MessageBoxOptions) => Effect.Effect<void>;
 }
 
-const layerElectronDialog = ({ shownMessageBox }: MenuServices) =>
+const layerElectronDialog = ({ shownMessageBox, onMessage }: MenuServices) =>
   Layer.succeed(ElectronDialog.ElectronDialog, {
     pickFolder: () => Effect.succeedNone,
     pickFiles: () => Effect.succeed([]),
     showMessageBox: (options) =>
       (shownMessageBox ? Deferred.succeed(shownMessageBox, options) : Effect.void).pipe(
+        Effect.andThen(onMessage?.(options) ?? Effect.void),
         Effect.as({ response: options.cancelId ?? 0, checkboxChecked: false }),
       ),
     showErrorBox: () => Effect.void,
@@ -81,6 +83,8 @@ const layerDesktopUpdates = ({ checkResult }: MenuServices) =>
     isActionActive: Effect.succeed(false),
     isInstallActive: Effect.succeed(false),
     subscribe: Effect.die("unexpected subscribe"),
+    getLastCodeSettings: Effect.die("unexpected getLastCodeSettings"),
+    setShowAndInstallLocalNightlies: () => Effect.die("unexpected local nightly toggle"),
     emitState: Effect.void,
     disabledReason: Effect.succeedNone,
     configure: Effect.void,
@@ -94,7 +98,7 @@ const layerDesktopUpdates = ({ checkResult }: MenuServices) =>
 const layerDesktopWindow = (selectedAction: Deferred.Deferred<string>) =>
   Layer.succeed(DesktopWindow.DesktopWindow, {
     createMain: Effect.die("unexpected createMain"),
-    ensureMain: Effect.die("unexpected ensureMain"),
+    ensureMain: Effect.succeed({} as Electron.BrowserWindow),
     revealOrCreateMain: Effect.die("unexpected revealOrCreateMain"),
     activate: Effect.void,
     createMainIfBackendReady: Effect.void,
@@ -109,6 +113,10 @@ const layerDesktopWindow = (selectedAction: Deferred.Deferred<string>) =>
       Deferred.succeed(selectedAction, `zoom-${direction}`).pipe(Effect.asVoid),
     runMainContentsCommand: (command) =>
       Deferred.succeed(selectedAction, `main-${command}`).pipe(Effect.asVoid),
+    runningActionCount: Effect.succeed(0),
+    reportRunningActionCount: () => Effect.void,
+    acknowledgeRunningActionQuitWarning: Effect.void,
+    consumeRunningActionQuitWarningAcknowledgment: Effect.succeed(false),
     syncAppearance: Effect.void,
   } satisfies DesktopWindow.DesktopWindow["Service"]);
 
@@ -160,6 +168,8 @@ const checkForUpdatesFromMacMenu = (state: Partial<DesktopUpdateState>) =>
       {
         checkResult: {
           checked: true,
+          checkpointRequested: false,
+          error: null,
           state: {
             ...createInitialDesktopUpdateState(
               "0.1.5",
@@ -197,6 +207,134 @@ const checkForUpdatesFromMacMenu = (state: Partial<DesktopUpdateState>) =>
   });
 
 describe("DesktopApplicationMenu", () => {
+  it.effect("keeps display branding in the macOS application menu", () =>
+    Effect.gen(function* () {
+      const selectedAction = yield* Deferred.make<string>();
+      const applicationMenuTemplate =
+        yield* Deferred.make<readonly Electron.MenuItemConstructorOptions[]>();
+
+      yield* configureMenu(selectedAction, applicationMenuTemplate, {
+        platform: "darwin",
+        appVersion: "0.0.43-nightly.20260929.2428",
+      });
+
+      const template = yield* Deferred.await(applicationMenuTemplate);
+      const applicationMenu = template[0];
+      assert.isDefined(applicationMenu);
+      assert.equal(applicationMenu.label, "LastCode (Nightly)");
+      if (!Array.isArray(applicationMenu.submenu)) {
+        throw new Error("Expected application menu submenu to be an array.");
+      }
+      assert.equal(
+        applicationMenu.submenu.find((item) => item.role === "about")?.label,
+        "About LastCode (Nightly)",
+      );
+      assert.equal(
+        applicationMenu.submenu.find((item) => item.role === "hide")?.label,
+        "Hide LastCode (Nightly)",
+      );
+      assert.equal(
+        applicationMenu.submenu.find((item) => item.role === "quit")?.label,
+        "Quit LastCode (Nightly)",
+      );
+    }),
+  );
+
+  it.effect.each(["idle", "available", "downloaded", "error"] as const)(
+    "confirms a checkpoint request while preserving %s updates",
+    (status) =>
+      Effect.gen(function* () {
+        const selectedAction = yield* Deferred.make<string>();
+        const templateReady =
+          yield* Deferred.make<readonly Electron.MenuItemConstructorOptions[]>();
+        const messageReady = yield* Deferred.make<Electron.MessageBoxOptions>();
+        const state = {
+          ...createInitialDesktopUpdateState(
+            "1.2.3",
+            {
+              hostArch: "arm64",
+              appArch: "arm64",
+              runningUnderArm64Translation: false,
+            },
+            "nightly",
+          ),
+          enabled: true,
+          source: "lastcode-local" as const,
+          status,
+          message: status === "error" ? "Local build failed" : "Unrelated update message",
+        };
+        yield* configureMenu(
+          selectedAction,
+          templateReady,
+          {},
+          {
+            checkResult: { checked: true, checkpointRequested: true, error: null, state },
+            onMessage: (options) => Deferred.succeed(messageReady, options).pipe(Effect.asVoid),
+          },
+        );
+        const template = yield* Deferred.await(templateReady);
+        const check = template
+          .flatMap((item) => (Array.isArray(item.submenu) ? item.submenu : []))
+          .find((item) => item.label === "Check for Updates...");
+        assert.isDefined(check);
+        assert.isFunction(check.click);
+        check.click!({} as Electron.MenuItem, {} as Electron.BrowserWindow, {} as KeyboardEvent);
+        const dialog = yield* Deferred.await(messageReady);
+        assert.equal(dialog.title, "Checkpoint requested");
+        assert.equal(dialog.message, DesktopUpdates.checkpointRequestedMessage);
+      }),
+  );
+
+  it.effect.each(["available", "downloaded", "error"] as const)(
+    "reports a failed checkpoint request while preserving %s updates",
+    (status) =>
+      Effect.gen(function* () {
+        const selectedAction = yield* Deferred.make<string>();
+        const templateReady =
+          yield* Deferred.make<readonly Electron.MenuItemConstructorOptions[]>();
+        const messageReady = yield* Deferred.make<Electron.MessageBoxOptions>();
+        const state = {
+          ...createInitialDesktopUpdateState(
+            "1.2.3",
+            {
+              hostArch: "arm64",
+              appArch: "arm64",
+              runningUnderArm64Translation: false,
+            },
+            "nightly",
+          ),
+          enabled: true,
+          source: "lastcode-local" as const,
+          status,
+          message: "Previous build or install diagnostic",
+        };
+        yield* configureMenu(
+          selectedAction,
+          templateReady,
+          {},
+          {
+            checkResult: {
+              checked: true,
+              checkpointRequested: false,
+              error: "Could not request checkpoint.",
+              state,
+            },
+            onMessage: (options) => Deferred.succeed(messageReady, options).pipe(Effect.asVoid),
+          },
+        );
+        const template = yield* Deferred.await(templateReady);
+        const check = template
+          .flatMap((item) => (Array.isArray(item.submenu) ? item.submenu : []))
+          .find((item) => item.label === "Check for Updates...");
+        assert.isDefined(check);
+        assert.isFunction(check.click);
+        check.click!({} as Electron.MenuItem, {} as Electron.BrowserWindow, {} as KeyboardEvent);
+        const dialog = yield* Deferred.await(messageReady);
+        assert.equal(dialog.title, "Update check failed");
+        assert.equal(dialog.detail, "Could not request checkpoint.");
+      }),
+  );
+
   it.effect("leaves the accelerator to Chromium instead of injecting a paste", () =>
     Effect.gen(function* () {
       const selectedAction = yield* Deferred.make<string>();
@@ -232,7 +370,9 @@ describe("DesktopApplicationMenu", () => {
       const applicationMenuTemplate =
         yield* Deferred.make<readonly Electron.MenuItemConstructorOptions[]>();
 
-      yield* configureMenu(selectedAction, applicationMenuTemplate, { platform: "darwin" });
+      yield* configureMenu(selectedAction, applicationMenuTemplate, {
+        platform: "darwin",
+      });
 
       const template = yield* Deferred.await(applicationMenuTemplate);
       const viewMenu = template.find((item) => item.label === "View");

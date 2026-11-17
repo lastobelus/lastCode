@@ -73,7 +73,22 @@ const checkForUpdatesFromMenu = Effect.gen(function* () {
   const result = yield* updates.check("menu");
   const updateState = result.state;
 
-  if (updateState.status === "up-to-date") {
+  if (result.error) {
+    yield* electronDialog.showMessageBox({
+      type: "warning",
+      title: "Update check failed",
+      message: "Could not check for updates.",
+      detail: result.error,
+      buttons: ["OK"],
+    });
+  } else if (result.checkpointRequested) {
+    yield* electronDialog.showMessageBox({
+      type: "info",
+      title: "Checkpoint requested",
+      message: DesktopUpdates.checkpointRequestedMessage,
+      buttons: ["OK"],
+    });
+  } else if (updateState.status === "up-to-date") {
     yield* electronDialog.showMessageBox({
       type: "info",
       title: "You're up to date!",
@@ -109,14 +124,6 @@ const checkForUpdatesFromMenu = Effect.gen(function* () {
       cancelId: 1,
     });
     if (response === 0) yield* updates.install;
-  } else if (updateState.status === "error") {
-    yield* electronDialog.showMessageBox({
-      type: "warning",
-      title: "Update check failed",
-      message: "Could not check for updates.",
-      detail: updateState.message ?? "An unknown error occurred. Please try again later.",
-      buttons: ["OK"],
-    });
   }
 }).pipe(Effect.withSpan("desktop.menu.checkForUpdates"));
 
