@@ -228,8 +228,9 @@ const handlers = {
       "snapshot",
       {
         ...operationInput,
+        // Saving still needs a capture even when the response contains only its path.
+        ...(includeImage !== true && save !== true ? { includeImage: false } : {}),
         ...(save === true ? { fullScreenshot: true } : {}),
-        ...(includeImage === true || save === true ? {} : { pixelsRequired: false }),
       },
     );
   }),
