@@ -1701,10 +1701,7 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
   sidebarAutoSettleOnMerge: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
-  capacityMode: CapacityMode.annotate({
-    description:
-      "Capacity checks. `off`: none. `observe`: sample and report verdicts without holding work.",
-  }).pipe(Schema.withDecodingDefault(Effect.succeed("observe"))),
+  capacityMode: CapacityMode.pipe(Schema.withDecodingDefault(Effect.succeed("observe"))),
   backgroundActivity: BackgroundActivitySettings,
 
   automaticGitFetchInterval: Schema.DurationFromMillis.pipe(

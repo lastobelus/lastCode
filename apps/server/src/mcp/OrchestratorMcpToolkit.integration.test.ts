@@ -1,4 +1,3 @@
-import * as CapacityTestkit from "../capacity/testkit.ts";
 import * as NodeURL from "node:url";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -72,7 +71,6 @@ const layerOrchestratorToolkit = Layer.mergeAll(
   McpHttpServer.layerOrchestratorToolkit,
   McpHttpServer.layerThreadToolkit,
 ).pipe(
-  Layer.provide(CapacityTestkit.layer),
   Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
   Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
   Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),

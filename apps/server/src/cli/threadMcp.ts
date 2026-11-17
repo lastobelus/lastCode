@@ -16,6 +16,8 @@ import {
   type OrchestratorMcpThreadStatus,
   type OrchestratorMcpThreadTimelineItem,
 } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
+import { unknownCapacitySnapshot } from "../capacity/logic.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
@@ -174,7 +176,7 @@ const ProjectListResult = Schema.Struct({
 });
 
 const ThreadLaunchResult = Schema.Struct({
-  capacity: CapacitySnapshot,
+  capacity: Schema.optional(CapacitySnapshot),
   threadId: ThreadId,
   projectId: ProjectId,
   runId: Schema.NullOr(RunId),
@@ -1007,10 +1009,21 @@ export const threadCapacityCommand = Command.make("capacity", {
             : {},
           Schema.Struct({
             environmentId: EnvironmentId,
-            capacity: EnvironmentCapacitySnapshot,
+            capacity: Schema.optional(EnvironmentCapacitySnapshot),
           }),
         )
-        .pipe(Effect.flatMap(printJson)),
+        .pipe(
+          Effect.flatMap((result) =>
+            Effect.gen(function* () {
+              const capacity = result.capacity ?? {
+                ...unknownCapacitySnapshot(yield* Clock.currentTimeMillis),
+                linkedObservation: "unknown",
+                linked: [],
+              };
+              return yield* printJson({ ...result, capacity });
+            }),
+          ),
+        ),
     ).pipe(reportThreadErrors),
   ),
 );

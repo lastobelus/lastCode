@@ -1,10 +1,11 @@
 import type { EnvironmentId } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Capacity from "../capacity/Capacity.ts";
 import { unknownCapacitySnapshot } from "../capacity/logic.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
-import type { McpInvocationScope } from "./McpInvocationContext.ts";
+import { McpInvocationContext, type McpInvocationScope } from "./McpInvocationContext.ts";
 import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
 
 export const capacityForTarget = Effect.fn("mcp.capacityForTarget")(function* (
@@ -13,13 +14,18 @@ export const capacityForTarget = Effect.fn("mcp.capacityForTarget")(function* (
 ) {
   const remote = PeerForwarding.remoteTarget(scope, target);
   if (remote === undefined) return yield* (yield* Capacity.Capacity).read;
-  const forwarding = yield* PeerForwarding.PeerForwarding;
+  const forwarding = yield* Effect.serviceOption(PeerForwarding.PeerForwarding);
+  if (Option.isNone(forwarding)) return unknownCapacitySnapshot(yield* Clock.currentTimeMillis);
   // Publication must never turn an accepted launch into a failure, or use this host's
   // reading for a different machine. An unavailable target stays explicitly unknown.
-  return yield* forwarding
+  return yield* forwarding.value
     .call(scope, EnvironmentToolkit.tools.t3_environment_read, remote, { includeLinked: false })
     .pipe(
-      Effect.map((result) => result.capacity),
+      Effect.flatMap((result) =>
+        result.capacity === undefined
+          ? Clock.currentTimeMillis.pipe(Effect.map((now) => unknownCapacitySnapshot(now)))
+          : Effect.succeed(result.capacity),
+      ),
       Effect.timeout("2 seconds"),
       Effect.catch(() =>
         Clock.currentTimeMillis.pipe(Effect.map((now) => unknownCapacitySnapshot(now))),
@@ -27,11 +33,12 @@ export const capacityForTarget = Effect.fn("mcp.capacityForTarget")(function* (
     );
 });
 
-export const linkedCapacity = Effect.fn("mcp.linkedCapacity")(function* (
-  scope: McpInvocationScope,
-) {
-  const forwarding = yield* PeerForwarding.PeerForwarding;
-  const listing = yield* forwarding.links(scope).pipe(Effect.timeout("4 seconds"), Effect.result);
+export const linkedCapacity = Effect.fn("mcp.linkedCapacity")(function* (scope: McpInvocationScope) {
+  const forwarding = yield* Effect.serviceOption(PeerForwarding.PeerForwarding);
+  if (Option.isNone(forwarding)) return { linkedObservation: "unknown" as const, linked: [] };
+  const listing = yield* forwarding.value
+    .links(scope)
+    .pipe(Effect.timeout("4 seconds"), Effect.result);
   if (listing._tag === "Failure") return { linkedObservation: "unknown" as const, linked: [] };
   const linked = yield* Effect.forEach(
     listing.success.links,
@@ -46,4 +53,16 @@ export const linkedCapacity = Effect.fn("mcp.linkedCapacity")(function* (
     { concurrency: 3 },
   );
   return { linkedObservation: "known" as const, linked };
+});
+
+export const readEnvironmentCapacity = Effect.fn("mcp.readEnvironmentCapacity")(function* (
+  includeLinked: boolean | undefined,
+) {
+  const scope = yield* McpInvocationContext;
+  return {
+    ...(yield* (yield* Capacity.Capacity).read),
+    ...(includeLinked === false
+      ? { linkedObservation: "not-requested" as const, linked: [] }
+      : yield* linkedCapacity(scope)),
+  };
 });

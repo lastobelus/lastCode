@@ -1,7 +1,10 @@
 import { EnvironmentId } from "./baseSchemas.ts";
 import * as Schema from "effect/Schema";
 
-export const CapacityMode = Schema.Literals(["off", "observe"]);
+export const CapacityMode = Schema.Literals(["off", "observe"]).annotate({
+  description:
+    "Capacity checks. `off`: none. `observe`: sample and report verdicts without holding work.",
+});
 export type CapacityMode = typeof CapacityMode.Type;
 
 export const CapacityMemoryPressure = Schema.Literals(["normal", "warning", "critical", "unknown"]);

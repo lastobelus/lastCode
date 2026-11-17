@@ -19,17 +19,20 @@ import {
   recordCapacitySample,
   SAMPLE_INTERVAL_MS,
   STALE_AFTER_MS,
+  unknownCapacitySnapshot,
 } from "./logic.ts";
 import { nativeSource, type CapacitySource } from "./source.ts";
 
 export type { CapacitySource } from "./source.ts";
 
-export class Capacity extends Context.Service<
-  Capacity,
+export class Capacity extends Context.Reference<{ readonly read: Effect.Effect<CapacitySnapshot> }>(
+  "t3/capacity/Capacity",
   {
-    readonly read: Effect.Effect<CapacitySnapshot>;
-  }
->()("t3/capacity/Capacity") {}
+    defaultValue: () => ({
+      read: Clock.currentTimeMillis.pipe(Effect.map((now) => unknownCapacitySnapshot(now))),
+    }),
+  },
+) {}
 
 export interface CapacityInputs {
   readonly mode: Effect.Effect<CapacityMode>;
@@ -77,15 +80,11 @@ export const make = Effect.fn("capacity.make")(function* (inputs: CapacityInputs
     }
     const resumed = yield* Ref.getAndSet(paused, false);
     const startedAt = yield* Clock.currentTimeMillis;
-    const [measurements, activity, ownerPower] = yield* Effect.all(
+    const [measurements, ownerPower] = yield* Effect.all(
       [
         readMeasurements.pipe(
           Effect.timeout("3 seconds"),
           Effect.orElseSucceed(() => failedMeasurements(startedAt)),
-        ),
-        inputs.activity.pipe(
-          Effect.timeout("3 seconds"),
-          Effect.orElseSucceed(() => null),
         ),
         inputs.ownerPower.pipe(
           Effect.timeout("3 seconds"),
@@ -114,7 +113,7 @@ export const make = Effect.fn("capacity.make")(function* (inputs: CapacityInputs
           }
         : current;
       const next = evaluateCapacity(
-        recordCapacitySample(base, measurements, activity, idle),
+        recordCapacitySample(base, measurements, current.activity, idle),
         now,
         mode,
       );
@@ -127,17 +126,20 @@ export const make = Effect.fn("capacity.make")(function* (inputs: CapacityInputs
       yield* Effect.logInfo("capacity.would-hold", { capacity: snapshot });
     }
   });
-  yield* sample();
-  yield* sample().pipe(
-    Effect.repeat(Schedule.fixed(SAMPLE_INTERVAL_MS)),
-    Effect.delay(SAMPLE_INTERVAL_MS),
-    Effect.forkScoped,
-  );
+  yield* sample().pipe(Effect.repeat(Schedule.fixed(SAMPLE_INTERVAL_MS)), Effect.forkScoped);
 
   const read = Effect.gen(function* () {
-    const [now, mode] = yield* Effect.all([Clock.currentTimeMillis, inputs.mode]);
+    const mode = yield* inputs.mode;
+    const activity =
+      mode === "off"
+        ? null
+        : yield* inputs.activity.pipe(
+            Effect.timeout("3 seconds"),
+            Effect.orElseSucceed(() => null),
+          );
+    const now = yield* Clock.currentTimeMillis;
     return yield* Ref.modify(state, (current) => {
-      const next = evaluateCapacity(current, now, mode);
+      const next = evaluateCapacity({ ...current, activity }, now, mode);
       return [next.snapshot, next.state] as const;
     });
   });

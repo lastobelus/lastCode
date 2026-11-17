@@ -1,5 +1,4 @@
-import { linkedCapacity } from "../../capacityRead.ts";
-import * as Capacity from "../../../capacity/Capacity.ts";
+import { readEnvironmentCapacity } from "../../capacityRead.ts";
 import * as PromptSnippets from "../../../promptSnippets/PromptSnippets.ts";
 import {
   OrchestratorMcpFailure,
@@ -148,12 +147,7 @@ export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
         serverVersion: descriptor.serverVersion,
         platform: descriptor.platform,
         preferences: preferences(current),
-        capacity: {
-          ...(yield* (yield* Capacity.Capacity).read),
-          ...(input.includeLinked === false
-            ? { linkedObservation: "not-requested" as const, linked: [] }
-            : yield* linkedCapacity(yield* McpInvocationContext.McpInvocationContext)),
-        },
+        capacity: yield* readEnvironmentCapacity(input.includeLinked),
       };
     }),
   ),

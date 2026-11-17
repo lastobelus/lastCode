@@ -43,10 +43,13 @@ describe("Capacity service", () => {
     "samples every five seconds, logs full verdicts each held sample, and skips sampling while off",
     () => {
       const logs: Array<unknown> = [];
+      let firstSample: Deferred.Deferred<void>;
       const logger = Logger.make(({ message }) => {
         logs.push(message);
+        Deferred.doneUnsafe(firstSample, Effect.void);
       });
       return Effect.gen(function* () {
+        firstSample = yield* Deferred.make<void>();
         const mode = yield* Ref.make<CapacityMode>("observe");
         const reads = yield* Ref.make(0);
         const directory = yield* Ref.make<string | null>("/unused");
@@ -71,6 +74,7 @@ describe("Capacity service", () => {
             }),
           },
         });
+        yield* Deferred.await(firstSample);
         expect(yield* Ref.get(reads)).toBe(1);
         expect((yield* service.read).ownerIdleSeconds).toBe(300);
         yield* TestClock.adjust("5 seconds");
@@ -157,6 +161,7 @@ describe("Capacity service", () => {
             ),
           },
         });
+        yield* TestClock.adjust("0 seconds");
         const off = yield* service.read;
         expect(off.sampledAt).toBeNull();
         expect(off.verdicts.agent.state).toBe("unknown");
@@ -193,6 +198,7 @@ describe("Capacity service", () => {
         activity,
         ownerPower: Effect.succeed(power),
       }).pipe(Effect.provide(Logger.layer([logger], { mergeWithExisting: false })));
+      yield* Deferred.await(sampled);
       expect((yield* service.read).measurements?.worktreeFoldersByProject).toEqual({
         "project-a": 1,
       });
@@ -214,5 +220,26 @@ describe("Capacity service", () => {
         Layer.mergeAll(NodeServices.layer, Layer.succeed(HostProcess.Platform, "linux")),
       ),
     ),
+  );
+  it.effect("does not wait for the first sample or read activity in the sampler", () =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const activityReads = yield* Ref.make(0);
+      const service = yield* Capacity.make({
+        mode: Effect.succeed("observe"),
+        worktreesDir: Effect.succeed("/unused"),
+        activity: Ref.update(activityReads, (count) => count + 1).pipe(Effect.andThen(activity)),
+        ownerPower: Effect.succeed(power),
+        source: { read: Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)) },
+      });
+      yield* Deferred.await(entered);
+      expect(yield* Ref.get(activityReads)).toBe(0);
+      expect((yield* service.read).sampledAt).toBeNull();
+      expect(yield* Ref.get(activityReads)).toBe(1);
+      yield* TestClock.adjust("15 seconds");
+      expect(yield* Ref.get(activityReads)).toBe(1);
+      expect((yield* service.read).activity).toEqual(yield* activity);
+      expect(yield* Ref.get(activityReads)).toBe(2);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });

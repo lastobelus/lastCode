@@ -1,6 +1,5 @@
-import * as Capacity from "../../../capacity/Capacity.ts";
-import { CapacitySnapshot } from "@t3tools/contracts";
 import {
+  CapacitySnapshot,
   OrchestratorMcpCapabilitiesInput,
   OrchestratorMcpCapabilitiesResult,
   OrchestrationV2StopWorkflowInput,
@@ -94,11 +93,11 @@ const DelegateTaskTool = Tool.make("delegate_task", {
   parameters: OrchestratorMcpDelegateTaskInput,
   success: Schema.Struct({
     ...OrchestratorMcpDelegateTaskResult.fields,
-    capacity: CapacitySnapshot,
+    capacity: Schema.optional(CapacitySnapshot),
   }),
   failure: OrchestratorMcpFailure,
   failureMode: "return",
-  dependencies: [...dependencies, Capacity.Capacity, PeerForwarding.PeerForwarding],
+  dependencies,
 })
   .annotate(Tool.Title, "Delegate a child task")
   .annotate(Tool.Destructive, true)
@@ -232,11 +231,11 @@ const CreateThreadsTool = Tool.make("create_threads", {
   parameters: OrchestratorMcpCreateThreadsInput,
   success: Schema.Struct({
     ...OrchestratorMcpCreateThreadsResult.fields,
-    capacity: CapacitySnapshot,
+    capacity: Schema.optional(CapacitySnapshot),
   }),
   failure: OrchestratorMcpFailure,
   failureMode: "return",
-  dependencies: [...dependencies, Capacity.Capacity],
+  dependencies,
 })
   .annotate(Tool.Title, "Create T3 threads")
   .annotate(Tool.Destructive, true)

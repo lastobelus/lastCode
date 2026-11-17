@@ -1,4 +1,3 @@
-import * as Capacity from "../../../capacity/Capacity.ts";
 import { capacityForTarget } from "../../capacityRead.ts";
 import { OrchestratorMcpFailure } from "@t3tools/contracts";
 import { OrchestratorToolkit } from "./tools.ts";
@@ -155,7 +154,7 @@ const handlers = {
       );
       const service = yield* OrchestratorMcpService.OrchestratorMcpService;
       const result = yield* service.createThreads(caller.scope, input);
-      return { ...result, capacity: yield* (yield* Capacity.Capacity).read };
+      return { ...result, capacity: yield* capacityForTarget(caller.scope, undefined) };
     }),
   ),
   t3_thread_list: McpToolAccess.reads((input) =>

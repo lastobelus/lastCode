@@ -1,5 +1,3 @@
-import * as PeerForwarding from "../../../peer/PeerForwarding.ts";
-import * as Capacity from "../../../capacity/Capacity.ts";
 import * as PromptSnippets from "../../../promptSnippets/PromptSnippets.ts";
 import {
   PromptSnippetsState,
@@ -10,9 +8,9 @@ import {
   PromptSnippetRestoreInput,
 } from "@t3tools/contracts";
 import {
-  EnvironmentCapacitySnapshot,
   BackgroundActivityProfile,
   BackgroundActivityProfileSelection,
+  EnvironmentCapacitySnapshot,
   ExecutionEnvironmentDescriptor,
   OrchestratorMcpEnvironmentTarget,
   EnvironmentPauseStatus,
@@ -58,7 +56,6 @@ const EnvironmentReadTool = Tool.make("t3_environment_read", {
   ...shared,
   description:
     "Read this server's identity, preferences, and capacity. `capacity.mode` is `off` or `observe`. Each verdict covers one class (owner, agent, background) and comes with sampled metrics and reasons. Owner is always open. Agent or background is `unknown` and would hold when its sample can't be read or is older than 30s. `observe` only reports: it never holds work. Providers and models: `orchestrator_capabilities`.",
-  dependencies: [...shared.dependencies, Capacity.Capacity, PeerForwarding.PeerForwarding],
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     includeLinked: Schema.optional(Schema.Boolean),
@@ -69,7 +66,7 @@ const EnvironmentReadTool = Tool.make("t3_environment_read", {
     serverVersion: Schema.String,
     platform: ExecutionEnvironmentDescriptor.fields.platform,
     preferences: Schema.Struct(PreferenceFields),
-    capacity: EnvironmentCapacitySnapshot,
+    capacity: Schema.optional(EnvironmentCapacitySnapshot),
   }),
 })
   .annotate(Tool.Readonly, true)

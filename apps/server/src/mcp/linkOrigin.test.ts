@@ -1,4 +1,3 @@
-import * as CapacityTestkit from "../capacity/testkit.ts";
 import { requireRemoteDelegationPeer } from "./linkOrigin.ts";
 import * as ActionResume from "../actionResume/ActionResume.ts";
 import * as ThreadReadBroker from "./ThreadReadBroker.ts";
@@ -134,7 +133,6 @@ const layerTools = Layer.mergeAll(
   McpHttpServer.layerProjectRegistration,
 )
   .pipe(
-    Layer.provide(CapacityTestkit.layer),
     Layer.provide(ThreadReadBroker.layer),
     Layer.provide(
       Layer.mock(ActionResume.ActionResume)({ readLatestSummary: () => Effect.succeed(null) }),

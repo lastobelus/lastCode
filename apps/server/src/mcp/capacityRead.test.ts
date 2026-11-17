@@ -25,7 +25,7 @@ it.effect(
     Effect.gen(function* () {
       const local = { ...unknownCapacitySnapshot(1), mode: "off" as const };
       const remote = unknownCapacitySnapshot(2);
-      const provide = (unavailable: boolean) =>
+      const provide = (response: "available" | "unavailable" | "older") =>
         Layer.mergeAll(
           Layer.succeed(Capacity.Capacity, { read: Effect.succeed(local) }),
           Layer.mock(PeerForwarding.PeerForwarding)({
@@ -33,33 +33,49 @@ it.effect(
               expect(tool.name).toBe("t3_environment_read");
               expect(params).toEqual({ includeLinked: false });
               expect(target).toBe(targetId);
-              return unavailable
+              return response === "unavailable"
                 ? Effect.fail(
                     new OrchestratorMcpFailure({
                       code: "environment_unavailable",
                       message: "Unavailable",
                     }),
                   )
-                : (Effect.succeed({ capacity: remote }) as never);
+                : (Effect.succeed(response === "older" ? {} : { capacity: remote }) as never);
             },
           }),
         );
       expect(
-        yield* capacityForTarget(scope, undefined).pipe(Effect.provide(provide(false))),
+        yield* capacityForTarget(scope, undefined).pipe(Effect.provide(provide("available"))),
       ).toEqual(local);
-      expect(yield* capacityForTarget(scope, localId).pipe(Effect.provide(provide(false)))).toEqual(
-        local,
-      );
       expect(
-        yield* capacityForTarget(scope, targetId).pipe(Effect.provide(provide(false))),
+        yield* capacityForTarget(scope, localId).pipe(Effect.provide(provide("available"))),
+      ).toEqual(local);
+      expect(
+        yield* capacityForTarget(scope, targetId).pipe(Effect.provide(provide("available"))),
       ).toEqual(remote);
-      const missing = yield* capacityForTarget(scope, targetId).pipe(Effect.provide(provide(true)));
-      expect(missing.verdicts.owner.state).toBe("open");
-      expect(missing.verdicts.agent.state).toBe("unknown");
-      expect(missing.verdicts.background.state).toBe("unknown");
-      expect(missing.measurements).toBeNull();
-      expect(missing).not.toEqual(local);
+      for (const response of ["unavailable", "older"] as const) {
+        const missing = yield* capacityForTarget(scope, targetId).pipe(
+          Effect.provide(provide(response)),
+        );
+        expect(missing.verdicts.owner.state).toBe("open");
+        expect(missing.verdicts.agent.state).toBe("unknown");
+        expect(missing.verdicts.background.state).toBe("unknown");
+        expect(missing.measurements).toBeNull();
+        expect(missing).not.toEqual(local);
+      }
     }),
+);
+
+it.effect("keeps missing local and peer services unknown", () =>
+  Effect.gen(function* () {
+    for (const target of [undefined, localId, targetId]) {
+      const result = yield* capacityForTarget(scope, target);
+      expect(result.verdicts.owner.state).toBe("open");
+      expect(result.verdicts.agent.state).toBe("unknown");
+      expect(result.verdicts.background.state).toBe("unknown");
+    }
+    expect(yield* linkedCapacity(scope)).toEqual({ linkedObservation: "unknown", linked: [] });
+  }),
 );
 
 it.effect("one read includes linked capacity and keeps unreachable machines unknown", () =>
