@@ -14,7 +14,7 @@ import { useState } from "react";
 import { CheckIcon, PlusIcon } from "lucide-react";
 import { Command, CommandInput, CommandItem, CommandList } from "../../components/ui/command";
 import { Button } from "../../components/ui/button";
-import { tagVocabulary } from "./state";
+import { vocabularyScope } from "./state";
 
 const vocabularyPages = Atom.family((key: string) => {
   const target = JSON.parse(key) as {
@@ -23,7 +23,6 @@ const vocabularyPages = Atom.family((key: string) => {
     projectOnly: boolean;
     query: string;
     archived: boolean;
-    cursor: number;
   };
   const input: ThreadTagVocabularyInput = {
     archived: target.archived,
@@ -40,18 +39,17 @@ const vocabularyPages = Atom.family((key: string) => {
     let loading = false;
     let failed = false;
     for (const environmentId of target.environmentIds) {
-      const result = get(tagVocabulary({ environmentId, input }));
+      const result = get(vocabularyScope(JSON.stringify({ environmentId, input })));
       loading ||= result.waiting || AsyncResult.isInitial(result);
       failed ||= AsyncResult.isFailure(result);
       const page = Option.getOrNull(AsyncResult.value(result));
-      pages.push(page?.entries ?? []);
+      pages.push(result.waiting || AsyncResult.isFailure(result) ? [] : (page?.entries ?? []));
     }
     const ranked = mergeThreadTagVocabulary(pages, target.query);
     return {
-      entries: ranked.slice(target.cursor, target.cursor + 100),
+      entries: ranked.slice(0, 100),
       loading,
       failed,
-      hasMore: ranked.length > target.cursor + 100,
     };
   });
 });
@@ -77,7 +75,6 @@ export function TagPicker({
 }) {
   const [query, setQuery] = useState("");
   const [projectOnly, setProjectOnly] = useState(false);
-  const [cursor, setCursor] = useState(0);
   const [highlighted, setHighlighted] = useState<string | null>(null);
   const key = JSON.stringify({
     environmentIds,
@@ -85,7 +82,6 @@ export function TagPicker({
     projectOnly,
     query,
     archived,
-    cursor,
   });
   const result = useAtomValue(vocabularyPages(key));
   const candidate = query.trim().replace(/^#/, "");
@@ -112,7 +108,6 @@ export function TagPicker({
         }}
         onValueChange={(value) => {
           setQuery(value);
-          setCursor(0);
           setHighlighted(null);
         }}
       >
@@ -195,7 +190,6 @@ export function TagPicker({
             variant="ghost"
             onClick={() => {
               setProjectOnly(!projectOnly);
-              setCursor(0);
             }}
             aria-label={
               projectOnly
@@ -208,18 +202,6 @@ export function TagPicker({
         ) : (
           <span className="text-xs text-muted-foreground">All projects</span>
         )}
-        <div className="flex gap-1">
-          {cursor > 0 ? (
-            <Button size="xs" variant="ghost" onClick={() => setCursor(Math.max(0, cursor - 100))}>
-              Previous
-            </Button>
-          ) : null}
-          {result.hasMore ? (
-            <Button size="xs" variant="ghost" onClick={() => setCursor(cursor + 100)}>
-              Next
-            </Button>
-          ) : null}
-        </div>
       </div>
     </div>
   );

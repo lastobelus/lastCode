@@ -9,10 +9,10 @@ import {
   THREAD_TAG_RPC_METHODS,
   type ThreadTagVocabularyInput,
 } from "@t3tools/contracts";
-import { threadTagDiscoveryRevision, mergeThreadTagVocabulary } from "@t3tools/shared/threadTags";
+import { threadTagDiscoveryRevision } from "@t3tools/shared/threadTags";
 import { loadThreadTagVocabulary } from "@t3tools/client-runtime/thread-tag-discovery";
 import * as Option from "effect/Option";
-import { AsyncResult, Atom } from "effect/reactivity";
+import { Atom } from "effect/reactivity";
 import { create } from "zustand";
 import { connectionAtomRuntime } from "../../connection/runtime";
 import { environmentCatalog } from "../../connection/catalog";
@@ -40,7 +40,7 @@ const vocabularyQuery = createEnvironmentQueryAtomFamily(connectionAtomRuntime, 
   staleTimeMs: Infinity,
   refreshTrigger: ({ environmentId }) => tagRevision(environmentId),
 });
-const vocabularyScope = Atom.family((key: string) => {
+export const vocabularyScope = Atom.family((key: string) => {
   const target = JSON.parse(key) as {
     environmentId: Parameters<typeof tagRevision>[0];
     input: ThreadTagVocabularyInput;
@@ -68,34 +68,6 @@ const vocabularyScope = Atom.family((key: string) => {
     );
   });
 });
-const vocabularySearch = Atom.family((key: string) => {
-  const target = JSON.parse(key) as {
-    environmentId: Parameters<typeof tagRevision>[0];
-    input: ThreadTagVocabularyInput;
-  };
-  const {
-    query,
-    cursor: _cursor,
-    limit: _limit,
-    uiVisibility: _visibility,
-    ...scope
-  } = target.input;
-  return Atom.map(
-    vocabularyScope(JSON.stringify({ environmentId: target.environmentId, input: scope })),
-    (result) =>
-      AsyncResult.map(result, (value) => ({
-        entries:
-          result.waiting || AsyncResult.isFailure(result)
-            ? []
-            : mergeThreadTagVocabulary([value.entries], query),
-      })),
-  );
-});
-export const tagVocabulary = (target: {
-  readonly environmentId: Parameters<typeof tagRevision>[0];
-  readonly input: ThreadTagVocabularyInput;
-}) => vocabularySearch(JSON.stringify(target));
-
 export const tagMatches = createEnvironmentRpcQueryAtomFamily(connectionAtomRuntime, {
   label: "Threads with tag",
   tag: THREAD_TAG_RPC_METHODS.query,

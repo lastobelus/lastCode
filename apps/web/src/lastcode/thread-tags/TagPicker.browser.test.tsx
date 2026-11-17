@@ -28,8 +28,10 @@ vi.mock("./state", async () => {
     return atom;
   });
   return {
-    tagVocabulary: ({ input }: { input: { preferredProjectId?: string } }) =>
-      searches(input.preferredProjectId),
+    vocabularyScope: (key: string) =>
+      searches(
+        (JSON.parse(key) as { input: { preferredProjectId?: string } }).input.preferredProjectId,
+      ),
   };
 });
 
@@ -75,6 +77,7 @@ it("does not submit a selected old tag while the new search is pending", async (
       />
     </RegistryContext.Provider>,
   );
+  await expect.element(screen.getByText("#work", { exact: true })).not.toBeInTheDocument();
   await userEvent.type(screen.getByRole("combobox", { name: "Search tags" }), "new/path");
   await userEvent.keyboard("{Enter}");
   expect(select).not.toHaveBeenCalled();

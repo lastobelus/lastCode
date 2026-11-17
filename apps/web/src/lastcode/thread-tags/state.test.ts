@@ -63,10 +63,10 @@ import { request } from "@t3tools/client-runtime/rpc";
 import { environmentShell } from "../../state/shell";
 import { environmentThreadShells } from "../../state/threads";
 import { serverEnvironment } from "../../state/server";
-import { tagVocabulary } from "./state";
+import { vocabularyScope } from "./state";
 
 it.effect(
-  "reuses vocabulary for typed searches and pages, invalidating on stream metadata and privacy changes",
+  "reuses complete vocabulary by scope, invalidating on stream metadata and privacy changes",
   () =>
     Effect.gen(function* () {
       const registry = AtomRegistry.make();
@@ -93,21 +93,18 @@ it.effect(
         const environmentId = EnvironmentId.make("local");
         const base = { preferredProjectId: ProjectId.make("project") };
         const read = (input: ThreadTagVocabularyInput) =>
-          AtomRegistry.getResult(registry, tagVocabulary({ environmentId, input }), {
-            suspendOnWaiting: true,
-          });
+          AtomRegistry.getResult(
+            registry,
+            vocabularyScope(JSON.stringify({ environmentId, input })),
+            {
+              suspendOnWaiting: true,
+            },
+          );
         expect((yield* read(base)).entries.map((entry) => entry.tag)).toEqual([
           "Work/Client",
           "WC",
         ]);
-        expect(
-          (yield* read({ ...base, query: "wc", cursor: 100, limit: 1 })).entries.map(
-            (entry) => entry.tag,
-          ),
-        ).toEqual(["Work/Client", "WC"]);
-        expect(
-          (yield* read({ ...base, query: "client" })).entries.map((entry) => entry.tag),
-        ).toEqual(["Work/Client"]);
+        yield* read(base);
         expect(reads).toBe(2);
         set(environmentShell.stateValueAtom(environmentId), {
           ...registry.get(environmentShell.stateValueAtom(environmentId)),
@@ -121,9 +118,7 @@ it.effect(
           environmentThreadShells.hiddenThreadKeysAtom,
           new Set([`${environmentId}\u0000${ThreadId.make("private")}`]),
         );
-        expect((yield* read({ ...base, query: "wc" })).entries.map((entry) => entry.tag)).toEqual([
-          "Work/Client",
-        ]);
+        expect((yield* read(base)).entries.map((entry) => entry.tag)).toEqual(["Work/Client"]);
         expect(reads).toBeGreaterThan(4);
       } finally {
         registry.dispose();
