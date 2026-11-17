@@ -711,6 +711,7 @@ describe("server browser element refs", () => {
 
   it("tells a click target that matches nothing from one that never becomes clickable", async () => {
     await page.setContent(`<button hidden>hidden</button>`);
+    using _now = vi.spyOn(Date, "now").mockReturnValue(0);
     const failure = (selector: string) =>
       ServerBrowserPage.click(page, { selector, timeoutMs: 500 }).then(
         () => expect.unreachable(),
