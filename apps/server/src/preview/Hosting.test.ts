@@ -5080,7 +5080,7 @@ describe("PreviewHosting", () => {
               assert.deepEqual(yield* hosting.list(), []);
               assert.equal(harness.closes.length, 1);
             }
-            assert.equal(scansAfterWrite, 1);
+            assert.equal(scansAfterWrite, owner === "preview" ? 1 : 10);
           }).pipe(Effect.provide(layer)),
         );
       }).pipe(
