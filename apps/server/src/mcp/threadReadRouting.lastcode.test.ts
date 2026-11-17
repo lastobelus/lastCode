@@ -274,6 +274,8 @@ describe("reference routing through the real read service", () => {
               "reauthenticate",
               "noGrant",
               "noDestination",
+              "revoked",
+              "fence",
             ] as const) {
               const precise = referenceReadFailure(diagnostic, true);
               const recovered = yield* harness({ link, reference: Effect.succeed(precise) });
@@ -291,6 +293,9 @@ describe("reference routing through the real read service", () => {
                   `outgoing read link to ${there} has also expired`,
                 );
                 expect(failure.message).toContain("renew that link");
+                expect(failure.message).not.toContain(
+                  "Do not retry this read through another route.",
+                );
                 expect(failure.message).toContain("do not read again until");
               } else {
                 expect(failure.message).toBe(original.message);

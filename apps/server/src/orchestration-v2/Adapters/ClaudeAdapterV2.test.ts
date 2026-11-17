@@ -3594,10 +3594,11 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       const offerAndWait = Effect.fnUntraced(function* (
         message: SDKMessage,
         offered?: Deferred.Deferred<void>,
+        queue = processQueues.at(-1) ?? sdkMessages,
       ) {
         const processed = yield* Deferred.make<void>();
         processedMessages.set(message, processed);
-        yield* Queue.offer(processQueues.at(-1) ?? sdkMessages, message);
+        yield* Queue.offer(queue, message);
         if (offered !== undefined) yield* Deferred.succeed(offered, undefined);
         yield* Deferred.await(processed);
       });
@@ -15367,6 +15368,214 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         ),
       ),
     ),
+  );
+
+  it.effect.each(["active-wake", "buffered-wake", "buffered-result", "resume"] as const)(
+    "binds $0 root MCP calls to the exact attached continuation execution",
+    (arrival) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const sessions = yield* McpProviderSessions.McpProviderSessions;
+          const registrationStarted = yield* Deferred.make<void>();
+          const allowRegistration = yield* Deferred.make<void>();
+          const registeredWakeExecutions: Array<
+            { readonly runId: RunId; readonly attemptId: RunAttemptId } | undefined
+          > = [];
+          const harness = yield* makeWakeHarnessWithOptions({ separateQueryMessages: true }).pipe(
+            Effect.provideService(McpProviderSessions.McpProviderSessions, {
+              ...sessions,
+              registerExecution: (threadId, origin, execution, nativeOwner): Effect.Effect<void> =>
+                Effect.gen(function* () {
+                  if (origin.provider === "claude" && origin.toolUseId === "wake-barrier") {
+                    yield* Deferred.succeed(registrationStarted, undefined);
+                    yield* Deferred.await(allowRegistration);
+                  }
+                  yield* sessions.registerExecution(threadId, origin, execution, nativeOwner);
+                  if (origin.provider === "claude" && origin.toolUseId === "wake-root") {
+                    registeredWakeExecutions.push(yield* lookup(origin.toolUseId));
+                  }
+                }),
+            }),
+          );
+          const config = {
+            environmentId: EnvironmentId.make("env-wake-origin"),
+            threadId: harness.threadId,
+            providerInstanceId: ProviderInstanceId.make("claude"),
+            providerSessionId: "credential-wake-origin",
+            endpoint: "http://localhost/mcp",
+            authorizationHeader: "Bearer test-wake-origin",
+            browserToolsAvailable: true,
+          };
+          yield* sessions.set(config);
+          const lookup = (id: string) =>
+            sessions.resolveExecution({
+              threadId: harness.threadId,
+              providerSessionId: config.providerSessionId,
+              authorizationHeader: config.authorizationHeader,
+              metadata: { "claudecode/toolUseId": id },
+            });
+          const frame = (
+            id: string,
+            parentToolUseId: string | null = null,
+            toolName = "mcp__t3-code__t3_thread_send",
+          ) =>
+            claudeSdkFrame({
+              type: "assistant",
+              message: {
+                model: "claude-sonnet-4-6",
+                id: `msg_${id}`,
+                type: "message",
+                role: "assistant",
+                content: [{ type: "tool_use", id, name: toolName, input: {} }],
+              },
+              parent_tool_use_id: parentToolUseId,
+              uuid: `frame-${id}`,
+              session_id: WAKE_NATIVE_SESSION,
+            });
+          const makeInput = (ordinal: number) =>
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make(`wake-origin-${ordinal}`),
+              text: "Continue",
+              attachments: [],
+              providerTurnOrdinal: ordinal,
+              ...(ordinal === 2 && arrival !== "resume"
+                ? { messageCreatedBy: "agent", messageCreationSource: "provider" }
+                : {}),
+            });
+          const now = yield* DateTime.now;
+          const first = makeInput(1);
+          yield* harness.runtime.startTurn(first);
+          yield* harness.offerAndWait(
+            claudeSdkFrame({ ...frame("first"), user_message_uuid: harness.promptUuid(0) }),
+          );
+          yield* harness.offerAndWait(turnOneResult);
+          yield* harness.awaitTerminal(1);
+          assert.isUndefined(yield* lookup("first"));
+          const oldQueryMessages = harness.getOpenedMessages();
+          if (oldQueryMessages === undefined) throw new Error("Expected an open native query");
+          const hook = harness.getOpenedOptions()?.hooks?.PreToolUse?.[0]?.hooks[0];
+          if (hook === undefined) throw new Error("Native T3 tools require a frame barrier");
+          const invokeHook = (id: string) =>
+            Effect.promise(() =>
+              hook(
+                {
+                  hook_event_name: "PreToolUse",
+                  session_id: WAKE_NATIVE_SESSION,
+                  transcript_path: "/transcript.jsonl",
+                  cwd: "/workspace",
+                  tool_name: "mcp__t3-code__t3_thread_send",
+                  tool_input: {},
+                  tool_use_id: id,
+                },
+                undefined,
+                { signal: new AbortController().signal },
+              ),
+            );
+          const wake = {
+            ...makeInput(2),
+            ...(arrival === "resume" ? { resume: true as const } : {}),
+          };
+          const buffered = arrival === "buffered-wake" || arrival === "buffered-result";
+          const rootHookStarted = yield* Deferred.make<void>();
+          const rootDispatched = yield* Deferred.make<void>();
+          const rootPermission = yield* Effect.gen(function* () {
+            yield* Deferred.succeed(rootHookStarted, undefined);
+            yield* invokeHook("wake-root");
+            return yield* lookup("wake-root");
+          }).pipe(
+            Effect.tap(() => Deferred.succeed(rootDispatched, undefined)),
+            Effect.forkScoped,
+          );
+          yield* Deferred.await(rootHookStarted);
+          if (buffered) {
+            yield* harness.offerAndWait(frame("wake-root"));
+            if (arrival === "buffered-result") yield* harness.offerAndWait(wakeResult);
+            assert.isUndefined(yield* lookup("wake-root"));
+            assert.isFalse(yield* Deferred.isDone(rootDispatched));
+          } else if (arrival === "active-wake") {
+            yield* harness.offerAndWait(wakeTurnInit);
+          }
+          yield* harness.runtime.startTurn(wake);
+          if (arrival === "resume") {
+            assert.notStrictEqual(harness.getOpenedMessages(), oldQueryMessages);
+            yield* harness.offerAndWait(frame("old-query"), undefined, oldQueryMessages);
+            assert.isUndefined(yield* lookup("old-query"));
+          }
+          if (!buffered) yield* harness.offerAndWait(frame("wake-root"));
+          const expected = { runId: wake.runId, attemptId: wake.attemptId };
+          assert.deepEqual(registeredWakeExecutions, [expected]);
+          const rootExecution = yield* Fiber.join(rootPermission);
+          if (arrival === "buffered-result") {
+            yield* harness.awaitTerminal(2);
+            assert.isUndefined(yield* lookup("wake-root"));
+            return;
+          }
+          assert.deepEqual(rootExecution, expected);
+          assert.deepEqual(yield* lookup("wake-root"), expected);
+
+          const dispatched = yield* Deferred.make<void>();
+          const permission = yield* invokeHook("wake-barrier").pipe(
+            Effect.andThen(() => lookup("wake-barrier")),
+            Effect.tap(() => Deferred.succeed(dispatched, undefined)),
+            Effect.forkScoped,
+          );
+          const consume = yield* harness
+            .offerAndWait(frame("wake-barrier"))
+            .pipe(Effect.forkScoped);
+          yield* Deferred.await(registrationStarted);
+          assert.isFalse(yield* Deferred.isDone(dispatched));
+          assert.isUndefined(yield* lookup("wake-barrier"));
+          yield* Deferred.succeed(allowRegistration, undefined);
+          assert.deepEqual(yield* Fiber.join(permission), expected);
+          yield* Fiber.join(consume);
+          yield* harness.offerAndWait(
+            claudeSdkFrame({ ...frame("foreign-wake"), session_id: "foreign-native-session" }),
+          );
+          assert.isUndefined(yield* lookup("foreign-wake"));
+          yield* harness.offerAndWait(frame("wake-launch", null, "Agent"));
+          yield* harness.offerAndWait(
+            makeSubagentTaskStartedFrame({
+              taskId: "native-wake-child",
+              toolUseId: "wake-launch",
+              uuid: "00000000-0000-4000-8000-000000000781",
+            }),
+          );
+          yield* harness.offerAndWait(frame("wake-child", "wake-launch"));
+          const child = yield* lookup("wake-child");
+          assert.deepEqual({ runId: child?.runId, attemptId: child?.attemptId }, expected);
+          assert.isTrue(child?.isLiveBackground?.());
+          yield* harness.offerAndWait(wakeResult);
+          yield* harness.awaitTerminal(2);
+          assert.isUndefined(yield* lookup("wake-root"));
+          assert.isUndefined(yield* lookup("wake-barrier"));
+          yield* invokeHook("wake-child");
+          assert.isTrue(child?.isLiveBackground?.());
+          yield* harness.offerAndWait(
+            makeSubagentNotificationFrame({
+              taskId: "native-wake-child",
+              toolUseId: "wake-launch",
+              summary: "Done",
+              uuid: "00000000-0000-4000-8000-000000000782",
+            }),
+          );
+          assert.isUndefined(yield* lookup("wake-child"));
+          assert.isFalse(child?.isLiveBackground?.());
+          yield* harness.offerAndWait(frame("ended-child", "wake-launch"));
+          assert.isUndefined(yield* lookup("ended-child"));
+        }),
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
+        ),
+      ),
   );
 
   it.effect.each([

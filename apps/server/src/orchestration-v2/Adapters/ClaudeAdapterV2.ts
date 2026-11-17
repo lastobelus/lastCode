@@ -8578,6 +8578,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           message: SDKAssistantMessage,
           liveQuery: ClaudeLiveQueryContext,
         ) {
+          const context = yield* Ref.get(activeTurn);
           const parentToolUseId = message.parent_tool_use_id;
           const child =
             parentToolUseId === null
@@ -8599,9 +8600,18 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           const rootOwner =
             parentToolUseId === null &&
             mcpFrameOwner !== null &&
+            liveQuery.lastTurn === mcpFrameOwner &&
+            !liveQuery.stopping &&
+            liveQuery.nativeThreadId === mcpFrameOwner.nativeThreadId &&
             message.session_id === mcpFrameOwner.nativeThreadId
               ? mcpFrameOwner
               : null;
+          // Idle root frames are replayed after the wake acquires its actual run and attempt.
+          const awaitingWakeOwner =
+            parentToolUseId === null &&
+            context === null &&
+            !liveQuery.stopping &&
+            message.session_id === liveQuery.nativeThreadId;
           for (const tool of claudeToolUseBlocksFromAssistantMessage(message)) {
             // A child keeps its launch execution after a later root prompt takes over.
             if (
@@ -8654,8 +8664,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             const frame = yield* toolFrameReady(tool.id);
             frame.parentToolUseId = parentToolUseId;
             if (
-              parentToolUseId === null ||
-              !awaitingMcpSubagentStart(parentToolUseId, child, liveQuery.nativeThreadId)
+              parentToolUseId === null
+                ? !awaitingWakeOwner
+                : !awaitingMcpSubagentStart(parentToolUseId, child, liveQuery.nativeThreadId)
             ) {
               yield* Deferred.succeed(frame.ready, undefined);
             }
@@ -12643,6 +12654,19 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   ? context
                   : null;
             }
+            // Native wakes and server resumes have no new prompt to echo. Only the turn
+            // attached to this live query and native session may own their root frames.
+            if (
+              context !== null &&
+              (context.promptUuid === null || context.input.resume === true) &&
+              liveQuery.lastTurn === context &&
+              !liveQuery.stopping &&
+              context.nativeThreadId === liveQuery.nativeThreadId &&
+              message.session_id === liveQuery.nativeThreadId &&
+              isClaudeRootTurnFrame(message)
+            ) {
+              mcpFrameOwner = context;
+            }
             if (message.type === "assistant") {
               yield* registerMcpAssistantTools(message, liveQuery);
             }
@@ -12657,7 +12681,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               mcpFrameOwner = null;
               // Background children can reach their hook after an unrelated root result.
               for (const [id, frame] of mcpToolFrames) {
-                if (frame.parentToolUseId === null) mcpToolFrames.delete(id);
+                if (frame.parentToolUseId === null && (yield* Deferred.isDone(frame.ready))) {
+                  mcpToolFrames.delete(id);
+                }
               }
             }
           }

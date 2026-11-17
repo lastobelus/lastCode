@@ -4,6 +4,7 @@ import {
   CommandId,
   ComposerContextId,
   EnvironmentId,
+  EventId,
   MessageId,
   OrchestratorMcpFailure,
   ScheduledTaskId,
@@ -33,8 +34,10 @@ import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ActionResume from "../actionResume/ActionResume.ts";
+import { ClaudeProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as EffectWorker from "../orchestration-v2/EffectWorker.ts";
+import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
@@ -129,15 +132,19 @@ const makeHarness = (
     readonly getLink: PeerLinks.PeerLinks["Service"]["get"];
     readonly call: PeerMcpClient.PeerMcpClient["Service"]["call"];
   },
+  providerDriver = driver,
 ) =>
   Effect.gen(function* () {
+    const driver = providerDriver;
+    const capabilities =
+      driver === "claudeAgent" ? ClaudeProviderCapabilitiesV2 : CodexProviderCapabilitiesV2;
     const cwd = yield* checkpointWorkspace(name);
     const started = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2TurnInput>();
     const sessionEvents = new Map<ThreadId, Queue.Queue<ProviderAdapter.ProviderAdapterV2Event>>();
     const adapter: ProviderAdapter.ProviderAdapterV2["Service"] = {
       instanceId,
       driver,
-      getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
+      getCapabilities: () => Effect.succeed(capabilities),
       planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
       openSession: (input) =>
         Effect.gen(function* () {
@@ -154,7 +161,7 @@ const makeHarness = (
               status: "ready",
               cwd,
               model: modelSelection.model,
-              capabilities: CodexProviderCapabilitiesV2,
+              capabilities,
               createdAt: now,
               updatedAt: now,
               lastError: null,
@@ -280,6 +287,7 @@ const makeHarness = (
     return yield* Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      const eventSink = yield* EventSink.EventSinkV2;
       const broker = yield* ThreadReadBroker.ThreadReadBroker;
       const service = yield* OrchestratorMcpService.OrchestratorMcpService;
       const sql = yield* SqlClient.SqlClient;
@@ -396,6 +404,7 @@ const makeHarness = (
         service,
         sql,
         started,
+        eventSink,
         awaitEvent,
         awaitStarted,
         finish,
@@ -748,6 +757,147 @@ const scopeOf = (
   },
   client: undefined,
 });
+
+it.effect("a registered provider-result wake sends with its accepted origin's authority", () =>
+  Effect.gen(function* () {
+    const driver = ProviderDriverKind.make("claudeAgent");
+    const h = yield* makeHarness("thread-communication-provider-result", undefined, driver);
+    const now = yield* DateTime.now;
+    yield* h.sql`INSERT INTO auth_sessions
+      (session_id, subject, method, scopes, issued_at, expires_at)
+      VALUES (${sessionId}, 'test-user', 'browser-session-cookie', '["orchestration:read"]',
+        ${DateTime.formatIso(now)}, ${DateTime.formatIso(DateTime.add(now, { days: 1 }))})`;
+    const _connection = yield* h.broker.connect(sessionId);
+    yield* h.createThread(parentThreadId);
+    const target = ThreadId.make("provider-wake-recipient");
+    yield* h.createThread(target, destinationProjectId);
+    const messageId = MessageId.make("provider-wake-original-input");
+    const threadReadIntent = yield* h.broker
+      .forSession(sessionId)
+      .authorize(parentThreadId, messageId);
+    assert.isDefined(threadReadIntent);
+    yield* h.orchestrator.dispatch(
+      {
+        type: "message.dispatch",
+        commandId: CommandId.make("provider-wake-original-command"),
+        threadId: parentThreadId,
+        messageId,
+        text: "Continue after the native background result.",
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+        createdBy: "user",
+        creationSource: "web",
+      },
+      { threadReadIntent },
+    );
+    yield* h.worker.drain();
+    const origin = yield* Queue.take(h.started);
+    yield* h.awaitStarted(origin);
+    yield* h.finish(origin);
+    const projection = yield* h.orchestrator.getThreadProjection(parentThreadId);
+    const provider = projection.providerThreads.find((row) => row.id === origin.providerThread.id)!;
+    const taskId = "provider-wake-task";
+    // Provider transport is a fixture here; persist its owed result before real wake admission.
+    yield* h.eventSink.write({
+      commandId: CommandId.make("command:runtime-reconcile:provider-wake-owed"),
+      events: [
+        {
+          id: EventId.make("event:provider-wake-owed"),
+          type: "provider-thread.updated",
+          threadId: parentThreadId,
+          occurredAt: now,
+          payload: {
+            ...provider,
+            owedBackgroundResults: [{ taskId, originRunId: origin.runId }],
+            updatedAt: now,
+          },
+        },
+      ],
+    });
+    yield* h.orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make("provider-wake-command"),
+      threadId: parentThreadId,
+      messageId: MessageId.make("provider-wake-message"),
+      text: "Native background result is ready.",
+      backgroundResultContinuation: {
+        providerThreadId: provider.id,
+        originRunId: origin.runId,
+        taskIds: [taskId],
+      },
+      attachments: [],
+      dispatchMode: { type: "queue_after_active" },
+      createdBy: "agent",
+      creationSource: "provider",
+    });
+    yield* h.worker.drain();
+    const wake = yield* Queue.take(h.started);
+    yield* h.awaitStarted(wake);
+    assert.notEqual(wake.runId, origin.runId);
+    const registry = yield* McpProviderSessions.McpProviderSessions.pipe(
+      Effect.provide(McpProviderSessions.layer),
+    );
+    const scope = scopeOf(wake);
+    yield* registry.set({
+      environmentId: localEnvironmentId,
+      threadId: parentThreadId,
+      providerSessionId: scope.thread!.providerSessionId,
+      providerInstanceId: instanceId,
+      endpoint: "http://localhost/mcp",
+      authorizationHeader: "Bearer native-wake-test",
+      browserToolsAvailable: true,
+    });
+    yield* registry.registerExecution(
+      parentThreadId,
+      {
+        provider: "claude",
+        toolUseId: "provider-wake-call",
+      },
+      { runId: wake.runId, attemptId: wake.attemptId },
+    );
+    const execution = yield* registry.resolveExecution({
+      threadId: parentThreadId,
+      providerSessionId: scope.thread!.providerSessionId,
+      authorizationHeader: "Bearer native-wake-test",
+      metadata: { "claudecode/toolUseId": "provider-wake-call" },
+    });
+    assert.isDefined(execution);
+    const sent = yield* h.service.sendToThread(
+      {
+        ...scope,
+        thread: { ...scope.thread!, attribution: "resolved", execution },
+      },
+      {
+        threadId: target,
+        message: "Registered native wake result.",
+        mode: "queue",
+        clientRequestId: "provider-wake-send",
+      },
+    );
+    const owners = yield* h.sql<{ sessionId: string }>`SELECT session_id AS sessionId
+      FROM lastcode_thread_read_grants WHERE thread_id = ${target}
+        AND kind = 'run' AND grant_id = ${sent.runId}`;
+    assert.deepEqual(owners, [{ sessionId }]);
+    const directWakeGrant = yield* h.sql`SELECT 1 FROM lastcode_thread_read_grants
+      WHERE thread_id = ${parentThreadId} AND kind = 'run' AND grant_id = ${wake.runId}`;
+    assert.lengthOf(directWakeGrant, 0);
+    const unregistered = yield* h.service
+      .sendToThread(
+        {
+          ...scope,
+          thread: { ...scope.thread!, attribution: "unresolved", execution: undefined },
+        },
+        {
+          threadId: target,
+          message: "Unregistered calls must not borrow the wake.",
+          mode: "queue",
+          clientRequestId: "provider-wake-unresolved-control",
+        },
+      )
+      .pipe(Effect.flip);
+    assert.equal(unregistered.code, "parent_not_active");
+  }),
+);
 
 it.effect.each(["scheduled", "callback"] as const)(
   "%s intake cannot borrow the recipient's client grant and can use an independent peer",

@@ -1347,9 +1347,12 @@ describe("ThreadReadBroker", () => {
     ),
   );
 
-  it.effect.each(["pruned", "revoked"] as const)(
-    "refuses a destination response when its retained grant was %s while waiting",
-    (removal) =>
+  it.effect.each([
+    { removal: "pruned", diagnostic: "lostGrant" },
+    { removal: "revoked", diagnostic: "reauthenticate" },
+  ] as const)(
+    "refuses a destination response when its retained grant was $removal while waiting",
+    ({ removal, diagnostic }) =>
       Effect.scoped(
         Effect.gen(function* () {
           const h = yield* makeHarness;
@@ -1357,7 +1360,7 @@ describe("ThreadReadBroker", () => {
           const read = yield* h.broker
             .read(sourceThreadId, sourceRunId, { threadId, environmentId })
             .pipe(
-              Effect.match({ onFailure: (error) => error.code, onSuccess: () => "success" }),
+              Effect.match({ onFailure: (error) => error, onSuccess: () => undefined }),
               Effect.forkScoped,
             );
           const requests = yield* stream.pipe(Stream.take(1), Stream.runCollect);
@@ -1367,7 +1370,12 @@ describe("ThreadReadBroker", () => {
             yield* h.sql`UPDATE auth_sessions SET revoked_at = 'revoked' WHERE session_id = 'client-session'`;
           }
           yield* respondTo(h.broker, "client-session", requests[0]!);
-          expect(yield* Fiber.join(read)).toBe("environment_unavailable");
+          const failure = yield* Fiber.join(read);
+          const expected = threadReadFailure(diagnostic);
+          expect(failure?.code).toBe(expected.code);
+          expect(failure?.threadReadReason).toBe(expected.threadReadReason);
+          expect(failure?.message).toBe(expected.message);
+          expect(failure?.noDestinationAttempt).toBeUndefined();
         }),
       ),
   );

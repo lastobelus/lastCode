@@ -1,6 +1,8 @@
 import { type EnvironmentId, OrchestratorMcpFailure } from "@t3tools/contracts";
 
 const threadReadMessages = {
+  lostGrant:
+    "The destination read was sent and answered, but the retained client read grant it relied on is now gone, with no recorded reason, so its result was discarded; this does not show whether the grant was revoked or expired. Ask the user a structured question that names this reference with its returned link verbatim, and have them answer it with this exact reference attached, from a client that can read the thread. If this provider cannot ask structured questions, ask the user to attach the reference to a new message instead. Do not read again until they have.",
   noGrant:
     'This run holds no client read grant for this reference, so no destination request was sent. If an independently authorized link might reach this environment, start a fresh read with the same environmentId and threadId and via: "reference" to use it. If only the user\'s client can reach the thread, ask the user a structured question that names this reference with its returned link verbatim, and have them answer it with the reference attached, from the client that can read it. If this provider cannot ask structured questions, the user must attach the reference to a new message instead.',
   disconnected:
@@ -24,6 +26,8 @@ const threadReadMessages = {
 export type ThreadReadDiagnostic = keyof typeof threadReadMessages;
 
 const referenceReadMessages = {
+  revoked:
+    'This via: "reference" read already checked both routes: the client\'s retained read authorization was revoked or has expired, and no usable peer link reaches the environment, so no request was sent. Tell the user both steps for client recovery: (1) approve that client again in its connection settings; (2) reauthorize reading this exact reference from that client. Approval alone does not restore the reference grant. Wait for client reapproval before asking the authorization question; its answer must attach this exact reference from a client that can read the thread. If this provider cannot ask structured questions, the user can attach the reference to a new message after reapproval instead. Once the client\'s authority or connection, or a peer link, changes, start a fresh via: "reference" read; before then it fails the same way.',
   noGrant:
     'This via: "reference" read already checked both routes: no client read grant is retained for this reference, and no peer link reaches its environment, so no request was sent. Ask the user a structured question that names this reference with its returned link verbatim, and have them answer it with this exact reference attached, from a client that can read the thread. If this provider cannot ask structured questions, ask the user to attach the reference to a new message instead. Once they have, start a fresh via: "reference" read; before then it fails the same way.',
   disconnected:

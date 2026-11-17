@@ -296,10 +296,24 @@ const make = Effect.gen(function* () {
           );
         const current = yield* checked(authority.touchSuccessfulRead(entry.grant, sessionId));
         if (!current) {
-          const check = yield* checked(
-            authority.eligibleConnectedSessions(entry.grant, connectedSessions()),
+          const retained = yield* checked(
+            lookup(entry.grant.threadId, entry.grant.kind, entry.grant.grantId),
           );
-          yield* Deferred.fail(entry.result, unavailableFor(check));
+          let failure: OrchestratorMcpFailure;
+          if (retained === undefined) {
+            failure = threadReadFailure("lostGrant");
+          } else if ("denialReason" in retained) {
+            failure = deniedGrant(retained.denialReason);
+          } else {
+            const check = yield* checked(
+              authority.eligibleConnectedSessions(retained, connectedSessions()),
+            );
+            failure =
+              check.status === "eligible" || check.status === "disconnected"
+                ? threadReadFailure("unavailable")
+                : unavailableFor(check);
+          }
+          yield* Deferred.fail(entry.result, failure);
           return;
         }
         yield* Deferred.succeed(entry.result, { ...response.result, readVia: "client" });

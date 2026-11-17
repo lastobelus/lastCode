@@ -50,6 +50,8 @@ it("keeps every wake diagnostic mock equal to the production failure factory's w
     "thread-wake-old-generation-reauthentication-control": ["reauthenticate", false],
     "thread-wake-no-destination-attempt-recovery-control": ["noDestination", true],
     "thread-wake-expired-peer-link-recovery": ["disconnected", true, "environment-b"],
+    "thread-wake-answered-read-lost-grant": ["lostGrant", false],
+    "thread-wake-revoked-client-expired-peer-link": ["revoked", true, "environment-b"],
   };
   const seen = new Set<string>();
   for (const testCase of cases) {
@@ -83,7 +85,7 @@ it("keeps every wake diagnostic mock equal to the production failure factory's w
           : threadReadFailure(reason, noDestinationAttempt);
       if (via === "reference") assert.notProperty(result, "noDestinationAttempt");
       if (noDestinationAttempt)
-        assert.include(["noGrant", "disconnected", "noDestination"], reason);
+        assert.include(["noGrant", "disconnected", "noDestination", "revoked"], reason);
       assert.deepStrictEqual<unknown>(
         result,
         {
@@ -345,4 +347,153 @@ it("starts attached mentions with reference and keeps client continuations and o
       ),
     ),
   );
+});
+
+it("requires an attached structured answer after an answered strict read loses its final grant", () => {
+  const lost = findCase("thread-wake-answered-read-lost-grant");
+  const link = "[Project Y status](t3-thread://v1/environment-b/thread-status-y)";
+  const question = `Please answer with ${link} attached, from a client that can read it.`;
+  const ask = (title: string, step = 0) =>
+    call({ questions: [{ title }] }, step, "AskUserQuestion");
+  const waiting =
+    "Checklist comparison found one documentation-only discrepancy. Waiting for your answer; I cannot verify the fresh source status.";
+  for (const input of [{ questions: [{ title: question }] }, { questions: [{ question }] }]) {
+    assert.ok(passes(lost, complete([call(input, 0, "AskUserQuestion")], waiting)));
+  }
+  assert.isFalse(passes(lost, complete([], waiting)));
+  // This fixture has a native question tool; the conditional provider fallback does not apply.
+  assert.isFalse(passes(lost, complete([], `Attach ${link} to a new message from the client.`)));
+  for (const badQuestion of [
+    "Please answer with this reference attached from a client that can read it.",
+    question.replace("[Project Y status]", "[Other status]"),
+    question.replace("environment-b", "environment-c"),
+    question.replace("thread-status-y", "thread-other"),
+    question.replace(" attached", ""),
+    question.replace("client", "session"),
+  ]) {
+    assert.isFalse(passes(lost, complete([ask(badQuestion)], waiting)), badQuestion);
+  }
+  for (const via of [undefined, "client", "reference"]) {
+    assert.isFalse(
+      passes(
+        lost,
+        complete([call({ ...exact, ...(via ? { via } : {}) }), ask(question, 1)], waiting),
+      ),
+      via ?? "peer",
+    );
+  }
+  assert.isFalse(passes(lost, complete([ask(question), ask(question, 1)], waiting)));
+  for (const invented of [
+    good,
+    "Export verification completed.",
+    "The thread is missing.",
+    "The retained grant was revoked.",
+    "The client read grant had expired.",
+    "The retained grant has expired.",
+    "No destination request was sent.",
+  ]) {
+    assert.isFalse(passes(lost, complete([ask(question)], `${waiting} ${invented}`)), invented);
+  }
+  for (const tool of [
+    "t3_thread_send",
+    "t3_thread_send_attachments",
+    "t3_thread_update",
+    "t3_thread_organize",
+    "t3_environment_link",
+    "t3_thread_search",
+    "task_status",
+    "Edit",
+  ]) {
+    assert.isFalse(passes(lost, complete([call(exact, 0, tool), ask(question, 1)], waiting)), tool);
+  }
+  assert.isFalse(
+    passes(
+      lost,
+      complete(
+        [call({ command: "lastcode-thread read thread-status-y" }, 0, "Bash"), ask(question, 1)],
+        waiting,
+      ),
+    ),
+  );
+  assert.isFalse(passes(lost, { calls: [ask(question)], text: waiting, stopReason: "max_steps" }));
+  const diagnostic = threadReadFailure("lostGrant");
+  assert.notProperty(diagnostic, "noDestinationAttempt");
+  assert.include(diagnostic.message, "sent and answered");
+  assert.include(diagnostic.message, "no recorded reason");
+  assert.include(diagnostic.message, "does not show whether the grant was revoked or expired");
+  assert.include(diagnostic.message, "If this provider cannot ask structured questions");
+  assert.include(diagnostic.message, "attach the reference to a new message instead");
+});
+
+it("requires independent client reapproval and expired-link renewal choices after revoked selection", () => {
+  const revoked = findCase("thread-wake-revoked-client-expired-peer-link");
+  const report =
+    "Checklist complete: one documentation-only discrepancy. I cannot verify fresh status. Either approve the client again in connection settings, then authorize this reference, or renew the existing expired outgoing read link to Environment B.";
+  assert.ok(passes(revoked, complete([call(reference)], report)));
+  assert.ok(
+    passes(
+      revoked,
+      complete(
+        [call(reference)],
+        report.replace("authorize this reference", "attach this reference"),
+      ),
+    ),
+  );
+  assert.isFalse(passes(revoked, complete([], report)));
+  for (const input of [exact, client, { ...reference, environmentId: "environment-c" }]) {
+    assert.isFalse(passes(revoked, complete([call(input)], report)));
+  }
+  assert.isFalse(passes(revoked, complete([call(reference), call(reference, 1)], report)));
+  for (const incomplete of [
+    "Checklist complete. I cannot verify fresh status. Renew the existing expired read link.",
+    "Checklist complete. I cannot verify fresh status. Approve the client and authorize this reference.",
+    report.replace("approve the client again in connection settings, then ", ""),
+    report.replace("then authorize this reference, ", ""),
+    "Checklist complete. I cannot verify fresh status: client authorization has expired. Approve that client again or renew the existing expired read link, then I can read the reference.",
+    report.replace("expired ", ""),
+    report.replace("Either ", "").replace(", or renew", ", and renew"),
+  ]) {
+    assert.isFalse(passes(revoked, complete([call(reference)], incomplete)), incomplete);
+  }
+  assert.isFalse(passes(revoked, complete([call(reference)], `${report} ${good}`)));
+  assert.isFalse(
+    passes(revoked, complete([call(reference)], `${report} I will renew the link myself.`)),
+  );
+  for (const tool of [
+    "t3_thread_send",
+    "t3_thread_send_attachments",
+    "t3_thread_update",
+    "t3_thread_organize",
+    "t3_environment_link",
+    "t3_thread_list",
+    "t3_thread_search",
+    "AskUserQuestion",
+    "Edit",
+  ]) {
+    assert.isFalse(
+      passes(revoked, complete([call(reference), call(exact, 1, tool)], report)),
+      tool,
+    );
+  }
+  assert.isFalse(
+    passes(
+      revoked,
+      complete(
+        [call(reference), call({ command: "lastcode-thread read thread-status-y" }, 1, "Bash")],
+        report,
+      ),
+    ),
+  );
+  assert.isFalse(
+    passes(revoked, { calls: [call(reference)], text: report, stopReason: "max_steps" }),
+  );
+  const diagnostic = exhaustedReferenceFailure(
+    referenceReadFailure("revoked", true),
+    EnvironmentId.make("environment-b"),
+  );
+  assert.notProperty(diagnostic, "noDestinationAttempt");
+  assert.include(diagnostic.message, 'This via: "reference" read already checked both routes');
+  assert.include(diagnostic.message, "no request was sent");
+  assert.include(diagnostic.message, "Wait for client reapproval before asking");
+  assert.notInclude(diagnostic.message, "Do not retry this read through another route");
 });
