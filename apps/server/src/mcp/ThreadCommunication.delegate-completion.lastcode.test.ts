@@ -51,7 +51,7 @@ import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
 import * as ProjectService from "../project/ProjectService.ts";
-import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as Sqlite from "../persistence/Sqlite.ts";
@@ -276,7 +276,28 @@ const makeHarness = (
           Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
           Layer.mock(GitVcsDriver.GitVcsDriver)({}),
           Layer.mock(ProjectService.ProjectService)({}),
-          Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+          ProviderRegistryMock.layer([
+            {
+              instanceId,
+              driver,
+              enabled: true,
+              installed: true,
+              version: "test",
+              status: "ready",
+              auth: { status: "authenticated" },
+              checkedAt: DateTime.formatIso(yield* DateTime.now),
+              models: [
+                {
+                  slug: modelSelection.model,
+                  name: "Test model",
+                  isCustom: false,
+                  capabilities: null,
+                },
+              ],
+              slashCommands: [],
+              skills: [],
+            },
+          ]),
           Layer.mock(SecretRequests.SecretRequests)({}),
           NodeCrypto.layer,
         ),
@@ -617,19 +638,6 @@ it.effect("retains the exact client reference when real delegate completion wake
     assert.deepEqual(wakeRead.result, originalRead);
     assert.deepEqual(forwarded, [exact, exact]);
 
-    // A captured call from the completed turn must not borrow the wake's live status.
-    const staleSend = yield* service
-      .sendToThread(scope, {
-        threadId: child.threadId,
-        message: "This stale invocation must not be delivered.",
-        mode: "queue",
-        clientRequestId: "stale-invocation-control",
-      })
-      .pipe(
-        Effect.as("unexpected-delivery"),
-        Effect.catch((error) => Effect.succeed(error.code)),
-      );
-    assert.equal(staleSend, "parent_not_active");
     yield* finish(wake);
     yield* sql`INSERT INTO auth_sessions
       (session_id, subject, method, scopes, issued_at, expires_at)
@@ -680,13 +688,15 @@ it.effect("retains the exact client reference when real delegate completion wake
       scope.thread!.execution!,
       "live-child",
     );
-    const nativeExecution = yield* nativeSessions.resolveExecution({
-      threadId: parentThreadId,
-      providerSessionId: scope.thread!.providerSessionId,
-      authorizationHeader: "Bearer native-test",
-      metadata: { "claudecode/toolUseId": "background-call" },
-    });
-    assert.isTrue(nativeExecution?.isLiveBackground?.());
+    const lookupNative = () =>
+      nativeSessions.resolveExecution({
+        threadId: parentThreadId,
+        providerSessionId: scope.thread!.providerSessionId,
+        authorizationHeader: "Bearer native-test",
+        metadata: { "claudecode/toolUseId": "background-call" },
+      });
+    const nativeExecution = yield* lookupNative();
+    assert.deepEqual(nativeExecution, scope.thread!.execution);
     const nativeBackground: McpInvocationScope = {
       ...scope,
       thread: {
@@ -707,21 +717,7 @@ it.effect("retains the exact client reference when real delegate completion wake
       AND kind = 'run' AND grant_id = ${nativeSent.runId}`;
     assert.equal(inheritedOwner[0]?.sessionId, sessionId);
     yield* nativeSessions.endExecution(parentThreadId, scope.thread!.execution!, "live-child");
-    assert.isFalse(nativeExecution?.isLiveBackground?.());
-    assert.equal(
-      yield* service
-        .sendToThread(nativeBackground, {
-          threadId: child.threadId,
-          message: "Ended child must not borrow the wake.",
-          mode: "queue",
-          clientRequestId: "ended-native-background-control",
-        })
-        .pipe(
-          Effect.as("unexpected-delivery"),
-          Effect.catch((error) => Effect.succeed(error.code)),
-        ),
-      "parent_not_active",
-    );
+    assert.isUndefined(yield* lookupNative());
 
     const unresolved: McpInvocationScope = {
       ...scope,
@@ -732,6 +728,35 @@ it.effect("retains the exact client reference when real delegate completion wake
         attribution: "unresolved",
       },
     };
+    const unownedSent = yield* service.sendToThread(unresolved, {
+      threadId: child.threadId,
+      message: "Ended child must not borrow the wake.",
+      mode: "queue",
+      clientRequestId: "ended-native-background-control",
+    });
+    assert.equal(unownedSent.threadId, child.threadId);
+    const unownedGrant = yield* sql`SELECT grant_id FROM lastcode_thread_read_grants
+      WHERE thread_id = ${child.threadId} AND kind = 'run' AND grant_id = ${unownedSent.runId}`;
+    assert.lengthOf(unownedGrant, 0);
+    const unownedCreated = yield* service.createThreads(unresolved, {
+      clientRequestId: "unattributed-structural-child",
+      threads: [
+        { title: "Unattributed structural child", prompt: "Do not inherit client access." },
+      ],
+    });
+    const structuralChild = unownedCreated.threads[0]!;
+    const structuralGrant = yield* sql`SELECT grant_id FROM lastcode_thread_read_grants
+      WHERE thread_id = ${structuralChild.threadId} AND kind = 'run'
+      AND grant_id = ${structuralChild.runId}`;
+    assert.lengthOf(structuralGrant, 0);
+    const structuralProjection = yield* orchestrator.getThreadProjection(structuralChild.threadId);
+    assert.isFalse(
+      structuralProjection.contextTransfers.some((transfer) => transfer.type === "subagent_spawn"),
+    );
+    const deniedDelegation = yield* service
+      .delegateTask(unresolved, { task: "Cannot borrow a parent run." })
+      .pipe(Effect.flip);
+    assert.equal(deniedDelegation.code, "parent_not_active");
     const unownedRead = yield* service.readThread(unresolved, exact).pipe(
       Effect.as("unexpected-read"),
       Effect.catch((error) => Effect.succeed(error.code)),
@@ -881,21 +906,21 @@ it.effect("a registered provider-result wake sends with its accepted origin's au
     const directWakeGrant = yield* h.sql`SELECT 1 FROM lastcode_thread_read_grants
       WHERE thread_id = ${parentThreadId} AND kind = 'run' AND grant_id = ${wake.runId}`;
     assert.lengthOf(directWakeGrant, 0);
-    const unregistered = yield* h.service
-      .sendToThread(
-        {
-          ...scope,
-          thread: { ...scope.thread!, attribution: "unresolved", execution: undefined },
-        },
-        {
-          threadId: target,
-          message: "Unregistered calls must not borrow the wake.",
-          mode: "queue",
-          clientRequestId: "provider-wake-unresolved-control",
-        },
-      )
-      .pipe(Effect.flip);
-    assert.equal(unregistered.code, "parent_not_active");
+    const unregistered = yield* h.service.sendToThread(
+      {
+        ...scope,
+        thread: { ...scope.thread!, attribution: "unresolved", execution: undefined },
+      },
+      {
+        threadId: target,
+        message: "Unregistered calls must not borrow the wake.",
+        mode: "queue",
+        clientRequestId: "provider-wake-unresolved-control",
+      },
+    );
+    const unregisteredGrants = yield* h.sql`SELECT 1 FROM lastcode_thread_read_grants
+      WHERE thread_id = ${target} AND kind = 'run' AND grant_id = ${unregistered.runId}`;
+    assert.lengthOf(unregisteredGrants, 0);
   }),
 );
 

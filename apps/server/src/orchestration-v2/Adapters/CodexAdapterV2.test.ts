@@ -10396,9 +10396,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assert.deepEqual<unknown>(owner, {
             runId: first.runId,
             attemptId: first.attemptId,
-            isLiveBackground: owner?.isLiveBackground,
           });
-          assert.isTrue(owner?.isLiveBackground?.());
         }
         assert.isUndefined(yield* lookup(RESUME_NATIVE_THREAD, RESUME_NATIVE_TURN));
         assert.isUndefined(yield* lookup("foreign-native-thread"));
@@ -10417,13 +10415,10 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.deepEqual<unknown>(owner, {
           runId: first.runId,
           attemptId: first.attemptId,
-          isLiveBackground: owner?.isLiveBackground,
         });
-        assert.isTrue(owner?.isLiveBackground?.());
         assert.isUndefined(yield* Fiber.join(unknownCall));
         yield* Deferred.succeed(releaseChild, undefined);
         yield* harness.awaitTerminal(2);
-        assert.isFalse(owner?.isLiveBackground?.());
         assert.isUndefined(yield* lookup());
         assert.equal(harness.subagentUpdates().at(-1)?.subagent.result, "CHILD_DURING_SECOND_TURN");
         assert.lengthOf(harness.continuationRequests, 0);

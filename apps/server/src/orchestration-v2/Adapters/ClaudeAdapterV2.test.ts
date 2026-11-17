@@ -15615,13 +15615,11 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           yield* harness.offerAndWait(frame("wake-child", "wake-launch"));
           const child = yield* lookup("wake-child");
           assert.deepEqual({ runId: child?.runId, attemptId: child?.attemptId }, expected);
-          assert.isTrue(child?.isLiveBackground?.());
           yield* harness.offerAndWait(wakeResult);
           yield* harness.awaitTerminal(2);
           assert.isUndefined(yield* lookup("wake-root"));
           assert.isUndefined(yield* lookup("wake-barrier"));
           yield* invokeHook("wake-child");
-          assert.isTrue(child?.isLiveBackground?.());
           yield* harness.offerAndWait(
             makeSubagentNotificationFrame({
               taskId: "native-wake-child",
@@ -15631,7 +15629,6 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             }),
           );
           assert.isUndefined(yield* lookup("wake-child"));
-          assert.isFalse(child?.isLiveBackground?.());
           yield* harness.offerAndWait(frame("ended-child", "wake-launch"));
           assert.isUndefined(yield* lookup("ended-child"));
         }),
@@ -15710,7 +15707,6 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               { runId: execution?.runId, attemptId: execution?.attemptId },
               expected,
             );
-            assert.isTrue(execution?.isLiveBackground?.());
             return execution;
           });
           const frame = (
@@ -15796,12 +15792,15 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           yield* harness.offerAndWait(frame("unknown"));
           assert.isUndefined(yield* lookup("unknown"));
           const preToolUse = harness.getOpenedOptions()?.hooks?.PreToolUse?.[0];
-          assert.match("mcp__t3-code__t3_thread_list", new RegExp(preToolUse?.matcher ?? "^$"));
+          assert.match("mcp__t3-code__t3_thread_read", new RegExp(preToolUse?.matcher ?? "^$"));
           assert.match(
             "mcp__t3-code__run_project_action_and_resume",
             new RegExp(preToolUse?.matcher ?? "^$"),
           );
           assert.notMatch("mcp__other__t3_thread_list", new RegExp(preToolUse?.matcher ?? "^$"));
+          for (const name of ["t3_thread_list", "preview_snapshot", "device_open", "html_render"]) {
+            assert.notMatch(`mcp__t3-code__${name}`, new RegExp(preToolUse?.matcher ?? "^$"));
+          }
           const hook = preToolUse?.hooks[0];
           if (hook === undefined)
             throw new Error("Native T3 tools require a pre-dispatch frame barrier");
@@ -15813,7 +15812,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                   session_id: WAKE_NATIVE_SESSION,
                   transcript_path: "/transcript.jsonl",
                   cwd: "/workspace",
-                  tool_name: "mcp__t3-code__t3_thread_list",
+                  tool_name: "mcp__t3-code__t3_thread_read",
                   tool_input: {},
                   tool_use_id: id,
                 },
@@ -15869,7 +15868,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 "a",
                 ownership === "root-result-only" ? undefined : harness.promptUuid(0),
                 null,
-                "mcp__t3-code__t3_thread_list",
+                "mcp__t3-code__t3_thread_read",
               ),
             )
             .pipe(Effect.forkScoped);
@@ -15916,14 +15915,13 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             { runId: earlyChildExecution?.runId, attemptId: earlyChildExecution?.attemptId },
             { runId: first.runId, attemptId: first.attemptId },
           );
-          assert.isTrue(earlyChildExecution?.isLiveBackground?.());
           yield* Fiber.join(startChild);
           yield* expectChildExecution("child-early", {
             runId: first.runId,
             attemptId: first.attemptId,
           });
           yield* harness.offerAndWait(frame("child-a", undefined, "launch-a"));
-          const firstChildExecution = yield* expectChildExecution("child-a", {
+          yield* expectChildExecution("child-a", {
             runId: first.runId,
             attemptId: first.attemptId,
           });
@@ -16032,8 +16030,6 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           );
           assert.isUndefined(yield* lookup("child-a"));
           assert.isUndefined(yield* lookup("child-a-later"));
-          assert.isFalse(firstChildExecution?.isLiveBackground?.());
-          assert.isFalse(earlyChildExecution?.isLiveBackground?.());
           yield* harness.offerAndWait(frame("old-child", undefined, "launch-a"));
           assert.isUndefined(yield* lookup("old-child"));
           yield* harness.offerAndWait(frame("resume-a", undefined, null, "SendMessage"));
@@ -16055,14 +16051,13 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             { runId: earlyResumedExecution?.runId, attemptId: earlyResumedExecution?.attemptId },
             { runId: second.runId, attemptId: second.attemptId },
           );
-          assert.isTrue(earlyResumedExecution?.isLiveBackground?.());
           yield* harness.offerAndWait(frame("resumed-child-original", undefined, "launch-a"));
           yield* harness.offerAndWait(frame("resumed-child-current", undefined, "resume-a"));
           yield* expectChildExecution("resumed-child-original", {
             runId: second.runId,
             attemptId: second.attemptId,
           });
-          const resumedChildExecution = yield* expectChildExecution("resumed-child-current", {
+          yield* expectChildExecution("resumed-child-current", {
             runId: second.runId,
             attemptId: second.attemptId,
           });
@@ -16078,8 +16073,6 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           );
           assert.isUndefined(yield* lookup("resumed-child-original"));
           assert.isUndefined(yield* lookup("resumed-child-current"));
-          assert.isFalse(resumedChildExecution?.isLiveBackground?.());
-          assert.isFalse(earlyResumedExecution?.isLiveBackground?.());
           yield* harness.offerAndWait(
             makeSubagentTaskStartedFrame({
               taskId: "native-child-a",

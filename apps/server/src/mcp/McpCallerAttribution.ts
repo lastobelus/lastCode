@@ -27,33 +27,31 @@ export const loadMcpCaller = Effect.fn("loadMcpCaller")(function* <E, R>(
   caller: McpThreadCaller,
   read: ReadCaller<E, R>,
 ) {
+  const parent = yield* read(caller.threadId, ["runs"], {
+    runStatuses: ACTIVE_RUN_STATUSES,
+  });
   const execution = caller.attribution === "unresolved" ? undefined : caller.execution;
   if (execution === undefined) {
     const absent = caller.attribution === undefined || caller.attribution === "absent";
-    const parent = yield* read(
-      caller.threadId,
-      ["runs"],
-      absent ? { runStatuses: ACTIVE_RUN_STATUSES } : { runIds: [] },
-    );
     return {
       ...parent,
       invocationRun: absent ? (latestActiveRun(parent) ?? latestRun(parent)) : undefined,
     } satisfies CapturedMcpCaller;
   }
   // An HTTP call captured before completion still acts for that exact execution afterwards.
-  const parent = yield* read(caller.threadId, ["runs", "attempts"], {
+  const invocation = yield* read(caller.threadId, ["runs", "attempts"], {
     runIds: [execution.runId],
     attemptIds: [execution.attemptId],
   });
-  const run = parent.runs.find((run) => run.id === execution.runId);
-  const attempt = parent.attempts.find((attempt) => attempt.id === execution.attemptId);
+  const run = invocation.runs.find((run) => run.id === execution.runId);
+  const attempt = invocation.attempts.find((attempt) => attempt.id === execution.attemptId);
   if (
     run?.threadId !== caller.threadId ||
     run.providerInstanceId !== caller.providerInstanceId ||
     attempt?.runId !== run.id ||
     attempt.providerInstanceId !== caller.providerInstanceId
   ) {
-    return { ...parent, runs: [], invocationRun: undefined } satisfies CapturedMcpCaller;
+    return { ...parent, invocationRun: undefined } satisfies CapturedMcpCaller;
   }
   const owners = yield* read(caller.threadId, ["providerThreads", "providerSessions"], {
     providerThreadIds: [attempt.providerThreadId],
@@ -72,7 +70,6 @@ export const loadMcpCaller = Effect.fn("loadMcpCaller")(function* <E, R>(
     );
   return {
     ...parent,
-    runs: owned ? [run] : [],
     invocationRun: owned ? run : undefined,
   } satisfies CapturedMcpCaller;
 });

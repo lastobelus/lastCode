@@ -33,8 +33,6 @@ const hashHtml = (html: string) => NodeCrypto.createHash("sha256").update(html).
 export interface McpExecutionOrigin {
   readonly runId: RunId;
   readonly attemptId: RunAttemptId;
-  /** Private live registration proof; never serialized or inferred from a newer run. */
-  readonly isLiveBackground?: () => boolean;
 }
 
 export type McpNativeOrigin =
@@ -296,12 +294,7 @@ const make = Effect.gen(function* () {
         entry.config.providerInstanceId !== config.providerInstanceId
       )
         return undefined;
-      return entry.nativeOwner === undefined
-        ? entry.execution
-        : {
-            ...entry.execution,
-            isLiveBackground: () => origins.get(input.threadId)?.get(originKey(origin)) === entry,
-          };
+      return entry.execution;
     }),
     set: Effect.fn("McpProviderSessions.set")(function* (config) {
       const current = yield* Ref.get(sessions);

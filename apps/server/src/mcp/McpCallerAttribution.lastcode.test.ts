@@ -120,9 +120,10 @@ it.effect("captures the exact ended run and attempt before a newer user's run", 
     const { read, reads } = fixture();
     const captured = yield* loadMcpCaller(caller, read);
     expect(captured.invocationRun?.id).toBe(a.id);
-    expect(captured.runs.map((row) => row.id)).toEqual([a.id]);
-    expect(reads[0]?.filter).toMatchObject({ runIds: [a.id], attemptIds: [attempt.id] });
-    expect(reads[0]?.filter?.runStatuses).toBeUndefined();
+    expect(captured.runs.map((row) => row.id)).toEqual([b.id]);
+    expect(reads[0]?.filter?.runStatuses).toContain("running");
+    expect(reads[1]?.filter).toMatchObject({ runIds: [a.id], attemptIds: [attempt.id] });
+    expect(reads[1]?.filter?.runStatuses).toBeUndefined();
   }),
 );
 
@@ -169,6 +170,7 @@ it.effect("allows legacy selection only when native metadata is absent", () =>
       expect(captured.invocationRun?.id).toBe(
         attribution === undefined || attribution === "absent" ? b.id : undefined,
       );
+      expect(captured.runs.map((row) => row.id)).toEqual([b.id]);
     }
     expect(
       (yield* loadMcpCaller({ ...caller, attribution: "unresolved" }, fixture().read))

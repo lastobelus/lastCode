@@ -2331,7 +2331,8 @@ export function makeClaudeQueryOptions(input: {
               : {
                   PreToolUse: [
                     {
-                      matcher: "^mcp__t3-code__",
+                      matcher:
+                        "^mcp__t3-code__(?:run_project_action_and_resume|t3_thread_(?:read|send|launch)|create_threads|delegate_task|(?:un)?watch_pull_request|t3_environment_pause_(?:status|start|retry|resume))$",
                       hooks: [input.beforeMcpToolUse],
                     },
                   ],

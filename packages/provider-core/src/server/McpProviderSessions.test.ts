@@ -155,19 +155,15 @@ it.effect("retains more than 4096 live tool origins and ends native children ind
     expect(yield* lookup("live-4099")).toBeUndefined();
     const childA = (yield* lookup("child-a"))!;
     const childB = (yield* lookup("child-b"))!;
-    expect(childA).toEqual({ ...a, isLiveBackground: expect.any(Function) });
-    expect(childB).toEqual({ ...a, isLiveBackground: expect.any(Function) });
-    expect(childA.isLiveBackground?.()).toBe(true);
-    expect(childB.isLiveBackground?.()).toBe(true);
+    expect(childA).toEqual(a);
+    expect(childB).toEqual(a);
     yield* sessions.endExecution(threadId, a, "native-child-a");
     expect(yield* lookup("child-a")).toBeUndefined();
-    expect((yield* lookup("child-b"))?.isLiveBackground?.()).toBe(true);
-    expect(childA.isLiveBackground?.()).toBe(false);
+    expect(yield* lookup("child-b")).toEqual(a);
     yield* sessions.registerExecution(threadId, origin("child-a"), a, "native-child-b");
     expect(yield* lookup("child-a")).toBeUndefined();
     yield* sessions.endExecution(threadId, a, "native-child-b");
     expect(yield* lookup("child-b")).toBeUndefined();
-    expect(childB.isLiveBackground?.()).toBe(false);
   }).pipe(Effect.provide(layer)),
 );
 
@@ -224,7 +220,6 @@ it.effect("isolates known pending Codex children and releases cancelled credenti
     );
     const resolved = yield* Fiber.join(a.fiber);
     expect(resolved).toMatchObject(execution);
-    expect(resolved?.isLiveBackground?.()).toBe(true);
     yield* releaseA;
     yield* releaseA;
     expect(yield* Deferred.isDone(b.done)).toBe(false);
@@ -234,7 +229,7 @@ it.effect("isolates known pending Codex children and releases cancelled credenti
     const cleared = yield* pending("clear");
     yield* sessions.clear(threadId);
     expect(yield* Fiber.join(cleared.fiber)).toBeUndefined();
-    expect(resolved?.isLiveBackground?.()).toBe(false);
+    expect(yield* Fiber.join((yield* pending("child-a")).fiber)).toBeUndefined();
     yield* sessions.set(config);
     const releaseReplace = yield* sessions.beginCodexTurn(threadId, "replace");
     const replaced = yield* pending("replace");
