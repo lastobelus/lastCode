@@ -5844,6 +5844,26 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           }
           return frame;
         });
+        // Frames that cannot be replayed must let their hooks fail closed without an execution.
+        const releaseMcpRootFrames = Effect.fnUntraced(function* (
+          nativeThreadId: string,
+          messages: ReadonlyArray<SDKMessage>,
+        ) {
+          for (const message of messages) {
+            if (
+              message.type !== "assistant" ||
+              message.parent_tool_use_id !== null ||
+              message.session_id !== nativeThreadId
+            )
+              continue;
+            for (const tool of claudeToolUseBlocksFromAssistantMessage(message)) {
+              const frame = mcpToolFrames.get(tool.id);
+              if (frame?.parentToolUseId === null) {
+                yield* Deferred.succeed(frame.ready, undefined);
+              }
+            }
+          }
+        });
         const taskOutputTails = new Map<
           string,
           { readonly fiber: Fiber.Fiber<void>; readonly stop: Deferred.Deferred<void> }
@@ -10333,6 +10353,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               yield* releaseContinuationLatch(wakeInput.nativeThreadId);
               yield* offerBufferedWake(wakeInput.nativeThreadId);
             } else if (isClaudeRootTurnFrame(message)) {
+              yield* releaseMcpRootFrames(wakeInput.nativeThreadId, [message]);
               yield* setRetiredLatch(wakeInput.nativeThreadId, "opened");
               yield* dropSettledSubagents(
                 wakeInput.nativeThreadId,
@@ -10429,6 +10450,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const offerWakeContinuation = Effect.fnUntraced(function* (nativeThreadId: string) {
           const route = (yield* Ref.get(lastTurnRouteByNativeThread)).get(nativeThreadId);
           if (route === undefined) {
+            yield* releaseMcpRootFrames(
+              nativeThreadId,
+              (yield* Ref.get(wakeBuffers)).get(nativeThreadId)?.messages ?? [],
+            );
             yield* Effect.logWarning("orchestration-v2.claude-wake-turn-unroutable", {
               providerSessionId: input.providerSessionId,
               nativeThreadId,
@@ -10561,6 +10586,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             ...later,
           ];
           if (!(yield* replaceWakeBuffer(nativeThreadId, buffered, kept, retiredTaskIds))) return;
+          yield* releaseMcpRootFrames(nativeThreadId, retired);
           for (const taskId of retiredTaskIds) {
             yield* clearPendingBackgroundTask(nativeThreadId, taskId);
             yield* clearTaskIdFromNativeThreadSet(
@@ -14069,7 +14095,15 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   seenFrames: new Set(),
                 });
               }
-              yield* attachTurn;
+              yield* sdkMessageLock.withPermits(1)(
+                Effect.gen(function* () {
+                  yield* attachTurn;
+                  yield* releaseMcpRootFrames(
+                    nativeThreadId,
+                    (yield* Ref.get(wakeBuffers)).get(nativeThreadId)?.messages ?? [],
+                  );
+                }),
+              );
               yield* offerUserMessage;
               return;
             }

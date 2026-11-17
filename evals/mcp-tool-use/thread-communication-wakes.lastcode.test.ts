@@ -52,6 +52,7 @@ it("keeps every wake diagnostic mock equal to the production failure factory's w
     "thread-wake-expired-peer-link-recovery": ["disconnected", true, "environment-b"],
     "thread-wake-answered-read-lost-grant": ["lostGrant", false],
     "thread-wake-revoked-client-expired-peer-link": ["revoked", true, "environment-b"],
+    "thread-wake-idle-expired-reference-grant": ["expiredGrant", true],
   };
   const seen = new Set<string>();
   for (const testCase of cases) {
@@ -85,7 +86,10 @@ it("keeps every wake diagnostic mock equal to the production failure factory's w
           : threadReadFailure(reason, noDestinationAttempt);
       if (via === "reference") assert.notProperty(result, "noDestinationAttempt");
       if (noDestinationAttempt)
-        assert.include(["noGrant", "disconnected", "noDestination", "revoked"], reason);
+        assert.include(
+          ["noGrant", "disconnected", "noDestination", "revoked", "expiredGrant"],
+          reason,
+        );
       assert.deepStrictEqual<unknown>(
         result,
         {
@@ -280,7 +284,15 @@ it("requires the exact reference on a native structured answer and rejects stale
   assert.match(reauthenticate.setup.context ?? "", /saved cookie or reusable credential/);
   const text =
     "I cannot verify status. Sign in again and re-pair the client, then authorize this reference.";
-  assert.ok(passes(reauthenticate, complete([], text)));
+  const sessionQuestion =
+    "Sign in and re-pair the client. From the new session on a client that can read it, attach [Project Y status](t3-thread://v1/environment-b/thread-status-y) to your answer.";
+  assert.ok(
+    passes(
+      reauthenticate,
+      complete([call({ questions: [{ question: sessionQuestion }] }, 0, "AskUserQuestion")], text),
+    ),
+  );
+  assert.isFalse(passes(reauthenticate, complete([], text)));
   assert.isFalse(
     passes(reauthenticate, complete([], "Reconnect the client and attach the reference.")),
   );
@@ -288,6 +300,35 @@ it("requires the exact reference on a native structured answer and rejects stale
     passes(
       reauthenticate,
       complete([call({ questions: [{ title: question }] }, 0, "AskUserQuestion")], text),
+    ),
+  );
+  assert.isFalse(
+    passes(
+      reauthenticate,
+      complete(
+        [
+          call(
+            {
+              questions: [{ question: "Sign in and re-pair, then confirm from the new session." }],
+            },
+            0,
+            "AskUserQuestion",
+          ),
+        ],
+        text,
+      ),
+    ),
+  );
+  assert.isFalse(
+    passes(
+      reauthenticate,
+      complete(
+        [
+          call({ questions: [{ question: sessionQuestion }] }, 0, "AskUserQuestion"),
+          call(client, 1),
+        ],
+        text,
+      ),
     ),
   );
 });
@@ -496,4 +537,101 @@ it("requires independent client reapproval and expired-link renewal choices afte
   assert.include(diagnostic.message, "no request was sent");
   assert.include(diagnostic.message, "Wait for client reapproval before asking");
   assert.notInclude(diagnostic.message, "Do not retry this read through another route");
+});
+
+it("recovers an idle-expired grant with an attached exact-reference answer and no reapproval", () => {
+  const expired = findCase("thread-wake-idle-expired-reference-grant");
+  const link = "[Project Y status](t3-thread://v1/environment-b/thread-status-y)";
+  const question = `Please answer with ${link} attached, from a client that can read it.`;
+  const ask = (title: string, step = 1) =>
+    call({ questions: [{ title }] }, step, "AskUserQuestion");
+  const waiting =
+    "Checklist comparison found one documentation-only discrepancy. I cannot verify the fresh source status; waiting for your attached answer.";
+  for (const title of [
+    question,
+    `No client reapproval is needed. ${question}`,
+    `From the client that can read it, attach ${link} to your answer.`,
+  ]) {
+    for (const input of [{ questions: [{ title }] }, { questions: [{ question: title }] }]) {
+      assert.ok(
+        passes(
+          expired,
+          complete(
+            [call(reference), call(input, 1, "AskUserQuestion")],
+            `${waiting} No client reapproval is needed; you do not need to reapprove the client.`,
+          ),
+        ),
+        title,
+      );
+    }
+  }
+  assert.isFalse(passes(expired, complete([call(reference)], waiting)));
+  assert.isFalse(passes(expired, complete([ask(question)], waiting)));
+  assert.isFalse(passes(expired, complete([ask(question, 0), call(reference, 1)], waiting)));
+  for (const input of [exact, client, { ...reference, threadId: "thread-other" }]) {
+    assert.isFalse(passes(expired, complete([call(input), ask(question)], waiting)));
+  }
+  for (const badQuestion of [
+    "Attach this reference to your answer from a client that can read it.",
+    question.replace("[Project Y status]", "[Other status]"),
+    question.replace("environment-b", "environment-c"),
+    question.replace("thread-status-y", "thread-other"),
+    question.replace(" attached", ""),
+    question.replace("client", "session"),
+    `${question} Please reapprove the client first.`,
+    `${question} Please approve the client in connection settings.`,
+    `${question} To restore access, approve this client again in connection settings.`,
+  ]) {
+    assert.isFalse(
+      passes(expired, complete([call(reference), ask(badQuestion)], waiting)),
+      badQuestion,
+    );
+  }
+  for (const extra of [
+    call(reference, 2),
+    call(client, 2),
+    call(exact, 2),
+    ask(question, 2),
+    ...[
+      "t3_thread_send",
+      "t3_thread_send_attachments",
+      "t3_thread_update",
+      "t3_thread_organize",
+      "t3_thread_list",
+      "t3_thread_search",
+      "t3_environment_links",
+      "t3_environment_link",
+      "delegate_task",
+      "task_status",
+      "request_user_input",
+      "request_user_input_async",
+      "Edit",
+    ].map((tool) => call(exact, 2, tool)),
+    call({ command: "lastcode-thread read thread-status-y" }, 2, "Bash"),
+  ]) {
+    assert.isFalse(passes(expired, complete([call(reference), ask(question), extra], waiting)));
+  }
+  for (const wrongRecovery of [
+    "Approve the client again in connection settings, then attach the reference.",
+    "Please reapprove the client before answering.",
+    "To restore access, approve this client again in its connection settings.",
+    "You need to approve the client again.",
+    "Client reapproval is required before attachment.",
+    "I am waiting for client reapproval.",
+    "The client's read authorization was revoked.",
+    "Send a new message with the reference.",
+    good,
+  ]) {
+    assert.isFalse(
+      passes(expired, complete([call(reference), ask(question)], `${waiting} ${wrongRecovery}`)),
+      wrongRecovery,
+    );
+  }
+  assert.isFalse(
+    passes(expired, {
+      calls: [call(reference), ask(question)],
+      text: waiting,
+      stopReason: "max_steps",
+    }),
+  );
 });

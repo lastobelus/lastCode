@@ -704,6 +704,19 @@ it.effect.each([
         yield* sql`UPDATE auth_sessions SET revoked_at = 'revoked' WHERE session_id = 'source'`;
       if (reason === "generation-stale")
         yield* sql`UPDATE lastcode_thread_read_generations SET generation = generation + 1 WHERE id = ${grant.familyId}`;
+      if (reason === "unapproved") {
+        yield* TestClock.adjust("7 days");
+        assert.deepEqual(yield* store.eligibleConnectedSessions(grant, ["ambient"]), {
+          status: "revoked",
+        });
+        assert.equal(yield* store.admissionFailureReason(pending), "revoked");
+      }
+      if (reason === "cookie-expired" || reason === "custom-expired") {
+        assert.deepEqual(yield* store.eligibleConnectedSessions(grant, ["ambient"]), {
+          status: "reauth-required",
+        });
+        assert.equal(yield* store.admissionFailureReason(pending), "reauth-required");
+      }
       assert.isUndefined(
         yield* store.prepareInheritedAuthority(
           grant,

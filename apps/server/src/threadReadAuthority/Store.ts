@@ -116,7 +116,6 @@ export const make = Effect.gen(function* () {
     SqlError.SqlError
   > {
     if (!(yield* fence())) return { status: "fence-unavailable" };
-    if (grant.lastUsedAt <= now - grantIdleMillis) return { status: "expired" };
     if (!(yield* approvalValid(grant))) return { status: "revoked" };
     if (!(yield* generationValid(grant))) return { status: "reauth-required" };
     const owner = yield* resolveOwner(grant);
@@ -135,7 +134,8 @@ export const make = Effect.gen(function* () {
       !rowCurrent(source, now, liveIds.includes(owner)) &&
       !(grant.proofKey !== null && grant.subject === "cloud-connect")
     )
-      return { status: "expired" };
+      return { status: "reauth-required" };
+    if (grant.lastUsedAt <= now - grantIdleMillis) return { status: "expired" };
     return { status: "current", sessionId: owner };
   });
   const authorityCurrent = Effect.fn("threadReadAuthority.current")(function* (
@@ -227,9 +227,17 @@ export const make = Effect.gen(function* () {
     authority: SessionAuthority,
   ) {
     if (!(yield* fence())) return "fence-unavailable" as const;
-    if (!(yield* generationValid(authority))) return "reauth-required" as const;
     if (!(yield* approvalValid(authority))) return "revoked" as const;
-    return "expired" as const;
+    if (!(yield* generationValid(authority))) return "reauth-required" as const;
+    if (authority.inheritedGrant !== undefined) {
+      const source = yield* grantSource(
+        { ...authority, ...authority.inheritedGrant },
+        yield* Clock.currentTimeMillis,
+        authority.liveSessionIds?.() ?? [],
+      );
+      return source.status === "current" ? ("expired" as const) : source.status;
+    }
+    return "reauth-required" as const;
   });
   const bindGrant = Effect.fn("threadReadAuthority.bind")(function* (
     threadId: ThreadId,

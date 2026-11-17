@@ -70,7 +70,9 @@ export class ThreadReadBroker extends Context.Service<
 >()("t3/mcp/ThreadReadBroker") {}
 
 const unavailableFor = (check: GrantCheck, reference = false) => {
-  const failure = (reason: "disconnected" | "reauthenticate" | "fence" | "revoked") =>
+  const failure = (
+    reason: "disconnected" | "reauthenticate" | "fence" | "revoked" | "expiredGrant",
+  ) =>
     reference
       ? referenceReadFailure(reason, true)
       : threadReadFailure(reason, reason === "disconnected");
@@ -81,6 +83,8 @@ const unavailableFor = (check: GrantCheck, reference = false) => {
       return failure("reauthenticate");
     case "fence-unavailable":
       return failure("fence");
+    case "expired":
+      return failure("expiredGrant");
     default:
       return failure("revoked");
   }
@@ -92,7 +96,9 @@ const deniedGrant = (reason: AuthorityFailureReason, reference = false) => {
       ? "reauthenticate"
       : reason === "fence-unavailable"
         ? "fence"
-        : "revoked";
+        : reason === "expired"
+          ? "expiredGrant"
+          : "revoked";
   return reference ? referenceReadFailure(diagnostic, true) : threadReadFailure(diagnostic);
 };
 type ReadAuthority = ThreadReadGrant | { readonly denialReason: AuthorityFailureReason };

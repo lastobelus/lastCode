@@ -276,6 +276,7 @@ describe("reference routing through the real read service", () => {
               "noDestination",
               "revoked",
               "fence",
+              "expiredGrant",
             ] as const) {
               const precise = referenceReadFailure(diagnostic, true);
               const recovered = yield* harness({ link, reference: Effect.succeed(precise) });

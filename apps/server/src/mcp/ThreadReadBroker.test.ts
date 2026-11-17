@@ -50,7 +50,11 @@ import type {
 import { OrchestratorProjectionError } from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadReadBroker from "./ThreadReadBroker.ts";
-import { referenceReadFailure, threadReadFailure } from "./ThreadReadDiagnostics.ts";
+import {
+  exhaustedReferenceFailure,
+  referenceReadFailure,
+  threadReadFailure,
+} from "./ThreadReadDiagnostics.ts";
 
 const threadId = ThreadId.make("thread-remote-example");
 const sourceThreadId = ThreadId.make("source-thread");
@@ -1350,12 +1354,15 @@ describe("ThreadReadBroker", () => {
   it.effect.each([
     { removal: "pruned", diagnostic: "lostGrant" },
     { removal: "revoked", diagnostic: "reauthenticate" },
+    { removal: "idle-expired", diagnostic: "expiredGrant" },
   ] as const)(
     "refuses a destination response when its retained grant was $removal while waiting",
     ({ removal, diagnostic }) =>
       Effect.scoped(
         Effect.gen(function* () {
           const h = yield* makeHarness;
+          if (removal === "idle-expired")
+            yield* TestClock.adjust(AuthorityStore.grantIdleMillis - 1);
           const stream = yield* h.broker.connect("client-session");
           const read = yield* h.broker
             .read(sourceThreadId, sourceRunId, { threadId, environmentId })
@@ -1366,8 +1373,10 @@ describe("ThreadReadBroker", () => {
           const requests = yield* stream.pipe(Stream.take(1), Stream.runCollect);
           if (removal === "pruned") {
             yield* h.sql`DELETE FROM lastcode_thread_read_grants WHERE thread_id = ${sourceThreadId}`;
-          } else {
+          } else if (removal === "revoked") {
             yield* h.sql`UPDATE auth_sessions SET revoked_at = 'revoked' WHERE session_id = 'client-session'`;
+          } else {
+            yield* TestClock.adjust(1);
           }
           yield* respondTo(h.broker, "client-session", requests[0]!);
           const failure = yield* Fiber.join(read);
@@ -1381,8 +1390,50 @@ describe("ThreadReadBroker", () => {
   );
 
   it.effect.each([
+    { cause: "idle-grant", diagnostic: "expiredGrant" },
+    { cause: "session", diagnostic: "reauthenticate" },
+    { cause: "idle-grant-and-session", diagnostic: "reauthenticate" },
+  ] as const)(
+    "separates $cause expiry from client approval and preserves independent link renewal",
+    ({ cause, diagnostic }) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const h = yield* makeHarness;
+          if (cause !== "session") yield* TestClock.adjust("7 days");
+          if (cause !== "idle-grant")
+            yield* h.sql`UPDATE auth_sessions SET expires_at = '1970-01-01T00:00:00.000Z'
+              WHERE session_id = 'client-session'`;
+          const connected = cause === "idle-grant" ? "client-session" : "other-session";
+          const _stream = yield* h.broker.connect(connected);
+          const selected = yield* h.broker.readReference(sourceThreadId, sourceRunId, {
+            threadId,
+            environmentId,
+            via: "client",
+          });
+          if (!("code" in selected)) throw new Error("Expired authority dispatched a read");
+          expect(selected.message).toBe(referenceReadFailure(diagnostic, true).message);
+          const exhausted = exhaustedReferenceFailure(selected, environmentId);
+          expect(exhausted.message).toContain("renew that link");
+          expect(exhausted.noDestinationAttempt).toBeUndefined();
+          if (cause === "idle-grant") {
+            expect(exhausted.message).toContain("no client reapproval");
+            expect(exhausted.message).toContain("client that can read");
+            expect(exhausted.message).toContain("thread attached");
+          } else {
+            expect(exhausted.message).toContain("sign in");
+            expect(exhausted.message).toContain("old session won't restore");
+          }
+          const strict = yield* h.broker
+            .read(sourceThreadId, sourceRunId, { threadId, environmentId, via: "client" })
+            .pipe(Effect.flip);
+          expect(strict.message).toBe(threadReadFailure(diagnostic).message);
+        }),
+      ),
+  );
+
+  it.effect.each([
     { denialReason: "revoked" as const, diagnostic: "revoked" as const },
-    { denialReason: "expired" as const, diagnostic: "revoked" as const },
+    { denialReason: "expired" as const, diagnostic: "expiredGrant" as const },
     { denialReason: "reauth-required" as const, diagnostic: "reauthenticate" as const },
     { denialReason: "fence-unavailable" as const, diagnostic: "fence" as const },
   ])(
@@ -1405,19 +1456,21 @@ describe("ThreadReadBroker", () => {
             ),
             Effect.forkScoped,
           );
-          expect(
-            yield* h.broker.readReference(source, runId(id), {
-              threadId,
-              environmentId,
-              via: "client",
-            }),
-          ).toMatchObject(referenceReadFailure(diagnostic, true));
+          const denied = yield* h.broker.readReference(source, runId(id), {
+            threadId,
+            environmentId,
+            via: "client",
+          });
+          expect(denied).toMatchObject(referenceReadFailure(diagnostic, true));
+          expect("message" in denied ? denied.message : undefined).toBe(
+            referenceReadFailure(diagnostic, true).message,
+          );
           expect(dispatched).toEqual([]);
-          expect(
-            yield* h.broker
-              .read(source, runId(id), { threadId, environmentId, via: "client" })
-              .pipe(Effect.flip),
-          ).toMatchObject(threadReadFailure(diagnostic));
+          const strict = yield* h.broker
+            .read(source, runId(id), { threadId, environmentId, via: "client" })
+            .pipe(Effect.flip);
+          expect(strict).toMatchObject(threadReadFailure(diagnostic));
+          expect(strict.message).toBe(threadReadFailure(diagnostic).message);
         }),
       ),
   );
