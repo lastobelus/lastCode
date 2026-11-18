@@ -8,9 +8,11 @@ import {
 } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
+import * as Cause from "effect/Cause";
 import { type ComponentProps, useState } from "react";
 
 import { primaryEnvironmentIdAtom } from "~/state/primaryEnvironment";
+import { toastManager } from "~/components/ui/toast";
 
 import { isElectron } from "~/env";
 import { useClientSettingsHydrated } from "~/hooks/useSettings";
@@ -31,6 +33,15 @@ import { HostedBrowserWebview } from "./HostedBrowserWebview";
 import { openUrlInPreview } from "./openFileInPreview";
 import { rendersServerTabNatively } from "./previewRuntime";
 import { previewRuntimeTabId } from "./previewRuntimeTabId";
+import { useDesktopBrowserSessions } from "./useDesktopBrowserSessions";
+
+function reportLinkOpenFailure(cause: unknown) {
+  toastManager.add({
+    type: "error",
+    title: "Could not open the link in the browser",
+    description: cause instanceof Error ? cause.message : undefined,
+  });
+}
 
 /** Every session this window renders as a hosted webview, in a fixed (non-display) order. */
 function hostedBrowserSessions(
@@ -106,7 +117,13 @@ function openLinkInPreview({ tabId, url, background }: DesktopPreviewOpenLinkEve
     openPreview: (input) => runAtomCommand(appAtomRegistry, previewEnvironment.open, input),
     profileId: source.snapshot.profileId,
     background,
-  });
+  })
+    .then((result) => {
+      if (result._tag === "Failure" && !Cause.hasInterruptsOnly(result.cause)) {
+        reportLinkOpenFailure(Cause.squash(result.cause));
+      }
+    })
+    .catch(reportLinkOpenFailure);
 }
 
 /** App-lifetime listeners for the desktop preview bridge: annotation theme, agent pointer, links. */
@@ -129,6 +146,7 @@ export function ElectronBrowserHost() {
   const previewByThreadKey = useActivePreviewSessions();
   const primaryEnvironmentId = useAtomValue(primaryEnvironmentIdAtom);
   useDesktopHostedPreviewSessions(primaryEnvironmentId);
+  useDesktopBrowserSessions(primaryEnvironmentId);
   const sessions = hostedBrowserSessions(previewByThreadKey, primaryEnvironmentId);
 
   if (!isElectron) return null;
