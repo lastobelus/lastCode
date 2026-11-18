@@ -5,13 +5,19 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentId } from "@t3tools/contracts";
+import {
+  LASTCODE_TRIAGE_CLI_COMMAND as TRIAGE_CLI_COMMAND,
+  LASTCODE_TRIAGE_CUSTOM_HOME_HINT,
+} from "@t3tools/shared/desktopDistribution";
 import { useNavigation } from "@react-navigation/native";
 import * as Clipboard from "expo-clipboard";
 import { useGT } from "gt-react-native";
 import { m } from "../../i18n/messages";
 
 import * as Dialog from "../../components/ui/Dialog";
+import { appAtomRegistry } from "../../state/atom-registry";
 import { projectEnvironment } from "../../state/projects";
+import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import {
   createNewTaskDraft,
@@ -20,8 +26,6 @@ import {
 } from "../../state/use-composer-drafts";
 import { useSelectWorkspaceDetail } from "../layout/workspace/useSelectWorkspaceDetail";
 import { usePrepareTriage } from "./usePrepareTriage";
-
-const CLI_COMMAND = "npx t3 triage";
 
 /**
  * In-app `t3 triage`, as on web: the server writes the session files and
@@ -34,27 +38,32 @@ export function useStartTriage() {
   const prepare = usePrepareTriage();
   const openScratch = useAtomCommand(projectEnvironment.openScratch, { reportFailure: false });
 
-  const fail = (message: string) =>
-    Dialog.alert(
+  const fail = (message: string, environmentId: EnvironmentId) => {
+    const command =
+      appAtomRegistry.get(serverEnvironment.configValueAtom(environmentId))?.triageCliCommand ??
+      TRIAGE_CLI_COMMAND;
+    const hint = command === TRIAGE_CLI_COMMAND ? ` ${LASTCODE_TRIAGE_CUSTOM_HOME_HINT}` : "";
+    return Dialog.alert(
       gt("Could not start triage"),
       gt("{message} Run {command} in a terminal on that machine instead.", {
         message,
-        command: CLI_COMMAND,
-      }),
+        command,
+      }) + hint,
       [
         {
           text: gt("Copy command"),
           onPress: () =>
-            void Clipboard.setStringAsync(CLI_COMMAND).catch(() =>
+            void Clipboard.setStringAsync(command).catch(() =>
               Dialog.alert(
                 gt("Could not copy"),
-                gt("Type {command} instead.", { command: CLI_COMMAND }),
+                gt("Type {command} instead.", { command }),
               ),
             ),
         },
         { text: gt("OK"), style: "cancel" },
       ],
     );
+  };
   const errorMessage = (error: unknown, fallback: string) =>
     error instanceof Error ? (errorDisplayMessage(error, m) ?? error.message) : fallback;
 
@@ -80,7 +89,7 @@ export function useStartTriage() {
           squashAtomCommandFailure(scratch),
           (failure) =>
             errorMessage(failure, gt("This machine cannot start threads without a project.")),
-          fail,
+          (message) => fail(message, environmentId),
         );
       }
       return;
@@ -91,7 +100,7 @@ export function useStartTriage() {
         pipe(
           squashAtomCommandFailure(prepared),
           (failure) => errorMessage(failure, gt("The server could not prepare it.")),
-          fail,
+          (message) => fail(message, environmentId),
         );
       }
       return;
@@ -99,7 +108,7 @@ export function useStartTriage() {
     try {
       await waitForComposerDraftsLoaded();
     } catch {
-      fail(gt("Drafts could not be loaded."));
+      fail(gt("Drafts could not be loaded."), environmentId);
       return;
     }
     if (routeChanged()) return;

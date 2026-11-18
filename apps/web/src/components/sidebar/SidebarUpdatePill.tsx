@@ -267,7 +267,12 @@ function SidebarUpdateControl() {
         : gt("Update available")
       : showCheckIcon
         ? gt("Checking for updates…")
-        : (idleTooltip?.title ?? gt("Check for updates"));
+        : !idleTooltip?.detail &&
+            state?.source === "lastcode-local" &&
+            state.status === "idle" &&
+            state.message
+          ? getDesktopUpdateButtonTooltip(state, messages)
+          : (idleTooltip?.title ?? gt("Check for updates"));
   const disabled = showCheckIcon
     ? true
     : runsEverything
@@ -344,13 +349,14 @@ function SidebarUpdateControl() {
     const appCheck = bridge
       .checkForUpdate()
       .then((result) => {
-        if (result.checked) return;
+        if (result.checked && !result.error) return;
         toastManager.add(
           stackedThreadToast({
             type: "error",
             title: gt("Could not check for updates"),
             description:
               updatesDenial ??
+              result.error ??
               result.state.message ??
               gt("Automatic updates are not available in this build."),
           }),

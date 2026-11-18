@@ -1,33 +1,63 @@
+import * as NodePath from "@effect/platform-node/NodePath";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import type * as FileSystem from "effect/FileSystem";
-import type * as Path from "effect/Path";
+import * as Path from "effect/Path";
 import * as Semaphore from "effect/Semaphore";
 
-const leases = new Map<string, { semaphore: Semaphore.Semaphore; users: number }>();
+const leases = new Map<
+  string,
+  { semaphore: Semaphore.Semaphore; users: number; ownerFiberId: number | null }
+>();
 
 export const withWorkspaceLease = <A, E, R>(
   cwd: string,
   effect: Effect.Effect<A, E, R>,
 ): Effect.Effect<A, E, R> =>
-  Effect.suspend(() => {
-    const lease = leases.get(cwd) ?? { semaphore: Semaphore.makeUnsafe(1), users: 0 };
-    leases.set(cwd, lease);
-    lease.users++;
-    return lease.semaphore.withPermit(effect).pipe(
-      Effect.ensuring(
-        Effect.sync(() => {
-          lease.users--;
-          if (lease.users === 0) leases.delete(cwd);
-        }),
-      ),
-    );
-  });
+  Effect.flatMap(
+    Path.Path.pipe(
+      Effect.map((path) => path.resolve(cwd)),
+      Effect.provide(NodePath.layer),
+    ),
+    (workspacePath) =>
+      Effect.withFiber((fiber) => {
+        const lease = leases.get(workspacePath) ?? {
+          semaphore: Semaphore.makeUnsafe(1),
+          users: 0,
+          ownerFiberId: null,
+        };
+        // Nested startup services share the caller's lease. A child fiber has its
+        // own id and must wait, even when it inherited the caller's context.
+        if (lease.ownerFiberId === fiber.id) return effect;
+        leases.set(workspacePath, lease);
+        lease.users++;
+        return lease.semaphore
+          .withPermit(
+            Effect.acquireUseRelease(
+              Effect.sync(() => {
+                lease.ownerFiberId = fiber.id;
+              }),
+              () => effect,
+              () =>
+                Effect.sync(() => {
+                  lease.ownerFiberId = null;
+                }),
+            ),
+          )
+          .pipe(
+            Effect.ensuring(
+              Effect.sync(() => {
+                lease.users--;
+                if (lease.users === 0) leases.delete(workspacePath);
+              }),
+            ),
+          );
+      }),
+  );
 
 // A restore rewrites files under its directory, so it must exclude provider
 // startup in any overlapping workspace: symlink aliases, parents, and children.
-// Kept apart from withWorkspaceLease because that lease is non-reentrant and
-// restores call Git work that leases the project root.
+// Restores also call Git work that leases the project root.
 interface Reservation {
   readonly cwd: string;
   readonly kind: "restore" | "turn-start";
