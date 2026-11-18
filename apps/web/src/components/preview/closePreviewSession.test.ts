@@ -92,7 +92,12 @@ describe("closePreviewSession", () => {
 
   it("keeps a tab this desktop renders mounted until the server has closed it", async () => {
     setPrimaryEnvironment(threadRef.environmentId);
-    const desktopSnapshot = { ...snapshot, runtime: "server" as const };
+    const desktopSnapshot = {
+      ...snapshot,
+      runtime: "server" as const,
+      backingPage: "desktop" as const,
+      desktopHostId: "local",
+    };
     applyPreviewServerSnapshot(threadRef, desktopSnapshot);
     let finishClose: (() => void) | undefined;
     const closing = closePreviewSession({

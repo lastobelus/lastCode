@@ -14,6 +14,7 @@ import {
 } from "@t3tools/client-runtime/state/project-grouping";
 import { msg } from "gt-react";
 
+import { m, type MessageResolver } from "~/i18n/messages";
 import type { Project } from "./types";
 
 export const PROJECT_GROUPING_MODE_LABELS: Record<SidebarProjectGroupingMode, string> = {
@@ -187,7 +188,7 @@ function buildSidebarProjectGroups(
       ?.project ?? members[0]!.project;
   const noProjectGroup: ProjectGroup<Project> = {
     key: NO_PROJECT_GROUP_KEY,
-    label: "No project",
+    label: msg("No project"),
     representative,
     members,
     memberProjectRefs: scratchGroups.flatMap((group) => group.memberProjectRefs),
@@ -218,6 +219,7 @@ export function buildPhysicalToLogicalProjectKeyMap(
 export function buildSidebarProjectSnapshots(
   input: SidebarProjectGroupingInput & {
     resolveEnvironmentLabel: (environmentId: EnvironmentId) => string | null;
+    resolveMessage?: MessageResolver;
     // Returns true when an env id maps to a desktop-local saved-env
     // record. Defaults to "false for every
     // env" so callers that don't care about the distinction get the
@@ -266,7 +268,8 @@ export function buildSidebarProjectSnapshots(
     return {
       ...representative,
       projectKey: group.key,
-      displayName: group.label,
+      displayName:
+        group.key === NO_PROJECT_GROUP_KEY ? (input.resolveMessage ?? m)(group.label) : group.label,
       groupedProjectCount: members.length,
       environmentPresence:
         hasLocal && hasRemote ? "mixed" : hasRemote ? "remote-only" : "local-only",
@@ -279,6 +282,23 @@ export function buildSidebarProjectSnapshots(
       archived: group.archived,
     };
   });
+}
+
+/** Puts the selected physical project first without changing shared group ordering. */
+export function orderProjectMembersForPicker(
+  members: readonly SidebarProjectGroupMember[],
+  targetProject: Pick<Project, "environmentId" | "id">,
+) {
+  const preferredIndex = members.findIndex(
+    (member) =>
+      member.environmentId === targetProject.environmentId && member.id === targetProject.id,
+  );
+  if (preferredIndex <= 0) return members;
+  return [
+    members[preferredIndex]!,
+    ...members.slice(0, preferredIndex),
+    ...members.slice(preferredIndex + 1),
+  ];
 }
 
 export function buildSidebarProjectPickerEntries(input: {

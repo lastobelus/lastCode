@@ -1,5 +1,6 @@
 import { managedCapabilityDenial } from "@t3tools/client-runtime/contract-labels";
 import { ConnectedEnvironmentIcon } from "../../environmentIcons";
+import { EnvironmentPauseControl } from "../EnvironmentPauseControl";
 import { SessionPermissions } from "./SessionPermissions";
 import {
   ChevronRightIcon,
@@ -419,6 +420,7 @@ export function SavedBackendListRow({
           appearance="icon"
         />
       ) : null}
+      <EnvironmentPauseControl key={environmentId} environment={environment} />
       <Tooltip>
         <TooltipTrigger
           render={

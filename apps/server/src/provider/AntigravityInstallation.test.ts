@@ -1153,8 +1153,9 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("Antigravity inst
           source: "managed",
           version: previousVersion,
         });
+        const canonicalExternalExecutable = yield* fs.realPath(externalExecutable);
         expect(yield* installation.resolve(externalExecutable)).toMatchObject({
-          executablePath: externalExecutable,
+          executablePath: canonicalExternalExecutable,
           source: "override",
           managedVersionDirectory: null,
         });
@@ -1180,7 +1181,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("Antigravity inst
         yield* installation.remove();
         expect(yield* installation.resolve()).toMatchObject({
           source: "path",
-          executablePath: externalExecutable,
+          executablePath: canonicalExternalExecutable,
         });
         const isolated = yield* makeHarness({ baseDir });
         expect(yield* isolated.installation.resolve().pipe(Effect.flip)).toMatchObject({
@@ -1190,11 +1191,11 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("Antigravity inst
           yield* isolated.installation.resolve(undefined, { PATH: externalDirectory }),
         ).toMatchObject({
           source: "path",
-          executablePath: externalExecutable,
+          executablePath: canonicalExternalExecutable,
         });
         expect(
           yield* isolated.installation.resolve(executableName, { PATH: externalDirectory }),
-        ).toMatchObject({ source: "override", executablePath: externalExecutable });
+        ).toMatchObject({ source: "override", executablePath: canonicalExternalExecutable });
 
         const incompleteDirectory = path.join(baseDir, "incomplete");
         yield* fs.makeDirectory(incompleteDirectory);
@@ -1204,11 +1205,11 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("Antigravity inst
         const shadowedPath = { PATH: `${incompleteDirectory}:${externalDirectory}` };
         expect(yield* isolated.installation.resolve(undefined, shadowedPath)).toMatchObject({
           source: "path",
-          executablePath: externalExecutable,
+          executablePath: canonicalExternalExecutable,
         });
         expect(yield* isolated.installation.resolve(executableName, shadowedPath)).toMatchObject({
           source: "override",
-          executablePath: externalExecutable,
+          executablePath: canonicalExternalExecutable,
         });
       }),
   );

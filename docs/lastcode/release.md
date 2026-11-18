@@ -148,15 +148,19 @@ suites on whichever CI node runs the gate.
 
 PR waits use the native pull-request watch, not a Project Action. Call
 `watch_pull_request` with the PR URL, then run the one-shot
-`pnpm lastcode:pr-gates [--pr PR_NUMBER]` check; when it reports `pending`, end
+`pnpm --config.verify-deps-before-run=false lastcode:pr-gates [--pr PR_NUMBER]` check; when it reports `pending`, end
 the turn. On each wake, run the check again. It reads the exact GitHub pull-request workflow run,
 whose identity records the PR number, head, base, and synthetic merge commit
 behind one stable aggregate `CI Gate`, together with exact-head Codex review
-and unresolved review threads. Head or base drift invalidates earlier evidence
-and requires the agent to decide whether to rebase, republish, and request
-review again. The watch has no review timeout. A CI run that never registers
-cannot wake it, so the check reports `ci-not-registered` attention once review
-is no longer pending.
+and unresolved review threads. A new head push invalidates earlier evidence.
+Main advancing does not: the guarded merge rechecks the PR against the current
+tip. Review waits end at a configurable quiet deadline, 45 minutes by
+default: once the newest exact-head review request is older than the deadline,
+the check reports `review-stalled` attention, even if Codex has reacted with
+eyes. The timeout never counts as approval, permits a merge, or substitutes for
+review. [LastCode PR](../../.agents/skills/lastcode-pr/SKILL.md#babysit-and-merge)
+owns the handling. A CI run that never registers cannot wake the watch, so the
+check reports `ci-not-registered` attention once review is no longer pending.
 
 For sequential stacked PRs, `--pr` checks one PR independently of the current
 checkout and rebuilds its parent chain live on every run. See
@@ -174,19 +178,35 @@ This applies to authorized repair PRs opened during checkpoint or build recovery
 without a separate request to babysit. Handle existing findings first, then
 use the check and watch above. Do not poll GitHub or run a separate watcher.
 
+Checkpoint review keeps `gpt-6.1-sol` at high effort as its default. A small
+pilot supported that choice, but its limited evidence does not show either model
+is better in general. Add `gpt-6.1-terra` at xhigh effort selectively, as an
+independent second opinion on publication or validation safety. It is not
+required on every review and never replaces the required exact-head GitHub Codex
+review. The selected model and effort must be available in the capability
+catalog; [External Review Mechanics](../../.agents/skills/_references/external-review-mechanics.md)
+covers how to check that and run the review.
+
 Merge the current ready PR with:
 
 ```bash
-pnpm lastcode:merge
+pnpm --config.verify-deps-before-run=false lastcode:merge
 ```
+
+The gate check and the merge need only Node, `git` and `gh`, so they run in a
+checkout without `node_modules`. The flag stops pnpm installing dependencies
+before the script.
 
 The merge wrapper refuses dirty worktrees, missing or stale exact GitHub CI,
 exact-head Codex review that is missing or pending, unresolved review threads,
-stale bases, draft or non-clean PRs, and PRs that do not target
-`lastcode/main`. The wrapper and checkpoint publisher share a short exclusive
+draft or non-clean PRs, and PRs that do not target `lastcode/main`. A PR behind
+main may merge; the wrapper refuses it only when it conflicts with the current
+tip, fails carry compilation against it, or was tested against a base that a
+checkpoint rewrote. The wrapper and checkpoint publisher share a short exclusive
 Git ref lock on the remote. After acquiring it, the wrapper checks the exact PR
-head, base, CI result, and review readiness again, then squash-merges with the
-exact-head guard. The lock protects only the final main write, not preparation or CI waits.
+head, unchanged base, CI result, and review readiness again, then squash-merges
+with the exact-head guard and prints the merge commit whose main CI the lander
+confirms. The lock protects only the final main write, not preparation or CI waits.
 Ordinary merges request no checkpoint; `--skip-checkpoint` explicitly selects
 that default. Use `--checkpoint` only with separate user authorization for an
 extra service run. Permission to merge or a request for a dependent feature is
@@ -230,11 +250,13 @@ disabled, report that setup problem rather than reverting to a sleep loop.
 
 When the checkpoint failure record links a conflict dossier, read it before you resolve a retained carry conflict.
 
+When a conflict or failing test touches keyboard scrolling (`lastcodeScrollKeys`, `timelineViewport.ts`, workspace focus, or the composer's arrow and page keys), read [Keyboard scrolling](keyboard-scrolling.md) first. It defines the behaviour to keep and when to stop and report a clash with upstream.
+
 Preserve the retained worktree, including resolutions and subsequent repairs.
 The checkpoint command enables rerere in repository configuration for
 historical, non-carry rebases; carry replay overrides it on its own rebase
 commands only. Continue a carry replay manually with
-`git -c rerere.enabled=false -c rerere.autoupdate=false rebase --continue`.
+`node <automation>/scripts/lastcode-carry-replay.ts --continue <worktree>`.
 When a replay or incorporation conflict is in a derived field, take either side
 of that field to clear the markers and continue; all of them are regenerated after the replay.
 The derived files are `pnpm-lock.yaml`,
@@ -307,8 +329,8 @@ pnpm --config.verify-deps-before-run=false lastcode:regenerate-derived --upstrea
    head the selection prints as `<selected-head>`, not the commit you passed in.
    Aim to start Full CI within about five minutes of replay completion; measure
    preparation and the gate if it takes longer.
-4. Run the required integrated client QA alongside Full CI, using `test-t3-app`
-   or `test-t3-mobile` as applicable. Additional investigation and broader focused
+4. Run the required integrated client QA alongside Full CI, as
+   [Verifying](../../AGENTS.md#verifying) describes. Additional investigation and broader focused
    checks also belong alongside Full CI. A successful CI result does not prove
    client QA passed. If either finds a defect, follow the repair procedure below.
 
@@ -353,12 +375,14 @@ Selection requires a clean, completed `sync/nightly/<nightly>` worktree and is
 bound to its head, nightly, and current source. The service skips only that
 nightly's rebase and runs Full CI against the unpublished candidate before
 publication. Repair revisions use the same complete validation. Every
-checkpoint first runs the `vp check` format/lint gate after dependency
-installation and fork invariants; a failure there aborts immediately with
-retained recovery and no Full CI diagnostic pass. Ordinary checkpoints then
-retain their fast smoke gate; any later check failure triggers a Full CI
-diagnostic pass so independent failures are visible in the same recovery.
-Dependency preparation and interrupted execution remain fatal.
+checkpoint first installs dependencies and checks fork invariants, including
+`git diff --check`; a failure there aborts with retained recovery and no Full CI
+diagnostic pass. Selected recoveries and repair revisions then go straight to
+Full CI, which includes `vp check`. Ordinary checkpoints run the
+[smoke gate](nightly-workflow.md#checkpointing) instead; if any smoke check
+fails, the service still runs Full CI on the candidate so independent failures
+appear in the same recovery, then refuses to publish. Interrupted execution
+remains fatal.
 The service publishes the immutable tag and source ref, then promotes main with a
 lease against the selected source commit. Open PRs do not block publication or promotion. Merges made after
 selection or during validation do not invalidate it: the tag still publishes,
@@ -475,7 +499,7 @@ For an authorized local Apple Silicon build, first select one exact installable
 checkpoint or revision in the requesting thread's worktree:
 
 ```bash
-MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@26.12.1 -- node "$T3CODE_PROJECT_ROOT/scripts/lastcode-build-local-package.ts" select \
+MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@26.13.1 -- node "$T3CODE_PROJECT_ROOT/scripts/lastcode-build-local-package.ts" select \
   --tag lastcode/revision/v0.0.34-nightly.20260825.1185.3
 ```
 

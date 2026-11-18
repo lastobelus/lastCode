@@ -1,12 +1,16 @@
 import type { ThreadStructure } from "@t3tools/client-runtime/state/shell";
 import type {
   EnvironmentId,
+  CommandId,
   RunId,
   ScopedThreadRef,
   ThreadId,
   WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
-import { workspacePreparationRetryRunIds } from "@t3tools/client-runtime/state/turn-item-presentation";
+import {
+  workspacePreparationRetryRunIds,
+  emptyWorkspacePreparationRetryFailureId,
+} from "@t3tools/client-runtime/state/turn-item-presentation";
 import { useState } from "react";
 import { useStableCallback } from "../../hooks/useStableCallback";
 import { useEnvironmentQuery } from "../../state/query";
@@ -20,7 +24,7 @@ import { resolveVisibleWorktreeSetup, resolveWorktreeSetupProgress } from "../Ch
 import { worktreeSetupAgentStarted } from "@t3tools/client-runtime/worktree-setup";
 
 // Share in-flight preparation retries across ChatView instances.
-const retryingWorkspacePreparationRunIds = new Set<RunId>();
+const retryingWorkspacePreparationRunIds = new Set<string>();
 
 export function useWorktreeSetup(input: {
   readonly routeThreadRef: ScopedThreadRef;
@@ -61,7 +65,10 @@ export function useWorktreeSetup(input: {
   const [heldSnapshot, setHeldSnapshot] = useState<WorktreeSetupSnapshot | null>(null);
   const started = startedSetup !== null && startedSetup.ownerKey === ownerKey;
   const target = started ? startedSetup : routeThreadRef;
-  const runPreparing = activityRun?.status === "preparing";
+  const runPreparing =
+    activityRun?.status === "preparing" ||
+    serverProjection?.thread.emptyWorkspacePreparationClaim !== undefined ||
+    serverProjection?.thread.emptyWorkspacePreparation?.state === "claimed";
   const snapshotQuery = useEnvironmentQuery(
     started ||
       (activeThread?.id === routeThreadRef.threadId &&
@@ -96,7 +103,7 @@ export function useWorktreeSetup(input: {
   const { snapshot: liveSnapshot, isPreparingWorktree } = resolveWorktreeSetupProgress({
     threadId: target.threadId,
     localPreparing,
-    runStatus: activityRun?.status,
+    runStatus: runPreparing ? "preparing" : activityRun?.status,
     latest: latestSnapshot,
     held: heldSnapshot,
   });
@@ -142,14 +149,21 @@ export function useWorktreeSetup(input: {
     });
     return result._tag === "Success" && result.value.cancelled;
   });
-  const retryPreparation = useStableCallback((runId: RunId) => {
-    if (!threadRef || retryingWorkspacePreparationRunIds.has(runId)) return;
-    retryingWorkspacePreparationRunIds.add(runId);
-    void retryWorkspacePreparation({
-      environmentId: threadRef.environmentId,
-      input: { threadId: threadRef.threadId, runId },
-    }).finally(() => retryingWorkspacePreparationRunIds.delete(runId));
-  });
+  const retryPreparation = useStableCallback(
+    (runId: RunId | null, failureCommandId?: CommandId) => {
+      const key = runId ?? failureCommandId;
+      if (!threadRef || key === undefined || retryingWorkspacePreparationRunIds.has(key)) return;
+      if (runId === null && failureCommandId === undefined) return;
+      retryingWorkspacePreparationRunIds.add(key);
+      void retryWorkspacePreparation({
+        environmentId: threadRef.environmentId,
+        input:
+          runId === null
+            ? { threadId: threadRef.threadId, runId: null, failureCommandId: failureCommandId! }
+            : { threadId: threadRef.threadId, runId },
+      }).finally(() => retryingWorkspacePreparationRunIds.delete(key));
+    },
+  );
   // Failed bootstrap deletes threads and terminals; expose terminals only for active threads.
   const setupThreadRef =
     worktreeSetup && threadRef && worktreeSetup.threadId === threadRef.threadId ? threadRef : null;
@@ -165,6 +179,9 @@ export function useWorktreeSetup(input: {
     isPreparingWorktree,
     blocksSend,
     retryableRunIds: retryableRunIds.ids,
+    retryableEmptyFailureId: serverProjection
+      ? emptyWorkspacePreparationRetryFailureId(serverProjection.thread)
+      : null,
     begin,
     cancel,
     retryPreparation,

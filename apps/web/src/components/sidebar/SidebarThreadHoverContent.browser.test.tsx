@@ -2,6 +2,8 @@ import { RunId, type ActionResumeState, type ThreadPullRequestLink } from "@t3to
 import { DEFAULT_CLIENT_SETTINGS } from "@t3tools/contracts/settings";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { expect, it, vi } from "vite-plus/test";
+import { commands, page, userEvent } from "vite-plus/test/browser";
+import type { MouseEvent } from "react";
 import { act, render } from "../../../test/render";
 import { makeThreadFixture } from "../../test-fixtures";
 import { useUiStateStore } from "../../uiStateStore";
@@ -11,7 +13,7 @@ import type { ThreadStatusPill } from "../Sidebar.logic";
 import type { SidebarThreadSummary } from "../../types";
 import "../../index.css";
 
-const mocks = vi.hoisted(() => ({ settingRead: vi.fn() }));
+const mocks = vi.hoisted(() => ({ settingRead: vi.fn(), multiplePullRequests: false }));
 
 vi.mock("../../hooks/useSettings", () => ({
   useClientSetting: (key: keyof typeof DEFAULT_CLIENT_SETTINGS) => {
@@ -24,11 +26,13 @@ vi.mock("../../hooks/useSettings", () => ({
   },
 }));
 vi.mock("~/hooks/useSupportsMultiplePullRequests", () => ({
-  useSupportsMultiplePullRequests: () => false,
+  useSupportsMultiplePullRequests: () => mocks.multiplePullRequests,
 }));
-vi.mock("../../state/terminalSessions", () => ({ useKnownTerminalSessions: () => [] }));
+vi.mock("../../state/terminalSessions", () => ({
+  useKnownTerminalSessions: () => [],
+  useThreadRunningTerminalIds: () => [],
+}));
 vi.mock("../../state/previewHosting", () => ({ useThreadPreviewLeases: () => [] }));
-vi.mock("../ThreadStatusIndicators", () => ({ ThreadPullRequestsMiniList: () => null }));
 vi.mock("../../environmentIcons", () => ({ ConnectedEnvironmentIcon: () => null }));
 vi.mock("../ProjectFavicon", () => ({ ProjectFavicon: () => null }));
 vi.mock("../chat/ProviderInstanceIcon", () => ({ ProviderInstanceIcon: () => null }));
@@ -48,10 +52,12 @@ const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id
 
 function setup(): Disposable {
   mocks.settingRead.mockClear();
+  mocks.multiplePullRequests = false;
   const previous = useUiStateStore.getState().threadLastVisitedAtById;
   useUiStateStore.setState({ threadLastVisitedAtById: {} });
   return {
     [Symbol.dispose]() {
+      mocks.multiplePullRequests = false;
       useUiStateStore.setState({ threadLastVisitedAtById: previous });
     },
   };
@@ -61,6 +67,7 @@ function hoverContent(
   lastVisitedAt: string | null | undefined,
   threadStatus?: ThreadStatusPill | null,
   overrides: Partial<SidebarThreadSummary> = {},
+  onOpenPullRequest?: (event: MouseEvent<HTMLAnchorElement>, url: string) => void,
 ) {
   const renderedThread = { ...thread, ...overrides };
   if (lastVisitedAt === undefined) {
@@ -83,6 +90,7 @@ function hoverContent(
       branchMismatch={null}
       terminalStatus={null}
       terminalProcessCount={0}
+      onOpenPullRequest={onOpenPullRequest}
     />
   );
 }
@@ -116,6 +124,44 @@ function pullRequest(number: number, watching: boolean): ThreadPullRequestLink {
       : {}),
   };
 }
+
+it("scrolls to and opens PRs at the end of a long list while keeping thread details visible", async () => {
+  using _state = setup();
+  mocks.multiplePullRequests = true;
+  const onOpen = vi.fn((event: MouseEvent<HTMLAnchorElement>, _url: string) =>
+    event.preventDefault(),
+  );
+  const container = document.createElement("div");
+  container.style.setProperty("--available-height", "600px");
+  await using screen = await render(
+    hoverContent(
+      null,
+      null,
+      { pullRequests: Array.from({ length: 70 }, (_, index) => pullRequest(index + 1, false)) },
+      onOpen,
+    ),
+    { container },
+  );
+  const links = [...screen.container.querySelectorAll<HTMLAnchorElement>("a")];
+  expect(links).toHaveLength(70);
+  const last = links.at(-1)!;
+  const scroller = last.closest("ul")!.parentElement!;
+  expect(scroller.clientHeight).toBeGreaterThan(500);
+  await userEvent.hover(page.elementLocator(scroller));
+  const scrolled = new Promise<void>((resolve) =>
+    scroller.addEventListener("scroll", () => resolve(), { once: true }),
+  );
+  await commands.wheel(200);
+  await scrolled;
+  expect(scroller.scrollTop).toBeGreaterThan(0);
+  await act(() => {
+    scroller.scrollTop = scroller.scrollHeight;
+  });
+  expect(scroller.scrollTop).toBeGreaterThan(0);
+  await expect.element(screen.getByText(thread.title, { exact: true })).toBeVisible();
+  await userEvent.click(page.elementLocator(last));
+  expect(onOpen).toHaveBeenCalledExactlyOnceWith(expect.anything(), last.href);
+});
 
 it("names active PR watches in the waiting hover and updates when watching stops", async () => {
   using _state = setup();

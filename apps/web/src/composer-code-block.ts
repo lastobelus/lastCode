@@ -3,7 +3,11 @@ import type { EditorState, Transaction } from "@tiptap/pm/state";
 import { TextSelection } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 
-import { isClosingFence, parseOpeningFence, serializeSelection } from "~/composer-rich-text-doc";
+import {
+  isClosingFence,
+  parseOpeningFence,
+  structuredSerializeSelection as serializeSelection,
+} from "~/composer-rich-text-doc";
 
 const CODE_BLOCK_INDENT = "  ";
 
@@ -23,11 +27,6 @@ function indentLines(lines: ReadonlyArray<string>, direction: "in" | "out"): str
     if (direction === "in") return line.length === 0 ? line : `${CODE_BLOCK_INDENT}${line}`;
     return outdentLine(line);
   });
-}
-
-export function selectionInOneCodeBlock(state: EditorState): boolean {
-  const { $from, $to } = state.selection;
-  return $from.parent.type.spec.code === true && $from.sameParent($to);
 }
 
 function codeBlockRange(

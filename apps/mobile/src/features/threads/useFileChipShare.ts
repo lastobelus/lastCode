@@ -1,14 +1,14 @@
 import * as Dialog from "../../components/ui/Dialog";
 import { errorDisplayMessage } from "@t3tools/client-runtime/errors";
-import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
+import { fileAssetResourceForAccess, resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { useGT } from "gt-react-native";
 import { m } from "../../i18n/messages";
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 
 import { downloadAndShareAttachment } from "../../lib/attachmentDownload";
-import { assetEnvironment } from "../../state/assets";
+import { assetEnvironment, useHostFileAccess } from "../../state/assets";
 import { usePreparedConnection } from "../../state/session";
 import { useAtomQueryRunner } from "../../state/use-atom-query-runner";
 import { fileChipShareSource, type FileChipTarget } from "./fileChipMenu";
@@ -19,12 +19,20 @@ export function useFileChipShare(
   sourceIdentifier: string,
 ) {
   const gt = useGT();
+  const fileAccess = useHostFileAccess(environmentId);
   const connection = usePreparedConnection(environmentId);
   const httpBaseUrl = Option.isSome(connection) ? connection.value.httpBaseUrl : null;
   const createUrl = useAtomQueryRunner(assetEnvironment.createUrl, {
     refresh: true,
     reportFailure: false,
   });
+  const canReadFilesRef = useRef(fileAccess.canReadFiles);
+  const connectionRef = useRef(httpBaseUrl);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keeps the native share request connection and file permission references current after commit
+  useLayoutEffect(() => {
+    connectionRef.current = httpBaseUrl;
+    canReadFilesRef.current = fileAccess.canReadFiles;
+  }, [httpBaseUrl, fileAccess.canReadFiles]);
   const requestRef = useRef<AbortController | null>(null);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- aborts the in-flight file share download when the component unmounts
   useEffect(() => () => requestRef.current?.abort(), []);
@@ -34,9 +42,13 @@ export function useFileChipShare(
     if (!source || requestRef.current) return;
     const request = new AbortController();
     requestRef.current = request;
-    void (async () => {
+    const httpBaseUrl = connectionRef.current;
+    return (async () => {
       if (httpBaseUrl === null) throw new Error(gt("Reconnect to the environment and try again."));
-      const result = await createUrl({ environmentId, input: { resource: source.resource } });
+      const result = await createUrl({
+        environmentId,
+        input: { resource: fileAssetResourceForAccess(source.resource, canReadFilesRef.current) },
+      });
       if (request.signal.aborted) return;
       const url =
         result._tag === "Success" ? resolveAssetUrl(httpBaseUrl, result.value.relativeUrl) : null;

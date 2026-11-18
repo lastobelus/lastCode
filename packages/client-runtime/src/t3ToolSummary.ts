@@ -1372,6 +1372,125 @@ export function summarizeT3ToolCalls(
       }
       break;
     }
+    case "thread-archive-family": {
+      const count = selected.length;
+      label = done
+        ? resolve(
+            msg(
+              "{count, plural, one {Inspected thread archive choices {count} time} other {Inspected thread archive choices {count} times}}",
+              { count },
+            ),
+          )
+        : resolve(
+            msg(
+              "{count, plural, one {Tried to inspect thread archive choices {count} time} other {Tried to inspect thread archive choices {count} times}}",
+              { count },
+            ),
+          );
+      break;
+    }
+    case "thread-repair": {
+      const count = selected.length;
+      label = done
+        ? resolve(
+            msg(
+              "{count, plural, one {Opened repair conversations {count} time} other {Opened repair conversations {count} times}}",
+              { count },
+            ),
+          )
+        : resolve(
+            msg(
+              "{count, plural, one {Tried to open repair conversations {count} time} other {Tried to open repair conversations {count} times}}",
+              { count },
+            ),
+          );
+      break;
+    }
+    case "environment-pause-status": {
+      const count = selected.length;
+      label = done
+        ? resolve(
+            msg(
+              "{count, plural, one {Checked environment pause status {count} time} other {Checked environment pause status {count} times}}",
+              { count },
+            ),
+          )
+        : resolve(
+            msg(
+              "{count, plural, one {Tried to check environment pause status {count} time} other {Tried to check environment pause status {count} times}}",
+              { count },
+            ),
+          );
+      break;
+    }
+    case "environment-pause-start": {
+      const count = selected.length;
+      label = done
+        ? resolve(
+            msg(
+              "{count, plural, one {Requested environment pause {count} time} other {Requested environment pause {count} times}}",
+              { count },
+            ),
+          )
+        : resolve(
+            msg(
+              "{count, plural, one {Tried to request environment pause {count} time} other {Tried to request environment pause {count} times}}",
+              { count },
+            ),
+          );
+      break;
+    }
+    case "environment-pause-retry": {
+      const count = selected.length;
+      label = done
+        ? resolve(
+            msg(
+              "{count, plural, one {Retried environment pause deliveries {count} time} other {Retried environment pause deliveries {count} times}}",
+              { count },
+            ),
+          )
+        : resolve(
+            msg(
+              "{count, plural, one {Tried to retry environment pause deliveries {count} time} other {Tried to retry environment pause deliveries {count} times}}",
+              { count },
+            ),
+          );
+      break;
+    }
+    case "environment-pause-resume": {
+      const count = selected.length;
+      label = done
+        ? resolve(
+            msg(
+              "{count, plural, one {Requested environment resume {count} time} other {Requested environment resume {count} times}}",
+              { count },
+            ),
+          )
+        : resolve(
+            msg(
+              "{count, plural, one {Tried to request environment resume {count} time} other {Tried to request environment resume {count} times}}",
+              { count },
+            ),
+          );
+      break;
+    }
+    case "thread-recover": {
+      const count = countEntities(threadIds);
+      label = done
+        ? resolve(
+            msg(
+              "{count, plural, one {Requested recovery of {count} thread} other {Requested recovery of {count} threads}}",
+              { count },
+            ),
+          )
+        : resolve(
+            msg(
+              "{count, plural, one {Tried to request recovery of {count} thread} other {Tried to request recovery of {count} threads}}",
+              { count },
+            ),
+          );
+      break;
+    }
     case "attachment-send": {
       const messages = new Map<string, (typeof selected)[number]>();
       selected.forEach((call, index) =>

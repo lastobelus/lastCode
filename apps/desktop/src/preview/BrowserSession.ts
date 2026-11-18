@@ -1,4 +1,5 @@
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { THREAD_LINK_PROTOCOL } from "@t3tools/shared/threadLinks";
 import type { Certificate, Session, WebContents } from "electron";
 import { BrowserWindow, session } from "electron";
 import { msg } from "gt-i18n";
@@ -52,6 +53,7 @@ const NEVER_EXTERNAL_PROTOCOLS: ReadonlySet<string> = new Set([
   "https:",
   "javascript:",
   "view-source:",
+  `${THREAD_LINK_PROTOCOL}:`,
 ]);
 
 const externalProtocolPromptUrl = (rawUrl: string | undefined): string | null => {

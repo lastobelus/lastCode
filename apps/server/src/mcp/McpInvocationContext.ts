@@ -1,3 +1,4 @@
+import type { McpExecutionOrigin } from "@t3tools/provider-core/server/McpProviderSessions";
 import {
   type AuthMcpClientAccess,
   type EnvironmentId,
@@ -25,15 +26,22 @@ const ALL_MCP_CAPABILITIES = [
   "device",
   "pull-requests",
   "issues",
+  "action-resume",
 ] as const;
 export type McpCapability = (typeof ALL_MCP_CAPABILITIES)[number];
 
 export interface McpThreadCaller {
+  readonly execution?: McpExecutionOrigin | undefined;
+  /** Internal HTTP attribution. Only absent native metadata permits legacy run selection. */
+  readonly attribution?: "absent" | "resolved" | "unresolved" | undefined;
+  /** Set by the issuing native adapter driver, never by request metadata. */
+  readonly nativeExecutionAttribution?: boolean;
   readonly threadId: ThreadId;
   readonly providerSessionId: string;
   readonly providerInstanceId: ProviderInstanceId;
   /** A delegated child task; its parent owns the work it hands back. */
   readonly subagent?: boolean;
+  readonly appOwnedSubagent?: boolean;
 }
 
 export interface McpClientCaller {
@@ -193,6 +201,14 @@ export const hiddenFromOutsideClients = (): boolean => {
   const fiber = Fiber.getCurrent();
   const scope = fiber && Context.getOrUndefined(fiber.context, McpInvocationContext);
   return scope === undefined || scope.thread !== undefined;
+};
+
+// Discovery has no native tool-call metadata. This server-issued classification only
+// exposes tools; their handlers still require the exact authenticated execution origin.
+export const visibleForPullRequestWatch = (): boolean => {
+  const fiber = Fiber.getCurrent();
+  const scope = fiber && Context.getOrUndefined(fiber.context, McpInvocationContext);
+  return scope?.thread?.subagent !== true || scope.thread.appOwnedSubagent === true;
 };
 
 /** `McpSchema.EnabledWhen` for tools that only serve links, hidden while the beta is off. */

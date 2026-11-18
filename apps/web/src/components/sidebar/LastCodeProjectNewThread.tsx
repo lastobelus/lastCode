@@ -1,3 +1,5 @@
+import { msg, useGT } from "gt-react";
+import { m } from "~/i18n/messages";
 import { type MouseEvent } from "react";
 import { SquarePenIcon } from "lucide-react";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
@@ -26,8 +28,8 @@ function reportNewThreadFailure(result: AtomCommandResult<unknown, unknown>, tit
   toastManager.add(
     stackedThreadToast({
       type: "error",
-      title,
-      description: error instanceof Error ? error.message : "An error occurred.",
+      title: m(title),
+      description: error instanceof Error ? error.message : m(msg("An error occurred.")),
     }),
   );
 }
@@ -41,7 +43,7 @@ async function chooseProjectThreadMember(
   const result = await settlePromise(() =>
     api.contextMenu.show(
       [
-        ...(canAutoBalance ? [{ id: "auto", label: "Auto balance" }] : []),
+        ...(canAutoBalance ? [{ id: "auto", label: m(msg("Auto balance")) }] : []),
         ...project.memberProjects.map((member) => ({
           id: member.physicalProjectKey,
           label: formatProjectMemberActionLabel(member, project.groupedProjectCount),
@@ -51,7 +53,7 @@ async function chooseProjectThreadMember(
     ),
   );
   if (result._tag === "Failure") {
-    reportNewThreadFailure(result, "Could not choose environment");
+    reportNewThreadFailure(result, msg("Could not choose environment"));
     return null;
   }
   const clicked = result.value;
@@ -70,6 +72,7 @@ export function LastCodeProjectNewThread({
   handleNewThread: ReturnType<typeof useNewThreadHandler>;
   shortcutLabel: string | null;
 }) {
+  const gt = useGT();
   const { isMobile, setOpenMobile } = useSidebar();
   const isNoProjectGroup = project.projectKey === NO_PROJECT_GROUP_KEY;
   const loadBalancingEnabled = useClientSetting("loadBalancingEnabled");
@@ -90,7 +93,7 @@ export function LastCodeProjectNewThread({
           environmentSelection,
         }),
       );
-      reportNewThreadFailure(result, "Could not create thread");
+      reportNewThreadFailure(result, msg("Could not create thread"));
     })();
   };
 
@@ -119,7 +122,7 @@ export function LastCodeProjectNewThread({
           <div className="pointer-events-none absolute top-[calc(50%+1px)] right-0.5 -translate-y-1/2 opacity-0 transition-opacity duration-150 max-sm:pointer-events-auto max-sm:opacity-100 group-hover/project-header:pointer-events-auto group-hover/project-header:opacity-100 group-has-[:focus-visible]/project-header:pointer-events-auto group-has-[:focus-visible]/project-header:opacity-100">
             <button
               type="button"
-              aria-label={`Create new thread in ${project.displayName}`}
+              aria-label={gt("Create new thread in {project}", { project: project.displayName })}
               data-testid="new-thread-button"
               className={SIDEBAR_ICON_ACTION_BUTTON_CLASS}
               onClick={handleCreateThreadClick}
@@ -130,7 +133,9 @@ export function LastCodeProjectNewThread({
         }
       />
       <TooltipPopup side="top">
-        {newThreadShortcutLabel ? `New thread (${newThreadShortcutLabel})` : "New thread"}
+        {newThreadShortcutLabel
+          ? gt("New thread ({shortcut})", { shortcut: newThreadShortcutLabel })
+          : gt("New thread")}
       </TooltipPopup>
     </Tooltip>
   );

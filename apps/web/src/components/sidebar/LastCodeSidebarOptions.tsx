@@ -1,3 +1,4 @@
+import { msg, T, useGT, useMessages } from "gt-react";
 import { ArrowUpDownIcon } from "lucide-react";
 import {
   MAX_SIDEBAR_THREAD_PREVIEW_COUNT,
@@ -18,13 +19,13 @@ import {
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { Button } from "../ui/button";
 const SIDEBAR_SORT_LABELS: Record<SidebarProjectSortOrder, string> = {
-  updated_at: "Last user message",
-  created_at: "Created at",
-  manual: "Manual",
+  updated_at: msg("Last user message"),
+  created_at: msg("Created at"),
+  manual: msg("Manual", { $context: "sort order" }),
 };
 const SIDEBAR_THREAD_SORT_LABELS: Record<SidebarThreadSortOrder, string> = {
-  updated_at: "Last user message",
-  created_at: "Created at",
+  updated_at: msg("Last user message"),
+  created_at: msg("Created at"),
 };
 function clampSidebarThreadPreviewCount(value: number): SidebarThreadPreviewCount {
   return Math.min(
@@ -34,6 +35,8 @@ function clampSidebarThreadPreviewCount(value: number): SidebarThreadPreviewCoun
 }
 
 export function LastCodeSidebarOptions() {
+  const gt = useGT();
+  const messages = useMessages();
   const projectSortOrder = useClientSettings((s) => s.sidebarProjectSortOrder);
   const threadSortOrder = useClientSettings((s) => s.sidebarThreadSortOrder);
   const threadPreviewCount = useClientSettings((s) => s.sidebarThreadPreviewCount);
@@ -60,18 +63,22 @@ export function LastCodeSidebarOptions() {
         <TooltipTrigger
           render={
             <MenuTrigger
-              render={<Button size="icon-xs" variant="ghost-muted" aria-label="Sidebar options" />}
+              render={
+                <Button size="icon-xs" variant="ghost-muted" aria-label={gt("Sidebar options")} />
+              }
             />
           }
         >
           <ArrowUpDownIcon className="size-3.5" />
         </TooltipTrigger>
-        <TooltipPopup side="right">Sidebar options</TooltipPopup>
+        <TooltipPopup side="right">
+          <T>Sidebar options</T>
+        </TooltipPopup>
       </Tooltip>
       <MenuPopup align="end" side="bottom">
         <MenuGroup>
           <div className="px-2 py-1 sm:text-xs font-medium text-muted-foreground">
-            Sort projects
+            <T>Sort projects</T>
           </div>
           <MenuRadioGroup
             value={projectSortOrder}
@@ -82,7 +89,7 @@ export function LastCodeSidebarOptions() {
             {(Object.entries(SIDEBAR_SORT_LABELS) as Array<[SidebarProjectSortOrder, string]>).map(
               ([value, label]) => (
                 <MenuRadioItem key={value} value={value}>
-                  {label}
+                  {messages(label)}
                 </MenuRadioItem>
               ),
             )}
@@ -90,7 +97,7 @@ export function LastCodeSidebarOptions() {
         </MenuGroup>
         <MenuGroup>
           <div className="px-2 pt-2 pb-1 sm:text-xs font-medium text-muted-foreground">
-            Sort threads
+            <T>Sort threads</T>
           </div>
           <MenuRadioGroup
             value={threadSortOrder}
@@ -102,18 +109,18 @@ export function LastCodeSidebarOptions() {
               Object.entries(SIDEBAR_THREAD_SORT_LABELS) as Array<[SidebarThreadSortOrder, string]>
             ).map(([value, label]) => (
               <MenuRadioItem key={value} value={value}>
-                {label}
+                {messages(label)}
               </MenuRadioItem>
             ))}
           </MenuRadioGroup>
         </MenuGroup>
         <MenuGroup>
           <div className="px-2 pt-2 pb-1 text-muted-foreground sm:text-xs font-medium">
-            Visible threads
+            <T>Visible threads</T>
           </div>
           <div className="px-2 py-1">
             <NumberField
-              aria-label="Visible thread count"
+              aria-label={gt("Visible thread count")}
               className="w-28"
               max={MAX_SIDEBAR_THREAD_PREVIEW_COUNT}
               min={MIN_SIDEBAR_THREAD_PREVIEW_COUNT}
@@ -124,18 +131,18 @@ export function LastCodeSidebarOptions() {
             >
               <NumberFieldGroup>
                 <NumberFieldDecrement
-                  aria-label="Decrease visible thread count"
+                  aria-label={gt("Decrease visible thread count")}
                   className="[&_svg]:size-3.5"
                 />
                 <NumberFieldInput
-                  aria-label="Visible thread count"
+                  aria-label={gt("Visible thread count")}
                   inputMode="numeric"
                   onKeyDownCapture={(event) => {
                     event.stopPropagation();
                   }}
                 />
                 <NumberFieldIncrement
-                  aria-label="Increase visible thread count"
+                  aria-label={gt("Increase visible thread count")}
                   className="[&_svg]:size-3.5"
                 />
               </NumberFieldGroup>

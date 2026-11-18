@@ -29,6 +29,7 @@ import { Switch } from "../ui/switch";
 import { resolveDefaultModelSettingsPresentation } from "./ProjectDefaultsSettings.logic";
 import type { ProjectSettingsCategory } from "./ProjectSettingsPanel";
 import { useSearchableSetting } from "./settingsSearch";
+import { AutoPullStatusNote } from "./AutoPullStatusNote";
 import { useSettingsScope } from "./SettingsScopeContext";
 import {
   SETTINGS_PICKER_TRIGGER_CLASSNAME,
@@ -455,6 +456,14 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
                 : gt(
                     "Keeps the default branch current when the checkout has no local changes or commits. Projects can override it.",
                   )
+            }
+            status={
+              isProjectScope && target?.projectId && !mixedAutoPull && settings.defaultAutoPull ? (
+                <AutoPullStatusNote
+                  environmentId={target.environmentId}
+                  projectId={target.projectId}
+                />
+              ) : undefined
             }
             resetAction={
               settings.defaultAutoPull ? (

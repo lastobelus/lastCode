@@ -1,8 +1,12 @@
 import type { EnvironmentId } from "@t3tools/contracts";
+import { useMessages } from "gt-react";
 import { useProjects, useThreadShells } from "../../state/entities";
 import { useClientSettings, useClientSetting } from "../../hooks/useSettings";
 import { useUiStateStore, legacyProjectCwdPreferenceKey } from "../../uiStateStore";
-import { getProjectOrderKey, selectProjectGroupingSettings } from "../../logicalProject";
+import {
+  getProjectOrderKey,
+  selectProjectGroupingSettings,
+} from "@t3tools/client-runtime/state/project-grouping";
 import { buildSidebarProjectSnapshots } from "../../sidebarProjectGrouping";
 import { orderItemsByPreferredIds } from "../Sidebar.logic";
 import {
@@ -19,6 +23,7 @@ interface ProjectEnvironments {
 }
 /** Collection-only entity selectors and derivation; rows keep their own project-local projections. */
 export function useLastCodeSidebarProjects(environments: ProjectEnvironments) {
+  const messages = useMessages();
   const projects = useProjects();
   const threads = useThreadShells();
   const preferredIds = useUiStateStore((state) => state.projectOrder);
@@ -45,6 +50,7 @@ export function useLastCodeSidebarProjects(environments: ProjectEnvironments) {
     settings,
     primaryEnvironmentId,
     scratchWorkspaceRootsByEnvironmentId,
+    resolveMessage: messages,
     resolveEnvironmentLabel: (id) => environmentLabelById.get(id) ?? null,
     isDesktopLocalEnvironment: (id) => desktopLocalEnvironmentIds.has(id),
     isWslEnvironment: (id) => wslEnvironmentIds.has(id),

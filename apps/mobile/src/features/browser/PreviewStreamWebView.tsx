@@ -1,4 +1,8 @@
 import { errorDisplayMessage } from "@t3tools/client-runtime/errors";
+import { browserThreadLinkTarget } from "@t3tools/shared/threadLinks";
+import { appAtomRegistry } from "../../state/atom-registry";
+import { environmentThreadShells } from "../../state/threads";
+import { useOpenLinkedThread } from "../threads/useOpenLinkedThread";
 import { Button } from "../../components/ui/Button";
 import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import * as Dialog from "../../components/ui/Dialog";
@@ -56,6 +60,7 @@ type NativeStreamBridge = {
   /** Asks for fresh access after a refusal, once `delayMs` has passed. */
   readonly onRefused: (delayMs: number) => void;
   readonly onGone?: () => void;
+  readonly onThreadLink?: (href: string) => void;
   readonly onViewport?: (viewport: { readonly width: number; readonly height: number }) => void;
   readonly onControl?: (control: PreviewStreamControl | null) => void;
   readonly onPictureInPicture?: (state: PreviewPictureInPictureState, detail?: string) => void;
@@ -121,6 +126,15 @@ export function PreviewStreamWebView(
       readonly paused?: boolean;
     },
 ) {
+  const openLinkedThread = useOpenLinkedThread();
+  const openThreadLink = (href: string) => {
+    const target = browserThreadLinkTarget(
+      href,
+      props.environmentId,
+      appAtomRegistry.get(environmentThreadShells.threadRefsAtom),
+    );
+    if (target) openLinkedThread(target);
+  };
   const { access, error, refresh, retryAfter } = usePreviewStreamAccess(props.environmentId);
   const gt = useGT();
   if (access && !props.paused) {
@@ -128,6 +142,7 @@ export function PreviewStreamWebView(
       <AuthorizedPreviewStream
         {...props}
         access={access}
+        onThreadLink={openThreadLink}
         onUnauthorized={refresh}
         onRefused={retryAfter}
       />
@@ -229,6 +244,7 @@ function PreviewStreamDocumentView({
   pdfUri,
   onUnauthorized,
   onGone,
+  onThreadLink,
   onViewport,
   onControl,
   onPictureInPicture,
@@ -347,11 +363,22 @@ function PreviewStreamDocumentView({
           </AppText>
           {control?.canOperate ? (
             <Button
-              label={control.controller === "you" ? gt("Release control") : gt("Take control")}
+              label={
+                control.controller === "you"
+                  ? gt("Release control")
+                  : control.controller === "taking-control"
+                    ? gt("Cancel")
+                    : gt("Take control")
+              }
               tone="secondary"
               disabled={control.controller === "another-viewer"}
               onPress={() =>
-                command({ type: control.controller === "you" ? "releaseControl" : "takeControl" })
+                command({
+                  type:
+                    control.controller === "you" || control.controller === "taking-control"
+                      ? "releaseControl"
+                      : "takeControl",
+                })
               }
             />
           ) : null}
@@ -407,6 +434,9 @@ function PreviewStreamDocumentView({
               case "hostSetup":
                 setHostSetup({ need: message.need, command: message.command });
                 fail(previewStreamHostSetupMessage(message, m));
+                return;
+              case "threadLink":
+                onThreadLink?.(message.href);
                 return;
               case "viewport":
                 onViewport?.(message);
@@ -467,7 +497,7 @@ function PreviewStreamDocumentView({
       {!compact && control?.dialog ? (
         <View className="absolute inset-x-3 top-16 gap-3 rounded-xl border border-secondary-border bg-secondary p-4">
           <AppText className="text-sm text-secondary-foreground">{control.dialog.message}</AppText>
-          {control.controller === "you" ? (
+          {control.controller === "you" || control.controller === "taking-control" ? (
             <>
               {control.dialog.type === "prompt" ? (
                 <TextInput

@@ -63,6 +63,23 @@ describe("check:changed", () => {
     assert.deepStrictEqual(crossFileTests(["packages/shared/src/String.ts"]), []);
   });
 
+  it("checks real orchestration intake when reference authority or projection changes", () => {
+    const expected = [
+      "apps/server/src/orchestration-v2/runtimeLayer.test.ts",
+      "apps/server/src/mcp/ThreadCommunication.delegate-completion.lastcode.test.ts",
+    ];
+    for (const file of [
+      "apps/server/src/threadReadAuthority/Admission.ts",
+      "apps/server/src/threadReadAuthority/Store.ts",
+      "apps/server/src/orchestration-v2/EventSink.ts",
+      "apps/server/src/orchestration-v2/ThreadMessageIntake.ts",
+      "packages/shared/src/composerContextReferences.ts",
+    ]) {
+      assert.deepStrictEqual(crossFileTests([file]), expected);
+    }
+    assert.deepStrictEqual(crossFileTests(["apps/server/src/project/ProjectService.ts"]), []);
+  });
+
   it.effect(
     "keeps weighted steps within the budget, in order, and serial steps one at a time",
     () =>

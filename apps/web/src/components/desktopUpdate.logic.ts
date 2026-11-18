@@ -1,6 +1,7 @@
 import type {
   DesktopLocalBuildFailure,
   DesktopUpdateActionResult,
+  DesktopUpdateReleaseNote,
   DesktopUpdateState,
 } from "@t3tools/contracts";
 import { msg } from "gt-react";
@@ -119,6 +120,22 @@ export function getDesktopUpdateReleaseUrl(
   return `${desktopReleaseRepositoryUrl(repository)}/tag/v${encodeURIComponent(normalizedVersion)}`;
 }
 
+/** Links a group to the release that published it, not to a guess from its version. */
+export function getDesktopUpdateReleaseNoteUrl(
+  releaseNote: Pick<DesktopUpdateReleaseNote, "version" | "release">,
+  repository: string | undefined = import.meta.env.T3CODE_DESKTOP_UPDATE_REPOSITORY,
+): string | null {
+  const release = releaseNote.release;
+  if (release && "upstream" in release) {
+    return getDesktopUpdateReleaseUrl(releaseNote.version, DEFAULT_DESKTOP_RELEASE_REPOSITORY);
+  }
+  if (release?.tag.trim()) {
+    const tag = release.tag.trim().split("/").map(encodeURIComponent).join("/");
+    return `${desktopReleaseRepositoryUrl(repository)}/tag/${tag}`;
+  }
+  return getDesktopUpdateReleaseUrl(releaseNote.version, repository);
+}
+
 export function getDesktopUpdateReleaseHistoryUrl(
   repository: string | undefined = import.meta.env.T3CODE_DESKTOP_UPDATE_REPOSITORY,
 ): string {
@@ -209,7 +226,9 @@ export function getDesktopUpdateButtonTooltip(
         ? msg("Local build failed for {version}. Click to retry.", {
             version: state.availableVersion,
           })
-        : msg("Download failed for {version}. Click to retry.", { version: state.availableVersion }),
+        : msg("Download failed for {version}. Click to retry.", {
+            version: state.availableVersion,
+          }),
     );
   }
   if (state.status === "available") {
@@ -272,6 +291,68 @@ export function getDesktopUpdateButtonTooltip(
   return resolve(msg("Up to date"));
 }
 
+/** Local nightlies read by checkpoint number (`4301`, or `3814.1` for a revision). */
+function formatDesktopUpdateShortVersion(state: DesktopUpdateState, version: string): string {
+  if (state.source !== "lastcode-local") return version;
+  return /-nightly\.\d{8}\.(\d+(?:\.\d+)?)$/u.exec(version)?.[1] ?? version;
+}
+
+export interface DesktopUpdatePopoverHeader {
+  readonly title: string;
+  readonly readiness: string;
+  readonly targetVersion: string;
+}
+
+/** Names the app's target and what clicking does, in every state that offers one. */
+export function getDesktopUpdatePopoverHeader(
+  state: DesktopUpdateState,
+  appName: string,
+): DesktopUpdatePopoverHeader | null {
+  const targetVersion = getDesktopUpdateDownloadedVersion(state);
+  if (!targetVersion) return null;
+  const action = resolveDesktopUpdateButtonAction(state);
+  if (action === "none" && state.status !== "downloading") return null;
+  const isLocal = state.source === "lastcode-local";
+  // Failed installs stay "downloaded" and failed downloads stay "available"; errorContext marks them.
+  const readiness = (() => {
+    if (state.status === "downloading") {
+      if (isLocal && state.localBuildProgress) {
+        const { phase, percent } = state.localBuildProgress;
+        return m(msg("{phase} · {percent}% est.", { phase, percent }));
+      }
+      if (typeof state.downloadPercent !== "number") {
+        return isLocal ? m(msg("Building")) : m(msg("Downloading"));
+      }
+      const percent = Math.floor(state.downloadPercent);
+      return isLocal
+        ? m(msg("Building · {percent}%", { percent }))
+        : m(msg("Downloading · {percent}%", { percent }));
+    }
+    if (action === "install" && state.errorContext === "install") {
+      return m(msg("Install failed · click to retry"));
+    }
+    if (action === "download" && state.errorContext === "download") {
+      return isLocal
+        ? m(msg("Build failed · click to retry"))
+        : m(msg("Download failed · click to retry"));
+    }
+    if (state.notAppliedVersion === targetVersion) {
+      return m(msg("Did not apply last time · click to retry"));
+    }
+    if (action === "download") {
+      return isLocal ? m(msg("Ready to build")) : m(msg("Ready to download"));
+    }
+    return isLocal
+      ? m(msg("Built and ready to install · restart required"))
+      : m(msg("Downloaded and ready to install · restart required"));
+  })();
+  return {
+    title: `${appName} ${formatDesktopUpdateShortVersion(state, state.currentVersion)} → ${formatDesktopUpdateShortVersion(state, targetVersion)}`,
+    readiness,
+    targetVersion,
+  };
+}
+
 export function getDesktopUpdateInstallConfirmationMessage(
   state: Pick<DesktopUpdateState, "availableVersion" | "downloadedVersion"> &
     Partial<Pick<DesktopUpdateState, "source">>,
@@ -314,6 +395,31 @@ export function getDesktopUpdateActionError(result: DesktopUpdateActionResult): 
   return result.state.source === "lastcode-local" && result.state.localBuildFailure
     ? formatLocalBuildFailureError(message)
     : message;
+}
+
+/** Why a confirmed install was refused: a different build replaced it, or it could not start yet. */
+export function getDesktopUpdateInstallRefusal(
+  result: DesktopUpdateActionResult,
+  confirmedVersion: string | undefined,
+): string | null {
+  if (result.accepted || confirmedVersion === undefined) return null;
+  const current = result.state.downloadedVersion ?? result.state.availableVersion;
+  if (current === confirmedVersion) {
+    return m(
+      msg(
+        "{confirmedVersion} could not start installing yet, for example while an update check finishes. Try again in a moment.",
+        { confirmedVersion },
+      ),
+    );
+  }
+  return current
+    ? m(
+        msg("{confirmedVersion} was replaced by {current}. Review it and try again.", {
+          confirmedVersion,
+          current,
+        }),
+      )
+    : m(msg("{confirmedVersion} is no longer ready to install.", { confirmedVersion }));
 }
 
 export function shouldToastDesktopUpdateActionResult(result: DesktopUpdateActionResult): boolean {

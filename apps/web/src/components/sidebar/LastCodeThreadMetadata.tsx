@@ -1,3 +1,4 @@
+import { useGT, useMessages } from "gt-react";
 import type { CSSProperties, ReactNode } from "react";
 import type { EnvironmentIconColor } from "@t3tools/contracts/settings";
 import type { SidebarThreadSummary } from "../../types";
@@ -30,6 +31,7 @@ export function LastCodeThreadMetadataEnvironment({
   providerEntry: ProviderInstanceEntry | null;
   preferences: SidebarProviderBadgePreferences;
 }) {
+  const gt = useGT();
   return (
     <span
       className="inline-flex h-3 w-full items-center justify-center"
@@ -41,7 +43,7 @@ export function LastCodeThreadMetadataEnvironment({
             render={
               <span
                 aria-label={[
-                  label ?? "Remote",
+                  label ?? gt("Remote", { $context: "environment location" }),
                   preferences.enabled ? providerEntry?.displayName : null,
                 ]
                   .filter(Boolean)
@@ -83,6 +85,7 @@ function TimestampContent({
   highlighted: boolean;
   annotated: boolean;
 }) {
+  const messages = useMessages();
   if (jumpLabel)
     return (
       <span className="inline-flex h-5 items-center rounded-full border border-dotted border-warning bg-warning/10 px-1.5 font-mono text-3xs font-medium tracking-tight text-warning-foreground shadow-sm">
@@ -94,7 +97,11 @@ function TimestampContent({
       className={`${annotated ? "border-b border-dotted border-warning " : ""}text-3xs tabular-nums ${highlighted ? "text-foreground" : "text-secondary-label"}`}
       data-lastcode-sidebar-unscaled-content
     >
-      {formatRelativeTimeLabel(thread.latestUserMessageAt ?? thread.updatedAt ?? thread.createdAt)}
+      {formatRelativeTimeLabel(
+        thread.latestUserMessageAt ?? thread.updatedAt ?? thread.createdAt,
+        undefined,
+        messages,
+      )}
     </span>
   );
 }
@@ -109,14 +116,18 @@ function Timestamp({
   highlighted: boolean;
   annotationHandle: AnnotationHandle;
 }) {
+  const gt = useGT();
   const annotated = thread.annotation?.resolvedAt === null;
   if (annotated)
     return (
       <PopoverTrigger
         aria-label={
           jumpLabel
-            ? `${jumpLabel}; show annotation for ${thread.title}`
-            : `Show annotation for ${thread.title}`
+            ? gt("{shortcut}; show annotation for {title}", {
+                shortcut: jumpLabel,
+                title: thread.title,
+              })
+            : gt("Show annotation for {title}", { title: thread.title })
         }
         handle={annotationHandle}
         onPointerDown={(event) => event.stopPropagation()}

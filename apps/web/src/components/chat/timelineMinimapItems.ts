@@ -9,13 +9,20 @@ import remarkGfm from "remark-gfm";
 import remarkParse from "remark-parse";
 import { unified } from "unified";
 
+import type { MessageId } from "@t3tools/contracts";
+import { resolveIncomingMessagePreview } from "@t3tools/client-runtime/user-message";
 import type { MessagesTimelineRow } from "./MessagesTimeline.logic";
 
 export interface TimelineMinimapItem {
   readonly id: string;
+  readonly messageId: MessageId;
   readonly rowIndex: number;
   readonly userText: string | null;
   readonly assistantText: string | null;
+  readonly isIncoming: boolean;
+  readonly summaryPending: boolean;
+  readonly isSummary: boolean;
+  readonly isShortOriginal: boolean;
 }
 
 export function deriveTimelineMinimapItems(
@@ -28,14 +35,28 @@ export function deriveTimelineMinimapItems(
       continue;
     }
 
+    const incoming = resolveIncomingMessagePreview(row.message);
     items.push({
       id: row.id,
+      messageId: row.message.id,
       rowIndex: index,
-      userText: isAttachmentOnlyBootstrapPrompt(row.message.text) ? "" : row.message.text,
+      userText: isAttachmentOnlyBootstrapPrompt(row.message.text)
+        ? ""
+        : incoming.isIncoming
+          ? incoming.previewText
+          : row.message.text,
       assistantText: resolveFinalAssistantTextForTurn(rows, index),
+      isIncoming: incoming.isIncoming,
+      summaryPending: incoming.pending,
+      isSummary: incoming.isSummary,
+      isShortOriginal: incoming.isIncoming && !incoming.canExpand,
     });
   }
   return items;
+}
+
+export function timelineMinimapPreviewUsesFullText(item: TimelineMinimapItem): boolean {
+  return item.isIncoming && !item.summaryPending && (item.isSummary || item.isShortOriginal);
 }
 
 function resolveFinalAssistantTextForTurn(
@@ -114,14 +135,17 @@ export function resolveTimelineMinimapPreview(
     ? null
     : {
         ...item,
-        // Before markdown parsing, which would reduce a citation link to "Assistant quote".
-        userText: markdownMinimapPreview(
-          item.userText === null
-            ? null
-            : assistantCitationsToPlainText(
-                replaceComposerContextReferences(item.userText, (reference) => reference.label),
-              ),
-        ),
+        // Incoming previews are already display text. Expand authored citations before parsing
+        // their Markdown, which would otherwise reduce them to "Assistant quote".
+        userText: item.isIncoming
+          ? item.userText
+          : markdownMinimapPreview(
+              item.userText === null
+                ? null
+                : assistantCitationsToPlainText(
+                    replaceComposerContextReferences(item.userText, (reference) => reference.label),
+                  ),
+            ),
         assistantText: markdownMinimapPreview(item.assistantText),
       };
 }

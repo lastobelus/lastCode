@@ -5,7 +5,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Layer from "effect/Layer";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { FetchHttpClient } from "effect/http";
+import { FetchHttpClient, HttpClient } from "effect/http";
 import { assert, expect, it } from "@effect/vitest";
 import {
   ComposerContextId,
@@ -35,6 +35,7 @@ import {
   namedPathsLine,
   shellRequest,
   shellResponsesRequest,
+  simulate,
   summarize,
   t3Default,
   t3SystemAppend,
@@ -274,6 +275,24 @@ it("accepts any tool listed as an alternative", () => {
     stopReason: "end_turn",
   };
   assert.lengthOf(failed(browserCase("br-guard-browser-access-off").expect, offTwice), 1);
+});
+
+it("orders and counts matching gate calls without rejecting instruction reads", () => {
+  const expect = {
+    order: ["watch_pull_request", { tool: "Bash", args: { command: "~lastcode:pr-gates" } }],
+    callCounts: [{ tool: "Bash", args: { command: "~lastcode:pr-gates" }, count: 1 }],
+  };
+  const read = { tool: "Bash", input: { command: "cat AGENTS.md package.json" } };
+  const watch = { tool: "watch_pull_request", input: {} };
+  const gate = { tool: "Bash", input: { command: "pnpm lastcode:pr-gates" } };
+  const run = (...calls: Array<{ tool: string; input: Record<string, unknown> }>): SampleRun => ({
+    calls: calls.map((call, step) => ({ step, ...call })),
+    text: "",
+    stopReason: "end_turn",
+  });
+  assert.deepEqual(failed(expect, run(read, watch, gate)), []);
+  assert.isNotEmpty(failed(expect, run(read, gate, watch)));
+  assert.isNotEmpty(failed(expect, run(read, watch, gate, gate)));
 });
 
 it("counts the new threads an agent asks for, one brief per thread, over both creation tools", () => {
@@ -776,6 +795,16 @@ it("rebuilds the template from this checkout and sends a child T3's task prompt"
     child.t3.map((tool) => tool.name),
     "mcp__t3-code__unwatch_pull_request",
   );
+  const owner = buildBase(template, {
+    model: "claude-sonnet-5-5",
+    keepUserInstructions: false,
+    subagent: true,
+    ownedPullRequestWatch: true,
+  });
+  assert.includeMembers(
+    owner.t3.map((tool) => tool.name),
+    ["mcp__t3-code__watch_pull_request", "mcp__t3-code__unwatch_pull_request"],
+  );
   const reminders = buildMessages(makeSample(childCase, base))[0]?.content.map((b) => b.text);
   assert.equal(reminders?.[0], "<system-reminder>\n# currentDate\n</system-reminder>");
   assert.include(reminders?.[1], "Current branch: fix/date-format");
@@ -827,6 +856,97 @@ it("lists link tools only while a case turns the beta on, and sends chips as T3 
   );
   assert.include(prompt?.text, "environmentId: environment-vps");
 });
+
+it.effect("simulates watch admission only for a verified owning child fixture", () =>
+  Effect.gen(function* () {
+    const config = {
+      apiKey: "",
+      model: "claude-sonnet-5-5",
+      effort: "high",
+      maxSteps: 1,
+      shellModel: "claude-haiku-5-5",
+    } as const;
+    for (const ownedPullRequestWatch of [false, true]) {
+      const base = buildBase(template, {
+        model: "claude-sonnet-5-5",
+        keepUserInstructions: false,
+        subagent: true,
+        ownedPullRequestWatch,
+      });
+      const sample = makeSample(
+        { ...childCase, setup: { ...childCase.setup, ownedPullRequestWatch } },
+        base,
+      );
+      sample.tools.push({ name: "mcp__t3-code__watch_pull_request" });
+      const result = yield* answerToolCall(sample, config, {
+        type: "tool_use",
+        id: "watch",
+        name: "mcp__t3-code__watch_pull_request",
+        input: { url: "https://github.com/acme/app/pull/123" },
+      });
+      assert.equal(result.is_error === true, !ownedPullRequestWatch);
+      if (ownedPullRequestWatch) {
+        assert.equal(JSON.parse(String(result.content)).watching, true);
+      }
+    }
+  }).pipe(Effect.provide(FetchHttpClient.layer)),
+);
+
+it.effect.each([
+  ["MENTION-THREAD-01", 80],
+  ["MENTION-THREAD-02", 64],
+] as const)("returns distinct page and item replies for %s", ([id, textOffset]) =>
+  Effect.gen(function* () {
+    const testCase = NodeFS.readFileSync(
+      new URL("./cases/universal-thread-mentions.ndjson", import.meta.url),
+      "utf8",
+    )
+      .trim()
+      .split("\n")
+      .map((line) => decodeMcpToolUseCase(JSON.parse(line)))
+      .find((testCase) => testCase.id === id)!;
+    const base = buildBase(template, { model: "claude-sonnet-5-5", keepUserInstructions: false });
+    const sample = makeSample(testCase, base);
+    sample.tools.push(...base.t3);
+    const config = {
+      apiKey: "",
+      model: "claude-sonnet-5-5",
+      effort: "high",
+      maxSteps: 1,
+      shellModel: "claude-haiku-5-5",
+    } as const;
+    const read = (input: Record<string, unknown>) =>
+      answerToolCall(sample, config, {
+        type: "tool_use",
+        id: "read",
+        name: "mcp__t3-code__t3_thread_read",
+        input: {
+          environmentId: "environment-remote-01",
+          threadId: "thread-review-api",
+          via: "client",
+          limit: 20,
+          ...input,
+        },
+      }).pipe(
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make(() => Effect.die("Fixture replies must not call a model")),
+        ),
+        Effect.map((result) => JSON.parse(String(result.content))),
+      );
+    const page = yield* read({ afterPosition: 12 });
+    const chunk = yield* read({ itemId: "item-review-11", textOffset });
+    assert.equal(page.items[0].itemId, "item-review-13");
+    assert.equal(chunk.items[0].itemId, "item-review-11");
+    assert.include(chunk.items[0].text, "retry race");
+    for (const result of [page, chunk]) {
+      assert.equal(result.thread.environmentId, "environment-remote-01");
+      assert.include(result.thread.link, "/environment-remote-01/");
+      assert.equal(result.readVia, "client");
+      assert.isFalse(result.hasMore);
+    }
+  }),
+);
 
 it("replays earlier capability results with the model under test as the caller", () => {
   const base = buildBase(template, { model: "claude-opus-5-5", keepUserInstructions: false });
@@ -939,41 +1059,113 @@ it("does not record a deferred tool called before it was loaded", () => {
   );
 });
 
-it("answers simple mocked commands itself and gives the simulator the sample's history", () => {
-  const sample = makeSample(
-    childCase,
-    buildBase(template, { model: "claude-sonnet-5-5", keepUserInstructions: false }),
-  );
-  assert.equal(mockOutput(sample, "gh pr create --fill"), "https://github.com/acme/app/pull/124");
-  assert.isUndefined(mockOutput(sample, "git push && gh pr create --fill"));
-  assert.isUndefined(mockOutput(sample, "git status"));
-  // Probes and installs come before the bare missing-CLI mock, which would shadow them.
-  const missing = makeSample(browserCase("br-look-on-web-missing-cli"), sample.base);
-  assert.equal(mockOutput(missing, "command -v agent-browser"), "Exit code 1");
-  assert.equal(mockOutput(missing, "which agent-browser"), "Exit code 1\nagent-browser not found");
-  for (const install of [
-    "npx -y agent-browser open http://localhost:3000",
-    "npm i -g agent-browser",
-  ])
-    assert.match(mockOutput(missing, install) ?? "", /^Exit code 1\nnpm error code ENOTFOUND/);
-  assert.equal(
-    mockOutput(missing, "agent-browser open http://localhost:3000"),
-    "Exit code 127\nzsh: command not found: agent-browser",
-  );
-  assert.isUndefined(mockOutput(missing, "command -v agent-browser || echo missing"));
+it.effect(
+  "answers simple mocked commands itself and gives the simulator the sample's history",
+  () =>
+    Effect.gen(function* () {
+      const sample = makeSample(
+        childCase,
+        buildBase(template, { model: "claude-sonnet-5-5", keepUserInstructions: false }),
+      );
+      assert.equal(
+        mockOutput(sample, "gh pr create --fill"),
+        "https://github.com/acme/app/pull/124",
+      );
+      assert.isUndefined(mockOutput(sample, "git push && gh pr create --fill"));
+      assert.isUndefined(mockOutput(sample, "git status"));
 
-  const call = { tool: "Bash", input: { command: "git push && gh pr create --fill" } };
-  const [machine, history] =
-    shellRequest(sample, call, "claude-haiku-5-5").messages[0]?.content ?? [];
-  assert.include(machine?.text, "Working directory: /home/user/app");
-  assert.include(machine?.text, '"src/date.ts":"export const format = 1;\\n"');
-  assert.include(machine?.text, "^gh pr create");
-  assert.include(machine?.text, childCase.prompt);
-  assert.equal(
-    history?.text,
-    '<call>Bash {"command":"git push"}</call>\n<output>\npushed\n</output>\n\nNew call:\n<call>Bash {"command":"git push && gh pr create --fill"}</call>',
-  );
-});
+      // Probes and installs come before the bare missing-CLI mock, which would shadow them.
+      const missing = makeSample(browserCase("br-look-on-web-missing-cli"), sample.base);
+      assert.equal(mockOutput(missing, "command -v agent-browser"), "Exit code 1");
+      assert.equal(
+        mockOutput(missing, "which agent-browser"),
+        "Exit code 1\nagent-browser not found",
+      );
+      for (const install of [
+        "npx -y agent-browser open http://localhost:3000",
+        "npm i -g agent-browser",
+      ])
+        assert.match(mockOutput(missing, install) ?? "", /^Exit code 1\nnpm error code ENOTFOUND/);
+      assert.equal(
+        mockOutput(missing, "agent-browser open http://localhost:3000"),
+        "Exit code 127\nzsh: command not found: agent-browser",
+      );
+      assert.isUndefined(mockOutput(missing, "command -v agent-browser || echo missing"));
+
+      const call = { tool: "Bash", input: { command: "git push && gh pr create --fill" } };
+      const [machine, history] =
+        shellRequest(sample, call, "claude-haiku-5-5").messages[0]?.content ?? [];
+      assert.include(machine?.text, "Working directory: /home/user/app");
+      assert.include(machine?.text, '"src/date.ts":"export const format = 1;\\n"');
+      assert.include(machine?.text, "^gh pr create");
+      assert.include(machine?.text, childCase.prompt);
+      assert.equal(
+        history?.text,
+        '<call>Bash {"command":"git push"}</call>\n<output>\npushed\n</output>\n\nNew call:\n<call>Bash {"command":"git push && gh pr create --fill"}</call>',
+      );
+      const whole = makeSample(
+        decodeMcpToolUseCase({
+          ...childCase,
+          setup: {
+            ...childCase.setup,
+            shellMocks: [
+              {
+                match: "git push && gh pr create --fill",
+                wholeCommand: true,
+                output: "https://github.com/acme/app/pull/124",
+              },
+            ],
+          },
+        }),
+        sample.base,
+      );
+      assert.equal(mockOutput(whole, call.input.command), "https://github.com/acme/app/pull/124");
+      assert.isUndefined(mockOutput(whole, `${call.input.command}; git status`));
+      assert.isUndefined(mockOutput(whole, `false && ${call.input.command}`));
+      const config = {
+        apiKey: "",
+        model: "gpt-6.1-sol",
+        effort: "medium",
+        maxSteps: 1,
+        shellModel: "gpt-6-luna",
+      } as const;
+      const offline = Effect.provideService(
+        HttpClient.HttpClient,
+        HttpClient.make(() => Effect.die("Mocked commands must not call a model")),
+      );
+      const output = yield* simulate(whole, config, call).pipe(offline);
+      assert.deepEqual(whole.shell.at(-1), { ...call, output });
+      assert.deepEqual([...whole.linked], ["https://github.com/acme/app/pull/124"]);
+      assert.include(
+        shellRequest(whole, { tool: "Bash", input: { command: "git status" } }, config.shellModel)
+          .messages[0]?.content[1]?.text,
+        `<call>Bash ${JSON.stringify(call.input)}</call>\n<output>\n${output}\n</output>`,
+      );
+      assert.equal(whole.shellUsage.input, 0);
+      const readOnly = makeSample(
+        {
+          ...childCase,
+          setup: {
+            shellMocks: [
+              {
+                match: "git status; gh pr view 125 --json url",
+                wholeCommand: true,
+                output: "https://github.com/acme/app/pull/125",
+              },
+            ],
+            role: "top",
+          },
+        },
+        sample.base,
+      );
+      yield* simulate(readOnly, config, {
+        tool: "Bash",
+        input: { command: "git status; gh pr view 125 --json url" },
+      }).pipe(offline);
+      assert.equal(readOnly.shell.length, 1);
+      assert.deepEqual([...readOnly.linked], []);
+    }),
+);
 
 it("tells the simulator that paths the case names exist, whatever the template's cwd", () => {
   const testCase = McpToolUseCase.make({
@@ -1230,6 +1422,35 @@ it.effect("fails preview calls with T3's errors when browser access is off or a 
   }).pipe(Effect.provide(FetchHttpClient.layer)),
 );
 
+const decodeMcpToolUseCase = Schema.decodeUnknownSync(McpToolUseCase);
+it.each([
+  ["quiet-watch-stalled-review-handback", "The review is STALLED."],
+  ["quiet-watch-pending-gates-handback", "CI is STILL PENDING."],
+])("grades the authored quiet-deadline handback: %s", (id, text) => {
+  const testCase = NodeFS.readFileSync(
+    new URL("./cases/pull-requests.ndjson", import.meta.url),
+    "utf8",
+  )
+    .trim()
+    .split("\n")
+    .map((line) => decodeMcpToolUseCase(JSON.parse(line)))
+    .find((testCase) => testCase.id === id)!;
+  const run: SampleRun = {
+    calls: [
+      {
+        step: 0,
+        tool: "unwatch_pull_request",
+        input: { url: "https://github.com/acme/app/pull/123" },
+      },
+    ],
+    text,
+    finalText: text,
+    stopReason: "end_turn",
+  };
+  assert.deepEqual(failed(testCase.expect, run), []);
+  assert.isNotEmpty(failed(testCase.expect, { ...run, text: "All work is complete." }));
+});
+
 const deviceCases = () =>
   NodeFS.readFileSync(new URL("./cases/device-manager.ndjson", import.meta.url), "utf8")
     .trim()
@@ -1239,7 +1460,7 @@ const deviceCases = () =>
 it.effect("builds device cases from product-backed worlds and synthetic prior turns", () =>
   Effect.gen(function* () {
     const cases = deviceCases();
-    assert.equal(new Set(cases.map((c) => c.id)).size, 16);
+    assert.equal(new Set(cases.map((c) => c.id)).size, 18);
     const base = buildBase(
       {
         ...template,

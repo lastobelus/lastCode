@@ -1,3 +1,4 @@
+import { T, useGT, useMessages } from "gt-react";
 import { MessageSquareLockIcon } from "lucide-react";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { actionRunningPresentation } from "@t3tools/shared/actionResume";
@@ -35,6 +36,7 @@ function WaitingAction({
   thread: SidebarThreadSummary;
   threadStatus: ThreadStatusPill | null;
 }) {
+  const gt = useGT();
   return (
     <>
       {thread.actionResume?.outcome === "running" &&
@@ -44,7 +46,10 @@ function WaitingAction({
           <TooltipTrigger
             render={
               <span
-                aria-label={`Waiting for ${thread.actionResume.actionName}. ${actionRunningPresentation(thread.actionResume).summary}`}
+                aria-label={gt("Waiting for {action}. {summary}", {
+                  action: thread.actionResume.actionName,
+                  summary: actionRunningPresentation(thread.actionResume).summary,
+                })}
                 className="inline-flex size-3.5 shrink-0 items-center justify-center text-warning-foreground"
               />
             }
@@ -70,14 +75,16 @@ function SubagentOutcome({
   label: string;
   leadingLabel: string | undefined;
 }) {
+  const messages = useMessages();
   if (label === leadingLabel) return null;
+  const displayLabel = messages(label);
   return (
     <Tooltip>
       <TooltipTrigger
         render={
           <span
             role="img"
-            aria-label={label}
+            aria-label={displayLabel}
             className="inline-flex shrink-0 items-center text-3xs text-sidebar-muted-foreground"
             style={{
               minWidth: "calc(14px * var(--lastcode-sidebar-content-zoom))",
@@ -90,11 +97,11 @@ function SubagentOutcome({
           data-lastcode-sidebar-unscaled-content
           className="inline-flex size-3.5 items-center justify-center @sm/lastcode-sidebar:hidden"
         >
-          {label.slice(0, 1)}
+          {displayLabel.slice(0, 1)}
         </span>
-        <span className="hidden min-w-0 truncate @sm/lastcode-sidebar:inline">{label}</span>
+        <span className="hidden min-w-0 truncate @sm/lastcode-sidebar:inline">{displayLabel}</span>
       </TooltipTrigger>
-      <TooltipPopup side="top">{label}</TooltipPopup>
+      <TooltipPopup side="top">{displayLabel}</TooltipPopup>
     </Tooltip>
   );
 }
@@ -109,6 +116,7 @@ function TitleText({
 }) {
   const thread = family.thread;
   const subagentLabel = presentation.subagentLabel;
+  const gt = useGT();
   const subagentStatus = lastcodeSidebarSubagentStatusLabel(thread, threadStatus);
   return (
     <>
@@ -133,7 +141,9 @@ function TitleText({
                 <TooltipTrigger
                   render={
                     <span
-                      aria-label="Protected"
+                      aria-label={gt("Protected", {
+                        $context: "thread protected from archive and deletion",
+                      })}
                       className="shrink-0 text-3xs text-sidebar-muted-foreground"
                     />
                   }
@@ -143,10 +153,12 @@ function TitleText({
                     className="size-3 @sm/lastcode-sidebar:hidden"
                   />
                   <span aria-hidden className="hidden @sm/lastcode-sidebar:inline">
-                    Protected
+                    <T>Protected</T>
                   </span>
                 </TooltipTrigger>
-                <TooltipPopup side="top">Protected from archive and deletion</TooltipPopup>
+                <TooltipPopup side="top">
+                  <T>Protected from archive and deletion</T>
+                </TooltipPopup>
               </Tooltip>
             ) : null}
             <LastCodeThreadRelationshipBadge presentation={presentation} />

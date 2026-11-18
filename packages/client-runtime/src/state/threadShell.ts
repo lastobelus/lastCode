@@ -17,6 +17,7 @@ import * as Schema from "effect/Schema";
 import { Atom } from "effect/reactivity";
 
 import type { EnvironmentThreadShell, PendingSubagentRequest } from "./models.ts";
+import { getArchiveRecoveryRows } from "./threadArchive.ts";
 import {
   presentThreadShell,
   threadRuntimeIsActive,
@@ -73,7 +74,11 @@ export function isShownUnderParent(
   lineage: OrchestrationV2ThreadShell["lineage"],
   delegatedUnderParent: ReadonlySet<string>,
 ): boolean {
-  return !isListedThreadLineage(lineage) || delegatedUnderParent.has(threadKey(ref));
+  return (
+    lineage.sideChat === true ||
+    (lineage.independent !== true && !isListedThreadLineage(lineage)) ||
+    delegatedUnderParent.has(threadKey(ref))
+  );
 }
 
 // Subagents, side chats and tasks delegated from a listed parent have no list row,
@@ -767,11 +772,18 @@ export function createEnvironmentThreadShellAtoms(input: {
     const hidden = get(hiddenThreadKeysAtom);
     for (const environmentId of enabledEnvironmentIds(get(input.catalogValueAtom))) {
       const subagentRequests = get(pendingSubagentRequestsAtom(environmentId));
-      for (const thread of get(environmentThreadsAtom(environmentId))) {
+      const environmentThreads = get(environmentThreadsAtom(environmentId));
+      const archiveRecoveryRows = getArchiveRecoveryRows(environmentThreads);
+      for (const thread of environmentThreads) {
         if (
           !threadShellIsVisible(thread) ||
           (!threadShellIsCleanupRecovery(thread) &&
-            isShownUnderParent({ environmentId, threadId: thread.id }, thread.lineage, underParent)) ||
+            !archiveRecoveryRows.has(thread) &&
+            isShownUnderParent(
+              { environmentId, threadId: thread.id },
+              thread.lineage,
+              underParent,
+            )) ||
           hidden.has(threadKey({ environmentId, threadId: thread.id }))
         ) {
           continue;

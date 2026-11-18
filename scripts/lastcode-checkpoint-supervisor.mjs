@@ -512,7 +512,7 @@ export function checkpointFailureMessage(failure, fingerprint, detailsPath) {
     "After replay completes, follow Resuming a repaired checkpoint in docs/lastcode/release.md; run-now does not supersede an active pass.",
     "For an already-started service run, use the resumable Wait for Checkpoint action as described in docs/lastcode/release.md instead of sleep/status loops. It only observes completion and does not start or repair the service.",
     "If an authorized recovery requires a local Apple Silicon build, follow the Resumable local builds section in docs/lastcode/release.md and use Build Local Package (lc-build-local-package), then end the turn instead of polling build logs. A pending prior Action continuation must be delivered before starting another Action.",
-    "If the authorized recovery includes a LastCode PR, read .agents/skills/lastcode-pr/SKILL.md. When CI or review is passive and no current finding needs judgement, call watch_pull_request with the PR URL, then run pnpm lastcode:pr-gates once; if it reports pending, end the turn immediately without polling. On each wake, rerun the check and act on what changed. This reminder does not authorize creating or merging a PR.",
+    "If the authorized recovery includes a LastCode PR, read .agents/skills/lastcode-pr/SKILL.md. When CI or review is passive and no current finding needs judgement, call watch_pull_request with the PR URL, then run pnpm --config.verify-deps-before-run=false lastcode:pr-gates once; if it reports pending, end the turn immediately without polling. On each wake, rerun the check and act on what changed. This reminder does not authorize creating or merging a PR.",
   ]
     .filter(Boolean)
     .join("\n");
@@ -730,6 +730,7 @@ function attemptDelivery(state, config, dependencies) {
       attemptedThreadId: targetThreadId,
       deliveryAttempts: (incident.deliveryAttempts ?? 0) + 1,
       lastDeliveryAttemptAt: dependencies.now(),
+      alertAttemptedAt: dependencies.now(),
     };
     pendingIncidents[pendingIncidentIndex] = updatedIncident;
     nextState = Object.assign({}, nextState, {
@@ -743,6 +744,7 @@ function attemptDelivery(state, config, dependencies) {
       const deliveredIncident = {
         ...updatedIncident,
         alertDelivery: "sent",
+        alertDeliveredAt: dependencies.now(),
         deliveryThreadId: deliveryThreadId(updatedIncident),
         attemptedThreadId: undefined,
       };
@@ -866,6 +868,7 @@ function attemptDelivery(state, config, dependencies) {
     ...(!resolving ? { attemptedThreadId: targetThreadId } : {}),
     deliveryAttempts: (incident.deliveryAttempts ?? 0) + 1,
     lastDeliveryAttemptAt: dependencies.now(),
+    ...(!resolving ? { alertAttemptedAt: dependencies.now() } : {}),
   };
   nextState = { ...nextState, incident: nextIncident };
   dependencies.writeState(nextState);
@@ -877,7 +880,11 @@ function attemptDelivery(state, config, dependencies) {
         ...nextIncident,
         [key]: "sent",
         ...(!resolving
-          ? { deliveryThreadId: deliveryThreadId(nextIncident), attemptedThreadId: undefined }
+          ? {
+              deliveryThreadId: deliveryThreadId(nextIncident),
+              attemptedThreadId: undefined,
+              alertDeliveredAt: dependencies.now(),
+            }
           : {}),
       },
     };
@@ -961,6 +968,17 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
   const environment = checkpointEnvironment(options.environment ?? process.env, home);
   const installedSupervisorPath = NodeURL.fileURLToPath(import.meta.url);
   const dependencies = {
+    collectEpisode: () => {
+      const collector = NodePath.join(repoRoot, "scripts", "lastcode-checkpoint-effort.mjs");
+      if (!NodeFS.existsSync(collector)) return;
+      const result = NodeChildProcess.spawnSync(process.execPath, [collector], {
+        cwd: repoRoot,
+        env: environment,
+        encoding: "utf8",
+        timeout: 30_000,
+      });
+      if (result.error || result.status !== 0) throw new Error("Episode collection unavailable.");
+    },
     latestFailedCheckpointRun: () => latestFailedCheckpointRun(paths.runHistoryPath),
     loadConfig: () => readJson(paths.configPath, "checkpoint supervisor config"),
     loadState: () => readJson(paths.statePath, "checkpoint supervisor state"),
@@ -1026,7 +1044,7 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
       });
     }
   };
-  const finish = (status, phase) =>
+  const finish = (status, phase) => {
     record({
       event: "run-finish",
       startedAt,
@@ -1035,6 +1053,14 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
       status,
       phase,
     });
+    try {
+      dependencies.collectEpisode();
+    } catch {
+      console.error(
+        "[lastcode:checkpoint-supervisor] Episode collection unavailable; checkpoint result unchanged.",
+      );
+    }
+  };
   record({ event: "run-start", startedAt });
   let previous = null;
   let config = null;

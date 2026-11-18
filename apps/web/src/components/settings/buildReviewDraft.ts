@@ -1,4 +1,5 @@
 import type { BuildReviewPreview } from "@t3tools/contracts";
+import { msg } from "gt-react";
 
 export interface BuildReviewDraft {
   readonly preview: BuildReviewPreview | null;
@@ -30,8 +31,9 @@ export function buildReviewDraftReducer(
     if (state.token !== null && state.token !== action.preview.token) {
       return {
         ...EMPTY_BUILD_REVIEW_DRAFT,
-        notice:
+        notice: msg(
           "The build files or cleanup policy changed. Reload this root and select files again.",
+        ),
       };
     }
     return {

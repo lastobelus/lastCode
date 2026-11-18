@@ -206,16 +206,20 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
               environment: activeEnvironmentUnavailableState.label,
             })
           : environmentReconnecting
-            ? gt("{environment} is reconnecting", {
+            ? gt("Reconnecting to {environment}…", {
                 environment: activeEnvironmentUnavailableState.label,
               })
-            : gt("{environment} is offline", {
+            : gt("Can't connect to {environment}", {
                 environment: activeEnvironmentUnavailableState.label,
               }),
-        description: awaitingApproval ? (
-          (unavailableConnection.error ?? undefined)
+        children: awaitingApproval ? (
+          <p className="px-3 pb-3 text-muted-foreground">
+            {unavailableConnection.error ?? undefined}
+          </p>
         ) : activeEnvironment ? (
-          <ConnectionDiagnosisHeadline environment={activeEnvironment} />
+          <p className="px-3 pb-3 text-muted-foreground">
+            <ConnectionDiagnosisHeadline environment={activeEnvironment} showNextStep />
+          </p>
         ) : undefined,
         actions: (
           <>
@@ -232,6 +236,13 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
                 {environmentReconnecting ? gt("Retry now") : gt("Reconnect")}
               </Button>
             ) : null}
+            <Button
+              size="xs"
+              variant="ghost"
+              onClick={() => void navigate({ to: "/settings/connections" })}
+            >
+              <T>Open Environments</T>
+            </Button>
             {disconnectAction}
           </>
         ),

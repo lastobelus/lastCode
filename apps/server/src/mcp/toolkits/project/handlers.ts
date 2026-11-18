@@ -14,7 +14,10 @@ import * as Hex from "effect/encoding/Hex";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { OrchestratorRuntimeModeAboveCeilingError } from "../../../orchestration-v2/Orchestrator.ts";
+import {
+  OrchestratorDispatchError,
+  OrchestratorRuntimeModeAboveCeilingError,
+} from "../../../orchestration-v2/Orchestrator.ts";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageIntake.ts";
 import * as ThreadReadBroker from "../../ThreadReadBroker.ts";
@@ -34,14 +37,30 @@ import {
   resolveProjectSettings,
 } from "@t3tools/shared/projectSettings";
 import { parseT3ProjectFile } from "@t3tools/shared/t3ProjectFile";
-import { resolveRuntimeMode } from "../../delegatedTaskModes.ts";
+import { resolveInteractionMode, resolveRuntimeMode } from "../../delegatedTaskModes.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import { loadMcpCaller } from "../../McpCallerAttribution.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as OrchestrationMcp from "../../OrchestratorMcpService.ts";
+import { requireRemoteDelegationPeer } from "../../linkOrigin.ts";
 import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../threadAccess.ts";
 import { ProjectToolkit } from "./tools.ts";
 
 const isAboveCeilingError = Schema.is(OrchestratorRuntimeModeAboveCeilingError);
+const isDispatchError = Schema.is(OrchestratorDispatchError);
+
+function groupingPlacementFailure(error: unknown): OrchestratorMcpFailure | undefined {
+  while (isDispatchError(error)) {
+    if (error.field === "groupedUnderThreadId") {
+      const detail = typeof error.cause === "string" ? `${error.cause} ` : "";
+      return new OrchestratorMcpFailure({
+        code: "invalid_request",
+        message: `Invalid groupedUnderThreadId. ${detail}Use JSON null (without quotes) for a top-level thread.`,
+      });
+    }
+    error = error.cause;
+  }
+}
 
 function projectFailure(error: Project.ProjectServiceError) {
   if (error._tag === "ProjectOperationError") return unavailable();
@@ -174,7 +193,21 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
       Effect.gen(function* () {
         const scope = yield* McpInvocationContext.McpInvocationContext;
         const context = yield* readCaller();
+        const peer =
+          input.remotePreparation === undefined
+            ? undefined
+            : yield* requireRemoteDelegationPeer(scope);
+        if (
+          input.remotePreparation !== undefined &&
+          (input.message !== undefined || (input.attachments?.length ?? 0) > 0)
+        ) {
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "Remote preparation cannot start a provider or include an initial message.",
+          });
+        }
         const { caller } = context;
+        yield* McpToolAccess.assertWritableThreads(context, [input.groupedUnderThreadId]);
         // A retry with the same key replays the first launch: the ids derive
         // from the caller and the key, and the launch service replays a
         // command it already accepted.
@@ -182,6 +215,39 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           input.clientRequestId === undefined
             ? yield* newCommandId()
             : yield* launchCommandId(scope.requestNamespace, input.clientRequestId);
+        const delegation =
+          input.remotePreparation === undefined
+            ? undefined
+            : {
+                parentEnvironmentId: input.remotePreparation.parentEnvironmentId,
+                parentThreadId: input.remotePreparation.parentThreadId,
+                sourceTaskId: input.remotePreparation.sourceTaskId,
+                delegationId: `delegation:${commandId}`,
+              };
+        if (input.remotePreparation?.existingThreadId !== undefined) {
+          const target = yield* context.threads
+            .getThreadRecords(input.remotePreparation.existingThreadId, [])
+            .pipe(Effect.mapError(unavailable));
+          yield* requireRemoteDelegationPeer(scope, target.thread);
+          yield* resolveRuntimeMode(runtimeMode, target.thread.runtimeMode);
+          yield* resolveInteractionMode(interactionMode, target.thread.interactionMode);
+          yield* context.threads
+            .dispatch({
+              type: "remote_delegation.prepare",
+              commandId,
+              threadId: target.thread.id,
+              association: { ...delegation!, linkSessionId: peer!.sessionId, stage: "prepared" },
+            })
+            .pipe(Effect.mapError(unavailable));
+          return {
+            threadId: target.thread.id,
+            projectId: target.thread.projectId,
+            modelSelection: target.thread.modelSelection,
+            delegation,
+            runId: null,
+            status: null,
+          };
+        }
         const threadId = ThreadId.make(commandId);
         const messageId = MessageId.make(commandId);
         const attachments = input.attachments ?? [];
@@ -199,24 +265,18 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
             message:
               "scratch:true picks its own project and folder; omit projectId and workspaceStrategy.",
           });
-        const readSource = (sourceThreadId: ThreadId) =>
-          context.threads.getThreadRecords(sourceThreadId, ["runs", "contextTransfers"]);
-        const readAuthority = yield* Effect.gen(function* () {
-          if (caller === undefined) return undefined;
-          const broker = yield* Effect.serviceOption(ThreadReadBroker.ThreadReadBroker);
-          if (Option.isNone(broker)) return undefined;
-          const source = yield* readSource(caller.id);
-          const sourceRunId = caller.activeRunId ?? caller.latestRunId;
-          const authority = yield* ThreadReadBroker.resolveAuthority(
-            broker.value,
-            source,
-            source.runs.find((run) => run.id === sourceRunId),
-            readSource,
-          );
-          return authority === undefined
+        // Resolved before preparation, so the launch keeps the requesting run's authority.
+        const broker = yield* Effect.serviceOption(ThreadReadBroker.ThreadReadBroker);
+        const parent =
+          scope.thread === undefined
             ? undefined
-            : { broker: broker.value, sessionId: authority.sessionId };
-        }).pipe(Effect.catch(() => Effect.succeed(undefined)));
+            : yield* loadMcpCaller(scope.thread, context.threads.getThreadRecords).pipe(
+                Effect.mapError(unavailable),
+              );
+        const readAuthorization =
+          parent?.invocationRun === undefined || Option.isNone(broker)
+            ? ThreadReadAuthorization.defaultValue()
+            : yield* broker.value.inherit(parent.thread.id, parent.invocationRun.id);
         const projectId =
           input.scratch === true
             ? (yield* ManagedProjectFolders.ManagedProjectFolders.pipe(
@@ -245,6 +305,17 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
             code: "invalid_request",
             message: "A launch retry must use the original project.",
           });
+        if (!replaying && input.groupedUnderThreadId != null) {
+          const parent = yield* context.threads
+            .getThreadShell(input.groupedUnderThreadId)
+            .pipe(Effect.mapError(unavailable));
+          if (parent === null || parent.deletedAt !== null)
+            return yield* new OrchestratorMcpFailure({
+              code: "invalid_request",
+              message:
+                "groupedUnderThreadId must name an existing thread. Use JSON null (without quotes) for a top-level thread.",
+            });
+        }
         const project =
           replaying && input.workspaceStrategy?.type !== "existing_worktree"
             ? undefined
@@ -347,7 +418,9 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
               "Pass modelSelection: the project has no default model. orchestrator_capabilities lists providers and models.",
           });
         let startedRuntimeMode =
-          projectDefaults !== undefined && input.runtimeMode === undefined
+          projectDefaults !== undefined &&
+          delegation === undefined &&
+          input.runtimeMode === undefined
             ? yield* resolveRuntimeMode(runtimeMode, projectDefaults.defaultRuntimeMode).pipe(
                 Effect.orElseSucceed(() => runtimeMode),
               )
@@ -380,26 +453,29 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                   attachments,
                 },
               }),
+          ...(delegation === undefined
+            ? {}
+            : {
+                remoteDelegation: {
+                  ...delegation,
+                  linkSessionId: peer!.sessionId,
+                  stage: "prepared" as const,
+                },
+              }),
           createdBy: "agent",
           creationSource: "mcp",
           ...(linkOrigin === undefined ? {} : { linkOrigin }),
           // Kept only alongside linkOrigin: thread.create drops it otherwise.
           ...(input.delegatedFrom === undefined ? {} : { delegatedFrom: input.delegatedFrom }),
           ...(caller === undefined ? {} : { creatorThreadId: caller.id }),
+          groupedUnderThreadId:
+            input.groupedUnderThreadId === undefined
+              ? caller?.projectId === projectId && caller.lineage.sideChat !== true
+                ? caller.id
+                : null
+              : input.groupedUnderThreadId,
         }).pipe(
-          Effect.provideService(ThreadReadAuthorization, {
-            authorize: (targetThreadId, targetMessageId) =>
-              Effect.gen(function* () {
-                if (readAuthority === undefined) return;
-                const target = yield* readSource(targetThreadId);
-                yield* readAuthority.broker.authorize({
-                  threadId: targetThreadId,
-                  messageId: targetMessageId,
-                  sessionId: readAuthority.sessionId,
-                  alreadyStored: target.runs.some((run) => run.userMessageId === targetMessageId),
-                });
-              }).pipe(Effect.catch(() => Effect.void)),
-          }),
+          Effect.provideService(ThreadReadAuthorization, readAuthorization),
           Effect.mapError((error) => {
             if (error._tag === "AttachmentClaimError") {
               return new OrchestratorMcpFailure({
@@ -420,6 +496,10 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                 message: error.cause.message,
               });
             }
+            if (error._tag === "ThreadLaunchError") {
+              const placement = groupingPlacementFailure(error.cause);
+              if (placement !== undefined) return placement;
+            }
             return unavailable();
           }),
         );
@@ -428,6 +508,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         return {
           threadId: thread.id,
           link: McpInvocationContext.threadLinkFor(scope, thread.id, thread.title),
+          ...(delegation === undefined ? {} : { delegation }),
           projectId: thread.projectId,
           modelSelection: thread.modelSelection,
           runId: run?.id ?? null,

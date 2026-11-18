@@ -84,7 +84,16 @@ it("offers every upstream presentation, keeps operational labels on circles, and
   await act(() => trigger.focus());
   await userEvent.keyboard("{Enter}");
   await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(15));
-  await userEvent.keyboard("{Home}{Enter}");
+  await vi.waitFor(() =>
+    expect(document.activeElement).toBe(
+      document.querySelector('[role="option"][aria-selected="true"]'),
+    ),
+  );
+  await userEvent.keyboard("{Home}");
+  await vi.waitFor(() =>
+    expect(document.activeElement).toBe(document.querySelector('[role="option"]')),
+  );
+  await userEvent.keyboard("{Enter}");
   await vi.waitFor(() =>
     expect(state.settings.lastcodeStatusIcons).toEqual({
       Working: { shape: "triangle", style: "open" },

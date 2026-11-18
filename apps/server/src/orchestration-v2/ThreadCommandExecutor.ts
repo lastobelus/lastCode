@@ -13,13 +13,20 @@ export class ThreadCommandExecutor extends Context.Service<
      * sources keep for the forks still alive. Take it before any thread lock.
      */
     readonly withDeletionLock: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
+    readonly withPersistenceLock: <A, E, R>(
+      effect: Effect.Effect<A, E, R>,
+    ) => Effect.Effect<A, E, R>;
   }
 >()("t3/orchestration-v2/ThreadCommandExecutor") {}
 
 export const make = Effect.gen(function* () {
   const deletion = yield* Semaphore.make(1);
+  const persistence = yield* Semaphore.make(1);
   return ThreadCommandExecutor.of({
     ...(yield* KeyedLock.make<ThreadId>()),
+    withPersistenceLock: Effect.fn("ThreadCommandExecutor.withPersistenceLock")((effect) =>
+      persistence.withPermit(effect),
+    ),
     withDeletionLock: Effect.fn("ThreadCommandExecutor.withDeletionLock")(function* <A, E, R>(
       effect: Effect.Effect<A, E, R>,
     ) {

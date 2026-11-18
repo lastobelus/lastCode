@@ -2,7 +2,7 @@ import { settlePromise } from "@t3tools/client-runtime/state/runtime";
 import { useNavigate, useParams } from "@tanstack/react-router";
 
 import { type DraftId, useComposerDraftStore } from "../../composerDraftStore";
-import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
+import { namedClipboardTarget, useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { discardComposerDraft } from "../../lib/discardComposerDraft";
 import { readLocalApi } from "../../localApi";
 import { useProjects } from "../../state/entities";
@@ -16,7 +16,7 @@ import { SidebarMenu, useSidebar } from "../ui/sidebar";
 // subscriptions isolate composer updates from the project list.
 export function ProjectSidebarDraftList() {
   const projects = useProjects();
-  const { copyToClipboard } = useCopyToClipboard({ target: "draft details" });
+  const { copyToClipboard } = useCopyToClipboard({ target: namedClipboardTarget("draft details") });
   const navigate = useNavigate();
   const { isMobile, setOpenMobile } = useSidebar();
   const clearSelection = useThreadSelectionStore((s) => s.clearSelection);

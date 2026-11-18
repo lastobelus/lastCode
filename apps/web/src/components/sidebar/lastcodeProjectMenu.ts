@@ -1,3 +1,5 @@
+import { msg } from "gt-react";
+import { m } from "~/i18n/messages";
 import type { ContextMenuItem } from "@t3tools/contracts";
 import type { SidebarProjectGroupMember } from "../../sidebarProjectGrouping";
 
@@ -34,7 +36,9 @@ function memberActionItem(
   return {
     id: `${action}:${target.member.physicalProjectKey}`,
     label:
-      action === "delete" && target.removalBlocked ? `${label} (disable persistence first)` : label,
+      action === "delete" && target.removalBlocked
+        ? m(msg("{project} (disable persistence first)", { project: label }))
+        : label,
     ...(action === "delete" ? { destructive: true } : {}),
     ...(disabled ? { disabled: true } : {}),
   };
@@ -73,17 +77,20 @@ export function buildLastCodeProjectMenu(input: {
   };
   const items: ContextMenuItem<string>[] = [];
   if (!isNoProjectGroup) {
-    items.push(targeted("rename", "Rename"), targeted("grouping", "Group into..."));
+    items.push(
+      targeted("rename", m(msg("Rename", { $context: "verb, renames a project" }))),
+      targeted("grouping", m(msg("Group into..."))),
+    );
   }
   items.push(
-    targeted("copy-path", "Copy Path"),
-    { id: "open-dashboard", label: "Open dashboard", icon: "layout-dashboard" },
-    { id: "project-settings", label: "Project settings", icon: "settings" },
+    targeted("copy-path", m(msg("Copy Path"))),
+    { id: "open-dashboard", label: m(msg("Open dashboard")), icon: "layout-dashboard" },
+    { id: "project-settings", label: m(msg("Project settings")), icon: "settings" },
     targeted(
       "delete",
       members.length === 1 && members[0]!.removalBlocked
-        ? "Remove (disable persistence first)"
-        : "Remove",
+        ? m(msg("Remove (disable persistence first)"))
+        : m(msg("Remove", { $context: "verb, removes a project" })),
     ),
   );
   return { items, actions };
