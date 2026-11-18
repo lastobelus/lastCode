@@ -111,7 +111,11 @@ export default mergeConfig(
         : packExecutable
           ? ["src/binMain.ts"]
           : ["src/bin.ts", "src/claude-history-worker.ts"],
-      outDir: packBootstrap ? "dist-exe" : packExecutable ? cliAssetDir : "dist",
+      outDir: packBootstrap
+        ? "dist-exe"
+        : packExecutable
+          ? cliAssetDir
+          : (process.env.T3CODE_SERVER_BUILD_STAGE ?? "dist"),
       sourcemap: !packExecutable,
       clean: true,
       // SEA can only resolve built-ins; keep dynamic imports inside each emitted module.

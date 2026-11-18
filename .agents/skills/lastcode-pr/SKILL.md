@@ -51,12 +51,19 @@ asks for an upstream contribution; never pause to ask whether to go upstream.
 1. Implement the smallest complete change, including focused regression tests
    for backend or automation behavior. [Build repairs](#build-repairs) skip
    the new tests.
-2. Run the smallest relevant tests, lint, and typecheck required by `AGENTS.md`.
+2. Run the smallest relevant tests and lint required by `AGENTS.md`. Use the
+   Quick CI policy below for workspace typechecks; do not recreate a deferred
+   local gate with parallel TypeScript processes.
 3. Rebase onto the latest `origin/lastcode/main` before publishing.
-4. Run the independent **Run Quick CI** Project Action. After it resumes with a
-   receipt for the exact clean head and workstream base, decide whether and what
-   to push. The pre-push hook consumes that receipt; ordinary command-line use
-   falls back to synchronous `pnpm lastcode:ci:quick`.
+4. Local Quick CI is optional; GitHub CI remains required. In the default
+   Automatic mode, run the independent **Run Quick CI** Project Action. It uses
+   free local capacity immediately or defers to GitHub without queuing. After
+   resume, verify the exact clean head and workstream base. A local pass records
+   a reusable receipt; a `validation: github-only` result permits publishing but
+   is not a local pass. In GitHub-only mode, publish without requiring the local
+   Action. The ordinary pre-push hook follows the same policy; keep it enabled.
+   Always local mode waits for capacity, and `--require-local` explicitly forces
+   local Quick CI. Settings → LastCode → Local CI selects the mode.
 5. Open a PR targeting `lastcode/main` only when the user explicitly asks.
 
 For an explicitly requested stack, a child may instead branch from and target
@@ -163,6 +170,21 @@ current GitHub thread and review-query mechanics.
    ```bash
    npm --silent run markover -- done <pr-url> --pr-status merged
    ```
+
+You can edit a PR's title or body after CI is green without pushing or closing
+and reopening it. The edit runs a lightweight `CI Gate` that passes only when a
+completed, successful `ci.yml` pull-request run, with successful `Check` and
+`CI Gate` jobs, exists for the PR's exact head, base, and merge commit. If that
+run is still in progress, the gate waits for it for a bounded time. Retargeting
+the base still runs full CI. When the lightweight gate fails because it found no
+such run, CI is not green: the current merge still needs a full CI run.
+However the lightweight gate failed (failed source jobs, a timeout, or an API
+error), re-running only the source `ci.yml` run leaves the failed gate in place.
+Once a source run passes for the same PR head, base, and merge commit, re-run
+the failed `Metadata only:` workflow run; it checks that source run's success
+without running full CI. If the head, base, or merge commit has changed and no
+source run exists for it, start a fresh one by pushing or by closing and
+reopening the PR.
 
 One immediate status snapshot can establish that a wait is needed. For this
 LastCode workflow, the resumable action owns subsequent passive checks; the

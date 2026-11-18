@@ -71,15 +71,11 @@ Use `.agents/skills/_references/external-review-mechanics.md` for external revie
 
 ## Validation
 
-After applying fixes, run relevant targeted tests plus required repo checks:
-
-```bash
-vp check
-vp run typecheck
-```
-
-Also run `vp run lint:mobile` for native mobile changes and appropriate `vp test` /
-`vp run test` commands for touched packages.
+After applying fixes, run focused tests and lint required by `AGENTS.md`, plus
+`vp run lint:mobile` for native mobile changes. For LastCode delivery, follow
+`lastcode-pr`: GitHub CI is required and local Quick CI follows the configured
+mode. Do not run repository-wide checks or recreate a GitHub deferral with
+direct parallel workspace typechecks.
 
 ## Synthesis
 
