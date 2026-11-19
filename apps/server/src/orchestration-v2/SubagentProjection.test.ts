@@ -250,6 +250,11 @@ it("does not inherit the parent's ordinary creator history or placement for eith
       createdBy: "agent" as const,
       creationSource: "mcp" as const,
       creatorThreadId: ThreadId.make("thread:ordinary-creator"),
+      historicalCreatorOrigin: {
+        kind: "thread_launch" as const,
+        environmentId: EnvironmentId.make("origin"),
+        threadId: ThreadId.make("thread:ordinary-creator"),
+      },
       creatorGrouping: "grouped" as const,
     };
     const childThread = makeSubagentChildThread({
@@ -265,6 +270,7 @@ it("does not inherit the parent's ordinary creator history or placement for eith
       creationSource,
     });
     assert.isFalse("creatorThreadId" in childThread);
+    assert.isFalse("historicalCreatorOrigin" in childThread);
     assert.isFalse("creatorGrouping" in childThread);
     assert.equal(childThread.lineage.parentThreadId, parentThread.id);
     assert.equal(childThread.lineage.relationshipToParent, "subagent");

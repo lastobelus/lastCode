@@ -103,6 +103,7 @@ export const layer: Layer.Layer<ThreadForkServiceV2> = Layer.succeed(
       const {
         delegatedFrom: _delegatedFrom,
         creatorThreadId: _creatorThreadId,
+        historicalCreatorOrigin: _historicalCreatorOrigin,
         creatorGrouping: _creatorGrouping,
         ...sourceThread
       } = input.sourceProjection.thread;

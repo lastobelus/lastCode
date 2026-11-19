@@ -127,7 +127,6 @@ export interface EventSinkV2Shape {
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
   }) => Effect.Effect<ReadonlyArray<OrchestrationV2StoredEvent>, EventSinkV2Error>;
   readonly writeWithEffects: (input: {
-    readonly onlyIf?: Effect.Effect<boolean, unknown>;
     /** Companion database writes share the event transaction; no external I/O. */
     readonly beforeCommit?: Effect.Effect<void, unknown>;
     /**
@@ -688,7 +687,8 @@ const layerBase: Layer.Layer<
     });
 
     const writeEffect = Effect.fn("orchestrationV2.EventSink.write")(function* (
-      input: Parameters<EventSinkV2Shape["writeWithEffects"]>[0],
+      input: Parameters<EventSinkV2Shape["writeWithEffects"]>[0] &
+        Pick<Parameters<EventSinkV2Shape["write"]>[0], "onlyIf">,
     ) {
       yield* Effect.annotateCurrentSpan({
         "orchestration_v2.command_id": input.commandId ?? null,

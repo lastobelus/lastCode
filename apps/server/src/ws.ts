@@ -1168,6 +1168,15 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
       ) {
         return yield* snapshotThenLive();
       }
+      // Older clients understand the repaired local creator field in a snapshot.
+      if (
+        replayed.some(
+          ({ event }) => event.type === "thread.creator-repaired" && event.payload.kind === "local",
+        ) &&
+        !replayed.some(({ event }) => event.type === "thread.deleted")
+      ) {
+        return yield* snapshotThenLive();
+      }
       const replay = coalesceLiveUpdatedEvents(replayed);
       const plan = decideThreadResume({
         afterSequence: input.afterSequence,

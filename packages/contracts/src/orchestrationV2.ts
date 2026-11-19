@@ -578,10 +578,13 @@ const HistoricalThreadCreatorRepairPayload = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("local"),
     creatorThreadId: ThreadId,
+    origin: HistoricalThreadCreatorOrigin,
   }),
   Schema.Struct({
     kind: Schema.Literal("scoped"),
     origin: HistoricalThreadCreatorOrigin,
+    creationEventId: EventId,
+    creationPayloadSha256: HistoricalThreadCreatorEvidenceDigest,
     evidenceSha256: HistoricalThreadCreatorEvidenceDigest,
   }),
 ]);

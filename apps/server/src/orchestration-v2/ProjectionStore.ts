@@ -1042,9 +1042,10 @@ export function applyToProjection(
         ...projection,
         thread: {
           ...projection.thread,
+          historicalCreatorOrigin: event.payload.origin,
           ...(event.payload.kind === "local"
             ? { creatorThreadId: event.payload.creatorThreadId }
-            : { historicalCreatorOrigin: event.payload.origin }),
+            : {}),
         },
       };
     case "thread.pull-request-link-updated":
@@ -2551,12 +2552,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           switch (event.type) {
             case "thread.creator-repaired": {
               const payload = event.payload;
+              const originJson = yield* encodeHistoricalCreatorOrigin(payload.origin);
               if (payload.kind === "local") {
                 yield* sql`UPDATE orchestration_v2_projection_threads
-                  SET payload_json = json_set(payload_json, '$.creatorThreadId', ${payload.creatorThreadId})
+                  SET payload_json = json_set(payload_json,
+                    '$.creatorThreadId', ${payload.creatorThreadId},
+                    '$.historicalCreatorOrigin', json(${originJson}))
                   WHERE thread_id = ${event.threadId}`;
               } else {
-                const originJson = yield* encodeHistoricalCreatorOrigin(payload.origin);
                 yield* sql`UPDATE orchestration_v2_projection_threads
                   SET payload_json = json_set(payload_json, '$.historicalCreatorOrigin', json(${originJson}))
                   WHERE thread_id = ${event.threadId}`;

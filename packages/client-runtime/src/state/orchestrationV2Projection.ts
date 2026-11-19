@@ -299,9 +299,10 @@ export function applyOrchestrationV2ProjectionEvent(
         ...projection,
         thread: {
           ...projection.thread,
+          historicalCreatorOrigin: event.payload.origin,
           ...(event.payload.kind === "local"
             ? { creatorThreadId: event.payload.creatorThreadId }
-            : { historicalCreatorOrigin: event.payload.origin }),
+            : {}),
         },
       };
     case "thread.pull-request-link-updated":

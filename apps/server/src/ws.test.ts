@@ -434,6 +434,34 @@ it.effect("thread resume skips unknown types, synchronizes, and receives the liv
   resumeSkipsUnknownTypes("thread"),
 );
 
+it.effect(
+  "thread resume refreshes the local creator for clients that cannot apply a repair event",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("thread:creator-repaired");
+      yield* sql`
+      INSERT INTO orchestration_events (
+        event_id, aggregate_kind, stream_id, stream_version, event_type,
+        occurred_at, actor_kind, payload_json, metadata_json, application_event_version
+      ) VALUES (
+        'creator-replay:1', 'thread', ${threadId}, 1, 'thread.creator-repaired',
+        '2026-10-13T00:00:00.000Z', 'server',
+        '{"kind":"local","creatorThreadId":"creator","origin":{"kind":"thread_launch","environmentId":"local","threadId":"creator"}}',
+        '{}', 2
+      )
+    `;
+      const exit = yield* subscribeOrchestrationV2Thread({ threadId, afterSequence: 0 }).pipe(
+        Effect.provideService(ThreadManagement.ThreadManagementService, {
+          ensureLegacyTranscript: () => Effect.void,
+          getThreadSnapshot: () => Effect.die("snapshot"),
+        } as unknown as ThreadManagement.ThreadManagementService["Service"]),
+        Effect.exit,
+      );
+      assert.equal(Exit.isFailure(exit) ? Cause.squash(exit.cause) : null, "snapshot");
+    }).pipe(Effect.scoped, Effect.provide(ReplayTestLayer)),
+);
+
 // Shell updates batch through `Stream.groupedWithin`, whose window needs real time to close.
 it.live("shell resume skips unknown types, synchronizes, and receives the live tail", () =>
   resumeSkipsUnknownTypes("shell"),

@@ -6,16 +6,19 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import { Command, Flag, GlobalFlag } from "effect/cli";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as EventStore from "../orchestration-v2/EventStore.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import {
   HistoricalThreadCreatorRepairManifest,
+  isHistoricalThreadCreatorRepairError,
   repairScopedHistoricalThreadCreators,
 } from "../orchestration-v2/repairHistoricalThreadCreators.ts";
-import { holdServerOwnershipLock } from "../serverOwnership.ts";
-import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
+import * as ProcessRunner from "../processRunner.ts";
+import { acquireServerOwnership } from "../serverOwnership.ts";
+import { projectLocationFlags, resolveThreadInspectionConfig } from "./config.ts";
 
 const decodeManifest = Schema.decodeEffect(
   Schema.fromJsonString(HistoricalThreadCreatorRepairManifest),
@@ -32,19 +35,21 @@ export const repairThreadCreatorsCommand = Command.make("repair-thread-creators"
   Command.withHandler((flags) =>
     Effect.gen(function* () {
       const logLevel = yield* GlobalFlag.LogLevel;
-      const config = yield* resolveCliAuthConfig(flags, logLevel);
+      const config = yield* resolveThreadInspectionConfig(flags, logLevel);
       const fs = yield* FileSystem.FileSystem;
       const manifest = yield* decodeManifest(yield* fs.readFileString(flags.manifest));
       const environmentId = yield* decodeEnvironmentId(
         (yield* fs.readFileString(config.environmentIdPath)).trim(),
       );
       yield* fs.stat(config.dbPath);
-      if (flags.apply) yield* holdServerOwnershipLock(config.serverRuntimeStatePath);
-      const result = yield* repairScopedHistoricalThreadCreators(
-        manifest,
-        environmentId,
-        flags.apply,
-      ).pipe(
+      if (flags.apply) yield* acquireServerOwnership(config.serverRuntimeStatePath);
+      const result = yield* Effect.gen(function* () {
+        if (flags.apply) {
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql`PRAGMA busy_timeout = 5000`;
+        }
+        return yield* repairScopedHistoricalThreadCreators(manifest, environmentId, flags.apply);
+      }).pipe(
         Effect.provide(
           EventSink.layer.pipe(
             Layer.provide(Layer.mergeAll(EventStore.layer, ProjectionStore.layer)),
@@ -53,8 +58,15 @@ export const repairThreadCreatorsCommand = Command.make("repair-thread-creators"
             ),
           ),
         ),
+        Effect.tapError((error) =>
+          isHistoricalThreadCreatorRepairError(error) && error.failedThreadId !== undefined
+            ? encodeOutput({ failedThreadId: error.failedThreadId, results: error.completed }).pipe(
+                Effect.flatMap(Console.log),
+              )
+            : Effect.void,
+        ),
       );
       yield* Console.log(yield* encodeOutput(result));
-    }).pipe(Effect.scoped),
+    }).pipe(Effect.scoped, Effect.provide(ProcessRunner.layer)),
   ),
 );

@@ -1308,7 +1308,9 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       candidate: {
         kind: thread.lineage.relationshipToParent === "subagent" ? "subagent" : "thread",
         agentCreatedChild:
-          thread.createdBy === "agent" && thread.creatorThreadId !== undefined
+          thread.createdBy === "agent" &&
+          thread.creatorThreadId !== undefined &&
+          thread.historicalCreatorOrigin === undefined
             ? true
             : thread.createdBy === "user"
               ? false

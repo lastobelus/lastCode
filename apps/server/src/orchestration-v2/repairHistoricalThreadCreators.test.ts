@@ -31,7 +31,7 @@ import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectionMaintenance from "./ProjectionMaintenance.ts";
 import * as ProjectionReplay from "./testkit/ProjectionReplay.ts";
 import {
-  repairHistoricalThreadCreators,
+  repairHistoricalThreadCreators as repairHistoricalThreadCreatorsInEnvironment,
   repairScopedHistoricalThreadCreators,
 } from "./repairHistoricalThreadCreators.ts";
 
@@ -47,6 +47,8 @@ const now = DateTime.makeUnsafe("2026-09-01T00:00:00Z");
 const provider = ProviderInstanceId.make("codex");
 const localEnvironment = EnvironmentId.make("local-environment");
 const remoteEnvironment = EnvironmentId.make("remote-environment");
+const repairHistoricalThreadCreators =
+  repairHistoricalThreadCreatorsInEnvironment(localEnvironment);
 
 const createThread = Effect.fnUntraced(function* (
   name: string,
@@ -183,6 +185,8 @@ it.layer(TestLayer)("historical thread creators", (it) => {
         {},
         `scheduled-task:${scheduledTaskId}:123:scheduled`,
       );
+      const localLaunch = yield* createThread("exact-local-launch", { creatorGrouping: "grouped" });
+      yield* launchMessage(localLaunch, scheduler.id);
       const sql = yield* SqlClient.SqlClient;
       const packet = Effect.fnUntraced(function* (
         threadId: ThreadId,
@@ -216,6 +220,16 @@ it.layer(TestLayer)("historical thread creators", (it) => {
         threadId: scheduler.id,
         scheduledTaskId,
       });
+      const competing = yield* packet(localLaunch.id, remote.origin);
+      const scheduleCycle = yield* createThread(
+        "scheduled-cycle",
+        {},
+        `scheduled-task:${scheduledTaskId}:456:manual`,
+      );
+      const linkedSchedule = yield* packet(scheduleCycle.id, {
+        ...schedule.origin,
+        threadId: scheduled.id,
+      });
       const request = (entries: ReadonlyArray<typeof remote>, apply: boolean) =>
         repairScopedHistoricalThreadCreators(
           { version: 1, environmentId: localEnvironment, entries },
@@ -225,6 +239,20 @@ it.layer(TestLayer)("historical thread creators", (it) => {
       const store = yield* ProjectionStore.ProjectionStoreV2;
       const eventStore = yield* EventStore.EventStoreV2;
       const sequence = yield* eventStore.latestSequence();
+      assert.deepStrictEqual(
+        (yield* request([competing], true)).map((row) => row.status),
+        ["conflicting-local-evidence"],
+      );
+      assert.deepStrictEqual(
+        (yield* request(
+          [
+            { ...schedule, origin: { ...schedule.origin, threadId: scheduleCycle.id } },
+            linkedSchedule,
+          ],
+          true,
+        )).map((row) => row.status),
+        ["creator-cycle", "creator-cycle"],
+      );
       assert.deepStrictEqual(
         (yield* request([remote, schedule], false)).map((row) => row.status),
         ["eligible", "eligible"],
@@ -257,6 +285,12 @@ it.layer(TestLayer)("historical thread creators", (it) => {
       assert.deepStrictEqual(
         (yield* request([remote, schedule], true)).map((row) => row.status),
         ["already-repaired", "already-repaired"],
+      );
+      assert.deepStrictEqual(
+        (yield* request([{ ...remote, evidenceSha256: "b".repeat(64) }], true)).map(
+          (row) => row.status,
+        ),
+        ["conflicting-repair-evidence"],
       );
       const conflict = { ...remote, origin: { ...remote.origin, threadId: scheduler.id } };
       assert.deepStrictEqual(
@@ -293,6 +327,11 @@ it.layer(TestLayer)("historical thread creators", (it) => {
         assert.deepStrictEqual(repaired, {
           ...child,
           creatorThreadId: parent.id,
+          historicalCreatorOrigin: {
+            kind: "thread_launch",
+            environmentId: localEnvironment,
+            threadId: parent.id,
+          },
         });
         const events = yield* EventStore.EventStoreV2;
         const sequence = yield* events.latestSequence();
@@ -332,7 +371,15 @@ it.layer(TestLayer)("historical thread creators", (it) => {
         const repaired = (yield* (yield* ProjectionStore.ProjectionStoreV2).getThreadProjection(
           child.id,
         )).thread;
-        assert.deepStrictEqual(repaired, { ...child, creatorThreadId: parent.id });
+        assert.deepStrictEqual(repaired, {
+          ...child,
+          creatorThreadId: parent.id,
+          historicalCreatorOrigin: {
+            kind: "thread_launch",
+            environmentId: localEnvironment,
+            threadId: parent.id,
+          },
+        });
       }),
   );
 
