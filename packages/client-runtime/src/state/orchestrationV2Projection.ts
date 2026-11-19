@@ -294,6 +294,16 @@ export function applyOrchestrationV2ProjectionEvent(
   const latestLocalTurnOrdinal = options?.latestLocalTurnOrdinal;
   const base = { ...projection, updatedAt: event.occurredAt };
   switch (event.type) {
+    case "thread.creator-repaired":
+      return {
+        ...projection,
+        thread: {
+          ...projection.thread,
+          ...(event.payload.kind === "local"
+            ? { creatorThreadId: event.payload.creatorThreadId }
+            : { historicalCreatorOrigin: event.payload.origin }),
+        },
+      };
     case "thread.pull-request-link-updated":
       return {
         ...base,

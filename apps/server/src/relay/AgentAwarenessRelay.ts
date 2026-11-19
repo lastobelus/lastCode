@@ -139,6 +139,7 @@ function shouldPublishAgentAwarenessEvent(
       );
     case "message.updated":
     case "thread.persistence-changed":
+    case "thread.creator-repaired":
     case "thread.annotation-upserted":
     case "thread.annotation-resolved":
     case "thread.annotation-reopened":

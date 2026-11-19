@@ -115,6 +115,8 @@ export interface EventSinkV2Shape {
   ) => Effect.Effect<A, E | EventSinkV2Error, R>;
 
   readonly write: (input: {
+    /** Read-only precondition evaluated inside the event transaction. */
+    readonly onlyIf?: Effect.Effect<boolean, unknown>;
     /** Return no events if another thread owns this native session at commit time. */
     readonly unlessNativeThreadOwned?: Pick<
       OrchestrationV2ProviderThread,
@@ -125,6 +127,7 @@ export interface EventSinkV2Shape {
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
   }) => Effect.Effect<ReadonlyArray<OrchestrationV2StoredEvent>, EventSinkV2Error>;
   readonly writeWithEffects: (input: {
+    readonly onlyIf?: Effect.Effect<boolean, unknown>;
     /** Companion database writes share the event transaction; no external I/O. */
     readonly beforeCommit?: Effect.Effect<void, unknown>;
     /**
@@ -697,6 +700,9 @@ const layerBase: Layer.Layer<
       if (batch !== undefined) batch.eventCount += input.events.length;
       const { committed } = yield* commitThenPublish(
         Effect.gen(function* () {
+          if (input.onlyIf !== undefined && !(yield* input.onlyIf)) {
+            return { committed: [], outcomes: [] };
+          }
           // Check ownership in the same transaction that claims the native session.
           const imported = input.unlessNativeThreadOwned;
           if (imported?.nativeThreadRef != null) {

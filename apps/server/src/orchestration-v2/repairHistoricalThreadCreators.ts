@@ -1,5 +1,11 @@
+// @effect-diagnostics nodeBuiltinImport:off -- Compare hashes of the persisted JSON bytes.
+import * as NodeCrypto from "node:crypto";
 import {
+  EnvironmentId,
   EventId,
+  HistoricalThreadCreatorEvidenceDigest,
+  HistoricalThreadCreatorOrigin,
+  getInteractiveThreadParentThreadId,
   type OrchestrationV2AppThread,
   OrchestrationV2AppThreadJson,
   ThreadId,
@@ -23,6 +29,39 @@ class HistoricalThreadCreatorRepairError extends Schema.TaggedError<HistoricalTh
 const decodeThread = Schema.decodeEffect(Schema.fromJsonString(OrchestrationV2AppThreadJson));
 const decodeThreadId = Schema.decodeUnknownEffect(ThreadId);
 
+export const HistoricalThreadCreatorRepairManifest = Schema.Struct({
+  version: Schema.Literal(1),
+  environmentId: EnvironmentId,
+  entries: Schema.Array(
+    Schema.Struct({
+      threadId: ThreadId,
+      creationEventId: EventId,
+      creationPayloadSha256: HistoricalThreadCreatorEvidenceDigest,
+      expectedPayloadSha256: HistoricalThreadCreatorEvidenceDigest,
+      evidenceSha256: HistoricalThreadCreatorEvidenceDigest,
+      origin: HistoricalThreadCreatorOrigin,
+    }),
+  ),
+});
+type HistoricalThreadCreatorRepairManifest = typeof HistoricalThreadCreatorRepairManifest.Type;
+
+const sha256 = (payload: string) => NodeCrypto.createHash("sha256").update(payload).digest("hex");
+
+function eligibleForRepair(thread: OrchestrationV2AppThread) {
+  return (
+    thread.deletedAt === null &&
+    thread.createdBy === "agent" &&
+    thread.creationSource === "mcp" &&
+    thread.creatorThreadId == null &&
+    thread.historicalCreatorOrigin === undefined &&
+    thread.delegatedFrom == null &&
+    thread.forkedFrom === null &&
+    thread.lineage.parentThreadId === null &&
+    thread.lineage.relationshipToParent === null &&
+    thread.lineage.rootThreadId === thread.id
+  );
+}
+
 /** Runs before command admission: recover only provenance recorded by the old MCP launch paths. */
 export const repairHistoricalThreadCreators = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -40,6 +79,9 @@ export const repairHistoricalThreadCreators = Effect.gen(function* () {
         AND json_extract(created.payload_json, '$.creationSource') = 'mcp'
         AND json_type(created.payload_json, '$.creatorThreadId') IS NULL
         AND json_type(current.payload_json, '$.creatorThreadId') IS NULL
+        AND json_type(current.payload_json, '$.historicalCreatorOrigin') IS NULL
+        AND json_extract(current.payload_json, '$.delegatedFrom') IS NULL
+        AND current.deleted_at IS NULL
         AND json_extract(current.payload_json, '$.createdBy') = 'agent'
         AND json_extract(current.payload_json, '$.creationSource') = 'mcp'
         AND json_extract(current.payload_json, '$.forkedFrom') IS NULL
@@ -108,53 +150,165 @@ export const repairHistoricalThreadCreators = Effect.gen(function* () {
     FROM orchestration_v2_projection_threads
   `;
   const parents = new Map(graphRows.map((row) => [row.thread_id, row.parent_thread_id]));
-  const candidates = new Map<ThreadId, OrchestrationV2AppThread>();
+  const candidates = new Map<
+    ThreadId,
+    { readonly before: string; readonly creatorThreadId: ThreadId }
+  >();
   for (const row of rows) {
     if (evidence.get(row.thread_id)?.size !== 1 || !parents.has(row.creator_thread_id)) continue;
     const thread = yield* decodeThread(row.payload_json);
+    if (!eligibleForRepair(thread)) continue;
+    const creatorThreadId = yield* decodeThreadId(row.creator_thread_id);
     if (
-      thread.creatorThreadId !== undefined ||
-      thread.createdBy !== "agent" ||
-      thread.creationSource !== "mcp" ||
-      thread.forkedFrom !== null ||
-      thread.lineage.parentThreadId !== null ||
-      thread.lineage.relationshipToParent !== null ||
-      thread.lineage.rootThreadId !== thread.id
+      getInteractiveThreadParentThreadId(thread) !==
+      getInteractiveThreadParentThreadId({ ...thread, creatorThreadId })
     )
       continue;
-    const creatorThreadId = yield* decodeThreadId(row.creator_thread_id);
     candidates.set(thread.id, {
-      ...thread,
+      before: row.payload_json,
       creatorThreadId,
-      creatorGrouping: thread.creatorGrouping ?? "grouped",
     });
     parents.set(thread.id, creatorThreadId);
   }
 
   const now = yield* DateTime.now;
   let repaired = 0;
-  for (const thread of candidates.values()) {
-    const visited = new Set<string>([thread.id]);
-    let ancestor = parents.get(thread.id);
+  for (const [threadId, candidate] of candidates) {
+    const visited = new Set<string>([threadId]);
+    let ancestor = parents.get(threadId);
     while (ancestor != null && !visited.has(ancestor)) {
       visited.add(ancestor);
       ancestor = parents.get(ancestor);
     }
     // Check the whole proposed graph before writing, so cyclic candidates cannot partly apply.
     if (ancestor != null) continue;
-    yield* sink.write({
+    const committed = yield* sink.write({
+      onlyIf: sql`SELECT 1 FROM orchestration_v2_projection_threads
+        WHERE thread_id = ${threadId} AND payload_json = ${candidate.before}`.pipe(
+        Effect.map((rows) => rows.length === 1),
+      ),
       events: [
         {
-          id: EventId.make(`historical-thread-creator:${thread.id}`),
-          type: "thread.metadata-updated",
-          threadId: thread.id,
-          providerInstanceId: thread.providerInstanceId,
+          id: EventId.make(`historical-thread-creator-v1:${threadId}`),
+          type: "thread.creator-repaired",
+          threadId,
           occurredAt: now,
-          payload: thread,
+          payload: { kind: "local", creatorThreadId: candidate.creatorThreadId },
         },
       ],
     });
-    repaired += 1;
+    repaired += committed.length;
   }
   return repaired;
 }).pipe(Effect.mapError((cause) => new HistoricalThreadCreatorRepairError({ cause })));
+
+/** The operator verifies and freezes source evidence on both environments before making a manifest. */
+export const repairScopedHistoricalThreadCreators = Effect.fn(
+  "repairScopedHistoricalThreadCreators",
+)(
+  function* (
+    input: HistoricalThreadCreatorRepairManifest,
+    environmentId: EnvironmentId,
+    apply: boolean,
+  ) {
+    if (
+      input.environmentId !== environmentId ||
+      new Set(input.entries.map(({ threadId }) => threadId)).size !== input.entries.length
+    ) {
+      return yield* new HistoricalThreadCreatorRepairError({
+        cause: "Expected a manifest for this environment with unique target thread IDs.",
+      });
+    }
+    const sql = yield* SqlClient.SqlClient;
+    const sink = yield* EventSink.EventSinkV2;
+    const now = yield* DateTime.now;
+    const results = [];
+    for (const entry of input.entries) {
+      const { threadId, origin } = entry;
+      const assess = Effect.gen(function* () {
+        const [row] = yield* sql<{ readonly payload_json: string }>`
+          SELECT payload_json FROM orchestration_v2_projection_threads WHERE thread_id = ${threadId}
+        `;
+        if (!row) return "missing-target";
+        const thread = yield* decodeThread(row.payload_json).pipe(Effect.option);
+        if (thread._tag === "None") return "invalid-target-payload";
+        const target = thread.value;
+        const current = target.historicalCreatorOrigin;
+        if (current !== undefined) {
+          return current.environmentId === origin.environmentId &&
+            current.threadId === origin.threadId &&
+            (current.kind === "thread_launch"
+              ? origin.kind === "thread_launch"
+              : origin.kind === "scheduled_task" &&
+                current.scheduledTaskId === origin.scheduledTaskId)
+            ? "already-repaired"
+            : "conflicting-origin";
+        }
+        if (target.creatorThreadId != null || target.delegatedFrom != null) {
+          return "conflicting-origin";
+        }
+        if (!eligibleForRepair(target)) return "ineligible-target";
+        if (sha256(row.payload_json) !== entry.expectedPayloadSha256) return "stale-target";
+        const [created] = yield* sql<{
+          readonly command_id: string | null;
+          readonly payload_json: string;
+        }>`
+          SELECT command_id, payload_json FROM orchestration_events
+          WHERE event_id = ${entry.creationEventId} AND stream_id = ${threadId}
+            AND aggregate_kind = 'thread' AND event_type = 'thread.created'
+            AND application_event_version = 2
+        `;
+        if (!created || sha256(created.payload_json) !== entry.creationPayloadSha256) {
+          return "missing-creation-evidence";
+        }
+        if (origin.kind === "thread_launch") {
+          if (origin.environmentId === environmentId || created.command_id !== threadId) {
+            return "invalid-launch-evidence";
+          }
+        } else {
+          const scheduledPrefix = `scheduled-task:${origin.scheduledTaskId}:`;
+          if (
+            origin.environmentId !== environmentId ||
+            origin.threadId === threadId ||
+            !created.command_id?.startsWith(scheduledPrefix) ||
+            !/^\d+:scheduled$/.test(created.command_id.slice(scheduledPrefix.length))
+          ) {
+            return "invalid-schedule-evidence";
+          }
+          const creator = yield* sql`SELECT 1 FROM orchestration_v2_projection_threads
+            WHERE thread_id = ${origin.threadId} AND deleted_at IS NULL`;
+          if (creator.length !== 1) return "missing-schedule-creator";
+        }
+        return "eligible";
+      });
+      if (!apply) {
+        results.push({ threadId, status: yield* assess });
+        continue;
+      }
+      const decision = { status: "not-checked" };
+      const committed = yield* sink.write({
+        onlyIf: assess.pipe(
+          Effect.map((status) => {
+            decision.status = status;
+            return status === "eligible";
+          }),
+        ),
+        events: [
+          {
+            id: EventId.make(`historical-thread-creator-v1:${threadId}`),
+            type: "thread.creator-repaired",
+            threadId,
+            occurredAt: now,
+            payload: { kind: "scoped", origin, evidenceSha256: entry.evidenceSha256 },
+          },
+        ],
+      });
+      results.push({
+        threadId,
+        status: committed.length > 0 ? "repaired" : decision.status,
+      });
+    }
+    return results;
+  },
+  Effect.mapError((cause) => new HistoricalThreadCreatorRepairError({ cause })),
+);
