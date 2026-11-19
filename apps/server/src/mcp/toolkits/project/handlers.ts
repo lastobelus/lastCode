@@ -23,7 +23,6 @@ import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts"
 import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageIntake.ts";
 import * as ThreadReadBroker from "../../ThreadReadBroker.ts";
 import * as Claims from "../../../orchestration-v2/AttachmentClaims.ts";
-import { prepareRemoteWorktreeBase } from "../../../peer/remoteWorktreeBase.ts";
 import * as Project from "../../../project/ProjectService.ts";
 import * as ProjectCloneTracker from "../../../project/ProjectCloneTracker.ts";
 import { mutateProjectWithClone } from "../../../project/ProjectMutation.ts";
@@ -374,12 +373,18 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                   }),
                 ),
               );
-        if (project !== undefined && worktreeBaseCommit !== undefined) {
-          yield* prepareRemoteWorktreeBase(
-            project,
-            worktreeBaseCommit,
-            input.remotePreparation?.worktreeBaseBranch,
-          );
+        if (
+          project !== undefined &&
+          worktreeBaseCommit !== undefined &&
+          (yield* ManagedProjectFolders.ManagedProjectFolders.pipe(
+            Effect.flatMap((folders) => folders.isScratchProject(projectId)),
+          ))
+        ) {
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message:
+              "An isolated remote task needs a Git project. Pick a destination project that can fetch the parent commit, or omit isolation.",
+          });
         }
         if (project !== undefined && input.workspaceStrategy?.type === "existing_worktree")
           yield* assertProjectWorktree(project.workspaceRoot, input.workspaceStrategy.worktreePath);

@@ -6010,7 +6010,16 @@ it.effect.each(["available", "missing"])(
         yield* command(cwd, ["commit", "--allow-empty", "-m", "destination root advance"]);
         const destinationCommit = (yield* command(cwd, ["rev-parse", "HEAD"])).stdout.trim();
         const worktreeBaseCommit = base === "available" ? parentCommit : "a".repeat(40);
-        const services = harness();
+        const fetchStarted = yield* Deferred.make<string>();
+        const releaseFetch = yield* Deferred.make<void>();
+        const services = harness({
+          git: {
+            fetchExactWorktreeBase: ({ commit }) =>
+              Deferred.succeed(fetchStarted, commit).pipe(
+                Effect.andThen(Deferred.await(releaseFetch)),
+              ),
+          },
+        });
         yield* Effect.gen(function* () {
           const launches = yield* ThreadLaunch.ThreadLaunchService;
           const threads = yield* ThreadManagement.ThreadManagementService;
@@ -6048,6 +6057,14 @@ it.effect.each(["available", "missing"])(
           assert.deepEqual(run.remoteDelegation, selector);
           assert.isNull(awaitingWorktree.thread.worktreePath);
           yield* launches.prepareRun({ commandId, threadId, runId: run.id });
+          assert.equal(yield* Deferred.await(fetchStarted), worktreeBaseCommit);
+          // The peer can return its activation receipt while the destination's
+          // durable worktree preparation outlasts T3 Connect's idle limit.
+          yield* TestClock.adjust(Duration.seconds(101));
+          const stillPreparing = yield* threads.getThreadProjection(threadId);
+          assert.equal(stillPreparing.runs[0]?.status, "preparing");
+          assert.isNull(stillPreparing.thread.worktreePath);
+          yield* Deferred.succeed(releaseFetch, undefined);
           const prepared = yield* preparationSettled(threadId);
           if (base === "missing") {
             assert.equal(prepared.runs[0]?.status, "failed");

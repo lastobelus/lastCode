@@ -52,7 +52,6 @@ import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as PeerForwarding from "./PeerForwarding.ts";
 import * as PeerLinks from "./PeerLinks.ts";
-import { remoteWorktreeBaseBranch } from "./remoteWorktreeBase.ts";
 
 /** How long one follow of a remote task waits on its thread there before checking again. */
 const FOLLOW_WAIT_MS = 10 * 60 * 1_000;
@@ -392,7 +391,6 @@ const make = Effect.gen(function* () {
         `command:mcp:${encodeURIComponent(scope.requestNamespace)}:remote-delegate:${encodeURIComponent(key)}`,
       );
       let worktreeBaseCommit: string | undefined;
-      let worktreeBaseBranch: string | undefined;
       if (input.isolation === "worktree" && !(yield* threads.hasReceipt(commandId))) {
         const invalidBase = new OrchestratorMcpFailure({
           code: "invalid_request",
@@ -414,9 +412,6 @@ const make = Effect.gen(function* () {
           .resolveCommit({ cwd, revision: "HEAD" })
           .pipe(Effect.mapError(() => invalidBase));
         worktreeBaseCommit = base.commitSha;
-        worktreeBaseBranch = yield* remoteWorktreeBaseBranch(cwd).pipe(
-          Effect.provideService(GitVcsDriver.GitVcsDriver, git),
-        );
       }
       const recorded = yield* threads
         .dispatch({
@@ -435,7 +430,6 @@ const make = Effect.gen(function* () {
             projectId,
             ...(existingThreadId === undefined ? {} : { existingThreadId }),
             ...(worktreeBaseCommit === undefined ? {} : { worktreeBaseCommit }),
-            ...(worktreeBaseBranch === undefined ? {} : { worktreeBaseBranch }),
             requestNamespace: scope.requestNamespace,
             requestKey: key,
             title: input.title ?? parent.thread.title,
@@ -854,9 +848,6 @@ const make = Effect.gen(function* () {
               ...(intent.worktreeBaseCommit === undefined
                 ? {}
                 : { worktreeBaseCommit: intent.worktreeBaseCommit }),
-              ...(intent.worktreeBaseBranch === undefined
-                ? {}
-                : { worktreeBaseBranch: intent.worktreeBaseBranch }),
               ...(intent.existingThreadId === undefined
                 ? {}
                 : { existingThreadId: intent.existingThreadId }),

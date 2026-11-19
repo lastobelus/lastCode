@@ -170,7 +170,6 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
         sourceTaskId: RemoteDelegationSelector.fields.sourceTaskId,
         existingThreadId: Schema.optional(ThreadId),
         worktreeBaseCommit: Schema.optional(RemoteWorktreeBaseCommit),
-        worktreeBaseBranch: Schema.optional(TrimmedNonEmptyString),
       }),
     ),
   }),

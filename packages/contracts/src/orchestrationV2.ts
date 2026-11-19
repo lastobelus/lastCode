@@ -549,7 +549,6 @@ export const RemoteLaunchIntent = Schema.Struct({
   projectId: ProjectId,
   existingThreadId: Schema.optional(ThreadId),
   worktreeBaseCommit: Schema.optional(RemoteWorktreeBaseCommit),
-  worktreeBaseBranch: Schema.optional(TrimmedNonEmptyString),
   requestNamespace: Schema.String,
   requestKey: Schema.String,
   title: Schema.String,
