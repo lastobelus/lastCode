@@ -620,6 +620,11 @@ function codexPlanStepStatus(
   }
 }
 
+// Full access's granular default still lets Codex ask about dangerous commands (e.g. a forced rm);
+// refuse them as `never` did. An explicit approval policy keeps its prompts.
+const refusesApprovalsItself = (runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy) =>
+  runtimePolicy.runtimeMode === "full-access" && runtimePolicy.approvalPolicy === undefined;
+
 const FULL_ACCESS_LEGACY_REFUSAL = {
   denied: { rejection: "Not permitted without approval. Use a safer approach." },
 } satisfies CodexSchema.ExecCommandApprovalResponse__ReviewDecision;
@@ -5950,8 +5955,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 payload,
               );
             }
-            // Granular full access still asks about dangerous commands (e.g. a forced rm); refuse them as `never` did.
-            if (context.input.runtimePolicy.runtimeMode === "full-access") {
+            if (refusesApprovalsItself(context.input.runtimePolicy)) {
               return {
                 decision: "decline",
               } satisfies CodexSchema.CommandExecutionRequestApprovalResponse;
@@ -6027,7 +6031,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 payload,
               );
             }
-            if (context.input.runtimePolicy.runtimeMode === "full-access") {
+            if (refusesApprovalsItself(context.input.runtimePolicy)) {
               return {
                 decision: "decline",
               } satisfies CodexSchema.FileChangeRequestApprovalResponse;
@@ -6249,7 +6253,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 payload,
               );
             }
-            if (context.input.runtimePolicy.runtimeMode === "full-access") {
+            if (refusesApprovalsItself(context.input.runtimePolicy)) {
               return {
                 decision: FULL_ACCESS_LEGACY_REFUSAL,
               } satisfies CodexSchema.ExecCommandApprovalResponse;
@@ -6323,7 +6327,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 payload,
               );
             }
-            if (context.input.runtimePolicy.runtimeMode === "full-access") {
+            if (refusesApprovalsItself(context.input.runtimePolicy)) {
               return {
                 decision: FULL_ACCESS_LEGACY_REFUSAL,
               } satisfies CodexSchema.ApplyPatchApprovalResponse;
