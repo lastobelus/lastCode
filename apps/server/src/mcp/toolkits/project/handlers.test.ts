@@ -360,6 +360,9 @@ it.effect.each(["resolved", "unresolved", "absent"] as const)(
       expect(launched[1]?.groupThread).toBe(true);
       expect(launched[1]?.creatorThreadId).toBe(sourceThreadId);
       expect(launched[1]?.groupedUnderThreadId).toBeNull();
+      expect(launched[1]).toMatchObject({
+        creatorOrigin: { kind: "thread_launch", threadId: sourceThreadId, owned: true },
+      });
 
       // A's accepted input retains its own authority after another client's run B starts.
       const store = Context.get(context, ProjectionStore.ProjectionStoreV2);

@@ -1691,7 +1691,11 @@ it.effect("runs a Scratch scheduled task saved with a worktree in its own folder
     assert.equal(ran.task.lastRunStatus, "succeeded");
     const [thread] = yield* threads.listProjectThreads({ projectId, includeSubagents: false });
     assert.isDefined(thread);
+    const shell = yield* threads.getThreadShell(thread!.id);
+    assert.equal(shell?.scheduledTaskOrigin, task.id);
+    assert.isNull(shell?.groupedUnderThreadId);
     const projection = yield* preparationSettled(thread!.id);
+    assert.equal(projection.thread.scheduledTaskOrigin, task.id);
     assert.equal(projection.runs[0]?.status, "starting");
     assert.equal(projection.thread.worktreePath, "/scratch/folder-1");
     assert.deepEqual(projection.runs[0]?.workspacePreparation, {

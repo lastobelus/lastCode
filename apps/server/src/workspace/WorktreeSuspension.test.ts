@@ -10,6 +10,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CommandId,
   DEFAULT_SERVER_SETTINGS,
+  EnvironmentId,
   GitCommandError,
   OrchestrationV2ThreadShell,
   ProjectId,
@@ -39,6 +40,7 @@ import { it } from "@effect/vitest";
 import { ChildProcessSpawner } from "effect/process";
 import { TestClock } from "effect/testing";
 
+import { ServerEnvironmentIdentity } from "../environment/ServerEnvironment.ts";
 import * as ServerConfig from "../config.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
@@ -351,6 +353,9 @@ const harness = (
       Effect.provide(
         Layer.mergeAll(
           Layer.succeed(Registry.WorktreeSuspensionRegistry, registry),
+          Layer.succeed(ServerEnvironmentIdentity, {
+            getEnvironmentId: Effect.succeed(EnvironmentId.make("test-environment")),
+          }),
           Layer.mock(ProjectionStore.ProjectionStoreV2)({
             getThreadShell: (id) =>
               Effect.sync(() => {
@@ -4668,6 +4673,46 @@ it.live("prefilters ineligible shells before identifying or registering checkout
       expect(yield* h.registry.list).toEqual([]);
     }),
   ),
+);
+
+it.live.each([
+  { owned: true, otherThreads: false, eligible: true },
+  { owned: false, otherThreads: false, eligible: false },
+  { owned: false, otherThreads: true, eligible: true },
+  { owned: undefined, otherThreads: true, eligible: false },
+])(
+  "classifies launch provenance for automatic suspension (owned: $owned, otherThreads: $otherThreads)",
+  ({ owned, otherThreads, eligible }) =>
+    realGit((f) =>
+      Effect.gen(function* () {
+        const h = yield* harness(f, {
+          cleanupThreads: true,
+          settings: {
+            ...automaticSettings,
+            worktreeSuspension: {
+              ...automaticSettings.worktreeSuspension,
+              scopes: { ...automaticSettings.worktreeSuspension.scopes, otherThreads },
+            },
+          },
+        });
+        untouchedOwners(h.threads);
+        for (const [id, thread] of h.threads) {
+          h.threads.set(id, {
+            ...thread,
+            creatorOrigin: {
+              kind: "thread_launch",
+              threadId: thread.creatorThreadId!,
+              environmentId: EnvironmentId.make("test-environment"),
+              ...(owned === undefined ? {} : { owned }),
+            },
+          });
+        }
+        yield* h.service.sweep;
+        expect((yield* h.registry.list).map((entry) => entry.summary.state)).toEqual(
+          eligible ? ["suspended"] : [],
+        );
+      }),
+    ),
 );
 
 it.live("preserves unknown child lineage before automatic scope classification", () =>

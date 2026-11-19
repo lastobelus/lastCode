@@ -223,7 +223,7 @@ const RequestSecretTool = Tool.make("request_secret", {
 
 const CreateThreadsTool = Tool.make("create_threads", {
   description:
-    "Create interactive threads in this checkout; not delegation. Omit prompt for an empty parent (no model turn). groupedUnderThreadId defaults to your thread; null means top level. One thread or its own worktree: `t3_thread_launch`. Project, branch, and worktree inherit.",
+    "Create interactive threads in this checkout; not delegation. Omit prompt for an empty parent (no model turn). Your thread owns each new thread. Set `topLevel:true` on a row only for a user-requested independent sidebar root. groupedUnderThreadId defaults to your thread unless it is a side chat; null leaves the new thread ungrouped. One thread or its own worktree: `t3_thread_launch`. Project, branch, and worktree inherit.",
   parameters: OrchestratorMcpCreateThreadsInput,
   success: OrchestratorMcpCreateThreadsResult,
   failure: OrchestratorMcpFailure,
@@ -310,7 +310,7 @@ const ThreadWaitTool = Tool.make("t3_thread_wait", {
 
 const ThreadInterruptTool = Tool.make("t3_thread_interrupt", {
   description:
-    "Interrupt a top-level thread's running turn. No `runId`: newest running turn. No effect when idle. For a delegate, use `task_cancel`.",
+    "Interrupt an interactive thread's running turn. No `runId`: newest running turn. No effect when idle. For a delegate, use `task_cancel`.",
   parameters: OrchestratorMcpThreadInterruptInput,
   success: OrchestratorMcpThreadInterruptResult,
   failure: OrchestratorMcpFailure,

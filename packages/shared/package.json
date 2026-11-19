@@ -23,6 +23,10 @@
       "types": "./src/userMessage.ts",
       "import": "./src/userMessage.ts"
     },
+    "./threadOwnership": {
+      "types": "./src/threadOwnership.ts",
+      "import": "./src/threadOwnership.ts"
+    },
     "./threadAnnotation": {
       "types": "./src/threadAnnotation.ts",
       "import": "./src/threadAnnotation.ts"

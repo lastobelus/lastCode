@@ -5,6 +5,7 @@ import {
   EventId,
   HistoricalThreadCreatorEvidenceDigest,
   ThreadCreatorOrigin,
+  HistoricalThreadCreatorOrigin,
   getInteractiveThreadParentThreadId,
   type OrchestrationV2AppThread,
   OrchestrationV2AppThreadJson,
@@ -51,7 +52,7 @@ export const HistoricalThreadCreatorRepairManifest = Schema.Struct({
       creationPayloadSha256: HistoricalThreadCreatorEvidenceDigest,
       expectedPayloadSha256: HistoricalThreadCreatorEvidenceDigest,
       evidenceSha256: HistoricalThreadCreatorEvidenceDigest,
-      origin: ThreadCreatorOrigin,
+      origin: HistoricalThreadCreatorOrigin,
     }),
   ),
 });

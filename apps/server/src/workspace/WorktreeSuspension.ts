@@ -34,6 +34,7 @@ import {
   generatedBuildReviewProtection,
 } from "@t3tools/shared/generatedBuildOwnership";
 import { resolveWorktreeSuspension } from "@t3tools/shared/projectSettings";
+import { getThreadOwner } from "@t3tools/shared/threadOwnership";
 import { evaluateWorktreeSuspensionEligibility } from "@t3tools/shared/worktreeSuspensionPolicy";
 import * as Context from "effect/Context";
 import * as Cause from "effect/Cause";
@@ -59,6 +60,7 @@ import * as Cleanup from "../orchestration-v2/WorktreeCleanupService.ts";
 import * as PreviewHosting from "../preview/Hosting.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { ServerEnvironmentIdentity } from "../environment/ServerEnvironment.ts";
 import * as ServerConfig from "../config.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { makeIsManagedWorktreePath } from "../worktreesDirectory.ts";
@@ -176,6 +178,8 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
   const previews = yield* PreviewHosting.PreviewHosting;
   const settings = yield* ServerSettings.ServerSettingsService;
   const config = yield* ServerConfig.ServerConfig;
+  const environment = yield* ServerEnvironmentIdentity;
+  const environmentId = yield* environment.getEnvironmentId;
   const git = yield* GitVcsDriver.GitVcsDriver;
   const acquisition = yield* WorkspaceAcquisition;
   const fs = yield* FileSystem.FileSystem;
@@ -1302,20 +1306,25 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       thread.settledOverride !== null ||
       thread.lineage.independent === true ||
       thread.creatorGrouping === "independent";
+    const origin = thread.creatorOrigin;
+    // New launches record their initial ownership decision. Historical repairs
+    // carry provenance only, so keep the legacy suspension classification.
+    const agentCreatedChild =
+      thread.createdBy === "user"
+        ? false
+        : thread.createdBy !== "agent"
+          ? null
+          : origin?.kind === "thread_launch" && origin.owned !== undefined
+            ? getThreadOwner(thread, environmentId) !== null
+            : origin === undefined && thread.creatorThreadId !== undefined
+              ? true
+              : null;
     return evaluateWorktreeSuspensionEligibility({
       policy,
       now: timestamp,
       candidate: {
         kind: thread.lineage.relationshipToParent === "subagent" ? "subagent" : "thread",
-        // A local repair fills both creator fields. Revisit this guard if creation starts writing both.
-        agentCreatedChild:
-          thread.createdBy === "agent" &&
-          thread.creatorThreadId !== undefined &&
-          thread.creatorOrigin === undefined
-            ? true
-            : thread.createdBy === "user"
-              ? false
-              : null,
+        agentCreatedChild,
         humanParticipation: adopted ? true : thread.workspaceUserAdopted === false ? false : null,
         settledAt: settledOrArchivedAt === null ? null : DateTime.formatIso(settledOrArchivedAt),
         lastWorkspaceUseAt: lastUse,

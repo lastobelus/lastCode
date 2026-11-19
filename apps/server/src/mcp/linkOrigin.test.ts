@@ -104,6 +104,7 @@ const layerLaunches = Layer.effect(
             worktreePath: null,
             ...(input.linkOrigin === undefined ? {} : { linkOrigin: input.linkOrigin }),
             ...(input.delegatedFrom === undefined ? {} : { delegatedFrom: input.delegatedFrom }),
+            ...(input.creatorOrigin === undefined ? {} : { creatorOrigin: input.creatorOrigin }),
             ...(input.creatorThreadId === undefined
               ? {}
               : { creatorThreadId: input.creatorThreadId }),
@@ -380,12 +381,45 @@ it.layer(Layer.provideMerge(layerTools, layerOrchestration))("work a link starts
       const plain = yield* launch(claudeCode, "Started by Claude Code");
       assert.equal((yield* projections.getThreadShell(plain))?.linkOrigin, undefined);
 
+      const sender = {
+        environmentId: EnvironmentId.make("environment:laptop"),
+        threadId: ThreadId.make("laptop-thread"),
+        title: "Launcher",
+      };
+      const forwarded = { ...laptop, client: { ...laptop.client!, senderThread: sender } };
+      for (const topLevel of [undefined, true]) {
+        const interactive = yield* launch(
+          forwarded,
+          "Interactive remote launch",
+          topLevel === undefined ? {} : { topLevel },
+        );
+        const shell = yield* projections.getThreadShell(interactive);
+        assert.deepEqual(shell?.creatorOrigin, {
+          kind: "thread_launch",
+          environmentId: sender.environmentId,
+          threadId: sender.threadId,
+          owned: topLevel !== true,
+        });
+        assert.isUndefined(shell?.delegatedFrom);
+        assert.isNull(shell?.groupedUnderThreadId);
+      }
+
       // A link's delegated task names its parent there; only a link's launch may.
       const delegatedFrom = {
         environmentId: "environment-laptop",
         threadId: "thread:laptop-parent",
         title: "Laptop parent",
       };
+      assert.equal(
+        failureCode(
+          yield* call(forwarded, "t3_thread_launch", {
+            projectId,
+            title: "Conflicting delegated parent",
+            delegatedFrom,
+          }),
+        ),
+        "invalid_request",
+      );
       const task = yield* launch(laptop, "Delegated from the laptop", { delegatedFrom });
       assert.deepEqual((yield* projections.getThreadShell(task))?.delegatedFrom, delegatedFrom);
       const claimed = yield* launch(claudeCode, "Claims a parent", { delegatedFrom });
@@ -484,6 +518,16 @@ it.layer(Layer.provideMerge(layerTools, layerOrchestration))("work a link starts
         } satisfies McpInvocationContext.McpInvocationScope;
       });
       const threadScope = yield* startCaller(ownLaunch);
+      const root = yield* launch(threadScope, "Explicit top-level thread", { topLevel: true });
+      const rootShell = yield* projections.getThreadShell(root);
+      assert.isNull(rootShell?.groupedUnderThreadId);
+      assert.deepEqual(rootShell?.creatorOrigin, {
+        kind: "thread_launch",
+        environmentId: threadScope.environmentId,
+        threadId: ownLaunch,
+        owned: false,
+      });
+
       for (const [tool, source] of [
         ["t3_thread_launch", laptop],
         ["t3_thread_launch", threadScope],

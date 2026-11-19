@@ -45,6 +45,7 @@ import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as OrchestrationMcp from "../../OrchestratorMcpService.ts";
 import { requireRemoteDelegationPeer } from "../../linkOrigin.ts";
 import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../threadAccess.ts";
+import { resolveLaunchOwnership } from "../../threadLaunchOwnership.ts";
 import { ProjectToolkit } from "./tools.ts";
 
 const isAboveCeilingError = Schema.is(OrchestratorRuntimeModeAboveCeilingError);
@@ -56,7 +57,7 @@ function groupingPlacementFailure(error: unknown): OrchestratorMcpFailure | unde
       const detail = typeof error.cause === "string" ? `${error.cause} ` : "";
       return new OrchestratorMcpFailure({
         code: "invalid_request",
-        message: `Invalid groupedUnderThreadId. ${detail}Use JSON null (without quotes) for a top-level thread.`,
+        message: `Invalid groupedUnderThreadId. ${detail}Use JSON null (without quotes) to leave the thread ungrouped.`,
       });
     }
     error = error.cause;
@@ -227,6 +228,12 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           });
         }
         const { caller } = context;
+        const ownership = resolveLaunchOwnership(input, {
+          caller,
+          client: scope.client,
+          environmentId: scope.environmentId,
+        });
+        if ("failure" in ownership) return yield* ownership.failure;
         yield* McpToolAccess.assertWritableThreads(context, [input.groupedUnderThreadId]);
         // A retry with the same key replays the first launch: the ids derive
         // from the caller and the key, and the launch service replays a
@@ -333,7 +340,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
             return yield* new OrchestratorMcpFailure({
               code: "invalid_request",
               message:
-                "groupedUnderThreadId must name an existing thread. Use JSON null (without quotes) for a top-level thread.",
+                "groupedUnderThreadId must name an existing thread. Use JSON null (without quotes) to leave the thread ungrouped.",
             });
         }
         const project =
@@ -487,15 +494,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           createdBy: "agent",
           creationSource: "mcp",
           ...(linkOrigin === undefined ? {} : { linkOrigin }),
-          // Kept only alongside linkOrigin: thread.create drops it otherwise.
-          ...(input.delegatedFrom === undefined ? {} : { delegatedFrom: input.delegatedFrom }),
-          ...(caller === undefined ? {} : { creatorThreadId: caller.id }),
-          groupedUnderThreadId:
-            input.groupedUnderThreadId === undefined
-              ? caller?.projectId === projectId && caller.lineage.sideChat !== true
-                ? caller.id
-                : null
-              : input.groupedUnderThreadId,
+          ...ownership.forProject(projectId),
         }).pipe(
           Effect.provideService(ThreadReadAuthorization, readAuthorization),
           Effect.mapError((error) => {
