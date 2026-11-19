@@ -5999,3 +5999,81 @@ it.effect(
     }).pipe(Effect.provide(harness.layer));
   },
 );
+
+it.effect.each(["available", "missing"])(
+  "activates a remote task with an %s exact worktree base",
+  (base) =>
+    withRealGitRepo(({ cwd, worktreePath, command, harness }) =>
+      Effect.gen(function* () {
+        yield* command(cwd, ["commit", "--allow-empty", "-m", "parent base"]);
+        const parentCommit = (yield* command(cwd, ["rev-parse", "HEAD"])).stdout.trim();
+        yield* command(cwd, ["commit", "--allow-empty", "-m", "destination root advance"]);
+        const destinationCommit = (yield* command(cwd, ["rev-parse", "HEAD"])).stdout.trim();
+        const worktreeBaseCommit = base === "available" ? parentCommit : "a".repeat(40);
+        const services = harness();
+        yield* Effect.gen(function* () {
+          const launches = yield* ThreadLaunch.ThreadLaunchService;
+          const threads = yield* ThreadManagement.ThreadManagementService;
+          const selector = {
+            parentEnvironmentId: EnvironmentId.make("source-environment"),
+            parentThreadId: ThreadId.make("remote-parent"),
+            sourceTaskId: NodeId.make("isolated-task"),
+            delegationId: "isolated-launch",
+          };
+          const linkSessionId = "peer-session";
+          const launched = yield* launches.launch({
+            ...launchInput({ command: "prepare-isolated-task", thread: "remote-isolated" }),
+            linkOrigin: { sessionId: linkSessionId, label: "Peer", access: "full-access" },
+            remoteDelegation: {
+              ...selector,
+              linkSessionId,
+              stage: "prepared",
+              worktreeBaseCommit,
+            },
+          });
+          const { threadId } = launched;
+          const commandId = CommandId.make("activate-isolated-task");
+          yield* threads.dispatch({
+            type: "remote_delegation.activate",
+            commandId,
+            threadId,
+            delegation: selector,
+            linkSessionId,
+            messageId: MessageId.make("isolated-task-prompt"),
+            text: "Run in the isolated checkout.",
+          });
+          const awaitingWorktree = yield* threads.getThreadProjection(threadId);
+          const run = awaitingWorktree.runs[0]!;
+          assert.equal(run.status, "preparing");
+          assert.deepEqual(run.remoteDelegation, selector);
+          assert.isNull(awaitingWorktree.thread.worktreePath);
+          yield* launches.prepareRun({ commandId, threadId, runId: run.id });
+          const prepared = yield* preparationSettled(threadId);
+          if (base === "missing") {
+            assert.equal(prepared.runs[0]?.status, "failed");
+            assert.isNull(prepared.thread.worktreePath);
+            assert.include(
+              preparationFailure(prepared)?.failure.message ?? "",
+              "exact worktree base",
+            );
+            assert.lengthOf(services.createWorktree.mock.calls, 0);
+          } else {
+            assert.equal(
+              prepared.runs[0]?.status,
+              "starting",
+              preparationFailure(prepared)?.failure.message,
+            );
+            assert.equal(prepared.thread.worktreePath, worktreePath);
+            assert.equal(
+              (yield* command(worktreePath, ["rev-parse", "HEAD"])).stdout.trim(),
+              parentCommit,
+            );
+            assert.equal(
+              (yield* command(cwd, ["rev-parse", "HEAD"])).stdout.trim(),
+              destinationCommit,
+            );
+          }
+        }).pipe(Effect.provide(services.layer));
+      }),
+    ),
+);

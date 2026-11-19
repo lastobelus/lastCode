@@ -10,6 +10,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CommandId,
   EventId,
+  GitCommandError,
   MessageId,
   type ModelSelection,
   NodeId,
@@ -45,6 +46,7 @@ import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as Tracer from "effect/Tracer";
 import type * as SqlClient from "effect/sql/SqlClient";
 import { McpSchema, McpServer } from "effect/ai";
+import { ChildProcessSpawner } from "effect/process";
 
 import * as ActionResume from "../actionResume/ActionResume.ts";
 import * as ThreadReadBroker from "../mcp/ThreadReadBroker.ts";
@@ -91,6 +93,7 @@ const boxProject = ProjectId.make("project:box");
 const instanceId = ProviderInstanceId.make("codex");
 const driver = ProviderDriverKind.make("codex");
 const modelSelection = { instanceId, model: "gpt-5.4" };
+const parentCommit = "a".repeat(40);
 
 type LaunchedWith = Pick<
   ThreadLaunch.ThreadLaunchInput,
@@ -99,6 +102,7 @@ type LaunchedWith = Pick<
 
 /** The thread the box launches for the task, which the test finishes. */
 interface BoxThread {
+  readonly preparedWorktreeBase: Ref.Ref<string | undefined>;
   readonly launched: Ref.Ref<ThreadId | null>;
   /** The link session that launched it, as the box stamps it. */
   readonly linkOrigin: Ref.Ref<{ readonly sessionId: string; readonly label: string } | null>;
@@ -165,6 +169,7 @@ interface BoxThread {
 
 const makeBoxThread = Effect.gen(function* () {
   return {
+    preparedWorktreeBase: yield* Ref.make<string | undefined>(undefined),
     launched: yield* Ref.make<ThreadId | null>(null),
     linkOrigin: yield* Ref.make<{ readonly sessionId: string; readonly label: string } | null>(
       null,
@@ -245,18 +250,29 @@ const boxProjects: ReadonlyArray<Project> = [
   },
 ];
 
-const serveBox = (thread: BoxThread, owned = true) => {
-  return servePeer(box, boxToolkitLayer(thread, owned));
-};
+const serveBox = (thread: BoxThread, owned = true, worktrees = true, fetchable = true) =>
+  servePeer(box, boxToolkitLayer(thread, owned, worktrees, fetchable));
 
 const boxRunId = RunId.make("run:box");
 const boxLaterRunId = RunId.make("run:box-later");
 const boxQueuedRunId = RunId.make("run:box-queued");
 const continuationOf = (runId: RunId) => RunId.make(`${runId}:restarted`);
 
-const boxToolkitLayer = (thread: BoxThread, owned: boolean) => {
+const boxToolkitLayer = (
+  thread: BoxThread,
+  owned: boolean,
+  worktrees: boolean,
+  fetchable: boolean,
+) => {
   const associations = new Map<string, RemoteDelegationAssociation>();
   const activations = new Map<string, OrchestrationV2Run>();
+  const gitSuccess = {
+    exitCode: ChildProcessSpawner.ExitCode(0),
+    stdout: "",
+    stderr: "",
+    stdoutTruncated: false,
+    stderrTruncated: false,
+  };
   const runId = boxRunId;
   const interrupts = new Set<string>();
   const shellOf = (threadId: ThreadId) =>
@@ -719,6 +735,9 @@ const boxToolkitLayer = (thread: BoxThread, owned: boolean) => {
         )
           associations.set(input.remoteDelegation.delegationId, input.remoteDelegation);
       }).pipe(
+        Effect.andThen(
+          Ref.set(thread.preparedWorktreeBase, input.remoteDelegation?.worktreeBaseCommit),
+        ),
         Effect.andThen(Ref.get(thread.runless)),
         Effect.flatMap((runless) =>
           Ref.set(thread.launched, input.threadId!).pipe(
@@ -741,6 +760,7 @@ const boxToolkitLayer = (thread: BoxThread, owned: boolean) => {
                   projectId: input.projectId,
                   title: input.title,
                   modelSelection: input.modelSelection,
+                  remoteDelegations: [...associations.values()],
                 },
                 runs:
                   input.initialMessage?.messageId && !runless
@@ -775,12 +795,14 @@ const boxToolkitLayer = (thread: BoxThread, owned: boolean) => {
                     const {
                       appOwnedActionContinuationVersion: _actionVersion,
                       remoteOwnedContinuationVersion: _remoteVersion,
+                      remoteWorktreeIsolationVersion: _worktreeVersion,
                       ...features
                     } = result.features;
                     return {
                       ...result,
                       features: {
                         ...features,
+                        ...(worktrees ? { remoteWorktreeIsolationVersion: 1 as const } : {}),
                         ...(owned
                           ? {
                               remoteOwnedContinuationVersion: 1 as const,
@@ -820,9 +842,29 @@ const boxToolkitLayer = (thread: BoxThread, owned: boolean) => {
       ),
     ),
     Layer.provide(
-      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/p" }),
+      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+        namedProjectsRoot: "/p",
+        isScratchProject: () => Effect.succeed(false),
+      }),
     ),
-    Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+    Layer.provide(
+      Layer.mock(GitVcsDriver.GitVcsDriver)({
+        execute: (input) =>
+          input.args[0] === "remote"
+            ? Effect.succeed({ ...gitSuccess, stdout: "origin\nupstream\n" })
+            : fetchable && input.args.at(-2) === "upstream" && input.args.at(-1) === parentCommit
+              ? Effect.succeed(gitSuccess)
+              : Effect.fail(
+                  new GitCommandError({
+                    operation: input.operation,
+                    command: "git fetch",
+                    cwd: input.cwd,
+                    detail: "Commit unavailable",
+                  }),
+                ),
+        resolveCommit: () => Effect.succeed({ commitSha: parentCommit }),
+      }),
+    ),
     Layer.provide(Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({})),
     Layer.provide(
       ServerConfig.layerTest(process.cwd(), { prefix: "t3-remote-delegation-box-" }).pipe(
@@ -997,7 +1039,12 @@ const makeLaptop = (
       Layer.provide(Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({})),
       Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
       Layer.provide(Layer.mock(ThreadLaunch.ThreadLaunchService)({})),
-      Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+      Layer.provide(
+        Layer.mock(GitVcsDriver.GitVcsDriver)({
+          resolveCommit: () => Effect.succeed({ commitSha: parentCommit }),
+          resolvePrimaryRemoteName: () => Effect.succeed("origin"),
+        }),
+      ),
       Layer.fresh,
     );
     const here = yield* Layer.build(layerHere);
@@ -1898,29 +1945,59 @@ it.effect("a task naming another driver there never runs its model on the parent
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
-it.effect("refuses worktree isolation for a task there before launching anything", () =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const thread = yield* makeBoxThread;
-      const b = yield* serveBox(thread);
-      const offers = yield* SubscriptionRef.make<
-        ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
-      >([]);
-      const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
-      const a = yield* makeLaptop(database, offers);
-      yield* linkTo(a.links, b, "auto");
-      yield* seedParent(a);
+it.effect.each(["available", "unfetchable", "older peer"] as const)(
+  "handles isolated delegation for %s",
+  (scenario) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const thread = yield* makeBoxThread;
+        const b = yield* serveBox(
+          thread,
+          true,
+          scenario !== "older peer",
+          scenario !== "unfetchable",
+        );
+        const offers = yield* SubscriptionRef.make<
+          ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+        >([]);
+        const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+        const a = yield* makeLaptop(database, offers);
+        yield* linkTo(a.links, b, "auto");
+        yield* seedParent(a);
 
-      const result = yield* a.call("delegate_task", {
-        task: "Run the suite on the box.",
-        target: { environmentId: box.environmentId },
-        isolation: "worktree",
-      });
-      expect(result.isError).toBe(true);
-      expect(JSON.stringify(result.content)).toContain("isolation");
-      expect(yield* Ref.get(thread.launched)).toBeNull();
-    }),
-  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+        const result = yield* a.call("delegate_task", {
+          task: "Run the suite on the box.",
+          target: { environmentId: box.environmentId },
+          isolation: "worktree",
+          mode: "async",
+          clientRequestId: "isolated-suite",
+        });
+        if (scenario === "older peer") {
+          expect(result.isError).toBe(true);
+          expect(JSON.stringify(result.content)).toContain("remote worktree isolation");
+          expect((yield* a.orchestrator.getThreadProjection(parentThreadId)).subagents).toEqual([]);
+        } else {
+          expect(result.isError, JSON.stringify(result.content)).toBe(false);
+          const { taskId } = result.structuredContent as { taskId: NodeId };
+          if (scenario === "available") {
+            expect(yield* Ref.get(thread.preparedWorktreeBase)).toBe(parentCommit);
+            yield* Ref.set(thread.reply, "Suite passed in the child worktree.");
+            yield* SubscriptionRef.set(thread.status, "completed");
+            yield* Deferred.succeed(thread.finished, undefined);
+            expect(yield* taskResult(a, taskId)).toMatchObject({
+              status: "completed",
+              result: "Suite passed in the child worktree.",
+            });
+            return;
+          }
+          expect(yield* taskResult(a, taskId)).toMatchObject({
+            status: "failed",
+            result: expect.stringContaining("Push the branch"),
+          });
+        }
+        expect(yield* Ref.get(thread.launched)).toBeNull();
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
 it.effect("follows an open task again after the laptop restarts", () =>

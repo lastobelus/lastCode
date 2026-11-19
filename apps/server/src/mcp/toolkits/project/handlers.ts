@@ -1,3 +1,4 @@
+import { prepareRemoteWorktreeBase } from "../../../peer/remoteWorktreeBase.ts";
 import {
   CommandId,
   MessageId,
@@ -251,6 +252,17 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                 sourceTaskId: input.remotePreparation.sourceTaskId,
                 delegationId: `delegation:${commandId}`,
               };
+        const worktreeBaseCommit = input.remotePreparation?.worktreeBaseCommit;
+        if (
+          worktreeBaseCommit !== undefined &&
+          (input.workspaceStrategy !== undefined ||
+            input.remotePreparation?.existingThreadId !== undefined)
+        ) {
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "An isolated remote task prepares a new thread from its exact base commit.",
+          });
+        }
         if (input.remotePreparation?.existingThreadId !== undefined) {
           const target = yield* context.threads
             .getThreadRecords(input.remotePreparation.existingThreadId, [])
@@ -362,6 +374,9 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                   }),
                 ),
               );
+        if (project !== undefined && worktreeBaseCommit !== undefined) {
+          yield* prepareRemoteWorktreeBase(project, worktreeBaseCommit);
+        }
         if (project !== undefined && input.workspaceStrategy?.type === "existing_worktree")
           yield* assertProjectWorktree(project.workspaceRoot, input.workspaceStrategy.worktreePath);
         if (!replaying && input.modelSelection !== undefined) {
@@ -384,6 +399,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         // An outside caller that names no workspace follows the new-threads-in-a-worktree
         // default, as the composer does.
         const requestedStrategy =
+          worktreeBaseCommit === undefined &&
           input.workspaceStrategy === undefined &&
           caller === undefined &&
           project !== undefined &&
@@ -489,6 +505,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                   ...delegation,
                   linkSessionId: peer!.sessionId,
                   stage: "prepared" as const,
+                  ...(worktreeBaseCommit === undefined ? {} : { worktreeBaseCommit }),
                 },
               }),
           createdBy: "agent",
@@ -530,6 +547,13 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           threadId: thread.id,
           link: McpInvocationContext.threadLinkFor(scope, thread.id, thread.title),
           ...(delegation === undefined ? {} : { delegation }),
+          ...(worktreeBaseCommit === undefined
+            ? {}
+            : {
+                worktreeBaseCommit: thread.remoteDelegations?.find(
+                  (entry) => entry.delegationId === delegation?.delegationId,
+                )?.worktreeBaseCommit,
+              }),
           projectId: thread.projectId,
           modelSelection: thread.modelSelection,
           runId: run?.id ?? null,

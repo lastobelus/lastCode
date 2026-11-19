@@ -12563,6 +12563,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         },
       });
       if (command.type === "remote_delegation.activate") {
+        const baseRef = old?.worktreeBaseCommit;
+        if (baseRef !== undefined && (thread.worktreePath !== null || projection.runs.length > 0)) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "An isolated remote task needs an unused thread to prepare its worktree.",
+          });
+        }
         const before = (yield* Ref.get(events)).length;
         yield* dispatchMessage(
           {
@@ -12574,7 +12582,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             attachments: [],
             createdBy: "agent",
             creationSource: "mcp",
-            dispatchMode: { type: "queue_after_active" },
+            dispatchMode:
+              baseRef === undefined
+                ? { type: "queue_after_active" }
+                : {
+                    type: "defer_start",
+                    workspaceStrategy: {
+                      type: "worktree",
+                      baseRef,
+                      startFromOrigin: false,
+                      requireExactBase: true,
+                    },
+                  },
           },
           events,
           effects,
@@ -18956,9 +18975,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                     stored.event.payload.id === command.runId,
                 )
               : source.value.threadId === command.threadId &&
-                ["thread.create", "message.dispatch", "prepared-run.retry"].includes(
-                  source.value.commandType,
-                ) &&
+                [
+                  "thread.create",
+                  "message.dispatch",
+                  "prepared-run.retry",
+                  "remote_delegation.activate",
+                ].includes(source.value.commandType) &&
                 sourceEvents.some(
                   (stored) =>
                     (stored.event.type === "run.created" || stored.event.type === "run.updated") &&

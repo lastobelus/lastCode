@@ -526,9 +526,14 @@ export const RemoteDelegationSelector = Schema.Struct({
 });
 export type RemoteDelegationSelector = typeof RemoteDelegationSelector.Type;
 
+export const RemoteWorktreeBaseCommit = Schema.String.check(
+  Schema.isPattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
+);
+
 export const RemoteDelegationAssociation = Schema.Struct({
   ...RemoteDelegationSelector.fields,
   linkSessionId: TrimmedNonEmptyString,
+  worktreeBaseCommit: Schema.optional(RemoteWorktreeBaseCommit),
   stage: Schema.Literals(["prepared", "active", "disposed", "settled"]),
   finalRun: Schema.optional(
     Schema.Struct({
@@ -543,6 +548,7 @@ export const RemoteLaunchIntent = Schema.Struct({
   environmentId: EnvironmentId,
   projectId: ProjectId,
   existingThreadId: Schema.optional(ThreadId),
+  worktreeBaseCommit: Schema.optional(RemoteWorktreeBaseCommit),
   requestNamespace: Schema.String,
   requestKey: Schema.String,
   title: Schema.String,
@@ -898,6 +904,7 @@ export const OrchestrationV2ThreadLaunchWorkspaceStrategy = Schema.Union([
     baseRef: TrimmedNonEmptyString,
     branch: Schema.optional(TrimmedNonEmptyString),
     startFromOrigin: Schema.optional(Schema.Boolean),
+    requireExactBase: Schema.optional(Schema.Literal(true)),
   }),
 ]);
 export type OrchestrationV2ThreadLaunchWorkspaceStrategy =

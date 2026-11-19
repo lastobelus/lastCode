@@ -1319,11 +1319,17 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
             : origin === undefined && thread.creatorThreadId !== undefined
               ? true
               : null;
+    const remoteWorktreeTask = thread.remoteDelegations?.some(
+      (association) => association.worktreeBaseCommit !== undefined,
+    );
     return evaluateWorktreeSuspensionEligibility({
       policy,
       now: timestamp,
       candidate: {
-        kind: thread.lineage.relationshipToParent === "subagent" ? "subagent" : "thread",
+        kind:
+          thread.lineage.relationshipToParent === "subagent" || remoteWorktreeTask
+            ? "subagent"
+            : "thread",
         agentCreatedChild,
         humanParticipation: adopted ? true : thread.workspaceUserAdopted === false ? false : null,
         settledAt: settledOrArchivedAt === null ? null : DateTime.formatIso(settledOrArchivedAt),

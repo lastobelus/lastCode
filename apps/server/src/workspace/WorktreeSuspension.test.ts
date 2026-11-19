@@ -11,6 +11,7 @@ import {
   CommandId,
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
+  NodeId,
   GitCommandError,
   OrchestrationV2ThreadShell,
   ProjectId,
@@ -4715,26 +4716,58 @@ it.live.each([
     ),
 );
 
-it.live("preserves unknown child lineage before automatic scope classification", () =>
-  realGit((f) =>
-    Effect.gen(function* () {
-      const h = yield* harness(f, {
-        cleanupThreads: true,
-        settings: {
-          ...automaticSettings,
-          worktreeSuspension: {
-            ...automaticSettings.worktreeSuspension,
-            scopes: { subagents: true, untouchedChildren: true, otherThreads: true },
+it.live.each(["unknown child lineage", "isolated remote task"] as const)(
+  "scopes automatic suspension for %s",
+  (kind) =>
+    realGit((f) =>
+      Effect.gen(function* () {
+        const h = yield* harness(f, {
+          cleanupThreads: true,
+          settings: {
+            ...automaticSettings,
+            worktreeSuspension: {
+              ...automaticSettings.worktreeSuspension,
+              scopes: {
+                subagents: true,
+                untouchedChildren: kind === "unknown child lineage",
+                otherThreads: kind === "unknown child lineage",
+              },
+            },
           },
-        },
-      });
-      for (const [id, thread] of h.threads)
-        h.threads.set(id, { ...thread, createdBy: "agent", workspaceUserAdopted: false });
-      yield* h.service.sweep;
-      expect(yield* h.registry.list).toEqual([]);
-      expect(h.gitRequests).toEqual([]);
-    }),
-  ),
+        });
+        for (const [id, thread] of h.threads) {
+          h.threads.set(id, {
+            ...thread,
+            createdBy: "agent",
+            workspaceUserAdopted: false,
+            ...(kind === "unknown child lineage"
+              ? {}
+              : {
+                  remoteDelegations: [
+                    {
+                      parentEnvironmentId: EnvironmentId.make("source-environment"),
+                      parentThreadId: ThreadId.make("foreign-parent"),
+                      sourceTaskId: NodeId.make("isolated-task"),
+                      delegationId: "isolated-task",
+                      linkSessionId: "peer-session",
+                      stage: "settled",
+                      worktreeBaseCommit: "a".repeat(40),
+                    },
+                  ],
+                }),
+          });
+        }
+        yield* h.service.sweep;
+        const saved = yield* h.registry.list;
+        if (kind === "isolated remote task") {
+          expect(saved).toHaveLength(1);
+          expect(saved[0]?.summary.state).toBe("suspended");
+        } else {
+          expect(saved).toEqual([]);
+          expect(h.gitRequests).toEqual([]);
+        }
+      }),
+    ),
 );
 
 it.live("keeps a recorded recent workspace-use clock in the cheap sweep prefilter", () =>

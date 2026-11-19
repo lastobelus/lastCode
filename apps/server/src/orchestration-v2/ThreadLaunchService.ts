@@ -81,6 +81,7 @@ export type ThreadLaunchWorkspaceStrategy =
       readonly baseRef: string;
       readonly branch?: string | undefined;
       readonly startFromOrigin?: boolean | undefined;
+      readonly requireExactBase?: true | undefined;
     };
 
 export interface ThreadLaunchInitialMessage {
@@ -786,6 +787,15 @@ const make = Effect.gen(function* () {
             })
             .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId))));
         if (!recordedBaseResolves) {
+          if (input.workspaceStrategy.requireExactBase === true) {
+            return yield* mapError(
+              input,
+              "provision-worktree",
+              threadId,
+            )(
+              `The exact worktree base ${requestedBaseRef} is unavailable. Push the branch and delegate again, or omit isolation.`,
+            );
+          }
           const remoteName =
             remote?.remoteName ??
             (yield* git

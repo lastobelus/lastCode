@@ -48,6 +48,7 @@ import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.t
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as PeerForwarding from "./PeerForwarding.ts";
 import * as PeerLinks from "./PeerLinks.ts";
@@ -163,6 +164,7 @@ const make = Effect.gen(function* () {
   const threads = yield* ThreadManagement.ThreadManagementService;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const projects = yield* ProjectService.ProjectService;
+  const git = yield* GitVcsDriver.GitVcsDriver;
   const repositoryIdentities = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
   const random = yield* SecureRandom.SecureRandom;
   const digest = yield* Digest.Digest;
@@ -315,15 +317,6 @@ const make = Effect.gen(function* () {
       }
       const parentNodeId = parentRun.rootNodeId;
       const { target } = input;
-      // A worktree there would branch from a commit this checkout has and the
-      // other may not, so a remote task runs in that project's checkout.
-      if (input.isolation === "worktree") {
-        return yield* new OrchestratorMcpFailure({
-          code: "invalid_request",
-          message:
-            'A task in a linked environment runs in that project\'s checkout; isolation "worktree" is not supported there. Omit isolation, or use t3_thread_launch with environmentId and a worktree workspaceStrategy.',
-        });
-      }
       // The provider and model inherit as they do for a task here. Another
       // provider there has no model to inherit, so the caller names one.
       const inherited = parent.thread.modelSelection;
@@ -380,6 +373,16 @@ const make = Effect.gen(function* () {
           message: "This peer does not support owned remote continuations.",
         });
       }
+      if (
+        input.isolation === "worktree" &&
+        capabilities.features.remoteWorktreeIsolationVersion !== 1
+      ) {
+        return yield* new OrchestratorMcpFailure({
+          code: "capability_denied",
+          message:
+            "This peer does not support remote worktree isolation. Upgrade it or omit isolation to run in the destination checkout.",
+        });
+      }
       if (runtimeMode !== undefined)
         yield* resolveRuntimeMode(capabilities.runtimeMode, runtimeMode);
       if (interactionMode !== undefined)
@@ -387,6 +390,29 @@ const make = Effect.gen(function* () {
       const commandId = CommandId.make(
         `command:mcp:${encodeURIComponent(scope.requestNamespace)}:remote-delegate:${encodeURIComponent(key)}`,
       );
+      let worktreeBaseCommit: string | undefined;
+      if (input.isolation === "worktree" && !(yield* threads.hasReceipt(commandId))) {
+        const invalidBase = new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message:
+            "Unable to resolve the parent checkout commit and its Git remote. Configure a shared Git remote and push the branch, or omit isolation.",
+        });
+        const project = yield* projects.getById(parent.thread.projectId).pipe(
+          Effect.mapError(() => invalidBase),
+          Effect.flatMap(
+            Option.match({
+              onNone: () => Effect.fail(invalidBase),
+              onSome: Effect.succeed,
+            }),
+          ),
+        );
+        const cwd = parent.thread.worktreePath ?? project.workspaceRoot;
+        yield* git.resolvePrimaryRemoteName(cwd).pipe(Effect.mapError(() => invalidBase));
+        const base = yield* git
+          .resolveCommit({ cwd, revision: "HEAD" })
+          .pipe(Effect.mapError(() => invalidBase));
+        worktreeBaseCommit = base.commitSha;
+      }
       const recorded = yield* threads
         .dispatch({
           type: "delegated_task.remote.request",
@@ -403,6 +429,7 @@ const make = Effect.gen(function* () {
             environmentId: target.environmentId,
             projectId,
             ...(existingThreadId === undefined ? {} : { existingThreadId }),
+            ...(worktreeBaseCommit === undefined ? {} : { worktreeBaseCommit }),
             requestNamespace: scope.requestNamespace,
             requestKey: key,
             title: input.title ?? parent.thread.title,
@@ -818,6 +845,9 @@ const make = Effect.gen(function* () {
               parentEnvironmentId: hereId,
               parentThreadId,
               sourceTaskId: taskId,
+              ...(intent.worktreeBaseCommit === undefined
+                ? {}
+                : { worktreeBaseCommit: intent.worktreeBaseCommit }),
               ...(intent.existingThreadId === undefined
                 ? {}
                 : { existingThreadId: intent.existingThreadId }),
@@ -828,11 +858,12 @@ const make = Effect.gen(function* () {
           prepared.delegation === undefined ||
           prepared.delegation.parentEnvironmentId !== hereId ||
           prepared.delegation.parentThreadId !== parentThreadId ||
-          prepared.delegation.sourceTaskId !== taskId
+          prepared.delegation.sourceTaskId !== taskId ||
+          prepared.worktreeBaseCommit !== intent.worktreeBaseCommit
         ) {
           return yield* new OrchestratorMcpFailure({
             code: "capability_denied",
-            message: "Peer did not return the exact prepared delegation identity.",
+            message: "Peer did not confirm the prepared delegation and its requested checkout.",
           });
         }
         const link = yield* links.get(intent.environmentId);

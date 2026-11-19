@@ -184,7 +184,7 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   isolation: Schema.optional(
     Schema.Literals(["shared", "worktree"]).annotate({
       description:
-        "'shared' (default): parent checkout. 'worktree': new prepared checkout from the parent commit, for a separate checkout or PR per child. Uncommitted edits stay out.",
+        "'shared' (default): parent checkout, or the destination's checkout with `target.environmentId`. 'worktree': new prepared checkout at the parent checkout's HEAD commit, for a separate checkout or PR per child. Uncommitted edits stay out. With `target.environmentId`, needs `remoteWorktreeIsolationVersion: 1` there and the commit fetchable there.",
     }),
   ),
   mode: Schema.optional(
@@ -788,6 +788,7 @@ export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
     appOwnedActionContinuationVersion: Schema.optional(Schema.Literal(1)),
     appOwnedPullRequestWatchContinuationVersion: Schema.optional(Schema.Literal(1)),
     remoteOwnedContinuationVersion: Schema.optional(Schema.Literal(1)),
+    remoteWorktreeIsolationVersion: Schema.optional(Schema.Literal(1)),
     asyncPolling: Schema.Boolean,
     cancellation: Schema.Boolean,
     batchThreadCreation: Schema.Boolean,
