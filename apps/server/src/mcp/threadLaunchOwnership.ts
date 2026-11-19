@@ -9,6 +9,6 @@ export function launchCreatorOrigin(
     kind: "thread_launch",
     environmentId: creator.environmentId,
     threadId: creator.threadId,
-    ...(topLevel === true ? {} : { owned: true }),
+    owned: topLevel !== true,
   };
 }

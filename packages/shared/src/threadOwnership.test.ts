@@ -25,9 +25,7 @@ const delegatedFrom = { environmentId: remote, threadId: creator, title: "Creato
 
 describe("getThreadOwner", () => {
   it("keeps launch provenance readable by the historical origin schema", () => {
-    const decoded = Schema.decodeSync(HistoricalThreadCreatorOrigin)(
-      ownedLaunch.creatorOrigin,
-    );
+    const decoded = Schema.decodeSync(HistoricalThreadCreatorOrigin)(ownedLaunch.creatorOrigin);
     expect(decoded).toEqual(origin);
     expect(getThreadOwner({ lineage, creatorOrigin: decoded }, local)).toBeNull();
   });
@@ -40,7 +38,12 @@ describe("getThreadOwner", () => {
       { lineage, delegatedFrom },
       { environmentId: remote, threadId: creator },
     ],
-    ["historical or independent launch provenance", { lineage, creatorOrigin: origin }, null],
+    ["historical launch provenance", { lineage, creatorOrigin: origin }, null],
+    [
+      "an explicitly independent launch",
+      { lineage, creatorOrigin: { ...origin, owned: false } },
+      null,
+    ],
     [
       "legacy creator fields",
       { lineage, creatorThreadId: creator, creatorGrouping: "grouped" },

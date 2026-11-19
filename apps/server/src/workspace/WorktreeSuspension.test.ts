@@ -4675,12 +4675,26 @@ it.live("prefilters ineligible shells before identifying or registering checkout
   ),
 );
 
-it.live.each([false, true])(
-  "suspends only a newly owned untouched launch with creator origin (owned: %s)",
-  (owned) =>
+it.live.each([
+  { owned: true, otherThreads: false, eligible: true },
+  { owned: false, otherThreads: false, eligible: false },
+  { owned: false, otherThreads: true, eligible: true },
+  { owned: undefined, otherThreads: true, eligible: false },
+])(
+  "classifies launch provenance for automatic suspension (owned: $owned, otherThreads: $otherThreads)",
+  ({ owned, otherThreads, eligible }) =>
     realGit((f) =>
       Effect.gen(function* () {
-        const h = yield* harness(f, { cleanupThreads: true, settings: automaticSettings });
+        const h = yield* harness(f, {
+          cleanupThreads: true,
+          settings: {
+            ...automaticSettings,
+            worktreeSuspension: {
+              ...automaticSettings.worktreeSuspension,
+              scopes: { ...automaticSettings.worktreeSuspension.scopes, otherThreads },
+            },
+          },
+        });
         untouchedOwners(h.threads);
         for (const [id, thread] of h.threads) {
           h.threads.set(id, {
@@ -4689,13 +4703,13 @@ it.live.each([false, true])(
               kind: "thread_launch",
               threadId: thread.creatorThreadId!,
               environmentId: EnvironmentId.make("test-environment"),
-              ...(owned ? { owned: true } : {}),
+              ...(owned === undefined ? {} : { owned }),
             },
           });
         }
         yield* h.service.sweep;
         expect((yield* h.registry.list).map((entry) => entry.summary.state)).toEqual(
-          owned ? ["suspended"] : [],
+          eligible ? ["suspended"] : [],
         );
       }),
     ),

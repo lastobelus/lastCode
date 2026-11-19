@@ -1306,23 +1306,25 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       thread.settledOverride !== null ||
       thread.lineage.independent === true ||
       thread.creatorGrouping === "independent";
+    const origin = thread.creatorOrigin;
+    // New launches record their initial ownership decision. Historical repairs
+    // carry provenance only, so keep the legacy suspension classification.
+    const agentCreatedChild =
+      thread.createdBy === "user"
+        ? false
+        : thread.createdBy !== "agent"
+          ? null
+          : origin?.kind === "thread_launch" && origin.owned !== undefined
+            ? getThreadOwner(thread, environmentId) !== null
+            : origin === undefined && thread.creatorThreadId !== undefined
+              ? true
+              : null;
     return evaluateWorktreeSuspensionEligibility({
       policy,
       now: timestamp,
       candidate: {
         kind: thread.lineage.relationshipToParent === "subagent" ? "subagent" : "thread",
-        // Preserve the pre-ownership suspension policy for legacy launches. A repaired
-        // creator is provenance only, while new launches have an explicit owner.
-        agentCreatedChild:
-          thread.createdBy === "agent" &&
-          (thread.creatorOrigin === undefined
-            ? thread.creatorThreadId !== undefined
-            : thread.creatorOrigin.kind === "thread_launch" &&
-              getThreadOwner(thread, environmentId) !== null)
-            ? true
-            : thread.createdBy === "user"
-              ? false
-              : null,
+        agentCreatedChild,
         humanParticipation: adopted ? true : thread.workspaceUserAdopted === false ? false : null,
         settledAt: settledOrArchivedAt === null ? null : DateTime.formatIso(settledOrArchivedAt),
         lastWorkspaceUseAt: lastUse,

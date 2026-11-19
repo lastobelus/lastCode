@@ -398,7 +398,7 @@ it.layer(Layer.provideMerge(layerTools, layerOrchestration))("work a link starts
           kind: "thread_launch",
           environmentId: sender.environmentId,
           threadId: sender.threadId,
-          ...(topLevel ? {} : { owned: true }),
+          owned: topLevel !== true,
         });
         assert.isUndefined(shell?.delegatedFrom);
         assert.isNull(shell?.groupedUnderThreadId);
@@ -525,6 +525,7 @@ it.layer(Layer.provideMerge(layerTools, layerOrchestration))("work a link starts
         kind: "thread_launch",
         environmentId: threadScope.environmentId,
         threadId: ownLaunch,
+        owned: false,
       });
 
       for (const [tool, source] of [

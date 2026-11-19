@@ -577,8 +577,8 @@ export const HistoricalThreadCreatorOrigin = Schema.Union([
 export const ThreadCreatorOrigin = Schema.Union([
   Schema.Struct({
     ...ThreadLaunchCreatorReference.fields,
-    /** Set at launch for an owned thread. Historical creator repairs omit it. */
-    owned: Schema.optional(Schema.Literal(true)),
+    /** New launches record whether they started owned. Historical creator repairs omit it. */
+    owned: Schema.optional(Schema.Boolean),
   }),
   ScheduledTaskCreatorReference,
 ]);

@@ -217,7 +217,7 @@ it.effect(
           kind: "thread_launch",
           environmentId: scope.environmentId,
           threadId: parentThreadId,
-          ...(index === 0 ? { owned: true } : {}),
+          owned: index === 0,
         });
       }
       const members: ThreadId[] = [];
