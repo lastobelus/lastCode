@@ -52,6 +52,7 @@ import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as PeerForwarding from "./PeerForwarding.ts";
 import * as PeerLinks from "./PeerLinks.ts";
+import { resolveParentWorktreeBase } from "./remoteWorktreeDelegation.ts";
 
 /** How long one follow of a remote task waits on its thread there before checking again. */
 const FOLLOW_WAIT_MS = 10 * 60 * 1_000;
@@ -390,28 +391,10 @@ const make = Effect.gen(function* () {
       const commandId = CommandId.make(
         `command:mcp:${encodeURIComponent(scope.requestNamespace)}:remote-delegate:${encodeURIComponent(key)}`,
       );
-      let worktreeBaseCommit: string | undefined;
-      if (input.isolation === "worktree" && !(yield* threads.hasReceipt(commandId))) {
-        const invalidBase = new OrchestratorMcpFailure({
-          code: "invalid_request",
-          message:
-            "Unable to resolve the parent checkout commit. Check out a Git commit before delegating, or omit isolation.",
-        });
-        const project = yield* projects.getById(parent.thread.projectId).pipe(
-          Effect.mapError(() => invalidBase),
-          Effect.flatMap(
-            Option.match({
-              onNone: () => Effect.fail(invalidBase),
-              onSome: Effect.succeed,
-            }),
-          ),
-        );
-        const cwd = parent.thread.worktreePath ?? project.workspaceRoot;
-        const base = yield* git
-          .resolveCommit({ cwd, revision: "HEAD" })
-          .pipe(Effect.mapError(() => invalidBase));
-        worktreeBaseCommit = base.commitSha;
-      }
+      const worktreeBaseCommit =
+        input.isolation === "worktree" && !(yield* threads.hasReceipt(commandId))
+          ? yield* resolveParentWorktreeBase(parent.thread, projects, git)
+          : undefined;
       const recorded = yield* threads
         .dispatch({
           type: "delegated_task.remote.request",

@@ -23,6 +23,7 @@ import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts"
 import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageIntake.ts";
 import * as ThreadReadBroker from "../../ThreadReadBroker.ts";
 import * as Claims from "../../../orchestration-v2/AttachmentClaims.ts";
+import { validateRemoteWorktreePreparation } from "../../../peer/remoteWorktreeDelegation.ts";
 import * as Project from "../../../project/ProjectService.ts";
 import * as ProjectCloneTracker from "../../../project/ProjectCloneTracker.ts";
 import { mutateProjectWithClone } from "../../../project/ProjectMutation.ts";
@@ -252,16 +253,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                 delegationId: `delegation:${commandId}`,
               };
         const worktreeBaseCommit = input.remotePreparation?.worktreeBaseCommit;
-        if (
-          worktreeBaseCommit !== undefined &&
-          (input.workspaceStrategy !== undefined ||
-            input.remotePreparation?.existingThreadId !== undefined)
-        ) {
-          return yield* new OrchestratorMcpFailure({
-            code: "invalid_request",
-            message: "An isolated remote task prepares a new thread from its exact base commit.",
-          });
-        }
+        const validateWorktreeProject = yield* validateRemoteWorktreePreparation(input);
         if (input.remotePreparation?.existingThreadId !== undefined) {
           const target = yield* context.threads
             .getThreadRecords(input.remotePreparation.existingThreadId, [])
@@ -373,19 +365,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                   }),
                 ),
               );
-        if (
-          project !== undefined &&
-          worktreeBaseCommit !== undefined &&
-          (yield* ManagedProjectFolders.ManagedProjectFolders.pipe(
-            Effect.flatMap((folders) => folders.isScratchProject(projectId)),
-          ))
-        ) {
-          return yield* new OrchestratorMcpFailure({
-            code: "invalid_request",
-            message:
-              "An isolated remote task needs a Git project. Pick a destination project that can fetch the parent commit, or omit isolation.",
-          });
-        }
+        yield* validateWorktreeProject(project === undefined ? undefined : projectId);
         if (project !== undefined && input.workspaceStrategy?.type === "existing_worktree")
           yield* assertProjectWorktree(project.workspaceRoot, input.workspaceStrategy.worktreePath);
         if (!replaying && input.modelSelection !== undefined) {

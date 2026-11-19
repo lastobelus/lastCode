@@ -5,6 +5,7 @@ import {
   remoteDelegationProgress,
   sameRemoteDelegation,
   remoteDelegationMayStart,
+  remoteWorktreeDispatchMode,
 } from "../peer/remoteOwnership.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
@@ -12563,14 +12564,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         },
       });
       if (command.type === "remote_delegation.activate") {
-        const baseRef = old?.worktreeBaseCommit;
-        if (baseRef !== undefined && (thread.worktreePath !== null || projection.runs.length > 0)) {
-          return yield* new OrchestratorDispatchError({
-            commandId: command.commandId,
-            commandType: command.type,
-            cause: "An isolated remote task needs an unused thread to prepare its worktree.",
-          });
-        }
+        const dispatchMode = yield* mapDispatchError(command)(
+          Effect.fromResult(remoteWorktreeDispatchMode(old?.worktreeBaseCommit, projection)),
+        );
         const before = (yield* Ref.get(events)).length;
         yield* dispatchMessage(
           {
@@ -12582,18 +12578,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             attachments: [],
             createdBy: "agent",
             creationSource: "mcp",
-            dispatchMode:
-              baseRef === undefined
-                ? { type: "queue_after_active" }
-                : {
-                    type: "defer_start",
-                    workspaceStrategy: {
-                      type: "worktree",
-                      baseRef,
-                      startFromOrigin: false,
-                      requireExactBase: true,
-                    },
-                  },
+            dispatchMode,
           },
           events,
           effects,
