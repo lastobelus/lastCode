@@ -1,4 +1,5 @@
 import { makeLastCodeArchivePlanner } from "./LastCodeArchivePlanner.ts";
+import { planGroupThreadUse } from "./planGroupThreadUse.ts";
 import type { ThreadReadIntakeIntent } from "../threadReadAuthority/Types.ts";
 import {
   remoteDelegationProgress,
@@ -20239,6 +20240,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           storedEvents: [],
         } satisfies OrchestratorV2DispatchResult;
       }
+      const committedEvents = yield* planGroupThreadUse({
+        events: plan.events,
+        readStoredThread: (threadId) =>
+          projectionStore.getThread(threadId).pipe(mapDispatchError(command)),
+        readPlannedThread: (threadId) =>
+          Ref.make([...plan.events]).pipe(
+            Effect.flatMap((events) => getProjectionWithPendingEvents(threadId, events)),
+            Effect.map(({ thread }) => thread),
+            mapDispatchError(command),
+          ),
+        makeMetadataUpdate: (event) => makeEvent(command, event),
+      });
       const acceptedAt = plan.events.at(-1)?.occurredAt ?? (yield* DateTime.now);
       const committed = yield* eventSink
         .commitCommand({
@@ -20251,9 +20264,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             : { threadReadIntent: options.threadReadIntent }),
           events:
             cancelledTask === undefined
-              ? plan.events
+              ? committedEvents
               : [
-                  ...plan.events,
+                  ...committedEvents,
                   yield* makeSystemEvent({
                     type: "subagent.updated",
                     threadId: cancelledTask.threadId,

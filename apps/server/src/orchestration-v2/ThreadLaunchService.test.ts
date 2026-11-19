@@ -5838,7 +5838,7 @@ it.effect(
         creator.threadId,
       );
 
-      yield* threads.dispatch({
+      const sent = yield* threads.dispatch({
         type: "message.dispatch",
         commandId: CommandId.make("creator:start-group"),
         threadId: launched.threadId,
@@ -5849,6 +5849,14 @@ it.effect(
         createdBy: "user",
         creationSource: "web",
       });
+      const lastEvent = sent.storedEvents.at(-1)?.event;
+      if (lastEvent?.type !== "thread.metadata-updated") {
+        return assert.fail("Expected the first send to commit the cleared thread state");
+      }
+      assert.isUndefined(lastEvent.payload.groupThread);
+      const used = yield* threads.getThreadProjection(launched.threadId);
+      assert.isNotNull(lastEvent.payload.activeProviderThreadId);
+      assert.equal(lastEvent.payload.activeProviderThreadId, used.thread.activeProviderThreadId);
       assert.isUndefined((yield* threads.getThreadShell(launched.threadId))?.groupThread);
       assert.isUndefined((yield* launches.launch(input)).projection.thread.groupThread);
     }).pipe(Effect.provide(harness.layer));

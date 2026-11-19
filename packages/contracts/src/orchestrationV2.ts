@@ -709,15 +709,6 @@ export const OrchestrationV2AppThread = Schema.Struct({
 });
 export type OrchestrationV2AppThread = typeof OrchestrationV2AppThread.Type;
 
-export function withThreadGroupMarker(
-  thread: OrchestrationV2AppThread,
-  marker: OrchestrationV2AppThread["groupThread"],
-): OrchestrationV2AppThread {
-  if (thread.groupThread === marker) return thread;
-  const { groupThread: _groupThread, ...rest } = thread;
-  return marker === true ? { ...rest, groupThread: true } : rest;
-}
-
 /** A visit changes read state only, so its event leaves the rest of the thread out. */
 export const OrchestrationV2ThreadVisit = Schema.Struct({
   lastVisitedAt: OrchestrationV2AppThread.fields.lastVisitedAt,

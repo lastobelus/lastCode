@@ -1,10 +1,6 @@
 import { readArchiveFamilyThreadIds } from "./ThreadArchiveReader.ts";
 import type { ProjectThreadAwarenessV2Input } from "@t3tools/shared/agentAwareness";
-import {
-  applyOrchestrationV2ThreadVisit,
-  pendingGuestMessageCount,
-  withThreadGroupMarker,
-} from "@t3tools/contracts";
+import { applyOrchestrationV2ThreadVisit, pendingGuestMessageCount } from "@t3tools/contracts";
 import { interactiveThreadParentSql } from "./InteractiveThreadParentSql.ts";
 import { applyThreadPullRequestLinkUpdate } from "../sourceControl/threadPullRequests.ts";
 import { projectTurnItemForWire } from "./WireProjection.ts";
@@ -1106,7 +1102,7 @@ export function applyToProjection(
 
   switch (event.type) {
     case "thread.group-marked":
-      return { ...projection, thread: withThreadGroupMarker(projection.thread, true) };
+      return { ...projection, thread: { ...projection.thread, groupThread: true } };
     case "thread.creator-repaired":
       return {
         ...projection,
@@ -1124,7 +1120,6 @@ export function applyToProjection(
         thread: applyThreadPullRequestLinkUpdate(projection.thread, event.payload),
       };
     case "thread.created":
-      return { ...base, thread: withOwnedActionResume(event.payload) };
     case "thread.archived":
     case "thread.unarchived":
     case "thread.deleted":
@@ -1150,9 +1145,7 @@ export function applyToProjection(
     case "thread.guest-share-updated":
       return {
         ...base,
-        thread: withOwnedActionResume(
-          withThreadGroupMarker(event.payload, projection.thread.groupThread),
-        ),
+        thread: withOwnedActionResume(event.payload),
       };
     // Reordering and PR refreshes preserve the orchestrator's activity timestamp.
     case "thread.active-reordered":
@@ -1161,18 +1154,14 @@ export function applyToProjection(
     case "thread.issue-synced":
       return {
         ...base,
-        thread: withOwnedActionResume(
-          withThreadGroupMarker(event.payload, projection.thread.groupThread),
-        ),
+        thread: withOwnedActionResume(event.payload),
         updatedAt: event.payload.updatedAt,
       };
     case "thread.visited":
     case "thread.marked-unread":
       return {
         ...projection,
-        thread: withOwnedActionResume(
-          withThreadGroupMarker(event.payload, projection.thread.groupThread),
-        ),
+        thread: withOwnedActionResume(event.payload),
       };
     case "thread.visit-recorded":
       return {
@@ -1183,10 +1172,6 @@ export function applyToProjection(
     case "run.updated":
       return withLocalVisibleTurnItems({
         ...base,
-        thread:
-          event.type === "run.created"
-            ? withThreadGroupMarker(base.thread, undefined)
-            : base.thread,
         runs: upsertById(
           base.runs,
           preserveRunRecordedFields(
@@ -1275,10 +1260,6 @@ export function applyToProjection(
     case "message.updated":
       return {
         ...base,
-        thread:
-          event.payload.runId === null
-            ? withThreadGroupMarker(base.thread, undefined)
-            : base.thread,
         messages: upsertById(base.messages, event.payload),
       };
     case "turn-item.updated":
@@ -2767,19 +2748,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 updated_at = excluded.updated_at,
                 archived_at = excluded.archived_at,
                 deleted_at = excluded.deleted_at,
-                payload_json = ${
-                  event.type === "thread.created"
-                    ? sql`excluded.payload_json`
-                    : // Shell snapshots may have been built before another event in this batch changed the marker.
-                      sql`CASE
-                      WHEN json_extract(orchestration_v2_projection_threads.payload_json, '$.groupThread')
-                        IS json_extract(excluded.payload_json, '$.groupThread')
-                      THEN excluded.payload_json
-                      WHEN json_extract(orchestration_v2_projection_threads.payload_json, '$.groupThread') = 1
-                      THEN json_set(excluded.payload_json, '$.groupThread', json('true'))
-                      ELSE json_remove(excluded.payload_json, '$.groupThread')
-                    END`
-                }
+                payload_json = excluded.payload_json
             `;
               break;
             }
@@ -3561,14 +3530,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             }
           }
 
-          if (
-            event.type === "run.created" ||
-            (event.type === "message.updated" && event.payload.runId === null)
-          ) {
-            yield* sql`UPDATE orchestration_v2_projection_threads
-              SET payload_json = json_remove(payload_json, '$.groupThread')
-              WHERE thread_id = ${event.threadId} AND json_extract(payload_json, '$.groupThread') = 1`;
-          }
           if (
             event.type !== "thread.created" &&
             event.type !== "thread.group-marked" &&
