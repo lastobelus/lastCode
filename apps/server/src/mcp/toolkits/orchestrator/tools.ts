@@ -88,7 +88,7 @@ const OrchestratorCapabilitiesTool = Tool.make("orchestrator_capabilities", {
 
 const DelegateTaskTool = Tool.make("delegate_task", {
   description:
-    "Start one child agent with only `task`. The child does not see this conversation, but it starts with the same project instructions you have, so the task prompt carries only what it cannot find there. Separate checkout or PR per child: `isolation:'worktree'`, which starts at the parent checkout's HEAD commit (yours); uncommitted edits stay out. With `target.environmentId`, first check that `orchestrator_capabilities` for that environment reports `features.remoteWorktreeIsolationVersion: 1`; older peers refuse this isolation. The destination must fetch that commit, so if it exists only here, push its branch to a remote the destination can reach. Omitting isolation runs the child in the destination's own checkout; choose that only when sharing that checkout is acceptable. Keep `taskId` for `task_status` and `task_cancel`. No secrets in `task`.",
+    "Start one child agent with only `task`. The child does not see this conversation, but it starts with the same project instructions you have, so the task prompt carries only what it cannot find there. Separate checkout or PR per child: `isolation:'worktree'`. Keep `taskId` for `task_status` and `task_cancel`. No secrets in `task`.",
   parameters: OrchestratorMcpDelegateTaskInput,
   success: OrchestratorMcpDelegateTaskResult,
   failure: OrchestratorMcpFailure,

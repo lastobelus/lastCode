@@ -1961,7 +1961,10 @@ it.effect.each(["available", "unfetchable", "older peer"] as const)(
         });
         if (scenario === "older peer") {
           expect(result.isError).toBe(true);
-          expect(JSON.stringify(result.content)).toContain("remote worktree isolation");
+          expect(JSON.stringify(result.content)).toContain(
+            "features.remoteWorktreeIsolationVersion: 1",
+          );
+          expect(JSON.stringify(result.content)).toContain("omit isolation");
           expect((yield* a.orchestrator.getThreadProjection(parentThreadId)).subagents).toEqual([]);
           expect(yield* Ref.get(thread.launched)).toBeNull();
           expect(yield* Ref.get(thread.preparingWorktreeRun)).toBeUndefined();

@@ -365,22 +365,22 @@ const make = Effect.gen(function* () {
       const task = taskPrompt(input);
       const capabilities = yield* forwarding.capabilities(scope, target.environmentId);
       if (
-        capabilities.features.remoteOwnedContinuationVersion !== 1 ||
-        capabilities.features.appOwnedActionContinuationVersion !== 1
-      ) {
-        return yield* new OrchestratorMcpFailure({
-          code: "capability_denied",
-          message: "This peer does not support owned remote continuations.",
-        });
-      }
-      if (
         input.isolation === "worktree" &&
         capabilities.features.remoteWorktreeIsolationVersion !== 1
       ) {
         return yield* new OrchestratorMcpFailure({
           code: "capability_denied",
           message:
-            "This peer does not support remote worktree isolation. Upgrade it or omit isolation to run in the destination checkout.",
+            "This peer does not support remote worktree isolation (features.remoteWorktreeIsolationVersion: 1). Upgrade the destination environment or omit isolation to use its existing checkout.",
+        });
+      }
+      if (
+        capabilities.features.remoteOwnedContinuationVersion !== 1 ||
+        capabilities.features.appOwnedActionContinuationVersion !== 1
+      ) {
+        return yield* new OrchestratorMcpFailure({
+          code: "capability_denied",
+          message: "This peer does not support owned remote continuations.",
         });
       }
       if (runtimeMode !== undefined)
