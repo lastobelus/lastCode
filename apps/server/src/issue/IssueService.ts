@@ -239,8 +239,6 @@ const make = Effect.fnUntraced(function* (selectGitHostIdentity: GitHostIdentity
   const listProjects = (filter: {
     readonly projectId?: IssueListInput["projectId"];
     readonly host?: string | undefined;
-    /** The link's `host:port`, for a host whose binding keeps its port. */
-    readonly authority?: string | undefined;
   }) =>
     (filter.projectId === undefined
       ? projects.listShells()
@@ -272,8 +270,7 @@ const make = Effect.fnUntraced(function* (selectGitHostIdentity: GitHostIdentity
           { tracker: IssueTrackerKind; projectCount: number }
         >();
         for (const candidate of bound.flat()) {
-          if (host !== undefined && candidate.host !== host && candidate.host !== filter.authority)
-            continue;
+          if (host !== undefined && candidate.host !== host) continue;
           const api = registry.get(candidate.tracker);
           if (api === null) {
             const counted = unimplemented.get(candidate.host);
@@ -667,7 +664,7 @@ const make = Effect.fnUntraced(function* (selectGitHostIdentity: GitHostIdentity
   const parseOnProjectHost = (value: string) => {
     const url = parseUrl(value);
     if (url === null) return Effect.succeed(null);
-    return listProjects({ host: url.hostname, authority: url.host.toLowerCase() }).pipe(
+    return listProjects({ host: url.host }).pipe(
       Effect.map(({ supported }) => {
         for (const project of supported) {
           const parsed = sourceControlDefinitions.parseIssueUrl(
@@ -699,12 +696,8 @@ const make = Effect.fnUntraced(function* (selectGitHostIdentity: GitHostIdentity
         });
       }
       const { tracker, link } = parsed;
-      // A link names its server's port; a binding does only when its remote or web URL did.
-      const authority = new URL(url).host.toLowerCase();
-      const { supported } = yield* listProjects({ host: link.host, authority });
-      const onHost = supported.filter((project) => project.tracker === tracker);
-      const onAuthority = onHost.filter((project) => project.host === authority);
-      const onTracker = onAuthority.length > 0 ? onAuthority : onHost;
+      const { supported } = yield* listProjects({ host: new URL(url).host });
+      const onTracker = supported.filter((project) => project.tracker === tracker);
       const preferFirst = (projects: ReadonlyArray<SupportedProject>) =>
         projects.find((project) => project.project.id === preferredProjectId) ?? projects[0];
       const scope = link.scope.toLowerCase();

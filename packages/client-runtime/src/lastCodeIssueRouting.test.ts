@@ -68,22 +68,57 @@ describe("fork issue navigation", () => {
           canonicalKey: "fork-ssh/fork/repo",
           remoteUrl: "git@fork-ssh:fork/repo.git",
           provider: SourceControlProviderKind.make("forgejo"),
-          webUrl: "https://forge.example.test:8443/fork/repo",
+          webUrl: "https://forge.example.test:8443/forge/fork/repo",
         },
       },
     };
     expect(
       resolveIssueLinkTarget({
-        url: "https://forge.example.test:8443/fork/repo/issues/7",
-        projects: [selfHosted],
+        url: "https://forge.example.test:8443/forge/fork/repo/issues/7",
+        projects: [
+          {
+            ...fork,
+            id: ProjectId.make("other"),
+            repositoryIdentity: {
+              ...selfHosted.repositoryIdentity!,
+              origin: {
+                canonicalKey: "other-ssh/other/repo",
+                provider: SourceControlProviderKind.make("forgejo"),
+                webUrl: "https://forge.example.test:8443/forge/other/repo",
+              },
+            },
+          },
+          selfHosted,
+        ],
       })?.ref,
     ).toMatchObject({
       projectId: fork.id,
       tracker: "forgejo",
       host: "forge.example.test:8443",
-      scope: "fork/repo",
+      scope: "forge/fork/repo",
       key: "7",
     });
+  });
+
+  it("leaves a link at a different web port outside the app", () => {
+    const identity = fork.repositoryIdentity!;
+    const selfHosted: EnvironmentProject = {
+      ...fork,
+      repositoryIdentity: {
+        ...identity,
+        origin: {
+          canonicalKey: "code.example.test/fork/repo",
+          provider: SourceControlProviderKind.make("forgejo"),
+          webUrl: "https://code.example.test/fork/repo",
+        },
+      },
+    };
+    expect(
+      resolveIssueLinkTarget({
+        url: "https://code.example.test:8443/fork/repo/issues/7",
+        projects: [selfHosted],
+      }),
+    ).toBeNull();
   });
 
   it("only requests filter candidates for the fork when the server lists its scope", () => {

@@ -52,10 +52,9 @@ function parseIssueLink(
 ) {
   const parsed = sourceControlClients.parseIssueUrl(url);
   if (parsed !== null || authority === null) return parsed;
-  const hostname = new URL(url).hostname.toLowerCase();
   for (const project of projects) {
     const binding = projectIssueBinding(project);
-    if (binding === null || (binding.host !== hostname && binding.host !== authority)) continue;
+    if (binding === null || binding.host !== authority) continue;
     const known = sourceControlClients.parseIssueUrl(url, binding.tracker);
     if (known !== null) return known;
   }
@@ -138,7 +137,6 @@ export function resolveIssueLinkTarget<Project extends LinkProject>(input: {
   /** The environment's standalone trackers and bindings; without them only git-host links resolve. */
   readonly trackers?: IssueTrackerConnectionList | undefined;
 }): { readonly project: Project; readonly ref: IssueRef } | null {
-  // A link names its server's port; a binding does only when its remote or web URL did.
   const authority = linkAuthority(input.url);
   const parsed = parseIssueLink(input.url, authority, input.projects);
   if (parsed === null)
@@ -149,16 +147,12 @@ export function resolveIssueLinkTarget<Project extends LinkProject>(input: {
       input.preferredProjectId,
     );
   const { definition, link } = parsed;
-  const onHost = input.projects.flatMap((project) => {
+  const bound = input.projects.flatMap((project) => {
     const binding = projectIssueBinding(project);
-    return binding === null ||
-      binding.tracker !== definition.kind ||
-      (binding.host !== link.host && binding.host !== authority)
+    return binding === null || binding.tracker !== definition.kind || binding.host !== authority
       ? []
       : [{ project, binding }];
   });
-  const onAuthority = onHost.filter((candidate) => candidate.binding.host === authority);
-  const bound = onAuthority.length > 0 ? onAuthority : onHost;
   const preferFirst = (candidates: typeof bound) =>
     candidates.find((candidate) => candidate.project.id === input.preferredProjectId) ??
     candidates[0];
