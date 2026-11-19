@@ -39,7 +39,9 @@ import {
   type PreviewAutomationTypeInput,
   type PreviewAutomationUploadInput,
   type PreviewAutomationWaitForInput,
+  DesktopBrowserTransportError,
   PreviewClearProfileError,
+  PreviewNativeCloseError,
   type PreviewEvent,
   type PreviewNavStatus,
   type PreviewSessionSnapshot,
@@ -55,9 +57,11 @@ import { normalizePreviewUrl } from "@t3tools/shared/preview";
 import { resolvePreviewViewport } from "@t3tools/shared/previewViewport";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
+import * as Mime from "effect/http/Mime";
 import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
 import * as Context from "effect/Context";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import { constVoid } from "effect/Function";
@@ -112,6 +116,7 @@ const SCREENCAST_MOTION_FRAMES = 4;
 const SCREENCAST_MOTION_WINDOW_MS = 300;
 const SCREENCAST_MOTION_QUALITY = 50;
 const HOST_RECONNECT_DELAY = "1 second";
+/** How long a desktop-backed tab waits for its selected native host to attach. */
 const DESKTOP_ATTACH_TIMEOUT = "10 seconds";
 // A viewer still is best-effort; a capture Chromium never answers must not hold the capture lock.
 const VIEWER_STILL_TIMEOUT_MS = 2_000;
@@ -120,6 +125,7 @@ const RECORDING_SCREENCAST = { format: "jpeg", quality: 90, everyNthFrame: 1 } a
 const RECORDING_BINARY_EXPORT_MIN_BYTES = 8 * 1024 * 1024;
 const RECORDING_DOWNLOAD_TIMEOUT_MS = 5_000;
 const decodeViewportSetting = Schema.decodeUnknownSync(PreviewViewportSettingSchema);
+const isDesktopBrowserTransportError = Schema.is(DesktopBrowserTransportError);
 const AGENT_CURSOR_MOVE_MS = 160;
 const AGENT_CURSOR_CLICK_LEAD_MS = 40;
 /** A dialog blocks page script, so a desktop size read gives up after this. */
@@ -128,8 +134,8 @@ const DESKTOP_VIEWPORT_READ_TIMEOUT = "1 second";
 const DESKTOP_RESIZE_WAIT_MS = 1000;
 // A revealed tab's client opens the panel and attaches its stream a few round trips later, remote ones included.
 const REVEAL_VIEWER_WAIT_MS = 1000;
-// A desktop panel's shown report waits on the renderer's layout, which a busy machine can push past a second.
-const REVEAL_DESKTOP_SHOWN_WAIT_MS = 3000;
+// A native panel can take more than a second to lay out and report presentation.
+const REVEAL_DESKTOP_PRESENTATION_WAIT_MS = 3000;
 
 const sleepUntil = (deadline: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, deadline - Date.now())));
@@ -305,10 +311,10 @@ interface ViewerState {
   readonly pressedKeys: Map<string, { key: string; code: string }>;
   readonly pressedButtons: Map<"left" | "middle" | "right", { x: number; y: number }>;
   readonly push: (output: ServerBrowserViewerOutput) => void;
-  readonly pause: () => Promise<void>;
-  readonly resume: () => Promise<void>;
+  readonly pause: (signal?: AbortSignal, timeoutMs?: number) => Promise<void>;
+  readonly resume: (timeoutMs?: number) => Promise<void>;
   scrolledAt: number;
-
+  /** Panel bounds survive fixed mode and control release; passive viewers never request a size. */
   requestedSize: { width: number; height: number; order: number } | null;
 }
 
@@ -327,6 +333,7 @@ interface Recording {
   readonly session: CDPSession;
   readonly startedAt: string;
   readonly framesInFlight: Set<Promise<void>>;
+  readonly releaseSurface: () => Promise<void>;
 }
 
 interface ServerTab {
@@ -355,6 +362,9 @@ interface ServerTab {
 
   readonly desktop: { readonly close: () => Promise<void> } | null;
   readonly profileId: string | undefined;
+  readonly desktopHostId: string | undefined;
+  nativePresented: boolean;
+  revealRequested: boolean;
   readonly openerTabId: string | undefined;
 
   readonly downloads: Array<ServerDownload>;
@@ -385,6 +395,8 @@ interface ServerTab {
   crash: PreviewAutomationLoadError | undefined;
   /** What Reload loads after a crash; the reported URL is shortened and drops data payloads. */
   crashedUrl: string | undefined;
+  navigationSequence: number;
+  navigationFailed: boolean;
   closing: boolean;
   recording: Recording | null;
   initialNavigation: Promise<void> | null;
@@ -595,6 +607,36 @@ const make = Effect.gen(function* () {
 
   const closedPendingTabs = new Set<string>();
   const adoptedPages = new Map<string, { readonly page: Page; readonly openerTabId: string }>();
+  const nativePopups = new Map<
+    string,
+    {
+      readonly source: DesktopBrowserChannel.DesktopTabKey;
+      readonly popupId: string;
+      snapshot: PreviewSessionSnapshot | null;
+      closed: boolean;
+      closeRequested: boolean;
+      bound: boolean;
+    }
+  >();
+  const popupKey = (source: DesktopBrowserChannel.DesktopTabKey, popupId: string) =>
+    JSON.stringify([source.desktopHostId ?? "local", source.threadId, source.tabId, popupId]);
+  const nativePopupForTab = (threadId: string, tabId: string) =>
+    [...nativePopups.values()].find(
+      (popup) => popup.snapshot?.threadId === threadId && popup.snapshot.tabId === tabId,
+    );
+  const confirmNativePopupClosed = (id: string, popup = nativePopups.get(id)) =>
+    Effect.gen(function* () {
+      if (!popup || nativePopups.get(id) !== popup) return;
+      popup.closed = true;
+      nativePopups.delete(id);
+      if (popup.snapshot)
+        yield* manager
+          .nativeClosedConfirmed({
+            threadId: ThreadId.make(popup.snapshot.threadId),
+            tabId: popup.snapshot.tabId,
+          })
+          .pipe(Effect.ignore);
+    });
   const closedSessions = new Set<string>();
   let hostConnectionId: string | null = null;
   let viewerResizeOrder = 0;
@@ -728,12 +770,12 @@ const make = Effect.gen(function* () {
   const report = (tab: ServerTab, navStatus: PreviewNavStatus) => {
     const generation = tab.navigationGeneration;
     const loadError = tab.loadError;
+    const sequence = ++tab.navigationSequence;
     void tab.cdp
       .send("Page.getNavigationHistory")
       .catch(() => null)
       .then((history) => {
-        // A status the dead page still had in flight must not replace the crash.
-        if (tab.crash) return;
+        if (tab.crash || tab.closing || tab.navigationSequence !== sequence) return;
         if (
           navStatus._tag === "Success" &&
           (tab.navigationGeneration !== generation || tab.loadError !== loadError)
@@ -755,18 +797,27 @@ const make = Effect.gen(function* () {
       });
   };
 
-  const reportLoaded = async (tab: ServerTab) => {
+  const reportLoaded = async (tab: ServerTab, sampleCurrentNavigation = false) => {
+    const sequence = tab.navigationSequence;
     const url = tab.page.url();
     // Chromium's error page loads after `requestfailed` and must not clear LoadFailed.
     if (url === "about:blank" || url.startsWith("chrome-error://")) return;
     // A navigation that starts and fails during the title read leaves the URL unchanged.
     const generation = tab.navigationGeneration;
     const loadError = tab.loadError;
+    if (
+      sampleCurrentNavigation &&
+      (await tab.page.evaluate("document.readyState").catch(() => null)) !== "complete"
+    )
+      return;
     const title = (await tab.page.title().catch(() => "")).slice(0, TITLE_LIMIT);
     if (
+      tab.closing ||
+      tab.loading ||
+      tab.navigationFailed ||
+      tab.navigationSequence !== sequence ||
       tab.navigationGeneration !== generation ||
       tab.loadError !== loadError ||
-      tab.loading ||
       tab.page.url() !== url
     )
       return;
@@ -824,7 +875,7 @@ const make = Effect.gen(function* () {
             liveTabs: [...tabs.values()].map((tab) => ({
               threadId: tab.threadId,
               tabId: tab.tabId,
-              visible: tab.viewers.size > 0,
+              visible: tab.nativePresented || tab.viewers.size > 0,
             })),
           }),
         ),
@@ -1033,6 +1084,7 @@ const make = Effect.gen(function* () {
       if (tab.isolatedContext) void closed.then(() => page.context().close()).catch(constVoid);
     }
     void tab.recording?.encoder.close().catch(constVoid);
+    void tab.recording?.releaseSurface();
     void NodeFSP.rm(downloadDir(tab), { recursive: true, force: true }).catch(constVoid);
     reportLiveTabs();
     if (closeSession) {
@@ -1040,11 +1092,19 @@ const make = Effect.gen(function* () {
     }
   };
 
+  /** Wait only for the page owner chosen before the session was published. */
   const desktopRenders = (snapshot: PreviewSessionSnapshot) =>
-    desktopChannel.available && !snapshot.headless
+    !snapshot.headless &&
+    (snapshot.backingPage === "desktop" || snapshot.backingPage === "desktop-popup")
       ? runPromise(
           Effect.gen(function* () {
-            const key = { threadId: snapshot.threadId, tabId: snapshot.tabId };
+            const key = {
+              threadId: snapshot.threadId,
+              tabId: snapshot.tabId,
+              ...(snapshot.desktopHostId === undefined
+                ? {}
+                : { desktopHostId: snapshot.desktopHostId }),
+            };
             // A reloaded desktop mounts a thread's tabs again only once an event for it arrives,
             // and a renderer still reloading misses events, so repeat it until the wait ends.
             if (!(yield* desktopChannel.isAttached(key))) {
@@ -1062,7 +1122,13 @@ const make = Effect.gen(function* () {
     try {
       const endpoint = await runPromise(
         desktopChannel
-          .endpoint({ threadId: snapshot.threadId, tabId: snapshot.tabId })
+          .endpoint({
+            threadId: snapshot.threadId,
+            tabId: snapshot.tabId,
+            ...(snapshot.desktopHostId === undefined
+              ? {}
+              : { desktopHostId: snapshot.desktopHostId }),
+          })
           .pipe(Scope.provide(scope)),
       );
       const connected = await contexts.connectDesktopPage(endpoint);
@@ -1100,6 +1166,24 @@ const make = Effect.gen(function* () {
   ): Promise<ServerTab> => {
     const adopted = adoptedPages.get(tabKey(snapshot.threadId, snapshot.tabId));
     adoptedPages.delete(tabKey(snapshot.threadId, snapshot.tabId));
+    const nativePopup = nativePopupForTab(snapshot.threadId, snapshot.tabId);
+    if (snapshot.backingPage === "desktop-popup") {
+      if (!nativePopup || nativePopup.closed || nativePopup.popupId !== snapshot.desktopPopupId)
+        throw new Error("The native popup binding is unavailable.");
+      // A bound child survives channel reconnects and re-announces its server
+      // key. Binding is only needed for the initial window announcement.
+      if (!nativePopup.bound)
+        await runPromise(
+          desktopChannel.bindPopup(
+            {
+              threadId: snapshot.threadId,
+              tabId: snapshot.tabId,
+              desktopHostId: snapshot.desktopHostId,
+            },
+            { popupId: nativePopup.popupId, openerTabId: nativePopup.source.tabId },
+          ),
+        );
+    }
     const desktop =
       adopted === undefined && (await desktopRenders(snapshot))
         ? await connectDesktop(snapshot)
@@ -1107,7 +1191,18 @@ const make = Effect.gen(function* () {
     if (desktop) opened.push(desktop.close);
     // Attaching over CDP emulates a light scheme; a tab on System follows the desktop's.
     if (desktop) await desktop.page.emulateMedia({ colorScheme: null });
-    // Otherwise a desktop that attaches late, or has no channel to draw it, shows its own page.
+    if (nativePopup && desktop) nativePopup.bound = true;
+    if (
+      adopted === undefined &&
+      (snapshot.backingPage === "desktop" || snapshot.backingPage === "desktop-popup") &&
+      desktop === null
+    ) {
+      throw new ServerBrowserPage.ServerBrowserOperationError({
+        tag: "PreviewAutomationRemoteUnavailableError",
+        message: "The selected desktop browser did not attach. Keep that desktop connected and retry; the requested profile was not opened in another browser.",
+      });
+    }
+    // Otherwise a desktop that attaches late shows its own page, and the agent drives another.
     if (!desktop) {
       await runPromise(
         manager
@@ -1170,7 +1265,10 @@ const make = Effect.gen(function* () {
       isolatedContext,
       desktop: desktop === null ? null : { close: desktop.close },
       profileId: snapshot.profileId,
-      openerTabId: adopted?.openerTabId,
+      desktopHostId: snapshot.desktopHostId,
+      nativePresented: false,
+      revealRequested: snapshot.reveal === true,
+      openerTabId: adopted?.openerTabId ?? nativePopup?.source.tabId,
       downloads: [],
       fileChooser: null,
       dialog: null,
@@ -1195,6 +1293,8 @@ const make = Effect.gen(function* () {
             }
           : undefined,
       crashedUrl,
+      navigationSequence: 0,
+      navigationFailed: snapshot.navStatus._tag === "LoadFailed",
       closing: false,
       recording: null,
       recordingStart: null,
@@ -1255,6 +1355,7 @@ const make = Effect.gen(function* () {
       clearAbortedNavigation(tab);
       tab.loading = true;
       tab.loadError = undefined;
+      tab.navigationFailed = false;
       tab.crash = undefined;
       tab.crashedUrl = undefined;
       if (stoppedInitialRequest) {
@@ -1321,6 +1422,7 @@ const make = Effect.gen(function* () {
         return;
       }
       tab.loading = false;
+      tab.navigationFailed = true;
       const { code, description } = ServerBrowserPage.parseNetError(errorText);
       const url = ServerBrowserPage.withoutDataPayload(request.url()).slice(0, 2048);
       tab.loadError = { url, code, description };
@@ -1354,10 +1456,12 @@ const make = Effect.gen(function* () {
     page.on("download", (download) => void saveDownload(tab, download));
     updateFileChooserInterception(tab);
     // Popups become tabs and keep `window.opener`, so sign-in popups can report back.
-    page.on("popup", (popup) => void adoptPopup(tab, popup));
+    // Electron announces its actual child window separately; its one-page relay
+    // cannot synthesize a Playwright popup without losing native identity.
+    if (!desktop) page.on("popup", (popup) => void adoptPopup(tab, popup));
     const key = tabKey(tab.threadId, tab.tabId);
-    if (closedPendingTabs.delete(key)) {
-      if (desktop) {
+    if (closedPendingTabs.delete(key) || nativePopup?.closed) {
+      if (desktop && !nativePopup) {
         tab.closing = true;
         await unloadDesktopPage(page).catch(constVoid);
       }
@@ -1366,10 +1470,19 @@ const make = Effect.gen(function* () {
     }
     page.on("close", () => dropTab(tab, true));
     page.on("crash", () => reopenCrashedTab(tab));
+    // Sample after all asynchronous setup, in the same tick that registers
+    // the tab. The presentation subscriber handles every later change.
+    tab.nativePresented =
+      desktop !== null &&
+      desktopChannel.isPresented({
+        threadId: tab.threadId,
+        tabId: tab.tabId,
+        desktopHostId: tab.desktopHostId,
+      });
     tabs.set(key, tab);
     reportLiveTabs();
-    // A desktop page navigates on its own and can finish loading before these listeners attach.
-    if (desktop) void page.waitForLoadState("load").then(() => reportLoaded(tab), constVoid);
+    // Native/adopted pages may have finished before their listeners were installed.
+    if (adopted || desktop) void reportLoaded(tab, true);
     // Existing desktop and popup PDFs can start loading before interception attaches.
     if (
       snapshot.navStatus._tag === "Loading" &&
@@ -1581,14 +1694,62 @@ const make = Effect.gen(function* () {
     if (tab.fileChooser === open) closeFileChooser(tab);
     return true;
   };
-  const uploadFiles = async (tab: ServerTab, input: PreviewAutomationUploadInput) => {
+  const uploadFiles = async (
+    tab: ServerTab,
+    input: PreviewAutomationUploadInput,
+    signal?: AbortSignal,
+  ) => {
+    signal?.throwIfAborted();
     const relative = input.paths.find((path) => !NodePath.isAbsolute(path));
     if (relative !== undefined)
       throw new ServerBrowserPage.ServerBrowserOperationError({
         tag: "PreviewAutomationExecutionError",
         message: `Upload paths must be absolute: ${relative}`,
       });
-    if (await ServerBrowserPage.setInputFiles(tab.page, input)) return undefined;
+    // A remote desktop cannot open the environment's filesystem paths. Supply
+    // file bytes through Playwright, which injects the same files into its page.
+    let totalBytes = 0;
+    const files =
+      tab.desktopHostId !== undefined && tab.desktopHostId !== "local"
+        ? await Promise.all(
+            input.paths.map(async (path) => {
+              const handle = await NodeFSP.open(path, "r");
+              try {
+                const stat = await handle.stat();
+                totalBytes += stat.size;
+                if (!stat.isFile() || totalBytes > 64 * 1024 * 1024) {
+                  throw new ServerBrowserPage.ServerBrowserOperationError({
+                    tag: "PreviewAutomationExecutionError",
+                    message: "Remote browser uploads must be regular files totaling at most 64 MiB.",
+                  });
+                }
+                const buffer = Buffer.alloc(stat.size);
+                let offset = 0;
+                while (offset < buffer.length) {
+                  const { bytesRead } = await handle.read(
+                    buffer,
+                    offset,
+                    buffer.length - offset,
+                    offset,
+                  );
+                  if (bytesRead === 0)
+                    throw new Error("An upload file changed while it was being read.");
+                  offset += bytesRead;
+                }
+                if ((await handle.stat()).size !== stat.size)
+                  throw new Error("An upload file changed while it was being read.");
+                return {
+                  name: NodePath.basename(path),
+                  mimeType: Option.getOrElse(Mime.getType(path), () => "application/octet-stream"),
+                  buffer,
+                };
+              } finally {
+                await handle.close();
+              }
+            }),
+          )
+        : [...input.paths];
+    if (await ServerBrowserPage.setInputFiles(tab.page, input, files, signal)) return undefined;
     const open = tab.fileChooser;
     if (!open)
       throw new ServerBrowserPage.ServerBrowserOperationError({
@@ -1601,8 +1762,9 @@ const make = Effect.gen(function* () {
         tag: "PreviewAutomationExecutionError",
         message: "This file picker accepts one file.",
       });
+    signal?.throwIfAborted();
     if (input.paths.length > 0)
-      await open.chooser.setFiles([...input.paths], {
+      await open.chooser.setFiles(files, {
         timeout: input.timeoutMs ?? NAVIGATION_TIMEOUT_MS,
       });
     if (tab.fileChooser === open) closeFileChooser(tab);
@@ -1712,6 +1874,7 @@ const make = Effect.gen(function* () {
         runtime: "server",
         ...(opener.profileId === undefined ? {} : { profileId: opener.profileId }),
         colorScheme: opener.colorScheme,
+        ...(opener.desktopHostId === undefined ? {} : { desktopHostId: opener.desktopHostId }),
         ...(opener.control.agentId === null
           ? {}
           : { automationOwner: opener.control.agentId, reveal: false }),
@@ -1731,6 +1894,128 @@ const make = Effect.gen(function* () {
     );
   };
 
+  const openNativePopup = async (
+    source: DesktopBrowserChannel.DesktopTabKey & {
+      readonly popupId: string;
+      readonly url: string;
+    },
+  ) => {
+    const id = popupKey(source, source.popupId);
+    const existing = nativePopups.get(id);
+    if (existing) {
+      if (existing.closeRequested) {
+        await runPromise(
+          existing.snapshot
+            ? manager
+                .close({
+                  threadId: ThreadId.make(existing.snapshot.threadId),
+                  tabId: existing.snapshot.tabId,
+                })
+                .pipe(Effect.ignore)
+            : desktopChannel.closePopup(existing.source, existing.popupId).pipe(Effect.ignore),
+        ).catch(constVoid);
+      }
+      return;
+    }
+    // Child windows can close while their source is still setting up.
+    // Record their lifecycle before awaiting the source page.
+    const popup = {
+      source,
+      popupId: source.popupId,
+      snapshot: null as PreviewSessionSnapshot | null,
+      closed: false,
+      closeRequested: false,
+      bound: false,
+    };
+    nativePopups.set(id, popup);
+    let opener =
+      tabs.get(tabKey(source.threadId, source.tabId)) ??
+      (await pendingTabs.get(tabKey(source.threadId, source.tabId))?.promise?.catch(() => undefined));
+    if (!opener && !popup.closed) {
+      const { sessions } = await runPromise(
+        manager.list({ threadId: ThreadId.make(source.threadId) }),
+      );
+      const snapshot = sessions.find(
+        (session) =>
+          session.tabId === source.tabId &&
+          session.runtime === "server" &&
+          (session.backingPage === "desktop" || session.backingPage === "desktop-popup") &&
+          (session.desktopHostId ?? "local") === (source.desktopHostId ?? "local"),
+      );
+      if (snapshot) opener = await ensureTab(snapshot).catch(() => undefined);
+    }
+    if (
+      !opener?.desktop ||
+      popup.closed ||
+      opener.closing ||
+      (opener.desktopHostId ?? "local") !== (source.desktopHostId ?? "local") ||
+      (opener.control.agentId !== null && atTabLimit(opener.control.agentId))
+    ) {
+      popup.closeRequested = true;
+      if (!popup.closed)
+        await runPromise(desktopChannel.closePopup(source, source.popupId)).catch(constVoid);
+      if (popup.closed) nativePopups.delete(id);
+      return;
+    }
+    try {
+      const snapshot = await runPromise(
+        openTab({
+          threadId: opener.threadId,
+          ...(/^https?:/i.test(source.url) ? { url: source.url } : {}),
+          runtime: "server",
+          desktopHostId: source.desktopHostId ?? "local",
+          desktopPopup: {
+            popupId: source.popupId,
+            close: () =>
+              Effect.suspend(() => {
+                popup.closeRequested = true;
+                return desktopChannel.closePopup(source, source.popupId).pipe(
+                  Effect.tapError((error) =>
+                    Effect.sync(() => {
+                      if (error.reason !== "close-canceled") return;
+                      popup.closeRequested = false;
+                      const tab = popup.snapshot
+                        ? tabs.get(tabKey(popup.snapshot.threadId, popup.snapshot.tabId))
+                        : undefined;
+                      // @effect-diagnostics-next-line globalDateInEffect:off -- Idle cutoff and page activity share this imperative Date.now clock domain.
+                      if (tab) tab.usedAt = Date.now();
+                      if (tab?.dialog?.type() === "beforeunload") {
+                        tab.dialog = null;
+                        broadcastControl(tab);
+                      }
+                    }),
+                  ),
+                  Effect.mapError(
+                    (error) =>
+                      new PreviewNativeCloseError({
+                        tabId: popup.snapshot!.tabId,
+                        reason: error.reason === "close-canceled" ? "canceled" : "unavailable",
+                      }),
+                  ),
+                );
+              }),
+          },
+          ...(opener.profileId === undefined ? {} : { profileId: opener.profileId }),
+          ...(opener.control.agentId === null
+            ? {}
+            : { automationOwner: opener.control.agentId, reveal: false }),
+          beforePublish: (snapshot) => {
+            popup.snapshot = snapshot;
+          },
+        }),
+      );
+      if (popup.closed)
+        await runPromise(
+          manager.nativeClosedConfirmed({ threadId: opener.threadId, tabId: snapshot.tabId }),
+        );
+    } catch {
+      popup.closeRequested = true;
+      if (!popup.closed)
+        await runPromise(desktopChannel.closePopup(source, source.popupId)).catch(constVoid);
+      if (popup.closed) nativePopups.delete(id);
+    }
+  };
+
   const ensureTab = (snapshot: PreviewSessionSnapshot): Promise<ServerTab> => {
     const key = tabKey(snapshot.threadId, snapshot.tabId);
     const pending = pendingTabs.get(key);
@@ -1739,6 +2024,12 @@ const make = Effect.gen(function* () {
     if (existing) return Promise.resolve(existing);
     const opening = createTab(snapshot)
       .catch((cause: unknown) => {
+        if (snapshot.backingPage === "desktop-popup")
+          runFork(
+            manager
+              .close({ threadId: ThreadId.make(snapshot.threadId), tabId: snapshot.tabId })
+              .pipe(Effect.ignore),
+          );
         runFork(
           Effect.logWarning(
             isHostSetupError(cause) ? cause.message : "server preview tab failed to start",
@@ -1789,7 +2080,7 @@ const make = Effect.gen(function* () {
 
   // The desktop draws its tabs in its own webview, so they never get a streamed viewer.
   const isVisible = (tab: ServerTab) =>
-    tab.viewers.size > 0 || (tab.desktop !== null && desktopChannel.isShown(tab));
+    tab.viewers.size > 0 || (tab.desktop !== null && desktopChannel.isPresented(tab));
 
   const reclaimingTabs = new Set<ServerTab>();
   const idleAgentTabs = () => {
@@ -1798,7 +2089,7 @@ const make = Effect.gen(function* () {
       (tab) =>
         tab.control.agentId !== null &&
         !reclaimingTabs.has(tab) &&
-        !isVisible(tab) &&
+        !(tab.viewers.size > 0 || (tab.desktop !== null && desktopChannel.isShown(tab))) &&
         tab.usedAt < cutoff,
     );
   };
@@ -2055,7 +2346,11 @@ const make = Effect.gen(function* () {
     if (!tab.page.url().startsWith("chrome-error://")) return undefined;
     // A desktop failure from before CDP attached is superseded by any navigation we observe.
     if (tab.loadError || !tab.desktop || tab.navigationGeneration > 0) return tab.loadError;
-    const reported = desktopChannel.loadFailure({ threadId: tab.threadId, tabId: tab.tabId });
+    const reported = desktopChannel.loadFailure({
+      threadId: tab.threadId,
+      tabId: tab.tabId,
+      desktopHostId: tab.desktopHostId,
+    });
     return reported && { ...reported, url: ServerBrowserPage.withoutDataPayload(reported.url) };
   };
 
@@ -2096,6 +2391,9 @@ const make = Effect.gen(function* () {
       return {
         available: false,
         visible: false,
+        nativePresented: false,
+        streamViewers: 0,
+        revealRequested: false,
         tabId: null,
         url: null,
         title: null,
@@ -2118,9 +2416,32 @@ const make = Effect.gen(function* () {
             () => "",
           ).then((title) => title || null),
     ]);
+    if (tab.desktop)
+      tab.nativePresented = desktopChannel.isPresented({
+        threadId: tab.threadId,
+        tabId: tab.tabId,
+        desktopHostId: tab.desktopHostId,
+      });
+    // A reveal response only confirms the request. Presentation comes from
+    // the actual native slot or an attached streamed viewer.
+    if (tab.nativePresented || tab.viewers.size > 0) tab.revealRequested = false;
+    const catalogue =
+      tab.desktopHostId === undefined || agentSessionId === undefined
+        ? null
+        : await runPromise(
+            desktopChannel.getProfiles({ threadId: tab.threadId, agentSessionId }),
+          );
     return {
+      profileId: tab.profileId ?? null,
+      profileName:
+        catalogue?.desktopHostId === tab.desktopHostId
+          ? (catalogue?.profiles.find((profile) => profile.id === tab.profileId)?.name ?? null)
+          : null,
       available: true,
       visible: isVisible(tab),
+      nativePresented: tab.nativePresented,
+      streamViewers: tab.viewers.size,
+      revealRequested: tab.revealRequested,
       tabId: tab.tabId,
       url: statusUrl,
       title,
@@ -2228,73 +2549,158 @@ const make = Effect.gen(function* () {
     return run;
   };
 
-  const startRecording = (tab: ServerTab): Promise<Recording> => {
+  const startRecording = (
+    tab: ServerTab,
+    signal: AbortSignal,
+    remainingTimeoutMs: () => number,
+    releaseRequestSurface?: () => Promise<void>,
+  ): Promise<Recording> => {
     const started = withCaptureLock(tab, async () => {
+      signal.throwIfAborted();
       if (tab.recording) return tab.recording;
-      const encoder = await contexts.scratchPage();
-      let session: CDPSession | null = null;
+      let active = true;
+      let published = false;
+      const resources = { encoder: null as Page | null, session: null as CDPSession | null };
+      let releaseSurface = async () => {};
+      const assertActive = () => {
+        signal.throwIfAborted();
+        if (!active || tab.closing)
+          throw new BrowserControlInterrupted({
+            message: "The recording start was interrupted.",
+          });
+      };
       try {
-        await encoder.evaluate(ServerBrowserPage.recordingEncoderScript(recordingFrameRate));
-        // Seed idle pages before returning so an immediate stop has a frame to encode.
-        const firstFrame = await ServerBrowserPage.captureViewport(tab.cdp, {
-          format: "jpeg",
-          quality: RECORDING_SCREENCAST.quality,
-        });
-        await encoder.evaluate(
-          ([data, width]) =>
-            (globalThis as unknown as EncoderWindow).__t3Recorder.frame(data, width),
-          [firstFrame, tab.page.viewportSize()?.width ?? UNATTACHED_FILL_VIEWPORT.width] as const,
-        );
-        const opened = await tab.page.context().newCDPSession(tab.page);
-        session = opened;
-        const framesInFlight = new Set<Promise<void>>();
-        // Chrome withholds frames while acks are outstanding, so ack on arrival and let a
-        // slow encoder skip to the newest frame instead of throttling the capture.
-        let pendingFrame: readonly [string, number] | null = null;
-        const deliverPending = async () => {
-          while (pendingFrame) {
-            const next = pendingFrame;
-            pendingFrame = null;
-            const accepted = await encoder
-              .evaluate(
+        return await ServerBrowserPage.withReadBudget(
+          { signal, timeoutMs: remainingTimeoutMs() },
+          async (read) => {
+            await read("recording surface", async () => {
+              const release = await acquirePersistentNativeSurface(tab, {
+                signal,
+                timeoutMs: remainingTimeoutMs(),
+              });
+              if (!active || signal.aborted) {
+                await release();
+                assertActive();
+              }
+              releaseSurface = release;
+            });
+            const openedEncoder = await read("recording encoder", () =>
+              contexts.scratchPage().then((page) => {
+                if (!active || signal.aborted) {
+                  void page.close().catch(constVoid);
+                  assertActive();
+                }
+                resources.encoder = page;
+                return page;
+              }),
+            );
+            await read("recording encoder setup", () =>
+              openedEncoder.evaluate(ServerBrowserPage.recordingEncoderScript(recordingFrameRate)),
+            );
+            const firstFrame = await read("recording seed frame", () =>
+              ServerBrowserPage.captureViewport(tab.cdp, {
+                format: "jpeg",
+                quality: RECORDING_SCREENCAST.quality,
+                signal,
+                timeoutMs: remainingTimeoutMs(),
+              }),
+            );
+            const width = (
+              await read("recording seed layout", () =>
+                ServerBrowserPage.viewportSize(tab.page, tab.cdp),
+              )
+            ).width;
+            await read("recording seed encoder", () =>
+              openedEncoder.evaluate(
                 ([data, width]) =>
                   (globalThis as unknown as EncoderWindow).__t3Recorder.frame(data, width),
-                next,
-              )
-              .catch(() => true);
-            if (!accepted) {
-              pendingFrame = null;
-              await opened.send("Page.stopScreencast").catch(constVoid);
-            }
-          }
-        };
-        opened.on("Page.screencastFrame", (frame) => {
-          void opened
-            .send("Page.screencastFrameAck", { sessionId: frame.sessionId })
-            .catch(constVoid);
-          const cssWidth = tab.page.viewportSize()?.width ?? frame.metadata.deviceWidth;
-          const delivering = framesInFlight.size > 0;
-          pendingFrame = [frame.data, cssWidth];
-          if (delivering) return;
-          const delivered: Promise<void> = deliverPending().finally(() =>
-            framesInFlight.delete(delivered),
-          );
-          framesInFlight.add(delivered);
-        });
-        await opened.send("Page.startScreencast", RECORDING_SCREENCAST);
-        if (tab.closing) throw new Error("The tab closed while the recording started.");
-        const recording: Recording = {
-          encoder,
-          session: opened,
-          startedAt: new Date().toISOString(),
-          framesInFlight,
-        };
-        tab.recording = recording;
-        return recording;
-      } catch (cause) {
-        await encoder.close().catch(constVoid);
-        await session?.detach().catch(constVoid);
-        throw cause;
+                [firstFrame, width] as const,
+              ),
+            );
+            const opened = await read("recording CDP session", () =>
+              tab.page
+                .context()
+                .newCDPSession(tab.page)
+                .then((opened) => {
+                  if (!active || signal.aborted) {
+                    void opened.detach().catch(constVoid);
+                    assertActive();
+                  }
+                  resources.session = opened;
+                  return opened;
+                }),
+            );
+            const framesInFlight = new Set<Promise<void>>();
+            // Chrome withholds frames while acks are outstanding, so ack on arrival and let a
+            // slow encoder skip to the newest frame instead of throttling the capture.
+            let pendingFrame: readonly [string, number] | null = null;
+            const deliverPending = async () => {
+              while (pendingFrame) {
+                const next = pendingFrame;
+                pendingFrame = null;
+                const accepted = await openedEncoder
+                  .evaluate(
+                    ([data, width]) =>
+                      (globalThis as unknown as EncoderWindow).__t3Recorder.frame(data, width),
+                    next,
+                  )
+                  .catch(() => true);
+                if (!accepted) {
+                  pendingFrame = null;
+                  await opened.send("Page.stopScreencast").catch(constVoid);
+                }
+              }
+            };
+            opened.on("Page.screencastFrame", (frame) => {
+              if (!active) return;
+              void opened
+                .send("Page.screencastFrameAck", { sessionId: frame.sessionId })
+                .catch(constVoid);
+              const cssWidth = tab.page.viewportSize()?.width ?? frame.metadata.deviceWidth;
+              const delivering = framesInFlight.size > 0;
+              pendingFrame = [frame.data, cssWidth];
+              if (delivering) return;
+              const delivered: Promise<void> = deliverPending().finally(() =>
+                framesInFlight.delete(delivered),
+              );
+              framesInFlight.add(delivered);
+            });
+            assertActive();
+            await read("recording screencast start", () =>
+              opened.send("Page.startScreencast", RECORDING_SCREENCAST),
+            );
+            assertActive();
+            const recording: Recording = {
+              encoder: openedEncoder,
+              session: opened,
+              startedAt: new Date().toISOString(),
+              framesInFlight,
+              releaseSurface,
+            };
+            tab.recording = recording;
+            published = true;
+            return recording;
+          },
+        );
+      } finally {
+        if (!published) {
+          active = false;
+          await releaseRequestSurface?.();
+          const { encoder, session } = resources;
+          const closedEncoder = encoder?.close().catch(constVoid);
+          if (encoder || session)
+            await withNativeCleanup(tab, () =>
+              Promise.all([
+                closedEncoder,
+                session
+                  ?.send("Page.stopScreencast")
+                  .catch(constVoid)
+                  .then(() => session?.detach().catch(constVoid)),
+              ]),
+            );
+          void session?.detach().catch(constVoid);
+          await releaseSurface();
+        }
       }
     }).finally(() => {
       if (tab.recordingStart === started) tab.recordingStart = null;
@@ -2303,127 +2709,186 @@ const make = Effect.gen(function* () {
     return started;
   };
 
-  const withScreencastsPaused = <A>(tab: ServerTab, capture: () => Promise<A>): Promise<A> =>
+  const withScreencastsPaused = <A>(
+    tab: ServerTab,
+    capture: () => Promise<A>,
+    signal: AbortSignal,
+    remainingTimeoutMs: () => number,
+    releaseRequestSurface?: () => Promise<void>,
+  ): Promise<A> =>
     withCaptureLock(tab, async () => {
+      signal.throwIfAborted();
       tab.capturing += 1;
       const recording = tab.recording;
       try {
-        await Promise.all([
-          ...[...tab.viewers].map((viewer) => viewer.pause()),
-          recording?.session.send("Page.stopScreencast").catch(constVoid),
-        ]);
+        await ServerBrowserPage.withReadBudget(
+          { signal, timeoutMs: remainingTimeoutMs() },
+          (read) =>
+            read("pause screencasts", () =>
+              Promise.all([
+                ...[...tab.viewers].map((viewer) => viewer.pause(signal, remainingTimeoutMs())),
+                recording?.session.send("Page.stopScreencast"),
+              ]),
+            ),
+        );
+        signal.throwIfAborted();
         return await capture();
       } finally {
         tab.capturing -= 1;
-
-        await Promise.all([
-          ...[...tab.viewers].map((viewer) => viewer.resume()),
-          recording && tab.recording === recording
-            ? recording.session.send("Page.startScreencast", RECORDING_SCREENCAST).catch(constVoid)
-            : undefined,
-        ]);
-      }
-    });
-
-  const stopRecording = (tab: ServerTab) =>
-    withCaptureLock(tab, async () => {
-      const recording = tab.recording;
-      if (!recording) {
-        throw new ServerBrowserPage.ServerBrowserOperationError({
-          tag: "PreviewAutomationRecordingNotActiveError",
-          message: "No recording is active for this tab.",
-        });
-      }
-      try {
-        await recording.session.send("Page.stopScreencast").catch(constVoid);
-        await Promise.all(recording.framesInFlight);
-        await recording.session.detach().catch(constVoid);
-        // A screencast can miss the last paint when the page goes idle.
-        if (!tab.closing && !tab.dialog) {
-          const finalFrame = await ServerBrowserPage.captureFinalRecordingFrame(
-            tab.cdp,
-            RECORDING_SCREENCAST.quality,
+        // Cleanup gets its own short native lease after the expired request lease leaves.
+        await releaseRequestSurface?.();
+        if (tab.viewers.size > 0 || (recording && tab.recording === recording)) {
+          await withNativeCleanup(tab, () =>
+            Promise.all([
+              ...[...tab.viewers].map((viewer) => viewer.resume(400)),
+              recording && tab.recording === recording
+                ? recording.session.send("Page.startScreencast", RECORDING_SCREENCAST)
+                : undefined,
+            ]),
           );
-          if (finalFrame !== undefined) {
-            await recording.encoder
-              .evaluate(
-                ([data, width]) =>
-                  (globalThis as unknown as EncoderWindow).__t3Recorder.frame(data, width),
-                [
-                  finalFrame,
-                  tab.page.viewportSize()?.width ?? UNATTACHED_FILL_VIEWPORT.width,
-                ] as const,
-              )
-              .catch(constVoid);
-          }
         }
-        const { mimeType, count, bytes } = await recording.encoder.evaluate(() =>
-          (globalThis as unknown as EncoderWindow).__t3Recorder.stop(),
-        );
-        // Checked before the transfer so an oversized video never lands in this process.
-        if (bytes > PROVIDER_SEND_TURN_MAX_FILE_BYTES) {
-          throw new ServerBrowserPage.ServerBrowserOperationError({
-            tag: "PreviewAutomationRecordingTooLargeError",
-            message: "The recording is larger than the attachment limit.",
-          });
-        }
-        if (!mimeType || bytes === 0) {
-          throw new ServerBrowserPage.ServerBrowserOperationError({
-            tag: "PreviewAutomationExecutionError",
-            message: "The recording captured no frames.",
-          });
-        }
-        const extension = mimeType.startsWith("video/mp4") ? "mp4" : "webm";
-        const pendingId = `${PENDING_ATTACHMENT_THREAD_SEGMENT}-${NodeCrypto.randomUUID()}-${extension}`;
-        const path = NodePath.join(config.attachmentsDir, `${pendingId}.${extension}`);
-        await NodeFSP.mkdir(config.attachmentsDir, { recursive: true });
-        if (bytes >= RECORDING_BINARY_EXPORT_MIN_BYTES) {
-          const stagedPath = `${path}.partial`;
-          try {
-            const [download] = await Promise.all([
-              recording.encoder.waitForEvent("download", {
-                timeout: RECORDING_DOWNLOAD_TIMEOUT_MS,
-              }),
-              recording.encoder.evaluate(() =>
-                (globalThis as unknown as EncoderWindow).__t3Recorder.download(),
-              ),
-            ]);
-            await download.saveAs(stagedPath);
-            if ((await NodeFSP.stat(stagedPath)).size !== bytes) {
-              throw new Error("The recording download is incomplete.");
-            }
-            await NodeFSP.rename(stagedPath, path);
-          } finally {
-            await NodeFSP.rm(stagedPath, { force: true }).catch(constVoid);
-          }
-        } else {
-          const chunks: Array<Buffer> = [];
-          for (let index = 0; index < count; index += 1) {
-            const chunk = await recording.encoder.evaluate(
-              (chunkIndex) =>
-                (globalThis as unknown as EncoderWindow).__t3Recorder.chunk(chunkIndex),
-              index,
-            );
-            chunks.push(Buffer.from(chunk, "base64"));
-          }
-          const data = Buffer.concat(chunks);
-          if (data.byteLength !== bytes) throw new Error("The recording transfer is incomplete.");
-          await NodeFSP.writeFile(path, data);
-        }
-        return {
-          id: pendingId,
-          tabId: tab.tabId,
-          path,
-          mimeType: mimeType.split(";")[0]!,
-          sizeBytes: bytes,
-          createdAt: new Date().toISOString(),
-          uploadedAttachmentId: pendingId,
-        };
-      } finally {
-        await recording.encoder.close().catch(constVoid);
-        tab.recording = null;
       }
     });
+
+  const stopRecording = (
+    tab: ServerTab,
+    signal: AbortSignal,
+    remainingTimeoutMs: () => number,
+    releaseRequestSurface?: () => Promise<void>,
+  ) =>
+    withCaptureLock(tab, () =>
+      ServerBrowserPage.withReadBudget(
+        { signal, timeoutMs: remainingTimeoutMs() },
+        async (read) => {
+          const recording = tab.recording;
+          if (!recording) {
+            throw new ServerBrowserPage.ServerBrowserOperationError({
+              tag: "PreviewAutomationRecordingNotActiveError",
+              message: "No recording is active for this tab.",
+            });
+          }
+          try {
+            await read("recording screencast stop", () =>
+              recording.session.send("Page.stopScreencast"),
+            );
+            await read("recording final frames", () => Promise.all(recording.framesInFlight));
+            await read("recording session detach", () => recording.session.detach());
+            // A screencast can miss the last paint when the page goes idle.
+            if (!tab.closing && !tab.dialog) {
+              const finalFrame = await read("recording final paint", () =>
+                ServerBrowserPage.captureFinalRecordingFrame(
+                  tab.cdp,
+                  RECORDING_SCREENCAST.quality,
+                  { signal, timeoutMs: remainingTimeoutMs() },
+                ),
+              );
+              if (finalFrame !== undefined) {
+                await read("recording final frame", () =>
+                  recording.encoder
+                    .evaluate(
+                      ([data, width]) =>
+                        (globalThis as unknown as EncoderWindow).__t3Recorder.frame(data, width),
+                      [
+                        finalFrame,
+                        tab.page.viewportSize()?.width ?? UNATTACHED_FILL_VIEWPORT.width,
+                      ] as const,
+                    )
+                    .catch(constVoid),
+                );
+              }
+            }
+            const stopped = await read("recording encoder stop", () =>
+              recording.encoder.evaluate(() =>
+                (globalThis as unknown as EncoderWindow).__t3Recorder.stop(),
+              ),
+            );
+            // Checked before the transfer so an oversized video never lands in this process.
+            if (stopped.bytes > PROVIDER_SEND_TURN_MAX_FILE_BYTES) {
+              throw new ServerBrowserPage.ServerBrowserOperationError({
+                tag: "PreviewAutomationRecordingTooLargeError",
+                message: "The recording is larger than the attachment limit.",
+              });
+            }
+            if (!stopped.mimeType || stopped.bytes === 0) {
+              throw new ServerBrowserPage.ServerBrowserOperationError({
+                tag: "PreviewAutomationExecutionError",
+                message: "The recording captured no frames.",
+              });
+            }
+            const extension = stopped.mimeType.startsWith("video/mp4") ? "mp4" : "webm";
+            const pendingId = `${PENDING_ATTACHMENT_THREAD_SEGMENT}-${NodeCrypto.randomUUID()}-${extension}`;
+            const path = NodePath.join(config.attachmentsDir, `${pendingId}.${extension}`);
+            await read("recording directory", () =>
+              NodeFSP.mkdir(config.attachmentsDir, { recursive: true }),
+            );
+            if (stopped.bytes >= RECORDING_BINARY_EXPORT_MIN_BYTES) {
+              const stagedPath = `${path}.partial`;
+              try {
+                const [download] = await read("recording download", (timeoutMs) =>
+                  Promise.all([
+                    recording.encoder.waitForEvent("download", {
+                      timeout: Math.min(RECORDING_DOWNLOAD_TIMEOUT_MS, timeoutMs),
+                    }),
+                    recording.encoder.evaluate(() =>
+                      (globalThis as unknown as EncoderWindow).__t3Recorder.download(),
+                    ),
+                  ]),
+                );
+                await read("recording download save", () => download.saveAs(stagedPath));
+                if (
+                  (await read("recording download size", () => NodeFSP.stat(stagedPath))).size !== stopped.bytes
+                ) {
+                  throw new Error("The recording download is incomplete.");
+                }
+                await read("recording download commit", () => NodeFSP.rename(stagedPath, path));
+              } finally {
+                await NodeFSP.rm(stagedPath, { force: true }).catch(constVoid);
+              }
+            } else {
+              const chunks: Array<Buffer> = [];
+              for (let index = 0; index < stopped.count; index += 1) {
+                const chunk = await read("recording chunk", () =>
+                  recording.encoder.evaluate(
+                    (chunkIndex) =>
+                      (globalThis as unknown as EncoderWindow).__t3Recorder.chunk(chunkIndex),
+                    index,
+                  ),
+                );
+                chunks.push(Buffer.from(chunk, "base64"));
+              }
+              const data = Buffer.concat(chunks);
+              if (data.byteLength !== stopped.bytes)
+                throw new Error("The recording transfer is incomplete.");
+              await read("recording write", () => NodeFSP.writeFile(path, data));
+            }
+            return {
+              id: pendingId,
+              tabId: tab.tabId,
+              path,
+              mimeType: stopped.mimeType.split(";")[0]!,
+              sizeBytes: stopped.bytes,
+              createdAt: new Date().toISOString(),
+              uploadedAttachmentId: pendingId,
+            };
+          } finally {
+            tab.recording = null;
+            await releaseRequestSurface?.();
+            const closedEncoder = recording.encoder.close().catch(constVoid);
+            await withNativeCleanup(tab, () =>
+              Promise.all([
+                closedEncoder,
+                recording.session
+                  .send("Page.stopScreencast")
+                  .catch(constVoid)
+                  .then(() => recording.session.detach().catch(constVoid)),
+              ]),
+            );
+            void recording.session.detach().catch(constVoid);
+            await recording.releaseSurface();
+          }
+        },
+      ),
+    );
 
   let pointerSequence = 0;
   const pointerFor =
@@ -2439,7 +2904,11 @@ const make = Effect.gen(function* () {
         if (tab.desktop)
           runFork(
             desktopChannel.pointer(
-              { threadId: tab.threadId, tabId: tab.tabId },
+              {
+                threadId: tab.threadId,
+                tabId: tab.tabId,
+                ...(tab.desktopHostId === undefined ? {} : { desktopHostId: tab.desktopHostId }),
+              },
               { phase: next, x, y },
             ),
           );
@@ -2529,10 +2998,37 @@ const make = Effect.gen(function* () {
     }
   };
 
+  const browserNavigationUrl = async (
+    target: { readonly threadId: string; readonly desktopHostId?: string | undefined },
+    url: string,
+    signal?: AbortSignal,
+  ) => {
+    signal?.throwIfAborted();
+    if (target.desktopHostId === undefined || target.desktopHostId === "local") return url;
+    const resolved = await runPromise(
+      desktopChannel.resolveUrl({
+        desktopHostId: target.desktopHostId,
+        threadId: target.threadId,
+        url,
+      }),
+      { signal },
+    );
+    signal?.throwIfAborted();
+    if (resolved === null)
+      throw new ServerBrowserPage.ServerBrowserOperationError({
+        tag: "PreviewAutomationRemoteUnavailableError",
+        message: "The connected desktop cannot resolve this environment URL. Check the environment connection before retrying; the desktop's localhost was not opened.",
+      });
+    return normalizePreviewUrl(resolved);
+  };
+
   const runOperation = async (
     request: PreviewAutomationRequest,
+    signal: AbortSignal,
+    remainingTimeoutMs: () => number,
     deadlineMs: number,
   ): Promise<unknown> => {
+    signal.throwIfAborted();
     const input = request.input;
     switch (request.operation) {
       case "status":
@@ -2542,13 +3038,78 @@ const make = Effect.gen(function* () {
             : tabs.get(tabKey(request.threadId, request.tabId)),
           request.agentSessionId,
         );
-      case "open": {
+      case "profiles": {
+        const profiles = await runPromise(
+          desktopChannel.getProfiles({
+            threadId: request.threadId,
+            agentSessionId: request.agentSessionId ?? "",
+          }),
+        );
+        if (profiles === null)
+          throw new ServerBrowserPage.ServerBrowserOperationError({
+            tag: "PreviewAutomationRemoteUnavailableError",
+            message: "No unambiguous connected desktop profile catalogue is available. Connect the desktop that owns the desired profile, then call preview_profiles again.",
+          });
+        return { profiles: profiles.profiles, defaultProfileId: profiles.defaultProfileId };
+      }
+      case "open":
+      case "openWithProfile": {
         if (!request.agentSessionId)
           throw new BrowserControlInterrupted({
             message: "The agent session is missing. Reconnect the provider.",
           });
         const open = input as PreviewAutomationOpenInput;
-        const url = open.url === undefined ? undefined : normalizePreviewUrl(open.url);
+        const catalogue = await runPromise(
+          desktopChannel.getProfiles({
+            threadId: request.threadId,
+            agentSessionId: request.agentSessionId,
+          }),
+        );
+        // Reported web profiles remain available for environment-hosted pages. An
+        // explicit desktop-profile operation must still use its owning desktop.
+        const useReportedProfile =
+          catalogue === null &&
+          request.operation === "open" &&
+          (reportedProfiles !== null || !desktopChannel.available);
+        const reportedProfileId = useReportedProfile
+          ? resolveOpenProfile(open.profileId ?? open.profileName)
+          : undefined;
+        let selectedProfileId: string | undefined;
+        if (
+          !useReportedProfile &&
+          (open.profileId !== undefined || open.profileName !== undefined)
+        ) {
+          if (catalogue === null)
+            throw new ServerBrowserPage.ServerBrowserOperationError({
+              tag: "PreviewAutomationRemoteUnavailableError",
+              message: "The desktop owning the requested browser profile is unavailable or ambiguous. Call preview_profiles after connecting the intended desktop.",
+            });
+          const requestedId = open.profileId;
+          const exactProfile = catalogue.profiles.find((profile) => profile.id === requestedId);
+          const matches = exactProfile
+            ? [exactProfile]
+            : catalogue.profiles.filter((profile) =>
+                requestedId !== undefined
+                  ? profile.name.toLowerCase() === requestedId.toLowerCase()
+                  : profile.name === open.profileName,
+              );
+          if (matches.length !== 1) {
+            const reason = matches.length === 0 ? "unknown" : "ambiguous";
+            const detail =
+              matches.length === 0
+                ? `Browser profile ${JSON.stringify(open.profileId ?? open.profileName)} does not exist. Call preview_profiles to list available profiles.`
+                : `Browser profile name ${JSON.stringify(open.profileName)} matches multiple profiles. Use profileId: ${matches.map((profile) => JSON.stringify(profile.id)).join(", ")}.`;
+            throw new ServerBrowserPage.ServerBrowserOperationError({
+              tag: "PreviewAutomationProfileError",
+              message: detail,
+              detail: { reason, detail },
+            });
+          }
+          selectedProfileId = matches[0]!.id;
+        }
+        const newTabProfileId =
+          selectedProfileId ?? catalogue?.defaultProfileId ?? reportedProfileId;
+        let url = open.url === undefined ? undefined : normalizePreviewUrl(open.url);
         const reuse = open.reuseExistingTab ?? true;
         if (
           reuse &&
@@ -2588,12 +3149,45 @@ const make = Effect.gen(function* () {
           });
         }
         // Reusing another session's tab requires explicit tabId; reading it grants no implicit takeover.
-        const existing =
+        let existing =
           found && (request.tabIdExplicit || found.control.agentId === request.agentSessionId)
             ? found
             : undefined;
-        const navigationTimeout = Math.min(request.timeoutMs, NAVIGATION_TIMEOUT_MS);
-        const profileId = existing ? undefined : resolveOpenProfile(open.profileId);
+        if (selectedProfileId !== undefined && request.tabIdExplicit && existing === undefined) {
+          throw new ServerBrowserPage.ServerBrowserOperationError({
+            tag: "PreviewAutomationTabNotFoundError",
+            message: "The requested preview tab no longer exists.",
+          });
+        }
+        if (
+          selectedProfileId !== undefined &&
+          existing &&
+          (existing.profileId !== selectedProfileId ||
+            existing.desktopHostId !== catalogue?.desktopHostId)
+        ) {
+          if (request.tabIdExplicit) {
+            const detail =
+              "The selected tab uses a different browser profile. Existing tabs cannot switch profiles; omit tabId to create a new tab.";
+            throw new ServerBrowserPage.ServerBrowserOperationError({
+              tag: "PreviewAutomationProfileError",
+              message: detail,
+              detail: { reason: "tab-mismatch", detail },
+            });
+          }
+          existing = undefined;
+        }
+        if (url !== undefined)
+          url = await browserNavigationUrl(
+            {
+              threadId: request.threadId,
+              desktopHostId:
+                existing?.desktopHostId ??
+                (newTabProfileId === undefined ? undefined : catalogue?.desktopHostId),
+            },
+            url,
+          );
+        signal.throwIfAborted();
+        const navigationTimeout = Math.min(remainingTimeoutMs(), NAVIGATION_TIMEOUT_MS);
         if (!existing) closeIdleAgentTabs();
         const tab =
           existing ??
@@ -2602,14 +3196,18 @@ const make = Effect.gen(function* () {
               {
                 threadId: request.threadId,
                 ...(url ? { url } : {}),
-                ...(profileId === undefined ? {} : { profileId }),
+                ...(reportedProfileId === undefined ? {} : { profileId: reportedProfileId }),
                 runtime: "server",
                 reveal: false,
                 automationOwner: request.agentSessionId,
+                ...(newTabProfileId === undefined || catalogue === null
+                  ? {}
+                  : { profileId: newTabProfileId, desktopHostId: catalogue.desktopHostId }),
               },
               { reclaimIdleSlot: true },
             ),
           ));
+        signal.throwIfAborted();
         if (existing?.dialog)
           throw new BrowserControlInterrupted({
             message:
@@ -2617,63 +3215,66 @@ const make = Effect.gen(function* () {
             reason: "dialogPending",
           });
         return tab.control.agent(
-          request.agentSessionId,
-          async () => {
-            if (tab.dialog)
-              throw new BrowserControlInterrupted({
-                message:
-                  "A browser dialog is pending. Read preview_status and use preview_dialog first.",
-                reason: "dialogPending",
-              });
-            if (existing) {
-              if (url) await navigate(tab, url, "load", navigationTimeout);
-            } else {
-              // A failed open returns no tabId; a leftover hidden tab would block later reuse.
-              await Promise.resolve(tab.initialNavigation)
-                .then(async () => {
-                  if (url) {
-                    await tab.page
-                      .waitForLoadState("load", { timeout: navigationTimeout })
-                      .catch(constVoid);
-                  }
-                  assertNavigationSucceeded(tab);
-                })
-                .catch(async (cause: unknown) => {
-                  // Playwright rejects downloads too; their tab must survive to save the file.
-                  if (cause instanceof Error && cause.message.includes("Download is starting")) {
-                    throw cause;
-                  }
-                  await runPromise(manager.close({ threadId: tab.threadId, tabId: tab.tabId }));
-                  dropTab(tab, false);
-                  throw cause;
+          request.agentSessionId!,
+          () =>
+            withNativeSurface(tab, signal, remainingTimeoutMs, async () => {
+              if (tab.dialog)
+                throw new BrowserControlInterrupted({
+                  message:
+                    "A browser dialog is pending. Read preview_status and use preview_dialog first.",
+                  reason: "dialogPending",
                 });
-            }
-            const reveal = open.open ?? open.show;
-            let shown: Promise<void> | undefined;
-            if (reveal !== false) {
-              await runPromise(
-                manager.requestReveal({
-                  threadId: tab.threadId,
-                  tabId: tab.tabId,
-                  force: reveal === true,
-                }),
-              );
-              // Only an explicit show is sure to reach a client; desktop tabs are visible without a viewer.
-              const remainingMs = deadlineMs - performance.now();
-              if (reveal === true && tab.viewers.size === 0 && tab.desktop === null)
-                shown = awaitViewer(tab, Math.min(REVEAL_VIEWER_WAIT_MS, remainingMs));
-              // A desktop panel reports the revealed tab shown a few hops after the reveal.
-              else if (reveal === true && !isVisible(tab))
-                shown = runPromise(
-                  desktopChannel.awaitShown(
-                    tab,
-                    Math.max(0, Math.min(REVEAL_DESKTOP_SHOWN_WAIT_MS, remainingMs)),
-                  ),
-                ).then(constVoid);
-            }
-            await shown;
-            return statusWithTitle(tab, request.agentSessionId);
-          },
+              const reveal = open.open ?? open.show;
+              if (reveal !== false) {
+                tab.revealRequested = true;
+                await runPromise(
+                  manager.requestReveal({
+                    threadId: tab.threadId,
+                    tabId: tab.tabId,
+                    force: reveal === true,
+                  }),
+                );
+              }
+              if (existing) {
+                if (url) await navigate(tab, url, "load", navigationTimeout);
+              } else {
+                // A failed open returns no tabId; a leftover hidden tab would block later reuse.
+                await Promise.resolve(tab.initialNavigation)
+                  .then(async () => {
+                    if (url) {
+                      await tab.page
+                        .waitForLoadState("load", { timeout: navigationTimeout })
+                        .catch(constVoid);
+                    }
+                    assertNavigationSucceeded(tab);
+                  })
+                  .catch(async (cause: unknown) => {
+                    // Playwright rejects downloads too; their tab must survive to save the file.
+                    if (cause instanceof Error && cause.message.includes("Download is starting")) {
+                      throw cause;
+                    }
+                    await runPromise(manager.close({ threadId: tab.threadId, tabId: tab.tabId }));
+                    dropTab(tab, false);
+                    throw cause;
+                  });
+                signal.throwIfAborted();
+              }
+              if (reveal === true && !isVisible(tab)) {
+                const remainingMs = deadlineMs - performance.now();
+                if (tab.desktop === null) {
+                  await awaitViewer(tab, Math.min(REVEAL_VIEWER_WAIT_MS, remainingMs));
+                } else {
+                  await runPromise(
+                    desktopChannel.awaitPresented(
+                      desktopKey(tab),
+                      Math.max(0, Math.min(REVEAL_DESKTOP_PRESENTATION_WAIT_MS, remainingMs)),
+                    ),
+                    { signal },
+                  );
+                }
+              }
+              return statusWithTitle(tab, request.agentSessionId);
+            }),
           deadlineMs,
         );
       }
@@ -2708,12 +3309,18 @@ const make = Effect.gen(function* () {
             message: "No recording is active for this thread.",
           });
         }
-        // A stop cannot act twice (a retry finds no recording);
-        // dropping a late one would leave capture running.
-        return tab.control.agent(request.agentSessionId ?? "", () => stopRecording(tab));
+        // Stopping must still drain a recording after its caller's deadline expires.
+        return tab.control.agent(request.agentSessionId ?? "", () => {
+          const stopSignal = signal.aborted ? new AbortController().signal : signal;
+          const stopTimeoutMs = signal.aborted ? () => 10_000 : remainingTimeoutMs;
+          return withNativeSurface(tab, stopSignal, stopTimeoutMs, (_viewport, releaseSurface) =>
+            stopRecording(tab, stopSignal, stopTimeoutMs, releaseSurface),
+          );
+        });
       }
     }
     const tab = await requireTab(request);
+    signal.throwIfAborted();
     // Closing must unblock an action waiting on a dialog, without queueing behind it.
     if (request.operation === "close") {
       if (tab.control.agentId === null)
@@ -2727,6 +3334,7 @@ const make = Effect.gen(function* () {
           reason: "humanControl",
         });
       await runPromise(manager.close({ threadId: tab.threadId, tabId: tab.tabId }));
+      void tab.control.close().catch(constVoid);
       dropTab(tab, false);
       return {};
     }
@@ -2753,50 +3361,197 @@ const make = Effect.gen(function* () {
             message: "A browser dialog is pending. Read preview_status.",
             reason: "dialogPending",
           });
-        return executeTabOperation(tab, request, deadlineMs);
+        return withNativeSurface(tab, signal, remainingTimeoutMs, (_viewport, releaseSurface) =>
+          executeTabOperation(tab, request, signal, remainingTimeoutMs, releaseSurface),
+        );
       });
     }
     return tab.control.agent(
       agentSessionId,
-      async () => {
-        if (tab.dialog)
-          throw new BrowserControlInterrupted({
-            message:
-              "A browser dialog is pending. Read preview_status and use preview_dialog first.",
-            reason: "dialogPending",
-          });
-        const generation = tab.control.generation;
-        tab.agentOperating = !READ_OPERATIONS.has(request.operation);
-        updateFileChooserInterception(tab);
-        try {
-          return await executeTabOperation(tab, request, deadlineMs);
-        } finally {
-          tab.agentOperating = false;
+      () =>
+        withNativeSurface(tab, signal, remainingTimeoutMs, async (_viewport, releaseSurface) => {
+          if (tab.dialog)
+            throw new BrowserControlInterrupted({
+              message: "A browser dialog is pending. Read preview_status and use preview_dialog first.",
+              reason: "dialogPending",
+            });
+          const generation = tab.control.generation;
+          tab.agentOperating = !READ_OPERATIONS.has(request.operation);
           updateFileChooserInterception(tab);
-          if (generation !== tab.control.generation) ServerBrowserPage.invalidateRefs(tab.page);
-        }
-      },
+          try {
+            return await executeTabOperation(
+              tab,
+              request,
+              signal,
+              remainingTimeoutMs,
+              releaseSurface,
+            );
+          } finally {
+            tab.agentOperating = false;
+            updateFileChooserInterception(tab);
+            if (generation !== tab.control.generation) ServerBrowserPage.invalidateRefs(tab.page);
+          }
+        }),
       deadlineMs,
     );
+  };
+
+  const desktopKey = (tab: ServerTab) => ({
+    threadId: tab.threadId,
+    tabId: tab.tabId,
+    ...(tab.desktopHostId === undefined ? {} : { desktopHostId: tab.desktopHostId }),
+  });
+
+  /** Native layout and captures need an on-window guest even when no thread shows it. */
+  const withNativeSurface = async <A>(
+    tab: ServerTab,
+    signal: AbortSignal,
+    remainingTimeoutMs: () => number,
+    operation: (
+      viewport?: { readonly width: number; readonly height: number } | null,
+      releaseSurface?: () => Promise<void>,
+    ) => Promise<A>,
+    viewport?: PreviewViewportSetting,
+  ): Promise<A> => {
+    signal.throwIfAborted();
+    if (!tab.desktop) return operation();
+    const key = desktopKey(tab);
+    const leaseId = NodeCrypto.randomUUID();
+    let released = false;
+    const release = async () => {
+      if (released) return;
+      released = true;
+      await runPromise(
+        desktopChannel
+          .surface(key, { action: "release", leaseId }, Math.min(500, remainingTimeoutMs()))
+          .pipe(Effect.ignore),
+      );
+    };
+    try {
+      const appliedViewport = await runPromise(
+        desktopChannel.surface(
+          key,
+          {
+            action: "acquire",
+            leaseId,
+            timeoutMs: Math.max(
+              1,
+              Math.floor(remainingTimeoutMs() - Math.min(150, remainingTimeoutMs() / 10)),
+            ),
+            ...(viewport === undefined ? {} : { viewport }),
+          },
+          Math.min(2_500, remainingTimeoutMs()),
+        ),
+        { signal },
+      );
+      signal.throwIfAborted();
+      return await operation(appliedViewport, release);
+    } finally {
+      await release();
+    }
+  };
+
+  /** Screencasts keep painting between individual automation requests. */
+  const acquirePersistentNativeSurface = async (
+    tab: ServerTab,
+    options: {
+      readonly signal?: AbortSignal;
+      readonly timeoutMs?: number;
+      readonly commandTimeoutMs?: number;
+    } = {},
+  ): Promise<() => Promise<void>> => {
+    options.signal?.throwIfAborted();
+    if (!tab.desktop) return async () => {};
+    const key = desktopKey(tab);
+    const leaseId = NodeCrypto.randomUUID();
+    let released = false;
+    const release = async () => {
+      if (released) return;
+      released = true;
+      await runPromise(
+        desktopChannel
+          .surface(key, { action: "release", leaseId }, Math.min(100, options.timeoutMs ?? 100))
+          .pipe(Effect.ignore),
+      );
+    };
+    try {
+      await runPromise(
+        desktopChannel.surface(
+          key,
+          {
+            action: "acquire",
+            leaseId,
+            ...(options.commandTimeoutMs === undefined
+              ? {}
+              : { timeoutMs: options.commandTimeoutMs }),
+          },
+          Math.min(2_500, options.timeoutMs ?? 2_500),
+        ),
+        { signal: options.signal },
+      );
+      options.signal?.throwIfAborted();
+      return release;
+    } catch (cause) {
+      await release();
+      throw cause;
+    }
+  };
+
+  /** Stop or resume streams without letting cleanup pin a request queue. */
+  const withNativeCleanup = async (tab: ServerTab, operation: () => Promise<unknown>) => {
+    let active = true;
+    let release = async () => {};
+    try {
+      await ServerBrowserPage.withReadBudget({ timeoutMs: 500 }, async (read) => {
+        await read("cleanup surface", async () => {
+          const acquired = await acquirePersistentNativeSurface(tab, {
+            timeoutMs: 200,
+            commandTimeoutMs: 450,
+          });
+          if (!active) {
+            await acquired();
+            return;
+          }
+          release = acquired;
+        }).catch(constVoid);
+        await read("screencast cleanup", operation);
+      });
+    } catch {
+      /* Cleanup is best effort; the native deadline still retires every command. */
+    } finally {
+      active = false;
+      await release();
+    }
   };
 
   const executeTabOperation = async (
     tab: ServerTab,
     request: PreviewAutomationRequest,
-    deadlineMs: number,
+    signal: AbortSignal,
+    remainingTimeoutMs: () => number,
+    releaseRequestSurface?: () => Promise<void>,
   ) => {
-    const input = request.input;
+    const originalInput = request.input as {
+      readonly timeoutMs?: number;
+      readonly [key: string]: unknown;
+    };
+    const input: unknown = {
+      ...originalInput,
+      timeoutMs: Math.max(1, Math.min(originalInput.timeoutMs ?? 10_000, remainingTimeoutMs())),
+    };
     switch (request.operation) {
       case "navigate": {
         const navigateInput = input as PreviewAutomationNavigateInput;
-        await recordAction(tab, "navigate", () =>
-          navigate(
+        await recordAction(tab, "navigate", async () => {
+          const url = await browserNavigationUrl(tab, resolveNavigationUrl(navigateInput), signal);
+          signal.throwIfAborted();
+          return navigate(
             tab,
-            resolveNavigationUrl(navigateInput),
+            url,
             navigateInput.readiness ?? "load",
-            navigateInput.timeoutMs ?? request.timeoutMs,
-          ),
-        );
+            Math.min(originalInput.timeoutMs ?? request.timeoutMs, remainingTimeoutMs()),
+          );
+        });
         return statusWithTitle(tab, request.agentSessionId);
       }
       case "resize": {
@@ -2815,27 +3570,29 @@ const make = Effect.gen(function* () {
             viewport: tab.page.viewportSize() ?? UNATTACHED_FILL_VIEWPORT,
           };
         }
-        const changed = from?.width !== to?.width || from?.height !== to?.height;
-        const remainingMs = () => Math.max(0, deadlineMs - performance.now());
-        const within = <A>(promise: Promise<A>, ms: number) =>
-          runPromise(
-            Effect.promise(() => promise).pipe(
-              Effect.timeoutOption(ms),
-              Effect.map(Option.getOrNull),
-            ),
-          );
-        // The desktop draws the new size after the session update; its page resize says it has.
-        // Half the time left keeps room for the read, which runs even if nothing was drawn,
-        // because a page can keep another size than the one asked for.
-        if (changed) await within(drawn, Math.min(DESKTOP_RESIZE_WAIT_MS, remainingMs() / 2));
-        const changes = tab.desktopViewportChanges;
-        const measured = await within(measureDesktopViewport(tab), remainingMs());
-        // Only a read after the draw, with no page resize or load during it, measures this resize.
-        return {
-          tabId: tab.tabId,
-          setting,
-          ...(measured && tab.desktopViewportChanges === changes ? { viewport: measured } : {}),
-        };
+        return withNativeSurface(tab, signal, remainingTimeoutMs, async () => {
+          const changed = from?.width !== to?.width || from?.height !== to?.height;
+          const remainingMs = remainingTimeoutMs;
+          const within = <A>(promise: Promise<A>, ms: number) =>
+            runPromise(
+              Effect.promise(() => promise).pipe(
+                Effect.timeoutOption(ms),
+                Effect.map(Option.getOrNull),
+              ),
+            );
+          // The desktop draws the new size after the session update; its page resize says it has.
+          // Half the time left keeps room for the read, which runs even if nothing was drawn,
+          // because a page can keep another size than the one asked for.
+          if (changed) await within(drawn, Math.min(DESKTOP_RESIZE_WAIT_MS, remainingMs() / 2));
+          const changes = tab.desktopViewportChanges;
+          const measured = await within(measureDesktopViewport(tab), remainingMs());
+          // Only a read after the draw, with no page resize or load during it, measures this resize.
+          return {
+            tabId: tab.tabId,
+            setting,
+            ...(measured && tab.desktopViewportChanges === changes ? { viewport: measured } : {}),
+          };
+        }, setting);
       }
       case "setColorScheme": {
         const { colorScheme } = input as PreviewAutomationSetColorSchemeInput;
@@ -2846,17 +3603,25 @@ const make = Effect.gen(function* () {
         return { tabId: tab.tabId, colorScheme };
       }
       case "snapshot": {
-        const snapshotInput = input as PreviewAutomationSnapshotInput | undefined;
+        const snapshotInput = input as
+          | (PreviewAutomationSnapshotInput & { readonly includeImage?: boolean })
+          | undefined;
+        const includeImage = snapshotInput?.includeImage !== false;
         const rendering = {
           ...tab,
           renderScale: tab.desktop ? "display" : RENDER_SCALE,
           fullScreenshot: snapshotInput?.fullScreenshot,
+          includeImage,
+          signal,
+          timeoutMs: remainingTimeoutMs(),
         } as const;
-        const snapshot = await withScreencastsPaused(tab, () =>
-          snapshotInput?.pixelsRequired === false
+        const capture = () =>
+          includeImage && snapshotInput?.pixelsRequired === false
             ? ServerBrowserPage.snapshotMetadata(rendering)
-            : ServerBrowserPage.snapshot(rendering),
-        );
+            : ServerBrowserPage.snapshot(rendering);
+        const snapshot = await (includeImage
+          ? withScreencastsPaused(tab, capture, signal, remainingTimeoutMs, releaseRequestSurface)
+          : capture());
         const loadError = loadErrorOf(tab);
         return loadError ? { ...snapshot, url: loadError.url, loadError } : snapshot;
       }
@@ -2864,85 +3629,134 @@ const make = Effect.gen(function* () {
         // Time spent queued behind other work on this tab counts against the broker's deadline.
         const clickInput = {
           ...(input as PreviewAutomationClickInput),
-          timeoutMs: Math.max(1, Math.floor(deadlineMs - performance.now())),
+          timeoutMs: Math.max(
+            1,
+            Math.floor(
+              Math.min(
+                (input as PreviewAutomationClickInput).timeoutMs ?? request.timeoutMs,
+                remainingTimeoutMs(),
+              ),
+            ),
+          ),
         };
         await recordAction(tab, "click", () =>
-          ServerBrowserPage.click(tab.page, clickInput, pointerFor(tab)),
+          ServerBrowserPage.click(tab.page, clickInput, pointerFor(tab), signal),
         );
         return undefined;
       }
       case "hover":
         return recordAction(tab, "hover", () =>
-          ServerBrowserPage.hover(tab.page, input as PreviewAutomationHoverInput, pointerFor(tab)),
+          ServerBrowserPage.hover(
+            tab.page,
+            input as PreviewAutomationHoverInput,
+            pointerFor(tab),
+            signal,
+          ),
         );
       case "select":
         return recordAction(tab, "select", () =>
-          ServerBrowserPage.select(tab.page, input as PreviewAutomationSelectInput),
+          ServerBrowserPage.select(tab.page, input as PreviewAutomationSelectInput, signal),
         );
       case "drag":
         return recordAction(tab, "drag", () =>
-          ServerBrowserPage.drag(tab.page, input as PreviewAutomationDragInput, pointerFor(tab)),
+          ServerBrowserPage.drag(
+            tab.page,
+            input as PreviewAutomationDragInput,
+            pointerFor(tab),
+            signal,
+          ),
         );
       case "upload":
         return recordAction(tab, "upload", () =>
-          uploadFiles(tab, input as PreviewAutomationUploadInput),
+          uploadFiles(tab, input as PreviewAutomationUploadInput, signal),
         );
       case "type":
         return recordAction(tab, "type", () =>
-          ServerBrowserPage.type(tab.page, input as PreviewAutomationTypeInput),
+          ServerBrowserPage.type(tab.page, input as PreviewAutomationTypeInput, signal),
         );
       case "press":
         return recordAction(tab, "press", () =>
-          ServerBrowserPage.press(tab.page, input as PreviewAutomationPressInput),
+          ServerBrowserPage.press(tab.page, input as PreviewAutomationPressInput, signal),
         );
       case "scroll":
         return recordAction(tab, "scroll", () =>
-          ServerBrowserPage.scroll(tab.page, input as PreviewAutomationScrollInput),
+          ServerBrowserPage.scroll(tab.page, input as PreviewAutomationScrollInput, signal),
         );
       case "evaluate":
-        return ServerBrowserPage.evaluate(
-          tab.cdp,
-          input as PreviewAutomationEvaluateInput,
-          request.timeoutMs,
-        );
+        return ServerBrowserPage.evaluate(tab.cdp, input as PreviewAutomationEvaluateInput, {
+          signal,
+          timeoutMs: remainingTimeoutMs(),
+        });
       case "waitFor":
-        return ServerBrowserPage.waitFor(tab.page, input as PreviewAutomationWaitForInput);
+        return ServerBrowserPage.waitFor(tab.page, input as PreviewAutomationWaitForInput, {
+          signal,
+          timeoutMs: remainingTimeoutMs(),
+        });
       case "recordingStart": {
-        const recording = await startRecording(tab);
+        const recording = await startRecording(
+          tab,
+          signal,
+          remainingTimeoutMs,
+          releaseRequestSurface,
+        );
         return { tabId: tab.tabId, recording: true, startedAt: recording.startedAt };
       }
     }
   };
 
   const handleRequest = (connectionId: string, request: PreviewAutomationRequest) =>
-    Effect.tryPromise({
-      try: () =>
-        runOperation(request, performance.now() + request.timeoutMs).finally(() =>
-          markUsed(request),
+    Clock.clockWith((clock) => {
+      const timeoutMs = Math.max(1, request.timeoutMs - Math.min(500, request.timeoutMs / 10));
+      const started = clock.monotonicTimeNanosUnsafe();
+      const deadlineMs = performance.now() + request.timeoutMs;
+      const remainingTimeoutMs = () =>
+        Math.max(1, timeoutMs - Number(clock.monotonicTimeNanosUnsafe() - started) / 1_000_000);
+      return Effect.tryPromise({
+        try: (signal) =>
+          runOperation(request, signal, remainingTimeoutMs, deadlineMs).finally(() =>
+            markUsed(request),
+          ),
+        catch: (cause) =>
+          isDesktopBrowserTransportError(cause)
+            ? new ServerBrowserPage.ServerBrowserOperationError({
+              tag: "PreviewAutomationRemoteUnavailableError",
+              message: cause.message,
+              detail: { reason: cause.reason },
+            })
+            : ServerBrowserPage.toOperationError(cause),
+      }).pipe(
+        Effect.timeout(timeoutMs),
+        Effect.catchTags({
+          TimeoutError: () =>
+            Effect.fail(
+              new ServerBrowserPage.ServerBrowserOperationError({
+                tag: "PreviewAutomationTimeoutError",
+                message: "The browser operation exceeded its execution deadline.",
+              }),
+            ),
+        }),
+        Effect.match({
+          onSuccess: (result) => ({ ok: true as const, result }),
+          onFailure: (error) => ({
+            ok: false as const,
+            error: {
+              _tag: error.tag,
+              message: error.message,
+              ...(error.detail === undefined ? {} : { detail: error.detail }),
+            },
+          }),
+        }),
+        Effect.flatMap((outcome) =>
+          broker.respond({
+            clientId: SERVER_HOST_CLIENT_ID,
+            connectionId,
+            requestId: request.requestId,
+            ...outcome,
+          }),
         ),
-      catch: ServerBrowserPage.toOperationError,
-    }).pipe(
-      Effect.match({
-        onSuccess: (result) => ({ ok: true as const, result }),
-        onFailure: (error) => ({
-          ok: false as const,
-          error: {
-            _tag: error.tag,
-            message: error.message,
-            ...(error.detail === undefined ? {} : { detail: error.detail }),
-          },
-        }),
-      }),
-      Effect.flatMap((outcome) =>
-        broker.respond({
-          clientId: SERVER_HOST_CLIENT_ID,
-          connectionId,
-          requestId: request.requestId,
-          ...outcome,
-        }),
-      ),
-      Effect.ignore,
-    );
+        Effect.ignore,
+      );
+    });
 
   const mirrorManagerEvent = (event: PreviewEvent) =>
     Effect.promise(async () => {
@@ -2954,6 +3768,12 @@ const make = Effect.gen(function* () {
       }
       const key = tabKey(event.threadId, event.tabId);
       const tab = tabs.get(key);
+      if (event.type === "closed") {
+        const popup = nativePopupForTab(event.threadId, event.tabId);
+        if (popup) {
+          popup.closeRequested = true;
+        }
+      }
       if (event.type === "closed" && !tab && pendingTabs.has(key)) closedPendingTabs.add(key);
       if (!tab) return;
       if (event.type === "closed") {
@@ -3005,7 +3825,6 @@ const make = Effect.gen(function* () {
         .catch(constVoid);
     }
     viewer.pressedButtons.clear();
-    viewer.requestedSize = null;
   };
 
   const dispatchViewerInput = async (
@@ -3123,7 +3942,7 @@ const make = Effect.gen(function* () {
       // bounded wait for a page script that never yields comes first.
       case "navigate":
         if (typeof message.url === "string") {
-          const url = normalizePreviewUrl(message.url);
+          const url = await browserNavigationUrl(tab, normalizePreviewUrl(message.url));
           tab.pendingInitialRequestUrl = null;
           await leaveBusyPage(tab, session);
           tab.control.trackUntilHandoff(tab.page.goto(url, VIEWER_NAVIGATION_OPTIONS));
@@ -3178,6 +3997,13 @@ const make = Effect.gen(function* () {
     "ServerBrowser.attachViewer",
   )(function* (input) {
     const tab = yield* findTab(input.threadId, input.tabId);
+    yield* Effect.acquireRelease(
+      Effect.tryPromise({
+        try: () => acquirePersistentNativeSurface(tab),
+        catch: (cause) => new ServerBrowserLaunchError({ cause }),
+      }),
+      (release) => Effect.promise(release),
+    );
     const output = yield* Queue.make<ServerBrowserViewerOutput>({
       capacity: VIEWER_OUTPUT_LIMIT,
       strategy: "dropping",
@@ -3204,20 +4030,23 @@ const make = Effect.gen(function* () {
     const recentFrames: Array<number> = [];
     let screencastParams = Promise.resolve();
     let screencastScale = 1;
-    const startScreencast = (scale: number) => {
+    const startScreencast = (scale: number, timeoutMs = 10_000) => {
       screencastScale = scale;
-      screencastParams = screencastParams.then(async () => {
+      const previous = screencastParams;
+      const started = ServerBrowserPage.withReadBudget({ timeoutMs }, async (read) => {
+        await read("viewer parameters", () => previous);
         if (tab.capturing > 0) return;
-        await session.send("Page.stopScreencast").catch(constVoid);
-        await session
-          .send("Page.startScreencast", {
+        await read("viewer screencast stop", () => session.send("Page.stopScreencast"));
+        await read("viewer screencast start", () =>
+          session.send("Page.startScreencast", {
             format: "jpeg",
             quality: screencastScale < 1 ? Math.min(quality, SCREENCAST_MOTION_QUALITY) : quality,
             maxWidth: Math.max(1, Math.round(input.maxWidth * screencastScale)),
             maxHeight: Math.max(1, Math.round(input.maxHeight * screencastScale)),
-          })
-          .catch(constVoid);
+          }),
+        );
       });
+      screencastParams = started.then(constVoid, constVoid);
       return screencastParams;
     };
     const viewer: ViewerState = {
@@ -3248,13 +4077,16 @@ const make = Effect.gen(function* () {
           for (const item of dropped.value) if (item._tag === "frame") runFork(item.ack);
         }
       },
-      pause: () => {
-        screencastParams = screencastParams.then(() =>
-          session.send("Page.stopScreencast").then(constVoid, constVoid),
-        );
-        return screencastParams;
+      pause: (signal, timeoutMs = 10_000) => {
+        const previous = screencastParams;
+        const paused = ServerBrowserPage.withReadBudget({ signal, timeoutMs }, async (read) => {
+          await read("viewer parameters", () => previous);
+          await read("viewer screencast pause", () => session.send("Page.stopScreencast"));
+        });
+        screencastParams = paused.then(constVoid, constVoid);
+        return paused;
       },
-      resume: () => startScreencast(screencastScale),
+      resume: (timeoutMs) => startScreencast(screencastScale, timeoutMs),
       scrolledAt: 0,
       requestedSize: null,
     };
@@ -3271,6 +4103,8 @@ const make = Effect.gen(function* () {
           tab.viewers.delete(viewer);
           broadcastControl(tab);
           reportLiveTabs();
+          if (!tab.closing && viewer.requestedSize !== null && tab.setting._tag === "fill")
+            await applySetting(tab, tab.setting).catch(constVoid);
         }),
     );
     if (input.canOperate && tab.control.agentId === null && tab.control.controller === null) {
@@ -3430,6 +4264,43 @@ const make = Effect.gen(function* () {
     Stream.runForEach(mirrorManagerEvent),
     Effect.forkScoped,
   );
+  yield* desktopChannel.connectedHosts.pipe(
+    Stream.runForEach((desktopHostId) =>
+      Effect.forEach(
+        [...nativePopups.values()].filter(
+          (popup) => (popup.source.desktopHostId ?? "local") === desktopHostId,
+        ),
+        (popup) =>
+          Effect.gen(function* () {
+            const id = popupKey(popup.source, popup.popupId);
+            const presence = yield* desktopChannel
+              .probePopup(popup.source, popup.popupId)
+              .pipe(Effect.option);
+            if (nativePopups.get(id) !== popup || Option.isNone(presence)) return;
+            if (!presence.value) return yield* confirmNativePopupClosed(id, popup);
+            if (!popup.closeRequested) return;
+            yield* popup.snapshot
+              ? manager
+                  .close({
+                    threadId: ThreadId.make(popup.snapshot.threadId),
+                    tabId: popup.snapshot.tabId,
+                  })
+                  .pipe(Effect.ignore)
+              : desktopChannel.closePopup(popup.source, popup.popupId).pipe(Effect.ignore);
+          }),
+        { discard: true },
+      ),
+    ),
+    Effect.forkScoped,
+  );
+  yield* desktopChannel.popups.pipe(
+    Stream.runForEach((popup) => Effect.promise(() => openNativePopup(popup))),
+    Effect.forkScoped,
+  );
+  yield* desktopChannel.closedPopups.pipe(
+    Stream.runForEach((event) => confirmNativePopupClosed(popupKey(event, event.popupId))),
+    Effect.forkScoped,
+  );
   if (
     !PreviewBrowserHost.sandboxDisabled(yield* HostProcess.Environment) &&
     (yield* PreviewBrowserHost.sandboxBlocked)
@@ -3443,7 +4314,20 @@ const make = Effect.gen(function* () {
     Stream.runForEach((key) =>
       Effect.sync(() => {
         const tab = tabs.get(tabKey(key.threadId, key.tabId));
-        if (tab?.desktop) dropTab(tab, false);
+        if (tab?.desktop && (tab.desktopHostId ?? "local") === (key.desktopHostId ?? "local"))
+          dropTab(tab, false);
+      }),
+    ),
+    Effect.forkScoped,
+  );
+  yield* desktopChannel.presentations.pipe(
+    Stream.runForEach((key) =>
+      Effect.sync(() => {
+        const tab = tabs.get(tabKey(key.threadId, key.tabId));
+        if (!tab?.desktop || tab.desktopHostId !== key.desktopHostId) return;
+        tab.nativePresented = desktopChannel.isPresented(key);
+        if (tab.nativePresented) tab.revealRequested = false;
+        reportLiveTabs();
       }),
     ),
     Effect.forkScoped,
@@ -3479,7 +4363,7 @@ const make = Effect.gen(function* () {
         environmentId,
         supportedOperations: [...PREVIEW_AUTOMATION_SERVER_OPERATIONS],
       },
-      { preferred: true },
+      { preferred: true, disconnectOnTimeout: false },
     )
     .pipe(
       Effect.flatMap((events) =>
@@ -3489,15 +4373,25 @@ const make = Effect.gen(function* () {
               hostConnectionId = event.connectionId;
               return Effect.sync(reportLiveTabs);
             }
-            return handleRequest(event.connectionId, event.request).pipe(
-              Effect.forkScoped,
-              Effect.asVoid,
-            );
+            return broker
+              .runRequest(
+                {
+                  clientId: SERVER_HOST_CLIENT_ID,
+                  connectionId: event.connectionId,
+                  requestId: event.request.requestId,
+                },
+                (remainingTimeoutMs) =>
+                  handleRequest(event.connectionId, {
+                    ...event.request,
+                    timeoutMs: remainingTimeoutMs,
+                  }),
+              )
+              .pipe(Effect.forkScoped, Effect.asVoid);
           }),
         ),
       ),
     );
-  // The broker disconnects timed-out hosts, including slow first installs. Reconnect.
+  // Re-register after transport loss; individual request deadlines keep this host alive.
   yield* hostSession.pipe(
     Effect.exit,
     Effect.andThen(Effect.sleep(HOST_RECONNECT_DELAY)),
