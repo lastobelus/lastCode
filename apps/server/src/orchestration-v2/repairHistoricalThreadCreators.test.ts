@@ -391,20 +391,8 @@ it.layer(TestLayer)("historical thread creators", (it) => {
           settledOverride: "settled",
         });
         yield* launchMessage(child, parent.id, {}, child.id);
-        const prompted = yield* createThread(
-          "thread:mcp:namespace:prompted:0",
-          {},
-          "command:mcp:namespace:create-thread:prompted:0",
-        );
-        yield* launchMessage(
-          prompted,
-          parent.id,
-          { id: MessageId.make("message:mcp:namespace:prompted:0") },
-          "command:mcp:namespace:create-thread:prompted:0:initial-message",
-        );
-        assert.equal(yield* repairHistoricalThreadCreators, 2);
+        assert.equal(yield* repairHistoricalThreadCreators, 1);
         const store = yield* ProjectionStore.ProjectionStoreV2;
-        assert.equal((yield* store.getThread(prompted.id)).creatorThreadId, parent.id);
         const repaired = (yield* store.getThreadProjection(child.id)).thread;
         assert.deepStrictEqual(repaired, {
           ...child,
@@ -540,48 +528,28 @@ it.layer(TestLayer)("historical thread creators", (it) => {
     }),
   );
 
-  it.effect(
-    "rejects conflicting evidence, self-links and cycles through proposed or existing provenance",
-    () =>
-      Effect.gen(function* () {
-        const parent = yield* createThread("conflict-parent");
-        const other = yield* createThread("conflict-other");
-        const conflict = yield* createThread(
-          "thread:mcp:namespace:conflict:0",
-          {},
-          "command:mcp:namespace:create-thread:conflict:0",
-        );
-        yield* launchMessage(
-          conflict,
-          parent.id,
-          { id: MessageId.make("message:mcp:namespace:conflict:0") },
-          "command:mcp:namespace:create-thread:conflict:0",
-        );
-        yield* creationRecord(
-          conflict,
-          other.id,
-          CommandId.make("command:mcp:namespace:record-created-thread:conflict:0"),
-        );
-        const self = yield* createThread("self");
-        yield* launchMessage(self, self.id);
-        const left = yield* createThread("cycle-left");
-        const right = yield* createThread("cycle-right");
-        yield* launchMessage(left, right.id);
-        yield* launchMessage(right, left.id);
-        const leadsToCycle = yield* createThread("downstream-cycle");
-        yield* launchMessage(leadsToCycle, left.id);
-        const existingChild = yield* createThread("existing-cycle-child", {
-          creatorThreadId: ThreadId.make("existing-cycle-parent"),
-        });
-        const existingParent = yield* createThread("existing-cycle-parent");
-        yield* launchMessage(existingParent, existingChild.id);
-        assert.equal(yield* repairHistoricalThreadCreators, 1);
-        const store = yield* ProjectionStore.ProjectionStoreV2;
-        assert.equal((yield* store.getThread(leadsToCycle.id)).creatorThreadId, left.id);
-        for (const thread of [conflict, self, left, right, existingParent]) {
-          assert.isUndefined((yield* store.getThread(thread.id)).creatorThreadId);
-        }
-      }),
+  it.effect("rejects self-links and cycles through proposed or existing provenance", () =>
+    Effect.gen(function* () {
+      const self = yield* createThread("self");
+      yield* launchMessage(self, self.id);
+      const left = yield* createThread("cycle-left");
+      const right = yield* createThread("cycle-right");
+      yield* launchMessage(left, right.id);
+      yield* launchMessage(right, left.id);
+      const leadsToCycle = yield* createThread("downstream-cycle");
+      yield* launchMessage(leadsToCycle, left.id);
+      const existingChild = yield* createThread("existing-cycle-child", {
+        creatorThreadId: ThreadId.make("existing-cycle-parent"),
+      });
+      const existingParent = yield* createThread("existing-cycle-parent");
+      yield* launchMessage(existingParent, existingChild.id);
+      assert.equal(yield* repairHistoricalThreadCreators, 1);
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      assert.equal((yield* store.getThread(leadsToCycle.id)).creatorThreadId, left.id);
+      for (const thread of [self, left, right, existingParent]) {
+        assert.isUndefined((yield* store.getThread(thread.id)).creatorThreadId);
+      }
+    }),
   );
 
   it.effect("keeps deleted creator provenance but skips missing creators", () =>

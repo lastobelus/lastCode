@@ -91,8 +91,8 @@ function localCreatorEvidence(
   sql: SqlClient.SqlClient,
   candidateQuery: Statement.Statement<unknown>,
 ) {
-  // Launches reused the thread ID. create_threads encoded a shared identity into
-  // separate thread, message, and record IDs. Both paths keep evidence lookups keyed.
+  // An ordinary launch is proven by its exact initial message, and create_threads
+  // by its keyed creation record. Other histories stay as recorded.
   // CROSS JOIN keeps candidates outermost even when SQLite statistics are absent.
   return sql<{
     readonly thread_id: string;
@@ -109,11 +109,7 @@ function localCreatorEvidence(
     ),
     launches AS (
       SELECT identity.*,
-        CASE
-          WHEN identity.command_id = identity.thread_id THEN identity.thread_id
-          WHEN identity.thread_id = 'thread:mcp:' || identity.stable_id
-            THEN 'message:mcp:' || identity.stable_id
-        END AS message_id,
+        CASE WHEN identity.command_id = identity.thread_id THEN identity.thread_id END AS message_id,
         CASE WHEN identity.thread_id = 'thread:mcp:' || identity.stable_id
           THEN replace(identity.command_id, ':create-thread:', ':record-created-thread:')
         END AS record_command_id
