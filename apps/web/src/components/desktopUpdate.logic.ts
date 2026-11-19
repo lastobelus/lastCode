@@ -159,6 +159,12 @@ export function getDesktopUpdateButtonTooltip(
     }
     return state.message ?? resolve(msg("Update failed"));
   }
+  if (state.source === "lastcode-local" && state.status === "idle" && state.message) {
+    const checkpointRequested = msg(
+      "Checkpoint requested. Check again later to pick up the result.",
+    );
+    return state.message === checkpointRequested ? resolve(checkpointRequested) : state.message;
+  }
   return resolve(msg("Up to date"));
 }
 
