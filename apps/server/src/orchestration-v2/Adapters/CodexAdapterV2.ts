@@ -620,6 +620,15 @@ function codexPlanStepStatus(
   }
 }
 
+// Full access's granular default still lets Codex ask about dangerous commands (e.g. a forced rm);
+// refuse them as `never` did. An explicit approval policy keeps its prompts.
+const refusesApprovalsItself = (runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy) =>
+  runtimePolicy.runtimeMode === "full-access" && runtimePolicy.approvalPolicy === undefined;
+
+const FULL_ACCESS_LEGACY_REFUSAL = {
+  denied: { rejection: "Not permitted without approval. Use a safer approach." },
+} satisfies CodexSchema.ExecCommandApprovalResponse__ReviewDecision;
+
 function approvalDecisionToLegacyReviewDecision(
   decision: ProviderApprovalDecision,
 ): CodexSchema.ExecCommandApprovalResponse__ReviewDecision {
@@ -5946,6 +5955,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 payload,
               );
             }
+            if (refusesApprovalsItself(context.input.runtimePolicy)) {
+              return {
+                decision: "decline",
+              } satisfies CodexSchema.CommandExecutionRequestApprovalResponse;
+            }
             const allowance = sessionAllowance(payload.threadId, context);
             if (allowance.has("command")) {
               return {
@@ -6016,6 +6030,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 `No active Codex turn context for file change approval turn ${payload.turnId}.`,
                 payload,
               );
+            }
+            if (refusesApprovalsItself(context.input.runtimePolicy)) {
+              return {
+                decision: "decline",
+              } satisfies CodexSchema.FileChangeRequestApprovalResponse;
             }
             const allowance = sessionAllowance(payload.threadId, context);
             if (allowance.has("file-change")) {
@@ -6234,6 +6253,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 payload,
               );
             }
+            if (refusesApprovalsItself(context.input.runtimePolicy)) {
+              return {
+                decision: FULL_ACCESS_LEGACY_REFUSAL,
+              } satisfies CodexSchema.ExecCommandApprovalResponse;
+            }
             const allowance = sessionAllowance(payload.conversationId, context);
             if (allowance.has("command")) {
               return {
@@ -6302,6 +6326,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 `No active Codex turn context for apply patch approval thread ${payload.conversationId}.`,
                 payload,
               );
+            }
+            if (refusesApprovalsItself(context.input.runtimePolicy)) {
+              return {
+                decision: FULL_ACCESS_LEGACY_REFUSAL,
+              } satisfies CodexSchema.ApplyPatchApprovalResponse;
             }
             const allowance = sessionAllowance(payload.conversationId, context);
             if (allowance.has("file-change")) {
