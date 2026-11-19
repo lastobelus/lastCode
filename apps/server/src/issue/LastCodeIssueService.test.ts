@@ -290,4 +290,63 @@ describe("LastCode issue repositories", () => {
       ).toMatchObject({ reason: "not-found" });
     }),
   );
+
+  it.effect(
+    "keeps the HTTP Forgejo target for a write and refuses HTTPS links on the same host",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* makeService(
+          {
+            ...projectIdentity,
+            origin: {
+              canonicalKey: "forgejo.test/fork/repo",
+              remoteUrl: "http://forgejo.test/fork/repo.git",
+              provider: SourceControlProviderKind.make("forgejo"),
+            },
+          },
+          tracker({
+            kind: IssueTrackerKind.make("forgejo"),
+            create: (input) =>
+              Effect.sync(() => {
+                expect(input).toMatchObject({
+                  webOrigin: "http://forgejo.test",
+                  scope: "fork/repo",
+                });
+                return {
+                  key: "7",
+                  url: "http://forgejo.test/fork/repo/issues/7",
+                  displayKey: "#7",
+                };
+              }),
+          }),
+        );
+        const scope = yield* service.projectScope(projectId);
+        yield* service.create({ ...scope, ...createInput });
+        expect(yield* service.resolveUrl("http://forgejo.test/fork/repo/issues/7")).toMatchObject({
+          writable: true,
+        });
+        expect(
+          yield* Effect.flip(service.resolveUrl("https://forgejo.test/fork/repo/issues/7")),
+        ).toMatchObject({ reason: "tracker-unsupported" });
+      }),
+  );
+
+  it.effect("resolves issue links for an ordinary enterprise checkout on a web port", () =>
+    Effect.gen(function* () {
+      const { origin: _, ...identity } = projectIdentity;
+      const service = yield* makeService({
+        ...identity,
+        canonicalKey: "code.example.test/team/repo",
+        displayName: "team/repo",
+        locator: {
+          source: "git-remote",
+          remoteName: "origin",
+          remoteUrl: "https://code.example.test:8443/team/repo.git",
+        },
+      });
+      expect(
+        yield* service.resolveUrl("https://code.example.test:8443/team/repo/issues/2"),
+      ).toMatchObject({ tracker: github, host: "code.example.test:8443", writable: true });
+    }),
+  );
 });

@@ -13,6 +13,7 @@ import * as NodePath from "node:path";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 import { decodeJsonResult } from "@t3tools/shared/schemaJson";
+import { parseUrl } from "@t3tools/shared/url";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as SourceControlHost from "@t3tools/source-control-core/server/SourceControlHost";
 import { collectUint8StreamText } from "@t3tools/provider-core/server/collectStreamText";
@@ -111,6 +112,7 @@ export interface ForgejoRepositoryInput {
   readonly repository?: string;
   readonly reference?: string;
   readonly host?: string;
+  readonly webOrigin?: string | undefined;
 }
 
 export interface ForgejoRepository {
@@ -592,7 +594,8 @@ export const make = Effect.gen(function* () {
         ssh: false,
         path: remote?.path ?? "",
       };
-    const schemeRemoteUrl = remote?.ssh ? input.context?.provider.baseUrl : remoteUrl;
+    const schemeRemoteUrl =
+      input.webOrigin ?? (remote?.ssh ? input.context?.provider.baseUrl : remoteUrl);
     const fjLogins = yield* listLogins({
       cwd: input.cwd,
       command: "fj",
@@ -600,16 +603,19 @@ export const make = Effect.gen(function* () {
     });
     const requestedHost = input.host ?? input.context?.requestedHost;
     const matchHostOnly = hostOnly || (!!input.host && !remote?.path);
+    const sameWebOrigin = (login: ReturnType<typeof parseForgejoLogins>[number]) =>
+      input.webOrigin === undefined || parseUrl(login.url)?.origin === input.webOrigin;
     const selectLogin = (logins: ReturnType<typeof parseForgejoLogins>) =>
       remote
         ? matchForgejoLogin(logins, remote, remote.ssh ? requestedHost : undefined, matchHostOnly)
         : (logins.find((item) => item.default === "true") ??
           (new Set(logins.map((item) => item.name)).size === 1 ? logins[0] : undefined));
-    let login = selectLogin(fjLogins);
+    const originFjLogins = fjLogins.filter(sameWebOrigin);
+    let login = selectLogin(originFjLogins);
     let command: "fj" | "tea" = "fj";
     if (
       !login &&
-      fjLogins.some(
+      originFjLogins.some(
         (item) =>
           !remote ||
           matchForgejoLogin([item], remote, remote.ssh ? requestedHost : undefined, matchHostOnly),
@@ -636,7 +642,9 @@ export const make = Effect.gen(function* () {
     }
     if (!login) {
       command = "tea";
-      login = selectLogin(yield* listLogins({ cwd: input.cwd, command: "tea" }));
+      login = selectLogin(
+        (yield* listLogins({ cwd: input.cwd, command: "tea" })).filter(sameWebOrigin),
+      );
     }
     if (!login)
       return yield* new ForgejoCliError({

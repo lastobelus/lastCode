@@ -18,7 +18,28 @@ export function isSameLastCodeRepositoryOrigin(
   if (canonicalKey !== originKey) return false;
   const canonical = webRemote(remoteUrl);
   const origin = webRemote(originUrl);
-  return canonical === null || origin === null || canonical.host === origin.host;
+  return canonical === null || origin === null || canonical.origin === origin.origin;
+}
+
+export function issueRepositoryAddress(
+  identity: RepositoryIdentity | null | undefined,
+  definitions: SourceControlDefinitionRegistry,
+) {
+  const tracker = identity?.provider;
+  if (identity == null || tracker === undefined || tracker === "unknown") return null;
+  const scope = definitions.issueScope(identity);
+  if (scope === null) return null;
+
+  const fallbackHost = definitions.changeRequestHost(identity, tracker);
+  const web = webRemote(identity.locator?.remoteUrl) ?? webRemote(identity.webUrl);
+  // Forgejo can dispatch to an explicitly pinned HTTP server.
+  if (web?.protocol === "http:" && tracker !== "forgejo") return null;
+  return {
+    tracker,
+    scope,
+    host: web?.host ?? fallbackHost,
+    webOrigin: web?.origin ?? `https://${fallbackHost}`,
+  };
 }
 
 /** Use the checkout's own repository for issues, including when upstream supplies its identity. */
@@ -37,11 +58,13 @@ export function selectLastCodeIssueRepository(
   const provider = origin.provider ?? definitions.recognizeRemote(keyUrl)?.kind;
   const web = webRemote(origin.webUrl);
   const remote = webRemote(origin.remoteUrl);
-  const mountedPath = provider === "forgejo" ? web?.pathname.replace(/^\/+|\/+$/g, "") : undefined;
+  const mountedPath =
+    provider === "forgejo" && (remote === null || remote.origin === web?.origin)
+      ? web?.pathname.replace(/^\/+|\/+$/g, "")
+      : undefined;
 
   return {
-    // Some host definitions read the issue authority from the key.
-    canonicalKey: remote?.port ? `${remote.host}/${path}` : origin.canonicalKey,
+    canonicalKey: origin.canonicalKey,
     locator: { source: "git-remote", remoteName: "origin", remoteUrl: origin.remoteUrl ?? keyUrl },
     displayName: mountedPath || (origin.displayName ?? path),
     ...(provider === undefined ? {} : { provider }),

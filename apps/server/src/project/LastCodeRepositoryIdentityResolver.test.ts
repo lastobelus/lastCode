@@ -70,3 +70,13 @@ it.live("keeps origin when the same hostname and repository path use different w
     });
   }).pipe(Effect.provide(fixtureLayer)),
 );
+
+it.live("keeps a distinct HTTP origin on its default port", () =>
+  Effect.gen(function* () {
+    const upstream = "https://forgejo.test/team/repo.git";
+    const origin = "http://forgejo.test/team/repo.git";
+    const cwd = yield* makeRepository(upstream, origin);
+    const resolver = yield* LastCodeRepositoryIdentityResolver.make({});
+    expect(yield* resolver.resolve(cwd)).toMatchObject({ origin: { remoteUrl: origin } });
+  }).pipe(Effect.provide(fixtureLayer)),
+);

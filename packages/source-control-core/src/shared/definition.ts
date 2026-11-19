@@ -21,6 +21,7 @@ import * as SchemaTransformation from "effect/SchemaTransformation";
 
 export {
   isSameLastCodeRepositoryOrigin,
+  issueRepositoryAddress,
   selectLastCodeIssueRepository,
 } from "./lastCodeIssueRepository.ts";
 
