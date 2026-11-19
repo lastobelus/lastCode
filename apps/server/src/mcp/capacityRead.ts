@@ -8,6 +8,10 @@ import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import { McpInvocationContext, type McpInvocationScope } from "./McpInvocationContext.ts";
 import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
 
+const unavailableCapacity = Clock.currentTimeMillis.pipe(
+  Effect.map((now) => ({ ...unknownCapacitySnapshot(now), mode: "unknown" })),
+);
+
 export const capacityForTarget = Effect.fn("mcp.capacityForTarget")(function* (
   scope: McpInvocationScope,
   target: EnvironmentId | undefined,
@@ -15,21 +19,17 @@ export const capacityForTarget = Effect.fn("mcp.capacityForTarget")(function* (
   const remote = PeerForwarding.remoteTarget(scope, target);
   if (remote === undefined) return yield* (yield* Capacity.Capacity).read;
   const forwarding = yield* Effect.serviceOption(PeerForwarding.PeerForwarding);
-  if (Option.isNone(forwarding)) return unknownCapacitySnapshot(yield* Clock.currentTimeMillis);
+  if (Option.isNone(forwarding)) return yield* unavailableCapacity;
   // Publication must never turn an accepted launch into a failure, or use this host's
   // reading for a different machine. An unavailable target stays explicitly unknown.
   return yield* forwarding.value
     .call(scope, EnvironmentToolkit.tools.t3_environment_read, remote, { includeLinked: false })
     .pipe(
-      Effect.flatMap((result) =>
-        result.capacity === undefined
-          ? Clock.currentTimeMillis.pipe(Effect.map((now) => unknownCapacitySnapshot(now)))
-          : Effect.succeed(result.capacity),
+      Effect.flatMap(({ capacity }) =>
+        capacity === undefined ? unavailableCapacity : Effect.succeed(capacity),
       ),
       Effect.timeout("2 seconds"),
-      Effect.catch(() =>
-        Clock.currentTimeMillis.pipe(Effect.map((now) => unknownCapacitySnapshot(now))),
-      ),
+      Effect.catch(() => unavailableCapacity),
     );
 });
 
@@ -49,7 +49,7 @@ export const linkedCapacity = Effect.fn("mcp.linkedCapacity")(function* (
         const capacity =
           link.status === "reachable"
             ? yield* capacityForTarget(scope, link.environmentId)
-            : unknownCapacitySnapshot(yield* Clock.currentTimeMillis);
+            : yield* unavailableCapacity;
         return { environmentId: link.environmentId, label: link.label, capacity };
       }),
     { concurrency: 3 },

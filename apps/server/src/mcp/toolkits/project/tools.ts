@@ -1,6 +1,6 @@
 import { McpAttachmentInput } from "../attachment/input.ts";
 import {
-  CapacitySnapshot,
+  OptionalCapacitySnapshot,
   clampedPositiveInt,
   NonNegativeInt,
   ModelSelection,
@@ -180,7 +180,7 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     ),
   }),
   success: Schema.Struct({
-    capacity: Schema.optional(CapacitySnapshot),
+    capacity: OptionalCapacitySnapshot,
     threadId: ThreadId,
     link: Schema.optional(Schema.String),
     projectId: ProjectId,

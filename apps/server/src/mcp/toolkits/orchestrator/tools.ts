@@ -1,5 +1,5 @@
 import {
-  CapacitySnapshot,
+  OptionalCapacitySnapshot,
   OrchestratorMcpCapabilitiesInput,
   OrchestratorMcpCapabilitiesResult,
   OrchestrationV2StopWorkflowInput,
@@ -93,7 +93,7 @@ const DelegateTaskTool = Tool.make("delegate_task", {
   parameters: OrchestratorMcpDelegateTaskInput,
   success: Schema.Struct({
     ...OrchestratorMcpDelegateTaskResult.fields,
-    capacity: Schema.optional(CapacitySnapshot),
+    capacity: OptionalCapacitySnapshot,
   }),
   failure: OrchestratorMcpFailure,
   failureMode: "return",
@@ -231,7 +231,7 @@ const CreateThreadsTool = Tool.make("create_threads", {
   parameters: OrchestratorMcpCreateThreadsInput,
   success: Schema.Struct({
     ...OrchestratorMcpCreateThreadsResult.fields,
-    capacity: Schema.optional(CapacitySnapshot),
+    capacity: OptionalCapacitySnapshot,
   }),
   failure: OrchestratorMcpFailure,
   failureMode: "return",

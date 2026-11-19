@@ -1,5 +1,5 @@
 import {
-  CapacitySnapshot,
+  OptionalCapacitySnapshot,
   ActionResumeError,
   ActionResumeState,
   ActionRunInspection,
@@ -46,7 +46,7 @@ const RunProjectActionAndResumeTool = Tool.make("run_project_action_and_resume",
   parameters: Schema.Struct({ actionId: Schema.String }),
   success: Schema.Struct({
     ...ActionResumeState.fields,
-    capacity: Schema.optional(CapacitySnapshot),
+    capacity: OptionalCapacitySnapshot,
   }),
   failure: ActionResumeToolError,
   dependencies: [...dependencies, ThreadManagementService.ThreadManagementService],

@@ -57,6 +57,7 @@ it.effect(
         const missing = yield* capacityForTarget(scope, targetId).pipe(
           Effect.provide(provide(response)),
         );
+        expect(missing.mode).toBe("unknown");
         expect(missing.verdicts.owner.state).toBe("open");
         expect(missing.verdicts.agent.state).toBe("unknown");
         expect(missing.verdicts.background.state).toBe("unknown");

@@ -10,11 +10,12 @@ import {
 import {
   BackgroundActivityProfile,
   BackgroundActivityProfileSelection,
-  EnvironmentCapacitySnapshot,
+  OptionalEnvironmentCapacitySnapshot,
   ExecutionEnvironmentDescriptor,
   OrchestratorMcpEnvironmentTarget,
   EnvironmentPauseStatus,
   OrchestratorMcpFailure,
+  ReportedCapacityMode,
   ServerSettings,
   ServerSettingsPatch,
 } from "@t3tools/contracts";
@@ -28,7 +29,7 @@ import * as Settings from "../../../serverSettings.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
 const PreferenceFields = {
-  capacityMode: ServerSettings.fields.capacityMode,
+  capacityMode: ReportedCapacityMode,
   defaultThreadEnvMode: ServerSettings.fields.defaultThreadEnvMode,
   newWorktreesStartFromOrigin: ServerSettings.fields.newWorktreesStartFromOrigin,
   enableProviderUpdateChecks: ServerSettings.fields.enableProviderUpdateChecks,
@@ -66,7 +67,7 @@ const EnvironmentReadTool = Tool.make("t3_environment_read", {
     serverVersion: Schema.String,
     platform: ExecutionEnvironmentDescriptor.fields.platform,
     preferences: Schema.Struct(PreferenceFields),
-    capacity: Schema.optional(EnvironmentCapacitySnapshot),
+    capacity: OptionalEnvironmentCapacitySnapshot,
   }),
 })
   .annotate(Tool.Readonly, true)

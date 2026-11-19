@@ -1,4 +1,5 @@
 import { EnvironmentId } from "./baseSchemas.ts";
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 export const CapacityMode = Schema.Literals(["off", "observe"]).annotate({
@@ -54,12 +55,28 @@ export const CapacityVerdict = Schema.Struct({
 });
 export type CapacityVerdict = typeof CapacityVerdict.Type;
 
+// Observation results can carry values introduced by a newer server.
+const ReportedCapacityMeasurements = CapacityMeasurements.mapFields((fields) => ({
+  ...fields,
+  memoryPressure: Schema.String,
+}));
+const ReportedCapacityReason = CapacityReason.mapFields((fields) => ({
+  ...fields,
+  signal: Schema.String,
+  comparison: Schema.String,
+}));
+const ReportedCapacityVerdict = CapacityVerdict.mapFields((fields) => ({
+  ...fields,
+  state: Schema.String,
+  reasons: Schema.Array(ReportedCapacityReason),
+}));
+
 export const CapacitySnapshot = Schema.Struct({
-  mode: CapacityMode,
+  mode: Schema.String,
   sampledAt: Schema.NullOr(Schema.Number),
   readAt: Schema.Number,
   stale: Schema.Boolean,
-  measurements: Schema.NullOr(CapacityMeasurements),
+  measurements: Schema.NullOr(ReportedCapacityMeasurements),
   smoothed: Schema.Struct({
     windowMs: Schema.Number,
     sampleCount: Schema.Number,
@@ -70,9 +87,9 @@ export const CapacitySnapshot = Schema.Struct({
   activity: Schema.NullOr(CapacityActivity),
   ownerIdleSeconds: Schema.NullOr(Schema.Number),
   verdicts: Schema.Struct({
-    owner: CapacityVerdict,
-    agent: CapacityVerdict,
-    background: CapacityVerdict,
+    owner: ReportedCapacityVerdict,
+    agent: ReportedCapacityVerdict,
+    background: ReportedCapacityVerdict,
   }),
 });
 export type CapacitySnapshot = typeof CapacitySnapshot.Type;
@@ -89,3 +106,12 @@ export const EnvironmentCapacitySnapshot = Schema.Struct({
   ),
 });
 export type EnvironmentCapacitySnapshot = typeof EnvironmentCapacitySnapshot.Type;
+
+function optionalObservation<S extends Schema.Constraint>(schema: S) {
+  const optional = Schema.optionalKey(schema);
+  return Schema.catchDecoding<typeof optional>(() => Effect.succeedNone)(optional);
+}
+
+export const OptionalCapacitySnapshot = optionalObservation(CapacitySnapshot);
+export const OptionalEnvironmentCapacitySnapshot = optionalObservation(EnvironmentCapacitySnapshot);
+export const ReportedCapacityMode = optionalObservation(CapacitySnapshot.fields.mode);

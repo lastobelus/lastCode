@@ -1,6 +1,6 @@
 import {
-  CapacitySnapshot,
-  EnvironmentCapacitySnapshot,
+  OptionalCapacitySnapshot,
+  OptionalEnvironmentCapacitySnapshot,
   EnvironmentId,
   OrchestratorMcpFailure,
   OrchestratorMcpThreadListResult,
@@ -176,7 +176,7 @@ const ProjectListResult = Schema.Struct({
 });
 
 const ThreadLaunchResult = Schema.Struct({
-  capacity: Schema.optional(CapacitySnapshot),
+  capacity: OptionalCapacitySnapshot,
   threadId: ThreadId,
   projectId: ProjectId,
   runId: Schema.NullOr(RunId),
@@ -1009,7 +1009,7 @@ export const threadCapacityCommand = Command.make("capacity", {
             : {},
           Schema.Struct({
             environmentId: EnvironmentId,
-            capacity: Schema.optional(EnvironmentCapacitySnapshot),
+            capacity: OptionalEnvironmentCapacitySnapshot,
           }),
         )
         .pipe(
@@ -1017,6 +1017,7 @@ export const threadCapacityCommand = Command.make("capacity", {
             Effect.gen(function* () {
               const capacity = result.capacity ?? {
                 ...unknownCapacitySnapshot(yield* Clock.currentTimeMillis),
+                mode: "unknown",
                 linkedObservation: "unknown",
                 linked: [],
               };
