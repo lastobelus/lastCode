@@ -10,6 +10,7 @@ import {
   OrchestrationV2AppThreadJson,
   ThreadId,
 } from "@t3tools/contracts";
+import { threadAnnotationsOf } from "@t3tools/shared/threadAnnotation";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -29,7 +30,9 @@ class HistoricalThreadCreatorRepairError extends Schema.TaggedError<HistoricalTh
   },
 ) {
   override get message(): string {
-    return "Failed to repair historical thread creators.";
+    return typeof this.cause === "string"
+      ? this.cause
+      : "Failed to repair historical thread creators.";
   }
 }
 export const isHistoricalThreadCreatorRepairError = Schema.is(HistoricalThreadCreatorRepairError);
@@ -87,6 +90,7 @@ const repairEventId = (threadId: ThreadId) => EventId.make(`${repairEventIdPrefi
 function localCreatorEvidence(
   sql: SqlClient.SqlClient,
   candidateQuery: Statement.Statement<unknown>,
+  useEvidenceIndex: boolean,
 ) {
   // The launch path reused one ID for creation and its initial message. Other sender
   // attribution is not creation evidence. createThreads recorded a typed timeline item.
@@ -118,7 +122,9 @@ function localCreatorEvidence(
     UNION ALL
     SELECT candidate.thread_id, record.stream_id AS creator_thread_id, candidate.payload_json
     FROM candidates AS candidate
-    CROSS JOIN orchestration_events AS record INDEXED BY orchestration_events_v2_thread_created_target_idx
+    CROSS JOIN orchestration_events AS record ${sql.literal(
+      useEvidenceIndex ? "INDEXED BY orchestration_events_v2_thread_created_target_idx" : "",
+    )}
       ON CAST(json_extract(record.payload_json, '$.targetThreadId') AS TEXT) = candidate.thread_id
     WHERE record.application_event_version = 2
       AND record.aggregate_kind = 'thread'
@@ -127,7 +133,36 @@ function localCreatorEvidence(
       AND record.sequence > candidate.sequence
       AND json_extract(record.payload_json, '$.type') = 'thread_created'
       AND json_extract(record.payload_json, '$.threadId') = record.stream_id
+    UNION ALL
+    SELECT candidate.thread_id, json_extract(message.payload_json, '$.senderThreadId') AS creator_thread_id,
+           candidate.payload_json
+    FROM candidates AS candidate
+    INNER JOIN orchestration_command_receipts AS receipt
+      ON receipt.command_id = candidate.command_id || ':initial-message'
+    INNER JOIN orchestration_v2_projection_messages AS message
+      ON message.thread_id = candidate.thread_id AND message.message_id = candidate.thread_id
+    WHERE candidate.command_id = candidate.thread_id
+      AND receipt.aggregate_kind = 'thread' AND receipt.aggregate_id = candidate.thread_id
+      AND receipt.command_type = 'message.dispatch' AND receipt.status = 'accepted'
+      AND receipt.result_sequence > candidate.sequence
+      AND json_extract(message.payload_json, '$.id') = candidate.thread_id
+      AND json_extract(message.payload_json, '$.threadId') = candidate.thread_id
+      AND json_extract(message.payload_json, '$.role') = 'user'
+      AND json_extract(message.payload_json, '$.createdBy') = 'agent'
+      AND json_extract(message.payload_json, '$.creationSource') = 'mcp'
+      AND json_type(message.payload_json, '$.senderThreadId') = 'text'
   `;
+}
+
+function anotherCreation(
+  sql: SqlClient.SqlClient,
+  threadId: string | Statement.Fragment,
+  sequence: number | Statement.Fragment,
+) {
+  return sql`SELECT 1 FROM orchestration_events AS duplicate
+    WHERE duplicate.aggregate_kind = 'thread' AND duplicate.stream_id = ${threadId}
+      AND duplicate.event_type = 'thread.created' AND duplicate.application_event_version = 2
+      AND duplicate.sequence <> ${sequence}`;
 }
 
 const localCreatorGraph = Effect.fnUntraced(function* (
@@ -174,6 +209,11 @@ export const repairHistoricalThreadCreators = Effect.fn("repairHistoricalThreadC
         AND json_extract(created.payload_json, '$.createdBy') = 'agent'
         AND json_extract(created.payload_json, '$.creationSource') = 'mcp'
         AND json_type(created.payload_json, '$.creatorThreadId') IS NULL
+        AND json_extract(created.payload_json, '$.delegatedFrom') IS NULL
+        AND json_type(created.payload_json, '$.historicalCreatorOrigin') IS NULL
+        AND COALESCE(created.command_id, '') NOT LIKE 'scheduled-task:%'
+        AND json_extract(created.payload_json, '$.createdAt') = json_extract(current.payload_json, '$.createdAt')
+        AND NOT EXISTS (${anotherCreation(sql, sql.literal("created.stream_id"), sql.literal("created.sequence"))})
         AND json_type(current.payload_json, '$.creatorThreadId') IS NULL
         AND json_type(current.payload_json, '$.historicalCreatorOrigin') IS NULL
         AND json_extract(current.payload_json, '$.delegatedFrom') IS NULL
@@ -193,7 +233,7 @@ export const repairHistoricalThreadCreators = Effect.fn("repairHistoricalThreadC
     const pending = yield* sql`SELECT 1 FROM (${candidateQuery}) LIMIT 1`;
     if (pending.length === 0) return 0;
 
-    const rows = yield* localCreatorEvidence(sql, candidateQuery);
+    const rows = yield* localCreatorEvidence(sql, candidateQuery, true);
     if (rows.length === 0) return 0;
 
     const evidence = new Map<string, Set<string>>();
@@ -205,7 +245,9 @@ export const repairHistoricalThreadCreators = Effect.fn("repairHistoricalThreadC
     const skipped = {
       conflictingEvidence: 0,
       invalidTarget: 0,
+      invalidCreator: 0,
       wouldMove: 0,
+      wouldHideAnnotation: 0,
       missingCreator: 0,
       cycle: 0,
       stale: 0,
@@ -228,12 +270,27 @@ export const repairHistoricalThreadCreators = Effect.fn("repairHistoricalThreadC
         continue;
       }
       const thread = decoded.value;
-      const creatorThreadId = yield* decodeThreadId(row.creator_thread_id);
+      const creator = yield* decodeThreadId(row.creator_thread_id).pipe(Effect.option);
+      if (creator._tag === "None") {
+        skipped.invalidCreator += 1;
+        continue;
+      }
+      const creatorThreadId = creator.value;
+      const repaired = { ...thread, creatorThreadId };
       if (
-        getInteractiveThreadParentThreadId(thread) !==
-        getInteractiveThreadParentThreadId({ ...thread, creatorThreadId })
+        getInteractiveThreadParentThreadId(thread) !== getInteractiveThreadParentThreadId(repaired)
       ) {
         skipped.wouldMove += 1;
+        continue;
+      }
+      if (threadAnnotationsOf(thread).length !== threadAnnotationsOf(repaired).length) {
+        skipped.wouldHideAnnotation += 1;
+        continue;
+      }
+      const exists = yield* sql`SELECT 1 FROM orchestration_v2_projection_threads
+        WHERE thread_id = ${creatorThreadId}`;
+      if (exists.length === 0) {
+        skipped.missingCreator += 1;
         continue;
       }
       candidates.set(thread.id, { before: row.payload_json, creatorThreadId });
@@ -248,13 +305,8 @@ export const repairHistoricalThreadCreators = Effect.fn("repairHistoricalThreadC
     }
 
     const parents = yield* localCreatorGraph(sql, environmentId);
-    for (const [threadId, candidate] of candidates) {
-      if (parents.has(candidate.creatorThreadId)) parents.set(threadId, candidate.creatorThreadId);
-      else {
-        candidates.delete(threadId);
-        skipped.missingCreator += 1;
-      }
-    }
+    for (const [threadId, candidate] of candidates)
+      parents.set(threadId, candidate.creatorThreadId);
     const now = yield* DateTime.now;
     let repaired = 0;
     for (const [threadId, candidate] of candidates) {
@@ -311,6 +363,10 @@ export const repairScopedHistoricalThreadCreators = Effect.fn(
     const sql = yield* SqlClient.SqlClient;
     const sink = yield* EventSink.EventSinkV2;
     const now = yield* DateTime.now;
+    const hasEvidenceIndex =
+      (yield* sql`SELECT 1 FROM sqlite_schema
+      WHERE type = 'index' AND name = 'orchestration_events_v2_thread_created_target_idx'`).length >
+      0;
     const scheduledEntries = input.entries.filter(
       ({ origin }) => origin.kind === "scheduled_task" && origin.environmentId === environmentId,
     );
@@ -318,111 +374,142 @@ export const repairScopedHistoricalThreadCreators = Effect.fn(
       scheduledEntries.length > 0
         ? yield* localCreatorGraph(sql, environmentId)
         : new Map<string, string | null>();
-    for (const { threadId, origin } of scheduledEntries) {
-      if (parents.get(threadId) === null) parents.set(threadId, origin.threadId);
-    }
-    const results: Array<typeof RepairResult.Type> = [];
-    for (const entry of input.entries) {
+    const assessEntry = Effect.fnUntraced(function* (
+      entry: HistoricalThreadCreatorRepairManifest["entries"][number],
+    ) {
       const { threadId, origin } = entry;
-      const assess = Effect.gen(function* () {
-        const [row] = yield* sql<{ readonly payload_json: string }>`
+      const [row] = yield* sql<{ readonly payload_json: string }>`
           SELECT payload_json FROM orchestration_v2_projection_threads WHERE thread_id = ${threadId}
         `;
-        if (!row) return "missing-target";
-        const thread = yield* decodeThread(row.payload_json).pipe(Effect.option);
-        if (thread._tag === "None") return "invalid-target-payload";
-        const target = thread.value;
-        const current = target.historicalCreatorOrigin;
-        const id = repairEventId(threadId);
-        const [previous] = yield* sql<{
-          readonly kind: string | null;
-          readonly creation_id: string | null;
-          readonly creation_hash: string | null;
-          readonly evidence_hash: string | null;
-          readonly origin_json: string | null;
-        }>`
+      if (!row) return "missing-target";
+      const thread = yield* decodeThread(row.payload_json).pipe(Effect.option);
+      if (thread._tag === "None") return "invalid-target-payload";
+      const target = thread.value;
+      const current = target.historicalCreatorOrigin;
+      const id = repairEventId(threadId);
+      const [previous] = yield* sql<{
+        readonly kind: string | null;
+        readonly creation_id: string | null;
+        readonly creation_hash: string | null;
+        readonly evidence_hash: string | null;
+        readonly expected_hash: string | null;
+        readonly origin_json: string | null;
+      }>`
           SELECT json_extract(payload_json, '$.kind') AS kind,
             json_extract(payload_json, '$.creationEventId') AS creation_id,
             json_extract(payload_json, '$.creationPayloadSha256') AS creation_hash,
             json_extract(payload_json, '$.evidenceSha256') AS evidence_hash,
+            json_extract(payload_json, '$.expectedPayloadSha256') AS expected_hash,
             json_extract(payload_json, '$.origin') AS origin_json
           FROM orchestration_events
           WHERE event_id = ${id} AND stream_id = ${threadId} AND event_type = 'thread.creator-repaired'
         `;
-        if (current !== undefined) {
-          if (!sameCreatorOrigin(current, origin)) return "conflicting-origin";
-          if (
-            previous?.kind !== "scoped" ||
-            previous.creation_id !== entry.creationEventId ||
-            previous.creation_hash !== entry.creationPayloadSha256 ||
-            previous.evidence_hash !== entry.evidenceSha256 ||
-            previous.origin_json === null
-          )
-            return "conflicting-repair-evidence";
-          const committedOrigin = yield* decodeOrigin(previous.origin_json).pipe(Effect.option);
-          return committedOrigin._tag === "Some" && sameCreatorOrigin(committedOrigin.value, origin)
-            ? "already-repaired"
-            : "conflicting-repair-evidence";
-        }
-        if (previous !== undefined) return "repair-projection-missing";
-        if (target.creatorThreadId != null || target.delegatedFrom != null) {
-          return "conflicting-origin";
-        }
-        if (!eligibleForRepair(target)) return "ineligible-target";
-        if (sha256(row.payload_json) !== entry.expectedPayloadSha256) return "stale-target";
-        const [created] = yield* sql<{
-          readonly command_id: string | null;
-          readonly payload_json: string;
-          readonly sequence: number;
-        }>`
+      if (current !== undefined) {
+        if (!sameCreatorOrigin(current, origin)) return "conflicting-origin";
+        if (
+          previous?.kind !== "scoped" ||
+          previous.creation_id !== entry.creationEventId ||
+          previous.creation_hash !== entry.creationPayloadSha256 ||
+          previous.evidence_hash !== entry.evidenceSha256 ||
+          previous.expected_hash !== entry.expectedPayloadSha256 ||
+          previous.origin_json === null
+        )
+          return "conflicting-repair-evidence";
+        const committedOrigin = yield* decodeOrigin(previous.origin_json).pipe(Effect.option);
+        return committedOrigin._tag === "Some" && sameCreatorOrigin(committedOrigin.value, origin)
+          ? "already-repaired"
+          : "conflicting-repair-evidence";
+      }
+      if (previous !== undefined) return "repair-projection-missing";
+      if (target.creatorThreadId != null || target.delegatedFrom != null) {
+        return "conflicting-origin";
+      }
+      if (!eligibleForRepair(target)) return "ineligible-target";
+      if (sha256(row.payload_json) !== entry.expectedPayloadSha256) return "stale-target";
+      const [created] = yield* sql<{
+        readonly command_id: string | null;
+        readonly payload_json: string;
+        readonly sequence: number;
+      }>`
           SELECT command_id, payload_json, sequence FROM orchestration_events
           WHERE event_id = ${entry.creationEventId} AND stream_id = ${threadId}
             AND aggregate_kind = 'thread' AND event_type = 'thread.created'
             AND application_event_version = 2
         `;
-        if (!created || sha256(created.payload_json) !== entry.creationPayloadSha256) {
-          return "missing-creation-evidence";
+      if (!created || sha256(created.payload_json) !== entry.creationPayloadSha256) {
+        return "missing-creation-evidence";
+      }
+      if ((yield* anotherCreation(sql, threadId, created.sequence)).length !== 0) {
+        return "ambiguous-creation";
+      }
+      const original = yield* decodeThread(created.payload_json).pipe(Effect.option);
+      if (
+        original._tag === "None" ||
+        original.value.id !== threadId ||
+        DateTime.toEpochMillis(original.value.createdAt) !==
+          DateTime.toEpochMillis(target.createdAt) ||
+        !eligibleForRepair(original.value)
+      )
+        return "conflicting-creation-evidence";
+      const localEvidence = yield* localCreatorEvidence(
+        sql,
+        sql`
+          SELECT ${threadId} AS thread_id, ${created.command_id} AS command_id,
+            ${created.sequence} AS sequence, ${row.payload_json} AS payload_json
+        `,
+        hasEvidenceIndex,
+      );
+      if (localEvidence.length > 0) return "conflicting-local-evidence";
+      if (origin.kind === "thread_launch") {
+        if (origin.environmentId === environmentId || created.command_id !== threadId) {
+          return "invalid-launch-evidence";
         }
-        if (origin.kind === "thread_launch") {
-          if (origin.environmentId === environmentId || created.command_id !== threadId) {
-            return "invalid-launch-evidence";
-          }
-          const localEvidence = yield* localCreatorEvidence(
-            sql,
-            sql`
-            SELECT ${threadId} AS thread_id, ${created.command_id} AS command_id,
-              ${created.sequence} AS sequence, ${row.payload_json} AS payload_json
-          `,
-          );
-          if (localEvidence.length > 0) return "conflicting-local-evidence";
-        } else {
-          const scheduledPrefix = `scheduled-task:${origin.scheduledTaskId}:`;
-          if (
-            origin.environmentId !== environmentId ||
-            origin.threadId === threadId ||
-            !created.command_id?.startsWith(scheduledPrefix) ||
-            !/^(?:\d+:(?:scheduled|manual)|webhook:delivery:.+)$/.test(
-              created.command_id.slice(scheduledPrefix.length),
-            )
-          ) {
-            return "invalid-schedule-evidence";
-          }
-          if (!parents.has(origin.threadId)) return "missing-schedule-creator";
-          if (entersCreatorCycle(threadId, parents)) return "creator-cycle";
+      } else {
+        const scheduledPrefix = `scheduled-task:${origin.scheduledTaskId}:`;
+        if (
+          origin.environmentId !== environmentId ||
+          origin.threadId === threadId ||
+          !created.command_id?.startsWith(scheduledPrefix) ||
+          !/^(?:\d+:(?:scheduled|manual)|webhook:delivery:(?:[0-9a-f-]{36}|relay:(?!.*:\d+:(?:scheduled|manual)$).+))$/.test(
+            created.command_id.slice(scheduledPrefix.length),
+          )
+        ) {
+          return "invalid-schedule-evidence";
         }
-        return "eligible";
+        if (!parents.has(origin.threadId)) return "missing-schedule-creator";
+      }
+      return "eligible";
+    });
+    const results: Array<typeof RepairResult.Type> = [];
+    const annotateFailure = (threadId: ThreadId) => (cause: unknown) =>
+      new HistoricalThreadCreatorRepairError({
+        cause,
+        failedThreadId: threadId,
+        completed: [...results],
       });
+    const scheduledPlan = new Map<ThreadId, string>();
+    for (const entry of scheduledEntries) {
+      const status = yield* assessEntry(entry).pipe(
+        Effect.mapError(annotateFailure(entry.threadId)),
+      );
+      scheduledPlan.set(entry.threadId, status);
+      if (status === "eligible") parents.set(entry.threadId, entry.origin.threadId);
+    }
+    for (const entry of input.entries) {
+      const { threadId, origin } = entry;
+      const scheduledStatus = scheduledPlan.get(threadId);
+      if (scheduledStatus !== undefined && scheduledStatus !== "eligible") {
+        results.push({ threadId, status: scheduledStatus });
+        continue;
+      }
+      if (scheduledStatus === "eligible" && entersCreatorCycle(threadId, parents)) {
+        results.push({ threadId, status: "creator-cycle" });
+        continue;
+      }
+      const assess = assessEntry(entry);
       if (!apply) {
-        const status = yield* assess.pipe(
-          Effect.mapError(
-            (cause) =>
-              new HistoricalThreadCreatorRepairError({
-                cause,
-                failedThreadId: threadId,
-                completed: results,
-              }),
-          ),
-        );
+        const status =
+          scheduledStatus ?? (yield* assess.pipe(Effect.mapError(annotateFailure(threadId))));
         results.push({ threadId, status });
         continue;
       }
@@ -446,21 +533,13 @@ export const repairScopedHistoricalThreadCreators = Effect.fn(
                 origin,
                 creationEventId: entry.creationEventId,
                 creationPayloadSha256: entry.creationPayloadSha256,
+                expectedPayloadSha256: entry.expectedPayloadSha256,
                 evidenceSha256: entry.evidenceSha256,
               },
             },
           ],
         })
-        .pipe(
-          Effect.mapError(
-            (cause) =>
-              new HistoricalThreadCreatorRepairError({
-                cause,
-                failedThreadId: threadId,
-                completed: results,
-              }),
-          ),
-        );
+        .pipe(Effect.mapError(annotateFailure(threadId)));
       results.push({
         threadId,
         status: committed.length > 0 ? "repaired" : decision.status,

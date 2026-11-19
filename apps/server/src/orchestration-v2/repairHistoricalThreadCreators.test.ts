@@ -188,6 +188,15 @@ it.layer(TestLayer)("historical thread creators", (it) => {
       const localLaunch = yield* createThread("exact-local-launch", { creatorGrouping: "grouped" });
       yield* launchMessage(localLaunch, scheduler.id);
       const sql = yield* SqlClient.SqlClient;
+      const initialCommand = `${localLaunch.id}:initial-message`;
+      yield* sql`
+        INSERT INTO orchestration_command_receipts (
+          command_id, aggregate_kind, aggregate_id, command_type, accepted_at, result_sequence, status
+        )
+        SELECT command_id, 'thread', stream_id, 'message.dispatch', occurred_at, sequence, 'accepted'
+        FROM orchestration_events WHERE command_id = ${initialCommand}
+      `;
+      yield* sql`DELETE FROM orchestration_events WHERE command_id = ${initialCommand}`;
       const packet = Effect.fnUntraced(function* (
         threadId: ThreadId,
         origin: HistoricalThreadCreatorOrigin,
@@ -221,6 +230,20 @@ it.layer(TestLayer)("historical thread creators", (it) => {
         scheduledTaskId,
       });
       const competing = yield* packet(localLaunch.id, remote.origin);
+      const reused = yield* createThread("reused-launch-id");
+      yield* (yield* EventSink.EventSinkV2).write({
+        commandId: CommandId.make("reused-launch-id-again"),
+        events: [
+          {
+            id: EventId.make("created-reused-launch-again"),
+            type: "thread.created",
+            threadId: reused.id,
+            occurredAt: now,
+            payload: { ...reused, title: "Reused" },
+          },
+        ],
+      });
+      const reusedPacket = yield* packet(reused.id, remote.origin);
       const scheduleCycle = yield* createThread(
         "scheduled-cycle",
         {},
@@ -230,6 +253,10 @@ it.layer(TestLayer)("historical thread creators", (it) => {
         ...schedule.origin,
         threadId: scheduled.id,
       });
+      const cycleStart = {
+        ...schedule,
+        origin: { ...schedule.origin, threadId: scheduleCycle.id },
+      };
       const request = (entries: ReadonlyArray<typeof remote>, apply: boolean) =>
         repairScopedHistoricalThreadCreators(
           { version: 1, environmentId: localEnvironment, entries },
@@ -244,14 +271,19 @@ it.layer(TestLayer)("historical thread creators", (it) => {
         ["conflicting-local-evidence"],
       );
       assert.deepStrictEqual(
-        (yield* request(
-          [
-            { ...schedule, origin: { ...schedule.origin, threadId: scheduleCycle.id } },
-            linkedSchedule,
-          ],
-          true,
-        )).map((row) => row.status),
+        (yield* request([reusedPacket], true)).map((row) => row.status),
+        ["ambiguous-creation"],
+      );
+      assert.deepStrictEqual(
+        (yield* request([cycleStart, linkedSchedule], true)).map((row) => row.status),
         ["creator-cycle", "creator-cycle"],
+      );
+      assert.deepStrictEqual(
+        (yield* request(
+          [cycleStart, { ...linkedSchedule, creationEventId: remote.creationEventId }],
+          false,
+        )).map((row) => row.status),
+        ["eligible", "missing-creation-evidence"],
       );
       assert.deepStrictEqual(
         (yield* request([remote, schedule], false)).map((row) => row.status),
@@ -288,6 +320,12 @@ it.layer(TestLayer)("historical thread creators", (it) => {
       );
       assert.deepStrictEqual(
         (yield* request([{ ...remote, evidenceSha256: "b".repeat(64) }], true)).map(
+          (row) => row.status,
+        ),
+        ["conflicting-repair-evidence"],
+      );
+      assert.deepStrictEqual(
+        (yield* request([{ ...remote, expectedPayloadSha256: "b".repeat(64) }], true)).map(
           (row) => row.status,
         ),
         ["conflicting-repair-evidence"],
@@ -430,6 +468,12 @@ it.layer(TestLayer)("historical thread creators", (it) => {
       yield* launchMessage(wrongMessage, parent.id, { id: MessageId.make("different-message") });
       const wrongCreation = yield* createThread("wrong-creation", {}, "different-creation-command");
       yield* launchMessage(wrongCreation, parent.id);
+      const malformed = yield* createThread("malformed-sender");
+      yield* launchMessage(malformed, parent.id);
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`UPDATE orchestration_events
+        SET payload_json = json_set(payload_json, '$.senderThreadId', '')
+        WHERE command_id = ${`${malformed.id}:initial-message`}`;
       const noEvidence = yield* createThread("no-evidence");
       assert.equal(yield* repairHistoricalThreadCreators, 0);
       assert.equal(

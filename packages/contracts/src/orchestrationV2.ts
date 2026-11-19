@@ -585,6 +585,7 @@ const HistoricalThreadCreatorRepairPayload = Schema.Union([
     origin: HistoricalThreadCreatorOrigin,
     creationEventId: EventId,
     creationPayloadSha256: HistoricalThreadCreatorEvidenceDigest,
+    expectedPayloadSha256: HistoricalThreadCreatorEvidenceDigest,
     evidenceSha256: HistoricalThreadCreatorEvidenceDigest,
   }),
 ]);

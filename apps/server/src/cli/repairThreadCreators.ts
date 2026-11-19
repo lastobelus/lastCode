@@ -4,6 +4,7 @@ import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { Command, Flag, GlobalFlag } from "effect/cli";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -17,7 +18,9 @@ import {
   repairScopedHistoricalThreadCreators,
 } from "../orchestration-v2/repairHistoricalThreadCreators.ts";
 import * as ProcessRunner from "../processRunner.ts";
-import { acquireServerOwnership } from "../serverOwnership.ts";
+import { acquireServerOwnerLease } from "../serverOwnerLease.ts";
+import { acquireServerOwnership, ServerAlreadyRunningError } from "../serverOwnership.ts";
+import { isProcessAlive, readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
 import { projectLocationFlags, resolveThreadInspectionConfig } from "./config.ts";
 
 const decodeManifest = Schema.decodeEffect(
@@ -28,6 +31,7 @@ const encodeOutput = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 export const repairThreadCreatorsCommand = Command.make("repair-thread-creators", {
   ...projectLocationFlags,
+  stateDir: Flag.String("state-dir").pipe(Flag.optional),
   manifest: Flag.String("manifest"),
   apply: Flag.Boolean("apply").pipe(Flag.withDefault(false)),
 }).pipe(
@@ -42,7 +46,18 @@ export const repairThreadCreatorsCommand = Command.make("repair-thread-creators"
         (yield* fs.readFileString(config.environmentIdPath)).trim(),
       );
       yield* fs.stat(config.dbPath);
-      if (flags.apply) yield* acquireServerOwnership(config.serverRuntimeStatePath);
+      if (flags.apply) {
+        // Match server admission order. The database layer closes before this scope releases either lock.
+        yield* Effect.acquireRelease(
+          acquireServerOwnerLease(config.stateDir),
+          (lease) => lease.release,
+        );
+        yield* acquireServerOwnership(config.serverRuntimeStatePath);
+        const runtime = yield* readPersistedServerRuntimeState(config.serverRuntimeStatePath);
+        if (Option.isSome(runtime) && isProcessAlive(runtime.value.pid)) {
+          return yield* new ServerAlreadyRunningError({ stateDir: config.stateDir });
+        }
+      }
       const result = yield* Effect.gen(function* () {
         if (flags.apply) {
           const sql = yield* SqlClient.SqlClient;
