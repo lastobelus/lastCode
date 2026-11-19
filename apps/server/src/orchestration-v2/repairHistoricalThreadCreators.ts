@@ -90,30 +90,51 @@ const repairEventId = (threadId: ThreadId) => EventId.make(`${repairEventIdPrefi
 function localCreatorEvidence(
   sql: SqlClient.SqlClient,
   candidateQuery: Statement.Statement<unknown>,
-  useEvidenceIndex: boolean,
 ) {
-  // The launch path reused one ID for creation and its initial message. Other sender
-  // attribution is not creation evidence. createThreads recorded a typed timeline item.
-  // CROSS JOIN keeps candidates outermost; INDEXED BY prevents SQLite from choosing
-  // a whole-history scan when statistics are absent or an old thread has no evidence.
+  // Launches reused the thread ID. create_threads encoded a shared identity into
+  // separate thread, message, and record IDs. Both paths keep evidence lookups keyed.
+  // CROSS JOIN keeps candidates outermost even when SQLite statistics are absent.
   return sql<{
     readonly thread_id: string;
     readonly creator_thread_id: string;
     readonly payload_json: string;
   }>`
-    WITH candidates AS (${candidateQuery})
+    WITH candidates AS (${candidateQuery}),
+    identities AS (
+      SELECT candidate.*,
+        CASE WHEN candidate.command_id LIKE 'command:mcp:%:create-thread:%'
+          THEN replace(substr(candidate.command_id, length('command:mcp:') + 1), ':create-thread:', ':')
+        END AS stable_id
+      FROM candidates AS candidate
+    ),
+    launches AS (
+      SELECT identity.*,
+        CASE
+          WHEN identity.command_id = identity.thread_id THEN identity.thread_id
+          WHEN identity.thread_id = 'thread:mcp:' || identity.stable_id
+            THEN 'message:mcp:' || identity.stable_id
+        END AS message_id,
+        CASE WHEN identity.thread_id = 'thread:mcp:' || identity.stable_id
+          THEN replace(identity.command_id, ':create-thread:', ':record-created-thread:')
+        END AS record_command_id
+      FROM identities AS identity
+    ),
+    evidence_keys AS (
+      SELECT launch.*, 'turn-item:created-thread:' ||
+        replace(replace(launch.record_command_id, '%', '%25'), ':', '%3A') AS record_item_id
+      FROM launches AS launch
+    )
     SELECT candidate.thread_id, json_extract(message.payload_json, '$.senderThreadId') AS creator_thread_id,
            candidate.payload_json
-    FROM candidates AS candidate
+    FROM evidence_keys AS candidate
     CROSS JOIN orchestration_events AS message INDEXED BY idx_orch_events_command_id
       ON message.stream_id = candidate.thread_id
       AND message.command_id IN (candidate.command_id, candidate.command_id || ':initial-message')
-    WHERE candidate.command_id = candidate.thread_id
-      AND message.application_event_version = 2
+    WHERE message.application_event_version = 2
       AND message.aggregate_kind = 'thread'
       AND message.event_type = 'message.updated'
       AND message.sequence > candidate.sequence
-      AND json_extract(message.payload_json, '$.id') = candidate.thread_id
+      AND json_extract(message.payload_json, '$.id') = candidate.message_id
       AND json_extract(message.payload_json, '$.threadId') = candidate.thread_id
       AND json_extract(message.payload_json, '$.role') = 'user'
       AND json_extract(message.payload_json, '$.createdBy') = 'agent'
@@ -121,28 +142,27 @@ function localCreatorEvidence(
       AND json_type(message.payload_json, '$.senderThreadId') = 'text'
     UNION ALL
     SELECT candidate.thread_id, record.stream_id AS creator_thread_id, candidate.payload_json
-    FROM candidates AS candidate
-    CROSS JOIN orchestration_events AS record ${sql.literal(
-      useEvidenceIndex ? "INDEXED BY orchestration_events_v2_thread_created_target_idx" : "",
-    )}
-      ON CAST(json_extract(record.payload_json, '$.targetThreadId') AS TEXT) = candidate.thread_id
+    FROM evidence_keys AS candidate
+    CROSS JOIN orchestration_events AS record INDEXED BY idx_orch_events_command_id
+      ON record.command_id = candidate.record_command_id
     WHERE record.application_event_version = 2
       AND record.aggregate_kind = 'thread'
       AND record.event_type = 'turn-item.updated'
-      AND record.command_id IS NOT NULL
       AND record.sequence > candidate.sequence
+      AND json_extract(record.payload_json, '$.id') = candidate.record_item_id
       AND json_extract(record.payload_json, '$.type') = 'thread_created'
+      AND json_extract(record.payload_json, '$.status') = 'completed'
       AND json_extract(record.payload_json, '$.threadId') = record.stream_id
+      AND json_extract(record.payload_json, '$.targetThreadId') = candidate.thread_id
     UNION ALL
     SELECT candidate.thread_id, json_extract(message.payload_json, '$.senderThreadId') AS creator_thread_id,
            candidate.payload_json
-    FROM candidates AS candidate
+    FROM evidence_keys AS candidate
     INNER JOIN orchestration_command_receipts AS receipt
       ON receipt.command_id IN (candidate.command_id, candidate.command_id || ':initial-message')
     INNER JOIN orchestration_v2_projection_messages AS message
-      ON message.thread_id = candidate.thread_id AND message.message_id = candidate.thread_id
-    WHERE candidate.command_id = candidate.thread_id
-      AND receipt.aggregate_kind = 'thread' AND receipt.aggregate_id = candidate.thread_id
+      ON message.thread_id = candidate.thread_id AND message.message_id = candidate.message_id
+    WHERE receipt.aggregate_kind = 'thread' AND receipt.aggregate_id = candidate.thread_id
       AND receipt.status = 'accepted'
       AND (
         (receipt.command_id = candidate.command_id AND receipt.command_type = 'thread.create')
@@ -150,7 +170,7 @@ function localCreatorEvidence(
           AND receipt.command_type = 'message.dispatch')
       )
       AND receipt.result_sequence > candidate.sequence
-      AND json_extract(message.payload_json, '$.id') = candidate.thread_id
+      AND json_extract(message.payload_json, '$.id') = candidate.message_id
       AND json_extract(message.payload_json, '$.threadId') = candidate.thread_id
       AND json_extract(message.payload_json, '$.role') = 'user'
       AND json_extract(message.payload_json, '$.createdBy') = 'agent'
@@ -160,16 +180,12 @@ function localCreatorEvidence(
     -- create_threads shares its namespace, request key and index across the create
     -- and record commands. The projected item ID percent-encodes that record command.
     SELECT candidate.thread_id, item.thread_id AS creator_thread_id, candidate.payload_json
-    FROM candidates AS candidate
+    FROM evidence_keys AS candidate
     INNER JOIN orchestration_command_receipts AS receipt
-      ON receipt.command_id = replace(candidate.command_id, ':create-thread:', ':record-created-thread:')
+      ON receipt.command_id = candidate.record_command_id
     INNER JOIN orchestration_v2_projection_turn_items AS item
-      ON item.turn_item_id = 'turn-item:created-thread:' ||
-        replace(replace(receipt.command_id, '%', '%25'), ':', '%3A')
-    WHERE candidate.command_id LIKE 'command:mcp:%:create-thread:%'
-      AND candidate.thread_id = 'thread:mcp:' ||
-        replace(substr(candidate.command_id, length('command:mcp:') + 1), ':create-thread:', ':')
-      AND receipt.aggregate_kind = 'thread' AND receipt.aggregate_id = item.thread_id
+      ON item.turn_item_id = candidate.record_item_id
+    WHERE receipt.aggregate_kind = 'thread' AND receipt.aggregate_id = item.thread_id
       AND receipt.command_type = 'thread.created.record' AND receipt.status = 'accepted'
       AND receipt.result_sequence > candidate.sequence
       AND item.type = 'thread_created' AND item.status = 'completed'
@@ -218,6 +234,13 @@ function firstRepeatedCreator(threadId: ThreadId, parents: ReadonlyMap<string, s
   return ancestor;
 }
 
+function removeProposedCreatorCycles(ids: Iterable<ThreadId>, parents: Map<string, string | null>) {
+  const members = new Set(Array.from(ids).filter((id) => firstRepeatedCreator(id, parents) === id));
+  // Remove the proposed cycle members before checking paths that lead to them.
+  for (const id of members) parents.set(id, null);
+  return members;
+}
+
 const scheduleFireSuffix =
   /^(?:\d+:(?:scheduled|manual)|webhook:delivery:(?:relay:)?[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
 
@@ -262,7 +285,7 @@ export const repairHistoricalThreadCreators = Effect.fn("repairHistoricalThreadC
     const pending = yield* sql`SELECT 1 FROM (${candidateQuery}) LIMIT 1`;
     if (pending.length === 0) return 0;
 
-    const rows = yield* localCreatorEvidence(sql, candidateQuery, true);
+    const rows = yield* localCreatorEvidence(sql, candidateQuery);
     if (rows.length === 0) return 0;
 
     const evidence = new Map<string, Set<string>>();
@@ -336,11 +359,12 @@ export const repairHistoricalThreadCreators = Effect.fn("repairHistoricalThreadC
     const parents = yield* localCreatorGraph(sql, environmentId);
     for (const [threadId, candidate] of candidates)
       parents.set(threadId, candidate.creatorThreadId);
+    const cyclic = removeProposedCreatorCycles(candidates.keys(), parents);
     const now = yield* DateTime.now;
     let repaired = 0;
     for (const [threadId, candidate] of candidates) {
       // Check the whole proposed graph before writing, so cyclic candidates cannot partly apply.
-      if (firstRepeatedCreator(threadId, parents) != null) {
+      if (cyclic.has(threadId) || firstRepeatedCreator(threadId, parents) != null) {
         skipped.cycle += 1;
         continue;
       }
@@ -392,10 +416,6 @@ export const repairScopedHistoricalThreadCreators = Effect.fn(
     const sql = yield* SqlClient.SqlClient;
     const sink = yield* EventSink.EventSinkV2;
     const now = yield* DateTime.now;
-    const hasEvidenceIndex =
-      (yield* sql`SELECT 1 FROM sqlite_schema
-      WHERE type = 'index' AND name = 'orchestration_events_v2_thread_created_target_idx'`).length >
-      0;
     const scheduledEntries = input.entries.filter(
       ({ origin }) => origin.kind === "scheduled_task" && origin.environmentId === environmentId,
     );
@@ -487,7 +507,6 @@ export const repairScopedHistoricalThreadCreators = Effect.fn(
           SELECT ${threadId} AS thread_id, ${created.command_id} AS command_id,
             ${created.sequence} AS sequence, ${row.payload_json} AS payload_json
         `,
-        hasEvidenceIndex,
       );
       if (localEvidence.length > 0) return "conflicting-local-evidence";
       if (origin.kind === "thread_launch") {
@@ -505,16 +524,17 @@ export const repairScopedHistoricalThreadCreators = Effect.fn(
           return "invalid-schedule-evidence";
         }
         const messageId = `scheduled-task-message:${created.command_id.slice("scheduled-task:".length)}`;
+        const [initialRun] = yield* sql<{ readonly message_id: string | null }>`
+          SELECT json_extract(payload_json, '$.userMessageId') AS message_id
+          FROM orchestration_v2_projection_runs
+          WHERE thread_id = ${threadId} AND ordinal = 1
+        `;
+        if (initialRun && initialRun.message_id !== messageId) return "conflicting-scheduled-task";
         const mismatched = yield* sql`SELECT 1
           FROM orchestration_v2_projection_messages AS message
-          LEFT JOIN orchestration_v2_projection_runs AS run ON run.run_id = message.run_id
-            AND run.thread_id = message.thread_id
           WHERE message.message_id = ${messageId} AND message.thread_id = ${threadId}
             AND message.role = 'user'
-            AND (
-              json_extract(message.payload_json, '$.scheduledTaskId') <> ${origin.scheduledTaskId}
-              OR json_extract(run.payload_json, '$.scheduledTaskId') <> ${origin.scheduledTaskId}
-            )`;
+            AND json_extract(message.payload_json, '$.scheduledTaskId') <> ${origin.scheduledTaskId}`;
         if (mismatched.length > 0) return "conflicting-scheduled-task";
         if (!parents.has(origin.threadId)) return "missing-schedule-creator";
       }
@@ -535,16 +555,13 @@ export const repairScopedHistoricalThreadCreators = Effect.fn(
       scheduledPlan.set(entry.threadId, status);
       if (status === "eligible") parents.set(entry.threadId, entry.origin.threadId);
     }
-    const cyclicEntries = scheduledEntries.filter(
-      ({ threadId }) =>
-        scheduledPlan.get(threadId) === "eligible" &&
-        firstRepeatedCreator(threadId, parents) === threadId,
+    const cyclic = removeProposedCreatorCycles(
+      scheduledEntries
+        .map(({ threadId }) => threadId)
+        .filter((id) => scheduledPlan.get(id) === "eligible"),
+      parents,
     );
-    // Remove only the proposed cycle members before checking paths that lead to them.
-    for (const { threadId } of cyclicEntries) {
-      scheduledPlan.set(threadId, "creator-cycle");
-      parents.set(threadId, null);
-    }
+    for (const threadId of cyclic) scheduledPlan.set(threadId, "creator-cycle");
     for (const entry of input.entries) {
       const { threadId, origin } = entry;
       const scheduledStatus = scheduledPlan.get(threadId);

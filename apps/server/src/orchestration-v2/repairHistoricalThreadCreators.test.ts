@@ -261,6 +261,18 @@ it.layer(TestLayer)("historical thread creators", (it) => {
         `scheduled-task:${scheduledTaskId}:webhook:delivery:relay:x:webhook:delivery:12345678-1234-4234-8234-123456789abc`,
       );
       const mismatchedWebhookPacket = yield* packet(webhook.id, schedule.origin);
+      const wrongTaskRun = yield* createThread(
+        "scheduled-run-for-other-task",
+        {},
+        `scheduled-task:${scheduledTaskId}:890:scheduled`,
+      );
+      yield* sql`INSERT INTO orchestration_v2_projection_runs (
+        run_id, thread_id, ordinal, provider, status, requested_at, payload_json
+      ) VALUES (
+        'wrong-task-run', ${wrongTaskRun.id}, 1, ${provider}, 'completed', '2026-09-01T00:00:00Z',
+        json_object('userMessageId', 'scheduled-task-message:scheduled-task:other:890:scheduled')
+      )`;
+      const wrongTaskRunPacket = yield* packet(wrongTaskRun.id, schedule.origin);
       const linkedSchedule = yield* packet(scheduleCycle.id, {
         ...schedule.origin,
         threadId: scheduled.id,
@@ -299,6 +311,10 @@ it.layer(TestLayer)("historical thread creators", (it) => {
       assert.deepStrictEqual(
         (yield* request([mismatchedWebhookPacket], true)).map((row) => row.status),
         ["invalid-schedule-evidence"],
+      );
+      assert.deepStrictEqual(
+        (yield* request([wrongTaskRunPacket], true)).map((row) => row.status),
+        ["conflicting-scheduled-task"],
       );
       assert.deepStrictEqual(
         (yield* request(
@@ -375,8 +391,20 @@ it.layer(TestLayer)("historical thread creators", (it) => {
           settledOverride: "settled",
         });
         yield* launchMessage(child, parent.id, {}, child.id);
-        assert.equal(yield* repairHistoricalThreadCreators, 1);
+        const prompted = yield* createThread(
+          "thread:mcp:namespace:prompted:0",
+          {},
+          "command:mcp:namespace:create-thread:prompted:0",
+        );
+        yield* launchMessage(
+          prompted,
+          parent.id,
+          { id: MessageId.make("message:mcp:namespace:prompted:0") },
+          "command:mcp:namespace:create-thread:prompted:0:initial-message",
+        );
+        assert.equal(yield* repairHistoricalThreadCreators, 2);
         const store = yield* ProjectionStore.ProjectionStoreV2;
+        assert.equal((yield* store.getThread(prompted.id)).creatorThreadId, parent.id);
         const repaired = (yield* store.getThreadProjection(child.id)).thread;
         assert.deepStrictEqual(repaired, {
           ...child,
@@ -502,6 +530,7 @@ it.layer(TestLayer)("historical thread creators", (it) => {
         SET payload_json = json_set(payload_json, '$.senderThreadId', '')
         WHERE command_id = ${`${malformed.id}:initial-message`}`;
       const noEvidence = yield* createThread("no-evidence");
+      yield* creationRecord(noEvidence, parent.id);
       assert.equal(yield* repairHistoricalThreadCreators, 0);
       assert.equal(
         (yield* (yield* ProjectionStore.ProjectionStoreV2).getThreadProjection(noEvidence.id))
@@ -517,21 +546,41 @@ it.layer(TestLayer)("historical thread creators", (it) => {
       Effect.gen(function* () {
         const parent = yield* createThread("conflict-parent");
         const other = yield* createThread("conflict-other");
-        const conflict = yield* createThread("conflict");
-        yield* launchMessage(conflict, parent.id);
-        yield* creationRecord(conflict, other.id);
+        const conflict = yield* createThread(
+          "thread:mcp:namespace:conflict:0",
+          {},
+          "command:mcp:namespace:create-thread:conflict:0",
+        );
+        yield* launchMessage(
+          conflict,
+          parent.id,
+          { id: MessageId.make("message:mcp:namespace:conflict:0") },
+          "command:mcp:namespace:create-thread:conflict:0",
+        );
+        yield* creationRecord(
+          conflict,
+          other.id,
+          CommandId.make("command:mcp:namespace:record-created-thread:conflict:0"),
+        );
         const self = yield* createThread("self");
         yield* launchMessage(self, self.id);
         const left = yield* createThread("cycle-left");
         const right = yield* createThread("cycle-right");
         yield* launchMessage(left, right.id);
-        yield* creationRecord(right, left.id);
+        yield* launchMessage(right, left.id);
+        const leadsToCycle = yield* createThread("downstream-cycle");
+        yield* launchMessage(leadsToCycle, left.id);
         const existingChild = yield* createThread("existing-cycle-child", {
           creatorThreadId: ThreadId.make("existing-cycle-parent"),
         });
         const existingParent = yield* createThread("existing-cycle-parent");
         yield* launchMessage(existingParent, existingChild.id);
-        assert.equal(yield* repairHistoricalThreadCreators, 0);
+        assert.equal(yield* repairHistoricalThreadCreators, 1);
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        assert.equal((yield* store.getThread(leadsToCycle.id)).creatorThreadId, left.id);
+        for (const thread of [conflict, self, left, right, existingParent]) {
+          assert.isUndefined((yield* store.getThread(thread.id)).creatorThreadId);
+        }
       }),
   );
 
@@ -604,7 +653,7 @@ it.layer(TestLayer)("historical thread creators", (it) => {
           );
           assert.match(
             details,
-            /SEARCH record USING INDEX orchestration_events_v2_thread_created_target_idx \(<expr>=\? AND sequence>\?\)/,
+            /SEARCH record USING INDEX idx_orch_events_command_id \(command_id=\?(?: AND rowid>\?)?\)/,
           );
           assert.notMatch(details, /SCAN (?:message|record)/);
           assert.notInclude(details, "idx_orchestration_events_application_sequence");
