@@ -4727,7 +4727,7 @@ describe("OrchestratorMcpService thread lookup", () => {
       yield* Effect.gen(function* () {
         const mcp = yield* OrchestratorMcpService.OrchestratorMcpService;
         for (const link of [
-          `t3-thread://v2/${ref.environmentId}/${ref.threadId}`,
+          formatThreadLink(ref).slice(1, -1),
           formatThreadLink(ref, "Delegated task"),
           hostedThreadLink(ref),
         ]) {

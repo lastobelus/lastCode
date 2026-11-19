@@ -405,7 +405,7 @@ const commitInitialRepo = (cwd: string, initArgs: ReadonlyArray<string> = []) =>
     // Newer Git detaches auto-maintenance after commit; its lock file would race the template copy.
     yield* fileSystem.writeFileString(
       pathService.join(cwd, ".git", "config"),
-      "[user]\n\temail = test@test.com\n\tname = Test\n[maintenance]\n\tauto = false\n",
+      "\n[user]\n\temail = test@test.com\n\tname = Test\n[maintenance]\n\tauto = false\n",
       { flag: "a" },
     );
     yield* writeTextFile(cwd, "README.md", "# test\n");
@@ -7399,6 +7399,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         assert.notInclude(yield* git(repo, ["worktree", "list", "--porcelain"]), "locked");
 
         // Only the sparse checkout runs the hook, so its failure removes the locked registration.
+        yield* git(repo, ["config", "core.hooksPath", pathService.join(repo, ".git/hooks")]);
         yield* writeTextFile(repo, ".git/hooks/post-checkout", "#!/bin/sh\nexit 1\n");
         yield* fileSystem.chmod(pathService.join(repo, ".git/hooks/post-checkout"), 0o755);
         const failed = pathService.join(worktrees, "failed");
