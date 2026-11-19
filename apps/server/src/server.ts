@@ -63,7 +63,7 @@ import { speechHttpApiLayer } from "./speech/http.ts";
 import { speechStreamRouteLayer } from "./speech/stream.ts";
 import * as PullRequestProviderRegistry from "./pullRequest/PullRequestProviderRegistry.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
-import * as IssueService from "./issue/IssueService.ts";
+import { layer as issueServiceLayer } from "./issue/LastCodeIssueService.ts";
 import * as IssueTrackerConnections from "./issue/IssueTrackerConnections.ts";
 import * as IssueTrackerBindings from "./persistence/IssueTrackerBindings.ts";
 import * as IssueTrackerRegistry from "./issue/IssueTrackerRegistry.ts";
@@ -465,7 +465,7 @@ const layerPullRequestService = PullRequestService.layer.pipe(
 
 // Both read the one registry, so a standalone tracker connected in Settings is the same
 // instance the listing reads through.
-const layerIssueService = Layer.merge(IssueService.layer, IssueTrackerConnections.layer).pipe(
+const layerIssueService = Layer.merge(issueServiceLayer, IssueTrackerConnections.layer).pipe(
   Layer.provide(Layer.merge(IssueTrackerRegistry.layer, IssueTrackerBindings.layer)),
 );
 

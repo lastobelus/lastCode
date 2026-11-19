@@ -1,5 +1,5 @@
 // A project bound to a standalone tracker (Linear) in settings lists it beside its git host's.
-// References outside the project's canonical repository may be read on the same host,
+// References outside the project's issue scope may be read on the same host,
 // but every write must pass through requireWritable.
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -31,6 +31,7 @@ import {
   type IssueUpdateInput,
   type OrchestrationProjectShell,
   type ProjectId,
+  type RepositoryIdentity,
 } from "@t3tools/contracts";
 import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
 import {
@@ -84,8 +85,7 @@ interface SupportedProject extends ProjectTrackerBinding {
  * The git-host path of resolution: the tracker is the host's own, named like the remote's
  * provider kind. Null for a project with no remote or a kind no tracker claims.
  */
-function resolveGitHostBinding(project: OrchestrationProjectShell): ProjectTrackerBinding | null {
-  const identity = project.repositoryIdentity;
+function resolveGitHostBinding(identity: RepositoryIdentity | null): ProjectTrackerBinding | null {
   const scope = sourceControlDefinitions.issueScope(identity);
   const kind = identity?.provider;
   if (!identity || kind === undefined || kind === "unknown" || scope === null) return null;
@@ -183,7 +183,9 @@ export class IssueService extends Context.Service<
   }
 >()("t3/issue/IssueService") {}
 
-const make = Effect.gen(function* () {
+type GitHostIdentitySelector = (identity: RepositoryIdentity | null) => RepositoryIdentity | null;
+
+const make = Effect.fnUntraced(function* (selectGitHostIdentity: GitHostIdentitySelector) {
   const registry = yield* IssueTrackerRegistry.IssueTrackerRegistry;
   const projects = yield* ProjectService.ProjectService;
   const repositoryIdentities = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
@@ -229,7 +231,7 @@ const make = Effect.gen(function* () {
         : repositoryIdentities.resolve(project.workspaceRoot)
       ).pipe(
         Effect.map((repositoryIdentity) =>
-          resolveGitHostBinding({ ...project, repositoryIdentity }),
+          resolveGitHostBinding(selectGitHostIdentity(repositoryIdentity)),
         ),
       ),
     ]).pipe(Effect.map((resolved) => resolved.filter((binding) => binding !== null)));
@@ -767,4 +769,7 @@ const make = Effect.gen(function* () {
   });
 });
 
-export const layer = Layer.effect(IssueService, make);
+export const layerWithGitHostIdentity = (selectGitHostIdentity: GitHostIdentitySelector) =>
+  Layer.effect(IssueService, make(selectGitHostIdentity));
+
+export const layer = layerWithGitHostIdentity((identity) => identity);

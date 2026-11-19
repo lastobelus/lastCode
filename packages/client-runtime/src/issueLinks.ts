@@ -1,9 +1,14 @@
-import type { IssueRef, IssueTrackerConnectionList } from "@t3tools/contracts";
+import type {
+  IssueRef,
+  IssueTrackerConnectionList,
+  SourceControlProviderKind,
+} from "@t3tools/contracts";
 import {
   LINEAR_HOST,
   LINEAR_KIND,
   parseLinearIssueUrl,
 } from "@t3tools/issue-tracker-linear/shared/issueUrl";
+import { selectLastCodeIssueRepository } from "@t3tools/source-control-core/shared/definition";
 
 import { sourceControlClients } from "./sourceControlClients.ts";
 import type { EnvironmentProject } from "./state/shell.ts";
@@ -12,11 +17,14 @@ type LinkProject = Pick<EnvironmentProject, "id" | "environmentId" | "repository
 
 /** The host and scope a project's git-host tracker is bound to, the way the server resolves it. */
 function projectIssueBinding(project: LinkProject): {
-  readonly tracker: string;
+  readonly tracker: SourceControlProviderKind;
   readonly host: string;
   readonly scope: string;
 } | null {
-  const identity = project.repositoryIdentity;
+  const identity = selectLastCodeIssueRepository(
+    project.repositoryIdentity ?? null,
+    sourceControlClients,
+  );
   const scope = sourceControlClients.issueScope(identity);
   const kind = identity?.provider;
   if (!identity || kind === undefined || kind === "unknown" || scope === null) return null;
@@ -47,7 +55,7 @@ function parseIssueLink(
   for (const project of projects) {
     const binding = projectIssueBinding(project);
     if (binding === null || (binding.host !== hostname && binding.host !== authority)) continue;
-    const known = sourceControlClients.parseIssueUrl(url, project.repositoryIdentity?.provider);
+    const known = sourceControlClients.parseIssueUrl(url, binding.tracker);
     if (known !== null) return known;
   }
   return null;
