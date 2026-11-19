@@ -395,7 +395,7 @@ const make = Effect.gen(function* () {
         const invalidBase = new OrchestratorMcpFailure({
           code: "invalid_request",
           message:
-            "Unable to resolve the parent checkout commit and its Git remote. Configure a shared Git remote and push the branch, or omit isolation.",
+            "Unable to resolve the parent checkout commit. Check out a Git commit before delegating, or omit isolation.",
         });
         const project = yield* projects.getById(parent.thread.projectId).pipe(
           Effect.mapError(() => invalidBase),
@@ -407,7 +407,6 @@ const make = Effect.gen(function* () {
           ),
         );
         const cwd = parent.thread.worktreePath ?? project.workspaceRoot;
-        yield* git.resolvePrimaryRemoteName(cwd).pipe(Effect.mapError(() => invalidBase));
         const base = yield* git
           .resolveCommit({ cwd, revision: "HEAD" })
           .pipe(Effect.mapError(() => invalidBase));

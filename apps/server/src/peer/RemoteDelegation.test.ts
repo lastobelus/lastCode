@@ -10,6 +10,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CommandId,
   EventId,
+  GitCommandError,
   MessageId,
   type ModelSelection,
   NodeId,
@@ -1024,7 +1025,15 @@ const makeLaptop = (
       Layer.provide(
         Layer.mock(GitVcsDriver.GitVcsDriver)({
           resolveCommit: () => Effect.succeed({ commitSha: parentCommit }),
-          resolvePrimaryRemoteName: () => Effect.succeed("origin"),
+          resolvePrimaryRemoteName: (cwd) =>
+            Effect.fail(
+              new GitCommandError({
+                operation: "git remote",
+                command: "git remote",
+                cwd,
+                detail: "No Git remote is configured.",
+              }),
+            ),
         }),
       ),
       Layer.fresh,
@@ -1945,7 +1954,7 @@ it.effect.each(["available", "unfetchable", "older peer"] as const)(
 
         const result = yield* a.call("delegate_task", {
           task: "Run the suite on the box.",
-          target: { environmentId: box.environmentId },
+          target: { environmentId: box.environmentId, projectId: boxProject },
           isolation: "worktree",
           mode: "async",
           clientRequestId: "isolated-suite",
