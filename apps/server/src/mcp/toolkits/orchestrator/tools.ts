@@ -223,7 +223,7 @@ const RequestSecretTool = Tool.make("request_secret", {
 
 const CreateThreadsTool = Tool.make("create_threads", {
   description:
-    "Create interactive threads in this checkout. Omit prompt for an empty thread. Your thread owns each row unless the user asked for an independent sidebar root: set topLevel:true on that row. groupedUnderThreadId controls placement only; null ungroups.",
+    "Create interactive threads in this checkout; not delegation. Omit prompt for an empty parent (no model turn). Your thread owns each new thread. Set `topLevel:true` on a row only for a user-requested independent sidebar root. groupedUnderThreadId defaults to your thread unless it is a side chat; null leaves the new thread ungrouped. One thread or its own worktree: `t3_thread_launch`. Project, branch, and worktree inherit.",
   parameters: OrchestratorMcpCreateThreadsInput,
   success: OrchestratorMcpCreateThreadsResult,
   failure: OrchestratorMcpFailure,
