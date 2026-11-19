@@ -1,7 +1,8 @@
-import type {
-  IssueRef,
-  IssueTrackerConnectionList,
-  SourceControlProviderKind,
+import {
+  IssueTrackerKind,
+  type IssueRef,
+  type IssueTrackerConnectionList,
+  type SourceControlProviderKind,
 } from "@t3tools/contracts";
 import {
   LINEAR_HOST,
@@ -170,7 +171,7 @@ export function resolveIssueLinkTarget<Project extends LinkProject>(input: {
     project: lender.project,
     ref: {
       projectId: lender.project.id,
-      tracker: lender.binding.tracker as IssueRef["tracker"],
+      tracker: IssueTrackerKind.make(lender.binding.tracker),
       host: lender.binding.host,
       scope: own === undefined ? link.scope : lender.binding.scope,
       key: link.key,

@@ -284,6 +284,8 @@ export const RepositoryOrigin = Schema.Struct({
   canonicalKey: TrimmedNonEmptyString,
   remoteUrl: Schema.optionalKey(TrimmedNonEmptyString),
   displayName: Schema.optionalKey(TrimmedNonEmptyString),
+  provider: Schema.optionalKey(SourceControlProviderKind),
+  webUrl: Schema.optionalKey(TrimmedNonEmptyString),
 });
 export type RepositoryOrigin = typeof RepositoryOrigin.Type;
 

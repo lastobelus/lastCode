@@ -58,6 +58,34 @@ describe("fork issue navigation", () => {
     ).toMatchObject({ projectId: fork.id, scope: "fork/repo", key: "7" });
   });
 
+  it("opens issue links using the origin's discovered web host and provider", () => {
+    const identity = fork.repositoryIdentity!;
+    const selfHosted: EnvironmentProject = {
+      ...fork,
+      repositoryIdentity: {
+        ...identity,
+        origin: {
+          canonicalKey: "fork-ssh/fork/repo",
+          remoteUrl: "git@fork-ssh:fork/repo.git",
+          provider: SourceControlProviderKind.make("forgejo"),
+          webUrl: "https://forge.example.test:8443/fork/repo",
+        },
+      },
+    };
+    expect(
+      resolveIssueLinkTarget({
+        url: "https://forge.example.test:8443/fork/repo/issues/7",
+        projects: [selfHosted],
+      })?.ref,
+    ).toMatchObject({
+      projectId: fork.id,
+      tracker: "forgejo",
+      host: "forge.example.test:8443",
+      scope: "fork/repo",
+      key: "7",
+    });
+  });
+
   it("only requests filter candidates for the fork when the server lists its scope", () => {
     const scope = { projectId: fork.id, tracker: github, host: "github.com", scope: "fork/repo" };
     const held = holdIssuePages(
