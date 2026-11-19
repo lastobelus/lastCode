@@ -148,6 +148,12 @@ it("stamps authoritative provenance on commands that create threads or messages"
       threadId: ThreadId.make("thread:elsewhere"),
       title: "Somewhere else",
     },
+    creatorOrigin: {
+      kind: "thread_launch",
+      environmentId: EnvironmentId.make("environment:elsewhere"),
+      threadId: ThreadId.make("thread:elsewhere"),
+      owned: true,
+    },
     // A client's message goes through intake; only the server folds one into the creation.
     initialMessage: {
       messageId: MessageId.make("message:thread-management:forged"),
@@ -166,6 +172,7 @@ it("stamps authoritative provenance on commands that create threads or messages"
   });
   expect(stamped).not.toHaveProperty("linkOrigin");
   expect(stamped).not.toHaveProperty("delegatedFrom");
+  expect(stamped).not.toHaveProperty("creatorOrigin");
   expect(stamped).not.toHaveProperty("initialMessage");
 });
 

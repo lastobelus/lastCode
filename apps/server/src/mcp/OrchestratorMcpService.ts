@@ -1,3 +1,4 @@
+import { launchCreatorOrigin } from "./threadLaunchOwnership.ts";
 import { assertRemoteDelegation } from "./linkOrigin.ts";
 import {
   getArchiveFamilyParentThreadId,
@@ -3396,6 +3397,15 @@ const make = Effect.gen(function* () {
             "Thread creation requires an active run owned by this MCP provider session.",
           );
         }
+        if (
+          input.threads.some(
+            (request) => request.topLevel === true && request.groupedUnderThreadId != null,
+          )
+        )
+          return yield* failure(
+            "invalid_request",
+            "topLevel:true requires an independent launch with no placement parent.",
+          );
         const parentNodeId = parentRun.rootNodeId;
         const readAuthorization =
           parent.invocationRun === undefined
@@ -3466,12 +3476,18 @@ const make = Effect.gen(function* () {
                 createdBy: "agent",
                 creationSource: "mcp",
                 creatorThreadId: scope.thread.threadId,
+                creatorOrigin: launchCreatorOrigin(
+                  { environmentId: scope.environmentId, threadId: scope.thread.threadId },
+                  request.topLevel,
+                ),
                 groupedUnderThreadId:
-                  request.groupedUnderThreadId === undefined
-                    ? parent.thread.lineage.sideChat === true
-                      ? null
-                      : parent.thread.id
-                    : request.groupedUnderThreadId,
+                  request.topLevel === true
+                    ? null
+                    : request.groupedUnderThreadId === undefined
+                      ? parent.thread.lineage.sideChat === true
+                        ? null
+                        : parent.thread.id
+                      : request.groupedUnderThreadId,
                 commandId,
                 threadId,
                 projectId: parent.thread.projectId,

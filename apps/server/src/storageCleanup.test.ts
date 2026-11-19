@@ -33,6 +33,7 @@ import { checkpointRefForScopeOrdinal } from "./orchestration-v2/CheckpointServi
 import * as SqlError from "effect/sql/SqlError";
 import {
   DEFAULT_SERVER_SETTINGS,
+  EnvironmentId,
   GitCommandError,
   OrchestrationV2AppThreadJson,
   StorageCleanupReport,
@@ -41,6 +42,7 @@ import {
   type TerminalSummary,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { ServerEnvironmentIdentity } from "./environment/ServerEnvironment.ts";
 import * as ServerConfig from "./config.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
@@ -635,6 +637,11 @@ const cleanupFixture = (
           }),
         ).pipe(
           Layer.provideMerge(SuspensionRegistry.layer),
+          Layer.provide(
+            Layer.succeed(ServerEnvironmentIdentity, {
+              getEnvironmentId: Effect.succeed(EnvironmentId.make("test-environment")),
+            }),
+          ),
           Layer.provideMerge(Acquisition.layer),
           Layer.provide(WorkspaceLifecycle.layer),
           Layer.provide(

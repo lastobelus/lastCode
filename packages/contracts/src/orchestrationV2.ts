@@ -207,7 +207,7 @@ export const OrchestrationV2AppThreadLineage = Schema.Struct({
   relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent"])),
   rootThreadId: ThreadId,
   sideChat: Schema.optional(Schema.Boolean),
-  /** Releases delegated ownership without changing where the conversation came from. */
+  /** Releases ownership without changing where the conversation came from. */
   independent: Schema.optional(Schema.Boolean),
 });
 export type OrchestrationV2AppThreadLineage = typeof OrchestrationV2AppThreadLineage.Type;
@@ -558,16 +558,29 @@ const ThreadCreatorReference = Schema.Struct({
   threadId: ThreadId,
 });
 
+const ThreadLaunchCreatorReference = Schema.Struct({
+  kind: Schema.Literal("thread_launch"),
+  ...ThreadCreatorReference.fields,
+});
+
+const ScheduledTaskCreatorReference = Schema.Struct({
+  kind: Schema.Literal("scheduled_task"),
+  ...ThreadCreatorReference.fields,
+  scheduledTaskId: ScheduledTaskId,
+});
+
+export const HistoricalThreadCreatorOrigin = Schema.Union([
+  ThreadLaunchCreatorReference,
+  ScheduledTaskCreatorReference,
+]);
+
 export const ThreadCreatorOrigin = Schema.Union([
   Schema.Struct({
-    kind: Schema.Literal("thread_launch"),
-    ...ThreadCreatorReference.fields,
+    ...ThreadLaunchCreatorReference.fields,
+    /** Set at launch for an owned thread. Historical creator repairs omit it. */
+    owned: Schema.optional(Schema.Literal(true)),
   }),
-  Schema.Struct({
-    kind: Schema.Literal("scheduled_task"),
-    ...ThreadCreatorReference.fields,
-    scheduledTaskId: ScheduledTaskId,
-  }),
+  ScheduledTaskCreatorReference,
 ]);
 export type ThreadCreatorOrigin = typeof ThreadCreatorOrigin.Type;
 
@@ -579,11 +592,11 @@ const HistoricalThreadCreatorRepairPayload = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("local"),
     creatorThreadId: ThreadId,
-    origin: ThreadCreatorOrigin,
+    origin: HistoricalThreadCreatorOrigin,
   }),
   Schema.Struct({
     kind: Schema.Literal("scoped"),
-    origin: ThreadCreatorOrigin,
+    origin: HistoricalThreadCreatorOrigin,
     creationEventId: EventId,
     creationPayloadSha256: HistoricalThreadCreatorEvidenceDigest,
     expectedPayloadSha256: HistoricalThreadCreatorEvidenceDigest,
@@ -614,6 +627,8 @@ export const OrchestrationV2AppThread = Schema.Struct({
   /** Immutable creator conversation, separate from fork/subagent ownership and sidebar placement. */
   creatorThreadId: Schema.optional(ThreadId),
   creatorOrigin: Schema.optional(ThreadCreatorOrigin),
+  /** The schedule in this environment that started this thread. */
+  scheduledTaskOrigin: Schema.optional(ScheduledTaskId),
   /** Sidebar placement only; changing it never changes creator history or delegated ownership. */
   creatorGrouping: Schema.optional(Schema.Literals(["grouped", "independent"])),
   /** Explicit organization; null is top level, absence preserves deployed creator grouping. */
@@ -2461,6 +2476,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   ...OrchestrationV2CreationFields,
   creatorThreadId: Schema.optional(ThreadId),
   creatorOrigin: OrchestrationV2AppThread.fields.creatorOrigin,
+  scheduledTaskOrigin: OrchestrationV2AppThread.fields.scheduledTaskOrigin,
   creatorGrouping: OrchestrationV2AppThread.fields.creatorGrouping,
   groupedUnderThreadId: OrchestrationV2AppThread.fields.groupedUnderThreadId,
   id: ThreadId,
@@ -3423,6 +3439,8 @@ export const OrchestrationV2Command = Schema.Union([
     /** Set by the server for an empty MCP launch. */
     groupThread: OrchestrationV2AppThread.fields.groupThread,
     creatorThreadId: Schema.optional(ThreadId),
+    /** Server-derived provenance for a new MCP launch. */
+    creatorOrigin: OrchestrationV2AppThread.fields.creatorOrigin,
     groupedUnderThreadId: OrchestrationV2AppThread.fields.groupedUnderThreadId,
     commandId: CommandId,
     threadId: ThreadId,

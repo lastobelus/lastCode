@@ -2011,6 +2011,9 @@ export function threadShellFromProjection(
     ...(projection.thread.creatorOrigin === undefined
       ? {}
       : { creatorOrigin: projection.thread.creatorOrigin }),
+    ...(projection.thread.scheduledTaskOrigin === undefined
+      ? {}
+      : { scheduledTaskOrigin: projection.thread.scheduledTaskOrigin }),
     ...(projection.thread.creatorGrouping === undefined
       ? {}
       : { creatorGrouping: projection.thread.creatorGrouping }),
@@ -2370,6 +2373,9 @@ function shellFromState(input: {
     ...(input.state.thread.creatorOrigin === undefined
       ? {}
       : { creatorOrigin: input.state.thread.creatorOrigin }),
+    ...(input.state.thread.scheduledTaskOrigin === undefined
+      ? {}
+      : { scheduledTaskOrigin: input.state.thread.scheduledTaskOrigin }),
     ...(input.state.thread.creatorGrouping === undefined
       ? {}
       : { creatorGrouping: input.state.thread.creatorGrouping }),

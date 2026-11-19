@@ -34,6 +34,7 @@ import {
   generatedBuildReviewProtection,
 } from "@t3tools/shared/generatedBuildOwnership";
 import { resolveWorktreeSuspension } from "@t3tools/shared/projectSettings";
+import { getThreadOwner } from "@t3tools/shared/threadOwnership";
 import { evaluateWorktreeSuspensionEligibility } from "@t3tools/shared/worktreeSuspensionPolicy";
 import * as Context from "effect/Context";
 import * as Cause from "effect/Cause";
@@ -59,6 +60,7 @@ import * as Cleanup from "../orchestration-v2/WorktreeCleanupService.ts";
 import * as PreviewHosting from "../preview/Hosting.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { ServerEnvironmentIdentity } from "../environment/ServerEnvironment.ts";
 import * as ServerConfig from "../config.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { makeIsManagedWorktreePath } from "../worktreesDirectory.ts";
@@ -176,6 +178,8 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
   const previews = yield* PreviewHosting.PreviewHosting;
   const settings = yield* ServerSettings.ServerSettingsService;
   const config = yield* ServerConfig.ServerConfig;
+  const environment = yield* ServerEnvironmentIdentity;
+  const environmentId = yield* environment.getEnvironmentId;
   const git = yield* GitVcsDriver.GitVcsDriver;
   const acquisition = yield* WorkspaceAcquisition;
   const fs = yield* FileSystem.FileSystem;
@@ -1307,11 +1311,14 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       now: timestamp,
       candidate: {
         kind: thread.lineage.relationshipToParent === "subagent" ? "subagent" : "thread",
-        // A local repair fills both creator fields. Revisit this guard if creation starts writing both.
+        // Preserve the pre-ownership suspension policy for legacy launches. A repaired
+        // creator is provenance only, while new launches have an explicit owner.
         agentCreatedChild:
           thread.createdBy === "agent" &&
-          thread.creatorThreadId !== undefined &&
-          thread.creatorOrigin === undefined
+          (thread.creatorOrigin === undefined
+            ? thread.creatorThreadId !== undefined
+            : thread.creatorOrigin.kind === "thread_launch" &&
+              getThreadOwner(thread, environmentId) !== null)
             ? true
             : thread.createdBy === "user"
               ? false

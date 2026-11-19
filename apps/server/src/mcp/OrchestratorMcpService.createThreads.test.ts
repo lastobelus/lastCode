@@ -204,6 +204,22 @@ it.effect(
         assert.isTrue(projection.thread.groupThread);
         assert.equal(projection.thread.creatorThreadId, parentThreadId);
       }
+      const unkeyed = yield* service.createThreads(scope, {
+        threads: [
+          { title: "Owned with root placement", groupedUnderThreadId: null, prompt: "Check logs" },
+          { title: "Explicitly independent", topLevel: true },
+        ],
+      });
+      for (const [index, row] of unkeyed.threads.entries()) {
+        const shell = yield* threads.getThreadShell(row.threadId);
+        assert.isNull(shell?.groupedUnderThreadId);
+        assert.deepEqual(shell?.creatorOrigin, {
+          kind: "thread_launch",
+          environmentId: scope.environmentId,
+          threadId: parentThreadId,
+          ...(index === 0 ? { owned: true } : {}),
+        });
+      }
       const members: ThreadId[] = [];
       for (let batch = 0; batch < 6; batch++) {
         const children = yield* service.createThreads(scope, {

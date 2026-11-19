@@ -45,6 +45,7 @@ import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as OrchestrationMcp from "../../OrchestratorMcpService.ts";
 import { requireRemoteDelegationPeer } from "../../linkOrigin.ts";
 import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../threadAccess.ts";
+import { launchCreatorOrigin } from "../../threadLaunchOwnership.ts";
 import { ProjectToolkit } from "./tools.ts";
 
 const isAboveCeilingError = Schema.is(OrchestratorRuntimeModeAboveCeilingError);
@@ -56,7 +57,7 @@ function groupingPlacementFailure(error: unknown): OrchestratorMcpFailure | unde
       const detail = typeof error.cause === "string" ? `${error.cause} ` : "";
       return new OrchestratorMcpFailure({
         code: "invalid_request",
-        message: `Invalid groupedUnderThreadId. ${detail}Use JSON null (without quotes) for a top-level thread.`,
+        message: `Invalid groupedUnderThreadId. ${detail}Use JSON null (without quotes) to leave the thread ungrouped.`,
       });
     }
     error = error.cause;
@@ -227,6 +228,32 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           });
         }
         const { caller } = context;
+        const delegatedFrom = scope.client?.linked === true ? input.delegatedFrom : undefined;
+        const linkedCreator = scope.client?.linked === true ? scope.client.senderThread : undefined;
+        if (
+          delegatedFrom !== undefined &&
+          linkedCreator !== undefined &&
+          (delegatedFrom.environmentId !== linkedCreator.environmentId ||
+            delegatedFrom.threadId !== linkedCreator.threadId)
+        )
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "delegatedFrom must match the linked environment's launching thread.",
+          });
+        if (
+          input.topLevel === true &&
+          (input.groupedUnderThreadId != null ||
+            input.remotePreparation !== undefined ||
+            delegatedFrom !== undefined)
+        )
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "topLevel:true requires an independent launch with no placement parent.",
+          });
+        const creator =
+          caller === undefined
+            ? linkedCreator
+            : { environmentId: scope.environmentId, threadId: caller.id };
         yield* McpToolAccess.assertWritableThreads(context, [input.groupedUnderThreadId]);
         // A retry with the same key replays the first launch: the ids derive
         // from the caller and the key, and the launch service replays a
@@ -333,7 +360,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
             return yield* new OrchestratorMcpFailure({
               code: "invalid_request",
               message:
-                "groupedUnderThreadId must name an existing thread. Use JSON null (without quotes) for a top-level thread.",
+                "groupedUnderThreadId must name an existing thread. Use JSON null (without quotes) to leave the thread ungrouped.",
             });
         }
         const project =
@@ -488,14 +515,19 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           creationSource: "mcp",
           ...(linkOrigin === undefined ? {} : { linkOrigin }),
           // Kept only alongside linkOrigin: thread.create drops it otherwise.
-          ...(input.delegatedFrom === undefined ? {} : { delegatedFrom: input.delegatedFrom }),
+          ...(delegatedFrom === undefined ? {} : { delegatedFrom }),
           ...(caller === undefined ? {} : { creatorThreadId: caller.id }),
+          ...(creator === undefined || delegatedFrom !== undefined || delegation !== undefined
+            ? {}
+            : { creatorOrigin: launchCreatorOrigin(creator, input.topLevel) }),
           groupedUnderThreadId:
-            input.groupedUnderThreadId === undefined
-              ? caller?.projectId === projectId && caller.lineage.sideChat !== true
-                ? caller.id
-                : null
-              : input.groupedUnderThreadId,
+            input.topLevel === true
+              ? null
+              : input.groupedUnderThreadId === undefined
+                ? caller?.projectId === projectId && caller.lineage.sideChat !== true
+                  ? caller.id
+                  : null
+                : input.groupedUnderThreadId,
         }).pipe(
           Effect.provideService(ThreadReadAuthorization, readAuthorization),
           Effect.mapError((error) => {

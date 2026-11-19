@@ -120,6 +120,7 @@ export interface ThreadLaunchInput {
   readonly delegatedFrom?: OrchestrationV2DelegatedFrom;
   readonly creatorThreadId?: ThreadId;
   readonly groupThread?: true;
+  readonly creatorOrigin?: import("@t3tools/contracts").ThreadCreatorOrigin;
   readonly remoteDelegation?: RemoteDelegationAssociation;
   readonly groupedUnderThreadId?: ThreadId | null;
 }
@@ -1760,6 +1761,9 @@ const make = Effect.gen(function* () {
                 ...(initialMessage === undefined
                   ? {}
                   : { initialMessage: { ...initialMessage, workspaceStrategy } }),
+                ...(input.creatorOrigin === undefined
+                  ? {}
+                  : { creatorOrigin: input.creatorOrigin }),
                 ...(input.creatorThreadId === undefined
                   ? {}
                   : { creatorThreadId: input.creatorThreadId }),
