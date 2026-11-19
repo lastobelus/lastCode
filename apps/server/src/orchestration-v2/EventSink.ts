@@ -115,6 +115,8 @@ export interface EventSinkV2Shape {
   ) => Effect.Effect<A, E | EventSinkV2Error, R>;
 
   readonly write: (input: {
+    /** Read-only precondition evaluated inside the event transaction. */
+    readonly onlyIf?: Effect.Effect<boolean, unknown>;
     /** Return no events if another thread owns this native session at commit time. */
     readonly unlessNativeThreadOwned?: Pick<
       OrchestrationV2ProviderThread,
@@ -685,7 +687,8 @@ const layerBase: Layer.Layer<
     });
 
     const writeEffect = Effect.fn("orchestrationV2.EventSink.write")(function* (
-      input: Parameters<EventSinkV2Shape["writeWithEffects"]>[0],
+      input: Parameters<EventSinkV2Shape["writeWithEffects"]>[0] &
+        Pick<Parameters<EventSinkV2Shape["write"]>[0], "onlyIf">,
     ) {
       yield* Effect.annotateCurrentSpan({
         "orchestration_v2.command_id": input.commandId ?? null,
@@ -697,6 +700,9 @@ const layerBase: Layer.Layer<
       if (batch !== undefined) batch.eventCount += input.events.length;
       const { committed } = yield* commitThenPublish(
         Effect.gen(function* () {
+          if (input.onlyIf !== undefined && !(yield* input.onlyIf)) {
+            return { committed: [], outcomes: [] };
+          }
           // Check ownership in the same transaction that claims the native session.
           const imported = input.unlessNativeThreadOwned;
           if (imported?.nativeThreadRef != null) {

@@ -52,6 +52,7 @@ import type {
   RunAttemptId,
 } from "@t3tools/contracts";
 import {
+  ThreadCreatorOrigin,
   IDLE_COMPACTION_TEXT,
   idleCompactionOf,
   isQueuedProviderThreadPlaceholder,
@@ -1036,6 +1037,17 @@ export function applyToProjection(
   };
 
   switch (event.type) {
+    case "thread.creator-repaired":
+      return {
+        ...projection,
+        thread: {
+          ...projection.thread,
+          creatorOrigin: event.payload.origin,
+          ...(event.payload.kind === "local"
+            ? { creatorThreadId: event.payload.creatorThreadId }
+            : {}),
+        },
+      };
     case "thread.pull-request-link-updated":
       return {
         ...projection,
@@ -1343,6 +1355,7 @@ const matchesNothing = (...filters: ReadonlyArray<ReadonlyArray<unknown> | undef
 const encodeThreadPayload = Schema.encodeEffect(
   Schema.fromJsonString(OrchestrationV2AppThreadJsonSchema),
 );
+const encodeCreatorOrigin = Schema.encodeEffect(Schema.fromJsonString(ThreadCreatorOrigin));
 const encodeThreadUpdatedAt = Schema.encodeEffect(
   OrchestrationV2AppThreadJsonSchema.fields.updatedAt,
 );
@@ -1929,6 +1942,9 @@ export function threadShellFromProjection(
     ...(projection.thread.creatorThreadId === undefined
       ? {}
       : { creatorThreadId: projection.thread.creatorThreadId }),
+    ...(projection.thread.creatorOrigin === undefined
+      ? {}
+      : { creatorOrigin: projection.thread.creatorOrigin }),
     ...(projection.thread.creatorGrouping === undefined
       ? {}
       : { creatorGrouping: projection.thread.creatorGrouping }),
@@ -2284,6 +2300,9 @@ function shellFromState(input: {
     ...(input.state.thread.creatorThreadId === undefined
       ? {}
       : { creatorThreadId: input.state.thread.creatorThreadId }),
+    ...(input.state.thread.creatorOrigin === undefined
+      ? {}
+      : { creatorOrigin: input.state.thread.creatorOrigin }),
     ...(input.state.thread.creatorGrouping === undefined
       ? {}
       : { creatorGrouping: input.state.thread.creatorGrouping }),
@@ -2529,6 +2548,22 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             if (cached.index.threadIds.includes(event.threadId)) timelineIndexes.delete(key);
           }
           switch (event.type) {
+            case "thread.creator-repaired": {
+              const payload = event.payload;
+              const originJson = yield* encodeCreatorOrigin(payload.origin);
+              if (payload.kind === "local") {
+                yield* sql`UPDATE orchestration_v2_projection_threads
+                  SET payload_json = json_set(payload_json,
+                    '$.creatorThreadId', ${payload.creatorThreadId},
+                    '$.creatorOrigin', json(${originJson}))
+                  WHERE thread_id = ${event.threadId}`;
+              } else {
+                yield* sql`UPDATE orchestration_v2_projection_threads
+                  SET payload_json = json_set(payload_json, '$.creatorOrigin', json(${originJson}))
+                  WHERE thread_id = ${event.threadId}`;
+              }
+              break;
+            }
             case "thread.pull-request-link-updated": {
               const thread = yield* getThread(event.threadId);
               yield* apply({
@@ -3406,6 +3441,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
 
           if (
             event.type !== "thread.created" &&
+            event.type !== "thread.creator-repaired" &&
             event.type !== "thread.archived" &&
             event.type !== "thread.unarchived" &&
             event.type !== "thread.deleted" &&

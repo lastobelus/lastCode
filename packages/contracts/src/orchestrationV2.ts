@@ -552,6 +552,44 @@ export const RemoteLaunchIntent = Schema.Struct({
 });
 export type RemoteLaunchIntent = typeof RemoteLaunchIntent.Type;
 
+const ThreadCreatorReference = Schema.Struct({
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+});
+
+export const ThreadCreatorOrigin = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("thread_launch"),
+    ...ThreadCreatorReference.fields,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("scheduled_task"),
+    ...ThreadCreatorReference.fields,
+    scheduledTaskId: ScheduledTaskId,
+  }),
+]);
+export type ThreadCreatorOrigin = typeof ThreadCreatorOrigin.Type;
+
+export const HistoricalThreadCreatorEvidenceDigest = Schema.String.check(
+  Schema.isPattern(/^[0-9a-f]{64}$/),
+);
+
+const HistoricalThreadCreatorRepairPayload = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("local"),
+    creatorThreadId: ThreadId,
+    origin: ThreadCreatorOrigin,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("scoped"),
+    origin: ThreadCreatorOrigin,
+    creationEventId: EventId,
+    creationPayloadSha256: HistoricalThreadCreatorEvidenceDigest,
+    expectedPayloadSha256: HistoricalThreadCreatorEvidenceDigest,
+    evidenceSha256: HistoricalThreadCreatorEvidenceDigest,
+  }),
+]);
+
 export const OrchestrationV2AppThread = Schema.Struct({
   emptyWorkspacePreparationClaim: Schema.optional(
     Schema.Struct({
@@ -574,6 +612,7 @@ export const OrchestrationV2AppThread = Schema.Struct({
   ...OrchestrationV2CreationFields,
   /** Immutable creator conversation, separate from fork/subagent ownership and sidebar placement. */
   creatorThreadId: Schema.optional(ThreadId),
+  creatorOrigin: Schema.optional(ThreadCreatorOrigin),
   /** Sidebar placement only; changing it never changes creator history or delegated ownership. */
   creatorGrouping: Schema.optional(Schema.Literals(["grouped", "independent"])),
   /** Explicit organization; null is top level, absence preserves deployed creator grouping. */
@@ -2174,6 +2213,11 @@ const OrchestrationV2EventBase = Schema.Struct({
 export const OrchestrationV2DomainEvent = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
+    type: Schema.Literal("thread.creator-repaired"),
+    payload: HistoricalThreadCreatorRepairPayload,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2EventBase.fields,
     type: Schema.Literal("thread.metadata-updated"),
     payload: OrchestrationV2AppThread,
     previousGroupedUnderThreadId: Schema.optional(Schema.NullOr(ThreadId)),
@@ -2406,6 +2450,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   recovery: Schema.optional(OrchestrationV2ThreadRecovery),
   ...OrchestrationV2CreationFields,
   creatorThreadId: Schema.optional(ThreadId),
+  creatorOrigin: OrchestrationV2AppThread.fields.creatorOrigin,
   creatorGrouping: OrchestrationV2AppThread.fields.creatorGrouping,
   groupedUnderThreadId: OrchestrationV2AppThread.fields.groupedUnderThreadId,
   id: ThreadId,
@@ -3162,6 +3207,11 @@ const OrchestrationV2JsonEventBaseFields = {
 } as const;
 
 export const OrchestrationV2DomainEventJson = Schema.Union([
+  Schema.Struct({
+    ...OrchestrationV2JsonEventBaseFields,
+    type: Schema.Literal("thread.creator-repaired"),
+    payload: HistoricalThreadCreatorRepairPayload,
+  }),
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,
     type: Schema.Literal("thread.metadata-updated"),

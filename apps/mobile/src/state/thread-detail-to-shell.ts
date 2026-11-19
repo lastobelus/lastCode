@@ -53,6 +53,7 @@ export function threadDetailToShell(
     createdBy: thread.createdBy,
     creationSource: thread.creationSource,
     ...(thread.creatorThreadId === undefined ? {} : { creatorThreadId: thread.creatorThreadId }),
+    ...(thread.creatorOrigin === undefined ? {} : { creatorOrigin: thread.creatorOrigin }),
     ...(thread.creatorGrouping === undefined ? {} : { creatorGrouping: thread.creatorGrouping }),
     ...(thread.groupedUnderThreadId === undefined
       ? {}

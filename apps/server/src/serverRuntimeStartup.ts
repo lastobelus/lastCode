@@ -567,7 +567,7 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
       ),
       recover: runStartupPhase(
         "orchestration-v2.creator-history.repair",
-        repairHistoricalThreadCreators.pipe(
+        repairHistoricalThreadCreators(environment.environmentId).pipe(
           Effect.tap((repairedThreadCount) =>
             repairedThreadCount === 0
               ? Effect.void
