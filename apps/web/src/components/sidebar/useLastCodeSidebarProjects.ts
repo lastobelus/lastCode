@@ -1,3 +1,8 @@
+import { useAtomValue } from "@effect/atom-react";
+import {
+  discoverableProjects,
+  showTemporaryProjectsAtom,
+} from "@t3tools/client-runtime/state/temporary-projects";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { useMessages } from "gt-react";
 import { useProjects, useThreadShells } from "../../state/entities";
@@ -46,7 +51,7 @@ export function useLastCodeSidebarProjects(environments: ProjectEnvironments) {
     wslEnvironmentIds,
   } = environments;
   const groups = buildSidebarProjectSnapshots({
-    projects: orderedProjects,
+    projects: discoverableProjects(orderedProjects, useAtomValue(showTemporaryProjectsAtom)),
     settings,
     primaryEnvironmentId,
     scratchWorkspaceRootsByEnvironmentId,
