@@ -2,6 +2,7 @@ import { applyThreadPullRequestLinkUpdate } from "../threadPullRequests.ts";
 import {
   applyOrchestrationV2ThreadVisit,
   isQueuedProviderThreadPlaceholder,
+  withThreadGroupMarker,
 } from "@t3tools/contracts";
 import type {
   OrchestrationV2DomainEvent,
@@ -294,6 +295,8 @@ export function applyOrchestrationV2ProjectionEvent(
   const latestLocalTurnOrdinal = options?.latestLocalTurnOrdinal;
   const base = { ...projection, updatedAt: event.occurredAt };
   switch (event.type) {
+    case "thread.group-marked":
+      return { ...projection, thread: withThreadGroupMarker(projection.thread, true) };
     case "thread.creator-repaired":
       return {
         ...projection,
@@ -317,6 +320,7 @@ export function applyOrchestrationV2ProjectionEvent(
     case "thread.attention-set":
     case "thread.attention-cleared":
     case "thread.created":
+      return { ...base, thread: event.payload };
     case "thread.archived":
     case "thread.unarchived":
     case "thread.deleted":
@@ -337,12 +341,18 @@ export function applyOrchestrationV2ProjectionEvent(
     case "thread.model-selection-updated":
     case "thread.provider-switched":
     case "thread.guest-share-updated":
-      return { ...base, thread: event.payload };
+      return {
+        ...base,
+        thread: withThreadGroupMarker(event.payload, projection.thread.groupThread),
+      };
     // Visited tracking and tags are not activity: skip the updatedAt bump.
     case "thread.visited":
     case "thread.tags-updated":
     case "thread.marked-unread":
-      return { ...projection, thread: event.payload };
+      return {
+        ...projection,
+        thread: withThreadGroupMarker(event.payload, projection.thread.groupThread),
+      };
     case "thread.visit-recorded":
       return {
         ...projection,
@@ -350,7 +360,14 @@ export function applyOrchestrationV2ProjectionEvent(
       };
     case "run.created":
     case "run.updated": {
-      const next = { ...base, runs: upsertEntity(base.runs, event.payload) };
+      const next = {
+        ...base,
+        thread:
+          event.type === "run.created"
+            ? withThreadGroupMarker(base.thread, undefined)
+            : base.thread,
+        runs: upsertEntity(base.runs, event.payload),
+      };
       const visible = { ...next, visibleTurnItems: activeVisibleTurnItems(next) };
       const wasQueued = base.runs.some(
         (run) => run.id === event.payload.id && run.status === "queued",
@@ -431,7 +448,14 @@ export function applyOrchestrationV2ProjectionEvent(
     case "runtime-request.updated":
       return { ...base, runtimeRequests: upsertEntity(base.runtimeRequests, event.payload) };
     case "message.updated":
-      return { ...base, messages: upsertEntity(base.messages, event.payload) };
+      return {
+        ...base,
+        thread:
+          event.payload.runId === null
+            ? withThreadGroupMarker(base.thread, undefined)
+            : base.thread,
+        messages: upsertEntity(base.messages, event.payload),
+      };
     case "plan.updated":
       return { ...base, plans: upsertEntity(base.plans, event.payload) };
     case "turn-item.updated": {

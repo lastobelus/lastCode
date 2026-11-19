@@ -207,6 +207,7 @@ export interface EnvironmentThreadShell {
   readonly opens?: import("@t3tools/contracts").OrchestrationV2ThreadOpens | null;
   readonly titleRegeneration?: { readonly requestId: string; readonly startedAt: string } | null;
   readonly deletedAt: string | null;
+  readonly groupThread?: true;
   readonly persistent?: boolean;
   readonly annotation?: import("@t3tools/contracts").ThreadAnnotation | null;
   readonly dashboardItems?: ReadonlyArray<import("@t3tools/contracts").ThreadDashboardItem>;
@@ -395,6 +396,7 @@ export function presentThreadShell(
             startedAt: iso(thread.titleRegeneration.startedAt),
           },
     deletedAt: nullableIso(thread.deletedAt),
+    ...(thread.groupThread ? { groupThread: true } : {}),
     ...(thread.persistent === undefined ? {} : { persistent: thread.persistent }),
     annotation: threadAnnotationOf(thread),
     dashboardItems: thread.dashboardItems ?? [],

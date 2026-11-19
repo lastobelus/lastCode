@@ -464,7 +464,9 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           interactionMode,
           workspaceStrategy: strategy ?? { type: "root" },
           ...(input.message === undefined && attachments.length === 0
-            ? {}
+            ? delegation === undefined
+              ? { groupThread: true as const }
+              : {}
             : {
                 initialMessage: {
                   messageId,

@@ -4647,6 +4647,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       workspaceUserAdopted: command.createdBy === "user",
       creationSource: command.creationSource,
       groupedUnderThreadId,
+      ...(command.groupThread === true &&
+      command.createdBy === "agent" &&
+      command.creationSource === "mcp" &&
+      command.initialMessage === undefined &&
+      command.delegatedFrom === undefined &&
+      command.importedNativeThread === undefined
+        ? { groupThread: true as const }
+        : {}),
       ...(command.creatorThreadId === undefined
         ? {}
         : { creatorThreadId: command.creatorThreadId, creatorGrouping }),

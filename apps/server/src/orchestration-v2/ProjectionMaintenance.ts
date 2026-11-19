@@ -127,6 +127,7 @@ export const layer: Layer.Layer<ProjectionMaintenanceV2, never, SqlClient.SqlCli
               WHEN event.event_type = 'thread.created' THEN 0
               -- Keep the evidence digest even after newer thread metadata is written.
               WHEN event.event_type = 'thread.creator-repaired' THEN 0
+              WHEN event.event_type = 'thread.group-marked' THEN 0
               -- Codex usage history reads the selection a run attempt started with.
               WHEN event.event_type = 'run.updated'
                 AND json_extract(event.payload_json, '$.status') = 'running' THEN 0

@@ -201,6 +201,7 @@ it.effect(
         const projection = yield* threads.getThreadProjection(row.threadId);
         assert.isEmpty(projection.runs);
         assert.isEmpty(projection.messages);
+        assert.isTrue(projection.thread.groupThread);
         assert.equal(projection.thread.creatorThreadId, parentThreadId);
       }
       const members: ThreadId[] = [];
@@ -225,6 +226,8 @@ it.effect(
         cursor: firstPage.nextCursor!,
       });
       assert.equal(firstPage.total, 120);
+      assert.isTrue(firstPage.threads.every((thread) => thread.groupThread === true));
+      assert.isTrue((yield* service.readThread(scope, { threadId: a })).thread.groupThread);
       assert.lengthOf(firstPage.threads, 100);
       assert.lengthOf(secondPage.threads, 20);
       assert.isNull(secondPage.nextCursor);

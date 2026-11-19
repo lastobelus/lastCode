@@ -637,6 +637,8 @@ export const OrchestrationV2AppThread = Schema.Struct({
   linkOrigin: Schema.optional(OrchestrationV2LinkOrigin),
   delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
   remoteDelegations: Schema.optional(Schema.Array(RemoteDelegationAssociation)),
+  /** Set for an empty thread created to hold other threads. */
+  groupThread: Schema.optional(Schema.Literal(true)),
   persistent: Schema.optional(Schema.Boolean),
   annotation: Schema.optional(Schema.NullOr(ThreadAnnotation)),
   dashboardItems: Schema.optional(ThreadDashboardItems),
@@ -706,6 +708,15 @@ export const OrchestrationV2AppThread = Schema.Struct({
   deletedAt: Schema.NullOr(Schema.DateTimeUtc),
 });
 export type OrchestrationV2AppThread = typeof OrchestrationV2AppThread.Type;
+
+export function withThreadGroupMarker(
+  thread: OrchestrationV2AppThread,
+  marker: OrchestrationV2AppThread["groupThread"],
+): OrchestrationV2AppThread {
+  if (thread.groupThread === marker) return thread;
+  const { groupThread: _groupThread, ...rest } = thread;
+  return marker === true ? { ...rest, groupThread: true } : rest;
+}
 
 /** A visit changes read state only, so its event leaves the rest of the thread out. */
 export const OrchestrationV2ThreadVisit = Schema.Struct({
@@ -2216,6 +2227,11 @@ const OrchestrationV2EventBase = Schema.Struct({
 export const OrchestrationV2DomainEvent = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
+    type: Schema.Literal("thread.group-marked"),
+    payload: Schema.Struct({}),
+  }),
+  Schema.Struct({
+    ...OrchestrationV2EventBase.fields,
     type: Schema.Literal("thread.creator-repaired"),
     payload: HistoricalThreadCreatorRepairPayload,
   }),
@@ -2477,6 +2493,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   linkOrigin: Schema.optional(OrchestrationV2LinkOrigin),
   delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
   remoteDelegations: Schema.optional(Schema.Array(RemoteDelegationAssociation)),
+  groupThread: OrchestrationV2AppThread.fields.groupThread,
   persistent: Schema.optional(Schema.Boolean),
   annotation: Schema.optional(Schema.NullOr(ThreadAnnotation)),
   dashboardItems: Schema.optional(ThreadDashboardItems),
@@ -3212,6 +3229,11 @@ const OrchestrationV2JsonEventBaseFields = {
 export const OrchestrationV2DomainEventJson = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,
+    type: Schema.Literal("thread.group-marked"),
+    payload: Schema.Struct({}),
+  }),
+  Schema.Struct({
+    ...OrchestrationV2JsonEventBaseFields,
     type: Schema.Literal("thread.creator-repaired"),
     payload: HistoricalThreadCreatorRepairPayload,
   }),
@@ -3407,6 +3429,8 @@ export const OrchestrationV2Command = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("thread.create"),
     ...OrchestrationV2CreationFields,
+    /** Set by the server for an empty MCP launch. */
+    groupThread: OrchestrationV2AppThread.fields.groupThread,
     creatorThreadId: Schema.optional(ThreadId),
     groupedUnderThreadId: OrchestrationV2AppThread.fields.groupedUnderThreadId,
     commandId: CommandId,

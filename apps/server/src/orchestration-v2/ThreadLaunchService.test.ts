@@ -5815,14 +5815,17 @@ it.effect(
         createdBy: "agent" as const,
         creationSource: "mcp" as const,
         creatorThreadId: creator.threadId,
+        groupThread: true as const,
       };
       const launched = yield* launches.launch(input);
       assert.equal(launched.projection.thread.creatorThreadId, creator.threadId);
       assert.equal(launched.projection.thread.creatorGrouping, "grouped");
       assert.equal(launched.projection.messages.length, 0);
+      assert.isTrue(launched.projection.thread.groupThread);
       assert.equal(launched.projection.thread.lineage.parentThreadId, null);
       const retry = yield* launches.launch(input);
       assert.equal(retry.projection.thread.creatorThreadId, creator.threadId);
+      assert.isTrue(retry.projection.thread.groupThread);
       const reused = yield* launches.launch({
         ...input,
         commandId: CommandId.make("creator:reuse"),
@@ -5834,6 +5837,20 @@ it.effect(
         (yield* threads.getThreadShell(launched.threadId))?.creatorThreadId,
         creator.threadId,
       );
+
+      yield* threads.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("creator:start-group"),
+        threadId: launched.threadId,
+        messageId: MessageId.make("creator:first-message"),
+        text: "Start work",
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+        createdBy: "user",
+        creationSource: "web",
+      });
+      assert.isUndefined((yield* threads.getThreadShell(launched.threadId))?.groupThread);
+      assert.isUndefined((yield* launches.launch(input)).projection.thread.groupThread);
     }).pipe(Effect.provide(harness.layer));
   },
 );
