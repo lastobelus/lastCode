@@ -99,29 +99,42 @@ const setup = Effect.gen(function* () {
       },
     ],
   });
-  const complete = executor.withLock(
-    threadId,
-    Effect.gen(function* () {
-      yield* sink.write({
-        events: [
-          {
-            id: EventId.make("original-completed"),
-            type: "run.updated",
-            threadId,
-            occurredAt: now,
-            payload: { ...running, status: "completed", completedAt: now },
-          },
-        ],
-      });
-      // The harness does not execute the original provider start. Terminal
-      // projection alone must not conceal a still-pending provider message.
-      yield* outbox.cancelUnsettled({
-        threadId,
-        effectTypes: ["provider-turn.start"],
-        reason: "Fixture provider work finished.",
-      });
-    }),
-  );
+  const complete = (queued?: typeof run) =>
+    executor.withLock(
+      threadId,
+      Effect.gen(function* () {
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("original-completed"),
+              type: "run.updated",
+              threadId,
+              occurredAt: now,
+              payload: { ...running, status: "completed", completedAt: now },
+            },
+            // Retire the simulated Pause under the lock before the queue reacts to completion.
+            ...(queued === undefined
+              ? []
+              : [
+                  {
+                    id: EventId.make("pause-completed"),
+                    type: "run.updated" as const,
+                    threadId,
+                    occurredAt: now,
+                    payload: { ...queued, status: "completed" as const, completedAt: now },
+                  },
+                ]),
+          ],
+        });
+        // The harness does not execute the original provider start. Terminal
+        // projection alone must not conceal a still-pending provider message.
+        yield* outbox.cancelUnsettled({
+          threadId,
+          effectTypes: ["provider-turn.start"],
+          reason: "Fixture provider work finished.",
+        });
+      }),
+    );
   const send = (id: string, pauseOnlyIfActive = false) =>
     threads.sendToThread({
       projectId,
@@ -157,7 +170,7 @@ it.effect(
         Effect.forkChild,
       );
       yield* Deferred.await(entered);
-      yield* h.complete;
+      yield* h.complete();
       yield* h.outbox.enqueue([
         {
           id: "remaining-checkpoint",
@@ -202,20 +215,7 @@ it.effect("replays an admitted Pause after completion before applying the activi
     const h = yield* setup;
     const admitted = yield* h.send("accepted-pause", true);
     assert.strictEqual(admitted.delivery, "queued");
-    const queued = admitted.run;
-    const now = yield* DateTime.now;
-    yield* h.complete;
-    yield* h.sink.write({
-      events: [
-        {
-          id: EventId.make("pause-completed"),
-          type: "run.updated",
-          threadId: h.threadId,
-          occurredAt: now,
-          payload: { ...queued, status: "completed", completedAt: now },
-        },
-      ],
-    });
+    yield* h.complete(admitted.run);
     assert.isEmpty(yield* h.outbox.pendingExecution);
     const replayed = yield* h.orchestrator
       .dispatch({
@@ -238,7 +238,7 @@ it.effect("replays an admitted Pause after completion before applying the activi
 it.effect("admits Pause for pending provider work even when the shell has no active run", () =>
   Effect.gen(function* () {
     const h = yield* setup;
-    yield* h.complete;
+    yield* h.complete();
     yield* h.outbox.enqueue([
       {
         id: "pending-provider-message",
@@ -263,7 +263,7 @@ it.effect.each([
     const h = yield* setup;
     // Intake selected native steering while this run was running. Admission
     // must use the state under the dispatch lock, after the run changed.
-    yield* h.complete;
+    yield* h.complete();
     if (scenario.status === "waiting") {
       const now = yield* DateTime.now;
       yield* h.sink.write({
