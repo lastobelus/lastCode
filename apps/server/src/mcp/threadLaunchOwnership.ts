@@ -22,6 +22,21 @@ type LaunchRequest = PlacementRequest & {
 };
 type LaunchCaller = Pick<OrchestrationV2ThreadShell, "id" | "projectId" | "lineage">;
 
+export function resolveAgentCreator({
+  caller,
+  client,
+  environmentId,
+}: {
+  readonly caller: Pick<LaunchCaller, "id"> | undefined;
+  readonly client: Pick<McpClientCaller, "linked" | "senderThread"> | undefined;
+  readonly environmentId: EnvironmentId;
+}): ThreadOwner | undefined {
+  if (caller !== undefined) return { environmentId, threadId: caller.id };
+  const sender = client?.linked === true ? client.senderThread : undefined;
+  if (sender !== undefined)
+    return { environmentId: sender.environmentId, threadId: sender.threadId };
+}
+
 function launchCreatorOrigin(
   creator: ThreadOwner,
   topLevel: boolean | undefined,
@@ -80,7 +95,7 @@ export function resolveLaunchOwnership(
   )
     return { failure: topLevelPlacementFailure() } as const;
 
-  const creator = caller === undefined ? linkedCreator : { environmentId, threadId: caller.id };
+  const creator = resolveAgentCreator({ caller, client, environmentId });
   const creatorOrigin =
     creator === undefined || delegatedFrom !== undefined || request.remotePreparation !== undefined
       ? undefined

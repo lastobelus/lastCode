@@ -1,9 +1,6 @@
-import type { EnvironmentId, OrchestrationV2AppThread, ThreadId } from "@t3tools/contracts";
+import type { EnvironmentId, OrchestrationV2AppThread, ThreadOwner } from "@t3tools/contracts";
 
-export interface ThreadOwner {
-  readonly environmentId: EnvironmentId;
-  readonly threadId: ThreadId;
-}
+export type { ThreadOwner } from "@t3tools/contracts";
 
 export function getThreadOwner(
   thread: Pick<OrchestrationV2AppThread, "creatorOrigin" | "delegatedFrom" | "lineage">,

@@ -13271,5 +13271,10 @@
   "abac141768d80661": "Keep editing",
   "e58ace32da3bf425": "Discard changes",
   "fee4481c9d25af3b": "Insert a common prompt",
-  "d768d8734071c937": "Prompts"
+  "d768d8734071c937": "Prompts",
+  "0c5204be873f3a76": "Mostrar proyectos temporales",
+  "0e2e3bf285bfc97c": "Ocultar proyectos temporales",
+  "66dc3acf46bef713": "Conservar proyecto",
+  "35fa9b4a4dc657c7": "No se pudo conservar el proyecto",
+  "a7c92c59b409fa46": "Proyecto temporal"
 }

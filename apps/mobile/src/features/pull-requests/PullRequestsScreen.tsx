@@ -22,6 +22,7 @@ import { EmptyState } from "../../components/ui/EmptyState";
 import { NativePrimaryColumnContext } from "../../native/v5-workspace-context";
 import { useNativeColumnLayoutMetrics } from "../../native/native-layout-metrics";
 import { useWorkspaceState } from "../../state/workspace";
+import { useDiscoverableProjects } from "../../state/temporary-projects";
 import { useProjects } from "../../state/entities";
 import { environmentServerConfigsAtom } from "../../state/server";
 import { PullRequestListRow } from "./PullRequestListRow";
@@ -144,6 +145,7 @@ export function PullRequestsScreen(
     selectDetail({ name: "PullRequest", params });
   };
   const allProjects = useProjects();
+  const discoverable = useDiscoverableProjects(allProjects);
   const savedControls = listControls.controlsFor(environmentId);
   const controls = useMemo(
     () => withoutScratchProjectScope(savedControls, allProjects),
@@ -220,7 +222,7 @@ export function PullRequestsScreen(
   }
   const labelColors =
     knownFacets.environmentId === environmentId ? knownFacets.labelColors : facets.labelColors;
-  const projects = pullRequestProjectChoices(allProjects, {
+  const projects = pullRequestProjectChoices(discoverable, {
     environmentId,
     controls,
     environmentLabels: new Map(

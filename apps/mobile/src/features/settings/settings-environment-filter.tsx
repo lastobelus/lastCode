@@ -14,6 +14,7 @@ import {
 
 import type { MessageResolver } from "../../i18n/messages";
 import { useEnvironments, type EnvironmentPresentation } from "../../state/environments";
+import { useDiscoverableProjects } from "../../state/temporary-projects";
 import { useProjects } from "../../state/entities";
 import { useMobileProjectGroupingSettings } from "../../state/project-grouping";
 import { toggleSettingsEnvironment } from "./settings-environment-filter.logic";
@@ -125,6 +126,7 @@ export function useSettingsEnvironmentFilter() {
     selection;
   const { environments } = useEnvironments();
   const projects = useProjects();
+  const discoverable = useDiscoverableProjects(projects);
   const groupingSettings = useMobileProjectGroupingSettings();
   const groupingMode = groupingSettings.sidebarProjectGroupingMode;
   const messages = useMessages();
@@ -138,14 +140,15 @@ export function useSettingsEnvironmentFilter() {
       ),
     [availableTargets, selectedIds],
   );
+  const discoverableGroups = settingsProjectGroups(discoverable, groupingMode, messages, locale);
   const selectableProjectGroups = useMemo(
     () =>
-      projectGroups.filter((group) =>
+      discoverableGroups.filter((group) =>
         group.members.some((member) =>
           selectedTargets.some((target) => target.environmentId === member.project.environmentId),
         ),
       ),
-    [projectGroups, selectedTargets],
+    [discoverableGroups, selectedTargets],
   );
   return useMemo(
     () => ({

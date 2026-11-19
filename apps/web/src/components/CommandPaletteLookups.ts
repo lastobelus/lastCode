@@ -6,6 +6,7 @@ import {
 import { useGT } from "gt-react";
 
 import { isDesktopLocalConnectionTarget } from "../connection/desktopLocal";
+import { useDiscoverableProjects } from "../hooks/useDiscoverableProjects";
 import { useClientSettings } from "../hooks/useSettings";
 import { getProjectOrderKey } from "@t3tools/client-runtime/state/project-grouping";
 import { useProjects, useVisibleThreadShells } from "../state/entities";
@@ -60,7 +61,7 @@ export const selectCommandPaletteClientSettings = (settings: ClientSettings) => 
 });
 
 export function useSortedProjectGroups(environmentLabelById: ReadonlyMap<EnvironmentId, string>) {
-  const projects = useProjects();
+  const projects = useDiscoverableProjects();
   const threads = useVisibleThreadShells();
   const projectOrder = useUiStateStore((store) => store.projectOrder);
   const clientSettings = useClientSettings(selectCommandPaletteClientSettings);

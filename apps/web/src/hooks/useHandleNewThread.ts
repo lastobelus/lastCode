@@ -49,6 +49,7 @@ import { getClientSettings } from "./useSettings";
 import { getLocalStorageItem, useLocalStorage } from "./useLocalStorage";
 import * as Schema from "effect/Schema";
 import { useAtomValue } from "@effect/atom-react";
+import { discoverableProjects } from "@t3tools/client-runtime/state/temporary-projects";
 import { defaultProjectFallbackReadyAtom } from "../state/projects";
 import { readUnloadedThreadCount } from "../state/olderSettledShelf";
 import { resolveProjectDefaultProviderModelSelection } from "../providerInstances";
@@ -507,7 +508,8 @@ export function resolveDefaultProjectRef(
   lastUsedProjectKey: string | null,
   fallbackReady = true,
 ): ScopedProjectRef | null {
-  const lastUsed = projects.find(
+  const ordinaryProjects = discoverableProjects(projects, false);
+  const lastUsed = ordinaryProjects.find(
     (project) =>
       project.archivedAt == null &&
       scopedProjectKey(scopeProjectRef(project.environmentId, project.id)) === lastUsedProjectKey,
@@ -515,7 +517,7 @@ export function resolveDefaultProjectRef(
   if (lastUsed) return scopeProjectRef(lastUsed.environmentId, lastUsed.id);
   if (!fallbackReady) return null;
   const [defaultProject] = orderItemsByPreferredIds({
-    items: projects.filter((project) => project.archivedAt == null),
+    items: ordinaryProjects.filter((project) => project.archivedAt == null),
     preferredIds: projectOrder,
     getId: getProjectOrderKey,
     getPreferenceIds: (project) => [

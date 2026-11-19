@@ -1,5 +1,6 @@
 import { availableScratchWorkspaceRoot } from "@t3tools/client-runtime/operations/projects";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
+import { isTemporaryProject } from "@t3tools/client-runtime/state/temporary-projects";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import {
   type EnvironmentId,
@@ -12,8 +13,8 @@ import {
   deriveLogicalProjectKeyFromSettings,
   selectProjectGroupingSettings,
 } from "@t3tools/client-runtime/state/project-grouping";
-import { useProjects } from "../state/entities";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
+import { useDiscoverableProjects } from "./useDiscoverableProjects";
 import { useClientSettings } from "./useSettings";
 
 export function useLogicalProjectEnvironments(
@@ -21,7 +22,7 @@ export function useLogicalProjectEnvironments(
   scratchDraft: boolean,
 ): readonly EnvironmentOption[] {
   const { environments } = useEnvironments();
-  const allProjects = useProjects();
+  const discoverable = useDiscoverableProjects();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
 
@@ -51,7 +52,7 @@ export function useLogicalProjectEnvironments(
       const scratchProject =
         environment.environmentId === activeProject.environmentId
           ? activeProject
-          : allProjects.find(
+          : discoverable.find(
               (p) =>
                 p.environmentId === environment.environmentId && isScratchProject(p, scratchRoot),
             );
@@ -60,7 +61,12 @@ export function useLogicalProjectEnvironments(
   } else {
     const logicalKey = deriveLogicalProjectKeyFromSettings(activeProject, projectGroupingSettings);
     const seen = new Set<string>();
-    for (const p of allProjects) {
+    // A draft opened through a temporary project's thread still has its exact target.
+    if (isTemporaryProject(activeProject)) {
+      seen.add(activeProject.environmentId);
+      pushEnvironment(activeProject.environmentId, activeProject.id);
+    }
+    for (const p of discoverable) {
       if (seen.has(p.environmentId)) continue;
       if (deriveLogicalProjectKeyFromSettings(p, projectGroupingSettings) !== logicalKey) continue;
       seen.add(p.environmentId);

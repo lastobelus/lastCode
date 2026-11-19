@@ -38,6 +38,11 @@ import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { ProjectFavicon } from "../../components/ProjectFavicon";
 import { GlassSurface } from "../../components/ui/GlassSurface";
 import { RowPressable } from "../../components/ui/RowPressable";
+import {
+  useDiscoverableProjects,
+  useTemporaryProjectsMenuItem,
+} from "../../state/temporary-projects";
+import { Button } from "../../components/ui/Button";
 import { AppText as Text } from "../../components/ui/AppText";
 import { SymbolView, type AppSymbolName } from "../../components/ui/AppSymbol";
 import { cn } from "../../lib/cn";
@@ -233,6 +238,8 @@ export function CommandPalette(props: {
   const selectDetail = useSelectWorkspaceDetail();
   const runCommand = props.onCommand;
   const projects = useProjects();
+  const discoverable = useDiscoverableProjects(projects);
+  const temporaryProjectsToggle = useTemporaryProjectsMenuItem();
   const threads = useVisibleThreadShells();
   const delegatedUnderParent = useDelegatedUnderParent();
   const activeThreadRef = parseActiveThreadPath(props.pathname);
@@ -423,7 +430,7 @@ export function CommandPalette(props: {
         });
       }
     }
-    const openProjects = projects.filter((project) => project.archivedAt == null);
+    const openProjects = discoverable.filter((project) => project.archivedAt == null);
     const projectItems: CommandPaletteItem[] = [
       ...openProjects.filter((project) => project.pinnedAt != null),
       ...openProjects.filter((project) => project.pinnedAt == null),
@@ -502,6 +509,7 @@ export function CommandPalette(props: {
     canShareWithGuest,
     navigation,
     projects,
+    discoverable,
     runCommand,
     savedConnectionsById,
     selectDetail,
@@ -698,6 +706,13 @@ export function CommandPalette(props: {
                     }}
                   />
                 </View>
+                {temporaryProjectsToggle && !query.startsWith(">") ? (
+                  <Button
+                    label={temporaryProjectsToggle.title}
+                    tone="secondary"
+                    onPress={temporaryProjectsToggle.onPress}
+                  />
+                ) : null}
               </View>
               {/* oxlint-disable-next-line t3code/require-registered-list-scroll -- The palette is a modal with no navigation header to register with. */}
               <LegendList

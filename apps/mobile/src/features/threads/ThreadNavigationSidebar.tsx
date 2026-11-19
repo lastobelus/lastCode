@@ -25,6 +25,10 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AppText as Text } from "../../components/ui/AppText";
 import { Button } from "../../components/ui/Button";
 import { scopedProjectKey, scopedThreadKey } from "../../lib/scopedEntities";
+import {
+  useDiscoverableProjects,
+  useTemporaryProjectsMenuItem,
+} from "../../state/temporary-projects";
 import { useProjects } from "../../state/entities";
 import { steadyNavigationThreadShellsAtom } from "../../state/threads";
 import { useThreadSearch } from "../../state/queries";
@@ -130,6 +134,8 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
   const insets = useSafeAreaInsets();
   const { fabClearance, fabSize } = useAndroidControlSizing();
   const projects = useProjects();
+  const discoverable = useDiscoverableProjects(projects);
+  const temporaryProjectsToggle = useTemporaryProjectsMenuItem();
   const threads = useAtomValue(steadyNavigationThreadShellsAtom);
   const selectedThreadKey = useSidebarRowThreadKey(props.selectedThreadKey);
   const { environments: workspaceEnvironments, state: catalogState } = useWorkspaceState();
@@ -180,13 +186,13 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
     () =>
       buildHomeProjectScopes(
         {
-          projects,
+          projects: discoverable,
           environmentId: options.selectedEnvironmentId,
           projectGroupingMode: options.projectGroupingMode,
         },
         messages,
       ),
-    [projects, options.selectedEnvironmentId, options.projectGroupingMode, messages],
+    [discoverable, options.selectedEnvironmentId, options.projectGroupingMode, messages],
   );
   const projectFilterOptions = pickableProjectGroups(
     sortHomeProjectScopes({
@@ -553,6 +559,7 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
           {
             environments,
             projects: projectFilterOptions,
+            temporaryProjectsToggle,
             selectedEnvironmentId: options.selectedEnvironmentId,
             selectedProjectKey,
             onEnvironmentChange: setSelectedEnvironmentId,

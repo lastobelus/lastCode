@@ -4,6 +4,7 @@ import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { useMemo, useCallback, type Dispatch, type SetStateAction } from "react";
 
+import { isTemporaryProject } from "@t3tools/client-runtime/state/temporary-projects";
 import { useProjects, useServerConfigs, useThreadShell } from "../../state/entities";
 import { useEnvironmentQuery } from "../../state/query";
 import { threadFamilies } from "../../state/threads";
@@ -71,9 +72,12 @@ export function useScheduledTaskEditor() {
           ),
         ) ??
         environmentProjects.find(
-          (project) => project.pinnedAt != null && project.archivedAt == null,
+          (project) =>
+            project.pinnedAt != null && project.archivedAt == null && !isTemporaryProject(project),
         ) ??
-        environmentProjects.find((project) => project.archivedAt == null);
+        environmentProjects.find(
+          (project) => project.archivedAt == null && !isTemporaryProject(project),
+        );
       return createDraft(
         project?.id ?? null,
         scheduledTaskDefaultModel(configs.get(environmentId) ?? null, project ?? null),

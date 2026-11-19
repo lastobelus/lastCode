@@ -56,6 +56,10 @@ import {
 } from "../../lib/layout";
 import type { ThreadListFilters } from "../../persistence/mobile-preferences";
 import { appAtomRegistry } from "../../state/atom-registry";
+import {
+  discoverableProjects,
+  showTemporaryProjectsAtom,
+} from "@t3tools/client-runtime/state/temporary-projects";
 import { useProjects } from "../../state/entities";
 import { environmentThreadShells } from "../../state/threads";
 import { withKnownPullRequestSummary } from "../../state/use-thread-pr";
@@ -619,7 +623,11 @@ function AdaptiveWorkspaceLayoutContent(
         ? listFilters.environmentId
         : null;
     const filteredScope = resolveHomeProjectFilterScope(
-      buildHomeProjectScopes({ projects, environmentId: listEnvironmentId, projectGroupingMode }),
+      buildHomeProjectScopes({
+        projects: discoverableProjects(projects, appAtomRegistry.get(showTemporaryProjectsAtom)),
+        environmentId: listEnvironmentId,
+        projectGroupingMode,
+      }),
       projects,
       { selectedProjectKey: listFilters?.projectKey ?? null, projectGroupingMode },
     );

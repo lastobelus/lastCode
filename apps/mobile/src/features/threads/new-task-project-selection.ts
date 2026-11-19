@@ -1,3 +1,4 @@
+import { isTemporaryProject } from "@t3tools/client-runtime/state/temporary-projects";
 import type { EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
 import { availableScratchWorkspaceRoot } from "@t3tools/client-runtime/operations/projects";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
@@ -165,13 +166,16 @@ export function resolveDraftProjectSelection(
           (project) =>
             project.environmentId === draft.lastProject?.environmentId &&
             project.id === draft.lastProject.projectId &&
-            project.archivedAt == null,
+            project.archivedAt == null &&
+            !isTemporaryProject(project),
         );
   if (last) {
     return { kind: "select", project: last };
   }
   const onlyScope = projectScopes.length === 1 ? projectScopes[0] : null;
-  return onlyScope ? { kind: "select", project: onlyScope.representative } : { kind: "pick" };
+  return onlyScope && !isTemporaryProject(onlyScope.representative)
+    ? { kind: "select", project: onlyScope.representative }
+    : { kind: "pick" };
 }
 
 type ProjectRef = { readonly environmentId: string; readonly projectId: string };
@@ -219,7 +223,7 @@ export function newTaskDestination(options: {
       ? undefined
       : (find(options.currentProject) ??
         find(options.filteredProject) ??
-        (last?.archivedAt == null ? last : undefined));
+        (last && last.archivedAt == null && !isTemporaryProject(last) ? last : undefined));
   return project
     ? {
         draft: {

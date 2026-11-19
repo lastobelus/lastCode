@@ -35,6 +35,7 @@ export function buildHomeListFilterMenuItems(
   props: {
     readonly environments: ReadonlyArray<HomeListFilterMenuEnvironment>;
     readonly projects: ReadonlyArray<HomeListFilterMenuProject>;
+    readonly temporaryProjectsToggle?: AppBarMenuItem | null;
     readonly selectedEnvironmentId: EnvironmentId | null;
     readonly selectedProjectKey: string | null;
     readonly onEnvironmentChange: (environmentId: EnvironmentId | null) => void;
@@ -64,7 +65,7 @@ export function buildHomeListFilterMenuItems(
     },
   ];
 
-  if (props.projects.length > 0) {
+  if (props.projects.length > 0 || props.temporaryProjectsToggle) {
     items.push({
       id: "project",
       title: resolve(msg("Project", { $context: "filter menu heading" })),
@@ -76,6 +77,7 @@ export function buildHomeListFilterMenuItems(
           selected: props.selectedProjectKey === null,
           onPress: () => props.onProjectChange(null),
         },
+        ...(props.temporaryProjectsToggle ? [props.temporaryProjectsToggle] : []),
         ...props.projects.map((project) => ({
           id: `project:${project.key}`,
           title: project.label,

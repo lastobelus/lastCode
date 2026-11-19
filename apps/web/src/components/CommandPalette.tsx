@@ -135,6 +135,8 @@ import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 import { useScratchProject } from "../hooks/useScratchProject";
 import { useStartTriage } from "../hooks/useStartTriage";
 import { pickTriageEnvironment } from "../lib/triageTarget";
+import { TemporaryProjectsToggle } from "./TemporaryProjectsToggle";
+import { useSettingsProjectGroups } from "./settings/useSettingsProjectGroups";
 import { useNewProject } from "../hooks/useNewProject";
 import { useOrderWhileOpen } from "../hooks/useOrderWhileOpen";
 import { reportProjectFailure, useProjectPin } from "../hooks/useProjectGroupUpdate";
@@ -584,6 +586,7 @@ function OpenCommandPaletteDialog(props: {
   const [isRemoteProjectCloning, setIsRemoteProjectCloning] = useState(false);
   const { environmentLabelById, projectEnvironmentLocationById } = useEnvironmentLookups();
   const projectGroups = useSortedProjectGroups(environmentLabelById);
+  const allProjectGroups = useSettingsProjectGroups();
   const contextualProjectRef = resolveThreadActionProjectRef({
     activeDraftThread,
     activeThread: activeThread ?? undefined,
@@ -1879,7 +1882,7 @@ function OpenCommandPaletteDialog(props: {
   // Every group, so an archived project's thread still opens its own settings.
   const currentProjectGroup =
     (contextualProjectRef
-      ? projectGroups.find((group) =>
+      ? allProjectGroups.find((group) =>
           group.memberProjectRefs.some(
             (ref) =>
               ref.environmentId === contextualProjectRef.environmentId &&
@@ -3182,7 +3185,17 @@ function OpenCommandPaletteDialog(props: {
       aria-label={gt("Command palette")}
       autoHighlight={autoHighlightsFirstRow ? "always" : false}
       footerActionLabel={footerActionLabel}
-      footerTrailing={footerTrailing}
+      footerTrailing={
+        (currentView === null && !isActionsOnly) ||
+        currentView?.groups[0]?.value === NEW_THREAD_IN_GROUP ? (
+          <div className="flex items-center gap-2">
+            <TemporaryProjectsToggle />
+            {footerTrailing}
+          </div>
+        ) : (
+          footerTrailing
+        )
+      }
       inputAccessory={inputAccessory}
       inputProps={{
         className: hasHighlightedNewProjectItem

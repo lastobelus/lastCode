@@ -5585,5 +5585,10 @@
   "8afa8cbe18948320": "Enter 1 to 3650 days, then tap Save.",
   "c9b2723ade9155f6": "Save dependency retention days",
   "f3287c4ed3bdb117": "Save",
-  "45d8a48a56da69a3": "Filter settings environments"
+  "45d8a48a56da69a3": "Filter settings environments",
+  "0c5204be873f3a76": "Temporäre Projekte anzeigen",
+  "0e2e3bf285bfc97c": "Temporäre Projekte ausblenden",
+  "66dc3acf46bef713": "Projekt behalten",
+  "35fa9b4a4dc657c7": "Projekt konnte nicht beibehalten werden",
+  "f8228a0b231333da": "Temporäre Projekte"
 }

@@ -1,10 +1,10 @@
 import { useClientSettings } from "../../hooks/useSettings";
 import { buildSidebarProjectSnapshots } from "../../sidebarProjectGrouping";
 import { useEnvironments, usePrimaryEnvironmentId } from "../../state/environments";
-import { useProjects } from "../../state/entities";
+import { useDiscoverableProjects } from "../../hooks/useDiscoverableProjects";
 
-export function useSettingsProjectGroups() {
-  const projects = useProjects();
+export function useSettingsProjectGroups({ discovery = false } = {}) {
+  const projects = useDiscoverableProjects({ showAll: !discovery });
   // Avoid object selector identities that rebuild groups and every settings row on each write.
   const sidebarProjectGroupingMode = useClientSettings(
     (settings) => settings.sidebarProjectGroupingMode,

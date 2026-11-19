@@ -1,3 +1,4 @@
+import { useTemporaryProjectsMenuItem } from "../../state/temporary-projects";
 import { useGT } from "gt-react-native";
 import { Pressable, ScrollView } from "react-native";
 import { SymbolView } from "../../components/ui/AppSymbol";
@@ -19,6 +20,7 @@ export function ThreadListFilters(props: {
   readonly gutter: number;
 }) {
   const gt = useGT();
+  const temporaryProjectsToggle = useTemporaryProjectsMenuItem();
   const selectedEnvironment = props.environments.find(
     (environment) => environment.environmentId === props.selectedEnvironmentId,
   );
@@ -71,6 +73,9 @@ export function ThreadListFilters(props: {
             title: gt("All projects"),
             state: props.selectedProjectKey === null ? "on" : "off",
           },
+          ...(temporaryProjectsToggle
+            ? [{ id: temporaryProjectsToggle.id, title: temporaryProjectsToggle.title }]
+            : []),
           ...props.projects.map((project) => ({
             id: JSON.stringify(project.key),
             title: project.label,
@@ -78,7 +83,8 @@ export function ThreadListFilters(props: {
           })),
         ]}
         onSelect={(id) => {
-          if (id === "all") props.onProjectChange(null);
+          if (id === temporaryProjectsToggle?.id) temporaryProjectsToggle.onPress();
+          else if (id === "all") props.onProjectChange(null);
           else {
             const project = props.projects.find(
               (candidate) => JSON.stringify(candidate.key) === id,

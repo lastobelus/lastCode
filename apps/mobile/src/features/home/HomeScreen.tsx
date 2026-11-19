@@ -51,6 +51,7 @@ import { EmptyState } from "../../components/ui/EmptyState";
 import { FloatingActionButton } from "../../components/ui/FloatingActionButton";
 import type { WorkspaceEnvironment, WorkspaceState } from "../../state/workspaceModel";
 import type { SavedRemoteConnection } from "../../lib/connection";
+import { useDiscoverableProjects } from "../../state/temporary-projects";
 import { scopedProjectKey, scopedThreadKey } from "../../lib/scopedEntities";
 import { NativePrimaryColumnContext } from "../../native/v5-workspace-context";
 import { nativeHeaderScrollEdgeEffects } from "../../native/scrollEdgeEffects";
@@ -323,17 +324,18 @@ export function HomeScreen(props: HomeScreenProps) {
   });
 
   const { projects, selectedEnvironmentId, projectGroupingMode } = props;
+  const discoverable = useDiscoverableProjects(projects);
   const projectScopes = useMemo(
     () =>
       buildHomeProjectScopes(
         {
-          projects,
+          projects: discoverable,
           environmentId: selectedEnvironmentId,
           projectGroupingMode,
         },
         m,
       ),
-    [projects, selectedEnvironmentId, projectGroupingMode, m],
+    [discoverable, selectedEnvironmentId, projectGroupingMode, m],
   );
   const hasSearchQuery = props.searchQuery.trim().length > 0;
   const projectByKey = (() => {

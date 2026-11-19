@@ -295,6 +295,22 @@ describe("newTaskDestination", () => {
     });
   });
 
+  it("opens the picker for a remembered temporary project and honors the current thread's project", () => {
+    const temporary = { ...makeProject("temporary"), temporary: true };
+    expect(
+      destination({
+        useLastProject: true,
+        projects: [temporary],
+        last: { environmentId: "environment", projectId: "temporary" },
+      }),
+    ).toEqual(picker);
+    expect(
+      destination({ useLastProject: true, projects: [temporary], current: temporary }),
+    ).toEqual({
+      draft: { requestId: "request", environmentId: "environment", projectId: "temporary" },
+    });
+  });
+
   it("treats an unset preference as on", () => {
     const projects = [makeProject("first"), makeProject("current")];
     expect(destination({ useLastProject: undefined, projects, current: projects[1] })).toEqual({

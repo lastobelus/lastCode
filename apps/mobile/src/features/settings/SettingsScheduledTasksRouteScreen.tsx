@@ -64,6 +64,10 @@ import { tryCopyTextWithHaptic } from "../../lib/copyTextWithHaptic";
 import { usePreparedConnection } from "../../state/session";
 import { buildModelOptions } from "../../lib/modelOptions";
 import { withImplicitFastModeSelection } from "../../lib/providerOptions";
+import {
+  isTemporaryProject,
+  showTemporaryProjectsAtom,
+} from "@t3tools/client-runtime/state/temporary-projects";
 import { useProjects, useEnvironmentServerConfig } from "../../state/entities";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
@@ -728,12 +732,13 @@ function TaskForm({
   const tasks = useEnvironmentQuery(
     serverEnvironment.scheduledTasksLive({ environmentId, input: {} }),
   );
-  // Pinned first. The chosen project stays listed after it is archived.
+  // Pinned first. An existing destination remains selectable.
+  const showTemporary = useAtomValue(showTemporaryProjectsAtom);
   const projects = useProjects()
     .filter(
       (project) =>
         project.environmentId === environmentId &&
-        (project.archivedAt == null ||
+        ((project.archivedAt == null && (showTemporary || !isTemporaryProject(project))) ||
           project.id === draft.projectId ||
           project.id === draft.task?.projectId),
     )
