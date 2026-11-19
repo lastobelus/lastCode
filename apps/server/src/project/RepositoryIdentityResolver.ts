@@ -62,12 +62,7 @@ function parseRemoteFetchUrls(stdout: string): Map<string, string> {
     const match = /^(\S+)\t(.+) \((fetch|push)\)(?:\s+\[[^\]]+\])?$/.exec(line);
     if (!match) continue;
     const [, remoteName = "", remoteUrl = "", direction = ""] = match;
-    if (
-      direction !== "fetch" ||
-      remoteName.length === 0 ||
-      remoteUrl.length === 0 ||
-      isLocalRemoteUrl(remoteUrl)
-    ) {
+    if (direction !== "fetch" || remoteName.length === 0 || remoteUrl.length === 0) {
       continue;
     }
     remotes.set(remoteName, remoteUrl);
@@ -350,7 +345,8 @@ const resolveRepositoryIdentityFromCacheKey = Effect.fn(
     return null;
   }
 
-  const remotes = parseRemoteFetchUrls(remoteResult.value.stdout);
+  const fetchRemotes = parseRemoteFetchUrls(remoteResult.value.stdout);
+  const remotes = new Map([...fetchRemotes].filter(([, url]) => !isLocalRemoteUrl(url)));
   // Exits 1 when no remote has a mark.
   const resolved =
     resolvedResult._tag === "Some" && resolvedResult.value.code === 0
@@ -364,13 +360,16 @@ const resolveRepositoryIdentityFromCacheKey = Effect.fn(
     originUrl === undefined || originUrl === remote.remoteUrl
       ? keyUrl
       : yield* sshResolvedRemoteUrl(originUrl);
-  return buildRepositoryIdentity({
+  const identity = buildRepositoryIdentity({
     ...remote,
     keyUrl,
     originUrl,
     originKeyUrl,
     rootPath: cacheKey.rootPath,
   });
+  return originUrl === undefined && fetchRemotes.has("origin")
+    ? { ...identity, originIsLocal: true as const }
+    : identity;
 });
 
 export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (

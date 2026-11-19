@@ -1,12 +1,16 @@
 import { describe, expect, it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { IssueTrackerKind, ProjectId, SourceControlProviderKind } from "@t3tools/contracts";
 import type { OrchestrationProjectShell, RepositoryIdentity } from "@t3tools/contracts";
 import { IssueTrackerError } from "@t3tools/source-control-core/server/IssueTracker";
 import type { IssueTrackerApi } from "@t3tools/source-control-core/server/IssueTracker";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 
 import * as IssueTrackerBindings from "../persistence/IssueTrackerBindings.ts";
+import * as ProcessRunner from "../processRunner.ts";
+import * as LastCodeRepositoryIdentityResolver from "../project/LastCodeRepositoryIdentityResolver.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as IssueService from "./IssueService.ts";
@@ -94,6 +98,47 @@ function makeService(identity: RepositoryIdentity, api = tracker()) {
 const createInput = { title: "A fixture issue", body: "", labels: [], assignees: [] };
 
 describe("LastCode issue repositories", () => {
+  it.live("refuses to file on hosted upstream when origin is a local path", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const runner = yield* ProcessRunner.ProcessRunner;
+      const cwd = yield* fileSystem.makeTempDirectoryScoped();
+      const git = (args: ReadonlyArray<string>) =>
+        runner.run({ command: "git", args: ["-C", cwd, ...args] });
+      const origin = `${cwd}/local-fork.git`;
+
+      yield* git(["init"]);
+      yield* git(["remote", "add", "upstream", "https://github.com/upstream/repo.git"]);
+      yield* git(["remote", "add", "origin", origin]);
+      const resolver = yield* LastCodeRepositoryIdentityResolver.make({});
+
+      for (const remoteUrl of [origin, `file://${origin}`]) {
+        yield* git(["remote", "set-url", "origin", remoteUrl]);
+        const identity = yield* resolver.resolve(cwd, { refresh: true });
+        expect(identity).toMatchObject({ canonicalKey: "github.com/upstream/repo" });
+        expect(JSON.stringify(identity)).not.toContain("local-fork.git");
+        const service = yield* makeService(
+          identity!,
+          tracker({
+            create: () => Effect.die("Unexpected write to the parent tracker"),
+          }),
+        );
+        expect((yield* service.list({ projectId, state: "open" })).scopes).toEqual([]);
+        expect(
+          yield* Effect.flip(
+            service.create({
+              projectId,
+              tracker: github,
+              host: "github.com",
+              scope: "upstream/repo",
+              ...createInput,
+            }),
+          ),
+        ).toMatchObject({ reason: "tracker-unsupported" });
+      }
+    }).pipe(Effect.provide(ProcessRunner.layer.pipe(Layer.provideMerge(NodeServices.layer)))),
+  );
+
   it.effect("uses the fork for project scope, lists, and writable issue URLs", () =>
     Effect.gen(function* () {
       const listed: string[] = [];

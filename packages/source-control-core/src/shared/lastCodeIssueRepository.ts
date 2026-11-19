@@ -16,6 +16,7 @@ export function selectLastCodeIssueRepository(
   identity: RepositoryIdentity | null,
   definitions: SourceControlDefinitionRegistry,
 ): RepositoryIdentity | null {
+  if (identity?.originIsLocal) return null;
   if (identity === null || identity.origin === undefined) return identity;
   const { origin } = identity;
   // Issue references cannot safely distinguish two endpoints with the same repository key.
