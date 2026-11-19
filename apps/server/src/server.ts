@@ -63,7 +63,7 @@ import { speechHttpApiLayer } from "./speech/http.ts";
 import { speechStreamRouteLayer } from "./speech/stream.ts";
 import * as PullRequestProviderRegistry from "./pullRequest/PullRequestProviderRegistry.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
-import * as IssueService from "./issue/IssueService.ts";
+import { layer as issueServiceLayer } from "./issue/LastCodeIssueService.ts";
 import * as IssueTrackerConnections from "./issue/IssueTrackerConnections.ts";
 import * as IssueTrackerBindings from "./persistence/IssueTrackerBindings.ts";
 import * as IssueTrackerRegistry from "./issue/IssueTrackerRegistry.ts";
@@ -149,6 +149,7 @@ import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
 import * as T3ProjectFileLoader from "./project/T3ProjectFileLoader.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
+import * as LastCodeRepositoryIdentityResolver from "./project/LastCodeRepositoryIdentityResolver.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as KnownWorkspaces from "./workspace/KnownWorkspaces.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
@@ -437,7 +438,7 @@ const layerRepositoryIdentityResolver = Layer.effect(
   RepositoryIdentityResolver.RepositoryIdentityResolver,
   Effect.gen(function* () {
     const registry = yield* SourceControlProviderRegistry.SourceControlProviderRegistry;
-    return yield* RepositoryIdentityResolver.make({
+    return yield* LastCodeRepositoryIdentityResolver.make({
       refine: Effect.fn(function* (identity: RepositoryIdentity) {
         for (const { kind } of BUILT_IN_SOURCE_CONTROL_DRIVER_LIST) {
           const provider = yield* registry.get(kind);
@@ -465,7 +466,7 @@ const layerPullRequestService = PullRequestService.layer.pipe(
 
 // Both read the one registry, so a standalone tracker connected in Settings is the same
 // instance the listing reads through.
-const layerIssueService = Layer.merge(IssueService.layer, IssueTrackerConnections.layer).pipe(
+const layerIssueService = Layer.merge(issueServiceLayer, IssueTrackerConnections.layer).pipe(
   Layer.provide(Layer.merge(IssueTrackerRegistry.layer, IssueTrackerBindings.layer)),
 );
 

@@ -7,9 +7,9 @@ import type {
   IssueListSort,
   IssueScopeRef,
   IssueTrackerSummary,
-  SourceControlProviderKind,
   ProjectId,
 } from "@t3tools/contracts";
+import { selectLastCodeIssueRepository } from "@t3tools/source-control-core/shared/definition";
 
 import { mergeIssueListPage } from "./state/issues.ts";
 import { sourceControlClients } from "./sourceControlClients.ts";
@@ -148,10 +148,12 @@ export function groupIssues(
       const project = projects.find(
         (p) => p.environmentId === environmentId && p.id === error.projectId,
       );
-      const kind = project?.repositoryIdentity?.provider as SourceControlProviderKind | undefined;
-      const host = kind
-        ? sourceControlClients.changeRequestHost(project?.repositoryIdentity, kind)
-        : null;
+      const identity = selectLastCodeIssueRepository(
+        project?.repositoryIdentity ?? null,
+        sourceControlClients,
+      );
+      const kind = identity?.provider;
+      const host = kind ? sourceControlClients.changeRequestHost(identity, kind) : null;
       const group =
         (host ? byTracker.get(`${kind} ${host.toLowerCase()}`) : undefined) ??
         [...byTracker.values()][0];
@@ -177,8 +179,11 @@ export function issueFilterScopes(
     for (const project of projects) {
       if (selectedProject && selectedProject.projectId !== project.id) continue;
       if (project.environmentId !== environmentId) continue;
-      const identity = project.repositoryIdentity;
-      const kind = identity?.provider as SourceControlProviderKind | undefined;
+      const identity = selectLastCodeIssueRepository(
+        project.repositoryIdentity ?? null,
+        sourceControlClients,
+      );
+      const kind = identity?.provider;
       const scope = sourceControlClients.issueScope(identity);
       if (!identity || !kind || scope === null) continue;
       const host = sourceControlClients.changeRequestHost(identity, kind);

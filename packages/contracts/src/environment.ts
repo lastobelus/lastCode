@@ -284,6 +284,8 @@ export const RepositoryOrigin = Schema.Struct({
   canonicalKey: TrimmedNonEmptyString,
   remoteUrl: Schema.optionalKey(TrimmedNonEmptyString),
   displayName: Schema.optionalKey(TrimmedNonEmptyString),
+  provider: Schema.optionalKey(SourceControlProviderKind),
+  webUrl: Schema.optionalKey(TrimmedNonEmptyString),
 });
 export type RepositoryOrigin = typeof RepositoryOrigin.Type;
 
@@ -298,6 +300,8 @@ export const RepositoryIdentity = Schema.Struct({
   owner: Schema.optionalKey(TrimmedNonEmptyString),
   name: Schema.optionalKey(TrimmedNonEmptyString),
   origin: Schema.optionalKey(RepositoryOrigin),
+  /** A configured origin points to a local repository. Its path stays on the server. */
+  originIsLocal: Schema.optionalKey(Schema.Literal(true)),
 });
 export type RepositoryIdentity = typeof RepositoryIdentity.Type;
 

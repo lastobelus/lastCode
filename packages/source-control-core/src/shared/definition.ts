@@ -19,6 +19,11 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 
+export {
+  hasDistinctLastCodeWebOrigins,
+  selectLastCodeIssueRepository,
+} from "./lastCodeIssueRepository.ts";
+
 /**
  * The two strings are what `changeRequestHost` and the project's `repositoryIdentity` produce
  * from a git remote — lower case, no port, the full path below the host — because links are
