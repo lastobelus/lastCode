@@ -25,7 +25,7 @@ const delegatedFrom = { environmentId: remote, threadId: creator, title: "Creato
 
 describe("getThreadOwner", () => {
   it("keeps launch provenance readable by the historical origin schema", () => {
-    const decoded = Schema.decodeUnknownSync(HistoricalThreadCreatorOrigin)(
+    const decoded = Schema.decodeSync(HistoricalThreadCreatorOrigin)(
       ownedLaunch.creatorOrigin,
     );
     expect(decoded).toEqual(origin);
