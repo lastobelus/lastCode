@@ -73,6 +73,8 @@ asks for an upstream contribution; never pause to ask whether to go upstream.
    unless its brief says it owns its Actions;
    see [Parent-mediated Actions](../../../docs/internals/resumable-project-actions-setup.md#parent-mediated-actions-for-delegated-children).
 5. Open a PR targeting `lastcode/main` only when the user explicitly asks.
+   Before it goes up for review, follow the global `review-loop` skill's rule
+   for requested PRs, even when the user named no review.
 
 For an explicitly requested stack, a child may instead branch from and target
 its same-repository parent PR, whose chain must lead to `lastcode/main`. Follow
