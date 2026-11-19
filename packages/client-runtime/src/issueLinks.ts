@@ -2,16 +2,14 @@ import {
   IssueTrackerKind,
   type IssueRef,
   type IssueTrackerConnectionList,
+  type SourceControlProviderKind,
 } from "@t3tools/contracts";
 import {
   LINEAR_HOST,
   LINEAR_KIND,
   parseLinearIssueUrl,
 } from "@t3tools/issue-tracker-linear/shared/issueUrl";
-import {
-  issueRepositoryAddress,
-  selectLastCodeIssueRepository,
-} from "@t3tools/source-control-core/shared/definition";
+import { selectLastCodeIssueRepository } from "@t3tools/source-control-core/shared/definition";
 
 import { sourceControlClients } from "./sourceControlClients.ts";
 import type { EnvironmentProject } from "./state/shell.ts";
@@ -19,30 +17,45 @@ import type { EnvironmentProject } from "./state/shell.ts";
 type LinkProject = Pick<EnvironmentProject, "id" | "environmentId" | "repositoryIdentity">;
 
 /** The host and scope a project's git-host tracker is bound to, the way the server resolves it. */
-function projectIssueBinding(project: LinkProject) {
+function projectIssueBinding(project: LinkProject): {
+  readonly tracker: SourceControlProviderKind;
+  readonly host: string;
+  readonly scope: string;
+} | null {
   const identity = selectLastCodeIssueRepository(
     project.repositoryIdentity ?? null,
     sourceControlClients,
   );
-  const address = issueRepositoryAddress(identity, sourceControlClients);
-  return address === null ? null : { ...address, scope: address.scope.toLowerCase() };
+  const scope = sourceControlClients.issueScope(identity);
+  const kind = identity?.provider;
+  if (!identity || kind === undefined || kind === "unknown" || scope === null) return null;
+  return {
+    tracker: kind,
+    host: sourceControlClients.changeRequestHost(identity, kind),
+    scope: scope.toLowerCase(),
+  };
 }
 
-function linkOrigin(url: string): string | null {
+function linkAuthority(url: string): string | null {
   try {
-    return new URL(url).origin;
+    return new URL(url).host.toLowerCase();
   } catch {
     return null;
   }
 }
 
 /** A host whose hostname does not name it, such as GitHub Enterprise Server, is vouched for by a project on it. */
-function parseIssueLink(url: string, origin: string | null, projects: ReadonlyArray<LinkProject>) {
+function parseIssueLink(
+  url: string,
+  authority: string | null,
+  projects: ReadonlyArray<LinkProject>,
+) {
   const parsed = sourceControlClients.parseIssueUrl(url);
-  if (parsed !== null || origin === null) return parsed;
+  if (parsed !== null || authority === null) return parsed;
+  const hostname = new URL(url).hostname.toLowerCase();
   for (const project of projects) {
     const binding = projectIssueBinding(project);
-    if (binding === null || binding.webOrigin !== origin) continue;
+    if (binding === null || (binding.host !== hostname && binding.host !== authority)) continue;
     const known = sourceControlClients.parseIssueUrl(url, binding.tracker);
     if (known !== null) return known;
   }
@@ -125,8 +138,9 @@ export function resolveIssueLinkTarget<Project extends LinkProject>(input: {
   /** The environment's standalone trackers and bindings; without them only git-host links resolve. */
   readonly trackers?: IssueTrackerConnectionList | undefined;
 }): { readonly project: Project; readonly ref: IssueRef } | null {
-  const origin = linkOrigin(input.url);
-  const parsed = parseIssueLink(input.url, origin, input.projects);
+  // A link names its server's port; a binding does only when its remote or web URL did.
+  const authority = linkAuthority(input.url);
+  const parsed = parseIssueLink(input.url, authority, input.projects);
   if (parsed === null)
     return resolveStandaloneIssueLink(
       input.url,
@@ -135,12 +149,16 @@ export function resolveIssueLinkTarget<Project extends LinkProject>(input: {
       input.preferredProjectId,
     );
   const { definition, link } = parsed;
-  const bound = input.projects.flatMap((project) => {
+  const onHost = input.projects.flatMap((project) => {
     const binding = projectIssueBinding(project);
-    return binding === null || binding.tracker !== definition.kind || binding.webOrigin !== origin
+    return binding === null ||
+      binding.tracker !== definition.kind ||
+      (binding.host !== link.host && binding.host !== authority)
       ? []
       : [{ project, binding }];
   });
+  const onAuthority = onHost.filter((candidate) => candidate.binding.host === authority);
+  const bound = onAuthority.length > 0 ? onAuthority : onHost;
   const preferFirst = (candidates: typeof bound) =>
     candidates.find((candidate) => candidate.project.id === input.preferredProjectId) ??
     candidates[0];

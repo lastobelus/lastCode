@@ -1,6 +1,6 @@
 import type { RepositoryIdentity, SourceControlProviderError } from "@t3tools/contracts";
 import {
-  isSameLastCodeRepositoryOrigin,
+  hasDistinctLastCodeWebOrigins,
   parseGitRemoteHost,
 } from "@t3tools/source-control-core/shared/definition";
 import { repositoryPathFromRemoteUrl } from "@t3tools/source-control-core/server/SourceControlProvider";
@@ -189,7 +189,7 @@ function buildRepositoryOrigin(
 ): RepositoryIdentity["origin"] {
   if (!originUrl) return undefined;
   const originKey = sourceControlDefinitions.repositoryKeyFromRemote(originKeyUrl ?? originUrl);
-  if (isSameLastCodeRepositoryOrigin(canonicalKey, originKey, remoteUrl, originUrl))
+  if (originKey === canonicalKey && !hasDistinctLastCodeWebOrigins(remoteUrl, originUrl))
     return undefined;
   const displayName = repositoryPathOf(originKey, originUrl);
   return { canonicalKey: originKey, remoteUrl: originUrl, ...(displayName ? { displayName } : {}) };

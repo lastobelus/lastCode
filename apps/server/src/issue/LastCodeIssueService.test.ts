@@ -97,9 +97,19 @@ describe("LastCode issue repositories", () => {
   it.effect("uses the fork for project scope, lists, and writable issue URLs", () =>
     Effect.gen(function* () {
       const listed: string[] = [];
+      const writes: string[] = [];
       const service = yield* makeService(
         projectIdentity,
         tracker({
+          create: (input) =>
+            Effect.sync(() => {
+              writes.push(`create ${input.scope}`);
+              return { key: "1", url: "https://github.com/fork/Repo/issues/1", displayKey: "#1" };
+            }),
+          comment: (input) =>
+            Effect.sync(() => {
+              writes.push(`comment ${input.scope}`);
+            }),
           listIssues: (input) =>
             Effect.sync(() => {
               listed.push(input.scope);
@@ -107,7 +117,8 @@ describe("LastCode issue repositories", () => {
             }),
         }),
       );
-      expect(yield* service.projectScope(projectId)).toEqual({
+      const target = yield* service.projectScope(projectId);
+      expect(target).toEqual({
         projectId,
         tracker: github,
         host: "github.com",
@@ -118,6 +129,8 @@ describe("LastCode issue repositories", () => {
       expect(
         yield* service.resolveUrl("https://github.com/fork/Repo/issues/1", projectId),
       ).toMatchObject({ scope: "fork/Repo", writable: true });
+      const created = yield* service.create({ ...target, ...createInput });
+      yield* service.comment({ ...target, key: created.key, body: "A fixture comment" });
 
       const parent = yield* service.resolveUrl(
         "https://github.com/upstream/repo/issues/1",
@@ -132,6 +145,36 @@ describe("LastCode issue repositories", () => {
         expect(yield* Effect.flip(write.pipe(Effect.asVoid))).toMatchObject({
           reason: "read-only",
         });
+      }
+      expect(writes).toEqual(["create fork/Repo", "comment fork/Repo"]);
+    }),
+  );
+
+  it.effect("refuses upstream writes when the origin is unknown or ambiguous", () =>
+    Effect.gen(function* () {
+      for (const origin of [
+        {
+          canonicalKey: "code.example.test/fork/repo",
+          remoteUrl: "https://code.example.test/fork/repo.git",
+        },
+        {
+          canonicalKey: projectIdentity.canonicalKey,
+          remoteUrl: "https://github.com:8443/upstream/repo.git",
+        },
+      ]) {
+        const service = yield* makeService({ ...projectIdentity, origin });
+        expect((yield* service.list({ projectId, state: "open" })).scopes).toEqual([]);
+        expect(
+          yield* Effect.flip(
+            service.create({
+              projectId,
+              tracker: github,
+              host: "github.com",
+              scope: "upstream/repo",
+              ...createInput,
+            }),
+          ),
+        ).toMatchObject({ reason: "tracker-unsupported" });
       }
     }),
   );
@@ -207,26 +250,6 @@ describe("LastCode issue repositories", () => {
     }),
   );
 
-  it.effect("keeps an explicit origin port for a forge whose host comes from the key", () =>
-    Effect.gen(function* () {
-      const canonicalKey = "code.example.test/team/repo";
-      const service = yield* makeService({
-        ...projectIdentity,
-        canonicalKey,
-        locator: { ...projectIdentity.locator, remoteUrl: `https://${canonicalKey}.git` },
-        origin: {
-          canonicalKey,
-          remoteUrl: "https://code.example.test:8443/team/repo.git",
-          provider: SourceControlProviderKind.make("github"),
-        },
-      });
-      expect(yield* service.projectScope(projectId)).toMatchObject({
-        host: "code.example.test:8443",
-        scope: "team/repo",
-      });
-    }),
-  );
-
   it.effect("addresses SSH forks on their web host, including existing parent links", () =>
     Effect.gen(function* () {
       const forgejo = IssueTrackerKind.make("forgejo");
@@ -234,7 +257,7 @@ describe("LastCode issue repositories", () => {
         canonicalKey: "fork-ssh/fork/repo",
         remoteUrl: "git@fork-ssh:fork/repo.git",
         provider: SourceControlProviderKind.make("forgejo"),
-        webUrl: "https://forge.example.test:8443/forge/fork/repo",
+        webUrl: "https://forgejo.example.test:8443/fork/repo",
       };
       const service = yield* makeService(
         {
@@ -242,111 +265,22 @@ describe("LastCode issue repositories", () => {
           canonicalKey: "parent-ssh/upstream/repo",
           locator: { ...projectIdentity.locator, remoteUrl: "git@parent-ssh:upstream/repo.git" },
           provider: origin.provider,
-          webUrl: "https://forge.example.test:8443/forge/upstream/repo",
+          webUrl: "https://forgejo.example.test:8443/upstream/repo",
           origin,
         },
         tracker({ kind: forgejo }),
       );
       expect(yield* service.projectScope(projectId)).toMatchObject({
         tracker: forgejo,
-        host: "forge.example.test:8443",
-        scope: "forge/fork/repo",
+        host: "forgejo.example.test:8443",
+        scope: "fork/repo",
       });
       expect(
         yield* service.resolveUrl(
-          "https://forge.example.test:8443/forge/fork/repo/issues/2",
+          "https://forgejo.example.test:8443/upstream/repo/issues/2",
           projectId,
         ),
-      ).toMatchObject({ projectId, scope: "forge/fork/repo", writable: true });
-      expect(
-        yield* service.resolveUrl(
-          "https://forge.example.test:8443/forge/upstream/repo/issues/2",
-          projectId,
-        ),
-      ).toMatchObject({ projectId, scope: "forge/upstream/repo", writable: false });
-    }),
-  );
-
-  it.effect("never borrows a Forgejo project on a different port for a supplied URL", () =>
-    Effect.gen(function* () {
-      const forgejo = IssueTrackerKind.make("forgejo");
-      const identity = {
-        ...projectIdentity,
-        origin: {
-          canonicalKey: "code.example.test/fork/repo",
-          provider: SourceControlProviderKind.make("forgejo"),
-          webUrl: "https://code.example.test/fork/repo",
-        },
-      };
-      const service = yield* makeService(identity, tracker({ kind: forgejo }));
-      expect(
-        yield* service.resolveUrl("https://code.example.test/fork/repo/issues/2"),
-      ).toMatchObject({
-        host: "code.example.test",
-        writable: true,
-      });
-      expect(
-        yield* Effect.flip(service.resolveUrl("https://code.example.test:8443/fork/repo/issues/2")),
-      ).toMatchObject({ reason: "not-found" });
-    }),
-  );
-
-  it.effect(
-    "keeps the HTTP Forgejo target for a write and refuses HTTPS links on the same host",
-    () =>
-      Effect.gen(function* () {
-        const service = yield* makeService(
-          {
-            ...projectIdentity,
-            origin: {
-              canonicalKey: "forgejo.test/fork/repo",
-              remoteUrl: "http://forgejo.test/fork/repo.git",
-              provider: SourceControlProviderKind.make("forgejo"),
-            },
-          },
-          tracker({
-            kind: IssueTrackerKind.make("forgejo"),
-            create: (input) =>
-              Effect.sync(() => {
-                expect(input).toMatchObject({
-                  webOrigin: "http://forgejo.test",
-                  scope: "fork/repo",
-                });
-                return {
-                  key: "7",
-                  url: "http://forgejo.test/fork/repo/issues/7",
-                  displayKey: "#7",
-                };
-              }),
-          }),
-        );
-        const scope = yield* service.projectScope(projectId);
-        yield* service.create({ ...scope, ...createInput });
-        expect(yield* service.resolveUrl("http://forgejo.test/fork/repo/issues/7")).toMatchObject({
-          writable: true,
-        });
-        expect(
-          yield* Effect.flip(service.resolveUrl("https://forgejo.test/fork/repo/issues/7")),
-        ).toMatchObject({ reason: "tracker-unsupported" });
-      }),
-  );
-
-  it.effect("resolves issue links for an ordinary enterprise checkout on a web port", () =>
-    Effect.gen(function* () {
-      const { origin: _, ...identity } = projectIdentity;
-      const service = yield* makeService({
-        ...identity,
-        canonicalKey: "code.example.test/team/repo",
-        displayName: "team/repo",
-        locator: {
-          source: "git-remote",
-          remoteName: "origin",
-          remoteUrl: "https://code.example.test:8443/team/repo.git",
-        },
-      });
-      expect(
-        yield* service.resolveUrl("https://code.example.test:8443/team/repo/issues/2"),
-      ).toMatchObject({ tracker: github, host: "code.example.test:8443", writable: true });
+      ).toMatchObject({ projectId, scope: "upstream/repo", writable: false });
     }),
   );
 });

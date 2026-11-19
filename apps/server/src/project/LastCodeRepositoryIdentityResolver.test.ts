@@ -56,22 +56,7 @@ it.live("refines an origin through its own remote and retains the web address", 
   }).pipe(Effect.provide(fixtureLayer)),
 );
 
-it.live("keeps origin when the same hostname and repository path use different web ports", () =>
-  Effect.gen(function* () {
-    const canonicalUrl = "https://forgejo.test/team/repo.git";
-    const originUrl = "https://forgejo.test:8443/team/repo.git";
-    const cwd = yield* makeRepository(canonicalUrl, originUrl);
-    const resolver = yield* LastCodeRepositoryIdentityResolver.make({});
-
-    expect(yield* resolver.resolve(cwd)).toMatchObject({
-      canonicalKey: "forgejo.test/team/repo",
-      locator: { remoteName: "upstream", remoteUrl: canonicalUrl },
-      origin: { canonicalKey: "forgejo.test/team/repo", remoteUrl: originUrl },
-    });
-  }).pipe(Effect.provide(fixtureLayer)),
-);
-
-it.live("keeps a distinct HTTP origin on its default port", () =>
+it.live("retains an ambiguous origin so issue routing cannot discard it and use upstream", () =>
   Effect.gen(function* () {
     const upstream = "https://forgejo.test/team/repo.git";
     const origin = "http://forgejo.test/team/repo.git";

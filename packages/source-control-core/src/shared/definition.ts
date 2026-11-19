@@ -20,8 +20,7 @@ import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 
 export {
-  isSameLastCodeRepositoryOrigin,
-  issueRepositoryAddress,
+  hasDistinctLastCodeWebOrigins,
   selectLastCodeIssueRepository,
 } from "./lastCodeIssueRepository.ts";
 

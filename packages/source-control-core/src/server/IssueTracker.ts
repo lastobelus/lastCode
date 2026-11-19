@@ -64,7 +64,6 @@ export interface IssueScopeTarget {
   readonly cwd: string;
   readonly host: string;
   readonly scope: string;
-  readonly webOrigin?: string | undefined;
 }
 
 export interface IssueTarget extends IssueScopeTarget {
@@ -108,9 +107,10 @@ export interface IssueTrackerApi {
   readonly capabilities: IssueCapabilities;
 
   /** The signed-in account, which is what involvement filtering compares against. */
-  readonly getViewer: (
-    input: Omit<IssueScopeTarget, "scope">,
-  ) => Effect.Effect<string, IssueTrackerError>;
+  readonly getViewer: (input: {
+    readonly cwd: string;
+    readonly host: string;
+  }) => Effect.Effect<string, IssueTrackerError>;
 
   readonly listIssues: (
     input: IssueScopeTarget &

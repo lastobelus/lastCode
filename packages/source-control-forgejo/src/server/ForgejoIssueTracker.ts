@@ -16,7 +16,6 @@ import {
 import { decodeJsonResult } from "@t3tools/shared/schemaJson";
 import {
   IssueTrackerError,
-  type IssueScopeTarget as Target,
   type IssueTrackerApi,
 } from "@t3tools/source-control-core/server/IssueTracker";
 
@@ -139,31 +138,25 @@ export const make: Effect.Effect<IssueTrackerApi, never, ForgejoCli.ForgejoCli> 
         detail: "Forgejo could not find the requested issue.",
       });
 
+    type Target = { readonly cwd: string; readonly host: string; readonly scope: string };
+
     const request = (
       target: Target,
       operation: string,
-      input: Omit<ForgejoCli.ForgejoApiInput, "cwd" | "repository" | "host" | "webOrigin">,
+      input: Omit<ForgejoCli.ForgejoApiInput, "cwd" | "repository" | "host">,
     ) =>
-      cli
-        .api({
-          cwd: target.cwd,
-          repository: target.scope,
-          host: target.host,
-          webOrigin: target.webOrigin,
-          ...input,
-        })
-        .pipe(
-          Effect.mapError(
-            (error) =>
-              new IssueTrackerError({
-                tracker: KIND,
-                operation,
-                reason: reasonFor(error),
-                detail: error.detail,
-                cause: error,
-              }),
-          ),
-        );
+      cli.api({ cwd: target.cwd, repository: target.scope, host: target.host, ...input }).pipe(
+        Effect.mapError(
+          (error) =>
+            new IssueTrackerError({
+              tracker: KIND,
+              operation,
+              reason: reasonFor(error),
+              detail: error.detail,
+              cause: error,
+            }),
+        ),
+      );
 
     const read = <A>(
       target: Target,

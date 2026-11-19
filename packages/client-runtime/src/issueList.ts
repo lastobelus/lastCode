@@ -9,10 +9,7 @@ import type {
   IssueTrackerSummary,
   ProjectId,
 } from "@t3tools/contracts";
-import {
-  issueRepositoryAddress,
-  selectLastCodeIssueRepository,
-} from "@t3tools/source-control-core/shared/definition";
+import { selectLastCodeIssueRepository } from "@t3tools/source-control-core/shared/definition";
 
 import { mergeIssueListPage } from "./state/issues.ts";
 import { sourceControlClients } from "./sourceControlClients.ts";
@@ -155,9 +152,10 @@ export function groupIssues(
         project?.repositoryIdentity ?? null,
         sourceControlClients,
       );
-      const address = issueRepositoryAddress(identity, sourceControlClients);
+      const kind = identity?.provider;
+      const host = kind ? sourceControlClients.changeRequestHost(identity, kind) : null;
       const group =
-        (address === null ? undefined : byTracker.get(`${address.tracker} ${address.host}`)) ??
+        (host ? byTracker.get(`${kind} ${host.toLowerCase()}`) : undefined) ??
         [...byTracker.values()][0];
       group?.errors.push({ ...error, environmentId });
     }
@@ -185,9 +183,10 @@ export function issueFilterScopes(
         project.repositoryIdentity ?? null,
         sourceControlClients,
       );
-      const address = issueRepositoryAddress(identity, sourceControlClients);
-      if (address === null) continue;
-      const { tracker: kind, host, scope } = address;
+      const kind = identity?.provider;
+      const scope = sourceControlClients.issueScope(identity);
+      if (!identity || !kind || scope === null) continue;
+      const host = sourceControlClients.changeRequestHost(identity, kind);
       const tracker = page.answer.trackers.find(
         (t) => String(t.tracker) === kind && t.host.toLowerCase() === host.toLowerCase(),
       );

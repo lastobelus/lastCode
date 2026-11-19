@@ -34,7 +34,6 @@ import {
   type RepositoryIdentity,
 } from "@t3tools/contracts";
 import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
-import { issueRepositoryAddress } from "@t3tools/source-control-core/shared/definition";
 import {
   IssueTrackerError,
   isStandaloneIssueTracker,
@@ -74,7 +73,6 @@ interface ProjectTrackerBinding {
   readonly tracker: IssueTrackerKind;
   readonly host: string;
   readonly scope: string;
-  readonly webOrigin: string;
 }
 
 /** A project the registry has a tracker for, ready to serve reads and writes. */
@@ -88,20 +86,15 @@ interface SupportedProject extends ProjectTrackerBinding {
  * provider kind. Null for a project with no remote or a kind no tracker claims.
  */
 function resolveGitHostBinding(identity: RepositoryIdentity | null): ProjectTrackerBinding | null {
-  const address = issueRepositoryAddress(identity, sourceControlDefinitions);
-  return address === null ? null : { ...address, tracker: IssueTrackerKind.make(address.tracker) };
+  const scope = sourceControlDefinitions.issueScope(identity);
+  const kind = identity?.provider;
+  if (!identity || kind === undefined || kind === "unknown" || scope === null) return null;
+  return {
+    tracker: IssueTrackerKind.make(kind),
+    host: sourceControlDefinitions.changeRequestHost(identity, kind),
+    scope,
+  };
 }
-
-const trackerConnection = ({ project, host, tracker, webOrigin }: SupportedProject) => ({
-  cwd: project.workspaceRoot,
-  host,
-  ...(tracker === "forgejo" ? { webOrigin } : {}),
-});
-
-const trackerTarget = (project: SupportedProject) => ({
-  ...trackerConnection(project),
-  scope: project.scope,
-});
 
 function findStandaloneIssueUrl(trackers: ReadonlyArray<StandaloneIssueTrackerApi>, value: string) {
   const url = parseUrl(value);
@@ -114,8 +107,8 @@ function findStandaloneIssueUrl(trackers: ReadonlyArray<StandaloneIssueTrackerAp
 }
 
 /** Lower case, so a scope keeps its cursor whichever project's spelling of it is read. */
-function listCursorKey({ host, scope, webOrigin }: ProjectTrackerBinding): string {
-  return `${host} ${webOrigin.startsWith("http:") ? `${webOrigin} ` : ""}${scope.toLowerCase()}`;
+function listCursorKey(host: string, scope: string): string {
+  return `${host} ${scope.toLowerCase()}`;
 }
 
 function isTrackerUnusable(error: IssueTrackerError): boolean {
@@ -211,7 +204,6 @@ const make = Effect.fnUntraced(function* (selectGitHostIdentity: GitHostIdentity
           tracker: binding.tracker,
           host: api.standalone.host,
           scope: binding.scope,
-          webOrigin: `https://${api.standalone.host}`,
         };
       }),
       // A failed read is not an unbound project: that would list the git host's issues alone.
@@ -246,7 +238,9 @@ const make = Effect.fnUntraced(function* (selectGitHostIdentity: GitHostIdentity
 
   const listProjects = (filter: {
     readonly projectId?: IssueListInput["projectId"];
-    readonly webOrigin?: string | undefined;
+    readonly host?: string | undefined;
+    /** The link's `host:port`, for a host whose binding keeps its port. */
+    readonly authority?: string | undefined;
   }) =>
     (filter.projectId === undefined
       ? projects.listShells()
@@ -271,13 +265,15 @@ const make = Effect.fnUntraced(function* (selectGitHostIdentity: GitHostIdentity
         ),
       ),
       Effect.map((bound) => {
+        const host = filter.host?.trim().toLowerCase();
         const supported: SupportedProject[] = [];
         const unimplemented = new Map<
           string,
           { tracker: IssueTrackerKind; projectCount: number }
         >();
         for (const candidate of bound.flat()) {
-          if (filter.webOrigin !== undefined && candidate.webOrigin !== filter.webOrigin) continue;
+          if (host !== undefined && candidate.host !== host && candidate.host !== filter.authority)
+            continue;
           const api = registry.get(candidate.tracker);
           if (api === null) {
             const counted = unimplemented.get(candidate.host);
@@ -336,7 +332,7 @@ const make = Effect.fnUntraced(function* (selectGitHostIdentity: GitHostIdentity
     const scopes = new Map<string, SupportedProject>();
     for (const project of supported) {
       if (host !== undefined && project.host !== host) continue;
-      const key = listCursorKey(project);
+      const key = listCursorKey(project.host, project.scope);
       if (!scopes.has(key)) scopes.set(key, project);
     }
     const continuing = input.cursors;
@@ -350,13 +346,13 @@ const make = Effect.fnUntraced(function* (selectGitHostIdentity: GitHostIdentity
     // Only a narrowed listing compares against the signed-in account; `all` never reads it.
     const viewerRequests = new Map<string, Effect.Effect<string, IssueTrackerError>>();
     for (const project of involvement === "all" ? [] : scopes.values()) {
-      if (viewerRequests.has(project.webOrigin)) continue;
+      if (viewerRequests.has(project.host)) continue;
       const request = yield* Effect.cached(
         project.api
-          .getViewer(trackerConnection(project))
+          .getViewer({ cwd: project.project.workspaceRoot, host: project.host })
           .pipe(Effect.tap((viewer) => Effect.sync(() => viewers.set(project.host, viewer)))),
       );
-      viewerRequests.set(project.webOrigin, request);
+      viewerRequests.set(project.host, request);
     }
 
     // Every project counts, including worktrees of a scope read once below.
@@ -390,7 +386,7 @@ const make = Effect.fnUntraced(function* (selectGitHostIdentity: GitHostIdentity
       scopes.values(),
       (project) =>
         Effect.gen(function* () {
-          const key = listCursorKey(project);
+          const key = listCursorKey(project.host, project.scope);
           // A continuation names the scopes it wants; one not named has nothing to add.
           if (continuing !== undefined && continuing[key] === undefined) return;
           const cursor = continuing?.[key];
@@ -398,13 +394,15 @@ const make = Effect.fnUntraced(function* (selectGitHostIdentity: GitHostIdentity
             involvement === "all"
               ? Effect.succeed({ involvement })
               : viewerRequests
-                  .get(project.webOrigin)!
+                  .get(project.host)!
                   .pipe(Effect.map((viewer) => ({ involvement, viewer })));
           const page = yield* filter.pipe(
             Effect.flatMap((filter) =>
               project.api.listIssues({
                 ...filter,
-                ...trackerTarget(project),
+                cwd: project.project.workspaceRoot,
+                host: project.host,
+                scope: project.scope,
                 state: input.state,
                 limit,
                 query: input.query,
@@ -487,7 +485,9 @@ const make = Effect.fnUntraced(function* (selectGitHostIdentity: GitHostIdentity
       Effect.flatMap((project) =>
         project.api
           .getIssue({
-            ...trackerTarget(project),
+            cwd: project.project.workspaceRoot,
+            host: project.host,
+            scope: project.scope,
             key: input.key,
           })
           .pipe(
@@ -502,7 +502,9 @@ const make = Effect.fnUntraced(function* (selectGitHostIdentity: GitHostIdentity
       Effect.flatMap((project) =>
         project.api
           .getComments({
-            ...trackerTarget(project),
+            cwd: project.project.workspaceRoot,
+            host: project.host,
+            scope: project.scope,
             key: input.key,
             cursor: input.cursor,
           })
@@ -517,7 +519,9 @@ const make = Effect.fnUntraced(function* (selectGitHostIdentity: GitHostIdentity
           ? Effect.fail(unsupported("templates", "issue templates"))
           : project.api
               .listTemplates({
-                ...trackerTarget(project),
+                cwd: project.project.workspaceRoot,
+                host: project.host,
+                scope: project.scope,
               })
               .pipe(Effect.mapError(toIssueError("templates"))),
       ),
@@ -531,7 +535,9 @@ const make = Effect.fnUntraced(function* (selectGitHostIdentity: GitHostIdentity
           ? Effect.fail(unsupported("candidates", "labels or assignees"))
           : project.api
               .listCandidates({
-                ...trackerTarget(project),
+                cwd: project.project.workspaceRoot,
+                host: project.host,
+                scope: project.scope,
               })
               .pipe(Effect.mapError(toIssueError("candidates"))),
       ),
@@ -544,7 +550,9 @@ const make = Effect.fnUntraced(function* (selectGitHostIdentity: GitHostIdentity
           ? Effect.fail(unsupported("create", "filing issues"))
           : project.api
               .create({
-                ...trackerTarget(project),
+                cwd: project.project.workspaceRoot,
+                host: project.host,
+                scope: project.scope,
                 title: input.title,
                 body: input.body,
                 labels: input.labels,
@@ -566,7 +574,9 @@ const make = Effect.fnUntraced(function* (selectGitHostIdentity: GitHostIdentity
           ? Effect.fail(unsupported("comment", "comments"))
           : project.api
               .comment({
-                ...trackerTarget(project),
+                cwd: project.project.workspaceRoot,
+                host: project.host,
+                scope: project.scope,
                 key: input.key,
                 body: input.body,
               })
@@ -593,7 +603,9 @@ const make = Effect.fnUntraced(function* (selectGitHostIdentity: GitHostIdentity
           return Effect.fail(unsupported("update", "assignees"));
         return project.api
           .update({
-            ...trackerTarget(project),
+            cwd: project.project.workspaceRoot,
+            host: project.host,
+            scope: project.scope,
             key: input.key,
             title: input.title,
             body: input.body,
@@ -611,7 +623,9 @@ const make = Effect.fnUntraced(function* (selectGitHostIdentity: GitHostIdentity
           return Effect.fail(unsupported("setState", "changing an issue's state"));
         return project.api
           .setState({
-            ...trackerTarget(project),
+            cwd: project.project.workspaceRoot,
+            host: project.host,
+            scope: project.scope,
             key: input.key,
             state: input.state,
           })
@@ -626,7 +640,9 @@ const make = Effect.fnUntraced(function* (selectGitHostIdentity: GitHostIdentity
           ? Effect.fail(unsupported("react", "reactions"))
           : project.api
               .setReaction({
-                ...trackerTarget(project),
+                cwd: project.project.workspaceRoot,
+                host: project.host,
+                scope: project.scope,
                 key: input.key,
                 subjectId: input.subjectId,
                 content: input.content,
@@ -651,7 +667,7 @@ const make = Effect.fnUntraced(function* (selectGitHostIdentity: GitHostIdentity
   const parseOnProjectHost = (value: string) => {
     const url = parseUrl(value);
     if (url === null) return Effect.succeed(null);
-    return listProjects({ webOrigin: url.origin }).pipe(
+    return listProjects({ host: url.hostname, authority: url.host.toLowerCase() }).pipe(
       Effect.map(({ supported }) => {
         for (const project of supported) {
           const parsed = sourceControlDefinitions.parseIssueUrl(
@@ -683,8 +699,12 @@ const make = Effect.fnUntraced(function* (selectGitHostIdentity: GitHostIdentity
         });
       }
       const { tracker, link } = parsed;
-      const { supported } = yield* listProjects({ webOrigin: new URL(url).origin });
-      const onTracker = supported.filter((project) => project.tracker === tracker);
+      // A link names its server's port; a binding does only when its remote or web URL did.
+      const authority = new URL(url).host.toLowerCase();
+      const { supported } = yield* listProjects({ host: link.host, authority });
+      const onHost = supported.filter((project) => project.tracker === tracker);
+      const onAuthority = onHost.filter((project) => project.host === authority);
+      const onTracker = onAuthority.length > 0 ? onAuthority : onHost;
       const preferFirst = (projects: ReadonlyArray<SupportedProject>) =>
         projects.find((project) => project.project.id === preferredProjectId) ?? projects[0];
       const scope = link.scope.toLowerCase();
@@ -714,7 +734,8 @@ const make = Effect.fnUntraced(function* (selectGitHostIdentity: GitHostIdentity
       // Team keys repeat across workspaces; only the credential's canonical issue URL identifies one.
       const issue = yield* lender.api
         .getIssue({
-          ...trackerTarget(lender),
+          cwd: lender.project.workspaceRoot,
+          host: lender.host,
           scope: link.scope,
           key: link.key,
         })
