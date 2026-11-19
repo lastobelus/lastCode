@@ -23,9 +23,11 @@ const delegatedHere = {
 };
 const delegatedFrom = { environmentId: remote, threadId: creator, title: "Creator" };
 
+const decodeHistoricalOrigin = Schema.decodeSync(HistoricalThreadCreatorOrigin);
+
 describe("getThreadOwner", () => {
   it("keeps launch provenance readable by the historical origin schema", () => {
-    const decoded = Schema.decodeSync(HistoricalThreadCreatorOrigin)(ownedLaunch.creatorOrigin);
+    const decoded = decodeHistoricalOrigin(ownedLaunch.creatorOrigin);
     expect(decoded).toEqual(origin);
     expect(getThreadOwner({ lineage, creatorOrigin: decoded }, local)).toBeNull();
   });
