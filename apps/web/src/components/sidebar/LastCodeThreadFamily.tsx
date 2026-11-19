@@ -181,8 +181,10 @@ export function LastCodeSubagentGroup({
 }
 export function LastCodeThreadRelationshipBadge({
   presentation,
+  iconOnly = false,
 }: {
   presentation: LastCodeThreadFamilyPresentation;
+  iconOnly?: boolean;
 }) {
   const {
     isAgentCreated,
@@ -209,7 +211,7 @@ export function LastCodeThreadRelationshipBadge({
             }
           >
             {isAgentCreated ? <BotIcon aria-hidden className="size-3" /> : null}
-            {isAgentCreated && !compactStatusIndicators ? (
+            {isAgentCreated && !iconOnly && !compactStatusIndicators ? (
               <span className="hidden @sm/lastcode-sidebar:inline">
                 <T>Agent-created</T>
               </span>

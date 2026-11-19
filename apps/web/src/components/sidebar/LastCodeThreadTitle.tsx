@@ -128,8 +128,11 @@ function TitleText({
         style={{ minWidth: "calc(32px * var(--lastcode-sidebar-content-zoom))" }}
       >
         <span className="flex min-w-0 flex-wrap items-center gap-1">
+          {thread.groupThread ? (
+            <LastCodeThreadRelationshipBadge presentation={presentation} iconOnly />
+          ) : null}
           <span
-            className={`min-w-0 flex-1 truncate text-sm ${thread.persistent ? "italic" : ""}`}
+            className={`min-w-0 flex-1 truncate text-sm ${thread.persistent || thread.groupThread ? "italic" : ""}`}
             style={{ minWidth: "calc(32px * var(--lastcode-sidebar-content-zoom))" }}
             data-testid={`thread-title-${thread.id}`}
           >
@@ -161,7 +164,9 @@ function TitleText({
                 </TooltipPopup>
               </Tooltip>
             ) : null}
-            <LastCodeThreadRelationshipBadge presentation={presentation} />
+            {thread.groupThread ? null : (
+              <LastCodeThreadRelationshipBadge presentation={presentation} />
+            )}
             {subagentLabel ? (
               <SubagentOutcome label={subagentStatus} leadingLabel={threadStatus?.label} />
             ) : null}
