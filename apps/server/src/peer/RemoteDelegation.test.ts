@@ -94,6 +94,7 @@ const instanceId = ProviderInstanceId.make("codex");
 const driver = ProviderDriverKind.make("codex");
 const modelSelection = { instanceId, model: "gpt-5.4" };
 const parentCommit = "a".repeat(40);
+const advertisedTip = "b".repeat(40);
 
 type LaunchedWith = Pick<
   ThreadLaunch.ThreadLaunchInput,
@@ -250,8 +251,14 @@ const boxProjects: ReadonlyArray<Project> = [
   },
 ];
 
-const serveBox = (thread: BoxThread, owned = true, worktrees = true, fetchable = true) =>
-  servePeer(box, boxToolkitLayer(thread, owned, worktrees, fetchable));
+type WorktreeFetch = "direct" | "branch" | "wrong branch" | "unfetchable" | "timeout";
+
+const serveBox = (
+  thread: BoxThread,
+  owned = true,
+  worktrees = true,
+  fetch: WorktreeFetch = "direct",
+) => servePeer(box, boxToolkitLayer(thread, owned, worktrees, fetch));
 
 const boxRunId = RunId.make("run:box");
 const boxLaterRunId = RunId.make("run:box-later");
@@ -262,7 +269,7 @@ const boxToolkitLayer = (
   thread: BoxThread,
   owned: boolean,
   worktrees: boolean,
-  fetchable: boolean,
+  fetch: WorktreeFetch,
 ) => {
   const associations = new Map<string, RemoteDelegationAssociation>();
   const activations = new Map<string, OrchestrationV2Run>();
@@ -849,19 +856,43 @@ const boxToolkitLayer = (
     ),
     Layer.provide(
       Layer.mock(GitVcsDriver.GitVcsDriver)({
-        execute: (input) =>
-          input.args[0] === "remote"
-            ? Effect.succeed({ ...gitSuccess, stdout: "origin\nupstream\n" })
-            : fetchable && input.args.at(-2) === "upstream" && input.args.at(-1) === parentCommit
-              ? Effect.succeed(gitSuccess)
-              : Effect.fail(
-                  new GitCommandError({
-                    operation: input.operation,
-                    command: "git fetch",
-                    cwd: input.cwd,
-                    detail: "Commit unavailable",
-                  }),
-                ),
+        execute: (input) => {
+          if (input.args[0] === "remote")
+            return Effect.succeed({ ...gitSuccess, stdout: "origin\nupstream\n" });
+          if (input.args[0] === "check-ref-format") return Effect.succeed(gitSuccess);
+          if (
+            input.args[0] === "merge-base" &&
+            input.args.at(-2) === parentCommit &&
+            input.args.at(-1) === advertisedTip &&
+            fetch === "branch"
+          )
+            return Effect.succeed(gitSuccess);
+          if (
+            input.args[0] === "fetch" &&
+            input.args.at(-2) === "upstream" &&
+            input.args.at(-1) === parentCommit &&
+            fetch === "direct"
+          )
+            return Effect.succeed(gitSuccess);
+          return Effect.fail(
+            new GitCommandError({
+              operation: input.operation,
+              command: "git",
+              cwd: input.cwd,
+              ...(fetch === "timeout" ? { reason: "timed_out" as const } : {}),
+              detail: "Commit unavailable",
+            }),
+          );
+        },
+        resolveDefaultBranchName: () => Effect.succeed(null),
+        fetchWorktreeBaseCommit: ({ remote }) =>
+          Effect.succeed(
+            (fetch === "branch" || fetch === "wrong branch") &&
+              remote?.remoteName === "upstream" &&
+              remote.branchName === "published-task"
+              ? { commitSha: advertisedTip, remoteRefName: "upstream/published-task" }
+              : null,
+          ),
         resolveCommit: () => Effect.succeed({ commitSha: parentCommit }),
       }),
     ),
@@ -1041,6 +1072,19 @@ const makeLaptop = (
       Layer.provide(Layer.mock(ThreadLaunch.ThreadLaunchService)({})),
       Layer.provide(
         Layer.mock(GitVcsDriver.GitVcsDriver)({
+          execute: () =>
+            Effect.succeed({
+              exitCode: ChildProcessSpawner.ExitCode(0),
+              stdout: "task\n",
+              stderr: "",
+              stdoutTruncated: false,
+              stderrTruncated: false,
+            }),
+          resolveWorktreeBaseRemote: () =>
+            Effect.succeed({
+              remoteName: "origin",
+              branchName: "published-task",
+            }),
           resolveCommit: () => Effect.succeed({ commitSha: parentCommit }),
           resolvePrimaryRemoteName: () => Effect.succeed("origin"),
         }),
@@ -1945,59 +1989,64 @@ it.effect("a task naming another driver there never runs its model on the parent
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
-it.effect.each(["available", "unfetchable", "older peer"] as const)(
-  "handles isolated delegation for %s",
-  (scenario) =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const thread = yield* makeBoxThread;
-        const b = yield* serveBox(
-          thread,
-          true,
-          scenario !== "older peer",
-          scenario !== "unfetchable",
-        );
-        const offers = yield* SubscriptionRef.make<
-          ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
-        >([]);
-        const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
-        const a = yield* makeLaptop(database, offers);
-        yield* linkTo(a.links, b, "auto");
-        yield* seedParent(a);
+it.effect.each([
+  "direct",
+  "branch",
+  "wrong branch",
+  "unfetchable",
+  "timeout",
+  "older peer",
+] as const)("handles isolated delegation for %s", (scenario) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const thread = yield* makeBoxThread;
+      const b = yield* serveBox(
+        thread,
+        true,
+        scenario !== "older peer",
+        scenario === "older peer" ? "direct" : scenario,
+      );
+      const offers = yield* SubscriptionRef.make<
+        ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+      >([]);
+      const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+      const a = yield* makeLaptop(database, offers);
+      yield* linkTo(a.links, b, "auto");
+      yield* seedParent(a);
 
-        const result = yield* a.call("delegate_task", {
-          task: "Run the suite on the box.",
-          target: { environmentId: box.environmentId },
-          isolation: "worktree",
-          mode: "async",
-          clientRequestId: "isolated-suite",
-        });
-        if (scenario === "older peer") {
-          expect(result.isError).toBe(true);
-          expect(JSON.stringify(result.content)).toContain("remote worktree isolation");
-          expect((yield* a.orchestrator.getThreadProjection(parentThreadId)).subagents).toEqual([]);
-        } else {
-          expect(result.isError, JSON.stringify(result.content)).toBe(false);
-          const { taskId } = result.structuredContent as { taskId: NodeId };
-          if (scenario === "available") {
-            expect(yield* Ref.get(thread.preparedWorktreeBase)).toBe(parentCommit);
-            yield* Ref.set(thread.reply, "Suite passed in the child worktree.");
-            yield* SubscriptionRef.set(thread.status, "completed");
-            yield* Deferred.succeed(thread.finished, undefined);
-            expect(yield* taskResult(a, taskId)).toMatchObject({
-              status: "completed",
-              result: "Suite passed in the child worktree.",
-            });
-            return;
-          }
+      const result = yield* a.call("delegate_task", {
+        task: "Run the suite on the box.",
+        target: { environmentId: box.environmentId },
+        isolation: "worktree",
+        mode: "async",
+        clientRequestId: "isolated-suite",
+      });
+      if (scenario === "older peer") {
+        expect(result.isError).toBe(true);
+        expect(JSON.stringify(result.content)).toContain("remote worktree isolation");
+        expect((yield* a.orchestrator.getThreadProjection(parentThreadId)).subagents).toEqual([]);
+      } else {
+        expect(result.isError, JSON.stringify(result.content)).toBe(false);
+        const { taskId } = result.structuredContent as { taskId: NodeId };
+        if (scenario === "direct" || scenario === "branch") {
+          expect(yield* Ref.get(thread.preparedWorktreeBase)).toBe(parentCommit);
+          yield* Ref.set(thread.reply, "Suite passed in the child worktree.");
+          yield* SubscriptionRef.set(thread.status, "completed");
+          yield* Deferred.succeed(thread.finished, undefined);
           expect(yield* taskResult(a, taskId)).toMatchObject({
-            status: "failed",
-            result: expect.stringContaining("Push the branch"),
+            status: "completed",
+            result: "Suite passed in the child worktree.",
           });
+          return;
         }
-        expect(yield* Ref.get(thread.launched)).toBeNull();
-      }),
-    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+        expect(yield* taskResult(a, taskId)).toMatchObject({
+          status: "failed",
+          result: expect.stringContaining(scenario === "timeout" ? "timed out" : "Push the branch"),
+        });
+      }
+      expect(yield* Ref.get(thread.launched)).toBeNull();
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
 it.effect("follows an open task again after the laptop restarts", () =>
