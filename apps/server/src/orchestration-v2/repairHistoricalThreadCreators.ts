@@ -107,7 +107,7 @@ function localCreatorEvidence(
     FROM candidates AS candidate
     CROSS JOIN orchestration_events AS message INDEXED BY idx_orch_events_command_id
       ON message.stream_id = candidate.thread_id
-      AND message.command_id = candidate.command_id || ':initial-message'
+      AND message.command_id IN (candidate.command_id, candidate.command_id || ':initial-message')
     WHERE candidate.command_id = candidate.thread_id
       AND message.application_event_version = 2
       AND message.aggregate_kind = 'thread'
@@ -138,12 +138,17 @@ function localCreatorEvidence(
            candidate.payload_json
     FROM candidates AS candidate
     INNER JOIN orchestration_command_receipts AS receipt
-      ON receipt.command_id = candidate.command_id || ':initial-message'
+      ON receipt.command_id IN (candidate.command_id, candidate.command_id || ':initial-message')
     INNER JOIN orchestration_v2_projection_messages AS message
       ON message.thread_id = candidate.thread_id AND message.message_id = candidate.thread_id
     WHERE candidate.command_id = candidate.thread_id
       AND receipt.aggregate_kind = 'thread' AND receipt.aggregate_id = candidate.thread_id
-      AND receipt.command_type = 'message.dispatch' AND receipt.status = 'accepted'
+      AND receipt.status = 'accepted'
+      AND (
+        (receipt.command_id = candidate.command_id AND receipt.command_type = 'thread.create')
+        OR (receipt.command_id = candidate.command_id || ':initial-message'
+          AND receipt.command_type = 'message.dispatch')
+      )
       AND receipt.result_sequence > candidate.sequence
       AND json_extract(message.payload_json, '$.id') = candidate.thread_id
       AND json_extract(message.payload_json, '$.threadId') = candidate.thread_id
@@ -151,6 +156,26 @@ function localCreatorEvidence(
       AND json_extract(message.payload_json, '$.createdBy') = 'agent'
       AND json_extract(message.payload_json, '$.creationSource') = 'mcp'
       AND json_type(message.payload_json, '$.senderThreadId') = 'text'
+    UNION ALL
+    -- create_threads shares its namespace, request key and index across the create
+    -- and record commands. The projected item ID percent-encodes that record command.
+    SELECT candidate.thread_id, item.thread_id AS creator_thread_id, candidate.payload_json
+    FROM candidates AS candidate
+    INNER JOIN orchestration_command_receipts AS receipt
+      ON receipt.command_id = replace(candidate.command_id, ':create-thread:', ':record-created-thread:')
+    INNER JOIN orchestration_v2_projection_turn_items AS item
+      ON item.turn_item_id = 'turn-item:created-thread:' ||
+        replace(replace(receipt.command_id, '%', '%25'), ':', '%3A')
+    WHERE candidate.command_id LIKE 'command:mcp:%:create-thread:%'
+      AND candidate.thread_id = 'thread:mcp:' ||
+        replace(substr(candidate.command_id, length('command:mcp:') + 1), ':create-thread:', ':')
+      AND receipt.aggregate_kind = 'thread' AND receipt.aggregate_id = item.thread_id
+      AND receipt.command_type = 'thread.created.record' AND receipt.status = 'accepted'
+      AND receipt.result_sequence > candidate.sequence
+      AND item.type = 'thread_created' AND item.status = 'completed'
+      AND json_extract(item.payload_json, '$.id') = item.turn_item_id
+      AND json_extract(item.payload_json, '$.threadId') = item.thread_id
+      AND json_extract(item.payload_json, '$.targetThreadId') = candidate.thread_id
   `;
 }
 
@@ -165,6 +190,7 @@ function anotherCreation(
       AND duplicate.sequence <> ${sequence}`;
 }
 
+// The enclosing repair spans trace the graph read and its use.
 const localCreatorGraph = Effect.fnUntraced(function* (
   sql: SqlClient.SqlClient,
   environmentId: EnvironmentId,
@@ -182,15 +208,18 @@ const localCreatorGraph = Effect.fnUntraced(function* (
   return new Map(rows.map((row) => [row.thread_id, row.parent_thread_id]));
 });
 
-function entersCreatorCycle(threadId: ThreadId, parents: ReadonlyMap<string, string | null>) {
+function firstRepeatedCreator(threadId: ThreadId, parents: ReadonlyMap<string, string | null>) {
   const visited = new Set<string>([threadId]);
   let ancestor = parents.get(threadId);
   while (ancestor != null && !visited.has(ancestor)) {
     visited.add(ancestor);
     ancestor = parents.get(ancestor);
   }
-  return ancestor != null;
+  return ancestor;
 }
+
+const scheduleFireSuffix =
+  /^(?:\d+:(?:scheduled|manual)|webhook:delivery:(?:relay:)?[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
 
 /** Runs before command admission: recover only provenance recorded by the old MCP launch paths. */
 export const repairHistoricalThreadCreators = Effect.fn("repairHistoricalThreadCreators")(
@@ -311,7 +340,7 @@ export const repairHistoricalThreadCreators = Effect.fn("repairHistoricalThreadC
     let repaired = 0;
     for (const [threadId, candidate] of candidates) {
       // Check the whole proposed graph before writing, so cyclic candidates cannot partly apply.
-      if (entersCreatorCycle(threadId, parents)) {
+      if (firstRepeatedCreator(threadId, parents) != null) {
         skipped.cycle += 1;
         continue;
       }
@@ -374,6 +403,7 @@ export const repairScopedHistoricalThreadCreators = Effect.fn(
       scheduledEntries.length > 0
         ? yield* localCreatorGraph(sql, environmentId)
         : new Map<string, string | null>();
+    // The enclosing repair and event-write spans already trace entry checks.
     const assessEntry = Effect.fnUntraced(function* (
       entry: HistoricalThreadCreatorRepairManifest["entries"][number],
     ) {
@@ -470,12 +500,22 @@ export const repairScopedHistoricalThreadCreators = Effect.fn(
           origin.environmentId !== environmentId ||
           origin.threadId === threadId ||
           !created.command_id?.startsWith(scheduledPrefix) ||
-          !/^(?:\d+:(?:scheduled|manual)|webhook:delivery:(?:[0-9a-f-]{36}|relay:(?!.*:\d+:(?:scheduled|manual)$).+))$/.test(
-            created.command_id.slice(scheduledPrefix.length),
-          )
+          !scheduleFireSuffix.test(created.command_id.slice(scheduledPrefix.length))
         ) {
           return "invalid-schedule-evidence";
         }
+        const messageId = `scheduled-task-message:${created.command_id.slice("scheduled-task:".length)}`;
+        const mismatched = yield* sql`SELECT 1
+          FROM orchestration_v2_projection_messages AS message
+          LEFT JOIN orchestration_v2_projection_runs AS run ON run.run_id = message.run_id
+            AND run.thread_id = message.thread_id
+          WHERE message.message_id = ${messageId} AND message.thread_id = ${threadId}
+            AND message.role = 'user'
+            AND (
+              json_extract(message.payload_json, '$.scheduledTaskId') <> ${origin.scheduledTaskId}
+              OR json_extract(run.payload_json, '$.scheduledTaskId') <> ${origin.scheduledTaskId}
+            )`;
+        if (mismatched.length > 0) return "conflicting-scheduled-task";
         if (!parents.has(origin.threadId)) return "missing-schedule-creator";
       }
       return "eligible";
@@ -495,6 +535,16 @@ export const repairScopedHistoricalThreadCreators = Effect.fn(
       scheduledPlan.set(entry.threadId, status);
       if (status === "eligible") parents.set(entry.threadId, entry.origin.threadId);
     }
+    const cyclicEntries = scheduledEntries.filter(
+      ({ threadId }) =>
+        scheduledPlan.get(threadId) === "eligible" &&
+        firstRepeatedCreator(threadId, parents) === threadId,
+    );
+    // Remove only the proposed cycle members before checking paths that lead to them.
+    for (const { threadId } of cyclicEntries) {
+      scheduledPlan.set(threadId, "creator-cycle");
+      parents.set(threadId, null);
+    }
     for (const entry of input.entries) {
       const { threadId, origin } = entry;
       const scheduledStatus = scheduledPlan.get(threadId);
@@ -502,7 +552,7 @@ export const repairScopedHistoricalThreadCreators = Effect.fn(
         results.push({ threadId, status: scheduledStatus });
         continue;
       }
-      if (scheduledStatus === "eligible" && entersCreatorCycle(threadId, parents)) {
+      if (scheduledStatus === "eligible" && firstRepeatedCreator(threadId, parents) != null) {
         results.push({ threadId, status: "creator-cycle" });
         continue;
       }

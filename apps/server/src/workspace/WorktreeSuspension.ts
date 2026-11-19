@@ -1307,6 +1307,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
       now: timestamp,
       candidate: {
         kind: thread.lineage.relationshipToParent === "subagent" ? "subagent" : "thread",
+        // A local repair fills both creator fields. Revisit this guard if creation starts writing both.
         agentCreatedChild:
           thread.createdBy === "agent" &&
           thread.creatorThreadId !== undefined &&

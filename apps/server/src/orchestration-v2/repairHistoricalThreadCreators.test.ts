@@ -133,18 +133,18 @@ const launchMessage = Effect.fnUntraced(function* (
 const creationRecord = Effect.fnUntraced(function* (
   thread: OrchestrationV2AppThread,
   creator: ThreadId,
+  commandId = CommandId.make(`record:${creator}:${thread.id}`),
 ) {
-  const key = `${creator}:${thread.id}`;
   yield* (yield* EventSink.EventSinkV2).write({
-    commandId: CommandId.make(`record:${key}`),
+    commandId,
     events: [
       {
-        id: EventId.make(`record:${key}`),
+        id: EventId.make(commandId),
         type: "turn-item.updated",
         threadId: creator,
         occurredAt: now,
         payload: {
-          id: TurnItemId.make(`item:${key}`),
+          id: TurnItemId.make(`turn-item:created-thread:${encodeURIComponent(commandId)}`),
           threadId: creator,
           runId: RunId.make(`run:${creator}`),
           nodeId: NodeId.make(`node:${creator}`),
@@ -246,6 +246,21 @@ it.layer(TestLayer)("historical thread creators", (it) => {
         {},
         `scheduled-task:${scheduledTaskId}:456:manual`,
       );
+      const scheduleToCycle = yield* createThread(
+        "schedule-to-cycle",
+        {},
+        `scheduled-task:${scheduledTaskId}:789:manual`,
+      );
+      const scheduleToCyclePacket = yield* packet(scheduleToCycle.id, {
+        ...schedule.origin,
+        threadId: scheduled.id,
+      });
+      const webhook = yield* createThread(
+        "webhook-other-task",
+        {},
+        `scheduled-task:${scheduledTaskId}:webhook:delivery:relay:x:webhook:delivery:12345678-1234-4234-8234-123456789abc`,
+      );
+      const mismatchedWebhookPacket = yield* packet(webhook.id, schedule.origin);
       const linkedSchedule = yield* packet(scheduleCycle.id, {
         ...schedule.origin,
         threadId: scheduled.id,
@@ -274,6 +289,16 @@ it.layer(TestLayer)("historical thread creators", (it) => {
       assert.deepStrictEqual(
         (yield* request([cycleStart, linkedSchedule], true)).map((row) => row.status),
         ["creator-cycle", "creator-cycle"],
+      );
+      assert.deepStrictEqual(
+        (yield* request([cycleStart, linkedSchedule, scheduleToCyclePacket], false)).map(
+          (row) => row.status,
+        ),
+        ["creator-cycle", "creator-cycle", "eligible"],
+      );
+      assert.deepStrictEqual(
+        (yield* request([mismatchedWebhookPacket], true)).map((row) => row.status),
+        ["invalid-schedule-evidence"],
       );
       assert.deepStrictEqual(
         (yield* request(
@@ -349,7 +374,7 @@ it.layer(TestLayer)("historical thread creators", (it) => {
           pinnedAt: now,
           settledOverride: "settled",
         });
-        yield* launchMessage(child, parent.id);
+        yield* launchMessage(child, parent.id, {}, child.id);
         assert.equal(yield* repairHistoricalThreadCreators, 1);
         const store = yield* ProjectionStore.ProjectionStoreV2;
         const repaired = (yield* store.getThreadProjection(child.id)).thread;
@@ -378,11 +403,23 @@ it.layer(TestLayer)("historical thread creators", (it) => {
       Effect.gen(function* () {
         const parent = yield* createThread("record-parent");
         const child = yield* createThread(
-          "record-child",
+          "thread:mcp:namespace%3Aqualifier:request:0",
           { creatorGrouping: "independent" },
-          "separate-create-command",
+          "command:mcp:namespace%3Aqualifier:create-thread:request:0",
         );
-        yield* creationRecord(child, parent.id);
+        const recordCommand = CommandId.make(
+          "command:mcp:namespace%3Aqualifier:record-created-thread:request:0",
+        );
+        yield* creationRecord(child, parent.id, recordCommand);
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`
+          INSERT INTO orchestration_command_receipts (
+            command_id, aggregate_kind, aggregate_id, command_type, accepted_at, result_sequence, status
+          )
+          SELECT command_id, 'thread', stream_id, 'thread.created.record', occurred_at, sequence, 'accepted'
+          FROM orchestration_events WHERE command_id = ${recordCommand}
+        `;
+        yield* launchMessage(parent, child.id, {}, "later-parent-message");
         const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
         const events = yield* EventStore.EventStoreV2;
         const sequence = yield* events.latestSequence();
@@ -390,11 +427,10 @@ it.layer(TestLayer)("historical thread creators", (it) => {
         yield* TestClock.adjust("1 day");
         yield* maintenance.pruneEventStore();
         assert.equal(yield* events.latestSequence(), sequence);
-        const sql = yield* SqlClient.SqlClient;
         assert.deepEqual(
           yield* sql`SELECT event_id FROM orchestration_events
-            WHERE event_id = ${`record:${parent.id}:${child.id}`}`,
-          [{ event_id: `record:${parent.id}:${child.id}` }],
+            WHERE event_id = ${recordCommand}`,
+          [],
         );
         assert.equal(yield* repairHistoricalThreadCreators, 1);
         const repaired = (yield* (yield* ProjectionStore.ProjectionStoreV2).getThreadProjection(
