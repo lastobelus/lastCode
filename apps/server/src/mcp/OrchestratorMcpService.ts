@@ -991,6 +991,7 @@ function listItemFromShell(
     link: threadLinkFor(scope, shell.id, shell.title),
     createdBy: shell.createdBy,
     creationSource: shell.creationSource,
+    ...(shell.groupThread ? { groupThread: true as const } : {}),
     ...(shell.creatorThreadId === undefined ? {} : { creatorThreadId: shell.creatorThreadId }),
     ...(shell.creatorGrouping === undefined ? {} : { creatorGrouping: shell.creatorGrouping }),
     ...(shell.groupedUnderThreadId === undefined
@@ -1038,6 +1039,7 @@ function threadDetail(
     link: threadLinkFor(scope, projection.thread.id, projection.thread.title),
     createdBy: projection.thread.createdBy,
     creationSource: projection.thread.creationSource,
+    ...(projection.thread.groupThread ? { groupThread: true as const } : {}),
     ...(projection.thread.creatorThreadId === undefined
       ? {}
       : { creatorThreadId: projection.thread.creatorThreadId }),
@@ -3482,7 +3484,9 @@ const make = Effect.gen(function* () {
                 ...(parent.thread.linkOrigin === undefined
                   ? {}
                   : { linkOrigin: parent.thread.linkOrigin }),
-                ...(initialMessage === undefined ? {} : { initialMessage }),
+                ...(initialMessage === undefined
+                  ? { groupThread: true as const }
+                  : { initialMessage }),
               } as const;
               if (initialMessage === undefined) {
                 yield* threadManagement

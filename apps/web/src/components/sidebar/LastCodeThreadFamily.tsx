@@ -181,8 +181,10 @@ export function LastCodeSubagentGroup({
 }
 export function LastCodeThreadRelationshipBadge({
   presentation,
+  part = "all",
 }: {
   presentation: LastCodeThreadFamilyPresentation;
+  part?: "all" | "agent" | "warning";
 }) {
   const {
     isAgentCreated,
@@ -192,35 +194,40 @@ export function LastCodeThreadRelationshipBadge({
   } = presentation;
   const typedGroups = useClientSetting("legacySidebarThreadGroupingStyle") === "typed-groups";
   const compactStatusIndicators = useClientSetting("compactLegacySidebarStatuses");
+  const showAgent = isAgentCreated && part !== "warning";
+  const warning = part === "agent" ? null : relationshipUnavailableLabel;
   return (
     <>
-      {isAgentCreated || relationshipUnavailableLabel ? (
+      {showAgent || warning ? (
         <Tooltip>
           <TooltipTrigger
             render={
               <span
-                aria-label={relationshipDescription ?? relationshipLabel ?? undefined}
+                aria-label={
+                  (part === "warning" ? warning : (relationshipDescription ?? relationshipLabel)) ??
+                  undefined
+                }
                 className={cn(
                   "inline-flex shrink-0 items-center gap-0.5 text-3xs",
                   typedGroups ? "rounded border px-1 py-0.5" : "text-sidebar-muted-foreground",
-                  typedGroups && isAgentCreated && "border-dashed",
+                  typedGroups && showAgent && "border-dashed",
                 )}
               />
             }
           >
-            {isAgentCreated ? <BotIcon aria-hidden className="size-3" /> : null}
-            {isAgentCreated && !compactStatusIndicators ? (
+            {showAgent ? <BotIcon aria-hidden className="size-3" /> : null}
+            {showAgent && part === "all" && !compactStatusIndicators ? (
               <span className="hidden @sm/lastcode-sidebar:inline">
                 <T>Agent-created</T>
               </span>
             ) : null}
-            {relationshipUnavailableLabel ? (
+            {warning ? (
               <TriangleAlertIcon aria-hidden className="size-3 text-warning-foreground" />
             ) : null}
           </TooltipTrigger>
           <TooltipPopup side="top">
-            {relationshipDescription}
-            {relationshipUnavailableLabel ? <div>{relationshipUnavailableLabel}</div> : null}
+            {part === "warning" ? null : relationshipDescription}
+            {warning ? <div>{warning}</div> : null}
           </TooltipPopup>
         </Tooltip>
       ) : null}

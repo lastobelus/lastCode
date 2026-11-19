@@ -355,7 +355,9 @@ it.effect.each(["resolved", "unresolved", "absent"] as const)(
       yield* toolkit
         .handle("t3_thread_launch", unprompted)
         .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
+      expect(launched[0]?.groupThread).toBeUndefined();
       expect(launched[1]?.initialMessage).toBeUndefined();
+      expect(launched[1]?.groupThread).toBe(true);
       expect(launched[1]?.creatorThreadId).toBe(sourceThreadId);
       expect(launched[1]?.groupedUnderThreadId).toBeNull();
 

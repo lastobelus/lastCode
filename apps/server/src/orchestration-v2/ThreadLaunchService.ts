@@ -119,6 +119,7 @@ export interface ThreadLaunchInput {
   /** The parent there, when that environment's agent delegated this as a task. */
   readonly delegatedFrom?: OrchestrationV2DelegatedFrom;
   readonly creatorThreadId?: ThreadId;
+  readonly groupThread?: true;
   readonly remoteDelegation?: RemoteDelegationAssociation;
   readonly groupedUnderThreadId?: ThreadId | null;
 }
@@ -1755,6 +1756,7 @@ const make = Effect.gen(function* () {
                   : { delegatedFrom: input.delegatedFrom }),
                 createdBy: input.createdBy,
                 creationSource: input.creationSource,
+                ...(input.groupThread === true ? { groupThread: true as const } : {}),
                 ...(initialMessage === undefined
                   ? {}
                   : { initialMessage: { ...initialMessage, workspaceStrategy } }),

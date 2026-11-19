@@ -33,6 +33,7 @@ import { flushCompileCache } from "./compileCache.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as EffectWorker from "./orchestration-v2/EffectWorker.ts";
+import { backfillGroupThreads } from "./orchestration-v2/backfillGroupThreads.ts";
 import { repairHistoricalThreadCreators } from "./orchestration-v2/repairHistoricalThreadCreators.ts";
 import * as LegacyV1ThreadImporter from "./orchestration-v2/legacy/LegacyV1ThreadImporter.ts";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
@@ -575,6 +576,18 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
           ),
         ),
       ).pipe(
+        Effect.andThen(
+          runStartupPhase(
+            "orchestration-v2.group-history.backfill",
+            backfillGroupThreads().pipe(
+              Effect.tap((groupThreadCount) =>
+                groupThreadCount === 0
+                  ? Effect.void
+                  : Effect.logInfo("Marked historical group threads", { groupThreadCount }),
+              ),
+            ),
+          ),
+        ),
         Effect.andThen(
           runStartupPhase("orchestration-v2.recovery", providerRuntimeRecovery.recover),
         ),

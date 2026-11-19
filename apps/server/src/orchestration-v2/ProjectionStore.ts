@@ -1101,6 +1101,8 @@ export function applyToProjection(
   };
 
   switch (event.type) {
+    case "thread.group-marked":
+      return { ...projection, thread: { ...projection.thread, groupThread: true } };
     case "thread.creator-repaired":
       return {
         ...projection,
@@ -2024,6 +2026,7 @@ export function threadShellFromProjection(
     interactionMode: projection.thread.interactionMode,
     branch: projection.thread.branch,
     worktreePath: projection.thread.worktreePath,
+    ...(projection.thread.groupThread ? { groupThread: true } : {}),
     persistent: projection.thread.persistent ?? false,
     annotation: projection.thread.annotation ?? null,
     dashboardItems: projection.thread.dashboardItems ?? [],
@@ -2382,6 +2385,7 @@ function shellFromState(input: {
     interactionMode: input.state.thread.interactionMode,
     branch: input.state.thread.branch,
     worktreePath: input.state.thread.worktreePath,
+    ...(input.state.thread.groupThread ? { groupThread: true } : {}),
     persistent: input.state.thread.persistent ?? false,
     annotation: input.state.thread.annotation ?? null,
     dashboardItems: input.state.thread.dashboardItems ?? [],
@@ -2629,6 +2633,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             yield* writeThreadTouches(sql, new Map([[rewrittenThreadId, deferredUpdatedAt]]));
           }
           switch (event.type) {
+            case "thread.group-marked":
+              yield* sql`UPDATE orchestration_v2_projection_threads
+                SET payload_json = json_set(payload_json, '$.groupThread', json('true'))
+                WHERE thread_id = ${event.threadId}`;
+              break;
             case "thread.creator-repaired": {
               const payload = event.payload;
               const originJson = yield* encodeCreatorOrigin(payload.origin);
@@ -3523,6 +3532,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
 
           if (
             event.type !== "thread.created" &&
+            event.type !== "thread.group-marked" &&
             event.type !== "thread.creator-repaired" &&
             event.type !== "thread.archived" &&
             event.type !== "thread.unarchived" &&

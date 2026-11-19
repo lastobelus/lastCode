@@ -113,6 +113,7 @@ export function withCreationProvenance(
         linkOrigin: _linkOrigin,
         delegatedFrom: _delegatedFrom,
         initialMessage: _initialMessage,
+        groupThread: _groupThread,
         ...rest
       } = command;
       return { ...rest, ...provenance };

@@ -294,6 +294,8 @@ export function applyOrchestrationV2ProjectionEvent(
   const latestLocalTurnOrdinal = options?.latestLocalTurnOrdinal;
   const base = { ...projection, updatedAt: event.occurredAt };
   switch (event.type) {
+    case "thread.group-marked":
+      return { ...projection, thread: { ...projection.thread, groupThread: true } };
     case "thread.creator-repaired":
       return {
         ...projection,

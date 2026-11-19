@@ -118,6 +118,15 @@ function TitleText({
   const subagentLabel = presentation.subagentLabel;
   const gt = useGT();
   const subagentStatus = lastcodeSidebarSubagentStatusLabel(thread, threadStatus);
+  const title = (
+    <span
+      className={`min-w-0 flex-1 truncate text-sm ${thread.persistent || thread.groupThread ? "italic" : ""}`}
+      style={{ minWidth: "calc(32px * var(--lastcode-sidebar-content-zoom))" }}
+      data-testid={`thread-title-${thread.id}`}
+    >
+      {thread.title}
+    </span>
+  );
   return (
     <>
       {thread.persistent && family.parentKey === null && !subagentLabel ? (
@@ -128,13 +137,14 @@ function TitleText({
         style={{ minWidth: "calc(32px * var(--lastcode-sidebar-content-zoom))" }}
       >
         <span className="flex min-w-0 flex-wrap items-center gap-1">
-          <span
-            className={`min-w-0 flex-1 truncate text-sm ${thread.persistent ? "italic" : ""}`}
-            style={{ minWidth: "calc(32px * var(--lastcode-sidebar-content-zoom))" }}
-            data-testid={`thread-title-${thread.id}`}
-          >
-            {thread.title}
-          </span>
+          {thread.groupThread ? (
+            <span className="flex min-w-0 flex-1 items-center gap-1">
+              <LastCodeThreadRelationshipBadge presentation={presentation} part="agent" />
+              {title}
+            </span>
+          ) : (
+            title
+          )}
           <span className="flex min-w-0 max-w-full flex-wrap items-center gap-1">
             {thread.persistent && (family.parentKey !== null || subagentLabel) ? (
               <Tooltip>
@@ -161,7 +171,10 @@ function TitleText({
                 </TooltipPopup>
               </Tooltip>
             ) : null}
-            <LastCodeThreadRelationshipBadge presentation={presentation} />
+            <LastCodeThreadRelationshipBadge
+              presentation={presentation}
+              part={thread.groupThread ? "warning" : "all"}
+            />
             {subagentLabel ? (
               <SubagentOutcome label={subagentStatus} leadingLabel={threadStatus?.label} />
             ) : null}

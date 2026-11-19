@@ -637,6 +637,8 @@ export const OrchestrationV2AppThread = Schema.Struct({
   linkOrigin: Schema.optional(OrchestrationV2LinkOrigin),
   delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
   remoteDelegations: Schema.optional(Schema.Array(RemoteDelegationAssociation)),
+  /** Set for an empty thread created to hold other threads. */
+  groupThread: Schema.optional(Schema.Literal(true)),
   persistent: Schema.optional(Schema.Boolean),
   annotation: Schema.optional(Schema.NullOr(ThreadAnnotation)),
   dashboardItems: Schema.optional(ThreadDashboardItems),
@@ -2216,6 +2218,11 @@ const OrchestrationV2EventBase = Schema.Struct({
 export const OrchestrationV2DomainEvent = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
+    type: Schema.Literal("thread.group-marked"),
+    payload: Schema.Struct({}),
+  }),
+  Schema.Struct({
+    ...OrchestrationV2EventBase.fields,
     type: Schema.Literal("thread.creator-repaired"),
     payload: HistoricalThreadCreatorRepairPayload,
   }),
@@ -2477,6 +2484,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   linkOrigin: Schema.optional(OrchestrationV2LinkOrigin),
   delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
   remoteDelegations: Schema.optional(Schema.Array(RemoteDelegationAssociation)),
+  groupThread: OrchestrationV2AppThread.fields.groupThread,
   persistent: Schema.optional(Schema.Boolean),
   annotation: Schema.optional(Schema.NullOr(ThreadAnnotation)),
   dashboardItems: Schema.optional(ThreadDashboardItems),
@@ -3212,6 +3220,11 @@ const OrchestrationV2JsonEventBaseFields = {
 export const OrchestrationV2DomainEventJson = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,
+    type: Schema.Literal("thread.group-marked"),
+    payload: Schema.Struct({}),
+  }),
+  Schema.Struct({
+    ...OrchestrationV2JsonEventBaseFields,
     type: Schema.Literal("thread.creator-repaired"),
     payload: HistoricalThreadCreatorRepairPayload,
   }),
@@ -3407,6 +3420,8 @@ export const OrchestrationV2Command = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("thread.create"),
     ...OrchestrationV2CreationFields,
+    /** Set by the server for an empty MCP launch. */
+    groupThread: OrchestrationV2AppThread.fields.groupThread,
     creatorThreadId: Schema.optional(ThreadId),
     groupedUnderThreadId: OrchestrationV2AppThread.fields.groupedUnderThreadId,
     commandId: CommandId,
