@@ -345,8 +345,9 @@ request without merging it. A reaction-only review result, such as a reviewer bo
 request, therefore still wakes the agent. Reactions carry no time, so ones already present can be
 reported once when watching starts. Threads in a project that watch the same pull request share one
 check. On GitHub, a check first asks whether anything changed and reads the pull request only when it
-did, which keeps watching inside GitHub's rate limit. A reaction on an older comment of a busy pull
-request can take up to about 30 minutes to notice. Comments from your own account do not wake it.
+did, which keeps watching inside GitHub's rate limit. A reaction on a review, an inline
+review comment, or an older comment of a busy pull request can take up to about 30 minutes to
+notice. Comments from your own account do not wake it.
 When the pull request merges or closes, watching ends, and the agent is woken once unless it merged
 or closed the pull request itself with the host's CLI. A reopened pull request needs a new watch.
 Watching also ends after 10 wakes in a row that bring only comments or reactions, after 8
