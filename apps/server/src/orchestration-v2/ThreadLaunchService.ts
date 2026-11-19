@@ -81,6 +81,7 @@ export type ThreadLaunchWorkspaceStrategy =
       readonly baseRef: string;
       readonly branch?: string | undefined;
       readonly startFromOrigin?: boolean | undefined;
+      readonly requireExactBase?: true | undefined;
     };
 
 export interface ThreadLaunchInitialMessage {
@@ -734,10 +735,11 @@ const make = Effect.gen(function* () {
             .pipe(Effect.mapError(mapError(input, "update-thread", threadId)));
         }
         const requestedBaseRef = input.workspaceStrategy.baseRef;
+        const requireExactBase = input.workspaceStrategy.requireExactBase === true;
         let startRef = requestedBaseRef;
         let baseRefName = requestedBaseRef;
         const remote =
-          input.workspaceStrategy.startFromOrigin === true
+          !requireExactBase && input.workspaceStrategy.startFromOrigin === true
             ? yield* git
                 .resolveWorktreeBaseRemote({
                   cwd: project.workspaceRoot,
@@ -745,10 +747,15 @@ const make = Effect.gen(function* () {
                 })
                 .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId)))
             : null;
-        const shouldFetch = remote !== null;
+        const shouldFetch = requireExactBase || remote !== null;
         yield* setupTracker.stageStatus(threadId, "fetch", shouldFetch ? "running" : "skipped");
         let fetchedBase = false;
-        if (remote !== null) {
+        if (requireExactBase) {
+          yield* ensureEmptyOwner;
+          yield* git
+            .fetchExactWorktreeBase({ cwd: project.workspaceRoot, commit: requestedBaseRef })
+            .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId)));
+        } else if (remote !== null) {
           const baseRef = input.workspaceStrategy.baseRef;
           const fetchBase = ensureEmptyOwner.pipe(
             Effect.andThen(
@@ -786,6 +793,15 @@ const make = Effect.gen(function* () {
             })
             .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId))));
         if (!recordedBaseResolves) {
+          if (requireExactBase) {
+            return yield* mapError(
+              input,
+              "provision-worktree",
+              threadId,
+            )(
+              `The exact worktree base ${requestedBaseRef} is unavailable. Push the branch and delegate again, or omit isolation.`,
+            );
+          }
           const remoteName =
             remote?.remoteName ??
             (yield* git

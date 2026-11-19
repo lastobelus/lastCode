@@ -33,6 +33,10 @@ import {
 } from "@t3tools/contracts";
 
 import * as GitManager from "./GitManager.ts";
+import {
+  fetchRemoteWorktreeBase,
+  type RemoteWorktreeBaseError,
+} from "../peer/remoteWorktreeBase.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
@@ -130,6 +134,10 @@ export class GitWorkflowService extends Context.Service<
       { readonly commitSha: string; readonly remoteRefName: string } | null,
       GitCommandError
     >;
+    readonly fetchExactWorktreeBase: (input: {
+      readonly cwd: string;
+      readonly commit: string;
+    }) => Effect.Effect<void, GitCommandError | RemoteWorktreeBaseError>;
     readonly resolveDefaultBranchName: (
       cwd: string,
       remoteName: string,
@@ -666,6 +674,11 @@ export const make = Effect.gen(function* () {
           ),
         );
       },
+    ),
+    fetchExactWorktreeBase: Effect.fn("GitWorkflowService.fetchExactWorktreeBase")((input) =>
+      acquireMutation("GitWorkflowService.fetchExactWorktreeBase", input, ({ cwd, commit }) =>
+        fetchRemoteWorktreeBase(git, cwd, commit),
+      ),
     ),
     resolveDefaultBranchName: Effect.fn("GitWorkflowService.resolveDefaultBranchName")(
       function (cwd, remoteName) {

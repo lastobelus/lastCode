@@ -23,6 +23,7 @@ import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts"
 import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageIntake.ts";
 import * as ThreadReadBroker from "../../ThreadReadBroker.ts";
 import * as Claims from "../../../orchestration-v2/AttachmentClaims.ts";
+import { validateRemoteWorktreePreparation } from "../../../peer/remoteWorktreeDelegation.ts";
 import * as Project from "../../../project/ProjectService.ts";
 import * as ProjectCloneTracker from "../../../project/ProjectCloneTracker.ts";
 import { mutateProjectWithClone } from "../../../project/ProjectMutation.ts";
@@ -251,6 +252,8 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                 sourceTaskId: input.remotePreparation.sourceTaskId,
                 delegationId: `delegation:${commandId}`,
               };
+        const worktreeBaseCommit = input.remotePreparation?.worktreeBaseCommit;
+        const validateWorktreeProject = yield* validateRemoteWorktreePreparation(input);
         if (input.remotePreparation?.existingThreadId !== undefined) {
           const target = yield* context.threads
             .getThreadRecords(input.remotePreparation.existingThreadId, [])
@@ -362,6 +365,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                   }),
                 ),
               );
+        yield* validateWorktreeProject(project === undefined ? undefined : projectId);
         if (project !== undefined && input.workspaceStrategy?.type === "existing_worktree")
           yield* assertProjectWorktree(project.workspaceRoot, input.workspaceStrategy.worktreePath);
         if (!replaying && input.modelSelection !== undefined) {
@@ -384,6 +388,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         // An outside caller that names no workspace follows the new-threads-in-a-worktree
         // default, as the composer does.
         const requestedStrategy =
+          worktreeBaseCommit === undefined &&
           input.workspaceStrategy === undefined &&
           caller === undefined &&
           project !== undefined &&
@@ -489,6 +494,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                   ...delegation,
                   linkSessionId: peer!.sessionId,
                   stage: "prepared" as const,
+                  ...(worktreeBaseCommit === undefined ? {} : { worktreeBaseCommit }),
                 },
               }),
           createdBy: "agent",
@@ -530,6 +536,13 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           threadId: thread.id,
           link: McpInvocationContext.threadLinkFor(scope, thread.id, thread.title),
           ...(delegation === undefined ? {} : { delegation }),
+          ...(worktreeBaseCommit === undefined
+            ? {}
+            : {
+                worktreeBaseCommit: thread.remoteDelegations?.find(
+                  (entry) => entry.delegationId === delegation?.delegationId,
+                )?.worktreeBaseCommit,
+              }),
           projectId: thread.projectId,
           modelSelection: thread.modelSelection,
           runId: run?.id ?? null,

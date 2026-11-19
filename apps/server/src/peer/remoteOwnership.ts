@@ -1,4 +1,9 @@
-import type { OrchestrationV2ThreadProjection, RemoteDelegationSelector } from "@t3tools/contracts";
+import type {
+  OrchestrationV2Command,
+  OrchestrationV2ThreadProjection,
+  RemoteDelegationSelector,
+} from "@t3tools/contracts";
+import * as Result from "effect/Result";
 import { delegatedTaskProgress } from "@t3tools/provider-core/server/subagentProjection";
 
 export const sameRemoteDelegation = (
@@ -53,3 +58,30 @@ export const remoteDelegationMayStart = (
       entry.stage === "active" &&
       entry.linkSessionId === thread.linkOrigin?.sessionId,
   ) === true;
+
+type DispatchMode = Extract<
+  OrchestrationV2Command,
+  { readonly type: "message.dispatch" }
+>["dispatchMode"];
+
+export function remoteWorktreeDispatchMode(
+  baseRef: string | undefined,
+  projection: {
+    readonly thread: Pick<OrchestrationV2ThreadProjection["thread"], "worktreePath">;
+    readonly runs: ReadonlyArray<unknown>;
+  },
+): Result.Result<DispatchMode, string> {
+  if (baseRef === undefined) return Result.succeed({ type: "queue_after_active" });
+  if (projection.thread.worktreePath !== null || projection.runs.length > 0) {
+    return Result.fail("An isolated remote task needs an unused thread to prepare its worktree.");
+  }
+  return Result.succeed({
+    type: "defer_start",
+    workspaceStrategy: {
+      type: "worktree",
+      baseRef,
+      startFromOrigin: false,
+      requireExactBase: true,
+    },
+  });
+}

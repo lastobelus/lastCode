@@ -5,6 +5,7 @@ import {
   remoteDelegationProgress,
   sameRemoteDelegation,
   remoteDelegationMayStart,
+  remoteWorktreeDispatchMode,
 } from "../peer/remoteOwnership.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
@@ -12563,6 +12564,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         },
       });
       if (command.type === "remote_delegation.activate") {
+        const dispatchMode = yield* mapDispatchError(command)(
+          Effect.fromResult(remoteWorktreeDispatchMode(old?.worktreeBaseCommit, projection)),
+        );
         const before = (yield* Ref.get(events)).length;
         yield* dispatchMessage(
           {
@@ -12574,7 +12578,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             attachments: [],
             createdBy: "agent",
             creationSource: "mcp",
-            dispatchMode: { type: "queue_after_active" },
+            dispatchMode,
           },
           events,
           effects,
@@ -18956,9 +18960,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                     stored.event.payload.id === command.runId,
                 )
               : source.value.threadId === command.threadId &&
-                ["thread.create", "message.dispatch", "prepared-run.retry"].includes(
-                  source.value.commandType,
-                ) &&
+                [
+                  "thread.create",
+                  "message.dispatch",
+                  "prepared-run.retry",
+                  "remote_delegation.activate",
+                ].includes(source.value.commandType) &&
                 sourceEvents.some(
                   (stored) =>
                     (stored.event.type === "run.created" || stored.event.type === "run.updated") &&

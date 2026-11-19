@@ -2917,6 +2917,7 @@ const make = Effect.gen(function* () {
           appOwnedActionContinuationVersion: 1,
           appOwnedPullRequestWatchContinuationVersion: 1,
           remoteOwnedContinuationVersion: 1,
+          remoteWorktreeIsolationVersion: 1,
           asyncPolling: true,
           cancellation: true,
           batchThreadCreation: true,
@@ -3897,6 +3898,11 @@ const make = Effect.gen(function* () {
             "orchestration_error",
             "Remote activation has no owned run receipt.",
           );
+        if (run.workspacePreparation !== undefined) {
+          yield* threadLaunch
+            .prepareRun({ commandId, threadId: input.threadId, runId: run.id })
+            .pipe(Effect.mapError((error) => failure("orchestration_error", errorMessage(error))));
+        }
         return {
           threadId: input.threadId,
           messageId,
