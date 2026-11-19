@@ -45,6 +45,7 @@ import {
   getDesktopUpdateButtonTooltip,
   getDesktopUpdateDisabledReason,
   getDesktopUpdateInstallConfirmationMessage,
+  getDesktopUpdateInstallRefusal,
   isDesktopUpdateButtonDisabled,
   resolveDesktopUpdateButtonAction,
 } from "../../components/desktopUpdate.logic";
@@ -222,7 +223,10 @@ function AboutVersionSection() {
     const action = updateState ? resolveDesktopUpdateButtonAction(updateState) : "none";
 
     if (action === "download") {
-      void downloadLocalUpdate(bridge, { notifyDownloaded: false });
+      void downloadLocalUpdate(bridge, {
+        notifyDownloaded: false,
+        isLocalBuild: updateState?.source === "lastcode-local",
+      });
       return;
     }
 
@@ -242,11 +246,11 @@ function AboutVersionSection() {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: gt("Could not confirm update"),
+            title: resolveMessage(msg("Could not confirm update")),
             description:
               error instanceof Error
                 ? (thrownErrorMessage(error, resolveMessage) ?? error.message)
-                : gt("Update confirmation failed."),
+                : resolveMessage(msg("Update confirmation failed.")),
           }),
         );
         return;
@@ -255,17 +259,29 @@ function AboutVersionSection() {
         setIsUpdateActionPending(false);
         return;
       }
+      const confirmedVersion = updateState?.downloadedVersion ?? undefined;
       void bridge
-        .installUpdate()
+        .installUpdate(confirmedVersion)
+        .then((result) => {
+          const refusal = getDesktopUpdateInstallRefusal(result, confirmedVersion);
+          if (!refusal) return;
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: resolveMessage(msg("Update not installed")),
+              description: refusal,
+            }),
+          );
+        })
         .catch((error: unknown) => {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: gt("Could not install update"),
+              title: resolveMessage(msg("Could not install update")),
               description:
                 error instanceof Error
                   ? (thrownErrorMessage(error, resolveMessage) ?? error.message)
-                  : gt("Install failed."),
+                  : resolveMessage(msg("Install failed.")),
             }),
           );
         })

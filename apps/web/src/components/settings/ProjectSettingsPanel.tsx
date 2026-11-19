@@ -1,4 +1,5 @@
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
+import { useWorkspaceLifecycleConfirmation } from "../../hooks/useWorkspaceLifecycleConfirmation";
 import { useComposerMenuState } from "../chat/useComposerMenuState";
 import { m as resolveMessage } from "../../i18n/messages";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
@@ -31,7 +32,7 @@ import {
   type SidebarProjectSnapshot,
 } from "../../sidebarProjectGrouping";
 import { useEnvironments, usePrimaryEnvironmentId } from "../../state/environments";
-import { useThreadShells, waitForProjectRemoval } from "../../state/entities";
+import { readThreadShells, useThreadShells, waitForProjectRemoval } from "../../state/entities";
 import { refreshProjectFaviconUrl } from "../../state/assets";
 import { projectEnvironment } from "../../state/projects";
 import { ProjectFavicon } from "../ProjectFavicon";
@@ -64,6 +65,7 @@ import {
 import { useSettingsProjectGroups } from "./useSettingsProjectGroups";
 import { readUnloadedThreadCount } from "../../state/olderSettledShelf";
 import { settingsScopeEnvironmentLabels } from "./settingsScopeAxis";
+import { projectsContainPersistentThread } from "../projectPersistence.logic";
 
 const ProjectIconPickerDialog = lazy(() =>
   import("./ProjectIconPickerDialog").then((module) => ({
@@ -289,6 +291,10 @@ function ProjectDetail({
   });
   const projectNameEditedRef = useRef(false);
 
+  const projectRemovalBlocked = projectsContainPersistentThread({
+    members: group.memberProjects,
+    threads,
+  });
   const faviconPath = group.faviconPath ?? null;
   const projectIcon = group.projectIcon ?? null;
   const pickProjectFavicon =
@@ -353,12 +359,26 @@ function ProjectDetail({
     group.memberProjects.every((member) => member.isScratch) &&
     group.memberProjects.some((member) => member.title !== SCRATCH_PROJECT_TITLE);
 
+  const lifecycle = useWorkspaceLifecycleConfirmation();
   const removeMembers = async (members: ReadonlyArray<SidebarProjectGroupMember>) => {
     if (checkProjectAccess(members, gt("Failed to remove project"))) return;
     const api = readLocalApi();
     if (!api) return;
 
-    const { projectThreads, isWholeGroup, confirmationMessage } = planProjectRemoval(
+    if (projectsContainPersistentThread({ members, threads })) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: gt("Persistent thread protected"),
+          description: gt(
+            "Disable persistence or move it to another thread before removing this project.",
+          ),
+        }),
+      );
+      return;
+    }
+
+    const { isWholeGroup, confirmationMessage } = planProjectRemoval(
       {
         members,
         groupMemberCount: group.memberProjects.length,
@@ -370,10 +390,37 @@ function ProjectDetail({
       resolveMessage,
     );
     const confirmed = await settlePromise(() =>
-      api.dialogs.confirm(confirmationMessage, { variant: "destructive" }),
+      lifecycle.confirm(
+        members.map((member) => ({
+          environmentId: member.environmentId,
+          input: {
+            operation: "delete" as const,
+            target: { kind: "project" as const, projectId: member.id },
+          },
+        })),
+        { title: gt("Remove project?"), description: confirmationMessage },
+      ),
     );
-    if (confirmed._tag === "Failure" || !confirmed.value) return;
+    if (confirmed._tag === "Failure" || confirmed.value === null) return;
     if (checkProjectAccess(members, gt("Failed to remove project"))) return;
+
+    const currentThreads = readThreadShells();
+    if (projectsContainPersistentThread({ members, threads: currentThreads })) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: gt("Persistent thread protected"),
+          description: gt(
+            "Disable persistence or move it to another thread before removing this project.",
+          ),
+        }),
+      );
+      return;
+    }
+    const memberKeys = new Set(members.map((member) => `${member.environmentId}:${member.id}`));
+    const currentProjectThreads = currentThreads.filter((thread) =>
+      memberKeys.has(`${thread.environmentId}:${thread.projectId}`),
+    );
 
     const draftStore = useComposerDraftStore.getState();
     const remainingMember = allMembers.find(
@@ -383,9 +430,9 @@ function ProjectDetail({
             member.environmentId === candidate.environmentId && member.id === candidate.id,
         ),
     );
-    for (const member of members) {
+    for (const [memberIndex, member] of members.entries()) {
       if (checkProjectAccess([member], gt("Failed to remove project"))) return;
-      const memberThreads = projectThreads.filter(
+      const memberThreads = currentProjectThreads.filter(
         (thread) => thread.environmentId === member.environmentId && thread.projectId === member.id,
       );
       const result = mapAtomCommandResult(
@@ -394,6 +441,9 @@ function ProjectDetail({
           input: {
             projectId: member.id,
             force: true,
+            ...(confirmed.value.dispositions[memberIndex]
+              ? { savedWorkspace: confirmed.value.dispositions[memberIndex] }
+              : {}),
           },
         }),
         () => undefined,
@@ -703,30 +753,38 @@ function ProjectDetail({
                   : gt("Remove project")
             }
             description={
-              hasOtherMembers
+              projectRemovalBlocked
                 ? gt(
-                    "Deletes the selected machine's checkout entries and their threads. Other machines and files on disk are not touched.",
+                    "Disable persistence or move it to another thread before removing this project.",
                   )
-                : group.memberProjects.length > 1
+                : hasOtherMembers
                   ? gt(
-                      "{count, plural, other {Deletes all {count} checkout entries and their threads on every machine. Files on disk are not touched.}}",
-                      { count: group.memberProjects.length },
+                      "Deletes the selected machine's checkout entries and their threads. Other machines and files on disk are not touched.",
                     )
-                  : gt("Deletes the project entry and its threads. Files on disk are not touched.")
+                  : group.memberProjects.length > 1
+                    ? gt(
+                        "{count, plural, other {Deletes all {count} checkout entries and their threads on every machine. Files on disk are not touched.}}",
+                        { count: group.memberProjects.length },
+                      )
+                    : gt(
+                        "Deletes the project entry and its threads. Files on disk are not touched.",
+                      )
             }
             control={
               <Button
                 size="sm"
                 variant="destructive-outline"
-                disabled={!canEditGroup}
+                disabled={!canEditGroup || projectRemovalBlocked}
                 onClick={() => void removeMembers(group.memberProjects)}
               >
                 <Trash2Icon />
-                {hasOtherMembers
-                  ? gt("Remove checkout")
-                  : group.memberProjects.length > 1
-                    ? gt("Remove all entries")
-                    : gt("Remove project")}
+                {projectRemovalBlocked
+                  ? gt("Disable persistence first")
+                  : hasOtherMembers
+                    ? gt("Remove checkout")
+                    : group.memberProjects.length > 1
+                      ? gt("Remove all entries")
+                      : gt("Remove project")}
               </Button>
             }
           />

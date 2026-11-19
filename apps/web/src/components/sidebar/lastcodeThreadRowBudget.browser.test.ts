@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
-import { THREAD_SIDEBAR_MIN_WIDTH } from "../threadSidebarWidth";
+import { resolveThreadSidebarMinimumWidth } from "../threadSidebarWidth";
 import { LASTCODE_THREAD_LEADING_MIN_WIDTH } from "./LastCodeThreadTitle";
 
 // Budget constraints for the flex inputs, not a substitute for native geometry.
 // The fixed metadata tracks occupy 80 physical pixels; indentation scales.
+const minimumWidth = resolveThreadSidebarMinimumWidth(0);
 const cases = [208, 256, 901].flatMap((width) =>
   [50, 75, 100].flatMap((scale) => [0, 4, 6].map((depth) => ({ width, scale, depth }))),
 );
@@ -17,7 +18,7 @@ describe("supported sidebar row budgets", () => {
       const ratio = value.scale / 100;
       // Disclosure, one row gap and end padding beside the reserved leading column.
       const firstLineMinimum = LASTCODE_THREAD_LEADING_MIN_WIDTH + (16 + 4 + 8) * ratio;
-      expect(value.width).toBeGreaterThanOrEqual(THREAD_SIDEBAR_MIN_WIDTH);
+      expect(value.width).toBeGreaterThanOrEqual(minimumWidth);
       expect(availableRow(value)).toBeGreaterThanOrEqual(firstLineMinimum);
       expect(availableRow(value)).toBeGreaterThanOrEqual(80 + 8 * ratio);
     },
@@ -27,7 +28,7 @@ describe("supported sidebar row budgets", () => {
     expect(LASTCODE_THREAD_LEADING_MIN_WIDTH - chrome).toBeGreaterThanOrEqual(32);
   });
   it.each([4, 6])("requires a separate metadata line at minimum width/depth%s", (depth) => {
-    const value = { width: THREAD_SIDEBAR_MIN_WIDTH, scale: 100, depth };
+    const value = { width: minimumWidth, scale: 100, depth };
     const singleLineMinimum = LASTCODE_THREAD_LEADING_MIN_WIDTH + 80 + 16 + 2 * 4 + 8;
     expect(availableRow(value)).toBeLessThan(singleLineMinimum);
   });

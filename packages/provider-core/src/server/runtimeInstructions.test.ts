@@ -41,8 +41,14 @@ describe("buildRuntimeInstructions", () => {
     );
     assert.notInclude(instructions, "merge it now");
     assert.include(instructions, "Otherwise act now or hand back.");
-    assert.include(instructions, "then watch and end your turn");
-    assert.include(instructions, "never watch, even if the brief says babysit");
+    assert.include(
+      instructions,
+      "then watch, run any required project gate check once, and end your turn while gates are pending.",
+    );
+    assert.include(
+      instructions,
+      "An app-owned delegated child owns a PR watch only when its brief says the parent verified features.appOwnedPullRequestWatchContinuationVersion and #482 Phase 4 acceptance",
+    );
     assert.include(
       instructions,
       "After PR work, a child's last line is: PR <full URL>, head <SHA>, checks and reviews <state>.",

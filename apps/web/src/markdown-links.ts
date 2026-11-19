@@ -19,6 +19,8 @@ export interface MarkdownFileLinkMeta {
   displayPath: string;
   workspaceRelativePath: string | null;
   basename: string;
+  /** Whether the authored destination omitted every directory segment. */
+  isBareFilename: boolean;
   line?: number;
   column?: number;
   endLine?: number;
@@ -79,8 +81,14 @@ export function resolveMarkdownFileLinkMeta(
   const targetPath = resolveMarkdownFileLinkTarget(href, cwd, baseDir);
   if (!targetPath) return null;
   const source = href ? parseMarkdownFileLink(href) : null;
+  const isBareFilename =
+    source !== null &&
+    !isAbsolutePath(source.path) &&
+    !/[\\/]/.test(source.path) &&
+    source.path !== "." &&
+    source.path !== "..";
   return {
-    ...buildFileLinkMetaFromTarget(targetPath, cwd),
+    ...buildFileLinkMetaFromTarget(targetPath, cwd, isBareFilename),
     ...(source?.endLine !== undefined ? { endLine: source.endLine } : {}),
     workspaceLookupPath:
       source !== null &&
@@ -92,7 +100,11 @@ export function resolveMarkdownFileLinkMeta(
   };
 }
 
-function buildFileLinkMetaFromTarget(targetPath: string, cwd?: string) {
+function buildFileLinkMetaFromTarget(
+  targetPath: string,
+  cwd: string | undefined,
+  isBareFilename: boolean,
+) {
   const { path, line, column } = splitFilePathPosition(targetPath);
   return {
     filePath: path,
@@ -100,6 +112,7 @@ function buildFileLinkMetaFromTarget(targetPath: string, cwd?: string) {
     displayPath: formatWorkspaceRelativePath(targetPath, cwd),
     workspaceRelativePath: workspaceRelativeFilePath(path, cwd),
     basename: fileBasename(path),
+    isBareFilename,
     ...(line !== undefined ? { line } : {}),
     ...(column !== undefined ? { column } : {}),
   };

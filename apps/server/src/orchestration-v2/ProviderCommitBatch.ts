@@ -286,6 +286,7 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
     process: (event: A) => Effect.Effect<void, E2, R2>,
     after: Effect.Effect<boolean, E2, R2>,
     canBatch: Effect.Effect<boolean, never, R2> = Effect.succeed(true),
+    batchableSnapshot: (event: A) => boolean = isSnapshot,
   ) {
     if (!enabled)
       return yield* source.pipe(
@@ -311,7 +312,11 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
           let check = false;
           if (signal._tag === "End") reply = Effect.succeed(true);
           else if (signal._tag === "Failure") reply = Effect.failCause(signal.cause);
-          else if (isSnapshot(signal.event) && (yield* canBatch)) {
+          else if (
+            isSnapshot(signal.event) &&
+            batchableSnapshot(signal.event) &&
+            (yield* canBatch)
+          ) {
             const bytes = Buffer.byteLength(yield* encodeQueue(signal.event));
             reply = yield* enqueue(
               process(signal.event).pipe(Effect.as(false)),

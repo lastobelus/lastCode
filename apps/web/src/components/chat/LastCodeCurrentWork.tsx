@@ -1,3 +1,4 @@
+import { T, useGT, useMessages } from "gt-react";
 import type {
   ActionResumeState,
   OrchestrationV2PendingBackgroundTask,
@@ -34,9 +35,11 @@ export function LastCodeCurrentWork({
   actionItems,
   onOpenThread,
 }: LastCodeCurrentWorkProps) {
+  const gt = useGT();
+  const messages = useMessages();
   const hoverDetails = useClientSetting("hoverCurrentWorkDetails");
   const actions = actionItems.filter((item) => item !== null);
-  const background = presentPendingBackgroundWork(tasks);
+  const background = presentPendingBackgroundWork(tasks, messages);
   const count = actions.length + (background?.items.length ?? 0);
   if (count === 0) return null;
 
@@ -46,7 +49,9 @@ export function LastCodeCurrentWork({
     actions.length === 0 || action === null
       ? null
       : action.outcome === "running"
-        ? `${runningPresentation?.state === "waiting" ? "Waiting for" : "Running"} ${action.actionName}`
+        ? runningPresentation?.state === "waiting"
+          ? gt("Waiting for {action}", { action: action.actionName })
+          : gt("Running {action}", { action: action.actionName })
         : typeof actions[0]?.title === "string"
           ? actions[0].title
           : action.actionName;
@@ -83,7 +88,9 @@ export function LastCodeCurrentWork({
         )}
         <PopoverTrigger
           openOnHover
-          render={<Button size="icon-xs" variant="ghost-muted" aria-label="Show work details" />}
+          render={
+            <Button size="icon-xs" variant="ghost-muted" aria-label={gt("Show work details")} />
+          }
         >
           <InfoIcon />
         </PopoverTrigger>
@@ -91,15 +98,17 @@ export function LastCodeCurrentWork({
           <span className="ms-1.5 flex shrink-0 items-center gap-2.5">{inlineActions}</span>
         ) : null}
       </div>
+      {/* Text-only background lists can loop in the animated measuring viewport. */}
       <PopoverPopup
-        aria-label="Current work"
+        aria-label={gt("Current work")}
         tooltipStyle
+        animated={false}
         side="top"
         className="max-w-[min(30rem,calc(100vw-2rem))] whitespace-normal wrap-anywhere [--inline-button-text-align:start] [--inline-button-white-space:normal] [&_[data-slot=inline-button]]:max-w-full"
       >
         <ComposerBanner.Scroll className="max-h-[min(var(--available-height),24rem,40dvh)]">
           <div className="flex flex-col gap-1.5 font-normal" data-lastcode-work-list="true">
-            <div className="text-muted-foreground">Current work · {count}</div>
+            <div className="text-muted-foreground">{gt("Current work · {count}", { count })}</div>
             {actions.map((item) => (
               <div key={item.id} className="flex min-w-0 gap-2">
                 <span
@@ -109,16 +118,7 @@ export function LastCodeCurrentWork({
                   {item.icon}
                 </span>
                 <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                  {action?.outcome === "running" ? (
-                    <div className="wrap-anywhere">{action.actionName}</div>
-                  ) : null}
-                  <div
-                    className={cn("wrap-anywhere", runningPresentation && secondaryTextClassName)}
-                  >
-                    {runningPresentation
-                      ? `${runningPresentation.label} ${runningPresentation.summary}`
-                      : item.title}
-                  </div>
+                  <div className="wrap-anywhere">{item.title}</div>
                   {item.description ? (
                     <div className={secondaryTextClassName}>{item.description}</div>
                   ) : null}
@@ -150,7 +150,7 @@ export function LastCodeCurrentWork({
                     ) : null}
                     {childThreadId != null && background.items.length > 1 ? (
                       <InlineButton tone="muted" onClick={() => onOpenThread(childThreadId)}>
-                        Open thread
+                        <T>Open thread</T>
                       </InlineButton>
                     ) : null}
                   </div>
@@ -159,7 +159,9 @@ export function LastCodeCurrentWork({
             })}
             {work?.actions ? (
               <div className="flex flex-wrap items-center gap-2">
-                <span className="text-muted-foreground">Background work</span>
+                <span className="text-muted-foreground">
+                  <T>Background work</T>
+                </span>
                 {work.actions}
               </div>
             ) : null}

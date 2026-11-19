@@ -7,9 +7,8 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
-import { quoteRemoteArg, remoteDeviceEnvironment, remoteDeviceScript } from "./sshDeviceScript.ts";
-
 import { AGENT_DEVICE_VERSION, DEVICE_HUB_VERSION } from "./DeviceToolchain.ts";
+import { quoteRemoteArg, remoteDeviceEnvironment, remoteDeviceScript } from "./sshDeviceScript.ts";
 
 const exec = NodeUtil.promisify(NodeChildProcess.execFile);
 
@@ -357,9 +356,10 @@ describe("remote helper lifecycle", () => {
         const home = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-remote-script-"));
         const bin = NodePath.join(home, "bin");
         await NodeFSP.mkdir(bin);
-        await NodeFSP.writeFile(NodePath.join(bin, "adb"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+        const sdk = NodePath.join(home, "sdk");
+        await completeSdk(sdk);
         await NodeFSP.writeFile(
-          NodePath.join(bin, "emulator"),
+          NodePath.join(sdk, "emulator/emulator"),
           "#!/bin/sh\nprintf 'emulated webcam<N> none\\n' >&2\n",
           { mode: 0o755 },
         );
@@ -428,7 +428,7 @@ else { const child=spawn(process.execPath,[path.join(path.dirname(process.argv[1
               HOME: home,
               PATH: `${bin}:${process.env.PATH}`,
               SERVE_EMU_FFMPEG: NodePath.join(home, "missing-ffmpeg"),
-              ANDROID_HOME: "",
+              ANDROID_HOME: sdk,
               EXPO_DEVICE_HUB_EMULATOR_EXTRA_ARGS: "-memory 4096",
             },
           });

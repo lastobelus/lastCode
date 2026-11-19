@@ -1,3 +1,4 @@
+import { T } from "gt-react";
 import { useState } from "react";
 import type { ScopedThreadRef } from "@t3tools/contracts";
 import { scopedThreadKey, scopeProjectRef } from "@t3tools/client-runtime/environment";
@@ -30,7 +31,7 @@ function EmptyProjects() {
       data-lastcode-sidebar-scale={scale}
       style={style}
     >
-      No projects yet
+      <T>No projects yet</T>
     </div>
   );
 }

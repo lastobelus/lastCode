@@ -1,10 +1,12 @@
 import { msg } from "gt-react";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { m } from "~/i18n/messages";
+import { readUnavailableThreadReference } from "../../lib/composerThreadReferences";
 import type { ThreadStructure } from "@t3tools/client-runtime/state/shell";
 import {
   AuthOrchestrationOperateScope,
   type EnvironmentId,
+  type OrchestrationMessageContext,
   type ProviderApprovalDecision,
   type RuntimeRequestId,
   type ScopedThreadRef,
@@ -45,8 +47,8 @@ import {
   withdrawDisplacedCustomAnswerFromPrompt,
   derivePendingUserInputProgress,
   answerContextRecords,
-  projectPendingUserInputAnswer,
   threadContextsReferencedByAnswer,
+  projectPendingUserInputAnswer,
 } from "../../pendingUserInput";
 import {
   questionAttachmentDraftId,
@@ -406,6 +408,7 @@ export function usePendingThreadRequests(input: {
     );
     const prepareAndRespond = async () => {
       const attachmentsByQuestionId = new Map<string, UserInputAttachments[string]>();
+      const contextsByQuestionId = new Map<string, OrchestrationMessageContext>();
       const providerAnswers = { ...answers };
       const threadDraft = useComposerDraftStore.getState().getComposerDraft(composerDraftTarget);
       const questionDrafts = pendingInput.questions.map((question) => {
@@ -420,9 +423,33 @@ export function usePendingThreadRequests(input: {
       });
       for (const { question, target, draft } of questionDrafts) {
         if ((useQuestionAttachmentPreparation.getState().counts[target] ?? 0) > 0) return;
+        const answer = answers[question.id];
+        const answerRecords = answerContextRecords(draft, threadDraft);
+        const unavailable =
+          typeof answer === "string"
+            ? readUnavailableThreadReference(answer, answerRecords, environmentId)
+            : undefined;
+        if (unavailable) {
+          setThreadError(
+            activeThreadId,
+            m(
+              msg(
+                "An attached thread can't be read. Check connections, read permissions and server updates for the source and selected machines, or remove the reference before submitting. Your answer is saved.",
+              ),
+            ),
+          );
+          return;
+        }
+        const records =
+          typeof answer === "string"
+            ? threadContextsReferencedByAnswer(answer, draft?.threadContexts ?? [])
+            : [];
+        if (records.length > 0) {
+          contextsByQuestionId.set(question.id, { version: 1, records });
+        }
         providerAnswers[question.id] = projectPendingUserInputAnswer(
-          answers[question.id],
-          answerContextRecords(draft, threadDraft),
+          answer,
+          answerRecords.filter((record) => record.kind !== "thread"),
         );
         const attachments = draft ? [...draft.images, ...draft.files] : [];
         if (attachments.length === 0) continue;
@@ -476,6 +503,9 @@ export function usePendingThreadRequests(input: {
           threadId: activeThreadId,
           requestId,
           answers: providerAnswers,
+          ...(contextsByQuestionId.size > 0
+            ? { contextsByQuestionId: Object.fromEntries(contextsByQuestionId) }
+            : {}),
           ...(attachmentsByQuestionId.size > 0
             ? { attachmentsByQuestionId: Object.fromEntries(attachmentsByQuestionId) }
             : {}),

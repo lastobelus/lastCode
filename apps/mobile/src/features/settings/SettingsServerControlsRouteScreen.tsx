@@ -27,6 +27,8 @@ import { useSettingsEnvironmentMenu } from "./components/SettingsEnvironmentFilt
 import { BranchNamingSettings } from "./components/BranchNamingSettings";
 import { DatabaseStorageNotice } from "./components/DatabaseStorageNotice";
 import { ListChoiceRow as SettingsChoiceRow } from "../../components/ui/ListChoiceRow";
+import { ListRowLayout } from "../../components/ui/ListRowLayout";
+import { RetentionDaysField } from "./components/RetentionDaysField";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 import { IssueTrackerSection } from "./components/IssueTrackerSection";
@@ -46,6 +48,12 @@ import {
 import { PullRequestGlyph } from "../pull-requests/pullRequestGlyphs";
 import { AutoSettleSettingsRows } from "./ThreadSettingsSections";
 import { supportsSharedSettingsSync } from "@t3tools/client-runtime/state/shared-settings";
+import {
+  DEFAULT_MOBILE_DEPENDENCY_RETENTION_DAYS,
+  planMobileWorktreeDependencyCleanup,
+  resolveMobileWorktreeDependencySettings,
+  supportsMobileWorktreeDependencyCleanup,
+} from "./settings-worktree-dependencies";
 
 type SettingsPage = "threads" | "source-control" | "worktrees" | "maintenance";
 
@@ -73,8 +81,30 @@ const PAGE_PROJECT_KEYS: Record<SettingsPage, readonly ProjectScopedServerSettin
     "branchNamePrefix",
     "branchNameInstructions",
   ],
-  maintenance: ["continueThreadsAfterServerUpdate"],
+  maintenance: ["continueThreadsAfterServerUpdate", "worktreeCleanup"],
 };
+
+const CUSTOM_WORKTREE_CLEANUP_LABEL = msg("Custom", {
+  $context: "use project-specific cleanup settings",
+});
+
+const WORKTREE_CLEANUP_CHOICES = [
+  {
+    mode: "inherit",
+    label: msg("Inherit", { $context: "use the inherited value" }),
+    description: msg("Use each environment's automatic cleanup rules."),
+  },
+  {
+    mode: "off",
+    label: msg("Off", { $context: "automatic worktree cleanup is disabled" }),
+    description: msg("Disable all automatic worktree and dependency cleanup for this project."),
+  },
+  {
+    mode: "custom",
+    label: CUSTOM_WORKTREE_CLEANUP_LABEL,
+    description: msg("Use this project's automatic cleanup rules."),
+  },
+] as const;
 
 const SUBMODULE_CHOICES: ReadonlyArray<{
   readonly mode: WorktreeSubmodules | null;
@@ -260,6 +290,35 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
     (key) => key !== "worktreeCleanup" || supportsDependencies,
   );
   const dependencySettings = resolveMobileWorktreeDependencySettings(displayTargets);
+  const persistWrites = (
+    writes: ReturnType<typeof planMobileScopedSettingsPatch>,
+    patch?: ServerSettingsPatch,
+  ) => {
+    if (
+      writeInFlight.current ||
+      !hasConnectedSelection ||
+      !targets.every((target) =>
+        readEnvironmentScope(target.environment.environmentId, AuthSettingsWriteScope),
+      ) ||
+      writes.length === 0
+    )
+      return;
+    writeInFlight.current = true;
+    setPendingTargets(targets);
+    setPendingWrites((count) => count + 1);
+    void writeSettings(targets, writes).finally(() => {
+      writeInFlight.current = false;
+      setPendingTargets(null);
+      setPendingWrites((count) => count - 1);
+      const queued = queuedPatch.current;
+      queuedPatch.current = null;
+      // Project overrides are replaced whole, so retain the patch that just completed.
+      // Clear and cleanup writes cannot replay drafts over their changed overrides.
+      if (patch !== undefined && queued?.key === targetsKey) {
+        write({ ...patch, ...queued.patch });
+      }
+    });
+  };
   const write = (patch: ServerSettingsPatch) => {
     if (writeInFlight.current) {
       const queued = queuedPatch.current;
@@ -269,49 +328,10 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
       };
       return;
     }
-    if (
-      !hasConnectedSelection ||
-      !targets.every((target) =>
-        readEnvironmentScope(target.environment.environmentId, AuthSettingsWriteScope),
-      )
-    )
-      return;
-    const writes = planServerSettingsWrites(targets, projectSelected, patch);
-    if (writes.length === 0) return;
-    writeInFlight.current = true;
-    setPendingTargets(targets);
-    setPendingWrites((count) => count + 1);
-    void writeSettings(targets, writes).finally(() => {
-      writeInFlight.current = false;
-      setPendingTargets(null);
-      setPendingWrites((count) => count - 1);
-      const queued = queuedPatch.current;
-      queuedPatch.current = null;
-      // These targets may not show this write yet, so send it again with the
-      // queued patch; project overrides are replaced whole.
-      if (queued?.key === targetsKey) write({ ...patch, ...queued.patch });
-    });
+    persistWrites(planServerSettingsWrites(targets, projectSelected, patch), patch);
   };
   const clearProjectOverrides = () => {
-    if (
-      writeInFlight.current ||
-      !targets.every((target) =>
-        readEnvironmentScope(target.environment.environmentId, AuthSettingsWriteScope),
-      )
-    )
-      return;
-    const writes = planMobileScopedSettingsClear(targets, PAGE_PROJECT_KEYS[props.page]);
-    if (writes.length === 0) return;
-    writeInFlight.current = true;
-    setPendingTargets(targets);
-    setPendingWrites((count) => count + 1);
-    void writeSettings(targets, writes).finally(() => {
-      writeInFlight.current = false;
-      // Resending a draft over these pre-clear targets would undo the clear.
-      queuedPatch.current = null;
-      setPendingTargets(null);
-      setPendingWrites((count) => count - 1);
-    });
+    persistWrites(planMobileScopedSettingsClear(targets, pageProjectKeys));
   };
   const disabled = !canWriteSettings || pendingWrites > 0 || !hasConnectedSelection;
   const managed = (...keys: string[]) => managedSettingReason(targets, keys, m);
@@ -337,11 +357,23 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
       !PROJECT_SCOPED_SERVER_SETTING_KEYS.includes(
         key as (typeof PROJECT_SCOPED_SERVER_SETTING_KEYS)[number],
       ));
+  const dependenciesDisabled =
+    disabled || !supportsDependencies || (projectSelected && dependencySettings.mode !== "custom");
+  const updateDependencyDays = (value: number | null) => {
+    if (dependenciesDisabled) return;
+    persistWrites(
+      planMobileWorktreeDependencyCleanup(targets, projectSelected, {
+        kind: "days",
+        value,
+      }),
+    );
+  };
 
   return (
     <SettingsScreen title={m(PAGE_TITLES[props.page])} menus={[environmentMenu]}>
       <ScrollView
         contentInsetAdjustmentBehavior="automatic"
+        keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
         className="flex-1"
         contentContainerClassName="gap-6 px-5 pt-4"
@@ -360,7 +392,7 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
               <SettingsProjectOverridesSection
                 projectLabel={selectedProject?.label ?? gt("Unavailable project")}
                 hasOverrides={targets.some((target) =>
-                  PAGE_PROJECT_KEYS[props.page].some((key) => target.sources[key] === "project"),
+                  pageProjectKeys.some((key) => target.sources[key] === "project"),
                 )}
                 pending={pendingWrites > 0}
                 disabled={!canWriteSettings}
@@ -645,7 +677,7 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                   <>
                     {projectSelected ? (
                       <SettingsSection
-                        title="Automatic worktree cleanup"
+                        title={gt("Automatic worktree cleanup")}
                         trailing={
                           pendingWrites === 0 && dependencySettings.mode === null ? (
                             <MixedValuesLabel projectSelected />
@@ -655,8 +687,8 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                         {WORKTREE_CLEANUP_CHOICES.map((choice, index) => (
                           <SettingsChoiceRow
                             key={choice.mode}
-                            label={choice.label}
-                            description={choice.description}
+                            label={m(choice.label)}
+                            description={m(choice.description)}
                             selected={dependencySettings.mode === choice.mode}
                             separated={index > 0}
                             disabled={disabled}
@@ -674,7 +706,7 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                       </SettingsSection>
                     ) : null}
                     <SettingsSection
-                      title="Worktree dependencies"
+                      title={gt("Worktree dependencies")}
                       trailing={
                         pendingWrites === 0 && dependencySettings.mixedDays ? (
                           <MixedValuesLabel projectSelected={projectSelected} />
@@ -697,8 +729,8 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                         <View className="border-t border-border-subtle">
                           <ListRowLayout
                             icon="clock"
-                            label="Inactive days"
-                            description="1 to 3650 days"
+                            label={gt("Inactive days")}
+                            description={gt("1 to 3650 days")}
                             disabled={dependenciesDisabled}
                             accessory={
                               <RetentionDaysField
@@ -718,17 +750,28 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                       ) : null}
                       {projectSelected && dependencySettings.mode !== "custom" ? (
                         <Text className="px-4 pb-4 text-sm text-foreground-muted">
-                          Select Custom to change this project's dependency cleanup.
+                          <T>
+                            Select <Var>{m(CUSTOM_WORKTREE_CLEANUP_LABEL)}</Var> to change this
+                            project's dependency cleanup.
+                          </T>
                         </Text>
                       ) : null}
                     </SettingsSection>
                   </>
                 ) : (
-                  <SettingsSection title="Worktree dependencies">
+                  <SettingsSection title={gt("Worktree dependencies")}>
                     <Text className="p-4 text-sm text-foreground-muted">
-                      {projectSelected
-                        ? "Update the selected environments to configure project worktree and dependency cleanup."
-                        : "Choose updated macOS or Linux environments to use dependency cleanup."}
+                      {projectSelected ? (
+                        <T>
+                          Update the selected environments to configure project worktree and
+                          dependency cleanup.
+                        </T>
+                      ) : (
+                        <T>
+                          Choose updated <Var>{"macOS"}</Var> or <Var>{"Linux"}</Var> environments
+                          to use dependency cleanup.
+                        </T>
+                      )}
                     </Text>
                   </SettingsSection>
                 )}
@@ -742,9 +785,12 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                       }}
                     />
                   ) : (
+                    // oxlint-disable-next-line t3code/no-untranslated-copy -- feature name shared with the supported settings section
                     <SettingsSection title="Local CI">
                       <Text className="p-4 text-sm text-foreground-muted">
-                        Update older servers to configure Local CI.
+                        <T>
+                          Update older servers to configure <Var>{"Local CI"}</Var>.
+                        </T>
                       </Text>
                     </SettingsSection>
                   )

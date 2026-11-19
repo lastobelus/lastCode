@@ -23,6 +23,7 @@ import type { EnvironmentThreadSearchMatch } from "@t3tools/client-runtime/state
 import {
   formatWorkingDurationLabel,
   resolveThreadWorkingStartedAt,
+  threadRuntimeIsActive,
 } from "@t3tools/client-runtime/state/models";
 import {
   AuthOrchestrationOperateScope,
@@ -46,6 +47,7 @@ import { memo, useCallback, useMemo, useState, type ComponentProps } from "react
 import { Platform, Pressable, Text as RNText, useWindowDimensions, View } from "react-native";
 import type { SwipeableMethods } from "react-native-gesture-handler/ReanimatedSwipeable";
 
+import { keepMarked, m as resolveMessage } from "../../i18n/messages";
 import type { ThreadListProvider } from "../../state/thread-list-environments";
 import { SymbolView, type AppSymbolName } from "../../components/ui/AppSymbol";
 import { AppText as Text } from "../../components/ui/AppText";
@@ -84,7 +86,6 @@ import { useSwipeRowDormant } from "../home/swipe-row-activation";
 import { ThreadSwipeable } from "../home/thread-swipe-actions";
 import { buildThreadTitleRegenerationMenuItems } from "./thread-title-regeneration-menu";
 import { canTurnThreadIntoProject, turnThreadIntoProject } from "./turnThreadIntoProject";
-import { threadCanArchive } from "../home/threadArchive";
 import { useCanShareWithGuest } from "./useCanShareWithGuest";
 import {
   THREAD_LIST_V2_SETTLED_PAGE_COUNT,
@@ -126,10 +127,10 @@ interface StatusLabel {
   readonly iconTintClassName?: string;
 }
 const STATUS_LABEL_BY_STATUS: Partial<Record<ThreadListV2Status, StatusLabel>> = {
-  archiving: { label: "Archiving…", className: "text-muted-foreground" },
-  "archive-failed": { label: "Archive failed", className: "text-warning-foreground" },
-  "not-responding": { label: "Not responding", className: "text-warning-foreground" },
-  "needs-repair": { label: "Needs repair", className: "text-warning-foreground" },
+  archiving: { label: msg("Archiving…"), className: "text-muted-foreground" },
+  "archive-failed": { label: msg("Archive failed"), className: "text-warning-foreground" },
+  "not-responding": { label: msg("Not responding"), className: "text-warning-foreground" },
+  "needs-repair": { label: msg("Needs repair"), className: "text-warning-foreground" },
   approval: {
     label: msg("Approval", { $context: "thread status, waiting for approval" }),
     icon: "exclamationmark.shield",
@@ -258,8 +259,12 @@ const LEGACY_MENU_ACTIONS: MenuAction[] = [
 ];
 
 const FAILED_CLEANUP_MENU_ACTIONS: MenuAction[] = [
-  { id: "retry-worktree-cleanup", title: "Retry", image: "arrow.clockwise" },
-  { id: "keep-worktree", title: "Keep worktree", image: "externaldrive" },
+  {
+    id: "retry-worktree-cleanup",
+    title: msg("Retry", { $context: "retry worktree cleanup" }),
+    image: "arrow.clockwise",
+  },
+  { id: "keep-worktree", title: msg("Keep worktree"), image: "externaldrive" },
 ];
 
 function ThreadListV2Section(props: {
@@ -958,9 +963,9 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     theme[sidebarPane ? "--color-drawer-foreground-muted" : "--color-foreground-muted"];
   const rawStatus = resolveThreadListV2Status(thread);
   const status = resolveThreadListV2RowStatus(thread);
-  const archiveStatus = presentThreadArchive(thread);
+  const archiveStatus = presentThreadArchive(thread, m);
   const showActionWaitingIndicator = shouldShowActionWaitingIndicator(thread, status);
-  const cleanupStatus = resolveWorktreeCleanupStatus(thread);
+  const cleanupStatus = resolveWorktreeCleanupStatus(thread, keepMarked);
   // "Done" marks a completion the user has not opened yet — same emerald
   // label as the web sidebar, sourced from the server-side visited watermark
   // so checking a thread on any device clears it everywhere.
@@ -969,7 +974,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     status === "waiting" && actionPresentation?.state === "waiting"
       ? {
           ...STATUS_LABEL_BY_STATUS.waiting!,
-          label: "Action",
+          label: msg("Action", { $context: "thread status, waiting for a project action" }),
           className: "text-warning-foreground",
           iconTintClassName: "accent-warning-foreground",
         }
@@ -1078,10 +1083,16 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         actionId !== threadListV2ArchiveFailureActionId(pending, retry ? "retry" : "dismiss")
       ) {
         Dialog.alert(
-          retry ? "Could not archive thread" : "Couldn't dismiss archive failure",
           retry
-            ? "This failed archive changed. Review the conversation before retrying it."
-            : "This failed archive changed. Review the conversation before dismissing it.",
+            ? resolveMessage(msg("Could not archive thread"))
+            : resolveMessage(msg("Couldn't dismiss archive failure")),
+          retry
+            ? resolveMessage(
+                msg("This failed archive changed. Review the conversation before retrying it."),
+              )
+            : resolveMessage(
+                msg("This failed archive changed. Review the conversation before dismissing it."),
+              ),
         );
         return;
       }
@@ -1096,8 +1107,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       if (result._tag === "Failure") {
         const error = Cause.squash(result.cause);
         Dialog.alert(
-          "Couldn't dismiss archive failure",
-          error instanceof Error ? error.message : "An error occurred.",
+          resolveMessage(msg("Couldn't dismiss archive failure")),
+          error instanceof Error ? error.message : resolveMessage(msg("An error occurred.")),
         );
       }
     },
@@ -1112,8 +1123,10 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       if (result._tag === "Failure") {
         const error = Cause.squash(result.cause);
         Dialog.alert(
-          "Could not update persistent thread",
-          error instanceof Error ? error.message : "The persistent thread could not be updated.",
+          resolveMessage(msg("Could not update persistent thread")),
+          error instanceof Error
+            ? error.message
+            : resolveMessage(msg("The persistent thread could not be updated.")),
         );
       }
     },
@@ -1128,8 +1141,10 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     if (result._tag === "Failure") {
       const error = Cause.squash(result.cause);
       Dialog.alert(
-        "Could not cancel Action",
-        error instanceof Error ? error.message : "The Project Action could not be cancelled.",
+        resolveMessage(msg("Could not cancel Action")),
+        error instanceof Error
+          ? error.message
+          : resolveMessage(msg("The Project Action could not be cancelled.")),
       );
     }
   }, [closeTerminal, runningAction, thread.environmentId, thread.id]);
@@ -1148,8 +1163,10 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       finishFeedback("error");
       const error = Cause.squash(result.cause);
       Dialog.alert(
-        "Could not stop all previews and processes",
-        error instanceof Error ? error.message : "The previews and processes could not be stopped.",
+        resolveMessage(msg("Could not stop all previews and processes")),
+        error instanceof Error
+          ? error.message
+          : resolveMessage(msg("The previews and processes could not be stopped.")),
       );
     }
   }, [stopThreadProcesses, thread.environmentId, thread.id, thread.title]);
@@ -1162,19 +1179,29 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     if (result._tag === "Failure") {
       const error = Cause.squash(result.cause);
       Dialog.alert(
-        "Could not retry worktree cleanup",
-        error instanceof Error ? error.message : "The worktree cleanup could not be retried.",
+        resolveMessage(msg("Could not retry worktree cleanup")),
+        error instanceof Error
+          ? error.message
+          : resolveMessage(msg("The worktree cleanup could not be retried.")),
       );
     }
   }, [retryWorktreeCleanup, thread.environmentId, thread.id]);
   const handleKeepWorktree = useCallback(() => {
     Dialog.alert(
-      "Keep worktree?",
-      "LastCode will stop trying to remove this worktree. You can remove it manually later.",
+      resolveMessage(msg("Keep worktree?")),
+      resolveMessage(
+        msg(
+          "{product} will stop trying to remove this worktree. You can remove it manually later.",
+          { product: "LastCode" },
+        ),
+      ),
       [
-        { text: "Cancel", style: "cancel" },
         {
-          text: "Keep worktree",
+          text: resolveMessage(msg("Cancel", { $context: "dismiss the dialog" })),
+          style: "cancel",
+        },
+        {
+          text: resolveMessage(msg("Keep worktree")),
           style: "destructive",
           onPress: () => {
             void abandonWorktreeCleanup({
@@ -1184,10 +1211,10 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
               if (result._tag === "Failure") {
                 const error = Cause.squash(result.cause);
                 Dialog.alert(
-                  "Could not keep worktree",
+                  resolveMessage(msg("Could not keep worktree")),
                   error instanceof Error
                     ? error.message
-                    : "The worktree cleanup could not be dismissed.",
+                    : resolveMessage(msg("The worktree cleanup could not be dismissed.")),
                 );
               }
             });
@@ -1321,7 +1348,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
               id: "turn-into-project",
               title: gt("Turn into project"),
               image: "folder.badge.plus",
-              attributes: { disabled: !threadCanArchive(thread.runtime) },
+              attributes: { disabled: threadRuntimeIsActive(thread.runtime) },
             } satisfies MenuAction,
           ]
         : []),
@@ -1342,16 +1369,18 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         : [
             {
               id: "cancel-action",
-              title: `Cancel ${runningAction.actionName}`,
+              title: gt("Cancel {actionName}", { actionName: runningAction.actionName }),
               image: "stop.fill",
               attributes: { destructive: true },
             },
           ],
-    [runningAction],
+    [gt, runningAction],
   );
   const menuActions = useMemo<MenuAction[]>(() => {
     const nested = Platform.OS === "ios";
     const localized = (action: MenuAction): MenuAction => ({ ...action, title: m(action.title) });
+    if (cleanupFailed) return FAILED_CLEANUP_MENU_ACTIONS.map(localized);
+    if (cleanupPending) return [];
     const directPrefix: MenuAction[] = [
       ...(thread.branch
         ? [
@@ -1374,35 +1403,37 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       const archiveInDirect = sections.direct.some((action) => action.id === "archive");
       const archiveOptions = { archiveFamiliesSupported, archivePending: thread.archivePending };
       const withArchive = (actions: readonly MenuAction[]) =>
-        withThreadListV2ArchiveAction(actions, archiveOptions).map((action) =>
-          action.id === "archive" && action.title === "Archive"
-            ? { ...action, title: gt("Archive", { $context: "verb, thread action" }) }
-            : action,
-        );
+        withThreadListV2ArchiveAction(actions, archiveOptions, m);
       const persistent = thread.persistent === true;
       const supportsDividers = Platform.OS === "ios" || Platform.OS === "android";
-      const direct = buildThreadPersistenceMenuItems({
-        actions: [
-          ...(hasManagedProcesses
-            ? [
-                {
-                  id: "stop-thread-processes",
-                  title: "Stop all previews & processes",
-                  image: "stop.fill",
-                  attributes: { destructive: true },
-                },
-              ]
-            : []),
-          ...(archiveInDirect ? withArchive(sections.direct) : sections.direct),
-        ],
-        persistent,
-        supported: props.persistenceSupported,
-      });
-      const secondary = buildThreadPersistenceMenuItems({
-        actions: archiveInDirect ? sections.secondary : withArchive(sections.secondary),
-        persistent,
-        supported: false,
-      });
+      const direct = buildThreadPersistenceMenuItems(
+        {
+          actions: [
+            ...(hasManagedProcesses
+              ? [
+                  {
+                    id: "stop-thread-processes",
+                    title: gt("Stop all previews & processes"),
+                    image: "stop.fill",
+                    attributes: { destructive: true },
+                  },
+                ]
+              : []),
+            ...(archiveInDirect ? withArchive(sections.direct) : sections.direct),
+          ],
+          persistent,
+          supported: props.persistenceSupported,
+        },
+        m,
+      );
+      const secondary = buildThreadPersistenceMenuItems(
+        {
+          actions: archiveInDirect ? sections.secondary : withArchive(sections.secondary),
+          persistent,
+          supported: false,
+        },
+        m,
+      );
       return withThreadMenuDividers(
         layoutThreadListV2RowMenuActions(
           {
@@ -1481,6 +1512,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   }, [
     actionMenuItems,
     archiveFamiliesSupported,
+    cleanupFailed,
+    cleanupPending,
     hasManagedProcesses,
     props.persistenceSupported,
     thread.archivePending,
@@ -1651,6 +1684,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     swipeActions.primary,
     thread.title,
   ]);
+  const retryArchive = thread.archivePending?.status === "failed";
   const secondaryAction = useMemo(
     () =>
       swipeActions.secondary === "snooze"
@@ -1667,9 +1701,13 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
           }
         : swipeActions.secondary === "archive"
           ? {
-              accessibilityLabel: `${thread.archivePending?.status === "failed" ? "Retry archive" : "Archive"} ${thread.title}`,
+              accessibilityLabel: retryArchive
+                ? gt("Retry archive {title}", { title: thread.title })
+                : gt("Archive {title}", { title: thread.title }),
               icon: "archivebox" as const,
-              label: thread.archivePending?.status === "failed" ? "Retry archive" : "Archive",
+              label: retryArchive
+                ? gt("Retry archive")
+                : gt("Archive", { $context: "verb, thread action" }),
               onPress: handleArchive,
             }
           : null,
@@ -1677,10 +1715,10 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       gt,
       handleArchive,
       handleMenuAction,
+      retryArchive,
       snoozePresetActions,
       swipeActions.secondary,
       thread.title,
-      thread.archivePending?.status,
     ],
   );
   const swipeAccessibilityHint = !canOperateThread
@@ -1689,13 +1727,28 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       ? primaryAction.swipeHint
       : swipeActions.secondary === "snooze"
         ? primaryAction.swipeSnoozeHint
-        : `Opens the thread. Swipe left for ${primaryAction.label.toLowerCase()} and ${secondaryAction.label.toLowerCase()} actions.`;
+        : swipeActions.primary === "unsnooze"
+          ? retryArchive
+            ? gt("Opens the thread. Swipe left for wake and retry archive actions.")
+            : gt("Opens the thread. Swipe left for wake and archive actions.")
+          : swipeActions.primary === "unsettle"
+            ? retryArchive
+              ? gt("Opens the thread. Swipe left for un-settle and retry archive actions.")
+              : gt("Opens the thread. Swipe left for un-settle and archive actions.")
+            : retryArchive
+              ? gt("Opens the thread. Swipe left for settle and retry archive actions.")
+              : gt("Opens the thread. Swipe left for settle and archive actions.");
+  const actionWaitingAccessibilityLabel =
+    showActionWaitingIndicator && runningAction && actionPresentation
+      ? gt("Waiting for {actionName}. {summary}", {
+          actionName: runningAction.actionName,
+          summary: actionPresentation.summary,
+        })
+      : undefined;
   const threadAccessibilityLabel = [
     rowAccessibilityLabel,
     archiveStatus ? `${archiveStatus.label}. ${archiveStatus.description}` : null,
-    showActionWaitingIndicator && runningAction
-      ? `Waiting for ${runningAction.actionName}. ${actionRunningPresentation(runningAction).summary}`
-      : null,
+    actionWaitingAccessibilityLabel,
   ]
     .filter(Boolean)
     .join(", ");
@@ -1760,7 +1813,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
           <View className="flex-row items-center gap-1">
             {showActionWaitingIndicator && runningAction ? (
               <SymbolView
-                accessibilityLabel={`Waiting for ${runningAction.actionName}. ${actionRunningPresentation(runningAction).summary}`}
+                accessibilityLabel={actionWaitingAccessibilityLabel}
                 name="clock.arrow.circlepath"
                 size={12}
                 tintColor={selected ? String(selectedForegroundColor) : "#eab308"}
@@ -2000,6 +2053,11 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     cardContent
   );
 
+  const rowAccessibilityHint = cleanupFailed
+    ? gt("Thread unavailable. Long-press for worktree recovery actions")
+    : thread.persistent === true
+      ? gt("Persistent thread. Long-press to disable persistence")
+      : swipeAccessibilityHint;
   const rowContent = (close: () => void) =>
     variant === "card" ? (
       <RowPressable
@@ -2007,13 +2065,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         interactionClassName={rowAppearance.interactionClassName}
         interactionOpacity={rowAppearance.interactionOpacity}
         className={rowAppearance.className}
-        accessibilityHint={
-          cleanupFailed
-            ? "Thread unavailable. Long-press for worktree recovery actions"
-            : thread.persistent === true
-              ? "Persistent thread. Long-press to disable persistence"
-              : swipeAccessibilityHint
-        }
+        accessibilityHint={rowAccessibilityHint}
         accessibilityLabel={threadAccessibilityLabel}
         accessibilityRole="button"
         accessibilityActions={rowAccessibilityActions}
@@ -2046,13 +2098,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         key={`${thread.environmentId}:${thread.id}`}
         interactionClassName={rowAppearance.interactionClassName}
         interactionOpacity={rowAppearance.interactionOpacity}
-        accessibilityHint={
-          cleanupFailed
-            ? "Thread unavailable. Long-press for worktree recovery actions"
-            : thread.persistent === true
-              ? "Persistent thread. Long-press to disable persistence"
-              : swipeAccessibilityHint
-        }
+        accessibilityHint={rowAccessibilityHint}
         accessibilityLabel={threadAccessibilityLabel}
         accessibilityRole="button"
         accessibilityState={{ disabled: cleanupPending, selected }}
@@ -2195,9 +2241,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         {(close) => (
           <Menu
             accessibilityLabel={threadAccessibilityLabel}
-            actions={
-              cleanupFailed ? FAILED_CLEANUP_MENU_ACTIONS : cleanupPending ? [] : menuActions
-            }
+            actions={menuActions}
             onPressAction={handleMenuAction}
             shouldOpenOnLongPress={cleanupFailed || !cleanupPending}
           >

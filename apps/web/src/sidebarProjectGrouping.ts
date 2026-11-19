@@ -14,7 +14,7 @@ import {
 } from "@t3tools/client-runtime/state/project-grouping";
 import { msg } from "gt-react";
 
-import { m, type MessageResolver } from "./i18n/messages";
+import { m, type MessageResolver } from "~/i18n/messages";
 import type { Project } from "./types";
 
 export const PROJECT_GROUPING_MODE_LABELS: Record<SidebarProjectGroupingMode, string> = {
@@ -223,6 +223,7 @@ export function buildPhysicalToLogicalProjectKeyMap(
 export function buildSidebarProjectSnapshots(
   input: SidebarProjectGroupingInput & {
     resolveEnvironmentLabel: (environmentId: EnvironmentId) => string | null;
+    resolveMessage?: MessageResolver;
     // Returns true when an env id maps to a desktop-local saved-env
     // record. Defaults to "false for every
     // env" so callers that don't care about the distinction get the
@@ -230,7 +231,7 @@ export function buildSidebarProjectSnapshots(
     isDesktopLocalEnvironment?: (environmentId: EnvironmentId) => boolean;
     isWslEnvironment?: (environmentId: EnvironmentId) => boolean;
   },
-  resolve: MessageResolver = m,
+  resolve: MessageResolver = input.resolveMessage ?? m,
 ): SidebarProjectSnapshot[] {
   return buildSidebarProjectGroups(input, resolve).map((group): SidebarProjectSnapshot => {
     const members = group.members.map(
@@ -285,6 +286,23 @@ export function buildSidebarProjectSnapshots(
       archived: group.archived,
     };
   });
+}
+
+/** Puts the selected physical project first without changing shared group ordering. */
+export function orderProjectMembersForPicker(
+  members: readonly SidebarProjectGroupMember[],
+  targetProject: Pick<Project, "environmentId" | "id">,
+) {
+  const preferredIndex = members.findIndex(
+    (member) =>
+      member.environmentId === targetProject.environmentId && member.id === targetProject.id,
+  );
+  if (preferredIndex <= 0) return members;
+  return [
+    members[preferredIndex]!,
+    ...members.slice(0, preferredIndex),
+    ...members.slice(preferredIndex + 1),
+  ];
 }
 
 export function buildSidebarProjectPickerEntries(input: {

@@ -7,6 +7,9 @@ export type LastCodeThreadActions = Pick<
   | "archiveThreads"
   | "unarchiveThread"
   | "deleteThread"
+  | "confirmAndDeleteThread"
+  | "confirmThreadDeletion"
+  | "deleteThreads"
   | "setThreadPersistence"
   | "markThreadUnread"
   | "markThreadRead"
@@ -18,6 +21,9 @@ export function LastCodeThreadActionsProvider({ children }: { children: ReactNod
     archiveThreads,
     unarchiveThread,
     deleteThread,
+    confirmAndDeleteThread,
+    confirmThreadDeletion,
+    deleteThreads,
     setThreadPersistence,
     markThreadUnread,
     markThreadRead,
@@ -27,6 +33,9 @@ export function LastCodeThreadActionsProvider({ children }: { children: ReactNod
     archiveThreads,
     unarchiveThread,
     deleteThread,
+    confirmAndDeleteThread,
+    confirmThreadDeletion,
+    deleteThreads,
     setThreadPersistence,
     markThreadUnread,
     markThreadRead,

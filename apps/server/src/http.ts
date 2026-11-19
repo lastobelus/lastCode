@@ -34,6 +34,7 @@ import { OtlpTracer, OtlpSerialization } from "effect/observability";
 import * as ServerConfig from "./config.ts";
 import { ASSET_ROUTE_PREFIX, readMcpAppHtml, resolveAsset } from "./assets/AssetAccess.ts";
 import { sourceControlMediaResponse } from "./assets/sourceControlMediaResponse.ts";
+import { managedPreviewResourceResponse } from "./assets/ManagedPreviewResource.ts";
 import { statMediaFile, streamMediaFile, type OpenMediaFile } from "./assets/MediaFile.ts";
 import {
   ATTACHMENT_UPLOAD_ROUTE_PREFIX,
@@ -295,9 +296,12 @@ export const layerBrowserApiCors = Layer.unwrap(
     return HttpRouter.middleware(
       (httpEffect) => {
         const withCors = cors(httpEffect);
-        return Effect.flatMap(HttpServerRequest.HttpServerRequest, (request) =>
-          request.url.split("?", 1)[0] === MCP_HTTP_PATH ? httpEffect : withCors,
-        );
+        return Effect.flatMap(HttpServerRequest.HttpServerRequest, (request) => {
+          const path = request.url.split("?", 1)[0];
+          return path === MCP_HTTP_PATH || path === `${MCP_HTTP_PATH}/thread`
+            ? httpEffect
+            : withCors;
+        });
       },
       { global: true },
     );
@@ -486,6 +490,20 @@ export const layerAssetRoute = HttpRouter.add(
             reason: cause.reason._tag,
           }),
         ),
+        Effect.orElseSucceed(() =>
+          HttpServerResponse.empty({
+            status: 502,
+            headers: { "cache-control": "private, no-store", "x-content-type-options": "nosniff" },
+          }),
+        ),
+      );
+    }
+    if (asset.kind === "managed-preview-resource") {
+      return yield* managedPreviewResourceResponse(
+        asset,
+        request.headers,
+        request.method === "HEAD" ? "HEAD" : "GET",
+      ).pipe(
         Effect.orElseSucceed(() =>
           HttpServerResponse.empty({
             status: 502,

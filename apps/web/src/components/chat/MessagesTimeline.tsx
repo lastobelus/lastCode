@@ -4,6 +4,7 @@ import { threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
 import type { ToolCallDiffTarget } from "../../diffPanelStore";
 import { AudioPreviewUnmountContext } from "../files/AudioPreview";
+import type { ThreadAnnotation } from "@t3tools/contracts";
 import { ThreadFindTimelineContext } from "./ThreadFindProvider";
 import { MarkdownFindContext } from "./markdownFindContext";
 import { useChatCanvas } from "./ChatCanvasContext";
@@ -13,6 +14,7 @@ import type { WorktreeSetupSnapshot } from "@t3tools/contracts";
 import { deriveTimelineMinimapItems } from "./timelineMinimapItems";
 import {
   type AssistantCitation,
+  type CommandId,
   type EnvironmentId,
   type MessageId,
   type OrchestrationV2TurnItem,
@@ -228,6 +230,11 @@ interface MessagesTimelineProps {
   respondingRequestIds?: TimelineRowSharedState["respondingRequestIds"];
   canOperateThread?: boolean;
   onRespondToApproval?: TimelineRowSharedState["onRespondToApproval"];
+  annotation?: ThreadAnnotation | null;
+  onAnnotationEdit?: (annotationId?: string) => void;
+  onAnnotationBodyChange?: (body: string, annotationId?: string) => Promise<boolean>;
+  onAnnotationResolve?: (annotationId?: string) => void;
+  onAnnotationReopen?: (annotationId?: string) => void;
   citationRequest?: AssistantCitationRequest | null;
   citationHistory?: CitedHistory;
   onCiteAssistantText?: (
@@ -245,7 +252,8 @@ interface MessagesTimelineProps {
   worktreeSetup?: WorktreeSetupSnapshot | null;
   onCancelWorktreeSetup?: () => void;
   retryableWorkspacePreparationRunIds?: ReadonlySet<RunId>;
-  onRetryWorkspacePreparation?: (runId: RunId) => void;
+  retryableEmptyWorkspacePreparationFailureId?: CommandId | null;
+  onRetryWorkspacePreparation?: (runId: RunId | null, failureCommandId?: CommandId) => void;
   onWorktreeSetupWorkLocally?: () => void;
   onOpenWorktreeSetupTerminal?: (terminalId: string) => void;
   isPreparingWorktree?: boolean;
@@ -352,6 +360,11 @@ const ConversationTimeline = memo(function ConversationTimeline({
   respondingRequestIds = EMPTY_RESPONDING_REQUEST_IDS,
   canOperateThread = false,
   onRespondToApproval,
+  annotation = null,
+  onAnnotationEdit,
+  onAnnotationBodyChange,
+  onAnnotationResolve,
+  onAnnotationReopen,
   citationRequest = null,
   citationHistory = CITED_HISTORY_LOADING,
   onCiteAssistantText,
@@ -365,6 +378,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   footer = null,
   onCancelWorktreeSetup,
   retryableWorkspacePreparationRunIds = EMPTY_RUN_IDS,
+  retryableEmptyWorkspacePreparationFailureId = null,
   onRetryWorkspacePreparation,
   onWorktreeSetupWorkLocally,
   onOpenWorktreeSetupTerminal,
@@ -607,7 +621,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   };
 
   const onToggleActionFollowUp = (rowId: string) => {
-    suspendEndScrollMaintenanceForDisclosure(rowId);
+    preserveDisclosurePosition(rowId);
     setExpandedActionMessageIds((existing) => {
       const next = new Set(existing);
       if (next.has(rowId)) {
@@ -1177,6 +1191,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     },
     onCancelWorktreeSetup: onCancelWorktreeSetup ?? null,
     retryableWorkspacePreparationRunIds,
+    retryableEmptyWorkspacePreparationFailureId,
     onRetryWorkspacePreparation: onRetryWorkspacePreparation ?? null,
     onWorktreeSetupWorkLocally: onWorktreeSetupWorkLocally ?? null,
     onOpenWorktreeSetupTerminal: onOpenWorktreeSetupTerminal ?? null,
@@ -1521,6 +1536,13 @@ const ConversationTimeline = memo(function ConversationTimeline({
               ListFooterComponent={timelineListFooter}
             />
             <TimelineMinimap
+              annotation={annotation}
+              threadRef={parseScopedThreadKey(routeThreadKey)}
+              markdownCwd={markdownCwd}
+              onAnnotationEdit={onAnnotationEdit}
+              onAnnotationBodyChange={onAnnotationBodyChange}
+              onAnnotationResolve={onAnnotationResolve}
+              onAnnotationReopen={onAnnotationReopen}
               items={minimapItems}
               hasPersistentGutter={minimapHasPersistentGutter}
               hitStripWidth={minimapHitStripWidth}
@@ -1725,6 +1747,9 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
         <AssistantTimelineRow row={row} />
       ) : null}
       {row.kind === "assistant-meta" ? <AssistantMetaTimelineRow row={row} /> : null}
+      {row.kind === "message" && row.message.role === "system" ? (
+        <SystemTimelineRow row={row} />
+      ) : null}
       {row.kind === "proposed-plan" ? <ProposedPlanTimelineRow row={row} /> : null}
       {row.kind === "html-render" ? <HtmlRenderTimelineRow row={row} /> : null}
       {row.kind === "sent-message" ? <SentMessageTimelineRow row={row} /> : null}

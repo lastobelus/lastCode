@@ -1,4 +1,5 @@
 import { doctorCommand } from "./cli/doctor.ts";
+import { repairThreadCreatorsCommand } from "./cli/repairThreadCreators.ts";
 import { policyCommand } from "./cli/policy.ts";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
@@ -9,6 +10,7 @@ import { Argument, Command } from "effect/cli";
 import * as CliError from "effect/cli/CliError";
 
 import * as NetService from "@t3tools/shared/Net";
+import * as ManagedPolicy from "./policy/ManagedPolicy.ts";
 import packageJson from "../package.json" with { type: "json" };
 import { acpMcpBridgeCommand, acpMcpCallCommand } from "./cli/acpMcpBridge.ts";
 import { authCommand } from "./cli/auth.ts";
@@ -41,7 +43,9 @@ import { traceCommand } from "./cli/trace.ts";
 import { triageCommand } from "./cli/triage.ts";
 import { connectCommand, statusCommand, upCommand } from "./cli/up.ts";
 
-const layerCliRuntime = Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, NetService.layer);
+const layerCliRuntime = Layer.mergeAll(NetService.layer, ManagedPolicy.layer).pipe(
+  Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+);
 
 const connectPublicConfigMissingMessage =
   "T3 Connect commands are unavailable: this build is missing T3 Connect public configuration.";
@@ -111,6 +115,7 @@ export const makeCli = ({ cloudEnabled = hasCloudPublicConfig } = {}) =>
       themeCommand,
       traceCommand,
       doctorCommand,
+      repairThreadCreatorsCommand,
       policyCommand,
       triageCommand,
       cloudEnabled ? connectCommand : connectUnavailableCommand,

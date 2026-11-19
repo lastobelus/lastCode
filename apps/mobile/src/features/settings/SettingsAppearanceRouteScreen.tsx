@@ -40,12 +40,12 @@ export function SettingsAppearanceRouteScreen() {
       >
         <ThemeAppearanceSection />
         {Platform.OS === "android" ? <AndroidNavigationAppearanceSection /> : null}
-        <SettingsSection title="Project icons">
+        <SettingsSection title={gt("Project icons")}>
           <SettingsSwitchRow
             disabled={!preferencesReady}
             icon="folder"
-            label="Rounded project icons"
-            subtitle="Round favicon corners instead of preserving each icon's original shape."
+            label={gt("Rounded project icons")}
+            subtitle={gt("Round favicon corners instead of preserving each icon's original shape.")}
             value={roundedProjectIcons}
             onValueChange={(value) => savePreferences({ roundedProjectIcons: value })}
           />

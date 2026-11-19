@@ -126,15 +126,6 @@ export function threadRuntimeIsActive(runtime: ThreadStructureRuntime | null | u
   return runtime !== null && runtime !== undefined && threadRunStatusIsActive(runtime.status);
 }
 
-export function threadRuntimeCanArchive(runtime: ThreadRuntimeSummary | null | undefined): boolean {
-  if (runtime?.status === "queued") return runtime.activeRunId === null;
-  return (
-    runtime?.status !== "preparing" &&
-    runtime?.status !== "starting" &&
-    runtime?.status !== "running"
-  );
-}
-
 function threadRunStatusIsActive(status: ThreadRuntimeSummary["status"]): boolean {
   return (
     status === "preparing" ||
@@ -147,7 +138,9 @@ function threadRunStatusIsActive(status: ThreadRuntimeSummary["status"]): boolea
 
 export interface EnvironmentThreadShell {
   readonly creatorThreadId?: ThreadId;
+  readonly creatorOrigin?: OrchestrationV2ThreadShell["creatorOrigin"];
   readonly creatorGrouping?: "grouped" | "independent";
+  readonly groupedUnderThreadId?: ThreadId | null;
   readonly environmentId: EnvironmentId;
   readonly id: ThreadId;
   readonly projectId: ProjectId;
@@ -193,7 +186,6 @@ export interface EnvironmentThreadShell {
   readonly unsettledAt: string | null;
   readonly snoozedUntil: string | null;
   readonly snoozedAt: string | null;
-  readonly subagentPromotion?: import("@t3tools/contracts").OrchestrationV2SubagentPromotion | null;
   readonly recovery?: import("@t3tools/contracts").OrchestrationV2ThreadRecovery | null;
   readonly limitRecovery?: import("@t3tools/contracts").OrchestrationV2LimitRecovery | null;
   readonly pinnedAt: string | null;
@@ -217,7 +209,6 @@ export interface EnvironmentThreadShell {
   readonly deletedAt: string | null;
   readonly persistent?: boolean;
   readonly annotation?: import("@t3tools/contracts").ThreadAnnotation | null;
-  readonly attention?: import("@t3tools/contracts").ThreadAttention | null;
   readonly dashboardItems?: ReadonlyArray<import("@t3tools/contracts").ThreadDashboardItem>;
   readonly actionResume?: import("@t3tools/contracts").ActionResumeState | null;
   readonly worktreeCleanup?: import("@t3tools/contracts").ThreadWorktreeCleanup | null;
@@ -266,11 +257,7 @@ function shellRuntime(thread: OrchestrationV2ThreadShell): ThreadRuntimeSummary 
     backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? []) &&
     thread.status !== "failed";
   // Native children can be active without owning an app run or provider thread.
-  if (
-    thread.latestRunId === null &&
-    thread.status === "idle" &&
-    !parkAtIdle
-  ) {
+  if (thread.latestRunId === null && thread.status === "idle" && !parkAtIdle) {
     return null;
   }
   const status = parkAtIdle ? "idle" : (thread.activityRunStatus ?? thread.status);
@@ -325,7 +312,11 @@ export function presentThreadShell(
   const runtime = shellRuntime(thread);
   return {
     ...(thread.creatorThreadId === undefined ? {} : { creatorThreadId: thread.creatorThreadId }),
+    ...(thread.creatorOrigin === undefined ? {} : { creatorOrigin: thread.creatorOrigin }),
     ...(thread.creatorGrouping === undefined ? {} : { creatorGrouping: thread.creatorGrouping }),
+    ...(thread.groupedUnderThreadId === undefined
+      ? {}
+      : { groupedUnderThreadId: thread.groupedUnderThreadId }),
     environmentId,
     id: thread.id,
     projectId: thread.projectId,
@@ -383,7 +374,6 @@ export function presentThreadShell(
     unsettledAt: nullableIso(thread.unsettledAt ?? null),
     snoozedUntil: nullableIso(thread.snoozedUntil ?? null),
     snoozedAt: nullableIso(thread.snoozedAt ?? null),
-    subagentPromotion: thread.subagentPromotion ?? null,
     recovery:
       thread.activeRunId !== null && thread.activeRunId !== thread.recovery?.runId
         ? null
@@ -407,7 +397,6 @@ export function presentThreadShell(
     deletedAt: nullableIso(thread.deletedAt),
     ...(thread.persistent === undefined ? {} : { persistent: thread.persistent }),
     annotation: threadAnnotationOf(thread),
-    attention: thread.attention ?? null,
     dashboardItems: thread.dashboardItems ?? [],
     // Cached shells and retained events can still carry a parent's Action.
     actionResume: thread.actionResume?.threadId === thread.id ? thread.actionResume : null,

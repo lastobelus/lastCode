@@ -132,7 +132,6 @@ export const makeRestoreMissingWorktree = Effect.gen(function* () {
     readonly branch: string;
   }) {
     const { cwd, worktreePath, branch } = input;
-    yield* gitWorkflow.pruneWorktrees({ cwd });
     const localBranchNames = yield* gitWorkflow.listLocalBranchNames(cwd);
     if (localBranchNames.includes(branch)) {
       yield* gitWorkflow.createWorktree({ cwd, refName: branch, path: worktreePath });

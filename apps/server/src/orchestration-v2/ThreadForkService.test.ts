@@ -3,6 +3,7 @@ import {
   CommandId,
   ContextTransferId,
   EnvironmentId,
+  getOwnedThreadFamily,
   MessageId,
   type ModelSelection,
   type OrchestrationV2AppThread,
@@ -150,6 +151,11 @@ it.effect("resets a fork's pin, snooze, settle and delegation state but keeps it
         title: "Linked parent",
       },
       historyOrigin: "v1_import",
+      creatorOrigin: {
+        kind: "thread_launch",
+        environmentId: EnvironmentId.make("source-environment"),
+        threadId: ThreadId.make("source-creator"),
+      },
       linkOrigin,
       tags: ["private"],
     };
@@ -167,6 +173,7 @@ it.effect("resets a fork's pin, snooze, settle and delegation state but keeps it
     assert.isNull(result.targetThread.activeOrderKey);
     assert.isNull(result.targetThread.autoSettleDisabledAt);
     assert.isUndefined(result.targetThread.delegatedFrom);
+    assert.isUndefined(result.targetThread.creatorOrigin);
     assert.equal(result.targetThread.historyOrigin, "v1_import");
     assert.deepEqual(result.targetThread.linkOrigin, linkOrigin);
     assert.deepEqual(result.targetThread.tags, ["private"]);
@@ -319,6 +326,7 @@ it.effect("does not inherit an ordinary source conversation's creator or placeme
         creationSource: "mcp" as const,
         creatorThreadId: ThreadId.make("thread:ordinary-creator"),
         creatorGrouping,
+        groupedUnderThreadId: ThreadId.make("thread:organization-parent"),
       };
       const sourceRun = makeSourceRun("completed");
       const { targetThread } = yield* planFork(sourceRun, {
@@ -327,11 +335,20 @@ it.effect("does not inherit an ordinary source conversation's creator or placeme
       });
       assert.isFalse("creatorThreadId" in targetThread);
       assert.isFalse("creatorGrouping" in targetThread);
+      assert.isNull(targetThread.groupedUnderThreadId);
+      const parent = { ...makeSourceThread(), id: sourceThread.groupedUnderThreadId };
+      assert.deepEqual(
+        getOwnedThreadFamily([parent, sourceThread, targetThread], parent.id).children.map(
+          (thread) => thread.id,
+        ),
+        [sourceThread.id],
+      );
       assert.equal(targetThread.createdBy, "user");
       assert.equal(targetThread.lineage.parentThreadId, sourceThread.id);
       assert.equal(targetThread.lineage.relationshipToParent, "fork");
       assert.equal(sourceThread.creatorThreadId, "thread:ordinary-creator");
       assert.equal(sourceThread.creatorGrouping, creatorGrouping);
+      assert.equal(sourceThread.groupedUnderThreadId, parent.id);
     }
   }),
 );

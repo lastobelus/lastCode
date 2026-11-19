@@ -14,8 +14,12 @@ import {
 import { useSettingsScope } from "./SettingsScopeContext";
 import { useThreadActions } from "../../hooks/useThreadActions";
 import { readLocalApi } from "../../localApi";
-import { derivePhysicalProjectKey } from "../../logicalProject";
+import { derivePhysicalProjectKey } from "@t3tools/client-runtime/state/project-grouping";
 import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
+import {
+  createArchivedThreadRestoreTarget,
+  groupArchivedThreadFamilies,
+} from "./archiveFamilyOrder";
 import { RelativeTime } from "../RelativeTime";
 import { Button } from "../ui/button";
 import { stackedThreadToast, toastManager } from "../ui/toast";
@@ -64,6 +68,7 @@ export function ArchivedThreadsPanel() {
     refresh: refreshArchivedThreads,
   } = useArchivedThreadSnapshots(environmentIds);
   const isLoadingArchive = !isScopeReady || isLoadingSnapshots;
+  const restoreThreadId = createArchivedThreadRestoreTarget(archivedSnapshots);
 
   const { groups: archivedGroups, hasMultipleEnvironments } = (() => {
     const selectedProjectKeys =
@@ -151,11 +156,13 @@ export function ArchivedThreadsPanel() {
     const sortedGroups = Array.from(groups, ([key, group]) => ({
       ...group,
       key,
-      threads: group.threads.toSorted((left, right) => {
-        const leftKey = left.archivedAt ?? left.createdAt;
-        const rightKey = right.archivedAt ?? right.createdAt;
-        return rightKey.localeCompare(leftKey) || right.id.localeCompare(left.id);
-      }),
+      threads: groupArchivedThreadFamilies(
+        group.threads.toSorted((left, right) => {
+          const leftKey = left.archivedAt ?? left.createdAt;
+          const rightKey = right.archivedAt ?? right.createdAt;
+          return rightKey.localeCompare(leftKey) || right.id.localeCompare(left.id);
+        }),
+      ),
     }));
     return { groups: sortedGroups, hasMultipleEnvironments };
   })();
@@ -178,11 +185,19 @@ export function ArchivedThreadsPanel() {
   };
 
   const handleThreadAction = async (action: ArchiveAction, thread: ArchivedThread) => {
-    const target = scopeThreadRef(thread.environmentId, thread.id);
+    const target = scopeThreadRef(
+      thread.environmentId,
+      action === "unarchive" ? restoreThreadId(thread) : thread.id,
+    );
     const key = scopedThreadKey(target);
     // Context menus can outlive their render, so checks and cleanup use the live set.
     const pending = pendingActionsRef.current;
-    if (pending.has(key)) return;
+    if (
+      pending.has(key) ||
+      pending.has(scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))) ||
+      pending.has(scopedThreadKey(scopeThreadRef(thread.environmentId, restoreThreadId(thread))))
+    )
+      return;
     pending.add(key);
     setPendingKeys(new Set(pending));
     const result = await settlePromise(async () => {
@@ -211,12 +226,19 @@ export function ArchivedThreadsPanel() {
 
   const handleContextMenu = async (thread: ArchivedThread, position: { x: number; y: number }) => {
     const pending = pendingActionsRef.current;
-    if (pending.has(scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)))) return;
+    if (
+      pending.has(scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))) ||
+      pending.has(scopedThreadKey(scopeThreadRef(thread.environmentId, restoreThreadId(thread))))
+    )
+      return;
     const result = await settlePromise(async () => {
       const clicked = await readLocalApi()?.contextMenu.show(
         ARCHIVE_ACTIONS.map(({ action, label }) => ({
           id: action,
-          label: m(label),
+          label:
+            action === "unarchive" && restoreThreadId(thread) !== thread.id
+              ? gt("Restore family")
+              : m(label),
           destructive: action === "delete",
         })),
         position,
@@ -271,48 +293,64 @@ export function ArchivedThreadsPanel() {
           >
             {projectThreads.map((thread) => {
               const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
+              const restoreKey = scopedThreadKey(
+                scopeThreadRef(thread.environmentId, restoreThreadId(thread)),
+              );
               return (
-                <SettingsRow
+                <div
                   key={`${thread.environmentId}:${thread.id}`}
-                  onContextMenu={(event) => {
-                    event.preventDefault();
-                    void handleContextMenu(thread, { x: event.clientX, y: event.clientY });
-                  }}
-                  title={thread.title}
-                  description={
-                    <span className={hasMultipleEnvironments ? "block truncate" : undefined}>
-                      {hasMultipleEnvironments ? `${thread.environmentLabel} · ` : null}
-                      <T>
-                        Archived <RelativeTime timestamp={thread.archivedAt ?? thread.createdAt} />
-                        {" \u00b7 Created "}
-                        <RelativeTime timestamp={thread.createdAt} />
-                      </T>
-                    </span>
-                  }
-                  control={
-                    <div className="flex shrink-0 items-center gap-2">
-                      {ARCHIVE_ACTIONS.map(({ action, label, threadLabel, Icon }) => (
-                        <Tooltip key={action}>
-                          <TooltipTrigger
-                            render={
-                              <Button
-                                type="button"
-                                variant={action === "delete" ? "destructive-outline" : "outline"}
-                                size="icon-sm"
-                                aria-label={m(threadLabel, { title: thread.title })}
-                                disabled={pendingKeys.has(threadKey)}
-                                onClick={() => void handleThreadAction(action, thread)}
-                              />
-                            }
-                          >
-                            <Icon className="size-3.5" />
-                          </TooltipTrigger>
-                          <TooltipPopup>{m(label)}</TooltipPopup>
-                        </Tooltip>
-                      ))}
-                    </div>
-                  }
-                />
+                  className={restoreThreadId(thread) !== thread.id ? "pl-4" : undefined}
+                >
+                  <SettingsRow
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      void handleContextMenu(thread, { x: event.clientX, y: event.clientY });
+                    }}
+                    title={thread.title}
+                    description={
+                      <span className={hasMultipleEnvironments ? "block truncate" : undefined}>
+                        {hasMultipleEnvironments ? `${thread.environmentLabel} · ` : null}
+                        <T>
+                          Archived{" "}
+                          <RelativeTime timestamp={thread.archivedAt ?? thread.createdAt} />
+                          {" \u00b7 Created "}
+                          <RelativeTime timestamp={thread.createdAt} />
+                        </T>
+                        {restoreThreadId(thread) !== thread.id ? (
+                          <>
+                            {" · "}
+                            <T>Archived with family</T>
+                          </>
+                        ) : null}
+                      </span>
+                    }
+                    control={
+                      <div className="flex shrink-0 items-center gap-2">
+                        {ARCHIVE_ACTIONS.map(({ action, label, threadLabel, Icon }) => (
+                          <Tooltip key={action}>
+                            <TooltipTrigger
+                              render={
+                                <Button
+                                  type="button"
+                                  variant={action === "delete" ? "destructive-outline" : "outline"}
+                                  size="icon-sm"
+                                  aria-label={m(threadLabel, { title: thread.title })}
+                                  disabled={
+                                    pendingKeys.has(threadKey) || pendingKeys.has(restoreKey)
+                                  }
+                                  onClick={() => void handleThreadAction(action, thread)}
+                                />
+                              }
+                            >
+                              <Icon className="size-3.5" />
+                            </TooltipTrigger>
+                            <TooltipPopup>{m(label)}</TooltipPopup>
+                          </Tooltip>
+                        ))}
+                      </div>
+                    }
+                  />
+                </div>
               );
             })}
           </SettingsSection>

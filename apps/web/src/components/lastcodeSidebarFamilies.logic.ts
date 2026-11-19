@@ -1,4 +1,7 @@
+import { msg } from "gt-react";
+import { m, type MessageResolver } from "~/i18n/messages";
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { getInteractiveThreadParentThreadId, type ScopedThreadRef } from "@t3tools/contracts";
 import { threadShellIsVisible } from "@t3tools/client-runtime/state/models";
 import type { SidebarThreadSummary } from "../types";
 import {
@@ -21,7 +24,7 @@ export interface LastCodeSidebarFamilyRow {
   descendantStatusCounts: Map<string, number>;
   createdThreadStatusCounts: Map<string, number>;
   creatorGroupingWarning: string | null;
-  groupHeading: "Created by this thread" | null;
+  groupHeading: "Grouped under this thread" | null;
   projectExpanded: boolean;
 }
 
@@ -46,11 +49,11 @@ export const lastcodeSidebarThreadKey = (thread: SidebarThreadSummary) =>
   scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
 
 const RUN_STATUS_LABELS = new Map<string, string>([
-  ["failed", "Failed"],
-  ["interrupted", "Stopped"],
-  ["cancelled", "Stopped"],
-  ["rolled_back", "Stopped"],
-  ["completed", "Done"],
+  ["failed", msg("Failed")],
+  ["interrupted", msg("Stopped")],
+  ["cancelled", msg("Stopped")],
+  ["rolled_back", msg("Stopped")],
+  ["completed", msg("Done")],
 ]);
 
 export function lastcodeSidebarSubagentStatusLabel(
@@ -58,8 +61,8 @@ export function lastcodeSidebarSubagentStatusLabel(
   status: ThreadStatusPill | null,
 ): string {
   if (status && status.label !== "Completed") return status.label;
-  if (thread.runtime?.lastError) return "Failed";
-  return RUN_STATUS_LABELS.get(thread.latestRun?.status ?? "") ?? "Idle";
+  if (thread.runtime?.lastError) return msg("Failed");
+  return RUN_STATUS_LABELS.get(thread.latestRun?.status ?? "") ?? msg("Idle");
 }
 
 // The parent agent decides whether a failed subagent needs human attention.
@@ -78,13 +81,24 @@ export function lastcodeSidebarCreatorGroupingEligible(thread: SidebarThreadSumm
   return lastcodeSidebarIsAgentCreated(thread) && thread.creatorThreadId !== undefined;
 }
 
+export function lastcodeSidebarThreadParentId(thread: SidebarThreadSummary) {
+  return getInteractiveThreadParentThreadId({
+    ...thread,
+    createdBy: thread.source.createdBy,
+    creationSource: thread.source.creationSource,
+  });
+}
+
 function creatorDescription(
   isAgentCreated: boolean,
   creator: SidebarThreadSummary | null,
   unavailableLabel: string | null,
+  resolve: MessageResolver,
 ) {
   if (!isAgentCreated) return null;
-  return creator ? `Creator: ${creator.title}` : (unavailableLabel ?? "Creator unknown");
+  return creator
+    ? resolve(msg("Creator: {title}", { title: creator.title }))
+    : (unavailableLabel ?? resolve(msg("Creator unknown")));
 }
 
 function matchingCreator(thread: SidebarThreadSummary, creator: SidebarThreadSummary | null) {
@@ -99,30 +113,51 @@ function matchingCreator(thread: SidebarThreadSummary, creator: SidebarThreadSum
 export function lastcodeSidebarCreatorDetails(
   thread: SidebarThreadSummary,
   creator: SidebarThreadSummary | null,
+  resolve: MessageResolver = m,
 ) {
   const knownCreator = matchingCreator(thread, creator);
   const availableCreator = knownCreator && threadShellIsVisible(knownCreator) ? knownCreator : null;
   const isAgentCreated = lastcodeSidebarIsAgentCreated(thread);
   const eligible = lastcodeSidebarCreatorGroupingEligible(thread);
   const unavailableLabel =
-    eligible && !availableCreator ? `Creator unavailable (${thread.creatorThreadId})` : null;
+    eligible && !availableCreator
+      ? resolve(msg("Creator unavailable ({id})", { id: thread.creatorThreadId! }))
+      : null;
   return {
-    description: creatorDescription(isAgentCreated, availableCreator, unavailableLabel),
+    description: creatorDescription(isAgentCreated, availableCreator, unavailableLabel, resolve),
     unavailableLabel: thread.creatorGrouping === "grouped" ? unavailableLabel : null,
     groupingEligible: eligible && (!knownCreator || knownCreator.projectId === thread.projectId),
     canOpen: eligible && availableCreator !== null,
   };
 }
 
-export function lastcodeSidebarFamilySummary(row: LastCodeSidebarFamilyRow): string {
-  const summarize = (counts: ReadonlyMap<string, number>, singular: string, plural: string) => {
+export function lastcodeSidebarFamilySummary(
+  row: LastCodeSidebarFamilyRow,
+  resolve: MessageResolver = m,
+): string {
+  const summarize = (counts: ReadonlyMap<string, number>, kind: "subagent" | "grouped-thread") => {
     const total = Array.from(counts.values()).reduce((sum, count) => sum + count, 0);
     if (!total) return null;
-    return `${total} ${total === 1 ? singular : plural} (${Array.from(counts, ([label, count]) => `${count} ${label.toLowerCase()}`).join(", ")})`;
+    const statuses = Array.from(counts, ([label, count]) =>
+      resolve(msg("{count} {status}", { count, status: resolve(label).toLowerCase() })),
+    ).join(", ");
+    return kind === "subagent"
+      ? resolve(
+          msg("{total, plural, one {{total} subagent} other {{total} subagents}} ({statuses})", {
+            total,
+            statuses,
+          }),
+        )
+      : resolve(
+          msg(
+            "{total, plural, one {{total} grouped thread} other {{total} grouped threads}} ({statuses})",
+            { total, statuses },
+          ),
+        );
   };
   return [
-    summarize(row.descendantStatusCounts, "subagent", "subagents"),
-    summarize(row.createdThreadStatusCounts, "created thread", "created threads"),
+    summarize(row.descendantStatusCounts, "subagent"),
+    summarize(row.createdThreadStatusCounts, "grouped-thread"),
   ]
     .filter(Boolean)
     .join(" · ");
@@ -161,16 +196,17 @@ function connectSubagentParents(graph: FamilyGraph) {
 }
 
 function connectCreators(graph: FamilyGraph) {
-  const { byKey, parentByKey, creatorEdges } = graph;
+  const { byKey, parentByKey, creatorEdges, unavailableByKey } = graph;
   for (const [key, thread] of byKey) {
-    if (!lastcodeSidebarCreatorGroupingEligible(thread) || thread.creatorGrouping !== "grouped")
-      continue;
-    const creatorId = thread.creatorThreadId!;
+    const creatorId = lastcodeSidebarThreadParentId(thread);
+    if (creatorId === null) continue;
     const creatorKey = scopedThreadKey(scopeThreadRef(thread.environmentId, creatorId));
     const creator = byKey.get(creatorKey);
     if (creator && creator.projectId === thread.projectId) {
       parentByKey.set(key, creatorKey);
       creatorEdges.add(key);
+    } else if (thread.groupedUnderThreadId != null) {
+      unavailableByKey.set(key, `Parent unavailable (${creatorId})`);
     }
   }
 }
@@ -248,6 +284,22 @@ function buildFamilyGraph(threads: readonly SidebarThreadSummary[]) {
   connectCreators(graph);
   detachFamilyCycles(graph);
   return { ...graph, ...orderFamilyChildren(graph) };
+}
+
+export function lastcodeSidebarThreadPath(
+  threads: readonly SidebarThreadSummary[],
+  senderRef: ScopedThreadRef,
+): readonly SidebarThreadSummary[] {
+  const { byKey, parentByKey } = buildFamilyGraph(threads);
+  const path: SidebarThreadSummary[] = [];
+  let cursor: string | undefined = scopedThreadKey(senderRef);
+  while (cursor !== undefined) {
+    const thread = byKey.get(cursor);
+    if (thread === undefined) break;
+    path.push(thread);
+    cursor = parentByKey.get(cursor);
+  }
+  return path.toReversed();
 }
 
 type FamilyProjectionInput = {
@@ -347,7 +399,7 @@ function familyStatuses(
         row.key,
         failed
           ? {
-              label: "Failed" as const,
+              label: msg("Failed"),
               colorClass: "text-red-700 dark:text-red-300",
               dotClass: "bg-red-600 dark:bg-red-300",
               pulse: false,
@@ -528,7 +580,7 @@ function applyCreatorHeadings(renderedRows: readonly LastCodeSidebarFamilyRow[])
   const shownGroups = new Set<string>();
   for (const row of renderedRows) {
     if (!row.parentKey || isSidebarSubagentThread(row.thread)) continue;
-    const heading = "Created by this thread";
+    const heading = "Grouped under this thread";
     const groupKey = `${row.parentKey}:${heading}`;
     if (!shownGroups.has(groupKey)) {
       row.groupHeading = heading;
@@ -543,7 +595,9 @@ function applyCreatorHeadings(renderedRows: readonly LastCodeSidebarFamilyRow[])
  * Unavailable parents/creators and cycles leave the child reachable as an identified root.
  */
 export function projectLastCodeSidebarFamilies(input: FamilyProjectionInput) {
-  const graph = buildFamilyGraph(input.threads);
+  const graph = buildFamilyGraph(
+    input.threads.filter((thread) => thread.lineage.sideChat !== true),
+  );
   const selection = selectFamilyPath(graph, input.activeThreadKey);
   const allRows = buildFamilyRows(graph, selection, input);
   const rowByKey = new Map(allRows.map((row) => [row.key, row]));

@@ -3,7 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   deriveReviewState,
   latestCodexReviewTrigger,
-  evaluatePullRequestGates,
+  evaluatePullRequestGates as evaluateGates,
   resolvePullRequestTarget,
   validateReviewForMerge,
   parsePrGatesOptions,
@@ -19,12 +19,20 @@ const MERGE = "fedcba0987654321fedcba0987654321fedcba09";
 const reviewRequest = (head = HEAD): string =>
   `@codex review\n<!-- lastcode-review-head: ${head} -->`;
 
+const NOW = Date.parse("2026-08-24T10:30:00Z");
+const evaluatePullRequestGates = (
+  current: GateObservation,
+  expectedBase = "lastcode/main",
+  options = { nowMs: NOW, quietMinutes: 45 },
+) => evaluateGates(current, expectedBase, options);
+
 const pendingReview: ReviewState = {
   terminalArtifacts: [],
   requestPresent: true,
   pending: true,
   ready: false,
   latestTriggerId: 10,
+  latestTriggerAt: "2026-08-24T10:00:00Z",
 };
 
 const handledReview: ReviewState = {
@@ -33,6 +41,7 @@ const handledReview: ReviewState = {
   pending: false,
   ready: true,
   latestTriggerId: 10,
+  latestTriggerAt: "2026-08-24T10:00:00Z",
 };
 
 const pendingCi: GateObservation["ci"] = { state: "pending", reason: "run-in-progress" };
@@ -367,6 +376,28 @@ describe("lastcode-pr-gates", () => {
       ],
     });
     expect(pending).toMatchObject({ requestPresent: true, pending: true });
+    const requestedAt = Date.parse(issueComments[0]!.created_at);
+    for (const quietMinutes of [1, 45, 120, 1440]) {
+      const deadline = requestedAt + quietMinutes * 60_000;
+      expect(
+        evaluatePullRequestGates(observation({ review: pending }), "lastcode/main", {
+          nowMs: deadline - 1,
+          quietMinutes,
+        }),
+      ).toMatchObject({ status: "pending", reason: "review-pending" });
+      expect(
+        evaluatePullRequestGates(observation({ review: pending }), "lastcode/main", {
+          nowMs: deadline,
+          quietMinutes,
+        }),
+      ).toMatchObject({ status: "attention", reason: "review-stalled" });
+    }
+    expect(
+      evaluatePullRequestGates(observation({ review: pending }), "lastcode/main", {
+        nowMs: requestedAt + 18 * 60 * 60_000,
+        quietMinutes: 45,
+      }),
+    ).toMatchObject({ status: "attention", reason: "review-stalled" });
 
     const thumbsUp = deriveReviewState({
       headSha: HEAD,
@@ -408,6 +439,63 @@ describe("lastcode-pr-gates", () => {
       ],
     });
     expect(restarted).toMatchObject({ requestPresent: true, pending: true });
+    const oldNow = requestedAt + 18 * 60 * 60_000;
+    expect(
+      evaluatePullRequestGates(
+        observation({ review: thumbsUp, ci: satisfiedCi }),
+        "lastcode/main",
+        {
+          nowMs: oldNow,
+          quietMinutes: 45,
+        },
+      ),
+    ).toMatchObject({ status: "ready" });
+    expect(
+      evaluatePullRequestGates(observation({ review: pending, ci: failedCi }), "lastcode/main", {
+        nowMs: oldNow,
+        quietMinutes: 45,
+      }),
+    ).toMatchObject({ reason: "ci-failed" });
+    expect(
+      evaluatePullRequestGates(
+        observation({ review: pending, unresolvedReviewThreads: 1 }),
+        "lastcode/main",
+        {
+          nowMs: oldNow,
+          quietMinutes: 45,
+        },
+      ),
+    ).toMatchObject({ reason: "review-unresolved" });
+    for (const latestTriggerAt of [null, "invalid", "2026-08-25T10:00:00Z"]) {
+      expect(
+        evaluatePullRequestGates(observation({ review: { ...pending, latestTriggerAt } })),
+      ).toMatchObject({ status: "attention", reason: "review-age-unknown" });
+    }
+    const retriggered = deriveReviewState({
+      headSha: HEAD,
+      formalReviews: [
+        {
+          id: 50,
+          user: { login: "chatgpt-codex-connector[bot]" },
+          state: "APPROVED",
+          commit_id: HEAD,
+          submitted_at: "2026-08-24T10:05:00Z",
+        },
+      ],
+      issueComments: [
+        ...issueComments,
+        { ...issueComments[0]!, id: 51, created_at: "2026-08-24T10:20:00Z" },
+      ],
+      reviewComments: [],
+      latestTriggerReactions: [],
+    });
+    expect(retriggered).toMatchObject({ pending: true, latestTriggerAt: "2026-08-24T10:20:00Z" });
+    expect(
+      evaluatePullRequestGates(observation({ review: retriggered }), "lastcode/main", {
+        nowMs: Date.parse("2026-08-24T11:05:00Z"),
+        quietMinutes: 45,
+      }),
+    ).toMatchObject({ status: "attention", reason: "review-stalled" });
   });
 
   it("selects the newer exact-head request when GitHub timestamps tie", () => {

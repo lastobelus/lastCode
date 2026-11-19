@@ -9,6 +9,7 @@ import { mFallback, msg } from "gt-i18n";
 import type { MFunctionType } from "gt-i18n/types";
 
 import type { ThreadStructure } from "./models.ts";
+import { recoveryQueuesFollowUps } from "./threadRecovery.ts";
 
 type Projection = ThreadStructure;
 type Run = Projection["runs"][number];
@@ -150,6 +151,9 @@ export function deriveThreadQueueWorkflowState(
   );
   const promoteSkipsCompaction =
     activeMessage !== undefined && isCompactionCommandMessage(activeMessage);
+  const recoveryForcesQueue =
+    recoveryQueuesFollowUps(projection.thread.recovery, activeRun?.id) &&
+    projection.thread.recovery?.attemptId === activeRun?.activeAttemptId;
   const hasSteerableProviderTurn =
     activeRun?.status === "running" &&
     activeRun.activeAttemptId !== null &&
@@ -183,14 +187,15 @@ export function deriveThreadQueueWorkflowState(
       projection.thread.archivedAt == null &&
       projection.thread.deletedAt == null,
     canPromoteToSteer:
-      promoteSkipsCompaction ||
-      ((activeRun?.status === "preparing" || activeRun?.status === "starting") &&
-        (capabilities === undefined ||
-          capabilities.supportsActiveSteering ||
-          capabilities.supportsSteeringByInterruptRestart)) ||
-      (hasSteerableProviderTurn &&
-        (capabilities?.supportsActiveSteering === true ||
-          capabilities?.supportsSteeringByInterruptRestart === true)),
+      !recoveryForcesQueue &&
+      (promoteSkipsCompaction ||
+        ((activeRun?.status === "preparing" || activeRun?.status === "starting") &&
+          (capabilities === undefined ||
+            capabilities.supportsActiveSteering ||
+            capabilities.supportsSteeringByInterruptRestart)) ||
+        (hasSteerableProviderTurn &&
+          (capabilities?.supportsActiveSteering === true ||
+            capabilities?.supportsSteeringByInterruptRestart === true))),
     promoteSkipsCompaction,
   };
 }

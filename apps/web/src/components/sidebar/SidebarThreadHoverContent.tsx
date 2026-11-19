@@ -1,9 +1,12 @@
-import type { ReactNode } from "react";
+import type { MouseEvent, ReactNode } from "react";
+import { msg, T, useGT, useMessages, Var } from "gt-react";
 import { ArrowRightLeftIcon, CircleAlertIcon, GitBranchIcon, TerminalIcon } from "lucide-react";
 import type { ProjectIconOverride } from "@t3tools/contracts";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentIconColor } from "@t3tools/contracts/settings";
 import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 
+import type { MessageResolver } from "../../i18n/messages";
 import type { ProviderInstanceEntry } from "../../providerInstances";
 import type { SidebarThreadSummary } from "../../types";
 import type { ThreadStatusPill } from "../Sidebar.logic";
@@ -14,6 +17,12 @@ import type { TerminalStatusIndicator } from "../ThreadStatusIndicators";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { ConnectedEnvironmentIcon } from "../../environmentIcons";
 import { RotateCcwClockIcon } from "../icons/RotateCcwClockIcon";
+import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
+import { ThreadPullRequestsMiniList } from "../ThreadStatusIndicators";
+import { MiddleTruncate } from "../ui/middle-truncate";
+import { useKnownTerminalSessions } from "../../state/terminalSessions";
+import { useThreadPreviewLeases } from "../../state/previewHosting";
+import { threadTerminalProcessLabels } from "./threadTerminalPresentation";
 
 type SidebarHoverProviderEntry = Pick<
   ProviderInstanceEntry,
@@ -44,15 +53,36 @@ export interface SidebarThreadHoverContentProps {
   terminalProcessCount: number;
   cleanupBlockerTitle?: string | null;
   showCleanup?: boolean;
+  onOpenPullRequest?: ((event: MouseEvent<HTMLAnchorElement>, url: string) => void) | undefined;
 }
 
-function terminalProcessLabel(count: number): string {
-  return `${count} terminal ${count === 1 ? "process" : "processes"} running`;
+function terminalProcessLabel(count: number, resolve: MessageResolver): string {
+  return resolve(
+    msg(
+      "{count, plural, one {{count} terminal process running} other {{count} terminal processes running}}",
+      { count },
+    ),
+  );
 }
 
 export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps) {
+  const gt = useGT();
+  const messages = useMessages();
+  const supportsMultiplePullRequests = useSupportsMultiplePullRequests(props.thread.environmentId);
   const driverKind = props.providerEntry?.driverKind ?? null;
   const projectDisplayName = props.projectDisplayName ?? props.projectTitle;
+  const sessions = useKnownTerminalSessions({
+    environmentId: props.thread.environmentId,
+    threadId: props.thread.id,
+  });
+  const previews = useThreadPreviewLeases(
+    scopeThreadRef(props.thread.environmentId, props.thread.id),
+  );
+  const terminalLabels = threadTerminalProcessLabels(
+    (sessions ?? []).flatMap((session) => (session.state.summary ? [session.state.summary] : [])),
+    previews,
+    messages,
+  );
   const previousProviderNames = props.thread.providerInstanceHistory
     .filter((instanceId) => instanceId !== props.modelInstanceId)
     .map(
@@ -69,26 +99,43 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
     props.thread.actionResume?.outcome === "running"
       ? actionRunningPresentation(props.thread.actionResume)
       : null;
+  const hasPullRequests = supportsMultiplePullRequests && props.thread.pullRequests.length > 0;
 
   return (
-    <div className="flex min-w-0 max-w-80 flex-col gap-2 p-(--floating-content-inset)">
-      <div className="min-w-0 truncate text-xs leading-tight font-medium text-foreground">
-        {props.thread.title}
-      </div>
-      {props.thread.persistent ? (
-        <div className="text-xs text-muted-foreground">
-          Persistent thread · protected from archive and deletion
+    <div
+      className={cn(
+        "grid min-h-0 min-w-0 max-h-(--available-height) max-w-80 gap-2 p-(--floating-content-inset)",
+        hasPullRequests
+          ? "grid-rows-[auto_minmax(0,auto)_minmax(3rem,1fr)]"
+          : "grid-rows-[auto_minmax(0,1fr)]",
+      )}
+    >
+      <div className="flex min-w-0 flex-col gap-2">
+        <div className="min-w-0 truncate text-xs leading-tight font-medium text-foreground">
+          {props.thread.title}
         </div>
-      ) : null}
-      <div className="grid gap-1.5 pl-0.5 text-xs text-muted-foreground">
+        {props.thread.persistent ? (
+          <div className="text-xs text-muted-foreground">
+            <T>Persistent thread · protected from archive and deletion</T>
+          </div>
+        ) : null}
+      </div>
+      <div
+        role="region"
+        aria-label={gt("Thread metadata")}
+        tabIndex={0}
+        className="grid min-h-0 gap-1.5 overflow-y-auto overscroll-contain pl-0.5 text-xs text-muted-foreground"
+      >
         {projectDisplayName ? (
           <div className="flex min-w-0 items-center gap-2">
             <ProjectFavicon
-              environmentId={props.thread.environmentId}
-              cwd={props.projectCwd ?? ""}
-              projectName={props.projectTitle ?? ""}
-              faviconPath={props.projectFaviconPath}
-              projectIcon={props.projectIcon ?? null}
+              project={{
+                environmentId: props.thread.environmentId,
+                workspaceRoot: props.projectCwd ?? "",
+                title: props.projectTitle ?? "",
+                faviconPath: props.projectFaviconPath,
+                projectIcon: props.projectIcon ?? null,
+              }}
               className="size-3 shrink-0"
             />
             <div className="min-w-0 truncate text-foreground/75">{projectDisplayName}</div>
@@ -96,7 +143,8 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
         ) : null}
         {props.environmentLabel ? (
           <div className="flex min-w-0 items-center gap-2">
-            {props.thread.lineage.relationshipToParent !== "subagent" ? (
+            {props.thread.lineage.relationshipToParent !== "subagent" ||
+            props.thread.lineage.independent === true ? (
               <ConnectedEnvironmentIcon
                 environmentId={props.thread.environmentId}
                 context="hover"
@@ -110,14 +158,16 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
         {props.thread.branch ? (
           <div className="flex min-w-0 items-center gap-2">
             <GitBranchIcon className="size-3 shrink-0 stroke-muted-foreground" />
-            <div className="min-w-0 truncate text-foreground/75">{props.thread.branch}</div>
+            <div className="min-w-0 text-foreground/75">
+              <MiddleTruncate value={props.thread.branch} className="flex" />
+            </div>
           </div>
         ) : null}
         {props.branchMismatch ? (
           <div className="flex min-w-0 items-start gap-2 text-warning">
             <CircleAlertIcon aria-hidden className="mt-0.5 size-3 shrink-0 stroke-current" />
             <div className="min-w-0 flex-1 wrap-break-word leading-5">
-              You're currently checked out on another branch.
+              <T>You're currently checked out on another branch.</T>
             </div>
           </div>
         ) : null}
@@ -136,7 +186,7 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
               showBadge={props.showInstanceBadge && props.providerEntry?.accentColor !== undefined}
               badgeContent="none"
               badgeClassName="h-2 min-w-2 px-0"
-              iconClassName="size-3 shrink-0 grayscale opacity-60"
+              iconClassName="size-3 shrink-0 opacity-60"
             />
             <div className="min-w-0 truncate text-foreground/75">
               {props.showInstanceBadge && props.providerEntry
@@ -149,18 +199,27 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
           <div className="flex min-w-0 items-center gap-2">
             <ArrowRightLeftIcon className="size-3 shrink-0 stroke-muted-foreground" />
             <div className="min-w-0 truncate text-foreground/75">
-              Handed off from {previousProviderNames.join(", ")}
+              <T>
+                Handed off from <Var>{previousProviderNames.join(", ")}</Var>
+              </T>
             </div>
           </div>
         ) : null}
-        {props.terminalStatus ? (
-          <div className="flex min-w-0 items-center gap-2">
+        {props.terminalStatus || terminalLabels.length > 0 ? (
+          <div className="flex min-w-0 items-start gap-2">
             <TerminalIcon
               aria-hidden
-              className={cn("size-3 shrink-0", props.terminalStatus.colorClass)}
+              className={cn("mt-0.5 size-3 shrink-0", props.terminalStatus?.colorClass)}
             />
-            <div className="min-w-0 truncate text-foreground/75">
-              {terminalProcessLabel(props.terminalProcessCount)}
+            <div className="grid min-w-0 gap-1 text-foreground/75">
+              {props.terminalStatus ? (
+                <div>{terminalProcessLabel(props.terminalProcessCount, messages)}</div>
+              ) : null}
+              {terminalLabels.map((terminal) => (
+                <div key={terminal.terminalId} className="wrap-anywhere">
+                  {terminal.label}
+                </div>
+              ))}
             </div>
           </div>
         ) : null}
@@ -203,12 +262,21 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
             <CircleAlertIcon className="size-3 shrink-0 stroke-current" />
             <div className="min-w-0 truncate">
               {props.thread.runtime.lastErrorClass === "usage_limit"
-                ? "Usage limit reached"
-                : "Error occurred"}
+                ? gt("Usage limit reached")
+                : gt("Error occurred")}
             </div>
           </div>
         ) : null}
       </div>
+      {hasPullRequests ? (
+        <div className="min-h-0 overflow-y-auto overscroll-contain border-t border-border/60 pt-2 pl-0.5 text-xs text-muted-foreground">
+          <ThreadPullRequestsMiniList
+            pullRequests={props.thread.pullRequests}
+            onOpenPullRequest={props.onOpenPullRequest}
+            plain
+          />
+        </div>
+      ) : null}
       {props.showCleanup === false ? null : (
         <SidebarThreadCleanupHoverContent
           thread={props.thread}
@@ -231,19 +299,23 @@ export function SidebarThreadCleanupHoverContent(props: {
     <div
       className={cn(
         !props.standalone && "-mx-(--floating-content-inset) -mb-(--floating-content-inset)",
-        "border-t border-warning/25 bg-warning px-(--floating-content-inset) py-2 text-xs text-warning-foreground",
+        "shrink-0 border-t border-warning/25 bg-warning px-(--floating-content-inset) py-2 text-xs text-warning-foreground",
       )}
     >
       {cleanup.status === "deleting" ? (
         <>
-          <div className="font-medium">Deleting worktree</div>
+          <div className="font-medium">
+            <T>Deleting worktree</T>
+          </div>
           <div className="mt-1 break-all font-mono text-3xs text-left [text-wrap-style:auto] opacity-80">
             {cleanup.worktreePath}
           </div>
         </>
       ) : (
         <>
-          <div className="font-medium">Waiting for cleanup</div>
+          <div className="font-medium">
+            <T>Waiting for cleanup</T>
+          </div>
           <div className="mt-1 truncate">
             {cleanup.blockedByThreadId}
             {props.blockerTitle ? `: ${props.blockerTitle}` : ""}

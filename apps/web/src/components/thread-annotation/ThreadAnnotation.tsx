@@ -4,6 +4,8 @@ import {
   type ThreadAnnotation as ThreadAnnotationModel,
 } from "@t3tools/contracts";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
+import { msg, T, useGT, useMessages, Var } from "gt-react";
+import { m, type MessageResolver } from "~/i18n/messages";
 import type { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 import { ChevronDownIcon } from "lucide-react";
 import {
@@ -84,6 +86,7 @@ export function ThreadAnnotationEditorDialog(props: {
   onOpenChange: (open: boolean) => void;
   onSave: (body: string) => Promise<boolean>;
 }) {
+  const gt = useGT();
   // Keep the draft in the textarea so typing does not rerender the dialog and
   // its portal/focus-management subtree on every keystroke.
   const [canSave, setCanSave] = useState(false);
@@ -93,6 +96,7 @@ export function ThreadAnnotationEditorDialog(props: {
   const canSaveRef = useRef(false);
   const wasOpenRef = useRef(false);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- initializes the uncontrolled textarea DOM value and its save eligibility when the annotation dialog opens
   useEffect(() => {
     const justOpened = props.open && !wasOpenRef.current;
     wasOpenRef.current = props.open;
@@ -119,9 +123,13 @@ export function ThreadAnnotationEditorDialog(props: {
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
       <DialogPopup className="max-w-xl">
         <DialogHeader>
-          <DialogTitle>{props.annotation ? "Edit annotation" : "Annotate thread"}</DialogTitle>
+          <DialogTitle>
+            {props.annotation ? gt("Edit annotation") : gt("Annotate thread")}
+          </DialogTitle>
           <DialogDescription>
-            Markdown supports headings, lists, task lists, links, and tags.
+            <T>
+              <Var>{"Markdown"}</Var> supports headings, lists, task lists, links, and tags.
+            </T>
           </DialogDescription>
         </DialogHeader>
         <DialogPanel scrollFade={false}>
@@ -129,7 +137,7 @@ export function ThreadAnnotationEditorDialog(props: {
             <Textarea
               ref={textareaRef}
               defaultValue={props.annotation?.body ?? ""}
-              aria-label="Thread annotation"
+              aria-label={gt("Thread annotation")}
               autoFocus
               className="[&_[data-slot=textarea]]:h-52 [&_[data-slot=textarea]]:field-sizing-fixed [&_[data-slot=textarea]]:resize-none"
               disabled={saving}
@@ -153,10 +161,14 @@ export function ThreadAnnotationEditorDialog(props: {
         </DialogPanel>
         <DialogFooter>
           <Button type="button" variant="ghost" onClick={() => props.onOpenChange(false)}>
-            Cancel
+            <T>Cancel</T>
           </Button>
           <Button disabled={!canSave || saving} form={formId} type="submit">
-            {saving ? "Saving…" : props.annotation ? "Save" : "Add annotation"}
+            {saving
+              ? gt("Saving…")
+              : props.annotation
+                ? gt("Save", { $context: "save the annotation" })
+                : gt("Add annotation")}
           </Button>
         </DialogFooter>
       </DialogPopup>
@@ -165,10 +177,14 @@ export function ThreadAnnotationEditorDialog(props: {
 }
 
 function ThreadAnnotationTimestamp({ annotation }: { annotation: ThreadAnnotationModel }) {
+  const resolve = useMessages();
   const timestamp = annotation.resolvedAt ?? annotation.updatedAt;
+  const time = formatRelativeTimeLabel(timestamp, undefined, resolve);
   return (
     <span className="text-2xs text-warning-foreground">
-      {annotation.resolvedAt ? "Resolved" : "Edited"} {formatRelativeTimeLabel(timestamp)}
+      {annotation.resolvedAt
+        ? resolve(msg("Resolved {time}", { time }))
+        : resolve(msg("Edited {time}", { time }))}
     </span>
   );
 }
@@ -210,21 +226,24 @@ export function ThreadAnnotationBody(props: {
   );
 }
 
-export function threadAnnotationBannerPresentation(props: {
-  annotation: ThreadAnnotationModel;
-  threadRef: ScopedThreadRef;
-  cwd?: string | undefined;
-  expanded: boolean;
-  onBodyChange?: ((body: string) => Promise<boolean>) | undefined;
-}): Pick<ComposerBannerStackItem, "title" | "description" | "children"> {
+export function threadAnnotationBannerPresentation(
+  props: {
+    annotation: ThreadAnnotationModel;
+    threadRef: ScopedThreadRef;
+    cwd?: string | undefined;
+    expanded: boolean;
+    onBodyChange?: ((body: string) => Promise<boolean>) | undefined;
+  },
+  resolve: MessageResolver = m,
+): Pick<ComposerBannerStackItem, "title" | "description" | "children"> {
   const summary =
     props.annotation.body
       .split(/\r?\n/)
       .map((line) => line.trim())
       .find(Boolean)
-      ?.replace(/^#{1,6}\s+/, "") ?? "Annotation";
+      ?.replace(/^#{1,6}\s+/, "") ?? resolve(msg("Annotation"));
   return {
-    title: "NOTE:",
+    title: resolve(msg("NOTE:")),
     description: props.expanded ? (
       <ThreadAnnotationTimestamp annotation={props.annotation} />
     ) : (
@@ -258,43 +277,58 @@ export function ThreadAnnotationActions(props: {
   onResolve: () => void;
   onReopen: () => void;
   pending?: boolean | undefined;
+  /** A different note is active, so a resolved note cannot reopen. Never affects Resolve. */
+  reopenBlocked?: boolean | undefined;
   expanded?: boolean | undefined;
   onToggleExpanded?: (() => void) | undefined;
   trailing?: ReactNode;
 }) {
+  const gt = useGT();
+  const reopenBlockedReasonId = useId();
+  const reopenBlocked = props.reopenBlocked === true && Boolean(props.annotation.resolvedAt);
   return (
-    <div className="flex items-center gap-3 text-xs">
-      <button
-        className="font-medium text-warning-foreground underline-offset-2 hover:underline disabled:opacity-50"
-        disabled={props.pending}
-        type="button"
-        onClick={props.onEdit}
-      >
-        Edit
-      </button>
-      <button
-        className="font-medium text-warning-foreground underline-offset-2 hover:underline disabled:opacity-50"
-        disabled={props.pending}
-        type="button"
-        onClick={props.annotation.resolvedAt ? props.onReopen : props.onResolve}
-      >
-        {props.annotation.resolvedAt ? "Reopen" : "Resolve"}
-      </button>
-      {props.onToggleExpanded ? (
-        <Button
-          aria-expanded={props.expanded === true}
-          aria-label={props.expanded ? "Collapse annotation" : "Expand annotation"}
+    <>
+      <div className="flex items-center gap-3 text-xs">
+        <button
+          className="font-medium text-warning-foreground underline-offset-2 hover:underline disabled:opacity-50"
           disabled={props.pending}
-          size="icon-xs"
           type="button"
-          variant="ghost-warning"
-          onClick={props.onToggleExpanded}
+          onClick={props.onEdit}
         >
-          <ChevronDownIcon className={props.expanded ? "size-3.5" : "size-3.5 -rotate-90"} />
-        </Button>
+          <T>Edit</T>
+        </button>
+        <button
+          aria-describedby={reopenBlocked ? reopenBlockedReasonId : undefined}
+          className="font-medium text-warning-foreground underline-offset-2 hover:underline disabled:opacity-50 disabled:hover:no-underline"
+          disabled={props.pending || reopenBlocked}
+          type="button"
+          onClick={props.annotation.resolvedAt ? props.onReopen : props.onResolve}
+        >
+          {props.annotation.resolvedAt
+            ? gt("Reopen", { $context: "reopen the annotation" })
+            : gt("Resolve", { $context: "resolve the annotation" })}
+        </button>
+        {props.onToggleExpanded ? (
+          <Button
+            aria-expanded={props.expanded === true}
+            aria-label={props.expanded ? gt("Collapse annotation") : gt("Expand annotation")}
+            disabled={props.pending}
+            size="icon-xs"
+            type="button"
+            variant="ghost-warning"
+            onClick={props.onToggleExpanded}
+          >
+            <ChevronDownIcon className={props.expanded ? "size-3.5" : "size-3.5 -rotate-90"} />
+          </Button>
+        ) : null}
+        {props.trailing}
+      </div>
+      {reopenBlocked ? (
+        <p className="mt-1.5 text-2xs text-warning-foreground" id={reopenBlockedReasonId}>
+          <T>Resolve the current annotation to reopen this one, or copy what you need into it.</T>
+        </p>
       ) : null}
-      {props.trailing}
-    </div>
+    </>
   );
 }
 
@@ -344,6 +378,7 @@ export function ThreadAnnotationHoverPopover(props: {
   navigationTriggerId: string;
   threadDetails: ReactNode;
   trailingContent?: ReactNode;
+  readOnly?: boolean;
   onEdit: () => void;
   onResolve: () => void;
   onBodyChange: (body: string) => Promise<boolean>;
@@ -352,6 +387,7 @@ export function ThreadAnnotationHoverPopover(props: {
   const popupRef = useRef<HTMLDivElement | null>(null);
   const actionsRef = useRef<PopoverPrimitive.Root.Actions | null>(null);
   const openedByHover = useRef(false);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- releases the detached popover handle and its imperative mounted content when the annotation row unmounts
   useEffect(() => {
     // The detached row outlives annotations removed or resolved by another client.
     const actions = actionsRef.current;
@@ -377,9 +413,9 @@ export function ThreadAnnotationHoverPopover(props: {
         if (
           !open &&
           details.reason === "trigger-hover" &&
-          (popupRef.current?.contains(activeElement) ||
-            (navigationTrigger?.contains(activeElement) &&
-              activeElement?.matches(":focus-visible")))
+          activeElement !== popupRef.current &&
+          activeElement?.matches(":focus-visible") &&
+          (popupRef.current?.contains(activeElement) || navigationTrigger?.contains(activeElement))
         ) {
           details.cancel();
         }
@@ -400,7 +436,13 @@ export function ThreadAnnotationHoverPopover(props: {
         onFocusCapture={(event) => {
           if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
           // Keyboard interaction needs the popover's focus-out/Escape handling, unlike hover.
-          if (openedByHover.current) props.handle.open(props.navigationTriggerId);
+          if (
+            openedByHover.current &&
+            event.target !== event.currentTarget &&
+            event.target.matches(":focus-visible")
+          ) {
+            props.handle.open(props.navigationTriggerId);
+          }
         }}
         onBlurCapture={(event) => {
           const nextFocus = event.relatedTarget as Node | null;
@@ -417,32 +459,34 @@ export function ThreadAnnotationHoverPopover(props: {
           props.handle.close();
         }}
       >
-        <div className="flex min-w-0 w-80 max-w-80 flex-col">
-          {props.threadDetails}
-          <div className="border-t border-border/70 bg-warning/10 p-(--floating-content-inset) text-warning-foreground">
+        <div className="flex min-h-0 min-w-0 w-80 max-h-(--available-height) max-w-80 flex-col">
+          <div className="flex min-h-0 flex-col">{props.threadDetails}</div>
+          <div className="flex min-h-0 max-h-[calc(var(--available-height)/3)] flex-col border-t border-border/70 bg-warning/10 p-(--floating-content-inset) text-warning-foreground">
             <ThreadAnnotationBody
               annotation={props.annotation}
-              className="max-h-64 overflow-y-auto"
+              className="min-h-0 max-h-64 overflow-y-auto overscroll-contain"
               compact
               cwd={props.cwd}
-              onBodyChange={props.onBodyChange}
+              onBodyChange={props.readOnly ? undefined : props.onBodyChange}
               threadRef={props.threadRef}
             />
-            <div className="mt-2">
-              <ThreadAnnotationActions
-                annotation={props.annotation}
-                onEdit={() => {
-                  props.handle.close();
-                  props.onEdit();
-                }}
-                onReopen={() => undefined}
-                onResolve={() => {
-                  props.handle.close();
-                  props.onResolve();
-                }}
-                pending={bodyChangePending}
-              />
-            </div>
+            {!props.readOnly ? (
+              <div className="mt-2 shrink-0">
+                <ThreadAnnotationActions
+                  annotation={props.annotation}
+                  onEdit={() => {
+                    props.handle.close();
+                    props.onEdit();
+                  }}
+                  onReopen={() => undefined}
+                  onResolve={() => {
+                    props.handle.close();
+                    props.onResolve();
+                  }}
+                  pending={bodyChangePending}
+                />
+              </div>
+            ) : null}
           </div>
           {props.trailingContent}
         </div>
