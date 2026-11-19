@@ -1310,7 +1310,7 @@ export const makeWithStoreOptions = Effect.fn("WorktreeSuspension.makeWithStoreO
         agentCreatedChild:
           thread.createdBy === "agent" &&
           thread.creatorThreadId !== undefined &&
-          thread.historicalCreatorOrigin === undefined
+          thread.creatorOrigin === undefined
             ? true
             : thread.createdBy === "user"
               ? false

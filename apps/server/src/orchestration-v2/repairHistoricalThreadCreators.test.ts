@@ -15,7 +15,7 @@ import {
   TurnItemId,
   type OrchestrationV2AppThread,
   type OrchestrationV2ConversationMessage,
-  type HistoricalThreadCreatorOrigin,
+  type ThreadCreatorOrigin,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -197,10 +197,7 @@ it.layer(TestLayer)("historical thread creators", (it) => {
         FROM orchestration_events WHERE command_id = ${initialCommand}
       `;
       yield* sql`DELETE FROM orchestration_events WHERE command_id = ${initialCommand}`;
-      const packet = Effect.fnUntraced(function* (
-        threadId: ThreadId,
-        origin: HistoricalThreadCreatorOrigin,
-      ) {
+      const packet = Effect.fnUntraced(function* (threadId: ThreadId, origin: ThreadCreatorOrigin) {
         const creationEventId = EventId.make(`create:${threadId}`);
         const [current] = yield* sql<{ readonly payload_json: string }>`
           SELECT payload_json FROM orchestration_v2_projection_threads WHERE thread_id = ${threadId}
@@ -308,11 +305,11 @@ it.layer(TestLayer)("historical thread creators", (it) => {
       );
       assert.deepStrictEqual(yield* store.getThread(child.id), {
         ...child,
-        historicalCreatorOrigin: remote.origin,
+        creatorOrigin: remote.origin,
       });
       assert.deepStrictEqual(yield* store.getThread(scheduled.id), {
         ...scheduled,
-        historicalCreatorOrigin: schedule.origin,
+        creatorOrigin: schedule.origin,
       });
       assert.deepStrictEqual(
         (yield* request([remote, schedule], true)).map((row) => row.status),
@@ -337,14 +334,8 @@ it.layer(TestLayer)("historical thread creators", (it) => {
       );
       assert.equal(yield* eventStore.latestSequence(), sequence + 2);
       yield* (yield* ProjectionReplay.ProjectionReplay).rebuild;
-      assert.deepStrictEqual(
-        (yield* store.getThread(child.id)).historicalCreatorOrigin,
-        remote.origin,
-      );
-      assert.deepStrictEqual(
-        (yield* store.getThread(scheduled.id)).historicalCreatorOrigin,
-        schedule.origin,
-      );
+      assert.deepStrictEqual((yield* store.getThread(child.id)).creatorOrigin, remote.origin);
+      assert.deepStrictEqual((yield* store.getThread(scheduled.id)).creatorOrigin, schedule.origin);
     }),
   );
 
@@ -365,7 +356,7 @@ it.layer(TestLayer)("historical thread creators", (it) => {
         assert.deepStrictEqual(repaired, {
           ...child,
           creatorThreadId: parent.id,
-          historicalCreatorOrigin: {
+          creatorOrigin: {
             kind: "thread_launch",
             environmentId: localEnvironment,
             threadId: parent.id,
@@ -412,7 +403,7 @@ it.layer(TestLayer)("historical thread creators", (it) => {
         assert.deepStrictEqual(repaired, {
           ...child,
           creatorThreadId: parent.id,
-          historicalCreatorOrigin: {
+          creatorOrigin: {
             kind: "thread_launch",
             environmentId: localEnvironment,
             threadId: parent.id,

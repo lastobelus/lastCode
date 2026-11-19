@@ -4,7 +4,7 @@ import {
   EnvironmentId,
   EventId,
   HistoricalThreadCreatorEvidenceDigest,
-  HistoricalThreadCreatorOrigin,
+  ThreadCreatorOrigin,
   getInteractiveThreadParentThreadId,
   type OrchestrationV2AppThread,
   OrchestrationV2AppThreadJson,
@@ -39,7 +39,7 @@ export const isHistoricalThreadCreatorRepairError = Schema.is(HistoricalThreadCr
 
 const decodeThread = Schema.decodeEffect(Schema.fromJsonString(OrchestrationV2AppThreadJson));
 const decodeThreadId = Schema.decodeUnknownEffect(ThreadId);
-const decodeOrigin = Schema.decodeEffect(Schema.fromJsonString(HistoricalThreadCreatorOrigin));
+const decodeOrigin = Schema.decodeEffect(Schema.fromJsonString(ThreadCreatorOrigin));
 
 export const HistoricalThreadCreatorRepairManifest = Schema.Struct({
   version: Schema.Literal(1),
@@ -51,7 +51,7 @@ export const HistoricalThreadCreatorRepairManifest = Schema.Struct({
       creationPayloadSha256: HistoricalThreadCreatorEvidenceDigest,
       expectedPayloadSha256: HistoricalThreadCreatorEvidenceDigest,
       evidenceSha256: HistoricalThreadCreatorEvidenceDigest,
-      origin: HistoricalThreadCreatorOrigin,
+      origin: ThreadCreatorOrigin,
     }),
   ),
 });
@@ -65,7 +65,7 @@ function eligibleForRepair(thread: OrchestrationV2AppThread) {
     thread.createdBy === "agent" &&
     thread.creationSource === "mcp" &&
     thread.creatorThreadId == null &&
-    thread.historicalCreatorOrigin === undefined &&
+    thread.creatorOrigin === undefined &&
     thread.delegatedFrom == null &&
     thread.forkedFrom === null &&
     thread.lineage.parentThreadId === null &&
@@ -74,7 +74,7 @@ function eligibleForRepair(thread: OrchestrationV2AppThread) {
   );
 }
 
-function sameCreatorOrigin(a: HistoricalThreadCreatorOrigin, b: HistoricalThreadCreatorOrigin) {
+function sameCreatorOrigin(a: ThreadCreatorOrigin, b: ThreadCreatorOrigin) {
   return (
     a.environmentId === b.environmentId &&
     a.threadId === b.threadId &&
@@ -171,8 +171,8 @@ const localCreatorGraph = Effect.fnUntraced(function* (
 ) {
   const rows = yield* sql<{ readonly thread_id: string; readonly parent_thread_id: string | null }>`
     SELECT thread_id, COALESCE(
-      CASE WHEN json_extract(payload_json, '$.historicalCreatorOrigin.environmentId') = ${environmentId}
-        THEN json_extract(payload_json, '$.historicalCreatorOrigin.threadId')
+      CASE WHEN json_extract(payload_json, '$.creatorOrigin.environmentId') = ${environmentId}
+        THEN json_extract(payload_json, '$.creatorOrigin.threadId')
       END,
       json_extract(payload_json, '$.creatorThreadId'),
       json_extract(payload_json, '$.lineage.parentThreadId')
@@ -210,12 +210,12 @@ export const repairHistoricalThreadCreators = Effect.fn("repairHistoricalThreadC
         AND json_extract(created.payload_json, '$.creationSource') = 'mcp'
         AND json_type(created.payload_json, '$.creatorThreadId') IS NULL
         AND json_extract(created.payload_json, '$.delegatedFrom') IS NULL
-        AND json_type(created.payload_json, '$.historicalCreatorOrigin') IS NULL
+        AND json_type(created.payload_json, '$.creatorOrigin') IS NULL
         AND COALESCE(created.command_id, '') NOT LIKE 'scheduled-task:%'
         AND json_extract(created.payload_json, '$.createdAt') = json_extract(current.payload_json, '$.createdAt')
         AND NOT EXISTS (${anotherCreation(sql, sql.literal("created.stream_id"), sql.literal("created.sequence"))})
         AND json_type(current.payload_json, '$.creatorThreadId') IS NULL
-        AND json_type(current.payload_json, '$.historicalCreatorOrigin') IS NULL
+        AND json_type(current.payload_json, '$.creatorOrigin') IS NULL
         AND json_extract(current.payload_json, '$.delegatedFrom') IS NULL
         AND current.deleted_at IS NULL
         AND NOT EXISTS (
@@ -385,7 +385,7 @@ export const repairScopedHistoricalThreadCreators = Effect.fn(
       const thread = yield* decodeThread(row.payload_json).pipe(Effect.option);
       if (thread._tag === "None") return "invalid-target-payload";
       const target = thread.value;
-      const current = target.historicalCreatorOrigin;
+      const current = target.creatorOrigin;
       const id = repairEventId(threadId);
       const [previous] = yield* sql<{
         readonly kind: string | null;

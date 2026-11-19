@@ -52,7 +52,7 @@ import type {
   RunAttemptId,
 } from "@t3tools/contracts";
 import {
-  HistoricalThreadCreatorOrigin,
+  ThreadCreatorOrigin,
   IDLE_COMPACTION_TEXT,
   idleCompactionOf,
   isQueuedProviderThreadPlaceholder,
@@ -1042,7 +1042,7 @@ export function applyToProjection(
         ...projection,
         thread: {
           ...projection.thread,
-          historicalCreatorOrigin: event.payload.origin,
+          creatorOrigin: event.payload.origin,
           ...(event.payload.kind === "local"
             ? { creatorThreadId: event.payload.creatorThreadId }
             : {}),
@@ -1355,9 +1355,7 @@ const matchesNothing = (...filters: ReadonlyArray<ReadonlyArray<unknown> | undef
 const encodeThreadPayload = Schema.encodeEffect(
   Schema.fromJsonString(OrchestrationV2AppThreadJsonSchema),
 );
-const encodeHistoricalCreatorOrigin = Schema.encodeEffect(
-  Schema.fromJsonString(HistoricalThreadCreatorOrigin),
-);
+const encodeCreatorOrigin = Schema.encodeEffect(Schema.fromJsonString(ThreadCreatorOrigin));
 const encodeThreadUpdatedAt = Schema.encodeEffect(
   OrchestrationV2AppThreadJsonSchema.fields.updatedAt,
 );
@@ -1944,9 +1942,9 @@ export function threadShellFromProjection(
     ...(projection.thread.creatorThreadId === undefined
       ? {}
       : { creatorThreadId: projection.thread.creatorThreadId }),
-    ...(projection.thread.historicalCreatorOrigin === undefined
+    ...(projection.thread.creatorOrigin === undefined
       ? {}
-      : { historicalCreatorOrigin: projection.thread.historicalCreatorOrigin }),
+      : { creatorOrigin: projection.thread.creatorOrigin }),
     ...(projection.thread.creatorGrouping === undefined
       ? {}
       : { creatorGrouping: projection.thread.creatorGrouping }),
@@ -2302,9 +2300,9 @@ function shellFromState(input: {
     ...(input.state.thread.creatorThreadId === undefined
       ? {}
       : { creatorThreadId: input.state.thread.creatorThreadId }),
-    ...(input.state.thread.historicalCreatorOrigin === undefined
+    ...(input.state.thread.creatorOrigin === undefined
       ? {}
-      : { historicalCreatorOrigin: input.state.thread.historicalCreatorOrigin }),
+      : { creatorOrigin: input.state.thread.creatorOrigin }),
     ...(input.state.thread.creatorGrouping === undefined
       ? {}
       : { creatorGrouping: input.state.thread.creatorGrouping }),
@@ -2552,16 +2550,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           switch (event.type) {
             case "thread.creator-repaired": {
               const payload = event.payload;
-              const originJson = yield* encodeHistoricalCreatorOrigin(payload.origin);
+              const originJson = yield* encodeCreatorOrigin(payload.origin);
               if (payload.kind === "local") {
                 yield* sql`UPDATE orchestration_v2_projection_threads
                   SET payload_json = json_set(payload_json,
                     '$.creatorThreadId', ${payload.creatorThreadId},
-                    '$.historicalCreatorOrigin', json(${originJson}))
+                    '$.creatorOrigin', json(${originJson}))
                   WHERE thread_id = ${event.threadId}`;
               } else {
                 yield* sql`UPDATE orchestration_v2_projection_threads
-                  SET payload_json = json_set(payload_json, '$.historicalCreatorOrigin', json(${originJson}))
+                  SET payload_json = json_set(payload_json, '$.creatorOrigin', json(${originJson}))
                   WHERE thread_id = ${event.threadId}`;
               }
               break;

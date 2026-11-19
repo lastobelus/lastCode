@@ -71,7 +71,7 @@ export function makeSubagentChildThread(input: {
   const {
     delegatedFrom: _delegatedFrom,
     creatorThreadId: _creatorThreadId,
-    historicalCreatorOrigin: _historicalCreatorOrigin,
+    creatorOrigin: _creatorOrigin,
     creatorGrouping: _creatorGrouping,
     ...inherited
   } = input.parentThread;

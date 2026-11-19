@@ -138,7 +138,7 @@ function threadRunStatusIsActive(status: ThreadRuntimeSummary["status"]): boolea
 
 export interface EnvironmentThreadShell {
   readonly creatorThreadId?: ThreadId;
-  readonly historicalCreatorOrigin?: OrchestrationV2ThreadShell["historicalCreatorOrigin"];
+  readonly creatorOrigin?: OrchestrationV2ThreadShell["creatorOrigin"];
   readonly creatorGrouping?: "grouped" | "independent";
   readonly groupedUnderThreadId?: ThreadId | null;
   readonly environmentId: EnvironmentId;
@@ -312,9 +312,7 @@ export function presentThreadShell(
   const runtime = shellRuntime(thread);
   return {
     ...(thread.creatorThreadId === undefined ? {} : { creatorThreadId: thread.creatorThreadId }),
-    ...(thread.historicalCreatorOrigin === undefined
-      ? {}
-      : { historicalCreatorOrigin: thread.historicalCreatorOrigin }),
+    ...(thread.creatorOrigin === undefined ? {} : { creatorOrigin: thread.creatorOrigin }),
     ...(thread.creatorGrouping === undefined ? {} : { creatorGrouping: thread.creatorGrouping }),
     ...(thread.groupedUnderThreadId === undefined
       ? {}

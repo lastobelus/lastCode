@@ -299,7 +299,7 @@ export function applyOrchestrationV2ProjectionEvent(
         ...projection,
         thread: {
           ...projection.thread,
-          historicalCreatorOrigin: event.payload.origin,
+          creatorOrigin: event.payload.origin,
           ...(event.payload.kind === "local"
             ? { creatorThreadId: event.payload.creatorThreadId }
             : {}),

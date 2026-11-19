@@ -552,23 +552,23 @@ export const RemoteLaunchIntent = Schema.Struct({
 });
 export type RemoteLaunchIntent = typeof RemoteLaunchIntent.Type;
 
-const HistoricalCreatorReference = Schema.Struct({
+const ThreadCreatorReference = Schema.Struct({
   environmentId: EnvironmentId,
   threadId: ThreadId,
 });
 
-export const HistoricalThreadCreatorOrigin = Schema.Union([
+export const ThreadCreatorOrigin = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("thread_launch"),
-    ...HistoricalCreatorReference.fields,
+    ...ThreadCreatorReference.fields,
   }),
   Schema.Struct({
     kind: Schema.Literal("scheduled_task"),
-    ...HistoricalCreatorReference.fields,
+    ...ThreadCreatorReference.fields,
     scheduledTaskId: ScheduledTaskId,
   }),
 ]);
-export type HistoricalThreadCreatorOrigin = typeof HistoricalThreadCreatorOrigin.Type;
+export type ThreadCreatorOrigin = typeof ThreadCreatorOrigin.Type;
 
 export const HistoricalThreadCreatorEvidenceDigest = Schema.String.check(
   Schema.isPattern(/^[0-9a-f]{64}$/),
@@ -578,11 +578,11 @@ const HistoricalThreadCreatorRepairPayload = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("local"),
     creatorThreadId: ThreadId,
-    origin: HistoricalThreadCreatorOrigin,
+    origin: ThreadCreatorOrigin,
   }),
   Schema.Struct({
     kind: Schema.Literal("scoped"),
-    origin: HistoricalThreadCreatorOrigin,
+    origin: ThreadCreatorOrigin,
     creationEventId: EventId,
     creationPayloadSha256: HistoricalThreadCreatorEvidenceDigest,
     expectedPayloadSha256: HistoricalThreadCreatorEvidenceDigest,
@@ -612,7 +612,7 @@ export const OrchestrationV2AppThread = Schema.Struct({
   ...OrchestrationV2CreationFields,
   /** Immutable creator conversation, separate from fork/subagent ownership and sidebar placement. */
   creatorThreadId: Schema.optional(ThreadId),
-  historicalCreatorOrigin: Schema.optional(HistoricalThreadCreatorOrigin),
+  creatorOrigin: Schema.optional(ThreadCreatorOrigin),
   /** Sidebar placement only; changing it never changes creator history or delegated ownership. */
   creatorGrouping: Schema.optional(Schema.Literals(["grouped", "independent"])),
   /** Explicit organization; null is top level, absence preserves deployed creator grouping. */
@@ -2450,7 +2450,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   recovery: Schema.optional(OrchestrationV2ThreadRecovery),
   ...OrchestrationV2CreationFields,
   creatorThreadId: Schema.optional(ThreadId),
-  historicalCreatorOrigin: OrchestrationV2AppThread.fields.historicalCreatorOrigin,
+  creatorOrigin: OrchestrationV2AppThread.fields.creatorOrigin,
   creatorGrouping: OrchestrationV2AppThread.fields.creatorGrouping,
   groupedUnderThreadId: OrchestrationV2AppThread.fields.groupedUnderThreadId,
   id: ThreadId,
