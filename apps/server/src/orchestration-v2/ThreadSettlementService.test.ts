@@ -1220,8 +1220,14 @@ describe("ThreadSettlementServiceV2 worker", () => {
             relationshipToParent: "subagent" as const,
           },
         };
+        const promoted = {
+          ...child,
+          id: ThreadId.make("manual-promoted"),
+          branch: null,
+          lineage: { ...child.lineage, independent: true },
+        };
         const marker = appThread("marker", "settled");
-        for (const thread of [parent, child, marker]) {
+        for (const thread of [parent, child, promoted, marker]) {
           yield* store.apply({
             type: "thread.created",
             id: EventId.make(`created:${thread.id}`),
@@ -1252,6 +1258,11 @@ describe("ThreadSettlementServiceV2 worker", () => {
           const service = yield* ThreadSettlementService.ThreadSettlementServiceV2;
           yield* startHarness(service, fixture.activation, fixture.snapshotReads);
           expect(yield* Ref.get(fixture.commands)).toEqual([]);
+          expect(yield* store.getSettlementCandidates(child.id)).toEqual([]);
+          const candidateIds = (yield* store.getSettlementCandidates(promoted.id)).map(
+            (thread) => thread.id,
+          );
+          expect(candidateIds).toEqual([promoted.id]);
           expect(yield* Ref.get(fixture.branchCalls)).toEqual([]);
           // Avoid a settings-change sweep: the parent event must trigger the child dispatch.
           yield* Ref.set(fixture.settings, {

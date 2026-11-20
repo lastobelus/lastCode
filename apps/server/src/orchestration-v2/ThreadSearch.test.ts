@@ -72,6 +72,7 @@ const thread = (
     readonly archivedAt?: DateTime.Utc;
     readonly deletedAt?: DateTime.Utc;
     readonly subagentOf?: ThreadId;
+    readonly independent?: true;
     readonly sideChatOf?: ThreadId;
     readonly title?: string;
     readonly settledAt?: DateTime.Utc;
@@ -104,6 +105,7 @@ const thread = (
           parentThreadId: overrides.subagentOf,
           relationshipToParent: "subagent",
           rootThreadId: overrides.subagentOf,
+          ...(overrides.independent ? { independent: true } : {}),
         }
       : overrides.sideChatOf
         ? {
@@ -1145,7 +1147,11 @@ it.layer(layerTest)("ThreadSearch.searchOlderSettled", (it) => {
           thread(id("old"), project, { title: "Kestrel nest", settledAt: old }),
           thread(id("recent"), project, { title: "Kestrel nest", settledAt: at(50) }),
           thread(id("open"), project, { title: "Kestrel nest" }),
-          thread(id("child"), project, { title: "Kestrel nest", subagentOf: id("old") }),
+          thread(id("child"), project, {
+            title: "Kestrel nest",
+            settledAt: old,
+            subagentOf: id("old"),
+          }),
           thread(id("elsewhere"), other, { title: "Kestrel nest", settledAt: old }),
           thread(id("note"), project, { title: "Unrelated", settledAt: old }),
           thread(id("new-note"), project, { title: "Unrelated", settledAt: at(50) }),
@@ -1178,6 +1184,26 @@ it.layer(layerTest)("ThreadSearch.searchOlderSettled", (it) => {
           messageThreadIds: [id("elsewhere"), ...messageThreadIds],
         }),
         [id("old"), id("note")],
+      );
+      yield* projections.apply(
+        thread(id("promoted"), project, {
+          title: "Released child",
+          settledAt: old,
+          subagentOf: id("old"),
+          independent: true,
+        }),
+      );
+      assert.deepEqual(
+        yield* search.searchOlderSettled({ query: "released child", before, messageThreadIds: [] }),
+        [id("promoted")],
+      );
+      assert.deepEqual(
+        yield* search.searchOlderSettled({
+          query: "unmatched",
+          before,
+          messageThreadIds: [id("child"), id("promoted")],
+        }),
+        [id("promoted")],
       );
       // A palette also matches the environment's name.
       assert.include(

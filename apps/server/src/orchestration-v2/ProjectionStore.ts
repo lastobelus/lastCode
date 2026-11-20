@@ -2,7 +2,7 @@ import { readArchiveFamilyThreadIds } from "./ThreadArchiveReader.ts";
 import type { ProjectThreadAwarenessV2Input } from "@t3tools/shared/agentAwareness";
 import { applyOrchestrationV2ThreadVisit, pendingGuestMessageCount } from "@t3tools/contracts";
 import { interactiveThreadParentSql } from "./InteractiveThreadParentSql.ts";
-import { ownedSubagentParentSql } from "./ThreadOwnershipSql.ts";
+import { isListedThreadLineageSql, ownedSubagentParentSql } from "./ThreadOwnershipSql.ts";
 import { applyThreadPullRequestLinkUpdate } from "../sourceControl/threadPullRequests.ts";
 import { projectTurnItemForWire } from "./WireProjection.ts";
 import * as Stream from "effect/Stream";
@@ -9179,15 +9179,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               AND json_extract(t.payload_json, '$.settledOverride') IS NULL
               AND json_extract(t.payload_json, '$.pinnedAt') IS NULL
               AND json_extract(t.payload_json, '$.autoSettleDisabledAt') IS NULL
-              AND (
-                json_extract(t.payload_json, '$.lineage.relationshipToParent') IS NOT 'subagent'
-                OR NOT EXISTS (
-                  SELECT 1 FROM orchestration_v2_projection_threads parent
-                  WHERE parent.thread_id = json_extract(t.payload_json, '$.lineage.parentThreadId')
-                    AND parent.deleted_at IS NULL
-                    AND json_extract(parent.payload_json, '$.archivedAt') IS NULL
-                    AND json_extract(parent.payload_json, '$.settledOverride') IS NOT 'settled'
-                )
+              AND NOT EXISTS (
+                SELECT 1 FROM orchestration_v2_projection_threads parent
+                WHERE parent.thread_id = ${ownedSubagentParentSql(sql, "t")}
+                  AND parent.deleted_at IS NULL
+                  AND json_extract(parent.payload_json, '$.archivedAt') IS NULL
+                  AND json_extract(parent.payload_json, '$.settledOverride') IS NOT 'settled'
               )
               AND NOT ${outstandingOwnedWork(sql`t.thread_id`)}
               AND NOT EXISTS (
@@ -10094,8 +10091,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         FROM orchestration_v2_projection_threads t
         WHERE t.deleted_at IS NULL
           AND t.archived_at IS NULL
-          AND json_extract(t.payload_json, '$.lineage.relationshipToParent') IS NOT 'subagent'
-          AND json_extract(t.payload_json, '$.lineage.sideChat') IS NOT 1
+          AND ${isListedThreadLineageSql(sql, "t")}
           AND json_extract(t.payload_json, '$.settledOverride') = 'settled'
           AND json_extract(t.payload_json, '$.settledAt') IS NOT NULL${
             projectIds === undefined ? sql`` : sql` AND t.project_id IN ${sql.in(projectIds)}`

@@ -3380,6 +3380,7 @@ it.effect("SQL list older settled threads below a cursor", () =>
       readonly settledDay: number | null;
       readonly project?: string;
       readonly subagent?: boolean;
+      readonly independent?: true;
       readonly archived?: boolean;
       readonly snoozedUntilDay?: number;
     }) =>
@@ -3405,6 +3406,7 @@ it.effect("SQL list older settled threads below a cursor", () =>
             parentThreadId: input.subagent === true ? id("b") : null,
             relationshipToParent: input.subagent === true ? "subagent" : null,
             rootThreadId: input.subagent === true ? id("b") : id(input.name),
+            ...(input.independent ? { independent: true } : {}),
           },
           forkedFrom: null,
           createdAt: now,
@@ -3455,6 +3457,13 @@ it.effect("SQL list older settled threads below a cursor", () =>
     assert.deepEqual(next.threadIds, [id("c"), id("d"), id("snoozed")]);
     assert.deepEqual(yield* list(before, 25, []), { threadIds: [], counts: [] });
     yield* assertShellIndexCoversShells();
+    yield* createThread({ name: "promoted", settledDay: 1, subagent: true, independent: true });
+    assert.deepEqual((yield* list({ settledAt: DateTime.formatIso(at(2)) }, 10)).threadIds, [
+      id("promoted"),
+    ]);
+    assert.deepEqual((yield* list({ settledAt: DateTime.formatIso(at(2)) }, 0)).counts, [
+      { projectId: ProjectId.make("project:a"), count: 1 },
+    ]);
     const scoped = yield* list(before, 0, [ProjectId.make("project:b")]);
     assert.deepEqual(scoped, {
       threadIds: [],
