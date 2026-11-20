@@ -1,5 +1,7 @@
 import { pipe } from "effect/Function";
 import { changeRequestTermKind, type ChangeRequestTermKind } from "./pullRequest/changeRequestTerm";
+import type { LastCodeStatusIcon } from "@t3tools/contracts/settings";
+import { ThreadStatusGlyph } from "./ThreadStatusGlyph";
 import {
   scopeProjectRef,
   scopedThreadKey,
@@ -709,7 +711,7 @@ export function terminalStatusFromRunningIds(
   };
 }
 
-function synchronizeTerminalPulse(event: AnimationEvent<SVGSVGElement>) {
+export function synchronizeTerminalPulse(event: AnimationEvent<SVGSVGElement>) {
   if (event.animationName !== "status-pulse") return;
 
   for (const animation of event.currentTarget.getAnimations()) {
@@ -805,15 +807,18 @@ export function ThreadWorktreeIndicator({
   );
 }
 
-function ThreadStatusLabel({
+export function ThreadStatusLabel({
   status,
   compact = false,
+  icon,
 }: {
   status: ThreadStatusPill;
   compact?: boolean;
+  icon?: LastCodeStatusIcon | undefined;
 }) {
   const m = useMessages();
   const label = m(status.label);
+  const accessibleLabel = status.description ? `${label}. ${status.description}` : label;
   if (compact) {
     return (
       <Tooltip>
@@ -821,18 +826,31 @@ function ThreadStatusLabel({
           render={
             <span
               role="img"
-              aria-label={label}
+              aria-label={accessibleLabel}
               className={`inline-flex size-3.5 shrink-0 items-center justify-center ${status.colorClass}`}
             />
           }
         >
-          <span
-            className={`size-[9px] rounded-full ${status.dotClass} ${
-              status.pulse ? "motion-safe:animate-status-pulse" : ""
-            }`}
-          />
+          {status.marker ? (
+            <span
+              aria-hidden
+              data-lastcode-sidebar-unscaled-content
+              className="shrink-0 font-semibold leading-none"
+            >
+              {status.marker}
+            </span>
+          ) : icon ? (
+            <ThreadStatusGlyph icon={icon} dotClass={status.dotClass} pulse={status.pulse} />
+          ) : (
+            <span
+              data-lastcode-sidebar-unscaled-content
+              className={`size-1.5 rounded-full ${status.dotClass} ${
+                status.pulse ? "motion-safe:animate-status-pulse" : ""
+              }`}
+            />
+          )}
         </TooltipTrigger>
-        <TooltipPopup side="top">{label}</TooltipPopup>
+        <TooltipPopup side="top">{status.description ?? label}</TooltipPopup>
       </Tooltip>
     );
   }
@@ -843,19 +861,34 @@ function ThreadStatusLabel({
         render={
           <span
             role="img"
-            aria-label={label}
-            className={`inline-flex items-center gap-1 text-3xs ${status.colorClass}`}
+            aria-label={accessibleLabel}
+            className={`inline-flex items-center gap-1 text-3xs ${icon ? "min-w-0 max-w-full" : ""} ${status.colorClass}`}
           />
         }
       >
-        <span
-          className={`h-1.5 w-1.5 rounded-full ${status.dotClass} ${
-            status.pulse ? "motion-safe:animate-status-pulse" : ""
-          }`}
-        />
-        <span className="hidden md:inline">{label}</span>
+        {status.marker ? (
+          <span
+            aria-hidden
+            data-lastcode-sidebar-unscaled-content
+            className="shrink-0 font-semibold leading-none"
+          >
+            {status.marker}
+          </span>
+        ) : icon ? (
+          <ThreadStatusGlyph icon={icon} dotClass={status.dotClass} pulse={status.pulse} />
+        ) : (
+          <span
+            data-lastcode-sidebar-unscaled-content
+            className={`size-1.5 rounded-full ${status.dotClass} ${
+              status.pulse ? "motion-safe:animate-status-pulse" : ""
+            }`}
+          />
+        )}
+        <span className={icon ? "hidden min-w-0 truncate md:inline" : "hidden md:inline"}>
+          {label}
+        </span>
       </TooltipTrigger>
-      <TooltipPopup side="top">{label}</TooltipPopup>
+      <TooltipPopup side="top">{status.description ?? label}</TooltipPopup>
     </Tooltip>
   );
 }
