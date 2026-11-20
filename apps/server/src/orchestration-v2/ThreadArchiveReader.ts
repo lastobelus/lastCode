@@ -10,6 +10,14 @@ export const archiveFamilyThreadIdsQuery = (
   options?: { readonly legacyOnly?: boolean },
 ) => {
   const discovery = options?.legacyOnly ? 0 : 1;
+  // Match the guarded expressions in the archive recorded-owner index migration.
+  const indexedField = (path: string) =>
+    sql.literal(
+      `CASE WHEN json_valid(child.payload_json) THEN json_extract(child.payload_json, '${path}') END`,
+    );
+  const creatorOwner = indexedField("$.creatorOrigin.threadId");
+  const creatorOwned = indexedField("$.creatorOrigin.owned");
+  const delegatedOwner = indexedField("$.delegatedFrom.threadId");
   return sql<{ readonly thread_id: string }>`
         WITH RECURSIVE family(thread_id) AS (
           SELECT ${threadId}
@@ -26,13 +34,13 @@ export const archiveFamilyThreadIdsQuery = (
           UNION
           SELECT child.thread_id FROM family
           CROSS JOIN orchestration_v2_projection_threads AS child
-            ON CAST(json_extract(child.payload_json, '$.creatorOrigin.threadId') AS TEXT) = family.thread_id
-          WHERE ${discovery} = 1 AND json_extract(child.payload_json, '$.creatorOrigin.owned') = 1
+            ON CAST(${creatorOwner} AS TEXT) = family.thread_id
+          WHERE ${discovery} = 1 AND ${creatorOwned} = 1
           UNION
           SELECT child.thread_id FROM family
           CROSS JOIN orchestration_v2_projection_threads AS child
-            ON CAST(json_extract(child.payload_json, '$.delegatedFrom.threadId') AS TEXT) = family.thread_id
-          WHERE ${discovery} = 1 AND json_extract(child.payload_json, '$.delegatedFrom.threadId') IS NOT NULL
+            ON CAST(${delegatedOwner} AS TEXT) = family.thread_id
+          WHERE ${discovery} = 1 AND ${delegatedOwner} IS NOT NULL
         ), groups(thread_id) AS (
           SELECT DISTINCT parent.thread_id
           FROM family
@@ -55,13 +63,13 @@ export const archiveFamilyThreadIdsQuery = (
           UNION ALL
           SELECT child.thread_id FROM groups
           CROSS JOIN orchestration_v2_projection_threads AS child
-            ON CAST(json_extract(child.payload_json, '$.creatorOrigin.threadId') AS TEXT) = groups.thread_id
-          WHERE json_extract(child.payload_json, '$.creatorOrigin.owned') = 1
+            ON CAST(${creatorOwner} AS TEXT) = groups.thread_id
+          WHERE ${creatorOwned} = 1
           UNION ALL
           SELECT child.thread_id FROM groups
           CROSS JOIN orchestration_v2_projection_threads AS child
-            ON CAST(json_extract(child.payload_json, '$.delegatedFrom.threadId') AS TEXT) = groups.thread_id
-          WHERE json_extract(child.payload_json, '$.delegatedFrom.threadId') IS NOT NULL
+            ON CAST(${delegatedOwner} AS TEXT) = groups.thread_id
+          WHERE ${delegatedOwner} IS NOT NULL
           UNION ALL
           SELECT child.thread_id FROM groups
           CROSS JOIN orchestration_v2_projection_threads AS child
